@@ -11,6 +11,7 @@
 use super::*;
 use crate::service::shutdown_flush::MIN_FLUSH_TIMEOUT_SECS;
 use serial_test::serial;
+use trusty_common::shutdown::CLEANUP_RESERVE;
 
 /// A snapshot path that does not exist, so `shutdown_flush_deadline_for` returns
 /// exactly its floor (`MIN_FLUSH_TIMEOUT_SECS`) with no size scaling.

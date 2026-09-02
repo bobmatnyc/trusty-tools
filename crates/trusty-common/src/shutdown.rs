@@ -42,6 +42,49 @@
 /// `commands::start::reap_orphans`.
 pub const TERMINATION_GRACE_SECS: u64 = 60;
 
+/// Wall-clock time held back from the grace window for post-drain cleanup
+/// (#4393, shared since #6601).
+///
+/// Why: [`TERMINATION_GRACE_SECS`] is the window that ends in SIGKILL, so a
+/// component that spends ALL of it has left nothing for the work that runs
+/// after it. Two components run that work today. `trusty-search` flushes each
+/// index and then removes its port file, deregisters discovery and releases its
+/// lockfile. `trusty-common`'s `uds::server::serve_until_idle` drains in-flight
+/// connections and then hands control back to a caller that unlinks the socket —
+/// and in `trusty-memory` runs the BM25 exit flush AFTER `serve_until`
+/// (`transport::uds::serve_with_shutdown`), which `bm25_lane::shutdown`
+/// documents as having "no window in which a SIGKILL can land mid-flush". A
+/// drain defaulted to the whole grace window makes that claim false.
+///
+/// What: 5 s, subtracted from the grace window by every component that plans
+/// inside it. One definition rather than two, per the common-entry-point rule —
+/// `trusty-search`'s `service::shutdown_budget::CLEANUP_RESERVE` re-exports this.
+///
+/// Test: `default_serve_options_reserve_cleanup_time_inside_the_grace_window`.
+/// trusty-search's `shutdown_budget_tests.rs` covers the flush side.
+pub const CLEANUP_RESERVE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The part of the grace window a component may actually plan to spend.
+///
+/// Why: every caller that subtracts [`CLEANUP_RESERVE`] by hand is a place the
+/// saturation can be got wrong — a grace window shorter than the reserve must
+/// yield an immediately-exhausted budget, never a wrapped enormous one.
+/// What: [`termination_grace`] minus [`CLEANUP_RESERVE`], saturating at zero.
+/// Test: `plannable_grace_reserves_cleanup_time`,
+/// `plannable_grace_saturates_below_the_reserve`.
+pub fn plannable_grace() -> std::time::Duration {
+    plannable_grace_from(termination_grace())
+}
+
+/// Pure half of [`plannable_grace`], over an already-resolved window.
+///
+/// Why: pure so the saturation is testable without touching the process
+/// environment.
+/// Test: `plannable_grace_saturates_below_the_reserve`.
+pub fn plannable_grace_from(window: std::time::Duration) -> std::time::Duration {
+    window.saturating_sub(CLEANUP_RESERVE)
+}
+
 /// Operator override for [`TERMINATION_GRACE_SECS`].
 ///
 /// Why: a host whose launchd `ExitTimeOut` cannot be raised (a stale installed
@@ -185,6 +228,39 @@ mod tests {
             super::termination_grace_from(Some(" 12 ")),
             std::time::Duration::from_secs(12)
         );
+    }
+
+    /// Why (#6601): the grace window is the SIGKILL deadline, so a component
+    /// that plans to spend all of it leaves nothing for the work that runs
+    /// after — trusty-memory's BM25 exit flush runs after `serve_until`
+    /// returns, and trusty-search's discovery teardown after its flush sweep.
+    /// What: the plannable window is strictly smaller than the grace window by
+    /// the reserve.
+    /// Test: itself.
+    #[test]
+    fn plannable_grace_reserves_cleanup_time() {
+        let window = std::time::Duration::from_secs(60);
+        assert_eq!(
+            super::plannable_grace_from(window),
+            window - super::CLEANUP_RESERVE
+        );
+    }
+
+    /// Why (#6601): a host that declares a tiny window through
+    /// [`super::TERMINATION_GRACE_ENV`] must get an immediately-exhausted
+    /// budget, never a wrapped enormous one — the same saturation rule
+    /// `ShutdownBudget::from_window_at` records.
+    /// What: a window at or below the reserve yields zero.
+    /// Test: itself.
+    #[test]
+    fn plannable_grace_saturates_below_the_reserve() {
+        for secs in [0, 1, 5] {
+            assert_eq!(
+                super::plannable_grace_from(std::time::Duration::from_secs(secs)),
+                std::time::Duration::ZERO,
+                "a {secs}s window must not wrap below the cleanup reserve"
+            );
+        }
     }
 
     /// Why (#4393): a zero or unparseable override must never collapse the

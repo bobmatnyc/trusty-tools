@@ -867,6 +867,53 @@ async fn a_child_that_never_binds_fails_with_the_service_budget() {
     );
 }
 
+/// Why (#6600 review): `SpawnTimeout`'s message guesses at the cause — "its
+/// spawn_probe is too small" — and the child's own last lines are what say
+/// whether the guess is right. A model still loading and a child spinning on a
+/// lock it will never get produce the same timeout and different logs, and only
+/// one of them is fixed by raising the budget.
+///
+/// What: a child that logs and then hangs without ever binding. The timeout must
+/// carry the tail, and the operator-facing message must quote it.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_child_that_never_binds_reports_the_stderr_it_did_write() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("stuck.sock");
+    let cfg = SupervisorConfig::new(
+        "test-service",
+        3,
+        ServiceTimeouts::new(
+            Duration::from_millis(300),
+            Duration::from_millis(10),
+            Duration::from_secs(1),
+        ),
+    );
+    let sup = UdsServiceSupervisor::new(cfg);
+
+    let err = sup
+        .ensure_running("inst", &socket, || {
+            Ok(SpawnSpec::new("/bin/sh")
+                .arg("-c")
+                .arg("echo 'still loading the model' >&2; sleep 30"))
+        })
+        .await
+        .expect_err("a child that never binds must not be reported as running");
+
+    let SupervisorError::SpawnTimeout { stderr, .. } = &err else {
+        panic!("expected SpawnTimeout, got {err:?}");
+    };
+    assert!(
+        stderr.iter().any(|l| l.contains("still loading the model")),
+        "the child's own words must reach the caller, got {stderr:?}"
+    );
+    assert!(
+        err.to_string().contains("still loading the model"),
+        "the operator-facing message must quote the stderr tail: {err}"
+    );
+}
+
 /// Why (#6600): the #6595 CI signature was a child that died on a held redb
 /// lock in ~100 ms and was reported 20 s later as `SpawnTimeout`, whose message
 /// blames the spawn budget. `ensure_running` has to observe the child, not only
@@ -926,6 +973,64 @@ async fn a_child_that_exits_before_binding_reports_its_status_and_stderr() {
         sup.supervised_count().await,
         0,
         "a child that never bound must not be registered"
+    );
+}
+
+/// Why (#6600 review): `STDERR_TAIL_LINES` bounds how MANY lines the relay
+/// retains and says nothing about how long one may be. A child that writes a
+/// megabyte before its first newline — a panic carrying a big `Debug` payload —
+/// was buffered whole by `lines()` and then retained whole by the ring, so a
+/// supervisor holding several such children carried tens of megabytes for as
+/// long as they lived.
+///
+/// What: a child that writes 1 MiB with no newline at all. Every retained line
+/// must fit `STDERR_LINE_CAP`, and the whole tail must fit
+/// `STDERR_TAIL_LINES * STDERR_LINE_CAP` — the bound the fix establishes. On the
+/// `lines()` implementation the tail is one 1 MiB entry and both assertions
+/// fail: `no retained line may exceed the per-line cap (8192 bytes); longest was
+/// 1048576`.
+///
+/// Why the relay's pass-through goes to `sink()` here: the relay copies every
+/// byte through unchanged, which is correct and not what this bounds — running
+/// it against the real stderr would put a megabyte of `0`s in every CI log.
+/// Test: this test itself.
+#[tokio::test]
+async fn a_child_writing_an_enormous_line_does_not_grow_the_relay_buffer() {
+    use super::child::{STDERR_LINE_CAP, STDERR_TAIL_LINES, relay_stderr_into};
+
+    const WRITTEN: usize = 1024 * 1024;
+
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("printf '%0{WRITTEN}d' 0 >&2"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the shouty child");
+    let pipe = child.stderr.take().expect("stderr was piped");
+
+    let (buffer, relay) = relay_stderr_into(pipe, tokio::io::sink());
+    relay.await.expect("the relay must finish at EOF");
+    child.wait().await.expect("reap the child");
+
+    let tail = buffer.tail(STDERR_TAIL_LINES);
+    let longest = tail.iter().map(String::len).max().unwrap_or(0);
+    assert!(
+        longest as u64 <= STDERR_LINE_CAP,
+        "no retained line may exceed the per-line cap ({STDERR_LINE_CAP} bytes); \
+         longest was {longest}"
+    );
+    let retained: usize = tail.iter().map(String::len).sum();
+    let ceiling = STDERR_TAIL_LINES as u64 * STDERR_LINE_CAP;
+    assert!(
+        retained as u64 <= ceiling,
+        "the whole retained tail must fit {ceiling} bytes; it held {retained} \
+         out of the {WRITTEN} the child wrote"
+    );
+    assert!(
+        !tail.is_empty(),
+        "bounding the line must not throw the child's output away entirely"
     );
 }
 

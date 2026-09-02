@@ -77,10 +77,17 @@ pub enum SupervisorError {
 
     /// The child started but never bound its socket inside the service's
     /// `spawn_probe` budget.
+    ///
+    /// #6600 review: this carries the child's stderr tail for the same reason
+    /// [`SupervisorError::ChildExited`] does. "Its `spawn_probe` is too small"
+    /// is the message's guess, and the child's own last lines are what say
+    /// whether that guess is right — a model still loading and a child blocked
+    /// on a lock it will never get produce the same timeout and different logs.
     #[error(
         "{service} instance {key} did not bind {socket} within {budget:?} — \
          if this service loads a model at startup, its ServiceTimeouts::spawn_probe \
-         is too small"
+         is too small{}",
+        format_stderr_tail(.stderr)
     )]
     SpawnTimeout {
         /// Service label.
@@ -91,6 +98,10 @@ pub enum SupervisorError {
         socket: PathBuf,
         /// The budget that elapsed.
         budget: Duration,
+        /// Last lines the child wrote to stderr before it was killed. EMPTY for
+        /// a detached child, whose stderr is inherited rather than captured —
+        /// see `child::spawn_child` for why capturing it would kill the child.
+        stderr: Vec<String>,
     },
 
     /// The child exited before it bound its socket (#6600).

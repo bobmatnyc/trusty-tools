@@ -38,16 +38,6 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// Wall-clock time held back from the flush for post-flush cleanup.
-///
-/// Why: `run_daemon` still has work to do after the sweep returns — remove the
-/// port file, remove `http_addr`, deregister shared discovery, release the
-/// lockfile, exit. Spending the entire window on flushing would hand SIGKILL the
-/// cleanup instead of the flush, trading one truncated step for another.
-/// What: 5 s, subtracted from the grace window when a budget is created.
-/// Test: `budget_reserves_time_for_post_flush_cleanup`.
-pub(crate) const CLEANUP_RESERVE: Duration = Duration::from_secs(5);
-
 /// How much of its life this process has left to spend on the shutdown flush.
 ///
 /// Why: see the module doc. The type exists so that "how long may this index
@@ -102,7 +92,10 @@ impl ShutdownBudget {
     /// one — the seam the tests drive.
     pub fn from_window_at(sigterm_at: Instant, window: Duration) -> Self {
         Self {
-            deadline: sigterm_at + window.saturating_sub(CLEANUP_RESERVE),
+            // #6601: the subtraction and its saturation live in
+            // `trusty_common::shutdown` so the UDS drain cannot get it right
+            // while this gets it wrong, or the reverse.
+            deadline: sigterm_at + trusty_common::shutdown::plannable_grace_from(window),
         }
     }
 

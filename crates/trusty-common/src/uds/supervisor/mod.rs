@@ -309,8 +309,11 @@ impl UdsServiceSupervisor {
                 });
             }
             probe::SpawnWait::TimedOut => {
-                // Explicit drop: `kill_on_drop` SIGKILLs the child that never
-                // bound. Nothing was acked to it, so there is nothing to flush.
+                // The child that never bound is killed here rather than by
+                // `kill_on_drop`, because the stderr tail below can only be read
+                // once the write end of the pipe is closed — which happens when
+                // the process dies. Nothing was acked to it, so there is nothing
+                // to flush.
                 // #6350: a DETACHED child was spawned without `kill_on_drop`, so
                 // dropping it would leave a process that never bound running with
                 // nothing left holding a handle to it. Terminate it here instead.
@@ -318,13 +321,19 @@ impl UdsServiceSupervisor {
                     let _ =
                         terminate_child(&mut spawned.child, self.config.timeouts.sigterm_patience)
                             .await;
+                } else {
+                    let _ = spawned.child.kill().await;
                 }
+                // #6600 review: the child's own last lines say whether the
+                // budget was too small or the child was never going to bind.
+                let stderr = spawned.stderr_tail().await;
                 drop(spawned);
                 return Err(SupervisorError::SpawnTimeout {
                     service: service.to_string(),
                     key: key.to_string(),
                     socket: socket_path.to_path_buf(),
                     budget: self.config.timeouts.spawn_probe,
+                    stderr,
                 });
             }
         }

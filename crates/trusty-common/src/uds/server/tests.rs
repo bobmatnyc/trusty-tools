@@ -1334,6 +1334,34 @@ fn spawn_draining_server(
     (socket, log, started_rx, stop_tx, handle)
 }
 
+/// Why (#6601 review): the drain and the caller's post-serve work are spent
+/// from ONE window — the SIGTERM-to-SIGKILL grace — so a default drain sized to
+/// the whole of it leaves the caller nothing. `trusty-memory` runs its BM25 exit
+/// flush after `serve_until` returns; `bm25_lane::shutdown` claims no SIGKILL
+/// can land mid-flush, and a full-window default is what would make that false.
+///
+/// What: the default drain plus the cleanup reserve must FIT in the grace
+/// window. Written as an inequality rather than an equality so a service that
+/// later shortens the default still passes, while restoring
+/// `termination_grace()` fails.
+/// Test: this is the test.
+#[test]
+fn default_serve_options_reserve_cleanup_time_inside_the_grace_window() {
+    let grace = crate::shutdown::termination_grace();
+    let drain = RpcServeOptions::default().shutdown_drain;
+    assert!(
+        drain + crate::shutdown::CLEANUP_RESERVE <= grace,
+        "the default drain ({drain:?}) plus the cleanup reserve ({:?}) must fit \
+         inside the termination grace window ({grace:?}), or the caller's \
+         post-serve work runs on borrowed time",
+        crate::shutdown::CLEANUP_RESERVE
+    );
+    assert!(
+        drain > Duration::ZERO,
+        "reserving cleanup time must not collapse the drain to nothing"
+    );
+}
+
 /// Why (#6601): the shutdown arm used to return the instant the signal
 /// resolved. Every accepted connection holds an `Arc<RpcRouter>` clone — in
 /// `trusty-analyze` that reaches a redb `Database` — so the caller's unlink ran
@@ -1389,11 +1417,22 @@ async fn shutdown_drains_an_in_flight_connection_before_it_returns() {
 /// there until the listener dropped and then see a reset, which it cannot tell
 /// from a broken service; accepted and closed at once it gets
 /// `UdsRpcError::NoResponse` immediately and can retry against a successor.
+///
+/// What makes this a test OF the drain (#6601 review): `refused.is_err()` alone
+/// is true of a dropped listener's reset too, so it passed with the drain arm
+/// replaced by a bare `return`. The two assertions below close that. The error
+/// must be `NoResponse` — the accept-and-close signature, which a dial against
+/// an already-unlinked path (`Dial`) is not — AND the loop must not yet have
+/// recorded `"returned"` when the refusal lands. Only one order produces both:
+/// the listener is still owned by a running drain. Replace the arm with a bare
+/// return and the loop records `"returned"` and drops the listener before any
+/// reset can reach the client, so whichever error the client gets, one of the
+/// two assertions fails.
 /// Test: this is the test.
 #[tokio::test]
 async fn shutdown_refuses_a_connection_dialled_after_the_signal() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (socket, _log, mut started, stop, handle) = spawn_draining_server(
+    let (socket, log, mut started, stop, handle) = spawn_draining_server(
         tmp.path(),
         Duration::from_millis(600),
         Duration::from_secs(5),
@@ -1416,9 +1455,20 @@ async fn shutdown_refuses_a_connection_dialled_after_the_signal() {
     )
     .await
     .expect("a post-signal dial must be refused, not left hanging in the backlog");
+    // Snapshot BEFORE any further await, so the 600 ms handler cannot finish and
+    // let the loop return between the refusal and the assertion.
+    let during_refusal = log.events();
+
     assert!(
-        refused.is_err(),
-        "nothing may be served after the signal: {refused:?}"
+        matches!(refused, Err(crate::uds::UdsRpcError::NoResponse { .. })),
+        "a dial during the drain must be accepted and closed — not reset by a \
+         dropped listener, and not refused at connect by an unlinked path: \
+         {refused:?}"
+    );
+    assert!(
+        !during_refusal.contains(&"returned"),
+        "the refusal must land while the drain still owns the listener; the \
+         loop had already returned: {during_refusal:?}"
     );
 
     let _ = client.await;

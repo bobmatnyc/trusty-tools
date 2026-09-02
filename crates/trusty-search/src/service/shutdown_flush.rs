@@ -532,8 +532,8 @@ mod tests {
     /// cleanup reserve. There is deliberately no constructor from a bare
     /// `Duration` — that is the whole point of the type.
     fn deadline_of(millis: u64) -> FlushDeadline {
-        let window = std::time::Duration::from_millis(millis)
-            + crate::service::shutdown_budget::CLEANUP_RESERVE;
+        let window =
+            std::time::Duration::from_millis(millis) + trusty_common::shutdown::CLEANUP_RESERVE;
         ShutdownBudget::from_window(window)
             .flush_deadline_for(std::path::Path::new("/nonexistent/hnsw.usearch"))
             .expect("a positive window grants a deadline")

@@ -13,5 +13,16 @@ Fixed
   `Stdio::inherit()` and reports an empty tail: it outlives the process that
   spawned it, and a pipe whose read end went with that process turns the child's
   next log write into `EPIPE`.
+- `SupervisorError::SpawnTimeout` carries that same stderr tail. Its message
+  guesses the cause ("its spawn_probe is too small"), and a child still loading a
+  model and one spinning on a lock it will never get produce the same timeout and
+  different logs.
+- The stderr relay bounds each line at 8 KiB rather than only the line COUNT, so
+  a child that writes a megabyte before its first newline can no longer be
+  buffered and retained whole. An over-long line is passed through to stderr in
+  8 KiB pieces — no bytes are lost — and the retained tail is bounded at about
+  160 KiB per child. The relay also survives invalid UTF-8 rather than treating
+  it as EOF, and writes each line and its terminator in one call so two children
+  cannot interleave mid-line.
 - A child that is alive but slow still gets the full probe window, and a
   `try_wait` that errors is treated as "still running" rather than as a death.

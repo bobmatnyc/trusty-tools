@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, Command};
 
 use crate::log_buffer::LogBuffer;
@@ -27,6 +27,23 @@ use super::{SpawnSpec, SupervisorError};
 /// service prints before it gives up on a lock, while a supervisor holding
 /// several children still costs kilobytes.
 pub(super) const STDERR_TAIL_LINES: usize = 20;
+
+/// Largest number of bytes the relay buffers for ONE stderr line (#6600 review).
+///
+/// Why: [`STDERR_TAIL_LINES`] bounds how MANY lines are retained and says
+/// nothing about how long one may be. A child that writes a megabyte before its
+/// first newline — a panic with a huge `Debug` payload, a serialised request
+/// echoed into a log — would otherwise be buffered whole by the reader and then
+/// retained whole by the ring, and twenty such lines per child is the supervisor
+/// carrying tens of megabytes for as long as the child lives. The bound is on
+/// the READ, not on a truncation after the fact, so the oversized line is never
+/// resident in the first place.
+///
+/// What: 8 KiB. A line longer than this is relayed to stderr in 8 KiB pieces and
+/// retained as those pieces — the operator loses no bytes, and the ring's
+/// worst case becomes `STDERR_TAIL_LINES * STDERR_LINE_CAP`, about 160 KiB.
+/// Test: `a_child_writing_an_enormous_line_does_not_grow_the_relay_buffer`.
+pub(super) const STDERR_LINE_CAP: u64 = 8 * 1024;
 
 /// How long [`SpawnedChild::stderr_tail`] waits for the relay to finish reading
 /// a dead child's pipe (#6600).
@@ -192,19 +209,71 @@ pub(super) async fn spawn_child(
 /// join handle is how [`SpawnedChild::stderr_tail`] knows the pipe has been
 /// drained. Write failures are ignored: losing a log line must never take down
 /// a supervisor.
-/// Test: `a_child_that_exits_before_binding_reports_its_status_and_stderr`.
+///
+/// Three details the obvious `lines()` loop gets wrong (#6600 review):
+///   - each read is bounded by [`STDERR_LINE_CAP`], so a child that writes
+///     without ever emitting a newline cannot grow this task's buffer;
+///   - the line and its terminator go out in ONE `write_all`, because two
+///     writes can interleave with another child's relay and split a line;
+///   - invalid UTF-8 is relayed lossily rather than ending the relay. `lines()`
+///     yields `Err` there, and the old `while let Ok(Some(_))` treated that as
+///     EOF — one bad byte and the operator silently lost the rest of the stream.
+///
+/// A read error DOES end the relay, with a `debug!`: the pipe is gone, and a
+/// bare `continue` on a persistent error would spin.
+/// Test: `a_child_that_exits_before_binding_reports_its_status_and_stderr`,
+/// `a_child_writing_an_enormous_line_does_not_grow_the_relay_buffer`.
 fn relay_stderr(pipe: ChildStderr) -> (LogBuffer, tokio::task::JoinHandle<()>) {
+    relay_stderr_into(pipe, tokio::io::stderr())
+}
+
+/// [`relay_stderr`] with the pass-through destination supplied by the caller.
+///
+/// Why the seam exists: the buffer bound is proven with a 1 MiB line, and
+/// `relay_stderr` would faithfully copy that megabyte to the test runner's own
+/// stderr — a megabyte in every CI log, on a property that has nothing to do
+/// with where the bytes go. The test passes `tokio::io::sink()`; production has
+/// exactly one caller and it passes `tokio::io::stderr()`.
+/// Test: `a_child_writing_an_enormous_line_does_not_grow_the_relay_buffer`.
+pub(super) fn relay_stderr_into<W>(
+    pipe: ChildStderr,
+    mut out: W,
+) -> (LogBuffer, tokio::task::JoinHandle<()>)
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let buffer = LogBuffer::new(STDERR_TAIL_LINES);
     let sink = buffer.clone();
     let handle = tokio::spawn(async move {
-        let mut out = tokio::io::stderr();
-        let mut lines = BufReader::new(pipe).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let _ = out.write_all(line.as_bytes()).await;
-            let _ = out.write_all(b"\n").await;
-            let _ = out.flush().await;
+        let mut reader = BufReader::new(pipe);
+        let mut raw: Vec<u8> = Vec::new();
+        loop {
+            raw.clear();
+            let read = match (&mut reader)
+                .take(STDERR_LINE_CAP)
+                .read_until(b'\n', &mut raw)
+                .await
+            {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::debug!(error = %e, "supervised child stderr relay ended on a read error");
+                    break;
+                }
+            };
+            if read == 0 {
+                break;
+            }
+            // One write, terminator included — see the doc comment.
+            if !raw.ends_with(b"\n") {
+                raw.push(b'\n');
+            }
+            let _ = out.write_all(&raw).await;
+            let line = String::from_utf8_lossy(&raw[..raw.len() - 1]).into_owned();
             sink.push(line);
         }
+        // Flushed once at EOF rather than per line: `tokio::io::stderr` writes
+        // through, so a flush inside the loop bought nothing per line.
+        let _ = out.flush().await;
     });
     (buffer, handle)
 }

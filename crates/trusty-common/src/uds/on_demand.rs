@@ -85,10 +85,25 @@ pub const DEFAULT_ANALYZE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 /// against it — the equality is checked, rather than assumed to have stayed
 /// true.
 ///
-/// One second: the server holds no write buffer. `redb` commits inside each
-/// handler before it answers, so a SIGTERM at any point discards nothing that
-/// was acked; the budget covers the accept loop returning and the socket unlink.
-pub const ANALYZE_SHUTDOWN_FLUSH: Duration = Duration::from_secs(1);
+/// Three seconds (#6601). The server holds no write buffer — `redb` commits
+/// inside each handler before it answers, so a SIGTERM discards nothing that was
+/// acked. What the budget has to cover since #6601 is the shutdown DRAIN:
+/// `serve_until_idle` waits for connections already accepted to be answered
+/// before it returns, because their handlers hold the router and through it the
+/// redb `Database` the successor must be able to open (#6595). One second was
+/// the budget for an accept loop that returned immediately; three is the budget
+/// for one that waits, and it still leaves 2 s of
+/// [`ANALYZE_SIGTERM_PATIENCE`]'s 5 s for signal delivery, the socket unlink and
+/// process exit.
+///
+/// It is deliberately NOT the process termination grace. This server is
+/// supervised by [`super::UdsServiceSupervisor`], so the deadline that actually
+/// applies to it is that supervisor's `sigterm_patience`, not launchd's window.
+/// A handler that outruns three seconds — `analyze.review` does — cannot be
+/// saved by any budget the supervisor will wait out; the drain's expiry warning
+/// is the designed outcome there, not a shortfall to paper over with a number
+/// the SIGKILL will not honour.
+pub const ANALYZE_SHUTDOWN_FLUSH: Duration = Duration::from_secs(3);
 
 /// How long to wait for a freshly-spawned analyze server to accept.
 ///
@@ -99,6 +114,11 @@ pub const ANALYZE_SHUTDOWN_FLUSH: Duration = Duration::from_secs(1);
 const ANALYZE_SPAWN_PROBE: Duration = Duration::from_secs(20);
 
 /// SIGTERM-to-SIGKILL patience. Must strictly exceed [`ANALYZE_SHUTDOWN_FLUSH`].
+///
+/// The 2 s margin over the flush budget is what the child spends after its drain
+/// ends: unlinking the socket, dropping its redb stores, and exiting. Raising it
+/// costs every reap — `enforce_limits` waits this out per victim — so it is
+/// sized to that margin rather than to the process grace window.
 const ANALYZE_SIGTERM_PATIENCE: Duration = Duration::from_secs(5);
 
 /// The analyze service's timing budget.

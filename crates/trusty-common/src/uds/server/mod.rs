@@ -240,27 +240,52 @@ pub struct RpcServeOptions {
     /// a service whose method runs for minutes needs the second to be large
     /// while the first stays small.
     ///
-    /// Defaults to [`crate::shutdown::termination_grace`] — the process-wide
-    /// SIGTERM-to-SIGKILL window, so the drain fits inside the time the daemon
-    /// actually has, including an operator's `TRUSTY_TERMINATION_GRACE_SECS`
-    /// override.
+    /// Defaults to [`crate::shutdown::plannable_grace`] — the process-wide
+    /// SIGTERM-to-SIGKILL window MINUS [`crate::shutdown::CLEANUP_RESERVE`],
+    /// including an operator's `TRUSTY_TERMINATION_GRACE_SECS` override.
+    ///
+    /// 🔴 **Why the reserve rather than the whole window (#6601).** The signal
+    /// that starts this drain is the same signal that starts the SIGKILL
+    /// countdown, so a drain sized to the whole window leaves the caller's
+    /// post-serve work with no budget at all whenever the drain runs long.
+    /// `trusty-memory` is the concrete case: `transport::uds::
+    /// serve_with_shutdown` runs the BM25 exit flush AFTER `serve_until`
+    /// returns, and `bm25_lane::shutdown` states there is "no window in which a
+    /// SIGKILL can land mid-flush" — a full-window drain makes that false.
+    ///
+    /// A service whose real SIGKILL deadline is shorter than the process grace
+    /// window sets this explicitly rather than inheriting the default:
+    /// `trusty-analyze` is supervised by `UdsServiceSupervisor`, whose
+    /// `sigterm_patience` is the deadline that actually applies to it, so it
+    /// passes its own `service::rpc::SHUTDOWN_FLUSH_TIMEOUT`.
     ///
     /// Test: `shutdown_drains_an_in_flight_connection_before_it_returns`,
-    /// `shutdown_returns_when_the_drain_budget_expires`.
+    /// `shutdown_returns_when_the_drain_budget_expires`,
+    /// `default_serve_options_reserve_cleanup_time_inside_the_grace_window`.
     pub shutdown_drain: Duration,
 }
 
 impl Default for RpcServeOptions {
-    /// Thirty seconds, [`MAX_FRAME_BYTES`], and the process's termination grace.
+    /// Thirty seconds, [`MAX_FRAME_BYTES`], and the plannable termination grace.
     ///
     /// The read covers a local socket writing one already-serialised frame, so
     /// thirty seconds is headroom for a stalled writer rather than a latency
     /// budget.
+    ///
+    /// 🔴 **This `Default` reads the environment on every call (#6601).**
+    /// `shutdown_drain` comes from [`crate::shutdown::plannable_grace`], which
+    /// reads `TRUSTY_TERMINATION_GRACE_SECS` each time — so two values built
+    /// either side of a `set_var` differ, and this cannot be a `const`.
+    /// Deliberate: the override exists so a host whose supervisor window cannot
+    /// be raised can tell the daemon the truth, and a value frozen at first call
+    /// would ignore it. A caller wanting one stable budget for the process
+    /// builds the options once and copies them, which is what [`RpcServer`] and
+    /// `trusty-analyze`'s `serve_options` both do.
     fn default() -> Self {
         Self {
             read_timeout: Duration::from_secs(30),
             max_frame_bytes: MAX_FRAME_BYTES,
-            shutdown_drain: crate::shutdown::termination_grace(),
+            shutdown_drain: crate::shutdown::plannable_grace(),
         }
     }
 }
@@ -567,7 +592,17 @@ async fn drain_shutdown(listener: &UnixListener, open: &Arc<IdleTracker>, budget
     if open.open_connections() == 0 {
         return;
     }
+    // #6601 review: a process serving more than one socket needs the warn below
+    // to say WHICH one is still busy. `local_addr` is the listener's own answer,
+    // so it cannot disagree with the path actually bound; an unnamed socket
+    // (which this loop never binds) degrades to "<unknown>" rather than a panic.
+    let socket = listener
+        .local_addr()
+        .ok()
+        .and_then(|addr| addr.as_pathname().map(|p| p.display().to_string()))
+        .unwrap_or_else(|| "<unknown>".to_string());
     tracing::info!(
+        %socket,
         open = open.open_connections(),
         ?budget,
         "uds rpc shutdown signalled; draining in-flight connections"
@@ -600,6 +635,7 @@ async fn drain_shutdown(listener: &UnixListener, open: &Arc<IdleTracker>, budget
         () = settled => {}
         () = refuse => {}
         () = tokio::time::sleep(budget) => tracing::warn!(
+            %socket,
             open = open.open_connections(),
             ?budget,
             "connections still in flight after the shutdown drain budget; \
