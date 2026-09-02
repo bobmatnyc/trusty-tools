@@ -27,6 +27,8 @@ pub mod migrate;
 pub mod migrations;
 pub mod monitor;
 pub mod note;
+// #6652: `palace stats` / `palace compact` — kg.redb measurement and rewrite.
+pub mod palace;
 pub mod port;
 pub mod prompt_context;
 pub mod rooms;

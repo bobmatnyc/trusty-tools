@@ -11,7 +11,7 @@ use crate::memory_core::store::concurrent_open::{
 };
 use crate::memory_core::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, KG_SCHEMA, ROOM_KEYS, ROOMS, TRIPLES,
-    TRIPLES_BY_OBJECT, TRIPLES_BY_PREDICATE, WING_KEYS, WINGS,
+    TRIPLES_BY_OBJECT, WING_KEYS, WINGS,
 };
 use anyhow::{Context, Result};
 use redb::Database;
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::migrate::migrate_triple_keys_fail_open;
-use super::types::{KgDbState, READ_ONLY_ERROR_MSG, canonical_key, db_cache};
+use super::types::{GuardedWrite, KgDbState, READ_ONLY_ERROR_MSG, canonical_key, db_cache};
 
 /// Why: All KG callers go through a single `KnowledgeGraph` handle that is
 /// cheap to clone and Send + Sync. Holding `Arc<Database>` lets background
@@ -29,7 +29,6 @@ use super::types::{KgDbState, READ_ONLY_ERROR_MSG, canonical_key, db_cache};
 #[derive(Clone)]
 pub struct KgStoreRedb {
     pub(super) state: Arc<KgDbState>,
-    #[allow(dead_code)]
     pub(super) path: PathBuf,
 }
 
@@ -148,9 +147,6 @@ impl KgStoreRedb {
                                 .open_table(TRIPLES_BY_OBJECT)
                                 .context("init triples_by_object table")?;
                             let _ = wtx
-                                .open_table(TRIPLES_BY_PREDICATE)
-                                .context("init triples_by_predicate table")?;
-                            let _ = wtx
                                 .open_table(ACTIVE_SUBJECT_COUNTS)
                                 .context("init active_subject_counts table")?;
                             let _ = wtx.open_table(DRAWERS).context("init drawers table")?;
@@ -190,7 +186,8 @@ impl KgStoreRedb {
                     }
 
                     let state = Arc::new(KgDbState {
-                        db,
+                        db: std::sync::RwLock::new(db),
+                        swap_lock: std::sync::RwLock::new(()),
                         mode,
                         _snapshot_guard: snapshot_guard,
                     });
@@ -248,8 +245,134 @@ impl KgStoreRedb {
     /// Internal accessor used by every method that previously read
     /// `self.db`. Centralising it lets the cache and snapshot guard live
     /// inside `KgDbState` without rewriting every call site.
-    pub(super) fn db(&self) -> &Database {
-        &self.state.db
+    ///
+    /// #6652: returns an owned `Arc<Database>` rather than a borrow, because
+    /// the handle is now swappable (see [`KgDbState::db`]). Call sites are
+    /// unchanged — `self.db().begin_read()` auto-derefs through the `Arc`, and
+    /// redb's `ReadTransaction`/`WriteTransaction` are owned, so the temporary
+    /// may drop while the transaction lives.
+    pub(super) fn db(&self) -> Arc<Database> {
+        self.state.db()
+    }
+
+    /// The canonical on-disk path this store was opened from.
+    ///
+    /// Why (#6652): the compaction path needs the file's directory to place the
+    /// `.compacting` and `.pre-compact.bak` siblings, and the `path` field is
+    /// crate-private.
+    /// What: clone of the path passed to `open_with_intent`.
+    /// Test: `kg_redb_path_reports_the_open_path`.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The current `Database`, for crate-internal tests (#6652).
+    ///
+    /// Why: the dream-level compaction tests have to seed `hist:` rows directly
+    /// — the real `retract` path closes every row at `now`, so history built
+    /// through it can never be old enough to cross the age gate. That needs a
+    /// write transaction against the same file the phase will rewrite, and
+    /// `db()` is module-private.
+    /// What: the same `Arc<Database>` clone `db()` returns. `pub(crate)`, so it
+    /// is not part of the crate's public API.
+    /// Test: `kg_compaction_shrinks_the_file_in_a_dream_cycle`.
+    #[cfg(test)]
+    pub(crate) fn db_for_test(&self) -> Arc<Database> {
+        self.db()
+    }
+
+    /// Begin a write transaction that the compaction swap cannot race.
+    ///
+    /// Why (#6652, code-critic BLOCK on effb8c343): every kg.redb write in this
+    /// crate reaches redb through `self.db().begin_write()`, and that is the
+    /// only chokepoint all of them share — `KgWriter`'s actor, `apply_batch`,
+    /// `import_all`, and the room/wing writers hold no palace handle and take
+    /// no palace mutex. Putting the exclusion here catches every writer with no
+    /// plumbing, and catches the ones that do not exist yet.
+    /// What: takes [`super::types::KgDbState::swap_lock`] for reading FIRST,
+    /// then reads the live handle, so a writer that blocked on an in-flight
+    /// swap resumes against the NEW file rather than the unlinked one. The
+    /// returned [`GuardedWrite`] holds both for the transaction's lifetime.
+    /// Test: `a_kg_writer_commit_inside_the_swap_window_is_never_dropped`.
+    pub(super) fn begin_write_guarded(&self) -> Result<GuardedWrite<'_>> {
+        let swap = self.state.swap_lock.read().expect("kg swap lock poisoned");
+        let db = self.state.db();
+        let txn = db.begin_write().context("begin kg.redb write txn")?;
+        Ok(GuardedWrite {
+            _swap: swap,
+            _db: db,
+            txn,
+        })
+    }
+
+    /// Wall-clock budget for taking the swap exclusion.
+    ///
+    /// Why (#6366): the caller holds the palace write mutex across the swap, so
+    /// an unbounded wait here would park every `remember` behind whatever
+    /// long-running write happens to hold the exclusion — `import_all` can hold
+    /// one for a while. Giving up instead turns "the palace is busy" into a
+    /// skipped cycle that retries, rather than a stall that surfaces as write
+    /// timeouts.
+    const SWAP_EXCLUSION_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Take the swap exclusion, or give up inside the budget.
+    ///
+    /// Why/What: see [`Self::SWAP_EXCLUSION_BUDGET`]. `std::sync::RwLock` has no
+    /// timed acquire, so this polls `try_write`. A poisoned lock means a
+    /// previous holder panicked mid-swap — an invariant break, not a runtime
+    /// condition, so it propagates as an error rather than being swallowed.
+    /// Test: `a_kg_writer_commit_inside_the_swap_window_is_never_dropped`
+    /// exercises the contended path.
+    fn acquire_swap_exclusion(&self) -> Result<std::sync::RwLockWriteGuard<'_, ()>> {
+        let deadline = std::time::Instant::now() + Self::SWAP_EXCLUSION_BUDGET;
+        loop {
+            match self.state.swap_lock.try_write() {
+                Ok(guard) => return Ok(guard),
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    anyhow::bail!("kg swap lock poisoned by a previous swap");
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "kg.redb writers stayed busy for {:?}; abandoning the compaction \
+                             swap with the live file unchanged (it retries next cycle)",
+                            Self::SWAP_EXCLUSION_BUDGET
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+    }
+
+    /// Run the compaction swap with every kg.redb writer excluded (#6652).
+    ///
+    /// Why: the rename and the handle install have to be indivisible from the
+    /// fingerprint re-check that authorised them. Anything committing in
+    /// between writes to an inode the rename is about to unlink, and the
+    /// caller is told it succeeded — the fail-open the critic blocked on.
+    /// What: takes `swap_lock` for writing, runs `swap` (which re-checks,
+    /// renames, and hands back the already-open replacement), installs that
+    /// replacement, and releases. Every writer is either fully before or fully
+    /// after this window. An `Err` from `swap` leaves the handle untouched.
+    /// Test: `a_kg_writer_commit_inside_the_swap_window_is_never_dropped`,
+    /// `compaction_swaps_the_live_handle_in_place`.
+    pub(super) fn swap_database_exclusively<F>(&self, swap: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<Database>,
+    {
+        let _exclusive = self.acquire_swap_exclusion()?;
+        let replacement = swap()?;
+        // Infallible from here: one pointer store into the `KgDbState` every
+        // clone of this store shares, so the daemon's own long-lived handle is
+        // swapped by this line — not lazily on some later open.
+        let mut slot = self
+            .state
+            .db
+            .write()
+            .expect("kg db handle lock poisoned during compaction swap");
+        *slot = Arc::new(replacement);
+        Ok(())
     }
 
     /// Reject the operation when the store is in snapshot mode.

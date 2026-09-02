@@ -14,6 +14,8 @@ mod dreamer;
 mod fading;
 mod guard;
 mod helpers;
+// #6652: the kg.redb prune-and-compact phase.
+pub mod kg_compact;
 mod recall_benchmark;
 
 #[cfg(test)]
@@ -21,8 +23,10 @@ mod tests;
 
 // ── Public re-exports ────────────────────────────────────────────────────────
 
+pub use config::{COMPACT_MIN_RECLAIM_PERCENT, MIN_PRUNE_HISTORY_DAYS};
 pub use config::{DreamConfig, DreamStats, PersistedDreamStats};
 pub use cycle::{RoomConsolidationStats, consolidate_scoped};
 pub use dreamer::Dreamer;
 pub use fading::{FadingMemory, FadingParams, detect_fading, rank_fading};
 pub use helpers::extract_keywords;
+pub use kg_compact::{KgCompactReport, kg_compact_pass, kg_compact_pass_with_hook};

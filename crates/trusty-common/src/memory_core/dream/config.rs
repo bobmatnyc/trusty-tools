@@ -13,6 +13,20 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Floor for [`DreamConfig::prune_history_after_days`] (#6652).
+///
+/// Why: history rows are the only record that a fact ever changed. A config
+/// that pruned them after a day would delete the evidence an operator reaches
+/// for while a contradiction is still fresh. Seven days is the shortest window
+/// in which someone plausibly notices and investigates.
+pub const MIN_PRUNE_HISTORY_DAYS: i64 = 7;
+
+/// Reclaimable share of the file below which a rewrite is not worth its cost.
+///
+/// Why: the rewrite reads and writes the whole file and takes a same-size
+/// backup. Paying that to recover 2% is worse than leaving the slack alone.
+pub const COMPACT_MIN_RECLAIM_PERCENT: u64 = 10;
+
 /// Tunables for the dream loop.
 ///
 /// Why: The defaults bias toward conservative consolidation (rare cycles, only
@@ -62,6 +76,58 @@ pub struct DreamConfig {
     /// scores are `None`.
     pub recall_benchmark_enabled: bool,
 
+    /// Whether the dream cycle rewrites `kg.redb` to reclaim disk (#6652).
+    ///
+    /// Why: redb never shrinks a live file, so a palace's KG store only grows —
+    /// 342 MB on `trusty-tools` for 2,425 drawers. Nothing in the cycle
+    /// reclaimed a byte of it before this flag existed; the step that looked
+    /// like it might (`kg.checkpoint()`) is a documented no-op.
+    /// What: `true` runs the prune-and-compact phase after the vector compact
+    /// pass, subject to [`Self::compact_min_bytes`] and the reclaimable-ratio
+    /// gate. `false` skips it entirely. Config key `dream.compact`.
+    /// Test: `dream_config_defaults`, `kg_compaction_is_skipped_below_the_size_gate`.
+    pub compact: bool,
+
+    /// Age in days after which a closed `hist:` triple row is prunable (#6652).
+    ///
+    /// Why: every retraction and every functional-predicate overwrite leaves a
+    /// permanent history row that no live query reads — only `dump_all_triples`
+    /// and the export paths built on it. Deleting them unconditionally would
+    /// destroy the audit trail an operator debugging a contradiction actually
+    /// wants, so the prune is gated on age rather than on the rows being
+    /// unread. 90 days is three times the existing `prune_pass` floor, because
+    /// a history delete has no undo and a low-importance drawer prune
+    /// effectively does.
+    /// What: rows whose `valid_to` is older than this are skipped by the
+    /// rewrite. Clamped to a floor of [`MIN_PRUNE_HISTORY_DAYS`] — a
+    /// configuration that would delete last week's history is a mistake, not a
+    /// preference. Config key `dream.prune_history_after_days`.
+    /// Test: `history_prune_days_never_goes_below_the_floor`.
+    pub prune_history_after_days: i64,
+
+    /// File size below which the rewrite is not worth running (#6652).
+    ///
+    /// Why: a compaction costs a full read+write pass over the file plus a
+    /// same-size backup, and it frees nothing a small palace misses. Running it
+    /// on every idle tick for a 2 MB store is pure I/O.
+    /// What: `kg.redb` must be at least this large AND its reclaimable estimate
+    /// must be at least [`COMPACT_MIN_RECLAIM_PERCENT`] of the file before the
+    /// phase runs. Config key `dream.compact_min_bytes`.
+    /// Test: `kg_compaction_is_skipped_below_the_size_gate`.
+    pub compact_min_bytes: u64,
+
+    /// Whether to keep `kg.redb.pre-compact.bak` until the next run (#6652).
+    ///
+    /// Why: the rewrite replaces the palace's whole knowledge graph. A verified
+    /// copy of the pre-rewrite bytes is the only recovery path if the new file
+    /// turns out wrong in a way the row-count verification did not catch.
+    /// What: `true` writes and size-verifies the backup before the copy starts;
+    /// a backup that cannot be written aborts the compaction. Exactly one
+    /// generation is kept — the previous backup is removed before the new one
+    /// is written, so the safety net never becomes the bloat.
+    /// Test: `a_backup_write_failure_aborts_before_the_copy_starts`.
+    pub compact_keep_backup: bool,
+
     /// Tunables for the fading-memories resurface pass (issue #2352).
     ///
     /// Why: The resurface thresholds must be configurable per deployment (and,
@@ -91,6 +157,11 @@ impl Default for DreamConfig {
             // #5188: a local model server is opt-in, never a fallback.
             local_model_enabled: false,
             recall_benchmark_enabled: true,
+            // #6652: on by default — a palace that only grows is the bug.
+            compact: true,
+            prune_history_after_days: 90,
+            compact_min_bytes: 64 * 1024 * 1024,
+            compact_keep_backup: true,
             fading: FadingParams::default(),
         }
     }
@@ -189,6 +260,34 @@ pub struct DreamStats {
     #[serde(default)]
     pub recall_score_after: Option<f64>,
 
+    /// Bytes `kg.redb` shed in this cycle's copy-then-swap rewrite (#6652).
+    ///
+    /// Why: the pre-#6652 cycle reported `compression_ratio`, which counts
+    /// DRAWERS and says nothing about file bytes — a palace could log zero net
+    /// growth every cycle while `kg.redb` only grew, which is exactly what
+    /// `trusty-tools` did. This is the byte-level twin.
+    /// What: `bytes_before - bytes_after`, or `0` when the phase was gated off
+    /// or skipped. `#[serde(default)]` keeps older `dream_stats.json` readable.
+    /// Test: `dream_cycle_records_kg_compaction_stats`.
+    #[serde(default)]
+    pub kg_bytes_reclaimed: u64,
+
+    /// `kg.redb` size after this cycle, for the doctor's growth check (#6652).
+    ///
+    /// Why: `trusty-memory doctor` warns when the store has grown sharply since
+    /// the last cycle, and the only durable record of "last cycle" is this file.
+    /// What: `metadata(kg.redb).len()` at the end of the phase; `0` when the
+    /// palace has no on-disk store.
+    /// Test: `dream_cycle_records_kg_compaction_stats`.
+    #[serde(default)]
+    pub kg_bytes_after: u64,
+
+    /// Stale `hist:` triple rows the rewrite dropped this cycle (#6652).
+    ///
+    /// Test: `dream_cycle_records_kg_compaction_stats`.
+    #[serde(default)]
+    pub kg_history_rows_pruned: u64,
+
     /// Fading high-value memories detected this cycle (issue #2352).
     ///
     /// Why: Ranked list of originally-important memories whose effective
@@ -203,6 +302,20 @@ pub struct DreamStats {
     /// `palace_dream_response_includes_fading` MCP test in trusty-memory.
     #[serde(default)]
     pub fading: Vec<FadingMemory>,
+}
+
+impl DreamConfig {
+    /// The history-prune age, clamped to [`MIN_PRUNE_HISTORY_DAYS`].
+    ///
+    /// Why: the clamp belongs at the read, not at the write. A value parsed
+    /// from `~/.trusty-memory/config.toml` never passes through a constructor
+    /// that could validate it, so a caller that read the field directly would
+    /// bypass the floor.
+    /// What: `max(prune_history_after_days, MIN_PRUNE_HISTORY_DAYS)`.
+    /// Test: `history_prune_days_never_goes_below_the_floor`.
+    pub fn effective_prune_history_days(&self) -> i64 {
+        self.prune_history_after_days.max(MIN_PRUNE_HISTORY_DAYS)
+    }
 }
 
 impl DreamStats {

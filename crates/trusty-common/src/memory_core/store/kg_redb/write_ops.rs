@@ -16,10 +16,9 @@
 
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::store::kg_store::{
-    ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, TRIPLES, TRIPLES_BY_OBJECT,
-    TRIPLES_BY_PREDICATE, TripleValue, decode_triple_key, decode_u64, decode_value,
-    encode_object_index_key, encode_predicate_index_key, encode_triple_key, encode_u64,
-    encode_value, is_functional_predicate, prefix_range_end, subject_predicate_prefix,
+    ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, TRIPLES, TRIPLES_BY_OBJECT, TripleValue,
+    decode_triple_key, decode_u64, decode_value, encode_object_index_key, encode_triple_key,
+    encode_u64, encode_value, is_functional_predicate, prefix_range_end, subject_predicate_prefix,
     subject_prefix,
 };
 use anyhow::{Context, Result};
@@ -52,27 +51,20 @@ impl KgStoreRedb {
     /// `single_assert_and_apply_batch_one_op_agree_on_valid_from`.
     pub fn assert(&self, triple: &Triple) -> Result<()> {
         self.check_writable()?;
-        let wtx = self.db().begin_write().context("begin assert txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self.begin_write_guarded().context("begin assert txn")?;
+        let wtx = &gw.txn;
         {
             let mut triples = wtx.open_table(TRIPLES).context("open triples table")?;
             let mut by_object = wtx
                 .open_table(TRIPLES_BY_OBJECT)
                 .context("open triples_by_object table")?;
-            let mut by_predicate = wtx
-                .open_table(TRIPLES_BY_PREDICATE)
-                .context("open triples_by_predicate table")?;
             let mut counts = wtx
                 .open_table(ACTIVE_SUBJECT_COUNTS)
                 .context("open active_subject_counts table")?;
-            batch_assert(
-                &mut triples,
-                &mut by_object,
-                &mut by_predicate,
-                &mut counts,
-                triple,
-            )?;
+            batch_assert(&mut triples, &mut by_object, &mut counts, triple)?;
         }
-        wtx.commit().context("commit assert txn")?;
+        gw.commit().context("commit assert txn")?;
         Ok(())
     }
 
@@ -141,30 +133,28 @@ impl KgStoreRedb {
         object: Option<&str>,
     ) -> Result<usize> {
         self.check_writable()?;
-        let wtx = self.db().begin_write().context("begin retract txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self.begin_write_guarded().context("begin retract txn")?;
+        let wtx = &gw.txn;
         let closed;
         {
             let mut triples = wtx.open_table(TRIPLES).context("open triples table")?;
             let mut by_object = wtx
                 .open_table(TRIPLES_BY_OBJECT)
                 .context("open triples_by_object table")?;
-            let mut by_predicate = wtx
-                .open_table(TRIPLES_BY_PREDICATE)
-                .context("open triples_by_predicate table")?;
             let mut counts = wtx
                 .open_table(ACTIVE_SUBJECT_COUNTS)
                 .context("open active_subject_counts table")?;
             closed = retract_rows(
                 &mut triples,
                 &mut by_object,
-                &mut by_predicate,
                 &mut counts,
                 subject,
                 predicate,
                 object,
             )?;
         }
-        wtx.commit().context("commit retract txn")?;
+        gw.commit().context("commit retract txn")?;
         Ok(closed)
     }
 
@@ -180,7 +170,11 @@ impl KgStoreRedb {
     /// `fact_key_index_tracks_upsert_and_delete`.
     pub fn upsert_drawer(&self, drawer: &Drawer) -> Result<()> {
         self.check_writable()?;
-        let wtx = self.db().begin_write().context("begin upsert_drawer txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self
+            .begin_write_guarded()
+            .context("begin upsert_drawer txn")?;
+        let wtx = &gw.txn;
         {
             let mut drawers = wtx.open_table(DRAWERS).context("open drawers table")?;
             let mut by_fact_key = wtx
@@ -188,7 +182,7 @@ impl KgStoreRedb {
                 .context("open drawers_by_fact_key table")?;
             batch_upsert_drawer(&mut drawers, &mut by_fact_key, drawer)?;
         }
-        wtx.commit().context("commit upsert_drawer txn")?;
+        gw.commit().context("commit upsert_drawer txn")?;
         Ok(())
     }
 
@@ -204,7 +198,11 @@ impl KgStoreRedb {
     /// `fact_key_index_tracks_upsert_and_delete`.
     pub fn delete_drawer(&self, id: Uuid) -> Result<()> {
         self.check_writable()?;
-        let wtx = self.db().begin_write().context("begin delete_drawer txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self
+            .begin_write_guarded()
+            .context("begin delete_drawer txn")?;
+        let wtx = &gw.txn;
         {
             let mut drawers = wtx.open_table(DRAWERS).context("open drawers table")?;
             let mut by_fact_key = wtx
@@ -212,7 +210,7 @@ impl KgStoreRedb {
                 .context("open drawers_by_fact_key table")?;
             batch_delete_drawer(&mut drawers, &mut by_fact_key, id)?;
         }
-        wtx.commit().context("commit delete_drawer txn")?;
+        gw.commit().context("commit delete_drawer txn")?;
         Ok(())
     }
 
@@ -320,17 +318,19 @@ fn active_rows_for_pair(
     Ok(out)
 }
 
-/// The three tables a triple write mutates together.
+/// The two tables a triple write mutates together.
 ///
-/// Why: `close_active_row` needs all three, and threading them as separate
+/// Why: `close_active_row` needs both, and threading them as separate
 /// parameters alongside the row's own identity pushed it past clippy's
 /// argument ceiling. Grouping them also names the real unit — a triple's
-/// primary row and its two indexes move as one or the invariant breaks.
+/// primary row and its reverse index move as one or the invariant breaks.
+/// #6652 removed the third member: `TRIPLES_BY_PREDICATE` had no reader
+/// anywhere in the workspace, so every assert and retract was paying to
+/// maintain an index nothing queried.
 /// What: borrowed handles into the caller's open write transaction.
 struct TripleTables<'a, 'txn> {
     triples: &'a mut Tbl<'txn>,
     by_object: &'a mut Tbl<'txn>,
-    by_predicate: &'a mut Tbl<'txn>,
 }
 
 /// Close one active row: copy it to history, drop it, drop its index entries.
@@ -340,7 +340,7 @@ struct TripleTables<'a, 'txn> {
 /// same three mutations everywhere.
 /// What: writes `hist:<key><valid_from_ms BE>` carrying the row with
 /// `valid_to = close_ms`, removes the active row, and removes its
-/// `TRIPLES_BY_OBJECT` / `TRIPLES_BY_PREDICATE` entries. The caller owns the
+/// `TRIPLES_BY_OBJECT` entry. The caller owns the
 /// `ACTIVE_SUBJECT_COUNTS` adjustment because it batches several closes into
 /// one net delta.
 /// Test: `assert_supersedes_prior`, `retract_closes_active_interval`.
@@ -375,11 +375,6 @@ fn close_active_row(
         .by_object
         .remove(obj_key.as_slice())
         .context("remove object index for closed row")?;
-    let pred_key = encode_predicate_index_key(predicate, subject, &prior.object);
-    tables
-        .by_predicate
-        .remove(pred_key.as_slice())
-        .context("remove predicate index for closed row")?;
     Ok(())
 }
 
@@ -438,7 +433,6 @@ fn adjust_active_count(counts: &mut Tbl<'_>, subject: &str, delta: i64) -> Resul
 pub(super) fn batch_assert<'txn>(
     triples: &mut Tbl<'txn>,
     by_object: &mut Tbl<'txn>,
-    by_predicate: &mut Tbl<'txn>,
     counts: &mut Tbl<'_>,
     triple: &Triple,
 ) -> Result<()> {
@@ -454,11 +448,7 @@ pub(super) fn batch_assert<'txn>(
     let functional = is_functional_predicate(&triple.predicate);
 
     let prior_rows = active_rows_for_pair(triples, &triple.subject, &triple.predicate)?;
-    let mut tables = TripleTables {
-        triples,
-        by_object,
-        by_predicate,
-    };
+    let mut tables = TripleTables { triples, by_object };
     let mut closed: i64 = 0;
     for (prior_key, prior) in prior_rows {
         // #4810: a functional predicate supersedes every object; a
@@ -494,12 +484,6 @@ pub(super) fn batch_assert<'txn>(
             .by_object
             .insert(obj_key.as_slice(), [].as_slice())
             .context("insert new object index")?;
-        let pred_key =
-            encode_predicate_index_key(&triple.predicate, &triple.subject, &new_value.object);
-        tables
-            .by_predicate
-            .insert(pred_key.as_slice(), [].as_slice())
-            .context("insert new predicate index")?;
         opened = 1;
     }
     adjust_active_count(counts, &triple.subject, opened - closed)
@@ -517,20 +501,11 @@ pub(super) fn batch_assert<'txn>(
 pub(super) fn batch_retract<'txn>(
     triples: &mut Tbl<'txn>,
     by_object: &mut Tbl<'txn>,
-    by_predicate: &mut Tbl<'txn>,
     counts: &mut Tbl<'_>,
     subject: &str,
     predicate: &str,
 ) -> Result<usize> {
-    retract_rows(
-        triples,
-        by_object,
-        by_predicate,
-        counts,
-        subject,
-        predicate,
-        None,
-    )
+    retract_rows(triples, by_object, counts, subject, predicate, None)
 }
 
 /// Close the active rows at `(subject, predicate)`, optionally narrowed to one
@@ -550,7 +525,6 @@ pub(super) fn batch_retract<'txn>(
 fn retract_rows<'txn>(
     triples: &mut Tbl<'txn>,
     by_object: &mut Tbl<'txn>,
-    by_predicate: &mut Tbl<'txn>,
     counts: &mut Tbl<'_>,
     subject: &str,
     predicate: &str,
@@ -558,11 +532,7 @@ fn retract_rows<'txn>(
 ) -> Result<usize> {
     let close_ms = now_ms();
     let active = active_rows_for_pair(triples, subject, predicate)?;
-    let mut tables = TripleTables {
-        triples,
-        by_object,
-        by_predicate,
-    };
+    let mut tables = TripleTables { triples, by_object };
     let mut closed = 0usize;
     for (key, prior) in &active {
         if let Some(target) = object

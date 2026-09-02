@@ -15,6 +15,7 @@ use super::cycle::{
 };
 use super::fading::detect_fading;
 use super::guard::CompactionGuard;
+use super::kg_compact::kg_compact_pass;
 use super::recall_benchmark::run_benchmark;
 use crate::memory_core::palace::PalaceId;
 use crate::memory_core::registry::PalaceRegistry;
@@ -310,28 +311,37 @@ impl Dreamer {
             compression_ratio: 0.0, // populated below
             recall_score_before,
             recall_score_after,
+            kg_bytes_reclaimed: 0,
+            kg_bytes_after: 0,
+            kg_history_rows_pruned: 0,
             fading,
         };
         stats.update_compression_ratio();
 
-        // WAL checkpoint hook — kept for API compatibility; redb manages its
-        // own write log internally so this is a no-op (issue #36, #989).
-        // Previously, SQLite needed periodic checkpointing to bound WAL growth.
-        match handle.kg.checkpoint() {
-            Ok((wal, done)) => {
-                tracing::debug!(
+        // ── Phase: kg.redb prune-and-compact (#6652) ──────────────────────────
+        // This replaces the `handle.kg.checkpoint()` call that used to sit here.
+        // That call was a documented no-op — redb manages its own write log —
+        // so the one step in the cycle whose stated job was bounding on-disk
+        // growth did nothing, and `kg.redb` only ever grew. A failure here is
+        // non-fatal: the rewrite leaves the live file untouched on every error
+        // path, so the cycle's other work still counts and the next cycle
+        // retries.
+        if self.config.compact {
+            match kg_compact_pass(handle, &self.config, false).await {
+                Ok(report) => {
+                    stats.kg_bytes_reclaimed = report.bytes_reclaimed();
+                    stats.kg_bytes_after = report.bytes_after;
+                    stats.kg_history_rows_pruned = report.history_rows_pruned;
+                    if report.ran() {
+                        tracing::info!(palace = %handle.id, "kg.redb: {}", report.summary());
+                    } else {
+                        tracing::debug!(palace = %handle.id, "kg.redb: {}", report.summary());
+                    }
+                }
+                Err(e) => tracing::warn!(
                     palace = %handle.id,
-                    wal_pages = wal,
-                    checkpointed = done,
-                    "WAL checkpoint complete"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    palace = %handle.id,
-                    error = %e,
-                    "WAL checkpoint failed (non-fatal)"
-                );
+                    "kg.redb compaction failed (non-fatal; the live file is unchanged): {e:#}"
+                ),
             }
         }
 
@@ -372,6 +382,8 @@ fn log_cycle_outcome(palace_id: &PalaceId, outcome: Result<DreamStats>) {
             semantically_consolidated = stats.semantically_consolidated,
             semantic_llm_calls = stats.semantic_llm_calls,
             duration_ms = stats.duration_ms,
+            kg_bytes_reclaimed = stats.kg_bytes_reclaimed,
+            kg_history_rows_pruned = stats.kg_history_rows_pruned,
             drawers_before = stats.drawers_before,
             drawers_after = stats.drawers_after,
             compression_ratio = stats.compression_ratio,

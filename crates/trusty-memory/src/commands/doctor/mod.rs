@@ -33,7 +33,9 @@ use audit::audit_palaces;
 pub use audit::{PalaceAuditEntry, PalaceAuditStatus};
 #[cfg(target_os = "macos")]
 use checks::check_launchd_plist;
-use checks::{check_daemon_health, check_fastembed_cache, check_stale_palace_locks};
+use checks::{
+    check_daemon_health, check_fastembed_cache, check_kg_redb_size, check_stale_palace_locks,
+};
 use mcp_registration::check_mcp_registrations;
 use tier_s::check_tier_s_reaffirmation;
 
@@ -280,6 +282,10 @@ pub async fn handle_doctor() -> Result<()> {
 
     // Check 4: stale palace locks.
     results.push(check_stale_palace_locks());
+
+    // #6652: kg.redb only ever grows; surface the biggest one before it is a
+    // slow-write symptom the operator has to trace by hand.
+    results.push(check_kg_redb_size());
 
     // Check 5 (#4890): Tier S facts overdue for re-affirmation. Report only.
     results.push(check_tier_s_reaffirmation().await);
@@ -708,5 +714,45 @@ mod tests {
         }));
         assert_eq!(r.status, CheckStatus::Warn);
         assert!(r.detail.as_deref().unwrap_or("").contains("disk full"));
+    }
+
+    /// Why (#6652): the thresholds are the whole check — an operator acts on
+    /// "warn at 100 MB, fail at 500 MB" and on the command the message names.
+    /// Pinning them here keeps a later tweak deliberate, and needs no
+    /// filesystem.
+    #[test]
+    fn kg_redb_size_verdict_matches_the_thresholds() {
+        use super::CheckStatus;
+        use checks::kg_redb_verdict;
+
+        let pass = kg_redb_verdict("kg.redb size".into(), "small", 10 * 1024 * 1024);
+        assert!(matches!(pass.status, CheckStatus::Pass), "{pass:?}");
+
+        let warn = kg_redb_verdict("kg.redb size".into(), "mid", 120 * 1024 * 1024);
+        assert!(matches!(warn.status, CheckStatus::Warn), "{warn:?}");
+        assert!(
+            warn.detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("palace stats mid"),
+            "the warning must name the command to run: {warn:?}"
+        );
+
+        let fail = kg_redb_verdict("kg.redb size".into(), "huge", 600 * 1024 * 1024);
+        assert!(matches!(fail.status, CheckStatus::Fail), "{fail:?}");
+        assert!(
+            fail.detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("palace compact huge"),
+            "the failure must name the command to run: {fail:?}"
+        );
+        assert!(
+            fail.detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("disk, not data"),
+            "a large store still serves every read; say so: {fail:?}"
+        );
     }
 }

@@ -26,11 +26,14 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+// #6652: `PalaceAction` lives beside its handlers in the library so this file
+// stays under the 500-SLOC production cap.
 use std::net::SocketAddr;
 use trusty_memory::commands::inbox_check::handle_inbox_check;
 use trusty_memory::commands::link::handle_link;
 use trusty_memory::commands::migrate::{handle_migrate, MigrateTarget};
 use trusty_memory::commands::note::handle_note;
+use trusty_memory::commands::palace::PalaceAction;
 use trusty_memory::commands::prompt_context::run_prompt_context_and_exit;
 use trusty_memory::commands::send_message::handle_send_message;
 use trusty_memory::commands::service::{handle_service, ServiceAction};
@@ -409,6 +412,22 @@ enum Command {
         action: RoomsAction,
     },
 
+    /// Inspect and reclaim a palace's knowledge-graph store, `kg.redb` (#6652).
+    ///
+    /// redb never returns freed pages to the filesystem — a retracted fact, a
+    /// forgotten drawer and a dropped table all release pages into redb's own
+    /// free list — so a palace's `kg.redb` only ever grows. `stats` reports
+    /// what is actually in the file; `compact` rewrites it into a fresh file
+    /// and renames that into place, dropping stale history rows on the way.
+    ///
+    ///   trusty-memory palace stats trusty-tools
+    ///   trusty-memory palace compact trusty-tools --dry-run
+    #[command(subcommand_required = true)]
+    Palace {
+        #[command(subcommand)]
+        action: PalaceAction,
+    },
+
     /// Rank existing drawers by how often they are actually injected, so a
     /// human can decide which deserve an `expires_at` (ADR-0028, Migration).
     ///
@@ -768,6 +787,7 @@ async fn main() -> Result<()> {
         Command::Rooms {
             action: RoomsAction::Backfill { palace, apply, .. },
         } => trusty_memory::commands::rooms::handle_rooms_backfill(palace, apply).await,
+        Command::Palace { action } => trusty_memory::commands::palace::dispatch(action).await,
         Command::BackfillReport {
             palace,
             limit,

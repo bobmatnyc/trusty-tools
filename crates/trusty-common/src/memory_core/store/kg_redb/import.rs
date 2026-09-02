@@ -9,9 +9,8 @@
 
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::store::kg_store::{
-    ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, TRIPLES, TRIPLES_BY_OBJECT,
-    TRIPLES_BY_PREDICATE, TripleValue, decode_u64, decode_value, encode_object_index_key,
-    encode_predicate_index_key, encode_triple_key, encode_u64, encode_value,
+    ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, TRIPLES, TRIPLES_BY_OBJECT, TripleValue,
+    decode_u64, decode_value, encode_object_index_key, encode_triple_key, encode_u64, encode_value,
 };
 use anyhow::{Context, Result};
 use redb::ReadableTable;
@@ -44,15 +43,14 @@ impl KgStoreRedb {
     /// `crates/trusty-common/tests/kg_migration_tests.rs`.
     pub fn import_all(&self, triples: Vec<Triple>, drawers: Vec<Drawer>) -> Result<()> {
         self.check_writable()?;
-        let wtx = self.db().begin_write().context("begin import txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self.begin_write_guarded().context("begin import txn")?;
+        let wtx = &gw.txn;
         {
             let mut triples_t = wtx.open_table(TRIPLES).context("open triples table")?;
             let mut by_object = wtx
                 .open_table(TRIPLES_BY_OBJECT)
                 .context("open triples_by_object table")?;
-            let mut by_predicate = wtx
-                .open_table(TRIPLES_BY_PREDICATE)
-                .context("open triples_by_predicate table")?;
             let mut counts = wtx
                 .open_table(ACTIVE_SUBJECT_COUNTS)
                 .context("open active_subject_counts table")?;
@@ -123,14 +121,6 @@ impl KgStoreRedb {
                             by_object
                                 .remove(obj_key.as_slice())
                                 .context("remove demoted object index")?;
-                            let pred_key = encode_predicate_index_key(
-                                &triple.predicate,
-                                &triple.subject,
-                                &prior.object,
-                            );
-                            by_predicate
-                                .remove(pred_key.as_slice())
-                                .context("remove demoted predicate index")?;
 
                             let subj_key = triple.subject.as_bytes();
                             let prev = counts
@@ -158,14 +148,6 @@ impl KgStoreRedb {
                     by_object
                         .insert(obj_key.as_slice(), [].as_slice())
                         .context("insert object index for imported row")?;
-                    let pred_key = encode_predicate_index_key(
-                        &triple.predicate,
-                        &triple.subject,
-                        &value.object,
-                    );
-                    by_predicate
-                        .insert(pred_key.as_slice(), [].as_slice())
-                        .context("insert predicate index for imported row")?;
 
                     let subj_key = triple.subject.as_bytes();
                     let prev = counts
@@ -194,7 +176,7 @@ impl KgStoreRedb {
                     .context("insert imported drawer")?;
             }
         }
-        wtx.commit().context("commit import txn")?;
+        gw.commit().context("commit import txn")?;
         Ok(())
     }
 
@@ -223,16 +205,17 @@ impl KgStoreRedb {
             return Ok(Vec::new());
         }
 
-        let wtx = self.db().begin_write().context("begin batch txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+
+        let gw = self.begin_write_guarded().context("begin batch txn")?;
+
+        let wtx = &gw.txn;
         let mut results: Vec<BatchOpResult> = Vec::with_capacity(ops.len());
         {
             let mut triples = wtx.open_table(TRIPLES).context("open triples table")?;
             let mut by_object = wtx
                 .open_table(TRIPLES_BY_OBJECT)
                 .context("open triples_by_object table")?;
-            let mut by_predicate = wtx
-                .open_table(TRIPLES_BY_PREDICATE)
-                .context("open triples_by_predicate table")?;
             let mut counts = wtx
                 .open_table(ACTIVE_SUBJECT_COUNTS)
                 .context("open active_subject_counts table")?;
@@ -245,18 +228,13 @@ impl KgStoreRedb {
 
             for (idx, op) in ops.iter().enumerate() {
                 let res: Result<BatchOpResult> = match op {
-                    BatchWriteOp::Assert(triple) => batch_assert(
-                        &mut triples,
-                        &mut by_object,
-                        &mut by_predicate,
-                        &mut counts,
-                        triple,
-                    )
-                    .map(|_| BatchOpResult::Asserted),
+                    BatchWriteOp::Assert(triple) => {
+                        batch_assert(&mut triples, &mut by_object, &mut counts, triple)
+                            .map(|_| BatchOpResult::Asserted)
+                    }
                     BatchWriteOp::Retract { subject, predicate } => batch_retract(
                         &mut triples,
                         &mut by_object,
-                        &mut by_predicate,
                         &mut counts,
                         subject,
                         predicate,
@@ -281,7 +259,7 @@ impl KgStoreRedb {
                 }
             }
         }
-        wtx.commit().context("commit batch txn")?;
+        gw.commit().context("commit batch txn")?;
         Ok(results)
     }
 }

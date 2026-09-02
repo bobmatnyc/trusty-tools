@@ -322,7 +322,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "palace_compact",
-                "description": "Remove orphaned vector index entries (vectors with no matching drawer row). See issue #49.",
+                "description": "Remove orphaned vector index entries (vectors with no matching drawer row). See issue #49. VECTOR-INDEX ONLY: this touches index.usearch.redb and does not read, rewrite, prune, or shrink the knowledge-graph store kg.redb. To reclaim kg.redb disk, use palace_dream with compact=true, or the CLI `trusty-memory palace compact <name>` (#6652).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

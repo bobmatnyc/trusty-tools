@@ -96,7 +96,11 @@ impl KgStoreRedb {
     pub fn insert_room_if_absent(&self, id: Uuid, key: &str, record: &RoomRecord) -> Result<bool> {
         self.check_writable()?;
         let value = encode_value(record).context("encode RoomRecord")?;
-        let wtx = self.db().begin_write().context("begin insert_room txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self
+            .begin_write_guarded()
+            .context("begin insert_room txn")?;
+        let wtx = &gw.txn;
         let inserted = {
             let mut rooms = wtx.open_table(ROOMS).context("open rooms table")?;
             let fresh = rooms
@@ -115,7 +119,7 @@ impl KgStoreRedb {
             }
             fresh
         };
-        wtx.commit().context("commit insert_room txn")?;
+        gw.commit().context("commit insert_room txn")?;
         Ok(inserted)
     }
 
@@ -180,14 +184,18 @@ impl KgStoreRedb {
             schema_version: ROOM_SCHEMA_VERSION,
         })
         .context("encode RoomSchemaMarker")?;
-        let wtx = self.db().begin_write().context("begin schema marker txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self
+            .begin_write_guarded()
+            .context("begin schema marker txn")?;
+        let wtx = &gw.txn;
         {
             let mut rooms = wtx.open_table(ROOMS).context("open rooms table")?;
             rooms
                 .insert(Uuid::nil().as_bytes().as_slice(), value.as_slice())
                 .context("insert schema marker")?;
         }
-        wtx.commit().context("commit schema marker txn")?;
+        gw.commit().context("commit schema marker txn")?;
         Ok(())
     }
 
@@ -218,7 +226,11 @@ impl KgStoreRedb {
     ) -> Result<()> {
         self.check_writable()?;
         let value = encode_value(record).context("encode RoomRecord")?;
-        let wtx = self.db().begin_write().context("begin rename_room txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self
+            .begin_write_guarded()
+            .context("begin rename_room txn")?;
+        let wtx = &gw.txn;
         {
             let mut keys = wtx.open_table(ROOM_KEYS).context("open room_keys table")?;
             if new_key != old_key {
@@ -250,7 +262,7 @@ impl KgStoreRedb {
                 .insert(id.as_bytes().as_slice(), value.as_slice())
                 .context("rewrite rooms row")?;
         }
-        wtx.commit().context("commit rename_room txn")?;
+        gw.commit().context("commit rename_room txn")?;
         Ok(())
     }
 

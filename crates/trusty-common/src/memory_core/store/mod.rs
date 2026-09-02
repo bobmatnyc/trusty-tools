@@ -30,7 +30,7 @@ pub mod vector;
 pub mod wings;
 
 pub use chat_sessions::{ChatSession, ChatSessionMeta, ChatSessionStore};
-pub use concurrent_open::{OpenIntent, OpenMode};
+pub use concurrent_open::{OpenIntent, OpenMode, ReadOnlyRedb};
 // #4906: the ledger row type; the read/write helpers stay module-qualified so
 // call sites read as `embed_ledger::record(..)`.
 pub use embed_ledger::EmbedFailure;

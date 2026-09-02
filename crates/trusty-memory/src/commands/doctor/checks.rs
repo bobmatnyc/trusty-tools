@@ -5,7 +5,8 @@
 //! audit data types and the command entry-points.
 //! What: exports check functions called by [`super::handle_doctor`]:
 //! [`check_fastembed_cache`], `check_launchd_plist` (macOS),
-//! [`check_daemon_health`], and [`check_stale_palace_locks`]. Also exports
+//! [`check_daemon_health`], [`check_stale_palace_locks`], and the #6652
+//! [`check_kg_redb_size`] disk-growth row. Also exports
 //! private helpers used by the tests in `mod.rs`.
 //! Test: individual check helpers are exercised by unit tests in `mod.rs`;
 //! the async `check_daemon_health` test verifies fallback-port behaviour.
@@ -423,4 +424,87 @@ pub fn find_lock_files(root: &Path) -> Vec<PathBuf> {
 
 pub(super) fn is_lock_file(path: &Path) -> bool {
     path.extension().and_then(|s| s.to_str()) == Some("lock")
+}
+
+/// Size at which a palace's `kg.redb` earns a warning (#6652).
+const KG_REDB_WARN_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Size at which it earns a failure.
+const KG_REDB_FAIL_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Report the largest `kg.redb` on disk and whether it needs compacting.
+///
+/// Why (#6652): redb never returns freed pages to the filesystem, so a palace's
+/// knowledge-graph store grows monotonically no matter how much is retracted or
+/// forgotten. `trusty-tools` reached 342 MB against 2,425 drawers, and nothing
+/// in `doctor` said so — the operator's first signal was a slow write, traced
+/// by hand. A size row makes the growth visible before it is a symptom.
+/// What: stats `<palace>/kg.redb` for every palace under the registry root and
+/// reports the largest. `Pass` under 100 MB, `Warn` from 100 MB to 500 MB with
+/// the compaction command named, `Fail` above 500 MB. The verdict is about disk
+/// only — a large store still serves every read correctly.
+/// Test: `kg_redb_size_verdict_matches_the_thresholds`.
+pub fn check_kg_redb_size() -> CheckResult {
+    let label = "kg.redb size".to_string();
+    let data_dir = match trusty_common::resolve_data_dir("trusty-memory") {
+        Ok(d) => d,
+        Err(e) => return CheckResult::fail(label, format!("could not resolve data dir: {e}")),
+    };
+    let root = crate::resolve_palace_registry_dir(data_dir);
+    let Some((palace, bytes)) = largest_kg_redb(&root) else {
+        return CheckResult::pass(label, format!("no palace store under {}", root.display()));
+    };
+    kg_redb_verdict(label, &palace, bytes)
+}
+
+/// The `(palace_id, bytes)` of the biggest `kg.redb` one level under `root`.
+///
+/// Why/What: the same one-level scan [`find_lock_files`] uses — a palace's
+/// store is always `<root>/<palace>/kg.redb`, so a recursive walk would only
+/// cost time. Unreadable entries are skipped rather than failing the check.
+/// Test: `kg_redb_size_verdict_matches_the_thresholds`.
+pub fn largest_kg_redb(root: &Path) -> Option<(String, u64)> {
+    let mut best: Option<(String, u64)> = None;
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(dir.join("kg.redb")) else {
+            continue;
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if best.as_ref().is_none_or(|(_, b)| meta.len() > *b) {
+            best = Some((name, meta.len()));
+        }
+    }
+    best
+}
+
+/// Turn a size into a check verdict.
+///
+/// Why: the thresholds and their wording are the part worth unit-testing, and
+/// they should not need a filesystem to exercise.
+/// Test: `kg_redb_size_verdict_matches_the_thresholds`.
+pub fn kg_redb_verdict(label: String, palace: &str, bytes: u64) -> CheckResult {
+    let mb = bytes / (1024 * 1024);
+    if bytes >= KG_REDB_FAIL_BYTES {
+        CheckResult::fail(
+            label,
+            format!(
+                "palace '{palace}' kg.redb is {mb} MB — run `trusty-memory palace compact \
+                 {palace}` (reads are still correct; this is disk, not data)"
+            ),
+        )
+    } else if bytes >= KG_REDB_WARN_BYTES {
+        CheckResult::warn(
+            label,
+            format!(
+                "palace '{palace}' kg.redb is {mb} MB — consider `trusty-memory palace stats \
+                 {palace}` to see what is reclaimable"
+            ),
+        )
+    } else {
+        CheckResult::pass(label, format!("largest is '{palace}' at {mb} MB"))
+    }
 }

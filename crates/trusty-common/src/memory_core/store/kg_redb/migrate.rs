@@ -10,11 +10,15 @@
 //! open.
 //! What: gated on the [`KG_SCHEMA`] marker row so it runs at most once per
 //! palace; backs the database file up first and verifies the copy; rewrites
-//! every TRIPLES key (active and `hist:`), rebuilds `TRIPLES_BY_PREDICATE`
-//! (whose key also gained the object), and stamps the marker — the rewrite and
-//! the stamp inside ONE redb write transaction, so a failure part-way through
-//! rolls both back and the next open retries from the original rows.
+//! every TRIPLES key (active and `hist:`) and stamps the marker — the rewrite
+//! and the stamp inside ONE redb write transaction, so a failure part-way
+//! through rolls both back and the next open retries from the original rows.
 //! `TRIPLES_BY_OBJECT` is untouched: its key already carried the object.
+//! #6652 retired the `TRIPLES_BY_PREDICATE` rebuild this migration used to
+//! carry: the index has no reader, so the write maintenance is gone and the
+//! table itself is dropped by not being copied during the
+//! [`super::copy_swap`] compaction — off the request path, size-gated, and
+//! behind a verified backup.
 //! Fail-open: any error is logged at `warn!` and the palace opens un-migrated,
 //! matching how `PalaceHandle::open_with_intent` degrades when `load_drawers`
 //! fails.
@@ -24,8 +28,7 @@
 
 use crate::memory_core::store::kg_store::{
     KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KG_TRIPLE_KEY_SCHEMA_VERSION, KgSchemaMarker, TRIPLES,
-    TRIPLES_BY_PREDICATE, TripleValue, decode_legacy_triple_key, decode_value,
-    encode_predicate_index_key, encode_triple_key, encode_value,
+    TripleValue, decode_legacy_triple_key, decode_value, encode_triple_key, encode_value,
 };
 use anyhow::{Context, Result, bail};
 use redb::{Database, ReadableDatabase, ReadableTable};
@@ -89,9 +92,6 @@ struct Rewrite {
     old_key: Vec<u8>,
     new_key: Vec<u8>,
     value: Vec<u8>,
-    /// Present only for active rows — the predicate index is rebuilt from
-    /// these.
-    index_parts: Option<(String, String, String)>,
 }
 
 /// Migrate this database's triple keys if it has not been migrated already.
@@ -152,27 +152,6 @@ fn migrate_triple_keys(db: &Database, path: &Path) -> Result<MigrationOutcome> {
             triples
                 .insert(r.new_key.as_slice(), r.value.as_slice())
                 .context("insert migrated triple key")?;
-        }
-
-        // TRIPLES_BY_PREDICATE's key gained the object too, so every entry in
-        // it is stale. Rebuilding beats rewriting: the table has no readers, so
-        // there is nothing to preserve, and rebuilding from the active rows
-        // cannot inherit an inconsistency the old index already had.
-        let mut by_predicate = wtx
-            .open_table(TRIPLES_BY_PREDICATE)
-            .context("open triples_by_predicate table for migration")?;
-        by_predicate
-            .retain(|_, _| false)
-            .context("clear stale predicate index")?;
-        for r in &plan {
-            if let Some((s, p, o)) = &r.index_parts {
-                by_predicate
-                    .insert(
-                        encode_predicate_index_key(p, s, o).as_slice(),
-                        [].as_slice(),
-                    )
-                    .context("rebuild predicate index entry")?;
-            }
         }
 
         let marker = encode_value(&KgSchemaMarker {
@@ -271,13 +250,10 @@ fn plan_rewrites(db: &Database) -> Result<Vec<Rewrite>> {
             continue;
         }
 
-        let index_parts = (!is_hist && value.valid_to_ms.is_none())
-            .then(|| (subject, predicate, value.object.clone()));
         plan.push(Rewrite {
             old_key,
             new_key,
             value: value_bytes,
-            index_parts,
         });
     }
     Ok(plan)

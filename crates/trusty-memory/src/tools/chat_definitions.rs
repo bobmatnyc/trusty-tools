@@ -122,13 +122,15 @@ pub(super) fn chat_tool_definitions(has_default: bool) -> Vec<Value> {
         }),
         json!({
             "name": "palace_dream",
-            "description": "On-demand LLM-driven consolidation for a palace (issue #1721). Alias for dream_consolidate_room with the same parameters; use this name when following the palace_* convention. Triggers a scoped dream/consolidation cycle immediately for the named palace, optionally filtered to one room. Task drawers are always skipped. Gracefully returns zero counts when no inference backend is configured. Returns { palace, room, summary_facts_created, facts_evicted }.",
+            "description": "On-demand LLM-driven consolidation for a palace (issue #1721). Alias for dream_consolidate_room with the same parameters; use this name when following the palace_* convention. Triggers a scoped dream/consolidation cycle immediately for the named palace, optionally filtered to one room. Task drawers are always skipped. Gracefully returns zero counts when no inference backend is configured. Set compact=true (#6652) to additionally prune stale kg.redb history rows and rewrite the file to reclaim disk; add dry_run=true to measure and report without writing. Returns { palace, room, summary_facts_created, facts_evicted, fading, compaction }.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "palace":       {"type": "string"},
                     "room":         {"type": "string", "description": "Room to scope to. Omit or null to consolidate all rooms."},
-                    "max_age_days": {"type": "integer", "default": 7, "description": "Only consolidate facts older than this many days."}
+                    "max_age_days": {"type": "integer", "default": 7, "description": "Only consolidate facts older than this many days."},
+                    "compact":      {"type": "boolean", "default": false, "description": "#6652: also run the kg.redb prune-and-compact phase (prune hist: rows older than dream.prune_history_after_days, then rewrite the file via copy-then-swap). Gated by dream.compact_min_bytes and a reclaimable-ratio floor."},
+                    "dry_run":      {"type": "boolean", "default": false, "description": "With compact=true, measure the file read-only and report what would be pruned and reclaimed without writing any bytes."}
                 },
                 "required": dream_consolidate_room_required,
             }

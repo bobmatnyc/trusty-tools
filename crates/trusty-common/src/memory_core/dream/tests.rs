@@ -2325,3 +2325,301 @@ async fn remember_racing_dream_rebuild_never_loses_a_vector() {
         "the anchor vector must survive too"
     );
 }
+
+// ── #6652: the kg.redb prune-and-compact phase ──────────────────────────────
+
+/// Seed `count` closed `hist:` rows aged `age_days` into the palace's KG.
+///
+/// Why: the real `retract` path closes rows at `now`, so history manufactured
+/// through it can never be older than the test. Writing the rows directly is
+/// the only way to place them behind the age gate, and it uses the exact key
+/// shape `close_active_row` writes.
+fn seed_stale_history(handle: &Arc<PalaceHandle>, count: usize, age_days: i64) {
+    use crate::memory_core::store::kg_store::{
+        TRIPLES, TripleValue, encode_triple_key, encode_value,
+    };
+
+    let closed_ms = Utc::now().timestamp_millis() - age_days * 86_400_000;
+    let store = handle.kg.redb_store();
+    let db = store.db_for_test();
+    let wtx = db.begin_write().expect("begin history seed");
+    {
+        let mut t = wtx.open_table(TRIPLES).expect("open triples");
+        for i in 0..count {
+            let core = encode_triple_key("dead", "was", &format!("v{i}"));
+            let mut key = b"hist:".to_vec();
+            key.extend_from_slice(&core);
+            key.extend_from_slice(&(closed_ms - 1000).to_be_bytes());
+            let value = TripleValue {
+                object: format!("v{i}"),
+                valid_from_ms: closed_ms - 1000,
+                valid_to_ms: Some(closed_ms),
+                confidence: 1.0,
+                provenance: None,
+            };
+            let bytes = encode_value(&value).expect("encode");
+            t.insert(key.as_slice(), bytes.as_slice()).expect("insert");
+        }
+    }
+    wtx.commit().expect("commit history seed");
+}
+
+/// A config whose only job is the kg.redb phase.
+fn compact_only_config() -> DreamConfig {
+    DreamConfig {
+        compact: true,
+        prune_history_after_days: 90,
+        // Every gate off: these palaces are tiny by design, and the gates
+        // exist to skip tiny palaces.
+        compact_min_bytes: 0,
+        compact_keep_backup: true,
+        ..dedup_only_config()
+    }
+}
+
+/// Why: the whole point of #6652 — a palace whose file is mostly dead history
+/// must come out smaller, with every live drawer and active triple intact.
+#[tokio::test]
+async fn kg_compaction_shrinks_the_file_in_a_dream_cycle() {
+    let handle = open_test_handle("kg-compact-shrinks").await;
+    for i in 0..12 {
+        handle
+            .remember(
+                format!("a live drawer number {i} with enough words to survive content prune"),
+                RoomType::Planning,
+                vec![],
+                0.9,
+            )
+            .await
+            .expect("remember");
+    }
+    seed_stale_history(&handle, 6_000, 400);
+
+    let path = handle.data_dir.as_ref().expect("data_dir").join("kg.redb");
+    let before = std::fs::metadata(&path).expect("stat").len();
+    let live_ids: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+
+    let report = kg_compact_pass(&handle, &compact_only_config(), false)
+        .await
+        .expect("compact pass");
+
+    assert!(report.ran(), "phase was skipped: {}", report.summary());
+    assert_eq!(report.history_rows_pruned, 6_000);
+    let after = std::fs::metadata(&path).expect("stat").len();
+    assert!(
+        after < before,
+        "file did not shrink: {before} -> {after} ({})",
+        report.summary()
+    );
+
+    // Every live drawer is still readable through the SAME handle the swap
+    // happened under — not a freshly-opened one, which would pass trivially.
+    let survivors = handle.kg.load_drawers().expect("load drawers");
+    for id in &live_ids {
+        assert!(
+            survivors.iter().any(|d| d.id == *id),
+            "drawer {id} vanished in the rewrite"
+        );
+    }
+    assert_eq!(survivors.len(), live_ids.len());
+}
+
+/// Why: a rewrite costs a full read+write pass plus a same-size backup. A small
+/// or already-tight file must not pay it on every idle tick.
+#[tokio::test]
+async fn kg_compaction_is_skipped_below_the_size_gate() {
+    let handle = open_test_handle("kg-compact-gated").await;
+    handle
+        .remember(
+            "one drawer with quite enough words in it".to_string(),
+            RoomType::Planning,
+            vec![],
+            0.9,
+        )
+        .await
+        .expect("remember");
+    let cfg = DreamConfig {
+        compact_min_bytes: 1_000_000_000,
+        ..compact_only_config()
+    };
+    let report = kg_compact_pass(&handle, &cfg, false).await.expect("pass");
+    assert!(!report.ran(), "the size gate did not stop the rewrite");
+    assert!(
+        report
+            .skipped
+            .as_deref()
+            .is_some_and(|r| r.contains("compact_min_bytes")),
+        "unexpected skip reason: {:?}",
+        report.skipped
+    );
+    assert_eq!(report.history_rows_pruned, 0);
+}
+
+/// Why: `--dry-run` is the gate the owner's "measure before deleting" amendment
+/// rests on. It must not write a backup, a temp file, or a byte of the store.
+#[tokio::test]
+async fn dry_run_prepares_nothing_and_writes_no_bytes() {
+    let handle = open_test_handle("kg-compact-dry").await;
+    handle
+        .remember(
+            "a drawer that must still be here afterwards".to_string(),
+            RoomType::Planning,
+            vec![],
+            0.9,
+        )
+        .await
+        .expect("remember");
+    seed_stale_history(&handle, 500, 400);
+
+    let data_dir = handle.data_dir.as_ref().expect("data_dir").clone();
+    let path = data_dir.join("kg.redb");
+    let bytes_before = std::fs::read(&path).expect("read");
+
+    let report = kg_compact_pass(&handle, &compact_only_config(), true)
+        .await
+        .expect("dry run");
+
+    assert!(report.dry_run);
+    assert_eq!(report.history_rows_pruned, 0, "a dry run prunes nothing");
+    assert_eq!(
+        report.stats.triples_history_stale, 500,
+        "but it must still report what a real run would prune"
+    );
+    assert_eq!(
+        bytes_before,
+        std::fs::read(&path).expect("read"),
+        "the dry run changed kg.redb"
+    );
+    assert!(
+        !data_dir.join("kg.redb.pre-compact.bak").exists(),
+        "a dry run must not write a backup"
+    );
+    assert!(
+        !data_dir.join("kg.redb.compacting").exists(),
+        "a dry run must not write a temp file"
+    );
+}
+
+/// Why: the deployment this was written for serves a dozen concurrent readers.
+/// A reader running across the whole rewrite must never see an error, a missing
+/// live row, or a half-copied state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_concurrent_reader_never_observes_a_torn_state() {
+    let handle = open_test_handle("kg-compact-concurrent").await;
+    for i in 0..10 {
+        handle
+            .remember(
+                format!("concurrent reader fixture drawer number {i} with words"),
+                RoomType::Planning,
+                vec![],
+                0.9,
+            )
+            .await
+            .expect("remember");
+    }
+    seed_stale_history(&handle, 4_000, 400);
+    let expected = handle.drawers.read().len();
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_handle = Arc::clone(&handle);
+    let reader_stop = Arc::clone(&stop);
+    let reader = tokio::task::spawn_blocking(move || {
+        let mut polls = 0usize;
+        while !reader_stop.load(Ordering::Relaxed) {
+            let drawers = reader_handle
+                .kg
+                .load_drawers()
+                .expect("a read during the rewrite must never fail");
+            assert_eq!(
+                drawers.len(),
+                expected,
+                "reader saw a torn drawer table mid-rewrite"
+            );
+            polls += 1;
+        }
+        polls
+    });
+
+    let report = kg_compact_pass(&handle, &compact_only_config(), false)
+        .await
+        .expect("compact pass");
+    stop.store(true, Ordering::Relaxed);
+    let polls = reader.await.expect("reader task");
+
+    assert!(report.ran(), "phase skipped: {}", report.summary());
+    assert!(polls > 0, "the reader never ran");
+    assert_eq!(handle.kg.load_drawers().expect("load").len(), expected);
+}
+
+/// Why: the floor exists so a config typo cannot delete last week's audit
+/// trail. It is applied at the read, because nothing validates the field on
+/// the way in from `config.toml`.
+#[test]
+fn history_prune_days_never_goes_below_the_floor() {
+    let cfg = DreamConfig {
+        prune_history_after_days: 1,
+        ..DreamConfig::default()
+    };
+    assert_eq!(cfg.effective_prune_history_days(), MIN_PRUNE_HISTORY_DAYS);
+    let generous = DreamConfig {
+        prune_history_after_days: 365,
+        ..DreamConfig::default()
+    };
+    assert_eq!(generous.effective_prune_history_days(), 365);
+}
+
+/// Why: pin the #6652 defaults the same way `dream_config_defaults` pins the
+/// rest, so a change to any of them is a deliberate edit rather than a drift.
+#[test]
+fn kg_compaction_config_defaults() {
+    let cfg = DreamConfig::default();
+    assert!(cfg.compact, "kg.redb compaction is on by default");
+    assert_eq!(cfg.prune_history_after_days, 90);
+    assert_eq!(cfg.compact_min_bytes, 64 * 1024 * 1024);
+    assert!(cfg.compact_keep_backup);
+    assert_eq!(MIN_PRUNE_HISTORY_DAYS, 7);
+    assert_eq!(COMPACT_MIN_RECLAIM_PERCENT, 10);
+}
+
+/// Why (#6652): the three `DreamStats` compaction fields are the only durable
+/// record that the phase ran — `trusty-memory doctor` reads `kg_bytes_after`
+/// out of `dream_stats.json` to spot growth between cycles. Testing
+/// `kg_compact_pass` alone leaves the wiring from `Dreamer::dream_cycle` into
+/// those fields unproven, which is exactly where a phase gets added and its
+/// telemetry forgotten.
+/// What: runs a full cycle over a palace stuffed with dead history and asserts
+/// all three fields carry the phase's real numbers.
+#[tokio::test]
+async fn dream_cycle_records_kg_compaction_stats() {
+    let handle = open_test_handle("kg-compact-stats").await;
+    handle
+        .remember(
+            "a drawer that survives the cycle with enough words".to_string(),
+            RoomType::Planning,
+            vec![],
+            0.9,
+        )
+        .await
+        .expect("remember");
+    seed_stale_history(&handle, 3_000, 400);
+
+    let dreamer = Dreamer::new(compact_only_config());
+    let stats = dreamer.dream_cycle(&handle).await.expect("dream cycle");
+
+    assert_eq!(
+        stats.kg_history_rows_pruned, 3_000,
+        "the cycle did not record what the phase pruned"
+    );
+    assert!(
+        stats.kg_bytes_reclaimed > 0,
+        "the cycle recorded no reclaimed bytes"
+    );
+    assert!(
+        stats.kg_bytes_after > 0,
+        "kg_bytes_after must carry the post-cycle file size for the doctor check"
+    );
+    assert!(
+        stats.kg_bytes_after < stats.kg_bytes_after + stats.kg_bytes_reclaimed,
+        "reclaimed bytes and the post-cycle size must be consistent"
+    );
+}

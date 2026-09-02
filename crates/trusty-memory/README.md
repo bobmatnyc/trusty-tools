@@ -289,7 +289,7 @@ this table is generated from it, not maintained by hand.
 | `palace_compact` | `palace` | Remove orphaned vector index entries (vectors with no matching drawer row). |
 | `palace_create` | `name`, `cwd?`, `description?`, `force?` | Create a new memory palace. |
 | `palace_delete` | `palace_id`, `force?` | Delete an entire memory palace, including its drawers, vectors, and knowledge graph. |
-| `palace_dream` | `palace`, `max_age_days?`, `room?` | On-demand LLM-driven consolidation for a palace (issue #1721). |
+| `palace_dream` | `palace`, `compact?`, `dry_run?`, `max_age_days?`, `room?` | On-demand LLM-driven consolidation for a palace (issue #1721). |
 | `palace_embed_sweep` | — | #5000 / #4786: vector coverage for EVERY palace on disk, uncapped. |
 | `palace_info` | `palace` | Get metadata and stats for a single palace. |
 | `palace_list` | — | List all palaces on this machine. |
