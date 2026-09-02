@@ -24,6 +24,9 @@ use serde::Deserialize;
 
 use trusty_common::daemon_guard::DaemonAddrLayout;
 
+use crate::integrations::search_client::IndexInfo;
+use crate::report::index_registry::fetch_registered_indexes;
+
 /// Why one trusty-search read could not answer.
 ///
 /// Why: all three arrive as a failed HTTP call, and collapsing them would put
@@ -102,6 +105,19 @@ pub struct TraceUsage {
 pub trait TraceSource: Send + Sync {
     /// Whether the daemon answers `/health`.
     async fn reachable(&self) -> bool;
+
+    /// The daemon's registered indexes, `root_path` included (#6677).
+    ///
+    /// Why: the pass addresses an index the audit registered, and the id it
+    /// registered under need not be the one this checkout derives to. The
+    /// registry is what tells them apart, and
+    /// [`crate::report::index_registry::resolve_report_index`] is what reads it.
+    /// What: the default is an empty list, which resolves to the derived id —
+    /// the behaviour every stub had before #6677.
+    /// Test: `trace_tests::an_index_registered_at_the_checkout_root_is_traced_against`.
+    async fn registered_indexes(&self) -> Vec<IndexInfo> {
+        Vec::new()
+    }
 
     /// The `[ENTRY]` node for `symbol`, with every edge discarded.
     ///
@@ -203,6 +219,12 @@ struct SearchBody {
 impl TraceSource for HttpTraceSource {
     async fn reachable(&self) -> bool {
         trusty_common::daemon_guard::probe_once(&format!("{}/health", self.base_url)).await
+    }
+
+    /// #6677: read from THIS source's daemon, so a test server and an
+    /// auto-ported daemon are both addressed by the same code path.
+    async fn registered_indexes(&self) -> Vec<IndexInfo> {
+        fetch_registered_indexes(&self.base_url).await
     }
 
     async fn entry_node(&self, index_id: &str, symbol: &str) -> Result<CallChainEntry, TraceError> {

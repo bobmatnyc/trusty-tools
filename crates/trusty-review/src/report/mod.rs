@@ -32,6 +32,8 @@ pub mod figures;
 pub mod fill;
 pub mod git_info;
 pub mod instructions;
+// #6677: the one place a checkout is resolved to a registered index id.
+pub mod index_registry;
 pub mod investigate;
 pub mod manifest;
 pub mod mermaid;
@@ -86,8 +88,10 @@ pub mod topology;
 
 pub use analyze_adapter::{
     AnalyzeAdapterError, AnalyzeCaveat, AnalyzeFetch, AnalyzeGap, AnalyzeMetricsSource,
-    HttpAnalyzeMetricsSource, derive_index_id, enrich_with_analyze, enrich_with_analyze_gaps,
+    HttpAnalyzeMetricsSource, enrich_with_analyze, enrich_with_analyze_gaps,
 };
+// #6677: `derive_index_id` moved here from `analyze_adapter`; the public path
+// `trusty_review::report::derive_index_id` is unchanged.
 pub use benchmark::{
     BenchmarkReport, BenchmarkStatus, CorpusSnapshot, LoadedCorpus, MetricPlacement,
     RepositoryBenchmark, build_benchmark_report, corpus_dir, load_corpus, write_snapshot,
@@ -96,6 +100,7 @@ pub use error::{ManifestError, ReportError, Result};
 pub use exec_summary::{DeterministicRisk, ExecSummary, TopRisks, compose as compose_exec_summary};
 pub use fill::{HONESTY_MARKER, Scope, render, strip_leading_comment};
 pub use git_info::{GitInfo, gather_git_info};
+pub use index_registry::{ReportIndex, derive_index_id, resolve_report_index};
 pub use instructions::{
     Instructions, MANIFEST_INSTRUCTIONS_FILE, discover_manifest_instructions, load_instructions,
 };

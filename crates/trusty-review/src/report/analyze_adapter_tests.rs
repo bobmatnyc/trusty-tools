@@ -6,6 +6,8 @@
 //! What: drives the private mapping helpers and the public fetch seam directly.
 //! Test: this file.
 
+use std::path::Path;
+
 use super::*;
 
 // ─── Severity map ────────────────────────────────────────────────────────────
@@ -701,36 +703,6 @@ fn new_accepts_a_socket_path() {
     assert_eq!(src.socket, socket);
 }
 
-/// #6149: the renderer and the audit are separate processes agreeing on one id.
-/// Two checkouts of one repository must not derive the same one — that is the
-/// collision that had this crate reading another tree's measurements.
-#[test]
-fn derive_index_id_distinguishes_same_named_checkouts() {
-    let engagement = std::path::Path::new("/w/dogfood/repos/local/northwind-web");
-    let working = std::path::Path::new("/home/me/northwind-web");
-
-    let a = derive_index_id(engagement).expect("id");
-    let b = derive_index_id(working).expect("id");
-    assert_ne!(a, b, "{a} vs {b}");
-    assert!(b.starts_with("northwind-web-"), "still readable: {b}");
-    assert_eq!(derive_index_id(std::path::Path::new("/")), None);
-}
-
-/// The agreement is a call, not a copy: this crate's id IS trusty-common's, so
-/// the audit that indexed under it and this renderer cannot drift.
-#[test]
-fn derive_index_id_is_the_shared_derivation() {
-    for path in ["/home/me/northwind-web", "/w/repos/acme-api", "/"] {
-        let path = std::path::Path::new(path);
-        assert_eq!(
-            derive_index_id(path),
-            trusty_common::derive_checkout_index_id(path),
-            "{}",
-            path.display()
-        );
-    }
-}
-
 #[test]
 fn error_display() {
     let e = AnalyzeAdapterError::Rpc {
@@ -760,6 +732,99 @@ impl AnalyzeMetricsSource for StubSource {
     async fn fetch_named(&self, _index_id: &str) -> AnalyzeFetch {
         (self.0)()
     }
+}
+
+/// A source that records the index ids it was asked for, over a registry it
+/// declares (#6677).
+struct RecordingSource {
+    /// What `registered_indexes` answers with.
+    registry: Vec<crate::integrations::search_client::IndexInfo>,
+    /// Every id `fetch_named` was called with, in order.
+    asked: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingSource {
+    fn with_registry(registry: Vec<crate::integrations::search_client::IndexInfo>) -> Self {
+        Self {
+            registry,
+            asked: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AnalyzeMetricsSource for RecordingSource {
+    async fn fetch(&self, _index_id: &str) -> Option<AnalyzeMetrics> {
+        None
+    }
+
+    async fn fetch_named(&self, index_id: &str) -> AnalyzeFetch {
+        self.asked.lock().expect("lock").push(index_id.to_string());
+        AnalyzeFetch::Missing(AnalyzeGap::NotIndexed)
+    }
+
+    async fn registered_indexes(&self) -> Vec<crate::integrations::search_client::IndexInfo> {
+        self.registry.clone()
+    }
+}
+
+/// A registry entry as `GET /indexes?details=true` returns it.
+fn registry_entry(id: &str, root_path: &str) -> crate::integrations::search_client::IndexInfo {
+    crate::integrations::search_client::IndexInfo {
+        id: id.to_string(),
+        name: None,
+        root_path: Some(root_path.to_string()),
+    }
+}
+
+/// #6677: a checkout registered under an id other than its derived one is
+/// fetched by the id it IS registered under. Before this, the enrichment walk
+/// asked for the derived id, the daemon did not hold it, and every repository
+/// degraded to scan with a ready index sitting in the registry.
+#[tokio::test]
+async fn a_repo_served_under_another_id_is_fetched_by_that_id() {
+    let mut model = model_with_local_repo("northwind-web");
+    let path = model.repositories[0]
+        .local_path
+        .clone()
+        .expect("fixture pins a local path");
+    let source = RecordingSource::with_registry(vec![registry_entry(
+        "northwind-checkout",
+        &path.display().to_string(),
+    )]);
+
+    let _ = enrich_with_analyze_gaps(&mut model, &source).await;
+
+    assert_eq!(
+        source.asked.lock().expect("lock").as_slice(),
+        ["northwind-checkout".to_string()],
+        "the registered id must be the one addressed"
+    );
+}
+
+/// The unchanged half: with nothing registered at the path, the derived id is
+/// what goes to the daemon and the not-indexed fallback stands.
+#[tokio::test]
+async fn an_unregistered_repo_is_still_fetched_by_its_derived_id() {
+    let mut model = model_with_local_repo("northwind-web");
+    let path = model.repositories[0]
+        .local_path
+        .clone()
+        .expect("fixture pins a local path");
+    let derived = crate::report::derive_index_id(&path).expect("id");
+    let source = RecordingSource::with_registry(vec![registry_entry(
+        "elsewhere",
+        "/w/repos/some-other-tree",
+    )]);
+
+    let gaps = enrich_with_analyze_gaps(&mut model, &source).await;
+
+    assert_eq!(source.asked.lock().expect("lock").as_slice(), [derived]);
+    assert_eq!(
+        gaps.len(),
+        1,
+        "the not-indexed gap is still named: {gaps:?}"
+    );
 }
 
 /// A source that implements ONLY `fetch`, exercising the trait's default
