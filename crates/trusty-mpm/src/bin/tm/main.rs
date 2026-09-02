@@ -520,6 +520,8 @@ async fn main() -> anyhow::Result<()> {
             runtime,
         }) => commands::ticket::ticket(&client, &url, issue, system, notes, runtime).await,
         Some(Command::Issue { cmd, system }) => commands::issue::issue(cmd, system),
+        // #6653: exits itself, like `tm wait` — the exit code IS the verb surface.
+        Some(Command::Pr { cmd }) => commands::pr::run(cmd),
         Some(Command::Watch { cmd }) => dispatch_watch(&client, &url, cmd).await,
         // #1045: the metaharness boots standalone (no daemon, no HTTP client).
         // The handler is async because `meta run` (#1049/#1051) launches a real

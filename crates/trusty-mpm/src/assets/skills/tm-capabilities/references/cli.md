@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-59 top-level commands.
+60 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -73,6 +73,9 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `overseer` — Inspect the session overseer
   - `status` — Show the overseer's enabled status and handler type
 - `path` — Print the stable repo path for a loaded alias (DOC-24 IDE-attach)
+- `pr` — Deterministic pull-request gates: open a PR, or check the merge queue
+  - `open` — Validate a PR body against the seven-field contract, then open the PR
+  - `queue-check` — Report, per open PR on a base branch, whether it is mergeable
 - `project` — Define and manage projects (registered working directories)
   - `info` — Show the current project's registered info and config
   - `init` — Register a working directory as a trusty-mpm project

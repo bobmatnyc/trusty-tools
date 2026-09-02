@@ -28,6 +28,8 @@ mod memory;
 mod meta;
 mod optimizer;
 mod overseer;
+// #6653: `tm pr` — the deterministic PR-open and merge-queue gates.
+mod pr;
 mod project;
 mod projects;
 mod repair;
@@ -57,6 +59,7 @@ pub(crate) use memory::MemoryAction;
 pub(crate) use meta::MetaAction;
 pub(crate) use optimizer::{CliCompressionLevel, OptimizerAction};
 pub(crate) use overseer::OverseerAction;
+pub(crate) use pr::{PrCmd, PrOpenArgs, PrQueueCheckArgs};
 pub(crate) use project::ProjectAction;
 pub(crate) use projects::{
     ClearableConfigField, ConfigAction, ProjectsAction, SettableConfigField,

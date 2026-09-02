@@ -841,6 +841,29 @@ pub(crate) enum Command {
         system: crate::commands::ticket::system::TicketSystemKind,
     },
 
+    /// Deterministic pull-request gates: open a PR, or check the merge queue.
+    ///
+    /// Why (#6653): `version-control` assembles every `gh pr create` by hand
+    /// and re-derives four mechanical judgments each time — is the seven-field
+    /// body complete, is the attribution footer exact, were the shipped
+    /// `--assignee @me --label trusty-mpm --label ws/<session>` defaults
+    /// attached, and does this diff owe a changelog fragment. The merge-queue
+    /// procedure is the same shape: a fixed decision table read out of three
+    /// `gh` calls, where skipping one under time pressure is the failure mode.
+    /// Both are prose in `tm-workflow.md` today; neither needs a model.
+    /// What: `open` validates the body file against the seven-field contract
+    /// (and the changelog gate, unless `--docs-only`) and refuses with exit 2,
+    /// naming the failed check, BEFORE `gh` is spawned; `queue-check` prints
+    /// one `MERGEABLE` / `BLOCKED: <reason>` line per open PR on a base branch
+    /// and exits 1 when any is blocked.
+    /// Test: `cli_parses_pr_*` in `tests.rs`; the semantics live in
+    /// `commands::pr`.
+    Pr {
+        /// PR verb to run.
+        #[command(subcommand)]
+        cmd: PrCmd,
+    },
+
     /// Watch a board for label-routed issues and dispatch them autonomously.
     ///
     /// Why: `tm ticket <issue#>` executes ONE hand-named issue. `tm watch`
