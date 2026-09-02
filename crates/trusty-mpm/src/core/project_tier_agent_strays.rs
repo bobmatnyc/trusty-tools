@@ -64,9 +64,10 @@ const SWEEP_WHAT: &str = "remove stray bundled agent copies from the project tie
 ///
 /// Why: spelled out from `project_dir` rather than taken from
 /// `paths.claude_agents_dir()`, for the reason
-/// [`crate::core::session_launch::quarantine_shadows`] states at length — those
+/// `core::session_launch::quarantine_shadows` states at length — those
 /// are the same directory for a managed layout and the operator's own
-/// `~/.claude/agents` for a home-tier one.
+/// `~/.claude/agents` for a home-tier one. (Named here, not linked: that module
+/// is private, so a link to it breaks the rustdoc gate.)
 /// Test: `a_tier_bundled_agents_deploy_to_is_never_swept`.
 pub fn project_agent_tier(project_dir: &Path) -> PathBuf {
     project_dir.join(".claude").join("agents")

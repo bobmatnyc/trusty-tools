@@ -250,6 +250,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   the linter, which has a `file:line` to report it at. Safe, repo-root-relative
   paths behave exactly as before.
 - The kg.redb compaction swap now excludes every writer, not just the ones holding the palace write mutex (#6652). `KgWriter`'s actor commits on a blocking thread holding only `Arc<KgStoreRedb>`, so `KnowledgeGraph::assert`/`retract` — and everything behind them — never took that mutex; a commit landing between the swap's fingerprint re-check and its rename went to the inode the rename was about to unlink, and the caller was told it succeeded. Every kg.redb write transaction now rides a per-store `swap_lock` that the swap takes exclusively across the re-check, the rename, and the handle install.
+- Two intra-doc links that rustdoc could not resolve, so the pre-publish gate is
+  green again: `launchd_claim`'s reference to the macOS-gated `launchd` module,
+  which does not exist on the Linux runner that builds the docs, and
+  `github_path`'s `RemoteRepo` / `parse_remote_url` mentions, which had no link
+  reference definition alongside the module's other three (#6693).
 
 ### Changed
 

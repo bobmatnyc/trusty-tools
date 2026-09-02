@@ -35,6 +35,8 @@
 //! [`GithubPath`]: crate::github_path::GithubPath
 //! [`parse_github_path`]: crate::github_path::parse_github_path
 //! [`derive_github_path`]: crate::github_path::derive_github_path
+//! [`RemoteRepo`]: crate::github_path::RemoteRepo
+//! [`parse_remote_url`]: crate::github_path::parse_remote_url
 
 use std::path::Path;
 use std::process::Command;

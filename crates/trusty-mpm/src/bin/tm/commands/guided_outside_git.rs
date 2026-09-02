@@ -300,7 +300,7 @@ pub(crate) async fn try_outside_git(
 /// `SessionAction` means the promise is kept by construction — a wrong flag
 /// would fail to parse rather than silently run something else — and nothing
 /// is spawned as a subprocess.
-/// What: prepends the `tm` argv[0] clap expects, parses, and calls
+/// What: prepends the `tm` `argv[0]` clap expects, parses, and calls
 /// [`crate::commands::session::session`]. Any other parsed command is an
 /// internal bug and returns `Err`.
 /// Test: `outside_git_dispatch_rejects_a_non_session_argv`; the happy paths are

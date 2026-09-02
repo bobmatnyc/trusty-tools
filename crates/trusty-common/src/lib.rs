@@ -268,8 +268,10 @@ pub mod launchd_restart;
 /// onto the production path without the plist's environment.
 /// What: [`launchd_claim::socket_owner`] decides from the registration signals,
 /// and [`launchd_claim::launchd_socket_owner`] reads them off the real launchd.
-/// Deliberately NOT macOS-gated, unlike [`launchd`], so cross-platform daemon
+/// Deliberately NOT macOS-gated, unlike `launchd`, so cross-platform daemon
 /// guards call it without a `cfg` split — off macOS it answers "no unit".
+/// (`launchd` is named here, not linked: it is macOS-gated, so a link to it
+/// breaks on the Linux runner that documents this crate.)
 /// Test: `cargo test -p trusty-common --features unconditional-only launchd_claim`.
 pub mod launchd_claim;
 
