@@ -403,10 +403,16 @@ The measured cost of calling this on reflex is 40% wall time for nothing
   after the edit to confirm no call site was missed.
 - Performance analysis: `lsp_call_hierarchy` to find hot paths, joined with
   `analyze.complexity_hotspots` to rank them.
-- The review or merge gate for a Python or TypeScript repository that has **no
-  CI type check** of its own. A repository whose CI already runs `pyright` or
+- The merge gate for a Python or TypeScript repository that has **no CI type
+  check** of its own. A repository whose CI already runs `pyright` or
   `tsc --noEmit` does not need this at the gate.
+- A review, when the operator asked for it with `--analyze` — never on a bare
+  review run (§8e).
 - An explicit operator request.
+
+**One trigger is not judicious — it is mandatory.** The audit always consumes
+this capability (§8d). §8's consumers table states each caller's obligation and
+what it does when the capability is unavailable.
 
 **Triggers that must not call it.**
 
@@ -485,8 +491,8 @@ daemon, and this repository has already paid for that lesson in `trusty-search`.
 
 ## {#SPEC-ANALYZELSP-08~draft} 8. Deliverables
 
-Four deliverables. The tools alone are not the capability; nothing calls them
-unless the skill and the instructions say when to.
+Five deliverables. The tools alone are not the capability; nothing calls them
+unless the skill, the instructions, and the consuming pipelines say when to.
 
 **(a) The tools.** §5's eight methods on `trusty-analyze`'s socket, mirrored as
 MCP tools, with the lifecycle of §2, the stamps of §3, and the events of §4 —
@@ -522,8 +528,9 @@ The section states the restraint in the same breath: not on every edit, not on
 session start, not for plain navigation. `BASE-AGENT.md` is not the right home —
 it is inherited by non-coding agents that have no use for this.
 
-**(d) The audit toolkit.** The tools become an analysis input to the audit,
-through the seam DOC-67 §5 already fixes. tga never calls trusty-analyze
+**(d) The audit toolkit — REQUIRED.** The audit consumes analyze; that is settled
+(owner ruling, 2026-09-01: "required for audit"). The tools reach it through the
+seam DOC-67 §5 already fixes. tga never calls trusty-analyze
 directly; `trusty-review`'s `HttpAnalyzeMetricsSource`
 (`crates/trusty-review/src/report/analyze_adapter.rs`) is the single client, and
 it already dials the socket through `OnDemandAnalyze`. So the LSP fetches are
@@ -533,14 +540,63 @@ happens inside stage 9, `report`, which is the stage that invokes
 `trusty-review report --analyze`. Adding a tenth sweep stage would put tga in
 direct contact with trusty-analyze, which DOC-67 §5 seam 3 forbids.
 
-**Which of the eight tools the audit consumes is decided by experiment, not by
-this spec** (owner ruling, §10 Q7). Phase 2 of §9 runs it. The seam is fixed
-here; the tool set that flows through it is an outcome.
+**Which of the eight tools the audit consumes is decided by experiment** (owner
+ruling, §10 Q7); phase 2 of §9 runs it. That the audit consumes analyze at all is
+not part of that experiment.
+
+**The audit must not fail open.** `trusty-review report --analyze` is fail-open
+today by design: an unreachable daemon prints a warning, pushes a
+`trusty-analyze data unavailable` string into `model.gaps`, and falls through to
+the built-in scan (`cli_report.rs:108-121`, `:248-264`). That is right for a
+review (§8e) and wrong for an audit, where a silently scan-only dimension reads
+as an assessed one.
+
+On the audit path, an unavailable capability produces one of two outcomes, never
+a silent fallback:
+
+- **Fail loudly** — the sweep's stage 9 aborts with the reason, when the audit
+  was invoked in a mode that requires complete dimensions.
+- **Mark the dimension INCOMPLETE** in the report, naming the reason verbatim.
+
+The reasons to distinguish: the server is not provisioned, the workspace's
+language is unsupported, the per-server RSS cap was exceeded (§7), or the
+`analysed_at` barrier timed out (§3). Each is a different remedy, so each is
+reported as itself rather than as one generic gap — the same absent-versus-
+undeterminable distinction [ADR-0045](../adr/0045-distinguish-absent-from-undeterminable-on-destructive-paths.md)
+draws for destructive paths, applied here to a report's evidence.
 
 > **Stale reference in DOC-67.** DOC-67 §5's diagram labels the analyze edge
 > `HTTP :7879`. #6287 retired that listener and ADR-0032 forbids it; the adapter
 > is UDS today. This spec does not edit DOC-67 — the correction belongs in a
 > DOC-67 revision.
+
+**(e) The review path — OPTIONAL, on request.** A review fetches analyze's LSP
+results when asked and not otherwise (owner ruling, 2026-09-01: "an option for
+review if requested").
+
+**The flag already exists.** `trusty-review report --analyze`
+(`crates/trusty-review/src/cli_report.rs:120-121`, epic #2445) is off by default,
+and a bare run stays scan-only. This deliverable does not add a flag — it adds
+the LSP fetches to what that flag already fetches, through the same
+`HttpAnalyzeMetricsSource` adapter §8d uses. One flag, one adapter, two fetch
+sets that differ only in whether the caller is a review or an audit.
+
+**Unavailable is reported, never fatal.** The review keeps its fail-open
+behaviour: it names the shortfall in the report and finishes. The existing gap
+string is the precedent — `"trusty-analyze data unavailable — … Findings,
+complexity, and health factors are not assessed, not clean"` — and the LSP
+shortfall is reported the same way, saying which capability was missing. A review
+run without `--analyze` reports nothing at all about it, because nothing was
+asked for.
+
+### Who calls this, and under what obligation
+
+| Consumer | Obligation | Behaviour when unavailable |
+|---|---|---|
+| Audit (`tga audit` → `trusty-review report --analyze`, stage 9) | **Required** (§8d) | Fail loudly, or mark the dimension INCOMPLETE with the specific reason |
+| Review (`trusty-review report --analyze`) | **Optional, on request** (§8e) | Report the shortfall in the report and finish |
+| Coding agents (`search_lsp_*`, `trusty-analyze lsp`) | **Judicious** — §6's trigger list | Fall back to the batch checker; the error is typed, never silent (§2) |
+| Session provisioning | **Never** (§2) | Not applicable; nothing is started |
 
 ---
 
@@ -758,12 +814,19 @@ references #6606.
 13. `trusty-mpm`: create the bundled `analyze` skill documenting each tool and its
     trigger policy (§8b).
 14. `trusty-agents-common`: add the tool-use section to `BASE-ENGINEER.md` (§8c).
-15. `trusty-review`: extend `analyze_adapter.rs`'s fetch set with the audit's LSP
-    fetches (§8d).
-16. **Phase 2 — audit tool-selection experiment (§9).** Run the three-repository
+15. `trusty-review`: extend `analyze_adapter.rs`'s fetch set with the LSP fetches
+    consumed by both the audit and `--analyze` (§8d, §8e).
+16. `trusty-review`: the audit's hard requirement — replace the fail-open
+    fallback on the audit path with fail-loud or an INCOMPLETE dimension naming
+    the specific reason (not provisioned, unsupported language, RSS cap,
+    barrier timeout) (§8d).
+17. `trusty-review`: surface the LSP shortfall through the existing `--analyze`
+    fail-open gap path, so a requested review that cannot get semantics says so
+    and still finishes (§8e).
+18. **Phase 2 — audit tool-selection experiment (§9).** Run the three-repository
     size ladder with and without the LSP fetches, fill the per-tool table, and
     set `analyze_adapter.rs`'s default fetch set from the result.
-17. Phase 1 acceptance run: re-measure §7's Rust row under deliberate tool use
+19. Phase 1 acceptance run: re-measure §7's Rust row under deliberate tool use
     and record the A/B against the batch checker.
-18. Phase 3 (`pyright`) and phase 4 (`typescript-language-server`), one issue
+20. Phase 3 (`pyright`) and phase 4 (`typescript-language-server`), one issue
     each, gated on phase 1's acceptance (§9).
