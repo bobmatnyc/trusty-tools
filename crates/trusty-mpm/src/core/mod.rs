@@ -180,6 +180,8 @@ pub mod workspace_liveness;
 pub mod workspace_scan;
 pub mod worktree_index;
 pub mod worktree_naming;
+// See ADR-0057 — the facts the pm-guard's removal re-checks ask git and GitHub.
+pub mod worktree_removal_facts;
 
 pub use connect::{ResolveResult, SessionSummary, resolve_target};
 pub use discovery::{

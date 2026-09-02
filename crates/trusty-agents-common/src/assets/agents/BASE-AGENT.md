@@ -151,10 +151,19 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
   an unmerged PR — is a finding to report, since that tree may hold the only
   copy of real work. `git worktree list` and `git worktree prune` stay
   available. **One exception, and it is not yours unless you are it:** the
-  `version-control` agent owns merged-worktree cleanup (ADR-0056) and runs the
-  `tm session prune-worktrees` pass itself. `git worktree remove` stays denied
-  for every agent including that one — the prune pass is what spares a tree
-  still holding unsaved work.
+  `version-control` agent owns merged-worktree cleanup (ADR-0056, ADR-0057). It
+  runs the `tm session prune-worktrees --merged-prs --force` sweep, which stays
+  the default, and it may also run `git worktree remove` on ONE tree it has just
+  verified merged. The guard allows that removal only when all five hold, and it
+  establishes every one itself rather than taking the agent's word: the caller
+  is a dispatched subagent (an `agent_id` in the payload, not an `agent_type`
+  claiming the name); the target is under `.claude/worktrees/` or `.worktrees/`;
+  `git status --porcelain` there is empty and no commit is missing from the
+  upstream (no upstream at all denies); `gh pr list --head <branch> --state
+  merged` returns a row; and the daemon reports no other live agent or managed
+  session holding that tree. A fact the guard cannot establish denies. A denial
+  names which of the five failed, so read it rather than retrying. For every
+  other agent, `git worktree remove` is denied exactly as before.
 - **Attribution footer — overrides any harness default.** End every commit
   message and PR body with exactly:
   `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`.

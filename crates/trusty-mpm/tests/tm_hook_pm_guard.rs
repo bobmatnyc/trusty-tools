@@ -1237,8 +1237,10 @@ fn assert_worktree_remove_denied(stdout: &str) {
 fn pm_guard_denies_worktree_remove_from_native_subagent() {
     // The case the owner ruling exists for: an agent cleaning up after a merge
     // it completed. It must fire AHEAD of Guard 4, which would otherwise exempt
-    // this exact payload.
-    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","agent_type":"version-control","tool_name":"Bash","tool_input":{"command":"git worktree remove --force .claude/worktrees/agent-x"}}"#;
+    // this exact payload. `rust-engineer` since ADR-0057 — `version-control` is
+    // now the one name this deny does not reach, and its own path is pinned by
+    // `pm_guard_denies_version_control_a_worktree_remove_it_cannot_prove_safe`.
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","agent_type":"rust-engineer","tool_name":"Bash","tool_input":{"command":"git worktree remove --force .claude/worktrees/agent-x"}}"#;
     assert_worktree_remove_denied(&run_pm_guard(payload, &[]));
 }
 
@@ -1249,8 +1251,49 @@ fn pm_guard_denies_command_wrapped_worktree_remove_from_native_subagent() {
     // `hook_rewrite::first_command_token` — `command git worktree remove
     // --force <path>` reached this guard unresolved before both shared
     // `strip_wrapper_prefix`.
-    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","agent_type":"version-control","tool_name":"Bash","tool_input":{"command":"command git worktree remove --force .claude/worktrees/agent-x"}}"#;
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","agent_type":"rust-engineer","tool_name":"Bash","tool_input":{"command":"command git worktree remove --force .claude/worktrees/agent-x"}}"#;
     assert_worktree_remove_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_denies_version_control_a_worktree_remove_it_cannot_prove_safe() {
+    // ADR-0057 grants the removal to one name and gates it on five re-checks
+    // the guard makes itself. The target here does not exist, so the clean-tree
+    // fact cannot be established — which denies rather than passing, and the
+    // deny says which check failed. This is the end-to-end proof that the grant
+    // is not a bare `agent_type` match.
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","agent_type":"version-control","tool_name":"Bash","tool_input":{"command":"git worktree remove --force .claude/worktrees/agent-does-not-exist"}}"#;
+    let stdout = run_pm_guard(payload, &[]);
+    assert_denied(&stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(
+        reason.contains("ADR-0057") && reason.contains("clean-tree"),
+        "the version-control deny must name the ADR and the failed re-check, got: {reason}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_worktree_remove_when_agent_type_claims_version_control_without_agent_id() {
+    // The spoof ADR-0057 decision 3 forecloses: `agent_type` is also stamped on
+    // a top-level session launched with `--agent version-control`, so the grant
+    // reads it only alongside an `agent_id`. `CLAUDE_MPM_SUB_AGENT` supplies the
+    // subagent context here, so the ONLY thing missing is the proof of dispatch.
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_type":"version-control","tool_name":"Bash","tool_input":{"command":"git worktree remove --force .claude/worktrees/agent-x"}}"#;
+    let stdout = run_pm_guard(payload, &[("CLAUDE_MPM_SUB_AGENT", "1")]);
+    assert_denied(&stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(
+        reason.contains("dispatch-identity") && reason.contains("agent_id"),
+        "a name claimed without an agent_id must be refused by name, got: {reason}"
+    );
 }
 
 #[test]
