@@ -26,3 +26,15 @@ Fixed
   cannot interleave mid-line.
 - A child that is alive but slow still gets the full probe window, and a
   `try_wait` that errors is treated as "still running" rather than as a death.
+- One over-cap stderr line now occupies ONE slot in the 20-line ring instead of
+  one slot per capped read (#6601 review). A child printing a real diagnosis and
+  then a megabyte of padding left `entries=20` of padding and evicted the
+  diagnosis — on the exact path this reporting exists to serve. The relay keeps
+  the capped prefix with a marker naming the dropped byte count, reads on to the
+  next newline without retaining it, and still relays every byte to stderr. A
+  line ending exactly at the cap no longer yields an empty entry, and a codepoint
+  the cap splits is dropped rather than rendered as U+FFFD.
+- `ensure_running`'s documentation now states that a detached child's
+  `ChildExited` and `SpawnTimeout` carry an EMPTY stderr tail: detached children
+  keep `Stdio::inherit()`, so there is nothing to quote. The status and the
+  one-probe-interval latency are unaffected.

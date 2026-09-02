@@ -976,6 +976,131 @@ async fn a_child_that_exits_before_binding_reports_its_status_and_stderr() {
     );
 }
 
+/// Why (#6601 review): capping the READ bounded memory but not the RING. A
+/// 1 MiB line arrived as 128 capped reads and was pushed as 128 entries, so it
+/// evicted all twenty slots and every real line before it. Measured on the
+/// pre-fix relay with this exact child: `entries=20 kept_real_line=false` — the
+/// lock diagnosis `a_child_that_exits_before_binding_reports_its_status_and_stderr`
+/// asserts on was gone, on the one code path #6600 exists to serve.
+///
+/// What: a real line, then an over-cap line, then a second real line. The two
+/// real lines must survive and the giant one must occupy exactly ONE slot.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_real_line_survives_the_over_cap_line_that_follows_it() {
+    use super::child::{STDERR_LINE_CAP, STDERR_TAIL_LINES, relay_stderr_into};
+
+    const PADDING: usize = 1024 * 1024;
+    const DIAGNOSIS: &str = "Database already open. Cannot acquire lock.";
+
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "echo '{DIAGNOSIS}' >&2; printf '%0{PADDING}d\\n' 0 >&2; echo 'after' >&2"
+        ))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the shouty child");
+    let pipe = child.stderr.take().expect("stderr was piped");
+
+    let (buffer, relay) = relay_stderr_into(pipe, tokio::io::sink());
+    relay.await.expect("the relay must finish at EOF");
+    child.wait().await.expect("reap the child");
+
+    let tail = buffer.tail(STDERR_TAIL_LINES);
+    assert_eq!(
+        tail.len(),
+        3,
+        "three logical lines were written; the ring must hold three, not one \
+         per capped read: {:?}",
+        tail.iter().map(|l| l.len()).collect::<Vec<_>>()
+    );
+    assert!(
+        tail[0].contains(DIAGNOSIS),
+        "the line written BEFORE the giant one must survive it, got {:?}",
+        tail[0]
+    );
+    assert!(
+        tail[1].ends_with("bytes truncated]"),
+        "the over-cap line must be retained once, marked, got {:?}",
+        &tail[1][tail[1].len().saturating_sub(40)..]
+    );
+    assert_eq!(tail[2], "after", "the line after it must survive too");
+    let longest = tail.iter().map(String::len).max().unwrap_or(0);
+    assert!(
+        longest as u64 <= STDERR_LINE_CAP,
+        "the marker must fit inside the cap, not extend past it; longest was \
+         {longest}"
+    );
+}
+
+/// Why (#6601 review): `ensure_running`'s doc promised a stderr tail with no
+/// caveat, and every test of the #6600 arms drove a SUPERVISED child. The one
+/// production consumer that matters is detached — `OnDemandAnalyze` — and a
+/// detached child keeps `Stdio::inherit()`, so its tail is structurally empty.
+/// Nothing asserted that, so a future change that started piping a detached
+/// child's stderr (reintroducing the EPIPE the inherit avoids) would have gone
+/// unnoticed here.
+///
+/// What: the same dying child as
+/// `a_child_that_exits_before_binding_reports_its_status_and_stderr`, spawned
+/// through a `with_detached(true)` config. The variant and the exit status must
+/// be identical; the tail must be EMPTY rather than absent-or-populated.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_detached_child_that_exits_before_binding_reports_an_empty_tail() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("dead-detached.sock");
+    let budget = Duration::from_secs(3);
+    let cfg = SupervisorConfig::new(
+        "test-service",
+        3,
+        ServiceTimeouts::new(budget, Duration::from_millis(10), Duration::from_secs(1)),
+    )
+    .with_detached(true);
+    let sup = UdsServiceSupervisor::new(cfg);
+
+    let started = std::time::Instant::now();
+    let err = sup
+        .ensure_running("inst", &socket, || {
+            Ok(SpawnSpec::new("/bin/sh")
+                .arg("-c")
+                .arg("echo 'Database already open. Cannot acquire lock.' >&2; exit 3"))
+        })
+        .await
+        .expect_err("a detached child that exited must not be reported as running");
+    let elapsed = started.elapsed();
+
+    match &err {
+        SupervisorError::ChildExited { status, stderr, .. } => {
+            assert_eq!(
+                status.code(),
+                Some(3),
+                "detaching must not cost the exit status"
+            );
+            assert!(
+                stderr.is_empty(),
+                "a detached child's stderr is inherited, so there is nothing to \
+                 quote; got {stderr:?}"
+            );
+        }
+        other => panic!("expected ChildExited, got {other:?}"),
+    }
+    assert!(
+        elapsed < budget / 3,
+        "the #6600 latency fix must hold for a detached child too: {elapsed:?}"
+    );
+    assert_eq!(
+        sup.supervised_count().await,
+        0,
+        "a detached child that never bound must not be registered"
+    );
+}
+
 /// Why (#6600 review): `STDERR_TAIL_LINES` bounds how MANY lines the relay
 /// retains and says nothing about how long one may be. A child that writes a
 /// megabyte before its first newline — a panic carrying a big `Debug` payload —

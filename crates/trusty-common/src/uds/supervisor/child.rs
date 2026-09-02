@@ -219,10 +219,30 @@ pub(super) async fn spawn_child(
 ///     yields `Err` there, and the old `while let Ok(Some(_))` treated that as
 ///     EOF — one bad byte and the operator silently lost the rest of the stream.
 ///
+/// 🔴 **One LOGICAL line takes one ring slot, however long it is (#6601
+/// review).** Bounding the READ is not by itself enough: a 1 MiB line arrives as
+/// 128 capped reads, and pushing each one retained a single line as 20 entries
+/// and evicted every real line before it. Measured on the pre-fix code, a child
+/// printing `Database already open. Cannot acquire lock.` and then 1 MiB of
+/// padding left a ring of `[8192 × 18, 0, 5]` — nothing but padding, on the
+/// exact failure #6600 exists to diagnose, and one empty entry from a body that
+/// ended level with the cap. So an over-cap line keeps its capped prefix, and
+/// [`drain_over_cap_line`] reads to the next newline WITHOUT retaining any of
+/// it. The prefix carries a marker naming how many bytes were dropped, and
+/// prefix plus marker still fit [`STDERR_LINE_CAP`], so the ring's worst case
+/// stays `STDERR_TAIL_LINES * STDERR_LINE_CAP`.
+///
+/// Every byte still reaches this process's stderr — the drain relays what it
+/// discards. Only the RETAINED copy is truncated. The capped prefix is written
+/// without a synthesised terminator for the same reason: inserting one would
+/// split the operator's view of a line the child wrote whole. A terminator is
+/// supplied only at EOF, where the child left the stream mid-line.
+///
 /// A read error DOES end the relay, with a `debug!`: the pipe is gone, and a
 /// bare `continue` on a persistent error would spin.
 /// Test: `a_child_that_exits_before_binding_reports_its_status_and_stderr`,
-/// `a_child_writing_an_enormous_line_does_not_grow_the_relay_buffer`.
+/// `a_child_writing_an_enormous_line_does_not_grow_the_relay_buffer`,
+/// `a_real_line_survives_the_over_cap_line_that_follows_it`.
 fn relay_stderr(pipe: ChildStderr) -> (LogBuffer, tokio::task::JoinHandle<()>) {
     relay_stderr_into(pipe, tokio::io::stderr())
 }
@@ -263,19 +283,118 @@ where
             if read == 0 {
                 break;
             }
-            // One write, terminator included — see the doc comment.
-            if !raw.ends_with(b"\n") {
-                raw.push(b'\n');
+
+            if raw.ends_with(b"\n") {
+                // One write, terminator included — see the doc comment.
+                let _ = out.write_all(&raw).await;
+                sink.push(decode_line(&raw[..raw.len() - 1]));
+                continue;
             }
+
+            if read as u64 != STDERR_LINE_CAP {
+                // The pipe ended mid-line. Nothing was dropped; supply the
+                // terminator the child never wrote so stderr is not left
+                // hanging.
+                raw.push(b'\n');
+                let _ = out.write_all(&raw).await;
+                sink.push(decode_line(&raw[..raw.len() - 1]));
+                continue;
+            }
+
+            // Over the cap. Relay the prefix as-is, then relay-and-discard the
+            // rest so this one logical line takes one ring slot (#6601 review).
             let _ = out.write_all(&raw).await;
-            let line = String::from_utf8_lossy(&raw[..raw.len() - 1]).into_owned();
-            sink.push(line);
+            let dropped = drain_over_cap_line(&mut reader, &mut out).await;
+            sink.push(if dropped == 0 {
+                decode_line(&raw)
+            } else {
+                truncated_entry(&raw, dropped)
+            });
         }
         // Flushed once at EOF rather than per line: `tokio::io::stderr` writes
         // through, so a flush inside the loop bought nothing per line.
         let _ = out.flush().await;
     });
     (buffer, handle)
+}
+
+/// Relay the remainder of an over-cap line to `out` without retaining it.
+///
+/// Why: the retained copy of a line is capped, but the operator's copy must not
+/// be — losing the second half of a panic message is the outcome #6600 was filed
+/// against. This reads on, writing every byte through, and reports only how much
+/// it threw away.
+/// What: capped reads until a newline or EOF. Returns the count of
+/// NON-terminator bytes discarded, which is `0` when the line happened to end
+/// exactly at the cap — that case is not a truncation and earns no marker.
+/// Test: `a_real_line_survives_the_over_cap_line_that_follows_it`,
+/// `a_child_writing_an_enormous_line_does_not_grow_the_relay_buffer`.
+async fn drain_over_cap_line<W>(reader: &mut BufReader<ChildStderr>, out: &mut W) -> u64
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut discarded: u64 = 0;
+    let mut chunk: Vec<u8> = Vec::new();
+    loop {
+        chunk.clear();
+        let read = match (&mut *reader)
+            .take(STDERR_LINE_CAP)
+            .read_until(b'\n', &mut chunk)
+            .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::debug!(error = %e, "supervised child stderr relay ended draining a long line");
+                break;
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        let _ = out.write_all(&chunk).await;
+        if chunk.ends_with(b"\n") {
+            discarded += read as u64 - 1;
+            break;
+        }
+        discarded += read as u64;
+    }
+    discarded
+}
+
+/// Decode one retained stderr line, tolerating a codepoint split by the cap.
+///
+/// Why: [`STDERR_LINE_CAP`] is a BYTE bound, so it can land inside a multi-byte
+/// character. `from_utf8_lossy` alone turns that tail into a U+FFFD that reads
+/// like corrupt child output; the bytes are in fact intact and simply continue
+/// past the cap.
+/// What: an incomplete TRAILING sequence is dropped; genuinely invalid bytes
+/// anywhere else still become U+FFFD, because the relay must never end on one.
+/// Test: `a_child_writing_an_enormous_line_does_not_grow_the_relay_buffer`.
+fn decode_line(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_owned(),
+        Err(e) if e.error_len().is_none() => {
+            String::from_utf8_lossy(&bytes[..e.valid_up_to()]).into_owned()
+        }
+        Err(_) => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// The ring entry standing in for an over-cap line.
+///
+/// Why: a silently shortened line invites the reader to believe they have the
+/// whole message. Naming the dropped byte count is what tells an operator to go
+/// look at this process's stderr for the rest.
+/// What: the prefix, trimmed so prefix-plus-marker still fits
+/// [`STDERR_LINE_CAP`] — which is what keeps the ring's worst case at
+/// `STDERR_TAIL_LINES * STDERR_LINE_CAP`.
+/// Test: `a_real_line_survives_the_over_cap_line_that_follows_it`.
+fn truncated_entry(prefix: &[u8], dropped: u64) -> String {
+    let marker = format!("…[+{dropped} bytes truncated]");
+    let room = (STDERR_LINE_CAP as usize).saturating_sub(marker.len());
+    let mut kept = decode_line(&prefix[..prefix.len().min(room)]);
+    kept.push_str(&marker);
+    kept
 }
 
 /// Send SIGTERM, wait out the service's patience window, then SIGKILL.

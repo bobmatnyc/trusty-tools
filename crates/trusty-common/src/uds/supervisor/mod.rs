@@ -198,9 +198,19 @@ impl UdsServiceSupervisor {
     /// its stderr, within one probe interval (#6600). Before that, such a child
     /// spent the whole `spawn_probe` budget and then blamed the budget.
     ///
+    /// 🔴 **Under [`SupervisorConfig::with_detached`] the tail is always empty
+    /// (#6601 review).** A detached child keeps `Stdio::inherit()` — see
+    /// `child::spawn_child` for why a pipe would kill the very server detached
+    /// mode exists to keep alive — so there is nothing to quote and the operator
+    /// reads the child's lines on this process's own stderr instead. The status
+    /// still arrives, and it still arrives within a probe interval; only the
+    /// quoting is lost. Both new error arms are affected: `ChildExited` and
+    /// `SpawnTimeout`.
+    ///
     /// Test: `external_mode_skips_spawn`,
     /// `adoption_refuses_a_world_writable_socket`,
     /// `a_child_that_exits_before_binding_reports_its_status_and_stderr`,
+    /// `a_detached_child_that_exits_before_binding_reports_an_empty_tail`,
     /// `adoption_accepts_a_hardened_socket_without_spawning`,
     /// `a_serving_child_is_reused_without_a_spawn`, plus `trusty-memory`'s
     /// concurrency suite for the racing cases.

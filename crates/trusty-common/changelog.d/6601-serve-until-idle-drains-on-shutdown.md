@@ -21,9 +21,17 @@ Fixed
   spent the time that flush needs. A handler that outlives the budget warns,
   naming the socket, and the loop returns anyway.
 - A service whose real SIGKILL deadline is shorter than the process grace window
-  sets `shutdown_drain` explicitly rather than inheriting the default;
-  `trusty-analyze` does, because its supervisor's `sigterm_patience` is what
-  actually applies to it.
+  may set `shutdown_drain` explicitly, but must first establish that the deadline
+  reaches the serving process. `trusty-analyze` does not qualify: it runs
+  detached, so it is absent from its supervisor's population and no reap path
+  signals it while it is serving.
+- The BM25 exit flush `trusty-memory` runs after `serve_until` is now awaited
+  under `shutdown::CLEANUP_RESERVE`. Holding the time back does not by itself
+  spend it well — `bm25_lane::shutdown` had no deadline, so a slow flush could
+  consume the whole reserve and the socket unlink after it would never run. An
+  abandoned flush is logged and costs nothing a SIGKILL would not: the snapshot
+  write is a temp-file rename, so every palace keeps what its last tick
+  published.
 - `shutdown::CLEANUP_RESERVE` and `shutdown::plannable_grace` are new, and
   `trusty-search`'s `ShutdownBudget` now subtracts through them instead of
   keeping its own copy of the same 5 s policy.

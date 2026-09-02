@@ -56,11 +56,21 @@ pub const TERMINATION_GRACE_SECS: u64 = 60;
 /// documents as having "no window in which a SIGKILL can land mid-flush". A
 /// drain defaulted to the whole grace window makes that claim false.
 ///
+/// 🔴 **Holding time back is not the same as spending it well (#6601 review).**
+/// This reserve bounds the drain; it cannot bound the cleanup itself, and
+/// `bm25_lane::shutdown` had no deadline of its own — a slow flush spent the
+/// reserve and the socket unlink after it never ran. So `trusty-memory`'s
+/// `transport::uds::serve_with_shutdown` now awaits that flush UNDER this
+/// duration (`flush_within_reserve`), which is what makes the sentence above
+/// true rather than aspirational. A component that adds post-drain work owes the
+/// same bound.
+///
 /// What: 5 s, subtracted from the grace window by every component that plans
 /// inside it. One definition rather than two, per the common-entry-point rule —
 /// `trusty-search`'s `service::shutdown_budget::CLEANUP_RESERVE` re-exports this.
 ///
-/// Test: `default_serve_options_reserve_cleanup_time_inside_the_grace_window`.
+/// Test: `default_serve_options_reserve_cleanup_time_inside_the_grace_window`,
+/// trusty-memory's `an_exit_flush_that_overruns_the_reserve_is_abandoned`.
 /// trusty-search's `shutdown_budget_tests.rs` covers the flush side.
 pub const CLEANUP_RESERVE: std::time::Duration = std::time::Duration::from_secs(5);
 
