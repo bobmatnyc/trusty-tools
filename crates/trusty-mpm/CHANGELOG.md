@@ -358,6 +358,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   logs to the wrong AWS account, which is the requirement the override exists to
   satisfy. The tick reports `Failed`, the failing destination is named in the
   doctor row, and every other destination still drains.
+- Two intra-doc links that rustdoc could not resolve, so the pre-publish gate is
+  green again: `project_tier_agent_strays`' link to the private
+  `session_launch::quarantine_shadows` module, and a bare `argv[0]` in
+  `guided_outside_git` that markdown read as a link (#6693).
 
 ### Changed
 
