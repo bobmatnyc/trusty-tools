@@ -62,6 +62,19 @@ fn seed_agent_source(fw: &FrameworkPaths, names: &[&str]) {
     }
 }
 
+/// The tier bundled skills actually deploy to since #6586 — the managed config
+/// dir's `skills` sibling, which is what `validate_skills` probes.
+///
+/// Why: these fixtures used to build "a complete workspace" by writing the
+/// bundled roster into `fw.claude_skills_dir()`. Bundled skills are user-tier
+/// only now, so that directory is no longer where completeness is decided.
+fn managed_skills_dir(fw: &FrameworkPaths) -> std::path::PathBuf {
+    fw.agent_deploy_dir()
+        .parent()
+        .map(|dir| dir.join("skills"))
+        .unwrap_or_else(|| fw.agent_deploy_dir().join("skills"))
+}
+
 fn seed_skill_source(fw: &FrameworkPaths, names: &[&str]) {
     std::fs::create_dir_all(&fw.skills).unwrap();
     for name in names {
@@ -118,7 +131,7 @@ fn fully_provisioned(base: &Path) -> FrameworkPaths {
     .unwrap();
     AgentManifest::default().save(&agents_dir).unwrap();
 
-    let skills_dir = fw.claude_skills_dir();
+    let skills_dir = managed_skills_dir(&fw);
     std::fs::create_dir_all(skills_dir.join("tm-doctor")).unwrap();
     std::fs::write(skills_dir.join("tm-doctor").join("SKILL.md"), "skill").unwrap();
     crate::core::skill_manifest::SkillManifest::default()
@@ -186,7 +199,7 @@ fn validate_filtered_but_manifest_matching_workspace_has_no_gaps() {
     );
     agent_manifest.save(&agents_dir).unwrap();
 
-    let skills_dir = fw.claude_skills_dir();
+    let skills_dir = managed_skills_dir(&fw);
     std::fs::create_dir_all(skills_dir.join("tm-doctor")).unwrap();
     std::fs::write(skills_dir.join("tm-doctor").join("SKILL.md"), "skill").unwrap();
     crate::core::skill_manifest::SkillManifest::default()
@@ -331,11 +344,8 @@ fn validate_missing_agent_is_a_gap() {
 fn validate_missing_skill_manifest_is_a_gap() {
     let tmp = TempDir::new().unwrap();
     let fw = fully_provisioned(tmp.path());
-    std::fs::remove_file(
-        fw.claude_skills_dir()
-            .join(skill_manifest::SKILL_MANIFEST_FILE),
-    )
-    .unwrap();
+    std::fs::remove_file(managed_skills_dir(&fw).join(skill_manifest::SKILL_MANIFEST_FILE))
+        .unwrap();
     let report = validate_workspace(&fw);
     assert!(report.gaps.contains(&DeploymentGap::SkillManifestMissing));
 }
@@ -344,7 +354,7 @@ fn validate_missing_skill_manifest_is_a_gap() {
 fn validate_missing_skill_is_a_gap() {
     let tmp = TempDir::new().unwrap();
     let fw = fully_provisioned(tmp.path());
-    std::fs::remove_dir_all(fw.claude_skills_dir().join("tm-doctor")).unwrap();
+    std::fs::remove_dir_all(managed_skills_dir(&fw).join("tm-doctor")).unwrap();
     let report = validate_workspace(&fw);
     assert!(
         report

@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::core::agent_skill_codeploy::{co_deploy_skill_set, log_declared_skills};
+use crate::core::agent_skill_codeploy::log_declared_skills;
 use crate::core::manifest::HarnessPlan;
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::DeployStats;
@@ -68,33 +68,34 @@ pub(super) fn deploy_session_skills(
         )),
     }
 
-    // DOC-42 (issue #2889): fold every deployed agent's declared `skills:` into
-    // the bundled-tier `select` predicate below, so a skill the harness manifest
-    // would otherwise exclude still deploys when an agent depends on it
-    // (§SPEC-AGENTSKILLS-02 co-deploy guarantee). Resolving the stem sets ONCE
-    // here (rather than inside `deploy_all_skill_tiers`) lets the same sets
-    // drive both the `select` override AND the resolution logging.
+    // DOC-42 (issue #2889): report how every deployed agent's declared `skills:`
+    // resolves across the three tiers. #6586 removed the other half of this
+    // block — the co-deploy `select` override — because the bundled tier is no
+    // longer deployed here at all; §SPEC-AGENTSKILLS-02's guarantee is met by
+    // the user-tier deploy, which takes the whole bundled roster unfiltered.
     let bundled_stems = list_source_stems(&plan.skill_source).unwrap_or_default();
     let user_stems = list_source_stems(&fw.user_skill_source_dir()).unwrap_or_default();
     let project_stems = list_project_custom_stems(&fw.claude_skills_dir()).unwrap_or_default();
-    let co_deploy_skills = co_deploy_skill_set(declared_skills);
     log_declared_skills(declared_skills, &project_stems, &user_stems, &bundled_stems);
 
-    // Claude Code reads `~/.claude/skills/` at startup. Skills carry no
-    // inheritance, so this is a manifest-tracked content copy. The manifest's
-    // skill-set selection restricts WHICH bundled skills deploy — OR'd with
-    // `co_deploy_skills` (DOC-42); the user-custom tier is deployed in full and
-    // overrides a same-named bundled skill; a skill hand-placed in the project's
-    // `.claude/skills/` outranks both and is never overwritten. See
-    // `core::skill_tiers`.
+    // Claude Code reads the project's `.claude/skills/` at startup. Skills carry
+    // no inheritance, so this is a manifest-tracked content copy. Since #6586
+    // only the user-custom tier deploys here; a skill hand-placed in the
+    // project's `.claude/skills/` outranks it and is never overwritten, and
+    // bundled skills reach the session through the user tier instead. See
+    // `core::skill_tiers` and
+    // `project_skill_tier::bundled_excluded_from_project_tier`.
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::DeployingSkills,
     );
+    // #6586: bundled skills are user-tier only — see
+    // `project_skill_tier::bundled_excluded_from_project_tier` for why this
+    // costs no coverage, including DOC-42's co-deploy guarantee.
     let stats = match deploy_all_skill_tiers(
         &plan.skill_source,
         &fw.user_skill_source_dir(),
         &fw.claude_skills_dir(),
-        |name| plan.skill_selected(name) || co_deploy_skills.contains(name),
+        crate::core::project_skill_tier::bundled_excluded_from_project_tier,
     ) {
         Ok(result) => result.stats,
         Err(err) => {

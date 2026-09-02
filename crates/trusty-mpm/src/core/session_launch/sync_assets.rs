@@ -29,7 +29,6 @@ use std::path::Path;
 
 use super::settings::deploy_output_style;
 use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered, retract_framework_agents};
-use crate::core::agent_skill_codeploy::co_deploy_skill_set;
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::DeployStats;
 use crate::core::skill_tiers::deploy_all_skill_tiers;
@@ -187,12 +186,13 @@ pub fn sync_session_assets(
             }
         };
 
-    let co_deploy_skills = co_deploy_skill_set(&deploy.declared_skills);
+    // #6586: bundled skills are user-tier only — see
+    // `project_skill_tier::bundled_excluded_from_project_tier`.
     let skill_deploy: DeployStats = deploy_all_skill_tiers(
         &plan.skill_source,
         &fw.user_skill_source_dir(),
         &fw.claude_skills_dir(),
-        |name| plan.skill_selected(name) || co_deploy_skills.contains(name),
+        crate::core::project_skill_tier::bundled_excluded_from_project_tier,
     )
     .map_err(|e| SyncAssetsError::SkillDeploy(e.to_string()))?
     .stats;

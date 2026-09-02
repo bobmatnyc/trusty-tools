@@ -31,9 +31,15 @@ fn seed_framework(base: &Path, stem: &str, body: &str) -> FrameworkPaths {
     fw
 }
 
-/// Overwrite the bundled source copy of a seeded skill.
+/// Overwrite the USER-CUSTOM source copy of a seeded skill.
+///
+/// #6586 retargeted this from the bundled source. Bundled skills are user-tier
+/// only now, so a bundled stem never reaches this destination and could no
+/// longer carry the stamp-trigger, freeze and shadowing behaviour these tests
+/// are actually about. The user-custom tier still deploys here, so it is the
+/// vehicle; every subject below is unchanged.
 fn reseed(fw: &FrameworkPaths, stem: &str, body: &str) {
-    std::fs::write(fw.skills.join(format!("{stem}.md")), body).unwrap();
+    std::fs::write(fw.user_skill_source_dir().join(format!("{stem}.md")), body).unwrap();
 }
 
 /// Write a project-override manifest layer for `project_dir`.
@@ -60,6 +66,11 @@ fn plan_for(fw: &FrameworkPaths, project_dir: &Path) -> HarnessPlan {
 fn fixture(stem: &str, body: &str) -> (TempDir, FrameworkPaths, std::path::PathBuf) {
     let tmp = TempDir::new().unwrap();
     let fw = seed_framework(tmp.path(), stem, body);
+    // #6586: the same stem in the USER-CUSTOM source, which is what actually
+    // deploys to the project tier now — see `reseed`. The bundled copy above
+    // stays so the missing/empty-source guards still have a source to find.
+    std::fs::create_dir_all(fw.user_skill_source_dir()).unwrap();
+    reseed(&fw, stem, body);
     let project = tmp.path().join("workspace");
     std::fs::create_dir_all(&project).unwrap();
     (tmp, fw, project)
@@ -233,9 +244,11 @@ fn project_custom_skill_is_never_overwritten() {
     let first = ensure_project_skill_tier_for_version(&fw, &project, V1).unwrap();
     assert_eq!(std::fs::read_to_string(&custom).unwrap(), mine);
     assert!(
+        // #6586: the loser is the USER tier now — a bundled stem is dropped
+        // before the planner ever sees it, so it records no shadow at all.
         first.shadowed.iter().any(|s| s.stem == "probe-skill"
             && s.winner == SkillTier::Project
-            && s.loser == SkillTier::Bundled),
+            && s.loser == SkillTier::User),
         "the hand-placed copy must win precedence outright: {:?}",
         first.shadowed
     );
@@ -383,5 +396,93 @@ fn empty_skill_source_does_not_stamp() {
             .exists(),
         "an empty source must not be recorded as a successful deploy — the stamp \
          would freeze the project tier stale forever"
+    );
+}
+
+// ── bundled skills are user-tier only (#6586) ────────────────────────────
+
+/// The issue's first acceptance: a fresh provision writes NO bundled skill into
+/// the project's own tier (#6586).
+///
+/// Owner ruling 2026-09-01, the same principle #4448 settled for bundled agents.
+/// Before it, all 21 bundled `tm-*` skills existed byte-identically in both
+/// tiers, so an upgrade had two copies to keep in step and a drifted project
+/// copy was indistinguishable from a deliberate customization.
+///
+/// Fails before #6586: `probe-bundled/SKILL.md` is written into the project tier
+/// and `deployed` names it.
+#[test]
+fn project_tier_receives_no_bundled_skill() {
+    let tmp = TempDir::new().unwrap();
+    let fw = seed_framework(tmp.path(), "probe-bundled", "BUNDLED ONLY");
+    let project = tmp.path().join("workspace");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let report = ensure_project_skill_tier_for_version(&fw, &project, V1).unwrap();
+
+    assert!(
+        !report.stats.deployed.iter().any(|s| s == "probe-bundled"),
+        "a bundled skill must not be deployed to the project tier: {:?}",
+        report.stats
+    );
+    assert!(
+        !project_skill_dir(&project).join("probe-bundled").exists(),
+        "and nothing may be written for it on disk"
+    );
+}
+
+/// The complement: the user-custom tier still deploys here, so the project tier
+/// is narrowed rather than retired (#6586).
+///
+/// Without this, setting the bundled selection to nothing could have been
+/// achieved by disabling the whole deploy, and no test would notice.
+#[test]
+fn project_tier_still_receives_a_user_custom_skill() {
+    let (_tmp, fw, project) = fixture("probe-skill", "V1");
+
+    let report = ensure_project_skill_tier_for_version(&fw, &project, V1).unwrap();
+
+    assert!(report.deployed, "the deploy must still run: {report:?}");
+    assert_eq!(
+        std::fs::read_to_string(
+            project_skill_dir(&project)
+                .join("probe-skill")
+                .join("SKILL.md")
+        )
+        .unwrap(),
+        "V1",
+        "a user-custom skill still reaches the project tier"
+    );
+}
+
+/// The bundled skill the project tier now declines is on disk one tier up
+/// (#6586) — which is why declining it costs no coverage.
+///
+/// `managed_config` deploys the bundled roster to the user tier with `|_| true`,
+/// the WHOLE roster rather than the manifest-selected subset, and for skills
+/// Claude Code resolves personal above project. This asserts the planner half of
+/// that claim: the user destination still takes every bundled stem.
+#[test]
+fn bundled_skill_reaches_the_user_tier_only() {
+    use crate::core::skill_tiers::plan_skill_tiers;
+    use std::collections::BTreeSet;
+
+    let bundled: BTreeSet<String> = ["tm-ticketing".to_string()].into_iter().collect();
+    let empty = BTreeSet::new();
+
+    let user_dest = plan_skill_tiers(&empty, &empty, &bundled);
+    assert!(
+        user_dest.bundled_deploy.contains("tm-ticketing"),
+        "the user tier deploys the whole bundled roster: {user_dest:?}"
+    );
+
+    let project_dest: BTreeSet<String> = bundled
+        .iter()
+        .filter(|s| super::bundled_excluded_from_project_tier(s))
+        .cloned()
+        .collect();
+    assert!(
+        project_dest.is_empty(),
+        "and the project tier's selection admits none of it: {project_dest:?}"
     );
 }

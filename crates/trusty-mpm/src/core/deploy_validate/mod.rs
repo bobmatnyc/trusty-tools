@@ -235,7 +235,16 @@ fn validate_agents(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
 /// Probe the deployed skill roster against the EXPECTED per-project set
 /// (issue #2171 — see [`expected_set::expected_skill_stems`]).
 fn validate_skills(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
-    let target = fw.claude_skills_dir();
+    // #6586: the expected set is the BUNDLED roster, and bundled skills are
+    // user-tier only now — so probing the project tier for them would report
+    // every one of them missing on a workspace that is in fact complete. The
+    // managed config dir is where they land; it is the `skills` sibling of
+    // `agent_deploy_dir`, the same derivation `skill_deploy_tiers` uses.
+    let target = fw
+        .agent_deploy_dir()
+        .parent()
+        .map(|dir| dir.join("skills"))
+        .unwrap_or_else(|| fw.agent_deploy_dir().join("skills"));
     let manifest_present = target.join(skill_manifest::SKILL_MANIFEST_FILE).is_file();
     if !manifest_present {
         gaps.push(DeploymentGap::SkillManifestMissing);
