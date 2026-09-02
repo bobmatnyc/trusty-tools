@@ -509,6 +509,7 @@ already deployed in `trusty-console/ui-search`, `trusty-analyze/ui`,
 
 Most references are linked from the rule they serve, above. Not linked elsewhere:
 
+- [ci-scripts.md](docs/reference/ci-scripts.md) — the eight `scripts/` checks that run only in a workflow: where each runs, what it gates, and which have a self-test
 - [documentation-layout.md](docs/reference/documentation-layout.md) — docs layout conventions
 - [DOC-38](docs/specs/spec-linked-documentation.md) — SLD policy, enforced by `scripts/check_sld.sh`
 - [threat-model.md](docs/reference/threat-model.md) — per-daemon bind/guard/proxy inventory ([ADR-0018](docs/adr/0018-loopback-only-doctrine.md))

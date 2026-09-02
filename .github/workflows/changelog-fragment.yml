@@ -1,4 +1,7 @@
-# Per-PR changelog fragment gate (issue #4476).
+# Per-PR changelog gates: the fragment gate (#4476) and the merge-time half of
+# the assembler gate (#6406). Both compare the branch against its base branch,
+# both need only git, and both belong to the same "the changelog is recorded
+# where release time can find it" contract, so they share one job.
 #
 # Enforces mechanically what was previously a review-gate-only rule: a PR that
 # changes `crates/<crate>/src/**` must record the change in a
@@ -123,3 +126,24 @@ jobs:
         env:
           CHANGELOG_GATE_BASE: origin/${{ github.event.pull_request.base.ref }}
         run: bash scripts/check_changelog_fragment.sh
+
+      # Merge-time half of the changelog-assembler gate (#6406). The publish-time
+      # half is preflight-publish.sh CHECK 9, which stops a bypass in the last
+      # seconds before `cargo publish`; this one catches the same shape while the
+      # PR is still open, so a hand-written `## [<version>]` section that left
+      # its fragments sitting in changelog.d/ never reaches main at all.
+      #
+      # Distinct from the step above, not a second spelling of it: that gate asks
+      # "did a source change record a fragment", this one asks "did a new release
+      # section consume the fragments it claims to have folded in". It fires ONLY
+      # on a NEW version heading, so an in-flight `bump-version.sh --no-changelog`
+      # bump stays silent — the scope note is in the script's own header.
+      #
+      # Base is origin/<base ref>, refreshed by the step above, never
+      # `github.event.pull_request.base.sha`: the frozen snapshot lags the merge
+      # ref's own first parent and blames crates the branch never touched
+      # (#5018 / run 31431273762, the same failure the refresh step exists for).
+      - name: Enforce assembled CHANGELOG sections (no stranded fragments)
+        env:
+          PR_CHANGELOG_ASSEMBLED_BASE: origin/${{ github.event.pull_request.base.ref }}
+        run: bash scripts/check-pr-changelog-assembled.sh
