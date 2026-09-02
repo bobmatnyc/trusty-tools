@@ -118,7 +118,8 @@ pub(crate) struct StateDef {
 /// resolved from the issue's own open/closed flag rather than from a label.
 /// What: `Open` (the default, so every pre-existing model keeps its meaning)
 /// and `Closed`.
-/// Test: `project_model_closed_state_is_gh_closed` in `project_model_tests.rs`.
+/// Test: `sm_closes_issue`, `sm_resolve_falls_back_to_labelless`,
+/// `project_close_requires_evidence_and_then_closes`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum GhState {
