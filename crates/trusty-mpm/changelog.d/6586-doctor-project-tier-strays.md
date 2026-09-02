@@ -32,10 +32,8 @@ Fixed
   rewrote those same copies from the bundled asset and re-stamped each ledger
   checksum — on the 51-stray project, 51 files and 51 backups written straight
   after the command said nothing would be. The redeploy now skips every stem the
-  sweep planned or applied. Its own gating is unchanged and deliberate: it
-  overwrites tm's own files, backs each one up, and has `tm doctor --fix` as its
-  preview, so it still applies on the flag alone; only the deletion waits for
-  `--yes` (#6586).
+  sweep planned or applied (#6586; #6620 then put the redeploy behind `--yes`
+  too, so the whole command previews on the bare flag).
 - A project tier that exists, permits the deploy-ledger lock, and cannot be
   LISTED is now one refusal naming the tier and the error. Both scanners treated
   an unreadable directory as an empty one, so the sweep produced no steps at all
