@@ -390,6 +390,41 @@ async fn a_disabled_config_records_skipped() {
 }
 
 #[tokio::test]
+async fn a_tick_over_only_disabled_sources_names_the_empty_plan() {
+    // #6657: switching every project off one at a time leaves an ENABLED
+    // section with nothing in it, which is NOT the same state as
+    // `enabled: false` — `a_disabled_config_records_skipped` covers that one.
+    // The tick still runs, covers zero destinations, and has to say so.
+    let tmp = TempDir::new().expect("tempdir");
+    let dest = tmp.path().join("dest");
+    let logs = log_dir_with(&tmp, "INFO a line\n");
+    let state = tmp.path().join("state");
+
+    let mut config = enabled_config(&dest, &logs);
+    let section = config.log_drain.as_mut().expect("fixture section");
+    section.sources[0].enabled = Some(false);
+
+    let plan = plan_of(&config, tmp.path());
+    assert!(
+        plan.destinations.is_empty(),
+        "no source is left for a destination to carry"
+    );
+    assert_eq!(plan.disabled.len(), 1);
+
+    let status = run_tick(&plan, &state).await;
+    assert_eq!(status.outcome, DrainOutcome::Success, "{}", status.detail);
+    assert_eq!(status.detail, "no destination had any source configured");
+    assert!(status.destinations.is_empty());
+    assert_eq!(status.uploaded, 0);
+    assert_eq!(status.skipped_unchanged, 0);
+    // An empty plan connects to nothing, so the `file://` root is never made.
+    assert!(
+        !dest.exists(),
+        "an empty plan must not touch the destination"
+    );
+}
+
+#[tokio::test]
 async fn a_config_error_records_failed() {
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path().join("framework");

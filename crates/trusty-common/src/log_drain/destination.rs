@@ -484,7 +484,9 @@ impl fmt::Debug for S3Auth {
 /// a bucket that is not there.
 ///
 /// Test: `super::tests::two_profiles_resolve_to_different_identities`,
-/// `super::tests::a_profile_without_a_region_is_refused`.
+/// `super::tests::a_profile_without_a_region_is_refused`,
+/// `super::tests::a_role_arn_resolves_to_an_assumed_role_identity`,
+/// `super::tests::a_profile_and_a_role_arn_do_not_collapse_onto_the_profile`.
 ///
 /// # Errors
 /// [`DrainError::Credentials`] when no region resolves, or when the default

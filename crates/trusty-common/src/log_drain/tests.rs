@@ -429,11 +429,29 @@ fn fixture_profiles() -> super::destination::ProfileFiles {
         .build()
 }
 
+/// The role every `?role_arn=` fixture assumes. Never contacted: the provider
+/// is lazy, so building one reaches no STS endpoint.
+const FIXTURE_ROLE_ARN: &str = "arn:aws:iam::123456789012:role/log-drain";
+
 /// Resolve one destination's identity against the in-memory profile fixture.
 async fn resolve_fixture_auth(
     label: &str,
     region: Option<&str>,
     profile: Option<&str>,
+) -> Result<super::destination::S3Auth, DrainError> {
+    resolve_fixture_auth_with_role(label, region, profile, None).await
+}
+
+/// The same, with an explicit `?role_arn=`.
+///
+/// Every caller also pins a `profile`. A role with no profile falls through to
+/// the AWS default chain, which reads the developer's own environment and
+/// `~/.aws` files — the one thing this fixture exists to avoid.
+async fn resolve_fixture_auth_with_role(
+    label: &str,
+    region: Option<&str>,
+    profile: Option<&str>,
+    role_arn: Option<&str>,
 ) -> Result<super::destination::S3Auth, DrainError> {
     let files = fixture_profiles();
     super::destination::resolve_s3_auth(
@@ -441,7 +459,7 @@ async fn resolve_fixture_auth(
         super::destination::S3AuthRequest {
             region,
             profile,
-            role_arn: None,
+            role_arn,
             profile_files: Some(&files),
         },
     )
@@ -515,6 +533,63 @@ async fn a_profile_without_a_region_is_refused() {
         message.contains("?region=") && message.contains("profile"),
         "the refusal must name what to set, got: {message}"
     );
+}
+
+#[tokio::test]
+async fn a_role_arn_resolves_to_an_assumed_role_identity() {
+    // #6657: `?role_arn=` is how one daemon writes into an account it holds no
+    // long-lived keys for. The provider the branch builds is the observable —
+    // reading credentials from it would call STS, and the design is that it
+    // does not until the first upload.
+    let resolved =
+        resolve_fixture_auth_with_role("s3://a/logs", None, Some("alpha"), Some(FIXTURE_ROLE_ARN))
+            .await
+            .expect("a role over a profile resolves");
+
+    // The region the STS client is pinned to comes off the same ladder an
+    // ordinary destination uses — here, the profile's own.
+    assert_eq!(resolved.region, "us-east-1");
+    let provider = format!("{:?}", resolved.provider);
+    assert!(
+        provider.contains("AssumeRoleProvider"),
+        "the role branch must wrap the base identity, got: {provider}"
+    );
+}
+
+#[tokio::test]
+async fn a_profile_and_a_role_arn_do_not_collapse_onto_the_profile() {
+    // The two knobs compose: the profile signs the AssumeRole, and the assumed
+    // role is what reaches S3. Returning the base provider unwrapped would
+    // still resolve, still carry the right region, and write with the wrong
+    // identity — so the with/without comparison is the assertion, not the Ok.
+    let plain = resolve_fixture_auth("s3://a/logs", None, Some("alpha"))
+        .await
+        .expect("the profile alone resolves");
+    let assumed = resolve_fixture_auth_with_role(
+        "s3://a/logs",
+        Some("ap-south-1"),
+        Some("alpha"),
+        Some(FIXTURE_ROLE_ARN),
+    )
+    .await
+    .expect("the profile plus a role resolves");
+
+    let plain_provider = format!("{:?}", plain.provider);
+    let assumed_provider = format!("{:?}", assumed.provider);
+    assert!(
+        !plain_provider.contains("AssumeRoleProvider"),
+        "no `?role_arn=` was given, got: {plain_provider}"
+    );
+    assert!(
+        assumed_provider.contains("AssumeRoleProvider"),
+        "the same profile plus a role must not resolve to the bare profile \
+         identity, got: {assumed_provider}"
+    );
+
+    // `?region=` still wins over the profile's own with a role in play, so the
+    // STS client is pinned to the region the operator asked for.
+    assert_eq!(plain.region, "us-east-1");
+    assert_eq!(assumed.region, "ap-south-1");
 }
 
 // ── collector: level filtering ──────────────────────────────────────────────

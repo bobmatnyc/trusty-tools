@@ -178,7 +178,10 @@ impl LogDrainStatus {
     /// Fold every destination's record into the tick's verdict.
     ///
     /// The tick FAILS when any destination failed — the fail-open guard is
-    /// per-destination, so a partial success is still a failure to report.
+    /// per-destination, so a partial success is still a failure to report. An
+    /// EMPTY plan — every source individually `enabled: false` (#6657) — is a
+    /// clean tick that covered nothing, and its detail says exactly that.
+    /// Test: `tests::a_tick_over_only_disabled_sources_names_the_empty_plan`.
     fn from_destinations(destinations: Vec<LogDrainDestinationStatus>) -> Self {
         let failed = destinations
             .iter()
@@ -326,7 +329,8 @@ pub fn save_status(state_dir: &Path, status: &LogDrainStatus) {
 /// memory for no operator-visible gain at a 15-minute cadence.
 /// Test: `tests::a_successful_tick_uploads_and_records_success`,
 /// `tests::a_second_tick_dedupes`, `tests::a_failing_destination_records_failed`,
-/// `tests::two_destinations_each_get_their_own_pass`.
+/// `tests::two_destinations_each_get_their_own_pass`,
+/// `tests::a_tick_over_only_disabled_sources_names_the_empty_plan`.
 pub async fn run_tick(plan: &ResolvedLogDrain, state_dir: &Path) -> LogDrainStatus {
     let mut per_destination = Vec::with_capacity(plan.destinations.len());
     for group in &plan.destinations {
