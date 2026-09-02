@@ -271,8 +271,8 @@ pub(crate) fn required_contexts<R: GhRunner>(
 /// prints one verdict line — or the whole set as a JSON array under `--json`.
 /// Exits 0 when every listed PR is mergeable and 1 otherwise; an empty queue
 /// is 0.
-/// Test: `queue_exits_1_when_any_pr_blocked`, `queue_json_shape`,
-/// `queue_empty_queue_is_ok`.
+/// Test: `queue_exits_1_when_any_pr_blocked`, `queue_reports_mergeable`,
+/// `queue_verdict_json_matches_the_line`, `queue_empty_queue_is_ok`.
 pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrQueueCheckArgs) -> anyhow::Result<i32> {
     let slug = repo_slug(gh, args.repo.as_deref())?;
     let required = required_contexts(gh, &slug, &args.base)?;

@@ -46,7 +46,7 @@ pub(crate) trait Preflight {
 /// look like a repo that cleared it.
 /// What: `Pass`, `Skipped` (no such script in this repo), or `Fail` carrying
 /// the script's own output.
-/// Test: `open_reports_changelog_failure`, `open_allows_missing_gate_script`.
+/// Test: `open_reports_changelog_failure`, `open_docs_only_skips_the_changelog_gate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChangelogVerdict {
     /// The gate ran and exited 0.
@@ -117,7 +117,7 @@ fn repo_root() -> anyhow::Result<std::path::PathBuf> {
 /// dry-run path and the real path provably identical.
 /// What: the `gh pr create` argv, the resolved workstream label, and the
 /// contract fields the body actually filled.
-/// Test: `open_dry_run_prints_the_argv`, `open_argv_carries_shipped_defaults`.
+/// Test: `open_dry_run_never_calls_gh`, `open_argv_carries_shipped_defaults`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct OpenPlan {
     /// The full `gh` argv, without the `gh` itself.
@@ -228,8 +228,8 @@ pub(crate) fn plan(
 /// argv (`--dry-run`) or runs it. On success prints the PR number and URL from
 /// `gh`'s own output plus the one-line list of supplied body fields; `--rung`
 /// is echoed there so the claimed test-ladder rung is visible at open time.
-/// Test: `open_dry_run_prints_the_argv`, `open_creates_and_reports`,
-/// and every `open_*` failure case.
+/// Test: `open_dry_run_never_calls_gh`, `open_creates_and_reports`,
+/// `open_failure_exits_two_without_calling_gh`, `open_rejects_an_empty_body_file`.
 pub(crate) fn run<R: GhRunner, P: Preflight>(
     gh: &R,
     args: &PrOpenArgs,
