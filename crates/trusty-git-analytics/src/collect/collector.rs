@@ -915,14 +915,18 @@ impl CollectionPipeline {
     /// per-repo retry of a render-stage failure. `--force` restores the
     /// unconditional full walk.
     /// What: reads the recorded [`walk_state`], compares it against the
-    /// repository's current tips, and dispatches on the resulting
-    /// [`walk_state::WalkPlan`]. The state is written incomplete before the
-    /// walk and complete after it succeeds, so an interrupted run re-walks in
-    /// full rather than skipping on partial data. Any bookkeeping failure
-    /// degrades to a full walk rather than aborting the repository.
+    /// repository's current tips AND this run's [`walk_state::WalkScope`], and
+    /// dispatches on the resulting [`walk_state::WalkPlan`]. The state is
+    /// marked in flight before the walk and recorded complete only after the
+    /// walk returns `Ok`, so both an interrupted run and one whose revwalk
+    /// aborted re-walk in full rather than skipping on partial data. Any
+    /// bookkeeping failure degrades to a full walk rather than aborting the
+    /// repository.
     /// Test: `crate::collect::git::extractor::tests::{unchanged_head_skips_the_walk,
     /// advanced_head_walks_only_the_new_commits,
-    /// unreachable_base_forces_a_full_rewalk}`.
+    /// unreachable_base_forces_a_full_rewalk,
+    /// a_scoped_walk_does_not_license_skipping_a_full_one,
+    /// an_aborted_revwalk_is_not_recorded_as_a_completed_walk}`.
     pub(crate) fn collect_unbounded(
         &self,
         db: &mut Database,
@@ -930,6 +934,10 @@ impl CollectionPipeline {
         stats: &mut CollectionStats,
     ) {
         let repo_name = collector.name().to_string();
+        // The scope comes from the collector, not from `self`, so it reflects
+        // what the revwalk will actually seed — including a per-repo
+        // `head_only: true` the pipeline ORed in (#6073 review).
+        let scope = collector.walk_scope();
         let tips = match collector.walk_tips() {
             Ok(t) => Some(t),
             Err(e) => {
@@ -943,7 +951,10 @@ impl CollectionPipeline {
         let plan = match (&tips, self.force) {
             // `--force` is the existing "re-collect everything" lever and
             // keeps meaning exactly that here.
-            (_, true) | (None, _) => walk_state::WalkPlan::Full {
+            (_, true) => walk_state::WalkPlan::Full {
+                reason: walk_state::FullWalkReason::Forced,
+            },
+            (None, _) => walk_state::WalkPlan::Full {
                 reason: walk_state::FullWalkReason::NeverWalked,
             },
             (Some(t), false) => {
@@ -954,7 +965,7 @@ impl CollectionPipeline {
                 let reachable = recorded
                     .as_ref()
                     .is_some_and(|s| collector.base_is_reachable(&s.head_sha));
-                walk_state::plan(recorded.as_ref(), t, reachable)
+                walk_state::plan(recorded.as_ref(), t, &scope, reachable)
             }
         };
 
@@ -978,22 +989,20 @@ impl CollectionPipeline {
                 }
             },
             walk_state::WalkPlan::Full { reason } => {
-                if !self.force {
-                    info!(
-                        repo = %repo_name,
-                        "collecting FULL git history: {}",
-                        reason.as_str()
-                    );
-                }
+                info!(
+                    repo = %repo_name,
+                    "collecting FULL git history: {}",
+                    reason.as_str()
+                );
                 None
             }
         };
 
         // Mark the walk in flight so a run interrupted here re-walks in full.
-        if let Some(t) = &tips {
-            if let Err(e) = walk_state::record(db.connection(), &repo_name, t, false) {
-                warn!(repo = %repo_name, error = %e, "could not mark walk in flight");
-            }
+        // This preserves any recorded head/digest/scope, so an interrupt does
+        // not overwrite the last known-good base with tips nothing walked.
+        if let Err(e) = walk_state::mark_in_flight(db.connection(), &repo_name) {
+            warn!(repo = %repo_name, error = %e, "could not mark walk in flight");
         }
 
         match collector.collect_window_hiding(db, None, None, hide) {
@@ -1001,7 +1010,9 @@ impl CollectionPipeline {
                 info!(repo = %repo_name, commits = n, ?hide, "extracted (unbounded)");
                 stats.commits_collected += n;
                 if let Some(t) = &tips {
-                    if let Err(e) = walk_state::record(db.connection(), &repo_name, t, true) {
+                    if let Err(e) =
+                        walk_state::record_complete(db.connection(), &repo_name, t, &scope)
+                    {
                         warn!(repo = %repo_name, error = %e, "could not record completed walk");
                     }
                 }

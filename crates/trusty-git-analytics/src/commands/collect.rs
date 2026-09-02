@@ -172,24 +172,31 @@ pub async fn run_reporting_fetch(
     };
 
     if args.dry_run {
+        // #6073: `repos_skipped` is the only figure separating a skipped
+        // full-history walk from one that ran and found nothing new — both
+        // leave `commits_collected` at zero.
         println!(
             "Dry run complete. Would have written {} commits, {} authors, \
-             {} PRs ({} weeks collected, {} weeks skipped). No changes persisted.",
+             {} PRs ({} weeks collected, {} weeks skipped, \
+             {} repo full-history walks skipped). No changes persisted.",
             stats.commits_collected,
             stats.authors_resolved,
             stats.prs_fetched,
             stats.weeks_collected,
             stats.weeks_skipped,
+            stats.repos_skipped,
         );
     } else {
         println!(
             "Collected {} commits from {} authors ({} PRs fetched, \
-             {} weeks collected, {} weeks skipped)",
+             {} weeks collected, {} weeks skipped, \
+             {} repo full-history walks skipped)",
             stats.commits_collected,
             stats.authors_resolved,
             stats.prs_fetched,
             stats.weeks_collected,
             stats.weeks_skipped,
+            stats.repos_skipped,
         );
     }
     if !stats.errors.is_empty() {

@@ -506,12 +506,18 @@ impl GitCollector {
 
         let mut written = 0usize;
         let mut walked = 0usize;
+        // #6073 review: a revwalk error truncates the traversal. Recording the
+        // reason here and returning it after the transaction commits keeps the
+        // rows already written while denying the caller the "walk completed"
+        // signal it would otherwise persist.
+        let mut aborted: Option<String> = None;
         let tx = db.connection_mut().transaction()?;
         for oid_res in revwalk {
             let oid = match oid_res {
                 Ok(o) => o,
                 Err(e) => {
                     warn!(error = %e, "revwalk yielded error; stopping traversal");
+                    aborted = Some(e.to_string());
                     break;
                 }
             };
@@ -646,6 +652,14 @@ impl GitCollector {
         }
         tx.commit()?;
         pb.finish_with_message(format!("done ({walked} walked, {written} new)"));
+        if let Some(source) = aborted {
+            return Err(CollectError::WalkAborted {
+                repository: self.name.clone(),
+                walked,
+                written,
+                cause: source,
+            });
+        }
         debug!(repo = %self.name, written, "commit extraction complete");
         Ok(written)
     }
@@ -682,6 +696,31 @@ impl GitCollector {
     pub fn walk_tips(&self) -> Result<walk_state::WalkTips> {
         let repo = Repository::open(&self.path)?;
         walk_state::current_walk_tips(&repo)
+    }
+
+    /// What this collector's walk is allowed to see (#6073 review).
+    ///
+    /// Why: `--branch`, a per-repo `branch:` override, `--head-only` and
+    /// `skip_merges` all narrow the walk without changing
+    /// [`Self::walk_tips`], so a scoped run would otherwise record a tip over
+    /// refs it never walked and let the next full-scope run skip. Deriving the
+    /// scope from the COLLECTOR rather than from the pipeline's flags means it
+    /// cannot drift from what the revwalk actually does, and it picks up the
+    /// per-repo `head_only: true` the pipeline ORs in.
+    /// What: the seeding flags in [`walk_state::WalkScope`] form. Branch names
+    /// come from both the `--branch` list and the per-repo override, because
+    /// either one alone narrows the walk.
+    /// Test: `tests::a_scoped_walk_does_not_license_skipping_a_full_one`.
+    pub fn walk_scope(&self) -> walk_state::WalkScope {
+        let mut branches = self.explicit_branches.clone();
+        if let Some(b) = &self.branch {
+            branches.push(b.clone());
+        }
+        walk_state::WalkScope {
+            branches,
+            head_only: self.head_only,
+            skip_merges: self.skip_merges,
+        }
     }
 
     /// True when `base_sha` is still reachable from this repository's head.
@@ -1601,24 +1640,45 @@ mod tests {
     /// exercise the wrong code. Building the pipeline here keeps every #6073
     /// case going through the same entry point a real `tga collect` uses.
     fn run_unbounded(db: &mut Database, repo_path: &Path, force: bool) -> (usize, usize) {
+        let (collected, skipped, failures) = try_run_unbounded(db, repo_path, force, &[]);
+        assert!(failures.is_empty(), "collect must not fail: {failures:?}");
+        (collected, skipped)
+    }
+
+    /// [`run_unbounded`], scoped to `branches` and tolerating stage failures.
+    ///
+    /// Why: two #6073-review cases need what `run_unbounded` asserts away —
+    /// the scope probe needs a `--branch` filter on the pipeline, and the
+    /// aborted-revwalk probe needs the run to FAIL so it can assert the walk
+    /// was not recorded as complete. Returns the stage-failure messages rather
+    /// than panicking on them.
+    fn try_run_unbounded(
+        db: &mut Database,
+        repo_path: &Path,
+        force: bool,
+        branches: &[&str],
+    ) -> (usize, usize, Vec<String>) {
         let repo_cfg = make_repo_config(repo_path);
+        let branches: Vec<String> = branches.iter().map(|b| (*b).to_string()).collect();
         let collector = GitCollector::new(&repo_cfg)
             .expect("collector")
-            .no_fetch(true);
+            .no_fetch(true)
+            .with_explicit_branches(branches.clone());
         let pipeline = crate::collect::collector::CollectionPipeline::new(Config {
             repositories: vec![repo_cfg],
             ..Config::default()
         })
         .with_no_fetch(true)
+        .with_branches(branches)
         .with_force(force);
         let mut stats = crate::collect::collector::CollectionStats::default();
         pipeline.collect_unbounded(db, &collector, &mut stats);
-        assert!(
-            stats.stage_failures().is_empty(),
-            "collect must not fail: {:?}",
-            stats.errors
-        );
-        (stats.commits_collected, stats.repos_skipped)
+        let failures = stats
+            .stage_failures()
+            .iter()
+            .map(|f| f.message.clone())
+            .collect();
+        (stats.commits_collected, stats.repos_skipped, failures)
     }
 
     fn recorded_state(db: &Database, repo: &str) -> Option<walk_state::WalkState> {
@@ -1664,12 +1724,10 @@ mod tests {
         );
 
         // Nothing moved, so the second run must skip rather than re-walk.
-        let tips = GitCollector::new(&make_repo_config(&tmp.path))
-            .expect("collector")
-            .walk_tips()
-            .expect("tips");
+        let probe = GitCollector::new(&make_repo_config(&tmp.path)).expect("collector");
+        let tips = probe.walk_tips().expect("tips");
         assert_eq!(
-            walk_state::plan(Some(&state), &tips, true),
+            walk_state::plan(Some(&state), &tips, &probe.walk_scope(), true),
             walk_state::WalkPlan::Skip,
             "an unchanged head must plan a skip"
         );
@@ -1702,7 +1760,7 @@ mod tests {
             .and_then(|n| n.to_str())
             .expect("repo name")
             .to_string();
-        walk_state::record(
+        walk_state::record_complete(
             db.connection(),
             &name,
             &walk_state::WalkTips {
@@ -1710,7 +1768,7 @@ mod tests {
                 head_ref: "refs/heads/main".to_string(),
                 tips_digest: "stale".to_string(),
             },
-            true,
+            &walk_state::WalkScope::default(),
         )
         .expect("stale state");
         run_unbounded(&mut db, &tmp.path, true);
@@ -1762,7 +1820,12 @@ mod tests {
         let tips = collector.walk_tips().expect("tips");
         let state = recorded_state(&db, &name).expect("state");
         assert_eq!(
-            walk_state::plan(Some(&state), &tips, collector.base_is_reachable(&base)),
+            walk_state::plan(
+                Some(&state),
+                &tips,
+                &collector.walk_scope(),
+                collector.base_is_reachable(&base)
+            ),
             walk_state::WalkPlan::Incremental {
                 base_sha: base.clone()
             }
@@ -1780,16 +1843,222 @@ mod tests {
             "the incremental walk must cover only the commits added since the base"
         );
 
+        // #6073 review: `hide` must be PROVED to reach the walk. Deleting a
+        // row inside the hidden ancestry is the only observable that fails
+        // when the dispatcher passes `None` — an incremental walk cannot see
+        // that commit and leaves the hole, a full walk restores it. Without
+        // this, swapping the call for an unconditional full walk left every
+        // assertion in this module green.
+        let deleted_sha: String = db
+            .connection()
+            .query_row(
+                "SELECT sha FROM commits ORDER BY timestamp ASC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("oldest sha");
+        db.connection()
+            .execute(
+                "DELETE FROM files WHERE commit_id IN (SELECT id FROM commits WHERE sha = ?1)",
+                rusqlite::params![deleted_sha],
+            )
+            .expect("delete files");
+        db.connection()
+            .execute(
+                "DELETE FROM commits WHERE sha = ?1",
+                rusqlite::params![deleted_sha],
+            )
+            .expect("delete commit");
+
         assert_eq!(
             run_unbounded(&mut db, &tmp.path, false),
             (2, 0),
             "an advanced head walks incrementally rather than skipping"
         );
+        let restored: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM commits WHERE sha = ?1",
+                rusqlite::params![deleted_sha],
+                |r| r.get(0),
+            )
+            .expect("count deleted");
+        assert_eq!(
+            restored, 0,
+            "the incremental walk must hide the recorded base's ancestry; \
+             re-inserting {deleted_sha} means the walk was full, not incremental"
+        );
         let total: i64 = db
             .connection()
             .query_row("SELECT COUNT(*) FROM commits", [], |r| r.get(0))
             .expect("count");
-        assert_eq!(total, 5, "no commit may be lost by going incremental");
+        assert_eq!(
+            total, 4,
+            "the two new commits are added to the three seeded minus the one deleted"
+        );
+    }
+
+    /// (#6073 review) A `--branch`-scoped run records a tip over refs it never
+    /// walked. A later full-scope run must therefore re-walk rather than skip,
+    /// or every side-branch commit is permanently absent.
+    #[test]
+    fn a_scoped_walk_does_not_license_skipping_a_full_one() {
+        let (tmp, repo) = init_repo("walk-scope");
+        // Two commits on the default branch.
+        for i in 0..2 {
+            commit_at(
+                &repo,
+                &tmp.path,
+                utc_seconds(2026, 1, 10 + i, 12, 0, 0),
+                0,
+                "main",
+            );
+        }
+        // One more, on a side branch only.
+        let head = repo.head().expect("head").peel_to_commit().expect("commit");
+        repo.branch("side", &head, false).expect("branch");
+        repo.set_head("refs/heads/side").expect("set head");
+        commit_at(
+            &repo,
+            &tmp.path,
+            utc_seconds(2026, 1, 20, 12, 0, 0),
+            0,
+            "side",
+        );
+        let default_branch = "master";
+        repo.set_head(&format!("refs/heads/{default_branch}"))
+            .or_else(|_| repo.set_head("refs/heads/main"))
+            .expect("restore head");
+
+        let mut db = open_in_memory_db();
+        // Run 1: scoped to the default branch only — two commits.
+        let branch = if repo.find_branch("master", git2::BranchType::Local).is_ok() {
+            "master"
+        } else {
+            "main"
+        };
+        let (first, _, failures) = try_run_unbounded(&mut db, &tmp.path, false, &[branch]);
+        assert!(failures.is_empty(), "scoped collect failed: {failures:?}");
+        assert_eq!(first, 2, "the scoped walk sees only the default branch");
+
+        // Run 2: unscoped. It must walk, and must reach the side commit.
+        let (second, skipped, failures) = try_run_unbounded(&mut db, &tmp.path, false, &[]);
+        assert!(failures.is_empty(), "unscoped collect failed: {failures:?}");
+        assert_eq!(
+            skipped, 0,
+            "a full-scope run must not skip on a scoped run's recorded tip"
+        );
+        assert_eq!(
+            second, 1,
+            "the side-branch commit is what the full scope adds"
+        );
+        let total: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM commits", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            total, 3,
+            "a scoped run followed by a full one must hold every commit"
+        );
+    }
+
+    /// (#6073 review) A revwalk that stops early must not be recorded as a
+    /// completed walk, or every later run skips on a partial traversal.
+    #[test]
+    fn an_aborted_revwalk_is_not_recorded_as_a_completed_walk() {
+        let (tmp, repo) = init_repo("walk-aborted");
+        let mut shas: Vec<String> = Vec::new();
+        for i in 0..3 {
+            commit_at(
+                &repo,
+                &tmp.path,
+                utc_seconds(2026, 1, 10 + i, 12, 0, 0),
+                0,
+                "c",
+            );
+            shas.push(
+                repo.head()
+                    .expect("head")
+                    .target()
+                    .expect("oid")
+                    .to_string(),
+            );
+        }
+        let name = tmp
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("repo name")
+            .to_string();
+
+        // Strand the OLDEST commit object. `Sort::TIME` yields newest-first,
+        // so the revwalk fails partway rather than on its first step.
+        let oldest = &shas[0];
+        let object_path = tmp
+            .path
+            .join(".git/objects")
+            .join(&oldest[0..2])
+            .join(&oldest[2..]);
+        let stashed = std::fs::read(&object_path).expect("read loose object");
+        std::fs::remove_file(&object_path).expect("strand the object");
+
+        let mut db = open_in_memory_db();
+        let (_, skipped, failures) = try_run_unbounded(&mut db, &tmp.path, false, &[]);
+        assert!(
+            !failures.is_empty(),
+            "an aborted revwalk must surface as a stage failure, not a silent success"
+        );
+        assert_eq!(skipped, 0, "an aborted walk skips nothing");
+        let state = recorded_state(&db, &name).expect("in-flight row");
+        assert!(
+            !state.walk_complete,
+            "an aborted walk must never record walk_complete = 1"
+        );
+
+        // With the object back, the next run must re-walk rather than skip.
+        std::fs::write(&object_path, &stashed).expect("restore the object");
+        let (second, second_skipped) = run_unbounded(&mut db, &tmp.path, false);
+        assert_eq!(
+            second_skipped, 0,
+            "the run after an aborted walk must re-walk, not skip"
+        );
+        assert!(
+            second > 0,
+            "the re-walk must write the commits the abort missed"
+        );
+        let total: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM commits", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(total, 3, "the re-walk must recover the full history");
+    }
+
+    /// (#6073 review) Marking a walk in flight must not overwrite the last
+    /// COMPLETED walk's base with tips nothing has walked yet.
+    #[test]
+    fn an_interrupted_walk_keeps_its_last_good_base() {
+        let (tmp, repo) = init_repo("walk-inflight");
+        commit_at(&repo, &tmp.path, utc_seconds(2026, 1, 10, 12, 0, 0), 0, "c");
+        let name = tmp
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("repo name")
+            .to_string();
+
+        let mut db = open_in_memory_db();
+        run_unbounded(&mut db, &tmp.path, false);
+        let good = recorded_state(&db, &name).expect("state");
+
+        walk_state::mark_in_flight(db.connection(), &name).expect("mark in flight");
+        let during = recorded_state(&db, &name).expect("state");
+        assert!(!during.walk_complete, "the row reads as in flight");
+        assert_eq!(
+            during.head_sha, good.head_sha,
+            "the last completed walk's base survives the in-flight write"
+        );
+        assert_eq!(during.tips_digest, good.tips_digest);
+        assert_eq!(during.walk_scope, good.walk_scope);
     }
 
     /// (#6073) A recorded base that is no longer reachable — the force-push
@@ -1823,10 +2092,16 @@ mod tests {
             head_sha: stranded.clone(),
             head_ref: "refs/heads/main".to_string(),
             tips_digest: "rewritten".to_string(),
+            walk_scope: collector.walk_scope().as_key(),
             walk_complete: true,
         };
         assert_eq!(
-            walk_state::plan(Some(&state), &tips, collector.base_is_reachable(&stranded)),
+            walk_state::plan(
+                Some(&state),
+                &tips,
+                &collector.walk_scope(),
+                collector.base_is_reachable(&stranded)
+            ),
             walk_state::WalkPlan::Full {
                 reason: walk_state::FullWalkReason::BaseUnreachable
             },
@@ -1834,7 +2109,7 @@ mod tests {
         );
 
         // End to end: the stale row must not stop the repository being walked.
-        walk_state::record(
+        walk_state::record_complete(
             db.connection(),
             &name,
             &walk_state::WalkTips {
@@ -1842,7 +2117,7 @@ mod tests {
                 head_ref: "refs/heads/main".to_string(),
                 tips_digest: "rewritten".to_string(),
             },
-            true,
+            &collector.walk_scope(),
         )
         .expect("record stale");
         let mut fresh = open_in_memory_db();
