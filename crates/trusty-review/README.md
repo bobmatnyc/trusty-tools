@@ -71,15 +71,16 @@ Homebrew provides:
 > ([#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468)).
 > `trusty-review profile` was removed in 0.16.0.
 >
-> **Sidecar services** (optional, degrade gracefully when absent):
+> **Optional analysis context** (degrades gracefully when absent):
 > - **trusty-search** on `:7878` — code-context hybrid search for richer reviews
-> - **trusty-analyze** on `:7879` — complexity and quality metrics
+> - **trusty-analyze** on `PATH` — invoked per review; report mode communicates
+>   with its on-demand daemon over the derived Unix socket
 >
 > ```bash
 > cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-search --locked
 > cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze --locked
 > trusty-search start
-> trusty-analyze serve
+> trusty-analyze --version
 > ```
 
 ## Quick start — one-shot review
@@ -359,7 +360,8 @@ required (`true`) everywhere unless explicitly opted out via
 |----------|---------|---------|
 | `PR_INTELLIGENCE_DRY_RUN` | `true` | Governs the webhook/service default. Does NOT gate `trusty-review run`, which requires the explicit `--live` flag to post ([#4460](https://github.com/bobmatnyc/trusty-tools/issues/4460)) |
 | `TRUSTY_SEARCH_URL` | `http://127.0.0.1:7878` | trusty-search daemon URL |
-| `PR_INTELLIGENCE_ANALYZER_URL` | `http://127.0.0.1:7879` | trusty-analyze daemon URL |
+| `PR_INTELLIGENCE_ANALYZER_SOCKET` | derived data-directory path | Unix socket used by report-mode `--analyze` |
+| `TRUSTY_ANALYZE_BIN` | `trusty-analyze` | Binary spawned on demand by the review pipeline |
 | `TRUSTY_REVIEW_REQUIRE_SEARCH` | per-surface (see above) | Force search required (`true`) or allow degrade (`false`) regardless of invocation surface |
 | `TRUSTY_REVIEW_REQUIRE_ANALYZE` | `true` | Force analyze required (`true`) or allow degrade (`false`) |
 | `GITHUB_TOKEN` | — | GitHub personal access token for `review_pr` |
@@ -644,7 +646,8 @@ layering: [docs/trusty-review/spec/report-generation.md](../../docs/trusty-revie
 ### `--analyze` (deterministic trusty-analyze integration)
 
 `--analyze` populates the metrics-driven sections (the complexity-distribution
-chart + RED/AMBER findings) from a live trusty-analyze daemon (`:7879`)
+chart + RED/AMBER findings) from an on-demand trusty-analyze daemon over its
+derived Unix socket
 without an LLM or a hand-authored metrics JSON. It is fully deterministic and
 fail-open: any probe, fetch, or parse failure degrades to the built-in scan
 rather than erroring — a missing analyze index is never fatal. Full detail:

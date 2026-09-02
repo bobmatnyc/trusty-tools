@@ -8,10 +8,11 @@ bot (`tm telegram`) are subcommands too, not standalone executables. The
 Tauri GUI lives in the sibling `trusty-mpm-gui` crate and is wrapped via the
 optional `gui` feature. Docs covering any surface live here.
 
-## Canonical specification
+## Historical product baseline
 
-The authoritative product + engineering spec for trusty-mpm lives in
-[**`spec/`**](spec/):
+The [**`spec/`**](spec/) set records an earlier product model. Use the
+[crate README](../../crates/trusty-mpm/README.md), workspace behavior contracts,
+and source for current behavior:
 
 - [spec/README.md](spec/README.md) — index, status legend, reading order, and the
   trusty-agents relationship.
@@ -23,8 +24,7 @@ The authoritative product + engineering spec for trusty-mpm lives in
 
 ## Layout
 
-This directory follows the standard three-subdir layout used across all
-published trusty-* crates:
+This product has the following extended documentation:
 
 | Subdir | Contents |
 |--------|----------|
@@ -40,8 +40,6 @@ Foundational design docs live under [`research/`](research/):
 - [Architecture & technical specification (reconstructed)](research/architecture-spec-2026-05-29.md)
 - [`tm services` discovery spec](research/tm-services-discovery-spec-2026-05-28.md)
 
-As work on trusty-mpm produces benchmarks, decisions, or session summaries, add files
-under the appropriate subdir and update its README index.
-
-See [`docs/trusty-search/`](../trusty-search/) for a worked example of the
-populated layout.
+New current requirements belong in the workspace behavior-contract catalog;
+dated benchmarks, research, and session summaries stay in their evidence
+directories.

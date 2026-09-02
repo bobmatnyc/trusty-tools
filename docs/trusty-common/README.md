@@ -1,16 +1,16 @@
 # trusty-common — documentation
 
-The **foundational shared library** of the trusty-* workspace — the one internal
-crate every other trusty-* tool links. Started as a bag of utilities (tracing,
-OpenRouter chat, port-walking, daemon address resolution) and absorbed seven
-formerly standalone micro-crates (MCP/RPC primitives, the embedder, the symbol
-graph, the memory-palace engine, ticketing, monitor TUIs) behind opt-in feature
-flags (issue #5).
+The foundational shared library of the trusty-* workspace: tracing, daemon and
+configuration helpers, model clients, memory/search support, ticketing, and
+other cross-package utilities behind opt-in features. Some former micro-crates
+were consolidated here; MCP protocol primitives were later extracted into
+`trusty-mcp` under ADR-0040.
 
-## Canonical specification
+## Historical product baseline
 
-The authoritative *what / why / gap* reference lives in
-[**`spec/`**](spec/) — start there:
+The [**`spec/`**](spec/) set records the library's earlier consolidation model.
+Use the [crate README](../../crates/trusty-common/README.md), accepted ADRs, and
+source for the current feature and module surface:
 
 | Document | Purpose |
 |--------|---------|
@@ -25,16 +25,15 @@ Architecture Decision Records (Nygard format) live in
 
 ## Layout
 
-This directory follows the standard layout used across all published trusty-*
-crates:
+This library has the following extended documentation:
 
 | Subdir | Contents |
 |--------|----------|
-| [`spec/`](spec/) | Canonical PRD / Architecture / Components specification set. |
+| [`spec/`](spec/) | Historical PRD / architecture / component baseline. |
 | [`decisions/`](decisions/) | Architecture Decision Records (Nygard format). |
 | [`regression-testing/`](regression-testing/) | Versioned performance/quality snapshots, baseline measurements, alternate-corpus baselines. |
 | [`research/`](research/) | Investigation docs, audits, decision documents. |
 | [`sessions/`](sessions/) | Engineering-session summaries — narrative + reasoning. |
 
-See [`docs/trusty-search/`](../trusty-search/) for a worked example of the
-populated layout.
+See [ADR-0040](../adr/0040-trusty-mcp-services-absorbs-trusty-gworkspace.md)
+for the later MCP extraction boundary.

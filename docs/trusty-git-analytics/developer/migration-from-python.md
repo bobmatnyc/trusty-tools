@@ -14,7 +14,7 @@ get equivalent results — significantly faster.
 
 ## Prerequisites
 
-- **Rust toolchain** (only if building from source): Rust 1.75+ via
+- **Rust toolchain** (only if building from source): Rust 1.94+ via
   [rustup](https://rustup.rs). The Rust edition is 2021.
 - **No system SQLite needed** — `tga` bundles SQLite via the `rusqlite`
   crate's `bundled` feature.

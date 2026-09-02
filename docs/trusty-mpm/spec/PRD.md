@@ -1,10 +1,14 @@
 # trusty-mpm — Product Requirements Document
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical product baseline · not a current behavior contract
 > **Last reviewed:** 2026-08-08
 > **Derived from:** code/docs/tickets audit
 > **Crate:** `crates/trusty-mpm/` (version `0.5.0`, edition 2024, `publish = false`)
 > **Companion docs:** [ARCHITECTURE.md](./ARCHITECTURE.md) · [COMPONENTS.md](./COMPONENTS.md)
+
+The version and implementation notes below are a dated snapshot. Use the
+[behavior-contract catalog](../../specs/README.md) and current crate README for
+implemented behavior.
 
 Status tags: ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational.
 Each requirement is framed **Vision / Current / Gap**: the intended product

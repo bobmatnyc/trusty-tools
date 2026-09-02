@@ -28,7 +28,7 @@ spec_refs:
 - [`docs/trusty-code/vision-and-architecture-spec.md`](../trusty-code/vision-and-architecture-spec.md) — Axiom 2: "The workstream is the unit of work" (not a session; one active per project; durable across daemon restart). Axiom 4 (daemon owns sessions).
 
 **Cross-ref (merged code):**
-- [`crates/trusty-agents-common/src/workstreams/`](../../../crates/trusty-agents-common/src/workstreams/) (trusty-agents PR #3260, merged) — Defines `trusty_agents_common::workstreams::Workstream`, a cross-tool ledger entry type that references tcode workstream IDs and assigned harness. **DISAMBIGUATION:** This spec defines tcode's native workstream domain object (a different type, recommended name: `trusty_code::workstreams::Workstream`). Imports must be qualified in code that touches both: `trusty_agents_common::workstreams::Workstream` for the ledger, `trusty_code::workstreams::Workstream` for tcode-native state.
+- [`crates/trusty-agents-common/src/workstreams/`](../../crates/trusty-agents-common/src/workstreams/) (trusty-agents PR #3260, merged) — Defines `trusty_agents_common::workstreams::Workstream`, a cross-tool ledger entry type that references tcode workstream IDs and assigned harness. **DISAMBIGUATION:** This spec defines tcode's native workstream domain object (a different type, recommended name: `trusty_code::workstreams::Workstream`). Imports must be qualified in code that touches both: `trusty_agents_common::workstreams::Workstream` for the ledger, `trusty_code::workstreams::Workstream` for tcode-native state.
 
 > **Scope note.** This is a **functional spec**, not an implementation plan. It states what the product must do — domain objects, storage layout, state transitions, persistence reconciliation, activation-lock exclusivity semantics, API surface (RPC/REST/CLI), and acceptance criteria — without prescribing the exact Rust types. Per DOC-39 §2.1's binding layer-priority rule (API → CLI → TUI → Web), §5 (the RPC/REST surface) is the normative core; everything else is downstream of it. The PR carrying this doc opens **no** Rust changes.
 
@@ -797,4 +797,3 @@ curl -X POST http://localhost:7882/rpc \
 - [ ] All ACs in §7 pass.
 - [ ] All curl examples in §12 succeed.
 - [ ] **Grep check:** No mentions of `lease`, `heartbeat`, `TTL`, `.attach`, `.detach` except DOC-40 cross-references (verify each hit is intentional).
-

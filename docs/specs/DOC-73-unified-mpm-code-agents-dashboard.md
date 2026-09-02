@@ -46,7 +46,7 @@ machine-status dashboard epic these views sit beside),
 [#6519](https://github.com/bobmatnyc/trusty-tools/issues/6519) (the
 `/ui/screensaver` route this spec's screensaver extends),
 [#6606](https://github.com/bobmatnyc/trusty-tools/issues/6606) and
-[DOC-72](./DOC-72-analyze-on-demand-language-server.md) §4 (the analyze-side
+[DOC-72](https://github.com/bobmatnyc/trusty-tools/pull/6607) §4 (the analyze-side
 console relay — the first feeder into the bus this spec generalizes).
 
 ---
@@ -1066,7 +1066,6 @@ references #6611.
     recommendation or triggers the sigma fallback; record the result in §7.3.
 31. **Phase 5 acceptance run: 24 hours unattended.** Memory trend and node count
     over a full day, on the `.saver` bundle (§8.2, #6516 phase 4).
-
 
 
 

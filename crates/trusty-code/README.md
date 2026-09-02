@@ -22,15 +22,13 @@ and MCP callers. An original coding harness, tracked under epic #2052.
 
 Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
 
-1. Download the latest release from [GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases):
-   - Look for assets tagged `trusty-code-v0.0.0`
-   - Download the archive for your platform:
-     - **macOS arm64 (Apple Silicon)**: `trusty-code-v0.0.0-aarch64-apple-darwin.tar.gz`
-     - **Linux x86_64**: `trusty-code-v0.0.0-x86_64-unknown-linux-gnu.tar.gz`
+1. Open [GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases),
+   choose the newest `trusty-code-v<version>` release, and download the
+   archive for your platform.
 
 2. Extract and install:
    ```bash
-   tar xzf trusty-code-v0.0.0-*.tar.gz
+   tar xzf trusty-code-*.tar.gz
    chmod +x tcode
    sudo mv tcode /usr/local/bin/    # or ~/.local/bin/ if you prefer user install
    ```
@@ -50,9 +48,9 @@ cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-code --lock
 
 This builds from the latest commit on `main` and installs the binary to `~/.cargo/bin/`. Make sure `~/.cargo/bin/` is on your PATH.
 
-To install a specific version:
+To install a specific release, replace `<version>` with its tag version:
 ```bash
-cargo install --git https://github.com/bobmatnyc/trusty-tools --tag trusty-code-v0.0.0 trusty-code --locked
+cargo install --git https://github.com/bobmatnyc/trusty-tools --tag trusty-code-vx.y.z trusty-code --locked
 ```
 
 ### With Homebrew (planned — not yet available)
@@ -86,13 +84,13 @@ All installations can be verified by running:
 tcode --version
 ```
 
-Expected output: the semantic version of the installed binary (e.g., `tcode 0.0.0`).
+The output includes the installed semantic version and build provenance.
 
 ## Status
 
-**Phase 0 scaffold.** The `tcode` binary parses its CLI surface but every
-subcommand stubs out with "not yet implemented". Implementation phases are
-tracked in epic #587.
+`tcode` is an active per-project orchestration harness. Its daemon supports
+stdio and HTTP JSON-RPC transports; the CLI drives task, session, transcript,
+workstream, and TUI flows. `run-workflow` remains the incomplete surface.
 
 ## Binaries
 
@@ -100,20 +98,24 @@ tracked in epic #587.
 |--------|-------------|
 | `tcode` | Per-project Claude-Code-compatible MPM orchestration harness |
 
-## Subcommands (Phase 0 surface — stubs)
+## Primary subcommands
 
 | Subcommand | Description |
 |------------|-------------|
-| `tcode serve --project <PATH>` | Start the per-project orchestration server (Phase 1) |
-| `tcode run-task <agent> <task>` | Delegate a single task to a named agent (Phase 2) |
-| `tcode run-workflow <name>` | Execute a named MPM workflow end-to-end (Phase 2) |
+| `tcode serve [--project <PATH>] --stdio\|--http` | Start a project-bound or projectless orchestration server |
+| `tcode tui [--project <PATH>]` | Launch the interactive TUI and attach to or start an HTTP daemon |
+| `tcode run-task <agent> <task>` | Run a task through a daemon-owned session |
+| `tcode session …` | List, inspect, and create sessions |
+| `tcode attach`, `cancel`, `transcript` | Operate on an existing session |
+| `tcode workstream …` | Manage workstreams and their active state |
+| `tcode run-workflow <name>` | Reserved workflow runner; not yet implemented |
 
 ## Build
 
 ```bash
 cargo build -p trusty-code
 cargo run -p trusty-code -- --version
-cargo test -p trusty-code
+cargo test -p trusty-code --no-fail-fast
 ```
 
 ## Design Constraints
@@ -124,8 +126,8 @@ cargo test -p trusty-code
   (AWS Bedrock or OpenRouter).
 - **Single-instance per project** — one `tcode serve` process per `.claude/`
   root.
-- **Event-driven** — will publish `HarnessEvent` via `trusty-common::events`
-  when Phase 1 lands.
+- **Event-driven** — publishes daemon-owned session and task events to attached
+  clients.
 
 ## Architecture Role
 

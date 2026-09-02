@@ -11,8 +11,8 @@ cargo run -p trusty-search -- query "fn authenticate" --indexes <name>
 # MCP stdio mode (used by Claude Code via .mcp.json)
 cargo run -p trusty-search -- serve
 
-# MPM daemon (there is no separate trusty-mpmd binary — the `tm`/`trusty-mpm`
-# binary runs the same long-running daemon mode via the `daemon` subcommand)
+# MPM daemon (the `tm`/`trusty-mpm` CLI runs the long-running daemon mode via
+# its `daemon` subcommand; there is no separate daemon executable)
 RUST_LOG=info cargo run -p trusty-mpm --bin trusty-mpm -- daemon
 
 # MPM CLI (tm / trusty-mpm) — the crate ships two identically-behaving bin

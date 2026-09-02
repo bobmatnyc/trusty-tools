@@ -11,11 +11,12 @@
 //! resumes, one pair every 60-70 seconds, each doing real tmux and store work.
 //!
 //! What: the policy is a counter and a window. Each auto-resume stamps
-//! `last_auto_resume_at`. Each runtime-exit stop asks [`evaluate`] whether this
-//! death came within [`ResumeBreakerConfig::flap_window`] of that stamp; if it
-//! did, the consecutive count rises, and at
-//! [`ResumeBreakerConfig::max_consecutive`] the session is PARKED — the reaper
-//! writes [`StopCause::ResumeFlapping`](super::record::StopCause::ResumeFlapping)
+//! `last_auto_resume_at`. Each runtime-exit stop asks
+//! [`evaluate`](crate::session_manager::resume_breaker::evaluate) whether this
+//! death came within the configured `flap_window` of that stamp; if it did, the
+//! consecutive count rises, and at the configured `max_consecutive` the
+//! session is PARKED — the reaper writes
+//! [`StopCause::ResumeFlapping`](crate::session_manager::record::StopCause::ResumeFlapping)
 //! instead of `Unexpected`, `is_auto_resumable` goes false, and no automatic
 //! path relaunches it again. A death OUTSIDE the window resets the count: a
 //! session that ran for a while and then crashed is not flapping.

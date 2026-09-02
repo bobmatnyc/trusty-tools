@@ -1617,7 +1617,7 @@ project.create_dir {
 **Status:** Draft
 
 **Normative: Foundry (v1)** replaces the missing design handoff PDF references. See
-[`docs/design/UI/design-system/`](../../design/UI/design-system/) (PR #3170, branch
+[`docs/design/UI/design-system/`](../design/UI/design-system/) (PR #3170, branch
 `docs-foundry-design-system`):
 
 - **Philosophy:** robot-themed, rust-colored. Machines talk mono; humans talk sans. Flat,

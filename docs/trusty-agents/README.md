@@ -7,18 +7,18 @@ per-project **PM** actors, each of which delegates work to specialized
 subprocesses communicating over NDJSON IPC. Its defining differentiator is
 **model-agnostic dispatch** — any agent role can be backed by OpenRouter, the
 direct Anthropic API, AWS Bedrock, or the `claude` CLI OAuth path, assignable
-per-agent via a two-line TOML change. trusty-agents consumes the shared
-trusty-* libraries (trusty-search, trusty-memory-core, trusty-symgraph).
+per-agent via configuration. trusty-agents integrates with trusty-search and
+trusty-memory and reuses the workspace's common MCP and agent libraries.
 
-This directory is the **single source of truth** for trusty-agents design,
-research, specification, and user/developer documentation. (Rustdoc and the
-crate `README.md` stay in-crate; see [ADR-0001](../adr/0001-docs-live-top-level.md).)
+This directory is the extended index for trusty-agents design, research, and
+user/developer documentation. Implemented behavior remains code-owned; start
+with the crate README and current workspace behavior contracts.
 
 ## Documentation map
 
 | Subdir | What's here |
 |--------|-------------|
-| [`spec/`](spec/) | Canonical specification set: **PRD**, **ARCHITECTURE**, **COMPONENTS**. Start here for *what trusty-agents is, how it fits together, and the per-subsystem detail*. |
+| [`spec/`](spec/) | Historical pre-rename PRD, architecture, and component baseline. |
 | [`research/`](research/) | ~70 investigation, audit, and design docs that shaped trusty-agents — frameworks, IPC patterns, dispatch, token compression, UI surfaces, bug analyses. Indexed in [`research/README.md`](research/README.md). |
 | [`design/`](design/) | Focused design notes: workflow engine, CTRL REPL, design goals. Visual assets (icon, treatment PDF) live in [`design/visual/`](design/visual/). |
 | [`developer/`](developer/) | Contributor docs: architecture overview, building, contributing, testing. |
@@ -30,7 +30,7 @@ crate `README.md` stay in-crate; see [ADR-0001](../adr/0001-docs-live-top-level.
 
 ## Where to start
 
-- **New to trusty-agents?** [`spec/PRD.md`](spec/PRD.md) → [`spec/ARCHITECTURE.md`](spec/ARCHITECTURE.md) → [`spec/COMPONENTS.md`](spec/COMPONENTS.md).
+- **New to trusty-agents?** Start with the [crate README](../../crates/trusty-agents/README.md) and [current product spec](../specs/trusty-agents-product-spec.md).
 - **Installing / using it?** [`user/quickstart.md`](user/quickstart.md).
 - **Contributing?** [`developer/contributing.md`](developer/contributing.md) and [`developer/building.md`](developer/building.md).
 - **Understanding a past decision?** [`decisions/`](decisions/) (crate-specific) or [`docs/adr/`](../adr/) (workspace-wide).
@@ -38,5 +38,6 @@ crate `README.md` stay in-crate; see [ADR-0001](../adr/0001-docs-live-top-level.
 ## Conventions
 
 Subdirs follow the workspace documentation conventions described in the root
-[`CLAUDE.md`](../../CLAUDE.md). The `spec/` set is a living document; `research/`
-files are dated point-in-time investigations preserved as-is.
+[`CLAUDE.md`](../../CLAUDE.md). The legacy `spec/` set and `research/` files are
+point-in-time evidence; current behavior is established by source, current
+READMEs, ADRs, and workspace behavior contracts.

@@ -1,10 +1,14 @@
 # trusty-mpm — Component Specifications
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical product baseline · not a current component map
 > **Last reviewed:** 2026-08-08
 > **Derived from:** code/docs/tickets audit
 > **Crate:** `crates/trusty-mpm/` (version `0.5.0`, edition 2024, `publish = false`)
 > **Companion docs:** [PRD.md](./PRD.md) · [ARCHITECTURE.md](./ARCHITECTURE.md)
+
+The version and component paths below are a dated snapshot. Use the
+[behavior-contract catalog](../../specs/README.md) and current crate README for
+implemented components.
 
 Status tags: ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational.
 Each component states **responsibility**, **key types/modules** (with `src/`

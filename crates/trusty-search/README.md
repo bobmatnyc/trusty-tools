@@ -19,7 +19,7 @@ This README and the rustdoc stay in-crate; everything else lives under `docs/`.
 
 ## System requirements
 
-- **Rust 1.75+** (for source builds)
+- **Rust 1.94+** (for source builds)
 - **16 GB RAM minimum (default)** — hard-checked at daemon startup. The daemon exits with an actionable error message on under-spec hosts. Set `TRUSTY_SKIP_RAM_CHECK=1` in the daemon environment to bypass this check for small workloads where peak RAM is known to stay well under the memory limit. Bypass at your own risk on large corpora — the default exists because realistic indexing OOMs without it.
 - **macOS 12+ or Linux** (Windows: not yet supported)
 - **~2 GB disk** for model cache (downloaded on first run to `~/Library/Caches/trusty-search/` on macOS or `$XDG_DATA_HOME/trusty-search/` on Linux)
@@ -30,15 +30,13 @@ This README and the rustdoc stay in-crate; everything else lives under `docs/`.
 
 Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
 
-1. Download the latest release from [GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases):
-   - Look for assets tagged `trusty-search-v0.24.1`
-   - Download the archive for your platform:
-     - **macOS arm64 (Apple Silicon)**: `trusty-search-v0.24.1-aarch64-apple-darwin.tar.gz`
-     - **Linux x86_64**: `trusty-search-v0.24.1-x86_64-unknown-linux-gnu.tar.gz`
+1. Open [GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases),
+   choose the newest `trusty-search-v<version>` release, and download the
+   archive for your platform.
 
 2. Extract and install:
    ```bash
-   tar xzf trusty-search-v0.24.1-*.tar.gz
+   tar xzf trusty-search-*.tar.gz
    chmod +x trusty-search
    sudo mv trusty-search /usr/local/bin/    # or ~/.local/bin/ if you prefer user install
    ```
@@ -58,9 +56,9 @@ cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-search --lo
 
 This builds from the latest commit on `main` and installs the binary to `~/.cargo/bin/`. Make sure `~/.cargo/bin/` is on your PATH.
 
-To install a specific version:
+To install a specific release, replace `<version>` with its tag version:
 ```bash
-cargo install --git https://github.com/bobmatnyc/trusty-tools --tag trusty-search-v0.24.1 trusty-search --locked
+cargo install --git https://github.com/bobmatnyc/trusty-tools --tag trusty-search-vx.y.z trusty-search --locked
 ```
 
 ### With Homebrew (recommended)
@@ -229,13 +227,14 @@ Add trusty-search as an MCP server in your Claude Code config (`~/.claude/claude
 }
 ```
 
-### HTTP/SSE
+### Optional HTTP/SSE transport
 
 ```bash
-trusty-search serve --http 127.0.0.1:7879
+trusty-search serve --with-http --port 7879
 ```
 
-Then add `http://127.0.0.1:7879/sse` as an SSE MCP endpoint in your Claude Code config.
+Then add `http://127.0.0.1:7879/mcp/sse` as an SSE MCP endpoint. The HTTP
+listener is opt-in; stdio remains active for the process.
 
 Once connected, Claude Code can call `search`, `index_file`, `list_indexes`, and the rest of the surface directly — see [MCP tools](#mcp-tools) for the generated roster. The daemon must be running independently (`trusty-search start`) before Claude Code connects.
 

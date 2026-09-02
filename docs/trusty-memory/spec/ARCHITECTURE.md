@@ -1,6 +1,6 @@
 # trusty-memory — System Architecture
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical product baseline · not a current architecture map
 > **Last reviewed:** 2026-06-08
 > **Derived from:** code/docs/tickets audit (v0.15.0)
 

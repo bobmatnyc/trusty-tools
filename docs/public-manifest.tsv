@@ -1,6 +1,6 @@
 # public-manifest.tsv — the ALLOWLIST of docs/ pages the public website may publish.
 #
-# Why: docs/ holds 463 markdown files, most of them internal engineering
+# Why: docs/ holds hundreds of markdown files, most of them internal engineering
 #   material — ADRs, behavior-contract specs, research, plans, PRDs,
 #   presentations, design notes, runbooks. docs/SUMMARY.md (the mdBook nav)
 #   cannot serve as the public list because it deliberately mixes those in: the

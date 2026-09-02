@@ -1,8 +1,12 @@
 # trusty-search — Specification Set
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical product baseline · not a current behavior contract
 > **Last reviewed:** 2026-06-01
 > **Derived from:** code/docs/tickets audit (v0.22.2)
+
+This set is retained as a dated design snapshot. Use the
+[behavior-contract catalog](../../specs/README.md), current crate README, and
+source code for implemented behavior.
 
 This directory holds the canonical product and engineering specification for the
 `trusty-search` crate (`crates/trusty-search/`). It is the single authoritative

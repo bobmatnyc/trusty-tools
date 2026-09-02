@@ -1,8 +1,13 @@
 # open-mpm — Specification Set
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical baseline · not a current behavior contract
 > **Last reviewed:** 2026-05-29
 > **Derived from:** research synthesis + code/docs/tickets audit
+
+This set predates the `open-mpm` to `trusty-agents` rename and is retained as
+design history. Use the [trusty-agents product spec](../../specs/trusty-agents-product-spec.md),
+the [behavior-contract catalog](../../specs/README.md), and the current crate
+README for implemented behavior.
 
 This directory holds the canonical product and engineering specification for the
 `open-mpm` crate (`crates/open-mpm/`). It is the single authoritative reference

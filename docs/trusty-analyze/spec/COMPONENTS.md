@@ -1,6 +1,6 @@
 # trusty-analyze — Components
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical product baseline · not a current component map
 > **Last reviewed:** 2026-06-01
 > **Derived from:** code/docs/tickets audit (drift audit v0.4.1)
 

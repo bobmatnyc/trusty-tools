@@ -1,8 +1,12 @@
 # open-mpm — System Architecture
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical baseline · not a current architecture map
 > **Last reviewed:** 2026-05-29
 > **Derived from:** research synthesis + code/docs/tickets audit
+
+This document predates the `trusty-agents` rename. See the
+[current product spec](../../specs/trusty-agents-product-spec.md) and crate
+README for current architecture.
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 

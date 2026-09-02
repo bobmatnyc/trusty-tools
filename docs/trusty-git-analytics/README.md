@@ -5,17 +5,16 @@ Developer-productivity analytics CLI / DB. Crate name: `tga`
 every commit into a work category via a multi-tier cascade, and emits
 per-author / per-week / DORA / velocity / quality reports.
 
-This directory is the **single source of truth** for trusty-git-analytics
-design, requirements, research, and user/developer documentation. The crate
-`README.md` and rustdoc stay in-crate; everything else lives here
-(see [ADR-0001](../adr/0001-docs-live-top-level.md)).
+This directory is the extended index for tga requirements, research, and
+user/developer documentation. Implemented behavior remains code-owned; start
+with the crate README and current CLI help.
 
 ## Documentation map
 
 | Subdir | What's here |
 |--------|-------------|
-| [`spec/`](spec/) | **Canonical, authoritative specification set** — the *what / why / gap* layer reconciled against the live code and ticket backlog: [`PRD.md`](spec/PRD.md), [`ARCHITECTURE.md`](spec/ARCHITECTURE.md), [`COMPONENTS.md`](spec/COMPONENTS.md). **Start here.** It sits *above* `requirements/` and supersedes it where they disagree. |
-| [`requirements/`](requirements/) | Detailed source specification ported from the Python predecessor: overview, configuration schema, database schema, CLI commands, classification cascade, collection, reporting, and Rust architecture. The field-by-field reference the `spec/` set links into. Some sections have drifted from the code (taxonomy, DB migration list, CLI surface, DORA/effort/quality additions) — where `spec/` and `requirements/` disagree, **`spec/` is authoritative**. Start at [`requirements/index.md`](requirements/index.md). |
+| [`spec/`](spec/) | Historical PRD, architecture, and component baseline through tga v2.5.0. |
+| [`requirements/`](requirements/) | Detailed reference ported from the Python predecessor. Treat it as supporting documentation and verify changing CLI, schema, and taxonomy details against current code. |
 | [`developer/`](developer/) | Contributor docs: [architecture](developer/architecture.md), [developer guide](developer/developer-guide.md), [configuration reference](developer/configuration-reference.md), [migration from Python](developer/migration-from-python.md), [publishing](developer/publishing.md). |
 | [`user/`](user/) | End-user docs: [user guide](user/user-guide.md). |
 | [`decisions/`](decisions/) | **Crate-specific ADRs** (Nygard format): SQLite tuning, performance hotspots, Bitbucket PR provider. Workspace-wide ADRs live in [`docs/adr/`](../adr/). |
@@ -25,7 +24,7 @@ design, requirements, research, and user/developer documentation. The crate
 
 ## Where to start
 
-- **Understanding the system?** [`spec/README.md`](spec/README.md) → [`spec/PRD.md`](spec/PRD.md) → [`spec/ARCHITECTURE.md`](spec/ARCHITECTURE.md) (canonical), then [`requirements/`](requirements/) for field-level detail.
+- **Understanding the system?** Start with the [crate README](../../crates/trusty-git-analytics/README.md), then use [`requirements/`](requirements/) for field-level background.
 - **Using the CLI?** [`user/user-guide.md`](user/user-guide.md).
 - **Contributing?** [`developer/developer-guide.md`](developer/developer-guide.md) and [`developer/architecture.md`](developer/architecture.md).
 - **Understanding a past decision?** [`decisions/`](decisions/) (crate-specific) or [`docs/adr/`](../adr/) (workspace-wide).
@@ -33,8 +32,7 @@ design, requirements, research, and user/developer documentation. The crate
 ## Conventions
 
 Subdirs follow the workspace documentation conventions described in the root
-[`CLAUDE.md`](../../CLAUDE.md). The `spec/` set is the canonical *what/why/gap*
-layer, reconciled against the live `crates/trusty-git-analytics/src/` tree; the
+[`CLAUDE.md`](../../CLAUDE.md). The `spec/` set is a dated baseline; the
 `requirements/` set is the detailed field-level source that originally mirrored
 the API contract of the [gitflow-analytics](https://github.com/bobmatnyc/gitflow-analytics)
 Python predecessor and now serves as reference beneath `spec/`. `research/`

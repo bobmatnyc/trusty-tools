@@ -1,6 +1,6 @@
 # trusty-git-analytics (`tga`) — Architecture
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical product baseline · not a current architecture map
 > **Last reviewed:** 2026-06-01
 > **Derived from:** existing `requirements/` docs + code/tickets reconciliation, updated through v2.5.0
 

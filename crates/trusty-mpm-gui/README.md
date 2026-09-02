@@ -209,10 +209,10 @@ UI adapts to smaller screens (tablets, phones):
 Error: Cannot connect to daemon at http://localhost:7687
 
 Troubleshooting:
-1. Verify daemon is running: ps aux | grep trusty-mpmd
+1. Verify daemon status: `tm status`
 2. Check daemon URL setting
 3. Check firewall/network access
-4. View daemon logs: RUST_LOG=info trusty-mpmd
+4. Run daemon mode in the foreground for diagnostic logs: `RUST_LOG=info tm daemon`
 ```
 
 ### UI Not Responding

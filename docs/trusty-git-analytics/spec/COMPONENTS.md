@@ -1,6 +1,6 @@
 # trusty-git-analytics (`tga`) — Components
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical product baseline · not a current component map
 > **Last reviewed:** 2026-06-01
 > **Derived from:** existing `requirements/` docs + code/tickets reconciliation, updated through v2.5.0
 

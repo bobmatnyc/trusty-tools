@@ -74,13 +74,13 @@ curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.
 
 **Pin a specific version:**
 ```bash
-TRUSTY_VERSION=0.3.0 curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh
+TRUSTY_VERSION=x.y.z curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh
 ```
 
 **Environment variables:**
 | Variable | Effect |
 |---|---|
-| `TRUSTY_VERSION` | Pin a version (e.g., `0.3.0`); default: latest |
+| `TRUSTY_VERSION` | Pin a release version; default: latest |
 | `TRUSTY_INSTALL_DIR` | Install directory; default: `~/.local/bin` |
 | `TRUSTY_YES=1` | Skip all prompts (same as `-y` flag) |
 | `TRUSTY_FORCE=1` | Re-download even if already installed |

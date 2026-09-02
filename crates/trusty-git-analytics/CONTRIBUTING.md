@@ -21,10 +21,10 @@ goals of accuracy, speed, and compatibility with the Python `gitflow-analytics` 
 ### Clone and build
 
 ```bash
-git clone https://github.com/bobmatnyc/trusty-git-analytics
-cd trusty-git-analytics
-cargo build
-cargo test
+git clone https://github.com/bobmatnyc/trusty-tools
+cd trusty-tools
+cargo check -p tga
+cargo test -p tga --no-fail-fast
 ```
 
 The first build downloads and compiles dependencies; subsequent builds are incremental.
@@ -33,10 +33,10 @@ The first build downloads and compiles dependencies; subsequent builds are incre
 
 ```bash
 # Development binary (faster to compile)
-cargo run --bin tga -- analyze --config config.yaml --dry-run
+cargo run -p tga --bin tga -- analyze --config config.yaml --dry-run
 
 # Release binary (used for benchmarking)
-cargo build --release
+cargo build --release -p tga
 ./target/release/tga --version
 ```
 
@@ -48,13 +48,13 @@ All pull requests must pass the following checks before merging:
 
 ```bash
 # No clippy warnings
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p tga --all-targets -- -D warnings
 
 # Code is formatted
 cargo fmt --check
 
 # All tests pass
-cargo test --workspace
+cargo test -p tga --no-fail-fast
 ```
 
 Run them locally before pushing:
@@ -183,13 +183,13 @@ Once approved, a maintainer will merge the PR using a squash merge.
 ## Adding Features
 
 Before implementing a new feature, read the
-[Developer Guide](docs/developer-guide.md) for architecture context. Key sections:
+[Developer Guide](../../docs/trusty-git-analytics/developer/developer-guide.md) for architecture context. Key sections:
 
-- [How to Add a New PM Integration](docs/developer-guide.md#4-how-to-add-a-new-pm-integration)
+- [How to Add a New PM Integration](../../docs/trusty-git-analytics/developer/developer-guide.md#4-how-to-add-a-new-pm-integration)
   — for new ticket or PR data sources.
-- [How to Add a New Output Format](docs/developer-guide.md#5-how-to-add-a-new-output-format)
+- [How to Add a New Output Format](../../docs/trusty-git-analytics/developer/developer-guide.md#5-how-to-add-a-new-output-format)
   — for new report formats.
-- [Database Migrations](docs/developer-guide.md#6-database-migrations)
+- [Database Migrations](../../docs/trusty-git-analytics/developer/developer-guide.md#6-database-migrations)
   — for schema changes.
 
 ---

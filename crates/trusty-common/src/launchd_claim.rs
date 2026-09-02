@@ -17,10 +17,12 @@
 //! window that loses the race the unit is BOOTED OUT, so launchd reports nothing
 //! and a check that trusted it would permit the spawn it exists to stop. The
 //! installed plist is what persists across the window, so its presence counts as
-//! registration — see [`socket_owner`].
+//! registration — see [`socket_owner`](crate::launchd_claim::socket_owner).
 //!
-//! What: [`socket_owner`] is the pure decision over the two registration
-//! signals; [`launchd_socket_owner`] reads them off the real launchd. A caller
+//! What: [`socket_owner`](crate::launchd_claim::socket_owner) is the pure
+//! decision over the two registration signals;
+//! [`launchd_socket_owner`](crate::launchd_claim::launchd_socket_owner) reads
+//! them off the real launchd. A caller
 //! that is not on its canonical production path (a test socket, a
 //! `TRUSTY_DATA_DIR_OVERRIDE` sandbox) passes `is_supervised_path: false` and is
 //! never affected.

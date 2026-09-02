@@ -5,11 +5,11 @@ Memory palace storage daemon + MCP server frontend. The storage engine lives in
 flag, absorbing the former `trusty-memory-core` crate); the frontend is
 `crates/trusty-memory`.
 
-## Canonical specification
+## Historical product baseline
 
-The authoritative product + engineering specification lives in
-[`spec/`](spec/) — start here for *what trusty-memory is, what it does today, and
-what gaps remain*:
+The [`spec/`](spec/) set records an earlier product and engineering model. Use
+the [crate README](../../crates/trusty-memory/README.md), current behavior
+contracts, and source for implemented behavior:
 
 | Document | Covers |
 |---|---|
@@ -24,12 +24,11 @@ Architectural decision records live in [`decisions/`](decisions/):
 
 ## Layout
 
-This directory follows the standard three-subdir layout used across all
-published trusty-* crates:
+This product has the following extended documentation:
 
 | Subdir | Contents |
 |--------|----------|
-| [`spec/`](spec/) | Canonical product + engineering specification (PRD / ARCHITECTURE / COMPONENTS). |
+| [`spec/`](spec/) | Historical PRD / architecture / component baseline. |
 | [`decisions/`](decisions/) | Architectural decision records (Nygard format). |
 | [`regression-testing/`](regression-testing/) | Versioned performance/quality snapshots, baseline measurements, alternate-corpus baselines. |
 | [`research/`](research/) | Investigation docs, audits, decision documents. |
@@ -37,9 +36,6 @@ published trusty-* crates:
 
 ## Status
 
-The canonical [`spec/`](spec/) set has been authored from a code/docs/tickets
-audit (2026-05-29). As work on trusty-memory produces benchmarks or session
-summaries, add files under the appropriate subdir and update its README index.
-
-See [`docs/trusty-search/`](../trusty-search/) for a worked example of the
-populated layout.
+The historical [`spec/`](spec/) set came from a 2026-05-29 audit. New current
+requirements belong in the workspace behavior-contract catalog; dated
+benchmarks and investigations stay in their evidence directories.

@@ -1,8 +1,13 @@
 # trusty-common — Specification Set
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical baseline · not a current behavior contract
 > **Last reviewed:** 2026-05-29
 > **Derived from:** code/docs/tickets audit
+
+This set predates later package extractions and consolidations. Use the
+[behavior-contract catalog](../../specs/README.md),
+[ADR-0040](../../adr/0040-trusty-mcp-services-absorbs-trusty-gworkspace.md),
+and the current crate README for implemented behavior.
 
 This directory holds the canonical product and engineering specification for the
 `trusty-common` crate (`crates/trusty-common/`). It is the single authoritative
