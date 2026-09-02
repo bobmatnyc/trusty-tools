@@ -1004,6 +1004,25 @@ async fn run_serve(
                 anyhow::bail!("single-instance check failed unexpectedly: {msg}");
             }
         }
+
+        // #6619: the guard above answers "is someone serving?", which is blind
+        // to the bootout/bootstrap window — nothing serves the socket then, and
+        // an unsupervised process bound it and kept it. Refuse the production
+        // socket outright when a launchd unit owns it and launchd positively
+        // reports it does not run us.
+        let production = si::is_production_socket(&socket);
+        let owner = trusty_common::launchd_claim::launchd_socket_owner(
+            trusty_common::launchd_labels::MEMORY,
+            production,
+        );
+        if let Some(refusal) = si::production_bind_refusal(
+            trusty_common::launchd_labels::MEMORY,
+            production,
+            owner.is_launchd(),
+            &trusty_common::supervision::launchd_supervision(),
+        ) {
+            anyhow::bail!(refusal);
+        }
     }
 
     // Resolve the standard data dir, then descend into `palaces/` if that

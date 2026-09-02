@@ -259,6 +259,20 @@ pub mod launchd_grace;
 #[cfg(target_os = "macos")]
 pub mod launchd_restart;
 
+/// Whether a launchd unit owns the socket an on-demand spawn would bind
+/// (#6619).
+///
+/// Why: a client bridge that spawns its daemon when nothing answers the socket
+/// cannot see launchd. During a bootout/bootstrap window it read the transiently
+/// unserved socket as "nothing is running" and spawned an unsupervised daemon
+/// onto the production path without the plist's environment.
+/// What: [`launchd_claim::socket_owner`] decides from the registration signals,
+/// and [`launchd_claim::launchd_socket_owner`] reads them off the real launchd.
+/// Deliberately NOT macOS-gated, unlike [`launchd`], so cross-platform daemon
+/// guards call it without a `cfg` split — off macOS it answers "no unit".
+/// Test: `cargo test -p trusty-common --features unconditional-only launchd_claim`.
+pub mod launchd_claim;
+
 /// Canonical launchd labels for every trusty-* LaunchAgent (#4919).
 ///
 /// Why: each daemon crate, the installer's mirror table, the Makefiles, and
