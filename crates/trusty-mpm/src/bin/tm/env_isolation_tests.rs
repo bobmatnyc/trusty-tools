@@ -87,8 +87,11 @@ const ENV_MUTATION_BUDGET: &[(&str, usize, usize)] = &[
     ("tm/commands/managed_root.rs", 24, 4),
     // Test-only: TRUSTY_MPM_SUB_AGENT / TRUSTY_MPM_DISABLE_HOOKS.
     ("tm/tests_behavior_a.rs", 4, 4),
-    // Test-only: REPOS_ROOT / TMUX / managed-session-id.
-    ("tm/tests_behavior_b_tests.rs", 21, 18),
+    // Test-only: REPOS_ROOT / TMUX / TMUX_PANE / managed-session-id. #6542
+    // added the 3 literal-key `TMUX_PANE` sites of `NestedTmuxPaneEnv`, which
+    // pins the nested-attach branch the fallback leak needs instead of
+    // inheriting it from whichever shell runs the suite.
+    ("tm/tests_behavior_b_tests.rs", 24, 18),
     ("tm/tests_behavior_c_tests.rs", 9, 9),
     ("tm/commands/managed_workspace_tests.rs", 3, 3),
     ("tm/commands/guided_inplace/tests.rs", 6, 4),

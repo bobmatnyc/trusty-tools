@@ -1912,6 +1912,9 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
         eprintln!("guided_fallback_leaves_no_tmux_session_behind: tmux unavailable, skipping");
         return;
     }
+    // #6542: pin the nested-attach branch instead of inheriting it from the
+    // host, or this test asserts on nothing wherever `$TMUX` is unset.
+    let _nested_tmux = NestedTmuxPaneEnv::pin();
 
     let origin = "https://github.com/test-owner-6542/test-repo-6542.git";
     let repos_root = tempfile::tempdir().unwrap();
@@ -1938,7 +1941,10 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
     assert!(
         !spawned.is_empty(),
         "fixture precondition: the fallback must have launched a tmux session \
-         under {}, or the teardown assertion below proves nothing",
+         under {}, or the teardown assertion below proves nothing. \
+         `NestedTmuxPaneEnv::pin` sets $TMUX_PANE so `tmux_attach` takes its \
+         nested branch, fails closed, and leaves the session for this guard — \
+         an empty set means that branch was not taken",
         repos_root_path.display()
     );
     drop(guard);
@@ -2011,6 +2017,55 @@ impl Drop for ReposRootEnv {
         match self.prev.take() {
             Some(v) => unsafe { std::env::set_var(key, v) },
             None => unsafe { std::env::remove_var(key) },
+        }
+    }
+}
+
+/// A `$TMUX_PANE` value no live tmux server can resolve (#6542).
+///
+/// Pane ids count up from `%0`, so nine digits is out of reach of any real
+/// server. `pane_tty_for` therefore returns `None` and `switch_client_to` fails
+/// closed without ever running `switch-client` — which also stops this test
+/// retargeting the operator's own terminal when someone runs it from a real
+/// tty inside tmux.
+const UNRESOLVABLE_TMUX_PANE: &str = "%999999999";
+
+/// RAII override of `$TMUX_PANE`, restored on drop (unwind included) (#6542).
+///
+/// Why: the leak `guided_fallback_leaves_no_tmux_session_behind` exists to
+/// catch only happens on the nested-tmux attach branch. With `$TMUX_PANE` set,
+/// `tmux_attach` calls `switch_client_to`, which fails closed and returns
+/// `Ok(AttachOutcome::TargetUnresolved)`; `launch` reads that `Ok` as a
+/// successful attach, disarms its `LaunchSessionGuard`, and the session
+/// survives. With `$TMUX_PANE` unset — every GitHub runner — `tmux_attach`
+/// runs `attach-session`, which exits `open terminal failed: not a terminal`,
+/// so `launch` bails and its own guard reaps the session before the test can
+/// see it. The test inherited that variable from the host, so it passed on the
+/// owner's tmux-hosted shell and panicked on its fixture precondition in CI.
+/// What: sets `$TMUX_PANE` to [`UNRESOLVABLE_TMUX_PANE`] on construction and
+/// restores the previous value (or removes it) on drop. Callers MUST be
+/// `#[serial_test::serial]` — the variable is process-global.
+/// Test: `guided_fallback_leaves_no_tmux_session_behind`.
+struct NestedTmuxPaneEnv {
+    prev: Option<std::ffi::OsString>,
+}
+
+impl NestedTmuxPaneEnv {
+    fn pin() -> Self {
+        let prev = std::env::var_os("TMUX_PANE");
+        // SAFETY: every caller is `#[serial_test::serial]`, so no other test
+        // thread races this set/restore.
+        unsafe { std::env::set_var("TMUX_PANE", UNRESOLVABLE_TMUX_PANE) };
+        Self { prev }
+    }
+}
+
+impl Drop for NestedTmuxPaneEnv {
+    fn drop(&mut self) {
+        // SAFETY: see `pin`.
+        match self.prev.take() {
+            Some(v) => unsafe { std::env::set_var("TMUX_PANE", v) },
+            None => unsafe { std::env::remove_var("TMUX_PANE") },
         }
     }
 }
