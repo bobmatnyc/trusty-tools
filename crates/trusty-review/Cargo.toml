@@ -85,7 +85,14 @@ name        = "trusty-review"
 # `report/code_only.rs`; `ReportRequest`/`run_report` are new public items,
 # purely additive. `cargo-semver-checks` reports no breaking changes against
 # the 0.31.0 baseline, so PATCH is correct.
-version     = "0.31.2"
+# 0.31.2 -> 0.32.0 (#6695, 2026-09-02 cut): MINOR, the breaking position for a
+# 0.x crate. `preflight-publish.sh` CHECK 5 refused 0.31.2 against 0.31.0 on two
+# counts: `function_missing` for
+# `trusty_review::report::analyze_adapter::derive_index_id` (the derivation moved
+# to `report::index_registry` under #6677), and `trait_method_added` for
+# `SearchClient::index_status` (src/integrations/search_client.rs:229), which an
+# out-of-tree implementor of the trait would have to add.
+version     = "0.32.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

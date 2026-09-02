@@ -43,16 +43,16 @@ engagement = "2026-Q3"
 #
 # Replace these with the versions your auditor pinned for this engagement.
 [tools]
-tga = "5.0.3"
+tga = "6.0.0"
 trusty-search = "0.52.0"
 trusty-analyze = "0.12.5"
-trusty-review = "0.31.2"
+trusty-review = "0.32.0"
 
 # A pin may name the artifact's digest as well as its version, in which case a
 # download whose bytes do not match is refused:
 #
 # [tools]
-# trusty-review = { version = "0.31.2", sha256 = "…" }
+# trusty-review = { version = "0.32.0", sha256 = "…" }
 
 # ---------------------------------------------------------------------------
 # Report selection — the CAST preset

@@ -10439,7 +10439,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "5.0.3"
+version = "6.0.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -11481,7 +11481,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-audit"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11694,7 +11694,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.9.3"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -11998,7 +11998,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.31.2"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "async-trait",
