@@ -54,7 +54,7 @@ use std::collections::{BTreeMap, HashMap};
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
-use crate::collect::identity::suggest::{detect_from_authors, HIGH_CONFIDENCE_CUTOFF};
+use crate::collect::identity::suggest::{detect_from_authors, Suggestion, HIGH_CONFIDENCE_CUTOFF};
 use crate::core::errors::Result;
 
 /// Schema tag written into the artifact — pairs with trusty-review's
@@ -260,55 +260,77 @@ fn confirmed_alias_map(conn: &Connection) -> Result<HashMap<String, String>> {
     Ok(map)
 }
 
+/// Every high-confidence merge suggestion the `authors` table alone supports.
+///
+/// Why (#6142 review): the suggestion scan cross-joins every distinct email
+/// against every other to compute Levenshtein distances, so it costs O(n²) in
+/// identities. `build_authorship_summary` runs once per REPOSITORY but the
+/// `authors` table is shared across all of them, so calling it inside the
+/// summary paid that cost once per repository for an identical answer. The
+/// caller runs this once per audit and passes the result to every repository.
+/// What: the author-table passes at [`HIGH_CONFIDENCE_CUTOFF`]. The commit-SHA
+/// pass is deliberately excluded — it scans every row of `commits`, which a
+/// report cannot afford on a large extract database. `canonical_domain`
+/// enables the `.local` / GitHub-noreply / domain-typo signals; passing `None`
+/// mutes exactly the signals issue #6142 names, so a caller with a configured
+/// domain must thread it through.
+/// Test: `super::authorship_tests::the_configured_domain_reaches_the_risk_flag`.
+///
+/// # Errors
+///
+/// Propagates [`crate::core::errors::TgaError::DbError`].
+pub fn merge_suggestions(
+    conn: &Connection,
+    canonical_domain: Option<&str>,
+) -> Result<Vec<Suggestion>> {
+    detect_from_authors(conn, canonical_domain, HIGH_CONFIDENCE_CUTOFF)
+}
+
 /// The risk flag for suggested-but-unmerged identities touching `ranked`.
 ///
 /// Why (#6142): only a suggestion that would move `ranked`'s head can move
 /// bus factor or top-author share, so a flag naming every suggestion in the
 /// database would be noise a reader learns to skip.
-/// What: runs the author-table suggestion passes at
-/// [`HIGH_CONFIDENCE_CUTOFF`], keeps the pairs with either endpoint among the
-/// first [`TOP_N_AUTHORS`] ranked authors, and counts the distinct source
+/// What: keeps the [`merge_suggestions`] pairs with either endpoint among the
+/// first [`TOP_N_AUTHORS`] ranked authors, drops any whose source is already a
+/// confirmed alias of its destination, and counts the distinct source
 /// identities. Returns `None` when that count is zero.
 /// Test: `super::authorship_tests::{suggested_but_unmerged_identity_raises_a_risk_flag,
 /// a_long_tail_suggestion_does_not_flag}`.
-///
-/// # Errors
-///
-/// Propagates [`crate::core::errors::TgaError::DbError`].
 fn identity_merge_risk(
-    conn: &Connection,
+    suggestions: &[Suggestion],
+    alias_map: &HashMap<String, String>,
     ranked: &[(&String, &u64)],
-) -> Result<Option<IdentityMergeRisk>> {
+) -> Option<IdentityMergeRisk> {
     let top: std::collections::BTreeSet<String> = ranked
         .iter()
         .take(TOP_N_AUTHORS)
         .map(|(email, _)| email.to_lowercase())
         .collect();
     if top.is_empty() {
-        return Ok(None);
+        return None;
     }
 
-    // The commit-SHA pass is deliberately excluded: it scans every row of
-    // `commits`, which a report cannot afford on a large extract database.
-    let suggestions = detect_from_authors(conn, None, HIGH_CONFIDENCE_CUTOFF)?;
-
     let touching: std::collections::BTreeSet<String> = suggestions
-        .into_iter()
+        .iter()
+        // A pair the operator already merged is not "unmerged", however the
+        // detector still scores it (#6142 review).
+        .filter(|s| !alias_map.contains_key(&s.src.to_lowercase()))
         .filter(|s| top.contains(&s.src.to_lowercase()) || top.contains(&s.dst.to_lowercase()))
         .map(|s| s.src.to_lowercase())
         .collect();
 
     if touching.is_empty() {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(IdentityMergeRisk {
+    Some(IdentityMergeRisk {
         suggested_unmerged: touching.len() as u64,
         affected_metrics: RISK_AFFECTED_METRICS
             .iter()
             .map(|s| s.to_string())
             .collect(),
         resolve_command: RISK_RESOLVE_COMMAND.to_string(),
-    }))
+    })
 }
 
 /// Name/email substrings identifying a machine-authored commit (issue #5453).
@@ -363,6 +385,11 @@ fn month_of(timestamp: &str) -> Option<String> {
 /// reusing it rather than re-grouping raw commit emails). A commit the resolver
 /// never linked keeps its raw email as the key and is counted into
 /// [`AuthorshipSummary::unresolved_authors`].
+/// `suggestions` comes from [`merge_suggestions`] and is supplied by the
+/// caller rather than computed here: the scan is O(n²) in identities and the
+/// `authors` table is shared across every repository in one database, so
+/// computing it per repository paid that cost repeatedly for one answer
+/// (#6142 review).
 /// Test: `super::authorship_tests::{builds_from_seeded_commits,
 /// bots_and_merges_are_excluded, single_author_subsystem_detected,
 /// aliases_collapse_through_the_identity_resolver,
@@ -371,7 +398,11 @@ fn month_of(timestamp: &str) -> Option<String> {
 /// # Errors
 ///
 /// Propagates [`crate::core::errors::TgaError::DbError`] from either query.
-pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<AuthorshipSummary> {
+pub fn build_authorship_summary(
+    conn: &Connection,
+    repository: &str,
+    suggestions: &[Suggestion],
+) -> Result<AuthorshipSummary> {
     // #6142: confirmed merges are applied before any figure is computed;
     // unconfirmed suggestions never are — they only raise the risk flag below.
     let alias_map = confirmed_alias_map(conn)?;
@@ -412,13 +443,22 @@ pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<A
         } else {
             email.clone()
         };
-        // The resolver's canonical email wins. An unlinked commit is then
-        // routed through the CONFIRMED alias map (#6142) — a merge the
-        // operator already accepted applies here even though the resolver
-        // never linked this row. Only when both miss does the commit fall
-        // back to its raw identity and count as an honesty caveat (#5453).
-        let author_key = match canonical_email.filter(|e| !e.is_empty()) {
-            Some(canonical) => canonical,
+        // A CONFIRMED merge (#6142) outranks the resolver on both paths.
+        //
+        // The resolver's answer is routed through the alias map too (#6142
+        // review): `upsert_observed_authors` relinks every `author_id IS NULL`
+        // commit on each collect, and a commit re-observed under a merged-away
+        // email gets a freshly created row for that email — so the resolver
+        // answers with the SOURCE address the merge deleted, and reading it
+        // uncritically lets the merge come apart. An unlinked commit is routed
+        // through the same map on its raw email. Only when both miss does the
+        // commit keep its raw identity and count as an honesty caveat (#5453).
+        let resolved = canonical_email.filter(|e| !e.is_empty());
+        let author_key = match resolved {
+            Some(canonical) => match alias_map.get(&canonical.to_lowercase()) {
+                Some(merged) => merged.clone(),
+                None => canonical,
+            },
             None => match alias_map.get(&raw_key.to_lowercase()) {
                 Some(canonical) => canonical.clone(),
                 None => {
@@ -480,7 +520,7 @@ pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<A
     }
 
     // #6142: the flag sits beside the metrics it names, and never merges.
-    let merge_risk = identity_merge_risk(conn, &ranked)?;
+    let merge_risk = identity_merge_risk(suggestions, &alias_map, &ranked);
     if let Some(risk) = &merge_risk {
         caveats.push(suggested_merge_caveat(risk));
     }

@@ -36,7 +36,11 @@ use tga::report::build_ticketing_summary;
 // #5453/#6004: per-repository ownership/bus-factor/trajectory figures, plus the
 // name-match probe that keeps an unmatched repository name from rendering as a
 // derived zero.
-use tga::report::{build_authorship_summary, recorded_repository_names, repository_has_commits};
+use tga::collect::identity::resolver::configured_canonical_domain;
+use tga::collect::identity::suggest::Suggestion;
+use tga::report::{
+    build_authorship_summary, merge_suggestions, recorded_repository_names, repository_has_commits,
+};
 use trusty_common::credentials::scrub_secrets;
 
 /// Arguments for `tga audit`.
@@ -280,7 +284,22 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     // itself (DOC-67 §9's "named gap, never a silent one" rule) rather than
     // an aborted run — the report's Authorship section degrades to that gap
     // for exactly the repositories it could not compute.
+    //
+    // #6142 review: the suggestion scan is O(n²) in identities and reads the
+    // `authors` table, which is shared across every repository here — so it
+    // runs ONCE for the sweep, with the configured canonical domain threaded
+    // in. Passing `None` there mutes the `.local`, GitHub-noreply and
+    // domain-typo signals #6142 exists to surface.
     let mut authorship_gaps: Vec<String> = Vec::new();
+    let suggestions = merge_suggestions(
+        db.connection(),
+        configured_canonical_domain(&config).as_deref(),
+    )
+    .unwrap_or_else(|e| {
+        // A failed scan costs the risk FLAG, never the figures beside it.
+        tracing::warn!(error = %e, "could not scan for unmerged identities; the authorship risk flag is omitted");
+        Vec::new()
+    });
     for (i, (entry, repo_cfg)) in manifest
         .repositories
         .iter_mut()
@@ -288,7 +307,7 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
         .enumerate()
     {
         let repository = repo_name(repo_cfg.name.as_deref(), &repo_cfg.path);
-        match authorship_artifact(db, &output, &repository, i) {
+        match authorship_artifact(db, &output, &repository, i, &suggestions) {
             Ok(AuthorshipArtifact::Written(path)) => entry.authorship = Some(path),
             Ok(AuthorshipArtifact::NameMatchedNothing(recorded)) => {
                 authorship_gaps.push(scrub_secrets(
@@ -472,13 +491,14 @@ fn authorship_artifact(
     output: &Path,
     repository: &str,
     index: usize,
+    suggestions: &[Suggestion],
 ) -> anyhow::Result<AuthorshipArtifact> {
     if !repository_has_commits(db.connection(), repository)? {
         return Ok(AuthorshipArtifact::NameMatchedNothing(
             recorded_repository_names(db.connection())?,
         ));
     }
-    let summary = build_authorship_summary(db.connection(), repository)?;
+    let summary = build_authorship_summary(db.connection(), repository, suggestions)?;
     let filename = format!("authorship-{index}.json");
     std::fs::write(output.join(&filename), summary.to_json()?)?;
     Ok(AuthorshipArtifact::Written(PathBuf::from(filename)))
@@ -888,8 +908,9 @@ mod tests {
         seed_commit(&db, "a1", "acme-web");
         seed_commit(&db, "b1", "acme-api");
 
-        let first = super::authorship_artifact(&db, dir.path(), "acme-web", 0).expect("write");
-        let second = super::authorship_artifact(&db, dir.path(), "acme-api", 1).expect("write");
+        let first = super::authorship_artifact(&db, dir.path(), "acme-web", 0, &[]).expect("write");
+        let second =
+            super::authorship_artifact(&db, dir.path(), "acme-api", 1, &[]).expect("write");
 
         let (super::AuthorshipArtifact::Written(first), super::AuthorshipArtifact::Written(second)) =
             (first, second)
@@ -926,7 +947,7 @@ mod tests {
         let blocked = dir.path().join("not-a-directory");
         std::fs::write(&blocked, "").expect("create blocking file");
 
-        let err = super::authorship_artifact(&db, &blocked, "acme-web", 0)
+        let err = super::authorship_artifact(&db, &blocked, "acme-web", 0, &[])
             .expect_err("an unwritable output must surface, not be swallowed");
         let rendered = format!("{err:#}");
         assert!(
@@ -951,7 +972,8 @@ mod tests {
         // Collection recorded `acme_web`; the manifest asks for `acme-web`.
         seed_commit(&db, "a1", "acme_web");
 
-        let outcome = super::authorship_artifact(&db, dir.path(), "acme-web", 0).expect("no error");
+        let outcome =
+            super::authorship_artifact(&db, dir.path(), "acme-web", 0, &[]).expect("no error");
         let super::AuthorshipArtifact::NameMatchedNothing(recorded) = outcome else {
             panic!("an unmatched name must never produce an artifact of zeroes");
         };

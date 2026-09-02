@@ -10,6 +10,7 @@
 //! Test: `tests` in `suggest_tests.rs`.
 
 use rusqlite::params;
+use tga::collect::identity::resolver::configured_canonical_domain;
 use tga::collect::identity::suggest::{detect_all, HIGH_CONFIDENCE_CUTOFF};
 use tga::core::config::Config;
 use tga::core::db::Database;
@@ -28,12 +29,7 @@ pub(super) fn run(
     confidence_floor: f64,
     auto_accept: bool,
 ) -> anyhow::Result<()> {
-    let canonical_domain = config
-        .team
-        .as_ref()
-        .and_then(|t| t.canonical_domain.as_deref())
-        .map(|d| d.trim().trim_start_matches('@').to_lowercase())
-        .filter(|d| !d.is_empty());
+    let canonical_domain = configured_canonical_domain(config);
 
     let suggestions = detect_all(
         db.connection(),
