@@ -580,10 +580,21 @@ fn pr_index_truncated_reply_makes_absent_branches_unknown() {
     );
 }
 
+/// A `gh` call that FAILED reports its reason for every branch it cannot
+/// answer, rather than a cause-free `Unknown` (#6561).
+///
+/// Why: the live failure this issue is about. `gh pr list` exited 4 for all 261
+/// registered worktrees and the survey said only "0 reclaimable" — the reason
+/// existed in `gh`'s stderr and was thrown away.
 #[test]
-fn pr_index_unavailable_makes_every_branch_unknown() {
-    let idx = PrIndex::unavailable();
-    assert_eq!(idx.state_for(Some("anything")), BranchPrState::Unknown);
+fn pr_index_reports_a_failed_lookup_with_its_reason() {
+    let idx = PrIndex::unavailable_because("`gh` exited 4: gh auth login".to_string());
+    assert_eq!(
+        idx.state_for(Some("anything")),
+        BranchPrState::LookupFailed {
+            reason: "`gh` exited 4: gh auth login".to_string()
+        }
+    );
 }
 
 #[test]
@@ -593,9 +604,13 @@ fn pr_index_malformed_json_is_unavailable() {
     // anywhere" and make every branch NoPr).
     for junk in ["", "not json", "{}", "gh: not authenticated"] {
         let idx = PrIndex::from_json(junk, 400);
-        assert_eq!(
-            idx.state_for(Some("feat/x")),
-            BranchPrState::Unknown,
+        // #6561: unparsable output is a FAILED lookup with a reason, no longer
+        // an unexplained `Unknown`.
+        assert!(
+            matches!(
+                idx.state_for(Some("feat/x")),
+                BranchPrState::LookupFailed { .. }
+            ),
             "{junk:?} must not yield a usable index"
         );
     }
@@ -957,10 +972,34 @@ fn pr_index_keeps_a_same_repo_pull_request() {
 fn run_with_timeout_captures_output() {
     let mut cmd = std::process::Command::new("echo");
     cmd.arg("hello");
-    let (ok, out) = run_with_timeout(cmd, std::time::Duration::from_secs(5))
+    let out = run_with_timeout(cmd, std::time::Duration::from_secs(5))
         .expect("a fast command must complete");
-    assert!(ok);
     assert_eq!(out.trim(), "hello");
+}
+
+/// 🔴 #6561 REGRESSION: a failing `gh` must hand back its exit code and its own
+/// first stderr line, not a bare "it did not work".
+///
+/// Why: that is the fact which identifies the fix. `exited 4: … gh auth login`
+/// sends the operator to the daemon's credentials; `gh: command not found`
+/// sends them to PATH. Before this both were the same `None`.
+#[test]
+fn run_with_timeout_reports_the_exit_code_and_stderr() {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.args(["-c", "echo 'gh auth login' >&2; exit 4"]);
+    let err = run_with_timeout(cmd, std::time::Duration::from_secs(5))
+        .expect_err("a non-zero exit must be an error");
+    assert!(err.contains("exited 4"), "{err}");
+    assert!(err.contains("gh auth login"), "{err}");
+}
+
+/// A binary that is not on PATH is its own reason, not a silent unknown (#6561).
+#[test]
+fn run_with_timeout_reports_a_spawn_failure() {
+    let cmd = std::process::Command::new("definitely-not-a-real-binary-6561");
+    let err = run_with_timeout(cmd, std::time::Duration::from_secs(5))
+        .expect_err("an unspawnable command must be an error");
+    assert!(err.contains("could not be run"), "{err}");
 }
 
 #[test]
@@ -972,7 +1011,7 @@ fn run_with_timeout_kills_a_hung_child() {
     cmd.arg("30");
     let started = std::time::Instant::now();
     let result = run_with_timeout(cmd, std::time::Duration::from_millis(300));
-    assert!(result.is_none(), "a timed-out child must report failure");
+    assert!(result.is_err(), "a timed-out child must report failure");
     assert!(
         started.elapsed() < std::time::Duration::from_secs(10),
         "the timeout must actually fire; took {:?}",
@@ -980,8 +1019,14 @@ fn run_with_timeout_kills_a_hung_child() {
     );
 }
 
+/// 🔴 #6561 REGRESSION: a failed per-branch lookup reports the FAILURE, not a
+/// cause-free `Unknown`.
+///
+/// This is the assertion that fails on `origin/main`, where every failure mapped
+/// to `BranchPrState::Unknown` and the survey then counted it in
+/// `pr_state_unknown` alongside genuine detached HEADs.
 #[test]
-fn pr_state_for_branch_maps_a_failed_call_to_unknown() {
+fn pr_state_for_branch_reports_a_failed_call_as_lookup_failed() {
     // Any `gh` failure must block, not read as "this branch has no PR".
     //
     // NOTE on what this does and does not prove: an earlier version of this
@@ -993,10 +1038,60 @@ fn pr_state_for_branch_maps_a_failed_call_to_unknown() {
     // mapping only. `gh_command_passes_no_dash_c_flag` pins the argv, and
     // `pr_index_from_gh_reads_this_repository` proves a real call succeeds.
     let tmp = tempfile::tempdir().expect("tempdir");
-    assert_eq!(
-        pr_state_for_branch(tmp.path(), "feat/whatever"),
-        BranchPrState::Unknown
+    let state = pr_state_for_branch(tmp.path(), "feat/whatever");
+    assert!(
+        matches!(state, BranchPrState::LookupFailed { .. }),
+        "a broken lookup must be distinguishable from an unanswerable one; got {state:?}"
     );
+}
+
+/// 🔴 #6561: a SQUASH-MERGED pull request whose head branch was deleted at merge
+/// still classifies as merged.
+///
+/// Why: the three worktrees the issue names (PRs #6604, #6588, #6573) all sit on
+/// branches deleted from the remote by `--delete-branch`. The pull request keeps
+/// the `headRefName` it was opened from, so `gh pr list --head <branch>
+/// --state all` still answers `MERGED` — the deleted branch was never why they
+/// read unknown. This pins that, so a later change to the `--json` field set
+/// cannot quietly drop `headRefName` and break the only path that resolves them.
+#[test]
+fn pr_index_resolves_a_squash_merged_pr_whose_head_branch_was_deleted() {
+    // The literal reply `gh pr list --head fix/6550-index-id-guard --state all`
+    // returns today, head branch already deleted on the remote.
+    let reply = r#"[{"headRefName":"fix/6550-index-id-guard","isCrossRepository":false,
+"number":6573,"state":"MERGED"}]"#;
+    let idx = PrIndex::from_json(reply, 50);
+    assert_eq!(
+        idx.state_for(Some("fix/6550-index-id-guard")),
+        BranchPrState::Merged { pr: 6573 }
+    );
+}
+
+/// 🔴 #6561: gate 5 refuses a failed lookup and NAMES the reason.
+///
+/// The refusal itself is unchanged (ADR-0045: an undeterminable tree stays
+/// unreclaimable). What changed is that the operator can read why.
+#[test]
+fn classify_blocks_a_failed_lookup_and_names_the_reason() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("lookup-failed-6561");
+    land(&path);
+    let verdict = classify(
+        &path,
+        Admission::Admitted,
+        false,
+        &BranchPrState::LookupFailed {
+            reason: "`gh` exited 4: gh auth login".to_string(),
+        },
+        &clean,
+        &no_agents,
+    );
+    assert!(!verdict.is_reclaimable());
+    let ReclaimVerdict::Blocked { reason } = verdict else {
+        panic!("a failed lookup is an ordinary block, not an agent refusal");
+    };
+    assert!(reason.contains("lookup failed"), "{reason}");
+    assert!(reason.contains("gh auth login"), "{reason}");
 }
 
 /// `gh` has no `-C` flag, and passing one made every call in this module fail
@@ -1064,9 +1159,9 @@ fn pr_index_from_gh_reads_this_repository() {
         ".nameWithOwner",
     ]);
     let resolved = match run_with_timeout(probe, std::time::Duration::from_secs(10)) {
-        Some((true, out)) => out.trim().to_string(),
-        _ => {
-            eprintln!("skipping: `gh` cannot resolve a repository here");
+        Ok(out) => out.trim().to_string(),
+        Err(reason) => {
+            eprintln!("skipping: `gh` cannot resolve a repository here — {reason}");
             return;
         }
     };

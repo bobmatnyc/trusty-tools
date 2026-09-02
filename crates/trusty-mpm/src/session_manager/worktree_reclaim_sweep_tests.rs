@@ -953,11 +953,12 @@ fn survey_separates_deadline_skips_from_lookup_failures() {
         "a deadline skip must not also read as a lookup failure"
     );
 
-    // Inspected, but the index answers nothing: a LOOKUP failure, not a skip.
+    // Inspected, but the index was TRUNCATED and never reached this branch: an
+    // indeterminate answer, not a skip and not a failure.
     let unresolved = survey_with_index(
         &fx.repos_root,
         &[],
-        &|_: &Path| PrIndex::unavailable(),
+        &|_: &Path| PrIndex::from_json(r#"[]"#, 0),
         &no_agents,
         SurveyBudget::default(),
         false,
@@ -969,6 +970,55 @@ fn survey_separates_deadline_skips_from_lookup_failures() {
     assert!(
         unresolved.pr_state_unknown > 0,
         "but the lookup resolved nothing"
+    );
+    assert_eq!(
+        unresolved.lookup_failed, 0,
+        "a truncated index is not a broken one (#6561)"
+    );
+}
+
+/// 🔴 #6561 REGRESSION: a FAILED lookup is counted apart from an indeterminate
+/// one, and the survey keeps the reason.
+///
+/// Why: live on 2026-09-02 the route reported `pr_state_unknown: 261` of 261
+/// surveyed, `reclaimable: 0`, and no cause — because `gh pr list` exited 4
+/// (the daemon inherits neither `GH_TOKEN` nor `GH_CONFIG_DIR`) and every
+/// failure was mapped to `Unknown`. On `origin/main` this test fails on
+/// `lookup_failed`, which does not exist there.
+#[test]
+fn survey_counts_a_failed_lookup_apart_from_an_unknown_state() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("lookup-broke-6561");
+    land(&path);
+
+    let out = survey_with_index(
+        &fx.repos_root,
+        &[],
+        &|_: &Path| {
+            PrIndex::unavailable_because(
+                "`gh` exited 4: To get started with GitHub CLI, please run:  gh auth login"
+                    .to_string(),
+            )
+        },
+        &no_agents,
+        SurveyBudget::default(),
+        false,
+    );
+    assert!(out.lookup_failed > 0, "the failure must be counted");
+    assert_eq!(
+        out.pr_state_unknown, 0,
+        "a broken lookup must not be filed as an indeterminate answer"
+    );
+    assert!(
+        out.lookup_failure
+            .as_deref()
+            .is_some_and(|r| r.contains("gh auth login")),
+        "the survey must keep `gh`'s own reason; got {:?}",
+        out.lookup_failure
+    );
+    assert_eq!(
+        out.reclaimable, 0,
+        "a failed lookup still blocks (ADR-0045)"
     );
 }
 
