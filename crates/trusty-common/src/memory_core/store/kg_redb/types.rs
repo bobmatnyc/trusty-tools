@@ -276,6 +276,27 @@ pub(super) struct KgDbState {
     /// held only for the pointer store inside [`super::copy_swap`].
     /// Test: `compaction_swaps_the_live_handle_in_place`.
     pub db: RwLock<Arc<Database>>,
+    /// Excludes every kg.redb write transaction for the duration of the
+    /// compaction swap (#6652, code-critic BLOCK on effb8c343).
+    ///
+    /// Why: the palace write mutex is the wrong primitive and was never
+    /// sufficient. It is per-`PalaceHandle`, while a `KgStoreRedb` is shared
+    /// per canonical path across every handle in the process — and, decisively,
+    /// `KgWriter`'s actor commits on a `spawn_blocking` thread holding only
+    /// `Arc<KgStoreRedb>`, so `KnowledgeGraph::assert` / `retract` (behind
+    /// `kg_assert`, `kg_retract_triple`, `share::supersede`, and every direct
+    /// KG mutator) never touch that mutex at all. A commit landing between the
+    /// swap's fingerprint re-check and its `rename` therefore wrote to the old
+    /// inode, the rename unlinked it, and the caller was told it succeeded.
+    /// What: `RwLock<()>` living beside the handle it protects, so its scope is
+    /// exactly the file being swapped. Writers take `read()` — they do not
+    /// contend with each other, because redb already serialises write
+    /// transactions — and hold it for the whole transaction. The swap takes
+    /// `write()` across the re-check, the rename, and the install together, so
+    /// there is no window between them for a write to slip into. Lock order is
+    /// always `PalaceHandle::write_mutex` then this, never the reverse.
+    /// Test: `a_kg_writer_commit_inside_the_swap_window_is_never_dropped`.
+    pub swap_lock: RwLock<()>,
     pub mode: OpenMode,
     pub _snapshot_guard: SnapshotGuard,
 }
@@ -367,6 +388,33 @@ pub(super) fn triple_from_parts(
         confidence: v.confidence,
         provenance: v.provenance,
     })
+}
+
+/// A kg.redb write transaction and the swap-exclusion it must not outlive.
+///
+/// Why (#6652): the guard has to live as long as the transaction, not just as
+/// long as the `begin_write` call — a swap that started after `begin_write`
+/// returned would still race the commit. Bundling the two makes that
+/// impossible to get wrong at a call site: you cannot hold the transaction
+/// without holding the guard.
+/// What: owns the read guard, an `Arc<Database>` clone (so the handle a
+/// blocked writer picks up after a swap stays alive for its whole
+/// transaction), and the transaction itself. [`Self::commit`] consumes all
+/// three in the right order.
+/// Test: `a_kg_writer_commit_inside_the_swap_window_is_never_dropped`.
+pub(super) struct GuardedWrite<'a> {
+    pub(super) _swap: std::sync::RwLockReadGuard<'a, ()>,
+    pub(super) _db: Arc<Database>,
+    pub(super) txn: redb::WriteTransaction,
+}
+
+impl GuardedWrite<'_> {
+    /// Commit the transaction, then release the swap exclusion.
+    ///
+    /// Test: every write path in this module.
+    pub(super) fn commit(self) -> Result<()> {
+        self.txn.commit().context("commit kg.redb write txn")
+    }
 }
 
 /// A single write op that can be queued through `apply_batch`.

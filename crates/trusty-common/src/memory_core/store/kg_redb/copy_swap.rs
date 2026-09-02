@@ -262,21 +262,27 @@ fn fill_and_verify(
 }
 
 impl PreparedCompaction {
-    /// Re-check, rename, and install the replacement handle.
+    /// Re-check, rename, and install the replacement handle, atomically.
     ///
-    /// Why: this is the only step that needs exclusivity, and it needs it for
-    /// one `rename` syscall plus one pointer store — microseconds, nowhere near
-    /// any write budget. The caller holds the palace write mutex across this
-    /// call and nothing else.
+    /// Why (#6652, code-critic BLOCK on effb8c343): this is the only step that
+    /// needs exclusivity, and it needs the RIGHT exclusivity. The palace write
+    /// mutex is not it: `KgWriter`'s actor commits on a `spawn_blocking` thread
+    /// holding only `Arc<KgStoreRedb>`, so `KnowledgeGraph::assert` / `retract`
+    /// never take that mutex. A commit landing between the fingerprint re-check
+    /// and the `rename` wrote to the inode the rename was about to unlink, and
+    /// the caller was told it succeeded. The three steps therefore run inside
+    /// [`KgStoreRedb::swap_database_exclusively`], which holds the store's own
+    /// `swap_lock` — the lock every kg.redb write transaction takes — across
+    /// all three. One `rename` syscall plus one pointer store: microseconds,
+    /// nowhere near any write budget.
     /// What: re-fingerprints the source (a write that landed since [`prepare`]
     /// aborts here with the live file untouched), renames the temp file over
     /// `kg.redb`, and installs the ALREADY-OPEN replacement into the shared
-    /// [`super::types::KgDbState`]. That ordering is what closes the
-    /// stale-handle hole: the replacement is opened before the rename, so after
-    /// the rename the only remaining step is an infallible pointer store. There
-    /// is no path where the file is swapped and the process keeps serving the
-    /// old inode.
-    /// Test: `a_write_during_the_copy_aborts_the_swap`,
+    /// [`super::types::KgDbState`]. That ordering closes the stale-handle hole:
+    /// the replacement is opened before the rename, so after the rename the
+    /// only remaining step is an infallible pointer store.
+    /// Test: `a_kg_writer_commit_inside_the_swap_window_is_never_dropped`,
+    /// `a_write_during_the_copy_aborts_the_swap`,
     /// `compaction_swaps_the_live_handle_in_place`,
     /// `a_crash_between_rename_and_install_recovers_on_reopen`.
     pub fn commit(
@@ -284,32 +290,47 @@ impl PreparedCompaction {
         store: &KgStoreRedb,
         hook: Option<&CompactFaultHook>,
     ) -> Result<CompactOutcome> {
-        let live = store.db();
-        verify_source_unchanged(&live, &self.fingerprint)
-            .context("a write landed between the rewrite and the swap; refusing to swap")?;
-        fire(hook, CompactStep::BeforeRename)?;
-
         let replacement = self
             .replacement
             .take()
             .context("compaction already committed")?;
-        std::fs::rename(&self.tmp_path, &self.live_path).with_context(|| {
-            format!(
-                "rename {} onto {}",
-                self.tmp_path.display(),
-                self.live_path.display()
-            )
+        let tmp_path = self.tmp_path.clone();
+        let live_path = self.live_path.clone();
+        let fingerprint = &self.fingerprint;
+
+        store.swap_database_exclusively(move || {
+            // Inside the exclusion: no kg.redb write transaction can be open,
+            // and none can start until this closure returns. The re-check and
+            // the rename are therefore indivisible.
+            verify_source_unchanged(&store.db(), fingerprint)
+                .context("a write landed between the rewrite and the swap; refusing to swap")?;
+            fire(hook, CompactStep::BeforeRename)?;
+            std::fs::rename(&tmp_path, &live_path).with_context(|| {
+                format!("rename {} onto {}", tmp_path.display(), live_path.display())
+            })?;
+            fire(hook, CompactStep::AfterRename)?;
+            Ok(replacement)
         })?;
-        fire(hook, CompactStep::AfterRename)?;
 
-        // Infallible from here: a pointer store under a lock held for the store
-        // alone. Every clone of this `KgStoreRedb` shares the same `KgDbState`,
-        // so the daemon's own long-lived handle is swapped by this one line —
-        // not lazily on some later open.
-        store.install_database(replacement);
-        sync_parent_dir(&self.live_path)?;
-
-        let bytes_after = file_len(&self.live_path)?;
+        // Past the point of no return: the rename committed and the handle is
+        // swapped, so the compaction SUCCEEDED. Neither the directory fsync nor
+        // the size re-stat can un-do that, and returning `Err` for either would
+        // make the dreamer log "the live file is unchanged" — false — and
+        // record zero reclaimed bytes for a run that reclaimed them. Both
+        // degrade to a warning and a best-effort number.
+        if let Err(e) = sync_parent_dir(&self.live_path) {
+            tracing::warn!(
+                path = %self.live_path.display(),
+                "#6652: swap committed but the directory fsync failed: {e:#}"
+            );
+        }
+        let bytes_after = file_len(&self.live_path).unwrap_or_else(|e| {
+            tracing::warn!(
+                path = %self.live_path.display(),
+                "#6652: swap committed but the size re-stat failed; reporting 0: {e:#}"
+            );
+            0
+        });
         Ok(CompactOutcome {
             bytes_before: self.bytes_before,
             bytes_after,

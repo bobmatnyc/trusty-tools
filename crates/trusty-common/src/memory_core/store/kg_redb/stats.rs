@@ -120,7 +120,8 @@ pub struct KgRedbStats {
     /// folded into a canonical drawer.
     pub superseded_drawers: u64,
     /// The `triples_by_predicate` index, when the file still carries it.
-    /// `None` once the #6652 at-open migration has dropped it.
+    /// `None` on a palace created after #6652, and on one whose compaction has
+    /// run — the rewrite reclaims it by not copying it.
     pub dead_predicate_index: Option<KgTableStats>,
     /// Bytes a compaction would reclaim: file slack, plus the dead index, plus
     /// the over-age history rows. An estimate, deliberately conservative.

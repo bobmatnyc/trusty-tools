@@ -93,7 +93,11 @@ impl KgStoreRedb {
     pub fn insert_wing_if_absent(&self, id: Uuid, key: &str, record: &WingRecord) -> Result<bool> {
         self.check_writable()?;
         let value = encode_value(record).context("encode WingRecord")?;
-        let wtx = self.db().begin_write().context("begin insert_wing txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self
+            .begin_write_guarded()
+            .context("begin insert_wing txn")?;
+        let wtx = &gw.txn;
         let inserted = {
             let mut wings = wtx.open_table(WINGS).context("open wings table")?;
             let fresh = wings
@@ -112,7 +116,7 @@ impl KgStoreRedb {
             }
             fresh
         };
-        wtx.commit().context("commit insert_wing txn")?;
+        gw.commit().context("commit insert_wing txn")?;
         Ok(inserted)
     }
 
@@ -175,7 +179,11 @@ impl KgStoreRedb {
         new_label: &str,
     ) -> Result<WingRecord> {
         self.check_writable()?;
-        let wtx = self.db().begin_write().context("begin rename_wing txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self
+            .begin_write_guarded()
+            .context("begin rename_wing txn")?;
+        let wtx = &gw.txn;
         let renamed = {
             let mut wings = wtx.open_table(WINGS).context("open wings table")?;
             // Read the row INSIDE the transaction and derive the old key from
@@ -226,7 +234,7 @@ impl KgStoreRedb {
             }
             renamed
         };
-        wtx.commit().context("commit rename_wing txn")?;
+        gw.commit().context("commit rename_wing txn")?;
         Ok(renamed)
     }
 
@@ -275,17 +283,18 @@ impl KgStoreRedb {
             schema_version: WING_SCHEMA_VERSION,
         })
         .context("encode WingSchemaMarker")?;
-        let wtx = self
-            .db()
-            .begin_write()
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self
+            .begin_write_guarded()
             .context("begin wing schema marker txn")?;
+        let wtx = &gw.txn;
         {
             let mut wings = wtx.open_table(WINGS).context("open wings table")?;
             wings
                 .insert(Uuid::nil().as_bytes().as_slice(), value.as_slice())
                 .context("insert wing schema marker")?;
         }
-        wtx.commit().context("commit wing schema marker txn")?;
+        gw.commit().context("commit wing schema marker txn")?;
         Ok(())
     }
 

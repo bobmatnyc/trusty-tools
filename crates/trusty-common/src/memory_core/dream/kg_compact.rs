@@ -174,6 +174,14 @@ pub async fn kg_compact_pass_with_hook(
     // The ONLY exclusive section: re-check, rename, install. Everything above
     // ran with writers free to proceed; anything they wrote is caught by the
     // fingerprint re-check inside `commit`, which aborts rather than swap.
+    //
+    // Two locks, always in this order. The palace write mutex keeps
+    // `remember`/`forget` out, and the store's own `swap_lock` — taken inside
+    // `commit` — keeps out every writer that never touches the palace mutex,
+    // `KgWriter`'s actor first among them (#6652, code-critic BLOCK). The whole
+    // thing runs on a blocking thread because `swap_lock` is a std lock that
+    // waits for in-flight redb transactions to drain; taking it on an executor
+    // thread would block that worker.
     let outcome = {
         let _write_guard = timeouts::lock_with_timeout(
             &handle.write_mutex,
@@ -181,7 +189,11 @@ pub async fn kg_compact_pass_with_hook(
             handle.id.as_str(),
         )
         .await?;
-        prepared.commit(handle.kg.redb_store(), hook.as_ref())?
+        let store = handle.kg.redb_store().clone();
+        let commit_hook = hook.clone();
+        tokio::task::spawn_blocking(move || prepared.commit(&store, commit_hook.as_ref()))
+            .await
+            .context("join kg.redb swap")??
     };
 
     Ok(KgCompactReport {

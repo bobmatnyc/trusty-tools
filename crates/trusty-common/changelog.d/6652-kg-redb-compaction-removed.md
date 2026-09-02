@@ -1,2 +1,2 @@
 Removed
-- `TRIPLES_BY_PREDICATE` index maintenance (#6652). No reader anywhere in the workspace consumed it, so every assert and retract was paying for an index nothing queried. An at-open, fail-open migration drops the table; the compaction reclaims its bytes.
+- `TRIPLES_BY_PREDICATE` index maintenance (#6652). No reader anywhere in the workspace consumed it, so every assert and retract was paying for an index nothing queried. The table itself is reclaimed by the compaction not copying it — off the request path, size-gated, and behind a verified backup — rather than by an at-open `delete_table`, which would put a full-table page walk on every daemon start.

@@ -187,25 +187,45 @@ fn measure_writes_nothing_to_the_live_file() {
 
 // ── the dead predicate index ───────────────────────────────────────────────
 
+/// Why (#6652): the dead index is reclaimed by the compaction NOT copying it,
+/// not by an at-open `delete_table`. `delete_table` walks every page of the
+/// table, and running that inline on every writer open would put a full-file
+/// page walk on the daemon's startup path for a 342 MB palace — the #6366
+/// symptom. The rewrite is already size-gated, off the request path, and
+/// behind a verified backup, so it is where the drop belongs.
 #[test]
-fn dropping_the_predicate_index_is_idempotent() {
-    let (_d, path) = palace_with_history(2, 0, 0);
+fn the_compaction_drops_the_dead_predicate_index() {
+    let (_d, path) = palace_with_history(3, 40, 400);
     let kg = KgStoreRedb::open(&path).expect("open");
-    let db = kg.db();
-    // The at-open migration already dropped it, so the first call here is a
-    // no-op and the second must be too.
-    assert!(!super::migrate::drop_dead_predicate_index(&db).expect("drop"));
-    assert!(!super::migrate::drop_dead_predicate_index(&db).expect("drop again"));
-}
+    {
+        // A palace that predates #6652 still carries the table on disk; a
+        // fresh one never creates it, so seed it to model the real case.
+        let db = kg.db();
+        let wtx = db.begin_write().expect("begin");
+        {
+            let mut t = wtx.open_table(TRIPLES_BY_PREDICATE).expect("open");
+            for i in 0..40u32 {
+                t.insert(format!("p{i}").as_bytes(), b"".as_slice())
+                    .expect("insert");
+            }
+        }
+        wtx.commit().expect("commit");
+    }
+    drop(kg);
+    let before = KgRedbStats::measure(&path, 90).expect("measure");
+    assert_eq!(
+        before.dead_predicate_index.as_ref().map(|t| t.rows),
+        Some(40),
+        "precondition: the seeded index is on disk"
+    );
 
-#[test]
-fn a_writer_open_leaves_no_predicate_index() {
-    let (_d, path) = palace_with_history(3, 0, 0);
-    let s = KgRedbStats::measure(&path, 90).expect("measure");
+    compact(&path, 90);
+
+    let after = KgRedbStats::measure(&path, 90).expect("measure");
     assert!(
-        s.dead_predicate_index.is_none(),
-        "the at-open migration should have dropped triples_by_predicate, got {:?}",
-        s.dead_predicate_index
+        after.dead_predicate_index.is_none(),
+        "the rewrite must not copy triples_by_predicate, got {:?}",
+        after.dead_predicate_index
     );
 }
 
@@ -494,4 +514,79 @@ fn unknown_table_aborts_the_compaction() {
     );
     drop(kg);
     assert_eq!(original, data_fingerprint(&path));
+}
+
+/// Why (#6652, code-critic BLOCK): `handle.write_mutex` does not gate every
+/// writer. `KnowledgeGraph::assert` routes through `KgWriter`, whose actor
+/// commits on a `spawn_blocking` thread holding only the shared
+/// `Arc<KgStoreRedb>` — a grep for `write_mutex` under `store/` returns
+/// nothing. A commit that lands between `commit`'s fingerprint re-check and
+/// its `rename` therefore writes to the old inode, the rename unlinks it, and
+/// the caller is told the write succeeded. Silent loss, fail-open.
+///
+/// What: fires a real `KnowledgeGraph::assert` (the `KgWriter` path, not a raw
+/// `KgStoreRedb::assert`) from inside the `BeforeRename` hook — the exact
+/// window — and requires that the write either survives the swap or the swap
+/// aborts. Never a silent drop.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kg_writer_commit_inside_the_swap_window_is_never_dropped() {
+    use crate::memory_core::store::kg::KnowledgeGraph;
+
+    let (_d, path) = palace_with_history(4, 40, 400);
+    let kg = KnowledgeGraph::open(&path).expect("open KnowledgeGraph");
+    let store = kg.redb_store().clone();
+    let plan = CompactPlan {
+        history_cutoff_ms: Some(history_cutoff_ms(Utc::now().timestamp_millis(), 90)),
+        keep_backup: true,
+    };
+    let prepared = copy_swap::prepare(&store, plan, None).expect("prepare");
+
+    // The hook runs on the compaction thread after the re-check and before the
+    // rename. It launches the writer and gives it time to reach its commit,
+    // which is what makes the race deterministic rather than incidental.
+    let kg_for_hook = std::sync::Arc::new(kg);
+    let writer_kg = std::sync::Arc::clone(&kg_for_hook);
+    let handle = tokio::runtime::Handle::current();
+    let launched = Arc::new(std::sync::Mutex::new(None::<tokio::task::JoinHandle<()>>));
+    let launched_slot = Arc::clone(&launched);
+    let hook: copy_swap::CompactFaultHook = Arc::new(move |step| {
+        if step == CompactStep::BeforeRename {
+            let kg = std::sync::Arc::clone(&writer_kg);
+            let task = handle.spawn(async move {
+                kg.assert(triple("late", "arrived", "yes"))
+                    .await
+                    .expect("the KgWriter commit must not fail");
+            });
+            *launched_slot.lock().expect("slot") = Some(task);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        Ok(())
+    });
+
+    let store_for_commit = store.clone();
+    let swap = tokio::task::spawn_blocking(move || prepared.commit(&store_for_commit, Some(&hook)))
+        .await
+        .expect("join swap");
+
+    let writer_task = launched.lock().expect("slot").take();
+    if let Some(task) = writer_task {
+        task.await.expect("join writer");
+    }
+
+    // Either outcome is acceptable; losing the write is not.
+    let survived = kg_for_hook
+        .redb_store()
+        .query_active("late")
+        .expect("query")
+        .len();
+    assert_eq!(
+        survived,
+        1,
+        "a KgWriter commit inside the swap window was silently dropped \
+         (swap result: {:?})",
+        swap.as_ref()
+            .map(|o| o.bytes_after)
+            .map_err(|e| format!("{e:#}"))
+    );
 }

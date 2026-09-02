@@ -43,7 +43,9 @@ impl KgStoreRedb {
     /// `crates/trusty-common/tests/kg_migration_tests.rs`.
     pub fn import_all(&self, triples: Vec<Triple>, drawers: Vec<Drawer>) -> Result<()> {
         self.check_writable()?;
-        let wtx = self.db().begin_write().context("begin import txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self.begin_write_guarded().context("begin import txn")?;
+        let wtx = &gw.txn;
         {
             let mut triples_t = wtx.open_table(TRIPLES).context("open triples table")?;
             let mut by_object = wtx
@@ -174,7 +176,7 @@ impl KgStoreRedb {
                     .context("insert imported drawer")?;
             }
         }
-        wtx.commit().context("commit import txn")?;
+        gw.commit().context("commit import txn")?;
         Ok(())
     }
 
@@ -203,7 +205,11 @@ impl KgStoreRedb {
             return Ok(Vec::new());
         }
 
-        let wtx = self.db().begin_write().context("begin batch txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+
+        let gw = self.begin_write_guarded().context("begin batch txn")?;
+
+        let wtx = &gw.txn;
         let mut results: Vec<BatchOpResult> = Vec::with_capacity(ops.len());
         {
             let mut triples = wtx.open_table(TRIPLES).context("open triples table")?;
@@ -253,7 +259,7 @@ impl KgStoreRedb {
                 }
             }
         }
-        wtx.commit().context("commit batch txn")?;
+        gw.commit().context("commit batch txn")?;
         Ok(results)
     }
 }

@@ -15,7 +15,10 @@
 //! through rolls both back and the next open retries from the original rows.
 //! `TRIPLES_BY_OBJECT` is untouched: its key already carried the object.
 //! #6652 retired the `TRIPLES_BY_PREDICATE` rebuild this migration used to
-//! carry — [`drop_dead_predicate_index_fail_open`] deletes that table instead.
+//! carry: the index has no reader, so the write maintenance is gone and the
+//! table itself is dropped by not being copied during the
+//! [`super::copy_swap`] compaction — off the request path, size-gated, and
+//! behind a verified backup.
 //! Fail-open: any error is logged at `warn!` and the palace opens un-migrated,
 //! matching how `PalaceHandle::open_with_intent` degrades when `load_drawers`
 //! fails.
@@ -25,8 +28,7 @@
 
 use crate::memory_core::store::kg_store::{
     KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KG_TRIPLE_KEY_SCHEMA_VERSION, KgSchemaMarker, TRIPLES,
-    TRIPLES_BY_PREDICATE, TripleValue, decode_legacy_triple_key, decode_value, encode_triple_key,
-    encode_value,
+    TripleValue, decode_legacy_triple_key, decode_value, encode_triple_key, encode_value,
 };
 use anyhow::{Context, Result, bail};
 use redb::{Database, ReadableDatabase, ReadableTable};
@@ -318,57 +320,4 @@ fn ensure_verified_backup(path: &Path) -> Result<PathBuf> {
         );
     }
     Ok(backup)
-}
-
-// ── #6652: retire the read-nobody predicate index ───────────────────────────
-
-/// Delete the dead [`TRIPLES_BY_PREDICATE`] table, logging rather than
-/// propagating any failure.
-///
-/// Why (#6652): no reader anywhere in the workspace consumes this table — every
-/// reference before this change was a write, an init, or this migration's own
-/// rebuild. Maintaining it cost one extra b-tree insert or remove on every
-/// assert and every retract, and on the `trusty-tools` palace its rows are a
-/// straight subtraction from a 342 MB file that only ever grows. Dropping the
-/// maintenance without dropping the table would leave the stale rows on disk
-/// forever, so the two ship together. Fail-open for the same reason the #4810
-/// migration is: a palace that cannot drop the table must still open, and the
-/// next open retries.
-/// What: opens a write transaction and calls `delete_table`. Idempotent — a
-/// palace whose table is already gone reports `false` and commits nothing.
-/// redb returns the freed pages to its own free list rather than to the
-/// filesystem, so the bytes are reclaimed by the copy-then-swap compaction in
-/// [`super::copy_swap`], not by this call.
-/// Test: `dropping_the_predicate_index_is_idempotent`.
-pub(super) fn drop_dead_predicate_index_fail_open(db: &Database, path: &Path) {
-    match drop_dead_predicate_index(db) {
-        Ok(true) => tracing::info!(
-            path = %path.display(),
-            "#6652: dropped the unread triples_by_predicate index"
-        ),
-        Ok(false) => {}
-        Err(e) => tracing::warn!(
-            path = %path.display(),
-            "#6652: could not drop the unread triples_by_predicate index (the palace opens \
-             normally, the table stays on disk, and the next open retries): {e:#}"
-        ),
-    }
-}
-
-/// Delete [`TRIPLES_BY_PREDICATE`]; `Ok(false)` when it was already absent.
-///
-/// Why/What: see [`drop_dead_predicate_index_fail_open`]. Separated so a test
-/// can assert on the outcome rather than on a log line.
-/// Test: `dropping_the_predicate_index_is_idempotent`.
-pub(super) fn drop_dead_predicate_index(db: &Database) -> Result<bool> {
-    let wtx = db.begin_write().context("begin predicate-index drop txn")?;
-    let existed = wtx
-        .delete_table(TRIPLES_BY_PREDICATE)
-        .context("delete triples_by_predicate table")?;
-    if !existed {
-        wtx.abort().context("abort no-op predicate-index drop")?;
-        return Ok(false);
-    }
-    wtx.commit().context("commit predicate-index drop")?;
-    Ok(true)
 }

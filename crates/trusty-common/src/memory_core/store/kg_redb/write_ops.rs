@@ -51,7 +51,9 @@ impl KgStoreRedb {
     /// `single_assert_and_apply_batch_one_op_agree_on_valid_from`.
     pub fn assert(&self, triple: &Triple) -> Result<()> {
         self.check_writable()?;
-        let wtx = self.db().begin_write().context("begin assert txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self.begin_write_guarded().context("begin assert txn")?;
+        let wtx = &gw.txn;
         {
             let mut triples = wtx.open_table(TRIPLES).context("open triples table")?;
             let mut by_object = wtx
@@ -62,7 +64,7 @@ impl KgStoreRedb {
                 .context("open active_subject_counts table")?;
             batch_assert(&mut triples, &mut by_object, &mut counts, triple)?;
         }
-        wtx.commit().context("commit assert txn")?;
+        gw.commit().context("commit assert txn")?;
         Ok(())
     }
 
@@ -131,7 +133,9 @@ impl KgStoreRedb {
         object: Option<&str>,
     ) -> Result<usize> {
         self.check_writable()?;
-        let wtx = self.db().begin_write().context("begin retract txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self.begin_write_guarded().context("begin retract txn")?;
+        let wtx = &gw.txn;
         let closed;
         {
             let mut triples = wtx.open_table(TRIPLES).context("open triples table")?;
@@ -150,7 +154,7 @@ impl KgStoreRedb {
                 object,
             )?;
         }
-        wtx.commit().context("commit retract txn")?;
+        gw.commit().context("commit retract txn")?;
         Ok(closed)
     }
 
@@ -166,7 +170,11 @@ impl KgStoreRedb {
     /// `fact_key_index_tracks_upsert_and_delete`.
     pub fn upsert_drawer(&self, drawer: &Drawer) -> Result<()> {
         self.check_writable()?;
-        let wtx = self.db().begin_write().context("begin upsert_drawer txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self
+            .begin_write_guarded()
+            .context("begin upsert_drawer txn")?;
+        let wtx = &gw.txn;
         {
             let mut drawers = wtx.open_table(DRAWERS).context("open drawers table")?;
             let mut by_fact_key = wtx
@@ -174,7 +182,7 @@ impl KgStoreRedb {
                 .context("open drawers_by_fact_key table")?;
             batch_upsert_drawer(&mut drawers, &mut by_fact_key, drawer)?;
         }
-        wtx.commit().context("commit upsert_drawer txn")?;
+        gw.commit().context("commit upsert_drawer txn")?;
         Ok(())
     }
 
@@ -190,7 +198,11 @@ impl KgStoreRedb {
     /// `fact_key_index_tracks_upsert_and_delete`.
     pub fn delete_drawer(&self, id: Uuid) -> Result<()> {
         self.check_writable()?;
-        let wtx = self.db().begin_write().context("begin delete_drawer txn")?;
+        // #6652: the swap-exclusion guard must outlive the txn.
+        let gw = self
+            .begin_write_guarded()
+            .context("begin delete_drawer txn")?;
+        let wtx = &gw.txn;
         {
             let mut drawers = wtx.open_table(DRAWERS).context("open drawers table")?;
             let mut by_fact_key = wtx
@@ -198,7 +210,7 @@ impl KgStoreRedb {
                 .context("open drawers_by_fact_key table")?;
             batch_delete_drawer(&mut drawers, &mut by_fact_key, id)?;
         }
-        wtx.commit().context("commit delete_drawer txn")?;
+        gw.commit().context("commit delete_drawer txn")?;
         Ok(())
     }
 

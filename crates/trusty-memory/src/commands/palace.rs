@@ -197,8 +197,8 @@ fn render_text(name: &str, s: &KgRedbStats) -> String {
     ));
     if let Some(dead) = &s.dead_predicate_index {
         out.push_str(&format!(
-            "  dead index triples_by_predicate: {} row(s), {} live bytes — dropped at the \
-             next writer open (#6652)\n",
+            "  dead index triples_by_predicate: {} row(s), {} live bytes — reclaimed by \
+             the next compaction (#6652)\n",
             dead.rows,
             dead.live_bytes()
         ));
