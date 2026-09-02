@@ -479,13 +479,26 @@ pub async fn serve_with_shutdown(
 /// `bind_singleton_hardened`'s takeover is a recovery path, not a licence to
 /// leave corpses.
 ///
+/// The router is dropped BEFORE the unlink (#6595). The unlink is what tells a
+/// client this server is gone, and the client's answer to that is to spawn a
+/// successor, whose first act is to open the same two redb files. redb takes an
+/// exclusive lock per file, so releasing those locks after the unlink hands the
+/// successor a `Database already open. Cannot acquire lock.` — measured at
+/// 54–560 ms of exposure on an idle machine, and `Supervisor::ensure_running`
+/// does not notice the child died, so it polls the socket for the full 20 s
+/// `spawn_probe` budget and reports a spawn timeout. Dropping the router drops
+/// every `AnalyzerAppState` clone the handlers hold, and with them the
+/// `FactStore` and `ScipOverlayStore` handles, so the locks are free before the
+/// path a successor keys off disappears.
+///
 /// # Errors
 ///
 /// As [`serve`].
 ///
 /// Test: `rpc_unlinks_its_socket_on_shutdown`,
-/// `rpc_accepts_a_request_larger_than_the_shared_default`, and
-/// `tests/on_demand.rs`' `serve_exits_on_its_own_idle_window`.
+/// `rpc_accepts_a_request_larger_than_the_shared_default`,
+/// `tests/on_demand.rs`' `serve_exits_on_its_own_idle_window` and
+/// `an_idle_exit_frees_its_redb_locks_before_it_unlinks_the_socket`.
 pub async fn serve_with_idle(
     state: AnalyzerAppState,
     socket: &Path,
@@ -529,6 +542,18 @@ pub async fn serve_with_idle(
     if exit == trusty_common::uds::server::ServeExit::Idle {
         info!(socket = %socket.display(), "trusty-analyze idle; exiting");
         eprintln!("trusty-analyze: idle; exiting");
+    }
+
+    // #6595: close the redb stores before the unlink advertises this server as
+    // gone, so a successor never opens facts.redb against a lock this process
+    // still holds.
+    match Arc::into_inner(router) {
+        Some(router) => drop(router),
+        None => tracing::warn!(
+            socket = %socket.display(),
+            "a connection task still holds the router at exit; \
+             the redb locks may outlive the socket"
+        ),
     }
 
     if let Err(e) = std::fs::remove_file(socket) {
