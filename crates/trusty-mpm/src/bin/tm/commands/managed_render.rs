@@ -186,6 +186,9 @@ fn row_state(s: &ManagedSessionSummary) -> String {
         s.unresumable,
         s.stale_assets,
         s.stale_assets_unchecked,
+        // #6568: the daemon sends the whole reason; the row shows only that
+        // there is one.
+        s.auto_resume_parked.is_some(),
     )
 }
 
@@ -284,9 +287,16 @@ pub(crate) fn format_tombstone_row(slot: u32, use_color: bool) -> String {
 /// mutually exclusive — an unprobed row has no verdict to report — so a stale
 /// verdict always wins if both flags somehow arrive set. Markers can otherwise
 /// appear together.
+///
+/// `" [resume-parked]"` (#6568) marks a session the supervisor has stopped
+/// auto-resuming because its runtime kept dying within seconds of each resume.
+/// Without it a parked row is indistinguishable from an ordinary `stopped` one,
+/// and the difference is that nothing will ever revive this one. `tm session
+/// status` prints the full reason; the row only has space for the fact.
 /// Test: `format_state_column_appends_dead_marker`,
 /// `format_state_column_appends_stale_assets_marker`,
 /// `format_state_column_appends_unchecked_assets_marker`,
+/// `format_state_column_appends_resume_parked_marker`,
 /// `format_state_column_leaves_healthy_state_unchanged`,
 /// `format_state_column_renders_deleted_marker`.
 pub(crate) fn format_state_column(
@@ -294,6 +304,7 @@ pub(crate) fn format_state_column(
     unresumable: bool,
     stale: bool,
     unchecked: bool,
+    resume_parked: bool,
 ) -> String {
     // A `deleted` record (soft-deleted via `tm sessions delete`) renders as the
     // `--deleted--` marker so the master list REFLECTS the deletion instead of
@@ -305,6 +316,10 @@ pub(crate) fn format_state_column(
     };
     if unresumable {
         out.push_str(" [dead]");
+    }
+    // #6568: nothing will auto-resume this row again until an operator does.
+    if resume_parked {
+        out.push_str(" [resume-parked]");
     }
     if stale {
         out.push_str(" [stale-assets]");

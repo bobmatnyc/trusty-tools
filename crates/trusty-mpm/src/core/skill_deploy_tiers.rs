@@ -39,6 +39,18 @@ pub struct SkillDeployTier {
     pub dir: PathBuf,
 }
 
+/// The project tier's skills directory: `<project_dir>/.claude/skills`.
+///
+/// Why (#6586): three call sites spelled this join by hand — the tier
+/// enumeration below, the stray sweep, and the `skill_project_tier` probe — and
+/// the sweep's deferral has to name the SAME directory the enumeration yields
+/// or the redeploy skips nothing. One spelling, one answer.
+/// What: `<project_dir>/.claude/skills`. Pure path arithmetic; touches no disk.
+/// Test: `tiers_add_the_project_tier`.
+pub fn project_skill_tier(project_dir: &Path) -> PathBuf {
+    project_dir.join(".claude").join("skills")
+}
+
 /// Enumerate every skill deploy target, deduplicated, highest-reach first.
 ///
 /// Why: see the module doc — one call site listing the tiers keeps `tm
@@ -61,16 +73,14 @@ pub fn skill_deploy_tiers(
     paths: &FrameworkPaths,
     project_dir: Option<&Path>,
 ) -> Vec<SkillDeployTier> {
-    let managed = paths
-        .agent_deploy_dir()
-        .parent()
-        .map(|dir| dir.join("skills"))
-        .unwrap_or_else(|| paths.agent_deploy_dir().join("skills"));
+    // #6586: one derivation, on `FrameworkPaths`, shared with the session
+    // launch's bundled deploy and `deploy_validate`'s probe.
+    let managed = paths.skill_deploy_dir();
 
     let candidates = [
         Some(("managed config", managed)),
         Some(("operator home", paths.claude_skills_dir())),
-        project_dir.map(|dir| ("project", dir.join(".claude").join("skills"))),
+        project_dir.map(|dir| ("project", project_skill_tier(dir))),
     ];
 
     let mut tiers: Vec<SkillDeployTier> = Vec::new();
@@ -97,10 +107,7 @@ mod tests {
         let tiers = skill_deploy_tiers(&paths, None);
 
         assert_eq!(tiers[0].label, "managed config");
-        assert_eq!(
-            tiers[0].dir,
-            paths.agent_deploy_dir().parent().unwrap().join("skills")
-        );
+        assert_eq!(tiers[0].dir, paths.skill_deploy_dir());
         assert!(tiers.iter().any(|t| t.dir == paths.claude_skills_dir()));
     }
 

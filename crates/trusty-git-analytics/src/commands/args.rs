@@ -153,7 +153,14 @@ Typical workflow:\n\
 TIPS:\n\
   - Run `tga classify` immediately after `tga collect` to keep the DB in sync.\n\
   - Use `--weeks 4 --force` for routine weekly re-runs to refresh recent data.\n\
-  - `--branch` is collect-only; commits in the DB do not carry branch attribution."
+  - `--branch` is collect-only; commits in the DB do not carry branch attribution.\n\n\
+ENVIRONMENT:\n\
+  TGA_RATE_LIMIT_SLEEP_BUDGET_SECS\n\
+      Total wall-clock seconds one run may spend asleep waiting out GitHub\n\
+      rate limits. The whole run shares one allowance; once it is spent, every\n\
+      later GitHub call fails fast and the result is reported as truncated.\n\
+      Default: 120. A positive integer wins; unset, empty, `0`, and any value\n\
+      that does not parse all fall back to the default."
 )]
 pub struct CollectArgs {
     /// Only collect from these repository names (comma-separated, e.g. --repos api,frontend).
@@ -481,4 +488,34 @@ pub struct TuiArgs {
     /// is already collected.
     #[arg(long, default_value_t = false)]
     pub correlate_only: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collect::github::budget::RATE_LIMIT_SLEEP_BUDGET_ENV;
+
+    /// Why (#6565): the knob was implemented but named nowhere an operator
+    /// looks, so a run needing a larger allowance had no discoverable way to ask
+    /// for one. This binds the literal in `CollectArgs`'s `after_help` to the
+    /// constant the collector actually reads, so renaming one without the other
+    /// fails here rather than silently un-documenting the variable.
+    /// What: renders `tga collect --help` through clap and asserts the variable
+    /// name and its stated default are both present.
+    /// Test: this test.
+    #[test]
+    fn collect_help_documents_the_rate_limit_sleep_budget_env() {
+        let help = CollectArgs::augment_args(clap::Command::new("collect"))
+            .render_long_help()
+            .to_string();
+
+        assert!(
+            help.contains(RATE_LIMIT_SLEEP_BUDGET_ENV),
+            "`tga collect --help` must name {RATE_LIMIT_SLEEP_BUDGET_ENV}; rendered help was:\n{help}"
+        );
+        assert!(
+            help.contains("Default: 120"),
+            "`tga collect --help` must name the 120 s default; rendered help was:\n{help}"
+        );
+    }
 }

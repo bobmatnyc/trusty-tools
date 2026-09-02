@@ -15,8 +15,8 @@
 //! crate must never contain; see DOC-50 §3.2 and Q9).
 //!
 //! # Spec References
-//! - [`SPEC-TTUI-03~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — §3.1 module layout (`widgets/`).
-//! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 4 deliverable (§5, Slice 4).
+//! - [`SPEC-TTUI-03~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — §3.1 module layout (`widgets/`).
+//! - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 4 deliverable (§5, Slice 4).
 
 pub mod banner;
 pub mod input_composer;

@@ -1,66 +1,98 @@
-//! Reading log files and preparing them for upload (#6533).
+//! Finding log files and handing each one to the streaming pipeline (#6533).
 //!
 //! Why: everything that must happen to a log line before it leaves the machine
-//! happens here, in one order, once. Splitting the level filter, the secret
-//! scrub, and the compression across call sites is how a body eventually
-//! reaches a bucket having skipped one of them.
+//! happens in one order, once. Splitting the level filter, the secret scrub,
+//! and the compression across call sites is how a body eventually reaches a
+//! bucket having skipped one of them.
 //! What: [`collect`] walks each [`LogSource`]'s root, matches its globs, and
-//! for every file: filters by level, scrubs secrets, gzips, and yields a
-//! [`CollectedFile`]. The SHA-256 it reports is over the PLAINTEXT bytes as
-//! read, before filtering — so the manifest's identity tracks the source file,
-//! not the drain's own processing, and a change to the filter never invalidates
+//! hands every match to [`super::pipeline::stream_file`], which reads it in
+//! bounded chunks. The SHA-256 it reports is over the PLAINTEXT bytes as read,
+//! before filtering — so the manifest's identity tracks the source file, not
+//! the drain's own processing, and a change to the filter never invalidates
 //! every recorded digest.
 //! Test: `super::tests::collect_filters_below_info`,
 //! `super::tests::collect_passes_through_non_tracing`,
-//! `super::tests::collect_scrubs_secrets_before_they_reach_the_destination`, `super::tests::collect_skips_oversize`.
+//! `super::tests::collect_scrubs_secrets_before_they_reach_the_destination`,
+//! `super::tests::collect_skips_oversize`.
+//!
+//! # The ceiling is a cost decision, not a memory one (#6547)
+//!
+//! Before #6547 a file over `max_file_bytes` was skipped because the collector
+//! read it whole; five copies of a 176 MB log is not a working set a daemon can
+//! take. [`super::pipeline::stream_file`] removed that constraint, so the
+//! DEFAULT ceiling moved from 64 MiB to [`DEFAULT_MAX_FILE_BYTES`] — high
+//! enough that no daily-rotated daemon log reaches it. What survives is an
+//! operator-facing guard against spending a pass on an absurd file, plus
+//! [`CollectLimits::max_wire_bytes`], which bounds the one thing still held
+//! whole: the COMPRESSED body `LogDestination::put` takes.
+//!
+//! A file that does trip either bound is reported as an [`OversizeFile`] and
+//! the decision is recorded in the manifest by [`super::run_once`], so it is
+//! made ONCE per `(file, size, mtime)` rather than re-logged every cycle.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
+
 use globset::{Glob, GlobSetBuilder};
-use sha2::{Digest, Sha256};
 
 use super::error::DrainError;
+use super::manifest::SkipReason;
+use super::pipeline::{StreamOutcome, stream_file};
+
+pub use super::pipeline::Level;
 
 /// Default ceiling on a single source file, in bytes.
 ///
-/// 64 MiB is well above the trusty daemons' daily rolled logs and well below
-/// anything that would embarrass a machine holding one plaintext copy, one
-/// scrubbed copy, and one gzip buffer at once.
-pub const DEFAULT_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// 4 GiB. Since #6547 the collector streams, so this no longer bounds memory —
+/// it bounds how much reading and hashing one pass will spend on one file. No
+/// daily-rotated trusty daemon log has come within two orders of magnitude of
+/// it; the largest observed was 176 MB.
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
-/// Log levels the drain can filter on, ordered least to most severe.
+/// Default ceiling on one file's COMPRESSED body, in bytes.
 ///
-/// Deliberately not `tracing::Level`: the drain reads level names out of
-/// already-written TEXT, and coupling that string parsing to `tracing`'s type
-/// would make the drain depend on the crate that produced the file rather than
-/// on the file format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// 64 MiB — the number the source ceiling used to carry, moved to where memory
+/// is actually spent. `LogDestination::put` takes an in-memory `Bytes`, so the
+/// gzip output is the one buffer that still scales with the file. At the ~20x
+/// ratio daemon log text compresses at, this admits well over a gigabyte of
+/// source.
+pub const DEFAULT_MAX_WIRE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The two size bounds one [`collect`] pass enforces.
+///
+/// Why: two adjacent `u64` parameters are two parameters waiting to be
+/// transposed, and the pair grew from one at #6547. Naming them makes a call
+/// site say which bound it is setting.
+/// What: `max_file_bytes` bounds the plaintext source, `max_wire_bytes` the
+/// compressed body. Either being exceeded yields an [`OversizeFile`], never a
+/// truncated upload.
+/// Test: `super::tests::collect_skips_oversize`,
+/// `super::tests::collect_skips_a_body_over_the_wire_cap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Level {
-    /// `TRACE`
-    Trace,
-    /// `DEBUG`
-    Debug,
-    /// `INFO`
-    Info,
-    /// `WARN`
-    Warn,
-    /// `ERROR`
-    Error,
+pub struct CollectLimits {
+    /// Plaintext source ceiling. See [`DEFAULT_MAX_FILE_BYTES`].
+    pub max_file_bytes: u64,
+    /// Compressed body ceiling. See [`DEFAULT_MAX_WIRE_BYTES`].
+    pub max_wire_bytes: u64,
 }
 
-impl Level {
-    /// Map a bare level token to its variant.
-    fn parse(token: &str) -> Option<Self> {
-        match token {
-            "TRACE" => Some(Self::Trace),
-            "DEBUG" => Some(Self::Debug),
-            "INFO" => Some(Self::Info),
-            "WARN" | "WARNING" => Some(Self::Warn),
-            "ERROR" => Some(Self::Error),
-            _ => None,
+impl Default for CollectLimits {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            max_wire_bytes: DEFAULT_MAX_WIRE_BYTES,
+        }
+    }
+}
+
+impl CollectLimits {
+    /// Both bounds, in bytes.
+    pub fn new(max_file_bytes: u64, max_wire_bytes: u64) -> Self {
+        Self {
+            max_file_bytes,
+            max_wire_bytes,
         }
     }
 }
@@ -103,13 +135,27 @@ pub struct CollectedFile {
     pub source_path: PathBuf,
 }
 
-/// A source file the collector declined to read.
+/// A source file the collector declined to upload.
+///
+/// Why: `path` and `size` were enough to log a warning, and logging a warning
+/// every cycle for a file that can never change its answer is exactly what
+/// #6547 is about. The extra three fields are what [`super::run_once`] needs to
+/// record the decision durably: the key it is recorded under, the mtime half of
+/// the identity that invalidates it, and which bound was hit.
+/// Test: `super::tests::run_once_records_an_oversize_skip_once`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct OversizeFile {
     /// The path that was skipped.
     pub path: PathBuf,
+    /// `<crate>/<relative path>` — the manifest's identity for this file.
+    pub relative_key: String,
     /// Its size in bytes.
     pub size: u64,
+    /// Source file's modification time, Unix seconds.
+    pub mtime_unix: i64,
+    /// Which bound the file hit.
+    pub reason: SkipReason,
 }
 
 /// What one [`collect`] pass found.
@@ -117,26 +163,27 @@ pub struct OversizeFile {
 pub struct Collected {
     /// Files read and ready to upload.
     pub files: Vec<CollectedFile>,
-    /// Files skipped for exceeding `max_file_bytes`.
+    /// Files skipped for exceeding one of the [`CollectLimits`].
     pub oversize: Vec<OversizeFile>,
     /// Per-file failures. A failure here never aborts the pass.
     pub errors: Vec<(PathBuf, String)>,
 }
 
-/// Enumerate, read, filter, scrub, and compress every matching log file.
+/// Enumerate every matching log file and stream each one into an upload body.
 ///
 /// Why: see the module docs — one ordered pipeline, so no body can reach a
 /// destination having skipped the scrub.
-/// What: for each source, compiles its globs once, walks `root`, and processes
-/// each matching file. Files larger than `max_file_bytes` are SKIPPED with a
-/// `warn!` and an [`OversizeFile`] entry rather than streamed in chunks: the
-/// scrub has to see a whole body to catch a secret that straddles a chunk
-/// boundary, so a chunked path could only ever upload partially-scrubbed text.
-/// Refusing to upload is the safe half of that trade, and the report says so
-/// out loud rather than silently truncating.
+/// What: for each source, compiles its globs once, walks `root`, and hands each
+/// matching file to [`super::pipeline::stream_file`]. A file over
+/// [`CollectLimits::max_file_bytes`] is never opened; one whose compressed body
+/// passes [`CollectLimits::max_wire_bytes`] is abandoned mid-stream. Both land
+/// in [`Collected::oversize`] rather than being truncated, and neither logs
+/// here — [`super::run_once`] owns that, because only it can tell a new
+/// decision from one already recorded (#6547).
 /// `secrets` is passed straight to [`crate::credentials::scrub_secrets`],
 /// which ignores needles under its own minimum length.
-/// Test: `super::tests::collect_skips_oversize`, `super::tests::collect_scrubs_secrets_before_they_reach_the_destination`.
+/// Test: `super::tests::collect_skips_oversize`,
+/// `super::tests::collect_scrubs_secrets_before_they_reach_the_destination`.
 ///
 /// # Errors
 /// Returns [`DrainError::Uri`] only for a malformed glob pattern, which is a
@@ -145,7 +192,7 @@ pub struct Collected {
 pub fn collect(
     sources: &[LogSource],
     secrets: &[String],
-    max_file_bytes: u64,
+    limits: CollectLimits,
 ) -> Result<Collected, DrainError> {
     let mut out = Collected::default();
 
@@ -178,20 +225,20 @@ pub fn collect(
             if !globs.is_match(relative) {
                 continue;
             }
-            process_file(source, path, relative, secrets, max_file_bytes, &mut out);
+            process_file(source, path, relative, secrets, limits, &mut out);
         }
     }
 
     Ok(out)
 }
 
-/// Read one matched file into `out`, recording an error rather than failing.
+/// Stream one matched file into `out`, recording an error rather than failing.
 fn process_file(
     source: &LogSource,
     path: &Path,
     relative: &Path,
     secrets: &[String],
-    max_file_bytes: u64,
+    limits: CollectLimits,
     out: &mut Collected,
 ) {
     let metadata = match std::fs::metadata(path) {
@@ -203,146 +250,44 @@ fn process_file(
     };
 
     let size = metadata.len();
-    if size > max_file_bytes {
-        // #6533: skip, never truncate — see `collect`'s docs for why a chunked
-        // path cannot scrub a secret that straddles a boundary.
-        tracing::warn!(
-            path = %path.display(),
-            size,
-            max_file_bytes,
-            "log-drain skipping oversize file; it will not be uploaded"
-        );
-        out.oversize.push(OversizeFile {
-            path: path.to_path_buf(),
-            size,
-        });
-        return;
-    }
-
-    let plaintext = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) => {
-            out.errors.push((path.to_path_buf(), e.to_string()));
-            return;
-        }
-    };
-
-    let sha256_plaintext = hex_digest(&plaintext);
     let mtime_unix = mtime_seconds(&metadata);
+    let relative_key = format!("{}/{}", source.crate_name, relative.to_string_lossy());
 
-    // Order is load-bearing: decode, then filter, then scrub, then compress.
-    let text = String::from_utf8_lossy(&plaintext);
-    let filtered = match source.level_filter {
-        Some(min) => filter_by_level(&text, min),
-        None => text.into_owned(),
-    };
-    let scrubbed = crate::credentials::scrub_secrets(&filtered, secrets);
-
-    let body = match gzip(scrubbed.as_bytes()) {
-        Ok(b) => b,
-        Err(e) => {
-            out.errors.push((path.to_path_buf(), e.to_string()));
-            return;
-        }
-    };
-
-    out.files.push(CollectedFile {
-        relative_key: format!("{}/{}", source.crate_name, relative.to_string_lossy()),
-        body: Bytes::from(body),
-        sha256_plaintext,
-        plaintext_len: size,
-        mtime_unix,
-        source_path: path.to_path_buf(),
-    });
-}
-
-/// Drop lines below `min`, leaving non-tracing files untouched.
-///
-/// Why: a daemon's DEBUG output is the bulk of its log bytes and almost never
-/// the reason anyone reads it later. Dropping it before compression is where
-/// the drain's egress saving actually comes from.
-/// What: recognises the `tracing_subscriber::fmt` default line shape —
-/// `<timestamp> <LEVEL> <target>: <message>` — and keeps a line when its level
-/// is at or above `min`. A line carrying no recognisable level is a
-/// CONTINUATION (a wrapped message, a backtrace frame) and inherits the
-/// disposition of the line above it. If the file contains no recognisable
-/// level line at all, it is not tracing output and is returned VERBATIM rather
-/// than filtered to nothing.
-/// Test: `super::tests::collect_filters_below_info`,
-/// `super::tests::collect_passes_through_non_tracing`.
-fn filter_by_level(text: &str, min: Level) -> String {
-    let mut saw_any_level = false;
-    let mut keeping = true;
-    let mut kept = String::with_capacity(text.len());
-
-    for line in text.split_inclusive('\n') {
-        // No level token means a continuation line, which keeps whatever
-        // disposition the line above it had — hence no `else` branch.
-        if let Some(level) = line_level(line) {
-            saw_any_level = true;
-            keeping = level >= min;
-        }
-        if keeping {
-            kept.push_str(line);
-        }
-    }
-
-    if saw_any_level {
-        kept
+    // #6547: no `warn!` on either arm. `run_once` decides whether the skip is
+    // news, because only it can see the manifest's record of the last answer.
+    let reason = if size > limits.max_file_bytes {
+        SkipReason::SourceTooLarge
     } else {
-        text.to_string()
-    }
-}
-
-/// Extract the level from a `tracing_subscriber::fmt` line, if it has one.
-///
-/// Scans the first few whitespace-separated tokens with ANSI escapes stripped,
-/// so a colourised log (`fmt` with `with_ansi(true)`, which the console layer
-/// uses) is recognised the same as a plain file appender's output.
-fn line_level(line: &str) -> Option<Level> {
-    let plain = strip_ansi(line);
-    // The level is the second token in the default format; allow a little slack
-    // for a prefixed thread name or span without scanning the whole message.
-    plain
-        .split_whitespace()
-        .take(4)
-        .find_map(|token| Level::parse(token.trim_matches(|c: char| !c.is_ascii_alphabetic())))
-}
-
-/// Remove ANSI CSI escape sequences so level detection survives colour output.
-fn strip_ansi(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        if c != '\u{1b}' {
-            out.push(c);
-            continue;
-        }
-        // ESC [ … <final byte in @-~>. Consume through the terminator.
-        if chars.next() != Some('[') {
-            continue;
-        }
-        for tail in chars.by_ref() {
-            if ('\u{40}'..='\u{7e}').contains(&tail) {
-                break;
+        match stream_file(path, source.level_filter, secrets, limits.max_wire_bytes) {
+            Ok(StreamOutcome::Body {
+                body,
+                sha256_plaintext,
+            }) => {
+                out.files.push(CollectedFile {
+                    relative_key,
+                    body,
+                    sha256_plaintext,
+                    plaintext_len: size,
+                    mtime_unix,
+                    source_path: path.to_path_buf(),
+                });
+                return;
+            }
+            Ok(StreamOutcome::CompressedTooLarge) => SkipReason::CompressedTooLarge,
+            Err(e) => {
+                out.errors.push((path.to_path_buf(), e.to_string()));
+                return;
             }
         }
-    }
-    out
-}
+    };
 
-/// Gzip a body at the default compression level.
-fn gzip(body: &[u8]) -> std::io::Result<Vec<u8>> {
-    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder.write_all(body)?;
-    encoder.finish()
-}
-
-/// Hex SHA-256 of a byte slice.
-fn hex_digest(body: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(body);
-    format!("{:x}", hasher.finalize())
+    out.oversize.push(OversizeFile {
+        path: path.to_path_buf(),
+        relative_key,
+        size,
+        mtime_unix,
+        reason,
+    });
 }
 
 /// Modification time in Unix seconds, or `0` when the platform withholds it.

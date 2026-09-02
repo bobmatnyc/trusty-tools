@@ -24,6 +24,77 @@ use super::graceful_bootstrap::run_graceful_python_bootstrap;
 use super::restore::restore_indexes;
 use crate::commands::prior_index_count::load_prior_index_count;
 
+/// Refusal text for a start that found another daemon holding the port.
+///
+/// Why (#6590): naming the pid was not enough to act on. When `launchctl
+/// bootout` cuts a snapshot flush short, `KeepAlive` respawns the OLD binary,
+/// and every subsequent start refuses against that orphan — the observed
+/// reinstall looped 17 times on a message whose only advice, `trusty-search
+/// stop`, reads as a no-op to an operator who has just run it. The remedy that
+/// worked was a direct SIGTERM, which is bounded by nothing launchd controls
+/// and let the flush finish in 15 s.
+///
+/// What: names the pid, the signal to send it, and the window to allow. Under
+/// launchd the message stops there, because `KeepAlive` starts the replacement
+/// on its own; unsupervised, it also names the re-run. The macOS code-signing
+/// warning is preserved from the message this replaces.
+/// Test: `already_running_message_names_the_pid_and_the_signal`,
+/// `already_running_message_defers_the_restart_to_launchd`.
+/// Refuse to start when a daemon is already live.
+///
+/// Why (#6590): this check used to run only inside the foreground daemon, and a
+/// bare `trusty-search start` forks a detached `--foreground` child with
+/// `Stdio::null()` before reaching it. The child raised the refusal and wrote it
+/// to `/dev/null`, while the parent had already printed "Daemon starting in
+/// background" and exited 0 — so an operator saw success against a daemon that
+/// never started. The parent calls this BEFORE forking now; the foreground path
+/// still calls it for the launchd/systemd case, which never forks.
+/// What: `Ok(())` when `running_pid` is `None`, otherwise an error carrying
+/// [`already_running_message`]. Takes the pid rather than probing for it, so the
+/// refusal is testable without a live daemon on the machine.
+/// Test: `a_bare_start_refuses_before_forking_when_a_daemon_is_running`,
+/// `a_start_proceeds_when_no_daemon_is_running`.
+pub(super) fn refuse_if_already_running(running_pid: Option<u32>) -> Result<()> {
+    let Some(pid) = running_pid else {
+        return Ok(());
+    };
+    tracing::warn!("daemon already running (pid {pid}); refusing to start a second instance");
+    #[cfg(target_os = "macos")]
+    let supervised = crate::commands::service::launchd_agent_loaded();
+    #[cfg(not(target_os = "macos"))]
+    let supervised = false;
+    Err(anyhow::anyhow!(already_running_message(
+        pid,
+        trusty_common::shutdown::termination_grace().as_secs(),
+        supervised
+    )))
+}
+
+pub(super) fn already_running_message(
+    pid: u32,
+    grace_secs: u64,
+    launchd_supervised: bool,
+) -> String {
+    let restart = if launchd_supervised {
+        "launchd's KeepAlive then starts the replacement on its own.".to_string()
+    } else {
+        "Then re-run `trusty-search start`.".to_string()
+    };
+    format!(
+        "Daemon already running (pid {pid}).\n\
+         \n\
+         If you just replaced the binary, this is the OLD image: a truncated \
+         shutdown leaves launchd respawning it, and it keeps the port.\n\
+         \n\
+         Remedy:  kill -TERM {pid}\n\
+         Allow up to {grace_secs}s for its index-snapshot flush to finish — do not \
+         SIGKILL it, that is what loses snapshots. {restart}\n\
+         \n\
+         Replacing the binary while the daemon is running causes macOS to SIGKILL \
+         the process (Code Signature Invalid)."
+    )
+}
+
 /// Main entry point for `trusty-search start`.
 ///
 /// Why: extracted from `main()`. The boot sequence is intricate (lockfile
@@ -97,6 +168,10 @@ pub async fn handle_start(
             tracing::info!("data-dir override: {}", dir.display());
         }
     }
+
+    // #6590: refuse in the PARENT, before the fork below detaches the child's
+    // stdio to /dev/null and discards everything it would have said.
+    refuse_if_already_running(crate::service::running_daemon_pid())?;
 
     // Background self-spawn path: when invoked without `--foreground`, fork a
     // detached copy of ourselves with `--foreground` and return immediately.
@@ -245,15 +320,9 @@ pub async fn handle_start(
     //
     // Issue #87 (Option A): if the lockfile exists and the recorded PID is
     // *alive*, print an actionable warning and exit 1.
-    if let Some(pid) = crate::service::running_daemon_pid() {
-        tracing::warn!("daemon already running (pid {pid}); refusing to start a second instance");
-        anyhow::bail!(
-            "Daemon already running (pid {pid}).\n\
-             Stop it first with `trusty-search stop`, then re-run `trusty-search start`.\n\
-             Replacing the binary while the daemon is running causes macOS to SIGKILL \
-             the process (Code Signature Invalid)."
-        );
-    }
+    // #6590: the bare `start` parent already ran this before forking; the
+    // foreground path reaches it here, which is what launchd and systemd take.
+    refuse_if_already_running(crate::service::running_daemon_pid())?;
 
     // Issue #81: detect orphan daemons whose PIDs are NOT recorded in the
     // lockfile. Reap them now so we don't end up with two daemons fighting

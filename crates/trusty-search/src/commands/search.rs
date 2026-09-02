@@ -37,7 +37,7 @@ pub async fn handle_search(
     top_k: usize,
     full: bool,
 ) -> Result<()> {
-    let (index_id, _warned) = resolve_index(explicit_index);
+    let (index_id, _warned) = resolve_index(explicit_index)?;
     // Forward to the shared `query` implementation. `handle_query` itself
     // prints the index-header line, so we don't repeat it here.
     super::query::handle_query(&Some(index_id), json, query, "*".to_string(), top_k, full).await

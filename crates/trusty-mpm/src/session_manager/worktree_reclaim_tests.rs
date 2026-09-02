@@ -122,6 +122,9 @@ fn classify_blocks_non_admitted_worktree() {
         Admission::MainCheckout,
         Admission::Bare,
         Admission::Locked,
+        // #6561: the harness's own agent-lifetime lock refuses too — it is
+        // reported differently, never more permissively.
+        Admission::HarnessAgentLock,
         Admission::Prunable,
         Admission::Unresolvable,
         Admission::OutsideProject,
@@ -336,15 +339,23 @@ fn classify_blocks_a_live_agents_worktree() {
     );
 }
 
+/// The post-restart shape, with the harness still holding the tree (#5661,
+/// retargeted by #6561; was `classify_blocks_an_agent_the_registry_never_heard_of`).
+///
+/// `DaemonState::delegations` is rebuilt empty at every boot, so "no delegation
+/// names this agent" is what the registry says about an agent that is still
+/// working, and an empty observation on a destructive path is undeterminable,
+/// not absent (ADR-0045). #6561 did not weaken that: it found a SECOND source
+/// for the same fact. The harness locks an agent's worktree for the life of that
+/// agent, and the lock is a file under `.git/worktrees/<id>/` that no daemon
+/// restart clears — so the fixture now states the fact the registry lost, and the
+/// refusal must still stand.
 #[test]
-fn classify_blocks_an_agent_the_registry_never_heard_of() {
-    // The post-restart shape. `DaemonState::delegations` is rebuilt empty at
-    // every boot, so "no delegation names this agent" is what the registry says
-    // about an agent that is still working. An empty observation on a
-    // destructive path is undeterminable, not absent (ADR-0045).
+fn classify_blocks_an_agent_the_harness_still_holds_after_a_restart() {
     let fx = GitWorktreeFixture::new();
     let path = agent_store_worktree(&fx, "forgotten-agent-5661");
     GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-lost-to-a-restart");
+    fx.harness_lock_worktree(&path, "agent-lost-to-a-restart");
     let v = classify(
         &path,
         Admission::Admitted,
@@ -354,7 +365,11 @@ fn classify_blocks_an_agent_the_registry_never_heard_of() {
         &no_agents,
     );
     assert!(!v.is_reclaimable(), "{v:?}");
-    assert!(reason(&v).contains("undeterminable"), "{}", reason(&v));
+    assert!(
+        reason(&v).contains("still reports the harness"),
+        "{}",
+        reason(&v)
+    );
 }
 
 #[test]
@@ -367,7 +382,9 @@ fn classify_records_an_agent_refusal_as_its_own_verdict_kind() {
     //
     // Both registry answers that refuse are pinned, because the post-restart
     // `Unknown` case is the one a fail-open implementation would quietly
-    // reclassify as an ordinary block.
+    // reclassify as an ordinary block. #6561: the `Unknown` row now also holds
+    // the harness lock, which is what carries that refusal since the registry's
+    // silence alone stopped being the whole answer.
     let fx = GitWorktreeFixture::new();
     for (name, probe, agent) in [
         (
@@ -383,6 +400,7 @@ fn classify_records_an_agent_refusal_as_its_own_verdict_kind() {
     ] {
         let path = agent_store_worktree(&fx, name);
         GitWorktreeFixture::stamp_agent_sentinel(&path, agent);
+        fx.harness_lock_worktree(&path, agent);
         let v = classify(
             &path,
             Admission::Admitted,
@@ -562,10 +580,21 @@ fn pr_index_truncated_reply_makes_absent_branches_unknown() {
     );
 }
 
+/// A `gh` call that FAILED reports its reason for every branch it cannot
+/// answer, rather than a cause-free `Unknown` (#6561).
+///
+/// Why: the live failure this issue is about. `gh pr list` exited 4 for all 261
+/// registered worktrees and the survey said only "0 reclaimable" — the reason
+/// existed in `gh`'s stderr and was thrown away.
 #[test]
-fn pr_index_unavailable_makes_every_branch_unknown() {
-    let idx = PrIndex::unavailable();
-    assert_eq!(idx.state_for(Some("anything")), BranchPrState::Unknown);
+fn pr_index_reports_a_failed_lookup_with_its_reason() {
+    let idx = PrIndex::unavailable_because("`gh` exited 4: gh auth login".to_string());
+    assert_eq!(
+        idx.state_for(Some("anything")),
+        BranchPrState::LookupFailed {
+            reason: "`gh` exited 4: gh auth login".to_string()
+        }
+    );
 }
 
 #[test]
@@ -575,9 +604,13 @@ fn pr_index_malformed_json_is_unavailable() {
     // anywhere" and make every branch NoPr).
     for junk in ["", "not json", "{}", "gh: not authenticated"] {
         let idx = PrIndex::from_json(junk, 400);
-        assert_eq!(
-            idx.state_for(Some("feat/x")),
-            BranchPrState::Unknown,
+        // #6561: unparsable output is a FAILED lookup with a reason, no longer
+        // an unexplained `Unknown`.
+        assert!(
+            matches!(
+                idx.state_for(Some("feat/x")),
+                BranchPrState::LookupFailed { .. }
+            ),
             "{junk:?} must not yield a usable index"
         );
     }
@@ -627,7 +660,10 @@ fn pr_index_unrecognised_state_is_not_treated_as_merged() {
 fn gh_command_strips_repository_redirecting_env() {
     // `gh` resolves the repository through git, so an inherited GIT_DIR would
     // aim the PR query at a different repository entirely.
-    let cmd = gh_command(Path::new("/tmp"));
+    let cmd = gh_command(
+        Path::new("/tmp"),
+        &crate::core::gh_identity::GhEnv::default(),
+    );
     let removed: Vec<&str> = cmd
         .get_envs()
         .filter(|(_, v)| v.is_none())
@@ -639,6 +675,28 @@ fn gh_command_strips_repository_redirecting_env() {
             "{key} must be stripped: {removed:?}"
         );
     }
+}
+
+/// Why (#6623): the resolved daemon `gh` identity must reach the actual
+/// `Command` — this is what makes a `GH_CONFIG_DIR` resolved from a project's
+/// config take effect instead of leaving the daemon's bare launchd
+/// environment in place.
+#[test]
+fn gh_command_applies_the_resolved_gh_env() {
+    let env = crate::core::gh_identity::resolve_gh_env(Some(
+        &crate::core::trusty_tools_config::GithubConfig {
+            config_dir: Some(PathBuf::from("/cfg/daemon")),
+            ..Default::default()
+        },
+    ))
+    .expect("ok");
+    let cmd = gh_command(Path::new("/tmp"), &env);
+    let value = cmd
+        .get_envs()
+        .find(|(k, _)| *k == "GH_CONFIG_DIR")
+        .and_then(|(_, v)| v)
+        .expect("GH_CONFIG_DIR must be set");
+    assert_eq!(value, "/cfg/daemon");
 }
 
 // ---------------------------------------------------------------------------
@@ -683,17 +741,23 @@ fn measure_bytes_stops_at_an_expired_deadline() {
 
 #[test]
 fn classify_blocks_a_worktree_trusty_mpm_does_not_own() {
-    // #2919 HIGH: `remove_session_worktree` refuses any path with no ownership
-    // sentinel that is not under `.worktrees/`, so classifying one as
-    // `Reclaimable` made `tm doctor` advertise a command that then failed and
-    // left the directory on disk. The classifier now applies exactly the
-    // predicate the remover applies.
+    // #2919 HIGH: `remove_session_worktree` refuses any path carrying none of
+    // the ownership marks, so classifying one as `Reclaimable` made `tm doctor`
+    // advertise a command that then failed and left the directory on disk. The
+    // classifier applies exactly the predicate the remover applies.
+    //
+    // #6561 moved the harness `.claude/worktrees/` store OUT of this case — it
+    // is now tier 3 of `removal_permitted` — so the unowned shape this asserts
+    // on is a worktree parked somewhere with no sentinel at all.
     let fx = GitWorktreeFixture::new();
-    let parent = fx.repo.join(".claude").join("worktrees");
-    let path = fx.add_worktree_at(&parent, "harness-owned-2919");
+    let path = fx.add_worktree_at(&fx.repo.join("elsewhere"), "unowned-2919");
     let v = classify_no_agent(&path, Admission::Admitted, false, &merged(9), &clean);
     assert!(!v.is_reclaimable(), "{v:?}");
-    assert!(reason(&v).contains("out of scope"), "{}", reason(&v));
+    assert!(
+        reason(&v).contains("not a trusty-mpm-removable worktree"),
+        "{}",
+        reason(&v)
+    );
 }
 
 #[test]
@@ -702,8 +766,7 @@ fn the_remover_really_refuses_what_tm_provisioned_rejects() {
     // than to a copy of its rules. Without this the two can drift silently and
     // the classifier goes back to advertising worktrees that cannot be removed.
     let fx = GitWorktreeFixture::new();
-    let parent = fx.repo.join(".claude").join("worktrees");
-    let path = fx.add_worktree_at(&parent, "remover-refuses-2919");
+    let path = fx.add_worktree_at(&fx.repo.join("elsewhere"), "remover-refuses-2919");
     assert!(
         !tm_provisioned(&path),
         "precondition: the classifier rejects this shape"
@@ -719,7 +782,7 @@ fn the_remover_really_refuses_what_tm_provisioned_rejects() {
 
 #[test]
 fn tm_provisioned_matches_the_removers_own_predicate() {
-    // Both tiers `remove_session_worktree` accepts must be accepted here, or
+    // Every tier `remove_session_worktree` accepts must be accepted here, or
     // the classifier and the remover disagree in the OTHER direction and real
     // reclaimable worktrees are silently skipped forever.
     let fx = GitWorktreeFixture::new();
@@ -732,12 +795,163 @@ fn tm_provisioned_matches_the_removers_own_predicate() {
     let parked = fx.add_worktree_at(&fx.repo.join("elsewhere"), "sentinel-2919");
     assert!(
         !tm_provisioned(&parked),
-        "no sentinel, not under .worktrees/"
+        "no sentinel, not under .worktrees/, not in the harness store"
     );
     GitWorktreeFixture::stamp_reclaimable_sentinel(&parked);
     assert!(
         tm_provisioned(&parked),
         "an ownership sentinel must be accepted wherever the worktree is parked"
+    );
+
+    // #6561 tier 3: the harness's own `isolation: "worktree"` store, which
+    // `agent_worktree_reap` already removes from on every agent exit.
+    let agent_store = fx.add_worktree_at(
+        &fx.repo.join(".claude").join("worktrees"),
+        "agent-aa049179cd3e4e1bb",
+    );
+    assert!(
+        tm_provisioned(&agent_store),
+        "a `.claude/worktrees/agent-*` leaf must be accepted — it is the dominant \
+         creation path in a tm-orchestrated session"
+    );
+}
+
+/// The #6556 critic round, HIGH 3. `removal_permitted`'s third tier lets an
+/// agent-store path reach gate 4, and the first cut of #6561 then let a
+/// SENTINEL-LESS one straight through it — leaving merged-PR and clean-tree as
+/// the only gates in front of a delete. That is the routine window the critic
+/// named: a `version-control` agent squash-merges while the dispatched agent is
+/// still finishing, so the tree is merged and clean and the agent is still in
+/// it. The sentinel is written only after `PostToolUse` teaches an `agent_id`,
+/// so #6556's own lost-`PostToolUse` population lands here with no attribution
+/// at all.
+///
+/// Fails before this round: `classify` returns `Reclaimable { pr: 759 }`.
+#[test]
+fn an_unattributed_agent_store_worktree_is_never_reclaimable() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree_at(
+        &fx.repo.join(".claude").join("worktrees"),
+        "agent-6561unattributed",
+    );
+    // No sentinel of any kind: nothing attributes this tree to an agent and
+    // nothing says whether one is still working in it. Merged and clean, so
+    // gates 5 and 6 both pass and only the ownership gate stands.
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
+    assert!(
+        !v.is_reclaimable(),
+        "an unattributed agent-store tree must never be deleted on merged+clean alone: {v:?}"
+    );
+    assert!(
+        reason(&v).contains("names no owner"),
+        "and the refusal must be the ownership one, naming why: {}",
+        reason(&v)
+    );
+}
+
+/// A merged, clean agent tree the HARNESS HAS RELEASED is reclaimable even
+/// though the delegation registry never heard of its agent (#6561).
+///
+/// This is the issue's headline case. The registry is a `DashMap` rebuilt empty
+/// at every daemon boot, so on a restarted daemon it answers `Unknown` for every
+/// agent — which refused every `.claude/worktrees/agent-*` tree in the store and
+/// produced the reported `0 of 0 measured`. Git's lock is the durable second
+/// source: the harness holds it for the agent's life and releases it when the
+/// agent ends, and no daemon writes or clears it.
+///
+/// Fails before #6561: `classify` refuses with "the delegation registry holds no
+/// record of that agent".
+#[test]
+fn classify_allows_a_merged_agent_tree_the_harness_released() {
+    let fx = GitWorktreeFixture::new();
+    let path = agent_store_worktree(&fx, "agent-6561released");
+    GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-6561released");
+    // No `harness_lock_worktree` call: the harness released this tree when its
+    // agent ended, which is what `git worktree list` now reports.
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
+    assert_eq!(
+        v,
+        ReclaimVerdict::Reclaimable { pr: 759 },
+        "a released, attributed, merged, clean agent tree must be reclaimable"
+    );
+}
+
+/// Git being unaskable is still undeterminable, never released (#6561).
+///
+/// The permit above rests entirely on `Released` being POSITIVE evidence. Its
+/// `Held` complement is `classify_blocks_an_agent_the_harness_still_holds_after_a_restart`;
+/// this is the third arm, where git answers nothing at all.
+#[test]
+fn classify_blocks_an_agent_tree_git_cannot_be_asked_about() {
+    let fx = GitWorktreeFixture::new();
+    let path = agent_store_worktree(&fx, "agent-6561unaskable");
+    GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-6561unaskable");
+    let _restore = deny_all(&path.join(".git"));
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
+    assert!(!v.is_reclaimable(), "two silences are not an answer: {v:?}");
+}
+
+/// A harness-locked agent tree reaches gate 1 as its own verdict KIND, so the
+/// survey can tell the operator it spared an agent (#6561).
+///
+/// Fails before #6561: the verdict is a plain `Blocked` naming the operator's
+/// `git worktree lock`, so `ReclaimSurvey::agent_owned` stays empty and the run
+/// prints `0 of 0` with no mention of the agent it protected.
+#[test]
+fn classify_discloses_a_harness_locked_agent_tree_as_agent_owned() {
+    let v = classify_no_agent(
+        &wt(),
+        Admission::HarnessAgentLock,
+        false,
+        &merged(760),
+        &clean,
+    );
+    assert!(
+        matches!(v, ReclaimVerdict::BlockedByAgent { .. }),
+        "a harness lock must be disclosed as an agent refusal, not an operator one: {v:?}"
+    );
+    assert_eq!(reason(&v), Admission::HarnessAgentLock.reason());
+}
+
+/// The #4091 dirty-work guard, asserted on the agent store specifically: unsaved
+/// work outranks a merged PR there as anywhere. This assertion must never be
+/// relaxed.
+#[test]
+fn a_dirty_agent_store_worktree_is_still_refused() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree_at(
+        &fx.repo.join(".claude").join("worktrees"),
+        "agent-6561dirty",
+    );
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &dirty);
+    assert!(
+        !v.is_reclaimable(),
+        "unsaved work outranks a merged PR, in the harness store as anywhere: {v:?}"
+    );
+}
+
+/// The #5661 refusal for the spelling it was written against — a sentinel FILE
+/// that exists but names no owner. Kept beside the sentinel-LESS case above so
+/// the two spellings are pinned to the same verdict; the first cut of #6561
+/// split them and admitted one.
+#[test]
+fn an_unreadable_agent_sentinel_still_blocks_an_agent_store_worktree() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree_at(
+        &fx.repo.join(".claude").join("worktrees"),
+        "agent-6561garbage",
+    );
+    std::fs::write(
+        path.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE),
+        b"{not json",
+    )
+    .expect("write garbage sentinel");
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
+    assert!(!v.is_reclaimable(), "{v:?}");
+    assert!(
+        reason(&v).contains("names no owner"),
+        "the #5661 reason must still be the one given: {}",
+        reason(&v)
     );
 }
 
@@ -783,10 +997,34 @@ fn pr_index_keeps_a_same_repo_pull_request() {
 fn run_with_timeout_captures_output() {
     let mut cmd = std::process::Command::new("echo");
     cmd.arg("hello");
-    let (ok, out) = run_with_timeout(cmd, std::time::Duration::from_secs(5))
+    let out = run_with_timeout(cmd, std::time::Duration::from_secs(5))
         .expect("a fast command must complete");
-    assert!(ok);
     assert_eq!(out.trim(), "hello");
+}
+
+/// 🔴 #6561 REGRESSION: a failing `gh` must hand back its exit code and its own
+/// first stderr line, not a bare "it did not work".
+///
+/// Why: that is the fact which identifies the fix. `exited 4: … gh auth login`
+/// sends the operator to the daemon's credentials; `gh: command not found`
+/// sends them to PATH. Before this both were the same `None`.
+#[test]
+fn run_with_timeout_reports_the_exit_code_and_stderr() {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.args(["-c", "echo 'gh auth login' >&2; exit 4"]);
+    let err = run_with_timeout(cmd, std::time::Duration::from_secs(5))
+        .expect_err("a non-zero exit must be an error");
+    assert!(err.contains("exited 4"), "{err}");
+    assert!(err.contains("gh auth login"), "{err}");
+}
+
+/// A binary that is not on PATH is its own reason, not a silent unknown (#6561).
+#[test]
+fn run_with_timeout_reports_a_spawn_failure() {
+    let cmd = std::process::Command::new("definitely-not-a-real-binary-6561");
+    let err = run_with_timeout(cmd, std::time::Duration::from_secs(5))
+        .expect_err("an unspawnable command must be an error");
+    assert!(err.contains("could not be run"), "{err}");
 }
 
 #[test]
@@ -798,7 +1036,7 @@ fn run_with_timeout_kills_a_hung_child() {
     cmd.arg("30");
     let started = std::time::Instant::now();
     let result = run_with_timeout(cmd, std::time::Duration::from_millis(300));
-    assert!(result.is_none(), "a timed-out child must report failure");
+    assert!(result.is_err(), "a timed-out child must report failure");
     assert!(
         started.elapsed() < std::time::Duration::from_secs(10),
         "the timeout must actually fire; took {:?}",
@@ -806,8 +1044,14 @@ fn run_with_timeout_kills_a_hung_child() {
     );
 }
 
+/// 🔴 #6561 REGRESSION: a failed per-branch lookup reports the FAILURE, not a
+/// cause-free `Unknown`.
+///
+/// This is the assertion that fails on `origin/main`, where every failure mapped
+/// to `BranchPrState::Unknown` and the survey then counted it in
+/// `pr_state_unknown` alongside genuine detached HEADs.
 #[test]
-fn pr_state_for_branch_maps_a_failed_call_to_unknown() {
+fn pr_state_for_branch_reports_a_failed_call_as_lookup_failed() {
     // Any `gh` failure must block, not read as "this branch has no PR".
     //
     // NOTE on what this does and does not prove: an earlier version of this
@@ -819,10 +1063,60 @@ fn pr_state_for_branch_maps_a_failed_call_to_unknown() {
     // mapping only. `gh_command_passes_no_dash_c_flag` pins the argv, and
     // `pr_index_from_gh_reads_this_repository` proves a real call succeeds.
     let tmp = tempfile::tempdir().expect("tempdir");
-    assert_eq!(
-        pr_state_for_branch(tmp.path(), "feat/whatever"),
-        BranchPrState::Unknown
+    let state = pr_state_for_branch(tmp.path(), "feat/whatever");
+    assert!(
+        matches!(state, BranchPrState::LookupFailed { .. }),
+        "a broken lookup must be distinguishable from an unanswerable one; got {state:?}"
     );
+}
+
+/// 🔴 #6561: a SQUASH-MERGED pull request whose head branch was deleted at merge
+/// still classifies as merged.
+///
+/// Why: the three worktrees the issue names (PRs #6604, #6588, #6573) all sit on
+/// branches deleted from the remote by `--delete-branch`. The pull request keeps
+/// the `headRefName` it was opened from, so `gh pr list --head <branch>
+/// --state all` still answers `MERGED` — the deleted branch was never why they
+/// read unknown. This pins that, so a later change to the `--json` field set
+/// cannot quietly drop `headRefName` and break the only path that resolves them.
+#[test]
+fn pr_index_resolves_a_squash_merged_pr_whose_head_branch_was_deleted() {
+    // The literal reply `gh pr list --head fix/6550-index-id-guard --state all`
+    // returns today, head branch already deleted on the remote.
+    let reply = r#"[{"headRefName":"fix/6550-index-id-guard","isCrossRepository":false,
+"number":6573,"state":"MERGED"}]"#;
+    let idx = PrIndex::from_json(reply, 50);
+    assert_eq!(
+        idx.state_for(Some("fix/6550-index-id-guard")),
+        BranchPrState::Merged { pr: 6573 }
+    );
+}
+
+/// 🔴 #6561: gate 5 refuses a failed lookup and NAMES the reason.
+///
+/// The refusal itself is unchanged (ADR-0045: an undeterminable tree stays
+/// unreclaimable). What changed is that the operator can read why.
+#[test]
+fn classify_blocks_a_failed_lookup_and_names_the_reason() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("lookup-failed-6561");
+    land(&path);
+    let verdict = classify(
+        &path,
+        Admission::Admitted,
+        false,
+        &BranchPrState::LookupFailed {
+            reason: "`gh` exited 4: gh auth login".to_string(),
+        },
+        &clean,
+        &no_agents,
+    );
+    assert!(!verdict.is_reclaimable());
+    let ReclaimVerdict::Blocked { reason } = verdict else {
+        panic!("a failed lookup is an ordinary block, not an agent refusal");
+    };
+    assert!(reason.contains("lookup failed"), "{reason}");
+    assert!(reason.contains("gh auth login"), "{reason}");
 }
 
 /// `gh` has no `-C` flag, and passing one made every call in this module fail
@@ -834,7 +1128,10 @@ fn pr_state_for_branch_maps_a_failed_call_to_unknown() {
 /// distinguishes them.
 #[test]
 fn gh_command_passes_no_dash_c_flag() {
-    let cmd = gh_command(Path::new("/tmp"));
+    let cmd = gh_command(
+        Path::new("/tmp"),
+        &crate::core::gh_identity::GhEnv::default(),
+    );
     let args: Vec<String> = cmd
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
@@ -855,7 +1152,10 @@ fn gh_command_runs_in_the_requested_directory() {
     // The repository is resolved from the working directory, so this IS the
     // repository selection — if it stops being set, every call silently
     // resolves whatever repository the daemon happens to be sitting in.
-    let cmd = gh_command(Path::new("/tmp"));
+    let cmd = gh_command(
+        Path::new("/tmp"),
+        &crate::core::gh_identity::GhEnv::default(),
+    );
     assert_eq!(cmd.get_current_dir(), Some(Path::new("/tmp")));
 }
 
@@ -890,9 +1190,9 @@ fn pr_index_from_gh_reads_this_repository() {
         ".nameWithOwner",
     ]);
     let resolved = match run_with_timeout(probe, std::time::Duration::from_secs(10)) {
-        Some((true, out)) => out.trim().to_string(),
-        _ => {
-            eprintln!("skipping: `gh` cannot resolve a repository here");
+        Ok(out) => out.trim().to_string(),
+        Err(reason) => {
+            eprintln!("skipping: `gh` cannot resolve a repository here — {reason}");
             return;
         }
     };

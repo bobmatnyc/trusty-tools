@@ -1217,6 +1217,8 @@ async fn doctor_endpoint_returns_report() {
         "deployment",
         "skill_staleness",
         "skill_unmanaged",
+        // #6586: a bundled skill an older binary left at a project's own tier.
+        "skill_project_tier",
         "legacy_sources",
         "legacy_overrides",
         "agent_skills",
@@ -2203,6 +2205,7 @@ fn pane_for_gate_test(name: &str, cmd: &str) -> crate::daemon::orphan_gc::PaneIn
         pane_current_command: cmd.to_string(),
         pane_pid: Some(4242),
         pane_id: None,
+        pane_current_path: None,
     }
 }
 

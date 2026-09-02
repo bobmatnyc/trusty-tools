@@ -85,10 +85,30 @@ pub const DEFAULT_ANALYZE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 /// against it — the equality is checked, rather than assumed to have stayed
 /// true.
 ///
-/// One second: the server holds no write buffer. `redb` commits inside each
-/// handler before it answers, so a SIGTERM at any point discards nothing that
-/// was acked; the budget covers the accept loop returning and the socket unlink.
-pub const ANALYZE_SHUTDOWN_FLUSH: Duration = Duration::from_secs(1);
+/// 🔴 **What this actually bounds, precisely (#6601 review).** It is the child's
+/// half of the `sigterm_patience > shutdown_flush` relation, and that relation
+/// governs the ONE path on which this supervisor signals an analyze child: the
+/// spawn-probe timeout in `UdsServiceSupervisor::ensure_running`. A child that
+/// BOUND is detached (see [`SupervisorConfig::with_detached`], #6350) — it is
+/// never entered in the supervisor's population, and every `terminate_child`
+/// call site reads only that population or the doomed queue — so no reap path
+/// can reach a serving analyze server, and this number says nothing about how
+/// long one lives after SIGTERM.
+///
+/// It is therefore NOT the serve loop's shutdown drain. `trusty-analyze`'s
+/// `service::rpc::serve_options` drains on
+/// [`crate::shutdown::plannable_grace`], because the only bounded terminator of
+/// a SERVING analyze process is the OS at logout or shutdown — `trusty-analyze
+/// stop` sends SIGTERM, polls 5 s and then merely reports. Setting the drain to
+/// this budget instead gave up the #6595 guarantee three seconds into a
+/// multi-minute `analyze.review` while averting no SIGKILL at all.
+///
+/// Three seconds is right for what it does bound. The server holds no write
+/// buffer — `redb` commits inside each handler before it answers, so a SIGTERM
+/// discards nothing that was acked — and what a spawn-failure kill must leave
+/// room for is signal delivery, the socket unlink and exit. Three leaves 2 s of
+/// [`ANALYZE_SIGTERM_PATIENCE`]'s 5 s for exactly that.
+pub const ANALYZE_SHUTDOWN_FLUSH: Duration = Duration::from_secs(3);
 
 /// How long to wait for a freshly-spawned analyze server to accept.
 ///
@@ -99,6 +119,11 @@ pub const ANALYZE_SHUTDOWN_FLUSH: Duration = Duration::from_secs(1);
 const ANALYZE_SPAWN_PROBE: Duration = Duration::from_secs(20);
 
 /// SIGTERM-to-SIGKILL patience. Must strictly exceed [`ANALYZE_SHUTDOWN_FLUSH`].
+///
+/// The 2 s margin over the flush budget is what the child spends after its drain
+/// ends: unlinking the socket, dropping its redb stores, and exiting. Raising it
+/// costs every reap — `enforce_limits` waits this out per victim — so it is
+/// sized to that margin rather than to the process grace window.
 const ANALYZE_SIGTERM_PATIENCE: Duration = Duration::from_secs(5);
 
 /// The analyze service's timing budget.

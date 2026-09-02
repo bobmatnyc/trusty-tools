@@ -884,6 +884,60 @@ async fn probe_uds_reports_refused_for_an_absent_socket() {
     );
 }
 
+/// REGRESSION (#6630): trusty-memory's `memory.health` binds `HealthQuery`, a
+/// plain derived `Deserialize` that refuses a `null` params value even though
+/// every field of the struct is `#[serde(default)]` — that attribute governs a
+/// MISSING key inside an object, not a `null` standing in for the object
+/// itself. A request with no `params` field decodes server-side as `Value::
+/// Null`, so a live trusty-memory answered every `tctl` probe with a coded
+/// `invalid_params` error and `stack doctor` printed `health:down` for a
+/// healthy daemon — the exact symptom #6630 reported. `analyze.health` and
+/// `search.health` bind `NoParams` (an `IgnoredAny` deserializer that accepts
+/// anything, `null` included), which is why only trusty-memory was affected.
+///
+/// What: binds a socket, captures the raw request bytes `probe_socket` sends,
+/// and asserts the parsed frame carries a `params` field that is a JSON object
+/// (never absent, never `null`) — the shape a strict handler like
+/// `HealthQuery` can decode. The stub still answers so the call completes.
+/// Test: This is the test.
+#[tokio::test]
+async fn probe_uds_sends_explicit_empty_params_so_a_strict_handler_answers() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = tmp.path().join("sockets").join("memory.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let Ok((mut conn, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buf = vec![0u8; 4096];
+        let n = conn.read(&mut buf).await.unwrap_or(0);
+        let _ = tx.send(buf[..n].to_vec());
+        let reply = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"status\":\"ok\"}}\n";
+        let _ = conn.write_all(reply.as_bytes()).await;
+        let _ = conn.flush().await;
+    });
+
+    let outcome = super::probe_socket(&socket, "memory.health").await;
+    assert!(
+        matches!(outcome, ProbeOutcome::Serving { .. }),
+        "got {outcome:?}"
+    );
+
+    let sent = rx.await.expect("the request frame must be captured");
+    let frame: serde_json::Value =
+        serde_json::from_slice(&sent).expect("the sent frame must be valid JSON");
+    assert!(
+        frame
+            .get("params")
+            .is_some_and(serde_json::Value::is_object),
+        "params must be an explicit object, never absent or null: {frame}"
+    );
+}
+
 /// A short-path data dir for a test that has to BIND the derived socket.
 ///
 /// Why not `test_support::stub_data_dir`: a `sun_path` is 104 bytes on macOS,

@@ -83,7 +83,10 @@ pub async fn run_tick<C: LlmClassifier>(
             // candidate, which respawned sessions the operator had just killed.
             // `is_auto_resumable` reads the recorded stop cause.
             ManagedSessionState::Stopped if cfg.auto_resume && record.is_auto_resumable() => {
-                match mgr.resume(&record.id).await {
+                // #6568: `resume_auto`, not `resume` — the automatic path stamps
+                // the attempt so the next runtime exit can be attributed to it.
+                // `resume` is the operator's entry point and forgives the streak.
+                match mgr.resume_auto(&record.id).await {
                     Ok(_) => {
                         info!(
                             id = %record.id,

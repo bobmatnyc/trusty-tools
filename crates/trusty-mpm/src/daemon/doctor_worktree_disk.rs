@@ -154,15 +154,30 @@ fn build_worktree_disk_check(survey: &ReclaimSurvey) -> DoctorCheck {
             crate::session_manager::worktree_reclaim::PR_INDEX_LIMIT
         ));
     }
+    // #6561: a broken lookup is its own clause, and it names `gh`'s own reason.
+    // "check that `gh` is installed and authenticated" sent operators to
+    // `gh auth status`, which passes in a login shell while the daemon — which
+    // inherits neither `GH_TOKEN` nor `GH_CONFIG_DIR` — still cannot call `gh`.
+    if survey.lookup_failed > 0 {
+        clauses.push_str(&format!(
+            "; the pull-request lookup FAILED for {} worktree(s) — {}",
+            survey.lookup_failed,
+            survey
+                .lookup_failure
+                .as_deref()
+                .unwrap_or("no reason given")
+        ));
+    }
     let window = clauses;
-    if survey.pr_state_unknown == total {
+    if survey.pr_state_unknown + survey.lookup_failed == total {
         return DoctorCheck::new(
             "worktree_disk",
             CheckStatus::Unknown,
             format!(
-                "{measured}{undercount}; pull-request state resolved for NONE of them, \
-                 so nothing could be classified reclaimable — check that `gh` is \
-                 installed and authenticated (`gh auth status`) (#2919)"
+                "{measured}{undercount}{window}; pull-request state resolved for NONE of \
+                 them, so nothing could be classified reclaimable — check that `gh` is \
+                 installed and authenticated for the DAEMON's environment, which \
+                 inherits neither `GH_TOKEN` nor `GH_CONFIG_DIR` (#2919, #6561)"
             ),
         );
     }

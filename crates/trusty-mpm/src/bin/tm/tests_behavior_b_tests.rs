@@ -16,6 +16,9 @@ use crate::cli::{AuthAction, Cli, Command, RepairAction, ServicesAction, Sessctl
 use crate::commands::session::{
     compose_session_instructions, compose_session_instructions_with_roster,
 };
+// #6542: teardown for the tmux sessions the guided-fallback tests cause
+// `fallback_protected` to launch.
+use crate::test_support::tmux_session::{FixtureTmuxSessions, ScratchTmuxSession};
 
 #[test]
 fn cli_parses_attach() {
@@ -1734,6 +1737,11 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
 
     let _repos_root_env = ReposRootEnv::set(repos_root.path());
 
+    // #6542: the fallback launches a REAL tmux session in the worktree it
+    // provisions, and this test never learns its name — the guard claims it by
+    // where its pane sits and kills it on every exit path.
+    let _tmux = fallback_tmux_guard(repos_root.path());
+
     let client = reqwest::Client::new();
     let _result =
         crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", live_dir.path())
@@ -1814,6 +1822,10 @@ async fn guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone
 
     let _repos_root_env = ReposRootEnv::set(&repos_root_path);
 
+    // #6542: same unnamed tmux session as the test above — see
+    // `fallback_tmux_guard`.
+    let _tmux = fallback_tmux_guard(&repos_root_path);
+
     let client = reqwest::Client::new();
     let _result =
         crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", live_dir.path())
@@ -1851,6 +1863,98 @@ async fn guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone
          has no .claude",
         worktree.display()
     );
+}
+
+/// The tmux binary the fallback's session-creation path resolves to.
+///
+/// The guard has to drive the same binary `create_managed_session` did, or it
+/// asks a different tmux server about a session it cannot see.
+fn fallback_tmux_bin() -> String {
+    trusty_mpm::core::tmux::resolve_tmux_binary_or_bare()
+}
+
+/// Kill-on-drop ownership of whatever tmux session the guided fallback launches
+/// under `repos_root` (#6542).
+///
+/// Why: `fallback_protected` provisions a worktree and launches a session named
+/// `tm-<session-uuid truncated>` — a name the test never sees, so
+/// `ScratchTmuxSession` (which owns a name it passed to `new-session`) does not
+/// fit. Before this guard, the two tests below each left one session behind on
+/// every run; 456 accumulated over five days and exhausted the host's
+/// pseudo-terminal pool (#6523).
+/// What: a [`FixtureTmuxSessions`] rooted at the repos-root temp dir, so it
+/// claims exactly the sessions this test's fallback created and nothing a
+/// concurrent suite owns. Construct it BEFORE the `fallback_protected` call —
+/// its snapshot is what separates "new" from "someone else's".
+/// Test: `guided_fallback_leaves_no_tmux_session_behind`.
+fn fallback_tmux_guard(repos_root: &std::path::Path) -> FixtureTmuxSessions {
+    FixtureTmuxSessions::watch(&fallback_tmux_bin(), repos_root)
+}
+
+/// The guided fallback's tmux session does not outlive the test (#6542).
+///
+/// Why: the two tests above assert on the FILESYSTEM — which directory got
+/// `.claude/`, which stayed clean — and both passed while leaking a live tmux
+/// session apiece. Nothing asserted on the session, so nothing noticed.
+/// What: drives the same fixture as
+/// `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`,
+/// then asserts on the SESSION: the fallback must launch one under the fixture
+/// root (otherwise the teardown assertion proves nothing), and dropping the
+/// guard must leave none alive.
+/// Test: this is the test. RED before this commit: a bare run of the two tests
+/// above left `tm-0c31ecd7-bb7e-4389-b` and `tm-b0561168-a6ca-44d9-b` behind,
+/// their panes rooted in the deleted fixture worktrees.
+#[tokio::test]
+#[serial_test::serial]
+async fn guided_fallback_leaves_no_tmux_session_behind() {
+    let tmux = fallback_tmux_bin();
+    if !ScratchTmuxSession::tmux_available(&tmux) {
+        eprintln!("guided_fallback_leaves_no_tmux_session_behind: tmux unavailable, skipping");
+        return;
+    }
+    // #6542: pin the nested-attach branch instead of inheriting it from the
+    // host, or this test asserts on nothing wherever `$TMUX` is unset.
+    let _nested_tmux = NestedTmuxPaneEnv::pin();
+
+    let origin = "https://github.com/test-owner-6542/test-repo-6542.git";
+    let repos_root = tempfile::tempdir().unwrap();
+    let repos_root_path = repos_root.path().canonicalize().unwrap();
+    let base = repos_root_path
+        .join("test-owner-6542")
+        .join("test-repo-6542");
+    fallback_git_repo(&base);
+    fallback_git_remote(&base, origin);
+
+    let live_dir = tempfile::tempdir().unwrap();
+    fallback_git_repo(live_dir.path());
+    fallback_git_remote(live_dir.path(), origin);
+
+    let _repos_root_env = ReposRootEnv::set(&repos_root_path);
+    let guard = fallback_tmux_guard(&repos_root_path);
+
+    let client = reqwest::Client::new();
+    let _result =
+        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", live_dir.path())
+            .await;
+
+    let spawned = guard.spawned();
+    assert!(
+        !spawned.is_empty(),
+        "fixture precondition: the fallback must have launched a tmux session \
+         under {}, or the teardown assertion below proves nothing. \
+         `NestedTmuxPaneEnv::pin` sets $TMUX_PANE so `tmux_attach` takes its \
+         nested branch, fails closed, and leaves the session for this guard — \
+         an empty set means that branch was not taken",
+        repos_root_path.display()
+    );
+    drop(guard);
+    for name in &spawned {
+        assert!(
+            !ScratchTmuxSession::exists(&tmux, name),
+            "session '{name}' outlived the test — this is #6542, the tm-<uuid> \
+             pty leak tracked in #6523"
+        );
+    }
 }
 
 /// A git repository with one empty commit at `path`, created or asserted.
@@ -1913,6 +2017,55 @@ impl Drop for ReposRootEnv {
         match self.prev.take() {
             Some(v) => unsafe { std::env::set_var(key, v) },
             None => unsafe { std::env::remove_var(key) },
+        }
+    }
+}
+
+/// A `$TMUX_PANE` value no live tmux server can resolve (#6542).
+///
+/// Pane ids count up from `%0`, so nine digits is out of reach of any real
+/// server. `pane_tty_for` therefore returns `None` and `switch_client_to` fails
+/// closed without ever running `switch-client` — which also stops this test
+/// retargeting the operator's own terminal when someone runs it from a real
+/// tty inside tmux.
+const UNRESOLVABLE_TMUX_PANE: &str = "%999999999";
+
+/// RAII override of `$TMUX_PANE`, restored on drop (unwind included) (#6542).
+///
+/// Why: the leak `guided_fallback_leaves_no_tmux_session_behind` exists to
+/// catch only happens on the nested-tmux attach branch. With `$TMUX_PANE` set,
+/// `tmux_attach` calls `switch_client_to`, which fails closed and returns
+/// `Ok(AttachOutcome::TargetUnresolved)`; `launch` reads that `Ok` as a
+/// successful attach, disarms its `LaunchSessionGuard`, and the session
+/// survives. With `$TMUX_PANE` unset — every GitHub runner — `tmux_attach`
+/// runs `attach-session`, which exits `open terminal failed: not a terminal`,
+/// so `launch` bails and its own guard reaps the session before the test can
+/// see it. The test inherited that variable from the host, so it passed on the
+/// owner's tmux-hosted shell and panicked on its fixture precondition in CI.
+/// What: sets `$TMUX_PANE` to [`UNRESOLVABLE_TMUX_PANE`] on construction and
+/// restores the previous value (or removes it) on drop. Callers MUST be
+/// `#[serial_test::serial]` — the variable is process-global.
+/// Test: `guided_fallback_leaves_no_tmux_session_behind`.
+struct NestedTmuxPaneEnv {
+    prev: Option<std::ffi::OsString>,
+}
+
+impl NestedTmuxPaneEnv {
+    fn pin() -> Self {
+        let prev = std::env::var_os("TMUX_PANE");
+        // SAFETY: every caller is `#[serial_test::serial]`, so no other test
+        // thread races this set/restore.
+        unsafe { std::env::set_var("TMUX_PANE", UNRESOLVABLE_TMUX_PANE) };
+        Self { prev }
+    }
+}
+
+impl Drop for NestedTmuxPaneEnv {
+    fn drop(&mut self) {
+        // SAFETY: see `pin`.
+        match self.prev.take() {
+            Some(v) => unsafe { std::env::set_var("TMUX_PANE", v) },
+            None => unsafe { std::env::remove_var("TMUX_PANE") },
         }
     }
 }

@@ -243,4 +243,22 @@ pub struct SessionSummary {
     /// (handler integration test, `tests/session_manager_slots.rs`).
     #[serde(default)]
     pub deleted: bool,
+    /// Why the supervisor has stopped auto-resuming this session, if it has
+    /// (#6568).
+    ///
+    /// Why: a parked session looks exactly like an idle stopped one on every
+    /// listing surface — the difference is only that nothing will ever revive
+    /// it. Before this field the only trace was the absence of resume lines in
+    /// a multi-gigabyte log. Carrying the reason on the wire puts it in
+    /// `tm session ls`'s and `tm session status`'s JSON, and in the MCP
+    /// `session_list` / `session_status` tools that pass this shape through.
+    /// What: `Some(<reason>)` exactly when the record's `stop_cause` is
+    /// `ResumeFlapping` — the string comes from
+    /// [`crate::session_manager::SessionRecord::auto_resume_park_reason`], the
+    /// single place the wording lives. `None` for every other record, and
+    /// omitted from the JSON entirely so an older consumer sees no change.
+    /// Test: `summary_carries_the_resume_park_reason` in
+    /// `session_manager::resume_breaker_tests`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_resume_parked: Option<String>,
 }

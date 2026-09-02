@@ -51,7 +51,8 @@ mod corpus_swap;
 mod finish;
 mod finish_teardown;
 mod guard;
-mod hash;
+// #6570: `watch_rescan` reuses the content-hash cache to skip unchanged files.
+pub(crate) mod hash;
 mod hnsw_swap;
 mod orchestrator;
 mod pollers;

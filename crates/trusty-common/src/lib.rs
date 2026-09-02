@@ -228,6 +228,51 @@ pub mod launchd;
 #[cfg(target_os = "macos")]
 pub mod launchd_activate;
 
+/// Pre-bootout verification of the ACTIVE launchd unit's grace window (#6590).
+/// macOS-only, like [`launchd`] itself.
+///
+/// Why: launchd applies the `ExitTimeOut` of the job it has LOADED, and re-reads
+/// the plist only at `bootstrap` — so the corrected window
+/// [`launchd::LaunchdConfig::render_plist`] writes never governs the bootout
+/// that immediately precedes the bootstrap. A host whose loaded unit predates
+/// #4393 therefore still SIGKILLs the daemon 5 s into a 55 s snapshot flush.
+/// What: [`launchd_grace::grace_verdict`] over the window launchd will really
+/// grant, plus [`launchd_grace::quiesce_job`], which stops the process with a
+/// directly-delivered SIGTERM — bounded by nothing launchd controls — so the
+/// bootout finds it already gone.
+/// Test: `cargo test -p trusty-common --features unconditional-only launchd_grace`.
+#[cfg(target_os = "macos")]
+pub mod launchd_grace;
+
+/// Bootout-completion waiting for a live launchd restart (#6618). macOS-only,
+/// like [`launchd`] itself.
+///
+/// Why: `launchctl bootout` returns when the unload is ACCEPTED, not when the
+/// job is gone. A restart that bootstraps immediately afterwards races its own
+/// bootout and launchd refuses it with `Bootstrap failed: 5: Input/output
+/// error`.
+/// What: [`launchd_restart::await_unload`] polls the label out of launchd, and
+/// [`launchd_restart::restart_sequence`] orders the whole bounce around that
+/// wait — reusing [`launchd_grace`]'s quiesce for the short-grace half of the
+/// same window.
+/// Test: `cargo test -p trusty-common --features unconditional-only launchd_restart`.
+#[cfg(target_os = "macos")]
+pub mod launchd_restart;
+
+/// Whether a launchd unit owns the socket an on-demand spawn would bind
+/// (#6619).
+///
+/// Why: a client bridge that spawns its daemon when nothing answers the socket
+/// cannot see launchd. During a bootout/bootstrap window it read the transiently
+/// unserved socket as "nothing is running" and spawned an unsupervised daemon
+/// onto the production path without the plist's environment.
+/// What: [`launchd_claim::socket_owner`] decides from the registration signals,
+/// and [`launchd_claim::launchd_socket_owner`] reads them off the real launchd.
+/// Deliberately NOT macOS-gated, unlike [`launchd`], so cross-platform daemon
+/// guards call it without a `cfg` split — off macOS it answers "no unit".
+/// Test: `cargo test -p trusty-common --features unconditional-only launchd_claim`.
+pub mod launchd_claim;
+
 /// Canonical launchd labels for every trusty-* LaunchAgent (#4919).
 ///
 /// Why: each daemon crate, the installer's mirror table, the Makefiles, and
@@ -691,12 +736,16 @@ pub use slug::slugify_string;
 /// What: Exposes [`index_id::derive_index_id`], [`index_id::resolve_project_root`],
 /// [`index_id::find_git_root`], and [`index_id::identifies_same_path`] — the one
 /// implementation of "do these two paths name the same directory tree?" that
-/// both registration guards route through.
+/// both registration guards route through — plus
+/// [`index_id::refuse_unindexable_root`], the one implementation of "may this
+/// root become an index at all?" that both DERIVATION sites route through
+/// (#6550).
 /// Test: `cargo test -p trusty-common --features unconditional-only --
 /// index_id::tests`.
 pub mod index_id;
 pub use index_id::{
-    derive_checkout_index_id, derive_index_id, find_git_root, identifies_same_path,
+    IndexRootRefusal, derive_checkout_index_id, derive_index_id, find_git_root,
+    identifies_same_path, refuse_unindexable_root, refuse_unindexable_root_against,
     resolve_project_root,
 };
 

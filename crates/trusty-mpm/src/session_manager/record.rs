@@ -273,6 +273,23 @@ pub enum StopCause {
     /// server itself went away, or the daemon restarted and found the session's
     /// tmux target already gone.
     Unexpected,
+    /// The runtime kept exiting within the flap window of its own auto-resume,
+    /// enough times in a row that auto-resume is now PARKED (#6568).
+    ///
+    /// Why: `Unexpected` says "relaunch this", and for seven sessions the
+    /// relaunch succeeded and the runtime was gone again ~60 seconds later —
+    /// 2,170 stops against 2,128 resumes in 48 hours, forever. A repeatedly
+    /// SUCCEEDING resume that restores nothing is not a transient failure, so it
+    /// needs a cause of its own rather than a retry budget layered onto
+    /// `Unexpected`.
+    /// What: written only by
+    /// [`super::SessionManager::mark_runtime_exited_stopped`], only when
+    /// [`super::resume_breaker::evaluate`] returns
+    /// [`super::resume_breaker::BreakerVerdict::Park`]. Read back by
+    /// [`SessionRecord::is_auto_resumable`] (false) and
+    /// [`SessionRecord::auto_resume_park_reason`] (the operator-facing string).
+    /// An operator's own `tm session resume` clears it like any other cause.
+    ResumeFlapping,
 }
 
 /// Full record for a managed session, persisted to disk.
@@ -582,13 +599,43 @@ impl SessionRecord {
     /// `stop_cause_tests.rs`.
     pub fn is_auto_resumable(&self) -> bool {
         matches!(self.state, ManagedSessionState::Stopped)
-            && self.stop_cause != Some(StopCause::Deliberate)
+            // #6568: `ResumeFlapping` joins `Deliberate` here — a session whose
+            // runtime died within the flap window of its own auto-resume K
+            // times in a row is parked, and an automatic path must leave it
+            // down until an operator resumes it by hand.
+            && !matches!(
+                self.stop_cause,
+                Some(StopCause::Deliberate) | Some(StopCause::ResumeFlapping)
+            )
             // #6116: never relaunch a test's session. The reaper stamps a
             // gone-tmux record `Unexpected` when other sessions are live, which
             // is auto-resumable — so without this the supervisor RECREATES the
             // leaked pane, reconcile re-adopts it, and the loop sustains itself
             // (observed three times in one day's daemon log).
             && !self.is_leaked_test_adoption()
+    }
+
+    /// The operator-facing reason auto-resume is parked, if it is (#6568).
+    ///
+    /// Why: "the supervisor stopped resuming this" must be readable somewhere an
+    /// operator looks, not inferable only from the absence of resume lines in a
+    /// 3GB log. This is the one place the wording lives, so the wire summary and
+    /// any future surface cannot describe the same state two ways.
+    /// What: `Some(<reason>)` exactly when `stop_cause` is
+    /// [`StopCause::ResumeFlapping`]; `None` for every other record, including a
+    /// deliberately stopped one — that is an operator's own decision, not a
+    /// circuit-breaker trip.
+    /// Test: `park_reason_is_set_only_for_a_flapping_record` in
+    /// `resume_breaker_tests.rs`.
+    pub fn auto_resume_park_reason(&self) -> Option<&'static str> {
+        match self.stop_cause {
+            Some(StopCause::ResumeFlapping) => Some(
+                "auto-resume parked: the runtime kept exiting within seconds of \
+                 each auto-resume (#6568). Resume it by hand once the cause is \
+                 fixed — `tm session resume <id>` clears the park.",
+            ),
+            _ => None,
+        }
     }
 
     /// Whether this record is an AUTOMATIC adoption of a session in the

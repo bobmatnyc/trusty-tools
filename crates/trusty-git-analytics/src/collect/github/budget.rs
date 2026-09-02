@@ -40,6 +40,43 @@ pub(crate) const MAX_REFERENCE_LOOKUPS: usize = 500;
 /// Total wall-clock one run may spend asleep waiting out GitHub.
 pub(crate) const RATE_LIMIT_SLEEP_BUDGET: Duration = Duration::from_secs(120);
 
+/// Operator override for [`RATE_LIMIT_SLEEP_BUDGET`], in whole seconds.
+///
+/// Why (#6565): the allowance now bounds a whole run rather than one client, so
+/// the same 120 s covers strictly more work than it used to. A long multi-org
+/// sweep that legitimately needs a larger total has no other way to ask for one.
+/// What: `TGA_RATE_LIMIT_SLEEP_BUDGET_SECS`, a positive integer.
+/// Test: `run_sleep_budget_honours_a_valid_override`,
+/// `run_sleep_budget_ignores_junk_overrides`.
+pub(crate) const RATE_LIMIT_SLEEP_BUDGET_ENV: &str = "TGA_RATE_LIMIT_SLEEP_BUDGET_SECS";
+
+/// The total sleep allowance this run should use.
+///
+/// Why: reads the override in the one place that owns the policy, so no caller
+/// re-implements the parse.
+/// What: [`run_sleep_budget_from`] applied to [`RATE_LIMIT_SLEEP_BUDGET_ENV`].
+/// Test: covered through `run_sleep_budget_from`'s tests.
+pub(crate) fn run_sleep_budget() -> Duration {
+    run_sleep_budget_from(std::env::var(RATE_LIMIT_SLEEP_BUDGET_ENV).ok().as_deref())
+}
+
+/// Pure half of [`run_sleep_budget`], over an already-read value.
+///
+/// Why: pure so the parse is testable without mutating a process env shared with
+/// every other test in the binary.
+/// What: a trimmed, positive integer wins; unset, empty, `0`, and unparseable
+/// all fall back to [`RATE_LIMIT_SLEEP_BUDGET`]. A zero allowance would make the
+/// breaker latch on the first rate-limited response, so junk must never produce
+/// one.
+/// Test: `run_sleep_budget_honours_a_valid_override`,
+/// `run_sleep_budget_ignores_junk_overrides`.
+pub(crate) fn run_sleep_budget_from(value: Option<&str>) -> Duration {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .map_or(RATE_LIMIT_SLEEP_BUDGET, Duration::from_secs)
+}
+
 /// Longest single wait honoured, however large `Retry-After` is.
 ///
 /// GitHub answers a drained primary limit with a reset up to an hour out.
@@ -227,6 +264,59 @@ impl FetchBudget {
 impl Default for FetchBudget {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The ONE [`FetchBudget`] a `tga` run shares across every client it builds.
+///
+/// Why (#6565): #6084 gave each client a budget, which bounds a client and not
+/// a run. One `collect` builds several — org discovery, the PR sweep, the
+/// reviewer pass — so the 120 s ceiling was charged that many times over, and
+/// the wall-clock a run could spend asleep scaled with the number of clients
+/// rather than being the fixed bound the constant reads as. Handing every client
+/// a handle to the same budget is what makes the ceiling per-RUN, so a rate
+/// limit that latches during org discovery is already latched when the PR sweep
+/// starts instead of funding a fresh storm.
+///
+/// What: a cheap-to-clone handle over one shared [`FetchBudget`]. Cloning shares
+/// the allowance; constructing a new one does not, which is why construction is
+/// confined to a run's entry point and every other layer takes a handle.
+/// Test: `two_clients_draw_down_one_run_budget`,
+/// `separate_run_budgets_do_not_share_an_allowance`.
+#[derive(Clone)]
+pub struct RunBudget(std::sync::Arc<FetchBudget>);
+
+impl RunBudget {
+    /// A run budget with this run's allowance — see [`run_sleep_budget`].
+    pub fn new() -> Self {
+        Self::with_sleep_budget(run_sleep_budget())
+    }
+
+    /// A run budget with a caller-chosen allowance, so tests can exhaust it
+    /// without sleeping for two minutes.
+    pub fn with_sleep_budget(sleep_budget: Duration) -> Self {
+        Self(std::sync::Arc::new(FetchBudget::with_sleep_budget(
+            sleep_budget,
+        )))
+    }
+
+    /// The shared budget every call on this run charges against.
+    pub(crate) fn shared(&self) -> &FetchBudget {
+        &self.0
+    }
+}
+
+impl Default for RunBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for RunBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunBudget")
+            .field("sleep_budget", &self.0.sleep_budget)
+            .finish_non_exhaustive()
     }
 }
 

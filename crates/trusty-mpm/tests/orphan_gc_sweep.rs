@@ -13,7 +13,7 @@
 use std::sync::Mutex;
 
 use trusty_mpm::daemon::orphan_gc::{
-    AlwaysIdleProbe, ChildLivenessProbe, OrphanGc, PaneInfo, TrackedNames, run_sweep,
+    AlwaysIdleProbe, ChildLivenessProbe, FsCwdProbe, OrphanGc, PaneInfo, TrackedNames, run_sweep,
 };
 use trusty_mpm::session_manager::{ManagedError, ManagedTmuxDriver};
 
@@ -58,6 +58,7 @@ fn pane(name: &str, cmd: &str) -> PaneInfo {
         pane_current_command: cmd.to_string(),
         pane_pid: Some(9999),
         pane_id: None,
+        pane_current_path: None,
     }
 }
 
@@ -86,7 +87,7 @@ fn sweep_reaps_only_untracked_idle_managed_session_after_debounce() {
     let mut gc = OrphanGc::new();
 
     // Pass 1: (d) is a candidate but the debounce must spare it — nothing killed.
-    let reaped1 = run_sweep(&mut gc, &panes, &tracked, &probe, &driver);
+    let reaped1 = run_sweep(&mut gc, &panes, &tracked, &probe, &FsCwdProbe, &driver);
     assert_eq!(reaped1, 0, "no session may be reaped on first observation");
     assert!(
         driver.killed().is_empty(),
@@ -95,7 +96,7 @@ fn sweep_reaps_only_untracked_idle_managed_session_after_debounce() {
     );
 
     // Pass 2: (d) seen orphaned twice in a row → reaped. NOTHING else, ever.
-    let reaped2 = run_sweep(&mut gc, &panes, &tracked, &probe, &driver);
+    let reaped2 = run_sweep(&mut gc, &panes, &tracked, &probe, &FsCwdProbe, &driver);
     assert_eq!(reaped2, 1);
     assert_eq!(
         driver.killed(),
@@ -114,7 +115,14 @@ fn sweep_never_reaps_untracked_active_managed_session() {
     let mut gc = OrphanGc::new();
 
     for _ in 0..5 {
-        run_sweep(&mut gc, &panes, &TrackedNames::default(), &probe, &driver);
+        run_sweep(
+            &mut gc,
+            &panes,
+            &TrackedNames::default(),
+            &probe,
+            &FsCwdProbe,
+            &driver,
+        );
     }
     assert!(
         driver.killed().is_empty(),
@@ -133,7 +141,14 @@ fn sweep_never_reaps_foreign_session() {
     let mut gc = OrphanGc::new();
 
     for _ in 0..5 {
-        run_sweep(&mut gc, &panes, &TrackedNames::default(), &probe, &driver);
+        run_sweep(
+            &mut gc,
+            &panes,
+            &TrackedNames::default(),
+            &probe,
+            &FsCwdProbe,
+            &driver,
+        );
     }
     assert!(
         driver.killed().is_empty(),
@@ -166,7 +181,7 @@ fn sweep_skips_reap_on_degraded_snapshot() {
 
     // Many passes off a degraded snapshot — never a single kill.
     for _ in 0..5 {
-        let reaped = run_sweep(&mut gc, &panes, &degraded, &probe, &driver);
+        let reaped = run_sweep(&mut gc, &panes, &degraded, &probe, &FsCwdProbe, &driver);
         assert_eq!(reaped, 0, "a degraded snapshot must reap nothing");
     }
     assert!(
@@ -195,19 +210,28 @@ fn degraded_pass_resets_debounce_between_trustworthy_passes() {
     let mut gc = OrphanGc::new();
 
     // Pass 1 (trustworthy): first sighting — candidate, not reaped.
-    assert_eq!(run_sweep(&mut gc, &panes, &complete, &probe, &driver), 0);
+    assert_eq!(
+        run_sweep(&mut gc, &panes, &complete, &probe, &FsCwdProbe, &driver),
+        0
+    );
     // Pass 2 (degraded): aborts and clears the debounce history.
-    assert_eq!(run_sweep(&mut gc, &panes, &degraded, &probe, &driver), 0);
+    assert_eq!(
+        run_sweep(&mut gc, &panes, &degraded, &probe, &FsCwdProbe, &driver),
+        0
+    );
     // Pass 3 (trustworthy): debounce was reset, so this is a *first* sighting
     // again — must NOT reap despite the candidate having been seen before.
     assert_eq!(
-        run_sweep(&mut gc, &panes, &complete, &probe, &driver),
+        run_sweep(&mut gc, &panes, &complete, &probe, &FsCwdProbe, &driver),
         0,
         "a degraded pass must restart the two-pass debounce"
     );
     // Pass 4 (trustworthy): now seen orphaned on two consecutive trustworthy
     // passes → finally reaped, proving the gate only *delays*, never breaks, GC.
-    assert_eq!(run_sweep(&mut gc, &panes, &complete, &probe, &driver), 1);
+    assert_eq!(
+        run_sweep(&mut gc, &panes, &complete, &probe, &FsCwdProbe, &driver),
+        1
+    );
     assert_eq!(driver.killed(), vec!["tmpm-d-untracked-idle".to_string()]);
 }
 
@@ -230,12 +254,141 @@ fn sweep_spares_session_with_live_child() {
             &panes,
             &TrackedNames::default(),
             &LiveProbe,
+            &FsCwdProbe,
             &driver,
         );
     }
     assert!(
         driver.killed().is_empty(),
         "a session with a live agent child must be spared, killed: {:?}",
+        driver.killed()
+    );
+}
+
+/// #6118 end to end: a pane running an AGENT whose working directory is gone is
+/// killed by the sweep — but only on the second consecutive observation, and
+/// only when the directory is really absent.
+///
+/// Why: the unit tests prove the classifier; only this one proves the kill
+/// reaches the driver through the real `run_sweep` path with the real
+/// filesystem probe. RED before the fix: `run_sweep` had no cwd input, so this
+/// pane was warned-and-kept forever — 478 of them on the reporting host.
+/// What: creates two directories, points one pane at each, deletes one, sweeps.
+/// Test: this is the test.
+#[test]
+fn sweep_reaps_an_agent_pane_whose_cwd_is_gone_after_debounce() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let gone = tmp.path().join("deleted-worktree");
+    let alive = tmp.path().join("live-worktree");
+    std::fs::create_dir(&gone).expect("create gone");
+    std::fs::create_dir(&alive).expect("create alive");
+
+    let mut zombie = pane("tm-zombie-01", "claude");
+    zombie.pane_current_path = Some(gone.to_string_lossy().to_string());
+    let mut healthy = pane("tm-healthy-01", "claude");
+    healthy.pane_current_path = Some(alive.to_string_lossy().to_string());
+    let panes = vec![zombie, healthy];
+
+    let driver = RecordingDriver::new();
+    let probe = AlwaysIdleProbe;
+    let mut gc = OrphanGc::new();
+
+    // While both directories exist, neither pane is ever a candidate.
+    for _ in 0..3 {
+        let reaped = run_sweep(
+            &mut gc,
+            &panes,
+            &TrackedNames::default(),
+            &probe,
+            &FsCwdProbe,
+            &driver,
+        );
+        assert_eq!(reaped, 0, "an agent pane with a live cwd must be kept");
+    }
+
+    std::fs::remove_dir(&gone).expect("remove");
+
+    // First sighting after the deletion: still spared by the debounce.
+    let first = run_sweep(
+        &mut gc,
+        &panes,
+        &TrackedNames::default(),
+        &probe,
+        &FsCwdProbe,
+        &driver,
+    );
+    assert_eq!(first, 0, "a live foreground process needs two sweeps");
+    assert!(driver.killed().is_empty(), "killed: {:?}", driver.killed());
+
+    // Second consecutive sighting: reaped, and ONLY the zombie.
+    let second = run_sweep(
+        &mut gc,
+        &panes,
+        &TrackedNames::default(),
+        &probe,
+        &FsCwdProbe,
+        &driver,
+    );
+    assert_eq!(second, 1);
+    assert_eq!(driver.killed(), vec!["tm-zombie-01".to_string()]);
+}
+
+/// The #4091-family protection, end to end: a TRACKED session whose cwd is gone
+/// is never touched. Tracking wins before the cwd gate, so a record the store
+/// still owns stays the store's to dispose of.
+#[test]
+fn sweep_never_reaps_a_tracked_session_whose_cwd_is_gone() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    // Deliberately never created — the path is absent from the start.
+    let gone = tmp.path().join("never-existed");
+
+    let mut tracked_pane = pane("tm-tracked-01", "claude");
+    tracked_pane.pane_current_path = Some(gone.to_string_lossy().to_string());
+    let panes = vec![tracked_pane];
+    let tracked = TrackedNames {
+        managed: ["tm-tracked-01".to_string()].into_iter().collect(),
+        ..TrackedNames::default()
+    };
+
+    let driver = RecordingDriver::new();
+    let mut gc = OrphanGc::new();
+    for _ in 0..5 {
+        run_sweep(
+            &mut gc,
+            &panes,
+            &tracked,
+            &AlwaysIdleProbe,
+            &FsCwdProbe,
+            &driver,
+        );
+    }
+    assert!(
+        driver.killed().is_empty(),
+        "a tracked session must never be reaped on cwd evidence, killed: {:?}",
+        driver.killed()
+    );
+}
+
+/// Fail-open check (ADR-0045): a pane whose cwd tmux never reported is kept
+/// forever, no matter how many sweeps run. No evidence is not absence.
+#[test]
+fn sweep_never_reaps_an_agent_pane_with_no_reported_cwd() {
+    let panes = vec![pane("tm-unknown-cwd-01", "claude")];
+    let driver = RecordingDriver::new();
+    let mut gc = OrphanGc::new();
+    for _ in 0..5 {
+        run_sweep(
+            &mut gc,
+            &panes,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &FsCwdProbe,
+            &driver,
+        );
+    }
+    assert!(
+        driver.killed().is_empty(),
+        "no cwd evidence must never become a kill, killed: {:?}",
         driver.killed()
     );
 }

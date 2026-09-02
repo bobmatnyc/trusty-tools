@@ -43,7 +43,7 @@ pub(crate) fn run_post_report_actions(flags: &DoctorFlags) {
         prune_stale_skills_locally();
     }
     if flags.fix_skills {
-        super::doctor_fix_skills::fix_skills_locally(flags.include_frozen);
+        super::doctor_fix_skills::fix_skills_locally(flags.include_frozen, flags.yes);
     }
     if flags.fix {
         run_repairs(flags.yes, flags.include_frozen);
@@ -167,10 +167,11 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
 
 /// Print one repair's worth of steps, with the per-outcome tallies.
 ///
-/// Why: `--fix` and `--quarantine-mcp` produce the same [`RepairStep`] shape
-/// and must render it identically — an operator should not have to learn two
-/// formats, and a refusal in particular must read the same way in both (it is
-/// the safety rule working, not an error).
+/// Why: `--fix`, `--quarantine-mcp`, and (since #6586) `--fix-skills`' project-
+/// tier sweep all produce the same [`RepairStep`] shape and must render it
+/// identically — an operator should not have to learn three formats, and a
+/// refusal in particular must read the same way in all of them (it is the safety
+/// rule working, not an error).
 /// What: one line per step, then the counts, the dry-run hint when anything is
 /// merely planned, and the refusal note when anything was refused. `apply_hint`
 /// is the exact command that applies THIS run — a shared printer that always
@@ -178,7 +179,7 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
 /// would not touch their file.
 /// Test: `core::doctor_repair` and `core::stray_mcp` cover the step values;
 /// this is printing.
-fn print_steps(steps: &[RepairStep], apply: bool, apply_hint: &str) {
+pub(crate) fn print_steps(steps: &[RepairStep], apply: bool, apply_hint: &str) {
     if steps.is_empty() {
         println!("  nothing to repair");
         return;
@@ -244,7 +245,14 @@ fn print_steps(steps: &[RepairStep], apply: bool, apply_hint: &str) {
 /// outcome onto a step. The classification itself is never re-derived here.
 /// Test: `core::skill_repair`'s tests produce every outcome variant.
 fn skill_steps(include_frozen: bool, mode: RepairMode) -> Vec<RepairStep> {
-    let (_origin, outcomes) = super::doctor_fix_skills::skill_repair_outcomes(include_frozen, mode);
+    let backup_root = super::doctor_fix_skills::default_backup_root();
+    // `--fix` deliberately does not run the #6586 sweep, so it defers nothing.
+    let (_origin, outcomes) = super::doctor_fix_skills::skill_repair_outcomes(
+        include_frozen,
+        mode,
+        &backup_root,
+        &std::collections::BTreeSet::new(),
+    );
     outcomes
         .into_iter()
         .map(|o| {

@@ -763,7 +763,6 @@ mod bounded_fetch_tests {
             .await
             .expect_err("a permanent rate limit must not read as `no reviews`");
         assert!(matches!(first, CollectError::Throttled { status: 429, .. }));
-        assert!(client.throttled());
 
         let before = server
             .received_requests()
@@ -787,4 +786,106 @@ mod bounded_fetch_tests {
             "49 further PRs must cost zero requests once the breaker has latched"
         );
     }
+}
+
+/// Why (#6565): #6084's budget bounds a CLIENT, and one `tga collect` builds
+/// several — org discovery, the PR sweep, the reviewer pass. Each owning its own
+/// allowance meant the 120 s ceiling was charged once per client, so the
+/// wall-clock a run could spend asleep scaled with the number of clients rather
+/// than being the fixed bound the constant reads as. This is the assertion that
+/// the allowance is now per-RUN.
+/// What: two clients built from one [`RunBudget`]; the first spends 2 s of a 3 s
+/// allowance and the second is refused a 2 s wait it would have been granted
+/// from a fresh budget. The breaker the refusal latches is then already latched
+/// for the first client too.
+/// Test: itself.
+#[test]
+fn two_clients_draw_down_one_run_budget() {
+    use std::time::Duration;
+
+    use crate::collect::github::budget::RunBudget;
+
+    let cfg = gh(Some("acme/widget"), None);
+    let run = RunBudget::with_sleep_budget(Duration::from_secs(3));
+    let first = GitHubClient::new_for_reviews(&cfg)
+        .expect("client builds")
+        .with_run_budget(&run);
+    let second = GitHubClient::new_for_reviews(&cfg)
+        .expect("client builds")
+        .with_run_budget(&run);
+
+    first
+        .budget
+        .shared()
+        .reserve(Duration::from_secs(2), 429)
+        .expect("2s fits in a 3s run allowance");
+
+    let refused = second.budget.shared().reserve(Duration::from_secs(2), 429);
+    assert!(
+        refused.is_err(),
+        "the second client must draw down the SAME allowance — 1s remains, not a fresh 3s"
+    );
+    assert!(
+        first.budget.shared().tripped_error().is_some(),
+        "a breaker latched by one client must already be latched for the other"
+    );
+}
+
+/// Why: the sharing must come from the handle a run passes down, not from
+/// clients being globally coupled — two independent runs (or a standalone
+/// caller like `tga profile`) must not exhaust each other's allowance.
+/// What: clients built from two different `RunBudget`s each get their own 3 s.
+/// Test: itself.
+#[test]
+fn separate_run_budgets_do_not_share_an_allowance() {
+    use std::time::Duration;
+
+    use crate::collect::github::budget::RunBudget;
+
+    let cfg = gh(Some("acme/widget"), None);
+    let first = GitHubClient::new_for_reviews(&cfg)
+        .expect("client builds")
+        .with_run_budget(&RunBudget::with_sleep_budget(Duration::from_secs(3)));
+    let second = GitHubClient::new_for_reviews(&cfg)
+        .expect("client builds")
+        .with_run_budget(&RunBudget::with_sleep_budget(Duration::from_secs(3)));
+
+    first
+        .budget
+        .shared()
+        .reserve(Duration::from_secs(3), 429)
+        .expect("3s fits");
+    second
+        .budget
+        .shared()
+        .reserve(Duration::from_secs(3), 429)
+        .expect("a separate run keeps its own allowance");
+}
+
+/// Why (#6565): a truncation one client records is a fact about the RUN, so the
+/// ledger has to be shared too — a caller reading notices off a different client
+/// than the one that hit the cap would report the results as complete.
+/// What: a page cap tripped on one client is visible in the other's
+/// `fetch_notices`.
+/// Test: itself.
+#[test]
+fn a_truncation_recorded_by_one_client_is_visible_to_the_other() {
+    use crate::collect::github::budget::RunBudget;
+
+    let cfg = gh(Some("acme/widget"), None);
+    let run = RunBudget::new();
+    let first = GitHubClient::new_for_reviews(&cfg)
+        .expect("client builds")
+        .with_run_budget(&run);
+    let second = GitHubClient::new_for_reviews(&cfg)
+        .expect("client builds")
+        .with_run_budget(&run);
+
+    assert!(second.fetch_notices().is_empty());
+    assert!(first.page_cap_reached("pulls", "acme/widget", super::MAX_PAGES + 1));
+    assert_eq!(
+        second.fetch_notices().len(),
+        1,
+        "the run's truncation ledger is shared, so either client reports it"
+    );
 }

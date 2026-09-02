@@ -276,6 +276,14 @@ impl LaunchdConfig {
         let replaced = previous.is_some();
         self.install()?;
 
+        // #6590: the plist is now correct on disk, but launchd is still running
+        // the OLD job definition — it re-reads the file only at `bootstrap`, and
+        // `bootstrap_and_verify` boots the old job out first. So the termination
+        // below is governed by the PREVIOUS unit's `ExitTimeOut`, which on a
+        // pre-#4393 host is launchd's 5 s default. Stop the daemon ourselves
+        // first when that window is too short; see `guard_short_grace`.
+        self.guard_short_grace(crate::shutdown::TERMINATION_GRACE_SECS);
+
         match self.bootstrap_and_verify() {
             Ok(()) => Ok(Activation::Activated { evicted, replaced }),
             Err(e) => {
@@ -389,6 +397,69 @@ impl LaunchdConfig {
             EvictionOutcome::Evicted
         } else {
             EvictionOutcome::Absent
+        }
+    }
+
+    /// Stop the daemon ourselves when launchd's own grace would cut it short.
+    ///
+    /// Why (#6590): `bootstrap` boots the old job out, and launchd bounds that
+    /// bootout by the `ExitTimeOut` of the job it LOADED — not by the corrected
+    /// plist `install()` just wrote, which it will not read until the bootstrap
+    /// that comes after. A unit loaded from a pre-#4393 plist grants
+    /// [`crate::launchd_grace::LAUNCHD_DEFAULT_EXIT_TIMEOUT_SECS`], so a daemon
+    /// flushing 50 index snapshots was SIGKILLed mid-write and `KeepAlive`
+    /// respawned the OLD binary as an orphan holding the port.
+    ///
+    /// What: reads the window launchd will really grant. When it covers
+    /// `required_secs`, or cannot be read at all, nothing happens — the bootout
+    /// proceeds as before. When it is too short, the daemon is sent SIGTERM
+    /// directly (bounded by nothing launchd controls) and waited for, so the
+    /// bootout that follows unloads an already-exited job. Advisory throughout:
+    /// a quiesce that fails still falls through to the bootout, which is no
+    /// worse than the behaviour this replaces.
+    ///
+    /// #6618: `tctl restart` needs this same guard for the same reason — its
+    /// bootout is bounded by the same loaded `ExitTimeOut` — so
+    /// [`crate::launchd_restart::restart_sequence`] calls THIS, rather than
+    /// growing a second copy. That is why it is crate-visible rather than
+    /// private to this module.
+    ///
+    /// Test: the verdict and the wait are unit-tested in `launchd_grace`; the
+    /// wiring is exercised by `trusty-search service install` and `tctl
+    /// restart`.
+    pub(crate) fn guard_short_grace(&self, required_secs: u64) {
+        use crate::launchd_grace::{GraceVerdict, Quiesce};
+
+        let GraceVerdict::TooShort {
+            active_secs,
+            required_secs,
+        } = self.active_grace_verdict(required_secs)
+        else {
+            return;
+        };
+
+        tracing::warn!(
+            label = %self.label,
+            active_secs,
+            required_secs,
+            "the loaded launchd unit grants less shutdown grace than the daemon \
+             needs; stopping it directly before bootout so its flush is not \
+             SIGKILLed (#6590)"
+        );
+
+        match self.quiesce_before_bootout(required_secs) {
+            Quiesce::NotRunning => {}
+            Quiesce::Exited { waited_secs } => tracing::info!(
+                label = %self.label,
+                waited_secs,
+                "daemon exited cleanly before bootout"
+            ),
+            Quiesce::StillRunning => tracing::warn!(
+                label = %self.label,
+                required_secs,
+                "daemon did not exit within its own grace window; the bootout \
+                 that follows may still be cut short by launchd"
+            ),
         }
     }
 

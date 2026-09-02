@@ -239,6 +239,36 @@ fn checks_code_file() {
 }
 
 #[test]
+fn checks_code_file_rejects_traversal() {
+    // #6605: a `..`-traversal path used to be dropped by the inline reader with
+    // no diagnostic, so its anchor was never validated — a bogus id passed the
+    // gate as `0 error(s)`. It now fails closed at `file:line`, naming the path,
+    // and is counted as rejected rather than resolved.
+    let src = "//! # Spec References\n//! - [`SPEC-X-99~draft`](../../docs/specs/x.md#SPEC-X-99~draft)\ncode();";
+    let scan = checks::check_code_file("crates/x/src/s.rs", src, "rs", &lookup);
+    assert_eq!(scan.checked, 0, "a refused reference resolved nothing");
+    assert_eq!(scan.rejected, 1, "and must be counted as refused");
+    let diag = scan
+        .diagnostics
+        .iter()
+        .find(|d| d.check == "ref-traversal")
+        .expect("the traversal must be reported, never skipped");
+    assert_eq!(diag.line, 2, "the report names the declaring line");
+    assert!(
+        diag.message.contains("../../docs/specs/x.md"),
+        "the report names the offending path: {}",
+        diag.message
+    );
+
+    // A conformant path in the same position is untouched by the change.
+    let ok = "//! # Spec References\n//! - [`SPEC-X-01~draft`](docs/specs/x.md#SPEC-X-01~draft)\ncode();";
+    let ok_scan = checks::check_code_file("crates/x/src/s.rs", ok, "rs", &lookup);
+    assert!(ok_scan.diagnostics.is_empty(), "{:?}", ok_scan.diagnostics);
+    assert_eq!(ok_scan.checked, 1);
+    assert_eq!(ok_scan.rejected, 0);
+}
+
+#[test]
 fn checks_markdown_refs() {
     let md = "---\nspec_refs:\n  - id: SPEC-X-01~draft\n    path: docs/specs/x.md\n    anchor: SPEC-X-01~draft\n---\n# Doc\n";
     let scan = checks::check_markdown_refs("d.md", md, &lookup);
@@ -486,6 +516,51 @@ fn run_clean_tree() {
 /// #5440-followup: the discovery counts above stay healthy when the reference
 /// grammar stops matching, so they cannot tell a real run from one that checked
 /// nothing. This asserts the two counters the floor is built on actually move.
+#[test]
+fn run_counts_rejected_references() {
+    // #6605: a whole-tree run must surface a non-conformant path as an error and
+    // keep it out of the checked totals the scan floor reads.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "docs/specs/README.md",
+        "| DOC | Spec ID | Title | Subsystem |\n|---|---|---|---|\n| DOC-1 | `SPEC-X-01~draft` | [Foo](./foo.md) | x |\n",
+    );
+    write(
+        root,
+        "docs/specs/foo.md",
+        "# DOC-1 — Foo\n\n**Status:** Draft\n**Subsystem:** x\n**Owner:** eng\n**Last-updated:** 2026-01-01\n**Spec ID:** SPEC-X-01~draft\n\n## 1. Section {#SPEC-X-01~draft}\n**ID:** SPEC-X-01~draft\nbody\n",
+    );
+    write(
+        root,
+        "crates/x/src/lib.rs",
+        "//! # Spec References\n//!\n//! - [`SPEC-X-01~draft`](../../../docs/specs/foo.md#SPEC-X-01~draft)\npub fn f() {}\n",
+    );
+
+    let report = run(&LintOptions::new(root)).expect("runs");
+    assert!(
+        !report.is_clean(),
+        "a traversal path must fail the lint, not pass quietly"
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.check == "ref-traversal" && d.line == 3),
+        "expected a ref-traversal at the declaring line: {:?}",
+        report.diagnostics
+    );
+    assert_eq!(
+        report.code_refs_checked, 0,
+        "a refused reference resolved nothing"
+    );
+    assert_eq!(
+        report.code_refs_rejected, 1,
+        "and is counted apart, so it cannot hold the scan floor up"
+    );
+}
+
 #[test]
 fn run_counts_references_checked() {
     let dir = tempfile::tempdir().unwrap();

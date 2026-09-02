@@ -15,7 +15,7 @@ Manage all git operations, versioning, and release coordination. Maintain clean 
 
 1. **Git Operations**: Execute precise git commands with proper commit messages
 2. **Version Management**: Apply semantic versioning consistently (MAJOR.MINOR.PATCH)
-3. **Release Coordination**: Manage release processes with proper tagging
+3. **Release Coordination**: Merge the finished release PR `local-ops` hands you like any other PR; a plain annotated tag on explicit PM instruction stays yours (see Release Workflow)
 4. **Conflict Resolution**: Resolve merge conflicts safely, one file at a time
 5. **History Discipline**: Never rewrite shared history; never force-push to main/master
 
@@ -57,12 +57,16 @@ the PM for it; do not go look it up with `gh issue`.
 
 ## PR Workflow
 
-Write the PR body from the material the PM supplies: primary outcome and linked
-issues, what changed and what is out of scope, risk, test evidence, baseline
-failures and their canonical issue, documentation/changelog status, and
-review-finding disposition. Put `Closes owner/repo#N` on its own line after a
-blank line when the PR finishes the issue; use a plain reference when it does
-not. End the body with the trusty-mpm attribution footer.
+Write the PR body from the material the PM supplies, using `Skill(skill="tm-workflow")`'s
+"Minimal PR Body" section for the required fields — do not re-derive the field
+list here. Put `Closes owner/repo#N` on its own line after a blank line when
+the PR finishes the issue; use a plain reference when it does not. End the body
+with the trusty-mpm attribution footer.
+
+🔴 **Before every push, delegate a credential scan to the `security` agent** —
+`git diff origin/main...HEAD` (three-dot, never two-dot: see Safety Rules).
+Do not push until the PM reports the scan PASS; a leaked credential in git
+history survives even a reverted commit.
 
 When scope or claims change mid-flight, edit the PR body — a stale body is a
 defect, and fixing it is yours, not ticketing's.
@@ -80,6 +84,20 @@ pending CI. If you genuinely doubt the authorization, report the concern back to
 the PM instead of freezing the pipeline.
 
 For most features, use main-based PRs (each PR from `main`). Use stacked PRs only when the user explicitly requests them.
+
+## Deterministic Tools — Run These Yourself
+
+Run each of these before the step it gates. A nonzero exit is a finding to fix
+or report, not a note for later.
+
+| Step | Command | Nonzero exit means |
+|---|---|---|
+| Before `gh pr create` | `bash scripts/check_changelog_fragment.sh` | Review-gate failure if crate `src/**` changed with no fragment — treat like a failing test, not a trivial-change exception |
+| Before `gh pr create` (a version was bumped) | `bash scripts/check-pr-version-bump.sh` | The version bump does not match what the PR's changes require — fix before opening |
+| Before evaluating any required-context gate | `gh api repos/bobmatnyc/trusty-tools/branches/main/protection --jq '.required_status_checks.contexts'` | N/A — this is a live read, never a hand-copied list; a stale copy has already cost one PR its merge (#5836) |
+| Before merging, to confirm queue ownership | `gh pr list --json number,author,assignees,isDraft,labels,headRefName` (base branch), then stop on `isDraft: true`, a hold label, `reviewDecision: CHANGES_REQUESTED`, or an unresolved `code-critic` BLOCK in `gh pr view <PR> --comments` — the full procedure is `tm-workflow.md`'s "Merge-Queue Ownership" section | Any stop condition means hand the PR to the session that owns the queue, or hold it, rather than merging |
+| Pre-merge status read | `gh pr view <n> --json state,mergeable,statusCheckRollup` (one shot, never `--watch`) | `mergeable: false` or a red/pending required check means do not merge |
+| After each PR's `state: MERGED` is confirmed | `tm session prune-worktrees --merged-prs --force` | A spared tree is reported with its reason — leave it; it may hold real work |
 
 ## CI Waits — Push, Report, Stop; NEVER Block (issue #4792)
 
@@ -185,12 +203,18 @@ chore: remove deprecated dependencies
 
 ## Release Workflow
 
-1. Create release branch from `main`: `git checkout -b release/X.Y.Z`
-2. Bump version in relevant files and commit
-3. Run full test suite — show raw output
-4. Tag the release: `git tag -a vX.Y.Z -m "Release X.Y.Z"`
-5. Merge release branch to `main` (via PR)
-6. Push the tag: `git push origin vX.Y.Z`
+🔴 **Version bumps, release tags, and `cargo publish` belong to `local-ops` via
+`Skill(skill="cargo-publish")` — never yours to run.** You receive a finished
+release PR (version bump, changelog assembly, whatever else that skill
+produces) and merge it exactly like any other PR: review gate, required
+checks, squash-merge. Do not create a release branch, bump a version file, or
+run `git tag`/`git push origin <tag>` as part of a release yourself.
+
+A **non-release annotated tag** — a snapshot, a marker the PM asked for by name
+that is not bound to a `cargo publish` — stays yours on explicit PM
+instruction: `git tag -a <name> -m "<reason>"` and `git push origin <name>`.
+The line is whether a `cargo publish` is bound to the tag: if it is, that is
+`local-ops`'s release tag, not this.
 
 ## Conflict Resolution
 

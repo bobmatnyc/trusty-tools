@@ -92,8 +92,103 @@ pub(crate) struct RegisteredWorktree {
     /// "do not remove this", which `git worktree remove` refuses to override
     /// without `--force`.
     pub locked: bool,
+    /// The lock's REASON when git reported one, else `None` (#6561).
+    ///
+    /// Why: a lock is not one thing. The operator's `git worktree lock` is a
+    /// standing veto; the Claude Code harness's own agent-worktree isolation
+    /// also locks, for the life of the dispatched agent, with a reason naming
+    /// that agent. Discarding the reason made both indistinguishable, so a tree
+    /// a live agent was working in was dropped at [`Admission::Locked`] and
+    /// never reached the gate that would have SAID SO — which is half of the
+    /// silent `0 of 0` #6561 reports.
+    /// Test: `parse_worktree_list_reads_locked_with_and_without_reason`,
+    /// `parse_worktree_list_keeps_the_harness_agent_lock_reason`.
+    pub lock_reason: Option<String>,
     /// `true` for the first record — git always lists the main worktree first.
     pub is_main: bool,
+}
+
+/// Does `reason` name the Claude Code harness's own agent-worktree lock (#6561)?
+///
+/// Why: this is the ONE fact that separates the harness's agent-lifetime lock
+/// from an operator's standing veto, and it has to be read from the reason
+/// string because git records nothing else about who locked a worktree. Measured
+/// on this machine (git 2.54.0, Claude Code agent isolation): every live agent's
+/// tree carries `claude agent agent-<id> (pid <n> start <time>)`, and every
+/// finished agent's tree carries no lock at all — the harness releases it when
+/// the agent ends.
+/// What: a case-insensitive `claude agent` prefix test on the trimmed reason.
+/// Deliberately a PREFIX and not a parse: nothing downstream reads the agent id
+/// or the pid out of this string, so recognising the shape is the whole job, and
+/// a reason that merely mentions "claude agent" further along is not matched.
+/// Test: `harness_agent_lock_reason_matches_the_harness_shape`,
+/// `harness_agent_lock_reason_rejects_an_operator_lock`.
+pub(crate) fn is_harness_agent_lock_reason(reason: &str) -> bool {
+    reason
+        .trim_start()
+        .get(..12)
+        .is_some_and(|head| head.eq_ignore_ascii_case("claude agent"))
+}
+
+/// What git can say, right now, about whether the harness holds `path` (#6561).
+///
+/// Why: the delegation registry is a `DashMap` rebuilt empty at every daemon
+/// boot, so after a restart it answers "nothing claims it" for an agent that is
+/// still working — [`super::worktree_ownership::AgentDelegationState::Unknown`],
+/// which ADR-0045 forbids reading as "free". Git's lock does not have that
+/// defect: it is a file under `.git/worktrees/<id>/locked`, written by the
+/// harness when it dispatches an agent into the tree and removed when that agent
+/// ends, and it survives a daemon restart because no daemon writes it. So it is
+/// the durable second source that can answer the question the registry cannot.
+/// What: three answers, and the third is the point. [`Held`](Self::Held) — git
+/// reports a harness agent lock. [`Released`](Self::Released) — git lists the
+/// worktree and reports no lock on it, which is POSITIVE evidence the harness
+/// let go. [`Undeterminable`](Self::Undeterminable) — git could not be asked, or
+/// no longer lists the path; never read as released.
+/// Test: `harness_lock_state_reports_a_harness_locked_tree_held`,
+/// `harness_lock_state_reports_an_unlocked_tree_released`,
+/// `harness_lock_state_of_a_non_worktree_is_undeterminable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HarnessLockState {
+    /// Git reports a lock whose reason names a harness agent.
+    Held,
+    /// Git lists this worktree and reports no lock on it at all.
+    Released,
+    /// Git could not be asked, or does not list this path.
+    Undeterminable,
+}
+
+/// Ask git whether the harness still holds `path` (#6561).
+///
+/// Why: see [`HarnessLockState`]. Resolved from the candidate itself so the
+/// answer comes from the repository that actually registered the worktree.
+/// What: one `git -C <path> worktree list --porcelain`, matched on the
+/// canonicalized path. An operator lock — a lock whose reason is not the
+/// harness's — is reported [`Undeterminable`](HarnessLockState::Undeterminable)
+/// rather than `Released`, because it is not evidence about the harness either
+/// way and must never advance a destructive path.
+/// Test: `harness_lock_state_reports_a_harness_locked_tree_held`,
+/// `harness_lock_state_reports_an_unlocked_tree_released`,
+/// `harness_lock_state_of_an_operator_locked_tree_is_undeterminable`,
+/// `harness_lock_state_of_a_non_worktree_is_undeterminable`.
+pub(crate) fn harness_lock_state(path: &Path) -> HarnessLockState {
+    let Some(registered) = list_registered_worktrees(path) else {
+        return HarnessLockState::Undeterminable;
+    };
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let found = registered
+        .into_iter()
+        .find(|w| std::fs::canonicalize(&w.path).unwrap_or_else(|_| w.path.clone()) == canonical);
+    let Some(record) = found else {
+        return HarnessLockState::Undeterminable;
+    };
+    if !record.locked {
+        return HarnessLockState::Released;
+    }
+    match record.lock_reason.as_deref() {
+        Some(reason) if is_harness_agent_lock_reason(reason) => HarnessLockState::Held,
+        _ => HarnessLockState::Undeterminable,
+    }
 }
 
 /// Parse `git worktree list --porcelain` output into records (#4207).
@@ -123,6 +218,7 @@ pub(crate) fn parse_worktree_list(stdout: &str) -> Vec<RegisteredWorktree> {
                 bare: false,
                 prunable: false,
                 locked: false,
+                lock_reason: None,
                 is_main: out.is_empty(),
             });
             continue;
@@ -141,8 +237,13 @@ pub(crate) fn parse_worktree_list(stdout: &str) -> Vec<RegisteredWorktree> {
             current.bare = true;
         } else if line == "prunable" || line.starts_with("prunable ") {
             current.prunable = true;
-        } else if line == "locked" || line.starts_with("locked ") {
+        } else if line == "locked" {
             current.locked = true;
+        } else if let Some(reason) = line.strip_prefix("locked ") {
+            // #6561: the reason is kept, not discarded — it is the only thing
+            // that tells the harness's agent-lifetime lock from an operator veto.
+            current.locked = true;
+            current.lock_reason = Some(reason.to_string());
         }
     }
     out
@@ -373,6 +474,19 @@ pub(crate) enum Admission {
     Prunable,
     /// The operator ran `git worktree lock` — an explicit removal veto.
     Locked,
+    /// The Claude Code harness holds its own agent-lifetime lock (#6561).
+    ///
+    /// Why a variant of its own rather than [`Locked`](Self::Locked): both are
+    /// refusals, but only one of them is a fact the operator has to be told.
+    /// An operator lock is the operator's own standing decision; a harness lock
+    /// means a DISPATCHED AGENT is working in that tree right now, and folding
+    /// it into `Locked` dropped the candidate at gate 1 of
+    /// `worktree_reclaim::classify` — before the gate that reports a spared
+    /// agent tree ever ran. So `--merged-prs` printed `0 of 0` over a store
+    /// full of agent worktrees and named none of them.
+    /// Test: `scan_separates_a_harness_agent_lock_from_an_operator_lock`,
+    /// `classify_discloses_a_harness_locked_agent_tree_as_agent_owned`.
+    HarnessAgentLock,
     /// The path could not be canonicalized, so nothing about it is comparable.
     Unresolvable,
     /// Registered, but not a strict descendant of the managed project.
@@ -395,6 +509,10 @@ impl Admission {
             Self::MainCheckout => "excluded: the repository's main checkout",
             Self::Prunable => "excluded: git reports the directory is already gone",
             Self::Locked => "excluded: git-locked by the operator",
+            Self::HarnessAgentLock => {
+                "excluded: the harness holds its agent-lifetime lock on this worktree — a \
+                 dispatched agent is still working in it (#6561)"
+            }
             Self::Unresolvable => "excluded: path could not be canonicalized",
             Self::OutsideProject => "excluded: not inside the managed project that registered it",
             Self::OutsideReposRoot => "excluded: outside the managed repos root",
@@ -597,7 +715,18 @@ fn admission_for(
             return Admission::Prunable;
         }
         if wt.locked {
-            return Admission::Locked;
+            // #6561: which KIND of lock, because only one of them names a
+            // dispatched agent the operator must be told about.
+            let harness = wt
+                .lock_reason
+                .as_deref()
+                .is_some_and(is_harness_agent_lock_reason)
+                && super::worktree_ownership::is_harness_agent_worktree(&wt.path);
+            return if harness {
+                Admission::HarnessAgentLock
+            } else {
+                Admission::Locked
+            };
         }
         // #1845 item 8, preserved: a path that cannot be canonicalized is
         // SKIPPED, never proposed. A dangling symlink, a deletion race, an

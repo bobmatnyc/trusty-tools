@@ -121,7 +121,7 @@ trusty-code = { path = "crates/trusty-code", version = "0.5.0" }
 # is the first upload.
 trusty-code-tui = { path = "crates/trusty-code-tui", version = "0.1.0" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.6.0" }
-trusty-common = { path = "crates/trusty-common", version = "0.46" }
+trusty-common = { path = "crates/trusty-common", version = "0.47" }
 # Shared JSON-RPC 2.0 / MCP protocol primitives, extracted from
 # `trusty_common::mcp` by ADR-0040 (#5803).
 trusty-mcp = { path = "crates/trusty-mcp", version = "0.1.2" }
@@ -411,21 +411,30 @@ aws-credential-types   = { version = "1.2" }
 # `fs` is re-enabled explicitly because dropping the defaults also drops
 # `LocalFileSystem`, which the `file://` destination and every hermetic test need.
 #
-# PINNED TO 0.13, NOT 0.14, TO KEEP THE DUPLICATE RATCHET AT ITS BASELINE.
-# 0.14.0 swapped three transitive pins at once, and each one lands as a second
-# copy of a crate the workspace already resolves:
+# PINNED TO 0.14, NOT 0.13, BECAUSE 0.13 CARRIES A VULNERABLE quick-xml.
+# object_store 0.13.2 wants quick-xml ^0.39, and quick-xml 0.39.4 carries
+# RUSTSEC-2026-0194 (quadratic run time on duplicate start-tag attributes) and
+# RUSTSEC-2026-0195 (unbounded namespace-declaration allocation in `NsReader`),
+# both 7.5 high, both fixed only in 0.41.0. `cargo audit` and `cargo deny check
+# advisories` — pre-publish Gates 2 and 3 — hard-fail on either one. 0.13 is the
+# end of its line: 0.13.2 is the newest 0.13.x on crates.io, so no patch release
+# moves it off 0.39. Only the object_store major chooses, and 0.14.1 wants
+# quick-xml ^0.41, which the workspace already resolves for calamine, plist and
+# trusty-search.
+#
+# The price is three duplicate versions, all semver-incompatible majors that no
+# `cargo update --precise` can unify:
 #   reqwest ^0.12 -> ^0.13   (the whole workspace, async-openai, teloxide-core,
 #                             hf-hub and reqwest-eventsource are all on 0.12)
 #   md-5    ^0.10 -> ^0.11   (lopdf holds 0.10)
 #   crc-fast (new)           (pulls spin 0.10; ring holds spin 0.9)
-# All three are semver-incompatible majors, so no `cargo update --precise` can
-# unify them — only the object_store major chooses. 0.13.2 needs none of them,
-# and the drain uses no 0.14-only API: AmazonS3Builder, AwsCredential,
-# LocalFileSystem, path::Path, ObjectMeta, CredentialProvider and the
-# NotFound/Unauthenticated variants all predate it. Staying on 0.13 also keeps a
-# second reqwest/hyper/rustls stack out of every binary. Revisit when the
-# workspace itself moves to reqwest 0.13. See #6549.
-object_store = { version = "0.13", default-features = false, features = ["aws", "fs"] }
+# That raises the duplicate ratchet from 84 to 86 and puts a second
+# reqwest/hyper/rustls stack in every binary that enables `log-drain`. A real
+# advisory outranks a duplicate count, so the ratchet baseline moves instead.
+# The reqwest duplicate collapses when the workspace itself moves to reqwest
+# 0.13; md-5 and spin need lopdf and ring to move. See #6549 and
+# scripts/deny-duplicate-baseline.txt.
+object_store = { version = "0.14", default-features = false, features = ["aws", "fs"] }
 # Cheaply-cloneable reference-counted byte buffer. `object_store` already
 # resolves it (its `PutPayload` is built from `Bytes`), so declaring it direct
 # adds no new crate to the lockfile — it only lets `LogDestination::put` name

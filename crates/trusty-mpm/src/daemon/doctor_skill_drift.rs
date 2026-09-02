@@ -191,7 +191,7 @@ fn report(
         parts.push(format!(
             "{} drifted and FROZEN — hand-edited after deployment, so `tm install` will \
              deliberately skip them and they stay stale ({}); re-deploy with \
-             `tm doctor --fix-skills --include-frozen` (backs each file up first)",
+             `tm doctor --fix-skills --include-frozen --yes` (backs each file up first)",
             frozen.len(),
             summarise(&frozen)
         ));
@@ -302,13 +302,13 @@ fn drift_remedy(label: &str) -> &'static str {
         "operator home" => "REPAIRABLE by `tm install`",
         "managed config" => {
             "`tm install` does NOT write this tier — it is refreshed on managed-session \
-             bootstrap, or repair it now with `tm doctor --fix-skills`"
+             bootstrap, or repair it now with `tm doctor --fix-skills --yes`"
         }
         "project" => {
             "`tm install` does NOT write this tier — it is refreshed when a managed session \
-             is next prepared for this project, or repair it now with `tm doctor --fix-skills`"
+             is next prepared for this project, or repair it now with `tm doctor --fix-skills --yes`"
         }
-        _ => "repairable with `tm doctor --fix-skills`",
+        _ => "repairable with `tm doctor --fix-skills --yes`",
     }
 }
 

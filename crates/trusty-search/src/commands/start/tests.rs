@@ -2258,3 +2258,87 @@ async fn swap_back_real_hardware_kills_sidecar_past_max_restarts() {
         search_resp.status()
     );
 }
+
+/// Why (#6590): a bare `trusty-search start` forks a detached `--foreground`
+/// child with `Stdio::null()` and returns, and the already-running check used to
+/// run only inside that child. The child's refusal went to `/dev/null` while the
+/// parent printed "Daemon starting in background" and exited 0, so an operator
+/// saw success against a daemon that never started. The parent runs the check
+/// itself now, and this is the gate that says so.
+/// What: with a live pid, the check REFUSES, and the error carries the same
+/// remedy text `already_running_message` renders.
+/// Test: itself.
+#[test]
+fn a_bare_start_refuses_before_forking_when_a_daemon_is_running() {
+    let err = super::daemon::refuse_if_already_running(Some(86880))
+        .expect_err("a live daemon must refuse a second start");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Daemon already running (pid 86880)"),
+        "the parent must raise the refusal, not swallow it: {msg}"
+    );
+    assert!(
+        msg.contains("kill -TERM 86880"),
+        "the remedy must survive into the parent's error: {msg}"
+    );
+}
+
+/// Why: the refusal must fire only against a live daemon — an empty probe is the
+/// ordinary first start, which has to proceed to the fork.
+/// What: `None` returns `Ok`.
+/// Test: itself.
+#[test]
+fn a_start_proceeds_when_no_daemon_is_running() {
+    assert!(
+        super::daemon::refuse_if_already_running(None).is_ok(),
+        "no running daemon means nothing to refuse"
+    );
+}
+
+/// Why (#6590): the refusal this asserts is what an operator reads while a
+/// launchd-respawned orphan holds the port. The pre-fix text named the pid and
+/// then advised `trusty-search stop` — which is what they had already tried.
+/// The remedy that worked was a direct SIGTERM allowed to run its full flush.
+/// What: the message names the pid, the signal, and the grace window, and warns
+/// against SIGKILL.
+/// Test: itself.
+#[test]
+fn already_running_message_names_the_pid_and_the_signal() {
+    let msg = super::daemon::already_running_message(86880, 60, false);
+    assert!(msg.contains("86880"), "must name the pid: {msg}");
+    assert!(
+        msg.contains("kill -TERM 86880"),
+        "must name the signal to send that pid: {msg}"
+    );
+    assert!(
+        msg.contains("60s"),
+        "must name the window the flush needs: {msg}"
+    );
+    assert!(
+        msg.contains("do not SIGKILL"),
+        "SIGKILL is what loses the snapshots: {msg}"
+    );
+    assert!(
+        msg.contains("re-run `trusty-search start`"),
+        "unsupervised, nothing restarts the daemon but the operator: {msg}"
+    );
+}
+
+/// Why: under `KeepAlive` the operator must NOT be told to re-run `start` —
+/// launchd brings the replacement up itself, and a manual start races it into
+/// the very "already running" refusal this message is about.
+/// What: the launchd-supervised variant names launchd and omits the re-run.
+/// Test: itself.
+#[test]
+fn already_running_message_defers_the_restart_to_launchd() {
+    let msg = super::daemon::already_running_message(86880, 60, true);
+    assert!(msg.contains("kill -TERM 86880"), "{msg}");
+    assert!(
+        msg.contains("KeepAlive"),
+        "must say what restarts it: {msg}"
+    );
+    assert!(
+        !msg.contains("re-run `trusty-search start`"),
+        "a manual start races launchd's own respawn: {msg}"
+    );
+}

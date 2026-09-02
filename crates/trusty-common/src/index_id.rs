@@ -18,12 +18,16 @@
 //! [`derive_index_id`] turns a project root into its index id (the path
 //! basename, preserved verbatim for backward-compatibility with already-indexed
 //! projects). [`identifies_same_path`] answers "do these two paths name the same
-//! directory tree?" for every registration guard that has to compare one. No
-//! global state; pure functions.
+//! directory tree?" for every registration guard that has to compare one.
+//! [`refuse_unindexable_root`] answers the question that has to come FIRST —
+//! may this root become an index at all? — because the basename rule cannot
+//! tell a project root from `$HOME` (#6550). No global state; pure functions,
+//! save for the one home-directory lookup.
 //!
 //! Test: `cargo test -p trusty-common --features unconditional-only --
 //! index_id::tests` covers basename derivation, the git-root walk, the
-//! no-marker fallback, and same-tree identity across case variants.
+//! no-marker fallback, same-tree identity across case variants, and the
+//! unindexable-root refusals.
 
 use std::path::{Path, PathBuf};
 
@@ -215,6 +219,84 @@ pub fn identifies_same_path(a: &Path, b: &Path) -> bool {
         Some(same) => same,
         None => a == b,
     }
+}
+
+/// Why a resolved root must never become a trusty-search index (#6550).
+///
+/// Why: [`resolve_project_root`] falls back to the START path when no `.git`
+/// ancestor exists and [`derive_index_id`] then takes its basename, so a
+/// registration handed `/Users/masa` produced index `masa` — a well-formed id
+/// naming the operator rather than any project. The derivation cannot detect
+/// that itself: a basename looks equally plausible for a real project root and
+/// for a directory that identifies no project at all. So the caller refuses
+/// before it registers or pins one. trusty-mpm's `AutoInitRefusal` refuses
+/// `git init` in the same two directories for the same reason.
+/// What: the two directories that never name a project.
+/// Test: `refuse_unindexable_root_refuses_the_home_directory`,
+/// `refuse_unindexable_root_refuses_the_filesystem_root`,
+/// `refuse_unindexable_root_permits_an_ordinary_project_root`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IndexRootRefusal {
+    /// The root is the operator's home directory.
+    HomeDirectory,
+    /// The root is the filesystem root.
+    FilesystemRoot,
+}
+
+impl std::fmt::Display for IndexRootRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::HomeDirectory => "the operator's home directory",
+            Self::FilesystemRoot => "the filesystem root",
+        })
+    }
+}
+
+/// Should `root` be refused as a trusty-search index root (#6550)?
+///
+/// Why: see [`IndexRootRefusal`]. Two crates ask this question — trusty-common's
+/// [`crate::search_index::ensure_project_indexed_reporting`] before it registers,
+/// and trusty-search's `detect_project` before it derives — so per this
+/// workspace's common-entry-point rule it is one implementation here.
+/// What: resolves the home directory through `dirs::home_dir` and delegates to
+/// [`refuse_unindexable_root_against`]. `None` means the root is indexable.
+/// Test: `refuse_unindexable_root_refuses_the_filesystem_root`, plus the
+/// caller-side `ensure_project_indexed_refuses_the_real_home_directory` and
+/// `detect_project_refuses_the_real_home_directory`.
+#[must_use]
+pub fn refuse_unindexable_root(root: &Path) -> Option<IndexRootRefusal> {
+    refuse_unindexable_root_against(root, dirs::home_dir().as_deref())
+}
+
+/// [`refuse_unindexable_root`] with `home` supplied by the caller.
+///
+/// Why: the process-wide home directory is the one input a test cannot vary
+/// safely — `set_var("HOME")` races every other thread in the binary — so the
+/// decision is a pure function of its two arguments and the wrapper above owns
+/// the lookup. Same split as trusty-mpm's `plan_auto_init`.
+/// What: `FilesystemRoot` when `root` has no parent (`/`, and the empty path);
+/// `HomeDirectory` when `root` and `home` name one directory tree per
+/// [`identifies_same_path`], which sees through a symlinked `$HOME` and through
+/// APFS case-insensitivity. `None` otherwise. A `home` of `None` — a stripped
+/// environment with no resolvable home — refuses nothing beyond the root, since
+/// there is no directory to compare against.
+/// Test: `refuse_unindexable_root_refuses_the_home_directory`,
+/// `refuse_unindexable_root_refuses_the_filesystem_root`,
+/// `refuse_unindexable_root_permits_an_ordinary_project_root`,
+/// `refuse_unindexable_root_without_a_home_still_refuses_the_root`.
+#[must_use]
+pub fn refuse_unindexable_root_against(
+    root: &Path,
+    home: Option<&Path>,
+) -> Option<IndexRootRefusal> {
+    if root.parent().is_none() {
+        return Some(IndexRootRefusal::FilesystemRoot);
+    }
+    if home.is_some_and(|home| identifies_same_path(root, home)) {
+        return Some(IndexRootRefusal::HomeDirectory);
+    }
+    None
 }
 
 /// Compare `a` and `b` by `(dev, ino)`, or `None` when either cannot be stat'd.
@@ -470,6 +552,70 @@ mod tests {
 
         assert!(identifies_same_path(&gone, &gone));
         assert!(!identifies_same_path(&gone, &other));
+    }
+
+    /// #6550, the defect itself: `/Users/masa` has no `.git`, so
+    /// `resolve_project_root` returns it unchanged and `derive_index_id` names
+    /// the index after the operator. This is the guard that stops it.
+    #[test]
+    fn refuse_unindexable_root_refuses_the_home_directory() {
+        let home = scratch_dir("home");
+        fs::create_dir_all(&home).unwrap();
+
+        assert_eq!(
+            derive_index_id(&home),
+            home.file_name().unwrap().to_string_lossy(),
+            "the basename rule is what produces the wrong id"
+        );
+        assert_eq!(
+            refuse_unindexable_root_against(&home, Some(&home)),
+            Some(IndexRootRefusal::HomeDirectory)
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A path with no final component derives the empty id, which callers
+    /// already treated as "no index" — the refusal states the reason instead of
+    /// leaving each caller to infer it from an empty string.
+    #[test]
+    fn refuse_unindexable_root_refuses_the_filesystem_root() {
+        assert_eq!(
+            refuse_unindexable_root_against(Path::new("/"), None),
+            Some(IndexRootRefusal::FilesystemRoot)
+        );
+        assert_eq!(
+            refuse_unindexable_root(Path::new("/")),
+            Some(IndexRootRefusal::FilesystemRoot)
+        );
+    }
+
+    /// The guard has to stay usable: an ordinary checkout under the home
+    /// directory is refused nowhere.
+    #[test]
+    fn refuse_unindexable_root_permits_an_ordinary_project_root() {
+        let home = scratch_dir("home-with-project");
+        let project = home.join("code/acme-api");
+        fs::create_dir_all(&project).unwrap();
+
+        assert_eq!(refuse_unindexable_root_against(&project, Some(&home)), None);
+        assert_eq!(refuse_unindexable_root(&project), None);
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A stripped environment resolves no home directory. That must not turn
+    /// the guard off for the filesystem root, and must not refuse a real root.
+    #[test]
+    fn refuse_unindexable_root_without_a_home_still_refuses_the_root() {
+        assert_eq!(
+            refuse_unindexable_root_against(Path::new(""), None),
+            Some(IndexRootRefusal::FilesystemRoot)
+        );
+        assert_eq!(
+            refuse_unindexable_root_against(Path::new("/w/repos/acme-api"), None),
+            None
+        );
     }
 
     #[test]

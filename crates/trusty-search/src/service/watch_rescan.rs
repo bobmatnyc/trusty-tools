@@ -21,6 +21,15 @@
 //! all restore a file's old mtime, so an mtime filter can miss exactly the
 //! writes this module exists to catch.
 //!
+//! What the pass DOES narrow is the work it does per file, not which files it
+//! looks at (#6570). Every walked file is still read from disk and fingerprinted
+//! with the same SHA-256 the reindex pipeline uses, so nothing is trusted from
+//! file metadata. A file whose content bytes are byte-identical to what the
+//! index already holds skips the tree-sitter parse, the embed, and the redb
+//! commit — the pass keeps full-tree coverage and drops the cost that made an
+//! overflow expensive. Measured before this: 22 passes in 48h, each reporting
+//! `files_reindexed=17284 chunks_indexed=183348` on an unchanged tree.
+//!
 //! Two limits are worth stating plainly rather than leaving to be discovered.
 //! The walk uses [`WalkOptions::default`], so an index registered with
 //! `follow_links: true` does not get its symlinked subtrees reconciled here —
@@ -87,6 +96,15 @@ pub struct RescanStats {
     /// out and the watch loop reports a non-zero value at `warn` rather than
     /// letting it disappear into a `debug` line.
     pub files_unreadable: usize,
+    /// Files the walk read and fingerprinted, whose content was byte-identical
+    /// to what the index already holds, so nothing was re-parsed or committed
+    /// for them (#6570).
+    ///
+    /// Why: this is the number that separates "the overflow found real work" —
+    /// what a rescan is for — from "the overflow found nothing", which is what
+    /// every one of the 22 observed passes actually found. Reported beside
+    /// `files_reindexed` so the log line says which of the two happened.
+    pub files_unchanged: usize,
 }
 
 impl RescanStats {
@@ -147,7 +165,8 @@ pub enum RescanError {
 /// documents for leaving `index_files_batch*` ungated.
 ///
 /// Test: `rescan_reconcile_indexes_files_written_during_the_gap`,
-/// `rescan_reconcile_drops_files_deleted_during_the_gap`.
+/// `rescan_reconcile_drops_files_deleted_during_the_gap`,
+/// `rescan_reconcile_skips_files_whose_content_did_not_change`.
 pub async fn reconcile_after_rescan(
     index_id: &IndexId,
     canonical_root: &Path,
@@ -159,6 +178,13 @@ pub async fn reconcile_after_rescan(
     let mut stats = RescanStats::default();
     let mut live: HashSet<PathBuf> = HashSet::with_capacity(walked.len());
 
+    // #6570: the same per-index content-hash cache the reindex pipeline skips
+    // unchanged files with. Warmed from the durable corpus when this process
+    // has not populated it yet, so the FIRST overflow after a daemon restart is
+    // already cheap rather than only the second.
+    let hashes = crate::service::reindex::hash::hashes_for(index_id);
+    warm_hashes_from_corpus(indexer, &hashes).await;
+
     // #3049: the reconcile is a writer, so it takes this index's teardown-lock
     // read side for the whole pass, exactly as `handle_modified` does.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(index_id).await;
@@ -166,6 +192,7 @@ pub async fn reconcile_after_rescan(
     for batch in walked.chunks(RECONCILE_BATCH) {
         let mut payload: Vec<(String, String)> = Vec::with_capacity(batch.len());
         let mut recorded: Vec<(PathBuf, Vec<String>)> = Vec::with_capacity(batch.len());
+        let mut fingerprints: Vec<(PathBuf, String)> = Vec::with_capacity(batch.len());
 
         for abs in batch {
             let content = match crate::core::extract::read_content(abs).await {
@@ -181,11 +208,22 @@ pub async fn reconcile_after_rescan(
             // Same relative key `handle_modified` records, so the two paths
             // never disagree about what a file is called in the corpus.
             let rel = watcher_relative_path(canonical_root, raw_root, abs);
+            let key = PathBuf::from(&rel);
+            // #6570: the file was still read and hashed, so this is a decision
+            // about its CONTENT, not about its mtime. `live` is populated either
+            // way — a skipped file is present on disk and must never look like a
+            // deletion to `sweep_deleted`.
+            let fingerprint = crate::service::reindex::hash::hash_content(&content);
+            if hashes.get(&key).is_some_and(|h| *h == fingerprint) {
+                stats.files_unchanged += 1;
+                live.insert(key);
+                continue;
+            }
             let (chunks, _entities) = chunk_ast(&rel, &content);
             let ids: Vec<String> = chunks.iter().map(|c| c.id.clone()).collect();
-            let key = PathBuf::from(&rel);
             live.insert(key.clone());
-            recorded.push((key, ids));
+            recorded.push((key.clone(), ids));
+            fingerprints.push((key, fingerprint));
             payload.push((rel, content));
         }
 
@@ -209,6 +247,11 @@ pub async fn reconcile_after_rescan(
         for (key, ids) in recorded {
             indexed_files.record(key, ids).await;
         }
+        // #6570: recorded only after the batch committed, so a failed batch
+        // cannot leave a hash claiming content the index does not hold.
+        for (key, fingerprint) in fingerprints {
+            hashes.insert(key, fingerprint);
+        }
     }
 
     stats.files_removed =
@@ -222,6 +265,47 @@ pub async fn reconcile_after_rescan(
     }
 
     Ok(stats)
+}
+
+/// Populate an empty content-hash cache from the index's durable corpus (#6570).
+///
+/// Why: the in-process cache is per-daemon-lifetime, and `spawn_reindex` is the
+/// only thing that warms it today. A daemon that warm-booted an index and then
+/// took an FSEvents overflow before any reindex ran would see an empty cache and
+/// re-parse the whole tree — the exact cost this skip exists to remove, paid on
+/// the first overflow after every restart.
+///
+/// What: no-op unless the cache is empty for this index, so a cache the reindex
+/// pipeline already populated is never re-read and a cache this pass just filled
+/// is never overwritten. An index with no durable corpus (BM25-only, tests) and
+/// an unreadable hash table both leave the cache empty, which costs a full pass
+/// and is correct — the cache is an optimisation whose miss penalty is the old
+/// behaviour.
+///
+/// Test: `rescan_reconcile_warms_the_hash_cache_from_the_corpus`.
+async fn warm_hashes_from_corpus(
+    indexer: &Arc<RwLock<CodeIndexer>>,
+    hashes: &dashmap::DashMap<PathBuf, String>,
+) {
+    if !hashes.is_empty() {
+        return;
+    }
+    let Some(corpus) = indexer.read().await.corpus_store() else {
+        return;
+    };
+    match tokio::task::spawn_blocking(move || corpus.load_file_hashes()).await {
+        Ok(Ok(entries)) => {
+            for (path, hash) in entries {
+                hashes.insert(PathBuf::from(path), hash);
+            }
+        }
+        Ok(Err(err)) => {
+            tracing::debug!(%err, "rescan reconcile: no persisted file hashes to warm from");
+        }
+        Err(err) => {
+            tracing::debug!(%err, "rescan reconcile: file-hash warm task did not complete");
+        }
+    }
 }
 
 /// Drop chunks for tracked files that the walk did not find and that are gone

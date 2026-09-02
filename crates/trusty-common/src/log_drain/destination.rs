@@ -128,6 +128,22 @@ pub trait LogDestination: Send + Sync + fmt::Debug {
 
     /// List objects under `prefix`, capped at [`LIST_LIMIT`] entries.
     async fn list(&self, prefix: &str) -> Result<Vec<ObjectMeta>, DrainError>;
+
+    /// Stable, filesystem-safe identity of this destination for local state.
+    ///
+    /// Why: a skip decision recorded against one destination says nothing about
+    /// another. The local manifest cache is stored under this string, so
+    /// switching buckets can no longer reuse the record written for the
+    /// previous one (#6548). It belongs on the DESTINATION rather than in a
+    /// caller-supplied config field because an id the caller passes in can
+    /// drift from the destination it names, and that drift is the bug again.
+    ///
+    /// What: any value that differs whenever two destinations could hold
+    /// different objects, and that is safe as a single path segment.
+    /// [`ObjectStoreDestination`] returns [`DestinationUri::cache_namespace`].
+    ///
+    /// Test: `super::tests::run_once_reuploads_when_the_destination_changes`.
+    fn cache_namespace(&self) -> &str;
 }
 
 /// The `object_store`-backed destination: `s3://` and `file://`.
@@ -154,6 +170,8 @@ pub struct ObjectStoreDestination {
     /// than failing. Nothing is lost: `Content-Encoding` exists to tell an HTTP
     /// client the body is gzipped, and a local destination has no HTTP client.
     supports_attributes: bool,
+    /// `DestinationUri::cache_namespace` for the URI this was built from (#6548).
+    cache_namespace: String,
 }
 
 impl fmt::Debug for ObjectStoreDestination {
@@ -186,6 +204,9 @@ impl ObjectStoreDestination {
     /// - [`DrainError::Credentials`] when the AWS chain yields no region.
     /// - [`DrainError::Transport`] when the S3 client cannot be constructed.
     pub async fn connect(uri: &DestinationUri) -> Result<Self, DrainError> {
+        // #6548: derived here, from the URI, so no caller can supply an id that
+        // disagrees with the destination it is naming.
+        let cache_namespace = uri.cache_namespace();
         match uri {
             DestinationUri::File { path } => {
                 std::fs::create_dir_all(path).map_err(|source| DrainError::Io {
@@ -201,13 +222,14 @@ impl ObjectStoreDestination {
                     prefix: String::new(),
                     label: format!("file://{}", path.display()),
                     supports_attributes: false,
+                    cache_namespace,
                 })
             }
             DestinationUri::S3 {
                 bucket,
                 prefix,
                 region,
-            } => Self::connect_s3(bucket, prefix, region.as_deref()).await,
+            } => Self::connect_s3(bucket, prefix, region.as_deref(), cache_namespace).await,
         }
     }
 
@@ -217,6 +239,7 @@ impl ObjectStoreDestination {
         bucket: &str,
         prefix: &str,
         region_override: Option<&str>,
+        cache_namespace: String,
     ) -> Result<Self, DrainError> {
         let label = format!("s3://{bucket}/{prefix}");
 
@@ -262,6 +285,7 @@ impl ObjectStoreDestination {
             prefix: prefix.to_string(),
             label,
             supports_attributes: true,
+            cache_namespace,
         })
     }
 
@@ -380,6 +404,10 @@ impl LogDestination for ObjectStoreDestination {
             }
         }
         Ok(out)
+    }
+
+    fn cache_namespace(&self) -> &str {
+        &self.cache_namespace
     }
 }
 

@@ -44,6 +44,11 @@ Widen the scope when the change is wider, not by default:
 every narrow change depend on the whole workspace turns unrelated flakes into
 false failures.
 
+🔴 **Editing `trusty-common`?** Its default feature set is empty, so a bare
+`cargo test -p trusty-common` is a compile error. Run
+`scripts/test_trusty_common_lanes.sh` instead of the four-command bar above —
+it runs every feature lane the crate actually needs covered.
+
 ### Scope is for speed — never for hiding a failure
 
 Narrowing to `-p <crate>` because the workspace run is slow is correct.

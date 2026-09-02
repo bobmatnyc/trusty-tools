@@ -29,7 +29,7 @@
 //!
 //! Test: `super::tests` — `dispatch_*` and `stream_*`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -59,6 +59,21 @@ use super::wire::{
 struct StreamOptIn {
     #[serde(default)]
     stream: bool,
+}
+
+/// The method name alone, read back off a frame (#6621).
+///
+/// Why it is a second parse rather than a value threaded out of [`RpcRouter::
+/// dispatch_streaming`]: that function answers with an [`RpcOutcome`], and
+/// widening it to carry the classification would change the signature every
+/// caller of it already uses. The parse costs one pass over a frame the server
+/// has already read into memory, and is paid ONLY by a router that registers at
+/// least one liveness method — see [`RpcRouter::frame_is_liveness`].
+///
+/// Test: `frame_is_liveness_reads_the_method_name_off_the_frame`.
+#[derive(Deserialize)]
+struct MethodName {
+    method: String,
 }
 
 /// One method's implementation.
@@ -177,6 +192,10 @@ pub struct RpcRouter {
     methods: BTreeMap<String, Arc<dyn RpcMethod>>,
     streams: BTreeMap<String, Arc<dyn RpcStreamMethod>>,
     fallback: Option<Arc<dyn RpcFallback>>,
+    /// Names whose answers must not restart an idle window (#6621). Held
+    /// separately from `methods` so marking a name is independent of how its
+    /// handler was registered — including through a [`RpcFallback`].
+    liveness: BTreeSet<String>,
 }
 
 impl std::fmt::Debug for RpcRouter {
@@ -186,6 +205,7 @@ impl std::fmt::Debug for RpcRouter {
         f.debug_struct("RpcRouter")
             .field("methods", &self.method_names().collect::<Vec<_>>())
             .field("streams", &self.stream_names().collect::<Vec<_>>())
+            .field("liveness", &self.liveness_names().collect::<Vec<_>>())
             .field("fallback", &self.fallback.is_some())
             .finish()
     }
@@ -216,6 +236,84 @@ impl RpcRouter {
         Fut: std::future::Future<Output = Result<Resp, RpcError>> + Send + 'static,
     {
         self.method(name, typed_method::<Req, Resp, F, Fut>(call))
+    }
+
+    /// Mark `name` as a LIVENESS method: answering it does not count as
+    /// activity for an idle-exit policy (#6621).
+    ///
+    /// Why: an on-demand service exits after an idle window, and "idle" is
+    /// measured from the last ANSWERED request. A monitor that dials a health
+    /// method on a poll loop therefore re-arms that window on every poll and the
+    /// process never exits — `trusty-console` polls `analyze.health` every 15s
+    /// against a 600s window, and the process it pinned lived 46 hours. Marking
+    /// the method is what tells the accept loop the answer carried no work.
+    ///
+    /// What: records the NAME. The handler is registered exactly as it was —
+    /// this only classifies. It is deliberately a separate call from
+    /// [`method`]/[`typed`] so a name served through a [`fallback`] can be
+    /// marked too, and so the classification is a visible line in the router
+    /// definition rather than a string match buried in the serve loop.
+    ///
+    /// 🔴 Mark only methods whose answer is pure liveness — a status, a version,
+    /// a reachability flag. A method that does the caller's work must never be
+    /// marked: the service would exit under a client that is genuinely using it.
+    ///
+    /// [`method`]: RpcRouter::method
+    /// [`typed`]: RpcRouter::typed
+    /// [`fallback`]: RpcRouter::fallback
+    ///
+    /// Test: `serve_until_idle_ignores_a_registered_liveness_method`,
+    /// `liveness_names_are_sorted_and_separate_from_the_method_table`.
+    pub fn mark_liveness(mut self, name: impl Into<String>) -> Self {
+        self.liveness.insert(name.into());
+        self
+    }
+
+    /// Register a liveness method over the caller's own types — [`typed`]
+    /// composed with [`mark_liveness`] (#6621).
+    ///
+    /// [`typed`]: RpcRouter::typed
+    /// [`mark_liveness`]: RpcRouter::mark_liveness
+    pub fn typed_liveness<Req, Resp, F, Fut>(self, name: impl Into<String>, call: F) -> Self
+    where
+        Req: DeserializeOwned + Send + 'static,
+        Resp: Serialize + Send + 'static,
+        F: Fn(Req) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Resp, RpcError>> + Send + 'static,
+    {
+        let name = name.into();
+        self.typed::<Req, Resp, F, Fut>(name.clone(), call)
+            .mark_liveness(name)
+    }
+
+    /// The names marked as liveness, in sorted order (#6621).
+    ///
+    /// A service asserts its own classification against this — see
+    /// `trusty-analyze`'s `rpc_health_is_registered_as_a_liveness_method`.
+    pub fn liveness_names(&self) -> impl Iterator<Item = &str> {
+        self.liveness.iter().map(String::as_str)
+    }
+
+    /// Whether `frame` names a method marked with [`mark_liveness`] (#6621).
+    ///
+    /// Why here rather than in the accept loop: the classification belongs to
+    /// the router registration, so the loop asks a question instead of matching
+    /// a string it would have to keep in step with every service.
+    /// What: `false` without a second glance when no name is marked — every
+    /// router that predates #6621 — so the parse is paid only where it decides
+    /// something. An unparseable frame is not liveness: it is about to be
+    /// refused, and a refusal is not activity the loop credits either way.
+    ///
+    /// [`mark_liveness`]: RpcRouter::mark_liveness
+    ///
+    /// Test: `frame_is_liveness_reads_the_method_name_off_the_frame`,
+    /// `frame_is_liveness_is_false_for_a_router_that_marks_nothing`.
+    pub(super) fn frame_is_liveness(&self, frame: &[u8]) -> bool {
+        if self.liveness.is_empty() {
+            return false;
+        }
+        serde_json::from_slice::<MethodName>(frame)
+            .is_ok_and(|named| self.liveness.contains(&named.method))
     }
 
     /// Register a streaming `handler` under `name`, replacing any previous

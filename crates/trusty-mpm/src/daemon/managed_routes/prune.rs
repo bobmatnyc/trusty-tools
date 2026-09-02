@@ -335,6 +335,13 @@ pub(crate) async fn prune_worktrees_core(
                         "reclaimable_bytes": o.survey.reclaimable_bytes,
                         "total_bytes": o.survey.total_bytes,
                         "pr_state_unknown": o.survey.pr_state_unknown,
+                        // #6561: without these three, `0 reclaimable` and
+                        // "the `gh` call failed for every worktree" are the
+                        // same reply. The renderer prints them beside the
+                        // reclaimable count.
+                        "not_inspected": o.survey.not_inspected,
+                        "lookup_failed": o.survey.lookup_failed,
+                        "lookup_failure": o.survey.lookup_failure,
                     }),
                     Err(e) => {
                         // A panicked pass reclaimed nothing; say so rather than

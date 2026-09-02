@@ -22,7 +22,12 @@ name = "trusty-memory"
 # requirement here could not resolve. 0.25.4 was tagged but never published, so
 # this is the version that reaches crates.io. No public item was removed or
 # changed.
-version = "0.25.5"
+# 0.25.6 (#6600, #6601): patch — the BM25 exit flush is bounded by
+# `trusty_common::shutdown::CLEANUP_RESERVE` so a slow flush still lets the UDS
+# socket unlink run, and one stderr line takes one ring slot with a bounded exit
+# flush. Internal to `transport::uds` and `bm25_lane`; no public item was
+# removed or changed.
+version = "0.25.6"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
@@ -98,7 +103,7 @@ trusty-mcp = { workspace = true }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
 # supplies the bind, the peer check, the framing and the accept loop, and
 # `uds::stream_client` the reader `memory.chat` needs. It replaces
 # `axum-server`, which was here for the retired HTTP listener.
-trusty-common = { path = "../trusty-common", version = "0.46", default-features = false, features = ["memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config", "palace-resolve", "codex-config", "uds"] }
+trusty-common = { path = "../trusty-common", version = "0.47", default-features = false, features = ["memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config", "palace-resolve", "codex-config", "uds"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-memory (single-owner-per-binary); the
@@ -190,7 +195,7 @@ serial_test = { workspace = true }
 # `memory-rpc` (#6286): `tests/uds_consumer_contract.rs` drives the SHARED
 # client against a real daemon on a temp socket — the one place the two halves
 # of this migration are proven to agree.
-trusty-common = { path = "../trusty-common", version = "0.46", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
+trusty-common = { path = "../trusty-common", version = "0.47", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
 chrono = { workspace = true }
 # #6555: `tests/uds_consumer_contract.rs` calls `tctl`'s real
 # `probe_daemon_http` against this daemon's real router. Every other arm hands

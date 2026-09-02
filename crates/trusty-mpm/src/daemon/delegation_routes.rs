@@ -66,6 +66,7 @@ use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
 use crate::daemon::error::DaemonError;
 use crate::daemon::state::DaemonState;
+use crate::daemon::state::sessions::SharedTreeQuestion;
 
 /// Request body of [`shared_tree_dispatch_route`].
 ///
@@ -214,9 +215,22 @@ pub fn granted_worktree_op(
         && str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool)
         && isolation_separates_working_tree(dispatch_isolation(input));
 
-    let (names, claimed) = state.claim_shared_tree_dispatch(&cwd, exclude, eligible, |s| {
-        crate::daemon::services::delegation_tracker::record_granted_isolation(s, session, payload);
-    });
+    // #6556: always `Dispatch`, and NOT derived from `eligible`. Every caller of
+    // this route is deciding whether to admit a dispatch —
+    // `evaluate_granted_worktree` denies on a non-empty answer — and `eligible`
+    // is false here whenever the grant cannot be recorded, which is exactly when
+    // the deny still has to see an occupant.
+    let (names, claimed) = state.claim_shared_tree_dispatch(
+        &cwd,
+        exclude,
+        eligible,
+        SharedTreeQuestion::Dispatch,
+        |s| {
+            crate::daemon::services::delegation_tracker::record_granted_isolation(
+                s, session, payload,
+            );
+        },
+    );
     Ok(writers_response(&names, claimed))
 }
 
@@ -280,18 +294,31 @@ pub fn shared_tree_dispatch_op(
     // daemon's policy call, shared with the guard through one classifier.
     // ADR-0056: `blocked_by_shared_tree`, not `shares_the_callers_tree` — the
     // guard's admission question, so the two halves stay one policy.
-    let eligible = str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool)
+    let is_dispatch = str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool);
+    let eligible = is_dispatch
         && dispatch_agent(input)
             .is_some_and(|agent| blocked_by_shared_tree(agent, dispatch_isolation(input)));
+    // #6556: this route serves BOTH questions. `tm hook` posts here for a
+    // `Bash` payload too — that is the ADR-0049 documents-only commit and the
+    // ADR-0048 HEAD-move query — and those must not hear a record #6556
+    // reconciled, or the commit they exist to unblock stays denied. The tool
+    // name is the discriminator, not `eligible`: an isolated or read-only
+    // dispatch is still a dispatch.
+    let question = if is_dispatch {
+        SharedTreeQuestion::Dispatch
+    } else {
+        SharedTreeQuestion::HeadWrite
+    };
 
-    let (names, claimed) = state.claim_shared_tree_dispatch(&cwd, exclude, eligible, |s| {
-        crate::daemon::services::delegation_tracker::observe(
-            s,
-            session,
-            HookEvent::PreToolUse,
-            payload,
-        );
-    });
+    let (names, claimed) =
+        state.claim_shared_tree_dispatch(&cwd, exclude, eligible, question, |s| {
+            crate::daemon::services::delegation_tracker::observe(
+                s,
+                session,
+                HookEvent::PreToolUse,
+                payload,
+            );
+        });
 
     Ok(writers_response(&names, claimed))
 }

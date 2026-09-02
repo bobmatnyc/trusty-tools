@@ -38,7 +38,7 @@
 //!   `engine.handle_input`.
 //!
 //! # Spec References
-//! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 7 deliverable (§5, Slice 7) and Q4 (mixed routing), Q6 (inline pickers).
+//! - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 7 deliverable (§5, Slice 7) and Q4 (mixed routing), Q6 (inline pickers).
 
 use tokio::sync::mpsc::UnboundedSender;
 

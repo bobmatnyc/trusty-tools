@@ -630,12 +630,16 @@ async fn a_declined_pane_is_reapable_by_the_orphan_gc() {
             pane_current_command: "sh".into(),
             pane_pid: None,
             pane_id: None,
+            pane_current_path: None,
         },
         &TrackedNames {
             managed,
             ..Default::default()
         },
         &AlwaysIdleProbe,
+        // #6118: this pane is already reapable on idleness alone, so the cwd
+        // gate must not be what carries the assertion.
+        &crate::daemon::orphan_gc::FsCwdProbe,
     );
     assert_eq!(
         decision,

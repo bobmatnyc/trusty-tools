@@ -423,7 +423,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_thirty_two_checks() {
+async fn run_doctor_produces_thirty_seven_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -446,7 +446,12 @@ async fn run_doctor_produces_thirty_two_checks() {
     // thirty-one); issue #3605 adds `base_clone` (thirty-one → thirty-two);
     // issue #5007 adds `session_store` and issue #6469 adds `tmux_options`
     // (thirty-two → thirty-four); issue #6529 adds `pty_headroom` and issue
-    // #6535 adds `log_drain` (thirty-four → thirty-six).
+    // #6535 adds `log_drain` (thirty-four → thirty-six); issue #6586 adds
+    // `skill_project_tier` (thirty-six → thirty-seven).
+    //
+    // The test NAME had drifted four additions behind the tally above by the
+    // time #6586 landed — it still read `thirty_two`. Renaming it is part of
+    // adding a check, not optional bookkeeping.
     // #1905's stale-skill cleanup is deliberately NOT a `run_doctor` probe
     // — see the `run_doctor` doc.
     let report = run_doctor(None, None, &[], None).await;
@@ -465,6 +470,8 @@ async fn run_doctor_produces_thirty_two_checks() {
         "deployment",
         "skill_staleness",
         "skill_unmanaged",
+        // #6586: a bundled skill an older binary left at a project's own tier.
+        "skill_project_tier",
         "legacy_sources",
         "legacy_overrides",
         "agent_skills",

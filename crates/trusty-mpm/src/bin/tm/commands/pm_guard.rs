@@ -78,6 +78,19 @@
 //! in the file to pierce an automatic-marker exemption; see that call
 //! site's comment for why it must never be routed through [`evaluate_tool`]
 //! instead.
+//! **Destructive-root deletion guard (issue #4031):** immediately after the
+//! worktree-tmp guard, and ahead of the same two exemptions,
+//! [`crate::commands::pm_guard_bash::evaluate_destructive_delete_command`]
+//! denies `rm`/`rmdir`/`unlink`/`find … -delete` when the resolved target is a
+//! filesystem root (`/`, `/root`, `/Users/<name>`, `$HOME`), a repository
+//! root, a `.git` directory, or a `.claude/worktrees`/`.worktrees` entry — a
+//! TARGET-PATH classifier in the same shape as the worktree-tmp guard above,
+//! not a verb-name enumerator. It denies every caller, PM included, because
+//! none of those targets is ever legitimate; ordinary cleanup elsewhere
+//! (`rm stale.txt`, `cargo clean`, `git clean -fd`) is untouched, and neither
+//! is `git worktree remove` (governed by #5791 below) or `git branch -D`
+//! (never restricted). See `pm_guard_bash::destructive_delete` for the full
+//! denylist and its residual bypasses.
 //! **Main-checkout destructive-git guard (ADR-0037):** immediately after the
 //! worktree-tmp guard, and ahead of the same two exemptions,
 //! [`crate::commands::pm_guard_bash::evaluate_main_checkout_destructive_command`]
@@ -191,9 +204,10 @@ use std::path::{Path, PathBuf};
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, read_stdin_hook_payload};
 use crate::commands::pm_guard_bash::{
     CommitVerdict, SHELL_EDIT_REASON, docs_commit_deny_reason, evaluate_bash_command,
-    evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
-    evaluate_worktree_add_command, evaluate_worktree_remove_command, extract_shell_edit_target,
-    head_move_deny_reason, main_checkout_head_move,
+    evaluate_destructive_delete_command, evaluate_main_checkout_commit_command,
+    evaluate_main_checkout_destructive_command, evaluate_worktree_add_command,
+    evaluate_worktree_remove_command, extract_shell_edit_target, head_move_deny_reason,
+    main_checkout_head_move,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_cost;
@@ -378,6 +392,25 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         if let Some(reason) = evaluate_worktree_add_command(command, &hook_cwd) {
+            audit_denied_tool(url, session_id, tool_name, reason).await;
+            println!("{}", build_pretooluse_deny_response(reason));
+            return Ok(());
+        }
+        // ABSOLUTE guard (issue #4031) — the same placement, and for the same
+        // structural reason, as the worktree-tmp guard directly above: an
+        // agent with script drift can `rm -rf` another session's worktree, or
+        // a filesystem root, just as easily as it could provision a worktree
+        // under /tmp, so a rule reachable only after Guard 1/4 would be a
+        // no-op for exactly the calling pattern (a dispatched agent) it exists
+        // to catch. Unlike the sibling `evaluate_worktree_remove_command`
+        // below (PM-exempt, agent-only), this denies EVERY caller — the PM
+        // included — because none of its denylisted targets (a filesystem
+        // root, the repo root, a `.git` directory, a worktree root) is ever
+        // legitimate for anyone. See `pm_guard_bash::destructive_delete` for
+        // the target-path classifier and what stays allowed (ordinary file
+        // cleanup, `cargo clean`, `git clean -fd`, and — untouched by this
+        // rule entirely — `git worktree remove` and `git branch -D`).
+        if let Some(reason) = evaluate_destructive_delete_command(command, &hook_cwd) {
             audit_denied_tool(url, session_id, tool_name, reason).await;
             println!("{}", build_pretooluse_deny_response(reason));
             return Ok(());

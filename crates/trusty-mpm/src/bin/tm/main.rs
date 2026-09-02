@@ -62,6 +62,13 @@ mod tests_behavior_a;
 #[path = "install_policy_tests.rs"]
 mod install_policy_tests;
 
+// #6441: parse-layer coverage for the bare `tm <github-url>` form. Its own
+// file rather than `tests.rs` because the `infer_subcommands` /
+// `external_subcommand` precedence it pins is one cohesive claim.
+#[cfg(test)]
+#[path = "tests_behavior_bare_run_tests.rs"]
+mod tests_behavior_bare_run;
+
 #[cfg(test)]
 #[path = "tests_behavior_b_tests.rs"]
 mod tests_behavior_b;
@@ -290,58 +297,16 @@ async fn main() -> anyhow::Result<()> {
     ) {
         #[cfg(feature = "daemon")]
         {
-            // File logging: write daily-rotated logs to ~/.trusty-mpm/logs/ in
-            // addition to the existing stderr stream.
-            let log_dir = dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("cannot resolve home directory"))?
-                .join(".trusty-mpm")
-                .join("logs");
-            std::fs::create_dir_all(&log_dir)?;
-            let file_appender = tracing_appender::rolling::daily(&log_dir, "trusty-mpm.log");
-            let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+            // #6569: the rotated file sink plus, under launchd, NO stderr layer
+            // — launchd's own StandardErrorPath capture was writing every line
+            // a second time to a file nothing rotates. `tracing_setup` owns the
+            // whole composition and the sink decision behind it.
+            let (guard, store) = tracing_setup::init_daemon_tracing()?;
+            // Both handles must outlive this block: the guard flushes the
+            // non-blocking appender, and the store is the read half of the
+            // capture ring (see the comments on their declarations above).
             _daemon_log_guard = Some(guard);
-
-            // EnvFilter is not Clone, so we build two independent instances that
-            // both re-parse RUST_LOG from the environment — one for the stderr
-            // layer, one for the file layer. This is intentional: each layer
-            // needs its own owned filter, and re-parsing is cheap at startup.
-            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into());
-            let file_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into());
-
-            // Bug-reporting Phase 1 (#478): compose the bug-capture layer so
-            // ERROR events are captured to <data_dir>/trusty-mpm/errors.jsonl
-            // and an in-memory ring without modifying any call sites.
-            // Capture writes ONLY to JSONL + in-memory ring — never stdout —
-            // so this is safe for both the HTTP daemon and the MCP stdio path.
-            let (capture_layer, store) = trusty_common::error_capture::bug_capture_layer(
-                "trusty-mpm",
-                trusty_common::error_capture::DEFAULT_CAPTURE_CAPACITY,
-                env!("CARGO_PKG_VERSION"),
-            );
-            // Move store into the main-scope binding so it outlives this block
-            // and remains reachable for the entire daemon run (see comment above).
             _error_store = Some(store);
-
-            use tracing_subscriber::Layer as _;
-            use tracing_subscriber::layer::SubscriberExt as _;
-            use tracing_subscriber::util::SubscriberInitExt as _;
-            tracing_subscriber::registry()
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        // MCP mode speaks JSON-RPC on stdout — keep tracing on stderr.
-                        .with_writer(std::io::stderr)
-                        .with_filter(env_filter),
-                )
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .with_writer(non_blocking)
-                        .with_ansi(false)
-                        .with_filter(file_filter),
-                )
-                .with(capture_layer)
-                .init();
         }
         // #4573: shares `tracing_setup`'s stderr-only builder with the CLI
         // inspection path — the two were byte-for-byte the same builder.
@@ -620,6 +585,12 @@ async fn main() -> anyhow::Result<()> {
         // routing decision lives in `run_target` so it is unit-testable.
         Some(Command::Run { target, task, root }) => {
             commands::run_target::run(&client, &url, &target, task, root).await
+        }
+        // #6441: a leading token that matched no subcommand. A repo shape runs
+        // the same cold start as `tm run`; anything else is a typo and gets
+        // clap's usage error back.
+        Some(Command::External(ref tokens)) => {
+            commands::run_target::run_external(&client, &url, tokens, &argv, &HELP).await
         }
         Some(Command::Path { alias, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;

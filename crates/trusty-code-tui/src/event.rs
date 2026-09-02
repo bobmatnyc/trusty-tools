@@ -16,8 +16,8 @@
 //! terminal-library-agnostic.
 //!
 //! # Spec References
-//! - [`SPEC-TTUI-03~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — Slice 1 `ReplEvent` deliverable (§5, Slice 1).
-//! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — per-variant slice ownership (Slices 5/6/8/9).
+//! - [`SPEC-TTUI-03~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — Slice 1 `ReplEvent` deliverable (§5, Slice 1).
+//! - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — per-variant slice ownership (Slices 5/6/8/9).
 
 use crate::model::StatuslineSegment;
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 /// cards in Slice 8, permission prompts in Slice 9).
 ///
 /// # Spec References
-/// - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft)
+/// - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft)
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReplEvent {
     // ── Terminal-origin (Slice 2, #3414, wires the producer) ──────────

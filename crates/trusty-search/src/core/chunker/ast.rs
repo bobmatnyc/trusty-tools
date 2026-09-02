@@ -113,10 +113,56 @@ pub fn chunk_ast(file: &str, content: &str) -> (Vec<RawChunk>, Vec<RawEntity>) {
     }
 
     // Split oversized chunks; produces sub-chunks with `parent_chunk_id`.
-    let split = split_oversized(chunks);
+    // #6571: then collapse id collisions before anything downstream keys on them.
+    let split = dedupe_chunk_ids(file, split_oversized(chunks));
 
     // Entities (single pass over the same tree).
     let entities = extract_entities(&tree, src, file, lang);
 
     (split, entities)
+}
+
+/// Drop chunks whose id a preceding chunk in the same file already claimed.
+///
+/// Why (#6571): a chunk's id is the primary key in every downstream layer — the
+/// redb corpus, the BM25 document map, the HNSW key map, and `IndexedFiles`.
+/// `walk::make_chunk_id` builds a named chunk's id from
+/// `{file}::{kind}::{name}::{start_line}` and omits the end line, so two
+/// declarations that share a name and a start line share an id. A minified
+/// JavaScript bundle is one long line of single-letter functions and hits this
+/// constantly: `app/hiring/static/assets/index.js` produced 225 distinct ids for
+/// its declarations and 209 surplus chunks per pass carrying an id already used.
+///
+/// Every layer but one absorbed that quietly by overwriting. `UsearchStore` did
+/// not: it resolved one usearch key for all occurrences of an id, added the
+/// first, and then failed every later `add` with "Duplicate keys not allowed in
+/// high-level wrappers" — after which the failure rollback removed the id→key
+/// mapping the successful add had just installed. The vector stayed in the graph
+/// with nothing pointing at it and the file never became searchable.
+///
+/// What: keeps the FIRST chunk for each id and drops the rest. First rather than
+/// last because a sub-chunk's `parent_chunk_id` names the parent that preceded
+/// it, so keeping the earlier occurrence keeps that reference resolvable. The
+/// dropped chunks are duplicates by id only, not by content — the underlying id
+/// scheme cannot tell them apart, and repairing that is a corpus-wide key change
+/// this does not attempt.
+///
+/// Test: `duplicate_chunk_ids_are_collapsed` in `core/chunker/tests.rs`.
+fn dedupe_chunk_ids(file: &str, chunks: Vec<RawChunk>) -> Vec<RawChunk> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let before = chunks.len();
+    let out: Vec<RawChunk> = chunks
+        .into_iter()
+        .filter(|c| seen.insert(c.id.clone()))
+        .collect();
+    let dropped = before - out.len();
+    if dropped > 0 {
+        tracing::debug!(
+            %file,
+            dropped,
+            kept = out.len(),
+            "chunker: dropped chunks whose id collided with an earlier chunk in the same file",
+        );
+    }
+    out
 }

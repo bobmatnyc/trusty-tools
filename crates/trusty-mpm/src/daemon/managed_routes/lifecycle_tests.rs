@@ -519,11 +519,16 @@ fn ensure_deployment_complete_ok_when_already_complete() {
     let agents_dir = fw.agent_deploy_dir();
     std::fs::create_dir_all(&agents_dir).unwrap();
     AgentManifest::default().save(&agents_dir).unwrap();
-    let skills_dir = fw.claude_skills_dir();
+    // #6586: bundled skills, and so the manifest that tracks them, live in the
+    // managed config-dir tier — the workspace tier no longer receives them.
+    let skills_dir = fw.skill_deploy_dir();
     std::fs::create_dir_all(&skills_dir).unwrap();
     SkillManifest::default().save(&skills_dir).unwrap();
 
+    // #6586: `workspace/.claude` used to exist only as a side effect of
+    // creating the workspace skill tier above. That tier moved, so create it.
     let claude_dir = workspace.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(
         claude_dir.join("settings.json"),
         r#"{"outputStyle": "trusty-mpm", "hooks": {"SessionStart": []}}"#,

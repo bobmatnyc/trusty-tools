@@ -1,23 +1,21 @@
-//! Background whole-machine host-metrics sampler + cache for the console (#6517).
+//! Point-in-time whole-machine host-metrics cache for the console (#6517).
 //!
 //! Why: the machine-status route must serve a host snapshot instantly, never
-//! blocking on a live sysinfo refresh. A background task owns the stateful
-//! [`HostSampler`] (CPU and network readings are deltas between refreshes, so
-//! the sampler must persist across polls) and writes each snapshot into a shared
-//! cache the route reads. This mirrors [`crate::metrics_poller`], which does the
-//! same for the per-service `ConsoleMetricsReport`s.
-//! What: [`HostMetricsCache`] is the `Arc<RwLock<Option<HostMetrics>>>` handle;
-//! [`start`] spawns the sampling loop. The whole-machine sampler itself lives in
-//! `trusty_common::host_metrics` (the shared, cross-crate capability); this
-//! module only schedules it and caches its output.
+//! blocking on a live sysinfo refresh, so a background task writes each snapshot
+//! into a shared cache the route reads. This mirrors [`crate::metrics_poller`],
+//! which does the same for the per-service `ConsoleMetricsReport`s.
+//! What: [`HostMetricsCache`] is the `Arc<RwLock<Option<HostMetrics>>>` handle.
+//! The sampling loop that fills it moved to
+//! [`crate::machine_history::sampler`] in #6641, because the same sample must
+//! also enter the bounded history ring and one stateful `HostSampler` cannot be
+//! shared by two tasks. The sampler itself lives in
+//! `trusty_common::host_metrics` (the shared, cross-crate capability).
 //! Test: `cache_initialises_empty`, `cache_write_read_roundtrip` in this module.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::RwLock;
-use tracing::{debug, info};
-use trusty_common::host_metrics::{HostMetrics, HostSampler};
+use trusty_common::host_metrics::HostMetrics;
 
 /// Shared read/write handle to the latest [`HostMetrics`] snapshot.
 ///
@@ -69,41 +67,10 @@ impl HostMetricsCache {
     }
 }
 
-/// Spawn the background host-metrics sampling loop, writing into `cache`.
-///
-/// Why: one place owns the sampler and the sampling cadence. The sampler is
-/// stateful (CPU + network deltas), so it must live for the whole task rather
-/// than being reconstructed each tick.
-/// What: spawns a tokio task that constructs one [`HostSampler`], samples it
-/// immediately (to warm the cache before the first request), then re-samples
-/// every `interval`. Sampling never fails, so there is no error path to log —
-/// unlike `metrics_poller`, whose MCP poll can fail.
-/// Test: not tested directly (spawns a real OS sampler on a timer); the cache
-/// round-trip is covered in this module and the sampler in `trusty-common`.
-pub fn start(cache: HostMetricsCache, interval: Duration) {
-    tokio::spawn(async move {
-        info!(
-            "host_status: starting host-metrics sampler (interval={}s)",
-            interval.as_secs()
-        );
-        let mut sampler = HostSampler::new();
-        loop {
-            let metrics = sampler.sample();
-            debug!(
-                overall = ?metrics.overall_pressure,
-                cpu_pct = metrics.cpu.usage_pct,
-                mem_pct = metrics.memory.usage_pct,
-                "host_status: sampled host metrics"
-            );
-            cache.set(metrics).await;
-            tokio::time::sleep(interval).await;
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trusty_common::host_metrics::HostSampler;
 
     /// Why: a fresh cache must return `None` so the route can answer 503 before
     /// the first sample.

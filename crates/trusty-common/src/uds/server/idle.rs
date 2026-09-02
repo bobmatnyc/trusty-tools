@@ -16,9 +16,16 @@
 //! without writing a frame does not — see [`IdleGuard::answered`] for why that
 //! distinction is the whole point.
 //!
+//! #6621 widened "does not": an answer to a method the router marked with
+//! [`super::RpcRouter::mark_liveness`] leaves the stamp alone too. A monitor
+//! that dials a health METHOD rather than connecting and closing was otherwise
+//! indistinguishable from a working client.
+//!
 //! Test: `tests.rs` — `serve_until_idle_exits_when_the_window_elapses`,
 //! `serve_until_idle_is_reset_by_an_answered_request`,
 //! `serve_until_idle_ignores_liveness_probes`,
+//! `serve_until_idle_ignores_a_registered_liveness_method`,
+//! `serve_until_idle_is_held_open_by_a_non_liveness_call`,
 //! `idle_tracker_counts_open_connections_and_restores_on_drop`.
 
 use std::sync::Arc;
@@ -68,6 +75,23 @@ impl IdleTracker {
             open: AtomicUsize::new(0),
             idle_since: Mutex::new(Instant::now()),
         })
+    }
+
+    /// A tracker that only COUNTS open connections (#6601).
+    ///
+    /// Why: the shutdown drain in [`super::serve_until_idle`] asks exactly the
+    /// question this type already answers — "is anything in flight" — and needs
+    /// it whether or not an idle policy is configured. A second counter beside
+    /// [`IdleGuard`] would be a second thing to keep correct, and the guard is
+    /// the one accounting path every connection already goes through.
+    ///
+    /// What: [`Self::new`] with a window nothing races. `serve_until_idle` arms
+    /// its idle arm from the CALLER's tracker and never from this one, so
+    /// [`Self::expired`] is not awaited here; the year is a value that stays
+    /// inside `tokio`'s timer range if some future caller does.
+    /// Test: `shutdown_drains_an_in_flight_connection_before_it_returns`.
+    pub(super) fn counting_only() -> Arc<Self> {
+        Self::new(Duration::from_secs(365 * 24 * 60 * 60))
     }
 
     /// The configured idle window.
@@ -136,14 +160,18 @@ impl IdleTracker {
 /// What: decrements the open count on drop and, when the connection ANSWERED
 /// something and was the last one open, restarts the idle window.
 ///
-/// 🔴 **A liveness probe must not restart the window.** A bare connect-and-close
-/// — what [`crate::uds::socket_is_serving`] does, and what `trusty-console`'s
-/// service detector does on a poll loop — arrives here with `answered` false.
-/// Counting it as activity would let a status page that polls every few seconds
-/// keep an on-demand service resident forever, which is precisely the outcome
-/// this module exists to prevent.
+/// 🔴 **Monitoring must not restart the window**, in either of its two shapes.
+/// A bare connect-and-close — what [`crate::uds::socket_is_serving`] does —
+/// arrives here with `answered` false. An answer to a method the router marked
+/// with [`super::RpcRouter::mark_liveness`] reaches the serve loop as
+/// [`super::Served::Answered`] with `liveness` true, and the loop does not call
+/// [`Self::answered`] for it (#6621). Counting either as activity lets a status
+/// page polling every few seconds keep an on-demand service resident forever —
+/// observed, not hypothetical: a 15s console poll against a 600s window held one
+/// `trusty-analyze` process up for 46 hours.
 ///
 /// Test: `serve_until_idle_ignores_liveness_probes`,
+/// `serve_until_idle_ignores_a_registered_liveness_method`,
 /// `idle_tracker_counts_open_connections_and_restores_on_drop`.
 #[derive(Debug)]
 pub struct IdleGuard {

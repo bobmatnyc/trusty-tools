@@ -130,6 +130,30 @@ async fn rpc_router_registers_every_documented_method() {
     );
 }
 
+/// REGRESSION (#6621): `analyze.health` is dialled by the console connector,
+/// the console's `console_metrics` MCP poll and `tctl`'s probe — all monitors,
+/// all on a loop faster than the 600s idle window. Registered as an ordinary
+/// method, each poll re-armed that window and one `trusty-analyze serve` process
+/// stayed resident for 46 hours.
+///
+/// Why the assertion is on the classification rather than on a timing: the idle
+/// behaviour itself is proven in `trusty-common`
+/// (`serve_until_idle_ignores_a_registered_liveness_method`). What this crate
+/// owns is which of its methods carries the mark.
+/// What: health is marked, and it is the ONLY method marked — every other name
+/// does the caller's work and must still hold the process open.
+/// Test: this is the test.
+#[tokio::test]
+async fn rpc_health_is_the_only_liveness_method() {
+    let (state, _tmp) = make_state();
+    let router = build_router(state);
+    assert_eq!(
+        router.liveness_names().collect::<Vec<_>>(),
+        vec![METHOD_HEALTH],
+        "only a method whose answer is pure liveness may skip the idle window"
+    );
+}
+
 /// Why: a client that drifts must read a reason, not a dropped connection.
 /// Test: this is the test.
 #[tokio::test]
@@ -1267,6 +1291,122 @@ fn rpc_diagnostics_reports_deadline_exceeded_distinctly() {
         "#5049's ingested-but-empty distinction shares the band and must not \
          collide with it"
     );
+}
+
+/// Why (#6601 review): the first version of this test pinned the drain to
+/// `SHUTDOWN_FLUSH_TIMEOUT` and asserted it fitted inside `sigterm_patience` —
+/// a deadline that never applies to a serving analyze process. A bound analyze
+/// child is detached, so `ensure_running` never enters it in the supervisor's
+/// population and no `terminate_child` call site can reach it; `sigterm_patience`
+/// governs only a child that failed to bind. `trusty-analyze stop` sends SIGTERM
+/// and polls 5 s to REPORT, never to kill. The only bounded terminator left is
+/// the OS grace window, so that is what the drain must be sized to.
+///
+/// What: `serve_options().shutdown_drain` must be the plannable grace — and the
+/// assertion pins the RELATION to the grace window, so an operator's
+/// `TRUSTY_TERMINATION_GRACE_SECS` moves both together instead of falsifying a
+/// hardcoded number. A 3 s drain fails the first assertion; a whole-window drain
+/// fails the second.
+/// Test: this is the test.
+#[test]
+fn serve_options_drain_for_as_long_as_this_server_may_actually_live() {
+    let drain = serve_options().shutdown_drain;
+    assert_eq!(
+        drain,
+        trusty_common::shutdown::plannable_grace(),
+        "the drain must be the part of the OS grace window this process may \
+         plan inside — no supervisor deadline binds a SERVING analyze child"
+    );
+    assert_eq!(
+        drain + trusty_common::shutdown::CLEANUP_RESERVE,
+        trusty_common::shutdown::termination_grace(),
+        "the drain must still leave the cleanup reserve for the socket unlink \
+         and the store drop that follow it"
+    );
+    assert!(
+        drain > SHUTDOWN_FLUSH_TIMEOUT,
+        "the #6595 guarantee — redb released before the unlink — must not be \
+         abandoned at the supervisor's spawn-failure budget"
+    );
+}
+
+/// Why (#6595): the idle exit reaches the unlink with zero open connections —
+/// `IdleGuard` guarantees it — but the SIGTERM/SIGINT exit used not to.
+/// `serve_until_idle` returned `ServeExit::Shutdown` the moment the signal
+/// future resolved, with no check on connections in flight, so a connection
+/// task still held an `Arc<RpcRouter>` clone and with it the `FactStore`'s
+/// `Arc<Database>`. The unlink then ran while that lock was held and handed the
+/// next `ensure_running` a successor that could not open facts.redb.
+///
+/// What closes it since #6601: `drain_shutdown` inside `serve_until_idle`. Every
+/// accepted connection holds an `IdleGuard`, and the shutdown arm waits for that
+/// count to reach zero — bounded by `RpcServeOptions::shutdown_drain`, which
+/// [`serve_options`] inherits from the plannable grace window — before it
+/// returns and [`release_stores`] drops the router.
+///
+/// What forces that path deterministically: a peer that has been accepted but
+/// never completes its request frame parks the connection task in a read, so the
+/// guard count is above zero when the shutdown lands. The peer is then released,
+/// which is what the drain is there to pick up.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_with_a_connection_in_flight_frees_its_redb_lock_before_the_unlink() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let tmp = TempDir::new().unwrap();
+    let stores = tmp.path().join("stores");
+    std::fs::create_dir_all(&stores).unwrap();
+    let facts_path = stores.join("facts.redb");
+    let socket = tmp.path().join("sockets").join("analyze.sock");
+    let (stop, handle) = spawn_daemon(state_in(&stores), &socket).await;
+
+    // No trailing newline, so the frame is incomplete and the handler never
+    // runs: the task sits in `read_one_frame` holding its router clone.
+    let mut stalled = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    stalled
+        .write_all(br#"{"jsonrpc":"2.0","id":1"#)
+        .await
+        .unwrap();
+    stalled.flush().await.unwrap();
+
+    // An answered request on a SECOND connection proves the accept loop got
+    // past the stalled one — the accept queue is FIFO — so the clone is
+    // outstanding by the time the shutdown below fires. A sleep would only
+    // make that likely.
+    let answered = call_over_socket(&socket, METHOD_HEALTH, serde_json::json!({})).await;
+    assert!(
+        answered.is_ok(),
+        "the daemon must answer before the shutdown"
+    );
+
+    let _ = stop.send(());
+    // Release the stalled peer just after the shutdown, so the wait has
+    // something to wait FOR rather than a task that was already gone.
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        drop(stalled);
+    });
+
+    let watched = socket.clone();
+    let probed = facts_path.clone();
+    let verdict = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while watched.exists() && std::time::Instant::now() < deadline {
+            std::hint::spin_loop();
+        }
+        assert!(!watched.exists(), "the shutdown never unlinked its socket");
+        FactStore::open(&probed).map(|_| ())
+    })
+    .await
+    .unwrap();
+
+    handle.await.unwrap().unwrap();
+    if let Err(e) = verdict {
+        panic!(
+            "a successor spawned at the unlink cannot open {}: {e:#}",
+            facts_path.display()
+        );
+    }
 }
 
 /// Why: `remove_retired_discovery_files` is deliberately never called from a

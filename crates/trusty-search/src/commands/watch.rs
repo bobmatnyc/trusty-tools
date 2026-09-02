@@ -22,13 +22,18 @@ pub async fn handle_watch(
     explicit_index: &Option<String>,
     path: Option<std::path::PathBuf>,
 ) -> Result<()> {
-    let (index_id, warned) = resolve_index(explicit_index);
+    let (index_id, warned) = resolve_index(explicit_index)?;
     print_index_header(&index_id, warned);
     crate::commands::daemon_guard::ensure_daemon_running_or_exit(&daemon_base_url()).await?;
-    let watch_path = path.unwrap_or_else(|| {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        detect_project(&cwd).root_path
-    });
+    // #6550: detection can refuse the resolved root, so this is a `match`, not
+    // an infallible `unwrap_or_else`.
+    let watch_path = match path {
+        Some(p) => p,
+        None => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            detect_project(&cwd)?.root_path
+        }
+    };
 
     // Issue #1621: the daemon watches every registered index automatically.
     let disabled = std::env::var("TRUSTY_DISABLE_WATCHER").as_deref() == Ok("1");

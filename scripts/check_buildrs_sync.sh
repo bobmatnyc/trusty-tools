@@ -14,6 +14,11 @@
 #               a placeholder there would ship a blank app. trusty-agents-ui and
 #               trusty-audit-ui are edition 2021, so this block must stay free
 #               of let-chains.
+#               Those last two are crate NAMES, not directory names: the first
+#               two live at crates/<name>/build.rs, but trusty-agents-ui is
+#               crates/trusty-agents/ui/src-tauri/build.rs and trusty-audit-ui
+#               is crates/trusty-audit/ui/src-tauri/build.rs. TAURI_UI_FILES
+#               below is the authoritative list.
 #
 # The two families are deliberately not merged: their failure semantics differ.
 #

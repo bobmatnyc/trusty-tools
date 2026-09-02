@@ -18,15 +18,26 @@
 //! What: `KgWriter` owns an `Arc<KgStoreRedb>` and an `mpsc::Sender`. The
 //! background task `writer_loop` blocks on `recv()` for the first op,
 //! then drains any further ops already buffered on the channel (up to a
-//! configurable cap, default 64). If the drained batch has >1 op, the
-//! whole set is committed via `KgStoreRedb::apply_batch`; if exactly 1
-//! op, it goes through the corresponding single-op method for symmetry.
+//! configurable cap, default 64). `commit_and_reply` then commits the
+//! drained batch via `KgStoreRedb::apply_batch` unconditionally — a
+//! lone op still travels as a one-element batch rather than through a
+//! separate single-op method, so the actor's write path is always
+//! `apply_batch` regardless of how many ops coalesced (#4922: this
+//! comment used to claim a buf-length branch to a "matching single-op
+//! method" that the code has never had). The single-op methods on
+//! `KgStoreRedb` (`assert`, `retract`, …) exist for the bypass path
+//! (`KgWriter::bypass`, used by synchronous callers with no running
+//! actor) and this actor's own closed-channel fallback, not for the
+//! coalescing loop itself.
 //! Errors are reported per-op via the matching `oneshot::Sender`. The
 //! actor shuts down cleanly when the last sender drops.
 //!
 //! Test: `writer_serialises_concurrent_asserts`,
 //! `writer_batches_burst_into_single_commit`,
-//! `writer_reports_error_per_op`, `writer_drops_cleanly_on_shutdown`.
+//! `writer_reports_error_per_op`, `writer_drops_cleanly_on_shutdown`;
+//! `single_assert_and_apply_batch_one_op_agree_on_valid_from`
+//! (`kg_redb::tests`) pins that the always-`apply_batch` path described
+//! above and the bypass/fallback single-op path stay identical.
 
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::store::kg::Triple;
@@ -446,10 +457,12 @@ async fn writer_loop(store: Arc<KgStoreRedb>, mut rx: mpsc::Receiver<QueuedOp>) 
 /// commit path is easy to unit-test (callers can poke a batch through
 /// it directly if needed). Replies are matched positionally to the ops
 /// in `buf` because `apply_batch` returns results in the same order.
-/// What: Calls `store.apply_batch` when `buf` has ≥ 2 ops; otherwise
-/// uses the matching single-op method. On a transaction-level error,
-/// every queued op gets the same error (the batch was atomic — none of
-/// them committed). On success, each reply gets its op's result.
+/// What: Calls `store.apply_batch` unconditionally, for every `buf` size
+/// from 1 upward (#4922) — there is no branch to a separate single-op
+/// method here; a solo op is simply a one-element batch. On a
+/// transaction-level error, every queued op gets the same error (the
+/// batch was atomic — none of them committed). On success, each reply
+/// gets its op's result.
 /// Test: `writer_batches_burst_into_single_commit`,
 /// `writer_reports_error_per_op`.
 async fn commit_and_reply(store: &Arc<KgStoreRedb>, buf: &mut Vec<QueuedOp>) {

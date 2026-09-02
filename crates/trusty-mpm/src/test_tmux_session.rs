@@ -199,16 +199,42 @@ impl ScratchTmuxSession {
     /// machine fails until the panes are reaped. That is a machine fault, not a
     /// fixture one; no test-side change creates a pty.
     pub(crate) fn spawn(tmux_bin: &str, name: &str, pane_command: &str) -> Self {
+        Self::spawn_in(tmux_bin, name, None, pane_command)
+    }
+
+    /// [`ScratchTmuxSession::spawn`] with the pane's working directory pinned.
+    ///
+    /// Why: [`FixtureTmuxSessions`] claims a session by where its pane sits, so
+    /// its own tests need to place a session inside — and outside — a fixture
+    /// root on purpose (#6542). Every other caller wants the inherited cwd and
+    /// keeps [`ScratchTmuxSession::spawn`].
+    /// What: adds `-c <cwd>` when `cwd` is `Some`; otherwise identical.
+    /// Test: [`tests::a_session_opened_under_the_root_is_killed_on_drop`].
+    pub(crate) fn spawn_in(
+        tmux_bin: &str,
+        name: &str,
+        cwd: Option<&std::path::Path>,
+        pane_command: &str,
+    ) -> Self {
         // #6116: reap what an earlier hard-killed run leaked, before adding to
         // the namespace. Once per process, mirroring `test_support`'s
         // `sweep_stale_test_dirs`.
         SWEEP_ONCE.call_once(|| sweep_stale_reserved_sessions(tmux_bin));
+        let mut args: Vec<String> = ["new-session", "-d", "-s", name]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        if let Some(dir) = cwd {
+            args.push("-c".to_string());
+            args.push(dir.to_string_lossy().into_owned());
+        }
+        args.push(pane_command.to_string());
         // #6523: capture tmux's stderr instead of letting it through. `.status()`
         // sent the real cause to the test binary's stderr, unattached to the
         // panic, so five simultaneous failures each read only `exit status: 1`
         // and got misattributed to nested tmux.
         let out = Command::new(tmux_bin)
-            .args(["new-session", "-d", "-s", name, pane_command])
+            .args(&args)
             .output()
             .unwrap_or_else(|e| panic!("spawn `{tmux_bin} new-session -s {name}`: {e}"));
         assert!(
@@ -258,6 +284,126 @@ impl Drop for ScratchTmuxSession {
         let _ = Command::new(&self.tmux_bin)
             .args(["kill-session", "-t", &format!("={}", self.name)])
             .output();
+    }
+}
+
+/// Live session names, or an empty set when tmux will not answer.
+fn live_session_names(tmux_bin: &str) -> std::collections::BTreeSet<String> {
+    let Ok(out) = Command::new(tmux_bin)
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output()
+    else {
+        return std::collections::BTreeSet::new();
+    };
+    if !out.status.success() {
+        return std::collections::BTreeSet::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Names of live sessions holding at least one pane whose working directory is
+/// inside `root`.
+///
+/// What: reads `<session-name>\t<pane-path>` from `list-panes -a`. A line that
+/// does not split on the tab is SKIPPED, never selected — an unparseable line
+/// leaves a session alive rather than killing one this guard cannot identify.
+/// `Path::starts_with` compares whole components, so `/tmp/ab` does not match a
+/// pane sitting in `/tmp/abc`.
+/// Test: [`tests::a_session_outside_the_root_is_left_alone`].
+fn sessions_with_pane_under(
+    tmux_bin: &str,
+    root: &std::path::Path,
+) -> std::collections::BTreeSet<String> {
+    let Ok(out) = Command::new(tmux_bin)
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{pane_current_path}",
+        ])
+        .output()
+    else {
+        return std::collections::BTreeSet::new();
+    };
+    if !out.status.success() {
+        return std::collections::BTreeSet::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.trim_end().split_once('\t'))
+        .filter(|(_, pane_path)| std::path::Path::new(pane_path).starts_with(root))
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+/// Sessions the CODE UNDER TEST created inside a fixture directory, killed when
+/// this value drops (#6542).
+///
+/// Why: [`ScratchTmuxSession`] guards a session the TEST spawns and therefore
+/// names. The guided-fallback tests spawn none — they call
+/// `commands::guided::fallback_protected`, which provisions a worktree and
+/// launches a session whose name is derived from a session uuid the test never
+/// sees. Two such sessions survived every run of `tests_behavior_b_tests`; 456
+/// accumulated on the owner's machine over five days and exhausted its
+/// pseudo-terminal pool (#6523).
+///
+/// What: snapshots the live session names at construction, and on drop kills
+/// every session that is BOTH absent from that snapshot AND holding a pane
+/// whose working directory is inside `root`. Both conditions are load-bearing —
+/// the snapshot alone would claim a session a concurrently running suite
+/// created, and the path alone would claim one this process created before the
+/// guard existed. `root` is canonicalized at construction because tmux reports
+/// `/private/var/…` where a macOS `TempDir` hands back `/var/…`.
+///
+/// What `Drop` cannot cover is the same gap [`ScratchTmuxSession`]'s module docs
+/// describe: a SIGKILL or an aborted run ends the process without unwinding.
+/// The sessions this guard reaps are named by the daemon's ordinary
+/// `tm-<uuid>` scheme, not the reserved test namespace, so
+/// [`sweep_stale_reserved_sessions`] does not reap them on the next run either.
+///
+/// Test: [`tests::a_session_opened_under_the_root_is_killed_on_drop`],
+/// [`tests::a_session_outside_the_root_is_left_alone`],
+/// [`tests::a_session_predating_the_guard_is_left_alone`].
+pub(crate) struct FixtureTmuxSessions {
+    tmux_bin: String,
+    root: std::path::PathBuf,
+    preexisting: std::collections::BTreeSet<String>,
+}
+
+impl FixtureTmuxSessions {
+    /// Start owning any session that appears under `root` from now on.
+    pub(crate) fn watch(tmux_bin: &str, root: &std::path::Path) -> Self {
+        Self {
+            tmux_bin: tmux_bin.to_string(),
+            root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+            preexisting: live_session_names(tmux_bin),
+        }
+    }
+
+    /// The sessions this guard currently owns — new since [`Self::watch`] and
+    /// rooted under the fixture directory.
+    pub(crate) fn spawned(&self) -> Vec<String> {
+        sessions_with_pane_under(&self.tmux_bin, &self.root)
+            .into_iter()
+            .filter(|name| !self.preexisting.contains(name))
+            .collect()
+    }
+}
+
+impl Drop for FixtureTmuxSessions {
+    fn drop(&mut self) {
+        for name in self.spawned() {
+            eprintln!("test-support: killing fixture tmux session '{name}' (#6542)");
+            // Best-effort: `Drop` runs during unwinding, where a panic would
+            // abort the process and bury the original failure.
+            let _ = Command::new(&self.tmux_bin)
+                .args(["kill-session", "-t", &format!("={name}")])
+                .output();
+        }
     }
 }
 
@@ -399,6 +545,85 @@ not-an-epoch tm-xtest-garbage-01
              by someone else; a bare `-t` target would have killed it"
         );
         drop(sibling);
+    }
+
+    /// The defect #6542 reports, inverted: a session the test did not name,
+    /// sitting inside the fixture root, must be gone once the guard drops.
+    ///
+    /// The `owner` guard is a safety net, not the subject — if
+    /// [`FixtureTmuxSessions`] were broken, this test must still not leak.
+    #[test]
+    fn a_session_opened_under_the_root_is_killed_on_drop() {
+        if !ScratchTmuxSession::tmux_available(TMUX) {
+            eprintln!("tmux not available; skipping");
+            return;
+        }
+        let root = tempfile::tempdir().expect("fixture root");
+        let name = scratch_name("under");
+        let guard = FixtureTmuxSessions::watch(TMUX, root.path());
+        let owner = ScratchTmuxSession::spawn_in(TMUX, &name, Some(root.path()), "sh");
+        assert_eq!(
+            guard.spawned(),
+            vec![name.clone()],
+            "the guard must claim the session that appeared under its root"
+        );
+        drop(guard);
+        assert!(
+            !ScratchTmuxSession::exists(TMUX, &name),
+            "session '{name}' survived the guard — this is #6542, where the \
+             guided-fallback tests left one tm-<uuid> session behind per run"
+        );
+        drop(owner);
+    }
+
+    /// The guard's claim is bounded by the fixture root: a session that a
+    /// concurrent suite opens elsewhere is neither claimed nor killed.
+    #[test]
+    fn a_session_outside_the_root_is_left_alone() {
+        if !ScratchTmuxSession::tmux_available(TMUX) {
+            eprintln!("tmux not available; skipping");
+            return;
+        }
+        let root = tempfile::tempdir().expect("fixture root");
+        let elsewhere = tempfile::tempdir().expect("unrelated dir");
+        let name = scratch_name("outside");
+        let guard = FixtureTmuxSessions::watch(TMUX, root.path());
+        let sibling = ScratchTmuxSession::spawn_in(TMUX, &name, Some(elsewhere.path()), "sh");
+        assert!(
+            guard.spawned().is_empty(),
+            "a session outside the fixture root is not this guard's to claim"
+        );
+        drop(guard);
+        assert!(
+            ScratchTmuxSession::exists(TMUX, &name),
+            "'{name}' sits outside the fixture root and belongs to someone else"
+        );
+        drop(sibling);
+    }
+
+    /// A session already live when the guard is created is not the guard's,
+    /// even when it sits inside the root — the snapshot is what makes the
+    /// ownership claim honest.
+    #[test]
+    fn a_session_predating_the_guard_is_left_alone() {
+        if !ScratchTmuxSession::tmux_available(TMUX) {
+            eprintln!("tmux not available; skipping");
+            return;
+        }
+        let root = tempfile::tempdir().expect("fixture root");
+        let name = scratch_name("predates");
+        let earlier = ScratchTmuxSession::spawn_in(TMUX, &name, Some(root.path()), "sh");
+        let guard = FixtureTmuxSessions::watch(TMUX, root.path());
+        assert!(
+            guard.spawned().is_empty(),
+            "a session that predates the guard is not new, so not the guard's"
+        );
+        drop(guard);
+        assert!(
+            ScratchTmuxSession::exists(TMUX, &name),
+            "'{name}' predates the guard and must survive it"
+        );
+        drop(earlier);
     }
 
     /// A guard is only handed out for a session that was actually created, so

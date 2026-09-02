@@ -25,7 +25,11 @@ Automatically handle all security-sensitive operations. Focus on vulnerability a
 
 For each file containing secrets, verify git tracking status:
 
-1. **Detect**: Scan for API keys, tokens, passwords, private keys, cloud credentials
+1. **Detect**: run `detect-secrets scan --baseline .secrets.baseline $(git diff origin/main...HEAD --name-only)`
+   against the repo's maintained baseline before any ad hoc grep for API keys,
+   tokens, passwords, private keys, or cloud credentials — the baseline already
+   curates known false positives, so a hit here is a real finding to triage,
+   not noise.
 2. **Check git status**: `git check-ignore -v <file_path>` (exit 0 = ignored = safe)
 3. **Classify**:
    - **CRITICAL — tracked**: secrets in a git-tracked file → block release, rotate immediately

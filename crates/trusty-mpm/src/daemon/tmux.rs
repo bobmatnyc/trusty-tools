@@ -660,7 +660,10 @@ impl TmuxDriver {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_current_command}\t#{pane_pid}\t#{pane_id}",
+            // #6118: `pane_current_path` is the evidence the cwd-gone reap path
+            // needs. Asking for it in the SAME listing keeps the sweep at one
+            // tmux call rather than one per untracked pane.
+            "#{session_name}\t#{pane_current_command}\t#{pane_pid}\t#{pane_id}\t#{pane_current_path}",
         ]);
         // #6529: without a UTF-8 client locale tmux rewrites every tab to `_`.
         crate::core::tmux::force_utf8_client_env(&mut cmd);
@@ -727,13 +730,24 @@ impl TmuxDriver {
     /// session forever (#6529, and the #1813 shape before it). A dropped row
     /// makes a pane invisible to the sweep, which can only ever spare a session
     /// — never kill one.
-    /// Test: `parses_managed_pane_row`, `sanitized_pane_row_is_dropped_not_coerced`.
+    ///
+    /// #6118 added a FIFTH column, `pane_current_path`. It is the only optional
+    /// one: an empty value parses to `None`, which the orphan-GC reads as "no
+    /// evidence about this pane's cwd" and so can never reap on. A row carrying
+    /// only the old four columns is REJECTED like any other shape mismatch —
+    /// accepting it would mean guessing that the absent column is the trailing
+    /// one.
+    /// Test: `parses_managed_pane_row`, `sanitized_pane_row_is_dropped_not_coerced`,
+    /// `parses_pane_row_with_empty_current_path`,
+    /// `four_column_pane_row_is_dropped`.
     fn parse_managed_pane_row(line: &str) -> Option<crate::daemon::orphan_gc::PaneInfo> {
         let mut parts = line.split('\t');
         let session_name = parts.next()?.trim();
         let pane_current_command = parts.next()?.trim();
         let pane_pid = parts.next()?.trim();
         let pane_id = parts.next()?.trim();
+        // #6118: the pane's working directory, as tmux recorded it.
+        let pane_current_path = parts.next()?.trim();
         // More columns than the format asked for means this is not the reply we
         // requested — refuse to guess which column is which.
         if parts.next().is_some() {
@@ -747,6 +761,9 @@ impl TmuxDriver {
             pane_current_command: pane_current_command.to_string(),
             pane_pid: Some(pane_pid.parse::<u32>().ok()?),
             pane_id: Some(pane_id.to_string()),
+            // Empty is NO evidence, never a path to test against the filesystem.
+            pane_current_path: (!pane_current_path.is_empty())
+                .then(|| pane_current_path.to_string()),
         })
     }
 

@@ -95,7 +95,7 @@ fn injection_status_wire(status: InjectionStatus) -> Option<String> {
 /// (#2595) overwrite the field on the returned value when they can await the
 /// probe.
 /// Test: covered by the list/get handler tests.
-pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
+pub(crate) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
     SessionSummary {
         id: r.id.to_string(),
         name: r.tmux_name.clone(),
@@ -134,6 +134,9 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         // them at their "not applicable" defaults.
         slot: 0,
         deleted: false,
+        // #6568: read straight off the record's `stop_cause`, so every listing
+        // surface says the same thing about a parked session.
+        auto_resume_parked: r.auto_resume_park_reason().map(str::to_string),
     }
 }
 
@@ -301,6 +304,7 @@ pub(super) fn tombstone_summary(slot: u32) -> SessionSummary {
         attached: false,
         slot,
         deleted: true,
+        auto_resume_parked: None,
     }
 }
 

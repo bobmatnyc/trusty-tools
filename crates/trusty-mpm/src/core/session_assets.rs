@@ -283,8 +283,18 @@ mod tests {
     /// #5040: the explicit-base form must be the same resolution
     /// [`session_plan`] performs, so a test built on `session_plan_under`
     /// proves what production actually does.
+    ///
+    /// #6580: both halves read `$HOME` — `session_plan` through
+    /// `FrameworkPaths::default()` and the explicit half through
+    /// `FrameworkPaths::home_base()` — in two separate calls. A sibling test
+    /// moving `$HOME` between them made the two halves resolve under different
+    /// roots, so the comparison failed while proving nothing about the two
+    /// forms. [`fake_home`] pins `$HOME` for the whole body and
+    /// `#[serial_test::serial]` keeps every other `$HOME` mover out.
     #[test]
+    #[serial_test::serial]
     fn session_plan_under_matches_session_plan_at_home() {
+        let (_home, _guard) = fake_home();
         let record = make_record(
             Some(PathBuf::from("/some/workspace")),
             PathBuf::from("/some/cwd"),

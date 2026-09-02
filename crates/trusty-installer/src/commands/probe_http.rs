@@ -848,8 +848,22 @@ pub fn classify_rpc_response(frame: &serde_json::Value) -> ProbeOutcome {
 /// What: one `send_framed_request` for `method` at [`REQUEST_TIMEOUT`], then
 /// [`classify_rpc_response`].
 ///
+/// #6630: the frame carries an explicit `"params": {}`, never an absent
+/// `params` field. `RpcRouter::typed` decodes a missing `params` as
+/// `Value::Null`, and trusty-memory's `memory.health` binds `HealthQuery` — a
+/// plain derived `Deserialize` that refuses `null` however many of its fields
+/// carry `#[serde(default)]` (that attribute governs a MISSING key inside an
+/// object, not a `null` in place of the object). `analyze.health` and
+/// `search.health` bind `NoParams`, whose hand-written `Deserialize` calls
+/// `IgnoredAny` and accepts anything including `null` or `{}` — so this was
+/// invisible for both and reached only trusty-memory, exactly as
+/// `trusty-console`'s `detect::memory::probe_health` documents at its own
+/// `#6356` fix for the identical mismatch. Sending `{}` here fixed it there;
+/// it fixes the same defect in this crate's independent copy of the request.
+///
 /// Test: `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`,
-/// `tests::probe_uds_reports_refused_for_an_absent_socket`.
+/// `tests::probe_uds_reports_refused_for_an_absent_socket`,
+/// `tests::probe_uds_sends_explicit_empty_params_so_a_strict_handler_answers`.
 async fn probe_socket(socket: &std::path::Path, method: &str) -> ProbeOutcome {
     // #6555: a params-less frame decodes to null, which a struct-bound method rejects with -32602.
     let request = serde_json::json!({

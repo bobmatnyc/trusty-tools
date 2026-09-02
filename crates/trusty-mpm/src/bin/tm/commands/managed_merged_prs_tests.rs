@@ -7,7 +7,60 @@
 //! What: exercises the null/absent short-circuit, the dry-run and real
 //! summaries, and every stderr diagnostic branch.
 
-use super::{diagnostic_lines, print_merged_pr_pass, session_prune_worktrees};
+use super::{
+    classification_clause, diagnostic_lines, print_merged_pr_pass, session_prune_worktrees,
+};
+
+/// 🔴 #6561 REGRESSION: "0 reclaimable" must never be printed without saying
+/// whether anything could be classified.
+///
+/// Why: the live reply on 2026-09-02 — `pr_state_unknown: 261` of 261 surveyed,
+/// `reclaimable: 0` — rendered as
+/// `merged-PR pass: 0 worktree(s) reclaimable; 0 byte(s) across 0 of 0 measured`,
+/// which is exactly what a healthy sweep over a workspace with nothing to
+/// reclaim prints. The cause (`gh` exited 4) reached the daemon and stopped
+/// there.
+#[test]
+fn merged_pr_pass_names_a_failed_lookup_beside_the_reclaimable_count() {
+    let body = serde_json::json!({
+        "reclaimable": 0,
+        "reclaimable_bytes": 0,
+        "reclaimable_measured": 0,
+        "pr_state_unknown": 4,
+        "not_inspected": 2,
+        "lookup_failed": 261,
+        "lookup_failure": "`gh` exited 4: To get started with GitHub CLI, please run:  gh auth login",
+    });
+    let clause = classification_clause(&body);
+    assert!(
+        clause.contains("261 pull-request lookup(s) FAILED"),
+        "{clause}"
+    );
+    assert!(clause.contains("gh auth login"), "{clause}");
+    assert!(
+        clause.contains("4 pull-request state(s) indeterminate"),
+        "{clause}"
+    );
+    assert!(clause.contains("2 not inspected"), "{clause}");
+    // And it must reach stdout in both modes, not merely be computed.
+    print_merged_pr_pass(Some(&body), true);
+    print_merged_pr_pass(Some(&body), false);
+}
+
+/// A run where everything classified adds no clause — the healthy line is
+/// unchanged (#6561).
+#[test]
+fn merged_pr_pass_adds_no_clause_when_everything_classified() {
+    let body = serde_json::json!({
+        "reclaimable": 3,
+        "pr_state_unknown": 0,
+        "not_inspected": 0,
+        "lookup_failed": 0,
+    });
+    assert_eq!(classification_clause(&body), "");
+    // An older daemon omits all three keys; that is also "nothing to say".
+    assert_eq!(classification_clause(&serde_json::json!({})), "");
+}
 
 #[test]
 fn merged_pr_pass_surfaces_an_agent_owned_skip() {

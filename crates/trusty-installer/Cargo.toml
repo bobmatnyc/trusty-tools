@@ -1,10 +1,8 @@
 [package]
 name = "trusty-installer"
-# 0.13.3 (#4847, #4917): patch — 0.13.2 is published and this PR edits
-# `src/**`. `stack doctor`/`stack health` gain an `undetermined` verdict and
-# exit 4, and `MemberDoctor::ok` narrows (an `unknown` member no longer passes);
-# `MemberDoctor::failed`/`undetermined` are additive. No signature changes.
-version = "0.13.3"
+# 0.13.4 (#6618, #6619): patch — 0.13.3 is published and this PR edits
+# `src/**` (launchd restart-race fix). No public API changes.
+version = "0.13.4"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"

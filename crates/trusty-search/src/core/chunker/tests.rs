@@ -1221,3 +1221,34 @@ fn test_deeply_nested_modules_does_not_crash() {
         entities.len()
     );
 }
+
+/// Why (#6571): `walk::make_chunk_id` builds a named chunk's id from
+/// `{file}::{kind}::{name}::{start_line}` and omits the end line. A minified
+/// JavaScript bundle is one long line, so every declaration in it shares a start
+/// line and any repeated name collapses onto one id. A chunk id is the primary
+/// key in the redb corpus, the BM25 document map, the HNSW key map, and
+/// `IndexedFiles`; two chunks under one id is a corpus defect, and in the vector
+/// store it orphaned a live vector and left the file unsearchable.
+///
+/// Pre-fix `chunk_ast` returned both `e` chunks and this assertion failed.
+#[test]
+fn duplicate_chunk_ids_are_collapsed() {
+    // One line, two `function e(...)` declarations — the shape a bundler emits.
+    let minified = "function e(a){return a+1}function e(b){return b+2}function q(c){return c}\n";
+    let (chunks, _entities) = chunk_ast("assets/index.js", minified);
+
+    let mut ids: Vec<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
+    ids.sort_unstable();
+    let mut distinct = ids.clone();
+    distinct.dedup();
+    assert_eq!(
+        ids.len(),
+        distinct.len(),
+        "chunk_ast must never emit two chunks under one id; got {ids:?}"
+    );
+    // The collision is real in this fixture — otherwise the test proves nothing.
+    assert!(
+        chunks.iter().any(|c| c.id.contains("::e::")),
+        "the fixture must produce the colliding `e` chunk; got {ids:?}"
+    );
+}

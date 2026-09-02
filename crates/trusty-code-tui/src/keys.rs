@@ -18,7 +18,7 @@
 //! variant upstream.
 //!
 //! # Spec References
-//! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 2 deliverable (§5, Slice 2).
+//! - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 2 deliverable (§5, Slice 2).
 
 use crossterm::event::{KeyCode as CtKeyCode, KeyEvent, KeyModifiers as CtKeyModifiers};
 

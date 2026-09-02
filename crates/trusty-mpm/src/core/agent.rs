@@ -277,6 +277,42 @@ pub struct Delegation {
     /// `subagent_sharing_the_dispatchers_tree_registers_nothing`.
     #[serde(default)]
     pub worktree_path: Option<std::path::PathBuf>,
+    /// The directory this subagent's most recent hook event ran in (#6556).
+    ///
+    /// Why: [`Self::worktree_path`] is a LATCH — once an agent reports a tree of
+    /// its own, that field never changes back, because the tree stays this
+    /// delegation's to own even after the agent walks out of it. That is right
+    /// for the reap, which asks "may this directory be deleted", and wrong for
+    /// the shared-tree guard, which asks "where is this agent writing NOW". An
+    /// agent can enter a worktree and leave it again — `EnterWorktree` followed
+    /// by `ExitWorktree` with `action: "keep"` restores the dispatcher's cwd —
+    /// and the latch alone would exclude it from the shared-tree count for the
+    /// rest of its life.
+    /// What: the `cwd` of the last hook event carrying this delegation's
+    /// `agent_id`, rewritten whenever it changes. `None` until the subagent's
+    /// first tool call.
+    /// Test: `an_agent_that_leaves_its_worktree_blocks_the_shared_tree_again`,
+    /// `subagent_tool_calls_track_the_current_working_directory`.
+    #[serde(default)]
+    pub last_agent_cwd: Option<std::path::PathBuf>,
+    /// Whether this record was staled by matching a `SubagentStop`'s
+    /// `agent_type` rather than its `agent_id` (#6556).
+    ///
+    /// Why: that reconciliation identifies a record by TYPE, which is weaker
+    /// than by id — a stop whose own dispatch was never observed can name a
+    /// still-running sibling of the same type. `Stale` alone would then release
+    /// the tree for BOTH questions the delegation map answers, and one of them
+    /// must not be released: admitting a second file-mutating agent onto a HEAD
+    /// a live writer holds is the ADR-0048 harm. This flag is what lets
+    /// [`crate::daemon::state::DaemonState::live_shared_tree_writers`] and
+    /// [`crate::daemon::state::DaemonState::shared_tree_occupants`] answer
+    /// differently for one record.
+    /// What: set only by the type-reconciliation path; never by the staleness
+    /// sweep and never by #6497's dead-session reaper, both of which act on
+    /// evidence about the record's own owner.
+    /// Test: `a_type_reconciled_record_still_occupies_the_tree_for_a_dispatch`.
+    #[serde(default)]
+    pub stale_by_agent_type: bool,
     /// The `isolation` mode the dispatch declared, when it declared one (#4480).
     ///
     /// Why: without this, a delegation record cannot answer the one question
@@ -333,6 +369,8 @@ impl Delegation {
             transcript_path: None,
             cwd: None,
             worktree_path: None,
+            last_agent_cwd: None,
+            stale_by_agent_type: false,
             isolation: None,
             started_at: None,
             ended_at: None,
@@ -373,6 +411,8 @@ impl Delegation {
             transcript_path: None,
             cwd: None,
             worktree_path: None,
+            last_agent_cwd: None,
+            stale_by_agent_type: false,
             isolation: None,
             started_at: Some(now),
             ended_at: None,

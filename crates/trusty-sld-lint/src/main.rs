@@ -70,9 +70,14 @@ const MIN_SPEC_REFS: usize = 26;
 /// inline block scanner and the YAML frontmatter reader — and either can break
 /// alone; a combined total would let a healthy frontmatter count mask the
 /// inline parser matching nothing, which is exactly the demonstrated defect.
-/// Measured tree: 37 inline references, floored on the same two-thirds basis.
+/// Measured tree: 77 inline references, floored on the same two-thirds basis.
+/// The measurement doubled at #6605 without a single reference being added —
+/// the reader used to drop every reference whose path carried a `..` traversal
+/// segment, so 40 declared references across four crates were counted nowhere
+/// and checked never. Re-floor when the measurement moves, or the ratchet
+/// tolerates a loss it was sized to catch.
 /// Test: `tests::floor_rejects_zeroed_references`.
-const MIN_CODE_REFS: usize = 24;
+const MIN_CODE_REFS: usize = 51;
 
 /// Reports why a run's scan coverage is too low to be trusted, if it is.
 ///
@@ -237,12 +242,18 @@ fn main() -> Result<ExitCode> {
     // #5440-followup: the resolved-reference counts are printed, not just
     // floored — a CI log that shows only file counts cannot distinguish a real
     // run from one whose grammar drifted to matching nothing.
+    // #6605: the rejected counts are printed beside them so a reader can tell a
+    // reference that resolved from one refused on its path shape. They were
+    // indistinguishable before — a refused reference was dropped silently and
+    // showed up nowhere at all.
     println!(
-        "sld-lint: scanned {} spec doc(s) + {} code file(s); resolved {} frontmatter + {} inline reference(s); {errors} error(s), {warnings} warning(s){}",
+        "sld-lint: scanned {} spec doc(s) + {} code file(s); resolved {} frontmatter + {} inline reference(s), rejected {} + {} on path shape; {errors} error(s), {warnings} warning(s){}",
         report.spec_docs,
         report.code_files,
         report.spec_refs_checked,
         report.code_refs_checked,
+        report.spec_refs_rejected,
+        report.code_refs_rejected,
         if strict { " [strict]" } else { "" }
     );
 

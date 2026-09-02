@@ -173,9 +173,12 @@ pub fn spawn_watch_loop(
                     };
                     match &outcome {
                         Ok(stats) if retry_attempt.is_none() => {
+                            // #6570: `files_unchanged` is what says whether the
+                            // overflow found real work or nothing at all.
                             tracing::info!(
                                 index_id = %index_id,
                                 files_reindexed = stats.files_reindexed,
+                                files_unchanged = stats.files_unchanged,
                                 chunks_indexed = stats.chunks_indexed,
                                 files_removed = stats.files_removed,
                                 "reconciled watched tree after a dropped-event rescan",
@@ -188,6 +191,7 @@ pub fn spawn_watch_loop(
                                 index_id = %index_id,
                                 attempt = retry_attempt,
                                 files_reindexed = stats.files_reindexed,
+                                files_unchanged = stats.files_unchanged,
                                 chunks_indexed = stats.chunks_indexed,
                                 files_removed = stats.files_removed,
                                 files_unreadable = stats.files_unreadable,

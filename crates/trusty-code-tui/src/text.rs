@@ -13,7 +13,7 @@
 //! `strip_interior_blank_lines` (DOC-50 §3.1/§5 Slice 4 migration).
 //!
 //! # Spec References
-//! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 4 deliverable (§5, Slice 4).
+//! - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 4 deliverable (§5, Slice 4).
 
 /// Strip leading and trailing whitespace-only lines from a multi-line string.
 ///

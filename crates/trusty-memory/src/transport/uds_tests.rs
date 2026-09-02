@@ -1390,6 +1390,54 @@ fn seed_palace(state: &AppState, name: &str) -> String {
     id.0
 }
 
+/// Why (#6601 review): the reserve was documented as bounding this flush and
+/// nothing enforced it — `bm25_lane::shutdown` holds the residency mutex and
+/// flushes every resident palace with no deadline. An unbounded flush spends the
+/// whole reserve, so `serve_with_shutdown` never reaches its socket unlink and
+/// the SIGKILL leaves the stale socket file behind.
+///
+/// What: a flush that never completes must be abandoned at the budget, and the
+/// wait must be the budget rather than the flush.
+/// Test: this test itself.
+#[tokio::test]
+async fn an_exit_flush_that_overruns_the_reserve_is_abandoned() {
+    let budget = std::time::Duration::from_millis(120);
+    let started = std::time::Instant::now();
+
+    let completed = super::flush_within_reserve(std::future::pending::<()>(), budget).await;
+
+    assert!(!completed, "a flush that never finishes must report as cut");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= budget,
+        "the flush must get its whole budget, not less: {elapsed:?}"
+    );
+    assert!(
+        elapsed < budget * 8,
+        "an overrunning flush must not hold the exit path open: {elapsed:?}"
+    );
+}
+
+/// Why (#6601 review): the bound must not become a delay. A flush that finishes
+/// promptly — the normal case, and the only one on a small palace set — has to
+/// return as soon as it is done, or every clean shutdown pays the reserve.
+/// What: a flush that completes immediately returns immediately and reports
+/// completion.
+/// Test: this test itself.
+#[tokio::test]
+async fn a_prompt_exit_flush_is_not_cut_short() {
+    let budget = std::time::Duration::from_secs(30);
+    let started = std::time::Instant::now();
+
+    let completed = super::flush_within_reserve(async {}, budget).await;
+
+    assert!(completed, "a flush that finished must report as finished");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "the bound must not delay a flush that already returned"
+    );
+}
+
 /// Create a real palace on disk WITHOUT registering it in `state`'s registry.
 ///
 /// Why: `create_palace` registers the handle it opened, and `open_palace`

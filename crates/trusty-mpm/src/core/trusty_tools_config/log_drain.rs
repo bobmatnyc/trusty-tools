@@ -33,7 +33,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use trusty_common::log_drain::{
-    DEFAULT_MAX_FILE_BYTES, DestinationScheme, DestinationUri, Level, LogSource,
+    DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_WIRE_BYTES, DestinationScheme, DestinationUri, Level,
+    LogSource,
 };
 
 use super::TrustyToolsConfig;
@@ -87,9 +88,16 @@ pub struct LogDrainConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_secs: Option<u64>,
 
-    /// Per-file size ceiling. `None` → [`DEFAULT_MAX_FILE_BYTES`].
+    /// Plaintext source ceiling. `None` → [`DEFAULT_MAX_FILE_BYTES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_file_bytes: Option<u64>,
+
+    /// Compressed-body ceiling (#6547). `None` → [`DEFAULT_MAX_WIRE_BYTES`].
+    ///
+    /// The collector streams, so the source size no longer bounds memory; the
+    /// gzip body handed to `put` does. This is the knob for that bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wire_bytes: Option<u64>,
 
     /// Extra literal strings scrubbed from every body before upload.
     ///
@@ -168,7 +176,7 @@ pub enum LogDrainConfigError {
     /// A numeric knob was set to zero.
     #[error("log_drain.{field} must be greater than zero")]
     NonPositive {
-        /// `interval_secs` or `max_file_bytes`.
+        /// `interval_secs`, `max_file_bytes`, or `max_wire_bytes`.
         field: &'static str,
     },
 
@@ -214,8 +222,10 @@ pub struct ResolvedLogDrain {
     pub destination_display: String,
     /// How long the scheduler sleeps between passes.
     pub interval: Duration,
-    /// Per-file size ceiling handed to `DrainConfig`.
+    /// Plaintext source ceiling handed to `DrainConfig`.
     pub max_file_bytes: u64,
+    /// Compressed-body ceiling handed to `DrainConfig` (#6547).
+    pub max_wire_bytes: u64,
     /// Extra literal secrets to scrub.
     pub secrets: Vec<String>,
     /// Operator-pinned GitHub login, when one was configured.
@@ -308,6 +318,14 @@ pub fn resolve_log_drain(
             field: "max_file_bytes",
         });
     }
+    // #6547: a zero wire cap would skip every file with a recorded decision,
+    // which reads exactly like a working drain with nothing to send.
+    let max_wire_bytes = section.max_wire_bytes.unwrap_or(DEFAULT_MAX_WIRE_BYTES);
+    if max_wire_bytes == 0 {
+        return Err(LogDrainConfigError::NonPositive {
+            field: "max_wire_bytes",
+        });
+    }
 
     let sources = resolve_sources(&section.sources, home)?;
 
@@ -330,6 +348,7 @@ pub fn resolve_log_drain(
         destination_display,
         interval: Duration::from_secs(interval_secs),
         max_file_bytes,
+        max_wire_bytes,
         secrets: section.secrets.clone(),
         github_id: non_empty(section.github_id.as_deref()),
         session_id: non_empty(section.session_id.as_deref()),

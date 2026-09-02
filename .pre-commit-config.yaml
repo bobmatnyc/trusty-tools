@@ -54,16 +54,24 @@ repos:
   # Ratcheted 500-line file-size cap (issue #610). Fails the commit when a new
   # tracked .rs file exceeds 500 lines, or an allowlisted file grows past its
   # frozen budget, or an allowlisted file dropped <= 500 (remove its entry).
-  # Runs against the whole tracked tree (pass_filenames: false) so the
-  # allowlist ratchet is evaluated holistically, not just on staged paths.
+  #
+  # Scoped to the STAGED .rs files. Scanning all 4,363 tracked .rs files cost
+  # ~34s on every commit, and all three FAILs above are decided per file — a
+  # staged file over its cap fails the hook exactly as it fails the whole-tree
+  # run, because the path-list mode reuses the same SLOC counter and the same
+  # allowlist comparison rather than a second implementation. The two checks a
+  # subset genuinely cannot answer (the #4618 scan floor and the drift WARN for
+  # an allowlisted file that no longer exists) are skipped here and still run on
+  # every PR: line-cap.yml calls the no-argument whole-tree form, unchanged.
   - repo: local
     hooks:
       - id: line-cap
         name: 500-line file-size cap (ratcheted allowlist)
         entry: scripts/check_line_cap.sh
         language: system
-        pass_filenames: false
-        always_run: true
+        pass_filenames: true
+        files: \.rs$
+        types: [file]
 
   # Test: doc-comment pointer lint (issue #2458). Fails the commit when a
   # `/// Test:`/`//! Test:` annotation cites a test name that doesn't exist

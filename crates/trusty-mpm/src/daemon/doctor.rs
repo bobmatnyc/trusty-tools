@@ -109,6 +109,12 @@ use doctor_binary_provenance::check_binary_provenance;
 mod doctor_skill_unmanaged;
 use doctor_skill_unmanaged::check_skill_unmanaged;
 
+// #6586: bundled skills are user-tier only. The deploy sites honour that now,
+// but they cannot reach a copy an earlier binary already wrote into a project.
+#[path = "doctor_skill_project_tier.rs"]
+mod doctor_skill_project_tier;
+use doctor_skill_project_tier::check_skill_project_tier;
+
 // Split out to keep this file under the 500-SLOC production cap (DOC-42,
 // issue #2889 — the agent-bundled-skills dangling-reference / prose-mention
 // probe).
@@ -329,7 +335,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_thirty_two_checks`,
+/// Test: `run_doctor_produces_thirty_seven_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -400,6 +406,9 @@ pub async fn run_doctor(
         // covers the deployed skills — an untracked bundled skill is
         // unreachable by every deploy and invisible to staleness.
         check_skill_unmanaged(&paths, project_dir),
+        // #6586: and this reports the duplicates the ruling retired — a bundled
+        // skill still sitting in a project's own tier, which no deploy refreshes.
+        check_skill_project_tier(&paths, project_dir),
         check_legacy_instruction_sources(&home),
         // #4286: the five `.trusty-mpm/` override files are no longer read. A
         // leftover file means the project's instructions stopped reaching the

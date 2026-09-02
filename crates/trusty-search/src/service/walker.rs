@@ -43,6 +43,14 @@ pub const SOURCE_EXTS: &[&str] = &[
 /// AWS CDK / SAM synth output (`cdk.out`, `.aws-sam`) is especially noisy: each
 /// Lambda asset is a full copy of a Python venv with vendored dependencies.
 pub const SKIP_DIRS: &[&str] = &[
+    // #6570: this daemon's own colocated storage
+    // (`colocated_storage::COLOCATED_DIR_NAME`). It sits INSIDE the watched
+    // root, so every corpus commit writes here and the watcher then delivers
+    // those writes back as file events. `.gitignore` already hides it from the
+    // walker on a git root; naming it here covers `respect_gitignore: false`
+    // and, more importantly, `path_in_skipped_dir`, which the watcher's
+    // per-event filter uses and which never consults `.gitignore`.
+    ".trusty-search",
     ".git",
     "target",
     "node_modules",

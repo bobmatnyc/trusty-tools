@@ -137,11 +137,33 @@ mod tests {
         addr
     }
 
-    /// Set `HTTP_PROXY`, run `body`, restore the previous value.
+    /// Set `HTTP_PROXY`, run `body`, restore the previous value, and hold
+    /// `ENV_LOCK` for the whole call (#6575).
     ///
-    /// SAFETY: every caller is `#[serial]`, so no other test in this binary is
-    /// reading or writing the environment concurrently.
+    /// Why more than one domain: this binary serializes environment mutation in
+    /// three domains that do not exclude each other — `#[serial]`'s default
+    /// group, the named `#[serial(dotenv_credential_env)]` group
+    /// (`credentials`, `inference`, `memory_core`), and `data_dir::ENV_LOCK`, a
+    /// plain mutex that excludes only the tests that take it
+    /// (`daemon_addr.rs`'s own comment records that gap). `reqwest` reads
+    /// `HTTP_PROXY` / `http_proxy` / `ALL_PROXY` through `std::env::var_os` at
+    /// every client build
+    /// (`hyper_util::client::proxy::matcher::Builder::from_env`, no cache), so
+    /// a proxy test holding one domain still builds its clients while a test in
+    /// another domain is inside `setenv`/`unsetenv` — and
+    /// `credentials::dotenv`'s `load_env_from_path` republishes arbitrary keys
+    /// in bulk. The callers moved to the `dotenv_credential_env` key, which is
+    /// where every bulk env writer lives, and this takes `ENV_LOCK`. The default
+    /// group is what they gave up, and it costs nothing: its env writers
+    /// (`bm25`, `catchup`, `daemon_token`) each set one named variable of their
+    /// own, none of them a proxy variable.
+    ///
+    /// SAFETY: the caller holds every domain above, so no other test in this
+    /// binary is reading or writing the environment concurrently.
     fn with_http_proxy<T>(value: &str, body: impl FnOnce() -> T) -> T {
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous = std::env::var("HTTP_PROXY").ok();
         unsafe { std::env::set_var("HTTP_PROXY", value) };
         let out = body();
@@ -164,14 +186,15 @@ mod tests {
     /// [`loopback_client`] must still reach the stub.
     /// What: exports `HTTP_PROXY` pointing at a released ephemeral port, builds
     /// both clients under it, and issues the same loopback GET with each.
-    /// `#[serial]` because `HTTP_PROXY` is process-global.
+    /// Serialized because `HTTP_PROXY` is process-global — both serial keys,
+    /// per [`with_http_proxy`] (#6575).
     /// Test: This is the test.
     ///
     /// If a future reqwest exempts loopback from proxies, the first assertion
     /// becomes obsolete and should be deleted — `.no_proxy()` itself must stay,
     /// because this crate cannot pin every consumer's reqwest patch level.
     #[tokio::test]
-    #[serial]
+    #[serial(dotenv_credential_env)]
     async fn loopback_client_ignores_exported_http_proxy() {
         let addr = stub_server().await;
         let url = format!("http://{addr}/health");
@@ -209,7 +232,7 @@ mod tests {
     /// Test: This is the test.
     #[cfg(feature = "blocking-http")]
     #[tokio::test]
-    #[serial]
+    #[serial(dotenv_credential_env)]
     async fn blocking_loopback_client_ignores_exported_http_proxy() {
         let addr = stub_server().await;
         let url = format!("http://{addr}/health");

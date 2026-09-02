@@ -156,6 +156,12 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "pull_requests_head_ref_and_body_ticket",
         sql: include_str!("../sql/0024_pull_requests_head_ref_and_body_ticket.sql"),
     },
+    // #6073: per-repo full-history walk bookkeeping.
+    Migration {
+        version: 25,
+        name: "repo_walk_state",
+        sql: include_str!("../sql/0025_repo_walk_state.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
@@ -224,7 +230,7 @@ pub fn run(conn: &mut Connection) -> Result<()> {
 /// # Errors
 ///
 /// Returns [`TgaError::MigrationError`] if a migration's SQL fails.
-fn run_through(conn: &mut Connection, max_version: i64) -> Result<()> {
+pub(crate) fn run_through(conn: &mut Connection, max_version: i64) -> Result<()> {
     ensure_migrations_table(conn)?;
     let current = current_version(conn)?;
     debug!(current_version = current, "running migrations");

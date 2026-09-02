@@ -160,6 +160,42 @@ fn uri_region_override() {
 }
 
 #[test]
+fn cache_namespace_separates_destinations() {
+    let a = DestinationUri::parse("s3://bucket-a/logs").expect("bucket-a");
+    let b = DestinationUri::parse("s3://bucket-b/logs").expect("bucket-b");
+    let other_prefix = DestinationUri::parse("s3://bucket-a/other").expect("other prefix");
+    let local = DestinationUri::parse("file:///tmp/drain-a").expect("file");
+
+    assert_ne!(a.cache_namespace(), b.cache_namespace(), "bucket");
+    assert_ne!(
+        a.cache_namespace(),
+        other_prefix.cache_namespace(),
+        "prefix"
+    );
+    assert_ne!(a.cache_namespace(), local.cache_namespace(), "scheme");
+
+    // A cache directory is named with this, so it is one segment and it is
+    // recognisable to an operator reading `ls`.
+    assert!(a.cache_namespace().starts_with("s3-"));
+    assert!(local.cache_namespace().starts_with("file-"));
+    assert!(!a.cache_namespace().contains('/'));
+    assert!(!local.cache_namespace().contains('/'));
+
+    // Unstable between calls would mean the cache is written and never read.
+    let a_again = DestinationUri::parse("s3://bucket-a/logs").expect("bucket-a again");
+    assert_eq!(a.cache_namespace(), a_again.cache_namespace());
+}
+
+#[test]
+fn cache_namespace_ignores_the_region_override() {
+    // `?region=` changes which endpoint serves a bucket, never which objects it
+    // holds, so adding one must not orphan a cache that is still valid (#6548).
+    let plain = DestinationUri::parse("s3://bucket-a/logs").expect("plain");
+    let regioned = DestinationUri::parse("s3://bucket-a/logs?region=eu-west-1").expect("regioned");
+    assert_eq!(plain.cache_namespace(), regioned.cache_namespace());
+}
+
+#[test]
 fn uri_table_rejects() {
     // Each case must fail with DrainError::Uri, not a scheme error.
     let cases = [
@@ -330,7 +366,7 @@ fn collect_filters_below_info() {
     let collected = collect(
         &[source(root.path(), Some(Level::Info))],
         &[],
-        DEFAULT_MAX_FILE_BYTES,
+        CollectLimits::default(),
     )
     .expect("collect succeeds");
 
@@ -368,7 +404,7 @@ fn collect_drops_continuation_of_a_dropped_line() {
     let collected = collect(
         &[source(root.path(), Some(Level::Info))],
         &[],
-        DEFAULT_MAX_FILE_BYTES,
+        CollectLimits::default(),
     )
     .expect("collect");
     let mut decoder = flate2::read::GzDecoder::new(&collected.files[0].body[..]);
@@ -388,7 +424,7 @@ fn collect_passes_through_non_tracing() {
     let collected = collect(
         &[source(root.path(), Some(Level::Info))],
         &[],
-        DEFAULT_MAX_FILE_BYTES,
+        CollectLimits::default(),
     )
     .expect("collect");
 
@@ -415,7 +451,7 @@ fn collect_recognises_ansi_coloured_levels() {
     let collected = collect(
         &[source(root.path(), Some(Level::Info))],
         &[],
-        DEFAULT_MAX_FILE_BYTES,
+        CollectLimits::default(),
     )
     .expect("collect");
     let mut decoder = flate2::read::GzDecoder::new(&collected.files[0].body[..]);
@@ -437,7 +473,12 @@ fn collect_skips_oversize() {
     write(&root.path().join("big.log"), &"x".repeat(4096));
     write(&root.path().join("small.log"), "tiny\n");
 
-    let collected = collect(&[source(root.path(), None)], &[], 1024).expect("collect");
+    let collected = collect(
+        &[source(root.path(), None)],
+        &[],
+        CollectLimits::new(1024, DEFAULT_MAX_WIRE_BYTES),
+    )
+    .expect("collect");
 
     assert_eq!(collected.files.len(), 1, "only the small file is collected");
     assert_eq!(collected.files[0].relative_key, "trusty-mpm/small.log");
@@ -535,11 +576,7 @@ async fn manifest_remote_wins_over_local_cache() {
         sha256: "stale".into(),
         uploaded_at: "2026-01-01T00:00:00Z".into(),
     });
-    let cache_path = state
-        .path()
-        .join("log-drain")
-        .join("bob/sess")
-        .join("manifest.json");
+    let cache_path = DrainManifest::cache_path(state.path(), &dest, "bob/sess");
     std::fs::create_dir_all(cache_path.parent().expect("parent")).expect("cache dir");
     std::fs::write(&cache_path, serde_json::to_vec(&stale).expect("encode")).expect("cache write");
 
@@ -683,6 +720,135 @@ async fn run_once_is_idempotent() {
     assert_eq!(second.uploaded, 0, "nothing changed, so nothing re-uploads");
     assert_eq!(second.skipped_unchanged, 1);
     assert_eq!(second.bytes_wire, 0);
+    assert_eq!(
+        second.manifest_spot_check_missing, 0,
+        "the manifest describes a file that really is there"
+    );
+}
+
+/// Every key under `prefix`, with its size, sorted — a stable snapshot of what
+/// a destination holds.
+async fn contents(dest: &dyn LogDestination, prefix: &str) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = dest
+        .list(prefix)
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|m| (m.key, m.size))
+        .collect();
+    out.sort();
+    out
+}
+
+#[tokio::test]
+async fn run_once_reuploads_when_the_destination_changes() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let dest_a_root = tempfile::tempdir().expect("tempdir");
+    let dest_b_root = tempfile::tempdir().expect("tempdir");
+    // ONE state dir across both runs: the operator changed
+    // `log_drain.destination`, not their machine.
+    let state = tempfile::tempdir().expect("tempdir");
+
+    write(&logs.path().join("daemon.log"), TRACING_FIXTURE);
+    write(&logs.path().join("nested/worker.log"), TRACING_FIXTURE);
+
+    let cfg = DrainConfig::new(state.path());
+    let t = target();
+    let sources = [source(logs.path(), Some(Level::Info))];
+
+    let dest_a = file_dest(dest_a_root.path()).await;
+    let first = run_once(&cfg, &dest_a, &t, &sources)
+        .await
+        .expect("run against A");
+    assert_eq!(first.uploaded, 2);
+    let a_before = contents(&dest_a, &t.logs_prefix()).await;
+
+    // Same identity, same state dir, a destination that holds nothing. B has no
+    // manifest of its own, so before #6548 the load fell back to the cache
+    // written for A and classified every file SkipUnchanged — the files never
+    // arrived, and B's manifest then claimed they had.
+    let dest_b = file_dest(dest_b_root.path()).await;
+    let second = run_once(&cfg, &dest_b, &t, &sources)
+        .await
+        .expect("run against B");
+
+    assert_eq!(
+        second.uploaded, 2,
+        "a fresh destination holds none of these files yet"
+    );
+    assert_eq!(
+        second.skipped_unchanged, 0,
+        "a skip decision made for A must decide nothing for B"
+    );
+
+    for relative in ["trusty-mpm/daemon.log", "trusty-mpm/nested/worker.log"] {
+        let key = t.object_key(relative);
+        assert!(
+            dest_b.head(&key).await.expect("head B").is_some(),
+            "expected an object at `{key}` under B"
+        );
+    }
+    assert!(
+        dest_b
+            .head(&t.manifest_key())
+            .await
+            .expect("head B")
+            .is_some(),
+        "B gets its own manifest"
+    );
+
+    assert_eq!(
+        a_before,
+        contents(&dest_a, &t.logs_prefix()).await,
+        "a run aimed at B must not write to A"
+    );
+}
+
+#[tokio::test]
+async fn run_once_spot_checks_a_lying_remote_manifest() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    write(&logs.path().join("daemon.log"), TRACING_FIXTURE);
+
+    let dest = file_dest(dest_root.path()).await;
+    let cfg = DrainConfig::new(state.path());
+    let t = target();
+    let sources = [source(logs.path(), Some(Level::Info))];
+
+    run_once(&cfg, &dest, &t, &sources)
+        .await
+        .expect("first run");
+
+    // Exactly what #6548 left in the wild: a remote manifest naming an object
+    // this destination never received. One entry, so the sample is determined.
+    let mut lying = DrainManifest::default();
+    lying.record(ManifestEntry {
+        relative_file: "trusty-mpm/never-uploaded.log".into(),
+        size: 1,
+        mtime_unix: 1,
+        sha256: "ghost".into(),
+        uploaded_at: "2026-01-01T00:00:00Z".into(),
+    });
+    dest.put(
+        &t.manifest_key(),
+        bytes::Bytes::from(serde_json::to_vec(&lying).expect("encode")),
+        PutMeta::default(),
+    )
+    .await
+    .expect("put the lying manifest");
+
+    let report = run_once(&cfg, &dest, &t, &sources)
+        .await
+        .expect("second run");
+    assert_eq!(
+        report.manifest_spot_check_missing, 1,
+        "the sampled entry names an object the destination does not have"
+    );
+    assert_eq!(
+        report.uploaded, 1,
+        "detection only — the run still uploads what the lying manifest omits"
+    );
 }
 
 #[tokio::test]
@@ -825,6 +991,270 @@ async fn run_once_counts_oversize_without_uploading() {
     );
 }
 
+// ── #6547: streaming, and skip decisions made once ──────────────────────────
+
+/// Read the destination's own manifest object.
+async fn remote_manifest(dest: &dyn LogDestination, t: &DrainTarget) -> DrainManifest {
+    let raw = dest
+        .get(&t.manifest_key())
+        .await
+        .expect("get manifest")
+        .expect("manifest object exists");
+    serde_json::from_slice(&raw).expect("manifest decodes")
+}
+
+/// A tracing-shaped fixture larger than the pipeline's 1 MiB read chunk, with
+/// `secret` planted so it straddles the boundary.
+///
+/// The straddle is the point: a needle split across two reads is found by
+/// neither chunk alone, which is the hazard `ScrubCarry` exists for.
+fn chunk_straddling_fixture(secret: &str) -> String {
+    const CHUNK: usize = 1024 * 1024;
+    let line = "2026-09-01T14:12:32.2Z  INFO tm: filler line to reach the chunk boundary\n";
+    let mut text = String::with_capacity(CHUNK + 4096);
+    // Stop a few bytes short of the boundary so the secret spans it.
+    while text.len() + line.len() < CHUNK - (secret.len() / 2) {
+        text.push_str(line);
+    }
+    let pad = CHUNK - (secret.len() / 2) - text.len();
+    text.push_str(&"p".repeat(pad));
+    text.push_str(secret);
+    text.push_str(" tail\n2026-09-01T14:12:33.0Z  INFO tm: after the boundary\n");
+    text
+}
+
+#[tokio::test]
+async fn stream_scrubs_a_secret_straddling_a_chunk_boundary() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+
+    let secret = "sk-straddle-0123456789abcdef0123456789abcdef";
+    let fixture = chunk_straddling_fixture(secret);
+    assert!(
+        fixture.len() > 1024 * 1024,
+        "the fixture must cross the read chunk"
+    );
+    write(&logs.path().join("daemon.log"), &fixture);
+
+    let dest = file_dest(dest_root.path()).await;
+    let cfg = DrainConfig::new(state.path()).with_secrets(vec![secret.to_string()]);
+    let t = target();
+
+    let report = run_once(&cfg, &dest, &t, &[source(logs.path(), None)])
+        .await
+        .expect("run_once");
+    assert_eq!(report.uploaded, 1);
+
+    let text = read_gunzipped(&dest, &t.object_key("trusty-mpm/daemon.log")).await;
+    assert!(
+        !text.contains(secret),
+        "a secret split across two read chunks reached the destination"
+    );
+    assert!(
+        text.contains("[REDACTED]"),
+        "the scrub must leave its marker"
+    );
+    assert!(
+        text.contains("after the boundary"),
+        "text past the boundary must survive"
+    );
+}
+
+#[tokio::test]
+async fn stream_matches_the_buffered_pipeline() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+
+    // Levels on both sides of a chunk boundary: the filter's `keeping` state
+    // has to survive the split, not reset to its default.
+    let mut fixture = chunk_straddling_fixture("sk-unused-needle-value-000000");
+    fixture.push_str("2026-09-01T14:12:34.0Z DEBUG tm: dropped after the boundary\n");
+    fixture.push_str("        continuation of the dropped line\n");
+    fixture.push_str("2026-09-01T14:12:35.0Z ERROR tm: kept after the boundary\n");
+    write(&logs.path().join("daemon.log"), &fixture);
+
+    let dest = file_dest(dest_root.path()).await;
+    let cfg = DrainConfig::new(state.path());
+    let t = target();
+
+    run_once(&cfg, &dest, &t, &[source(logs.path(), Some(Level::Info))])
+        .await
+        .expect("run_once");
+
+    let text = read_gunzipped(&dest, &t.object_key("trusty-mpm/daemon.log")).await;
+    assert!(
+        !text.contains("dropped after the boundary"),
+        "DEBUG past the chunk boundary must still be dropped"
+    );
+    assert!(
+        !text.contains("continuation of the dropped line"),
+        "a continuation inherits its parent's disposition across a chunk boundary"
+    );
+    assert!(
+        text.contains("kept after the boundary"),
+        "ERROR must survive"
+    );
+    assert!(
+        text.contains("filler line to reach the chunk boundary"),
+        "INFO before the boundary must survive"
+    );
+}
+
+#[tokio::test]
+async fn run_once_uploads_a_file_over_the_old_ceiling() {
+    // The 64 MiB ceiling is what left 29 days of daemon logs permanently
+    // undrained; the streamed pipeline is what let the default move past it.
+    const {
+        assert!(
+            DEFAULT_MAX_FILE_BYTES > 64 * 1024 * 1024,
+            "the default source ceiling must clear the pre-#6547 64 MiB"
+        );
+    }
+
+    let logs = tempfile::tempdir().expect("tempdir");
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+
+    let line = "2026-09-01T14:12:32.2Z  INFO tm: a rotated daemon log line\n";
+    let big = line.repeat((65 * 1024 * 1024 / line.len()) + 1);
+    assert!(big.len() > 64 * 1024 * 1024, "fixture must clear 64 MiB");
+    write(&logs.path().join("trusty-mpm.2026-09-01.log"), &big);
+
+    let dest = file_dest(dest_root.path()).await;
+    let t = target();
+
+    let report = run_once(
+        &DrainConfig::new(state.path()),
+        &dest,
+        &t,
+        &[source(logs.path(), Some(Level::Info))],
+    )
+    .await
+    .expect("run_once");
+
+    assert_eq!(report.uploaded, 1, "{:?}", report.errors);
+    assert_eq!(report.skipped_too_large, 0);
+    assert_eq!(report.bytes_plain, big.len() as u64);
+    assert!(
+        report.bytes_wire < 1024 * 1024,
+        "the gzip body is what stays in memory: {} B",
+        report.bytes_wire
+    );
+}
+
+#[tokio::test]
+async fn collect_skips_a_body_over_the_wire_cap() {
+    let root = tempfile::tempdir().expect("tempdir");
+    // Random-ish text so gzip cannot squeeze it under a 64-byte wire cap.
+    let body: String = (0..8192u32)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
+    write(&root.path().join("wide.log"), &body);
+
+    let collected = collect(
+        &[source(root.path(), None)],
+        &[],
+        CollectLimits::new(DEFAULT_MAX_FILE_BYTES, 64),
+    )
+    .expect("collect");
+
+    assert!(collected.files.is_empty(), "the body must not be truncated");
+    assert_eq!(collected.oversize.len(), 1);
+    assert_eq!(collected.oversize[0].reason, SkipReason::CompressedTooLarge);
+    assert_eq!(collected.oversize[0].reason.limit_name(), "max_wire_bytes");
+}
+
+#[tokio::test]
+async fn run_once_records_an_oversize_skip_once() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    write(&logs.path().join("big.log"), &"x".repeat(4096));
+
+    let dest = file_dest(dest_root.path()).await;
+    let cfg = DrainConfig::new(state.path()).with_max_file_bytes(1024);
+    let t = target();
+    let sources = [source(logs.path(), None)];
+
+    let first = run_once(&cfg, &dest, &t, &sources)
+        .await
+        .expect("first pass");
+    assert_eq!(first.skipped_too_large, 1);
+    assert_eq!(
+        first.skips_recorded, 1,
+        "the first pass decides, and that is the pass that warns"
+    );
+
+    let manifest = remote_manifest(&dest, &t).await;
+    assert_eq!(manifest.skips.len(), 1, "the decision must be durable");
+    assert_eq!(manifest.skips[0].relative_file, "trusty-mpm/big.log");
+    assert_eq!(manifest.skips[0].size, 4096);
+    assert_eq!(manifest.skips[0].reason, SkipReason::SourceTooLarge);
+
+    // The cycle that produced 1,276 identical WARNs in 48 hours. `warn!` is
+    // gated on the same branch that increments `skips_recorded`, so a zero here
+    // is a pass that logged nothing about this file.
+    for pass in 0..3 {
+        let again = run_once(&cfg, &dest, &t, &sources)
+            .await
+            .expect("repeat pass");
+        assert_eq!(again.skipped_too_large, 1, "pass {pass}");
+        assert_eq!(
+            again.skips_recorded, 0,
+            "pass {pass} re-decided a file that cannot have changed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn run_once_re_evaluates_a_skip_when_the_file_changes() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    let path = logs.path().join("big.log");
+    write(&path, &"x".repeat(4096));
+
+    let dest = file_dest(dest_root.path()).await;
+    let cfg = DrainConfig::new(state.path()).with_max_file_bytes(1024);
+    let t = target();
+    let sources = [source(logs.path(), None)];
+
+    assert_eq!(
+        run_once(&cfg, &dest, &t, &sources)
+            .await
+            .expect("first pass")
+            .skips_recorded,
+        1
+    );
+
+    // A daily log is appended to all day. Its size moved, so the recorded
+    // answer no longer describes it and the decision is made again.
+    write(&path, &"x".repeat(8192));
+    let after_growth = run_once(&cfg, &dest, &t, &sources)
+        .await
+        .expect("pass after growth");
+    assert_eq!(
+        after_growth.skips_recorded, 1,
+        "a file whose size changed must be re-evaluated"
+    );
+    assert_eq!(remote_manifest(&dest, &t).await.skips[0].size, 8192);
+
+    // Raising the ceiling makes the same file drainable, and the stale
+    // decision must not outlive the upload that contradicts it.
+    let raised = DrainConfig::new(state.path()).with_max_file_bytes(1024 * 1024);
+    let uploaded = run_once(&raised, &dest, &t, &sources)
+        .await
+        .expect("pass with a raised ceiling");
+    assert_eq!(uploaded.uploaded, 1);
+    assert_eq!(uploaded.skipped_too_large, 0);
+    assert!(
+        remote_manifest(&dest, &t).await.skips.is_empty(),
+        "a file that uploaded must carry no skip record"
+    );
+}
+
 #[tokio::test]
 async fn run_once_refuses_empty_github_id() {
     let dest_root = tempfile::tempdir().expect("tempdir");
@@ -934,6 +1364,10 @@ impl LogDestination for FailingDestination {
 
     async fn list(&self, prefix: &str) -> Result<Vec<ObjectMeta>, DrainError> {
         self.inner.list(prefix).await
+    }
+
+    fn cache_namespace(&self) -> &str {
+        self.inner.cache_namespace()
     }
 }
 

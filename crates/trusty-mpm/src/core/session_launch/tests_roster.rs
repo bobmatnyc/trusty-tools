@@ -110,7 +110,10 @@ fn prepare_session_continues_after_skill_deploy_failure() {
     // self-heals the skill *source* to the full bundled set (including
     // `tm-doctor.md`) before the deploy step runs, so this deterministically
     // makes `create_dir_all` fail when the deploy reaches that entry.
-    let skills_dir = fw.claude_skills_dir();
+    // #6586: the bundled roster now deploys to the MANAGED user tier, so the
+    // obstruction has to be planted there — `claude_skills_dir()` declines
+    // bundled skills and would never reach this name.
+    let skills_dir = fw.skill_deploy_dir();
     std::fs::create_dir_all(&skills_dir).unwrap();
     std::fs::write(skills_dir.join("tm-doctor"), b"not a directory").unwrap();
 

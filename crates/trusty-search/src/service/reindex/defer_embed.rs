@@ -290,8 +290,34 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
 mod tests {
     use super::*;
     use crate::core::{indexer::CodeIndexer, registry::IndexId};
-    use crate::service::reindex::ReindexProgress;
+    use crate::service::reindex::{deferred_embed_queue_depth, ReindexProgress};
     use std::sync::Arc;
+
+    /// Wait until the job this test enqueued has left the process-global queue.
+    ///
+    /// Why (#6574): `defer_embed_queue::enqueue` increments `QUEUE_DEPTH` inline
+    /// but spawns `wait_for_turn` — which owns the ONLY decrement — onto the
+    /// CALLING runtime. Each test below returns as soon as a `stages` field
+    /// flips, and `run_embed_catch_up` writes those fields before that decrement
+    /// runs, so `#[tokio::test]` drops the runtime with the task still in flight
+    /// and the job's depth is never given back. The phantom is permanent,
+    /// process-global, and invisible to the test that created it; it is what made
+    /// `embed_pause_tests::shutdown_drain_releases_a_parked_embed_pass` fail its
+    /// entry guard with "depth is 1". These tests are also `#[serial_test::serial]`
+    /// so nothing else is adding while this waits.
+    /// What: polls the shared depth to zero under a bounded deadline.
+    /// Test: the three tests below that enqueue.
+    async fn drain_the_queue(what: &str) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        while deferred_embed_queue_depth() > 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{what}: the deferred-embed queue never emptied; depth is {}",
+                deferred_embed_queue_depth()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
 
     /// Issue #928: `spawn_deferred_embed_pass` with a BM25-only (no embedder)
     /// handle must mark semantic Ready after the pass completes. Without an
@@ -303,7 +329,10 @@ mod tests {
     /// What: constructs a bare handle with `defer_embed=true`, calls
     /// `spawn_deferred_embed_pass`, and polls until semantic.status == Ready.
     /// Test: this test.
+    // #6574: joins the serial group and drains below — this test enqueues onto
+    // the process-global deferred-embed queue.
     #[tokio::test]
+    #[serial_test::serial]
     async fn deferred_embed_pass_marks_semantic_ready_and_is_idempotent() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
@@ -331,6 +360,8 @@ mod tests {
             crate::core::registry::StageStatus::Ready,
             "deferred embed pass (no-embedder) must flip semantic to Ready"
         );
+        drop(stages);
+        drain_the_queue("this test's own job").await;
     }
 
     /// Issue #928: when the background embed pass fails, `spawn_deferred_embed_pass`
@@ -344,7 +375,10 @@ mod tests {
     /// store, commits a chunk so `embed_deferred_chunks` has work to do, then
     /// calls `spawn_deferred_embed_pass` and asserts semantic.status == Failed.
     /// Test: this test.
+    // #6574: joins the serial group and drains below — this test enqueues onto
+    // the process-global deferred-embed queue.
     #[tokio::test]
+    #[serial_test::serial]
     async fn failing_deferred_embed_pass_marks_semantic_failed() {
         use crate::core::{
             chunker::{ChunkType, RawChunk},
@@ -434,6 +468,8 @@ mod tests {
             stages.semantic.failure.is_some(),
             "Failed stage must carry the failure reason"
         );
+        drop(stages);
+        drain_the_queue("this test's own job").await;
     }
 
     /// Issue #929: `spawn_deferred_embed_pass` must populate `stages.semantic.total`
@@ -448,7 +484,10 @@ mod tests {
     /// on a BM25-only handle, and asserts that `semantic.total == Some(1)` is
     /// visible BEFORE the pass completes (by racing a read against the spawn).
     /// Test: this test.
+    // #6574: joins the serial group and drains below — this test enqueues onto
+    // the process-global deferred-embed queue.
     #[tokio::test]
+    #[serial_test::serial]
     async fn deferred_embed_pass_pre_seeds_total_before_embedding() {
         use crate::core::{
             chunker::{ChunkType, RawChunk},
@@ -512,6 +551,7 @@ mod tests {
              before embed_deferred_chunks runs — so /indexes/:id/status shows \
              real N/total progress even during embedding"
         );
+        drain_the_queue("this test's own job").await;
     }
 
     /// Issue #2984 Phase 1 MEDIUM finding 4: if a component disable lands

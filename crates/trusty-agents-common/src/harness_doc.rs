@@ -1,6 +1,6 @@
 //! # Spec References
 //!
-//! - [`SPEC-HARNESS-UNDERSTANDING-01~draft`](../../docs/specs/harness-understanding.md)
+//! - [`SPEC-HARNESS-UNDERSTANDING-01~draft`](docs/specs/harness-understanding.md)
 //!
 //! Canonical harness-understanding instructions shared between trusty-mpm SM and
 //! future t-code overseer (DOC-21).
