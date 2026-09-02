@@ -15,15 +15,23 @@
 //! `worktree_remove` before this module is reached, so an out-of-scope target
 //! never costs a daemon round trip.
 //!
-//! **Every check fails CLOSED.** An `Err` from the probe means the fact could
-//! not be established, which denies — the
+//! **Every check fails CLOSED, the daemon answer included.** An `Err` from the
+//! probe means the fact could not be established, which denies. So does an
+//! `Err` in `live_owners`: a daemon that is down, timed out, or replied
+//! unparseably has proved nothing about who holds the tree, and an empty vec
+//! from such a reply would read as "nobody". That is why this takes a
+//! `Result` rather than a slice, and why the caller uses
+//! `live_shared_tree_writers_or_deny` rather than the HEAD-move rule's
+//! fail-open sibling. All of it is the
 //! [ADR-0045](../../../../../../../docs/adr/0045-distinguish-absent-from-undeterminable-on-destructive-paths.md)
 //! distinction, applied to a gate whose ALLOW deletes a checkout.
 //!
 //! Test: `allows_worktree_remove_from_version_control_on_clean_merged_unowned_tree`,
 //! `denies_worktree_remove_from_version_control_when_tree_dirty`,
+//! `denies_worktree_remove_from_version_control_when_commits_are_unpushed`,
 //! `denies_worktree_remove_from_version_control_when_no_merged_pr`,
-//! `denies_worktree_remove_from_version_control_when_another_agent_holds_lock`
+//! `denies_worktree_remove_from_version_control_when_another_agent_holds_lock`,
+//! `denies_worktree_remove_from_version_control_when_the_owner_query_fails`
 //! in `super::worktree_remove`.
 
 use std::path::Path;
@@ -84,13 +92,16 @@ pub(crate) fn recheck_deny(check: &str, target: &Path, detail: &str) -> String {
 /// round trip.
 ///
 /// `live_owners` is passed in rather than queried here because the daemon call
-/// is async and this policy is not; the caller makes it through the same
-/// `live_shared_tree_writers` route ADR-0048 decision 10's HEAD-move rule uses,
-/// so both rules read one answer built one way.
-/// Test: as the module doc.
+/// is async and this policy is not; the caller makes it over the same
+/// shared-tree route ADR-0048 decision 10's HEAD-move rule uses, through
+/// [`crate::commands::pm_guard_dispatch::live_shared_tree_writers_or_deny`],
+/// whose `Err` arm is what keeps an unanswered daemon from reading as an empty
+/// owner set.
+/// Test: as the module doc, plus
+/// `denies_worktree_remove_from_version_control_when_the_owner_query_fails`.
 pub(crate) fn evaluate_removal_rechecks(
     target: &Path,
-    live_owners: &[String],
+    live_owners: Result<&[String], &str>,
     probe: &dyn WorktreeRemovalProbe,
 ) -> Option<String> {
     match probe.dirty_entries(target) {
@@ -119,16 +130,31 @@ pub(crate) fn evaluate_removal_rechecks(
         Err(e) => return Some(recheck_deny(CHECK_UNPUSHED_COMMITS, target, &e)),
     }
 
-    if !live_owners.is_empty() {
-        return Some(recheck_deny(
-            CHECK_SOLE_OWNER,
-            target,
-            &format!(
-                "the daemon reports {} still writing here: {}.",
-                live_owners.len(),
-                live_owners.join(", ")
-            ),
-        ));
+    match live_owners {
+        Ok([]) => {}
+        Ok(owners) => {
+            return Some(recheck_deny(
+                CHECK_SOLE_OWNER,
+                target,
+                &format!(
+                    "the daemon reports {} still writing here: {}.",
+                    owners.len(),
+                    owners.join(", ")
+                ),
+            ));
+        }
+        Err(detail) => {
+            return Some(recheck_deny(
+                CHECK_SOLE_OWNER,
+                target,
+                &format!(
+                    "the daemon did not answer who holds this tree — {detail}. Silence is not \
+                     an empty owner set, and a removal made on it would be the one this check \
+                     exists to prevent. `tm doctor` reports an unhealthy daemon and \
+                     `tm restart` clears it."
+                ),
+            ));
+        }
     }
 
     let branch = match probe.branch(target) {

@@ -85,8 +85,15 @@ the guard will establish every precondition itself.
    - **`unpushed-commits`** — `git rev-list --count @{upstream}..HEAD` is zero.
      No upstream is a DENY, not a pass: nothing then proves the commits reached
      a remote.
-   - **`sole-owner`** — the daemon's `live_shared_tree_writers`, keyed on the
-     TARGET directory, names nobody.
+   - **`sole-owner`** — the daemon, keyed on the TARGET directory, names
+     nobody. Asked through `live_shared_tree_writers_or_deny`, NOT the
+     fail-open `live_shared_tree_writers` the HEAD-move rule uses: that one
+     collapses "nobody is here" and "nothing answered" into the same empty vec,
+     which is right where a wrong ALLOW costs the operator a `git merge` and
+     wrong where it costs another session its worktree. An unreachable, timed
+     out or unparseable reply denies, and so does a payload with no
+     `session_id`, since no session's delegations can be addressed without
+     one.
    - **`merged-pull-request`** — `gh pr list --head <branch> --state merged`
      returns at least one row. Ancestry is not an acceptable substitute: every
      merge on this repository is a squash merge, so a merged branch's tip is
@@ -130,7 +137,16 @@ the sweep stays the default.
 **Neutral.** The daemon query is the same route ADR-0048 decision 10's HEAD-move
 rule already uses, keyed by directory, so it claims nothing and records nothing.
 It is asked only after the two local git checks pass, so ordinary traffic and a
-dirty tree both cost zero round trips.
+dirty tree both cost zero round trips. What it does NOT share with that rule is
+the reader: the two failure biases are opposite and are kept as two functions
+rather than one function with a flag, so neither caller can acquire the other's
+bias by editing a default.
+
+**One consequence of that bias, stated rather than discovered later.** With the
+daemon down, `version-control` cannot remove a worktree directly at all. The
+sweep is in the same position — it queries the same registry — so the fallback
+is to fix the daemon (`tm doctor`, `tm restart`), not to route around the
+check.
 
 ## Related Decisions
 

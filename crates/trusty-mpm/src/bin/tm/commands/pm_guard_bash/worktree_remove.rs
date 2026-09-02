@@ -47,8 +47,10 @@
 //! `denies_a_remove_hidden_in_a_composed_command`,
 //! `allows_worktree_remove_from_version_control_on_clean_merged_unowned_tree`,
 //! `denies_worktree_remove_from_version_control_when_tree_dirty`,
+//! `denies_worktree_remove_from_version_control_when_commits_are_unpushed`,
 //! `denies_worktree_remove_from_version_control_when_no_merged_pr`,
 //! `denies_worktree_remove_from_version_control_when_another_agent_holds_lock`,
+//! `denies_worktree_remove_from_version_control_when_the_owner_query_fails`,
 //! `denies_worktree_remove_when_agent_type_claims_version_control_without_agent_id`
 //! below; `pm_guard_denies_worktree_remove_from_native_subagent` and
 //! `pm_guard_allows_worktree_remove_from_pm` run the binary end to end in
@@ -259,7 +261,8 @@ fn removal_target_path(tail: &[String], base: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::commands::pm_guard_bash::worktree_remove_rechecks::{
-        CHECK_CLEAN_TREE, CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER, evaluate_removal_rechecks,
+        CHECK_CLEAN_TREE, CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER, CHECK_UNPUSHED_COMMITS,
+        evaluate_removal_rechecks,
     };
     use trusty_mpm::core::worktree_removal_facts::WorktreeRemovalProbe;
 
@@ -439,7 +442,7 @@ mod tests {
         ));
         assert_eq!(target, PathBuf::from(WT));
         assert_eq!(
-            evaluate_removal_rechecks(&target, &[], &FakeProbe::reclaimable()),
+            evaluate_removal_rechecks(&target, Ok(&[]), &FakeProbe::reclaimable()),
             None,
             "a clean, pushed, merged, unowned tree must pass every re-check"
         );
@@ -451,10 +454,25 @@ mod tests {
             dirty: Ok(3),
             ..FakeProbe::reclaimable()
         };
-        let reason = evaluate_removal_rechecks(Path::new(WT), &[], &probe)
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
             .expect("a dirty tree must deny removal");
         assert!(reason.contains(CHECK_CLEAN_TREE), "{reason}");
         assert!(reason.contains('3'), "{reason}");
+    }
+
+    #[test]
+    fn denies_worktree_remove_from_version_control_when_commits_are_unpushed() {
+        // A clean working tree is not a pushed one. Removing here destroys
+        // commits that exist nowhere else, which is the harm `unpushed-commits`
+        // is separate from `clean-tree` to catch.
+        let probe = FakeProbe {
+            unpushed: Ok(2),
+            ..FakeProbe::reclaimable()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("an unpushed commit must deny removal");
+        assert!(reason.contains(CHECK_UNPUSHED_COMMITS), "{reason}");
+        assert!(reason.contains('2'), "{reason}");
     }
 
     #[test]
@@ -463,7 +481,7 @@ mod tests {
             merged: Ok(0),
             ..FakeProbe::reclaimable()
         };
-        let reason = evaluate_removal_rechecks(Path::new(WT), &[], &probe)
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
             .expect("an unmerged branch must deny removal");
         assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
         assert!(reason.contains("feat/thing"), "{reason}");
@@ -472,10 +490,26 @@ mod tests {
     #[test]
     fn denies_worktree_remove_from_version_control_when_another_agent_holds_lock() {
         let owners = vec!["rust-engineer".to_string()];
-        let reason = evaluate_removal_rechecks(Path::new(WT), &owners, &FakeProbe::reclaimable())
-            .expect("a tree another live agent holds must deny removal");
+        let reason =
+            evaluate_removal_rechecks(Path::new(WT), Ok(&owners), &FakeProbe::reclaimable())
+                .expect("a tree another live agent holds must deny removal");
         assert!(reason.contains(CHECK_SOLE_OWNER), "{reason}");
         assert!(reason.contains("rust-engineer"), "{reason}");
+    }
+
+    #[test]
+    fn denies_worktree_remove_from_version_control_when_the_owner_query_fails() {
+        // The critical hole the first cut shipped: the fail-OPEN reader mapped
+        // an unreachable daemon to an empty writer set, and an empty set reads
+        // as "nobody owns this". Silence establishes nothing, so it must deny.
+        let reason = evaluate_removal_rechecks(
+            Path::new(WT),
+            Err("nothing is listening at http://127.0.0.1:1"),
+            &FakeProbe::reclaimable(),
+        )
+        .expect("an unanswered owner query must deny removal");
+        assert!(reason.contains(CHECK_SOLE_OWNER), "{reason}");
+        assert!(reason.contains("nothing is listening"), "{reason}");
     }
 
     #[test]
@@ -515,7 +549,7 @@ mod tests {
             unpushed: Err("no upstream configured for HEAD".to_string()),
             ..FakeProbe::reclaimable()
         };
-        let reason = evaluate_removal_rechecks(Path::new(WT), &[], &probe)
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
             .expect("an unestablished fact must deny removal");
         assert!(reason.contains("no upstream configured"), "{reason}");
     }

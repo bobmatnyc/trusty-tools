@@ -1276,6 +1276,120 @@ fn pm_guard_denies_version_control_a_worktree_remove_it_cannot_prove_safe() {
     );
 }
 
+/// A worktree that passes every LOCAL ADR-0057 re-check: a real git repository
+/// under `.claude/worktrees/`, clean, with an upstream it is level with.
+///
+/// Why: the `sole-owner` check runs after `clean-tree` and `unpushed-commits`,
+/// so a fixture failing either would never reach the arm under test and the
+/// assertion would pass for the wrong reason. Everything here is local — a bare
+/// repository stands in for the remote — so the fixture reaches no network.
+/// Returns the `TempDir` guard (which must outlive the test) and the worktree.
+fn clean_pushed_worktree_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let remote = dir.path().join("origin.git");
+    let wt = dir.path().join("repo/.claude/worktrees/agent-merged");
+    std::fs::create_dir_all(&wt).expect("mkdir worktree");
+    let run = |args: &[&str], cwd: &std::path::Path| {
+        let ok = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(cwd)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git runs")
+            .success();
+        assert!(ok, "git {args:?} must succeed");
+    };
+    let remote_arg = remote.to_str().expect("utf8");
+    run(
+        &["init", "--bare", "-q", "-b", "main", remote_arg],
+        dir.path(),
+    );
+    run(&["init", "-q", "-b", "feat-merged"], &wt);
+    std::fs::write(wt.join("a.txt"), "x").expect("write");
+    run(&["add", "a.txt"], &wt);
+    run(&["commit", "-q", "-m", "seed"], &wt);
+    run(&["remote", "add", "origin", remote_arg], &wt);
+    run(&["push", "-q", "-u", "origin", "feat-merged"], &wt);
+    (dir, wt)
+}
+
+/// The ADR-0057 payload the two tests below share: a genuine `version-control`
+/// dispatch removing `wt` by absolute path.
+///
+/// The `session_id` is not decoration. `post_shared_tree` cannot address any
+/// session's delegations without one and reports `Unavailable`, which the
+/// `sole-owner` re-check reads — correctly — as "ownership could not be
+/// established" and denies. A payload without it therefore never reaches the
+/// arm either test is about.
+fn version_control_removal_payload(wt: &std::path::Path) -> String {
+    bash_payload_at(
+        &format!("git worktree remove {}", wt.display()),
+        wt,
+        r#""session_id":"11111111-1111-1111-1111-111111111111","agent_id":"agent-abc123","agent_type":"version-control","#,
+    )
+}
+
+/// The `permissionDecisionReason` of a deny, or panic.
+fn deny_reason_of(stdout: &str) -> String {
+    assert_denied(stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string")
+        .to_string()
+}
+
+#[test]
+fn pm_guard_denies_version_control_a_removal_when_the_daemon_is_unreachable() {
+    // The CRITICAL the first cut of ADR-0057 shipped: the `sole-owner`
+    // re-check read its answer through the HEAD-move rule's FAIL-OPEN helper,
+    // which maps an unreachable, timed-out or unparseable reply to an empty
+    // writer set — and an empty set is exactly what "nobody owns this tree"
+    // looks like. So a down daemon licensed the removal with the ownership
+    // check never having run. The local checks all pass here by construction,
+    // so that arm is the only thing between this payload and a deleted tree.
+    let (_dir, wt) = clean_pushed_worktree_fixture();
+    let reason = deny_reason_of(&run_pm_guard_at(
+        &version_control_removal_payload(&wt),
+        UNREACHABLE_DAEMON,
+        &wt,
+    ));
+    assert!(
+        reason.contains("sole-owner"),
+        "an unanswered daemon must deny the removal by name, got: {reason}"
+    );
+}
+
+#[test]
+fn pm_guard_carries_version_control_past_sole_owner_when_the_daemon_answers_empty() {
+    // The mirror, and what stops the fix from being a blanket deny: an ANSWERED
+    // empty writer set is a real "nobody is here". `merged-pull-request` is the
+    // next check and this fixture has no GitHub repository behind it, so the
+    // removal is still refused — but by that check, which is the proof
+    // `sole-owner` passed.
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0}"#);
+    let (_dir, wt) = clean_pushed_worktree_fixture();
+    let reason = deny_reason_of(&run_pm_guard_at(
+        &version_control_removal_payload(&wt),
+        &url,
+        &wt,
+    ));
+    assert!(
+        reason.contains("merged-pull-request") && !reason.contains("sole-owner"),
+        "an answered empty owner set must pass sole-owner and stop at the PR check, got: {reason}"
+    );
+}
+
 #[test]
 fn pm_guard_denies_worktree_remove_when_agent_type_claims_version_control_without_agent_id() {
     // The spoof ADR-0057 decision 3 forecloses: `agent_type` is also stamped on

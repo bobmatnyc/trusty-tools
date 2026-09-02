@@ -573,12 +573,18 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                 // being deleted is the one whose owner matters, and the
                 // `version-control` agent's own record sits at the checkout it
                 // was dispatched into.
-                let live =
-                    pm_guard_dispatch::live_shared_tree_writers(url, session_id, &target, &payload)
-                        .await;
+                //
+                // `_or_deny`, NOT the fail-open reader the HEAD-move rule uses:
+                // an unreachable or silent daemon establishes nothing about who
+                // holds this tree, and an empty vec from such a reply would let
+                // the removal proceed over another agent's live work.
+                let live = pm_guard_dispatch::live_shared_tree_writers_or_deny(
+                    url, session_id, &target, &payload,
+                )
+                .await;
                 if let Some(reason) = evaluate_removal_rechecks(
                     &target,
-                    &live,
+                    live.as_deref().map_err(String::as_str),
                     &trusty_mpm::core::worktree_removal_facts::GitAndGhProbe,
                 ) {
                     audit_denied_tool(url, session_id, tool_name, &reason).await;
