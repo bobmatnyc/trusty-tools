@@ -12,35 +12,56 @@
 //! ordinary local cleanup (`rm stale.txt`), build-artifact cleanup
 //! (`cargo clean`), or local temp cleanup (`git clean -fd`) — none of those
 //! target a denylisted path.
-//! What: [`evaluate_destructive_delete_command`] is the same TARGET-PATH
-//! classifier shape as the sibling
-//! [`super::evaluate_worktree_add_command`] (issue #3977's precedent) rather
-//! than a verb-name enumerator — matching only the literal `rm` token would
-//! miss `rmdir`/`unlink`/`find -delete`, so instead every composition segment
-//! whose resolved program is one of those four is inspected for its
-//! DELETION-TARGET argument(s), which are resolved against a `cd`-tracked
-//! effective working directory (the same [`PathEnv`] expansion and lexical
-//! normalization [`super::evaluate_worktree_add_command`] uses) and checked
-//! against [`is_denylisted_delete_target`]. It is called from `pm_guard()`
-//! BEFORE Guard 1's and Guard 4's early returns, and applies to every caller —
-//! the PM and any subagent alike — matching the worktree-add-tmp and
-//! main-checkout-destructive guards' placement, not the PM-exempt shape of the
-//! sibling [`super::evaluate_worktree_remove_command`]: a filesystem-root,
-//! repo-root, `.git`, or worktree deletion is never legitimate for either
-//! caller, so there is no exemption to preserve. `git worktree remove` and
-//! `git branch -D` are untouched by this rule — they are different verbs,
-//! governed by their own existing rules (`git worktree remove` by #5791; `git
-//! branch -D` by no rule at all, allowed for both PM and subagent, unchanged).
+//! What: [`evaluate_destructive_delete_command`] is a TARGET-PATH classifier
+//! — matching only the literal `rm` token would miss `rmdir`/`unlink`/`find
+//! -delete`, so instead every composition segment is scanned TOKEN BY TOKEN
+//! for one of those four verbs (issue #4031 review, pass 2, item 1). This
+//! deliberately does NOT enumerate wrapper words (`sudo`, `env`, `nice`,
+//! `time`, `nohup`, `exec`, `command`, `builtin`, `doas`, `ionice`, `timeout`,
+//! `stdbuf`, `caffeinate`, …) the way the sibling `cd`-tracker and the git
+//! guards do — round 1 of this review enumerated only `sudo`/`env`, then
+//! `command`/`builtin`, and each addition missed the next wrapper someone
+//! actually used. Scanning every token for the verb itself makes the
+//! enumeration moot: no wrapper, known or future, changes which token IS
+//! `rm`, only what precedes it. **Over-matching is intentional and
+//! ACCEPTED**: this guard denies only when a resolved TARGET lands on the
+//! absolute denylist below, so a benign command that merely CONTAINS the word
+//! `rm` as a non-verb argument (`echo rm -rf /`) being denied is the safe
+//! direction for a safety rule, not a bug to special-case away — the
+//! alternative (verb-position enumeration) is exactly the defect this
+//! rewrite closes.
+//! Once a verb token is found, its DELETION-TARGET argument(s) are resolved
+//! against a `cd`-tracked effective working directory (the same [`PathEnv`]
+//! expansion and lexical normalization [`super::evaluate_worktree_add_command`]
+//! uses) and checked against [`is_denylisted_delete_target`], which also
+//! resolves a glob-suffixed target's PARENT ([`glob_parent`]) since this
+//! module classifies text and never expands a glob the way the shell would.
+//! **A delete verb whose target could not be resolved at all — an
+//! unparseable segment, or a verb found with no positional argument — FAILS
+//! CLOSED** ([`DESTRUCTIVE_DELETE_UNRESOLVED_REASON`], issue #4031 review item
+//! 2): the alternative (silently allow) is exactly how `first_command_token`
+//! returning `None` for `env -i rm -rf /root` bypassed the previous
+//! iteration of this guard, which depended on it for verb detection.
+//! It is called from `pm_guard()` BEFORE Guard 1's and Guard 4's early
+//! returns, and applies to every caller — the PM and any subagent alike —
+//! matching the worktree-add-tmp and main-checkout-destructive guards'
+//! placement, not the PM-exempt shape of the sibling
+//! [`super::evaluate_worktree_remove_command`]: a filesystem-root, repo-root,
+//! `.git`, or worktree deletion is never legitimate for either caller, so
+//! there is no exemption to preserve. `git worktree remove` and `git branch
+//! -D` are untouched by this rule — they are different verbs, governed by
+//! their own existing rules (`git worktree remove` by #5791, now also
+//! wrapper-resistant via `shell_lex::git_subcommand`'s shared
+//! `strip_wrapper_prefix`; `git branch -D` by no rule at all, allowed for
+//! both PM and subagent, unchanged).
 //!
-//! Residual bypasses accepted, stated rather than hidden (same shape as the
-//! sibling worktree-add guard's own list, which this module inherits by
-//! construction):
+//! Residual bypasses accepted, stated rather than hidden:
 //! - Indirection through a shell variable (`X=/; rm -rf "$X"`) or a command
 //!   substitution (`rm -rf "$(mktemp -d)"`) is not resolved.
-//! - A verb reached via `xargs`, `sh -c`, or a shell function/alias is not
-//!   resolved — this module reads the same [`first_command_token`] every
-//!   other verb in this file's classifier reads, and none of them unwrap those
-//!   wrappers either.
+//! - A verb reached via `xargs` or a genuine shell function/alias override of
+//!   `rm` itself (not the `\`/`command`/`builtin` bypass idioms, which this
+//!   module resolves) is not detected — this scans the command TEXT, it does
+//!   not execute the shell or consult its alias table.
 //! - A symlink whose target is a denylisted root is not followed — resolution
 //!   here is purely lexical, never `fs::canonicalize`, for the same
 //!   fast/side-effect-free reason [`super::resolve_target_path`] documents.
@@ -53,7 +74,10 @@
 //! `allows_worktree_interior_paths`, `allows_ordinary_cleanup`,
 //! `denies_rmdir_of_a_denylisted_root`, `denies_find_delete_of_a_denylisted_root`,
 //! `denies_a_delete_hidden_in_a_composed_command`,
-//! `denies_home_expanded_from_a_literal_dollar_home` below;
+//! `denies_home_expanded_from_a_literal_dollar_home`,
+//! `denies_wrapper_words_regardless_of_enumeration`,
+//! `denies_bare_container_roots`, `denies_unresolvable_delete_targets`,
+//! `allows_over_matched_non_verb_mentions_that_resolve_to_no_target` below;
 //! `pm_guard_denies_destructive_delete_of_repo_root` and siblings in
 //! `tests/tm_hook_pm_guard.rs` exercise the end-to-end binary path.
 
@@ -74,15 +98,37 @@ use crate::commands::hook_rewrite::first_command_token;
 /// does for the sibling `git worktree remove` rule.
 /// What: the `permissionDecisionReason` string emitted on this deny.
 pub(crate) const DESTRUCTIVE_DELETE_REASON: &str = "`rm`/`rmdir`/`unlink`/`find -delete` must \
-     not target a filesystem root (`/`, `/root`, `/Users/<name>`, `$HOME`), a repository root, a \
-     `.git` directory, or a `.claude/worktrees`/`.worktrees` entry (issue #4031) — each is either \
+     not target a filesystem root or bare container (`/`, `/root`, `/Users`, `/Users/<name>`, \
+     `/home`, `/Volumes`, `/private`, `/var`, `/etc`, `/usr`, `/opt`, `/Library`, `/System`, \
+     `/Applications`, `$HOME`, or `$HOME`'s parent directory), a repository root, a `.git` \
+     directory, or a `.claude/worktrees`/`.worktrees` entry (issue #4031) — each is either \
      unrecoverable data loss or another session's or workstream's uncommitted work. Ordinary file \
      and directory cleanup elsewhere (build artifacts, stale files, `git clean -fd`) is unaffected. \
      To remove a worktree, ask the PM to run `tm session prune-worktrees --merged-prs --force` — \
      `rm -rf` on a worktree directory is never the workaround.";
 
-/// The four verbs this guard inspects — everything else falls through to
-/// [`super::classify_bash_segment`]'s ordinary rules unchanged.
+/// Deny reason when a segment contains a delete verb this classifier cannot
+/// resolve a target for — an unparseable segment (unbalanced quotes) that
+/// plausibly names one, or a bare verb invocation with no positional
+/// argument at all (issue #4031 review, item 2).
+///
+/// Why: the alternative is silently allowing exactly the shape that bypassed
+/// the previous iteration of this guard (`env -i rm -rf /root`, where verb
+/// detection depended on [`first_command_token`] and that function
+/// conservatively returns `None` rather than guess past an ambiguous flag).
+/// A guard whose failure mode is "can't tell, so allow" is not a guard; this
+/// one's failure mode is "can't tell, so deny and say so".
+/// What: the `permissionDecisionReason` string emitted on this deny.
+pub(crate) const DESTRUCTIVE_DELETE_UNRESOLVED_REASON: &str = "A Bash segment names \
+     `rm`/`rmdir`/`unlink`/`find` but this guard could not resolve what it targets (issue #4031) \
+     — either the segment's quoting could not be parsed, or the verb carried no positional \
+     argument. Denying rather than guessing is this guard's fail-closed rule. Rewrite the command \
+     with an unambiguous, directly-quoted target.";
+
+/// The four verbs this guard scans every segment's TOKENS for — not just the
+/// first/wrapper-resolved one (issue #4031 review, item 1). Everything else
+/// falls through to [`super::classify_bash_segment`]'s ordinary rules
+/// unchanged.
 const DELETE_VERBS: &[&str] = &["rm", "rmdir", "unlink", "find"];
 
 /// Classify a Bash command for destructive-root deletion: `Some(reason)`
@@ -119,7 +165,11 @@ fn evaluate_destructive_delete_command_in(
         // Same `cd`-tracking shape as `evaluate_worktree_add_command_in`: a
         // deliberate, partial closing of `cd /tmp && rm -rf x` — see that
         // function's doc for the residual (shell-variable / substitution
-        // built `cd` target) this shares.
+        // built `cd` target) this shares. Unlike verb detection below, this
+        // still goes through `first_command_token` — a wrapped `cd` (`nice cd
+        // /tmp`) is a real but narrower gap than wrapper-enumerated VERB
+        // detection was, since a missed `cd` only leaves `effective_cwd`
+        // stale rather than letting a delete verb through unclassified.
         if first_command_token(trimmed) == Some("cd") {
             if let Some(argv) = shlex::split(trimmed)
                 && let Some(dest) = argv.get(1)
@@ -128,30 +178,38 @@ fn evaluate_destructive_delete_command_in(
             }
             continue;
         }
-        let Some(program) = first_command_token(trimmed) else {
-            continue;
-        };
-        if !DELETE_VERBS.contains(&program) {
-            continue;
-        }
         let Some(argv) = shlex::split(trimmed) else {
+            // Unbalanced quotes — cannot tokenize this segment at all. Fail
+            // CLOSED (item 2) only when the raw text plausibly names one of
+            // the delete verbs as a whole word; an unparseable segment with
+            // nothing suspicious in it is simply not this rule's business.
+            if segment_mentions_a_delete_verb(trimmed) {
+                return Some(DESTRUCTIVE_DELETE_UNRESOLVED_REASON);
+            }
             continue;
         };
-        // Locate the resolved program's own position in argv rather than
-        // assuming index 0 — `first_command_token` already skipped any
-        // env-assignment (`FOO=bar rm …`) or `sudo`/`env` prefix to find
-        // `program`, and this reuses that same resolved name to find where
-        // the real argument list begins, without duplicating that skip logic.
-        let Some(start) = argv
+        // #4031 review, item 1: scan EVERY token for a delete verb — no
+        // wrapper enumeration, see the module doc for why. A leading `\` is
+        // stripped before comparison (the same alias-bypass idiom
+        // `hook_rewrite::strip_wrapper_prefix` resolves).
+        let Some(verb_idx) = argv
             .iter()
-            .position(|tok| tok.rsplit('/').next() == Some(program))
+            .position(|tok| DELETE_VERBS.contains(&tok.strip_prefix('\\').unwrap_or(tok)))
         else {
             continue;
         };
-        let tail = &argv[start + 1..];
-        let targets = delete_targets(program, tail);
-        if targets.is_empty() {
+        let verb = argv[verb_idx].strip_prefix('\\').unwrap_or(&argv[verb_idx]);
+        let tail = &argv[verb_idx + 1..];
+        let targets = delete_targets(verb, tail);
+        if verb == "find" && targets.is_empty() {
+            // No `-delete` action present — a plain search, not this rule's
+            // business (see `delete_targets`).
             continue;
+        }
+        if targets.is_empty() {
+            // rm/rmdir/unlink found but no resolvable positional argument —
+            // fail CLOSED (item 2) rather than silently allow.
+            return Some(DESTRUCTIVE_DELETE_UNRESOLVED_REASON);
         }
         let repo_root = main_checkout_root(&effective_cwd);
         for target in targets {
@@ -162,6 +220,22 @@ fn evaluate_destructive_delete_command_in(
         }
     }
     None
+}
+
+/// Whether `text` — a segment [`shlex::split`] could not tokenize — plausibly
+/// names one of [`DELETE_VERBS`] as a whole word.
+///
+/// Why: an unparseable segment (unbalanced quotes) gives no argv to scan, but
+/// item 2's fail-closed rule still applies when the raw text looks like it
+/// might be a delete invocation — this is the conservative, over-matching
+/// fallback for that rare case, not the normal path (which shlex parses).
+/// What: splits on any non-alphanumeric/underscore byte (quotes, slashes,
+/// dashes, backslashes all separate) and checks the resulting words for an
+/// exact match — cruder than [`shlex::split`], deliberately, since a proper
+/// parse already failed.
+fn segment_mentions_a_delete_verb(text: &str) -> bool {
+    text.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|word| DELETE_VERBS.contains(&word))
 }
 
 /// The path argument(s) a resolved deletion verb's argv tail would act on.
@@ -226,10 +300,21 @@ fn is_denylisted_delete_target(path: &Path, repo_root: Option<&Path>, env: &Path
     if path == Path::new("/") || path == Path::new("/root") {
         return true;
     }
-    if let Some(home) = env.home.as_deref()
-        && path == Path::new(home)
+    if BARE_CONTAINER_ROOTS
+        .iter()
+        .any(|root| path == Path::new(root))
     {
         return true;
+    }
+    if let Some(home) = env.home.as_deref() {
+        if path == Path::new(home) {
+            return true;
+        }
+        if let Some(parent) = Path::new(home).parent()
+            && path == parent
+        {
+            return true;
+        }
     }
     if is_user_home_root(path) {
         return true;
@@ -242,6 +327,30 @@ fn is_denylisted_delete_target(path: &Path, repo_root: Option<&Path>, env: &Path
     }
     is_worktree_root_or_container(path)
 }
+
+/// Bare container directories — deleting the whole directory (not a specific
+/// entry inside it) destroys every user's / every app's / every mount's data
+/// at once (issue #4031 review, item 3). `/Users/<name>` (a SPECIFIC user's
+/// home) is [`is_user_home_root`]'s separate, narrower check; this list is
+/// the container ABOVE that.
+///
+/// Why: round 1 of this review only denylisted a specific user's home root
+/// and the literal filesystem root — `rm -rf /Users` (every user's home at
+/// once) and `rm -rf /etc` (system configuration) matched neither and were
+/// allowed.
+const BARE_CONTAINER_ROOTS: &[&str] = &[
+    "/Users",
+    "/home",
+    "/Volumes",
+    "/private",
+    "/var",
+    "/etc",
+    "/usr",
+    "/opt",
+    "/Library",
+    "/System",
+    "/Applications",
+];
 
 /// The directory a glob-suffixed delete target would actually clear, or
 /// `path` itself when it names no glob.
@@ -258,10 +367,13 @@ fn is_denylisted_delete_target(path: &Path, repo_root: Option<&Path>, env: &Path
 /// glob's PARENT directory — where the shell would actually perform the
 /// deletion — is evaluated against the denylist instead.
 /// What: gated on the LAST path component containing `*`, `?`, or `[`
-/// (POSIX glob metacharacters); when it does, returns `path`'s parent (or
-/// `path` itself if it has none — e.g. a bare `*` with no resolvable
-/// parent, which conservatively keeps the check running against something
-/// rather than nothing). A non-glob path is returned unchanged.
+/// (POSIX glob metacharacters); when it does, returns `path`'s parent —
+/// `Path::parent` yields an empty relative path for a bare single component
+/// (e.g. a literal `*` with no directory prefix, which in practice never
+/// reaches this function unresolved: [`resolve_target_path`] always joins a
+/// relative token onto the tracked effective cwd first) — or `path` itself in
+/// the (unreachable in practice) case `parent()` returns `None` at all. A
+/// non-glob path is returned unchanged.
 fn glob_parent(path: &Path) -> &Path {
     let has_glob = path
         .file_name()
@@ -578,5 +690,131 @@ mod tests {
                 "expected deny for: {command}"
             );
         }
+    }
+
+    #[test]
+    fn denies_wrapper_words_regardless_of_enumeration() {
+        // #4031 review pass 2, item 1: verb detection no longer depends on
+        // enumerating wrapper words at all — `env -i` and `command -p` (both
+        // followed by a FLAG, which `first_command_token`/`strip_wrapper_prefix`
+        // conservatively refuse to resolve past) still deny here, because
+        // this scans every token for the verb rather than resolving "the"
+        // program.
+        let env = env_with_home("/Users/agent");
+        for command in [
+            "env -i rm -rf /root",
+            "command -p rm -rf /root",
+            "nice rm -rf /root",
+            "exec rm -rf /root",
+        ] {
+            assert_eq!(
+                evaluate_destructive_delete_command_in(command, Path::new("/repo"), &env),
+                Some(DESTRUCTIVE_DELETE_REASON),
+                "expected deny for: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn denies_bare_container_roots() {
+        // #4031 review pass 2, item 3: a bare container (every user's home,
+        // every mounted volume, system configuration) is as destructive to
+        // delete whole as a single user's home root.
+        let env = env_with_home("/Users/agent");
+        for command in [
+            "rm -rf /Users",
+            "rm -rf /Users/*",
+            "rm -rf /home",
+            "rm -rf /Volumes",
+            "rm -rf /etc",
+            "rm -rf /var",
+        ] {
+            assert_eq!(
+                evaluate_destructive_delete_command_in(command, Path::new("/repo"), &env),
+                Some(DESTRUCTIVE_DELETE_REASON),
+                "expected deny for: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn denies_unresolvable_delete_targets() {
+        // #4031 review pass 2, item 2: a delete verb with no resolvable
+        // target — an unbalanced-quote segment mentioning one, or a bare verb
+        // invocation — fails CLOSED rather than silently allowing.
+        let env = env_with_home("/Users/agent");
+        assert_eq!(
+            evaluate_destructive_delete_command_in("echo 'rm -rf /root", Path::new("/repo"), &env),
+            Some(DESTRUCTIVE_DELETE_UNRESOLVED_REASON)
+        );
+        assert_eq!(
+            evaluate_destructive_delete_command_in("rm --", Path::new("/repo"), &env),
+            Some(DESTRUCTIVE_DELETE_UNRESOLVED_REASON)
+        );
+    }
+
+    #[test]
+    fn allows_over_matched_non_verb_mentions_that_resolve_to_no_target() {
+        // The companion property to `denies_unresolvable_delete_targets`: an
+        // unparseable segment that does NOT mention a delete verb at all is
+        // simply not this rule's business, and a `find` with no `-delete`
+        // action is a plain search, never denied regardless of its argument.
+        let env = env_with_home("/Users/agent");
+        assert_eq!(
+            evaluate_destructive_delete_command_in(
+                "echo 'unrelated unterminated",
+                Path::new("/repo"),
+                &env
+            ),
+            None
+        );
+        assert_eq!(
+            evaluate_destructive_delete_command_in(
+                "find /repo -name '*.rs'",
+                Path::new("/repo"),
+                &env
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn allows_wrapped_non_destructive_commands() {
+        // Companion allow cases: a wrapper preceding a NON-delete command, or
+        // a delete verb whose target is genuinely benign, must stay allowed
+        // — over-matching applies to the VERB, not to every wrapped command.
+        let env = env_with_home("/Users/agent");
+        for command in [
+            "nice cargo clean",
+            "time rm -rf ./target",
+            "env FOO=1 rm stale.txt",
+        ] {
+            assert_eq!(
+                evaluate_destructive_delete_command_in(command, Path::new("/repo"), &env),
+                None,
+                "expected allow for: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn glob_parent_resolves_the_directory_a_glob_would_clear() {
+        assert_eq!(glob_parent(Path::new("/repo/*")), Path::new("/repo"));
+        assert_eq!(glob_parent(Path::new("/repo/a*b")), Path::new("/repo"));
+        assert_eq!(
+            glob_parent(Path::new("/repo/dir/*")),
+            Path::new("/repo/dir")
+        );
+        assert_eq!(glob_parent(Path::new("/repo/.[!.]*")), Path::new("/repo"));
+        // A bare `*` with no directory prefix yields `Path::parent`'s empty
+        // relative path — unreachable in the real pipeline, since
+        // `resolve_target_path` always joins a relative token onto the
+        // tracked cwd first, but exercised here directly for completeness.
+        assert_eq!(glob_parent(Path::new("*")), Path::new(""));
+        // Non-glob paths are returned unchanged.
+        assert_eq!(
+            glob_parent(Path::new("/repo/file.txt")),
+            Path::new("/repo/file.txt")
+        );
     }
 }

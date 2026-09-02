@@ -19,6 +19,8 @@
 //! leading env/`sudo` noise and git global options.
 //! Test: `shell_lex::tests`.
 
+use crate::commands::hook_rewrite::strip_wrapper_prefix;
+
 /// Quote context of a single byte of a shell command.
 ///
 /// Why: the guard's operator/redirection/substitution scanners must treat a
@@ -173,40 +175,28 @@ const GIT_GLOBAL_OPTS_WITH_ARG: &[&str] = &[
 /// leading git global flags, which the earlier two-token `effective_tool_name`
 /// matcher could not see past. Parsing the argv properly closes both the
 /// `git -C <path> commit` false positive and the `git -C <path> apply`
-/// false negative.
+/// false negative. Issue #4031 review (pass 2): this function had its OWN
+/// `sudo`/`env`-only prefix skip, a second enumeration site that inherited the
+/// same weakness `hook_rewrite::first_command_token` did — `command git apply
+/// -` and `command git worktree remove --force <path>` reached the git guards
+/// unresolved. It now shares [`crate::commands::hook_rewrite::strip_wrapper_prefix`]
+/// with that function instead of re-enumerating.
 /// What: shlex-splits `segment` (quote-aware; `None` on unbalanced quotes →
-/// caller falls back), skips leading `KEY=value`/`sudo`/`env` prefixes, requires
-/// the program basename to be `git`, then walks past global options — those in
-/// [`GIT_GLOBAL_OPTS_WITH_ARG`] consume an extra token, `=`-joined long options
-/// consume none, other dash-prefixed tokens are valueless global flags — and
-/// returns the first non-option token (the subcommand). `None` when the segment
-/// is not `git`, is unparseable, or has no subcommand after the options.
+/// caller falls back), delegates the leading `KEY=value`/wrapper skip to
+/// [`strip_wrapper_prefix`], requires the program basename to be `git`, then
+/// walks past global options — those in [`GIT_GLOBAL_OPTS_WITH_ARG`] consume
+/// an extra token, `=`-joined long options consume none, other dash-prefixed
+/// tokens are valueless global flags — and returns the first non-option token
+/// (the subcommand). `None` when the segment is not `git`, is unparseable, or
+/// has no subcommand after the options.
 /// Test: `git_subcommand_skips_global_flags`, `git_subcommand_plain`,
-/// `git_subcommand_none_for_non_git`, `git_subcommand_none_when_unbalanced`.
+/// `git_subcommand_none_for_non_git`, `git_subcommand_none_when_unbalanced`,
+/// `git_subcommand_resolves_through_command_and_nice_wrappers`.
 pub(super) fn git_subcommand(segment: &str) -> Option<String> {
     let argv = shlex::split(segment)?;
-    let mut i = 0;
-    // Skip env-assignment / sudo / env prefixes (mirrors first_command_token).
-    while i < argv.len() {
-        let tok = &argv[i];
-        if is_env_assignment(tok) {
-            i += 1;
-            continue;
-        }
-        if tok == "sudo" || tok == "env" {
-            match argv.get(i + 1) {
-                Some(next) if !next.starts_with('-') => {
-                    i += 1;
-                    continue;
-                }
-                // Flag or nothing after sudo/env — needs arg-aware parsing we
-                // don't do; not resolvable as git.
-                _ => return None,
-            }
-        }
-        break;
-    }
+    let mut i = strip_wrapper_prefix(&argv)?;
     let program = argv.get(i)?;
+    let program = program.strip_prefix('\\').unwrap_or(program);
     if program.rsplit('/').next().unwrap_or(program) != "git" {
         return None;
     }
@@ -242,23 +232,6 @@ pub(super) fn git_subcommand(segment: &str) -> Option<String> {
         return Some(tok.clone());
     }
     None
-}
-
-/// Whether `token` looks like a `KEY=value` shell environment assignment.
-///
-/// Why: a leading env assignment (`FOO=bar git …`) must be skipped before the
-/// `git` program token, mirroring `hook_rewrite::first_command_token`'s rule so
-/// both code paths agree on what a prefix is.
-/// What: `KEY` non-empty, starting with a letter/underscore, alphanumerics or
-/// underscores up to the first `=`.
-/// Test: covered via `git_subcommand_skips_global_flags`.
-fn is_env_assignment(token: &str) -> bool {
-    let Some((key, _)) = token.split_once('=') else {
-        return false;
-    };
-    let mut chars = key.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[cfg(test)]
@@ -364,6 +337,29 @@ mod tests {
         assert_eq!(
             git_subcommand("/usr/bin/git -C /p commit").as_deref(),
             Some("commit")
+        );
+    }
+
+    #[test]
+    fn git_subcommand_resolves_through_command_and_nice_wrappers() {
+        // #4031 review, item 4: `git_subcommand` had its own sudo/env-only
+        // prefix skip, a second enumeration site independent of
+        // `hook_rewrite::first_command_token` — `command git apply -` and a
+        // `nice`-wrapped git call both reached the git guards unresolved
+        // before sharing `strip_wrapper_prefix`.
+        for command in ["command git apply -", "nice git reset --hard"] {
+            assert!(
+                git_subcommand(command).is_some(),
+                "expected a resolved subcommand for: {command}"
+            );
+        }
+        assert_eq!(
+            git_subcommand("command git apply -").as_deref(),
+            Some("apply")
+        );
+        assert_eq!(
+            git_subcommand("nice git reset --hard").as_deref(),
+            Some("reset")
         );
     }
 }
