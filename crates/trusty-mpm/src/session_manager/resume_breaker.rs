@@ -11,7 +11,7 @@
 //! resumes, one pair every 60-70 seconds, each doing real tmux and store work.
 //!
 //! What: the policy is a counter and a window. Each auto-resume stamps
-//! `last_auto_resume_at`. Each runtime-exit stop asks [`evaluate`] whether this
+//! `last_auto_resume_at`. Each runtime-exit stop asks [`evaluate_breaker_verdict`] whether this
 //! death came within [`ResumeBreakerConfig::flap_window`] of that stamp; if it
 //! did, the consecutive count rises, and at
 //! [`ResumeBreakerConfig::max_consecutive`] the session is PARKED — the reaper
@@ -143,7 +143,7 @@ pub struct FlapState {
     pub consecutive: u32,
 }
 
-/// What [`evaluate`] decided about one runtime-exit stop.
+/// What [`evaluate_breaker_verdict`] decided about one runtime-exit stop.
 ///
 /// Why: the caller has to distinguish "not flapping" from "flapping but not yet
 /// parked" from "park it", and a bool cannot carry the count the log line needs.
@@ -192,7 +192,7 @@ impl BreakerVerdict {
 /// `evaluate_resets_for_a_slow_death`, `evaluate_counts_a_fast_death`,
 /// `evaluate_parks_at_the_threshold`, `evaluate_resets_on_a_backwards_clock`,
 /// `a_zero_window_disables_the_breaker`.
-pub fn evaluate(
+pub fn evaluate_breaker_verdict(
     cfg: &ResumeBreakerConfig,
     state: &FlapState,
     now: DateTime<Utc>,
@@ -366,7 +366,7 @@ impl ResumeBreakerStore {
     /// Apply one runtime-exit stop and return what it means.
     ///
     /// What: reloads (so the other process's stamp is visible), evaluates
-    /// through [`evaluate`], then stores the resulting streak — `Reset` clears
+    /// through [`evaluate_breaker_verdict`], then stores the resulting streak — `Reset` clears
     /// the entry, including the stamp, so the NEXT death is not attributed to a
     /// resume that is now old news; `Counting`/`Park` keep the stamp and store
     /// the new count.
@@ -380,7 +380,7 @@ impl ResumeBreakerStore {
         now: DateTime<Utc>,
     ) -> BreakerVerdict {
         let state = self.state_of(id).await;
-        let verdict = evaluate(cfg, &state, now);
+        let verdict = evaluate_breaker_verdict(cfg, &state, now);
         match verdict {
             BreakerVerdict::Reset => {
                 self.states.remove(&id.to_string());
@@ -430,7 +430,7 @@ impl ResumeBreakerStore {
 ///
 /// Why: `manager.rs` sits at the 500-SLOC production cap, and these methods are
 /// the breaker's rather than the manager's — keeping them beside the policy
-/// they implement means the resume/park pair cannot drift from [`evaluate`].
+/// they implement means the resume/park pair cannot drift from [`evaluate_breaker_verdict`].
 /// Same extraction precedent `reconcile.rs` and `create.rs` set for that file.
 impl super::SessionManager {
     /// Resume a session on behalf of an AUTOMATIC path.

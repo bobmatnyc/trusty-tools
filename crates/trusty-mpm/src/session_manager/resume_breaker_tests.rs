@@ -4,7 +4,7 @@
 //! in 48 hours. Reproducing it means driving the SAME two calls the daemon and
 //! the supervisor make — `mark_runtime_exited_stopped` and `resume_auto` — with
 //! a compressed window, and asserting the streak eventually parks the session.
-//! What: the pure-policy cases against [`super::resume_breaker::evaluate`], the
+//! What: the pure-policy cases against [`super::resume_breaker::evaluate_breaker_verdict`], the
 //! sidecar's failure paths, and the end-to-end park/unpark cycle against a real
 //! [`SessionManager`] on a [`FakeNoopTmuxDriver`].
 //! Test: this is the test module.
@@ -17,7 +17,7 @@ use chrono::{TimeDelta, Utc};
 use super::record::{ManagedSessionId, ManagedSessionState, StopCause};
 use super::resume_breaker::{
     BreakerVerdict, DEFAULT_MAX_CONSECUTIVE, ENV_FLAP_WINDOW_SECS, ENV_MAX_CONSECUTIVE, FlapState,
-    ResumeBreakerConfig, ResumeBreakerStore, evaluate,
+    ResumeBreakerConfig, ResumeBreakerStore, evaluate_breaker_verdict,
 };
 use super::{FakeNoopTmuxDriver, SessionManager};
 
@@ -67,7 +67,7 @@ fn cfg(window_secs: u64, k: u32) -> ResumeBreakerConfig {
 fn evaluate_resets_without_a_prior_auto_resume() {
     // A session nobody auto-resumed cannot be evidence that auto-resume is
     // failing to fix anything — the very first crash must stay resumable.
-    let v = evaluate(&cfg(120, 3), &FlapState::default(), Utc::now());
+    let v = evaluate_breaker_verdict(&cfg(120, 3), &FlapState::default(), Utc::now());
     assert_eq!(v, BreakerVerdict::Reset);
 }
 
@@ -78,7 +78,10 @@ fn evaluate_resets_for_a_slow_death() {
         last_auto_resume_at: Some(now - TimeDelta::seconds(500)),
         consecutive: 2,
     };
-    assert_eq!(evaluate(&cfg(120, 3), &state, now), BreakerVerdict::Reset);
+    assert_eq!(
+        evaluate_breaker_verdict(&cfg(120, 3), &state, now),
+        BreakerVerdict::Reset
+    );
 }
 
 #[test]
@@ -89,7 +92,7 @@ fn evaluate_counts_a_fast_death() {
         consecutive: 1,
     };
     assert_eq!(
-        evaluate(&cfg(120, 5), &state, now),
+        evaluate_breaker_verdict(&cfg(120, 5), &state, now),
         BreakerVerdict::Counting { consecutive: 2 }
     );
 }
@@ -102,7 +105,7 @@ fn evaluate_parks_at_the_threshold() {
         consecutive: 2,
     };
     assert_eq!(
-        evaluate(&cfg(120, 3), &state, now),
+        evaluate_breaker_verdict(&cfg(120, 3), &state, now),
         BreakerVerdict::Park { consecutive: 3 }
     );
 }
@@ -117,7 +120,10 @@ fn evaluate_resets_on_a_backwards_clock() {
         last_auto_resume_at: Some(now + TimeDelta::seconds(600)),
         consecutive: 4,
     };
-    assert_eq!(evaluate(&cfg(120, 5), &state, now), BreakerVerdict::Reset);
+    assert_eq!(
+        evaluate_breaker_verdict(&cfg(120, 5), &state, now),
+        BreakerVerdict::Reset
+    );
 }
 
 #[test]
@@ -129,7 +135,10 @@ fn a_zero_window_disables_the_breaker() {
         last_auto_resume_at: Some(now),
         consecutive: 99,
     };
-    assert_eq!(evaluate(&cfg(0, 1), &state, now), BreakerVerdict::Reset);
+    assert_eq!(
+        evaluate_breaker_verdict(&cfg(0, 1), &state, now),
+        BreakerVerdict::Reset
+    );
 }
 
 #[test]

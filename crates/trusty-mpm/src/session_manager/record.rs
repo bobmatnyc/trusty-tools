@@ -284,7 +284,7 @@ pub enum StopCause {
     /// `Unexpected`.
     /// What: written only by
     /// [`super::SessionManager::mark_runtime_exited_stopped`], only when
-    /// [`super::resume_breaker::evaluate`] returns
+    /// [`super::resume_breaker::evaluate_breaker_verdict`] returns
     /// [`super::resume_breaker::BreakerVerdict::Park`]. Read back by
     /// [`SessionRecord::is_auto_resumable`] (false) and
     /// [`SessionRecord::auto_resume_park_reason`] (the operator-facing string).
