@@ -480,7 +480,11 @@ pub async fn serve_with_shutdown(
 /// leave corpses.
 ///
 /// The router is released BEFORE the unlink, through [`release_stores`]
-/// (#6595). The unlink is what tells a client this server is gone, and the
+/// (#6595). Since #6601 that release is a bare drop: `serve_until_idle` drains
+/// in-flight connections on the shutdown path too, so it returns only once every
+/// connection task has let go of its clone.
+///
+/// The unlink is what tells a client this server is gone, and the
 /// client's answer to that is to spawn a successor, whose first act is to open
 /// the same two redb files. redb takes an exclusive lock per file, so releasing
 /// those locks after the unlink hands the successor a `Database already open.
@@ -546,7 +550,7 @@ pub async fn serve_with_idle(
     // #6595: close the redb stores before the unlink advertises this server as
     // gone, so a successor never opens facts.redb against a lock this process
     // still holds.
-    release_stores(router, socket).await;
+    release_stores(router);
 
     if let Err(e) = std::fs::remove_file(socket) {
         tracing::debug!(socket = %socket.display(), error = %e, "socket already gone");
@@ -568,34 +572,23 @@ pub async fn serve_with_idle(
 /// unlink is what tells a client to spawn a successor, and the successor dies
 /// on `Database already open. Cannot acquire lock.`
 ///
-/// What: polls `Arc::strong_count` for up to [`SHUTDOWN_FLUSH_TIMEOUT`], whose
-/// doc already scopes it to "the accept loop returning and the socket unlink".
-/// The count only falls — nothing accepts once the loop has returned, and this
-/// function clones nothing — so reading 1 proves sole ownership rather than
-/// merely suggesting it. `Arc::into_inner` cannot be polled in its place: it
-/// consumes the `Arc` on the `None` arm, so a failed attempt cannot be retried.
+/// What: a plain drop. The WAIT this used to perform moved into
+/// `serve_until_idle` (#6601), which now drains in-flight connections on the
+/// shutdown path as it always did on the idle path — so by the time it returns,
+/// every connection task has released its clone and this one is the last. The
+/// caller-side `Arc::strong_count` poll that shipped with #6595 was the same
+/// wait done one layer too high, where only this service benefited; keeping both
+/// would be two implementations of one guarantee.
 ///
-/// A handler with no read budget — `analyze.review` runs for minutes by
-/// design — can outlast the budget. That case warns and proceeds: the process
-/// is exiting on a signal either way, and holding the path open longer trades
-/// one hazard for a socket file nobody unlinks.
+/// A handler with no read budget — `analyze.review` runs for minutes by design —
+/// can still outlast `RpcServeOptions::shutdown_drain`. That case warns inside
+/// the serve loop and proceeds: the process is exiting on a signal either way,
+/// and holding the path open longer trades one hazard for a socket file nobody
+/// unlinks. A clone outstanding at that point makes this drop a no-op, which is
+/// exactly what the old poll's timeout arm did.
 ///
 /// Test: `shutdown_with_a_connection_in_flight_frees_its_redb_lock_before_the_unlink`.
-async fn release_stores(router: Arc<RpcRouter>, socket: &Path) {
-    let deadline = std::time::Instant::now() + SHUTDOWN_FLUSH_TIMEOUT;
-    while Arc::strong_count(&router) > 1 {
-        if std::time::Instant::now() >= deadline {
-            tracing::warn!(
-                socket = %socket.display(),
-                holders = Arc::strong_count(&router),
-                "a connection task still holds the router after the flush budget; \
-                 the redb locks may outlive the socket and a successor spawned in \
-                 that window will fail to open them"
-            );
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+fn release_stores(router: Arc<RpcRouter>) {
     drop(router);
 }
 

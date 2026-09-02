@@ -70,6 +70,23 @@ impl IdleTracker {
         })
     }
 
+    /// A tracker that only COUNTS open connections (#6601).
+    ///
+    /// Why: the shutdown drain in [`super::serve_until_idle`] asks exactly the
+    /// question this type already answers — "is anything in flight" — and needs
+    /// it whether or not an idle policy is configured. A second counter beside
+    /// [`IdleGuard`] would be a second thing to keep correct, and the guard is
+    /// the one accounting path every connection already goes through.
+    ///
+    /// What: [`Self::new`] with a window nothing races. `serve_until_idle` arms
+    /// its idle arm from the CALLER's tracker and never from this one, so
+    /// [`Self::expired`] is not awaited here; the year is a value that stays
+    /// inside `tokio`'s timer range if some future caller does.
+    /// Test: `shutdown_drains_an_in_flight_connection_before_it_returns`.
+    pub(super) fn counting_only() -> Arc<Self> {
+        Self::new(Duration::from_secs(365 * 24 * 60 * 60))
+    }
+
     /// The configured idle window.
     pub fn timeout(&self) -> Duration {
         self.timeout
