@@ -469,6 +469,34 @@ impl FrameworkPaths {
         self.agent_deploy.clone()
     }
 
+    /// The ONE directory bundled (framework-owned) SKILLS deploy into
+    /// (issue #6586) — the skill counterpart of
+    /// [`agent_deploy_dir`](Self::agent_deploy_dir).
+    ///
+    /// Why: the 2026-09-01 owner ruling put bundled skills at the managed user
+    /// tier only, the same principle #4448/#4409 settled for bundled agents.
+    /// Four call sites then need this one directory — the session-launch
+    /// deploy, `tm sessions sync-assets`, `deploy_validate`'s completeness
+    /// probe, and [`crate::core::skill_deploy_tiers::skill_deploy_tiers`] — and
+    /// each deriving it independently is the split-destination defect #4409
+    /// closed for agents, reopened for skills.
+    /// What: the `skills` sibling of
+    /// [`agent_deploy_dir`](Self::agent_deploy_dir), i.e.
+    /// `<base>/.trusty-tools/trusty-mpm/claude-config/skills`. Like that
+    /// accessor it is NEVER rewritten to a project-local path by
+    /// [`for_managed_project`](Self::for_managed_project) /
+    /// [`for_managed_workspace`](Self::for_managed_workspace), which is what
+    /// makes it the shared tier. Falls back to a `skills` CHILD of the deploy
+    /// dir in the practically-unreachable case where it has no parent.
+    /// Test: `managed_skills_dir_is_the_agent_deploy_sibling`,
+    /// `managed_skills_dir_is_not_project_local_for_managed_workspace`.
+    pub fn managed_skills_dir(&self) -> PathBuf {
+        self.agent_deploy
+            .parent()
+            .map(|dir| dir.join("skills"))
+            .unwrap_or_else(|| self.agent_deploy.join("skills"))
+    }
+
     /// Directory Claude Code reads skill files from (`~/.claude/skills`).
     ///
     /// Why: the skill deploy step writes `.md` skill files here so Claude Code
@@ -648,6 +676,36 @@ mod tests {
             FrameworkPaths::from_root("/managed-root").agent_deploy_dir(),
             "the workspace override must not touch the agent deploy tier"
         );
+    }
+
+    #[test]
+    fn managed_skills_dir_is_the_agent_deploy_sibling() {
+        // #6586: one derivation, so the deploy sites, the completeness probe
+        // and `skill_deploy_tiers` cannot aim at different directories.
+        let paths = FrameworkPaths::under("/base");
+        assert_eq!(
+            paths.managed_skills_dir(),
+            paths.agent_deploy_dir().parent().unwrap().join("skills")
+        );
+        assert!(paths.managed_skills_dir().ends_with("claude-config/skills"));
+    }
+
+    #[test]
+    fn managed_skills_dir_is_not_project_local_for_managed_workspace() {
+        // #6586: bundled skills are user-tier only, so the workspace override
+        // that moves `claude_skills_dir` project-local must leave this alone —
+        // otherwise a managed session deploys them right back into the project.
+        let paths = FrameworkPaths::for_managed_project("/managed-root", "/some/project/repo");
+        assert!(
+            !paths.managed_skills_dir().starts_with("/some/project/repo"),
+            "bundled skills must never deploy into a workspace: {}",
+            paths.managed_skills_dir().display()
+        );
+        assert_eq!(
+            paths.managed_skills_dir(),
+            FrameworkPaths::from_root("/managed-root").managed_skills_dir(),
+        );
+        assert_ne!(paths.managed_skills_dir(), paths.claude_skills_dir());
     }
 
     #[test]

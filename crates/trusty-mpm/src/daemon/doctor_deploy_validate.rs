@@ -73,7 +73,9 @@ mod tests {
         crate::core::agent_manifest::AgentManifest::default()
             .save(&agents_dir)
             .unwrap();
-        let skills_dir = paths.claude_skills_dir();
+        // #6586: the skill ledger completeness is decided at lives in the
+        // managed tier now, alongside the agent one seeded just above.
+        let skills_dir = paths.managed_skills_dir();
         std::fs::create_dir_all(&skills_dir).unwrap();
         crate::core::skill_manifest::SkillManifest::default()
             .save(&skills_dir)

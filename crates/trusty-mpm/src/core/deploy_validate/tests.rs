@@ -62,6 +62,17 @@ fn seed_agent_source(fw: &FrameworkPaths, names: &[&str]) {
     }
 }
 
+/// The tier bundled skills actually deploy to since #6586 — see
+/// [`FrameworkPaths::managed_skills_dir`], which is what `validate_skills`
+/// probes.
+///
+/// Why: these fixtures used to build "a complete workspace" by writing the
+/// bundled roster into `fw.claude_skills_dir()`. Bundled skills are user-tier
+/// only now, so that directory is no longer where completeness is decided.
+fn managed_skills_dir(fw: &FrameworkPaths) -> std::path::PathBuf {
+    fw.managed_skills_dir()
+}
+
 fn seed_skill_source(fw: &FrameworkPaths, names: &[&str]) {
     std::fs::create_dir_all(&fw.skills).unwrap();
     for name in names {
@@ -118,7 +129,7 @@ fn fully_provisioned(base: &Path) -> FrameworkPaths {
     .unwrap();
     AgentManifest::default().save(&agents_dir).unwrap();
 
-    let skills_dir = fw.claude_skills_dir();
+    let skills_dir = managed_skills_dir(&fw);
     std::fs::create_dir_all(skills_dir.join("tm-doctor")).unwrap();
     std::fs::write(skills_dir.join("tm-doctor").join("SKILL.md"), "skill").unwrap();
     crate::core::skill_manifest::SkillManifest::default()
@@ -186,7 +197,7 @@ fn validate_filtered_but_manifest_matching_workspace_has_no_gaps() {
     );
     agent_manifest.save(&agents_dir).unwrap();
 
-    let skills_dir = fw.claude_skills_dir();
+    let skills_dir = managed_skills_dir(&fw);
     std::fs::create_dir_all(skills_dir.join("tm-doctor")).unwrap();
     std::fs::write(skills_dir.join("tm-doctor").join("SKILL.md"), "skill").unwrap();
     crate::core::skill_manifest::SkillManifest::default()
@@ -331,11 +342,8 @@ fn validate_missing_agent_is_a_gap() {
 fn validate_missing_skill_manifest_is_a_gap() {
     let tmp = TempDir::new().unwrap();
     let fw = fully_provisioned(tmp.path());
-    std::fs::remove_file(
-        fw.claude_skills_dir()
-            .join(skill_manifest::SKILL_MANIFEST_FILE),
-    )
-    .unwrap();
+    std::fs::remove_file(managed_skills_dir(&fw).join(skill_manifest::SKILL_MANIFEST_FILE))
+        .unwrap();
     let report = validate_workspace(&fw);
     assert!(report.gaps.contains(&DeploymentGap::SkillManifestMissing));
 }
@@ -344,12 +352,40 @@ fn validate_missing_skill_manifest_is_a_gap() {
 fn validate_missing_skill_is_a_gap() {
     let tmp = TempDir::new().unwrap();
     let fw = fully_provisioned(tmp.path());
-    std::fs::remove_dir_all(fw.claude_skills_dir().join("tm-doctor")).unwrap();
+    std::fs::remove_dir_all(managed_skills_dir(&fw).join("tm-doctor")).unwrap();
     let report = validate_workspace(&fw);
     assert!(
         report
             .gaps
             .contains(&DeploymentGap::SkillMissing("tm-doctor".to_string()))
+    );
+}
+
+/// Why (#6586): the probe moved to the managed tier, and the failure mode worth
+/// pinning is the mirror image of the one that moved it — a project-tier copy
+/// standing in for the managed one. If `validate_skills` accepted either, a
+/// workspace whose managed tier was never provisioned would read complete
+/// because a leftover copy from an older binary happened to sit in the project.
+/// What: removes the managed-tier skill, plants the same stem in the project
+/// tier, and asserts the gap is still reported.
+/// Test: this function IS the test.
+#[test]
+fn validate_ignores_a_bundled_skill_in_the_project_tier() {
+    let tmp = TempDir::new().unwrap();
+    let fw = fully_provisioned(tmp.path());
+    std::fs::remove_dir_all(managed_skills_dir(&fw).join("tm-doctor")).unwrap();
+
+    let project_copy = fw.claude_skills_dir().join("tm-doctor");
+    std::fs::create_dir_all(&project_copy).unwrap();
+    std::fs::write(project_copy.join("SKILL.md"), "skill").unwrap();
+
+    let report = validate_workspace(&fw);
+    assert!(
+        report
+            .gaps
+            .contains(&DeploymentGap::SkillMissing("tm-doctor".to_string())),
+        "a project-tier copy must not satisfy the managed-tier roster: {:?}",
+        report.gaps
     );
 }
 

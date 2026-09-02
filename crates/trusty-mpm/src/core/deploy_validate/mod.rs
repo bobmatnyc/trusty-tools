@@ -234,8 +234,22 @@ fn validate_agents(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
 
 /// Probe the deployed skill roster against the EXPECTED per-project set
 /// (issue #2171 — see [`expected_set::expected_skill_stems`]).
+///
+/// Why (#6586): the expected set is the BUNDLED roster, and bundled skills are
+/// user-tier only since the 2026-09-01 owner ruling. Probing the PROJECT tier
+/// for them would report every one of them missing on a workspace that is in
+/// fact complete, turning `deployment_completeness` red for every project.
+/// What: probes [`FrameworkPaths::managed_skills_dir`] — the tier the
+/// session-launch deploy and `sync-assets` now write bundled skills to, so the
+/// probe and the repair that [`validate_and_repair`] runs agree on which
+/// directory decides completeness. The #2171 guarantee is unchanged; it simply
+/// moved one tier up with the roster it describes.
+/// Test: `validate_missing_skill_manifest_is_a_gap`,
+/// `validate_missing_skill_is_a_gap`,
+/// `validate_ignores_a_bundled_skill_in_the_project_tier` (#6586),
+/// `repair_closes_gaps_on_incomplete_workspace`.
 fn validate_skills(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
-    let target = fw.claude_skills_dir();
+    let target = fw.managed_skills_dir();
     let manifest_present = target.join(skill_manifest::SKILL_MANIFEST_FILE).is_file();
     if !manifest_present {
         gaps.push(DeploymentGap::SkillManifestMissing);

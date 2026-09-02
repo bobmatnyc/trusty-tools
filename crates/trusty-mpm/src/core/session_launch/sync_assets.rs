@@ -117,7 +117,11 @@ pub struct SyncAssetsReport {
 /// retracts any bundled copy an older binary left in the workspace's own
 /// `.claude/agents/`; (2) folds the redeployed agents' declared `skills:`
 /// into the skill `select` predicate (DOC-42 co-deploy) and redeploys the
-/// 3-tier skill set via [`deploy_all_skill_tiers`]; (3) best-effort refreshes
+/// bundled roster into [`FrameworkPaths::managed_skills_dir`] via
+/// [`deploy_all_skill_tiers`] — the skill tier #6586 made user-tier-only, the
+/// direct counterpart of the agent destination in (1) — then redeploys
+/// user-custom skills alone into the project's own `.claude/skills/`;
+/// (3) best-effort refreshes
 /// the PROJECT-tier output styles via [`deploy_output_style`] (issue #2125 item
 /// 2 — the tier a managed session's `--setting-sources project,local` launch
 /// actually reads). `fw` MUST be workspace-scoped
@@ -187,15 +191,39 @@ pub fn sync_session_assets(
             }
         };
 
+    // #6586: bundled skills refresh in the MANAGED tier, exactly as agents
+    // refresh in `fw.agent_deploy_dir()` above (#4409). Keeping the #2444
+    // guarantee — a long-lived session's stale bundled skill IS refreshed by
+    // sync-assets — required following the roster to the tier it now lives in.
     let co_deploy_skills = co_deploy_skill_set(&deploy.declared_skills);
-    let skill_deploy: DeployStats = deploy_all_skill_tiers(
+    let mut skill_deploy: DeployStats = deploy_all_skill_tiers(
         &plan.skill_source,
         &fw.user_skill_source_dir(),
-        &fw.claude_skills_dir(),
+        &fw.managed_skills_dir(),
         |name| plan.skill_selected(name) || co_deploy_skills.contains(name),
     )
     .map_err(|e| SyncAssetsError::SkillDeploy(e.to_string()))?
     .stats;
+
+    // The project tier still takes user-custom skills; only the bundled roster
+    // is declined there (#6586). Non-fatal for the same reason it is in
+    // `session_launch::skills` — personal outranks project for skills.
+    match deploy_all_skill_tiers(
+        &plan.skill_source,
+        &fw.user_skill_source_dir(),
+        &fw.claude_skills_dir(),
+        crate::core::project_skill_tier::bundled_excluded_from_project_tier,
+    ) {
+        Ok(result) => {
+            skill_deploy.deployed.extend(result.stats.deployed);
+            skill_deploy.skipped.extend(result.stats.skipped);
+            skill_deploy.unchanged.extend(result.stats.unchanged);
+        }
+        Err(err) => tracing::warn!(
+            project_dir = %project_dir.display(),
+            "project-tier user-custom skill deploy failed during sync-assets (non-fatal): {err}"
+        ),
+    }
 
     // Non-fatal, mirroring `prepare_session_inner`'s own treatment of this step.
     let output_style_synced = deploy_output_style(project_dir).is_ok();
@@ -265,7 +293,12 @@ mod tests {
         ws_fw.claude_skills = project_dir.join(".claude").join("skills");
 
         sync_session_assets(&ws_fw, &project_dir).unwrap();
-        let deployed_path = ws_fw.claude_skills_dir().join("tm-doctor").join("SKILL.md");
+        // #6586: the bundled roster lives at the managed tier now, so that is
+        // where the refresh has to land. Same guarantee, one tier up.
+        let deployed_path = ws_fw
+            .managed_skills_dir()
+            .join("tm-doctor")
+            .join("SKILL.md");
         assert_eq!(std::fs::read_to_string(&deployed_path).unwrap(), "v1.0.0");
 
         // The catalog/bundled skill bumps version mid-session.
@@ -273,6 +306,16 @@ mod tests {
         let report = sync_session_assets(&ws_fw, &project_dir).unwrap();
         assert!(report.skills_deployed.contains(&"tm-doctor".to_string()));
         assert_eq!(std::fs::read_to_string(&deployed_path).unwrap(), "v1.1.0");
+
+        // #6586: and it must NOT have been written into the project tier.
+        assert!(
+            !ws_fw
+                .claude_skills_dir()
+                .join("tm-doctor")
+                .join("SKILL.md")
+                .exists(),
+            "sync-assets must not write a bundled skill into the project tier"
+        );
     }
 
     #[test]

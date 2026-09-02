@@ -519,11 +519,17 @@ fn ensure_deployment_complete_ok_when_already_complete() {
     let agents_dir = fw.agent_deploy_dir();
     std::fs::create_dir_all(&agents_dir).unwrap();
     AgentManifest::default().save(&agents_dir).unwrap();
-    let skills_dir = fw.claude_skills_dir();
+    // #6586: and the skill ownership manifest sits beside it there, for the
+    // same reason — bundled skills are user-tier only.
+    let skills_dir = fw.managed_skills_dir();
     std::fs::create_dir_all(&skills_dir).unwrap();
     SkillManifest::default().save(&skills_dir).unwrap();
 
+    // #6586: created explicitly — the skill-manifest seed above used to create
+    // it as a side effect of `<workspace>/.claude/skills`, and that seed moved
+    // to the managed tier.
     let claude_dir = workspace.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(
         claude_dir.join("settings.json"),
         r#"{"outputStyle": "trusty-mpm", "hooks": {"SessionStart": []}}"#,

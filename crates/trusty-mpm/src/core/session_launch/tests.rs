@@ -752,6 +752,14 @@ fn prepare_session_self_heals_missing_skill_source() {
         report.skill_deploy
     );
     assert!(fw.skills.join("tm-doctor.md").exists());
+    // #6586: and the deploy lands at the MANAGED tier, not the project's own.
+    assert!(
+        fw.managed_skills_dir()
+            .join("tm-doctor")
+            .join("SKILL.md")
+            .is_file(),
+        "the self-healed skill must reach the managed tier"
+    );
 }
 
 #[test]
@@ -780,6 +788,87 @@ fn prepare_session_self_heals_renamed_skill_source() {
     assert!(
         !report.skill_deploy.deployed.is_empty(),
         "renamed/stale skill source must self-heal and deploy current skills"
+    );
+    // #6586: the refreshed roster lands at the managed tier.
+    assert!(
+        fw.managed_skills_dir()
+            .join("tm-doctor")
+            .join("SKILL.md")
+            .is_file()
+    );
+}
+
+/// Why (#6586): the owner ruling puts bundled skills at the user tier only, and
+/// the regression this pins is the one the ruling names — before it, every
+/// bundled `tm-*` skill was written byte-identically into BOTH tiers, so an
+/// upgrade had two copies to keep in step and a drifted project copy was
+/// indistinguishable from a deliberate customization. On `origin/main` this test
+/// fails at the first assertion: `deploy_session_skills` wrote the whole
+/// manifest-selected roster into `<project>/.claude/skills/`.
+///
+/// What: provisions a fresh workspace and asserts a bundled skill (`tm-doctor`,
+/// which `ensure_skill_source_fresh` always materializes) reaches the managed
+/// tier and NOT the project tier, and that a project-tier skill the operator
+/// planted by hand is left exactly as it was — the deploy declines the bundled
+/// roster there, it does not sweep the directory. The other half of the
+/// guarantee — that a leftover copy is REPORTED — is
+/// `daemon::doctor_skill_project_tier::tests::project_tier_bundled_copy_warns`,
+/// wired into `tm doctor` by `run_doctor_produces_thirty_seven_checks`.
+/// Test: this function IS the test.
+#[test]
+#[serial_test::serial]
+fn prepare_session_deploys_no_bundled_skill_to_the_project_tier() {
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    // `fw.claude_skills_dir()` IS the workspace tier this deploy writes — a
+    // managed spawn resolves it to `<workspace>/.claude/skills` and these
+    // home-scoped fixtures to `<tmp_home>/.claude/skills`; either way it is the
+    // destination `deploy_session_skills` targets, and the one #6586 says must
+    // hold no bundled skill.
+    //
+    // A hand-placed copy under a bundled name, planted BEFORE the provision:
+    // the deploy must neither refresh it nor delete it.
+    let planted = fw.claude_skills_dir().join("tm-doctor");
+    std::fs::create_dir_all(&planted).unwrap();
+    std::fs::write(planted.join("SKILL.md"), "operator's own copy").unwrap();
+
+    prepare_session(&fw, project).expect("prep succeeds");
+
+    assert!(
+        fw.managed_skills_dir()
+            .join("tm-doctor")
+            .join("SKILL.md")
+            .is_file(),
+        "the bundled roster must reach the managed tier"
+    );
+    assert_eq!(
+        std::fs::read_to_string(planted.join("SKILL.md")).unwrap(),
+        "operator's own copy",
+        "a project-tier copy must be neither overwritten nor removed"
+    );
+
+    // No OTHER bundled stem may have been written into the project tier — the
+    // planted one is the only skill directory that may exist there. Read the
+    // DIRECTORY, not `list_project_custom_stems`: that helper filters out
+    // anything the tier's manifest claims, which is precisely what a bundled
+    // deploy into this tier would create, so it cannot see the regression.
+    let mut project_stems: Vec<String> = std::fs::read_dir(fw.claude_skills_dir())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().join("SKILL.md").is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    project_stems.sort();
+    assert_eq!(
+        project_stems,
+        vec!["tm-doctor".to_string()],
+        "no bundled skill may be deployed into the project tier"
     );
 }
 

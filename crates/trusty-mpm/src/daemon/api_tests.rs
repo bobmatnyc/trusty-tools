@@ -1217,6 +1217,8 @@ async fn doctor_endpoint_returns_report() {
         "deployment",
         "skill_staleness",
         "skill_unmanaged",
+        // #6586: a bundled skill left behind in a project's own tier.
+        "skill_project_tier",
         "legacy_sources",
         "legacy_overrides",
         "agent_skills",
