@@ -4,26 +4,11 @@ Run a CAST-style technical due-diligence report against a codebase outside
 this workspace, using only what a repository checkout can tell you — no
 interviews, no ops data, no organizational input.
 
-## Required versions
-
 This runbook targets `trusty-analyze report --template cast --code-only
---manifest <path>` — a command not yet released. It is tracked alongside the
-CAST template's own gaps in [#6004](https://github.com/bobmatnyc/trusty-tools/issues/6004)
-and the DD-dimension gap analysis in
-[DOC-71](../specs/DOC-71-audit-dimensions-and-templates.md). Confirm it
-exists before following this runbook: `trusty-analyze report --help` must
-list a `--code-only` flag.
-
-| Crate | Current version (this repo) | Needed |
-|---|---|---|
-| `trusty-analyze` | 0.12.4 | ≥ next release after 0.12.4 (adds the `report`/`--code-only` verb) |
-| `trusty-review` | 0.31.1 | ≥ next release after 0.31.1 (adds the `code_only` marker plumbing) |
-| `trusty-audit` | 0.12.1 | ≥ next release after 0.12.1 — only if you drive this through a full `trusty-audit` engagement instead of calling `trusty-analyze report` directly (see "Producing the manifest") |
-
-`trusty-analyze report` embeds `trusty-review`'s report generator as a
-library; the CAST template and its section-rendering logic live in
-`trusty-review`, not `trusty-analyze` — both versions matter even though you
-only invoke one binary.
+--manifest <path>`. It is tracked alongside the CAST template's own gaps in
+[#6004](https://github.com/bobmatnyc/trusty-tools/issues/6004) and the
+DD-dimension gap analysis in
+[DOC-71](../specs/DOC-71-audit-dimensions-and-templates.md).
 
 ## Prerequisites
 
@@ -35,31 +20,42 @@ only invoke one binary.
 
 - **Binaries:**
 
+  Path A — use `trusty-analyze report` directly against a hand-written manifest:
+
   ```bash
-  cargo install trusty-analyze trusty-review --locked
+  cargo install trusty-analyze --features review --locked
+  cargo install trusty-review --locked
   ```
 
-  Add `trusty-audit` only if you plan to drive the run through a full
-  engagement (`trusty-audit init` / `add repo` / `audit`) instead of calling
-  `trusty-analyze report` directly against a hand-written manifest:
+  Path B — drive the run through a full `trusty-audit` engagement (`trusty-audit
+  init` / `add repo` / `audit`), which coordinates the same pipeline:
 
   ```bash
-  cargo install trusty-audit --locked
+  cargo install trusty-audit trusty-review --locked
   ```
 
-- **Cloud credentials:** none, for a local checkout. Report generation always
-  makes one LLM call (synthesis is unconditional since
-  [#5454](https://github.com/bobmatnyc/trusty-tools/issues/5454)), so you need
-  one of:
+  `trusty-analyze report` embeds `trusty-review`'s report generator as a
+  library — both binaries reach the same implementation entry point. The
+  `--features review` flag is required for `trusty-analyze report`; without it,
+  the `report` verb and `--code-only` flag are unavailable.
+
+- **LLM credentials:** Required. Report generation always makes inference calls
+  [#5454](https://github.com/bobmatnyc/trusty-tools/issues/5454). Provide one of:
 
   ```bash
+  # OpenRouter (default provider):
   export OPENROUTER_API_KEY=sk-or-v1-...
-  # or leave AWS Bedrock credentials in ~/.aws/credentials / the AWS env vars / an IAM role
+
+  # or AWS Bedrock (standard credential chain):
+  export AWS_REGION=us-east-1            # if not already set
+  export TRUSTY_LLM_MODEL=bedrock/us.anthropic.claude-sonnet-4-6
+  # AWS credentials via env vars, ~/.aws/credentials, IAM role, or SSO
   ```
 
-  Neither key is written into the rendered report or the manifest — a
-  manifest's `[inference]` section carries provider/model identity, never a
-  credential (`crates/trusty-review/src/report/manifest.rs`).
+  Neither credential is written into the rendered report or the manifest — a
+  manifest's `[report]` section carries provider/model identity, never a
+  credential. The run stops before reading any repository if credentials are
+  missing, naming the missing key.
 
 - **`GITHUB_TOKEN`** — optional. Only needed if a manifest repository entry
   uses `remote = "owner/repo"` instead of a local `path`, or if you separately
@@ -92,22 +88,37 @@ tracked files directly (`git ls-files`, or a filtered walk for a non-git
 directory) and needs no prior indexing. Local entries get deterministic git
 enrichment (branch, short SHA, origin, dirty flag) for free.
 
-Optional keys worth setting for a code-only run:
+Optional keys for a code-only run:
 
 ```toml
 [report]
 title = "FLYR Technical DD"
 analyst = "Matt"
+code_only = true
 
 [[repositories]]
 name = "FLYR"
 path = "<repo-path>"
 ref  = "main"
+investigate_max_files = 40
 ```
 
-`--instructions <file>` (or the manifest's `[report].instructions` key) can
-steer emphasis in the executive summary and findings; it never authorizes
-inventing a fact.
+Key notes:
+- `[report] code_only = true` is optional in the manifest; the `--code-only` CLI
+  flag also sets it. The flag turns the mode ON only — omitting it never widens
+  a scope the manifest declared.
+- Each `[[repositories]]` entry declares **exactly one** of `path` (local
+  checkout) or `remote` (`owner/repo` for GitHub repositories).
+- `investigate_max_files` caps how many files are sent to the LLM per repository;
+  default is built-in (roughly 40 files). `--investigate-max-files` CLI flag
+  takes precedence.
+- `ref` is optional; when omitted, the current checked-out branch is used.
+- `metrics` can reference a pre-produced `trusty-analyze` metrics JSON file;
+  when omitted, a scan is performed.
+
+`--instructions <file>` (or the manifest's `[report].instructions` key) hands
+the generator a free-form markdown brief. It steers emphasis in synthesis (if
+enabled) but never authorizes inventing a fact.
 
 If you instead drive this through `trusty-audit` (multiple repositories, or
 you want `tga`'s git-history sweep alongside the code scan), `trusty-audit
@@ -120,17 +131,32 @@ out of scope for the rest of this runbook, which assumes the direct
 
 ```bash
 trusty-analyze report \
+  --manifest report-manifest.toml \
   --template cast \
   --code-only \
-  --manifest report-manifest.toml
+  --out ./dd-reports
 ```
 
-`trusty-review`'s own `report` subcommand takes the same manifest and accepts
-`--out <dir>` (default `./reports`), `--instructions <file>`, `--no-mermaid`,
-and `--analyze`; `trusty-analyze report` is expected to carry the same flags
-since it calls the identical generator — confirm the exact set with
-`trusty-analyze report --help` once the command ships, rather than assuming
-this list is final.
+Both `trusty-analyze report` and `trusty-review report` call the same generator
+and accept the same flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--manifest <FILE>` | required | The report manifest TOML file |
+| `--template <NAME>` | `report-technical-dd` | Template name: `cast`, `default`, `generic`, or a full/override name |
+| `--code-only` | off | Mark non-code sections as out-of-scope; mark code-derived sections as inferred |
+| `--out <DIR>` | `./reports` | Output directory for the markdown + JSON pair |
+| `--instructions <FILE>` | unset | Free-form analyst brief (markdown) for synthesis focus |
+| `--synthesize` | off | Add LLM-written prose to executive summary, top risks, and RED/AMBER findings |
+| `--corpus <DIR>` | XDG data dir | Deterministic cross-repo benchmark corpus directory |
+| `--benchmark` | off | Compute percentile/quartile placement in the corpus |
+| `--analyze` | on | Fetch trusty-analyze metrics on-demand (fail-open; built-in scan used if unavailable) |
+| `--no-mermaid` | off | Skip Mermaid chart generation beneath graph-ready data tables |
+
+Template aliases: `cast` → `report-technical-dd-cast`, `default` / `generic` →
+`report-technical-dd`. Override either by dropping a same-named file in
+`~/.trusty-review/templates/`; the override directory is checked before the
+bundled default.
 
 **Where it lands.** The generator writes a markdown + JSON pair per run,
 `{slug}.md` / `{slug}.json`, under the output directory (`./reports` unless
@@ -144,11 +170,12 @@ PDF or HTML — hand the markdown to a general-purpose converter (e.g.
 deliverable. Mermaid charts render fine on GitHub and most markdown viewers;
 a converter that does not support Mermaid fences will drop them.
 
-**Expected runtime.** Scales with repository size and the number of LLM
-calls, not with binary download time. No fixed SLA exists in the codebase —
-a first run against a large, previously unindexed repository takes
-noticeably longer than a small one. Give it time rather than assuming a
-hang.
+**Expected runtime.** Scales with the file investigation budget and the number
+of LLM calls. A default run (40-file investigation budget per repository) takes
+roughly 60–120 seconds per repository; scales roughly linearly with the file
+budget. Large repositories with non-default `investigate_max_files` settings
+cost correspondingly more. No fixed SLA — a run that is still logging output is
+not stuck.
 
 ## Reading the report
 
@@ -163,30 +190,25 @@ superscript, defined once in a legend near the top of the report:
 
 A genuinely unknowable field is dropped rather than shown with a marker.
 
-**Code-only markers.** `--code-only` adds two more things to watch for,
-beyond the three-way legend:
+**Code-only markers.** `--code-only` adds two categories of output:
 
-- A line ending **"Inferred from code; not validated by interview or ops
-  data."** — the section rendered real, code-derived content, but nothing in
-  it was cross-checked against a conversation or an ops dashboard the way a
-  full CAST engagement would. Treat it as directionally useful, not as a
-  validated finding the way a ⁽ᵐ⁾ fact is.
-- A cell reading **"Out of scope for a code-only audit — requires
-  [interview / CAST's proprietary benchmark corpus / ops metrics], not
-  available from repository inspection alone."** — trusty deliberately did
-  not attempt that measurement. This is the run's stated boundary, not a bug
-  or a missing feature; the section heading still renders so the gap is
-  never mistaken for a silent omission.
+- **Non-code sections** (Peer Benchmark, Next Steps) render with an explicit
+  marker: "Out of scope for a code-only audit — requires <what it needs>, not
+  available from repository inspection alone." The section heading still renders
+  so the gap is never mistaken for a silent omission.
+- **Partial sections** (OSS/CVE exposure, License/IP risk, Remediation Economics)
+  render their code-derived content with an added marker: "Inferred from code;
+  not validated by interview or operational data." Treat these findings as
+  directionally useful, not as validated facts the way a ⁽ᵐ⁾ measurement is.
 
-**The CAST 1.00–4.00 scale.** The CAST template documents CAST's own scoring
-model: five health factors (Robustness, Efficiency, Security, Changeability,
-Transferability), each scored 1.00 (very-high-risk) to 4.00 (low-risk) from
-rule-violation percentages, rolled up into a TQI. Age-adjusted acceptability
-bands apply (`<2yr` expects `>3.40`; `2–5yr` `>3.20`; `5–10yr` `>3.00`;
-`>10yr` `>2.70`). As of this writing, not every health-factor cell has a real
-computation behind it — some render the code-only PARTIAL marker rather than
-a genuine 1.00–4.00 score; check the report's own Gaps & Caveats section for
-which cells are live versus placeholder for your run.
+The Report Metadata table states the scope, so a reader never has to infer it.
+
+**The CAST 1.00–4.00 scale.** The CAST template renders CAST's scoring model:
+five health factors (Robustness, Efficiency, Security, Changeability,
+Transferability), each scored 1.00 (very-high-risk) to 4.00 (low-risk). Known gap:
+not every health-factor cell has a computation behind it yet. The report's own
+"Gaps & Caveats" section names which cells are live versus placeholder for your
+run. This gap is tracked in #6004.
 
 **trusty's own Code Quality / Security / Performance sections are NOT
 CAST-scored.** The default (non-CAST) template carries these sections on
@@ -216,13 +238,13 @@ factor, or vice versa.
   SKIP_UI_BUILD=1 cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze --locked
   ```
 
-- **Large-repo runtime.** A large, previously unindexed repository costs
-  noticeably more wall-clock time than a small one — both in the file scan
-  and in the LLM calls. There is no fixed SLA; a run that is still making
-  progress (growing log output, no error) is not stuck.
-- **Missing `OPENROUTER_API_KEY` / AWS credentials.** The run stops before
-  reading any repository, naming the missing credential — this is the
-  intended fail-fast behavior (#5454), not a bug.
+- **Engagement-level configuration.** If driving through `trusty-audit`, set
+  `[report] template = "cast"` and `code_only = true` in the engagement
+  manifest; `trusty-audit` passes these to the child renderer as environment
+  variables `TRUSTY_AUDIT_REPORT_TEMPLATE` and `TRUSTY_AUDIT_REPORT_CODE_ONLY`.
+- **Missing LLM credentials.** The run stops before reading any repository,
+  naming the missing credential — this is the intended fail-fast behavior
+  (#5454), not a bug.
 
 ## What this run does NOT cover
 
