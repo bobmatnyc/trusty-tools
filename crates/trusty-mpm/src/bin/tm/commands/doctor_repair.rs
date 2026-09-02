@@ -45,6 +45,11 @@ pub(crate) fn run_post_report_actions(flags: &DoctorFlags) {
     if flags.fix_skills {
         super::doctor_fix_skills::fix_skills_locally(flags.include_frozen, flags.yes);
     }
+    // #6649: the agent mirror of `--fix-skills`, and like it never run by
+    // `--fix` — `--fix` still never deletes.
+    if flags.fix_agents {
+        super::doctor_fix_agents::fix_agents_locally(flags.yes);
+    }
     if flags.fix {
         run_repairs(flags.yes, flags.include_frozen);
     }

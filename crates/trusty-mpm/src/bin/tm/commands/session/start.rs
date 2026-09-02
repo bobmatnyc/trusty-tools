@@ -218,6 +218,11 @@ async fn start_session_in_place(
             for err in &report.roster_errors {
                 eprintln!("error: roster provisioning gap: {err}");
             }
+            // #6649: one line per unclean asset kind, and nothing at all when
+            // every kind is clean.
+            for notice in &report.asset_notices {
+                println!("  assets: {notice}");
+            }
         }
         // #4752: fatal — refuse to start rather than run a session whose
         // compiled instructions could not be written. Other prep failures stay

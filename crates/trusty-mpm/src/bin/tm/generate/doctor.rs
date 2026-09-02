@@ -45,7 +45,11 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "asset_tier",
-        "Fails when tm-owned agent files sit in a project's `.claude/agents/` — that tier outranks the canonical `$CLAUDE_CONFIG_DIR/agents/` deploy, so a stale or stub copy shadows the real agent while every presence-only check stays green (issue #4442). Warns for leftovers in `~/.claude/agents/`, which a managed session no longer reads. Read-only; never deletes.",
+        "Fails when tm-owned agent files sit in a project's `.claude/agents/` — that tier outranks the canonical `$CLAUDE_CONFIG_DIR/agents/` deploy, so a stale or stub copy shadows the real agent while every presence-only check stays green (issue #4442). Warns for leftovers in `~/.claude/agents/`, which a managed session no longer reads. The check itself is read-only; `tm doctor --fix-agents` PREVIEWS the removal and `tm doctor --fix-agents --yes` applies it, removing only the copies this tier's `.trusty-mpm-manifest.json` records as tm's, with a framework-owned origin, whose bytes still match the recorded checksum. It refuses a bundled-named DIRECTORY, an untracked file, a ledger entry the operator owns, a copy hand-edited after deployment, a project tier that is a symlink or cannot be listed, and any tier resolving onto the canonical deploy dir or `~/.claude/agents`. Every removal is backed up first; `tm doctor --fix` never runs it (issues #4442, #6649).",
+    ),
+    (
+        "asset_duplicates",
+        "Warns when ONE asset name is claimed by two entries in the SAME tier — `qa.md` beside a `qa/` directory, or `QA.md` beside `qa.md`, in either the agent or the skill tier. Only one of the two ever loads, which one is loader order, and on a case-insensitive filesystem the two names are one file — so the copy the operator edits may not be the copy that runs. `asset_tier` and `skill_project_tier` both compare one directory against another and are structurally unable to see this. Ownership is not the question here (both entries may be the operator's own), which is why it is a separate row rather than folded into either. Scans the canonical agent and skill deploy dirs plus the project's own `.claude/agents` and `.claude/skills`; reports UNKNOWN for a tier it cannot list. Report-only, with NO repair: tm cannot know which entry the operator meant to keep, so the operator deletes or renames one (issue #6649).",
     ),
     (
         "transcript_saving",

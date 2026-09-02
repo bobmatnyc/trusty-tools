@@ -914,18 +914,16 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
                 );
                 // Issue #2149: `prepare_session_with_repo_url` no longer aborts
                 // on a roster-deploy failure, so a broken agent/skill catalog
-                // would otherwise only show up as a suspiciously low
-                // `deployed` count above. Surface it loudly and explicitly —
-                // this is the gap that previously shipped a session with no
-                // roster AND no trusty-mpm identity.
-                for err in &report.roster_errors {
-                    tracing::error!(
-                        session = %session_id,
-                        path = %workspace_path.display(),
-                        "roster provisioning gap (session still launches with its \
-                         trusty-mpm identity): {err}"
-                    );
-                }
+                // would otherwise only show up as a suspiciously low `deployed`
+                // count above — this is the gap that previously shipped a
+                // session with no roster AND no trusty-mpm identity. #6649 adds
+                // the asset-hygiene lines beside it; both go through the one
+                // shared reporter so a path cannot surface half of them.
+                crate::core::session_launch::log_prep_findings(
+                    &report.roster_errors,
+                    &report.asset_notices,
+                    format_args!("session {session_id} at {}", workspace_path.display()),
+                );
             }
             // #4752: a compiled-prompt write failure fails the provision — a
             // workspace whose session cannot record its own instructions is not

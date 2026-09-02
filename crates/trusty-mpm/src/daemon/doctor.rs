@@ -71,6 +71,11 @@ use doctor_agent_reachability::check_agent_reachability;
 #[path = "doctor_asset_tier.rs"]
 mod doctor_asset_tier;
 use doctor_asset_tier::check_asset_tier;
+// #6649: and this proves no single tier holds one name twice — the collision
+// `asset_tier` and `skill_project_tier` are both structurally unable to see.
+#[path = "doctor_asset_duplicates.rs"]
+mod doctor_asset_duplicates;
+use doctor_asset_duplicates::check_asset_duplicates;
 
 // #4467: the same silent-failure shape as #4451, one layer down — a managed
 // spawn that inherits `CLAUDE_CODE_CHILD_SESSION` has transcript saving turned
@@ -335,7 +340,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_thirty_seven_checks`,
+/// Test: `run_doctor_produces_thirty_eight_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -390,6 +395,11 @@ pub async fn run_doctor(
         // project-tier copy of a bundled agent shadows the canonical deploy
         // while every presence-only probe above stays green.
         check_asset_tier(&paths, project_dir, &home),
+        // #6649: and this proves neither tier holds one asset NAME twice —
+        // `foo.md` beside `foo/`, or two case-variant stems. Ownership is not
+        // the question, so it is its own row rather than a fold into the two
+        // above. Report-only: tm cannot know which entry the operator meant.
+        check_asset_duplicates(&paths, project_dir),
         // #4467: and this proves the spawn does not silently lose the session's
         // own transcript, which costs it all native --resume/--continue/rewind
         // recovery. No `project_dir`/`paths` input — the invariant is a property

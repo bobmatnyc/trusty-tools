@@ -61,14 +61,16 @@ pub(super) fn prepare_inproject_session(
             // Issue #2149: a roster-deploy failure no longer aborts
             // preparation, so surface it loudly here rather than letting it
             // hide behind a low `deployed`/`skills_deployed` count.
-            for err in &report.roster_errors {
-                tracing::error!(
-                    id = %session_id,
-                    worktree = %worktree.display(),
-                    "spawn_managed (inproject): roster provisioning gap (session \
-                     still launches with its trusty-mpm identity): {err}"
-                );
-            }
+            // #6649 folded the asset-hygiene lines in beside them, through the
+            // one shared reporter.
+            crate::core::session_launch::log_prep_findings(
+                &report.roster_errors,
+                &report.asset_notices,
+                format_args!(
+                    "spawn_managed (inproject) session {session_id} at {}",
+                    worktree.display()
+                ),
+            );
         }
         // #4752: a compiled-prompt write failure refuses the spawn — the caller
         // propagates this string. Every other prep failure stays non-fatal

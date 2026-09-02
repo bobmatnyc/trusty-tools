@@ -1208,6 +1208,8 @@ async fn doctor_endpoint_returns_report() {
         "agents",
         "agent_reachability",
         "asset_tier",
+        // #6649: one asset name claimed twice inside ONE tier.
+        "asset_duplicates",
         "transcript_saving",
         "skills",
         "skill_source",
