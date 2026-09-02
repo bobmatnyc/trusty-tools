@@ -6,3 +6,4 @@ pub mod run;
 pub mod service;
 pub mod setup;
 pub mod socket;
+pub mod version;
