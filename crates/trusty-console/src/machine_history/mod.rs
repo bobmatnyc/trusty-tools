@@ -409,4 +409,155 @@ mod tests {
         h.set_sample_interval(30);
         assert_eq!(h.snapshot().await.sample_interval_secs, 30);
     }
+
+    /// A minimal snapshot carrying `seq` in `sampled_at_unix`.
+    ///
+    /// Why not `HostSampler::sample()`: the concurrency test below needs the
+    /// writer bounded by the lock, not by cloning a real sample's mount list,
+    /// and it needs a sequence number the reader can check contiguity on.
+    fn tagged_sample(seq: u64) -> HostMetrics {
+        use trusty_common::host_metrics::{
+            CpuMetrics, DiskMetrics, MemoryMetrics, NetworkMetrics, Pressure,
+        };
+        HostMetrics {
+            cpu: CpuMetrics {
+                usage_pct: 0.0,
+                logical_cores: 1,
+                physical_cores: None,
+                pressure: Pressure::Nominal,
+            },
+            memory: MemoryMetrics {
+                total_bytes: 1,
+                used_bytes: 0,
+                available_bytes: 1,
+                usage_pct: 0.0,
+                swap_total_bytes: 0,
+                swap_used_bytes: 0,
+                pressure: Pressure::Nominal,
+            },
+            disks: DiskMetrics {
+                aggregate_total_bytes: 1,
+                aggregate_available_bytes: 1,
+                aggregate_used_bytes: 0,
+                aggregate_usage_pct: 0.0,
+                pressure: Pressure::Nominal,
+                mounts: Vec::new(),
+            },
+            network: NetworkMetrics {
+                rx_bytes_per_sec: 0.0,
+                tx_bytes_per_sec: 0.0,
+                rx_total_bytes: 0,
+                tx_total_bytes: 0,
+                window_secs: 1.0,
+            },
+            overall_pressure: Pressure::Nominal,
+            sampled_at_unix: Some(seq),
+        }
+    }
+
+    /// Why: `subscribe` takes its snapshot and its receiver under ONE read lock,
+    /// and until this test that guarantee rested on reading the lock scope. Move
+    /// `events.subscribe()` outside the guard — the obvious refactor, and what
+    /// `let snapshot = self.snapshot().await;` would do — and a sample recorded
+    /// in the gap between the two is in neither half, which the dashboard draws
+    /// as a hole it cannot see.
+    ///
+    /// Why the check is "first live sequence == last snapshotted sequence + 1":
+    /// the writer emits `0..TOTAL` in order and the broadcast buffer is sized
+    /// above the run, so no subscriber can lag. A subscription is then correct
+    /// exactly when its receiver resumes one past where its snapshot stopped —
+    /// resuming later means a sample fell in the gap, resuming at the same
+    /// sequence means it was delivered in both halves. One number per
+    /// subscription is what makes tens of thousands of attempts affordable, and
+    /// that volume is what turns a nanosecond-wide race into a failure that
+    /// shows up rather than one that hides.
+    ///
+    /// Why the ring is deliberately tiny and the run deliberately long: the gap
+    /// is a few nanoseconds between releasing the read lock and subscribing, so
+    /// what matters is how many subscriptions fit inside the run. A full-size
+    /// ring makes each snapshot an O(window) clone, the subscriber spends nearly
+    /// all its time inside the lock, and the race almost never lands. Measured
+    /// against the broken version: 1 failure in 10 runs with a full ring at
+    /// 3000 samples, 6 in 10 with an 8-slot ring at 10 000, and 10 in 10 at
+    /// 20 000 — which is the shape kept here, at about 5 s. Eviction is harmless
+    /// because the check reads the last sequence, not the count.
+    /// What: one task records `TOTAL` sequence-tagged samples as fast as it can
+    /// while the main task subscribes in a tight loop for the whole run, then
+    /// checks that resume point for every subscription that landed mid-run.
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn every_sample_reaches_a_mid_run_subscriber_exactly_once() {
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        const TOTAL: u64 = 20_000;
+        const MAX_SUBSCRIPTIONS: usize = 200_000;
+
+        let history = MachineHistory::with_limits(
+            8,
+            8,
+            // Above the whole run, so a receiver read at the end cannot lag and
+            // every gap it reports is the ordering bug.
+            TOTAL as usize * 2,
+            Duration::from_secs(60),
+        );
+
+        let writer = {
+            let history = history.clone();
+            tokio::spawn(async move {
+                for seq in 0..TOTAL {
+                    history.record_sample(tagged_sample(seq)).await;
+                }
+            })
+        };
+
+        // One subscriber, not several: the window only opens when the writer is
+        // already running on another core as the reader releases the lock, and
+        // extra subscriber tasks compete for the same worker threads. Three
+        // subscribers measured 5 failures in 10 runs against the broken version
+        // where one measured 10 in 10.
+        let mut taken: Vec<(Option<u64>, broadcast::Receiver<HistoryEvent>)> = Vec::new();
+        while !writer.is_finished() && taken.len() < MAX_SUBSCRIPTIONS {
+            let (snapshot, rx) = history.subscribe().await;
+            let last = snapshot
+                .samples
+                .last()
+                .map(|m| m.sampled_at_unix.expect("tagged sample"));
+            taken.push((last, rx));
+        }
+        writer.await.expect("writer task");
+
+        let mut mid_run = 0usize;
+        for (nth, (last_snapshotted, mut rx)) in taken.into_iter().enumerate() {
+            // Subscribed after the last sample — nothing live to resume at.
+            if last_snapshotted == Some(TOTAL - 1) {
+                continue;
+            }
+            let expected = last_snapshotted.map_or(0, |s| s + 1);
+            mid_run += 1;
+            let first_live = loop {
+                match rx.try_recv() {
+                    Ok(HistoryEvent::Sample(m)) => break m.sampled_at_unix.expect("tagged sample"),
+                    Ok(HistoryEvent::Transition(_)) => {}
+                    Err(TryRecvError::Empty | TryRecvError::Closed) => panic!(
+                        "subscription {nth} snapshotted through {last_snapshotted:?} of {TOTAL} \
+                         samples and then received nothing live"
+                    ),
+                    Err(TryRecvError::Lagged(n)) => panic!(
+                        "subscription {nth} lagged by {n} — the buffer was sized to prevent it"
+                    ),
+                }
+            };
+            assert_eq!(
+                first_live, expected,
+                "subscription {nth} snapshotted through {last_snapshotted:?} and must resume live \
+                 at {expected}; resuming later means a sample fell between the snapshot and the \
+                 subscription, resuming at the same sequence means it landed in both"
+            );
+        }
+        assert!(
+            mid_run >= 500,
+            "only {mid_run} subscription(s) landed mid-run — the race this test exists to catch \
+             was never given a chance"
+        );
+    }
 }

@@ -14,6 +14,17 @@
 //! that long — transitions to `down`, because a retained cache entry is not
 //! evidence the service is alive (`metrics_poller::poll_once` keeps the previous
 //! report when a poll fails).
+//!
+//! Two deliberate choices a consumer of this log inherits (#6642 renders it):
+//! - A service's FIRST observation is seeded silently, so a daemon that starts
+//!   after the console produces no `up` entry — its timeline begins at the first
+//!   time it CHANGES state. Current state comes from the machine-status rollup,
+//!   never from replaying this log.
+//! - A report with `collected_at_unix: None` is never judged stale, because
+//!   there is no timestamp to judge it against. Such a service is held at its
+//!   self-reported health until it drops out of the report set entirely, and
+//!   only the missing-report path can then take it down.
+//!
 //! Test: `first_observation_seeds_without_a_transition`,
 //! `repeated_identical_reports_log_one_transition`,
 //! `a_stale_report_transitions_to_down`,
@@ -166,8 +177,12 @@ impl TransitionTracker {
     /// read `down`), then marks any previously-known service missing from
     /// `reports` for longer than `grace` as `down`. Returns a transition only
     /// where the derived state differs from the stored one; a service seen for
-    /// the first time is seeded silently. `now` and `now_unix` are passed in so
-    /// the grace window is testable without sleeping.
+    /// the first time is seeded silently, so a late-starting daemon gets no `up`
+    /// entry and its timeline opens at its first real change. A report carrying
+    /// no `collected_at_unix` is never counted stale — there is no timestamp to
+    /// judge — so only the missing-report sweep below can take it down. `now`
+    /// and `now_unix` are passed in so the grace window is testable without
+    /// sleeping.
     /// Test: `repeated_identical_reports_log_one_transition`,
     /// `a_stale_report_transitions_to_down`,
     /// `a_service_that_stops_reporting_goes_down_after_the_grace`.
