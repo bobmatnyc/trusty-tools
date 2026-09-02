@@ -207,6 +207,28 @@ fn duplicate_notice(project_dir: &Path) -> Option<String> {
     ))
 }
 
+/// Which spawn path a set of prep findings belongs to, as tracing FIELDS.
+///
+/// Why: #6649 consolidated five hand-written reporting loops into one helper,
+/// and the first cut passed the caller's identity as one `impl Display` that the
+/// helper interpolated into the message. That flattened the structured fields
+/// each call site used to emit — `id`/`session` for the session id,
+/// `worktree`/`path`/`repo_dir` for the directory — into free text, so a log
+/// query could no longer filter on them. This carries them through as fields
+/// instead, under one spelling for all five paths.
+/// What: `kind` names the path (`"connect"`, `"load"`, …), `session` is the
+/// session id for the two paths that have one, and `dir` is the directory that
+/// was prepared.
+/// Test: `findings_carry_queryable_fields`.
+pub struct PrepScope<'a> {
+    /// The spawn path — a short static label, not free text.
+    pub kind: &'a str,
+    /// The session id, where the caller has one. `None` logs as empty.
+    pub session: Option<&'a dyn std::fmt::Display>,
+    /// The worktree, workspace, or repository directory prepared.
+    pub dir: &'a Path,
+}
+
 /// Log one prepared session's non-fatal findings, for a caller with no terminal.
 ///
 /// Why: five spawn paths — the daemon provisioner, the in-project spawn, the
@@ -217,23 +239,32 @@ fn duplicate_notice(project_dir: &Path) -> Option<String> {
 /// 500-SLOC cap when the second loop landed.
 /// What: one `error!` per roster error — those are provisioning gaps — and one
 /// `warn!` per asset notice, since the launch itself succeeded and what is
-/// reported is the state of the operator's working tree. `scope` names what the
-/// findings belong to (a worktree path, a session id). Silent for a clean
-/// report. The CLI paths print to stdout instead and do NOT call this.
-/// Test: `findings_are_logged_by_severity`.
-pub fn log_prep_findings(
-    roster_errors: &[String],
-    asset_notices: &[String],
-    scope: impl std::fmt::Display,
-) {
+/// reported is the state of the operator's working tree. Every line carries
+/// [`PrepScope`]'s three fields plus the finding itself as `err` / `notice`, so
+/// the whole set is queryable. Silent for a clean report. The CLI paths print to
+/// stdout instead and do NOT call this.
+/// Test: `findings_carry_queryable_fields`, `a_clean_report_logs_nothing`.
+pub fn log_prep_findings(roster_errors: &[String], asset_notices: &[String], scope: PrepScope<'_>) {
+    // #6649: an absent session id logs as an empty `session` rather than an
+    // invented sentinel — two of the five paths genuinely have none.
+    let session: &dyn std::fmt::Display = scope.session.unwrap_or(&"");
     for err in roster_errors {
         tracing::error!(
-            "{scope}: roster provisioning gap (session still launches with its trusty-mpm \
-             identity): {err}"
+            scope = scope.kind,
+            session = %session,
+            dir = %scope.dir.display(),
+            err = %err,
+            "roster provisioning gap (session still launches with its trusty-mpm identity)"
         );
     }
     for notice in asset_notices {
-        tracing::warn!("{scope}: assets: {notice}");
+        tracing::warn!(
+            scope = scope.kind,
+            session = %session,
+            dir = %scope.dir.display(),
+            notice = %notice,
+            "asset tier finding"
+        );
     }
 }
 

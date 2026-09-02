@@ -21,7 +21,7 @@ mod asset_notices;
 /// Why: five spawn paths wrote the same two loops by hand, and a sixth would
 /// have surfaced only half of them. See [`asset_notices::log_prep_findings`].
 /// Test: covered by `asset_notices`' own tests (this is a plain re-export).
-pub use asset_notices::log_prep_findings;
+pub use asset_notices::{PrepScope, log_prep_findings};
 mod palace_alias;
 // #4448: the ONE wiring of the shadowing-agent quarantine, shared by
 // `prepare_session_inner` and `sync_session_assets`.
@@ -1119,10 +1119,12 @@ fn prepare_session_inner(
     // text this session will actually receive (`resolved_prompt`, the same
     // string stashed to `.trusty-mpm/last-instructions.md` above).
     //
-    // It is deliberately the LAST step, so a refusal is not also a
+    // It is deliberately the last step that WRITES, so a refusal is not also a
     // half-provisioned workspace: everything the session needs is already on
-    // disk by the time this can fail. Nothing below this line may depend on the
-    // write succeeding — keep it last.
+    // disk by the time this can fail. #6649 puts exactly one step after it —
+    // `launch_asset_notices`, which only READS the tiers this launch just wrote.
+    // Nothing that writes, and nothing that depends on the write succeeding, may
+    // go below this line.
     // #4832 migration, best-effort: retire the pre-#4832 per-project compiled
     // prompt so an upgraded install is not left with a file nothing refreshes.
     // Run against BOTH the directory handed in (which is the worktree on a

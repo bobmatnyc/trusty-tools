@@ -47,7 +47,11 @@ impl DaemonClient {
                 crate::core::session_launch::log_prep_findings(
                     &report.roster_errors,
                     &report.asset_notices,
-                    format_args!("connect {workdir}"),
+                    crate::core::session_launch::PrepScope {
+                        kind: "connect",
+                        session: None,
+                        dir: std::path::Path::new(workdir),
+                    },
                 );
             }
             // #4752: fatal — refuse the launch rather than start a session

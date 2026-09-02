@@ -384,32 +384,57 @@ fn a_symlinked_project_tier_is_refused() {
     assert!(real.join("qa.md").is_file(), "the link target must survive");
 }
 
+/// Pins the reserved-tier GUARD, not a production call site: `--fix-agents`
+/// resolves `FrameworkPaths::default()`, whose `claude_agents_dir()` is
+/// `~/.claude/agents` and never a project's own tier. A MANAGED-PROJECT
+/// `FrameworkPaths` is the one shape that puts a deploy destination and the
+/// project tier on the same path, so it is what makes the guard's
+/// `claude_agents_dir` arm executable at all.
+///
+/// #6649: the first cut of this test built its "project" as
+/// `agent_deploy_dir().parent().parent()`, whose `.claude/agents` is a sibling
+/// of the deploy dir and not the deploy dir. That tier never existed, the sweep
+/// returned no steps, and `steps.iter().all(..)` passed vacuously — so the
+/// assertions below index `steps[0]` and require a non-empty result.
 #[test]
 fn a_tier_bundled_agents_deploy_to_is_never_swept() {
     let home = TempDir::new().unwrap();
     let backups = TempDir::new().unwrap();
-    let paths = hermetic_paths(home.path());
+    let project = home.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut paths = FrameworkPaths::for_managed_project(home.path().join(".trusty-mpm"), &project);
+    // As in `hermetic_paths`: keep the agent SOURCE off the real repository.
+    paths.trusty_mpm_root = None;
     bundle(&paths, "qa");
-    // A "project" whose `.claude/agents` IS the canonical deploy dir.
-    let deploy = paths.agent_deploy_dir();
-    std::fs::create_dir_all(&deploy).unwrap();
-    let fake_project = deploy.parent().unwrap().parent().unwrap().to_path_buf();
-    std::fs::write(deploy.join("qa.md"), doc("qa")).unwrap();
-
-    let steps = remove_project_tier_agent_strays(
-        &paths,
-        Some(&fake_project),
-        backups.path(),
-        RepairMode::Apply,
+    assert_eq!(
+        paths.claude_agents_dir(),
+        project_agent_tier(&project),
+        "fixture must collide the two tiers, or the guard is never reached"
     );
 
+    // A copy the ledger proves tm wrote, with a matching checksum — every other
+    // refusal is out of the way, so only the guard can stop the removal.
+    let body = doc("qa");
+    place(&project, "qa.md", &body);
+    track(&project, "qa.md", &body, Origin::Bundled);
+
+    let steps =
+        remove_project_tier_agent_strays(&paths, Some(&project), backups.path(), RepairMode::Apply);
+
+    assert_eq!(
+        steps.len(),
+        1,
+        "one tier-wide refusal, nothing else: {steps:?}"
+    );
     assert!(
-        steps
-            .iter()
-            .all(|s| matches!(s.status, StepStatus::Refused(_))),
-        "the canonical tier is never swept: {steps:?}"
+        matches!(&steps[0].status, StepStatus::Refused(why) if why.contains("resolves onto")),
+        "the canonical tier is never swept: {:?}",
+        steps[0]
     );
-    assert!(deploy.join("qa.md").is_file());
+    assert!(
+        project_agent_tier(&project).join("qa.md").is_file(),
+        "the deployed roster must survive --yes"
+    );
 }
 
 #[test]

@@ -922,7 +922,11 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
                 crate::core::session_launch::log_prep_findings(
                     &report.roster_errors,
                     &report.asset_notices,
-                    format_args!("session {session_id} at {}", workspace_path.display()),
+                    crate::core::session_launch::PrepScope {
+                        kind: "provision_workspace",
+                        session: Some(&session_id),
+                        dir: &workspace_path,
+                    },
                 );
             }
             // #4752: a compiled-prompt write failure fails the provision — a

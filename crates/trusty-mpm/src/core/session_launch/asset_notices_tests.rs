@@ -79,18 +79,93 @@ fn a_quarantined_agent_produces_one_line() {
     assert!(notices[0].contains("rust-engineer"), "{notices:?}");
 }
 
+/// Capture what `log_prep_findings` emits for one call.
+///
+/// Why: the first cut of the consolidation flattened every call site's
+/// structured fields into a Display string, and nothing failed — the old test
+/// only checked that the call did not panic. This reads the fields back.
+fn captured(
+    roster_errors: &[String],
+    asset_notices: &[String],
+    scope: PrepScope<'_>,
+) -> Vec<String> {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    // #4931: `with_default` is thread-local and never raises the process-global
+    // MAX_LEVEL, so without this the capture records nothing.
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        log_prep_findings(roster_errors, asset_notices, scope);
+    });
+    buffer.tail(64)
+}
+
 #[test]
-fn findings_are_logged_by_severity() {
-    // The helper is a logging sink, so what a test can prove is that it accepts
-    // both slices and a formatted scope, and that a clean report is a no-op —
-    // no panic, nothing to emit. The severity split (error for a roster gap,
-    // warn for an asset notice) is one branch each and is read in the source.
-    log_prep_findings(&[], &[], format_args!("clean"));
-    log_prep_findings(
+#[serial_test::serial]
+fn findings_carry_queryable_fields() {
+    // #6649: `scope`, `session`, `dir` and the finding itself are FIELDS, not
+    // text interpolated into the message — a log query filters on them.
+    let lines = captured(
         &["agent deploy failed: x".to_string()],
         &["duplicates 1 (qa)".to_string()],
-        format_args!("session {} at {}", 7, "/tmp/p"),
+        PrepScope {
+            kind: "provision_workspace",
+            session: Some(&7),
+            dir: Path::new("/tmp/p"),
+        },
     );
+
+    let gap = lines
+        .iter()
+        .find(|l| l.contains("roster provisioning gap"))
+        .unwrap_or_else(|| panic!("no roster-gap line: {lines:#?}"));
+    assert!(gap.contains("ERROR"), "a roster gap is an error: {gap}");
+    for field in [
+        "scope=provision_workspace",
+        "session=7",
+        "dir=/tmp/p",
+        "err=agent deploy failed: x",
+    ] {
+        assert!(gap.contains(field), "missing `{field}`: {gap}");
+    }
+
+    let asset = lines
+        .iter()
+        .find(|l| l.contains("asset tier finding"))
+        .unwrap_or_else(|| panic!("no asset line: {lines:#?}"));
+    assert!(
+        asset.contains("WARN"),
+        "an asset notice is a warning: {asset}"
+    );
+    for field in [
+        "scope=provision_workspace",
+        "session=7",
+        "dir=/tmp/p",
+        "notice=duplicates 1 (qa)",
+    ] {
+        assert!(asset.contains(field), "missing `{field}`: {asset}");
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn a_clean_report_logs_nothing() {
+    // This runs on every launch, so a clean tree must add nothing to the log.
+    // The `None` session is the shape the connect and load paths pass.
+    let lines = captured(
+        &[],
+        &[],
+        PrepScope {
+            kind: "connect",
+            session: None,
+            dir: Path::new("/tmp/p"),
+        },
+    );
+    assert!(lines.is_empty(), "{lines:#?}");
 }
 
 #[test]

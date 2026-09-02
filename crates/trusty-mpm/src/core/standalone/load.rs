@@ -213,7 +213,11 @@ fn run_prepare_session(
     crate::core::session_launch::log_prep_findings(
         &report.roster_errors,
         &report.asset_notices,
-        format_args!("load {}", repo_dir.display()),
+        crate::core::session_launch::PrepScope {
+            kind: "load",
+            session: None,
+            dir: repo_dir,
+        },
     );
     Ok(())
 }

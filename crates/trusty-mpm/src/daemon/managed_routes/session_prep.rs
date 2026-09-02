@@ -66,10 +66,11 @@ pub(super) fn prepare_inproject_session(
             crate::core::session_launch::log_prep_findings(
                 &report.roster_errors,
                 &report.asset_notices,
-                format_args!(
-                    "spawn_managed (inproject) session {session_id} at {}",
-                    worktree.display()
-                ),
+                crate::core::session_launch::PrepScope {
+                    kind: "spawn_managed_inproject",
+                    session: Some(session_id),
+                    dir: worktree,
+                },
             );
         }
         // #4752: a compiled-prompt write failure refuses the spawn — the caller

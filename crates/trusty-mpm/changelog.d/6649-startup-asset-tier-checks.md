@@ -7,7 +7,10 @@ Added
   does not show — the #4448 quarantine MOVES files in the operator's working tree
   and said so at `warn` level. A tier that cannot be listed, and a bundled roster
   that cannot be built, each produce an `UNDETERMINED` line rather than reading as
-  clean (#6649).
+  clean. The five launch paths with no terminal — the daemon provisioner, the
+  in-project spawn, the client connect, the standalone load and `tm launch` — log
+  the same findings instead, each as one `tracing` event carrying `scope`,
+  `session`, `dir` and `err`/`notice` as fields a log query can filter on (#6649).
 - `tm doctor --fix-agents` sweeps bundled AGENT copies stranded at a project's own
   `.claude/agents/`, mirroring `--fix-skills`. It previews by default and removes
   only on `--yes`, and only a copy that tier's `.trusty-mpm-manifest.json` records
