@@ -65,8 +65,20 @@
 //!
 //! Test: `resolve_*`, `precedence_*`, `host_*`, `account_*`, `clone_url_*`,
 //! `select_github_config_*` in the inline `tests` module.
+//!
+//! ## Directory-based resolution (#6623)
+//!
+//! [`select_config_for_origin`] promotes the CLI's project-matching glue
+//! (`bin/tm/gh_identity::resolve_project_aware`, which detects the active
+//! project from `std::env::current_dir()`'s git origin remote) to the
+//! library, so a daemon-side `gh` spawn — which has a WORKING DIRECTORY but no
+//! already-detected project — can apply the identical #2184 precedence. It is
+//! the pure half only: matching an already-resolved `origin_url` against
+//! `config.projects`. The impure half (reading the directory's origin remote,
+//! loading [`TrustyToolsConfig`] from disk) is production wiring left to each
+//! caller — see `session_manager::worktree_reclaim_gh::resolve_daemon_gh_env`.
 
-use crate::core::trusty_tools_config::{DEFAULT_GITHUB_HOST, GithubConfig};
+use crate::core::trusty_tools_config::{DEFAULT_GITHUB_HOST, GithubConfig, TrustyToolsConfig};
 
 /// `GH_CONFIG_DIR` — points gh at a private config/auth home.
 const ENV_GH_CONFIG_DIR: &str = "GH_CONFIG_DIR";
@@ -132,6 +144,35 @@ impl GhEnv {
     pub fn is_empty(&self) -> bool {
         self.vars.is_empty()
     }
+
+    /// One-line, secret-free description of the resolved overrides (#6623).
+    ///
+    /// Why: a daemon `gh` lookup that fails needs to say WHICH identity it
+    /// tried — the #6561 failure was invisible for so long precisely because
+    /// nothing distinguished "used no config dir at all" from "used the wrong
+    /// one". `GH_TOKEN`'s VALUE must never appear in a diagnostic string.
+    /// What: `"no github: binding resolved …"` for an empty `GhEnv`, else the
+    /// resolved `VAR=value` pairs joined by `, `, with `GH_TOKEN`'s value
+    /// redacted.
+    /// Test: `describe_empty_env`, `describe_config_dir`, `describe_redacts_token`.
+    pub fn describe(&self) -> String {
+        if self.vars.is_empty() {
+            return "no github: binding resolved — gh inherits the daemon's ambient \
+                    environment"
+                .to_string();
+        }
+        self.vars
+            .iter()
+            .map(|(k, v)| {
+                if k == ENV_GH_TOKEN {
+                    format!("{k}=<redacted>")
+                } else {
+                    format!("{k}={v}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 /// Apply the #2184 project-over-global precedence for a `github:` binding.
@@ -150,6 +191,40 @@ pub fn select_github_config<'a>(
     global: Option<&'a GithubConfig>,
 ) -> Option<&'a GithubConfig> {
     project.or(global)
+}
+
+/// Select the `GithubConfig` that governs `gh` spawns for an already-detected
+/// git origin remote (#6623).
+///
+/// Why: every daemon-side `gh` spawn has a WORKING DIRECTORY but no
+/// already-resolved project — `bin/tm/gh_identity::resolve_project_aware`
+/// performs this same match from `std::env::current_dir()`'s origin remote for
+/// an interactive `tm` invocation, but that helper is CLI-only (`bin/tm`),
+/// unreachable from library/daemon code. Promoting the pure "which config
+/// applies" step here lets both call sites share one implementation.
+/// What: matches `origin_url` (when `Some`) against `config.projects` via
+/// [`crate::project::record::repo_url_matches`]; the matched project's own
+/// `github:` binding, when it has one, wins outright over the global
+/// `config.github` section via [`select_github_config`]. `origin_url: None`,
+/// or a URL matching no registered project, resolves purely from
+/// `config.github` — matching pre-#2184 behaviour exactly.
+/// Test: `select_config_for_origin_project_wins`,
+/// `select_config_for_origin_falls_back_to_global`,
+/// `select_config_for_origin_no_match_uses_global`,
+/// `select_config_for_origin_no_origin_uses_global`.
+pub fn select_config_for_origin<'a>(
+    config: &'a TrustyToolsConfig,
+    origin_url: Option<&str>,
+) -> Option<&'a GithubConfig> {
+    let project_github = origin_url
+        .and_then(|url| {
+            config
+                .projects
+                .iter()
+                .find(|p| crate::project::record::repo_url_matches(&p.repo_url, url))
+        })
+        .and_then(|p| p.github.as_ref());
+    select_github_config(project_github, config.github.as_ref())
 }
 
 /// Resolve an optional [`GithubConfig`] into the [`GhEnv`] for `gh` subprocesses.
@@ -530,5 +605,139 @@ mod tests {
     #[test]
     fn select_github_config_none_when_neither_set() {
         assert_eq!(select_github_config(None, None), None);
+    }
+
+    // ── #6623: directory-based resolution ─────────────────────────────────
+
+    use crate::core::trusty_tools_config::ProjectConfig;
+
+    fn project_cfg(repo_url: &str, github: Option<GithubConfig>) -> ProjectConfig {
+        ProjectConfig {
+            name: "p".into(),
+            repo_url: repo_url.into(),
+            github,
+            ..ProjectConfig::default()
+        }
+    }
+
+    /// Why: a matched project's own `github:` binding must win outright over
+    /// the global one — the same #2184 precedence `select_github_config`
+    /// applies, now reachable from a bare origin URL rather than a `cwd`.
+    /// Test: itself.
+    #[test]
+    fn select_config_for_origin_project_wins() {
+        let config = TrustyToolsConfig {
+            github: Some(gh("/cfg/global")),
+            projects: vec![project_cfg(
+                "https://github.com/acme/widget",
+                Some(gh("/cfg/project")),
+            )],
+            ..TrustyToolsConfig::default()
+        };
+        let selected =
+            select_config_for_origin(&config, Some("https://github.com/acme/widget.git"));
+        assert_eq!(
+            selected.and_then(|c| c.config_dir.as_deref()),
+            Some(std::path::Path::new("/cfg/project"))
+        );
+    }
+
+    /// Why: a project match with no `github:` binding of its own must fall
+    /// back to the global tier.
+    /// Test: itself.
+    #[test]
+    fn select_config_for_origin_falls_back_to_global() {
+        let config = TrustyToolsConfig {
+            github: Some(gh("/cfg/global")),
+            projects: vec![project_cfg("https://github.com/acme/widget", None)],
+            ..TrustyToolsConfig::default()
+        };
+        let selected = select_config_for_origin(&config, Some("https://github.com/acme/widget"));
+        assert_eq!(
+            selected.and_then(|c| c.config_dir.as_deref()),
+            Some(std::path::Path::new("/cfg/global"))
+        );
+    }
+
+    /// Why: an origin that matches NO registered project must resolve purely
+    /// from the global tier, not fall through to ambient.
+    /// Test: itself.
+    #[test]
+    fn select_config_for_origin_no_match_uses_global() {
+        let config = TrustyToolsConfig {
+            github: Some(gh("/cfg/global")),
+            ..TrustyToolsConfig::default()
+        };
+        let selected = select_config_for_origin(&config, Some("https://github.com/someone/else"));
+        assert_eq!(
+            selected.and_then(|c| c.config_dir.as_deref()),
+            Some(std::path::Path::new("/cfg/global"))
+        );
+    }
+
+    /// Why: `origin_url: None` (a directory whose remote could not be read)
+    /// must resolve purely from the global tier — matching pre-#2184
+    /// behaviour exactly, the no-regression guarantee.
+    /// Test: itself.
+    #[test]
+    fn select_config_for_origin_no_origin_uses_global() {
+        let config = TrustyToolsConfig {
+            github: Some(gh("/cfg/global")),
+            ..TrustyToolsConfig::default()
+        };
+        let selected = select_config_for_origin(&config, None);
+        assert_eq!(
+            selected.and_then(|c| c.config_dir.as_deref()),
+            Some(std::path::Path::new("/cfg/global"))
+        );
+    }
+
+    fn gh(config_dir: &str) -> GithubConfig {
+        GithubConfig {
+            config_dir: Some(PathBuf::from(config_dir)),
+            ..GithubConfig::default()
+        }
+    }
+
+    /// Why: an empty `GhEnv` must describe itself as "no binding resolved"
+    /// rather than an empty string, which would render as a blank diagnostic.
+    /// Test: itself.
+    #[test]
+    fn describe_empty_env() {
+        assert!(GhEnv::default().describe().contains("no github: binding"));
+    }
+
+    /// Why: a resolved `GH_CONFIG_DIR` must appear verbatim — it names the
+    /// exact fix an operator applies.
+    /// Test: itself.
+    #[test]
+    fn describe_config_dir() {
+        let env = resolve_gh_env(Some(&gh("/cfg/dir"))).expect("ok");
+        assert_eq!(env.describe(), "GH_CONFIG_DIR=/cfg/dir");
+    }
+
+    /// Why: `GH_TOKEN`'s VALUE must never appear in a diagnostic string.
+    /// Test: itself.
+    #[test]
+    fn describe_redacts_token() {
+        let _g = env_lock();
+        let name = "TM_TEST_GH_TOKEN_DESCRIBE";
+        // SAFETY: guarded by env_lock; removed below.
+        unsafe { std::env::set_var(name, "ghp_super_secret") };
+        let c = GithubConfig {
+            token_env: Some(name.to_string()),
+            ..cfg()
+        };
+        let env = resolve_gh_env(Some(&c)).expect("ok");
+        unsafe { std::env::remove_var(name) };
+        let described = env.describe();
+        assert!(
+            described.contains("GH_TOKEN=<redacted>"),
+            "described: {described}"
+        );
+        assert!(
+            !described.contains("ghp_super_secret"),
+            "described: {described}"
+        );
     }
 }
