@@ -317,6 +317,30 @@ impl GitWorktreeFixture {
         );
     }
 
+    /// Lock `wt` the way the Claude Code HARNESS locks an agent's worktree
+    /// (#6561).
+    ///
+    /// Why: the harness's agent-lifetime lock and an operator's standing veto
+    /// are the same `locked` flag and differ only in the reason string, so a
+    /// test that used [`Self::lock_worktree`] would prove nothing about the
+    /// distinction. Reproducing the real reason is the whole fixture — this is
+    /// the exact shape observed on this machine (git 2.54.0).
+    /// What: `git worktree lock --reason "claude agent <id> (pid … start …)"`.
+    /// Test: `scan_separates_a_harness_agent_lock_from_an_operator_lock`,
+    /// `survey_discloses_a_harness_locked_agent_worktree`.
+    pub(crate) fn harness_lock_worktree(&self, wt: &Path, agent_id: &str) {
+        git_ok(
+            &self.repo,
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                &format!("claude agent {agent_id} (pid 4242 start Mon Sep 1 20:33:51 2026)"),
+                wt.to_str().expect("utf8 worktree path"),
+            ],
+        );
+    }
+
     /// Create a bare `.base` clone inside the checkout and register a worktree
     /// in ITS registry (#4207).
     ///

@@ -604,3 +604,134 @@ fn enumerate_orders_nested_worktree_before_its_parent() {
         "the nested worktree must precede its container; got {found:?}"
     );
 }
+
+// ── harness agent lock vs operator lock (#6561) ──────────────────────────
+
+/// The porcelain parse keeps the lock REASON, not just the flag (#6561).
+///
+/// Fails before #6561: `lock_reason` did not exist, and the reason text was
+/// dropped by a `starts_with("locked ")` arm that set only the boolean — so
+/// nothing downstream could tell the harness's agent-lifetime lock from an
+/// operator's standing veto.
+#[test]
+fn parse_worktree_list_keeps_the_harness_agent_lock_reason() {
+    let stdout = "\
+worktree /repos/owner/repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /repos/owner/repo/.claude/worktrees/agent-a1c
+HEAD def456
+branch refs/heads/worktree-agent-a1c
+locked claude agent agent-a1c (pid 11002 start Mon Aug 31 20:33:51 2026)
+
+worktree /repos/owner/repo/.worktrees/kept
+HEAD 999999
+branch refs/heads/session/kept
+locked
+";
+    let got = parse_worktree_list(stdout);
+    assert_eq!(got.len(), 3, "one record per stanza; got {got:?}");
+    assert!(got[1].locked);
+    assert_eq!(
+        got[1].lock_reason.as_deref(),
+        Some("claude agent agent-a1c (pid 11002 start Mon Aug 31 20:33:51 2026)"),
+        "the reason must survive the parse"
+    );
+    assert!(got[2].locked, "a bare `locked` line still locks");
+    assert_eq!(
+        got[2].lock_reason, None,
+        "and carries no reason to misread as the harness's"
+    );
+}
+
+#[test]
+fn harness_agent_lock_reason_matches_the_harness_shape() {
+    assert!(is_harness_agent_lock_reason(
+        "claude agent agent-a1c (pid 11002 start Mon Aug 31 20:33:51 2026)"
+    ));
+    assert!(
+        is_harness_agent_lock_reason("Claude Agent agent-a1c (pid 1)"),
+        "the shape is what matters, not the casing"
+    );
+}
+
+#[test]
+fn harness_agent_lock_reason_rejects_an_operator_lock() {
+    assert!(!is_harness_agent_lock_reason(""));
+    assert!(!is_harness_agent_lock_reason(
+        "do not remove - salvaging work"
+    ));
+    assert!(
+        !is_harness_agent_lock_reason("held for review by claude agent later"),
+        "a mention further along the string is not the harness's own reason"
+    );
+}
+
+/// The scan reports the harness's agent lock as its OWN admission verdict
+/// (#6561).
+///
+/// Fails before #6561: both worktrees came back `Admission::Locked`, so the
+/// merged-PR sweep dropped a live agent's tree at gate 1 with a message naming
+/// the operator, and the operator was never told an agent had been spared.
+#[test]
+fn scan_separates_a_harness_agent_lock_from_an_operator_lock() {
+    let fixture = GitWorktreeFixture::new();
+    let store = fixture.repo.join(".claude").join("worktrees");
+    let agent = fixture.add_worktree_at(&store, "agent-6561");
+    let session = fixture.add_worktree("operator-held");
+    fixture.harness_lock_worktree(&agent, "agent-6561");
+    fixture.lock_worktree(&session);
+
+    let scanned = scan_registered_worktrees(&fixture.repos_root);
+    let canonical = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
+    let verdict = |p: &std::path::Path| {
+        scanned
+            .iter()
+            .find(|s| s.path == canonical(p))
+            .unwrap_or_else(|| panic!("{} must be scanned; got {scanned:?}", p.display()))
+            .admission
+    };
+    assert_eq!(verdict(&agent), Admission::HarnessAgentLock);
+    assert_eq!(verdict(&session), Admission::Locked);
+}
+
+#[test]
+fn harness_lock_state_reports_a_harness_locked_tree_held() {
+    let fixture = GitWorktreeFixture::new();
+    let store = fixture.repo.join(".claude").join("worktrees");
+    let agent = fixture.add_worktree_at(&store, "agent-held");
+    fixture.harness_lock_worktree(&agent, "agent-held");
+    assert_eq!(harness_lock_state(&agent), HarnessLockState::Held);
+}
+
+/// An unlocked registered worktree is POSITIVE evidence the harness let go
+/// (#6561) — the one answer that permits reclamation past an empty registry.
+#[test]
+fn harness_lock_state_reports_an_unlocked_tree_released() {
+    let fixture = GitWorktreeFixture::new();
+    let store = fixture.repo.join(".claude").join("worktrees");
+    let agent = fixture.add_worktree_at(&store, "agent-released");
+    assert_eq!(harness_lock_state(&agent), HarnessLockState::Released);
+}
+
+/// An OPERATOR lock says nothing about the harness either way, so it is
+/// undeterminable rather than released (#6561).
+#[test]
+fn harness_lock_state_of_an_operator_locked_tree_is_undeterminable() {
+    let fixture = GitWorktreeFixture::new();
+    let store = fixture.repo.join(".claude").join("worktrees");
+    let agent = fixture.add_worktree_at(&store, "agent-operator-held");
+    fixture.lock_worktree(&agent);
+    assert_eq!(harness_lock_state(&agent), HarnessLockState::Undeterminable);
+}
+
+#[test]
+fn harness_lock_state_of_a_non_worktree_is_undeterminable() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    assert_eq!(
+        harness_lock_state(tmp.path()),
+        HarnessLockState::Undeterminable,
+        "git cannot be asked here, and silence is never `Released`"
+    );
+}

@@ -16,7 +16,7 @@
 //! fails if its re-check is removed.
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
@@ -969,5 +969,182 @@ fn survey_separates_deadline_skips_from_lookup_failures() {
     assert!(
         unresolved.pr_state_unknown > 0,
         "but the lookup resolved nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The harness agent store, end to end (#6561)
+// ---------------------------------------------------------------------------
+
+/// Add a `.claude/worktrees/agent-<name>` worktree carrying an agent sentinel,
+/// landed and pushed — the shape Claude Code's `isolation: "worktree"` leaves
+/// behind when its agent has ended (#6561).
+///
+/// The harness lock is deliberately NOT applied: the harness releases it when
+/// the agent ends, and that release is the evidence the sweep now reads.
+fn released_agent_worktree(fx: &GitWorktreeFixture, name: &str) -> PathBuf {
+    let path = fx.add_worktree_at(&fx.repo.join(".claude").join("worktrees"), name);
+    land(&path);
+    GitWorktreeFixture::stamp_agent_sentinel(&path, name);
+    path
+}
+
+/// A registry that has never heard of the agent — what every registry answers
+/// after a daemon restart, and the answer that made the whole agent store
+/// unreclaimable (#6561).
+fn restarted_registry(_: &AgentWorktreeOwner) -> AgentDelegationState {
+    AgentDelegationState::Unknown
+}
+
+/// The issue's acceptance, dry-run half: an `agent-*` worktree whose branch's
+/// PR merged is LISTED as a reclaimable candidate (#6561).
+///
+/// Fails before #6561: the candidate is blocked at gate 4 with "the delegation
+/// registry holds no record of that agent", `reclaimable` is 0, and the run
+/// prints the reported `0 of 0 measured`.
+#[test]
+fn survey_offers_a_merged_agent_worktree_the_harness_released() {
+    let fx = GitWorktreeFixture::new();
+    let path = released_agent_worktree(&fx, "agent-6561e2e");
+    let out = reclaim_with_probes(
+        &fx.repos_root,
+        &FreshProbes {
+            agent_state: &restarted_registry,
+            in_use_now: &|| Some(Vec::new()),
+            index_for: &|_: &Path| merged_index("wt/agent-6561e2e", 6561),
+        },
+        ReclaimMode::Report,
+    );
+    let found = out
+        .survey
+        .candidates
+        .iter()
+        .find(|c| c.path == path)
+        .unwrap_or_else(|| panic!("survey missed {}", path.display()));
+    assert_eq!(found.verdict, ReclaimVerdict::Reclaimable { pr: 6561 });
+    assert_eq!(out.survey.reclaimable, 1, "outcome: {out:?}");
+    assert!(
+        out.removed.is_empty() && path.exists(),
+        "a dry run must delete nothing"
+    );
+}
+
+/// The issue's acceptance, real-run half: the same worktree is RECLAIMED
+/// (#6561).
+///
+/// Fails before #6561: `out.removed` is empty and the directory is still there.
+#[test]
+fn reclaim_reclaims_a_merged_agent_worktree_the_harness_released() {
+    let fx = GitWorktreeFixture::new();
+    let path = released_agent_worktree(&fx, "agent-6561reclaim");
+    let out = reclaim_with_probes(
+        &fx.repos_root,
+        &FreshProbes {
+            agent_state: &restarted_registry,
+            in_use_now: &|| Some(Vec::new()),
+            index_for: &|_: &Path| merged_index("wt/agent-6561reclaim", 6562),
+        },
+        ReclaimMode::Remove,
+    );
+    assert_eq!(out.removed, vec![path.clone()], "outcome: {out:?}");
+    assert!(!path.exists(), "the directory must be gone");
+    assert!(out.removal_failed.is_empty(), "outcome: {out:?}");
+}
+
+/// An agent worktree whose branch's PR is still OPEN is never a candidate
+/// (#6561).
+///
+/// The permit above must not have widened past the landing-evidence gate: this
+/// asserts the refusal is gate 5's, not the ownership gate's.
+#[test]
+fn reclaim_never_offers_an_agent_worktree_whose_pr_is_open() {
+    let fx = GitWorktreeFixture::new();
+    let path = released_agent_worktree(&fx, "agent-6561open");
+    let out = reclaim_with_probes(
+        &fx.repos_root,
+        &FreshProbes {
+            agent_state: &restarted_registry,
+            in_use_now: &|| Some(Vec::new()),
+            index_for: &|_: &Path| open_index("wt/agent-6561open", 6563),
+        },
+        ReclaimMode::Remove,
+    );
+    assert_eq!(out.survey.reclaimable, 0, "outcome: {out:?}");
+    assert!(out.removed.is_empty() && path.exists());
+    let found = out
+        .survey
+        .candidates
+        .iter()
+        .find(|c| c.path == path)
+        .expect("listed");
+    assert_eq!(
+        found.verdict,
+        ReclaimVerdict::blocked("PR #6563 is still open"),
+        "the refusal must be the landing-evidence gate's"
+    );
+}
+
+/// An agent worktree holding uncommitted work is never a candidate, merged PR
+/// or not (#6561). This assertion must never be relaxed.
+#[test]
+fn reclaim_never_offers_a_dirty_agent_worktree() {
+    let fx = GitWorktreeFixture::new();
+    let path = released_agent_worktree(&fx, "agent-6561dirty");
+    std::fs::write(path.join("in-flight.rs"), "// unsaved\n").expect("write unsaved file");
+    let out = reclaim_with_probes(
+        &fx.repos_root,
+        &FreshProbes {
+            agent_state: &restarted_registry,
+            in_use_now: &|| Some(Vec::new()),
+            index_for: &|_: &Path| merged_index("wt/agent-6561dirty", 6564),
+        },
+        ReclaimMode::Remove,
+    );
+    assert_eq!(out.survey.reclaimable, 0, "outcome: {out:?}");
+    assert!(out.removed.is_empty() && path.exists());
+    let found = out
+        .survey
+        .candidates
+        .iter()
+        .find(|c| c.path == path)
+        .expect("listed");
+    assert!(
+        matches!(&found.verdict, ReclaimVerdict::Blocked { reason }
+            if reason.contains("holds unsaved work")),
+        "the refusal must be the unsaved-work gate's: {:?}",
+        found.verdict
+    );
+}
+
+/// A worktree the harness STILL holds is spared, and the operator is told
+/// (#6561).
+///
+/// Fails before #6561: the harness lock read as an operator `git worktree lock`,
+/// so the candidate was dropped at gate 1 as a plain `Blocked` and
+/// `survey.agent_owned` came back empty — the silent `0 of 0` the issue reports.
+#[test]
+fn survey_discloses_a_harness_locked_agent_worktree() {
+    let fx = GitWorktreeFixture::new();
+    let path = released_agent_worktree(&fx, "agent-6561locked");
+    fx.harness_lock_worktree(&path, "agent-6561locked");
+    let out = reclaim_with_probes(
+        &fx.repos_root,
+        &FreshProbes {
+            agent_state: &restarted_registry,
+            in_use_now: &|| Some(Vec::new()),
+            index_for: &|_: &Path| merged_index("wt/agent-6561locked", 6565),
+        },
+        ReclaimMode::Remove,
+    );
+    assert!(out.removed.is_empty() && path.exists(), "outcome: {out:?}");
+    let disclosed = out.survey.agent_owned.join("\n");
+    assert_eq!(
+        out.survey.agent_owned.len(),
+        1,
+        "the spared worktree must be reported exactly once: {disclosed}"
+    );
+    assert!(
+        disclosed.contains("agent-6561locked"),
+        "the disclosure must name the worktree: {disclosed}"
     );
 }
