@@ -43,7 +43,7 @@ pub(crate) fn run_post_report_actions(flags: &DoctorFlags) {
         prune_stale_skills_locally();
     }
     if flags.fix_skills {
-        super::doctor_fix_skills::fix_skills_locally(flags.include_frozen);
+        super::doctor_fix_skills::fix_skills_locally(flags.include_frozen, flags.yes);
     }
     if flags.fix {
         run_repairs(flags.yes, flags.include_frozen);
@@ -245,7 +245,9 @@ pub(crate) fn print_steps(steps: &[RepairStep], apply: bool, apply_hint: &str) {
 /// outcome onto a step. The classification itself is never re-derived here.
 /// Test: `core::skill_repair`'s tests produce every outcome variant.
 fn skill_steps(include_frozen: bool, mode: RepairMode) -> Vec<RepairStep> {
-    let (_origin, outcomes) = super::doctor_fix_skills::skill_repair_outcomes(include_frozen, mode);
+    let backup_root = super::doctor_fix_skills::default_backup_root();
+    let (_origin, outcomes) =
+        super::doctor_fix_skills::skill_repair_outcomes(include_frozen, mode, &backup_root);
     outcomes
         .into_iter()
         .map(|o| {

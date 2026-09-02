@@ -378,6 +378,24 @@ fn cli_parses_doctor_fix_skills() {
         Cli::try_parse_from(["trusty-mpm", "doctor", "--include-frozen"]).is_err(),
         "--include-frozen without --fix-skills must be rejected"
     );
+
+    // #6586: the project-tier sweep DELETES, so `--yes` must reach it — the
+    // `writes` group is what makes `--fix-skills --yes` parse at all.
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--fix-skills", "--yes"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags {
+                fix_skills: true,
+                yes: true,
+                ..
+            }
+        }
+    ));
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "doctor", "--yes"]).is_err(),
+        "--yes without a write action must still be rejected"
+    );
 }
 
 /// #4948: `--fix` is a DRY RUN, and writing needs `--yes` on top of it.
@@ -2351,9 +2369,8 @@ fn cli_parses_doctor_quarantine_mcp() {
 #[test]
 fn cli_rejects_doctor_yes_without_a_write_action() {
     assert!(Cli::try_parse_from(["trusty-mpm", "doctor", "--yes"]).is_err());
-    assert!(
-        Cli::try_parse_from(["trusty-mpm", "doctor", "--fix-skills", "--yes"]).is_err(),
-        "--fix-skills applies directly and has no preview to promote"
-    );
+    // #6586: `--fix-skills` DID have nothing to promote until it grew the
+    // project-tier sweep, which deletes. `cli_parses_doctor_fix_skills` pins
+    // the pair parsing now; what stays rejected is `--yes` with no action.
     assert!(Cli::try_parse_from(["trusty-mpm", "doctor", "--quarantine-mcp"]).is_err());
 }

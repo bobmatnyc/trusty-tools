@@ -1,4 +1,4 @@
-//! `tm doctor --fix-skills`: remove bundled skill copies stranded at the
+//! `tm doctor --fix-skills --yes`: remove bundled skill copies stranded at the
 //! PROJECT tier (#6586).
 //!
 //! Why: the `skill_project_tier` probe reports a stray and, being read-only,
@@ -18,9 +18,16 @@
 //! 1. **Absent from the ledger → REFUSED.** A bundled-named directory tm never
 //!    recorded may be a project-custom skill the operator wrote under a bundled
 //!    name, and that is real work. It is reported, never removed.
-//! 2. **Recorded but hand-edited → REFUSED** unless `include_frozen`. The same
-//!    rule [`super::skill_repair`] applies to an overwrite applies to a removal,
-//!    for the same reason: the edit was deliberate.
+//! 2. **Anything in the subtree tm did not deploy, or deployed and someone
+//!    changed → REFUSED.** The unit of removal is `remove_dir_all` on a
+//!    DIRECTORY, so the question is never "does `SKILL.md` still match" but "is
+//!    every file under here one tm wrote and nobody has touched".
+//!    [`skill_removal_verdict`] is that question, shared with the #5224
+//!    retirement sweep and `update_check::apply::prune_guard`, so the three
+//!    cannot drift on what counts as safe to delete. `--include-frozen` does
+//!    NOT override it: that flag promotes an OVERWRITE of one file, which is
+//!    recoverable from the backup of that same file, and a whole-directory
+//!    deletion is a different act.
 //! 3. **Every removal is backed up first** under the run's timestamped
 //!    `~/.trusty-mpm/backup-doctor-remediation-<ts>/` root, whole directory
 //!    including `references/`, and the removal is CONFIRMED by re-reading disk.
@@ -29,8 +36,11 @@
 //! `<project>/.claude/skills`. The managed tier
 //! ([`FrameworkPaths::skill_deploy_dir`]) is where the bundled roster is
 //! SUPPOSED to live — removing a skill there would be the #6586 defect running
-//! backwards — so a project tier that resolves onto it, or onto the operator's
-//! `~/.claude/skills`, is refused rather than swept.
+//! backwards — so a project tier that RESOLVES onto it, or onto the operator's
+//! `~/.claude/skills`, is refused rather than swept. The comparison is made on
+//! canonicalised paths and a symlinked tier is refused outright, because a
+//! lexical `PathBuf ==` sees `<project>/.claude/skills` and `~/.claude/skills`
+//! as different paths even when the first is a symlink to the second.
 //!
 //! Test: `project_tier_strays_tests.rs`.
 
@@ -40,11 +50,15 @@ use crate::core::agent_manifest::ManifestError;
 use crate::core::doctor_repair::{RepairMode, RepairStep, StepStatus};
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_manifest::{SkillManifest, SkillManifestSave, with_skill_manifest_lock};
+use crate::core::skill_retire::{SkillRemoval, skill_removal_verdict};
 use crate::core::skill_tiers::list_source_stems;
-use crate::core::skill_unmanaged::{SKILL_ENTRY_POINT, bundled_skill_dirs};
+use crate::core::skill_unmanaged::bundled_skill_dirs;
 
 /// The doctor check these steps repair.
 const CHECK: &str = "skill_project_tier";
+
+/// The one-line summary every tier-wide refusal carries.
+const SWEEP_WHAT: &str = "remove stray bundled skill copies from the project tier";
 
 /// Sweep the project tier of bundled skill copies tm's ledger proves it wrote.
 ///
@@ -53,19 +67,19 @@ const CHECK: &str = "skill_project_tier";
 /// guessed.
 /// What: for each directory under `<project_dir>/.claude/skills` whose stem the
 /// bundled roster carries, emits one [`RepairStep`] — [`StepStatus::Refused`]
-/// when the ledger does not record it or records a checksum its bytes no longer
-/// match (and `include_frozen` is unset), [`StepStatus::Planned`] in
-/// [`RepairMode::DryRun`], otherwise [`StepStatus::Applied`] after the directory
-/// has been copied under `backup_root`, removed, confirmed gone, and dropped
-/// from the ledger. Returns no steps at all when there is no project in scope
-/// and no tier on disk. The whole load-modify-save runs under the tier's ledger
-/// lock, so a sweep cannot race a concurrent deploy into publishing a manifest
-/// missing that deploy's entries.
+/// when the ledger does not record it or [`skill_removal_verdict`] keeps it,
+/// [`StepStatus::Planned`] in [`RepairMode::DryRun`], otherwise
+/// [`StepStatus::Applied`] after the directory has been copied under
+/// `backup_root`, removed, confirmed gone, and dropped from the ledger. A
+/// bundled-named entry that is not a skill directory at all is refused rather
+/// than skipped silently. Returns no steps at all when there is no project in
+/// scope and no tier on disk. The whole load-modify-save runs under the tier's
+/// ledger lock, so a sweep cannot race a concurrent deploy into publishing a
+/// manifest missing that deploy's entries.
 /// Test: `project_tier_strays_tests.rs`.
 pub fn remove_project_tier_strays(
     paths: &FrameworkPaths,
     project_dir: Option<&Path>,
-    include_frozen: bool,
     backup_root: &Path,
     mode: RepairMode,
 ) -> Vec<RepairStep> {
@@ -73,65 +87,128 @@ pub fn remove_project_tier_strays(
         return Vec::new();
     };
     let dir = project_dir.join(".claude").join("skills");
-    if !dir.is_dir() {
-        return Vec::new();
+    match tier_shape(&dir) {
+        TierShape::Nothing => return Vec::new(),
+        TierShape::Refuse(why) => return vec![refusal(dir, why)],
+        TierShape::Sweepable => {}
     }
-
-    // #6586: the managed tier is where bundled skills BELONG. Sweeping it would
-    // run this fix backwards, so a project tier that resolves onto it (or onto
-    // the operator's home tier) is refused loudly rather than silently skipped.
-    for reserved in [paths.skill_deploy_dir(), paths.claude_skills_dir()] {
-        if dir == reserved {
-            return vec![RepairStep {
-                check: CHECK,
-                path: dir,
-                what: "remove stray bundled skill copies from the project tier".to_string(),
-                status: StepStatus::Refused(
-                    "this project's skill tier IS a tier bundled skills are deployed to — \
-                     removing them here would undo the deploy, not repair it"
-                        .to_string(),
-                ),
-            }];
-        }
+    if let Some(why) = resolves_onto_a_reserved_tier(paths, &dir) {
+        return vec![refusal(dir, why)];
     }
 
     let bundled = list_source_stems(&paths.skill_source_dir()).unwrap_or_default();
     if bundled.is_empty() {
         // Mirrors the probe: an empty roster classifies nothing, and treating it
         // as "nothing is bundled" would condemn every skill in the tier at once.
-        return vec![RepairStep {
-            check: CHECK,
-            path: dir,
-            what: "remove stray bundled skill copies from the project tier".to_string(),
-            status: StepStatus::Refused(
-                "no bundled skill source found — cannot tell which project-tier skills are \
-                 bundled duplicates (run `tm install` to populate it)"
-                    .to_string(),
-            ),
-        }];
+        return vec![refusal(
+            dir,
+            "no bundled skill source found — cannot tell which project-tier skills are \
+             bundled duplicates (run `tm install` to populate it)"
+                .to_string(),
+        )];
     }
 
     let locked = with_skill_manifest_lock::<_, ManifestError, _>(&dir, || {
-        Ok(sweep_locked(
-            &dir,
-            &bundled,
-            include_frozen,
-            backup_root,
-            mode,
-        ))
+        Ok(sweep_locked(&dir, &bundled, backup_root, mode))
     });
     match locked {
         Ok(steps) => steps,
         Err(e) => vec![RepairStep {
             check: CHECK,
             path: dir,
-            what: "remove stray bundled skill copies from the project tier".to_string(),
+            what: SWEEP_WHAT.to_string(),
             status: StepStatus::Failed(format!(
                 "could not lock the deploy manifest: {e} — refusing to sweep this tier \
                  unserialised"
             )),
         }],
     }
+}
+
+/// One tier-wide [`StepStatus::Refused`] step.
+fn refusal(dir: PathBuf, why: String) -> RepairStep {
+    RepairStep {
+        check: CHECK,
+        path: dir,
+        what: SWEEP_WHAT.to_string(),
+        status: StepStatus::Refused(why),
+    }
+}
+
+/// What the tier path on disk is, before anything is swept.
+enum TierShape {
+    /// Absent, or not a directory — there is no stray here to remove.
+    Nothing,
+    /// Present but must not be swept; the string says why.
+    Refuse(String),
+    /// A real directory this module may walk.
+    Sweepable,
+}
+
+/// Classify `<project>/.claude/skills` before the sweep touches it.
+///
+/// Why (#6586 critic HIGH): the guard used `Path::is_dir`, which FOLLOWS
+/// symlinks — a project whose `.claude/skills` is a symlink to the operator's
+/// `~/.claude/skills` passed it, and the sweep would then have removed the
+/// operator's live home-tier skills through the link. `remove_dir_all` on a
+/// path reached through a symlinked tier is not a repair of that project.
+/// What: [`TierShape::Nothing`] when the path is absent or is not a directory,
+/// [`TierShape::Refuse`] when it is a symlink or cannot be stat-ed, otherwise
+/// [`TierShape::Sweepable`]. Uses `symlink_metadata`, which does not follow.
+/// Test: `a_symlinked_project_tier_is_refused`.
+fn tier_shape(dir: &Path) -> TierShape {
+    match std::fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TierShape::Nothing,
+        Err(e) => TierShape::Refuse(format!(
+            "{} could not be inspected, so tm cannot tell what it would be deleting: {e}",
+            dir.display()
+        )),
+        Ok(meta) if meta.is_symlink() => TierShape::Refuse(format!(
+            "{} is a symlink — sweeping it would delete whatever it points at, which is \
+             not this project's tier",
+            dir.display()
+        )),
+        Ok(meta) if !meta.is_dir() => TierShape::Nothing,
+        Ok(_) => TierShape::Sweepable,
+    }
+}
+
+/// Does this project tier resolve onto a tier bundled skills DEPLOY to?
+///
+/// Why: removing a skill from the managed deploy dir or the operator's
+/// `~/.claude/skills` would run the #6586 fix backwards. Comparing the two
+/// lexically answered a different question — whether the paths are spelled the
+/// same — so an ancestor symlink walked straight past it.
+/// What: `Some(reason)` when `dir` canonicalises onto
+/// [`FrameworkPaths::skill_deploy_dir`] or
+/// [`FrameworkPaths::claude_skills_dir`], and also when `dir` itself cannot be
+/// canonicalised — an unresolvable path is never a licence to delete. A
+/// reserved tier that does not exist falls back to its lexical path, which still
+/// catches the spelled-identical case.
+/// Test: `a_tier_bundled_skills_deploy_to_is_never_swept`,
+/// `a_tier_resolving_onto_the_managed_deploy_dir_is_refused`.
+fn resolves_onto_a_reserved_tier(paths: &FrameworkPaths, dir: &Path) -> Option<String> {
+    let real = match std::fs::canonicalize(dir) {
+        Ok(p) => p,
+        Err(e) => {
+            return Some(format!(
+                "{} could not be resolved to a real path, so tm cannot prove it is not a tier \
+                 bundled skills deploy to: {e}",
+                dir.display()
+            ));
+        }
+    };
+    for reserved in [paths.skill_deploy_dir(), paths.claude_skills_dir()] {
+        let real_reserved = std::fs::canonicalize(&reserved).unwrap_or(reserved);
+        if real == real_reserved {
+            return Some(format!(
+                "this project's skill tier resolves onto {} — a tier bundled skills are \
+                 deployed to; removing them there would undo the deploy, not repair it",
+                real_reserved.display()
+            ));
+        }
+    }
+    None
 }
 
 /// Sweep one project tier, holding that tier's skill ledger lock.
@@ -145,7 +222,6 @@ pub fn remove_project_tier_strays(
 fn sweep_locked(
     dir: &Path,
     bundled: &std::collections::BTreeSet<String>,
-    include_frozen: bool,
     backup_root: &Path,
     mode: RepairMode,
 ) -> Vec<RepairStep> {
@@ -156,23 +232,25 @@ fn sweep_locked(
     let mut manifest = match SkillManifest::load(dir) {
         Ok(m) => m,
         Err(e) => {
-            return vec![RepairStep {
-                check: CHECK,
-                path: dir.to_path_buf(),
-                what: "remove stray bundled skill copies from the project tier".to_string(),
-                status: StepStatus::Refused(format!(
+            return vec![refusal(
+                dir.to_path_buf(),
+                format!(
                     "{e} — refusing to touch this tier; its ownership ledger is what proves \
                      which copies tm wrote"
-                )),
-            }];
+                ),
+            )];
         }
     };
     // #4881: the snapshot the merging save replays this run's delta against.
     let base = manifest.clone();
     let mut dirty = false;
-    let mut steps = Vec::new();
 
-    for skill in bundled_skill_dirs(dir, bundled) {
+    let skills = bundled_skill_dirs(dir, bundled);
+    let classified: std::collections::BTreeSet<&str> =
+        skills.iter().map(|s| s.stem.as_str()).collect();
+    let mut steps = unclassifiable_entries(dir, bundled, &classified);
+
+    for skill in &skills {
         let what = format!(
             "remove the stray bundled copy of `{}` from the project tier",
             skill.stem
@@ -184,33 +262,37 @@ fn sweep_locked(
                     .to_string(),
             )
         } else {
-            match hand_edited(&skill.dir, &skill.stem, &manifest) {
-                Err(why) => StepStatus::Failed(why),
-                Ok(true) if !include_frozen => StepStatus::Refused(
-                    "hand-edited after deployment — pass `--include-frozen` to remove it \
-                     anyway, backing it up first"
-                        .to_string(),
-                ),
-                Ok(_) if mode == RepairMode::DryRun => StepStatus::Planned,
-                Ok(_) => match back_up_and_remove(&skill.dir, &skill.stem, backup_root) {
-                    Ok(backup) => {
-                        unrecord(&mut manifest, &skill.stem);
-                        dirty = true;
-                        StepStatus::Applied {
-                            backup: Some(backup),
+            // #6586 critic HIGH: the whole DIRECTORY is deleted, so the whole
+            // subtree must be verified — checksumming `SKILL.md` alone would
+            // take an operator's `references/our-notes.md` with it.
+            match skill_removal_verdict(&manifest, dir, &skill.stem) {
+                SkillRemoval::Kept(why) => StepStatus::Refused(format!(
+                    "{why} — the whole directory would be deleted, so tm removes one only when \
+                     every file under it is one tm deployed and nobody has changed"
+                )),
+                SkillRemoval::Removable if mode == RepairMode::DryRun => StepStatus::Planned,
+                SkillRemoval::Removable => {
+                    match back_up_and_remove(&skill.dir, &skill.stem, backup_root) {
+                        Ok(backup) => {
+                            unrecord(&mut manifest, &skill.stem);
+                            dirty = true;
+                            StepStatus::Applied {
+                                backup: Some(backup),
+                            }
                         }
+                        Err(why) => StepStatus::Failed(why),
                     }
-                    Err(why) => StepStatus::Failed(why),
-                },
+                }
             }
         };
         steps.push(RepairStep {
             check: CHECK,
-            path: skill.dir,
+            path: skill.dir.clone(),
             what,
             status,
         });
     }
+    steps.sort_by(|a, b| a.path.cmp(&b.path));
 
     // The files are already gone, so this save must publish or the ledger keeps
     // claiming tm owns copies that no longer exist — which the next deploy would
@@ -239,19 +321,43 @@ fn sweep_locked(
     steps
 }
 
-/// Has this deployed copy been edited since tm wrote it?
+/// Report every bundled-named entry [`bundled_skill_dirs`] could not classify.
 ///
-/// Why: a hand-edit is the operator's work even under a bundled name, so it gets
-/// the same `--include-frozen` gate an overwrite gets.
-/// What: `Ok(true)` when the entry point's bytes no longer match the checksum
-/// the ledger recorded. An unreadable entry point is `Err` — unverifiable is
-/// never a licence to delete.
-/// Test: `a_hand_edited_stray_is_refused_without_include_frozen`.
-fn hand_edited(dir: &Path, stem: &str, manifest: &SkillManifest) -> Result<bool, String> {
-    let entry_point = dir.join(SKILL_ENTRY_POINT);
-    let content = std::fs::read_to_string(&entry_point)
-        .map_err(|e| format!("could not read {}: {e}", entry_point.display()))?;
-    Ok(!manifest.checksum_matches(stem, &content))
+/// Why (#6586 critic): `bundled_skill_dirs` silently drops an entry that is a
+/// symlink, a plain file, or a directory with no `SKILL.md`. Dropping it from
+/// the SCAN is right — none of those is a deployed skill this sweep can verify —
+/// but dropping it from the REPORT told the operator the tier was clean when
+/// something bundled-named was sitting in it.
+/// What: one [`StepStatus::Refused`] step per entry of `dir` whose file name the
+/// bundled roster carries and which `classified` does not already cover.
+/// Test: `a_bundled_named_entry_that_is_not_a_skill_directory_is_refused`.
+fn unclassifiable_entries(
+    dir: &Path,
+    bundled: &std::collections::BTreeSet<String>,
+    classified: &std::collections::BTreeSet<&str>,
+) -> Vec<RepairStep> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            if !bundled.contains(&name) || classified.contains(name.as_str()) {
+                return None;
+            }
+            Some(RepairStep {
+                check: CHECK,
+                path: entry.path(),
+                what: format!("remove the stray bundled copy of `{name}` from the project tier"),
+                status: StepStatus::Refused(
+                    "a bundled-named entry that is not a skill directory — no `SKILL.md`, or \
+                     not a directory at all — so tm cannot tell what it is and leaves it alone"
+                        .to_string(),
+                ),
+            })
+        })
+        .collect()
 }
 
 /// Copy the whole skill directory under `backup_root`, remove it, confirm.
@@ -262,7 +368,9 @@ fn hand_edited(dir: &Path, stem: &str, manifest: &SkillManifest) -> Result<bool,
 /// `references/*.md` are as much the operator's recoverable state as its entry
 /// point.
 /// What: copies `dir` to `<backup_root>/project/<stem>`, removes `dir`, then
-/// re-checks that the path is gone. Returns the backup path.
+/// re-checks that the path is gone. Returns the backup path. A failure AFTER
+/// the copy names the backup, because at that point the operator's copy exists
+/// in two places and the message is the only thing that says where.
 /// Test: `a_removed_stray_is_backed_up_whole`.
 fn back_up_and_remove(dir: &Path, stem: &str, backup_root: &Path) -> Result<PathBuf, String> {
     let dest = backup_root.join("project").join(stem);
@@ -273,11 +381,19 @@ fn back_up_and_remove(dir: &Path, stem: &str, backup_root: &Path) -> Result<Path
             dest.display()
         )
     })?;
-    std::fs::remove_dir_all(dir).map_err(|e| format!("could not remove {}: {e}", dir.display()))?;
+    std::fs::remove_dir_all(dir).map_err(|e| {
+        format!(
+            "could not remove {}: {e} — it was backed up to {} first, so nothing is lost",
+            dir.display(),
+            dest.display()
+        )
+    })?;
     if dir.exists() {
         return Err(format!(
-            "removed {} but it is still present — the repair did NOT take",
-            dir.display()
+            "removed {} but it is still present — the repair did NOT take; the backup at {} \
+             holds the copy either way",
+            dir.display(),
+            dest.display()
         ));
     }
     Ok(dest)

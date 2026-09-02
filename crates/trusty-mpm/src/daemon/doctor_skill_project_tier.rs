@@ -14,8 +14,8 @@
 //! read-only diagnostic's own initiative is the one thing this probe must never
 //! do. So the probe REPORTS and names the exact command, and the operator
 //! decides — the same contract `skill_unmanaged` keeps.
-//! [`crate::core::project_tier_strays`] is the action half, reached through
-//! `tm doctor --fix-skills`.
+//! [`crate::core::project_tier_strays`] is the action half, previewed by
+//! `tm doctor --fix-skills` and applied by `tm doctor --fix-skills --yes`.
 //!
 //! What: [`check_skill_project_tier`] reads the project's `.claude/skills/`
 //! FROM DISK and reports [`CheckStatus::Warn`] for every directory whose stem
@@ -64,11 +64,13 @@ const MAX_NAMED: usize = 5;
 /// project directory to scan, no bundled roster to compare against, or a project
 /// tier that exists and cannot be read — none is a clean bill of health;
 /// otherwise [`CheckStatus::Warn`] naming the count, up to [`MAX_NAMED`] stems,
-/// and the `tm doctor --fix-skills` remediation. Never removes a file.
+/// and the `tm doctor --fix-skills` remediation (which previews; `--yes`
+/// applies). Never removes a file.
 /// Test: `project_tier_bundled_copy_warns`,
 /// `project_tier_manifest_managed_copy_is_still_flagged`,
 /// `project_tier_without_bundled_names_is_ok`, `a_user_custom_skill_is_not_flagged`,
 /// `project_custom_only_tier_is_ok`, `unverifiable_states_are_unknown_not_ok`,
+/// `an_unreadable_project_tier_is_unknown_not_ok`,
 /// `the_probe_removes_nothing_it_reports`.
 pub(super) fn check_skill_project_tier(
     paths: &FrameworkPaths,
@@ -143,9 +145,9 @@ pub(super) fn check_skill_project_tier(
             "{} bundled skill(s) are still deployed at the PROJECT tier {} ({}{}) — bundled \
              skills are user-tier only since #6586, so no deploy refreshes these and they \
              freeze at the text that shipped when they landed. The user-tier copy is the one \
-             Claude Code loads (for skills, personal outranks project). Remove them with \
-             `tm doctor --fix-skills`, or keep one deliberately by renaming it so it no \
-             longer shadows a bundled name",
+             Claude Code loads (for skills, personal outranks project). Preview the removal with \
+             `tm doctor --fix-skills` and apply it with `tm doctor --fix-skills --yes`, or \
+             keep one deliberately by renaming it so it no longer shadows a bundled name",
             found.len(),
             dir.display(),
             shown.join(", "),

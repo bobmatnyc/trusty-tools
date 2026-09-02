@@ -4,8 +4,10 @@
 //! do, so each test drives real directories and asserts against disk — the
 //! evidence rule that licenses the deletion is only meaningful if the tests
 //! read the same disk the operator would.
-//! What: the removal and its ledger update, the two refusals that protect the
-//! operator's own work, the managed-tier boundary, and the dry run.
+//! What: the removal and its ledger update, the refusals that protect the
+//! operator's own work (an unrecorded copy, a hand-edited copy, an operator file
+//! anywhere in the subtree, an entry that is not a skill directory), the two
+//! reserved-tier boundaries, the symlinked tier, and the dry run.
 //! Test: this file IS the test module.
 
 use super::*;
@@ -81,7 +83,6 @@ fn a_managed_stray_is_removed_and_a_custom_skill_is_kept() {
     let steps = remove_project_tier_strays(
         &paths,
         Some(&project),
-        false,
         &backups(tmp.path()),
         RepairMode::Apply,
     );
@@ -129,7 +130,7 @@ fn a_removed_stray_is_backed_up_whole() {
     record(&project, "tm-ticketing", &body);
     let root = backups(tmp.path());
 
-    let steps = remove_project_tier_strays(&paths, Some(&project), false, &root, RepairMode::Apply);
+    let steps = remove_project_tier_strays(&paths, Some(&project), &root, RepairMode::Apply);
 
     let StepStatus::Applied { backup: Some(path) } = &steps[0].status else {
         panic!("expected an applied removal with a backup: {steps:?}");
@@ -156,14 +157,13 @@ fn an_unrecorded_bundled_name_is_refused() {
     let steps = remove_project_tier_strays(
         &paths,
         Some(&project),
-        true,
         &backups(tmp.path()),
         RepairMode::Apply,
     );
 
     assert!(
         matches!(steps[0].status, StepStatus::Refused(_)),
-        "an unrecorded copy is never removed, even with --include-frozen: {steps:?}"
+        "an unrecorded copy is never removed: {steps:?}"
     );
     assert!(
         tier(&project)
@@ -173,9 +173,11 @@ fn an_unrecorded_bundled_name_is_refused() {
     );
 }
 
-/// A hand-edit is deliberate work under any name.
+/// A hand-edit is deliberate work under any name, and no flag overrides it —
+/// `--include-frozen` promotes an overwrite of one file, never a
+/// whole-directory deletion.
 #[test]
-fn a_hand_edited_stray_is_refused_without_include_frozen() {
+fn a_hand_edited_stray_is_refused() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (paths, project) = fixture(tmp.path(), &["tm-ticketing"]);
     let body = project_skill(&project, "tm-ticketing");
@@ -186,31 +188,98 @@ fn a_hand_edited_stray_is_refused_without_include_frozen() {
     let steps = remove_project_tier_strays(
         &paths,
         Some(&project),
-        false,
         &backups(tmp.path()),
         RepairMode::Apply,
     );
+    let StepStatus::Refused(why) = &steps[0].status else {
+        panic!("expected a refusal: {steps:?}");
+    };
     assert!(
-        matches!(steps[0].status, StepStatus::Refused(_)),
-        "{steps:?}"
+        why.contains("edited after it was deployed"),
+        "the refusal must say what it saw: {why}"
     );
     assert!(entry.is_file(), "the edit must survive");
+}
+
+/// The #6586 critic HIGH: `remove_dir_all` takes the WHOLE subtree, so a file
+/// the operator added under `references/` must stop the removal — checksumming
+/// `SKILL.md` alone would destroy it.
+///
+/// Fails before this fix: the sweep verified only the entry point, so a stray
+/// carrying `references/our-notes.md` was reported `Applied` and the note was
+/// gone from disk with only the backup left.
+#[test]
+fn a_stray_holding_an_operator_file_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (paths, project) = fixture(tmp.path(), &["tm-ticketing"]);
+    let body = project_skill(&project, "tm-ticketing");
+    record(&project, "tm-ticketing", &body);
+    let note = tier(&project)
+        .join("tm-ticketing")
+        .join("references")
+        .join("our-notes.md");
+    std::fs::write(&note, "# our notes\n").expect("operator adds a reference file");
 
     let steps = remove_project_tier_strays(
         &paths,
         Some(&project),
-        true,
         &backups(tmp.path()),
         RepairMode::Apply,
     );
+
+    let StepStatus::Refused(why) = &steps[0].status else {
+        panic!("an operator file in the subtree must stop the removal: {steps:?}");
+    };
     assert!(
-        matches!(steps[0].status, StepStatus::Applied { .. }),
-        "--include-frozen is the opt-in that removes it: {steps:?}"
+        why.contains("our-notes.md"),
+        "the refusal must name the file it protected: {why}"
     );
-    assert!(!entry.exists());
+    assert!(note.is_file(), "the operator's file must survive");
+    assert!(
+        tier(&project)
+            .join("tm-ticketing")
+            .join("SKILL.md")
+            .is_file(),
+        "and so must the rest of the directory"
+    );
 }
 
-/// A dry run reports the same set it would remove, and writes nothing.
+/// A bundled-named entry that is not a skill directory used to vanish from the
+/// report entirely — the scan skipped it and nothing said so.
+#[test]
+fn a_bundled_named_entry_that_is_not_a_skill_directory_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (paths, project) = fixture(tmp.path(), &["tm-ticketing", "tm-workflow"]);
+    std::fs::create_dir_all(tier(&project)).expect("tier dir");
+    // A directory carrying a bundled name but no `SKILL.md`.
+    std::fs::create_dir_all(tier(&project).join("tm-ticketing")).expect("empty bundled-named dir");
+    // A plain FILE carrying a bundled name.
+    std::fs::write(tier(&project).join("tm-workflow"), "not a skill\n")
+        .expect("bundled-named file");
+
+    let steps = remove_project_tier_strays(
+        &paths,
+        Some(&project),
+        &backups(tmp.path()),
+        RepairMode::Apply,
+    );
+
+    assert_eq!(steps.len(), 2, "both entries must be reported: {steps:?}");
+    for step in &steps {
+        let StepStatus::Refused(why) = &step.status else {
+            panic!("a tm-unclassifiable entry is refused, never removed: {steps:?}");
+        };
+        assert!(
+            why.contains("not a skill directory"),
+            "the refusal must say why: {why}"
+        );
+    }
+    assert!(tier(&project).join("tm-ticketing").is_dir());
+    assert!(tier(&project).join("tm-workflow").is_file());
+}
+
+/// A dry run reports the same set it would remove, and writes nothing. This is
+/// also what a bare `tm doctor --fix-skills` runs — applying needs `--yes`.
 #[test]
 fn a_dry_run_removes_nothing() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -219,8 +288,7 @@ fn a_dry_run_removes_nothing() {
     record(&project, "tm-ticketing", &body);
     let root = backups(tmp.path());
 
-    let steps =
-        remove_project_tier_strays(&paths, Some(&project), false, &root, RepairMode::DryRun);
+    let steps = remove_project_tier_strays(&paths, Some(&project), &root, RepairMode::DryRun);
 
     assert!(matches!(steps[0].status, StepStatus::Planned), "{steps:?}");
     assert!(
@@ -238,10 +306,11 @@ fn a_dry_run_removes_nothing() {
     );
 }
 
-/// A tier bundled skills are DEPLOYED to is never swept — removing them there
-/// would run the #6586 fix backwards. A managed-workspace `FrameworkPaths`
-/// resolves `claude_skills_dir` onto the project's own `.claude/skills`, which
-/// is exactly the collision the guard exists for.
+/// Pins the reserved-tier GUARD, not a production call site: `--fix-skills`
+/// resolves `FrameworkPaths::default()`, whose `claude_skills_dir()` is
+/// `~/.claude/skills` and never a project's own tier. A managed-workspace
+/// `FrameworkPaths` is the one shape that collides the two lexically, so it is
+/// what makes the guard's `claude_skills_dir` arm executable at all.
 #[test]
 fn a_tier_bundled_skills_deploy_to_is_never_swept() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -264,7 +333,6 @@ fn a_tier_bundled_skills_deploy_to_is_never_swept() {
     let steps = remove_project_tier_strays(
         &paths,
         Some(&project),
-        true,
         &backups(tmp.path()),
         RepairMode::Apply,
     );
@@ -279,6 +347,80 @@ fn a_tier_bundled_skills_deploy_to_is_never_swept() {
     );
 }
 
+/// The #6586 critic HIGH: `Path::is_dir` FOLLOWS symlinks, so a project tier
+/// symlinked at the operator's own `~/.claude/skills` passed the guard and the
+/// sweep would have deleted the operator's live home-tier skills through it.
+///
+/// Fails before this fix: the guard compared `PathBuf`s lexically over a
+/// `is_dir()` probe, so the symlinked tier was swept and `home/tm-ticketing`
+/// was gone from disk.
+#[test]
+#[cfg(unix)]
+fn a_symlinked_project_tier_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (paths, project) = fixture(tmp.path(), &["tm-ticketing"]);
+
+    // The operator's own home tier, holding a real skill.
+    let home_tier = paths.claude_skills_dir();
+    std::fs::create_dir_all(home_tier.join("tm-ticketing")).expect("home tier skill dir");
+    let live = home_tier.join("tm-ticketing").join("SKILL.md");
+    std::fs::write(&live, "# live home copy\n").expect("write home tier skill");
+
+    std::fs::create_dir_all(project.join(".claude")).expect("project .claude");
+    std::os::unix::fs::symlink(&home_tier, tier(&project)).expect("symlink the project tier");
+
+    let steps = remove_project_tier_strays(
+        &paths,
+        Some(&project),
+        &backups(tmp.path()),
+        RepairMode::Apply,
+    );
+
+    let StepStatus::Refused(why) = &steps[0].status else {
+        panic!("a symlinked tier must be refused: {steps:?}");
+    };
+    assert!(why.contains("symlink"), "the refusal must say why: {why}");
+    assert!(
+        live.is_file(),
+        "the operator's live home-tier skill must be untouched"
+    );
+}
+
+/// The reserved-tier guard has to survive an ancestor symlink too: `.claude`
+/// itself pointing at the managed config directory leaves `.claude/skills` a
+/// real directory, which a lexical comparison walks straight past.
+#[test]
+#[cfg(unix)]
+fn a_tier_resolving_onto_the_managed_deploy_dir_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (paths, project) = fixture(tmp.path(), &["tm-ticketing"]);
+
+    let managed_skills = paths.skill_deploy_dir();
+    std::fs::create_dir_all(managed_skills.join("tm-ticketing")).expect("managed deploy dir");
+    let live = managed_skills.join("tm-ticketing").join("SKILL.md");
+    std::fs::write(&live, "# managed copy\n").expect("write managed skill");
+    let managed_root = managed_skills.parent().expect("managed root");
+
+    std::os::unix::fs::symlink(managed_root, project.join(".claude"))
+        .expect("symlink .claude at the managed config dir");
+
+    let steps = remove_project_tier_strays(
+        &paths,
+        Some(&project),
+        &backups(tmp.path()),
+        RepairMode::Apply,
+    );
+
+    let StepStatus::Refused(why) = &steps[0].status else {
+        panic!("a tier resolving onto the managed deploy dir must be refused: {steps:?}");
+    };
+    assert!(
+        why.contains("deployed to"),
+        "the refusal must name the boundary it held: {why}"
+    );
+    assert!(live.is_file(), "the managed roster must survive");
+}
+
 /// No project in scope and no tier on disk are both "nothing to do", not a
 /// finding.
 #[test]
@@ -287,10 +429,9 @@ fn nothing_to_sweep_reports_nothing() {
     let (paths, project) = fixture(tmp.path(), &["tm-ticketing"]);
     let root = backups(tmp.path());
 
-    assert!(remove_project_tier_strays(&paths, None, false, &root, RepairMode::Apply).is_empty());
+    assert!(remove_project_tier_strays(&paths, None, &root, RepairMode::Apply).is_empty());
     assert!(
-        remove_project_tier_strays(&paths, Some(&project), false, &root, RepairMode::Apply)
-            .is_empty(),
+        remove_project_tier_strays(&paths, Some(&project), &root, RepairMode::Apply).is_empty(),
         "an unprovisioned project tier holds no stray"
     );
 }

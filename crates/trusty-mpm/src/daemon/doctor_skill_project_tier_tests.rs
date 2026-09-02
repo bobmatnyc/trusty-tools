@@ -195,3 +195,44 @@ fn unverifiable_states_are_unknown_not_ok() {
         "an empty bundled roster classifies nothing"
     );
 }
+
+/// The third unverifiable state: a tier that EXISTS and cannot be read.
+///
+/// Why (#6586 critic MEDIUM): `bundled_skill_dirs` returns an empty vec for a
+/// directory it cannot open, and empty renders as `Ok` — the #4605 fail-open
+/// shape. The guard that turns that into `Unknown` shipped with no test, which
+/// is how a guard comes back.
+#[test]
+#[cfg(unix)]
+fn an_unreadable_project_tier_is_unknown_not_ok() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (paths, project) = fixture(tmp.path(), &["tm-ticketing"]);
+    project_skill(&project, "tm-ticketing");
+    let dir = project.join(".claude").join("skills");
+
+    let original = std::fs::metadata(&dir)
+        .expect("tier metadata")
+        .permissions();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+    // Running as root, mode 0o000 does not stop the read and there is nothing
+    // to assert. Probe first, restore, then decide.
+    let readable_anyway = std::fs::read_dir(&dir).is_ok();
+    let check = check_skill_project_tier(&paths, Some(&project));
+    std::fs::set_permissions(&dir, original).expect("restore tier permissions");
+
+    if readable_anyway {
+        return;
+    }
+    assert_eq!(
+        check.status,
+        CheckStatus::Unknown,
+        "an unreadable tier is undetermined, never a clean bill of health: {check:?}"
+    );
+    assert!(
+        check.message.contains("could not be read"),
+        "the message must say what it could not do: {}",
+        check.message
+    );
+}
