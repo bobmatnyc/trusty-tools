@@ -245,6 +245,85 @@ fn is_orchestrator_command(command: &str) -> bool {
     }
 }
 
+/// Wrapper words that precede a real command without changing which program
+/// ultimately runs — privilege/environment wrappers (`sudo`, `env`,
+/// `command`, `builtin`, `doas`) and process/resource wrappers (`nice`,
+/// `time`, `nohup`, `exec`, `ionice`, `timeout`, `stdbuf`, `caffeinate`)
+/// alike. Issue #4031 review (pass 2): enumerating only `sudo`/`env` (then
+/// `command`/`builtin`) left `nice rm -rf /`, `nohup rm -rf /`, `exec rm -rf
+/// /`, and `env -i rm -rf /root` unresolved — each is a DIFFERENT wrapper
+/// bypassing the SAME enumeration weakness, so the fix is one list shared by
+/// every caller rather than another single word added to it.
+/// What: matched exactly (no prefix/substring matching) by [`strip_wrapper_prefix`].
+pub(crate) const COMMAND_WRAPPERS: &[&str] = &[
+    "sudo",
+    "env",
+    "command",
+    "builtin",
+    "doas",
+    "nice",
+    "time",
+    "nohup",
+    "exec",
+    "ionice",
+    "timeout",
+    "stdbuf",
+    "caffeinate",
+];
+
+/// Skip a leading run of `KEY=value` env-assignments and [`COMMAND_WRAPPERS`]
+/// tokens in `tokens` (a leading `\` on any token stripped before comparison,
+/// per the same alias-bypass idiom [`first_command_token`] documents),
+/// returning the index of the first token that is neither — the real command
+/// — or `None` when a wrapper is immediately followed by a flag-shaped token
+/// (`sudo -u root make`, `env -i cmd`): resolving the real program name past
+/// that needs argument-aware parsing this function doesn't do.
+///
+/// Why: [`first_command_token`] and [`super::pm_guard_bash::shell_lex::git_subcommand`]
+/// both need this exact skip — a wrapper reaching either unresolved is a
+/// classifier silently seeing a different (wrapped) command than the one
+/// that will actually run (issue #4031 review). One generic helper, indexing
+/// into whatever token slice the caller already has (`&[&str]` here,
+/// `&[String]` from `shlex::split` there), is what keeps the two from
+/// re-diverging the way `sudo`/`env`-only enumeration already had once.
+/// What: generic over any `T: AsRef<str>` token slice; loops advancing past
+/// each env-assignment or wrapper ONE TOKEN AT A TIME — a wrapper only
+/// consumes itself, then re-examines the following token (which may be
+/// another wrapper, an env-assignment, or the real command) — and returns
+/// the index it stops at. A wrapper followed by nothing, or by a
+/// flag-shaped token (ambiguous: might be the wrapper's own flag, e.g.
+/// `sudo -u root`), yields `None` rather than guessing.
+/// Test: `strip_wrapper_prefix_skips_env_assignment`,
+/// `strip_wrapper_prefix_skips_every_known_wrapper`,
+/// `strip_wrapper_prefix_none_for_wrapper_followed_by_flag`,
+/// `strip_wrapper_prefix_skips_backslash_before_a_wrapper`.
+pub(crate) fn strip_wrapper_prefix<T: AsRef<str>>(tokens: &[T]) -> Option<usize> {
+    let mut i = 0;
+    while i < tokens.len() {
+        let raw = tokens[i].as_ref();
+        let tok = raw.strip_prefix('\\').unwrap_or(raw);
+        if is_env_assignment(tok) {
+            i += 1;
+            continue;
+        }
+        if COMMAND_WRAPPERS.contains(&tok) {
+            match tokens.get(i + 1) {
+                // The wrapper itself is the only token consumed here — the
+                // NEXT token becomes the new candidate to re-examine (it may
+                // itself be another wrapper, an env-assignment, or the real
+                // command), which is why this advances by ONE, not two.
+                Some(next) if !next.as_ref().starts_with('-') => {
+                    i += 1;
+                    continue;
+                }
+                _ => return None,
+            }
+        }
+        break;
+    }
+    Some(i)
+}
+
 /// Extract the effective first command token, stripping noise prefixes.
 ///
 /// Why: A raw `command.split_whitespace().next()` would miss
@@ -252,48 +331,35 @@ fn is_orchestrator_command(command: &str) -> bool {
 /// `/usr/bin/make` (absolute path) — all of which should still match
 /// `make` for exclusion purposes. Being permissive here trades a little
 /// precision for staying on the safe (under-rewrite) side.
-/// What: Loops skipping any number of leading `KEY=value`-shaped tokens
-/// interleaved with `sudo`/`env` prefixes (so `env FOO=bar make build`
-/// resolves to `make` just like `sudo make build` does — see
-/// [`effective_tool_name`]'s doc comment for the same `env`-handling gap
-/// this mirrors), then returns the basename (post-`/`) of whatever token
-/// remains.
-/// Returns `None` — "can't confidently resolve" — when the token
-/// immediately after `sudo`/`env` is itself flag-shaped (starts with `-`,
-/// e.g. `sudo -u root make`, `env -i cmd`): the real program name in that
-/// case needs argument-aware parsing this function doesn't do, and
-/// [`is_orchestrator_command`] treats `None` as "conservatively assume
-/// orchestrator" rather than risk missing a real exclusion (trusty-review
-/// finding, PR #1968).
+/// What: delegates the prefix-skip to [`strip_wrapper_prefix`], then returns
+/// the basename (post-`/`, post-`\`) of whatever token remains.
+/// Returns `None` — "can't confidently resolve" — under the same condition
+/// [`strip_wrapper_prefix`] does (a wrapper followed by a flag-shaped
+/// token): the real program name in that case needs argument-aware parsing
+/// this function doesn't do, and [`is_orchestrator_command`] treats `None`
+/// as "conservatively assume orchestrator" rather than risk missing a real
+/// exclusion (trusty-review finding, PR #1968).
 /// Test: `first_command_token_strips_env_assignment`,
 /// `first_command_token_strips_sudo`, `first_command_token_strips_path`,
 /// `first_command_token_plain_command`,
 /// `first_command_token_strips_env_command_prefix`,
-/// `first_command_token_none_for_sudo_followed_by_flag`.
+/// `first_command_token_none_for_sudo_followed_by_flag`,
+/// `first_command_token_strips_leading_backslash`,
+/// `first_command_token_strips_command_wrapper`,
+/// `first_command_token_strips_builtin_wrapper`,
+/// `first_command_token_strips_backslash_after_sudo`,
+/// `first_command_token_strips_nice_time_nohup_exec`.
 pub(crate) fn first_command_token(command: &str) -> Option<&str> {
-    let mut tokens = command.split_whitespace();
-    let mut tok = tokens.next()?;
-    loop {
-        if is_env_assignment(tok) {
-            tok = tokens.next()?;
-            continue;
-        }
-        if tok == "sudo" || tok == "env" {
-            let next = tokens.next()?;
-            if next.starts_with('-') {
-                return None;
-            }
-            tok = next;
-            continue;
-        }
-        break;
-    }
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let start = strip_wrapper_prefix(&tokens)?;
+    let tok = tokens.get(start)?;
+    let tok = tok.strip_prefix('\\').unwrap_or(tok);
     Some(tok.rsplit('/').next().unwrap_or(tok))
 }
 
 /// Whether `token` looks like a `KEY=value` shell environment assignment.
 ///
-/// Why: Shared by [`first_command_token`]; split out so the "what counts as
+/// Why: Shared by [`strip_wrapper_prefix`]; split out so the "what counts as
 /// an env assignment" rule has one definition.
 /// What: `KEY` must be non-empty, start with a letter or underscore, and
 /// contain only alphanumerics/underscores up to the first `=`.
@@ -590,6 +656,91 @@ mod tests {
         // bogus token `"-u"`.
         assert_eq!(first_command_token("sudo -u root make build"), None);
         assert_eq!(first_command_token("env -i make build"), None);
+    }
+
+    #[test]
+    fn first_command_token_strips_leading_backslash() {
+        // #4031 review, HIGH 3: `\rm` is the standard alias-bypass idiom —
+        // Bash itself strips the backslash before exec, so this classifier
+        // must too, or a resolved verb like `\rm` never matches `"rm"`.
+        assert_eq!(first_command_token("\\rm -rf /root"), Some("rm"));
+    }
+
+    #[test]
+    fn first_command_token_strips_command_wrapper() {
+        // #4031 review, HIGH 4: `command rm` runs the real `rm`, bypassing
+        // any shell function/alias named `rm` — the same bypass class as a
+        // leading backslash, via the POSIX `command` builtin instead.
+        assert_eq!(first_command_token("command rm -rf /root"), Some("rm"));
+    }
+
+    #[test]
+    fn first_command_token_strips_builtin_wrapper() {
+        assert_eq!(first_command_token("builtin rm -rf /root"), Some("rm"));
+    }
+
+    #[test]
+    fn first_command_token_strips_backslash_after_sudo() {
+        // The two bypass idioms compose: `sudo \rm` must resolve the same
+        // as `sudo rm` — the backslash strip re-runs on every token the
+        // `sudo`/`env`/`command`/`builtin` arm advances to.
+        assert_eq!(first_command_token("sudo \\rm -rf /root"), Some("rm"));
+    }
+
+    #[test]
+    fn first_command_token_strips_nice_time_nohup_exec() {
+        // #4031 review pass 2: enumerating only sudo/env/command/builtin
+        // left process/resource wrappers unresolved — the whole class closes
+        // at once via `COMMAND_WRAPPERS`, not one word at a time.
+        //
+        // `env -i rm -rf /root` is deliberately excluded here: `-i` is env's
+        // OWN flag, and this function still degrades to `None` on a wrapper
+        // immediately followed by a flag-shaped token, unchanged from
+        // `sudo -u root make`. That case is closed instead in
+        // `destructive_delete.rs`, which no longer depends on this function
+        // for verb detection at all (issue #4031 review, item 1).
+        for command in [
+            "nice rm -rf /root",
+            "time rm -rf /root",
+            "nohup rm -rf /root",
+            "exec rm -rf /root",
+        ] {
+            assert_eq!(
+                first_command_token(command),
+                Some("rm"),
+                "expected \"rm\" for: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_wrapper_prefix_skips_env_assignment() {
+        let tokens = ["FOO=bar", "make", "build"];
+        assert_eq!(strip_wrapper_prefix(&tokens), Some(1));
+    }
+
+    #[test]
+    fn strip_wrapper_prefix_skips_every_known_wrapper() {
+        for wrapper in COMMAND_WRAPPERS {
+            let tokens = [*wrapper, "rm", "-rf", "/root"];
+            assert_eq!(
+                strip_wrapper_prefix(&tokens),
+                Some(1),
+                "expected wrapper {wrapper} to be skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_wrapper_prefix_none_for_wrapper_followed_by_flag() {
+        let tokens = ["sudo", "-u", "root", "make"];
+        assert_eq!(strip_wrapper_prefix(&tokens), None);
+    }
+
+    #[test]
+    fn strip_wrapper_prefix_skips_backslash_before_a_wrapper() {
+        let tokens = ["\\nice", "rm", "-rf", "/root"];
+        assert_eq!(strip_wrapper_prefix(&tokens), Some(1));
     }
 
     #[test]

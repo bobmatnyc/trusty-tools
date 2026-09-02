@@ -28,11 +28,17 @@
 //! and the HEAD-moving `pull`/`merge`/`rebase` (ADR-0048). The sibling
 //! [`heredoc`] module tells the redirection check which bytes are
 //! here-document body content, so a `>` inside a `<<'PY'` script is a
-//! comparison rather than a file write (#5356).
+//! comparison rather than a file write (#5356). The sibling
+//! [`destructive_delete`] module carries the rule `pm_guard` calls directly,
+//! ahead of the subagent exemptions, alongside the worktree-add-tmp guard: a
+//! target-path denylist for `rm`/`rmdir`/`unlink`/`find … -delete` aimed at a
+//! filesystem root, a repository root, a `.git` directory, or a worktree
+//! entry (issue #4031).
 //! Test: `evaluate_bash_command_*`, `split_shell_segments_*`, and
 //! `has_file_write_redirection_*` in this module's `tests` submodule;
 //! `sed_awk::tests` for the sed/awk-specific safety analysis.
 
+mod destructive_delete;
 mod heredoc;
 mod main_checkout;
 mod persistence;
@@ -40,6 +46,7 @@ mod sed_awk;
 mod shell_lex;
 mod worktree_remove;
 
+pub(crate) use destructive_delete::evaluate_destructive_delete_command;
 pub(crate) use main_checkout::{
     CommitVerdict, docs_commit_deny_reason, evaluate_main_checkout_commit_command,
     evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
@@ -828,24 +835,34 @@ fn worktree_add_target_token(tail: &[String]) -> Option<String> {
     None
 }
 
-/// Expand a leading `~`, `$TMPDIR`/`${TMPDIR}`, and `$TMP`/`${TMP}` in a path
-/// token using `env`, then resolve it against `base` if relative, then
-/// lexically normalize (collapse `.`/`..` components WITHOUT touching the
-/// filesystem).
+/// Expand a leading `~`, `$TMPDIR`/`${TMPDIR}`, `$TMP`/`${TMP}`,
+/// `$HOME`/`${HOME}`, and `$PWD`/`${PWD}` in a path token using `env`/`base`,
+/// then resolve it against `base` if still relative, then lexically
+/// normalize (collapse `.`/`..` components WITHOUT touching the filesystem).
 ///
 /// Why: `shlex::split` does not perform shell variable expansion, so a target
-/// argument like `$TMPDIR/wt-foo` or `~/scratch/wt-foo` reaches this function
-/// as literal text; the guard must expand it itself to see where it really
-/// points. Filesystem-touching resolution (`fs::canonicalize`) is deliberately
-/// avoided — the worktree target usually does not exist yet, and a
-/// `PreToolUse` hook must stay fast and side-effect-free.
-/// What: string-replaces the env-var forms, expands a `~`/`~/…` prefix via
-/// `$HOME`, joins onto `base` if the result is still relative, then
-/// normalizes. The values arrive via [`PathEnv`] rather than being read here,
-/// so a test can pin them without mutating process-global state — see
-/// [`PathEnv`] for the CI failure that motivated the seam. In production
-/// [`PathEnv::from_process`] supplies the guard process's own environment,
-/// which a `Bash` tool call inherits unchanged.
+/// argument like `$TMPDIR/wt-foo`, `~/scratch/wt-foo`, a literal `$HOME`
+/// (issue #4031 — an agent typing `rm -rf $HOME` verbatim), or `$PWD` (issue
+/// #4031 review — `rm -rf $PWD` from inside a session's own worktree root
+/// reached this function unexpanded, so the guard saw a literal `"$PWD"`
+/// token that matched nothing) reaches this function as literal text; the
+/// guard must expand it itself to see where it really points. `$PWD` expands
+/// to `base` — the SAME cwd this function's own `.`/`..` resolution already
+/// treats as "here" — rather than a second read of the process environment's
+/// `PWD`, so a command composed with a preceding `cd` (which updates `base`
+/// via the caller's tracking, never the process env) still resolves `$PWD`
+/// against where the command actually stands. Filesystem-touching resolution
+/// (`fs::canonicalize`) is deliberately avoided — the worktree target usually
+/// does not exist yet, and a `PreToolUse` hook must stay fast and
+/// side-effect-free.
+/// What: string-replaces the env-var forms (`$PWD`/`${PWD}` against `base`,
+/// the rest against `env`), expands a `~`/`~/…` prefix via `$HOME`, joins onto
+/// `base` if the result is still relative, then normalizes. The env values
+/// arrive via [`PathEnv`] rather than being read here, so a test can pin them
+/// without mutating process-global state — see [`PathEnv`] for the CI failure
+/// that motivated the seam. In production [`PathEnv::from_process`] supplies
+/// the guard process's own environment, which a `Bash` tool call inherits
+/// unchanged.
 fn resolve_target_path(token: &str, base: &Path, env: &PathEnv) -> PathBuf {
     let mut expanded = token.to_string();
     if let Some(tmpdir) = env.tmpdir.as_deref() {
@@ -856,6 +873,11 @@ fn resolve_target_path(token: &str, base: &Path, env: &PathEnv) -> PathBuf {
     if let Some(tmp) = env.tmp.as_deref() {
         expanded = expanded.replace("${TMP}", tmp).replace("$TMP", tmp);
     }
+    if let Some(home) = env.home.as_deref() {
+        expanded = expanded.replace("${HOME}", home).replace("$HOME", home);
+    }
+    let pwd = base.to_string_lossy();
+    expanded = expanded.replace("${PWD}", &pwd).replace("$PWD", &pwd);
     if expanded == "~" {
         if let Some(home) = env.home.as_deref() {
             expanded = home.to_string();
