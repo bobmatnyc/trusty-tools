@@ -4,13 +4,18 @@ description = "Engine-agnostic terminal-UI seam (TuiEngine trait + ReplEvent) sh
 homepage = "https://github.com/bobmatnyc/trusty-tools"
 keywords = ["tui", "repl", "terminal", "ratatui", "engine-adapter"]
 categories = ["command-line-interface", "asynchronous"]
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
 readme = "README.md"
+# 0.1.1 (#6605/#6577): PATCH bump — 0.1.0 is already published and this PR
+# edits several doc comments' `# Spec References` link paths to be
+# repo-root-relative. No public item changes shape; the `PR version bump vs
+# crates.io` gate (#4421) requires the bump since `src/**` changed.
+#
 # #4713: this crate is published. `trusty-code` depends on it from production
 # code (`src/cli/tui.rs`, `src/tui_client/`), and `cargo publish` refuses a
 # crate whose non-dev dependency is unpublishable — so the earlier
