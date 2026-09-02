@@ -77,15 +77,23 @@ impl WalkScope {
     ///
     /// What: branch names sorted and deduplicated so two runs listing the same
     /// branches in different orders compare equal, then the two booleans. The
-    /// value is readable in the database on purpose — an operator asking why a
-    /// repository re-walked can read the answer out of the row.
+    /// branch list is JSON-encoded rather than comma-joined (#6073 review):
+    /// git permits a comma inside a ref name, so `,` as a separator gave
+    /// branch `a,b` and branches `a` + `b` one key, and a run scoped to either
+    /// would then skip the other. The value stays readable in the database on
+    /// purpose — an operator asking why a repository re-walked can read the
+    /// answer out of the row.
+    /// Test: `tests::a_comma_in_a_branch_name_is_a_distinct_scope`.
     pub fn as_key(&self) -> String {
         let mut branches = self.branches.clone();
         branches.sort();
         branches.dedup();
+        // Serializing a `Vec<String>` cannot fail — no non-string map key, no
+        // non-finite float, and the strings are already valid UTF-8.
+        let branches =
+            serde_json::to_string(&branches).expect("a Vec<String> always serialises to JSON");
         format!(
-            "branches={};head_only={};skip_merges={}",
-            branches.join(","),
+            "branches={branches};head_only={};skip_merges={}",
             u8::from(self.head_only),
             u8::from(self.skip_merges),
         )
@@ -463,6 +471,44 @@ mod tests {
                 reason: FullWalkReason::PreviousWalkIncomplete
             }
         );
+    }
+
+    /// (#6073 review) git permits a comma inside a ref name, so a
+    /// comma-joined branch list gave `a,b` and `a` + `b` one key — and a run
+    /// scoped to either would then skip the other's walk entirely.
+    #[test]
+    fn a_comma_in_a_branch_name_is_a_distinct_scope() {
+        // Sorted, these two produce the identical `a,b` under a comma join.
+        let one_odd_branch = WalkScope {
+            branches: vec!["a,b".to_string()],
+            ..WalkScope::default()
+        };
+        let two_branches = WalkScope {
+            branches: vec!["a".to_string(), "b".to_string()],
+            ..WalkScope::default()
+        };
+        assert_ne!(
+            one_odd_branch.as_key(),
+            two_branches.as_key(),
+            "a comma inside a ref name must not read as a separator"
+        );
+
+        // The recorded key of one scope must not license skipping the other.
+        let mut recorded = state("aaa", "d1", true);
+        recorded.walk_scope = two_branches.as_key();
+        assert_eq!(
+            plan(Some(&recorded), &tips("aaa", "d1"), &one_odd_branch, true),
+            WalkPlan::Full {
+                reason: FullWalkReason::ScopeChanged
+            }
+        );
+
+        // Order and duplicates still collapse to one key.
+        let reordered = WalkScope {
+            branches: vec!["b".to_string(), "a".to_string(), "b".to_string()],
+            ..WalkScope::default()
+        };
+        assert_eq!(two_branches.as_key(), reordered.as_key());
     }
 
     /// (#6073 review) A narrower walk records a tip over refs it never walked,

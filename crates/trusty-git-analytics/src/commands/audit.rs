@@ -39,7 +39,8 @@ use tga::report::build_ticketing_summary;
 use tga::collect::identity::resolver::configured_canonical_domain;
 use tga::collect::identity::suggest::Suggestion;
 use tga::report::{
-    build_authorship_summary, merge_suggestions, recorded_repository_names, repository_has_commits,
+    build_authorship_summary_with, merge_suggestions, recorded_repository_names,
+    repository_has_commits,
 };
 use trusty_common::credentials::scrub_secrets;
 
@@ -291,15 +292,12 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     // in. Passing `None` there mutes the `.local`, GitHub-noreply and
     // domain-typo signals #6142 exists to surface.
     let mut authorship_gaps: Vec<String> = Vec::new();
-    let suggestions = merge_suggestions(
+    let suggestions = scan_merge_suggestions(
         db.connection(),
         configured_canonical_domain(&config).as_deref(),
-    )
-    .unwrap_or_else(|e| {
-        // A failed scan costs the risk FLAG, never the figures beside it.
-        tracing::warn!(error = %e, "could not scan for unmerged identities; the authorship risk flag is omitted");
-        Vec::new()
-    });
+        &configured_secrets(&config),
+        &mut authorship_gaps,
+    );
     for (i, (entry, repo_cfg)) in manifest
         .repositories
         .iter_mut()
@@ -498,10 +496,46 @@ fn authorship_artifact(
             recorded_repository_names(db.connection())?,
         ));
     }
-    let summary = build_authorship_summary(db.connection(), repository, suggestions)?;
+    let summary = build_authorship_summary_with(db.connection(), repository, suggestions)?;
     let filename = format!("authorship-{index}.json");
     std::fs::write(output.join(&filename), summary.to_json()?)?;
     Ok(AuthorshipArtifact::Written(PathBuf::from(filename)))
+}
+
+/// Scan for unmerged identities once for the sweep, naming a failed scan.
+///
+/// Why (#6142 review): the scan feeds only
+/// [`tga::report::IdentityMergeRisk`], so a failure costs the risk FLAG while
+/// bus factor and top-author share still render from the same rows. Degrading
+/// to an empty suggestion set with only a `warn!` therefore prints those
+/// figures with no indication that the check beside them never ran — the
+/// silent absence DOC-67 §9 forbids.
+/// What: runs [`merge_suggestions`] once against the shared `authors` table
+/// (it is O(n²) in identities, so it must not run per repository), and on
+/// failure pushes a scrubbed gap naming the scan and returns an empty set.
+/// Test: `tests::a_failed_suggestion_scan_becomes_a_named_gap`.
+fn scan_merge_suggestions(
+    conn: &rusqlite::Connection,
+    canonical_domain: Option<&str>,
+    secrets: &[String],
+    gaps: &mut Vec<String>,
+) -> Vec<Suggestion> {
+    match merge_suggestions(conn, canonical_domain) {
+        Ok(suggestions) => suggestions,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not scan for unmerged identities");
+            gaps.push(scrub_secrets(
+                &format!(
+                    "Authorship: the unmerged-identity scan failed ({e:#}), so no repository \
+                     carries the identity-merge risk flag. The ownership-concentration figures \
+                     are unaffected, but nothing in this report states whether identities that \
+                     should have been merged are inflating them."
+                ),
+                secrets,
+            ));
+            Vec::new()
+        }
+    }
 }
 
 /// The gap line for a repository whose name matched no collected commit.
@@ -728,6 +762,46 @@ mod tests {
         announce(None, PHASE_INDEX);
         finish_phase(None, PHASE_INDEX);
         fail_phase(None, PHASE_RENDER, "ignored".to_string());
+    }
+
+    /// (#6142 review) A failed unmerged-identity scan must reach the reader.
+    /// The scan feeds only the identity-merge risk flag, so its failure leaves
+    /// bus factor and top-author share rendering normally — without a named
+    /// gap the reader cannot tell the check ran and found nothing from the
+    /// check never running at all (DOC-67 §9).
+    #[test]
+    fn a_failed_suggestion_scan_becomes_a_named_gap() {
+        let db = Database::open_in_memory().expect("open");
+        // The scan reads `authors`; without that table it can only fail.
+        db.connection()
+            .execute("DROP TABLE authors", [])
+            .expect("drop authors");
+
+        let mut gaps: Vec<String> = Vec::new();
+        let suggestions = super::scan_merge_suggestions(
+            db.connection(),
+            None,
+            &["s3cret".to_string()],
+            &mut gaps,
+        );
+
+        assert!(
+            suggestions.is_empty(),
+            "a failed scan yields no suggestions, so the figures beside it still render"
+        );
+        assert_eq!(gaps.len(), 1, "the failure is named exactly once: {gaps:?}");
+        assert!(
+            gaps[0].contains("unmerged-identity scan failed")
+                && gaps[0].contains("identity-merge risk flag"),
+            "the gap must name the scan and what it cost: {}",
+            gaps[0]
+        );
+
+        // A successful scan on the same shape of database adds no gap.
+        let ok_db = Database::open_in_memory().expect("open");
+        let mut none: Vec<String> = Vec::new();
+        super::scan_merge_suggestions(ok_db.connection(), None, &[], &mut none);
+        assert!(none.is_empty(), "a clean scan says nothing: {none:?}");
     }
 
     /// Proves DOC-67 §9's "named gap, never a silent skip" obligation at the

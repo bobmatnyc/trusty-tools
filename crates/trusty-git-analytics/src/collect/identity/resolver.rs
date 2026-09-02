@@ -109,7 +109,8 @@ fn normalize_domain(raw: &str) -> Option<String> {
 /// before writing keeps an accepted merge accepted.
 /// What: matches the JSON array with `LIKE` to narrow the scan, then confirms
 /// an exact case-insensitive element match, because `LIKE` alone matches a
-/// substring of a longer address. Malformed JSON yields no match.
+/// substring of a longer address. Malformed JSON yields no match, and says so
+/// on stderr rather than reading as an author with no aliases.
 /// Test: `resolver_tests::a_merged_away_email_routes_to_its_canonical_row`.
 ///
 /// # Errors
@@ -129,7 +130,22 @@ fn confirmed_alias_owner(
     while let Some(row) = rows.next()? {
         let id: i64 = row.get(0)?;
         let aliases_json: String = row.get::<_, Option<String>>(1)?.unwrap_or_default();
-        let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap_or_default();
+        // #6142 review: an `aliases` value that will not parse reads as "no
+        // aliases", which quietly re-creates the row a confirmed merge
+        // deleted. The fallback stays — one bad row must not fail the collect
+        // — but it is named on stderr with the author row it belongs to.
+        let aliases: Vec<String> = match serde_json::from_str(&aliases_json) {
+            Ok(aliases) => aliases,
+            Err(e) => {
+                warn!(
+                    author_id = id,
+                    error = %e,
+                    "authors.aliases is not a JSON array of strings; confirmed merges on this \
+                     author are not applied to newly observed commits"
+                );
+                Vec::new()
+            }
+        };
         if aliases.iter().any(|a| a.to_lowercase() == needle) {
             return Ok(Some(id));
         }

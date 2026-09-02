@@ -248,7 +248,24 @@ fn confirmed_alias_map(conn: &Connection) -> Result<HashMap<String, String>> {
         if canonical.is_empty() {
             continue;
         }
-        let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap_or_default();
+        // #6142 review: a row whose `aliases` value will not parse is treated
+        // as having none, which silently un-applies a merge the operator
+        // accepted. The fallback stays — one bad row must not fail the whole
+        // report — but it is named on stderr with the author it belongs to.
+        let aliases: Vec<String> = match serde_json::from_str(&aliases_json) {
+            Ok(aliases) => aliases,
+            Err(e) => {
+                if !aliases_json.trim().is_empty() {
+                    tracing::warn!(
+                        author = %canonical,
+                        error = %e,
+                        "authors.aliases is not a JSON array of strings; this author's confirmed \
+                         merges are not applied to the authorship figures"
+                    );
+                }
+                Vec::new()
+            }
+        };
         for alias in aliases {
             let key = alias.to_lowercase();
             if key.is_empty() || key == canonical.to_lowercase() {
@@ -366,6 +383,30 @@ fn month_of(timestamp: &str) -> Option<String> {
     timestamp.get(0..7).map(str::to_string)
 }
 
+/// [`build_authorship_summary_with`] for a caller that has no suggestion set.
+///
+/// Why (#6142 review): the suggestion set became a required parameter when the
+/// scan moved out to the audit caller, which would break every existing caller
+/// of this function. Keeping the previous signature working keeps tga's public
+/// surface additive.
+/// What: runs [`merge_suggestions`] itself, then delegates. That scan is O(n²)
+/// in identities, so this wrapper pays one full scan PER CALL — a caller
+/// summarising several repositories from one database should call
+/// [`build_authorship_summary_with`] with a set scanned once. It also passes
+/// `None` for the canonical domain, which mutes the `.local`, GitHub-noreply
+/// and domain-typo signals; a caller with a configured domain must use
+/// [`build_authorship_summary_with`].
+/// Test: `super::authorship_tests::the_wrapper_scans_its_own_suggestions`.
+///
+/// # Errors
+///
+/// Propagates [`crate::core::errors::TgaError::DbError`] from the scan or the
+/// summary queries.
+pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<AuthorshipSummary> {
+    let suggestions = merge_suggestions(conn, None)?;
+    build_authorship_summary_with(conn, repository, &suggestions)
+}
+
 /// Build one repository's authorship summary from an open database.
 ///
 /// Why: the single function that reads `commits JOIN files` for this artifact
@@ -398,7 +439,7 @@ fn month_of(timestamp: &str) -> Option<String> {
 /// # Errors
 ///
 /// Propagates [`crate::core::errors::TgaError::DbError`] from either query.
-pub fn build_authorship_summary(
+pub fn build_authorship_summary_with(
     conn: &Connection,
     repository: &str,
     suggestions: &[Suggestion],

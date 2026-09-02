@@ -3,8 +3,9 @@
 use rusqlite::params;
 
 use super::{
-    build_authorship_summary, merge_suggestions, recorded_repository_names, repository_has_commits,
-    AuthorshipSummary, AUTHORSHIP_SCHEMA_VERSION,
+    build_authorship_summary, build_authorship_summary_with, merge_suggestions,
+    recorded_repository_names, repository_has_commits, AuthorshipSummary,
+    AUTHORSHIP_SCHEMA_VERSION,
 };
 use crate::core::db::Database;
 use crate::core::errors::Result;
@@ -12,14 +13,14 @@ use crate::core::errors::Result;
 /// Build one repository's summary, scanning for merge suggestions first.
 ///
 /// Why (#6142 review): the suggestion scan moved OUT of
-/// `build_authorship_summary` — it is O(n²) in identities and the `authors`
+/// `build_authorship_summary_with` — it is O(n²) in identities and the `authors`
 /// table is shared across every repository, so the audit runs it once. This
 /// helper restores the one-call shape for tests that do not care which caller
 /// supplies the set. `None` for the domain matches an unconfigured project;
 /// `the_configured_domain_reaches_the_risk_flag` supplies a real one.
 fn summary_for(conn: &rusqlite::Connection, repository: &str) -> Result<AuthorshipSummary> {
     let suggestions = merge_suggestions(conn, None)?;
-    build_authorship_summary(conn, repository, &suggestions)
+    build_authorship_summary_with(conn, repository, &suggestions)
 }
 
 /// Insert one `authors` row — the identity resolver's output — and hand back
@@ -770,7 +771,8 @@ fn the_configured_domain_reaches_the_risk_flag() {
         "the configured domain must surface the .local identity: {with_domain:?}"
     );
 
-    let flagged = build_authorship_summary(db.connection(), "repo", &with_domain).expect("summary");
+    let flagged =
+        build_authorship_summary_with(db.connection(), "repo", &with_domain).expect("summary");
     let risk = flagged
         .identity_merge_risk
         .expect("a .local identity beside a top author must raise the flag");
@@ -837,5 +839,45 @@ fn a_long_tail_suggestion_does_not_flag() {
         summary.identity_merge_risk.is_none(),
         "a pair outside the top-N must not raise the flag, got {:?}",
         summary.identity_merge_risk
+    );
+}
+
+/// (#6142 review) The two-argument `build_authorship_summary` is the signature
+/// every caller before the suggestion set existed compiled against, so it stays
+/// callable: it scans for its own suggestions and answers identically to
+/// `build_authorship_summary_with` given that same scan.
+#[test]
+fn the_wrapper_scans_its_own_suggestions() {
+    let db = Database::open_in_memory().expect("open");
+    insert_commit(
+        &db,
+        "a1",
+        "Alice",
+        "alice@x.com",
+        "2026-01-15T00:00:00Z",
+        "repo",
+        false,
+        &["src/lib.rs"],
+    );
+    insert_commit(
+        &db,
+        "b1",
+        "Alice",
+        "alice@example.com",
+        "2026-02-15T00:00:00Z",
+        "repo",
+        false,
+        &["src/other.rs"],
+    );
+
+    let scanned = merge_suggestions(db.connection(), None).expect("scan");
+    let delegated =
+        build_authorship_summary_with(db.connection(), "repo", &scanned).expect("summary");
+    let wrapped = build_authorship_summary(db.connection(), "repo").expect("summary");
+
+    assert_eq!(
+        wrapped.to_json().expect("json"),
+        delegated.to_json().expect("json"),
+        "the wrapper must answer exactly as the delegating form does"
     );
 }
