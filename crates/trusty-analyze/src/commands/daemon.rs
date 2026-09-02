@@ -428,31 +428,50 @@ pub async fn handle_doctor(socket: &Path, facts_path: &Path) -> Result<()> {
 ///
 /// What: a WARN per surviving plist, never a deletion and never a failure. This
 /// function observes; `service uninstall` is the one path that removes, and the
-/// warning names it. A plist path that cannot be resolved yields no line —
-/// there is nothing to report about a home directory that does not resolve, and
-/// the data-dir check above already fails on that.
+/// warning names it.
+///
+/// Only [`retired_plist_if_present`] is platform-specific — where a label's
+/// plist lives. Which labels to look for and what to say about one are the
+/// same everywhere, so they stay outside the `cfg` and are proven by tests that
+/// run on every platform.
 ///
 /// Test: `stale_unit_warnings_name_the_retired_labels`,
 /// `stale_unit_warning_points_at_the_uninstall_command`.
-#[cfg(target_os = "macos")]
 fn stale_unit_warnings() -> Vec<String> {
-    trusty_common::launchd_labels::retired_labels_for_member(RETIRED_MEMBER)
+    retired_labels()
         .into_iter()
-        .filter_map(|label| {
-            let path = trusty_common::launchd::user_plist_path(label).ok()?;
-            path.exists().then(|| stale_unit_warning(&path))
-        })
+        .filter_map(retired_plist_if_present)
+        .map(|path| stale_unit_warning(&path))
         .collect()
 }
 
-/// Nothing to warn about off macOS — there are no LaunchAgents there.
-#[cfg(not(target_os = "macos"))]
-fn stale_unit_warnings() -> Vec<String> {
-    Vec::new()
+/// The member whose retired launchd labels `doctor` looks for.
+const RETIRED_MEMBER: &str = "trusty-analyze";
+
+/// Every launchd label a pre-#6350 install of this daemon could have left.
+///
+/// Read from the shared registry rather than spelled out here: a label added to
+/// `RETIRED_SERVICES` later is then covered without editing this check.
+fn retired_labels() -> Vec<&'static str> {
+    trusty_common::launchd_labels::retired_labels_for_member(RETIRED_MEMBER)
 }
 
-/// The member whose retired labels [`stale_unit_warnings`] looks for.
-const RETIRED_MEMBER: &str = "trusty-analyze";
+/// `label`'s installed plist, when one is on disk.
+///
+/// A path that cannot be resolved yields `None` — there is nothing to report
+/// about a home directory that does not resolve, and the data-dir check in
+/// [`handle_doctor`] already fails on that.
+#[cfg(target_os = "macos")]
+fn retired_plist_if_present(label: &str) -> Option<PathBuf> {
+    let path = trusty_common::launchd::user_plist_path(label).ok()?;
+    path.exists().then_some(path)
+}
+
+/// Off macOS there are no LaunchAgents, so no label has a plist.
+#[cfg(not(target_os = "macos"))]
+fn retired_plist_if_present(_label: &str) -> Option<PathBuf> {
+    None
+}
 
 /// The warning text for one surviving plist.
 ///
