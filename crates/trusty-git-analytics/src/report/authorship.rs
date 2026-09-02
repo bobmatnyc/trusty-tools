@@ -25,10 +25,15 @@
 //!   (`collect::identity::IdentityResolver`, which populates
 //!   `commits.author_id → authors.canonical_email`), so one person committing
 //!   under several names or emails collapses to one author. A commit the
-//!   resolver never linked (`author_id IS NULL`) falls back to its raw commit
-//!   email, so its aliases stay split — [`AuthorshipSummary::unresolved_authors`]
-//!   counts exactly those identities, which is the honesty gate issue #5453
-//!   asked for.
+//!   resolver never linked (`author_id IS NULL`) is then routed through the
+//!   CONFIRMED merges recorded in `authors.aliases` (#6142), so a merge an
+//!   operator accepted applies to every figure here without a separate manual
+//!   step. What stays split is an identity that is neither resolved nor
+//!   merged — [`AuthorshipSummary::unresolved_authors`] counts exactly those,
+//!   which is the honesty gate issue #5453 asked for. An identity that a
+//!   HIGH-confidence suggestion would merge, but nobody has confirmed, is
+//!   never merged silently; it raises
+//!   [`AuthorshipSummary::identity_merge_risk`] instead (#6142).
 //! - **Squash-merge attribution, vendored-path exclusion** — NOT handled (each
 //!   needs, respectively: nothing extra for GitHub squash since
 //!   `commits.author_name`/`author_email` already read the PR author verbatim,
@@ -44,11 +49,12 @@
 //! [`AuthorshipSummary::to_json`].
 //! Test: `super::authorship_tests`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
+use crate::collect::identity::suggest::{detect_from_authors, HIGH_CONFIDENCE_CUTOFF};
 use crate::core::errors::Result;
 
 /// Schema tag written into the artifact — pairs with trusty-review's
@@ -96,10 +102,61 @@ pub struct AuthorshipSummary {
     /// the resolver.
     /// Test: `super::authorship_tests::unresolved_authors_are_counted_and_caveated`.
     pub unresolved_authors: u64,
+    /// Set when unconfirmed high-confidence alias suggestions touch the
+    /// authors that determine this repository's concentration figures (#6142).
+    ///
+    /// Why: a confirmed merge is applied before the figures are computed, but
+    /// a merge nobody has accepted yet is not — and silently auto-merging a
+    /// suggestion would invent an identity the operator never approved. The
+    /// flag is how the figures stay honest without that: it names the metrics
+    /// at risk, the number of identities involved, and the command that
+    /// resolves them.
+    /// Test: `super::authorship_tests::suggested_but_unmerged_identity_raises_a_risk_flag`.
+    pub identity_merge_risk: Option<IdentityMergeRisk>,
     /// Data-trap limitations this run did NOT correct for (issue #5453) —
     /// rendered verbatim by the report section's caption.
     pub caveats: Vec<String>,
 }
+
+/// The risk flag a report carries when suggested-but-unmerged identities
+/// touch its concentration metrics (#6142).
+///
+/// Why: bus factor and top-author share are the two figures a split identity
+/// distorts, and both distort in the same direction — they read LOWER than
+/// reality. A reader needs to know which figures are affected, by how many
+/// identities, and what to run.
+/// What: the count of distinct suggested-but-unmerged source identities
+/// touching the top-N authors, the names of the metrics they affect, and the
+/// resolving command.
+/// Test: `super::authorship_tests::suggested_but_unmerged_identity_raises_a_risk_flag`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct IdentityMergeRisk {
+    /// Distinct identities suggested for merge, at or above
+    /// [`crate::collect::identity::suggest::HIGH_CONFIDENCE_CUTOFF`], that no
+    /// operator has confirmed and that touch a top-N author.
+    pub suggested_unmerged: u64,
+    /// Field names of the affected metrics on [`AuthorshipSummary`].
+    pub affected_metrics: Vec<String>,
+    /// The command that lists the suggestions so an operator can confirm them.
+    pub resolve_command: String,
+}
+
+/// How many of the ranked authors count as "top-N" for the risk flag (#6142).
+///
+/// Why: bus factor and top-author share are determined by the head of the
+/// ranked list, so a suggestion touching a long-tail author cannot move
+/// either figure enough to warrant a flag. Ten is generous relative to the
+/// bus-factor cohort a real repository produces, which keeps the flag from
+/// under-reporting.
+/// Test: `super::authorship_tests::a_long_tail_suggestion_does_not_flag`.
+const TOP_N_AUTHORS: usize = 10;
+
+/// The metric fields a split identity distorts, named in the risk flag.
+const RISK_AFFECTED_METRICS: &[&str] = &["bus_factor", "top_author_share_pct"];
+
+/// The command a reader runs to resolve the flagged suggestions.
+const RISK_RESOLVE_COMMAND: &str = "tga aliases suggest";
 
 /// One month's active-author/commit-volume figures.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -141,6 +198,117 @@ fn unresolved_caveat(count: u64) -> String {
          author, so their aliases stay split — concentration and bus factor read LOWER than \
          reality by that much."
     )
+}
+
+/// The caveat naming the suggested-but-unmerged identities (#6142).
+///
+/// Why: the structured [`IdentityMergeRisk`] is what a machine reads; a
+/// renderer that only prints [`AuthorshipSummary::caveats`] would otherwise
+/// drop the flag entirely.
+fn suggested_merge_caveat(risk: &IdentityMergeRisk) -> String {
+    format!(
+        "{count} identity/identities are suggested for merge but not confirmed, and they touch \
+         the authors behind {metrics} — both read LOWER than reality until the merges are \
+         accepted. Run `{command}` to review them; nothing is merged automatically.",
+        count = risk.suggested_unmerged,
+        metrics = risk.affected_metrics.join(" and "),
+        command = risk.resolve_command,
+    )
+}
+
+/// Map every CONFIRMED alias to the canonical email that owns it (#6142).
+///
+/// Why: `tga aliases merge` records an accepted merge two ways — it reassigns
+/// `commits.author_id` for the commits present at merge time, and it appends
+/// the source email to the destination's `authors.aliases`. Only the second
+/// survives a later collect that re-observes the source email on new commits
+/// the resolver does not link, so a report reading `author_id` alone lets a
+/// confirmed merge silently come apart. Reading the alias list closes that.
+/// What: one lowercased `alias → canonical_email` entry per element of every
+/// row's `aliases` JSON array. Malformed JSON yields no entries for that row
+/// rather than failing the report. Suggestions are never in this map — only
+/// merges an operator accepted.
+/// Test: `super::authorship_tests::confirmed_alias_merge_collapses_the_authorship_metric`.
+///
+/// # Errors
+///
+/// Propagates [`crate::core::errors::TgaError::DbError`].
+fn confirmed_alias_map(conn: &Connection) -> Result<HashMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT canonical_email, aliases FROM authors")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+        ))
+    })?;
+
+    let mut map: HashMap<String, String> = HashMap::new();
+    for row in rows {
+        let (canonical, aliases_json) = row?;
+        if canonical.is_empty() {
+            continue;
+        }
+        let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap_or_default();
+        for alias in aliases {
+            let key = alias.to_lowercase();
+            if key.is_empty() || key == canonical.to_lowercase() {
+                continue;
+            }
+            map.insert(key, canonical.clone());
+        }
+    }
+    Ok(map)
+}
+
+/// The risk flag for suggested-but-unmerged identities touching `ranked`.
+///
+/// Why (#6142): only a suggestion that would move `ranked`'s head can move
+/// bus factor or top-author share, so a flag naming every suggestion in the
+/// database would be noise a reader learns to skip.
+/// What: runs the author-table suggestion passes at
+/// [`HIGH_CONFIDENCE_CUTOFF`], keeps the pairs with either endpoint among the
+/// first [`TOP_N_AUTHORS`] ranked authors, and counts the distinct source
+/// identities. Returns `None` when that count is zero.
+/// Test: `super::authorship_tests::{suggested_but_unmerged_identity_raises_a_risk_flag,
+/// a_long_tail_suggestion_does_not_flag}`.
+///
+/// # Errors
+///
+/// Propagates [`crate::core::errors::TgaError::DbError`].
+fn identity_merge_risk(
+    conn: &Connection,
+    ranked: &[(&String, &u64)],
+) -> Result<Option<IdentityMergeRisk>> {
+    let top: std::collections::BTreeSet<String> = ranked
+        .iter()
+        .take(TOP_N_AUTHORS)
+        .map(|(email, _)| email.to_lowercase())
+        .collect();
+    if top.is_empty() {
+        return Ok(None);
+    }
+
+    // The commit-SHA pass is deliberately excluded: it scans every row of
+    // `commits`, which a report cannot afford on a large extract database.
+    let suggestions = detect_from_authors(conn, None, HIGH_CONFIDENCE_CUTOFF)?;
+
+    let touching: std::collections::BTreeSet<String> = suggestions
+        .into_iter()
+        .filter(|s| top.contains(&s.src.to_lowercase()) || top.contains(&s.dst.to_lowercase()))
+        .map(|s| s.src.to_lowercase())
+        .collect();
+
+    if touching.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(IdentityMergeRisk {
+        suggested_unmerged: touching.len() as u64,
+        affected_metrics: RISK_AFFECTED_METRICS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        resolve_command: RISK_RESOLVE_COMMAND.to_string(),
+    }))
 }
 
 /// Name/email substrings identifying a machine-authored commit (issue #5453).
@@ -204,6 +372,9 @@ fn month_of(timestamp: &str) -> Option<String> {
 ///
 /// Propagates [`crate::core::errors::TgaError::DbError`] from either query.
 pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<AuthorshipSummary> {
+    // #6142: confirmed merges are applied before any figure is computed;
+    // unconfirmed suggestions never are — they only raise the risk flag below.
+    let alias_map = confirmed_alias_map(conn)?;
     let mut stmt = conn.prepare(
         "SELECT c.id, c.author_name, c.author_email, a.canonical_email, c.timestamp, f.path \
          FROM commits c \
@@ -241,14 +412,20 @@ pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<A
         } else {
             email.clone()
         };
-        // The resolver's canonical email wins; an unlinked commit falls back to
-        // its raw identity and is counted as an honesty caveat (#5453).
+        // The resolver's canonical email wins. An unlinked commit is then
+        // routed through the CONFIRMED alias map (#6142) — a merge the
+        // operator already accepted applies here even though the resolver
+        // never linked this row. Only when both miss does the commit fall
+        // back to its raw identity and count as an honesty caveat (#5453).
         let author_key = match canonical_email.filter(|e| !e.is_empty()) {
             Some(canonical) => canonical,
-            None => {
-                unresolved.insert(raw_key.clone());
-                raw_key
-            }
+            None => match alias_map.get(&raw_key.to_lowercase()) {
+                Some(canonical) => canonical.clone(),
+                None => {
+                    unresolved.insert(raw_key.clone());
+                    raw_key
+                }
+            },
         };
         *touches_by_author.entry(author_key.clone()).or_insert(0) += 1;
         authors_by_subsystem
@@ -302,6 +479,12 @@ pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<A
         caveats.push(unresolved_caveat(unresolved_authors));
     }
 
+    // #6142: the flag sits beside the metrics it names, and never merges.
+    let merge_risk = identity_merge_risk(conn, &ranked)?;
+    if let Some(risk) = &merge_risk {
+        caveats.push(suggested_merge_caveat(risk));
+    }
+
     Ok(AuthorshipSummary {
         schema_version: AUTHORSHIP_SCHEMA_VERSION.to_string(),
         repository: repository.to_string(),
@@ -311,6 +494,7 @@ pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<A
         single_author_subsystems,
         monthly_trajectory,
         unresolved_authors,
+        identity_merge_risk: merge_risk,
         caveats,
     })
 }

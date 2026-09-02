@@ -30,7 +30,7 @@ pub mod ticketing;
 
 pub use authorship::{
     build_authorship_summary, recorded_repository_names, repository_has_commits, AuthorshipSummary,
-    AUTHORSHIP_SCHEMA_VERSION,
+    IdentityMergeRisk, AUTHORSHIP_SCHEMA_VERSION,
 };
 pub use dd_manifest::{
     build_dd_manifest, repo_name, DdManifest, DdManifestError, DdManifestOptions, DdReportSection,
