@@ -130,6 +130,30 @@ async fn rpc_router_registers_every_documented_method() {
     );
 }
 
+/// REGRESSION (#6621): `analyze.health` is dialled by the console connector,
+/// the console's `console_metrics` MCP poll and `tctl`'s probe — all monitors,
+/// all on a loop faster than the 600s idle window. Registered as an ordinary
+/// method, each poll re-armed that window and one `trusty-analyze serve` process
+/// stayed resident for 46 hours.
+///
+/// Why the assertion is on the classification rather than on a timing: the idle
+/// behaviour itself is proven in `trusty-common`
+/// (`serve_until_idle_ignores_a_registered_liveness_method`). What this crate
+/// owns is which of its methods carries the mark.
+/// What: health is marked, and it is the ONLY method marked — every other name
+/// does the caller's work and must still hold the process open.
+/// Test: this is the test.
+#[tokio::test]
+async fn rpc_health_is_the_only_liveness_method() {
+    let (state, _tmp) = make_state();
+    let router = build_router(state);
+    assert_eq!(
+        router.liveness_names().collect::<Vec<_>>(),
+        vec![METHOD_HEALTH],
+        "only a method whose answer is pure liveness may skip the idle window"
+    );
+}
+
 /// Why: a client that drifts must read a reason, not a dropped connection.
 /// Test: this is the test.
 #[tokio::test]

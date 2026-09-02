@@ -385,7 +385,8 @@ impl LaunchdConfig {
 /// common-entry-point rule exists to prevent.
 /// What: `~/Library/LaunchAgents/<label>.plist`. `None` when the home directory
 /// cannot be resolved. [`LaunchdConfig::plist_path`] is this over its own label.
-/// Test: `plist_path_layout` covers the layout through the method.
+/// Test: `plist_path_layout` covers the layout through the method;
+/// `plist_path_for_label_matches_the_config_method` keeps the two in step.
 #[must_use]
 pub fn plist_path_for_label(label: &str) -> Option<PathBuf> {
     Some(
@@ -641,6 +642,19 @@ mod tests {
     fn plist_path_layout() {
         let p = sample(KeepAlive::Always).plist_path().unwrap();
         assert!(p.ends_with("Library/LaunchAgents/com.trusty.search.plist"));
+    }
+
+    /// Why (#6621): a label-only caller must resolve the SAME path an install
+    /// wrote, or a staleness check reads a file launchd never had. The method
+    /// delegates to the free function, and this is what keeps that true.
+    /// Test: this is the test.
+    #[test]
+    fn plist_path_for_label_matches_the_config_method() {
+        let cfg = sample(KeepAlive::Always);
+        assert_eq!(
+            plist_path_for_label(&cfg.label).unwrap(),
+            cfg.plist_path().unwrap()
+        );
     }
 
     #[test]

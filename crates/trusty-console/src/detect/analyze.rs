@@ -13,15 +13,28 @@
 //! process that took 7879 read as a healthy trusty-analyze. It is deleted rather
 //! than corrected.
 //!
-//! What: `AnalyzeConnector::detect()` dials `analyze.health` over the socket and
-//! reads `version` off the answer. When nothing answers — the resting state of
-//! an on-demand server (#6350) — the verdict comes off the binary instead, the
-//! way the trusty-review connector's has since #6290.
+//! What: `AnalyzeConnector::detect()` decides Running from a connect-only probe
+//! and reads `version` off one `analyze.health` call per daemon lifetime. When
+//! nothing answers — the resting state of an on-demand server (#6350) — the
+//! verdict comes off the binary instead, the way the trusty-review connector's
+//! has since #6290.
+//!
+//! #6621: the health call used to run on every poll, four times a minute
+//! against a 600s idle window, and re-armed that window every time. The idle
+//! accounting in `trusty_common::uds::server` now exempts the method outright;
+//! this connector additionally stops asking, because the answer does not change
+//! while one server is up. Only the version needs the RPC, and the version is a
+//! property of the process — so it is read once and cached against the socket's
+//! inode, which a respawn replaces.
+//!
 //! Test: `analyze_connector_reports_available_when_nothing_is_serving`,
 //! `analyze_connector_reads_the_version_off_a_live_socket`,
+//! `analyze_detect_dials_health_once_per_socket_identity`,
 //! `analyze_reports_an_on_demand_lifecycle_on_every_verdict`.
 
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::connector::{ServiceConnector, ServiceInfo, ServiceLifecycle, ServiceStatus};
@@ -79,12 +92,57 @@ pub struct AnalyzeConnector {
     /// process-global and this connector runs beside five others in one poll,
     /// so a path override keeps a test from redirecting its siblings too.
     socket: Option<PathBuf>,
+    /// The version last read, and the socket it was read from (#6621).
+    ///
+    /// One entry, not a map: a connector watches one path, and a new identity
+    /// means the previous server is gone. `Mutex` because `detect` takes `&self`
+    /// — the poller holds this connector across every poll, which is what makes
+    /// the cache worth having.
+    version: Mutex<Option<VersionForSocket>>,
+}
+
+/// A version reading, bound to the socket instance it came from (#6621).
+///
+/// Why device and inode rather than the path: the path is stable across the
+/// daemon's whole life AND across every respawn, so it cannot distinguish one
+/// process's version from the next one's. An on-demand server unlinks its socket
+/// on the way out and the successor binds a fresh file, so the inode changes
+/// exactly when the answer might.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketIdentity {
+    /// The socket file's device id.
+    dev: u64,
+    /// The socket file's inode.
+    ino: u64,
+}
+
+/// What [`AnalyzeConnector::version`] holds.
+#[derive(Debug)]
+struct VersionForSocket {
+    /// The socket instance the version was read from.
+    identity: SocketIdentity,
+    /// The version, or `None` when the daemon answered without one.
+    version: Option<String>,
+}
+
+/// The socket file's identity, or `None` when there is no file to stat.
+///
+/// An absent file is the resting state of an on-demand service, not an error.
+fn socket_identity(socket: &Path) -> Option<SocketIdentity> {
+    let meta = std::fs::metadata(socket).ok()?;
+    Some(SocketIdentity {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
 }
 
 impl AnalyzeConnector {
     /// Create a new `AnalyzeConnector`.
     pub fn new() -> Self {
-        Self { socket: None }
+        Self {
+            socket: None,
+            version: Mutex::new(None),
+        }
     }
 
     /// Create a connector that dials `socket` instead of the resolved path.
@@ -95,6 +153,7 @@ impl AnalyzeConnector {
     pub fn with_socket(socket: PathBuf) -> Self {
         Self {
             socket: Some(socket),
+            version: Mutex::new(None),
         }
     }
 
@@ -122,7 +181,7 @@ impl Default for AnalyzeConnector {
     }
 }
 
-/// Dial `analyze.health` and return the envelope, or `None` if nothing answered.
+/// Run one async probe against `socket` on a thread of its own.
 ///
 /// Why: `ServiceConnector::detect` is synchronous — the poller calls it inside
 /// `spawn_blocking` — and the shared UDS client is async. The exchange runs on
@@ -132,12 +191,16 @@ impl Default for AnalyzeConnector {
 /// from inside another runtime's worker panics, and this way the call is safe
 /// from any caller regardless of what it is running on.
 ///
-/// What: one `send_framed_request` bounded by [`HEALTH_TIMEOUT`], then a
-/// JSON-RPC envelope check. A response carrying an `error` is `None`: the
-/// daemon answered, but not with health, and the console has nothing to render.
-///
-/// Test: `analyze_connector_reports_available_when_nothing_is_serving`.
-fn probe_health(socket: &Path) -> Option<HealthEnvelope> {
+/// A thread that will not spawn, a runtime that will not build, or a panicking
+/// probe all read as `None` — the same verdict as nothing answering, which is
+/// the honest one when nothing was observed.
+fn blocking_probe<T, F>(socket: &Path, probe: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce(PathBuf) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<T>>>>
+        + Send
+        + 'static,
+{
     let socket = socket.to_path_buf();
     let handle = std::thread::Builder::new()
         .name("console-analyze-probe".to_owned())
@@ -146,21 +209,55 @@ fn probe_health(socket: &Path) -> Option<HealthEnvelope> {
                 .enable_all()
                 .build()
                 .ok()?;
-            rt.block_on(async {
-                let request = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": METHOD_HEALTH,
-                });
-                let response: trusty_common::uds::server::RpcResponse =
-                    trusty_common::uds::send_framed_request(&socket, &request, HEALTH_TIMEOUT)
-                        .await
-                        .ok()?;
-                serde_json::from_value::<HealthEnvelope>(response.result?).ok()
-            })
+            rt.block_on(probe(socket))
         })
         .ok()?;
     handle.join().ok()?
+}
+
+/// Whether something is accepting connections on `socket` right now (#6621).
+///
+/// Why this and not `analyze.health`: a connect-and-close answers the only
+/// question the dashboard asks every poll, and it is the one probe an on-demand
+/// server's idle accounting has always exempted — it reaches the server as
+/// `Served::LivenessProbe`, before any frame is read.
+fn probe_is_serving(socket: &Path) -> bool {
+    blocking_probe(socket, |socket| {
+        Box::pin(async move {
+            trusty_common::uds::socket_is_serving(&socket, HEALTH_TIMEOUT)
+                .await
+                .then_some(())
+        })
+    })
+    .is_some()
+}
+
+/// Dial `analyze.health` and return the envelope, or `None` if nothing answered.
+///
+/// What: one `send_framed_request` bounded by [`HEALTH_TIMEOUT`], then a
+/// JSON-RPC envelope check. A response carrying an `error` is `None`: the
+/// daemon answered, but not with health, and the console has nothing to render.
+///
+/// #6621: called at most once per socket instance — see
+/// [`AnalyzeConnector::version_for`].
+///
+/// Test: `analyze_connector_reads_the_version_off_a_live_socket`,
+/// `analyze_detect_dials_health_once_per_socket_identity`.
+fn probe_health(socket: &Path) -> Option<HealthEnvelope> {
+    blocking_probe(socket, |socket| {
+        Box::pin(async move {
+            let request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": METHOD_HEALTH,
+            });
+            let response: trusty_common::uds::server::RpcResponse =
+                trusty_common::uds::send_framed_request(&socket, &request, HEALTH_TIMEOUT)
+                    .await
+                    .ok()?;
+            serde_json::from_value::<HealthEnvelope>(response.result?).ok()
+        })
+    })
 }
 
 impl ServiceConnector for AnalyzeConnector {
@@ -228,7 +325,47 @@ impl AnalyzeConnector {
     /// Test: `analyze_connector_surfaces_an_unresolvable_socket_path_as_a_hint`,
     /// `detect_never_starts_a_server`,
     /// `analyze_reports_an_on_demand_lifecycle_on_every_verdict`,
+    /// `analyze_detect_dials_health_once_per_socket_identity`,
     /// `analyze_reads_a_version_off_the_binary_when_nothing_is_serving`.
+    /// The running daemon's version, dialling `analyze.health` at most once per
+    /// socket instance (#6621).
+    ///
+    /// Why a cache and not simply a slower poll: a version does not change while
+    /// one process is up, so a second reading of it carries no information —
+    /// only an idle-window re-arm. Keying on the socket's inode is what makes
+    /// "while one process is up" observable from outside: an on-demand server
+    /// unlinks its socket on exit and the next one binds a new file.
+    ///
+    /// What: returns the cached version when the identity matches, otherwise
+    /// dials once and stores what came back. A dial that answers without a
+    /// version is cached too — repeating it would not produce one, and the
+    /// verdict is `Running` either way because the connect probe already
+    /// observed a server.
+    ///
+    /// A socket that cannot be stat'd is not cached: something is serving it (a
+    /// caller only reaches here past the connect probe) but there is no identity
+    /// to key on, so the next poll asks again rather than caching against a key
+    /// it cannot recheck.
+    ///
+    /// Test: `analyze_detect_dials_health_once_per_socket_identity`,
+    /// `analyze_version_cache_is_reread_when_the_socket_is_replaced`.
+    fn version_for(&self, socket: &Path) -> Option<String> {
+        let identity = socket_identity(socket);
+        let mut cached = self.version.lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some(identity), Some(entry)) = (identity, cached.as_ref())
+            && entry.identity == identity
+        {
+            return entry.version.clone();
+        }
+
+        let version = probe_health(socket).and_then(|health| health.version);
+        *cached = identity.map(|identity| VersionForSocket {
+            identity,
+            version: version.clone(),
+        });
+        version
+    }
+
     fn detect_from(&self, socket: Result<PathBuf, String>) -> ServiceInfo {
         let base =
             |status: ServiceStatus, version: Option<String>, hint: Option<String>| ServiceInfo {
@@ -251,13 +388,17 @@ impl AnalyzeConnector {
         // An unresolvable socket path leaves nothing to dial, but the binary
         // question is still answerable — so the reason rides along as the hint
         // rather than short-circuiting the verdict.
-        let (socket_hint, dialled) = match socket {
-            Ok(path) => (None, probe_health(&path)),
+        // #6621: Running is decided by the connect probe, which the server's
+        // idle accounting has always exempted; the version comes off at most one
+        // `analyze.health` per socket instance.
+        let (socket_hint, running) = match socket {
+            Ok(path) if probe_is_serving(&path) => (None, Some(self.version_for(&path))),
+            Ok(_) => (None, None),
             Err(reason) => (Some(reason), None),
         };
 
-        if let Some(health) = dialled {
-            return base(ServiceStatus::Running, health.version, None);
+        if let Some(version) = running {
+            return base(ServiceStatus::Running, version, None);
         }
 
         // #6416: nothing is serving, which for an on-demand member is healthy.
@@ -281,6 +422,9 @@ impl AnalyzeConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Why (#6287): the pre-migration connector fell back to probing
     /// `127.0.0.1:7879` when its discovery file was missing, so any process
@@ -363,6 +507,46 @@ mod tests {
     /// What: binds a socket that answers one `analyze.health` frame with a real
     /// envelope, and asserts the connector reads the version off it.
     /// Test: this is the test.
+    /// Serve `socket` as a fake analyzer, counting the request FRAMES it is
+    /// sent.
+    ///
+    /// Why the count is of frames and not of connections: the connect-only
+    /// liveness probe is a connection that sends nothing, and it is precisely
+    /// the traffic #6621 wants unbounded. What must stay rare is the frame — the
+    /// `analyze.health` RPC that used to re-arm the idle window.
+    ///
+    /// The task loops rather than serving once: `detect` now opens two
+    /// connections on its first pass and one on every pass after it.
+    fn spawn_fake_analyzer(socket: &Path) -> Arc<AtomicUsize> {
+        let listener = trusty_common::uds::bind_hardened(socket).expect("bind");
+        let frames = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&frames);
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+            loop {
+                let Ok((conn, _)) = listener.accept().await else {
+                    return;
+                };
+                let counted = Arc::clone(&counted);
+                tokio::spawn(async move {
+                    let mut reader = tokio::io::BufReader::new(conn);
+                    let mut frame = String::new();
+                    // A connect-and-close reads zero bytes and is not a request.
+                    if reader.read_line(&mut frame).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    let reply = br#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"9.9.9","search_reachable":true}}"#;
+                    let conn = reader.get_mut();
+                    let _ = conn.write_all(reply).await;
+                    let _ = conn.write_all(b"\n").await;
+                    let _ = conn.flush().await;
+                });
+            }
+        });
+        frames
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn analyze_connector_reads_the_version_off_a_live_socket() {
         if which::which("trusty-analyze").is_err() {
@@ -372,21 +556,7 @@ mod tests {
 
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let socket = tmp.path().join("sockets").join("analyze.sock");
-        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
-
-        tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-            let Ok((mut conn, _)) = listener.accept().await else {
-                return;
-            };
-            let mut sink = Vec::new();
-            let _ = conn.read_to_end(&mut sink).await;
-            let reply =
-                br#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"9.9.9","search_reachable":true}}"#;
-            let _ = conn.write_all(reply).await;
-            let _ = conn.write_all(b"\n").await;
-            let _ = conn.flush().await;
-        });
+        spawn_fake_analyzer(&socket);
 
         let connector = AnalyzeConnector::with_socket(socket);
         let info = tokio::task::spawn_blocking(move || connector.detect())
@@ -395,6 +565,84 @@ mod tests {
 
         assert_eq!(info.status, ServiceStatus::Running);
         assert_eq!(info.version.as_deref(), Some("9.9.9"));
+    }
+
+    /// REGRESSION (#6621): this connector dialled `analyze.health` on every
+    /// poll — four times a minute against trusty-analyze's 600s idle window — so
+    /// an open dashboard re-armed that window forever and the on-demand server
+    /// it was watching stayed resident for 46 hours.
+    ///
+    /// Why the assertion is a frame COUNT rather than a cadence in seconds: the
+    /// poll interval is the operator's to set, so a fix expressed as "at most
+    /// once per N seconds" is only as good as N. Once per daemon lifetime holds
+    /// at any interval.
+    /// What: three `detect` passes over one live socket send exactly one request
+    /// frame, and every pass still reports Running with the version.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn analyze_detect_dials_health_once_per_socket_identity() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = tmp.path().join("sockets").join("analyze.sock");
+        let frames = spawn_fake_analyzer(&socket);
+
+        let connector = Arc::new(AnalyzeConnector::with_socket(socket.clone()));
+        for pass in 0..3 {
+            let connector = Arc::clone(&connector);
+            let dialled = socket.clone();
+            let version = tokio::task::spawn_blocking(move || connector.version_for(&dialled))
+                .await
+                .expect("probe");
+            assert_eq!(version.as_deref(), Some("9.9.9"), "pass {pass}");
+        }
+
+        assert_eq!(
+            frames.load(Ordering::SeqCst),
+            1,
+            "monitoring must not issue an idle-re-arming call on every poll"
+        );
+    }
+
+    /// The other half of the cache contract: a version cached against a socket
+    /// that has since been replaced is stale, and must be re-read.
+    ///
+    /// Why it matters: an on-demand server exits and a successor binds a new
+    /// file at the same path, so a cache keyed on the PATH would render the
+    /// previous process's version indefinitely after an upgrade.
+    /// What: reads a version, replaces the socket, and asserts a second frame
+    /// was sent.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn analyze_version_cache_is_reread_when_the_socket_is_replaced() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = tmp.path().join("sockets").join("analyze.sock");
+        let first = spawn_fake_analyzer(&socket);
+
+        let connector = Arc::new(AnalyzeConnector::with_socket(socket.clone()));
+        let probe = |connector: Arc<AnalyzeConnector>, socket: PathBuf| async move {
+            tokio::task::spawn_blocking(move || connector.version_for(&socket))
+                .await
+                .expect("probe")
+        };
+        assert_eq!(
+            probe(Arc::clone(&connector), socket.clone())
+                .await
+                .as_deref(),
+            Some("9.9.9")
+        );
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+
+        std::fs::remove_file(&socket).expect("unlink");
+        let second = spawn_fake_analyzer(&socket);
+        assert_eq!(
+            probe(connector, socket).await.as_deref(),
+            Some("9.9.9"),
+            "a replaced socket is a new process, so its version is read again"
+        );
+        assert_eq!(
+            second.load(Ordering::SeqCst),
+            1,
+            "the successor must have been dialled exactly once"
+        );
     }
 
     /// Why (#6350): the console polls `detect` while a dashboard is open. If it

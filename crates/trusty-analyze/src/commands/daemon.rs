@@ -401,6 +401,11 @@ pub async fn handle_doctor(socket: &Path, facts_path: &Path) -> Result<()> {
         }
     }
 
+    // 4. A retired LaunchAgent plist left behind by a pre-#6350 install.
+    for line in stale_unit_warnings() {
+        println!("  {} {line}", "!".yellow());
+    }
+
     println!();
     if ok {
         println!("{} all checks passed", "✓".green());
@@ -411,9 +416,110 @@ pub async fn handle_doctor(socket: &Path, facts_path: &Path) -> Result<()> {
     }
 }
 
+/// Warn about each retired LaunchAgent plist still on disk (#6621).
+///
+/// Why: #6350 retired this daemon's LaunchAgent, and `service uninstall` —
+/// which `tctl install`/`upgrade` also run unattended — unloads and DELETES it.
+/// A host that has run neither still carries `~/Library/LaunchAgents/
+/// com.trusty.analyze.plist`, and that plist declares `KeepAlive: true`: the
+/// next `launchctl load`, or the next login on a host where it is still
+/// referenced, restarts a resident daemon that fights the idle exit. Nothing
+/// told the operator it was there, so `doctor` does.
+///
+/// What: a WARN per surviving plist, never a deletion and never a failure. This
+/// function observes; `service uninstall` is the one path that removes, and the
+/// warning names it.
+///
+/// Only [`retired_plist_if_present`] is platform-specific — where a label's
+/// plist lives. Which labels to look for and what to say about one are the
+/// same everywhere, so they stay outside the `cfg` and are proven by tests that
+/// run on every platform.
+///
+/// Test: `stale_unit_warnings_name_the_retired_labels`,
+/// `stale_unit_warning_points_at_the_uninstall_command`.
+fn stale_unit_warnings() -> Vec<String> {
+    retired_labels()
+        .into_iter()
+        .filter_map(retired_plist_if_present)
+        .map(|path| stale_unit_warning(&path))
+        .collect()
+}
+
+/// The member whose retired launchd labels `doctor` looks for.
+const RETIRED_MEMBER: &str = "trusty-analyze";
+
+/// Every launchd label a pre-#6350 install of this daemon could have left.
+///
+/// Read from the shared registry rather than spelled out here: a label added to
+/// `RETIRED_SERVICES` later is then covered without editing this check.
+fn retired_labels() -> Vec<&'static str> {
+    trusty_common::launchd_labels::retired_labels_for_member(RETIRED_MEMBER)
+}
+
+/// `label`'s installed plist, when one is on disk.
+///
+/// A path that cannot be resolved yields `None` — there is nothing to report
+/// about a home directory that does not resolve, and the data-dir check in
+/// [`handle_doctor`] already fails on that.
+#[cfg(target_os = "macos")]
+fn retired_plist_if_present(label: &str) -> Option<PathBuf> {
+    let path = trusty_common::launchd::plist_path_for_label(label)?;
+    path.exists().then_some(path)
+}
+
+/// Off macOS there are no LaunchAgents, so no label has a plist.
+#[cfg(not(target_os = "macos"))]
+fn retired_plist_if_present(_label: &str) -> Option<PathBuf> {
+    None
+}
+
+/// The warning text for one surviving plist.
+///
+/// Pure, so the message contract is asserted without a home directory that
+/// happens to have one — the filesystem walk above is what varies per host.
+fn stale_unit_warning(path: &Path) -> String {
+    format!(
+        "a retired LaunchAgent is still installed: {} \
+         (it declares KeepAlive and would fight the on-demand idle exit — \
+         clear it with `trusty-analyze service uninstall`)",
+        path.display()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (#6621): the issue's host still carried
+    /// `~/Library/LaunchAgents/com.trusty.analyze.plist` from a pre-#6350
+    /// install — `KeepAlive: true`, not currently loaded, and nothing told the
+    /// operator it was there. The check is only as good as the labels it looks
+    /// for, so this is what says it looks for the right ones.
+    /// Test: this is the test.
+    #[test]
+    fn stale_unit_warnings_name_the_retired_labels() {
+        let labels = trusty_common::launchd_labels::retired_labels_for_member(RETIRED_MEMBER);
+        assert!(
+            labels.contains(&"com.trusty.analyze"),
+            "the pre-#6350 label must be one doctor looks for: {labels:?}"
+        );
+    }
+
+    /// Why: `doctor` observes and never deletes — a check that removed a plist
+    /// would be doing `service uninstall`'s job behind an operator who typed a
+    /// read-only command. The message has to hand that job back.
+    /// Test: this is the test.
+    #[test]
+    fn stale_unit_warning_points_at_the_uninstall_command() {
+        let warning = stale_unit_warning(Path::new(
+            "/Users/x/Library/LaunchAgents/com.trusty.analyze.plist",
+        ));
+        assert!(warning.contains("com.trusty.analyze.plist"), "{warning}");
+        assert!(
+            warning.contains("trusty-analyze service uninstall"),
+            "the warning must name the command that clears it: {warning}"
+        );
+    }
 
     /// REGRESSION (#6287): `start` must hand the child a bare `serve`.
     ///
