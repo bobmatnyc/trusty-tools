@@ -37,6 +37,62 @@ fn enabled_config(dest_dir: &Path, log_dir: &Path) -> TrustyToolsConfig {
     }
 }
 
+/// One `sources[]` entry over `root`, optionally pinned to its own destination.
+fn source_entry(
+    crate_name: &str,
+    root: &Path,
+    destination: Option<&Path>,
+) -> crate::core::trusty_tools_config::LogDrainSourceConfig {
+    crate::core::trusty_tools_config::LogDrainSourceConfig {
+        crate_name: Some(crate_name.to_string()),
+        root: Some(root.display().to_string()),
+        include: vec!["*.log".to_string()],
+        destination: destination.map(|d| format!("file://{}", d.display())),
+        ..Default::default()
+    }
+}
+
+/// Two sources, two destinations: one inherits the section default, one
+/// overrides it (#6657).
+fn two_destination_config(
+    default_dest: &Path,
+    inheriting_logs: &Path,
+    override_dest: &Path,
+    overriding_logs: &Path,
+) -> TrustyToolsConfig {
+    TrustyToolsConfig {
+        log_drain: Some(LogDrainConfig {
+            enabled: Some(true),
+            destination: Some(format!("file://{}", default_dest.display())),
+            github_id: Some("octocat".to_string()),
+            session_id: Some("sess-fixture".to_string()),
+            sources: vec![
+                source_entry("trusty-mpm", inheriting_logs, None),
+                source_entry("trusty-code", overriding_logs, Some(override_dest)),
+            ],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Where a drained file for `crate_name` lands under `dest`.
+fn drained_path(dest: &Path, crate_name: &str, file: &str) -> std::path::PathBuf {
+    dest.join("octocat")
+        .join("sess-fixture")
+        .join("logs")
+        .join(crate_name)
+        .join(file)
+}
+
+/// A temp directory named `name` holding one `<name>.log` file.
+fn named_log_dir(tmp: &TempDir, name: &str) -> std::path::PathBuf {
+    let dir = tmp.path().join(name);
+    std::fs::create_dir_all(&dir).expect("create log dir");
+    std::fs::write(dir.join(format!("{name}.log")), "INFO a line\n").expect("write log file");
+    dir
+}
+
 /// A config whose `log_drain:` section will not resolve.
 fn broken_config(destination: &str) -> TrustyToolsConfig {
     TrustyToolsConfig {
@@ -86,7 +142,8 @@ async fn a_successful_tick_uploads_and_records_success() {
 
     assert_eq!(status.outcome, DrainOutcome::Success, "{}", status.detail);
     assert_eq!(status.uploaded, 1, "{}", status.detail);
-    assert_eq!(status.scheme.as_deref(), Some("file"));
+    assert_eq!(status.destinations.len(), 1);
+    assert_eq!(status.destinations[0].scheme, "file");
 
     // The object landed at `<github-id>/<session>/logs/<crate>/<file>`, which
     // is the epic's key layout — proof this drained rather than merely
@@ -195,6 +252,92 @@ async fn the_wire_ceiling_reaches_the_drain_config() {
 }
 
 #[tokio::test]
+async fn two_destinations_each_get_their_own_pass() {
+    // #6657: the epic's whole point — one daemon, two accounts. Two `file://`
+    // roots stand in for two buckets, so the property is provable with no
+    // network: each source's bytes land under its OWN destination and nowhere
+    // else.
+    let tmp = TempDir::new().expect("tempdir");
+    let dest_a = tmp.path().join("dest-a");
+    let dest_b = tmp.path().join("dest-b");
+    let logs_a = named_log_dir(&tmp, "alpha");
+    let logs_b = named_log_dir(&tmp, "beta");
+    let state = tmp.path().join("state");
+
+    let config = two_destination_config(&dest_a, &logs_a, &dest_b, &logs_b);
+    let plan = plan_of(&config, tmp.path());
+    assert_eq!(
+        plan.destinations.len(),
+        2,
+        "two groups, one per destination"
+    );
+
+    let status = run_tick(&plan, &state, &fixture_target()).await;
+    assert_eq!(status.outcome, DrainOutcome::Success, "{}", status.detail);
+    assert_eq!(status.uploaded, 2, "{}", status.detail);
+    assert_eq!(status.destinations.len(), 2);
+    assert!(
+        status
+            .destinations
+            .iter()
+            .all(|d| d.outcome == DrainOutcome::Success && d.uploaded == 1),
+        "each destination uploads its own single file: {:?}",
+        status.destinations
+    );
+
+    let a = drained_path(&dest_a, "trusty-mpm", "alpha.log");
+    let b = drained_path(&dest_b, "trusty-code", "beta.log");
+    assert!(a.exists(), "expected {}", a.display());
+    assert!(b.exists(), "expected {}", b.display());
+    // Neither destination received the other's bytes.
+    assert!(!drained_path(&dest_a, "trusty-code", "beta.log").exists());
+    assert!(!drained_path(&dest_b, "trusty-mpm", "alpha.log").exists());
+}
+
+#[tokio::test]
+async fn one_failing_destination_does_not_stop_the_others() {
+    // #6657 fail-closed guard: a per-source destination that cannot be reached
+    // must be SKIPPED, never retried against the section default. Falling back
+    // would put this project's logs in the wrong AWS account, which is exactly
+    // what the override exists to prevent.
+    let tmp = TempDir::new().expect("tempdir");
+    let dest_a = tmp.path().join("dest-a");
+    // A `file://` root nested under a regular FILE: `create_dir_all` cannot
+    // make it, so connecting destination B fails.
+    let blocker = tmp.path().join("not-a-directory");
+    std::fs::write(&blocker, b"x").expect("write blocker");
+    let dest_b = blocker.join("dest-b");
+    let logs_a = named_log_dir(&tmp, "alpha");
+    let logs_b = named_log_dir(&tmp, "beta");
+    let state = tmp.path().join("state");
+
+    let config = two_destination_config(&dest_a, &logs_a, &dest_b, &logs_b);
+    let plan = plan_of(&config, tmp.path());
+    let status = run_tick(&plan, &state, &fixture_target()).await;
+
+    // The tick as a whole failed, but the reachable destination still drained.
+    assert_eq!(status.outcome, DrainOutcome::Failed, "{}", status.detail);
+    assert_eq!(status.destinations.len(), 2);
+    assert_eq!(status.destinations[0].outcome, DrainOutcome::Success);
+    assert_eq!(status.destinations[0].uploaded, 1);
+    assert_eq!(status.destinations[1].outcome, DrainOutcome::Failed);
+    assert!(
+        status.destinations[1]
+            .detail
+            .contains("cannot reach the destination"),
+        "unhelpful detail: {}",
+        status.destinations[1].detail
+    );
+
+    // The skipped source's bytes are nowhere under the working destination.
+    assert!(drained_path(&dest_a, "trusty-mpm", "alpha.log").exists());
+    assert!(
+        !drained_path(&dest_a, "trusty-code", "beta.log").exists(),
+        "a failed destination must not fall back to the section default"
+    );
+}
+
+#[tokio::test]
 async fn a_failing_destination_records_failed() {
     let tmp = TempDir::new().expect("tempdir");
     // A `file://` root nested under a regular FILE: `create_dir_all` cannot
@@ -246,7 +389,7 @@ async fn a_disabled_config_records_skipped() {
     let root = tmp.path().join("framework");
     let status = drain_once(&TrustyToolsConfig::default(), &root, tmp.path()).await;
     assert_eq!(status.outcome, DrainOutcome::SkippedDisabled);
-    assert_eq!(status.destination, None);
+    assert!(status.destinations.is_empty());
 }
 
 #[tokio::test]

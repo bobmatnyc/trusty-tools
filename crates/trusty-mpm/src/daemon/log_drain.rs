@@ -35,6 +35,20 @@
 //! The loop awaits each pass to completion before arming the next tick, so two
 //! passes can never race the one manifest. `tokio::time::interval` compensates
 //! for a slow pass by firing immediately rather than by overlapping.
+//!
+//! # One pass per destination, and no fall-back between them (#6657)
+//!
+//! A tick runs `run_once` once per entry in
+//! [`ResolvedLogDrain::destinations`](crate::core::trusty_tools_config::ResolvedLogDrain),
+//! sequentially, each with its own connection and its own manifest — the cache
+//! is already keyed by destination (#6548), so nothing here forks that.
+//!
+//! A destination that cannot be reached fails ALONE. Its sources are skipped
+//! for that tick and the remaining destinations still run. There is deliberately
+//! no path that retries a source against the section default: a per-source
+//! destination exists precisely because those bytes belong in one specific
+//! account, so shipping them to the fallback would be worse than not shipping
+//! them at all.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -47,7 +61,8 @@ use trusty_common::log_drain::{
 };
 
 use crate::core::trusty_tools_config::{
-    LOG_DRAIN_STATE_SUBDIR, LogDrainSetting, ResolvedLogDrain, TrustyToolsConfig, resolve_log_drain,
+    LOG_DRAIN_STATE_SUBDIR, LogDrainSetting, ResolvedDrainDestination, ResolvedLogDrain,
+    TrustyToolsConfig, resolve_log_drain,
 };
 
 /// Filename of the last-run record inside the drain state directory.
@@ -81,28 +96,56 @@ pub enum DrainOutcome {
     Failed,
 }
 
+/// How one destination's pass ended, within a tick (#6657).
+///
+/// Why: a tick now covers several object stores, and "the drain failed" is not
+/// actionable when only one of three destinations is unreachable. The doctor
+/// row lists these, so an operator sees which account stopped accepting logs.
+/// What: one record per entry in `ResolvedLogDrain::destinations`, in the same
+/// order.
+/// Test: `tests::one_failing_destination_does_not_stop_the_others`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct LogDrainDestinationStatus {
+    /// The destination as the operator wrote it.
+    pub destination: String,
+    /// Destination scheme (`s3`, `file`).
+    pub scheme: String,
+    /// How this destination's pass ended.
+    pub outcome: DrainOutcome,
+    /// Files uploaded to this destination.
+    pub uploaded: usize,
+    /// Files the manifest proved this destination already had.
+    pub skipped_unchanged: usize,
+    /// One line an operator can act on, for this destination alone.
+    pub detail: String,
+}
+
 /// The persisted result of the most recent drain pass.
 ///
 /// Why: `tm doctor` runs daemonless (see [`super::doctor::run_doctor`]), so the
 /// doctor row cannot read the scheduler's memory. A small JSON file is the only
 /// channel between the two.
-/// What: the outcome, when it happened, the destination it was aimed at, the
-/// upload counts, and a human-readable detail line.
+/// What: the aggregate outcome, when it happened, one
+/// [`LogDrainDestinationStatus`] per destination the tick covered, the summed
+/// counts, and a human-readable detail line. `destinations` is
+/// `#[serde(default)]`, so a `status.json` written before #6657 still decodes —
+/// it simply carries no per-destination breakdown and the doctor row falls back
+/// to `detail`.
 /// Test: `tests::status_round_trips_through_the_state_dir`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct LogDrainStatus {
-    /// Which of the three states this pass ended in.
+    /// The tick's verdict: `Failed` when ANY destination failed.
     pub outcome: DrainOutcome,
     /// RFC 3339 timestamp of the pass.
     pub at: String,
-    /// The destination as the operator wrote it, or `null` when disabled.
-    pub destination: Option<String>,
-    /// Destination scheme (`s3`, `file`), or `null` when disabled.
-    pub scheme: Option<String>,
-    /// Files uploaded this pass.
+    /// Per-destination outcomes, in plan order. Empty when disabled (#6657).
+    #[serde(default)]
+    pub destinations: Vec<LogDrainDestinationStatus>,
+    /// Files uploaded this pass, across every destination.
     pub uploaded: usize,
-    /// Files the manifest proved were already uploaded.
+    /// Files the manifests proved were already uploaded, across every destination.
     pub skipped_unchanged: usize,
     /// One line an operator can act on.
     pub detail: String,
@@ -114,8 +157,7 @@ impl LogDrainStatus {
         Self {
             outcome: DrainOutcome::SkippedDisabled,
             at: chrono::Utc::now().to_rfc3339(),
-            destination: None,
-            scheme: None,
+            destinations: Vec::new(),
             uploaded: 0,
             skipped_unchanged: 0,
             detail: detail.into(),
@@ -131,32 +173,95 @@ impl LogDrainStatus {
         Self {
             outcome: DrainOutcome::Failed,
             at: chrono::Utc::now().to_rfc3339(),
-            destination: None,
-            scheme: None,
+            destinations: Vec::new(),
             uploaded: 0,
             skipped_unchanged: 0,
             detail: format!("config error: {reason}"),
         }
     }
 
-    /// Build a failure record for `plan`.
+    /// Build a failure record covering every destination in `plan` at once.
+    ///
+    /// Used when the tick fails BEFORE any destination is reached — an
+    /// unresolvable identity, which is not a property of any one of them.
     fn failed(plan: &ResolvedLogDrain, detail: impl Into<String>) -> Self {
+        let detail = detail.into();
+        let destinations = plan
+            .destinations
+            .iter()
+            .map(|group| LogDrainDestinationStatus {
+                destination: group.destination_display.clone(),
+                scheme: group.scheme().to_string(),
+                outcome: DrainOutcome::Failed,
+                uploaded: 0,
+                skipped_unchanged: 0,
+                detail: detail.clone(),
+            })
+            .collect();
         Self {
             outcome: DrainOutcome::Failed,
             at: chrono::Utc::now().to_rfc3339(),
-            destination: Some(plan.destination_display.clone()),
-            scheme: Some(plan.scheme().to_string()),
+            destinations,
+            uploaded: 0,
+            skipped_unchanged: 0,
+            detail,
+        }
+    }
+
+    /// Fold every destination's record into the tick's verdict.
+    ///
+    /// The tick FAILS when any destination failed — the fail-open guard is
+    /// per-destination, so a partial success is still a failure to report.
+    fn from_destinations(destinations: Vec<LogDrainDestinationStatus>) -> Self {
+        let failed = destinations
+            .iter()
+            .any(|d| d.outcome == DrainOutcome::Failed);
+        let uploaded = destinations.iter().map(|d| d.uploaded).sum();
+        let skipped_unchanged = destinations.iter().map(|d| d.skipped_unchanged).sum();
+        // With one destination the tick's detail IS that destination's, so a
+        // single-destination host reads exactly as it did before #6657.
+        let detail = match destinations.as_slice() {
+            [] => "no destination had any source configured".to_string(),
+            [only] => only.detail.clone(),
+            many => many
+                .iter()
+                .map(|d| format!("{} → {}: {}", d.scheme, d.destination, d.detail))
+                .collect::<Vec<_>>()
+                .join("; "),
+        };
+        Self {
+            outcome: if failed {
+                DrainOutcome::Failed
+            } else {
+                DrainOutcome::Success
+            },
+            at: chrono::Utc::now().to_rfc3339(),
+            destinations,
+            uploaded,
+            skipped_unchanged,
+            detail,
+        }
+    }
+}
+
+impl LogDrainDestinationStatus {
+    /// Build a failure record for one destination.
+    fn failed(group: &ResolvedDrainDestination, detail: impl Into<String>) -> Self {
+        Self {
+            destination: group.destination_display.clone(),
+            scheme: group.scheme().to_string(),
+            outcome: DrainOutcome::Failed,
             uploaded: 0,
             skipped_unchanged: 0,
             detail: detail.into(),
         }
     }
 
-    /// Build the record for a completed `run_once`.
+    /// Build the record for one destination's completed `run_once`.
     ///
     /// A report carrying per-file errors is [`DrainOutcome::Failed`] even
     /// though `run_once` returned `Ok` — see the module docs.
-    fn from_report(plan: &ResolvedLogDrain, report: &DrainReport) -> Self {
+    fn from_report(group: &ResolvedDrainDestination, report: &DrainReport) -> Self {
         let failed = !report.errors.is_empty();
         let detail = if failed {
             let (key, message) = &report.errors[0];
@@ -179,14 +284,13 @@ impl LogDrainStatus {
             )
         };
         Self {
+            destination: group.destination_display.clone(),
+            scheme: group.scheme().to_string(),
             outcome: if failed {
                 DrainOutcome::Failed
             } else {
                 DrainOutcome::Success
             },
-            at: chrono::Utc::now().to_rfc3339(),
-            destination: Some(plan.destination_display.clone()),
-            scheme: Some(plan.scheme().to_string()),
             uploaded: report.uploaded,
             skipped_unchanged: report.skipped_unchanged,
             detail,
@@ -311,20 +415,46 @@ pub async fn resolve_github_id(plan: &ResolvedLogDrain) -> Result<String, String
 /// Why: separated from [`drain_once`] so the tests can drive a pass with an
 /// explicit identity and an explicit state directory — no config file, no `gh`,
 /// no home directory.
-/// What: connects the destination, calls `run_once`, and maps the outcome
-/// through [`LogDrainStatus`]. Every failure arm is [`DrainOutcome::Failed`];
-/// none can produce a success record.
+/// What: one [`run_destination_pass`] per entry in `plan.destinations`, in
+/// order, each folded into the tick's verdict by
+/// [`LogDrainStatus::from_destinations`]. Passes are sequential rather than
+/// concurrent: the single-flight guarantee this module provides is "one pass at
+/// a time", and running two destinations at once would double the drain's peak
+/// memory for no operator-visible gain at a 15-minute cadence.
 /// Test: `tests::a_successful_tick_uploads_and_records_success`,
-/// `tests::a_second_tick_dedupes`, `tests::a_failing_destination_records_failed`.
+/// `tests::a_second_tick_dedupes`, `tests::a_failing_destination_records_failed`,
+/// `tests::two_destinations_each_get_their_own_pass`.
 pub async fn run_tick(
     plan: &ResolvedLogDrain,
     state_dir: &Path,
     target: &DrainTarget,
 ) -> LogDrainStatus {
-    let dest = match ObjectStoreDestination::connect(&plan.destination).await {
+    let mut per_destination = Vec::with_capacity(plan.destinations.len());
+    for group in &plan.destinations {
+        per_destination.push(run_destination_pass(plan, group, state_dir, target).await);
+    }
+    LogDrainStatus::from_destinations(per_destination)
+}
+
+/// Drain one destination's own sources, and report only on that destination.
+///
+/// #6657: every failure arm ends here. Nothing retries these sources against
+/// another destination — a per-source destination is a statement about which
+/// account the bytes belong in, so a fallback would violate the very
+/// requirement the override exists to satisfy.
+async fn run_destination_pass(
+    plan: &ResolvedLogDrain,
+    group: &ResolvedDrainDestination,
+    state_dir: &Path,
+    target: &DrainTarget,
+) -> LogDrainDestinationStatus {
+    let dest = match ObjectStoreDestination::connect(&group.destination).await {
         Ok(dest) => dest,
         Err(e) => {
-            return LogDrainStatus::failed(plan, format!("cannot reach the destination: {e}"));
+            return LogDrainDestinationStatus::failed(
+                group,
+                format!("cannot reach the destination: {e}"),
+            );
         }
     };
     let cfg = DrainConfig::new(state_dir)
@@ -332,9 +462,12 @@ pub async fn run_tick(
         .with_max_file_bytes(plan.max_file_bytes)
         // #6547: the collector streams, so this is the bound that matters.
         .with_max_wire_bytes(plan.max_wire_bytes);
-    match run_once(&cfg, &dest, target, &plan.sources).await {
-        Ok(report) => LogDrainStatus::from_report(plan, &report),
-        Err(e) => LogDrainStatus::failed(plan, format!("drain run failed: {e}")),
+    // The manifest cache under `state_dir` is namespaced by destination
+    // (#6548), so each group reads and writes its own record from one shared
+    // directory.
+    match run_once(&cfg, &dest, target, &group.sources).await {
+        Ok(report) => LogDrainDestinationStatus::from_report(group, &report),
+        Err(e) => LogDrainDestinationStatus::failed(group, format!("drain run failed: {e}")),
     }
 }
 

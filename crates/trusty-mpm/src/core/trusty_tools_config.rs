@@ -43,7 +43,7 @@ pub use untracked_sync::{
 pub mod log_drain;
 pub use log_drain::{
     DEFAULT_INTERVAL_SECS as LOG_DRAIN_DEFAULT_INTERVAL_SECS, LogDrainConfig, LogDrainConfigError,
-    LogDrainSetting, LogDrainSourceConfig, ResolvedLogDrain,
+    LogDrainSetting, LogDrainSourceConfig, ResolvedDrainDestination, ResolvedLogDrain,
     STATE_SUBDIR as LOG_DRAIN_STATE_SUBDIR, resolve_log_drain,
 };
 

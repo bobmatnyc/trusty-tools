@@ -129,9 +129,11 @@ pub struct LogDrainConfig {
 /// each writes somewhere different. Naming sources in config means adopting a
 /// new producer needs no code change here.
 /// What: `crate_name` becomes a key segment, `root` is the directory walked,
-/// `include` the globs relative to it, `level` the minimum line level kept.
+/// `include` the globs relative to it, `level` the minimum line level kept, and
+/// `destination` the object store this source alone goes to (#6657).
 /// Test: `tests::resolve_uses_configured_sources`,
-/// `tests::resolve_rejects_a_source_with_no_root`.
+/// `tests::resolve_rejects_a_source_with_no_root`,
+/// `tests::resolve_groups_sources_by_destination`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct LogDrainSourceConfig {
@@ -148,6 +150,15 @@ pub struct LogDrainSourceConfig {
     /// `None` → every line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
+    /// Where THIS source's logs go. `None` → the section's `destination`.
+    ///
+    /// #6657: one host drains several projects, and a project's logs can be
+    /// required to land in a specific AWS account. Overriding per source is how
+    /// that requirement is expressed without splitting the daemon. A source
+    /// whose override cannot be reached is SKIPPED, never rerouted to the
+    /// section default — see [`resolve_log_drain`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
 }
 
 /// Every way the `log_drain:` section can be wrong.
@@ -189,6 +200,15 @@ pub enum LogDrainConfigError {
         field: &'static str,
     },
 
+    /// A `sources[].destination` override did not parse (#6657).
+    #[error("log_drain.sources[{index}].destination is invalid: {reason}")]
+    SourceDestination {
+        /// Position of the offending entry.
+        index: usize,
+        /// The parser's own message, which names the URI and what was wrong.
+        reason: String,
+    },
+
     /// A `sources[].level` value that is not a level name.
     #[error(
         "log_drain.sources[{index}].level `{value}` is not a level — \
@@ -202,12 +222,48 @@ pub enum LogDrainConfigError {
     },
 }
 
+/// One object store, and every source that resolved to it (#6657).
+///
+/// Why: the scheduler runs one `run_once` per destination, because `run_once`
+/// takes exactly one. Grouping here rather than in the scheduler means the
+/// doctor row and the scheduler read the same grouping, and a source can never
+/// be counted against a destination it was not configured for.
+/// What: `sources` is non-empty by construction — a destination nothing points
+/// at is not in the list at all, so no pass is ever run for one.
+/// Test: `tests::resolve_groups_sources_by_destination`,
+/// `tests::resolve_inherits_the_section_destination`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ResolvedDrainDestination {
+    /// The parsed destination.
+    pub destination: DestinationUri,
+    /// The destination as the operator wrote it, for log and doctor messages.
+    pub destination_display: String,
+    /// The directories collected for this destination. Never empty.
+    pub sources: Vec<LogSource>,
+}
+
+impl ResolvedDrainDestination {
+    /// The destination's scheme, as the doctor row reports it.
+    pub fn scheme(&self) -> &'static str {
+        match self.destination.scheme() {
+            DestinationScheme::S3 => "s3",
+            DestinationScheme::File => "file",
+            // `DestinationScheme` is `#[non_exhaustive]` and reserves `gs`/`az`
+            // for a later phase; `DestinationUri::parse` refuses both today, so
+            // this arm is unreachable rather than a silent mislabel.
+            _ => "other",
+        }
+    }
+}
+
 /// A validated, runnable drain plan.
 ///
 /// Why: the scheduler and the doctor row both need the same resolved answer,
 /// and re-deriving it in two places is how the two disagree.
 /// What: everything `run_once` needs except the identity, which the scheduler
-/// resolves at tick time.
+/// resolves at tick time. `destinations` is non-empty for any enabled plan; the
+/// knobs beside it are section-wide and apply to every pass.
 /// Test: `tests::resolve_fills_defaults`.
 ///
 /// Deliberately not `PartialEq`: `LogSource` (a `trusty-common` type) is not,
@@ -216,10 +272,8 @@ pub enum LogDrainConfigError {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ResolvedLogDrain {
-    /// The parsed destination.
-    pub destination: DestinationUri,
-    /// The destination as the operator wrote it, for log and doctor messages.
-    pub destination_display: String,
+    /// Every destination with at least one source, in config order (#6657).
+    pub destinations: Vec<ResolvedDrainDestination>,
     /// How long the scheduler sleeps between passes.
     pub interval: Duration,
     /// Plaintext source ceiling handed to `DrainConfig`.
@@ -232,22 +286,6 @@ pub struct ResolvedLogDrain {
     pub github_id: Option<String>,
     /// Operator-pinned session segment, when one was configured.
     pub session_id: Option<String>,
-    /// The directories to collect.
-    pub sources: Vec<LogSource>,
-}
-
-impl ResolvedLogDrain {
-    /// The destination's scheme, as the doctor row reports it.
-    pub fn scheme(&self) -> &'static str {
-        match self.destination.scheme() {
-            DestinationScheme::S3 => "s3",
-            DestinationScheme::File => "file",
-            // `DestinationScheme` is `#[non_exhaustive]` and reserves `gs`/`az`
-            // for a later phase; `DestinationUri::parse` refuses both today, so
-            // this arm is unreachable rather than a silent mislabel.
-            _ => "other",
-        }
-    }
 }
 
 /// What the config says the drain should do.
@@ -279,10 +317,26 @@ pub enum LogDrainSetting {
 /// `<home>/.trusty-mpm/logs` filtered at INFO, which is the file appender
 /// `bin/tm/main.rs` installs for the daemon.
 ///
+/// # Per-source destinations (#6657)
+///
+/// A source's own `destination` wins over the section's; a source that names
+/// none inherits the section default. Sources are then GROUPED by the
+/// destination they resolved to, in first-appearance order, and the scheduler
+/// runs one pass per group. `destination` at the section level is required only
+/// when at least one source still needs it — a config where every source names
+/// its own is complete without one.
+///
+/// Grouping is by the PARSED destination, so `s3://b/p` and `s3://b/p/` are one
+/// group, while two identities against one bucket (`?profile=`) are two. That
+/// asymmetry matches `DestinationUri::cache_namespace`, which the manifest
+/// cache is keyed by (#6548) — so each group's pass reads and writes its own
+/// record with no forking of that fix.
+///
 /// Test: `tests::resolve_disabled_when_section_absent`,
 /// `tests::resolve_fills_defaults`,
 /// `tests::resolve_rejects_a_malformed_destination`,
-/// `tests::resolve_validates_even_while_disabled`.
+/// `tests::resolve_validates_even_while_disabled`,
+/// `tests::resolve_groups_sources_by_destination`.
 ///
 /// # Errors
 /// Any [`LogDrainConfigError`]. The caller must not fall back to a default
@@ -329,47 +383,84 @@ pub fn resolve_log_drain(
 
     let sources = resolve_sources(&section.sources, home)?;
 
-    let Some((destination_display, destination)) = destination else {
-        // Reached only when `destination` is absent: a present-but-malformed
-        // one already returned above, disabled or not.
-        return if enabled {
-            Err(LogDrainConfigError::MissingDestination)
-        } else {
-            Ok(LogDrainSetting::Disabled)
-        };
-    };
-
     if !enabled {
         return Ok(LogDrainSetting::Disabled);
     }
 
+    let destinations = group_by_destination(sources, destination)?;
+
     Ok(LogDrainSetting::Enabled(Box::new(ResolvedLogDrain {
-        destination,
-        destination_display,
+        destinations,
         interval: Duration::from_secs(interval_secs),
         max_file_bytes,
         max_wire_bytes,
         secrets: section.secrets.clone(),
         github_id: non_empty(section.github_id.as_deref()),
         session_id: non_empty(section.session_id.as_deref()),
-        sources,
     })))
+}
+
+/// A destination as the operator wrote it, beside its parsed form.
+type NamedDestination = (String, DestinationUri);
+
+/// One source and the destination override it carried, if any.
+type SourceWithOverride = (LogSource, Option<NamedDestination>);
+
+/// Collect sources under the destination each one resolved to (#6657).
+///
+/// First-appearance order, so the doctor row and the log lines list
+/// destinations in the order the operator wrote them rather than in whatever
+/// order a hash map yields. A linear scan is the right structure here: a host
+/// drains to a handful of destinations, and `DestinationUri` is `Eq` but not
+/// `Hash`.
+///
+/// Test: `tests::resolve_groups_sources_by_destination`,
+/// `tests::resolve_rejects_enabled_with_no_destination`.
+fn group_by_destination(
+    sources: Vec<SourceWithOverride>,
+    default: Option<NamedDestination>,
+) -> Result<Vec<ResolvedDrainDestination>, LogDrainConfigError> {
+    let mut groups: Vec<ResolvedDrainDestination> = Vec::new();
+    for (source, over) in sources {
+        // A source with no override needs the section default; without one
+        // there is nowhere for it to go, and guessing is what #6657 forbids.
+        let (display, uri) = match over.or_else(|| default.clone()) {
+            Some(named) => named,
+            None => return Err(LogDrainConfigError::MissingDestination),
+        };
+        match groups.iter_mut().find(|g| g.destination == uri) {
+            Some(group) => group.sources.push(source),
+            None => groups.push(ResolvedDrainDestination {
+                destination: uri,
+                destination_display: display,
+                sources: vec![source],
+            }),
+        }
+    }
+    Ok(groups)
 }
 
 /// Validate the `sources[]` list, or supply the built-in daemon source.
 ///
-/// Test: `tests::resolve_fills_defaults`, `tests::resolve_uses_configured_sources`.
+/// Each entry's `destination` override is parsed here so a typo is refused
+/// while the drain is still disabled, exactly as the section's own is.
+///
+/// Test: `tests::resolve_fills_defaults`, `tests::resolve_uses_configured_sources`,
+/// `tests::resolve_rejects_a_malformed_source_destination`.
 fn resolve_sources(
     configured: &[LogDrainSourceConfig],
     home: &Path,
-) -> Result<Vec<LogSource>, LogDrainConfigError> {
+) -> Result<Vec<SourceWithOverride>, LogDrainConfigError> {
     if configured.is_empty() {
-        return Ok(vec![LogSource {
-            crate_name: super::CRATE_NAME.to_string(),
-            root: home.join(".trusty-mpm").join(DAEMON_LOG_SUBDIR),
-            include: DEFAULT_INCLUDE.iter().map(|s| (*s).to_string()).collect(),
-            level_filter: Some(Level::Info),
-        }]);
+        return Ok(vec![(
+            LogSource {
+                crate_name: super::CRATE_NAME.to_string(),
+                root: home.join(".trusty-mpm").join(DAEMON_LOG_SUBDIR),
+                include: DEFAULT_INCLUDE.iter().map(|s| (*s).to_string()).collect(),
+                level_filter: Some(Level::Info),
+            },
+            None,
+        )]);
     }
 
     configured
@@ -403,12 +494,27 @@ fn resolve_sources(
             } else {
                 entry.include.clone()
             };
-            Ok(LogSource {
-                crate_name,
-                root: expand_home(&root, home),
-                include,
-                level_filter,
-            })
+            let over = match non_empty(entry.destination.as_deref()) {
+                None => None,
+                Some(raw) => {
+                    let uri = DestinationUri::parse(&raw).map_err(|e| {
+                        LogDrainConfigError::SourceDestination {
+                            index,
+                            reason: e.to_string(),
+                        }
+                    })?;
+                    Some((raw, uri))
+                }
+            };
+            Ok((
+                LogSource {
+                    crate_name,
+                    root: expand_home(&root, home),
+                    include,
+                    level_filter,
+                },
+                over,
+            ))
         })
         .collect()
 }

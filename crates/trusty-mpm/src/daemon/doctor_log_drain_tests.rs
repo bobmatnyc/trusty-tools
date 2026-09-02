@@ -11,34 +11,73 @@ use std::time::Duration;
 
 use super::*;
 use crate::core::trusty_tools_config::LOG_DRAIN_DEFAULT_INTERVAL_SECS;
+use crate::daemon::log_drain::LogDrainDestinationStatus;
 use trusty_common::log_drain::DestinationUri;
 
-/// An enabled plan pointing at `file:///tmp/drain`.
-fn plan() -> LogDrainSetting {
+/// One resolved destination group at `file://<path>`, with no sources.
+fn group(path: &str) -> crate::core::trusty_tools_config::ResolvedDrainDestination {
+    crate::core::trusty_tools_config::ResolvedDrainDestination {
+        destination: DestinationUri::File {
+            path: PathBuf::from(path),
+        },
+        destination_display: format!("file://{path}"),
+        sources: Vec::new(),
+    }
+}
+
+/// An enabled plan over `destinations`.
+fn plan_over(
+    destinations: Vec<crate::core::trusty_tools_config::ResolvedDrainDestination>,
+) -> LogDrainSetting {
     LogDrainSetting::Enabled(Box::new(
         crate::core::trusty_tools_config::ResolvedLogDrain {
-            destination: DestinationUri::File {
-                path: PathBuf::from("/tmp/drain"),
-            },
-            destination_display: "file:///tmp/drain".to_string(),
+            destinations,
             interval: Duration::from_secs(LOG_DRAIN_DEFAULT_INTERVAL_SECS),
             max_file_bytes: 1024,
             max_wire_bytes: 1024,
             secrets: Vec::new(),
             github_id: Some("octocat".to_string()),
             session_id: Some("sess-1".to_string()),
-            sources: Vec::new(),
         },
     ))
 }
 
-/// A recorded status with `outcome` and `detail`.
+/// An enabled plan pointing at `file:///tmp/drain`.
+fn plan() -> LogDrainSetting {
+    plan_over(vec![group("/tmp/drain")])
+}
+
+/// One recorded destination outcome.
+fn recorded(path: &str, outcome: DrainOutcome, detail: &str) -> LogDrainDestinationStatus {
+    LogDrainDestinationStatus {
+        destination: format!("file://{path}"),
+        scheme: "file".to_string(),
+        outcome,
+        uploaded: 3,
+        skipped_unchanged: 1,
+        detail: detail.to_string(),
+    }
+}
+
+/// A recorded status with `outcome` and `detail`, over one destination.
 fn status(outcome: DrainOutcome, detail: &str) -> LogDrainStatus {
+    status_over(
+        outcome,
+        vec![recorded("/tmp/drain", outcome, detail)],
+        detail,
+    )
+}
+
+/// A recorded status over an explicit destination list.
+fn status_over(
+    outcome: DrainOutcome,
+    destinations: Vec<LogDrainDestinationStatus>,
+    detail: &str,
+) -> LogDrainStatus {
     LogDrainStatus {
         outcome,
         at: "2026-09-01T00:00:00Z".to_string(),
-        destination: Some("file:///tmp/drain".to_string()),
-        scheme: Some("file".to_string()),
+        destinations,
         uploaded: 3,
         skipped_unchanged: 1,
         detail: detail.to_string(),
@@ -106,6 +145,66 @@ fn a_failed_run_fails() {
     );
     assert!(
         check.message.contains("cannot reach the destination"),
+        "{}",
+        check.message
+    );
+}
+
+#[test]
+fn the_row_lists_every_destination_with_its_own_outcome() {
+    // #6657: one unreachable account among two is a different repair from both
+    // being down, so the row names each destination and quotes each verdict.
+    let setting = plan_over(vec![group("/tmp/drain-a"), group("/tmp/drain-b")]);
+    let recorded_status = status_over(
+        DrainOutcome::Failed,
+        vec![
+            recorded("/tmp/drain-a", DrainOutcome::Success, "2 file(s) uploaded"),
+            recorded(
+                "/tmp/drain-b",
+                DrainOutcome::Failed,
+                "cannot reach the destination: no such directory",
+            ),
+        ],
+        "aggregate detail nobody should be reading here",
+    );
+    let check = build_log_drain_check(Ok(&setting), Some(&recorded_status));
+
+    // One destination failing fails the row.
+    assert_eq!(check.status, CheckStatus::Fail);
+    // Both destinations are named, in plan order, with their own verdicts.
+    assert!(
+        check
+            .message
+            .contains("file → file:///tmp/drain-a, file → file:///tmp/drain-b"),
+        "the row must name every configured destination: {}",
+        check.message
+    );
+    assert!(
+        check
+            .message
+            .contains("file:///tmp/drain-a: ok — 2 file(s) uploaded"),
+        "the healthy destination keeps its own verdict: {}",
+        check.message
+    );
+    assert!(
+        check
+            .message
+            .contains("file:///tmp/drain-b: FAILED — cannot reach the destination"),
+        "the broken destination is named as the broken one: {}",
+        check.message
+    );
+}
+
+#[test]
+fn a_record_predating_per_destination_outcomes_still_reads() {
+    // A `status.json` written before #6657 carries no breakdown; the row falls
+    // back to its single detail line rather than claiming nothing ran.
+    let setting = plan();
+    let recorded_status = status_over(DrainOutcome::Success, Vec::new(), "3 file(s) uploaded");
+    let check = build_log_drain_check(Ok(&setting), Some(&recorded_status));
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(
+        check.message.contains("3 file(s) uploaded"),
         "{}",
         check.message
     );

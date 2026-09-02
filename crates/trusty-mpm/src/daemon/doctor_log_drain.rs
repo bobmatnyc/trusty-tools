@@ -52,9 +52,16 @@ pub(crate) fn check_log_drain(framework_root: &Path, home: &Path) -> DoctorCheck
 ///
 /// A last run recorded as `SkippedDisabled` under a now-enabled config reads as
 /// the no-run case: the record predates the current setting.
+///
+/// #6657: the row names EVERY configured destination, and quotes each one's own
+/// last-run outcome. One unreachable account among three is a different repair
+/// from all three being down, and a row that named only the first would hide
+/// the difference.
+///
 /// Test: `tests::config_error_fails`, `tests::disabled_is_ok`,
 /// `tests::enabled_with_no_run_warns`, `tests::a_failed_run_fails`,
-/// `tests::a_successful_run_is_ok`.
+/// `tests::a_successful_run_is_ok`,
+/// `tests::the_row_lists_every_destination_with_its_own_outcome`.
 fn build_log_drain_check(
     setting: Result<&LogDrainSetting, &LogDrainConfigError>,
     status: Option<&LogDrainStatus>,
@@ -80,7 +87,12 @@ fn build_log_drain_check(
         Ok(LogDrainSetting::Enabled(plan)) => plan,
     };
 
-    let where_to = format!("{} → {}", plan.scheme(), plan.destination_display);
+    let where_to = plan
+        .destinations
+        .iter()
+        .map(|group| format!("{} → {}", group.scheme(), group.destination_display))
+        .collect::<Vec<_>>()
+        .join(", ");
     let Some(status) = status.filter(|s| s.outcome != DrainOutcome::SkippedDisabled) else {
         return DoctorCheck::new(
             "log_drain",
@@ -88,14 +100,15 @@ fn build_log_drain_check(
             format!("log drain enabled ({where_to}) but no run has been recorded yet"),
         );
     };
+    let outcomes = recorded_outcomes(status);
 
     match status.outcome {
         DrainOutcome::Success => DoctorCheck::new(
             "log_drain",
             CheckStatus::Ok,
             format!(
-                "log drain enabled ({where_to}); last run {} — {}",
-                status.at, status.detail
+                "log drain enabled ({where_to}); last run {} — {outcomes}",
+                status.at
             ),
         ),
         // #6535: an errored pass must never read as drained. See
@@ -104,8 +117,8 @@ fn build_log_drain_check(
             "log_drain",
             CheckStatus::Fail,
             format!(
-                "log drain enabled ({where_to}) but the last run FAILED at {} — {}",
-                status.at, status.detail
+                "log drain enabled ({where_to}) but the last run FAILED at {} — {outcomes}",
+                status.at
             ),
         ),
         // Filtered out above; kept total rather than `unreachable!`.
@@ -115,6 +128,30 @@ fn build_log_drain_check(
             format!("log drain enabled ({where_to}) but no run has been recorded yet"),
         ),
     }
+}
+
+/// Render each recorded destination's own outcome, one clause apiece (#6657).
+///
+/// A record written before #6657 carries no per-destination breakdown, so its
+/// single `detail` line is used unchanged rather than reported as "no
+/// destinations ran".
+fn recorded_outcomes(status: &LogDrainStatus) -> String {
+    if status.destinations.is_empty() {
+        return status.detail.clone();
+    }
+    status
+        .destinations
+        .iter()
+        .map(|d| {
+            let verdict = match d.outcome {
+                DrainOutcome::Success => "ok",
+                DrainOutcome::Failed => "FAILED",
+                DrainOutcome::SkippedDisabled => "skipped",
+            };
+            format!("{} → {}: {verdict} — {}", d.scheme, d.destination, d.detail)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 #[cfg(test)]

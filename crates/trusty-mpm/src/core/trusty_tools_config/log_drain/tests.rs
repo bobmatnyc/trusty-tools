@@ -37,9 +37,14 @@ log_drain:
       root: "~/Library/Logs/trusty-code"
       include: ["*.log"]
       level: warn
+      destination: "s3://owner-bucket/logs?profile=owner"
 "#,
     );
     let section = config.log_drain.as_ref().expect("section present");
+    assert_eq!(
+        section.sources[0].destination.as_deref(),
+        Some("s3://owner-bucket/logs?profile=owner")
+    );
     assert_eq!(section.enabled, Some(true));
     assert_eq!(
         section.destination.as_deref(),
@@ -94,13 +99,15 @@ log_drain:
     assert_eq!(plan.interval.as_secs(), DEFAULT_INTERVAL_SECS);
     assert_eq!(plan.max_file_bytes, DEFAULT_MAX_FILE_BYTES);
     assert_eq!(plan.max_wire_bytes, DEFAULT_MAX_WIRE_BYTES);
-    assert_eq!(plan.scheme(), "file");
+    assert_eq!(plan.destinations.len(), 1);
+    assert_eq!(plan.destinations[0].scheme(), "file");
     assert_eq!(plan.github_id, None);
     assert_eq!(plan.session_id, None);
 
     // The built-in source is the daemon's own rolling file log.
-    assert_eq!(plan.sources.len(), 1);
-    let source = &plan.sources[0];
+    let sources = &plan.destinations[0].sources;
+    assert_eq!(sources.len(), 1);
+    let source = &sources[0];
     assert_eq!(source.crate_name, "trusty-mpm");
     assert_eq!(source.root, home().join(".trusty-mpm").join("logs"));
     assert_eq!(source.include, vec!["trusty-mpm.log*".to_string()]);
@@ -127,20 +134,121 @@ log_drain:
     else {
         panic!("expected an enabled plan");
     };
-    assert_eq!(plan.scheme(), "s3");
-    assert_eq!(plan.sources.len(), 2);
+    // Both sources inherit the section destination, so they share one group.
+    assert_eq!(plan.destinations.len(), 1);
+    assert_eq!(plan.destinations[0].scheme(), "s3");
+    let sources = &plan.destinations[0].sources;
+    assert_eq!(sources.len(), 2);
     // `~` expands against the supplied home, and the level name is
     // case-insensitive.
-    assert_eq!(
-        plan.sources[0].root,
-        home().join("Library/Logs/trusty-agents")
-    );
-    assert_eq!(plan.sources[0].level_filter, Some(Level::Warn));
+    assert_eq!(sources[0].root, home().join("Library/Logs/trusty-agents"));
+    assert_eq!(sources[0].level_filter, Some(Level::Warn));
     // An absent `include` collects everything under the root; an absent `level`
     // uploads every line.
-    assert_eq!(plan.sources[1].include, vec!["**/*".to_string()]);
-    assert_eq!(plan.sources[1].level_filter, None);
-    assert_eq!(plan.sources[1].root, Path::new("/var/log/trusty-code"));
+    assert_eq!(sources[1].include, vec!["**/*".to_string()]);
+    assert_eq!(sources[1].level_filter, None);
+    assert_eq!(sources[1].root, Path::new("/var/log/trusty-code"));
+}
+
+#[test]
+fn resolve_groups_sources_by_destination() {
+    // #6657: a source's own `destination` wins; a source without one inherits
+    // the section default. Sources sharing a destination share one pass.
+    let config = config_from_yaml(
+        r#"
+log_drain:
+  enabled: true
+  destination: "s3://default-bucket/prefix"
+  sources:
+    - crate_name: trusty-mpm
+      root: "/var/log/trusty-mpm"
+    - crate_name: trusty-code
+      root: "/var/log/trusty-code"
+      destination: "s3://owner-bucket/logs?profile=owner"
+    - crate_name: trusty-agents
+      root: "/var/log/trusty-agents"
+    - crate_name: trusty-search
+      root: "/var/log/trusty-search"
+      destination: "s3://owner-bucket/logs?profile=owner"
+"#,
+    );
+    let LogDrainSetting::Enabled(plan) = resolve_log_drain(&config, home()).expect("resolves")
+    else {
+        panic!("expected an enabled plan");
+    };
+
+    // Two distinct destinations, in first-appearance order.
+    assert_eq!(plan.destinations.len(), 2);
+    assert_eq!(
+        plan.destinations[0].destination_display,
+        "s3://default-bucket/prefix"
+    );
+    assert_eq!(
+        plan.destinations[1].destination_display,
+        "s3://owner-bucket/logs?profile=owner"
+    );
+
+    // The two inheriting sources landed on the default; the two overriding
+    // ones collapsed onto one group rather than opening a pass each.
+    let names = |index: usize| {
+        plan.destinations[index]
+            .sources
+            .iter()
+            .map(|s| s.crate_name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(0), vec!["trusty-mpm", "trusty-agents"]);
+    assert_eq!(names(1), vec!["trusty-code", "trusty-search"]);
+}
+
+#[test]
+fn resolve_needs_no_section_destination_when_every_source_names_one() {
+    // The section default is required only by a source that still needs it.
+    let config = config_from_yaml(
+        r#"
+log_drain:
+  enabled: true
+  sources:
+    - crate_name: trusty-code
+      root: "/var/log/trusty-code"
+      destination: "file:///tmp/drain-a"
+"#,
+    );
+    let LogDrainSetting::Enabled(plan) = resolve_log_drain(&config, home()).expect("resolves")
+    else {
+        panic!("expected an enabled plan");
+    };
+    assert_eq!(plan.destinations.len(), 1);
+    assert_eq!(
+        plan.destinations[0].destination_display,
+        "file:///tmp/drain-a"
+    );
+}
+
+#[test]
+fn resolve_rejects_a_malformed_source_destination() {
+    // A per-source override is validated exactly as the section's own is: a
+    // typo must not fall back to the default, which is the wrong account.
+    let config = config_from_yaml(
+        r#"
+log_drain:
+  enabled: true
+  destination: "file:///tmp/drain"
+  sources:
+    - crate_name: trusty-code
+      root: "/var/log/trusty-code"
+      destination: "s3://bucket/logs?porfile=owner"
+"#,
+    );
+    let err = resolve_log_drain(&config, home())
+        .expect_err("a malformed source destination is a hard error");
+    match err {
+        LogDrainConfigError::SourceDestination { index, ref reason } => {
+            assert_eq!(index, 0);
+            assert!(reason.contains("porfile"), "unhelpful reason: {reason}");
+        }
+        other => panic!("expected SourceDestination, got {other:?}"),
+    }
 }
 
 #[test]
