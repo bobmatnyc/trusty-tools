@@ -237,6 +237,22 @@ enum Cmd {
     /// the facts-store path can be opened. Exits non-zero on any failure.
     /// Test: with the daemon down → ✗ for daemon, exits 1.
     Doctor,
+    /// Print the crate version, or (with `--json`) the DOC-1
+    /// capability-discovery envelope `tctl doctor --self-check` reads.
+    ///
+    /// Why (#6631): `tctl doctor trusty-analyze --self-check` spawns this
+    /// exact form and requires `contract_version` + a non-empty `verbs[]`;
+    /// trusty-analyze had no `version` subcommand at all, so the self-check
+    /// failed on a clap usage error before it reached the daemon.
+    /// What: delegates to `commands::version::run`. Needs no daemon and no
+    /// data-directory access — it answers from the binary alone.
+    /// Test: `commands::version::envelope_satisfies_the_doc1_self_check`,
+    /// `main_tests::version_json_parses_and_carries_the_crate_version`.
+    Version {
+        /// Emit the DOC-1 capability-discovery envelope as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate shell completion script.
     ///
     /// Why: shell completion massively improves discoverability for a CLI
@@ -637,6 +653,10 @@ async fn main() -> Result<()> {
         Cmd::Status => daemon_cmds::handle_status(&trusty_analyze::service::socket_path()?).await,
         Cmd::Doctor => {
             daemon_cmds::handle_doctor(&trusty_analyze::service::socket_path()?, &facts_path).await
+        }
+        Cmd::Version { json } => {
+            commands::version::run(json);
+            Ok(())
         }
         Cmd::Completions { shell } => {
             // Why: clap_complete renders a script for the requested shell from
