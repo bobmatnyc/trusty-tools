@@ -1410,8 +1410,15 @@ pub struct DoctorFlags {
     /// overwrite under `~/.trusty-mpm/backup-doctor-remediation-<ts>/`,
     /// rewrites it from the bundled asset, then RE-READS it to confirm the
     /// repair took. Frozen skills are reported and left alone unless
-    /// `--include-frozen` is also passed. It never deletes anything, and it
-    /// never touches worktrees — those checks stay report-only.
+    /// `--include-frozen` is also passed. It never touches worktrees — those
+    /// checks stay report-only.
+    ///
+    /// Since #6586 it also sweeps the project tier of bundled skill copies an
+    /// older binary stranded under `<project>/.claude/skills`. That sweep is
+    /// the one thing here that DELETES, and it acts only on positive evidence:
+    /// a copy the tier's own deploy ledger records and whose bytes still match
+    /// the recorded checksum. Anything else is refused, every removal is backed
+    /// up whole first, and `--fix` does not run it.
     #[arg(long)]
     pub fix_skills: bool,
 

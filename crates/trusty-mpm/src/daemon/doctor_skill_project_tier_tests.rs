@@ -105,6 +105,77 @@ fn project_tier_without_bundled_names_is_ok() {
     );
 }
 
+/// Record `stems` as tm-managed in the project tier's own deploy ledger.
+fn mark_managed(project: &Path, stems: &[&str]) {
+    use trusty_agents_common::agents::manifest::checksum;
+    use trusty_agents_common::skills::manifest::{SkillManifest, SkillManifestEntry};
+
+    let dir = project.join(".claude").join("skills");
+    let mut manifest = SkillManifest::load(&dir).expect("fixture: load ledger");
+    for stem in stems {
+        let content = std::fs::read_to_string(dir.join(stem).join("SKILL.md"))
+            .expect("fixture: read the deployed copy");
+        manifest.managed.insert(
+            (*stem).to_string(),
+            SkillManifestEntry {
+                checksum: checksum(&content),
+                deployed_at: "2026-09-01T00:00:00Z".to_string(),
+            },
+        );
+    }
+    manifest.save(&dir).expect("fixture: save ledger");
+}
+
+/// The live-verification failure (#6586): a stray the project's own ledger
+/// marks MANAGED is exactly what the pre-#6602 deploy left behind, and it is
+/// the case the check was blind to.
+///
+/// Fails before this fix: `check_skill_project_tier` intersected the bundled
+/// roster with `list_project_custom_stems`, which by design drops every stem
+/// the manifest marks managed — so 51 bundled copies in a real project reported
+/// `✅ … holds no bundled skill`.
+#[test]
+fn project_tier_manifest_managed_copy_is_still_flagged() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (paths, project) = fixture(tmp.path(), &["tm-ticketing", "tm-workflow"]);
+    project_skill(&project, "tm-ticketing");
+    mark_managed(&project, &["tm-ticketing"]);
+
+    let check = check_skill_project_tier(&paths, Some(&project));
+    assert_eq!(
+        check.status,
+        CheckStatus::Warn,
+        "a manifest-managed stray is still a stray: {check:?}"
+    );
+    assert!(
+        check.message.contains("tm-ticketing"),
+        "the duplicate must be named: {}",
+        check.message
+    );
+    assert!(
+        check.message.contains("tm doctor --fix-skills"),
+        "and the remediation given: {}",
+        check.message
+    );
+}
+
+/// A project-custom skill under a name the bundled roster does NOT carry is not
+/// a stray and must never be flagged (#6586).
+#[test]
+fn a_user_custom_skill_is_not_flagged() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (paths, project) = fixture(tmp.path(), &["tm-ticketing"]);
+    project_skill(&project, "our-house-style");
+    mark_managed(&project, &[]);
+
+    let check = check_skill_project_tier(&paths, Some(&project));
+    assert_eq!(
+        check.status,
+        CheckStatus::Ok,
+        "a non-bundled name is the operator's own work: {check:?}"
+    );
+}
+
 /// Neither unverifiable state may render as healthy — the #4605 rule, kept.
 #[test]
 fn unverifiable_states_are_unknown_not_ok() {

@@ -85,7 +85,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "skill_project_tier",
-        "Warns when a bundled skill is still deployed at the PROJECT tier (`<project>/.claude/skills`). Bundled skills are user-tier only since the 2026-09-01 owner ruling, the same principle #4448 settled for bundled agents, so the deploy sites no longer write them there — but they cannot remove a copy an earlier binary already wrote, and nothing refreshes it afterward. The user-tier copy is the one Claude Code loads (for skills, personal outranks project). Read-only, never deletes: a bundled-named file here could be a project-custom skill the operator wrote. `tm doctor --fix-skills` is the repair (issue #6586).",
+        "Warns when a bundled skill is still deployed at the PROJECT tier (`<project>/.claude/skills`). Bundled skills are user-tier only since the 2026-09-01 owner ruling, the same principle #4448 settled for bundled agents, so the deploy sites no longer write them there — but they cannot remove a copy an earlier binary already wrote, and nothing refreshes it afterward. The user-tier copy is the one Claude Code loads (for skills, personal outranks project). Reads the tier from DISK, not from the deploy manifest: a stray the earlier deploy left behind is recorded MANAGED in that manifest, so filtering by it hid the one shape this check exists to catch. The check itself is read-only; `tm doctor --fix-skills` removes the copies the tier's ledger proves tm wrote and drops them from it, refusing any copy the ledger does not record or whose bytes were hand-edited (issue #6586).",
     ),
     (
         "legacy_sources",
