@@ -12,7 +12,7 @@
 //!
 // CUTOVER BRIDGE — remove post-migration (#1762)
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -36,33 +36,45 @@ pub struct CatchupState {
 /// Resolve the directory path for a palace's catch-up state.
 ///
 /// Why: centralizes the path derivation so tests and production code resolve the
-/// same location.
-/// What: returns `~/.trusty-mpm/projects/<palace-id>/` using the home dir.
-/// Test: covered indirectly by `state_save_load_roundtrip`.
-fn catchup_dir(palace_id: &str) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    Some(home.join(".trusty-mpm").join("projects").join(palace_id))
+/// same location. #4323: `state_root` is the seam that keeps the trusty-mpm test
+/// suite from writing catch-up watermarks into the operator's real
+/// `~/.trusty-mpm/projects/`. `prepare_session` already threads a `home`
+/// parameter for its two user-global writes (#5544); the catch-up watermark is
+/// the third such write and was the one still resolving `dirs::home_dir()`
+/// directly, so a temp-home test still littered the real state dir.
+/// What: when `state_root` is `Some`, uses it as the `.trusty-mpm` framework
+/// root; otherwise derives `~/.trusty-mpm` from the home directory. Returns
+/// `<root>/projects/<palace-id>/`.
+/// Test: `catchup_dir_honours_state_root`, `catchup_dir_falls_back_to_home`.
+fn catchup_dir(palace_id: &str, state_root: Option<&Path>) -> Option<PathBuf> {
+    let root = match state_root {
+        Some(root) => root.to_path_buf(),
+        None => dirs::home_dir()?.join(".trusty-mpm"),
+    };
+    Some(root.join("projects").join(palace_id))
 }
 
 /// Resolve the path to the catch-up state JSON file for a palace.
 ///
 /// Why: callers need the file path for read and write; centralizing avoids drift.
-/// What: `~/.trusty-mpm/projects/<palace-id>/catchup-state.json`.
+/// What: `<state_root|~/.trusty-mpm>/projects/<palace-id>/catchup-state.json`.
 /// Test: covered indirectly by `state_save_load_roundtrip`.
-fn state_path(palace_id: &str) -> Option<PathBuf> {
-    Some(catchup_dir(palace_id)?.join("catchup-state.json"))
+fn state_path(palace_id: &str, state_root: Option<&Path>) -> Option<PathBuf> {
+    Some(catchup_dir(palace_id, state_root)?.join("catchup-state.json"))
 }
 
 /// Load the catch-up watermark state for a palace, fail-open.
 ///
 /// Why: if the state file is absent (first run) or corrupt, we want full
 /// catch-up history — returning None signals "no watermark, use full history".
-/// What: reads `~/.trusty-mpm/projects/<palace-id>/catchup-state.json`; returns
-/// None if the file is missing, unreadable, or JSON-invalid. Never panics.
+/// What: reads `<state_root|~/.trusty-mpm>/projects/<palace-id>/catchup-state.json`;
+/// returns None if the file is missing, unreadable, or JSON-invalid. Never panics.
+/// `state_root` overrides the framework root (#4323); `None` is the production
+/// home-relative default.
 /// Test: `state_missing_file_returns_none`, `state_parse_failure_returns_none`,
 /// `state_save_load_roundtrip`.
-pub fn load_catchup_state(palace_id: &str) -> Option<CatchupState> {
-    let path = state_path(palace_id)?;
+pub fn load_catchup_state(palace_id: &str, state_root: Option<&Path>) -> Option<CatchupState> {
+    let path = state_path(palace_id, state_root)?;
     let bytes = std::fs::read(&path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
@@ -72,9 +84,15 @@ pub fn load_catchup_state(palace_id: &str) -> Option<CatchupState> {
 /// Why: advancing the watermark after a successful catch-up ensures the next
 /// run only surfaces incremental activity.
 /// What: creates parent directories if needed, then writes the state as JSON.
-/// Test: `state_save_load_roundtrip`.
-pub fn save_catchup_state(palace_id: &str, state: &CatchupState) -> anyhow::Result<()> {
-    let dir = catchup_dir(palace_id)
+/// `state_root` overrides the framework root (#4323); `None` is the production
+/// home-relative default.
+/// Test: `state_save_load_roundtrip`, `save_catchup_state_honours_state_root`.
+pub fn save_catchup_state(
+    palace_id: &str,
+    state: &CatchupState,
+    state_root: Option<&Path>,
+) -> anyhow::Result<()> {
+    let dir = catchup_dir(palace_id, state_root)
         .ok_or_else(|| anyhow::anyhow!("could not resolve home directory for catchup state"))?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("catchup-state.json");
