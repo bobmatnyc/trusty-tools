@@ -5,7 +5,12 @@ name = "trusty-audit"
 # `.code_only` fields through). `cargo-semver-checks` reports this as
 # `function_parameter_count_changed` against the 0.12.0 baseline; for a 0.y.z
 # crate the breaking bump is the MINOR position.
-version = "0.13.0"
+# 0.13.0 -> 0.13.1 (#6695, 2026-09-02 cut): PATCH. #6701 merged `src/**` after
+# the 0.13.0 changelog section was assembled and left its fragment unfolded, so
+# the cut ships as 0.13.1 with that fragment folded in. This bump also carries
+# the `[tools]` pin refresh in templates/engagement.template.toml onto the
+# versions this cut publishes. No public API change.
+version = "0.13.1"
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"

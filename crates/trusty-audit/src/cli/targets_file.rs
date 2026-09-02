@@ -575,8 +575,8 @@ mod targets_file_tests {
         std::fs::write(
             &path,
             "openrouter_key = \"\"\ninstructions = \"x\"\n\n\
-             [tools]\ntga = \"5.0.3\"\ntrusty-search = \"0.52.0\"\n\
-             trusty-analyze = \"0.12.5\"\ntrusty-review = \"0.31.2\"\n\n\
+             [tools]\ntga = \"6.0.0\"\ntrusty-search = \"0.52.0\"\n\
+             trusty-analyze = \"0.12.5\"\ntrusty-review = \"0.32.0\"\n\n\
              [[targets]]\nkind = \"repo\"\nname_with_owner = \"acme/api\"\n",
         )
         .expect("write the config");
