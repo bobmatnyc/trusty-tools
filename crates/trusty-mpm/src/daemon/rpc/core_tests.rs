@@ -77,6 +77,38 @@ fn rpc_router(state: &Arc<DaemonState>) -> RpcRouter {
     register(RpcRouter::new(), state)
 }
 
+/// RAII guard restoring `$HOME` on drop, including on a panic-driven unwind —
+/// mirrors `core::session_assets::tests::HomeGuard`.
+struct HomeGuard(Option<std::ffi::OsString>);
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: every caller is `#[serial_test::serial]`, so no other test
+        // thread reads or writes the environment concurrently.
+        match self.0.take() {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+/// Pin `$HOME` at a fresh tempdir for the guard's lifetime (#6580).
+///
+/// Why: `core::host_state_gate` embeds the LIVE `$HOME` in the refusal it hands
+/// every tmux route, so a test that reads that refusal twice gets two different
+/// strings whenever a sibling moves `$HOME` between the reads. Pinning makes the
+/// classification — and therefore the message — the same for both reads. Both
+/// returned values must stay alive for the test's body: dropping the `TempDir`
+/// removes the directory `$HOME` names.
+/// Callers MUST be tagged `#[serial_test::serial]`.
+fn pinned_home() -> (TempDir, HomeGuard) {
+    let home = tempfile::tempdir().expect("temp dir for a pinned $HOME");
+    let prior = std::env::var_os("HOME");
+    // SAFETY: caller is `#[serial_test::serial]`.
+    unsafe { std::env::set_var("HOME", home.path()) };
+    (home, HomeGuard(prior))
+}
+
 /// Drive one HTTP request through the real daemon router and decode the answer.
 ///
 /// Why the real router rather than calling a handler directly: the parity claim
@@ -698,9 +730,20 @@ async fn rpc_claude_config_apply_unknown_recommendation_reports_not_found() {
 /// the machine rather than on the transport. What must hold either way is that
 /// the socket's code is the code the HTTP status maps to and its message is the
 /// HTTP body's message — which is the whole of requirement 3.
+///
+/// Why the pinned `$HOME` and the serial group (#6580): the refusal both
+/// transports carry comes from `core::host_state_gate`, whose message names the
+/// LIVE `$HOME` ("$HOME is /var/folders/… but this user's real home is
+/// /Users/…"). Several tests in this binary move `$HOME` process-wide, and one
+/// landing between the two calls below left the HTTP read and the socket read
+/// quoting different homes — the verbatim-message assertion then failed while
+/// proving nothing about the transports. `#[serial_test::serial]` keeps those
+/// tests out, and [`pinned_home`] fixes what the gate classifies for both reads.
 /// Test: this function IS the test.
+#[serial_test::serial]
 #[tokio::test]
 async fn rpc_tmux_snapshot_unknown_session_reports_a_coded_error() {
+    let (_home, _home_guard) = pinned_home();
     let (state, _dir) = hermetic();
 
     let (status, body) = http(
