@@ -114,7 +114,7 @@ pub struct HealthResponse {
     /// JSON bool (`true`/`false`) and JSON string (`"ready"`, `"loading"`, …).
     #[serde(default)]
     pub embedder: EmbedderState,
-    /// Warm-boot health summary (issues #3693, #3706, #4079).
+    /// Warm-boot health summary (issues #3693, #3706, #4086).
     ///
     /// Why: since trusty-search #3706 the top-level `status` is `"degraded"`
     /// whenever ANY warm-boot condition tripped — a benign auto-disabled file
@@ -134,7 +134,7 @@ pub struct HealthResponse {
     pub warmboot_summary: Option<WarmBootSummary>,
 }
 
-/// Mirror of trusty-search's warm-boot health summary (issues #3693, #4079).
+/// Mirror of trusty-search's warm-boot health summary (issues #3693, #4086).
 ///
 /// Why: the aggregate `warm_boot_degraded` flag alone is not actionable. It is
 /// an OR over four structurally different conditions (TCC/FDA denial, warm-boot
@@ -145,7 +145,7 @@ pub struct HealthResponse {
 /// silently answering queries wrong (corpus-open failure) from one that merely
 /// left some unrelated repo's index unloaded (scan timeout) — and reading it as
 /// "not serving" reported a live, query-answering daemon as unreachable
-/// (#4079). Mirroring the individual counters lets `serving_state` explain
+/// (#4086). Mirroring the individual counters lets `serving_state` explain
 /// WHICH gap exists, in a message an operator can act on.
 /// What: the individual warm-boot counters plus the aggregate flag. Every field
 /// is `#[serde(default)]` and unknown fields are discarded (no
@@ -204,7 +204,7 @@ pub struct WarmBootSummary {
     /// Kept on the wire mirror because it is part of the pinned payload shape
     /// and is re-serialised by consumers of this type, but deliberately NOT
     /// branched on: reading the aggregate is exactly what made a live daemon
-    /// report as unreachable (#4079). `serving_state` reads the individual
+    /// report as unreachable (#4086). `serving_state` reads the individual
     /// counters instead, so a future trusty-search rename of this key degrades
     /// to a `false` default without changing any decision — the counters, and
     /// `warm_boot_summary_wire_shape_is_pinned`, are the real guards.
@@ -225,7 +225,7 @@ impl HealthResponse {
     }
 
     /// Classify what trusty-search can actually do for a review right now
-    /// (issues #3693, #4079).
+    /// (issues #3693, #4086).
     ///
     /// Why: reachability and full health are different questions, and folding
     /// them into one boolean produced a flatly false report. trusty-search
@@ -236,7 +236,7 @@ impl HealthResponse {
     /// reported as `reachable: false, state: "unreachable"` — for a daemon that
     /// was up, embedder-ready, and answering queries. Operators reasonably read
     /// "unreachable" as "the daemon is down" and went looking for a dead
-    /// process that did not exist (#4079). The three outcomes here keep the
+    /// process that did not exist (#4086). The three outcomes here keep the
     /// genuinely-fatal cases fatal while making a partial capability gap
     /// visible and explainable instead of masquerading as an outage.
     /// What: [`ServingState::NotServing`] when the embedder is not ready (no
@@ -247,7 +247,7 @@ impl HealthResponse {
     /// `"degraded"` daemon is still answering queries, so the caller proceeds
     /// but must stamp the reason onto its output rather than swallow it.
     ///
-    /// Deliberate policy change vs. the pre-#4079 behaviour: a warm-boot gap is
+    /// Deliberate policy change vs. the pre-#4086 behaviour: a warm-boot gap is
     /// no longer a blanket refusal. `indexes_corpus_failed` (the one silent
     /// failure mode — trusty-search answers `200 OK` with an empty result set
     /// for such an index) and `indexes_skipped_*` (indexes absent from the
@@ -256,7 +256,7 @@ impl HealthResponse {
     /// unrelated repo's bad corpus must not silently cancel every review on the
     /// host; it must instead be reported on the review that ran. Closing the
     /// remaining gap properly needs a per-index status probe against the index
-    /// the review actually uses — see the follow-up noted in #4079.
+    /// the review actually uses — see the follow-up filed as #6686.
     /// Test: `health_response_degraded_watcher_only_is_serving`,
     /// `health_response_live_warmboot_degraded_payload_is_reachable`,
     /// `health_response_degraded_reason_names_corpus_failures`,
@@ -280,6 +280,42 @@ impl HealthResponse {
                 Some(reason) => ServingState::Degraded(reason),
                 None => ServingState::Serving,
             },
+            other => ServingState::NotServing(format!(
+                "trusty-search reports status {other:?} — not serving queries"
+            )),
+        }
+    }
+
+    /// Answer the ONE question `/health` is qualified to answer: is this daemon
+    /// reachable and serving queries (#6686)?
+    ///
+    /// Why: `/health` counts registry handles and discards index ids
+    /// (`crates/trusty-search/src/service/server/health.rs`), so its warm-boot
+    /// counters describe the HOST, never the index a given review queries. The
+    /// required-context gate used to branch on them and therefore degraded every
+    /// review on a host where any unrelated index had failed — the review whose
+    /// own index was healthy included (#6686). The per-index probe
+    /// [`crate::integrations::index_status::IndexStatusResponse::serving_state`]
+    /// answers the index-scoped question; this method answers the host-scoped
+    /// one and reads no counter to do it.
+    /// What: [`ServingState::NotServing`] when the embedder is not ready (no
+    /// semantic context is possible at all) or the status is neither `"ok"` nor
+    /// `"degraded"` (`"starting"`, `"error"`, …). Otherwise
+    /// [`ServingState::Serving`] — a `"degraded"` daemon is answering queries,
+    /// and WHAT it lost is the per-index probe's question, not this one.
+    /// [`ServingState::Degraded`] is never returned.
+    /// Test: `reachability_state_ignores_warm_boot_counters`,
+    /// `reachability_state_embedder_not_ready_is_not_serving`,
+    /// `reachability_state_other_status_is_not_serving`.
+    pub fn reachability_state(&self) -> ServingState {
+        if !self.embedder.is_ready() {
+            return ServingState::NotServing(
+                "trusty-search embedder is not ready — semantic code context is unavailable"
+                    .to_string(),
+            );
+        }
+        match self.status.as_str() {
+            "ok" | "degraded" => ServingState::Serving,
             other => ServingState::NotServing(format!(
                 "trusty-search reports status {other:?} — not serving queries"
             )),
@@ -318,18 +354,21 @@ impl HealthResponse {
                 w.indexes_corpus_failed
             ));
         }
-        // #5927: the indexes counted by `indexes_stage_failed` but NOT by
-        // `indexes_corpus_failed` — a dead embed or graph lane over a corpus
-        // that opened fine. Reported separately because the consequence
-        // differs: those indexes return PARTIAL results, not empty ones.
-        // Subtracting keeps the corpus cohort from being named twice.
-        let lane_only = w
-            .indexes_stage_failed
-            .saturating_sub(w.indexes_corpus_failed);
-        if lane_only > 0 {
+        // #6686: this clause used to subtract `indexes_corpus_failed` from
+        // `indexes_stage_failed` and announce that the remainder "return LEXICAL
+        // results only". Two host-wide totals cannot support that claim, and it
+        // was flatly wrong for the index that produced #6686 — `workspace` had
+        // its lexical lane failed too and reported `search_capabilities: []`.
+        // The counter says how MANY indexes have a dead lane and nothing more;
+        // which index and which lane is what `GET /indexes/{id}/status` answers,
+        // and that probe — not this arithmetic — is now what the review gate
+        // decides on.
+        if w.indexes_stage_failed > 0 {
             clauses.push(format!(
-                "{lane_only} index(es) have a failed search lane (semantic or graph) over a \
-                 healthy corpus — queries against them return LEXICAL results only"
+                "{} index(es) have at least one failed search lane, lexical included (a superset \
+                 of any corpus failures above) — /health does not say which index or which lane, \
+                 so read GET /indexes/{{id}}/status for the index in question",
+                w.indexes_stage_failed
             ));
         }
         if w.indexes_failed > 0 {
@@ -378,9 +417,9 @@ impl HealthResponse {
     }
 }
 
-/// What trusty-search can do for a review right now (issue #4079).
+/// What trusty-search can do for a review right now (issue #4086).
 ///
-/// Why: the pre-#4079 code had one boolean for two questions — "is the daemon
+/// Why: the pre-#4086 code had one boolean for two questions — "is the daemon
 /// answering?" and "is it fully healthy?" — and reported the answer to the
 /// second under the name of the first. Three explicit states make the middle
 /// case (up and answering, with a named capability gap) representable, so it can
@@ -585,7 +624,7 @@ mod tests {
         );
     }
 
-    /// REGRESSION (#4079): the VERBATIM `/health` payload captured from the
+    /// REGRESSION (#4086): the VERBATIM `/health` payload captured from the
     /// live daemon that trusty-review reported as `state: "unreachable"`.
     ///
     /// Why: this exact daemon was up, embedder-ready, and answering queries
@@ -621,7 +660,7 @@ mod tests {
         assert!(
             resp.is_serving(),
             "a live, embedder-ready, query-answering daemon must never be classified as \
-             not-serving just because warm boot left some indexes behind (#4079)"
+             not-serving just because warm boot left some indexes behind (#4086)"
         );
         assert!(
             matches!(resp.serving_state(), ServingState::Degraded(_)),
@@ -676,8 +715,13 @@ mod tests {
     /// What: a payload in the exact shape trusty-search now sends for that
     /// state — `indexes_stage_failed: 2` with `indexes_corpus_failed: 0` —
     /// asserting the verdict is `Degraded`, that the reason names the lane
-    /// failure and its consequence, and that it does NOT claim a corpus
-    /// failure that did not happen.
+    /// failure, and that it does NOT claim a corpus failure that did not
+    /// happen.
+    ///
+    /// #6686 narrowed what the clause may claim: it counts indexes and says so,
+    /// and it no longer asserts that the surviving lane is lexical. That claim
+    /// came from subtracting two host-wide totals and was false for the index
+    /// that produced #6686 — `workspace`, whose lexical lane had also failed.
     /// Test: this IS the test.
     #[test]
     fn health_response_degraded_reason_names_a_lane_failure_over_a_healthy_corpus() {
@@ -699,12 +743,18 @@ mod tests {
             );
         };
         assert!(
-            reason.contains("2 index(es) have a failed search lane"),
+            reason.contains("2 index(es) have at least one failed search lane"),
             "reason must name the lane failures; got: {reason}"
         );
         assert!(
-            reason.contains("LEXICAL results only"),
-            "reason must state the query-time consequence; got: {reason}"
+            reason.contains("GET /indexes/{id}/status"),
+            "#6686: the reason must point at the probe that can name the index and lane; \
+             got: {reason}"
+        );
+        assert!(
+            !reason.contains("LEXICAL results only"),
+            "#6686: two host-wide counters cannot establish which lane survived — the reason \
+             must not claim lexical results are available; got: {reason}"
         );
         assert!(
             !reason.contains("failed to open their corpus"),
@@ -712,15 +762,19 @@ mod tests {
         );
     }
 
-    /// trusty-search #5927: a corpus-open failure must be named once, not
-    /// twice.
+    /// trusty-search #5927 / #6686: a corpus-open failure must not be reported
+    /// as a SECOND, separate cohort of broken indexes.
     ///
     /// Why: `indexes_stage_failed` is a superset of `indexes_corpus_failed`, so
-    /// summing the two would report the same index under both clauses and
-    /// inflate the count an operator reads.
+    /// a reader who adds the two clauses together doubles the number of broken
+    /// indexes. #5927 solved that by subtracting; #6686 removed the subtraction
+    /// because the claim it justified ("the remainder return LEXICAL results
+    /// only") was false. The clause now states the superset relationship in
+    /// words instead, so the two numbers cannot be read as disjoint cohorts.
     /// What: the shape trusty-search sends when all three failing indexes are
     /// corpus failures — both counters read `3`. Asserts the corpus clause
-    /// appears and no lane clause does.
+    /// appears, that the lane clause reports the same 3 rather than an extra
+    /// cohort, and that it says so.
     /// Test: this IS the test.
     #[test]
     fn health_response_degraded_reason_does_not_double_count_a_corpus_failure() {
@@ -743,9 +797,67 @@ mod tests {
             "reason must name the corpus failures; got: {reason}"
         );
         assert!(
-            !reason.contains("have a failed search lane"),
-            "#5927: the corpus cohort is already named — it must not be counted \
-             again as a lane failure; got: {reason}"
+            reason.contains("3 index(es) have at least one failed search lane"),
+            "the lane clause must report the same 3 indexes, not a fourth cohort; got: {reason}"
+        );
+        assert!(
+            reason.contains("a superset of any corpus failures above"),
+            "#6686: the clause must say the two counts overlap, so a reader does not add \
+             them; got: {reason}"
+        );
+    }
+
+    // ── reachability_state (#6686) ──────────────────────────────────────────
+
+    /// REGRESSION (#6686): `/health` answers reachability and nothing else.
+    ///
+    /// Why: this is the live payload from the #6686 report — one unrelated index
+    /// (`workspace`) with every lane failed, on a daemon that was up,
+    /// embedder-ready and answering queries for 40 other indexes. The gate used
+    /// to read these counters and degrade EVERY review on the host over them.
+    /// `reachability_state` must report such a daemon as plainly `Serving`; what
+    /// the failed index means for a given review is `GET /indexes/{id}/status`'s
+    /// question, and only for the index that review actually uses.
+    /// Test: this IS the test.
+    #[test]
+    fn reachability_state_ignores_warm_boot_counters() {
+        let json = r#"{
+            "status": "degraded",
+            "embedder": "ready",
+            "warmboot_summary": {
+                "indexes_loaded": 41,
+                "indexes_corpus_failed": 1,
+                "indexes_stage_failed": 1,
+                "indexes_skipped_timeout": 11,
+                "warm_boot_degraded": true
+            }
+        }"#;
+        let resp: HealthResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            resp.reachability_state(),
+            ServingState::Serving,
+            "#6686: a reachable, embedder-ready daemon is SERVING — a warm-boot counter is not \
+             the review gate's business"
+        );
+    }
+
+    #[test]
+    fn reachability_state_embedder_not_ready_is_not_serving() {
+        let json = r#"{"status":"ok","embedder":"loading"}"#;
+        let resp: HealthResponse = serde_json::from_str(json).unwrap();
+        assert!(
+            matches!(resp.reachability_state(), ServingState::NotServing(_)),
+            "no embedder means no semantic context at all — still a host-level outage"
+        );
+    }
+
+    #[test]
+    fn reachability_state_other_status_is_not_serving() {
+        let json = r#"{"status":"starting","embedder":"ready"}"#;
+        let resp: HealthResponse = serde_json::from_str(json).unwrap();
+        assert!(
+            matches!(resp.reachability_state(), ServingState::NotServing(_)),
+            "a daemon that says it is still starting is not serving"
         );
     }
 

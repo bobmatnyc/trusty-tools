@@ -10,9 +10,11 @@
 //! operator explicitly opted out (`require_*` = false) the run proceeds but is
 //! tagged DEGRADED / non-authoritative.
 //!
-//! What: `preflight_context` probes `SearchClient::health` and
-//! `AnalyzeClient::has_analysis` concurrently and folds the two `require_*` flags
-//! into a single `GateOutcome`: `Proceed`, `Skip(reason)`, or `Degraded(reason)`.
+//! What: `preflight_context` probes `SearchClient::health` (is the daemon up),
+//! `SearchClient::index_status` (can the index under review answer, #6686), and
+//! `AnalyzeClient::has_analysis` concurrently, then folds the two `require_*`
+//! flags into a single `GateOutcome`: `Proceed`, `Skip(reason)`, or
+//! `Degraded(reason)`.
 //! The gate lives here (not inline in the runner) so every subject goes through
 //! the same code path and `runner.rs` stays under the 500-line cap.
 //!
@@ -85,16 +87,31 @@ pub enum GateOutcome {
 /// routes through this same Degraded branch (never `Proceed`) regardless of
 /// whether `surface` is `Hosted` or `Interactive` — only the reason text and
 /// the required-vs-degraded branch selection differ per surface.
+///
+/// #6686: degraded-ness is decided by `GET /indexes/{id}/status` for the index
+/// under review, not by `/health`. `/health` counts registry handles and
+/// discards index ids, so a single failed index anywhere on the host degraded
+/// every review on it — including a review whose own index was healthy — and the
+/// banner reason it produced was counter arithmetic that could be flatly wrong
+/// about which lanes survived. `/health` now answers reachability only
+/// (`HealthResponse::reachability_state`); the reason a reader sees comes from
+/// the per-index probe and names that index and its actually-failed lanes.
+///
+/// #6687: an index trusty-search has never heard of is a `Skip` that names it,
+/// and one that no `require_search` opt-out relaxes. Every search against such
+/// an index answers `404 unknown index`; the alternative outcome is a review
+/// that saw none of the project and published a verdict anyway.
 /// Test: `gate_tests::{skips_when_search_down_and_required,
 /// degraded_when_search_down_and_opted_out,
 /// skips_when_analyze_down_and_required, proceeds_when_both_healthy,
 /// interactive_surface_defaults_to_degraded_when_search_down,
 /// hosted_surface_defaults_to_skip_when_search_down,
 /// degraded_reason_prefers_health_error_detail,
-/// degraded_but_serving_proceeds, not_serving_search_still_skips}` (issue #3693:
-/// a `status: "degraded"` health response now proceeds when trusty-search's
-/// own `warmboot_summary.warm_boot_degraded` flag says it is still serving,
-/// and still skips when that flag says it is genuinely broken).
+/// degraded_but_serving_proceeds, not_serving_search_still_skips,
+/// healthy_target_index_proceeds_despite_an_unrelated_failed_index,
+/// degraded_target_index_reason_comes_from_the_per_index_probe,
+/// unknown_index_skips_and_names_the_index,
+/// unknown_index_skips_even_when_search_is_opted_out}`.
 pub async fn preflight_context(
     config: &ReviewConfig,
     deps: &ReviewDeps,
@@ -104,9 +121,12 @@ pub async fn preflight_context(
     let index = &config.search_index;
     let require_search = config.context.effective_require_search(surface);
 
-    // Probe both dependencies concurrently — context retrieval is latency
+    // Probe the dependencies concurrently — context retrieval is latency
     // sensitive and these are independent network calls.
+    // #6686: `index_status` is the probe that decides degraded-ness, scoped to
+    // the index THIS review queries.
     let search_fut = async { deps.search.health().await };
+    let index_fut = async { deps.search.index_status(index).await };
     let analyze_fut = async {
         match deps.analyze.as_ref() {
             Some(a) => a.has_analysis(index).await,
@@ -114,7 +134,8 @@ pub async fn preflight_context(
             None => false,
         }
     };
-    let (search_health, analyze_ready) = tokio::join!(search_fut, analyze_fut);
+    let (search_health, index_status, analyze_ready) =
+        tokio::join!(search_fut, index_fut, analyze_fut);
 
     // Captures the health probe's own error text (e.g. a `NullSearchClient`'s
     // `--source-root` notice) so the Degraded branch below can surface it
@@ -125,37 +146,20 @@ pub async fn preflight_context(
     // reports `status: "degraded"` on EFS/NFS-mounted repos purely because it
     // auto-disabled its file watcher (a benign, OS-level capability gap —
     // search itself stays 100% functional), which made every review on such
-    // a deployment fail-closed. `HealthResponse::is_serving` inspects the
-    // structured `warmboot_summary.warm_boot_degraded` flag instead of
-    // guessing from the status string, so this scenario now proceeds (with a
-    // WARN noting the reason) while a genuinely broken search (embedder
-    // dead, indexes unloadable, TCC-denied, scan-timed-out) still gates shut.
+    // a deployment fail-closed.
     //
-    // Issue #4079: a `Degraded` daemon is SERVING — it answers queries — so the
-    // review proceeds and gets real context. But the gap it reported is never
-    // swallowed: it becomes a `GateOutcome::Degraded` reason, which the runner
-    // stamps into the review body as a banner and into `result.error`. That is
-    // the deliberate choice between the two failure modes available here.
-    // Refusing every review because ONE of ~20 unrelated indexes on the host
-    // failed to open its corpus is a false-positive machine that trains callers
-    // to ignore the gate; returning a clean-looking verdict is the silent
-    // downgrade this fix exists to eliminate. Proceed-and-stamp is the only
-    // option that is neither.
+    // #6686: `/health` now answers ONE question here — is the daemon reachable
+    // and serving. It counts registry handles and discards index ids, so its
+    // warm-boot counters are host-wide by construction, and branching on them
+    // degraded every review on a host where any unrelated index had failed. The
+    // index-scoped question moved to `index_status` below.
     let mut search_error_detail: Option<String> = None;
-    let mut search_degraded_reason: Option<String> = None;
     let search_ok = match &search_health {
-        Ok(h) => match h.serving_state() {
-            ServingState::Serving => true,
-            ServingState::Degraded(reason) => {
-                warn!(
-                    status = %h.status,
-                    reason = %reason,
-                    "trusty-search is serving with a capability gap — proceeding, review will be \
-                     labelled DEGRADED (#4079)"
-                );
-                search_degraded_reason = Some(reason);
-                true
-            }
+        Ok(h) => match h.reachability_state() {
+            // `reachability_state` never returns `Degraded`; a daemon that
+            // answers the probe and has an embedder is serving, whatever its
+            // warm boot did.
+            ServingState::Serving | ServingState::Degraded(_) => true,
             ServingState::NotServing(reason) => {
                 warn!(status = %h.status, reason = %reason, "trusty-search health is not serving");
                 search_error_detail = Some(reason);
@@ -194,6 +198,58 @@ pub async fn preflight_context(
         return GateOutcome::Degraded(reason);
     }
 
+    // ── per-index gate (#6686, #6687) ──────────────────────────────────────
+    // The daemon is up. The remaining question is about ONE index: the one this
+    // review queries. Three outcomes, and they are genuinely different:
+    //   * the index does not exist        → Skip, naming it (#6687)
+    //   * the index exists and is broken  → record a reason, review is labelled
+    //   * the status probe itself failed  → record a reason, review is labelled
+    let mut search_degraded_reason: Option<String> = None;
+    match index_status {
+        Ok(status) => match status.serving_state() {
+            ServingState::Serving => {}
+            // `IndexStatusResponse::serving_state` produces only `Serving` and
+            // `Degraded`; a `NotServing` from a future revision is at least as
+            // serious, so it takes the same labelled path rather than being
+            // dropped.
+            ServingState::Degraded(reason) | ServingState::NotServing(reason) => {
+                warn!(
+                    index = %index,
+                    reason = %reason,
+                    "the index under review is degraded — proceeding, review will be labelled \
+                     DEGRADED (#6686)"
+                );
+                search_degraded_reason = Some(reason);
+            }
+        },
+        // #6687: an unknown index is a configuration fault, not an outage the
+        // operator can opt out of. Every search this review would issue returns
+        // `404 unknown index`, `runner_context` used to turn that into an empty
+        // result set, and the review published an AUTHORITATIVE verdict having
+        // seen no code at all. There is no degraded version of that — skip, and
+        // say which index was missing.
+        Err(e) if e.is_unknown_index() => {
+            warn!(index = %index, "trusty-search has no index `{index}` — skipping review");
+            return GateOutcome::Skip(format!(
+                "trusty-search at {search_url} has no index `{index}` — refusing to review with \
+                 no code context. Every search against it returns `404 unknown index`, so the \
+                 review would see none of the project. Index this checkout \
+                 (`trusty-search index <repo-root>`) or point the review at an existing index \
+                 (`[search] index` / TRUSTY_SEARCH_INDEX); `trusty-search list-indexes` shows \
+                 what is registered. This is NOT opt-out-able: \
+                 TRUSTY_REVIEW_REQUIRE_SEARCH=false degrades a daemon outage, not a missing \
+                 index."
+            ));
+        }
+        Err(e) => {
+            warn!(index = %index, "index status probe failed: {e}");
+            search_degraded_reason = Some(format!(
+                "the status of index `{index}` could not be read ({e}) — the review ran without \
+                 a per-index health verdict, so missing context would not have been detected"
+            ));
+        }
+    }
+
     // ── trusty-analyze gate ────────────────────────────────────────────────
     if !analyze_ready {
         if config.context.require_analyze {
@@ -227,7 +283,7 @@ pub async fn preflight_context(
         );
     }
 
-    // ── trusty-search serving-but-degraded (#4079) ─────────────────────────
+    // ── the index under review is serving-but-degraded (#4086, #6686) ──────
     // Checked last so a hard analyze outage still wins the reason slot. Search
     // answered and supplied context, so this is not a skip — but the gap must
     // reach the reader of the review, not just the daemon's own log.

@@ -46,6 +46,15 @@ struct StubSearch {
 
 #[async_trait]
 impl SearchClient for StubSearch {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<HealthResponse, SearchClientError> {
         match self.health {
             Some(ok) => Ok(HealthResponse {
@@ -278,13 +287,22 @@ async fn explicit_require_skips_even_interactive_surface() {
 
 /// Search stub whose `/health` reports `status: "degraded"` with a caller-chosen
 /// warm-boot summary, independent of the `Some(bool)`/`None` shape `StubSearch`
-/// uses (#3693, #4079).
+/// uses (#3693, #4086).
 struct DegradedSearch {
     summary: crate::integrations::health::WarmBootSummary,
 }
 
 #[async_trait]
 impl SearchClient for DegradedSearch {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<HealthResponse, SearchClientError> {
         Ok(HealthResponse {
             status: "degraded".to_string(),
@@ -338,36 +356,174 @@ async fn degraded_but_serving_proceeds() {
     );
 }
 
-/// REGRESSION (#4079): a trusty-search with a real warm-boot gap must produce a
-/// LABELLED review, not a blanket skip and not a clean-looking verdict.
+// ── Per-index gate (#6686) and unknown index (#6687) ──────────────────────────
+
+/// What the per-index probe should answer for a given test.
+enum IndexProbe {
+    /// A fully-healthy index.
+    Ready,
+    /// A caller-chosen status payload.
+    Status(Box<crate::integrations::search_client::IndexStatusResponse>),
+    /// `404 unknown index` — trusty-search has never heard of it.
+    Unknown,
+    /// The daemon answered `/health` but the status probe itself failed.
+    ProbeFailed,
+}
+
+/// Search stub with an independently-configurable `/health` and per-index
+/// status, so a test can hold one constant and vary the other.
 ///
-/// Why: this is the live payload that broke — 11 indexes skipped on a scan
-/// timeout and 3 with a failed corpus, on a daemon that was up and answering.
-/// The pre-fix gate hard-skipped every review on the host over it; the failure
-/// mode being avoided in the other direction is a verdict that looks complete.
-/// Proceed-and-label is the only outcome that is neither, and the reason must
-/// name the silent failure mode by hand so a reader can act on it.
-/// Test: this test itself.
+/// Why: #6686 is entirely about the two probes disagreeing — a host with a
+/// failed index and a healthy target index, and a clean host with a failed
+/// target index. A fake that derives one from the other cannot express either.
+/// What: `health_status` / `summary` drive `/health`; `probe` drives
+/// `index_status`.
+/// Test: used by the `#6686` / `#6687` tests below.
+struct TargetIndexSearch {
+    health_status: &'static str,
+    summary: Option<crate::integrations::health::WarmBootSummary>,
+    probe: IndexProbe,
+}
+
+#[async_trait]
+impl SearchClient for TargetIndexSearch {
+    async fn health(&self) -> Result<HealthResponse, SearchClientError> {
+        Ok(HealthResponse {
+            status: self.health_status.to_string(),
+            embedder: EmbedderState::Str("ready".to_string()),
+            warmboot_summary: self.summary.clone(),
+        })
+    }
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Ok(vec![])
+    }
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        match &self.probe {
+            IndexProbe::Ready => {
+                Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+            }
+            IndexProbe::Status(s) => Ok((**s).clone()),
+            IndexProbe::Unknown => Err(SearchClientError::Api {
+                status: 404,
+                body: format!(r#"{{"error":"unknown index: {index_id}"}}"#),
+            }),
+            IndexProbe::ProbeFailed => {
+                Err(SearchClientError::Transport("connection reset".to_string()))
+            }
+        }
+    }
+    async fn search(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Ok(vec![])
+    }
+}
+
+/// The exact live payload from the #6686 report: an unrelated index
+/// (`workspace`) with a failed corpus and a failed lane, on a host serving 40
+/// other indexes.
+fn unrelated_failed_index_summary() -> crate::integrations::health::WarmBootSummary {
+    crate::integrations::health::WarmBootSummary {
+        indexes_loaded: 41,
+        indexes_skipped_timeout: 11,
+        indexes_corpus_failed: 1,
+        indexes_stage_failed: 1,
+        warm_boot_degraded: true,
+        ..Default::default()
+    }
+}
+
+/// REGRESSION (#6686): a review whose OWN index is healthy must be
+/// authoritative, whatever some other index on the host is doing.
+///
+/// Why: this is the reported bug. `/health` counts registry handles and
+/// discards index ids, so ONE broken index anywhere — here `workspace`, a
+/// walk-budget refusal on an unrelated repo root — made the gate return
+/// `Degraded` and stamp a NOT AUTHORITATIVE banner onto every review on the
+/// host, including reviews of projects whose index was perfectly fine. The
+/// pre-fix gate read `warmboot_summary` and had no way to ask about the index
+/// under review.
+/// What: a daemon reporting `status: "degraded"` with the live warm-boot
+/// counters, paired with a per-index probe that says the target index is ready.
+/// Asserts `Proceed` — no banner, no degraded label.
+/// Test: this IS the test.
 #[tokio::test]
-async fn degraded_warm_boot_gap_labels_review_instead_of_skipping() {
+async fn healthy_target_index_proceeds_despite_an_unrelated_failed_index() {
     let cfg = config(); // defaults: require_search=true
     let d = deps_with_search(
-        Arc::new(DegradedSearch {
-            summary: crate::integrations::health::WarmBootSummary {
-                indexes_loaded: 20,
-                indexes_skipped_timeout: 11,
-                indexes_corpus_failed: 3,
-                warm_boot_degraded: true,
-                ..Default::default()
-            },
+        Arc::new(TargetIndexSearch {
+            health_status: "degraded",
+            summary: Some(unrelated_failed_index_summary()),
+            probe: IndexProbe::Ready,
+        }),
+        true,
+    );
+    assert_eq!(
+        preflight_context(&cfg, &d, InvocationSurface::Hosted).await,
+        GateOutcome::Proceed,
+        "#6686: the index under review is healthy — an unrelated index's warm-boot failure must \
+         not degrade this review or stamp a NOT AUTHORITATIVE banner on it"
+    );
+}
+
+/// REGRESSION (#6686): the banner reason comes from the index under review, and
+/// says what that index's own status payload says.
+///
+/// Why: the counter arithmetic it replaces emitted "queries return LEXICAL
+/// results only" for `workspace` — an index whose lexical lane had ALSO failed
+/// and whose `search_capabilities` was `[]`. A reader acting on that reason
+/// would believe a lane that was dead. The host here is spotless (`status: "ok"`,
+/// no warm-boot summary at all), so the pre-fix gate had nothing to report and
+/// returned `Proceed`: this test fails in BOTH directions against it.
+/// What: a clean `/health` paired with a per-index probe reporting all three
+/// lanes failed and no capabilities. Asserts `Degraded`, that the reason names
+/// the index and each failed lane, and that it does not claim lexical results.
+/// Test: this IS the test.
+#[tokio::test]
+async fn degraded_target_index_reason_comes_from_the_per_index_probe() {
+    let cfg = config();
+    let failed: crate::integrations::search_client::IndexStatusResponse = serde_json::from_str(
+        r#"{
+            "index_id": "workspace",
+            "search_capabilities": [],
+            "stages": {
+                "lexical": {"status": "failed", "failure": "walk budget refused"},
+                "semantic": {"status": "failed"},
+                "graph": {"status": "failed"}
+            }
+        }"#,
+    )
+    .expect("fixture must parse");
+    let d = deps_with_search(
+        Arc::new(TargetIndexSearch {
+            health_status: "ok",
+            summary: None,
+            probe: IndexProbe::Status(Box::new(failed)),
         }),
         true,
     );
     match preflight_context(&cfg, &d, InvocationSurface::Hosted).await {
         GateOutcome::Degraded(reason) => {
             assert!(
-                reason.contains("failed to open their corpus"),
-                "the degraded reason must name the SILENT failure mode; got: {reason}"
+                reason.contains("workspace"),
+                "the reason must name the index under review; got: {reason}"
+            );
+            for lane in ["lexical", "semantic", "graph"] {
+                assert!(
+                    reason.contains(lane),
+                    "the reason must name the failed {lane} lane; got: {reason}"
+                );
+            }
+            assert!(
+                !reason.contains("LEXICAL results only"),
+                "#6686: this index's lexical lane failed — the reason must never claim lexical \
+                 results are available; got: {reason}"
             );
             assert!(
                 reason.contains("trusty-search at"),
@@ -375,15 +531,115 @@ async fn degraded_warm_boot_gap_labels_review_instead_of_skipping() {
             );
         }
         other => panic!(
-            "a serving-but-degraded search must produce a labelled review, not {other:?} (#4079)"
+            "#6686: a failed target index must label the review, got {other:?} — a spotless \
+             /health is exactly what let this through before"
         ),
+    }
+}
+
+/// REGRESSION (#6687): an index trusty-search has never heard of is a loud skip
+/// that names it, not a review with no context.
+///
+/// Why: the resolver falls back to the default index id (`main`) for a checkout
+/// whose only registered indexes are `.worktrees/*` descendants. `POST
+/// /indexes/main/search` then answers `404 {"error":"unknown index: main"}`,
+/// `runner_context` collapsed that into `Vec::new()`, and the review published
+/// an AUTHORITATIVE verdict having read none of the project. The pre-fix gate
+/// never asked, so it returned `Proceed`.
+/// What: a healthy daemon whose per-index probe 404s. Asserts `Skip` and that
+/// the message names the index id that was tried.
+/// Test: this IS the test.
+#[tokio::test]
+async fn unknown_index_skips_and_names_the_index() {
+    let cfg = config();
+    let d = deps_with_search(
+        Arc::new(TargetIndexSearch {
+            health_status: "ok",
+            summary: None,
+            probe: IndexProbe::Unknown,
+        }),
+        true,
+    );
+    match preflight_context(&cfg, &d, InvocationSurface::Hosted).await {
+        GateOutcome::Skip(reason) => {
+            assert!(
+                reason.contains(&format!("`{}`", cfg.search_index)),
+                "#6687: the skip must name the index it tried to query; got: {reason}"
+            );
+            assert!(
+                reason.contains("no code context"),
+                "the skip must say why no verdict is possible; got: {reason}"
+            );
+        }
+        other => panic!(
+            "#6687: a missing index must skip, got {other:?} — proceeding here is a verdict \
+             produced without reading the project"
+        ),
+    }
+}
+
+/// A missing index is not opt-out-able.
+///
+/// Why: `require_search=false` says "review anyway if the DAEMON is down" —
+/// a degraded run still reads whatever the daemon can give. A missing index
+/// gives nothing at all, on every query, and there is no degraded version of
+/// that. If the opt-out relaxed this too, #6687 would reopen for every
+/// interactive caller, whose surface default is exactly that opt-out.
+/// Test: this IS the test.
+#[tokio::test]
+async fn unknown_index_skips_even_when_search_is_opted_out() {
+    let mut cfg = config();
+    cfg.context.require_search = Some(false);
+    let d = deps_with_search(
+        Arc::new(TargetIndexSearch {
+            health_status: "ok",
+            summary: None,
+            probe: IndexProbe::Unknown,
+        }),
+        true,
+    );
+    match preflight_context(&cfg, &d, InvocationSurface::Interactive).await {
+        GateOutcome::Skip(reason) => assert!(
+            reason.contains(&format!("`{}`", cfg.search_index)),
+            "got: {reason}"
+        ),
+        other => panic!(
+            "#6687: require_search=false degrades a daemon outage, not a missing \
+             index — got {other:?}"
+        ),
+    }
+}
+
+/// A status probe that could not complete degrades; it does not skip.
+///
+/// Why: the daemon answered `/health`, so it is up. Refusing every review over a
+/// transient probe failure is the false-positive machine #4086 removed; running
+/// one silently is the gap #6686 closed. Label it and carry on.
+/// Test: this IS the test.
+#[tokio::test]
+async fn index_status_probe_failure_degrades_rather_than_skipping() {
+    let cfg = config();
+    let d = deps_with_search(
+        Arc::new(TargetIndexSearch {
+            health_status: "ok",
+            summary: None,
+            probe: IndexProbe::ProbeFailed,
+        }),
+        true,
+    );
+    match preflight_context(&cfg, &d, InvocationSurface::Hosted).await {
+        GateOutcome::Degraded(reason) => assert!(
+            reason.contains("could not be read"),
+            "the reason must say the per-index verdict is missing; got: {reason}"
+        ),
+        other => panic!("a probe failure on a live daemon must label, not skip: {other:?}"),
     }
 }
 
 /// A trusty-search that cannot serve at all (embedder not ready) must STILL
 /// fail-closed under the default `require_search=true`.
 ///
-/// Why: #4079 relaxes the warm-boot gap, and the risk of that change is
+/// Why: #4086 relaxes the warm-boot gap, and the risk of that change is
 /// relaxing the genuine outage too. Without an embedder there is no semantic
 /// code context to be had, so there is nothing to label — the review must not
 /// run. This test is the guard on that boundary.
@@ -394,6 +650,16 @@ async fn not_serving_search_still_skips() {
 
     #[async_trait]
     impl SearchClient for EmbedderDownSearch {
+        // #6686: the per-index probe the gate decides on. This stand-in reports a
+        // fully-ready index so the fake exercises the branch under test, not this one.
+        async fn index_status(
+            &self,
+            index_id: &str,
+        ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError>
+        {
+            Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+        }
+
         async fn health(&self) -> Result<HealthResponse, SearchClientError> {
             Ok(HealthResponse {
                 status: "ok".to_string(),
@@ -450,6 +716,16 @@ async fn degraded_reason_prefers_health_error_detail() {
 
     #[async_trait]
     impl SearchClient for SourceRootNoticeSearch {
+        // #6686: the per-index probe the gate decides on. This stand-in reports a
+        // fully-ready index so the fake exercises the branch under test, not this one.
+        async fn index_status(
+            &self,
+            index_id: &str,
+        ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError>
+        {
+            Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+        }
+
         async fn health(&self) -> Result<HealthResponse, SearchClientError> {
             Err(SearchClientError::Unavailable(
                 "--source-root /tmp/proj has no registered trusty-search index — proceeding in \

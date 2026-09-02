@@ -9,6 +9,8 @@
 //!   - `health` — tolerant `HealthResponse` / `EmbedderState` types for the
 //!     trusty-search `/health` wire format (accepts both bool and string forms;
 //!     closes #628).
+//!   - `index_status` — per-index `GET /indexes/{id}/status` wire types; the
+//!     probe the required-context gate decides on since #6686.
 //!   - `search_client` — HTTP client over trusty-search `:7878` (REQUIRED).
 //!   - `null_search_client` — no-op `SearchClient` used by the `--source-root`
 //!     diff-only fallback when no registered index matches (#2994).
@@ -31,6 +33,7 @@ pub mod analyze_client;
 pub mod context;
 pub mod github;
 pub mod health;
+pub mod index_status;
 pub mod null_analyze_client;
 pub mod null_search_client;
 pub mod search_client;
@@ -51,6 +54,9 @@ pub use github::{
     AuthStrategy, GH_ALLOW_PUSH, GithubClient, GithubError, PostedReview, PrMetadata, PrRef,
     PrUser, RunMode, assert_no_push_operation, fetch_pr_diff, fetch_pr_metadata, mint_app_jwt,
     post_pr_review, resolve_token_for_mode,
+};
+pub use index_status::{
+    CorpusOpenFailure, IndexStageReport, IndexStagesReport, IndexStatusResponse,
 };
 pub use null_analyze_client::NullAnalyzeClient;
 pub use null_search_client::NullSearchClient;

@@ -9,8 +9,13 @@
 //! AFTER the required-context gate (`pipeline::context_gate`, #590) has confirmed
 //! the dependencies are reachable (or the operator opted into a degraded run), so
 //! a transient per-query error here degrades gracefully to a partial context
-//! rather than re-deciding the hard require/skip policy.
-//! Test: covered transitively by `runner_tests` (gate + gather paths).
+//! rather than re-deciding the hard require/skip policy.  #6687 carves out the
+//! one error that is NOT a partial context: a `404 unknown index` means the
+//! configured index does not exist, so every retrieval returns nothing for a
+//! reason the query had nothing to do with.  That propagates as
+//! `UnknownIndexError` and the runner refuses to emit a verdict.
+//! Test: covered transitively by `runner_tests` (gate + gather paths); the
+//! unknown-index split is covered by this module's own tests.
 
 use tracing::{debug, warn};
 
@@ -27,14 +32,48 @@ use crate::{
     pipeline::runner::ReviewDeps,
 };
 
+/// An index the trusty-search daemon has never heard of (#6687).
+///
+/// Why: `gather_context` collapsed every search failure into `Vec::new()`, so a
+/// `404 unknown index` was indistinguishable from a query that legitimately
+/// matched nothing. A review whose configured index did not exist therefore ran
+/// with zero code context and still published a verdict. This type is what makes
+/// the two outcomes different at the type level: a query fault stays fail-open
+/// and contributes nothing, a missing index propagates and stops the review.
+/// What: carries the index id the review tried to query plus the daemon's own
+/// error text, so the operator-facing message can name both.
+/// Test: `unknown_index_propagates_instead_of_emptying_the_context`,
+/// `a_failing_search_against_a_real_index_stays_fail_open`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "trusty-search has no index `{index_id}` — the review would have run with no code context \
+     at all ({detail})"
+)]
+pub(crate) struct UnknownIndexError {
+    /// The index id the review asked trusty-search for.
+    pub(crate) index_id: String,
+    /// The daemon's own 404 text.
+    pub(crate) detail: String,
+}
+
 /// Gather code context from trusty-search and trusty-analyze.
 ///
 /// Why: context retrieval is the most latency-sensitive step; running the
 /// search query and the analyze probe in parallel reduces wall-clock time.
 /// What: runs the search query (identifier names + PR title) and the analyze
-/// probe concurrently; both degrade gracefully on error (empty context).
+/// probe concurrently. A transport error, a 5xx, or an analyze fault degrades
+/// gracefully to a partial context — the required-context gate already decided
+/// the hard require/skip policy, so re-deciding it here would double-gate.
+///
+/// #6687 is the one exception, and it is not a degradation: a `404 unknown
+/// index` means every search this review issues returns nothing for a reason
+/// that has nothing to do with the query, so it returns
+/// `Err(UnknownIndexError)` and the runner refuses to emit a verdict. The
+/// distinction is the HTTP status, via `SearchClientError::is_unknown_index`.
 /// Test: `gather_context_degrades_gracefully_on_search_failure` in runner_tests.rs;
-/// `gather_context_makes_no_apex_retrieval` in this module (#4999).
+/// `gather_context_makes_no_apex_retrieval`,
+/// `unknown_index_propagates_instead_of_emptying_the_context`,
+/// `a_failing_search_against_a_real_index_stays_fail_open` in this module.
 // #4999: APEX retrieval was dropped by owner ruling (0/69 citations at
 // ~0.001 relevance); this path issues exactly one search — the code context.
 pub(crate) async fn gather_context(
@@ -44,7 +83,7 @@ pub(crate) async fn gather_context(
     changed_files: &[String],
     pr_title: &str,
     _pr_description: &str,
-) -> ReviewContext {
+) -> Result<ReviewContext, UnknownIndexError> {
     // Build a search query from identifiers + changed files.
     let query_parts: Vec<&str> = {
         let mut parts: Vec<&str> = identifiers.iter().map(|s| s.as_str()).collect();
@@ -59,7 +98,7 @@ pub(crate) async fn gather_context(
 
     let search_fut = async {
         if query.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         match deps
             .search
@@ -68,11 +107,18 @@ pub(crate) async fn gather_context(
         {
             Ok(results) => {
                 debug!(count = results.len(), "search context retrieved");
-                results
+                Ok(results)
             }
+            // #6687: an index that does not exist is not a query that found
+            // nothing. Every retrieval this review makes would 404 for the same
+            // reason, so there is no partial context to proceed with.
+            Err(e) if e.is_unknown_index() => Err(UnknownIndexError {
+                index_id: config.search_index.clone(),
+                detail: e.to_string(),
+            }),
             Err(e) => {
-                warn!("trusty-search unavailable (proceeding with no context): {e}");
-                Vec::new()
+                warn!("trusty-search query failed (proceeding with no code context): {e}");
+                Ok(Vec::new())
             }
         }
     };
@@ -113,8 +159,9 @@ pub(crate) async fn gather_context(
     };
 
     let (search_results, (complexity_hotspots, smells)) = tokio::join!(search_fut, analyze_fut);
+    let search_results = search_results?;
 
-    ReviewContext {
+    Ok(ReviewContext {
         search_results,
         complexity_hotspots,
         smells,
@@ -127,7 +174,7 @@ pub(crate) async fn gather_context(
         pr_description: None,
         pr_discussion: None,
         referenced_code: None,
-    }
+    })
 }
 
 /// Gather external enrichment context (JIRA / Confluence / GitHub Issues).
@@ -271,6 +318,16 @@ mod tests {
     }
     #[async_trait]
     impl SearchClient for RecordingSearch {
+        // #6686: the per-index probe the gate decides on. This stand-in reports a
+        // fully-ready index so the fake exercises the branch under test, not this one.
+        async fn index_status(
+            &self,
+            index_id: &str,
+        ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError>
+        {
+            Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+        }
+
         async fn health(&self) -> Result<HealthResponse, SearchClientError> {
             Err(SearchClientError::Unavailable("unused".into()))
         }
@@ -346,6 +403,113 @@ mod tests {
         assert_eq!(
             calls[0].0, config.search_index,
             "the sole search must target the code-context index, not an APEX index"
+        );
+    }
+
+    // ── Unknown index vs. failing query (#6687) ──────────────────────────────
+
+    /// Search client whose `search()` always fails with a caller-chosen HTTP
+    /// status, so a test can pin which statuses are fail-open and which are not.
+    struct FailingSearch {
+        status: u16,
+    }
+    #[async_trait]
+    impl SearchClient for FailingSearch {
+        async fn health(&self) -> Result<HealthResponse, SearchClientError> {
+            Err(SearchClientError::Unavailable("unused".into()))
+        }
+        async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+            Err(SearchClientError::Unavailable("unused".into()))
+        }
+        async fn index_status(
+            &self,
+            index_id: &str,
+        ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError>
+        {
+            Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+        }
+        async fn search(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<u32>,
+        ) -> Result<Vec<SearchResult>, SearchClientError> {
+            Err(SearchClientError::Api {
+                status: self.status,
+                body: r#"{"error":"unknown index: main"}"#.to_string(),
+            })
+        }
+    }
+
+    fn deps_with(search: Arc<dyn SearchClient>) -> ReviewDeps {
+        ReviewDeps {
+            llm: Arc::new(FakeLlmApprove),
+            verifier: None,
+            search,
+            analyze: Some(Arc::new(NullAnalyze)),
+            dedup: None,
+        }
+    }
+
+    /// REGRESSION (#6687): a `404 unknown index` must stop the review, not
+    /// become an empty result set.
+    ///
+    /// Why: `gather_context` matched every `Err` into `Vec::new()`, so a review
+    /// against an index trusty-search had never heard of returned zero search
+    /// hits and nothing downstream could tell that apart from a query that
+    /// genuinely matched nothing. The review then ran the LLM over a diff with
+    /// no project context and published a verdict.
+    /// What: a search client that answers every query with `404`; asserts
+    /// `gather_context` returns `Err` and that the message names the index.
+    /// Test: this IS the test.
+    #[tokio::test]
+    async fn unknown_index_propagates_instead_of_emptying_the_context() {
+        let config = ReviewConfig::load(None);
+        let deps = deps_with(Arc::new(FailingSearch { status: 404 }));
+        let err = gather_context(
+            &config,
+            &deps,
+            &["foo".to_string()],
+            &["src/a.rs".to_string()],
+            "PR title",
+            "PR body",
+        )
+        .await
+        .expect_err("#6687: a missing index must not degrade to an empty context");
+        let msg = err.to_string();
+        assert_eq!(err.index_id, config.search_index);
+        assert!(
+            msg.contains(&config.search_index) && msg.contains("no code context"),
+            "the error must name the index and say the review would have had no context; \
+             got: {msg}"
+        );
+    }
+
+    /// The other half of the split: a query that fails against an index that
+    /// EXISTS stays fail-open.
+    ///
+    /// Why: #6687 must not turn every transient search fault into a refused
+    /// review. The gate already decided the require/skip policy; a 5xx here is
+    /// a partial context, and the review proceeds with what it has.
+    /// What: the same client answering `500`; asserts `Ok` with no results.
+    /// Test: this IS the test.
+    #[tokio::test]
+    async fn a_failing_search_against_a_real_index_stays_fail_open() {
+        let config = ReviewConfig::load(None);
+        let deps = deps_with(Arc::new(FailingSearch { status: 500 }));
+        let ctx = gather_context(
+            &config,
+            &deps,
+            &["foo".to_string()],
+            &["src/a.rs".to_string()],
+            "PR title",
+            "PR body",
+        )
+        .await
+        .expect("a 5xx against an existing index must degrade, not refuse");
+        assert!(
+            ctx.search_results.is_empty(),
+            "a failed query contributes nothing, but the review still runs"
         );
     }
 }

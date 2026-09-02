@@ -192,6 +192,73 @@ async fn subprocess_client_degraded_search_still_has_analysis() {
     server.await.expect("stub server task must not panic");
 }
 
+/// Bind a stub trusty-search that answers `/health` and `/indexes/{id}/status`.
+///
+/// Why: `has_analysis` now makes two requests, and #6687 is about how the SECOND
+/// one's status code is read. A one-shot stub cannot express that.
+/// What: serves `health_body` for any path containing `/health`, `200` for
+/// `/indexes/{known_index}/status`, and `404` for every other index. Loops
+/// until the test ends; the task is dropped with the runtime.
+/// Test: used by `subprocess_client_has_no_analysis_for_an_unknown_index`.
+async fn stub_search_server(health_body: &'static str, known_index: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral loopback port");
+    let addr = listener.local_addr().expect("stub server local_addr");
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 4096];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let (status, body) = if req.contains("/health") {
+                ("200 OK", health_body.to_string())
+            } else if req.contains(&format!("/indexes/{known_index}/status")) {
+                ("200 OK", r#"{"search_capabilities":["bm25"]}"#.to_string())
+            } else {
+                ("404 Not Found", r#"{"error":"unknown index"}"#.to_string())
+            };
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// REGRESSION (#6687): `has_analysis` must read its `index_id`, not discard it.
+///
+/// Why: the argument was named `_index_id` and ignored, so the analyze side
+/// reported itself ready for an index trusty-search had never heard of — the
+/// same failure the search side was swallowing, in the one place that could
+/// have caught it. `trusty-analyze` reads its data OUT of trusty-search, so an
+/// index that does not exist there means it has nothing to analyse.
+/// What: one stub daemon, two calls. The known index must be `true` and the
+/// unknown index `false` — the pre-fix code cannot distinguish them, so
+/// whichever answer it gives, one of these two assertions fails.
+/// Test: this IS the test.
+#[tokio::test]
+async fn subprocess_client_has_no_analysis_for_an_unknown_index() {
+    let base_url = stub_search_server(LIVE_DEGRADED_HEALTH, "trusty-tools").await;
+    let client = SubprocessAnalyzeClient::new("echo", base_url).expect("TLS init should succeed");
+
+    assert!(
+        client.has_analysis("trusty-tools").await,
+        "an index trusty-search knows about must stay analysable"
+    );
+    assert!(
+        !client.has_analysis("no-such-index").await,
+        "#6687: trusty-search has no `no-such-index`, so trusty-analyze has nothing to analyse \
+         for it — has_analysis must not answer true for any index name whatsoever"
+    );
+}
+
 /// The degraded status string must survive the probe unaltered.
 ///
 /// Why: the fix must not "solve" the block by laundering `"degraded"` into

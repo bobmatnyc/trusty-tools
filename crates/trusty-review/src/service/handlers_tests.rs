@@ -61,6 +61,15 @@ pub(super) struct FakeSearch;
 
 #[async_trait]
 impl SearchClient for FakeSearch {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<SearchHealth, SearchClientError> {
         Ok(SearchHealth {
             status: "ok".to_string(),
@@ -87,6 +96,15 @@ pub(super) struct FailSearch;
 
 #[async_trait]
 impl SearchClient for FailSearch {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<SearchHealth, SearchClientError> {
         Err(SearchClientError::Unavailable("down".to_string()))
     }
@@ -114,6 +132,15 @@ pub(super) struct UnhealthySearch;
 
 #[async_trait]
 impl SearchClient for UnhealthySearch {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<SearchHealth, SearchClientError> {
         // Transport succeeds (HTTP 200, valid JSON) but the embedder isn't
         // ready, so `HealthResponse::is_healthy()` is `false` — e.g. a
@@ -148,6 +175,15 @@ pub(super) struct DegradedButServingSearch;
 
 #[async_trait]
 impl SearchClient for DegradedButServingSearch {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<SearchHealth, SearchClientError> {
         Ok(SearchHealth {
             status: "degraded".to_string(),
@@ -173,13 +209,22 @@ impl SearchClient for DegradedButServingSearch {
     }
 }
 
-/// A search stub reproducing the LIVE payload from #4079: up, embedder ready,
+/// A search stub reproducing the LIVE payload from #4086: up, embedder ready,
 /// answering queries, but with a real warm-boot gap (11 indexes skipped on a
 /// scan timeout, 3 with a failed corpus).
 pub(super) struct WarmBootGapSearch;
 
 #[async_trait]
 impl SearchClient for WarmBootGapSearch {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<SearchHealth, SearchClientError> {
         Ok(SearchHealth {
             status: "degraded".to_string(),
@@ -208,7 +253,7 @@ impl SearchClient for WarmBootGapSearch {
     }
 }
 
-/// REGRESSION (#4079): `probe_deps` must publish a serving-but-degraded
+/// REGRESSION (#4086): `probe_deps` must publish a serving-but-degraded
 /// trusty-search as REACHABLE, with the gap in `state`/`detail`.
 ///
 /// Why: the type-level guard (`dep_state_degraded_is_reachable`) proves the
@@ -233,7 +278,7 @@ async fn probe_deps_degraded_search_is_reachable() {
 
     assert!(
         deps.trusty_search.reachable,
-        "a daemon that answered the probe must be reachable, whatever its warm boot did (#4079)"
+        "a daemon that answered the probe must be reachable, whatever its warm boot did (#4086)"
     );
     assert_eq!(deps.trusty_search.state, DepState::Degraded);
     assert!(
@@ -498,6 +543,15 @@ struct ParkingSearch {
 
 #[async_trait]
 impl SearchClient for ParkingSearch {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<SearchHealth, SearchClientError> {
         if let Some(tx) = self
             .entered
@@ -786,13 +840,13 @@ async fn health_stalled_dep_returns_timeout_state_within_bound() {
     );
 }
 
-// ── DepState serialisation + bounded_probe unit tests (#3658, #4079) ──────────
+// ── DepState serialisation + bounded_probe unit tests (#3658, #4086) ──────────
 
 /// Minimal `classify` closure for the `bounded_probe` unit tests: `true` maps to
 /// a healthy dep, `false` to one that cannot serve.
 ///
 /// Why: `bounded_probe` now takes a `(DepState, Option<String>)` classifier
-/// rather than a bool predicate (#4079); sharing one helper keeps the four probe
+/// rather than a bool predicate (#4086); sharing one helper keeps the four probe
 /// tests focused on the branch each exercises.
 /// What: `true` → `(DepState::Ok, None)`; `false` → `(DepState::Unreachable, …)`.
 /// Test: used by the `bounded_probe_*` tests below.
@@ -839,7 +893,7 @@ fn dep_state_serialises_lowercase() {
     );
 }
 
-/// REGRESSION (#4079): `reachable` must describe the transport, never the
+/// REGRESSION (#4086): `reachable` must describe the transport, never the
 /// dependency's capability.
 ///
 /// Why: reporting a live, answering daemon as `reachable: false` sent an
@@ -853,7 +907,7 @@ fn dep_state_degraded_is_reachable() {
 
     assert!(
         DepState::Degraded.is_reachable(),
-        "a dependency that answered the probe is reachable, whatever it reported (#4079)"
+        "a dependency that answered the probe is reachable, whatever it reported (#4086)"
     );
     assert!(DepState::Ok.is_reachable());
     assert!(
@@ -867,7 +921,7 @@ fn dep_state_degraded_is_reachable() {
 }
 
 /// `bounded_probe` carries a `Degraded` classification and its reason through
-/// unchanged (#4079).
+/// unchanged (#4086).
 ///
 /// Why: the whole point of the middle state is the reason attached to it. A
 /// `Degraded` state whose detail was dropped on the floor would be as

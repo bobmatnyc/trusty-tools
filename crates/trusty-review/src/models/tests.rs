@@ -275,6 +275,31 @@ fn review_result_without_inline_comments_defaults_empty() {
     assert!(back.inline_comments.is_empty());
 }
 
+/// `mark_infra_skip` must set every field the loudness contract depends on.
+///
+/// Why: two call sites in `run_review` produce a context-dependency skip — the
+/// required-context gate and #6687's missing search index. The MCP layer keys
+/// `isError: true` off `infra_unavailable`, not off `status`, so a call site
+/// that set one and forgot the other would publish a SILENT skip. One helper is
+/// what stops that, and this pins what it sets.
+/// Test: this IS the test.
+#[test]
+fn review_result_infra_skip_sets_every_loudness_field() {
+    let mut result = ReviewResult::new("acme", "backend", 1, "t", "u");
+    result.mark_infra_skip("trusty-search has no index `main`".to_string());
+    assert_eq!(result.status, ReviewStatus::Skipped);
+    assert!(
+        result.infra_unavailable,
+        "the MCP layer reads THIS flag to set isError:true — a skip without it is silent"
+    );
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(
+        result.error.as_deref(),
+        Some("trusty-search has no index `main`")
+    );
+    assert!(result.dry_run, "a skipped review must never be posted");
+}
+
 #[test]
 fn review_result_serde_roundtrip() {
     let mut result = ReviewResult::new(

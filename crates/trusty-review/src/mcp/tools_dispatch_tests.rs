@@ -74,6 +74,15 @@ struct FakeSearchDispatch;
 
 #[async_trait]
 impl SearchClient for FakeSearchDispatch {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<SearchHealth, SearchClientError> {
         Ok(SearchHealth {
             status: "ok".into(),
@@ -142,6 +151,15 @@ struct FailingSearchDispatch;
 
 #[async_trait]
 impl SearchClient for FailingSearchDispatch {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<SearchHealth, SearchClientError> {
         Err(SearchClientError::Unavailable("down".into()))
     }
@@ -278,7 +296,7 @@ async fn call_tool_review_diff_search_down_interactive_default_degrades() {
     assert_eq!(
         result["mcp_status"],
         json!("degraded_context"),
-        "a Degraded outcome must carry the degraded sentinel (#4079), never the \
+        "a Degraded outcome must carry the degraded sentinel (#4086), never the \
          infra-unavailable one — the review ran, it was just incomplete"
     );
 

@@ -86,6 +86,42 @@ impl SubprocessAnalyzeClient {
         &self.binary
     }
 
+    /// Whether trusty-search knows an index by this id (#6687).
+    ///
+    /// Why: `has_analysis` used to ignore its `index_id` argument entirely, so
+    /// the analyze side reported itself ready for an index that does not exist —
+    /// the same swallowed failure the search side had. Asking the daemon is the
+    /// whole fix.
+    /// What: `GET /indexes/{id}/status`; `false` ONLY on `404`, which is the
+    /// daemon saying it has never heard of this index. Any other outcome —
+    /// `200`, a `503` residency miss, or a probe that could not complete —
+    /// answers `true`, because `health()` has already established the daemon is
+    /// up and an indeterminate probe must not manufacture an analyze outage.
+    /// Test: `subprocess_client_has_no_analysis_for_an_unknown_index`.
+    async fn search_index_exists(&self, index_id: &str) -> bool {
+        let url = format!(
+            "{}/indexes/{index_id}/status",
+            self.search_url.trim_end_matches('/')
+        );
+        match self.probe_http.get(&url).send().await {
+            Ok(resp) => {
+                let known = resp.status() != reqwest::StatusCode::NOT_FOUND;
+                if !known {
+                    tracing::warn!(
+                        index = %index_id,
+                        "trusty-search has no index `{index_id}` — trusty-analyze has nothing to \
+                         analyse for it (#6687)"
+                    );
+                }
+                known
+            }
+            Err(e) => {
+                tracing::debug!("index existence probe failed for `{index_id}` (optional): {e}");
+                true
+            }
+        }
+    }
+
     /// Invoke `trusty-analyze review --index-id <id> -` with the given diff on stdin.
     ///
     /// Why: the single subprocess-spawn path used by callers that want per-diff
@@ -197,7 +233,7 @@ impl AnalyzeClient for SubprocessAnalyzeClient {
     /// embedder-ready and answering queries normally, the string test pinned
     /// `has_analysis` at `false` and `context_gate` skipped every single review
     /// with "trusty-analyze unreachable/not-ready". The search-side gate in
-    /// `pipeline::context_gate` received exactly this fix under #4079; this
+    /// `pipeline::context_gate` received exactly this fix under #4086; this
     /// duplicated twin did not. It now CONSUMES `serving_state` so there is one
     /// place — and only one — that decides what a trusty-search health payload
     /// means.
@@ -240,7 +276,7 @@ impl AnalyzeClient for SubprocessAnalyzeClient {
         // verdict to the shared `serving_state()`, instead of re-testing
         // `status == "ok"` on a locally-declared one-field struct. The old
         // private struct is gone deliberately: keeping it is what let this copy
-        // drift out of sync with the #4079 fix in the first place.
+        // drift out of sync with the #4086 fix in the first place.
         let sh: HealthResponse = serde_json::from_str(&body)
             .map_err(|e| AnalyzeClientError::Parse(format!("search health parse: {e}")))?;
 
@@ -306,18 +342,23 @@ impl AnalyzeClient for SubprocessAnalyzeClient {
     /// search-side gate uses, so degraded-but-serving proceeds while a daemon
     /// that genuinely cannot answer still returns `false`.
     ///
-    /// The `index_id` argument is accepted for trait compatibility but the
-    /// subprocess model does not pre-check index existence (the review subcommand
-    /// will surface a missing index as an exit-1 error at call time). It is
-    /// effectively dead weight here; removing it would change the shared
-    /// `AnalyzeClient` trait signature and every implementor, so it is left
-    /// alone deliberately — out of scope for a gate-unblocking fix.
+    /// #6687: `index_id` is now read, not discarded. The subprocess model reads
+    /// its data OUT of trusty-search, so an index trusty-search has never heard
+    /// of means `trusty-analyze` has nothing to analyse either — yet this probe
+    /// answered `true` for any index name whatsoever, so the analyze side could
+    /// not catch a missing index that the search side had also swallowed. It now
+    /// asks the daemon whether the index exists and answers `false` when it does
+    /// not. A probe that cannot reach the status endpoint at all does NOT make
+    /// this `false`: `health()` already established the daemon is up, so an
+    /// indeterminate answer is treated as "index present" rather than
+    /// manufacturing an analyze outage out of a flaky probe.
     /// Test: `subprocess_client_has_analysis_returns_false_on_error`,
     /// `subprocess_client_degraded_search_still_has_analysis`,
-    /// `subprocess_client_not_serving_search_has_no_analysis`.
-    async fn has_analysis(&self, _index_id: &str) -> bool {
+    /// `subprocess_client_not_serving_search_has_no_analysis`,
+    /// `subprocess_client_has_no_analysis_for_an_unknown_index`.
+    async fn has_analysis(&self, index_id: &str) -> bool {
         match self.health().await {
-            Ok(h) => h.search_reachable,
+            Ok(h) => h.search_reachable && self.search_index_exists(index_id).await,
             Err(e) => {
                 tracing::debug!("trusty-analyze subprocess health check failed (optional): {e}");
                 false

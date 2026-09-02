@@ -520,7 +520,7 @@ fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolError> {
 const MCP_STATUS_INFRA_UNAVAILABLE: &str = "infrastructure_unavailable";
 
 /// Machine-readable envelope sentinel signalling that a tool result IS a real
-/// verdict but was produced without complete context (issue #4079).
+/// verdict but was produced without complete context (issue #4086).
 ///
 /// Why: a degraded review used to be distinguishable from a complete one only
 /// by parsing `content[0].text` and reading `status`/`error`, or by noticing a
@@ -531,7 +531,7 @@ const MCP_STATUS_INFRA_UNAVAILABLE: &str = "infrastructure_unavailable";
 /// `isError` deliberately stays `false`, because the review DID run and its
 /// findings are real; flipping it would make harnesses discard a useful verdict
 /// and would collapse "incomplete" back into "failed" — the same conflation
-/// #4079 removes on the health side.
+/// #4086 removes on the health side.
 /// What: the literal value written to the envelope's `mcp_status` field,
 /// alongside a `degraded_reason` string naming what was missing.
 /// Test: `wrap_result_degraded_sets_sentinel_and_reason`,
@@ -584,7 +584,7 @@ fn wrap_result(result: &ReviewResult) -> Value {
     } else if result.status == ReviewStatus::Degraded
         && let Some(obj) = envelope.as_object_mut()
     {
-        // #4079: a real verdict, but produced with incomplete context. Both the
+        // #4086: a real verdict, but produced with incomplete context. Both the
         // sentinel and the reason live on the envelope so a caller never has to
         // parse prose to learn the verdict is qualified.
         obj.insert(
