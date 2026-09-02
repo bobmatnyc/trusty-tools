@@ -75,6 +75,19 @@
   });
 
   let online = $derived(!!health && health.status === 'ok');
+
+  /*
+   * Why: `/health` counted failing indexes without naming them until #6688, so
+   * an operator reading `indexes_stage_failed: 1` on a 41-index daemon had to
+   * poll every index to find the one. #6694 added the ids; this renders them.
+   * What: the array as sent, or `[]`. The field is omitted entirely when
+   * nothing is failing — not `null`, not `[]` — so this must not assume it
+   * exists, and a daemon predating #6694 simply never sends it.
+   */
+  let stageFailedIds = $derived(
+    Array.isArray(health?.indexes_stage_failed_ids) ? health.indexes_stage_failed_ids : []
+  );
+
 </script>
 
 <div class="page-head">
@@ -133,6 +146,40 @@
     <div class="stat-label">Uptime</div>
     <div class="stat-value">{humanUptime(health?.uptime_secs)}</div>
     <div class="stat-meta">daemon v{health?.version ?? '—'}</div>
+  </div>
+</div>
+
+<!--
+  #6689 / #6694: name the indexes with a failed lane, fleet-wide. The note is
+  load-bearing, not filler: this list is `IndexStages::any_failed()`, and the
+  zero-vector case that motivated #6689 reports `ready` on every lane, so it
+  can never appear here. Saying so stops this card from reading as an
+  all-clear it cannot give.
+-->
+<div class="card mt-4">
+  <div class="card-header">Index lanes</div>
+  <div class="card-body">
+    {#if stageFailedIds.length > 0}
+      <p class="text-sm" style="color: var(--trusty-danger); margin: 0 0 var(--trusty-space-3) 0">
+        {stageFailedIds.length}
+        {stageFailedIds.length === 1 ? 'index has' : 'indexes have'} a failed lane:
+      </p>
+      <ul class="id-list">
+        {#each stageFailedIds as id (id)}
+          <li class="text-mono text-xs">
+            <span class="badge badge-danger">failed</span>
+            {id}
+          </li>
+        {/each}
+      </ul>
+    {:else}
+      <p class="text-sm text-muted" style="margin: 0">No index reports a failed lane.</p>
+    {/if}
+    <p class="hint">
+      A lane can report <code>ready</code> and still be empty — an index whose
+      vector store holds nothing advertises vector search and never appears
+      here. Expand an index on the Indexes page to see its vector coverage.
+    </p>
   </div>
 </div>
 
@@ -232,6 +279,21 @@
   }
   .gauge-fill.gauge-danger {
     background: var(--trusty-danger);
+  }
+  /* Failed-lane index list (#6689) */
+  .id-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .hint {
+    font-size: var(--trusty-fs-xs);
+    color: var(--trusty-text-muted);
+    line-height: 1.5;
+    margin: var(--trusty-space-3) 0 0 0;
   }
   .table th {
     background: var(--trusty-content-bg);

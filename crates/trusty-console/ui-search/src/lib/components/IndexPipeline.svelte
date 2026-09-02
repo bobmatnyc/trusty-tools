@@ -23,11 +23,13 @@
   import Badge from './Badge.svelte';
   import {
     STAGES,
-    stageBadge,
     stageMeta,
     isEmbeddingPaused,
     fileEventRow,
-    pushFeedRow
+    pushFeedRow,
+    laneBadge,
+    indexHealth,
+    coverageMeta
   } from '../indexingPipeline.js';
 
   let { id } = $props();
@@ -51,6 +53,10 @@
 
   let reportedPaused = $derived(isEmbeddingPaused(status));
   let paused = $derived(pausedOverride === null ? reportedPaused : pausedOverride);
+
+  // #6689: the verdict the banner shows — stages, capabilities and vector
+  // coverage read together, because a status-only read shows an empty index green.
+  let health = $derived(indexHealth(status));
 
   /** How often the open row re-reads its status. */
   const POLL_MS = 15_000;
@@ -154,15 +160,41 @@
 <div class="pipeline">
   <section class="stages">
     <h3 class="section-title">Pipeline</h3>
+    <!--
+      #6689: the verdict first, then the lanes it was computed from. An operator
+      scanning an expanded row reads one badge instead of combining three.
+    -->
+    <div class="verdict" data-testid="index-health">
+      <Badge tone={health.tone} dot={health.healthy !== null}>{health.label}</Badge>
+      {#if health.faults.length > 0}
+        <ul class="fault-list">
+          {#each health.faults as fault (fault.lane + fault.label)}
+            <li class="fault" data-testid="index-fault">
+              <strong>{fault.label}.</strong>
+              {fault.detail}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
     <div class="stage-grid">
       {#each STAGES as stage (stage.key)}
         {@const lane = status?.stages?.[stage.key]}
-        {@const badge = stageBadge(lane)}
-        <div class="stage">
+        <!-- #6689: laneBadge, not stageBadge — the semantic lane needs the
+             coverage cross-check, and a status-only badge is the defect. -->
+        {@const badge = laneBadge(stage.key, status)}
+        {@const coverage = stage.key === 'semantic' ? coverageMeta(status) : ''}
+        <div class="stage" data-testid={`stage-${stage.key}`}>
           <span class="stage-name">{stage.label}</span>
           <Badge tone={badge.tone} spinner={badge.spinner}>{badge.label}</Badge>
           {#if stageMeta(lane)}
             <span class="stage-meta">{stageMeta(lane)}</span>
+          {/if}
+          {#if coverage}
+            <span class="stage-meta" data-testid="semantic-coverage">{coverage}</span>
+          {/if}
+          {#if badge.detail}
+            <span class="stage-failure" title={badge.detail}>{badge.detail}</span>
           {/if}
           {#if lane?.failure}
             <span class="stage-failure" title={lane.failure}>{lane.failure}</span>
@@ -237,6 +269,30 @@
     color: var(--trusty-text-muted);
     font-weight: 600;
     margin: 0 0 var(--trusty-space-3) 0;
+  }
+  /* Index health verdict (#6689) */
+  .verdict {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--trusty-space-2);
+    margin-bottom: var(--trusty-space-3);
+  }
+  .fault-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .fault {
+    font-size: var(--trusty-fs-xs);
+    color: var(--trusty-danger);
+    background: var(--trusty-danger-soft);
+    border-radius: var(--trusty-radius-sm);
+    padding: var(--trusty-space-2);
+    line-height: 1.5;
   }
   .stage-grid {
     display: flex;
