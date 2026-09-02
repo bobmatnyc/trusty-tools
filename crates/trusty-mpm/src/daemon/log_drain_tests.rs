@@ -492,3 +492,77 @@ async fn a_disabled_source_uploads_nothing_and_is_still_reported() {
         "a disabled source must upload nothing"
     );
 }
+
+#[tokio::test]
+async fn the_object_key_comes_from_the_source_root_s_git_origin() {
+    // #6657, end to end: a real checkout, a real drain, a real object. The key
+    // must be `<owner>/<project>/<crate>/<file>` with owner and project read
+    // from the checkout's `origin` — nothing configured, nothing guessed.
+    let tmp = TempDir::new().expect("tempdir");
+    let repo = tmp.path().join("checkout");
+    let logs = repo.join("logs");
+    std::fs::create_dir_all(&logs).expect("repo dirs");
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if !git(&["init"]) {
+        return; // no usable git on this runner
+    }
+    let _ = git(&[
+        "remote",
+        "add",
+        "origin",
+        "git@github.com:duettoresearch/pricing.git",
+    ]);
+    std::fs::write(logs.join("trusty-code.log"), "INFO a line\n").expect("write log file");
+
+    let dest = tmp.path().join("dest");
+    let state = tmp.path().join("state");
+    let config = TrustyToolsConfig {
+        log_drain: Some(LogDrainConfig {
+            enabled: Some(true),
+            destination: Some(format!("file://{}", dest.display())),
+            sources: vec![crate::core::trusty_tools_config::LogDrainSourceConfig {
+                crate_name: Some("trusty-code".to_string()),
+                root: Some(logs.display().to_string()),
+                include: vec!["*.log".to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let plan = plan_of(&config, tmp.path());
+    assert_eq!(
+        plan.destinations[0].target.key_prefix(),
+        "duettoresearch/pricing"
+    );
+
+    let status = run_tick(&plan, &state).await;
+    assert_eq!(status.outcome, DrainOutcome::Success, "{}", status.detail);
+    assert_eq!(status.uploaded, 1, "{}", status.detail);
+
+    let key = dest
+        .join("duettoresearch")
+        .join("pricing")
+        .join("trusty-code")
+        .join("trusty-code.log");
+    assert!(
+        key.exists(),
+        "expected the drained object at {}",
+        key.display()
+    );
+    // The retired layout put a session segment and a `logs/` interlayer above
+    // the crate; neither may reappear.
+    assert!(
+        !dest.join("octocat").exists() && !key.parent().unwrap().join("logs").exists(),
+        "the old <github_id>/<session>/logs layout must be gone"
+    );
+}
