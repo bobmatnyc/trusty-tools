@@ -2258,3 +2258,51 @@ async fn swap_back_real_hardware_kills_sidecar_past_max_restarts() {
         search_resp.status()
     );
 }
+
+/// Why (#6590): the refusal this asserts is what an operator reads while a
+/// launchd-respawned orphan holds the port. The pre-fix text named the pid and
+/// then advised `trusty-search stop` — which is what they had already tried.
+/// The remedy that worked was a direct SIGTERM allowed to run its full flush.
+/// What: the message names the pid, the signal, and the grace window, and warns
+/// against SIGKILL.
+/// Test: itself.
+#[test]
+fn already_running_message_names_the_pid_and_the_signal() {
+    let msg = super::daemon::already_running_message(86880, 60, false);
+    assert!(msg.contains("86880"), "must name the pid: {msg}");
+    assert!(
+        msg.contains("kill -TERM 86880"),
+        "must name the signal to send that pid: {msg}"
+    );
+    assert!(
+        msg.contains("60s"),
+        "must name the window the flush needs: {msg}"
+    );
+    assert!(
+        msg.contains("do not SIGKILL"),
+        "SIGKILL is what loses the snapshots: {msg}"
+    );
+    assert!(
+        msg.contains("re-run `trusty-search start`"),
+        "unsupervised, nothing restarts the daemon but the operator: {msg}"
+    );
+}
+
+/// Why: under `KeepAlive` the operator must NOT be told to re-run `start` —
+/// launchd brings the replacement up itself, and a manual start races it into
+/// the very "already running" refusal this message is about.
+/// What: the launchd-supervised variant names launchd and omits the re-run.
+/// Test: itself.
+#[test]
+fn already_running_message_defers_the_restart_to_launchd() {
+    let msg = super::daemon::already_running_message(86880, 60, true);
+    assert!(msg.contains("kill -TERM 86880"), "{msg}");
+    assert!(
+        msg.contains("KeepAlive"),
+        "must say what restarts it: {msg}"
+    );
+    assert!(
+        !msg.contains("re-run `trusty-search start`"),
+        "a manual start races launchd's own respawn: {msg}"
+    );
+}

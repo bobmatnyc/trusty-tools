@@ -24,6 +24,47 @@ use super::graceful_bootstrap::run_graceful_python_bootstrap;
 use super::restore::restore_indexes;
 use crate::commands::prior_index_count::load_prior_index_count;
 
+/// Refusal text for a start that found another daemon holding the port.
+///
+/// Why (#6590): naming the pid was not enough to act on. When `launchctl
+/// bootout` cuts a snapshot flush short, `KeepAlive` respawns the OLD binary,
+/// and every subsequent start refuses against that orphan — the observed
+/// reinstall looped 17 times on a message whose only advice, `trusty-search
+/// stop`, reads as a no-op to an operator who has just run it. The remedy that
+/// worked was a direct SIGTERM, which is bounded by nothing launchd controls
+/// and let the flush finish in 15 s.
+///
+/// What: names the pid, the signal to send it, and the window to allow. Under
+/// launchd the message stops there, because `KeepAlive` starts the replacement
+/// on its own; unsupervised, it also names the re-run. The macOS code-signing
+/// warning is preserved from the message this replaces.
+/// Test: `already_running_message_names_the_pid_and_the_signal`,
+/// `already_running_message_defers_the_restart_to_launchd`.
+pub(super) fn already_running_message(
+    pid: u32,
+    grace_secs: u64,
+    launchd_supervised: bool,
+) -> String {
+    let restart = if launchd_supervised {
+        "launchd's KeepAlive then starts the replacement on its own.".to_string()
+    } else {
+        "Then re-run `trusty-search start`.".to_string()
+    };
+    format!(
+        "Daemon already running (pid {pid}).\n\
+         \n\
+         If you just replaced the binary, this is the OLD image: a truncated \
+         shutdown leaves launchd respawning it, and it keeps the port.\n\
+         \n\
+         Remedy:  kill -TERM {pid}\n\
+         Allow up to {grace_secs}s for its index-snapshot flush to finish — do not \
+         SIGKILL it, that is what loses snapshots. {restart}\n\
+         \n\
+         Replacing the binary while the daemon is running causes macOS to SIGKILL \
+         the process (Code Signature Invalid)."
+    )
+}
+
 /// Main entry point for `trusty-search start`.
 ///
 /// Why: extracted from `main()`. The boot sequence is intricate (lockfile
@@ -247,12 +288,17 @@ pub async fn handle_start(
     // *alive*, print an actionable warning and exit 1.
     if let Some(pid) = crate::service::running_daemon_pid() {
         tracing::warn!("daemon already running (pid {pid}); refusing to start a second instance");
-        anyhow::bail!(
-            "Daemon already running (pid {pid}).\n\
-             Stop it first with `trusty-search stop`, then re-run `trusty-search start`.\n\
-             Replacing the binary while the daemon is running causes macOS to SIGKILL \
-             the process (Code Signature Invalid)."
-        );
+        // #6590: name the remedy, not just the pid — the loop this refusal
+        // produced ran 17 times against a launchd-respawned orphan.
+        #[cfg(target_os = "macos")]
+        let supervised = crate::commands::service::launchd_agent_loaded();
+        #[cfg(not(target_os = "macos"))]
+        let supervised = false;
+        anyhow::bail!(already_running_message(
+            pid,
+            trusty_common::shutdown::termination_grace().as_secs(),
+            supervised
+        ));
     }
 
     // Issue #81: detect orphan daemons whose PIDs are NOT recorded in the
