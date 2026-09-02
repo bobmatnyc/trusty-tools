@@ -8,6 +8,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.52.0] — 2026-09-02
 
+### Added
+
+- `GET /health` names the indexes behind `warmboot_summary.indexes_stage_failed`
+  in a new top-level `indexes_stage_failed_ids` array (#6688). Until now the
+  response carried counts only, so a consumer reading `indexes_stage_failed: 1`
+  on a 41-index daemon had to poll `GET /indexes/:id/status` for every
+  registration to find the broken one. The ids come from the same
+  `IndexStages::any_failed()` predicate, in the same registry scan, as the
+  counter, so the two can never disagree; they are sorted, because the registry
+  iterates arbitrarily. The field is optional and omitted entirely when nothing
+  is failing — every existing counter keeps its exact shape, and a consumer
+  built against an older daemon needs no change. A consumer that mirrors the
+  field must spell it `Option<Vec<String>>` or add `#[serde(default)]`; a bare
+  `Vec<String>` hard-fails against a daemon that omits it.
+- The Health page names the indexes with a failed lane, from the `indexes_stage_failed_ids` array [#6694](https://github.com/bobmatnyc/trusty-tools/pull/6694) added to `GET /health`, instead of leaving an operator to poll every registered index to find the one behind a count. The card says outright that a lane can report `ready` and still be empty, because `IndexStages::any_failed()` cannot see the zero-vector case ([#6689](https://github.com/bobmatnyc/trusty-tools/issues/6689))
+
 ### Fixed
 
 - `detect_project` refuses to derive an index id from the home directory or the
@@ -43,6 +59,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   with the same remedy text (the pid, `kill -TERM <pid>`, and the flush window).
   The `--foreground` path is unchanged: launchd and systemd never fork here and
   reach the same check where they always did.
+- **The dashboard showed an index with an empty vector store as green.** Expanding an index rendered its semantic lane straight from `stages.semantic.status`, and that status reports on the last embedding pass rather than on what the vector store holds — so `tm-trusty-tools-19` (58,415 chunks) and `tm-trusty-tools-21` (58,167 chunks) read `ready`, advertised `vector` in `search_capabilities`, and returned nothing for every vector query, while their `hnsw.usearch` files sat at 112 bytes against ~98 MB for healthy same-size siblings ([#6689](https://github.com/bobmatnyc/trusty-tools/issues/6689))
+  - the lane badge is now computed from the stage, the advertised capability and `semantic_coverage.vectors_present` together; an index with a nonzero chunk count that advertises `vector` and holds zero vectors renders `Empty` in red, with the chunk count it should have covered
+  - a `Healthy` / `Degraded` verdict sits above the three lanes, naming every failed lane and carrying the daemon's own failure string, so an operator reads one badge rather than combining three
+  - the semantic lane also shows cumulative coverage (`0 / 58,415 vectors stored`) beside the existing per-boot `embedded/total`, which counts only this boot's pass and reads `0` on a healthy index whose snapshot was already current (#4787)
+  - `skip_vector`, `lexical_only`, a `skipped` semantic stage and the daemon's own `no_vector_store` are all left alone — none of them is at fault for holding no vectors — and a lane still embedding has not yet been granted the `vector` capability the flag requires, so it is not flagged for being unfinished
 
 ### Changed
 
