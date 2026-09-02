@@ -12,3 +12,13 @@ Fixed
   index whose canonicalised `root_path` IS the checkout (logging the
   substitution), and otherwise names the derived id and says nothing registered
   covers the path (#6677).
+- `HttpAnalyzeMetricsSource::with_search_base_url` points the trusty-search
+  registry read at an explicit address. Without it the read resolved the
+  machine's advertised daemon whatever socket the source was built with, so a
+  caller holding the source over a stub analyze socket still issued a live HTTP
+  GET to whatever trusty-search was running and resolved against what that
+  daemon held (#6677).
+- The report's unresolved-index warning says which cause it hit —
+  `registry=empty` for a daemon that answered nothing, `registry=populated` for
+  one holding indexes none of which is rooted at this checkout — so the remedy
+  reads off one line instead of two (#6677).

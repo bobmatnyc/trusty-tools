@@ -12,10 +12,20 @@
 //! #6287 (ADR-0032): the mock was an HTTP/1.1 listener on loopback. trusty-analyze
 //! serves JSON-RPC over a Unix socket now, so the mock speaks that instead —
 //! the fixture bodies and every assertion below are unchanged.
+//!
+//! #6677: the enrichment reads trusty-search's index registry once per run, and
+//! that read went to whatever daemon the host advertised — a real HTTP GET out
+//! of a suite documented as never touching a real daemon. Every source built
+//! here now names where the registry comes from: [`DEAD_SEARCH_URL`] for the
+//! tests that want none, and a counting in-process mock for
+//! `the_registry_read_goes_to_the_injected_search_url`, which is the proof that
+//! the read follows the injection.
 //! Test: this file (only compiled with the default `report` feature).
 #![cfg(feature = "report")]
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use trusty_review::report::{
@@ -113,6 +123,56 @@ fn spawn_mock(index_id: String, dir: &std::path::Path) -> PathBuf {
     socket
 }
 
+// ─── In-process trusty-search registry mock (#6677) ──────────────────────────
+
+/// A trusty-search address with nothing behind it.
+///
+/// Port 1 is never a trusty-search daemon, and a loopback connect to it is
+/// refused immediately rather than hanging. `fetch_registered_indexes` is
+/// fail-open, so the refusal reads as an empty registry and resolution falls
+/// back to the derived id — which is what every test below other than the
+/// injection proof expects.
+const DEAD_SEARCH_URL: &str = "http://127.0.0.1:1";
+
+/// Serve one `GET /indexes?details=true` body over loopback, counting
+/// connections.
+///
+/// Why: this is how the suite proves the registry read follows
+/// `with_search_base_url`. A request that reached the host's real daemon
+/// instead would leave this counter at zero AND leave the resolution deriving
+/// its own id, so the two assertions in the proof test fail together.
+/// What: binds `127.0.0.1:0`, answers every connection with `body` as
+/// `HTTP/1.1 200` and `connection: close`, and increments the returned counter
+/// once per accepted connection. Returns the base URL and that counter.
+async fn spawn_search_registry_mock(body: String) -> (String, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the registry mock");
+    let addr = listener.local_addr().expect("registry mock address");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&hits);
+    tokio::spawn(async move {
+        while let Ok((mut conn, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let body = body.clone();
+            tokio::spawn(async move {
+                // One read is the whole request: a GET with no body, well
+                // under the buffer. The response does not depend on it.
+                let mut scratch = [0_u8; 2048];
+                let _ = conn.read(&mut scratch).await;
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = conn.write_all(reply.as_bytes()).await;
+                let _ = conn.flush().await;
+            });
+        }
+    });
+    (format!("http://{addr}"), hits)
+}
+
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
 /// Create a real local checkout named `acme-core` with one source file so the
@@ -171,7 +231,9 @@ async fn analyze_populates_complexity_and_findings() {
     // Precondition: no declared metrics — the chart/findings are empty pre-fetch.
     assert!(model.repositories[0].metrics.is_none());
 
-    let source = HttpAnalyzeMetricsSource::new(socket).expect("client");
+    let source = HttpAnalyzeMetricsSource::new(socket)
+        .expect("client")
+        .with_search_base_url(DEAD_SEARCH_URL);
     enrich_with_analyze(&mut model, &source).await;
 
     // The live fetch populated metrics.
@@ -286,7 +348,9 @@ async fn green_diagnostic_stays_dropped_under_a_path_that_spells_its_code() {
     let mut model =
         ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("build");
 
-    let source = HttpAnalyzeMetricsSource::new(socket).expect("client");
+    let source = HttpAnalyzeMetricsSource::new(socket)
+        .expect("client")
+        .with_search_base_url(DEAD_SEARCH_URL);
     enrich_with_analyze(&mut model, &source).await;
 
     let metrics = model.repositories[0]
@@ -304,6 +368,71 @@ async fn green_diagnostic_stays_dropped_under_a_path_that_spells_its_code() {
     assert_green_diagnostic_dropped(metrics, &md);
 }
 
+/// #6677 HERMETICITY PROOF: the registry read goes where the source was pointed,
+/// and nowhere else.
+///
+/// Why: `HttpAnalyzeMetricsSource::registered_indexes` resolved
+/// `DaemonAddrLayout::TRUSTY_SEARCH` unconditionally, so this suite — documented
+/// as never touching a real daemon — issued a live HTTP GET to the developer's
+/// own trusty-search on every run, and its resolution depended on what that
+/// daemon happened to hold.
+/// What: stands up a counting loopback registry that reports ONE index rooted at
+/// the fixture tree under an id the path cannot derive to, points the source at
+/// it, and asserts both halves. The counter proves the read reached this mock;
+/// the analyze mock serving `INJECTED_INDEX_ID` and nothing else proves the id
+/// came from this mock's body — a read that went to the host's daemon could not
+/// have produced that id, would have left the counter at zero, and would have
+/// left metrics unpopulated.
+/// Test: this test itself.
+#[tokio::test]
+async fn the_registry_read_goes_to_the_injected_search_url() {
+    // An id `derive_index_id` cannot produce for the fixture path: the
+    // derivation always appends `-<8 hex>` to the basename.
+    const INJECTED_INDEX_ID: &str = "acme-core-registered";
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let manifest_path = write_fixture(tmp.path());
+    let repo = tmp
+        .path()
+        .join(REPO_DIR)
+        .canonicalize()
+        .expect("the fixture tree exists");
+    let derived = trusty_review::report::derive_index_id(&repo).expect("id");
+    assert_ne!(
+        derived, INJECTED_INDEX_ID,
+        "the proof rests on these two ids differing"
+    );
+
+    let (search_url, hits) = spawn_search_registry_mock(format!(
+        r#"{{"indexes":[{{"id":"{INJECTED_INDEX_ID}","name":null,"root_path":"{}"}}]}}"#,
+        repo.display()
+    ))
+    .await;
+    // The analyze mock serves ONLY the injected id, so a fetch under the
+    // derived id answers "not built" and leaves metrics unset.
+    let socket = spawn_mock(INJECTED_INDEX_ID.to_string(), tmp.path());
+
+    let manifest = load_manifest(&manifest_path).expect("manifest loads");
+    let mut model =
+        ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("build");
+    let source = HttpAnalyzeMetricsSource::new(socket)
+        .expect("client")
+        .with_search_base_url(&search_url);
+
+    enrich_with_analyze(&mut model, &source).await;
+
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "the enrichment must read the registry exactly once, from {search_url}"
+    );
+    assert!(
+        model.repositories[0].metrics.is_some(),
+        "the fetch must have addressed {INJECTED_INDEX_ID} — the id only this \
+         mock's registry carries"
+    );
+}
+
 /// Why: a fetch failure must fall through cleanly to scan-only output, never
 /// abort. What: points the source at a socket nothing bound; asserts metrics
 /// stays None and the report still renders. Test: this test itself.
@@ -319,8 +448,9 @@ async fn analyze_fetch_failure_falls_through_to_scan() {
         ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("build");
 
     // Nothing ever bound this path — the probe fails, fetch is fail-open.
-    let source =
-        HttpAnalyzeMetricsSource::new(tmp.path().join("absent-analyze.sock")).expect("client");
+    let source = HttpAnalyzeMetricsSource::new(tmp.path().join("absent-analyze.sock"))
+        .expect("client")
+        .with_search_base_url(DEAD_SEARCH_URL);
     enrich_with_analyze(&mut model, &source).await;
 
     assert!(

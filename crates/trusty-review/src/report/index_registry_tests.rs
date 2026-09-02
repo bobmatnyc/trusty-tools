@@ -173,6 +173,48 @@ fn the_root_comparison_is_canonicalised() {
     );
 }
 
+/// A registry entry can outlive the tree it describes — a worktree removed
+/// while its index stayed registered. `canonical_source_root` cannot resolve
+/// such a path and hands back the raw string, so this pins what the fallback
+/// then does: it matches nothing but an identically-spelled `repo_path`.
+#[test]
+fn a_registry_root_that_no_longer_exists_matches_only_its_own_raw_path() {
+    let gone = "/w/worktrees/removed-tree";
+    let indexes = vec![index("stale", Some(gone))];
+
+    // A real checkout canonicalises; the stale raw path is not a prefix of it.
+    let live = tempfile::tempdir().expect("tempdir");
+    assert!(
+        matches!(
+            resolve_report_index(live.path(), &indexes),
+            ReportIndex::Unresolved { .. }
+        ),
+        "a registry root that no longer exists must not stand in for a live checkout"
+    );
+
+    // Both sides fall back to the raw string, so the two spellings are equal
+    // and the entry does substitute. Stated so the fallback is a decision on
+    // record rather than an accident of `unwrap_or_else`.
+    assert!(
+        matches!(
+            resolve_report_index(Path::new(gone), &indexes),
+            ReportIndex::Substituted { .. }
+        ),
+        "with neither side resolvable, an exact raw-path match is still a match"
+    );
+}
+
+/// The `Unresolved` warning carries WHICH cause, so an operator does not have
+/// to correlate it with the registry read's own line.
+#[test]
+fn the_unresolved_warning_names_which_cause() {
+    assert_eq!(registry_state(&[]), "empty");
+    assert_eq!(
+        registry_state(&[index("unrelated", Some("/w/repos/other"))]),
+        "populated"
+    );
+}
+
 // ── The fail-open read ───────────────────────────────────────────────────────
 
 /// A daemon that is not there reads as an empty registry, never an error — the

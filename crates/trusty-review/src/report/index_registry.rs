@@ -134,16 +134,39 @@ pub fn resolve_report_index(repo_path: &Path, indexes: &[IndexInfo]) -> ReportIn
             ReportIndex::Substituted { id, derived }
         }
         None => {
+            // #6677 review: the cause rides on this line, so an operator reading
+            // one warning knows which remedy applies.
             warn!(
                 derived = derived.as_deref().unwrap_or("<none>"),
                 repo_path = %repo_path.display(),
+                registry = registry_state(indexes),
                 registered = indexes.len(),
-                "report index resolution: the derived index id is not registered and \
-                 no registered index root_path covers this checkout; the analyze fetch \
-                 falls back to scan and traces record no anchor"
+                "report index resolution: no registered index matches this checkout; \
+                 registry=empty means the daemon answered nothing — it is down, or it \
+                 holds no index — and registry=populated means it holds indexes but \
+                 none rooted here; the analyze fetch falls back to scan and traces \
+                 record no anchor"
             );
             ReportIndex::Unresolved { derived }
         }
+    }
+}
+
+/// Which of the two `Unresolved` causes produced an empty match.
+///
+/// Why: the warning had a count and no cause, so a reader had to correlate it
+/// with `fetch_registered_indexes`'s own line to tell "the daemon told us
+/// nothing" from "the daemon holds indexes, none of them this tree". The two
+/// have different remedies — start or reach the daemon, versus index this
+/// checkout — and they now ride on the one line.
+/// What: `"empty"` for a registry with no entries (an unreachable daemon reads
+/// as one, fail-open), `"populated"` otherwise.
+/// Test: `index_registry_tests::the_unresolved_warning_names_which_cause`.
+fn registry_state(indexes: &[IndexInfo]) -> &'static str {
+    if indexes.is_empty() {
+        "empty"
+    } else {
+        "populated"
     }
 }
 
@@ -156,9 +179,13 @@ pub fn resolve_report_index(repo_path: &Path, indexes: &[IndexInfo]) -> ReportIn
 /// demanding its winner BE the checkout keeps one root-path matcher in the crate
 /// and one report-side rule about which index describes this tree.
 /// What: `Some(id)` when the winning index's canonicalised `root_path` equals
-/// the canonicalised `repo_path`; `None` otherwise.
+/// the canonicalised `repo_path`; `None` otherwise. `canonical_source_root`
+/// falls back to the raw path for a directory that no longer exists, so a
+/// registry entry naming a deleted tree matches only a `repo_path` whose raw
+/// string is the same — a real checkout never collides with one.
 /// Test: `index_registry_tests.rs::{a_root_path_match_substitutes_for_an_
-/// unregistered_derived_id, a_parent_rooted_index_is_not_substituted}`.
+/// unregistered_derived_id, a_parent_rooted_index_is_not_substituted,
+/// a_registry_root_that_no_longer_exists_matches_only_its_own_raw_path}`.
 fn index_at_root(indexes: &[IndexInfo], repo_path: &Path) -> Option<String> {
     let root = canonical_source_root(repo_path);
     let id = best_matching_index(indexes, &root)?;

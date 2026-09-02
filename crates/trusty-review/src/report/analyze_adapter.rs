@@ -492,6 +492,17 @@ pub struct HttpAnalyzeMetricsSource {
     /// would otherwise pay a spawn budget per repository, and report the same
     /// failure N times.
     started: tokio::sync::OnceCell<Result<(), String>>,
+    /// Where [`AnalyzeMetricsSource::registered_indexes`] reads the trusty-search
+    /// registry from (#6677).
+    ///
+    /// Why: the read resolved `DaemonAddrLayout::TRUSTY_SEARCH` unconditionally,
+    /// so a caller holding this source over a stub analyze socket still issued a
+    /// real HTTP GET to whatever trusty-search daemon the host happened to be
+    /// running. The address is a property of the source now, so a caller that
+    /// stubs the analyze side stubs this side with it.
+    /// What: `None` resolves the advertised daemon at read time — the production
+    /// default, unchanged; `Some(url)` reads that URL instead.
+    search_base_url: Option<String>,
 }
 
 impl HttpAnalyzeMetricsSource {
@@ -518,7 +529,26 @@ impl HttpAnalyzeMetricsSource {
             launcher: trusty_common::uds::OnDemandAnalyze::at(&socket),
             socket,
             started: tokio::sync::OnceCell::new(),
+            search_base_url: None,
         })
+    }
+
+    /// Read the trusty-search registry from `base_url` rather than from the
+    /// daemon this machine advertises (#6677).
+    ///
+    /// Why: `enrich_with_analyze_gaps` reads the registry once per run, and
+    /// without this the read ignored the socket the source was built with and
+    /// went to the host's live trusty-search. A test standing up an in-process
+    /// analyze mock was therefore not hermetic — it depended on whether the
+    /// developer's own daemon was up and what it held.
+    /// What: consuming builder; the stored URL is handed to
+    /// [`super::index_registry::fetch_registered_indexes`], which is fail-open,
+    /// so an address with nothing behind it reads as an empty registry.
+    /// Test: `tests/report_analyze_e2e.rs::the_registry_read_goes_to_the_injected_search_url`.
+    #[must_use]
+    pub fn with_search_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.search_base_url = Some(base_url.into());
+        self
     }
 
     /// Start trusty-analyze if nothing is serving, exactly once per source.
@@ -819,9 +849,14 @@ impl AnalyzeMetricsSource for HttpAnalyzeMetricsSource {
 
     /// #6677: the registry is trusty-search's, not the analyze daemon's —
     /// `analyze.list_indexes` proxies the ids and drops `root_path`, which is
-    /// the field resolution needs.
+    /// the field resolution needs. The address is
+    /// [`Self::with_search_base_url`]'s when one was set, so a caller that
+    /// stubbed the analyze socket can stub this read too.
     async fn registered_indexes(&self) -> Vec<IndexInfo> {
-        super::index_registry::registered_indexes().await
+        match &self.search_base_url {
+            Some(url) => super::index_registry::fetch_registered_indexes(url).await,
+            None => super::index_registry::registered_indexes().await,
+        }
     }
 
     /// #5239: the same fail-open fetch, naming which of the two conditions
