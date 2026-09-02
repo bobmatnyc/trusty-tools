@@ -6,11 +6,12 @@
 //! `ops.rs` focused on the `gh` orchestration and keeps the pure logic unit-
 //! testable without a runner.
 //! What: [`StateMachine`] wrapping a `&StateModel` with `transition_allowed`,
-//! `resolve_current_state` (from an issue's labels), `state_label`,
-//! `assignee_target_for`, and `allowed_targets_from`.
+//! `resolve_current_state` (from an issue's labels and open/closed flag),
+//! `state_label`, `closes_issue`, `requires_note`, `assignee_target_for`, and
+//! `allowed_targets_from`.
 //! Test: the `sm_*` tests in this file.
 
-use super::config::StateModel;
+use super::config::{GhState, StateModel};
 use crate::commands::ticket::labels::AssigneeTarget;
 
 /// A read-only state-machine view over a validated model.
@@ -34,17 +35,50 @@ impl<'a> StateMachine<'a> {
         Self { model }
     }
 
-    /// The GitHub label for a state name, if the state exists.
+    /// The GitHub label for a state name, if the state exists AND is labelled.
     ///
     /// Why: the transition swap and seeding need the visible label for a state.
-    /// What: linear lookup by state name → `&label.name`.
-    /// Test: `sm_state_label`.
+    /// What: linear lookup by state name → `&label.name`. Returns `None` both
+    /// for an unknown state and for a label-less one; callers that need to tell
+    /// those apart pair it with [`Self::is_state`].
+    /// Test: `sm_state_label`, `sm_state_label_none_for_labelless`.
     pub(crate) fn state_label(&self, state: &str) -> Option<&'a str> {
         self.model
             .states
             .iter()
             .find(|s| s.name == state)
-            .map(|s| s.label.name.as_str())
+            .and_then(|s| s.label.as_ref())
+            .map(|l| l.name.as_str())
+    }
+
+    /// Whether reaching `state` means the GitHub issue must be closed.
+    ///
+    /// Why: a lifecycle can end by closing the issue rather than by labelling
+    /// it, and `tm issue transition` performs that close.
+    /// What: looks the state up and compares its `gh_state` to `Closed`; an
+    /// unknown state is not closing.
+    /// Test: `sm_closes_issue`.
+    pub(crate) fn closes_issue(&self, state: &str) -> bool {
+        self.model
+            .states
+            .iter()
+            .any(|s| s.name == state && s.gh_state == GhState::Closed)
+    }
+
+    /// Whether the `from → to` edge refuses to run without a `--note`.
+    ///
+    /// Why: some edges exist to RECORD something (trusty-tools closes an issue
+    /// only with live-verification evidence). Making the note a model property
+    /// keeps that rule in the YAML instead of in prose.
+    /// What: finds the matching edge and returns its `requires_note`; an edge
+    /// that is not in the graph never requires a note (the edge check rejects
+    /// it first anyway).
+    /// Test: `sm_requires_note`.
+    pub(crate) fn requires_note(&self, from: Option<&str>, to: &str) -> bool {
+        self.model
+            .transitions
+            .iter()
+            .any(|t| t.from.as_deref() == from && t.to == to && t.requires_note)
     }
 
     /// Whether `state` is a known state name.
@@ -93,28 +127,60 @@ impl<'a> StateMachine<'a> {
             .collect()
     }
 
-    /// Resolve the issue's current state from the labels present on it.
+    /// Resolve the issue's current state from its labels and open/closed flag.
     ///
-    /// Why: the visibility north star requires exactly one state label; this
-    /// reconstructs state from GitHub artifacts alone. Zero or multiple matches
-    /// is surfaced as an error (the caller turns `Multiple` into a `repair`
-    /// hint).
-    /// What: intersects the issue's labels with the state labels and classifies
-    /// the result as `None` / `One` / `Many`.
-    /// Test: `sm_resolve_one`, `sm_resolve_none`, `sm_resolve_many`.
-    pub(crate) fn resolve_current_state(&self, issue_labels: &[String]) -> CurrentState<'a> {
+    /// Why: the visibility north star requires exactly one state; this
+    /// reconstructs it from GitHub artifacts alone. Multiple matches is
+    /// surfaced as an error (the caller turns `Many` into a `repair` hint).
+    /// What: intersects the issue's labels with the state labels. On zero
+    /// matches it falls back to the model's label-less state for the issue's
+    /// open/closed flag (trusty-tools' `open`), and only reports `None` when
+    /// the model declares no such state.
+    /// Test: `sm_resolve_one`, `sm_resolve_none`, `sm_resolve_many`,
+    /// `sm_resolve_falls_back_to_labelless`.
+    pub(crate) fn resolve_current_state(
+        &self,
+        issue_labels: &[String],
+        gh_open: bool,
+    ) -> CurrentState<'a> {
         let matches: Vec<&'a str> = self
             .model
             .states
             .iter()
-            .filter(|s| issue_labels.iter().any(|l| l == &s.label.name))
+            .filter(|s| {
+                s.label
+                    .as_ref()
+                    .is_some_and(|lbl| issue_labels.iter().any(|l| l == &lbl.name))
+            })
             .map(|s| s.name.as_str())
             .collect();
         match matches.len() {
-            0 => CurrentState::None,
+            0 => self
+                .labelless_state(gh_open)
+                .map_or(CurrentState::None, CurrentState::One),
             1 => CurrentState::One(matches[0]),
             _ => CurrentState::Many(matches),
         }
+    }
+
+    /// The label-less state for an open (or closed) issue, if the model has one.
+    ///
+    /// Why: `open` and `closed` have no label of their own, so they are named
+    /// by the issue's own open/closed flag. Validation guarantees at most one
+    /// such state per flag, so the first match is the only match.
+    /// What: finds the first state with no label whose `gh_state` matches.
+    /// Test: `sm_resolve_falls_back_to_labelless`.
+    fn labelless_state(&self, gh_open: bool) -> Option<&'a str> {
+        let want = if gh_open {
+            GhState::Open
+        } else {
+            GhState::Closed
+        };
+        self.model
+            .states
+            .iter()
+            .find(|s| s.label.is_none() && s.gh_state == want)
+            .map(|s| s.name.as_str())
     }
 
     /// The effective assignee rule for a target state.
@@ -242,7 +308,7 @@ mod tests {
         let sm = StateMachine::new(&m);
         let labels = vec!["unicorn".to_string(), "unicorn:approved".to_string()];
         assert_eq!(
-            sm.resolve_current_state(&labels),
+            sm.resolve_current_state(&labels, true),
             CurrentState::One("approved")
         );
     }
@@ -252,7 +318,8 @@ mod tests {
         let m = model();
         let sm = StateMachine::new(&m);
         let labels = vec!["unicorn".to_string(), "blast:high".to_string()];
-        assert_eq!(sm.resolve_current_state(&labels), CurrentState::None);
+        // The factory model has no label-less state, so zero matches is `None`.
+        assert_eq!(sm.resolve_current_state(&labels, true), CurrentState::None);
     }
 
     #[test]
@@ -260,12 +327,79 @@ mod tests {
         let m = model();
         let sm = StateMachine::new(&m);
         let labels = vec!["unicorn:queued".to_string(), "unicorn:approved".to_string()];
-        match sm.resolve_current_state(&labels) {
+        match sm.resolve_current_state(&labels, true) {
             CurrentState::Many(v) => {
                 assert!(v.contains(&"queued") && v.contains(&"approved"));
             }
             other => panic!("expected Many, got {other:?}"),
         }
+    }
+
+    /// A two-label-less-state model mirroring trusty-tools' `open`/`closed`.
+    fn labelless_model() -> StateModel {
+        let yaml = r#"
+version: 1
+label_config: { base: "", approved: "", blast_prefix: "", status_prefix: "s:" }
+states:
+  - { name: open, gh_state: open, order: 0 }
+  - { name: "s:working", label: { name: "s:working", color: "AABBCC" }, order: 1 }
+  - { name: closed, gh_state: closed, order: 2 }
+transitions:
+  - { from: open, to: "s:working", trigger: executor_start }
+  - { from: "s:working", to: closed, trigger: human_label, requires_note: true }
+  - { from: "s:working", to: open, trigger: human_label }
+assignee_model: { strategy: unchanged, per_state: {} }
+"#;
+        serde_yaml::from_str(yaml).expect("label-less model parses")
+    }
+
+    #[test]
+    fn sm_state_label_none_for_labelless() {
+        let m = labelless_model();
+        let sm = StateMachine::new(&m);
+        assert_eq!(sm.state_label("open"), None);
+        assert!(sm.is_state("open"), "label-less states are still states");
+        assert_eq!(sm.state_label("s:working"), Some("s:working"));
+    }
+
+    #[test]
+    fn sm_resolve_falls_back_to_labelless() {
+        let m = labelless_model();
+        let sm = StateMachine::new(&m);
+        // No state label + issue open → the label-less `open` state.
+        assert_eq!(
+            sm.resolve_current_state(&["chore".to_string()], true),
+            CurrentState::One("open")
+        );
+        // No state label + issue closed → the label-less `closed` state.
+        assert_eq!(
+            sm.resolve_current_state(&["chore".to_string()], false),
+            CurrentState::One("closed")
+        );
+        // A state label still wins over the flag.
+        assert_eq!(
+            sm.resolve_current_state(&["s:working".to_string()], true),
+            CurrentState::One("s:working")
+        );
+    }
+
+    #[test]
+    fn sm_closes_issue() {
+        let m = labelless_model();
+        let sm = StateMachine::new(&m);
+        assert!(sm.closes_issue("closed"));
+        assert!(!sm.closes_issue("open"));
+        assert!(!sm.closes_issue("s:working"));
+        assert!(!sm.closes_issue("nonexistent"));
+    }
+
+    #[test]
+    fn sm_requires_note() {
+        let m = labelless_model();
+        let sm = StateMachine::new(&m);
+        assert!(sm.requires_note(Some("s:working"), "closed"));
+        assert!(!sm.requires_note(Some("s:working"), "open"));
+        assert!(!sm.requires_note(Some("open"), "s:working"));
     }
 
     #[test]

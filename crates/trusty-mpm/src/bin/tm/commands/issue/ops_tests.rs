@@ -181,10 +181,11 @@ fn ops_seed_idempotent_when_all_present() {
         let mut v: Vec<RepoLabel> = m
             .states
             .iter()
-            .map(|s| RepoLabel {
-                name: s.label.name.clone(),
-                color: s.label.color.clone(),
-                description: s.label.description.clone(),
+            .filter_map(|s| s.label.as_ref())
+            .map(|l| RepoLabel {
+                name: l.name.clone(),
+                color: l.color.clone(),
+                description: l.description.clone(),
             })
             .collect();
         v.extend(m.extra_labels.iter().map(|l| RepoLabel {

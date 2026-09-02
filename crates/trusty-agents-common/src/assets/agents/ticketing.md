@@ -274,12 +274,31 @@ matters happens between them. Four labels carry that middle:
 | `status:merged` | PR merged to main; live verification pending |
 | `status:tested` | Verified live (installed binary, real run); eligible to close |
 
-🔴 **They are mutually exclusive. Advancing removes the prior label in the same
-edit** — two `status:` labels on one issue is a defect, not a history:
+🔴 **They are mutually exclusive. Advance with `tm issue transition`, never by
+hand** — two `status:` labels on one issue is a defect, not a history:
 
 ```bash
-gh issue edit N --add-label status:merged --remove-label status:coded
+tm issue transition N status:merged
 ```
+
+That reads the project's state model (`issue-state.yaml` at the repo root),
+refuses any edge the model does not declare, and issues the `--add-label` and
+`--remove-label` as ONE `gh issue edit`, so the issue is never observed carrying
+two of them.
+
+- `tm issue states` lists the states and legal edges; `tm issue current N`
+  prints where an issue is now.
+- A refusal exits 1 and names the states you may move to instead. An issue that
+  already carries two `status:` labels is refused with `tm issue repair N`,
+  which drops the stale one.
+- Closing needs evidence: `tm issue transition N closed --note "<what you ran
+  and what it printed>"`. Without `--note` the edge is refused.
+- **On a host with no `tm`**, and only there, fall back to a hand-typed edit —
+  both flags in ONE call, never two:
+
+  ```bash
+  gh issue edit N --add-label status:merged --remove-label status:coded
+  ```
 
 ### Claim at dispatch
 
@@ -287,9 +306,12 @@ gh issue edit N --add-label status:merged --remove-label status:coded
 finishes**, together with a dated comment naming the claiming session:
 
 ```bash
-gh issue edit N --add-label status:in-progress
+tm issue transition N status:in-progress
 gh issue comment N --body "Claimed by session <name>, <YYYY-MM-DD> — fix in flight."
 ```
+
+The claim comment stays a separate `gh issue comment` — the transition posts its
+own audit line, which is not the dated claim record.
 
 🔴 **Another session takes a claimed issue only when the claim is provably
 stale**, which means BOTH: the named session is gone, AND nothing referencing
@@ -302,12 +324,13 @@ sessions fixing one issue costs more than one issue sitting still.
 🔴 **Each advance is triggered by an event, and the agent that observed the
 event owes the label pass immediately.** Nothing sweeps for stale labels later.
 
-| Event | Advance to |
+| Event | Command |
 |---|---|
-| PR opened for the fix | `status:coded` |
-| Merge CONFIRMED — `gh pr view <n> --json state` reports `MERGED` | `status:merged` |
-| Live verification evidence in hand | `status:tested` |
-| Closed, with that evidence in the closing comment | — |
+| PR opened for the fix | `tm issue transition N status:coded` |
+| Merge CONFIRMED — `gh pr view <n> --json state` reports `MERGED` | `tm issue transition N status:merged` |
+| Live verification evidence in hand | `tm issue transition N status:tested` |
+| Closing, with that evidence | `tm issue transition N closed --note "<evidence>"` |
+| Claim released — the session is gone and nothing moved | `tm issue transition N open` |
 
 🔴 **A confirmed merge with no label pass is an incomplete step** (learned
 2026-08-31). Auto-merge lands PRs unattended, so nobody is watching at the
@@ -319,7 +342,9 @@ the advance happens then.
 
 🔴 **An issue closes only from `status:tested`, and the closing comment carries
 the live verification evidence** — what was run against the installed artifact
-and what it printed. A merged fix that fails live verification stays open at
+and what it printed. `tm issue transition N closed --note "<evidence>"` enforces
+both halves: the edge exists only from `status:tested`, and it refuses to run
+without the note. A merged fix that fails live verification stays open at
 `status:merged`.
 
 🔴 **A fix PR references `Refs #N`, never `Closes #N`.** A merge must not

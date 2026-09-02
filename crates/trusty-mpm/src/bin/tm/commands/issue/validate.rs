@@ -6,12 +6,13 @@
 //! message and keeps the checks testable in isolation.
 //! What: [`validate_model`] runs every load-time rule — known version, unique
 //! state names, transition refs resolve, 6-hex colors, generic terminal-edge
-//! check, and `bot` strategy requires an identity.
+//! check, at most one label-less state per `gh_state`, and `bot` strategy
+//! requires an identity.
 //! Test: the `validate_*` tests in this file cover each rejection path.
 
 use std::collections::BTreeSet;
 
-use super::config::{SUPPORTED_VERSION, StateModel};
+use super::config::{GhState, SUPPORTED_VERSION, StateModel};
 
 /// Structured validation failures for the issue state model.
 ///
@@ -65,6 +66,23 @@ pub(crate) enum ModelError {
     /// The `bot` strategy was selected without an identity.
     #[error("assignee strategy `bot` requires an `identity_pattern` (or `identity_example`)")]
     BotStrategyMissingIdentity,
+
+    /// Two label-less states share one GitHub open/closed flag.
+    ///
+    /// A label-less state is resolved from the issue's open/closed flag alone,
+    /// so two of them on the same flag would be indistinguishable.
+    #[error(
+        "label-less states `{first}` and `{second}` both map to gh_state \
+         `{gh_state}`; at most one label-less state per gh_state"
+    )]
+    AmbiguousLabellessState {
+        /// The first label-less state declared for this flag.
+        first: String,
+        /// The second (conflicting) one.
+        second: String,
+        /// The shared `open`/`closed` flag.
+        gh_state: &'static str,
+    },
 }
 
 /// Whether `s` is exactly six hexadecimal digits (no `#`).
@@ -84,7 +102,8 @@ fn is_six_hex(s: &str) -> bool {
 /// preserved as the source.
 /// What: checks version, non-empty + unique states, transition ref integrity,
 /// 6-hex colors (states + extra labels), terminal states have no outbound edge,
-/// and (for the `bot` strategy) an identity is present.
+/// at most one label-less state per `gh_state`, and (for the `bot` strategy) an
+/// identity is present.
 /// Test: `validate_default_ok` and the `validate_rejects_*` tests.
 pub(crate) fn validate_model(model: &StateModel) -> anyhow::Result<()> {
     validate_model_inner(model).map_err(|e| anyhow::anyhow!(e))
@@ -140,12 +159,14 @@ fn validate_model_inner(model: &StateModel) -> Result<(), ModelError> {
         }
     }
 
-    // 4. Colors are 6-hex (states + extra labels).
+    // 4. Colors are 6-hex (states + extra labels). A label-less state has no
+    //    color to check.
     for s in &model.states {
-        if !is_six_hex(&s.label.color) {
+        let Some(label) = &s.label else { continue };
+        if !is_six_hex(&label.color) {
             return Err(ModelError::BadColor {
-                label: s.label.name.clone(),
-                color: s.label.color.clone(),
+                label: label.name.clone(),
+                color: label.color.clone(),
             });
         }
     }
@@ -171,7 +192,27 @@ fn validate_model_inner(model: &StateModel) -> Result<(), ModelError> {
         }
     }
 
-    // 6. `bot` strategy requires an identity.
+    // 6. At most one label-less state per gh_state, so `resolve_current_state`
+    //    can name it unambiguously from the issue's open/closed flag.
+    let mut labelless: [Option<&str>; 2] = [None, None];
+    for s in &model.states {
+        if s.label.is_some() {
+            continue;
+        }
+        let slot = usize::from(s.gh_state == GhState::Closed);
+        match labelless[slot] {
+            None => labelless[slot] = Some(s.name.as_str()),
+            Some(first) => {
+                return Err(ModelError::AmbiguousLabellessState {
+                    first: first.to_string(),
+                    second: s.name.clone(),
+                    gh_state: if slot == 0 { "open" } else { "closed" },
+                });
+            }
+        }
+    }
+
+    // 7. `bot` strategy requires an identity.
     if model.assignee_model.strategy == "bot"
         && model.assignee_model.identity_pattern.is_none()
         && model.assignee_model.identity_example.is_none()
@@ -246,7 +287,11 @@ mod tests {
     #[test]
     fn validate_rejects_bad_hex() {
         let mut m = default_model();
-        m.states[0].label.color = "ZZZ".to_string();
+        m.states[0]
+            .label
+            .as_mut()
+            .expect("every factory state is labelled")
+            .color = "ZZZ".to_string();
         let err = validate_model_inner(&m).unwrap_err();
         assert!(matches!(err, ModelError::BadColor { .. }), "got: {err:?}");
     }
@@ -268,6 +313,7 @@ mod tests {
             from: Some("done".to_string()),
             to: "queued".to_string(),
             trigger: super::super::config::Trigger::HumanLabel,
+            requires_note: false,
             description: String::new(),
         });
         assert_eq!(
@@ -303,6 +349,48 @@ mod tests {
             validate_model_inner(&m),
             Err(ModelError::BotStrategyMissingIdentity)
         );
+    }
+
+    #[test]
+    fn validate_rejects_two_labelless_states_on_one_gh_state() {
+        // Two label-less `open` states cannot be told apart from an issue's
+        // labels or its open/closed flag, so the model must be refused.
+        let yaml = r#"
+version: 1
+label_config: { base: x, approved: x:a, blast_prefix: "b:", status_prefix: "x:" }
+states:
+  - { name: open, order: 0 }
+  - { name: also-open, order: 1 }
+transitions:
+  - { from: open, to: also-open, trigger: human_label }
+assignee_model: { strategy: unchanged, per_state: {} }
+"#;
+        let m: StateModel = serde_yaml::from_str(yaml).expect("synthetic parses");
+        assert_eq!(
+            validate_model_inner(&m),
+            Err(ModelError::AmbiguousLabellessState {
+                first: "open".to_string(),
+                second: "also-open".to_string(),
+                gh_state: "open",
+            })
+        );
+    }
+
+    #[test]
+    fn validate_accepts_one_labelless_state_per_gh_state() {
+        // One `open` + one `closed` label-less state IS resolvable.
+        let yaml = r#"
+version: 1
+label_config: { base: x, approved: x:a, blast_prefix: "b:", status_prefix: "x:" }
+states:
+  - { name: open, gh_state: open, order: 0 }
+  - { name: closed, gh_state: closed, order: 1 }
+transitions:
+  - { from: open, to: closed, trigger: human_label }
+assignee_model: { strategy: unchanged, per_state: {} }
+"#;
+        let m: StateModel = serde_yaml::from_str(yaml).expect("synthetic parses");
+        assert!(validate_model_inner(&m).is_ok());
     }
 
     #[test]

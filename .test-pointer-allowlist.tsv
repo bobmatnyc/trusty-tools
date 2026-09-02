@@ -380,7 +380,6 @@ crates/trusty-mpm/src/bin/tm/commands/auth.rs	set_token_reads_from_stdin
 crates/trusty-mpm/src/bin/tm/commands/daemon.rs	group_sessions_by_git_root_groups_correctly
 crates/trusty-mpm/src/bin/tm/commands/install.rs	install_claude_hooks_is_idempotent
 crates/trusty-mpm/src/bin/tm/commands/issue/ops.rs	ops_transition_assignee_unchanged
-crates/trusty-mpm/src/bin/tm/commands/issue/ops.rs	ops_transition_rejects_invalid
 crates/trusty-mpm/src/bin/tm/commands/issue/state.rs	sm_assignee_none
 crates/trusty-mpm/src/bin/tm/commands/issue/state.rs	sm_assignee_self
 crates/trusty-mpm/src/bin/tm/commands/managed_root.rs	test_expand_tilde_noop

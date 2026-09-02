@@ -1,0 +1,131 @@
+# issue-state.yaml — the trusty-tools issue lifecycle, as a state machine.
+#
+# Why this file is at the repo root: `tm issue` resolves its model in the order
+# `--config` flag > ./issue-state.yaml (this file) > ~/.trusty-tools/trusty-mpm/
+# issue-state.yaml > the embedded default (the Unicorn Factory example). Running
+# any `tm issue` verb from the repo root therefore picks this model up with no
+# flag. See crates/trusty-mpm/src/bin/tm/commands/issue/config.rs.
+#
+# What it encodes: CLAUDE.md's "Issue lifecycle — open → in-progress → coded →
+# merged → tested → closed". The four `status:*` labels are MUTUALLY EXCLUSIVE:
+# `tm issue transition` performs the add+remove as ONE `gh issue edit`, so an
+# issue can never carry two of them.
+#
+# State names are the label names for the four labeled states, so
+# `tm issue transition 1234 status:merged` reads the same as the label it sets.
+# `open` and `closed` carry no label: `open` is the absence of every `status:*`
+# label, `closed` is GitHub's own closed state.
+
+version: 1
+
+# This repo has no ownership (`unicorn`) or blast-radius label family — only the
+# lifecycle prefix. The unused prefixes are empty rather than invented.
+label_config:
+  base: ""
+  approved: ""
+  blast_prefix: ""
+  status_prefix: "status:"
+
+states:
+
+  # No `status:*` label. A freshly-filed issue is here, and so is one whose
+  # claim was released.
+  - name: open
+    gh_state: open
+    order: 0
+
+  - name: "status:in-progress"
+    label:
+      name: "status:in-progress"
+      color: "1D76DB"
+      description: "A session/agent has claimed it and is actively working it"
+    order: 1
+
+  - name: "status:coded"
+    label:
+      name: "status:coded"
+      color: "5319E7"
+      description: "Implementation pushed on a branch; PR not yet merged"
+    order: 2
+
+  - name: "status:merged"
+    label:
+      name: "status:merged"
+      color: "0E8A16"
+      description: "PR merged to main; live verification pending"
+    order: 3
+
+  - name: "status:tested"
+    label:
+      name: "status:tested"
+      color: "C2E0C6"
+      description: "Verified live (installed binary / real run); eligible to close"
+    order: 4
+
+  # GitHub's closed state. Not terminal: a closed issue can be reopened.
+  - name: closed
+    gh_state: closed
+    order: 5
+
+transitions:
+
+  # --- forward: one rung at a time -----------------------------------------
+  - from: open
+    to: "status:in-progress"
+    trigger: executor_start
+    description: "Claimed at dispatch; comment naming the session and date"
+
+  - from: "status:in-progress"
+    to: "status:coded"
+    trigger: executor_complete
+    description: "Implementation pushed on a branch"
+
+  - from: "status:coded"
+    to: "status:merged"
+    trigger: executor_complete
+    description: "PR squash-merged to main"
+
+  - from: "status:merged"
+    to: "status:tested"
+    trigger: human_label
+    description: "Live verification passed"
+
+  - from: "status:tested"
+    to: closed
+    trigger: human_label
+    # CLAUDE.md: an issue closes only from status:tested, WITH live verification
+    # evidence in the closing comment. `--note` is that evidence and is required.
+    requires_note: true
+    description: "Closed with live-verification evidence (--note required)"
+
+  # --- back to open: release a claim, or reopen ----------------------------
+  - from: "status:in-progress"
+    to: open
+    trigger: human_label
+    description: "Release a claim — the session is gone and nothing has moved"
+
+  - from: "status:coded"
+    to: open
+    trigger: human_label
+    description: "Reopened: the coded work was abandoned or reverted"
+
+  - from: "status:merged"
+    to: open
+    trigger: human_label
+    description: "Reopened: a merged fix that failed live verification stays open"
+
+  - from: "status:tested"
+    to: open
+    trigger: human_label
+    description: "Reopened: the live verification was later invalidated"
+
+  - from: closed
+    to: open
+    trigger: human_label
+    description: "Reopened: back to no status label"
+
+assignee_model:
+  # `tm issue` never touches assignees in this repo — the claim is recorded by
+  # the `status:in-progress` label plus the dispatch comment.
+  strategy: unchanged
+  per_state: {}

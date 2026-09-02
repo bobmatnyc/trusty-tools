@@ -128,6 +128,15 @@ pub(crate) trait TicketSystem {
         anyhow::bail!("swap_labels not supported for this ticket system")
     }
 
+    /// Close the issue.
+    ///
+    /// A lifecycle state can be GitHub's own closed state rather than a label
+    /// (trusty-tools' `status:tested → closed`); reaching such a state closes
+    /// the issue.
+    fn close_issue(&self, _issue: u64) -> anyhow::Result<()> {
+        anyhow::bail!("close_issue not supported for this ticket system")
+    }
+
     /// Apply an assignee rule to an issue; `current` is the issue's existing
     /// assignee set (needed for the `None` clear-all rule — RFC §5.4).
     fn set_assignee(
@@ -160,6 +169,12 @@ impl<R: CommandRunner> GhTicketSystem<R> {
     /// Test: used by every `gh_*` test.
     pub(crate) fn new(runner: R) -> Self {
         Self { runner }
+    }
+
+    /// Borrow the underlying runner so a test can assert what reached `gh`.
+    #[cfg(test)]
+    pub(crate) fn runner(&self) -> &R {
+        &self.runner
     }
 }
 
@@ -290,6 +305,14 @@ impl<R: CommandRunner> TicketSystem for GhTicketSystem<R> {
 
     fn swap_labels(&self, issue: u64, add: &str, remove: &str) -> anyhow::Result<()> {
         gh_swap_labels(&self.runner, issue, add, remove)
+    }
+
+    fn close_issue(&self, issue: u64) -> anyhow::Result<()> {
+        let n = issue.to_string();
+        self.runner
+            .run("gh", &["issue", "close", &n])?
+            .ok_or_stderr("gh issue close")?;
+        Ok(())
     }
 
     fn set_assignee(

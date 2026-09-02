@@ -94,14 +94,40 @@ pub(crate) struct LabelConfig {
 pub(crate) struct StateDef {
     /// Machine state name (e.g. `queued`).
     pub(crate) name: String,
-    /// The GitHub label representing this state.
-    pub(crate) label: StateLabel,
+    /// The GitHub label representing this state, or `None` for a *label-less*
+    /// state — one whose only artifact is the ABSENCE of every state label
+    /// (e.g. trusty-tools' `open`, and `closed` which is GitHub's own state).
+    #[serde(default)]
+    pub(crate) label: Option<StateLabel>,
+    /// Whether this state means the GitHub issue is open or closed.
+    #[serde(default)]
+    pub(crate) gh_state: GhState,
     /// Optional display/sort ordering (informational; does not gate transitions).
     #[serde(default)]
     pub(crate) order: Option<u32>,
     /// `true` for terminal states (no outbound edges allowed).
     #[serde(default)]
     pub(crate) terminal: bool,
+}
+
+/// Whether a state corresponds to an open or a closed GitHub issue.
+///
+/// Why: a lifecycle can end by CLOSING the issue rather than by labelling it
+/// (trusty-tools' `status:tested → closed`). Recording that on the state lets
+/// `tm issue transition` close the issue, and lets a label-less state be
+/// resolved from the issue's own open/closed flag rather than from a label.
+/// What: `Open` (the default, so every pre-existing model keeps its meaning)
+/// and `Closed`.
+/// Test: `sm_closes_issue`, `sm_resolve_falls_back_to_labelless`,
+/// `project_close_requires_evidence_and_then_closes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GhState {
+    /// The issue is open (every labelled lifecycle state).
+    #[default]
+    Open,
+    /// The issue is closed.
+    Closed,
 }
 
 /// A state's GitHub label (name + color + description).
@@ -153,6 +179,10 @@ pub(crate) struct Transition {
     pub(crate) to: String,
     /// What drives this edge.
     pub(crate) trigger: Trigger,
+    /// When `true`, `tm issue transition` refuses this edge unless `--note` is
+    /// given — the note is the evidence the edge exists to record.
+    #[serde(default)]
+    pub(crate) requires_note: bool,
     /// Optional human description.
     #[serde(default)]
     pub(crate) description: String,

@@ -230,10 +230,17 @@ GitHub's native `open` and `closed`:
 | `status:merged` | PR merged to main; live verification pending |
 | `status:tested` | Verified live (installed binary, real run); eligible to close |
 
-Advancing a state removes the prior label in the same edit —
-`gh issue edit N --add-label status:merged --remove-label status:coded`. Two
-`status:` labels on one issue is a defect. The `ticketing` agent runs every one
-of these edits; the PM never runs `gh issue` itself.
+Advance with `tm issue transition N status:merged`, never a hand-typed label
+swap. It reads the project's state model (`issue-state.yaml` at the repo root),
+refuses any edge the model does not declare with exit 1 and the list of states
+you may move to, and issues the `--add-label` and `--remove-label` as ONE
+`gh issue edit`. Two `status:` labels on one issue is a defect the tool makes
+unreachable; an issue that already has two is refused with a pointer to
+`tm issue repair N`. `tm issue states` lists the model, `tm issue current N`
+reads an issue's state back. On a host with no `tm` — and only there — fall back
+to `gh issue edit N --add-label status:merged --remove-label status:coded`, both
+flags in one call. The `ticketing` agent runs every one of these; the PM never
+runs `gh issue` or `tm issue` itself.
 
 **Claim at dispatch.** `status:in-progress` goes on when the work is dispatched,
 with a dated comment naming the claiming session ("Claimed by session `<name>`,
@@ -245,11 +252,12 @@ not enough. When in doubt, leave it.
 **Advances are event-driven, not swept.** The agent that observed the event owes
 the label pass then and there:
 
-| Event | Advance to |
+| Event | Command |
 |---|---|
-| PR opened for the fix | `status:coded` |
-| Merge CONFIRMED (`gh pr view <n> --json state` reports `MERGED`) | `status:merged` |
-| Live verification evidence in hand | `status:tested` |
+| PR opened for the fix | `tm issue transition N status:coded` |
+| Merge CONFIRMED (`gh pr view <n> --json state` reports `MERGED`) | `tm issue transition N status:merged` |
+| Live verification evidence in hand | `tm issue transition N status:tested` |
+| Claim released — session gone, nothing moved | `tm issue transition N open` |
 
 A confirmed merge with no label pass is an incomplete step, not a tidy-up for
 later (learned 2026-08-31: auto-merge lands PRs unattended, so nothing is
@@ -259,8 +267,10 @@ confirmed merge and flags the advance it owes; the PM routes that report to
 
 **The close bar.** An issue closes only from `status:tested`, with the live
 verification evidence in the closing comment — what ran against the installed
-artifact and what it printed. A merged fix that fails live verification stays
-open at `status:merged`. A fix PR carries `Refs #N`, never `Closes #N`, so a
+artifact and what it printed: `tm issue transition N closed --note "<evidence>"`.
+The model declares that edge only from `status:tested` and marks it
+`requires_note`, so a close without evidence is refused. A merged fix that fails
+live verification stays open at `status:merged`. A fix PR carries `Refs #N`, never `Closes #N`, so a
 merge cannot auto-close something nobody has verified.
 
 **Comments along the way.** A progress comment at each meaningful transition —
