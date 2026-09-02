@@ -6,6 +6,217 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.3] — 2026-09-02
+
+### Added
+
+- `compress_tool_output` now compresses `grep`/`rg`/`find` match-or-path
+  lists and `ls` directory listings, which previously passed through
+  unchanged (0% reduction, per the #1953 spike). Long lists are head/tail
+  capped with an explicit `... N lines omitted ...` marker rather than
+  silently dropped.
+- `BASE-AGENT.md` carries the same ASD-STE-100 sentence-construction layer the
+  PM output styles now state, keeping the two prose channels in step: one idea
+  per sentence, ~20/25-word targets, active voice, one meaning per word, the
+  same term for the same thing, no noun cluster over three words, present
+  tense. The approved word list is explicitly not adopted (#4574).
+- `agent_assets` — the agent-asset roster now lives here as one physical `.md`
+  per agent, embedded once and shared by `trusty-mpm` and `trusty-code`. Exposes
+  42 named `pub const &str` items, the filename-keyed `AGENT_ASSETS` table for
+  consumers that compose `extends:` chains in memory, and `AGENT_ASSETS_DIR` for
+  those that compose from a directory. Both crates previously shipped their own
+  byte-identical copy of 30 of these files, kept in step by a CI diff that could
+  only report drift after it landed.
+- `BASE-AGENT.md` and `version-control.md` now forbid switching to a different
+  `gh` account, token, or credential to obtain a permission the active one
+  lacks; the agent reports the block to the PM instead. `version-control.md`
+  also names the response to a `BEHIND` block with green CI —
+  `gh pr update-branch`, or merge the head that is already green. A
+  PM-relayed authorization to admin-merge is unchanged and still honored
+  (#5680).
+- `compress::has_filter_for(tool_name)` reports whether any native filter
+  covers a tool name, so a caller upstream of the dispatch can skip work that
+  would return its input unchanged. It is backed by `compress::classify_tool`,
+  which returns the new `ToolFilter` enum; `compress_tool_output` now routes
+  through that same classification with an exhaustive match, so a filter
+  cannot be added to the dispatch without the predicate seeing it.
+
+### Fixed
+
+- `rust-engineer.md` and `BASE-AGENT.md` now name `check_test_pointers.sh`
+  alongside `check_line_cap.sh` and `check_changelog_fragment.sh` in the
+  pre-return doc gates. Three engineer PRs (#6656, #6659, #6670) went red on
+  the required "Doc-comment pointer lint (Why/What/Test)" CI job because no
+  engineer's gate list named the script.
+- `security.md`'s secret-detection protocol no longer tells the agent to pass
+  `--baseline .secrets.baseline` with a partial file list — `detect-secrets
+  scan --baseline <path> <files>` rewrites the baseline at `<path>`, dropping
+  every entry for a file not in the list, and it truncated the tracked
+  baseline from 4240 lines to 2 twice in one day. The protocol now scans
+  against a scratch copy of the baseline, or with no `--baseline` at all, and
+  ends with `git status --porcelain .secrets.baseline` confirmed empty.
+- `version-control` agent — its "Release Workflow" section no longer instructs
+  the agent to bump versions, cut release tags, or push tags; that belongs to
+  `local-ops` via `Skill(skill="cargo-publish")`, and `version-control` now
+  merges a finished release PR like any other. A non-release annotated tag on
+  explicit PM instruction stays permitted. Added a "Deterministic Tools" table
+  naming the exact commands (`check_changelog_fragment.sh`,
+  `check-pr-version-bump.sh`, the live required-contexts read, the
+  merge-queue-ownership query, the one-shot pre-merge status read, and
+  `tm session prune-worktrees`) the agent runs itself before opening or
+  merging a PR, and points the seven-field PR body contract at `tm-workflow`
+  by name instead of restating it. Added a pre-push credential-scan reminder.
+- `security` agent — the secret-detection protocol now runs
+  `detect-secrets scan --baseline .secrets.baseline` before any ad hoc grep.
+- `mpm-skills-manager` agent — Tech Stack Detection now defers to
+  `framework-manifest.toml` / `tm-capabilities`'s `references/agents.md`
+  instead of hand-listing `ls`/`cat` probes; both `mpm-skills-manager` and
+  `mpm-agent-manager`'s Improvement Workflow sections now name `tm doctor` and
+  `tm doctor --fix-skills --yes` as the on-demand tier-shadow check and repair.
+- `rust-engineer` agent — Quality Bar now names
+  `scripts/test_trusty_common_lanes.sh` for `trusty-common` edits, since its
+  empty default feature set makes a bare `cargo test -p trusty-common` a
+  compile error.
+- `events::EVENT_LINE_PREFIX` is now `"__OMPM_EVENT__ "` — the prefix trusty-code
+  and trusty-agents have always written to stderr. It read `"__HARNESS_EVENT__ "`,
+  and the bundled harness-understanding assets repeated that value, so the
+  trusty-mpm session manager was told to watch for a marker no harness emits
+  ([#5129](https://github.com/bobmatnyc/trusty-tools/issues/5129)). The constant
+  is now the single declaration both harness crates re-export, and
+  `harness_doc_names_the_relay_prefix` pins the assets to it instead of to a copy
+  of its text.
+- The agent and skill ownership ledgers no longer report an absence they never
+  established (#5626, ADR-0045). `SkillManifest::load` returned the empty
+  manifest for a missing file, a malformed document, `EACCES`, and any other
+  I/O error alike, and every consumer reads the empty manifest as "trusty-mpm
+  owns nothing here" — which let a deploy write over managed skills and record
+  none of them. It now returns `Result<SkillManifest>`: only
+  `ErrorKind::NotFound` yields the empty default, and every other failure is a
+  `ManifestError` naming the ledger. `AgentManifest::load_checked` routes
+  non-`NotFound` I/O errors to `ManifestLoad::Corrupt`, so
+  `quarantine::sweep_locked`'s `CorruptLedger` refusal now covers an unreadable
+  ledger as well as a torn one. `audit_agent_tier` returns
+  `Result<Vec<MisplacedAgent>, TierAuditError>` so a tier directory it could not
+  enumerate is no longer reported to `tm doctor` as scanned-and-clean.
+- `ticketing` agent no longer applies `trusty-mpm` as an "umbrella" crate
+  label on every issue it files. The instruction that caused it — apply
+  `trusty-mpm` to "anything surfaced through tm-orchestrated dogfooding" —
+  fired on every ticket the agent created, since the agent always runs
+  inside a tm-orchestrated session. Replaced with a positive rule: a crate
+  label names the crate whose code the defect lives in, read from the file
+  path the finding cites; when no crate label fits, apply none. `trusty-mpm`
+  is now a crate label like any other, applied only when the finding's own
+  file path is under `crates/trusty-mpm/` (#5679).
+- Closed a follow-on loophole in that same rule: a live run correctly found
+  no crate applied to a `.github/workflows/ci.yml` defect, then attached
+  `trusty-mpm` anyway as a self-invented "provenance" label recording which
+  session found it. The rule now states directly that no such second label
+  axis exists — the origin of a finding is never a labeling input under any
+  name, and "no crate label fits" is final, not a fallback trigger for
+  `trusty-mpm` (#5679).
+- `harness_doc`'s `# Spec References` block names its spec by the
+  repo-root-relative path DOC-38 §2.1 requires, not a `../../` traversal
+  (#6605).
+
+### Changed
+
+- The `ticketing` agent carries the full four-label issue lifecycle: the claim
+  at dispatch with a dated session comment, the stale-claim takeover test,
+  event-driven advances, and a close bar that requires live verification
+  evidence. Every issue verb routes here, whoever wanted it.
+- The `version-control` agent owns every git and PR operation end to end —
+  including arming auto-merge, the merge into main, post-merge verification
+  against the exact head SHA, and reclaiming merged worktrees and their local
+  branches. After a confirmed merge it flags the `status:` advance it owes so
+  the PM routes it to `ticketing`; it never makes that edit itself.
+- `BASE-AGENT` records the one exemption both changes rest on: the
+  `version-control` agent keeps the checkout it is dispatched into and runs the
+  merged-worktree prune pass (ADR-0056). `git worktree remove` stays denied for
+  every agent.
+- `BASE-AGENT.md`'s "never remove a worktree" rule and the `version-control`
+  agent's "After a Merge" section now describe the direct-removal path
+  ADR-0057 grants that one agent, alongside its five preconditions — dispatched
+  identity, a target under `.claude/worktrees/` or `.worktrees/`, a clean and
+  fully pushed tree, a MERGED pull request on GitHub, and no other live owner.
+  `tm session prune-worktrees --merged-prs --force` stays the default sweep and
+  keeps the wider scans; direct removal is for a single tree the agent has just
+  verified merged. Every other agent is still told never to remove a worktree.
+- **Breaking (#5626):** `SkillManifest::load` returns `Result<SkillManifest>`,
+  `skills::unmanaged::unmanaged_bundled_skills` and
+  `skills::reconcile::preview_unmanaged_bundled_skills` return
+  `Result<Vec<UnmanagedBundledSkill>>`, and
+  `agents::tier_audit::audit_agent_tier` returns
+  `Result<Vec<MisplacedAgent>, TierAuditError>`. `TierAuditError` is new and
+  public. Callers must decide what an unreadable ledger means for them; an
+  `unwrap_or_default()` reinstates the defect this release removes.
+- Version bumped 0.5.3 → 0.6.0. The crate's four #5626 breaking changes
+  (`SkillManifest::load`, `skills::unmanaged::unmanaged_bundled_skills`,
+  `skills::reconcile::preview_unmanaged_bundled_skills`, and
+  `agents::tier_audit::audit_agent_tier` all became fallible; `TierAuditError`
+  is new and public) shipped in an unpublished 0.5.3 patch bump. For a
+  `0.y.z` crate the MINOR position is the breaking position, so this bump
+  moves the crate to the version its own API change requires.
+  crates.io's latest published version is still 0.5.2 — nothing is yanked
+  or republished by this change.
+- `BASE-AGENT.md` no longer tells agents to create their own worktree. Agents
+  stay in the tree they were given and ask the PM to re-dispatch with
+  `isolation: "worktree"` (or to serialize) when they have none — a self-made
+  worktree is invisible to `tm hook --pm-guard` and gets the next dispatch
+  wrongly denied (#5649).
+- `BASE-AGENT.md` no longer tells an agent to remove its worktree and delete its branch after a merge. Neither dispatch path could carry that out, and `tm hook --pm-guard` now denies the command outright, so the instruction produced a deadlock rather than cleanup. The bullet now says what to do instead: report the merged PR, the worktree path, and the branch, then stop — the PM confirms the work is done and reclaims the tree with `tm session prune-worktrees --merged-prs --force` (owner ruling 2026-08-19, Refs #5791).
+- `events::recv_with_lag` now returns `Result<Result<HarnessEvent, Lag>, BusClosed>`
+  instead of `Result<Result<HarnessEvent, Lag>, ()>`. `BusClosed` is a new public
+  unit error type deriving `thiserror::Error`; it renders as
+  "event channel closed: all senders dropped and the buffer is drained" and is
+  re-exported from `events`. Callers that only tested `is_err()` are unaffected;
+  callers that matched `Err(())` must match `Err(BusClosed)`. The `()` error tripped
+  `clippy::result_unit_err` once CI's floating `dtolnay/rust-toolchain@stable` rolled
+  to 1.98.0, turning the required workspace Clippy job red on every PR.
+- The `ticketing` agent's lifecycle section now advances a status label with
+  `tm issue transition <n> <state>` instead of a hand-typed
+  `gh issue edit --add-label … --remove-label …`. The transition validates the
+  edge against the project's `issue-state.yaml` and issues both label flags as
+  one `gh issue edit`, so two `status:*` labels on one issue is unreachable
+  rather than merely forbidden in prose. A close now names its evidence
+  (`--note`), and the hand-typed single-call edit is documented only as the
+  fallback for a host without `tm`. Claim comments at dispatch are unchanged —
+  the transition's own audit line is not the dated claim record.
+- `version-control` agent — the PR Workflow now opens every PR through
+  `tm pr open --title <t> --body-file <path> [--issue N] [--rung 1-6] [--base
+  main] [--docs-only]` instead of hand-assembling `gh pr create`. It names the
+  seven-field body contract, the exact attribution footer, the shipped
+  `--assignee @me --label trusty-mpm --label ws/<session>` defaults, the
+  `scripts/check_changelog_fragment.sh` gate that runs before `gh` is ever
+  spawned, the `--issue N` / `Refs #N` (never `Closes` without `--closes`)
+  rule, and `--dry-run` for previewing the argv — with hand-assembled
+  `gh pr create` kept only as the fallback where `tm` is absent. The
+  Deterministic Tools table gained rows for `tm pr open`, `tm pr
+  queue-check`, `scripts/required-checks.sh`, and `scripts/is-branch-caused.sh`
+  (Refs #6659).
+
+### Documentation
+
+- Repaired every broken rustdoc intra-doc link in this crate and added
+  `#![deny(rustdoc::broken_intra_doc_links)]` to its crate root(s), so a new
+  one fails the build instead of shipping as dead text on docs.rs (#5744).
+- **Module docs render once instead of twice.** All 13 modules carried both an outer `///` on their `mod x;` declaration and their own inner `//!`; rustdoc concatenates the two, so each module page showed two summary lines and two Why/What/Test triples. The outer is gone and the inner `//!` is now the single module doc, per the `//!` convention in `documentation-style` and DOC-38 §3.1 ([#5754](https://github.com/bobmatnyc/trusty-tools/pull/5754))
+  - this crate's outer docs consistently carried extraction provenance the inner docs lacked, so seven were merged forward rather than deleted: the Wave 1 (#862) / Wave 2 (#867, refs #830/#832) hoist history on `perf`, `runner`, `adapters` and `session_registry`; the `events` epic (#830, refs #833); the three `compress_tool_output*` entry points `compress` re-exports; and the `TrustyMemoryRecovery` stub blocked on #3228 in `workstreams`
+  - `agent_assets`' outer doc was stale — it said 30 embedded consts where the inner correctly says 42 — so deleting it removed wrong information rather than a duplicate
+- **BASE-AGENT states the post-merge cleanup rule agents were skipping.** `gh pr merge --delete-branch` only removes the remote branch, so the local worktree and branch were being left behind after every merge. The Git Workflow section now says: remove the worktree first, then use `gh pr view <branch> --json state` — never git's own ancestry check, which under-reports every squash merge and gets worse from a stale local checkout — as the sole merged-ness test before `git branch -D` ([#5768](https://github.com/bobmatnyc/trusty-tools/pull/5768))
+- **BASE-AGENT also now says fetch before you branch and fetch again after you merge.** Branch off `origin/main` explicitly, never local `main`, which can be stale enough to lose commits or leave a fresh branch `BEHIND` the moment its PR opens ([#5768](https://github.com/bobmatnyc/trusty-tools/pull/5768))
+- `BASE-AGENT.md`'s "Never Narrate a Wait" section now teaches `tm wait --for
+  run|file|check --timeout <secs>` as the primary in-turn wait, ahead of the
+  hand-rolled `sleep`/`until` poll loop, which stays documented only as the
+  fallback when `tm` is not on `PATH`
+  (refs [#5843](https://github.com/bobmatnyc/trusty-tools/issues/5843),
+  closure condition 2). `tm wait` shipped in
+  [#6235](https://github.com/bobmatnyc/trusty-tools/pull/6235) and is published
+  in trusty-mpm 1.5.0.
+- `ManifestLoad` and `AgentManifest::load_checked` referred to
+  `quarantine::sweep_locked` as a rustdoc link. That function is private to its
+  own module, so no path resolves to it from `manifest` and the link rendered as
+  dead text. It is plain code text now (#5973).
+
 ## [0.5.0] — 2026-08-10
 
 ### Added

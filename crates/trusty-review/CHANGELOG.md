@@ -6,6 +6,54 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.31.2] — 2026-09-02
+
+### Added
+
+- `report --code-only` renders the CAST template's non-code sections as stated out-of-scope boundaries instead of dropping them, and marks the code-derived-but-uncorroborated ones as inferred; a template declares its own regions with `code_only:non_code` / `code_only:partial` markers. `--template` gains the `cast` / `default` / `generic` aliases, the manifest gains `[report] code_only`, and the report pipeline moves into the library as `trusty_review::report::run_report` so `trusty-analyze report` drives one implementation rather than a second copy. The CAST template also gains the Code Quality & Architecture / Security Posture / Performance & Scalability sections deferred under #6004, marked trusty-derived rather than CAST-scored, plus a Next Steps section and an Audit scope metadata row. Code-only regions never nest: a region that opens another region before its own `code_only:end` is left untransformed and logged, so a nested marker can no longer close the outer region early and spill the rest of its body into the report as literal template text. (#6669)
+- `report::mermaid::tests::{parses_full_marker, ignores_non_dataset_comment}` — `parse_marker` had no direct coverage, so nothing proved the `group:` field survives the comma-inside-`y:` grammar or that a marker missing `x:`/`y:` is rejected rather than half-parsed (#6678).
+- `report::reporter::tests::a_second_narrative_cannot_overwrite_a_claimed_row` — two narratives sharing one title and one cited file exercise `match_row`'s unclaimed-rows filter on its own, which component disambiguation cannot reach (#6678).
+
+### Fixed
+
+- The review runner rendered the full noise-filtered diff twice (once unbounded just to measure its length, once bounded for the prompt) — now renders once; the map-reduce decision reuses the bounded render's own truncation marker (Refs #1660).
+- The map-reduce branch assigned `ReviewStatus::Degraded` from two independent sites (partial coverage, opted-out context dependency) — consolidated to one assignment so a future finer-grained status can't be silently clobbered by whichever site ran second (Refs #1661).
+- The calibration harness's `run_pipeline_for_entry` built its own `GithubClient`/token instead of reusing the runner's shared `resolve_diff_token` helper — now routes through the same funnel, removing an auth-path divergence risk (Refs #1632).
+- `compute_metrics` panicked via `assert_eq!` on a corpus/results length mismatch — now returns a `Result` error instead (Refs #1632).
+- `report::exec_summary`'s `# Spec References` block names DOC-67 by its
+  repo-root-relative path rather than a `../../../../` traversal, so its
+  reference is checked by `check_sld.sh` instead of skipped (#6605).
+- The report pipeline finds a checkout's trusty-search index when it is
+  registered under an id the path does not derive to. `--analyze` and the trace
+  pass resolved by `derive_checkout_index_id` and an exact id match only, so a
+  ready index registered at the same `root_path` under another id — the main
+  checkout served as `trusty-tools-checkout` against a derived
+  `trusty-tools-4e2cf878` — could never be reached: analyze degraded to scan,
+  every trace lookup returned `IndexAbsent`, and the run exited 0. Both call
+  sites now resolve through `report::index_registry::resolve_report_index`,
+  which keeps the derived id when the daemon holds it, otherwise substitutes the
+  index whose canonicalised `root_path` IS the checkout (logging the
+  substitution), and otherwise names the derived id and says nothing registered
+  covers the path (#6677).
+- `HttpAnalyzeMetricsSource::with_search_base_url` points the trusty-search
+  registry read at an explicit address. Without it the read resolved the
+  machine's advertised daemon whatever socket the source was built with, so a
+  caller holding the source over a stub analyze socket still issued a live HTTP
+  GET to whatever trusty-search was running and resolved against what that
+  daemon held (#6677).
+- The report's unresolved-index warning says which cause it hit —
+  `registry=empty` for a daemon that answered nothing, `registry=populated` for
+  one holding indexes none of which is rooted at this checkout — so the remedy
+  reads off one line instead of two (#6677).
+- The required-context gate now decides from `GET /indexes/{id}/status` for the index under review instead of the host-wide `/health` counters, so one failed index anywhere on the host no longer degrades every review and stamps a NOT AUTHORITATIVE banner on it. `/health` retains one job: is the daemon reachable and serving. A degraded target index still labels the review, and its reason names that index and the lanes that actually failed rather than inferring them from counter arithmetic that could claim lexical results were available when the lexical lane had failed too (#6686).
+- A review whose configured trusty-search index does not exist now skips loudly and names the index, instead of collapsing the daemon's `404 unknown index` into an empty result set and publishing an authoritative verdict with no code context. A query that fails against an index that does exist stays fail-open. `SubprocessAnalyzeClient::has_analysis` reads its `index_id` argument and reports no analysis for an index trusty-search has never heard of (#6687).
+
+### Documentation
+
+- Repointed seven `Test:` citations whose named test had been renamed, and rewrapped the `analyze_endpoints` module citation that split an identifier across two doc lines. All were invisible while the pointer lint dropped brace-set citations (#6678).
+- Repointed eighteen more brace-set `Test:` citations across `context_gate`, `analyze_findings`, `investigate::select`, `investigate::verify`, `mermaid`, `reporter`, `reporter_findings`, `synthesize`, `synthesize_normalize`, `synthesize_prompt` and `topology` at the tests that exist — renamed successors where the test was renamed, and the surviving test where the cited name never shipped (#6678).
+- Corrected `verify_findings`'s What paragraph, which still described GREEN as a title-only topic admitted without evidence; since #6080 every band must cite a file in the inspected set (#6678).
+
 ## [0.31.0] — 2026-08-31
 
 ### Removed

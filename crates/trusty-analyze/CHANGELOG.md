@@ -7,6 +7,184 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.12.5] — 2026-09-02
+
+### Breaking
+
+- `RefactorSuggestion` gains a public `region_kind` field, so an exhaustive
+  struct literal built outside this crate no longer compiles.
+- `core::refactor::analyze` (re-exported as `core::analyze_refactor`) takes an
+  eighth parameter to carry the region kind through.
+- Both are what move the version to 0.11.0 rather than 0.10.1; for a 0.x crate
+  the breaking position is MINOR.
+- The daemon no longer binds `127.0.0.1:7879`. It serves JSON-RPC 2.0 over
+  `<data dir>/trusty-analyze/trusty-analyze.sock`, which every consumer derives
+  through `trusty_common::daemon_socket_path` rather than reading a
+  written-down address (#6287, ADR-0032). The `http_addr` discovery file is
+  gone with it. `serve --port` and `serve --mcp-port` are accepted, hidden, and
+  ignored with a warning rather than removed: the launchd plist on every
+  machine that installed before this change still passes `--port 7879`, a
+  `cargo install` does not rewrite it, and clap exiting 2 under
+  `KeepAlive::Always` is a permanent crash loop with nothing in the logs but a
+  usage message. `serve --socket` overrides the derived path.
+- `trusty-analyze port` is replaced by `trusty-analyze socket`. The path
+  resolves whether or not a daemon is running, so the new command reports
+  liveness too and exits non-zero when nothing answers — preserving the
+  property that `$(trusty-analyze socket)` fails rather than handing a caller a
+  path to a dead socket.
+- `service::routes`, `service::ui` and the axum router are replaced by
+  `service::rpc`. `service::events::DEFAULT_PORT` is removed, and
+  `ApiErrorKind` replaces the `axum::http::StatusCode` the handlers reported
+  through.
+- `--mcp-port` and the `/sse` broadcast are DELETED, not ported. `/sse`'s only
+  subscriber was this daemon's own SPA; `--mcp-port` had no in-repo consumer at
+  all and was a second ADR-0032-forbidden HTTP surface.
+- The embedded UI is not served by this daemon any more. `ui/dist` stays
+  tracked; the console-hosted mount is follow-up work.
+- `commands::daemon::handle_start` no longer takes a `socket` parameter. It
+  probed the socket it was handed but always spawned a child that derived its
+  own, so a non-default path would have been probed and reported while a
+  different one was served. It resolves the single path itself now.
+
+### Added
+
+- **New `scip_status` MCP tool wraps `analyze.scip_status`** — an MCP caller can now distinguish an index with no SCIP overlay ingested from one whose overlay carried zero symbols, the same distinction `GET /indexes/{id}/scip` gave HTTP callers in #5054. `extract_graph`'s `scip_overlay` flag already carried this through the JSON-RPC body since #6287; this tool adds the dedicated node/edge/ingested_at lookup MCP had no way to reach ([#5056](https://github.com/bobmatnyc/trusty-tools/issues/5056))
+- Refactor suggestions carry a `region_kind` for Python, distinguishing a `class_body` from a `function`. Every other language emits no key at all, so their payloads are unchanged.
+- `service::events::CODE_DEADLINE_EXCEEDED` (`-32005`) so a handler that
+  exhausted its own deadline stays distinguishable from one that broke —
+  trusty-review reads the code to print "ran out of time" rather than "could not
+  be reached". `CODE_NOT_FOUND` (`-32004`) preserves #5049's
+  ingested-but-empty distinction across the transport change.
+- `service::rpc::METHODS`, the list the four crates that dial these names by
+  literal are checked against, and `tests/uds_consumer_contract.rs`, which
+  stands the daemon up on a temp socket and asks each of them what it sees.
+- `trusty-analyze doctor` warns when a retired LaunchAgent plist is still on
+  disk (`~/Library/LaunchAgents/com.trusty.analyze.plist` from a pre-#6350
+  install), naming `trusty-analyze service uninstall` as the way to clear it.
+  The check only reports; it never deletes (#6621).
+- `trusty-analyze version` subcommand, so `tctl doctor trusty-analyze
+  --self-check` can spawn `version --json` instead of failing on a clap usage
+  error. `--json` emits the DOC-1 capability-discovery envelope
+  (`contract_version`, `tool_version`, `verbs`); without it, a one-line
+  `trusty-analyze v<version>` (#6631).
+- `trusty-analyze report --manifest <path> [--template cast] [--code-only]` and the matching `tr_report` MCP tool generate a technical due-diligence report over the embedded trusty-review pipeline, under the existing `review` feature. Both call `trusty_review::report::run_report` rather than reimplementing manifest loading, template precedence, or the credential preflight. (#6669)
+
+### Fixed
+
+- `trusty-analyze health`, `daemon status` and the `setup` readiness poll no
+  longer report a healthy daemon as DOWN when `HTTP_PROXY` is exported. All
+  three build through `trusty_common::http_client`, which applies `.no_proxy()`
+  (#4392).
+- **The dashboard misrouted every API call on a reload of a hash-routed URL (`/ui/#/`).** `computeBase()` in `ui/src/lib/base.js` ran its `$`-anchored `index.html` / `ui/` strips against the raw `document.baseURI`, which includes the URL fragment, so the `ui/` mount segment survived and API paths resolved under `/ui/` — onto the SPA catch-all, which answers `200 text/html` (closes [#4980](https://github.com/bobmatnyc/trusty-tools/issues/4980))
+  - trusty-analyze mounts its SPA at `/ui/` (`src/service/routes.rs`) with the JSON API as siblings at the daemon root, so it had the identical defect to trusty-search rather than a merely theoretical one
+  - the strips now run against `new URL(document.baseURI).pathname`, which carries neither fragment nor query, re-joined to `origin`. The `window.__ANALYZER_BASE__` override branch and the non-browser guard are unchanged
+  - same fix as trusty-search, per the KEEP IN SYNC contract on this file; the committed `ui/dist/` bundle is regenerated, since CI and release set `SKIP_UI_BUILD=1` and ship whatever is committed
+- **`--features review` pulled in trusty-review's entire default feature set, including a contributor-profile pipeline this crate never calls.** The `trusty-review` dependency carried no `default-features = false`, so enabling `review` transitively compiled `tga`, `rusqlite`, and a vendored libgit2 with no source-code trigger anywhere in trusty-analyze. It now takes `default-features = false` and gets only the `mcp` feature the `review` gate already names ([#5466](https://github.com/bobmatnyc/trusty-tools/issues/5466))
+  - this had to land with the removal itself: trusty-review 0.16.0 deletes the `profile` feature, which would otherwise have broken `--features review` in a crate whose source nobody touched
+- **`GET /indexes/{id}/diagnostics` ran unbounded and clients got zero bytes instead of a response.** The handler awaited one `spawn_blocking` that looped every unique file and spawned one subprocess per file-scoped tool with no per-request deadline; on the 4097-file trusty-tools index that ran past ten minutes and every client abandoned the connection at the transport layer ([#6018](https://github.com/bobmatnyc/trusty-tools/issues/6018))
+  - the dispatch now takes a wall-clock deadline and checks it between subprocess spawns, so it stops mid-corpus and returns what it has. The response carries `timed_out` plus a `cutoff` object naming the files never reached and the tools never invoked — a truncated list can no longer read as a clean corpus
+  - the deadline defaults to 180 s and is tunable with `TRUSTY_DIAGNOSTICS_DEADLINE_SECS`. Past that budget plus a 30 s grace the handler answers HTTP 504 with a JSON body saying which request was abandoned, rather than holding the connection
+  - `service/routes.rs` layers a blanket `tower_http::timeout::TimeoutLayer` as a last-resort net under every non-streaming route. `/sse` is merged in after the layer so the event stream is not cut off
+  - the four timeouts between a client and a `cargo clippy` subprocess now derive from one place, `core::deadlines`, instead of being independent hardcoded constants. Each rung is computed from the configured deadline, so raising `TRUSTY_DIAGNOSTICS_DEADLINE_SECS` cannot invert the ordering — a fixed 300 s router timeout used to lose to the handler's own budget at any deadline above 270 s, which handed the client the layer's empty-bodied 504 instead of the handler's structured JSON on the exact remediation path the error message recommends
+
+- **The MCP `run_diagnostics` tool still timed out with no body in the default configuration.** `AnalyzerMcpServer`'s HTTP client used a flat 150 s request timeout, below the 180 s diagnostics deadline, so any run between the two produced a transport error rather than the daemon's answer — the original symptom, one layer further out ([#6018](https://github.com/bobmatnyc/trusty-tools/issues/6018))
+  - the client timeout is now the outermost rung of the same ladder, with a floor that keeps `deep_analysis` above the 120 s OpenRouter ceiling regardless of how low the diagnostics deadline is set
+
+- **A project-scoped build could outlive the request that asked for it.** The deadline gated only whether `run_project` STARTED; inside, each `cargo clippy` or `dotnet build` ran under a flat `build_tool_timeout()` (300 s default, and two spawns per project for Roslyn). Because `spawn_blocking` cannot be cancelled, one cold project — or several in series — kept building for multiples of that after the client had its 504, and a client retry stacked another build behind it on the same toolchain lock ([#6018](https://github.com/bobmatnyc/trusty-tools/issues/6018))
+  - `StaticTool::run_project` now takes the request deadline. Clippy and Roslyn cap each subprocess at `min(remaining budget, build_tool_timeout())` and recheck between project roots, so the existing kill-on-timeout path terminates the child when the request ends instead of 300 s later. The default `run_project` checks the deadline between files
+
+- **`cargo clippy` was invoked once per Rust file in a directory with no `Cargo.toml`, so it could never produce a diagnostic.** Every invocation errored with "could not find Cargo.toml" and returned `Ok(vec![])` while still costing ~0.155 s, which made a structurally useless tool the endpoint's main cost driver ([#6018](https://github.com/bobmatnyc/trusty-tools/issues/6018))
+  - `ClippyTool` is now project-scoped, like the existing Roslyn tool: the dispatcher hands it real on-disk paths and calls `run_project` once per request instead of `run` once per file
+  - `run_project` groups the files by their enclosing cargo root — the workspace root when one exists, so a 21-crate workspace is one build and not 21 — runs `cargo clippy --workspace` there under the build-class timeout, parses that output once, and keeps the diagnostics belonging to the requested files
+- The chunk export now walks trusty-search's cursor pagination (`?after=`) rather than offset pagination, and refuses an export that falls short of the `total` the daemon reports. Offset mode reads trusty-search's in-memory chunk cache — a map that is evicted after 300s idle, rehydrated on a detached task the request does not wait for, and capped by `TRUSTY_MAX_CHUNKS` — so a cold or unreadable corpus answered HTTP 200 with an empty page and every analyze endpoint then asserted a confident zero. Refs #6043, #5917.
+- `build.rs` keeps the committed `ui/dist/` bundle instead of rebuilding it on every cold build. It used to run the package manager's install and a full `vite build` unconditionally, and both write files git tracks: `vite build` empties `ui/dist/`, deleting the tracked `ui-source-hash.txt` the publish-time freshness gate reads, and the pnpm-absent `npm install` fallback rewrote `ui/package-lock.json` with the host platform's optional-dependency set. Freshness is decided by `scripts/check-ui-bundle-freshness.sh`, the same check `preflight-publish.sh` runs, and an unreadable answer keeps the committed bundle rather than rebuilding it. `FORCE_UI_BUILD=1` rebuilds unconditionally and re-stamps the bundle afterwards, which is what a UI change now needs. Backported from trusty-memory ([#6060](https://github.com/bobmatnyc/trusty-tools/pull/6060), [#5078](https://github.com/bobmatnyc/trusty-tools/issues/5078))
+- `ui/package-lock.json` is untracked and ignored. Nothing read it — CI and every `build.rs` install run pnpm against `pnpm-lock.yaml` — and its only writer was the npm fallback above ([#5936](https://github.com/bobmatnyc/trusty-tools/issues/5936))
+- `trusty-analyze service uninstall` reports a unit it could not clear and exits
+  non-zero. It used to fold "no plist" and "removal failed" into one `false`, so
+  a surviving file rendered as evicted or absent and the command exited 0 while
+  launchd still reloaded the unit at next login. It now delegates the eviction
+  to `LaunchdConfig::evict_legacy_detailed` — the workspace's one
+  implementation, which also verifies launchd actually let go rather than
+  trusting `bootout`'s exit code — and reports its `EvictionOutcome` per label
+  (#6350).
+- `--help` no longer advertises `service install`, `service status` and
+  `service logs`; all three were removed from the CLI and each exited 2. The
+  retired-`--port` warning points at `service uninstall` rather than the
+  `service install` that no longer exists (#6350).
+- **A server that ended could make its own successor fail to start.** `serve_with_idle` unlinked the socket while the router — and through it every `AnalyzerAppState` clone, so both redb handles — was still alive, so the `facts.redb` and `scip_overlays.redb` locks outlived the path a client keys off. A client that saw the unlink spawned a successor, whose `FactStore::open` hit `Database already open. Cannot acquire lock.`; the successor died before binding, `Supervisor::ensure_running` never noticed, and the caller waited out the full 20s spawn probe for a `SpawnTimeout`. The router is now released before the unlink, so the locks are free by the time anything can observe the server as gone (#6595)
+  - measured at 54-560 ms of exposure on an idle machine, with `lsof` naming the exiting server as the only holder in 15 rounds out of 15; 0 out of 15 after the change
+  - the signalled exit had the same window and no `IdleGuard` to close it: `serve_until_idle` returns `Shutdown` the instant the signal resolves, leaving a connection task holding a router clone. That case now waits out `SHUTDOWN_FLUSH_TIMEOUT` for the task to finish before unlinking, and warns rather than proceeding silently when a handler with no read budget outlasts it
+- `analyze.health` no longer restarts the idle window. Every caller of it is a
+  monitor — the console connector, the console's `console_metrics` MCP poll and
+  `tctl`'s probe — each dialling every 15 s against a 600 s window, which kept
+  one `trusty-analyze serve` process resident for 46 hours. It is registered as
+  a liveness method now, so answering it costs the daemon nothing (#6621).
+- `ensure_daemon_running` no longer races a launchd-supervised
+  `com.trusty.analyze` unit onto its own socket. The PID-file check that
+  coordinates this daemon's own bridges cannot see launchd, so during a
+  bootout/bootstrap window left by a pre-#6350 install the socket read as
+  "nothing is running" and a bridge would spawn a second, unsupervised
+  process. The guard now asks `trusty_common::launchd_claim` first and waits
+  for the unit instead of spawning — a no-op on the ordinary host, where
+  ADR-0032 means no plist is installed at all (#6624).
+
+### Changed
+
+- `core::redb_open::is_format_obsolete` now delegates to
+  `trusty_common::redb_open::is_incompatible_format` instead of carrying its own
+  copy of the four-arm `match` (#5063). Same verdict for every input; the
+  quarantine policy `open_or_quarantine` is unchanged and stays here, because it
+  takes a caller-supplied suffix and recovery string that trusty-common's
+  fixed-suffix helper does not offer.
+- **MCP protocol primitives now come from the `trusty-mcp` crate instead of `trusty_common::mcp`** — imports move from `trusty_common::mcp::…` to `trusty_mcp::…`, and the `trusty-common/mcp` feature is replaced by a direct `trusty-mcp` dependency. No behaviour change: the types and functions are byte-identical, only their home crate moved (ADR-0040, [#5803](https://github.com/bobmatnyc/trusty-tools/issues/5803))
+- `serve` names the interface it binds as `LOOPBACK_BIND` instead of an unnamed
+  `[127, 0, 0, 1]` literal (#6038). Behaviour is identical — the daemon answers
+  on the IPv4 loopback and only there (ADR-0018) — but a client whose default
+  URL said `localhost` looked correct while resolving `::1` first on macOS, and
+  nothing in this file stated the address a client has to match.
+- The MCP stdio server was an HTTP client of its own daemon; it is an RPC
+  client of its own socket now. Every tool-handler call site is unchanged.
+- trusty-analyze runs on demand instead of as a resident daemon. `serve` now
+  exits after ten minutes with no traffic (`TRUSTY_ANALYZE_IDLE_TIMEOUT_SECS`
+  overrides it; `0` disables the exit), unlinking its socket on the way out, and
+  `trusty-analyze deep` starts the server itself rather than failing when
+  nothing is listening (#6350).
+  - `serve --mcp` is the exception and serves until it is signalled. The stdio
+    loop that process runs dials the socket once per tool call and never
+    respawns it, so an idle exit would strand a live MCP session with a
+    transport error for the rest of its life (#6355).
+- `trusty-analyze service install`, `service status` and `service logs` are
+  removed — no LaunchAgent is installed any more. `service uninstall` remains as
+  the migration: it unloads `com.trusty.analyze` and its legacy alias and deletes
+  their plists. `setup daemon` runs the same eviction before doing anything else,
+  so an upgrade moves off the resident unit without an explicit command (#6350).
+- `service::rpc::release_stores` is a plain drop again. The `Arc::strong_count`
+  poll it grew in #6595 waited for connection tasks to release the router before
+  the socket unlink; `serve_until_idle` now performs that drain itself on the
+  shutdown path (#6601), so keeping the caller-side loop would be two
+  implementations of one guarantee.
+- `serve_options` inherits `RpcServeOptions::shutdown_drain` from the shared
+  default (`shutdown::plannable_grace()`). An override to this crate's 3 s
+  `SHUTDOWN_FLUSH_TIMEOUT` was reverted before release: it rested on the
+  supervisor SIGKILLing this server at `ANALYZE_SIGTERM_PATIENCE`, which no
+  supervisor path does. A bound analyze child is detached, so `ensure_running`
+  never enters it in the supervised population and no reap path reaches it;
+  `trusty-analyze stop` sends SIGTERM, polls 5 s and only reports. The 3 s drain
+  averted no SIGKILL and abandoned the #6595 guarantee — every redb handle
+  released before the socket unlink — three seconds into a multi-minute
+  `analyze.review`.
+- `SHUTDOWN_FLUSH_TIMEOUT` rises from 1 s to 3 s and is now an alias of
+  `trusty_common::uds::ANALYZE_SHUTDOWN_FLUSH` rather than a second literal
+  asserted equal to it. It bounds the supervisor's spawn-failure kill — the one
+  path that signals an analyze child — leaving 2 s of the 5 s patience for the
+  socket unlink, the redb store drop and exit.
+
+### Documentation
+
+- Repaired every broken rustdoc intra-doc link in this crate and added
+  `#![deny(rustdoc::broken_intra_doc_links)]` to its crate root(s), so a new
+  one fails the build instead of shipping as dead text on docs.rs (#5744).
+
 ## [0.9.0] — 2026-08-10
 
 ### Breaking

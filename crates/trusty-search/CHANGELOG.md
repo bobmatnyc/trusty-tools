@@ -6,6 +6,54 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.52.0] — 2026-09-02
+
+### Fixed
+
+- `detect_project` refuses to derive an index id from the home directory or the
+  filesystem root instead of using their basename (#6550). Running a
+  project-scoped command from `$HOME` derived an index named after the
+  operator; it now returns `ProjectRootRefused`, which the CLI reports with the
+  refused path and a pointer to `--index <id>`. `detect_project` and
+  `index_resolve::resolve_index` are fallible as a result.
+- An FSEvents-overflow rescan no longer re-parses and re-commits the whole corpus when nothing changed. Every walked file is still read and fingerprinted, so full-tree coverage is unchanged, but a file whose content matches what the index already holds now skips the tree-sitter parse, the embed, and the redb commit. Observed before the fix: 22 overflow passes in 48h, each reporting 17,284 files reindexed and 183,348 chunks committed on an untouched tree (#6570).
+  - The fingerprint cache is warmed from the durable corpus when the process has not populated it, so the first overflow after a daemon restart is cheap too.
+  - The daemon's own colocated `.trusty-search/` storage joins the walker's skip list. It sits inside the watched root and is rewritten by every commit, and the watcher's per-event filter reads that list and never consults `.gitignore`.
+  - The reconcile log line adds `files_unchanged`, which is what says whether an overflow found real work.
+- A file whose chunks collide on id is indexed and searchable again. `make_chunk_id` omits the end line, so a minified JS bundle — one line, many single-letter declarations — produced repeated ids. `UsearchStore::upsert_batch` resolved one key for all of them, added the first, failed every later one with usearch's "Duplicate keys not allowed in high-level wrappers", then rolled back the id-to-key mapping the successful add had installed, leaving a vector nothing could reach (#6571).
+  - `chunk_ast` now drops a chunk whose id an earlier chunk in the same file already claimed, so the duplicates are never embedded.
+  - `upsert_batch` collapses duplicate ids at the boundary that owns the one-vector-per-id contract.
+  - The skip warning reports the error the add actually returned instead of asserting a NaN or zero vector it did not observe.
+- `trusty-search start`'s "daemon already running" refusal now names the remedy,
+  not just the pid (#6590). When a truncated shutdown leaves launchd respawning
+  the old binary, every subsequent start refuses against that orphan — one
+  reinstall looped 17 times on a message whose only advice was `trusty-search
+  stop`, which the operator had already run. The text now gives the signal to
+  send (`kill -TERM <pid>`), the seconds to allow for the index-snapshot flush,
+  and a warning against SIGKILL. Under launchd it says `KeepAlive` starts the
+  replacement, so the operator does not race it with a manual `start`;
+  unsupervised, it names the re-run.
+- A bare `trusty-search start` now refuses when a daemon is already running,
+  instead of reporting success (#6590). Without `--foreground`, `start` forks a
+  detached `--foreground` child with its stdio on `/dev/null` and returns — and
+  the already-running check ran only inside that child. The child raised the
+  refusal into `/dev/null` while the parent had already printed "Daemon starting
+  in background (pid N)" and exited 0, so an operator was told a daemon started
+  when none had. The parent runs the check before forking now and exits non-zero
+  with the same remedy text (the pid, `kill -TERM <pid>`, and the flush window).
+  The `--foreground` path is unchanged: launchd and systemd never fork here and
+  reach the same check where they always did.
+
+### Changed
+
+- `service::shutdown_budget::CLEANUP_RESERVE` is now an alias of
+  `trusty_common::shutdown::CLEANUP_RESERVE`, and `ShutdownBudget` subtracts it
+  through `shutdown::plannable_grace_from` instead of doing the saturating
+  subtraction itself (#6601). The UDS serve loop reserves the same time from the
+  same window for the same reason, so the policy has one definition. No number
+  changes: the reserve is still 5 s and a window shorter than it still yields an
+  immediately-exhausted budget.
+
 ## [0.51.0] — 2026-09-01
 
 ### Added

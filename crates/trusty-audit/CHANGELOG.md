@@ -10,6 +10,25 @@ edit this file by hand (see
 
 ---
 
+## [0.13.0] — 2026-09-02
+
+### Added
+
+- `engagement.toml` accepts `[report] template` and `[report] code_only`, so an engagement declares which report it wants once instead of the operator remembering a flag for a child this crate spawns. Both reach the renderer as environment pairs on the `audit` sweep and the `render` re-render, the same channel the investigation budget already uses — the manifest arrives too late on the sweep path, and an argument would break an older pinned renderer. (#6669)
+- `grounding::index::index_tests::a_refused_index_is_a_reason_not_a_status` — `ensure_indexed` turns a refused `trusty-search index` into the one-line reason its caller records as a gap, rather than reporting an `IndexStatus` for an index that was never built (#6678).
+
+### Changed
+
+- The grounding guard's `analyze.health` frame carries `"params": {}` (#6555). It sent no `params` at all, which decodes to `Value::Null` and works only because `analyze.health` is bound to `NoParams`; binding that method to a struct would have turned the omission into a `-32602`, which the guard reads as a degraded daemon and refuses the run on
+
+### Documentation
+
+- `grounding::index`'s cross-process contract note points at
+  `trusty_review::report::index_registry::derive_index_id`, the module that
+  derivation moved to (#6677).
+- Repointed the `Test:` citation for `ground_manifest` and `hotspots::fetch` at the renamed `hotspots_and_search_hits_become_ranked_inspect_priority_in_the_manifest`, which the pointer lint could not see while brace-set citations were dropped (#6678).
+- Repointed four more brace-set `Test:` citations whose named test never shipped: `Budget::for_engagement`, `dependency_manifests` and `write_into_manifest` now name the tests that assert the same behaviour, and `ensure_indexed` names the new `a_refused_index_is_a_reason_not_a_status` (#6678).
+
 ## [0.12.0] — 2026-08-29
 
 ### Breaking

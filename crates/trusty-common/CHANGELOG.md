@@ -6,6 +6,281 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.47.1] — 2026-09-02
+
+### Added
+
+- `launchd_restart` — `await_unload` polls a label out of launchd, and
+  `restart_sequence` orders a live bounce around that wait: quiesce, boot out,
+  wait, bootstrap, and one retry after a second wait. `launchctl bootout` returns
+  when the unload is ACCEPTED, not when the job is gone, so a bootstrap issued
+  immediately afterwards raced its own bootout and launchd refused it with
+  `Bootstrap failed: 5: Input/output error` (#6618). Every effect is injected, so
+  the ordering is asserted rather than described.
+- `LaunchdConfig::restart_gracefully` binds that sequence to the real
+  `launchctl`, the real SIGTERM, and a one-second clock. Its wait budget is
+  `shutdown::termination_grace()` — launchd cannot deregister a job before the
+  process it is terminating has gone, so a shorter budget would give up
+  mid-unload.
+- `launchd_claim` — `socket_owner` decides whether a launchd unit owns the socket
+  an on-demand spawn is about to bind, and `launchd_socket_owner` reads the two
+  registration signals off the real launchd. `launchctl print` alone cannot
+  answer it: in the bootout/bootstrap window that loses the race the unit is
+  booted out and launchd reports nothing, so the INSTALLED PLIST counts as
+  registration too (#6619). Not macOS-gated, so cross-platform daemon guards call
+  it without a `cfg` split; off macOS it answers "no unit".
+- `launchd::plist_path_for_label` and `launchd::label_is_loaded` — the label-only
+  readers behind that check. `LaunchdConfig::plist_path` and
+  `LaunchdConfig::is_loaded` now delegate to them, so there is one spelling of
+  `~/Library/LaunchAgents/<label>.plist` and one `launchctl print`.
+- `RpcRouter::mark_liveness` / `typed_liveness` classify a method as a liveness
+  check. `serve_until_idle` answers such a method normally but does not restart
+  the idle window for it, so a monitor polling faster than the window can no
+  longer keep an on-demand service resident. A connect-and-close probe was
+  already exempt; a health RPC was not (#6621).
+- `host_metrics::history` — a bounded FIFO of metric samples behind the console's
+  real-time graphs. `MetricRing::push` is the single write path, so a sample the
+  console takes itself and one a service pushes (#6284) enter the buffer
+  identically; at capacity it evicts the oldest and preserves insertion order.
+  `HOST_HISTORY_CAPACITY` (120) and `HOST_SAMPLE_INTERVAL_SECS` (5) pin the
+  owner's 10-minute window (#6641).
+- `kg.redb` copy-then-swap compaction (#6652). `memory_core::dream::kg_compact_pass` measures the palace's knowledge-graph store read-only, prunes closed `hist:` triple rows older than `dream.prune_history_after_days`, and rewrites the file into a fresh sibling that is renamed into place under the palace write mutex. redb never returns freed pages to the filesystem, so before this the store only ever grew.
+- `store::kg_redb::KgRedbStats` — a read-only per-table measurement (row counts, stored/metadata/fragmented bytes, the active-vs-history triple split, and a reclaimable estimate). Opens the file `O_RDONLY`, or a throw-away snapshot when a writer holds it, so it never writes to the store it measures.
+- `store::ReadOnlyRedb` — a redb open that provably cannot write to the live file.
+- `DreamConfig` gains `compact`, `prune_history_after_days`, `compact_min_bytes` and `compact_keep_backup`; `DreamStats` gains `kg_bytes_reclaimed`, `kg_bytes_after` and `kg_history_rows_pruned`.
+- An `s3://` log-drain destination can name its own AWS identity:
+  `?profile=<name>` reads credentials and region from that `~/.aws` profile
+  alone, and `?role_arn=<arn>` assumes that role over whatever base identity
+  resolved (#6657). Both combine, and both sit beside the existing `?region=`;
+  every other query key is still rejected, and a repeated key is now rejected
+  rather than resolving to the last occurrence. Without either, the destination
+  keeps today's AWS default provider chain.
+- `DestinationUri::cache_namespace()` now separates two identities against one
+  bucket, so a skip decision recorded under one profile is never read back under
+  another. A destination that pins no identity keeps the namespace it already
+  had, so upgrading orphans no existing manifest cache.
+- `github_path::parse_remote_url` parses a git remote URL into its host and its
+  `owner/repo`, keeping the case the remote spells them in, and
+  `github_path::derive_remote_repo` reads a directory's `origin` and parses it
+  (#6657). This is the workspace's one git-remote-URL parser: it replaces the
+  three private copies `trusty-git-analytics` (twice) and `trusty-code` carried.
+  Unlike `parse_github_path` it does not slugify, carries the host so a caller
+  can filter on it, and refuses a path that is not exactly `<owner>/<repo>`.
+- `env_vars::ENV_AUDIT_REPORT_TEMPLATE` and `env_vars::ENV_AUDIT_REPORT_CODE_ONLY` — the shared names `trusty-audit` writes and `trusty-review` reads for an engagement's report selection, so the spelling has one home rather than a literal in each crate. (#6669)
+
+### Fixed
+
+- `KgStoreRedb::assert` and `apply_batch`'s `Assert` op already shared one
+  close-and-replace implementation (`batch_assert`) as of the #4810 triple-key
+  rework — this closes the remaining gap #4922 found: `kg_writer.rs`'s module
+  and `commit_and_reply` doc comments claimed a single queued op falls back to
+  "the matching single-op method," but `commit_and_reply` calls
+  `KgStoreRedb::apply_batch` unconditionally, for every batch size from 1
+  upward. The comments now describe that unconditional path; the single-op
+  methods on `KgStoreRedb` are reachable only via `KgWriter::bypass` (no
+  running actor) and the actor's own closed-channel fallback, never from the
+  coalescing loop. Added
+  `single_assert_and_apply_batch_one_op_agree_on_valid_from`, which pins that
+  the sync single-op path and a one-element `apply_batch` produce
+  byte-identical stored triples (`valid_from`/`valid_to` included) — the
+  agreement PR #4920's Tier S `affirmed_at` derivation depends on.
+- `log_drain` now streams each log file instead of reading it whole, so a file
+  over the old 64 MiB ceiling uploads rather than being skipped forever. The
+  collector held five live copies of a body — plaintext, decoded, filtered,
+  scrubbed, gzipped — which is the only reason the ceiling existed; 29 of 86
+  daily-rotated daemon logs, up to 176 MB each, were permanently undrainable on
+  the first live run (#6547). The new `pipeline` module reads 1 MiB at a time,
+  splitting on the last line terminator, and carries the level filter's
+  disposition and a scrub window across each boundary, so the streamed result
+  matches the buffered one. The scrub window holds back the last
+  `longest needle - 1` bytes of every chunk, which is what makes chunking safe
+  for a secret that straddles a boundary (the hazard #6534 refused to chunk
+  over).
+- `DEFAULT_MAX_FILE_BYTES` moved from 64 MiB to 4 GiB, and a second bound,
+  `DEFAULT_MAX_WIRE_BYTES` (64 MiB), caps the COMPRESSED body — the one buffer
+  that still scales with the file, since `LogDestination::put` takes an
+  in-memory `Bytes`. `collect` now takes a `CollectLimits` in place of a bare
+  `max_file_bytes`, and `DrainConfig` gained `with_max_wire_bytes`.
+- A file that does trip either bound has the decision recorded in the manifest
+  as a `SkipRecord`, so it is made once per `(file, size, mtime)` rather than
+  every cycle. The drain re-decided ~40 permanently-oversize files every 15
+  minutes and re-logged the same warning — 1,276 of them in 48 hours. A later
+  pass that sees an unchanged file counts it silently; a size or mtime change
+  re-evaluates it; and any file the pass can read has its record dropped, so
+  raising a bound takes effect on the next pass. `DrainReport` gained
+  `skips_recorded`, the count of decisions that actually warned. `skips` is
+  `#[serde(default)]`, so manifests written before this change still decode.
+- `log_drain`'s local manifest cache is now keyed by the destination as well as
+  the identity, so switching `log_drain.destination` from one bucket to another
+  re-uploads instead of silently skipping. The cache lived at
+  `<state_dir>/log-drain/<github_id>/<session_id>/`, which described no
+  particular destination: repointing a session at a brand-new bucket found the
+  record written for the old one, and because the new bucket had no remote
+  manifest to override it, every previously drained file was classified
+  `SkipUnchanged` — 86 of them never arrived, while sources with no prior entry
+  uploaded normally (#6548). The cache path now carries
+  `DestinationUri::cache_namespace()` — scheme, bucket-or-path and key prefix,
+  hashed; `?region=` is excluded so a region override does not orphan a valid
+  cache. `LogDestination` gained a `cache_namespace` method, so the identity
+  comes from the destination rather than from a caller who could name the wrong
+  one.
+- A run whose manifest came from the destination now `head`s one sampled entry
+  and warns when that object is missing, reporting it in `DrainReport`'s new
+  `manifest_spot_check_missing` counter. Manifests written before the keying fix
+  list objects their bucket never received, and every file such a manifest names
+  skips forever; the repair is to delete the manifest object, documented in
+  `docs/reference/log-drain.md`.
+- Index-id derivation no longer falls back to the home directory's basename
+  (#6550). `resolve_project_root` returns the start path when nothing above it
+  is a git repository, so a registration handed `$HOME` created an index named
+  after the operator — the live daemon held index `masa` for an unrelated
+  repository. `ensure_project_indexed_reporting` and the incremental
+  `index_files_best_effort` path now refuse a root that is the home directory
+  or the filesystem root, log at error, and return no id, so no caller can pin
+  one. New shared predicate `trusty_common::refuse_unindexable_root` (and its
+  pure `*_against` form) is the one implementation trusty-search's
+  `detect_project` routes through too.
+  - `IndexRegistration` gains a `RefusedUnindexableRoot(IndexRootRefusal)`
+    variant reporting that outcome.
+- `blocking_loopback_client_ignores_exported_http_proxy` no longer builds its
+  reqwest clients while another test is inside `setenv`/`unsetenv`. This binary
+  serializes environment mutation in three domains that do not exclude each
+  other — `#[serial]`'s default group, the named `dotenv_credential_env` group,
+  and `data_dir::ENV_LOCK` — and reqwest re-reads `HTTP_PROXY` / `http_proxy` /
+  `ALL_PROXY` at every client build, so holding one domain left the other two
+  free to republish the environment mid-test. Both proxy tests now hold the
+  named group and take `ENV_LOCK` (#6575).
+- `install_and_activate` now verifies the ACTIVE launchd unit's shutdown grace
+  before the bootout it performs, and stops the daemon itself when that grace is
+  too short (#6590). The corrected 60 s `ExitTimeOut` #4393 added to
+  `render_plist` could never govern the shutdown that matters: launchd applies
+  the `ExitTimeOut` of the job it has LOADED, and re-reads the plist file only
+  at `bootstrap` — which happens AFTER `bootstrap`'s own bootout. A host whose
+  loaded unit predated #4393 was therefore still granted launchd's 5 s default,
+  so a daemon flushing 50 index snapshots was SIGKILLed mid-write and
+  `KeepAlive` respawned the old binary as an orphan holding the port.
+- The new `launchd_grace` module reads the window launchd will really grant —
+  the loaded job's `exit timeout` first, falling back to the installed plist,
+  where an absent `ExitTimeOut` key resolves to the 5 s system default rather
+  than to "unknown". When it is shorter than
+  `shutdown::TERMINATION_GRACE_SECS`, the daemon is sent SIGTERM directly, which
+  launchd does not bound, and waited for; the bootout that follows then unloads
+  an already-exited job. An unreadable unit changes nothing, and a quiesce that
+  fails falls through to the bootout as before.
+- `UdsServiceSupervisor::ensure_running` now watches the child it spawned as
+  well as the socket, so a child that dies before binding is reported within one
+  poll interval instead of after the whole `ServiceTimeouts::spawn_probe` window
+  (#6600). The #6595 CI signature was a child that failed `FactStore::open` on a
+  held redb lock in ~100 ms and surfaced 20 s later as `SpawnTimeout`, whose
+  message blames the probe budget — a budget that had nothing to do with it.
+- New `SupervisorError::ChildExited` carries the child's exit status and the
+  last 20 lines it wrote to stderr. A supervised (non-detached) child's stderr is
+  piped and copied through to this process's stderr unchanged, so the operator's
+  log stream is unaffected while the tail stays quotable. A DETACHED child keeps
+  `Stdio::inherit()` and reports an empty tail: it outlives the process that
+  spawned it, and a pipe whose read end went with that process turns the child's
+  next log write into `EPIPE`.
+- `SupervisorError::SpawnTimeout` carries that same stderr tail. Its message
+  guesses the cause ("its spawn_probe is too small"), and a child still loading a
+  model and one spinning on a lock it will never get produce the same timeout and
+  different logs.
+- The stderr relay bounds each line at 8 KiB rather than only the line COUNT, so
+  a child that writes a megabyte before its first newline can no longer be
+  buffered and retained whole. An over-long line is passed through to stderr in
+  8 KiB pieces — no bytes are lost — and the retained tail is bounded at about
+  160 KiB per child. The relay also survives invalid UTF-8 rather than treating
+  it as EOF, and writes each line and its terminator in one call so two children
+  cannot interleave mid-line.
+- A child that is alive but slow still gets the full probe window, and a
+  `try_wait` that errors is treated as "still running" rather than as a death.
+- One over-cap stderr line now occupies ONE slot in the 20-line ring instead of
+  one slot per capped read (#6601 review). A child printing a real diagnosis and
+  then a megabyte of padding left `entries=20` of padding and evicted the
+  diagnosis — on the exact path this reporting exists to serve. The relay keeps
+  the capped prefix with a marker naming the dropped byte count, reads on to the
+  next newline without retaining it, and still relays every byte to stderr. A
+  line ending exactly at the cap no longer yields an empty entry, and a codepoint
+  the cap splits is dropped rather than rendered as U+FFFD.
+- `ensure_running`'s documentation now states that a detached child's
+  `ChildExited` and `SpawnTimeout` carry an EMPTY stderr tail: detached children
+  keep `Stdio::inherit()`, so there is nothing to quote. The status and the
+  one-probe-interval latency are unaffected.
+- `uds::server::serve_until_idle` now drains in-flight connections on
+  SIGTERM/SIGINT before returning `ServeExit::Shutdown` (#6601). It used to
+  return the instant the signal resolved, so the caller's socket unlink ran while
+  handlers still held their `Arc<RpcRouter>` clones — and through them whatever a
+  service's handlers own. In `trusty-analyze` that is a redb `Database`, and the
+  unlink is exactly the signal a client acts on by spawning a successor, which
+  then died on `Database already open. Cannot acquire lock.` (#6595).
+- Connections are now counted whether or not an idle policy is configured, so
+  every service behind this loop gets the guarantee rather than the one caller
+  that noticed and polled `Arc::strong_count` itself.
+- A client that dials during the drain is accepted and immediately closed, which
+  reaches it as `UdsRpcError::NoResponse` rather than sitting in the kernel
+  backlog until the listener drops and resets it.
+- New `RpcServeOptions::shutdown_drain` bounds that wait. It defaults to
+  `shutdown::plannable_grace()` — the SIGTERM-to-SIGKILL window MINUS the new
+  shared `shutdown::CLEANUP_RESERVE` — so the caller's post-serve work still has
+  a budget when the drain runs long. `trusty-memory` runs its BM25 exit flush
+  after `serve_until` returns, and a drain sized to the whole window would have
+  spent the time that flush needs. A handler that outlives the budget warns,
+  naming the socket, and the loop returns anyway.
+- A service whose real SIGKILL deadline is shorter than the process grace window
+  may set `shutdown_drain` explicitly, but must first establish that the deadline
+  reaches the serving process. `trusty-analyze` does not qualify: it runs
+  detached, so it is absent from its supervisor's population and no reap path
+  signals it while it is serving.
+- The BM25 exit flush `trusty-memory` runs after `serve_until` is now awaited
+  under `shutdown::CLEANUP_RESERVE`. Holding the time back does not by itself
+  spend it well — `bm25_lane::shutdown` had no deadline, so a slow flush could
+  consume the whole reserve and the socket unlink after it would never run. An
+  abandoned flush is logged and costs nothing a SIGKILL would not: the snapshot
+  write is a temp-file rename, so every palace keeps what its last tick
+  published.
+- `shutdown::CLEANUP_RESERVE` and `shutdown::plannable_grace` are new, and
+  `trusty-search`'s `ShutdownBudget` now subtracts through them instead of
+  keeping its own copy of the same 5 s policy.
+- `sld::parse_inline_refs` no longer drops an inline `# Spec References` entry
+  whose path carries a `..` traversal segment or is absolute. It used to
+  `continue` past one with no diagnostic, so the reference never reached
+  `check_reference` and its anchor was never validated — a whole block could
+  name a spec id that exists nowhere and `check_sld.sh` still reported
+  `0 error(s)` (#6605). The reader now returns every reference the DOC-38 §2.2
+  grammar matches, whatever the path shape, and leaves §2.1 path conformance to
+  the linter, which has a `file:line` to report it at. Safe, repo-root-relative
+  paths behave exactly as before.
+- The kg.redb compaction swap now excludes every writer, not just the ones holding the palace write mutex (#6652). `KgWriter`'s actor commits on a blocking thread holding only `Arc<KgStoreRedb>`, so `KnowledgeGraph::assert`/`retract` — and everything behind them — never took that mutex; a commit landing between the swap's fingerprint re-check and its rename went to the inode the rename was about to unlink, and the caller was told it succeeded. Every kg.redb write transaction now rides a per-store `swap_lock` that the swap takes exclusively across the re-check, the rename, and the handle install.
+
+### Changed
+
+- `LaunchdConfig::guard_short_grace` (the #6590 short-`ExitTimeOut` quiesce) is
+  crate-visible instead of private to `launchd_activate`. `restart_gracefully`
+  needs the same guard for the same reason — its bootout is bounded by the same
+  loaded `ExitTimeOut` — and calls this one rather than growing a second copy.
+- `uds::server::Served::Answered` carries a `liveness` flag saying whether the
+  method answered was marked as a liveness check (#6621).
+- The dream cycle's `handle.kg.checkpoint()` step, a documented no-op since the SQLite era, is replaced by the kg.redb prune-and-compact phase (#6652).
+- A pinned `?profile=` is the WHOLE identity for that destination: the default
+  chain is not consulted, so `AWS_ACCESS_KEY_ID` in a daemon's environment can
+  no longer silently re-point one destination at another account. Region
+  resolution for such a destination is `?region=` → the profile's own `region` →
+  refusal with `DrainError::Credentials`.
+- The log-drain key layout is now `<owner>/<project>/<crate>/<file>` beneath the
+  destination prefix, replacing `<github_id>/<session_id>/logs/…` (#6657).
+  `DrainTarget` carries `owner` and `project` instead, and `logs_prefix()` is
+  now `key_prefix()`. Objects already uploaded under the old layout stay where
+  they are — the manifest is keyed by destination and key, so the first pass
+  after the upgrade re-uploads the current files under the new prefix and then
+  dedupes as before.
+
+### Removed
+
+- `TRIPLES_BY_PREDICATE` index maintenance (#6652). No reader anywhere in the workspace consumed it, so every assert and retract was paying for an index nothing queried. The table itself is reclaimed by the compaction not copying it — off the request path, size-gated, and behind a verified backup — rather than by an at-open `delete_table`, which would put a full-table page walk on every daemon start.
+
+### Documentation
+
+- Repair launchd module links so rustdoc resolves each referenced helper and constant.
+
 ## [0.46.6] — 2026-09-01
 
 ### Added
