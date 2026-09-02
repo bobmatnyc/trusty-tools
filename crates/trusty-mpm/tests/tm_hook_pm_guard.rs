@@ -804,6 +804,83 @@ fn pm_guard_allows_non_add_worktree_subcommands_and_ordinary_temp_usage() {
 }
 
 #[test]
+fn pm_guard_denies_destructive_delete_of_filesystem_roots() {
+    // Issue #4031: no `rm`/`rmdir`/`unlink`/`find -delete` verb existed
+    // anywhere in the classifier. Every case here is a native
+    // Task/Agent-dispatched subagent (`agent_id` present) — proving these deny
+    // proves the rule fires BEFORE Guard 4's subagent exemption, the same
+    // property `pm_guard_blocks_worktree_add_under_tmp_via_subagent_payload`
+    // proves for the sibling worktree-tmp guard.
+    for command in ["rm -rf /", "rm -rf /root", "unlink /root"] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","agent_type":"rust-engineer","tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#
+        );
+        let stdout = run_pm_guard(&payload, &[]);
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("4031"),
+            "deny message must cite issue #4031: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_destructive_delete_of_repo_root_and_dot_git() {
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        format!("rm -rf {}", repo.display()),
+        "rm -rf .git".to_string(),
+        "rmdir .git".to_string(),
+        "find . -delete".to_string(),
+        "cargo build && rm -rf .git".to_string(),
+    ] {
+        let stdout = run_pm_guard(&bash_payload_at(&command, &repo, ""), &[]);
+        assert_denied(&stdout);
+    }
+}
+
+#[test]
+fn pm_guard_denies_destructive_delete_of_a_worktree_root() {
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /projects/example-repo/.claude/worktrees/agent-x"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_allows_ordinary_delete_cleanup() {
+    // The other half of #4031's scope: none of these target a denylisted
+    // root, so they must stay allowed — the same fixture used for the deny
+    // cases above proves this isn't passing merely because the cwd resolves
+    // to nothing.
+    // `git clean -fd` is deliberately excluded here: ADR-0037 already denies
+    // it in a MAIN CHECKOUT (a pre-existing, unrelated rule), so asserting
+    // ALLOW for it against `main_checkout_fixture` would test that guard's
+    // absence rather than this one's.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "rm stale.txt",
+        "rm -rf crates/trusty-mpm/src",
+        "rmdir empty-dir",
+        "cargo clean",
+    ] {
+        assert_eq!(
+            run_pm_guard(&bash_payload_at(command, &repo, ""), &[]).trim(),
+            "",
+            "expected allow for: {command}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_destructive_delete_denial_is_not_budget_eligible() {
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /root"}}"#;
+    for _ in 1..=4 {
+        assert_denied(&run_pm_guard(payload, &[("HOME", &home_s)]));
+    }
+}
+
+#[test]
 fn pm_guard_allows_benign_pipes_and_dev_null() {
     // Composition with no forbidden segment must still allow.
     let piped = run_pm_guard(
