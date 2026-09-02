@@ -70,6 +70,86 @@ mod tests {
         assert!(objects.contains(&"Beta"));
     }
 
+    /// A sortable projection of a `Triple`'s stored fields, used to compare
+    /// two stores' contents without requiring `Triple: PartialEq`.
+    fn triple_fingerprint(
+        t: &Triple,
+    ) -> (
+        String,
+        String,
+        String,
+        i64,
+        Option<i64>,
+        u32,
+        Option<String>,
+    ) {
+        (
+            t.subject.clone(),
+            t.predicate.clone(),
+            t.object.clone(),
+            t.valid_from.timestamp_millis(),
+            t.valid_to.map(|d| d.timestamp_millis()),
+            t.confidence.to_bits(),
+            t.provenance.clone(),
+        )
+    }
+
+    #[test]
+    fn single_assert_and_apply_batch_one_op_agree_on_valid_from() {
+        // #4922: `KgStoreRedb::assert` (the sync/bypass path) and
+        // `apply_batch`'s `Assert` op (the daemon's hot path, taken even for
+        // a lone queued op — see `kg_writer::commit_and_reply`) both
+        // delegate to the same `batch_assert` helper. This pins that
+        // agreement so it cannot regress silently: #4920 derives a Tier S
+        // fact's `affirmed_at` from `valid_from`, which is only safe if both
+        // call paths stamp it identically on both the closed-history row and
+        // the new active row.
+        let (_d1, via_single) = open_kg();
+        let (_d2, via_batch) = open_kg();
+
+        // First assertion, then a superseding one — exercises the
+        // close-and-replace path (a history row plus a new active row) on
+        // both sides, not just a bare insert.
+        let first = t("alice", "is_alias_for", "Acme");
+        let second = t("alice", "is_alias_for", "Beta");
+
+        via_single.assert(&first).unwrap();
+        via_single.assert(&second).unwrap();
+
+        via_batch
+            .apply_batch(&[BatchWriteOp::Assert(first.clone())])
+            .unwrap();
+        via_batch
+            .apply_batch(&[BatchWriteOp::Assert(second.clone())])
+            .unwrap();
+
+        let mut single_all: Vec<_> = via_single
+            .dump_all_triples()
+            .unwrap()
+            .iter()
+            .map(triple_fingerprint)
+            .collect();
+        let mut batch_all: Vec<_> = via_batch
+            .dump_all_triples()
+            .unwrap()
+            .iter()
+            .map(triple_fingerprint)
+            .collect();
+        single_all.sort();
+        batch_all.sort();
+
+        assert_eq!(
+            single_all.len(),
+            2,
+            "one closed history row + one active row"
+        );
+        assert_eq!(
+            single_all, batch_all,
+            "single-op assert and a one-element apply_batch must produce \
+             byte-identical stored triples, valid_from/valid_to included"
+        );
+    }
+
     #[test]
     fn retract_closes_active_interval() {
         let (_d, kg) = open_kg();
