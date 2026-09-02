@@ -40,7 +40,7 @@ use super::worktree_ownership::{
     AgentDelegationState, AgentWorktreeOwner, SentinelOwner, is_harness_agent_worktree,
     read_sentinel_owner,
 };
-use super::worktree_registry::Admission;
+use super::worktree_registry::{Admission, HarnessLockState, harness_lock_state};
 use super::worktree_safety::DirtyWorktree;
 
 /// Resolves the delegation registry's answer for the agent a sentinel names.
@@ -528,11 +528,21 @@ pub(crate) fn tm_provisioned(path: &Path) -> bool {
 /// parse the orphan path uses, not a second one — and refuses on two answers.
 ///
 /// 1. [`SentinelOwner::Agent`] whose agent the registry calls
-///    [`Live`](AgentDelegationState::Live) or
-///    [`Unknown`](AgentDelegationState::Unknown). `Unknown` refuses because the
-///    delegation map is rebuilt empty at every daemon boot: after a restart it
-///    reports nothing for an agent that is still working, and an unanswerable
-///    liveness question must never resolve to "free" (ADR-0045).
+///    [`Live`](AgentDelegationState::Live).
+///
+///    [`Unknown`](AgentDelegationState::Unknown) used to refuse outright,
+///    because the delegation map is rebuilt empty at every daemon boot: after a
+///    restart it reports nothing for an agent that is still working, and an
+///    unanswerable liveness question must never resolve to "free" (ADR-0045).
+///    That reasoning is intact; what changed in #6561 is that the question is no
+///    longer unanswerable. Git holds a second, DURABLE record of the same fact:
+///    the Claude Code harness locks an agent's worktree for the life of that
+///    agent and releases the lock when the agent ends, and that lock is a file
+///    under `.git/worktrees/<id>/` which no daemon writes and no daemon restart
+///    clears. So an `Unknown` registry answer now consults
+///    [`harness_lock_state`]: `Released` is POSITIVE evidence the harness let go
+///    and permits; `Held` and `Undeterminable` both refuse. Two silences still
+///    do not make an answer — only a positive `Released` does.
 /// 2. [`SentinelOwner::Unknown`] for ANY path inside the harness agent store
 ///    ([`is_harness_agent_worktree`]) — whether the sentinel is unreadable or
 ///    absent entirely. Undeterminable, not absent.
@@ -566,12 +576,14 @@ pub(crate) fn tm_provisioned(path: &Path) -> bool {
 /// this module was written to reclaim — permanently unreclaimable, which is the
 /// opposite failure and not #5661's.
 /// Test: `classify_blocks_a_live_agents_worktree`,
-/// `classify_blocks_an_agent_the_registry_never_heard_of`,
+/// `classify_blocks_an_agent_the_harness_still_holds_after_a_restart`,
 /// `classify_allows_a_finished_agents_merged_worktree`,
 /// `classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel`,
 /// `classify_leaves_a_session_owned_worktree_alone`,
 /// `an_unattributed_agent_store_worktree_is_never_reclaimable`,
-/// `an_unreadable_agent_sentinel_still_blocks_an_agent_store_worktree`.
+/// `an_unreadable_agent_sentinel_still_blocks_an_agent_store_worktree`,
+/// `classify_allows_a_merged_agent_tree_the_harness_released`,
+/// `classify_blocks_an_agent_tree_git_cannot_be_asked_about`.
 pub(crate) fn agent_ownership_blocks(
     path: &Path,
     agent_state: AgentStateProbe<'_>,
@@ -583,13 +595,22 @@ pub(crate) fn agent_ownership_blocks(
                  still working in this tree (#5661)",
                 owner.agent_id
             )),
-            AgentDelegationState::Unknown => Some(format!(
-                "owned by dispatched agent {} and the delegation registry holds no record of \
-                 that agent — a registry rebuilt empty at daemon boot cannot tell a finished \
-                 agent from a working one, so its silence is undeterminable, not absent \
-                 (#5661, ADR-0045)",
-                owner.agent_id
-            )),
+            // #6561: the registry's silence is not the last word — ask git.
+            AgentDelegationState::Unknown => match harness_lock_state(path) {
+                HarnessLockState::Released => None,
+                HarnessLockState::Held => Some(format!(
+                    "owned by dispatched agent {} and git still reports the harness's \
+                     agent-lifetime lock on this worktree (#6561)",
+                    owner.agent_id
+                )),
+                HarnessLockState::Undeterminable => Some(format!(
+                    "owned by dispatched agent {} — the delegation registry holds no record of \
+                     that agent, and git could not be asked whether the harness still holds the \
+                     worktree. Two silences are not an answer: undeterminable, not absent \
+                     (#5661, #6561, ADR-0045)",
+                    owner.agent_id
+                )),
+            },
             AgentDelegationState::Ended => None,
         },
         // #6561 critic round: absent and unreadable are BOTH undeterminable
@@ -704,7 +725,7 @@ impl ReclaimVerdict {
 /// `classify_blocks_live_session_workspace`,
 /// `classify_blocks_a_worktree_trusty_mpm_does_not_own`,
 /// `classify_blocks_a_live_agents_worktree`,
-/// `classify_blocks_an_agent_the_registry_never_heard_of`,
+/// `classify_blocks_an_agent_the_harness_still_holds_after_a_restart`,
 /// `classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel`,
 /// `classify_records_an_agent_refusal_as_its_own_verdict_kind`,
 /// `classify_blocks_open_pr`,
@@ -722,6 +743,13 @@ pub(crate) fn classify(
     agent_state: AgentStateProbe<'_>,
 ) -> ReclaimVerdict {
     // Gate 1 (#2919): git decides existence and eligibility, per ADR-0023.
+    // #6561: a harness agent lock is a refusal the operator must be TOLD about
+    // — it means an agent is working in that tree — so it leaves gate 1 as its
+    // own verdict kind and reaches `ReclaimSurvey::agent_owned`. Every other
+    // non-admitted verdict is an ordinary block, as before.
+    if admission == Admission::HarnessAgentLock {
+        return ReclaimVerdict::blocked_by_agent(admission.reason());
+    }
     if admission != Admission::Admitted {
         return ReclaimVerdict::blocked(admission.reason());
     }

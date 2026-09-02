@@ -228,7 +228,7 @@ pub(crate) enum SentinelOwner {
 /// [`Unknown`](Self::Unknown) — the registry holds no delegation naming this
 /// agent, so its silence proves nothing.
 /// Test: `classify_blocks_a_live_agents_worktree`,
-/// `classify_blocks_an_agent_the_registry_never_heard_of`,
+/// `classify_blocks_an_agent_the_harness_still_holds_after_a_restart`,
 /// `classify_allows_a_finished_agents_merged_worktree`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentDelegationState {

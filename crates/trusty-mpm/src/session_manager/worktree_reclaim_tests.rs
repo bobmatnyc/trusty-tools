@@ -122,6 +122,9 @@ fn classify_blocks_non_admitted_worktree() {
         Admission::MainCheckout,
         Admission::Bare,
         Admission::Locked,
+        // #6561: the harness's own agent-lifetime lock refuses too — it is
+        // reported differently, never more permissively.
+        Admission::HarnessAgentLock,
         Admission::Prunable,
         Admission::Unresolvable,
         Admission::OutsideProject,
@@ -336,15 +339,23 @@ fn classify_blocks_a_live_agents_worktree() {
     );
 }
 
+/// The post-restart shape, with the harness still holding the tree (#5661,
+/// retargeted by #6561; was `classify_blocks_an_agent_the_registry_never_heard_of`).
+///
+/// `DaemonState::delegations` is rebuilt empty at every boot, so "no delegation
+/// names this agent" is what the registry says about an agent that is still
+/// working, and an empty observation on a destructive path is undeterminable,
+/// not absent (ADR-0045). #6561 did not weaken that: it found a SECOND source
+/// for the same fact. The harness locks an agent's worktree for the life of that
+/// agent, and the lock is a file under `.git/worktrees/<id>/` that no daemon
+/// restart clears — so the fixture now states the fact the registry lost, and the
+/// refusal must still stand.
 #[test]
-fn classify_blocks_an_agent_the_registry_never_heard_of() {
-    // The post-restart shape. `DaemonState::delegations` is rebuilt empty at
-    // every boot, so "no delegation names this agent" is what the registry says
-    // about an agent that is still working. An empty observation on a
-    // destructive path is undeterminable, not absent (ADR-0045).
+fn classify_blocks_an_agent_the_harness_still_holds_after_a_restart() {
     let fx = GitWorktreeFixture::new();
     let path = agent_store_worktree(&fx, "forgotten-agent-5661");
     GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-lost-to-a-restart");
+    fx.harness_lock_worktree(&path, "agent-lost-to-a-restart");
     let v = classify(
         &path,
         Admission::Admitted,
@@ -354,7 +365,11 @@ fn classify_blocks_an_agent_the_registry_never_heard_of() {
         &no_agents,
     );
     assert!(!v.is_reclaimable(), "{v:?}");
-    assert!(reason(&v).contains("undeterminable"), "{}", reason(&v));
+    assert!(
+        reason(&v).contains("still reports the harness"),
+        "{}",
+        reason(&v)
+    );
 }
 
 #[test]
@@ -367,7 +382,9 @@ fn classify_records_an_agent_refusal_as_its_own_verdict_kind() {
     //
     // Both registry answers that refuse are pinned, because the post-restart
     // `Unknown` case is the one a fail-open implementation would quietly
-    // reclassify as an ordinary block.
+    // reclassify as an ordinary block. #6561: the `Unknown` row now also holds
+    // the harness lock, which is what carries that refusal since the registry's
+    // silence alone stopped being the whole answer.
     let fx = GitWorktreeFixture::new();
     for (name, probe, agent) in [
         (
@@ -383,6 +400,7 @@ fn classify_records_an_agent_refusal_as_its_own_verdict_kind() {
     ] {
         let path = agent_store_worktree(&fx, name);
         GitWorktreeFixture::stamp_agent_sentinel(&path, agent);
+        fx.harness_lock_worktree(&path, agent);
         let v = classify(
             &path,
             Admission::Admitted,
@@ -789,6 +807,70 @@ fn an_unattributed_agent_store_worktree_is_never_reclaimable() {
         "and the refusal must be the ownership one, naming why: {}",
         reason(&v)
     );
+}
+
+/// A merged, clean agent tree the HARNESS HAS RELEASED is reclaimable even
+/// though the delegation registry never heard of its agent (#6561).
+///
+/// This is the issue's headline case. The registry is a `DashMap` rebuilt empty
+/// at every daemon boot, so on a restarted daemon it answers `Unknown` for every
+/// agent — which refused every `.claude/worktrees/agent-*` tree in the store and
+/// produced the reported `0 of 0 measured`. Git's lock is the durable second
+/// source: the harness holds it for the agent's life and releases it when the
+/// agent ends, and no daemon writes or clears it.
+///
+/// Fails before #6561: `classify` refuses with "the delegation registry holds no
+/// record of that agent".
+#[test]
+fn classify_allows_a_merged_agent_tree_the_harness_released() {
+    let fx = GitWorktreeFixture::new();
+    let path = agent_store_worktree(&fx, "agent-6561released");
+    GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-6561released");
+    // No `harness_lock_worktree` call: the harness released this tree when its
+    // agent ended, which is what `git worktree list` now reports.
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
+    assert_eq!(
+        v,
+        ReclaimVerdict::Reclaimable { pr: 759 },
+        "a released, attributed, merged, clean agent tree must be reclaimable"
+    );
+}
+
+/// Git being unaskable is still undeterminable, never released (#6561).
+///
+/// The permit above rests entirely on `Released` being POSITIVE evidence. Its
+/// `Held` complement is `classify_blocks_an_agent_the_harness_still_holds_after_a_restart`;
+/// this is the third arm, where git answers nothing at all.
+#[test]
+fn classify_blocks_an_agent_tree_git_cannot_be_asked_about() {
+    let fx = GitWorktreeFixture::new();
+    let path = agent_store_worktree(&fx, "agent-6561unaskable");
+    GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-6561unaskable");
+    let _restore = deny_all(&path.join(".git"));
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
+    assert!(!v.is_reclaimable(), "two silences are not an answer: {v:?}");
+}
+
+/// A harness-locked agent tree reaches gate 1 as its own verdict KIND, so the
+/// survey can tell the operator it spared an agent (#6561).
+///
+/// Fails before #6561: the verdict is a plain `Blocked` naming the operator's
+/// `git worktree lock`, so `ReclaimSurvey::agent_owned` stays empty and the run
+/// prints `0 of 0` with no mention of the agent it protected.
+#[test]
+fn classify_discloses_a_harness_locked_agent_tree_as_agent_owned() {
+    let v = classify_no_agent(
+        &wt(),
+        Admission::HarnessAgentLock,
+        false,
+        &merged(760),
+        &clean,
+    );
+    assert!(
+        matches!(v, ReclaimVerdict::BlockedByAgent { .. }),
+        "a harness lock must be disclosed as an agent refusal, not an operator one: {v:?}"
+    );
+    assert_eq!(reason(&v), Admission::HarnessAgentLock.reason());
 }
 
 /// The #4091 dirty-work guard, asserted on the agent store specifically: unsaved
