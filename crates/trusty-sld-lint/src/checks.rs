@@ -120,16 +120,25 @@ pub fn check_reference(
 /// a tree it never actually checked. Returning the number of references put
 /// through [`check_reference`] is what lets [`crate::run`] floor the WORK instead
 /// of the discovery.
-/// What: `checked` counts references handed to [`check_reference`];
-/// `diagnostics` are the findings they produced. A file with no declared
-/// references contributes `checked == 0` — the floor is a whole-run total, never
-/// a per-file requirement.
+/// What: `checked` counts references whose path was conformant enough to be
+/// resolved against the tree; `rejected` counts those refused on the path alone
+/// (DOC-38 §2.1 traversal/absolute), which produce a `ref-traversal` error and
+/// resolve nothing; `diagnostics` are the findings both produced. A file with no
+/// declared references contributes `checked == 0` — the floor is a whole-run
+/// total, never a per-file requirement.
+///
+/// #6605: the two counts are separate because a rejected reference is not
+/// verified work. Folding it into `checked` would let a tree of unresolvable
+/// paths hold the scan floor up while nothing was actually checked — the same
+/// count-the-work-not-the-discovery argument that put `checked` here.
 /// Test: `super::tests::checks_code_file`, `checks_markdown_refs`,
-/// `checks_markdown_bad_frontmatter`.
+/// `checks_markdown_bad_frontmatter`, `checks_code_file_rejects_traversal`.
 #[derive(Debug, Default)]
 pub struct RefScan {
     /// References actually resolved (not merely files walked).
     pub checked: usize,
+    /// References refused on path shape alone, so resolved against nothing.
+    pub rejected: usize,
     /// Findings produced while resolving them.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -143,7 +152,14 @@ pub struct RefScan {
 /// yields an empty [`RefScan`] (never guess an idiom). Otherwise parses inline
 /// references, resolves each via [`check_reference`], and reports how many were
 /// resolved so the caller can floor that count.
-/// Test: `super::tests::checks_code_file`.
+///
+/// #6605: an inline reference whose path is unsafe (§2.1 traversal/absolute)
+/// used to be dropped by the parser without a diagnostic, so its anchor was
+/// never validated and the block passed the gate while saying nothing. Such a
+/// reference now reaches [`check_reference`], which fails it closed with
+/// `ref-traversal` at `file:line`, and is counted as `rejected` rather than
+/// `checked` — it resolved nothing, so it must not prop the scan floor up.
+/// Test: `super::tests::checks_code_file`, `checks_code_file_rejects_traversal`.
 pub fn check_code_file(
     decl_path: &str,
     content: &str,
@@ -153,14 +169,41 @@ pub fn check_code_file(
     let Some(syntax) = syntax_for_extension(ext) else {
         return RefScan::default();
     };
-    let refs = parse_inline_refs(content, &syntax);
-    RefScan {
-        checked: refs.len(),
-        diagnostics: refs
+    scan_refs(
+        parse_inline_refs(content, &syntax)
             .iter()
-            .flat_map(|r| check_reference(decl_path, &r.id, &r.path, &r.anchor, r.line, lookup))
-            .collect(),
+            .map(|r| (r.id.as_str(), r.path.as_str(), r.anchor.as_str(), r.line)),
+        decl_path,
+        lookup,
+    )
+}
+
+/// Resolve a sequence of declared references into one [`RefScan`].
+///
+/// Why: the inline and frontmatter readers recover the same `(id, path, anchor,
+/// line)` triple-plus-line, and both owe the caller the same checked/rejected
+/// split (#6605). Sharing the fold keeps that split defined once, so a future
+/// path-conformance rule cannot apply to one representation and not the other.
+/// What: partitions on [`is_unsafe_path`] to fill `checked`/`rejected`, and runs
+/// every reference — rejected ones included — through [`check_reference`], which
+/// is what emits `ref-traversal`.
+/// Test: `super::tests::checks_code_file_rejects_traversal`.
+fn scan_refs<'a>(
+    refs: impl Iterator<Item = (&'a str, &'a str, &'a str, usize)>,
+    decl_path: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> RefScan {
+    let mut out = RefScan::default();
+    for (id, path, anchor, line) in refs {
+        if is_unsafe_path(path) {
+            out.rejected += 1;
+        } else {
+            out.checked += 1;
+        }
+        out.diagnostics
+            .extend(check_reference(decl_path, id, path, anchor, line, lookup));
     }
+    out
 }
 
 /// Validate and resolve a Markdown document's `spec_refs:` frontmatter.
@@ -169,8 +212,9 @@ pub fn check_code_file(
 /// violation is itself a defect, and each valid entry must resolve.
 /// What: on a schema error emits `frontmatter-schema` (file-scoped) and reports
 /// zero references checked — an unparseable block resolved nothing; otherwise
-/// resolves each frontmatter reference via [`check_reference`] and reports how
-/// many were resolved.
+/// folds the block through [`scan_refs`], which resolves each reference and
+/// splits the count into `checked` and `rejected` on the same §2.1 path rule the
+/// inline form uses (#6605).
 /// Test: `super::tests::checks_markdown_refs`, `checks_markdown_bad_frontmatter`.
 pub fn check_markdown_refs(
     decl_path: &str,
@@ -178,15 +222,15 @@ pub fn check_markdown_refs(
     lookup: &impl Fn(&str) -> Option<String>,
 ) -> RefScan {
     match parse_frontmatter_refs(content) {
-        Ok(refs) => RefScan {
-            checked: refs.len(),
-            diagnostics: refs
-                .iter()
-                .flat_map(|r| check_reference(decl_path, &r.id, &r.path, &r.anchor, r.line, lookup))
-                .collect(),
-        },
+        Ok(refs) => scan_refs(
+            refs.iter()
+                .map(|r| (r.id.as_str(), r.path.as_str(), r.anchor.as_str(), r.line)),
+            decl_path,
+            lookup,
+        ),
         Err(e) => RefScan {
             checked: 0,
+            rejected: 0,
             diagnostics: vec![Diagnostic::error(
                 decl_path,
                 0,

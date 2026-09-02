@@ -154,6 +154,37 @@ fn inline_hash_block_closes_on_prose() {
 }
 
 #[test]
+fn inline_keeps_traversal_path_for_the_linter() {
+    // #6605: the reader used to drop a reference whose path carried a `..`
+    // traversal segment, with no diagnostic. That made the whole block
+    // invisible to `check_sld.sh` — `crates/trusty-git-analytics/src/audit/
+    // sweep.rs` carried a bogus anchor (`SPEC-TGAUDIT-98~draft`) that the gate
+    // reported as `0 error(s)`. The reader now returns every declared
+    // reference; DOC-38 §2.1 path conformance is the linter's call, and it
+    // reports it as `ref-traversal` at `file:line`.
+    let src = "//! # Spec References\n//! - [`SPEC-TGAUDIT-98~draft`](../../../../docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-98~draft)";
+    let refs = parse_inline_refs(src, &syntax_for_extension("rs").unwrap());
+    assert_eq!(
+        refs.len(),
+        1,
+        "a traversal path must reach the linter, not vanish: {refs:?}"
+    );
+    assert_eq!(refs[0].id, "SPEC-TGAUDIT-98~draft");
+    assert_eq!(
+        refs[0].path,
+        "../../../../docs/specs/DOC-67-tga-audit-mode.md"
+    );
+    assert_eq!(refs[0].line, 2);
+
+    // An absolute path is the same class of non-conformance and is likewise
+    // handed on rather than swallowed.
+    let abs = "//! # Spec References\n//! - [`SPEC-SLD-01~draft`](/docs/specs/spec-linked-documentation.md#SPEC-SLD-01~draft)";
+    let abs_refs = parse_inline_refs(abs, &syntax_for_extension("rs").unwrap());
+    assert_eq!(abs_refs.len(), 1, "absolute path must reach the linter");
+    assert_eq!(abs_refs[0].path, "/docs/specs/spec-linked-documentation.md");
+}
+
+#[test]
 fn inline_skips_fenced() {
     // A fenced example inside the block must NOT be extracted; the block
     // survives the fence and the real ref after it IS extracted.

@@ -22,8 +22,8 @@
 //! event loop two sources of truth to reconcile.
 //!
 //! # Spec References
-//! - [`SPEC-TTUI-02~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-02~draft) — architecture, the engine-adapter seam.
-//! - [`SPEC-TTUI-03~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — Slice 1 trait shape; §3.2, Slice 1.5 generalization layer.
+//! - [`SPEC-TTUI-02~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-02~draft) — architecture, the engine-adapter seam.
+//! - [`SPEC-TTUI-03~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — Slice 1 trait shape; §3.2, Slice 1.5 generalization layer.
 
 use crate::event::ReplEvent;
 use crate::model::{CommandDescriptor, PickerRequest};
@@ -53,7 +53,7 @@ use tokio::sync::mpsc::UnboundedSender;
 /// shareable across that task boundary (typically via `Arc<dyn TuiEngine>`).
 ///
 /// # Spec References
-/// - [`SPEC-TTUI-02~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-02~draft)
+/// - [`SPEC-TTUI-02~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-02~draft)
 #[async_trait::async_trait]
 pub trait TuiEngine: Send + Sync {
     /// Process one submitted line — either free-form chat input or a slash
