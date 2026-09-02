@@ -137,3 +137,35 @@ fn consecutive_regions_are_each_transformed() {
     assert_eq!(out.matches(PARTIAL_NOTE).count(), 1, "{out}");
     assert_eq!(out.matches(OUT_OF_SCOPE_LEAD).count(), 1, "{out}");
 }
+
+/// Why: nesting is the one malformed shape that used to fail SILENTLY. The
+/// outer region closed at the INNER region's `code_only:end`, so the rest of
+/// the outer body flowed into the report as literal template text and the
+/// outer's real end marker dangled — and no `warn!` fired, because an end
+/// marker HAD been found. Failing open on one section is this module's
+/// doctrine; rewriting a different span than the author marked is not.
+/// What: an opening marker inside an open region leaves the OUTER region
+/// untransformed — its whole body survives and no boundary is stated for it.
+/// Test: this test itself.
+#[test]
+fn a_nested_region_leaves_the_outer_region_untransformed() {
+    let tpl = "## Outer\n<!-- code_only:non_code a corpus -->\nOUTER-A\n\
+               <!-- code_only:partial -->\nINNER\n<!-- code_only:end -->\n\
+               OUTER-B\n<!-- code_only:end -->\n## Next\n";
+    let out = apply(tpl, true);
+    assert!(
+        out.contains("OUTER-A"),
+        "the outer body before the nested marker survives: {out}"
+    );
+    assert!(
+        out.contains("OUTER-B"),
+        "the outer body after the nested region survives rather than being cut \
+         adrift by the inner end marker: {out}"
+    );
+    assert!(out.contains("INNER"), "the inner body survives: {out}");
+    assert!(
+        !out.contains(OUT_OF_SCOPE_LEAD),
+        "no boundary is stated for a region whose extent is ambiguous: {out}"
+    );
+    assert!(out.contains("## Next"), "the next section survives: {out}");
+}

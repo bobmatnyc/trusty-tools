@@ -575,7 +575,9 @@ shorten the report — it makes the report say what it could not measure:
 
 A template declares its own regions with `<!-- code_only:non_code <reason> -->`
 / `<!-- code_only:partial -->`, each closed by `<!-- code_only:end -->`; no
-section name is hardcoded in Rust. Without the switch both are ordinary
+section name is hardcoded in Rust. Regions must not nest — a region that opens
+another region before its own `code_only:end` is left untransformed and logged,
+exactly as one that is never closed. Without the switch both are ordinary
 comments and the output is unchanged. Parser: `src/report/code_only.rs`.
 
 `--code-only` can also be set by the manifest key `[report] code_only = true`

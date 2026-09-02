@@ -38,7 +38,7 @@ fn the_request_template_wins() {
     req.template = Some("report-technical-dd".to_string());
     let manifest = manifest_with("template = \"report-technical-dd-cast\"");
     assert_eq!(
-        resolve_template_name(&req, &manifest),
+        resolve_template_name_from(&req, &manifest, None),
         "report-technical-dd"
     );
 }
@@ -52,13 +52,13 @@ fn the_cast_alias_expands() {
     let mut req = ReportRequest::new("m.toml");
     req.template = Some("cast".to_string());
     assert_eq!(
-        resolve_template_name(&req, &manifest_with("")),
+        resolve_template_name_from(&req, &manifest_with(""), None),
         "report-technical-dd-cast"
     );
 
     let from_manifest = ReportRequest::new("m.toml");
     assert_eq!(
-        resolve_template_name(&from_manifest, &manifest_with("template = \"cast\"")),
+        resolve_template_name_from(&from_manifest, &manifest_with("template = \"cast\""), None),
         "report-technical-dd-cast"
     );
 }
@@ -69,15 +69,55 @@ fn the_cast_alias_expands() {
 /// Test: this test itself.
 #[test]
 fn nothing_named_is_still_the_default_template() {
-    // The environment tier is read from the real process environment; this
-    // machine is not expected to have it set, and the assertion states which
-    // variable would make it fail rather than silently skipping.
-    if std::env::var(trusty_common::env_vars::ENV_AUDIT_REPORT_TEMPLATE).is_ok() {
-        return;
-    }
+    // #6669: the environment tier is injected as `None` rather than read from
+    // the process, so this asserts unconditionally instead of skipping on a
+    // machine that happens to export the variable.
     assert_eq!(
-        resolve_template_name(&ReportRequest::new("m.toml"), &manifest_with("")),
+        resolve_template_name_from(&ReportRequest::new("m.toml"), &manifest_with(""), None),
         DEFAULT_TEMPLATE
+    );
+}
+
+/// Why: `trusty-audit` hands an engagement's template down the environment,
+/// and that tier must sit BELOW the manifest — an operator editing the
+/// manifest is making a later, more specific decision than the orchestrator
+/// that exported the variable.
+/// What: the variable alone beats the default, the manifest beats the
+/// variable, and the request beats both; the `cast` alias expands from the
+/// environment tier too.
+/// Test: this test itself.
+#[test]
+fn the_environment_template_is_read_below_the_manifest() {
+    let bare = ReportRequest::new("m.toml");
+    let from_env = Some("report-technical-dd-cast".to_string());
+
+    assert_eq!(
+        resolve_template_name_from(&bare, &manifest_with(""), from_env.clone()),
+        "report-technical-dd-cast",
+        "the variable is read when nothing above it names a template"
+    );
+    assert_eq!(
+        resolve_template_name_from(
+            &bare,
+            &manifest_with("template = \"report-technical-dd\""),
+            from_env.clone()
+        ),
+        "report-technical-dd",
+        "a manifest key still wins over the variable"
+    );
+
+    let mut req = ReportRequest::new("m.toml");
+    req.template = Some("report-technical-dd".to_string());
+    assert_eq!(
+        resolve_template_name_from(&req, &manifest_with("template = \"cast\""), from_env),
+        "report-technical-dd",
+        "the request wins over both"
+    );
+
+    assert_eq!(
+        resolve_template_name_from(&bare, &manifest_with(""), Some("cast".to_string())),
+        "report-technical-dd-cast",
+        "the alias expands at the environment tier too"
     );
 }
 
@@ -89,10 +129,15 @@ fn nothing_named_is_still_the_default_template() {
 #[test]
 fn the_manifest_can_declare_code_only() {
     let req = ReportRequest::new("m.toml");
-    assert!(resolve_code_only(&req, &manifest_with("code_only = true")));
-    assert!(!resolve_code_only(
+    assert!(resolve_code_only_from(
         &req,
-        &manifest_with("code_only = false")
+        &manifest_with("code_only = true"),
+        false
+    ));
+    assert!(!resolve_code_only_from(
+        &req,
+        &manifest_with("code_only = false"),
+        false
     ));
 }
 
@@ -105,40 +150,57 @@ fn the_manifest_can_declare_code_only() {
 fn the_request_flag_only_widens_nothing() {
     let mut req = ReportRequest::new("m.toml");
     req.code_only = true;
-    assert!(resolve_code_only(&req, &manifest_with("")));
+    assert!(resolve_code_only_from(&req, &manifest_with(""), false));
 
     let bare = ReportRequest::new("m.toml");
     assert!(
-        resolve_code_only(&bare, &manifest_with("code_only = true")),
+        resolve_code_only_from(&bare, &manifest_with("code_only = true"), false),
         "an omitted flag must not turn off what the manifest declared"
+    );
+}
+
+/// Why: `trusty-audit` declares an engagement's scope through the environment,
+/// and that tier must be able to turn the mode ON on its own — an audit that
+/// collected only a repository says so once, wherever the re-render happens.
+/// What: the variable alone turns it on, and it cannot turn off what the
+/// request or the manifest declared.
+/// Test: this test itself.
+#[test]
+fn the_environment_can_declare_code_only() {
+    let bare = ReportRequest::new("m.toml");
+    assert!(
+        resolve_code_only_from(&bare, &manifest_with(""), true),
+        "the variable alone turns the mode on"
+    );
+    assert!(
+        !resolve_code_only_from(&bare, &manifest_with(""), false),
+        "with no tier declaring it, the render stays full scope"
+    );
+    assert!(
+        resolve_code_only_from(&bare, &manifest_with("code_only = true"), false),
+        "an unset variable must not widen what the manifest declared"
+    );
+
+    let mut req = ReportRequest::new("m.toml");
+    req.code_only = true;
+    assert!(
+        resolve_code_only_from(&req, &manifest_with("code_only = false"), false),
+        "and must not widen what the request asked for"
     );
 }
 
 /// Why: a typo in an orchestrator's environment must read as absent. Silently
 /// narrowing a report's stated scope is the one failure this cannot afford.
-/// What: the truthy set is recognised; everything else is not.
+/// What: `flag_is_truthy` — the function `env_flag` itself calls — recognises
+/// the four truthy spellings after trimming and case-folding, and nothing else.
 /// Test: this test itself.
 #[test]
-fn only_recognised_truthy_values_set_the_flag() {
-    // `env_flag` reads the process environment, so the RULE is exercised
-    // through the same match it uses, over values rather than variables.
+fn an_unrecognised_env_value_reads_as_absent() {
     for truthy in ["1", "true", "TRUE", " yes ", "on"] {
-        assert!(
-            matches!(
-                truthy.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            ),
-            "{truthy} must read as set"
-        );
+        assert!(flag_is_truthy(truthy), "{truthy} must read as set");
     }
-    for falsy in ["", "0", "no", "off", "ture", "maybe"] {
-        assert!(
-            !matches!(
-                falsy.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            ),
-            "{falsy} must read as absent"
-        );
+    for falsy in ["", "0", "no", "off", "ture", "maybe", "1 0"] {
+        assert!(!flag_is_truthy(falsy), "{falsy} must read as absent");
     }
 }
 

@@ -313,14 +313,31 @@ pub async fn run_report(config_path: Option<&Path>, req: &ReportRequest) -> Resu
 /// What: request field > manifest `[report].template` >
 /// `TRUSTY_AUDIT_REPORT_TEMPLATE` > [`DEFAULT_TEMPLATE`], with
 /// [`resolve_template_alias`] applied last so `cast` works at every tier.
-/// Test: `run_tests::{the_request_template_wins,
-/// the_environment_template_is_read_below_the_manifest, the_cast_alias_expands}`.
+/// Test: `the_request_template_wins`, `the_cast_alias_expands`,
+/// `the_environment_template_is_read_below_the_manifest`.
 fn resolve_template_name(req: &ReportRequest, manifest: &Manifest) -> String {
+    resolve_template_name_from(req, manifest, env_template())
+}
+
+/// [`resolve_template_name`]'s precedence rule, over a value already read.
+///
+/// Why: taking the environment tier as a parameter is what lets the precedence
+/// be tested without `std::env::set_var`, which is `unsafe` in edition 2024 and
+/// unsound under the parallel test harness — the same split
+/// [`resolve_budget_from`] uses.
+/// Test: `the_request_template_wins`, `the_cast_alias_expands`,
+/// `nothing_named_is_still_the_default_template`,
+/// `the_environment_template_is_read_below_the_manifest`.
+fn resolve_template_name_from(
+    req: &ReportRequest,
+    manifest: &Manifest,
+    env_template: Option<String>,
+) -> String {
     let chosen = req
         .template
         .clone()
         .or_else(|| manifest.report.template.clone())
-        .or_else(env_template)
+        .or(env_template)
         .unwrap_or_else(|| DEFAULT_TEMPLATE.to_string());
     resolve_template_alias(&chosen).to_string()
 }
@@ -341,26 +358,47 @@ fn env_template() -> Option<String> {
 /// What: true when the request asks for it, OR the manifest declares
 /// `[report] code_only = true`, OR `TRUSTY_AUDIT_REPORT_CODE_ONLY` is set to a
 /// recognised truthy value.
-/// Test: `run_tests::{the_manifest_can_declare_code_only,
-/// the_environment_can_declare_code_only, an_unrecognised_env_value_reads_as_absent}`.
+/// Test: `the_manifest_can_declare_code_only`,
+/// `the_request_flag_only_widens_nothing`,
+/// `the_environment_can_declare_code_only`.
 fn resolve_code_only(req: &ReportRequest, manifest: &Manifest) -> bool {
-    req.code_only
-        || manifest.report.code_only.unwrap_or(false)
-        || env_flag(trusty_common::env_vars::ENV_AUDIT_REPORT_CODE_ONLY)
+    resolve_code_only_from(
+        req,
+        manifest,
+        env_flag(trusty_common::env_vars::ENV_AUDIT_REPORT_CODE_ONLY),
+    )
+}
+
+/// [`resolve_code_only`]'s rule, over a value already read.
+///
+/// Why: the environment tier arrives as a parameter for the same reason
+/// [`resolve_budget_from`]'s does — the precedence is then testable without
+/// `std::env::set_var`.
+/// What: an OR across the three tiers, so each can only turn the mode ON.
+/// Test: `the_manifest_can_declare_code_only`,
+/// `the_request_flag_only_widens_nothing`,
+/// `the_environment_can_declare_code_only`.
+fn resolve_code_only_from(req: &ReportRequest, manifest: &Manifest, env_code_only: bool) -> bool {
+    req.code_only || manifest.report.code_only.unwrap_or(false) || env_code_only
 }
 
 /// True when `name` holds a recognised truthy value.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|raw| flag_is_truthy(&raw))
+}
+
+/// True for the recognised truthy spellings, case- and whitespace-insensitive.
 ///
 /// Why: an unrecognised value must read as absent rather than as `true` — a
 /// typo silently narrowing what a report says its scope was is the one failure
-/// this decision cannot afford.
-fn env_flag(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|raw| {
-        matches!(
-            raw.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
+/// this decision cannot afford. It is a free function so the recognised set is
+/// tested directly rather than restated in a test's own `matches!`.
+/// Test: `an_unrecognised_env_value_reads_as_absent`.
+fn flag_is_truthy(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 /// Run the opt-in deterministic analyze fetch, recording what it could not

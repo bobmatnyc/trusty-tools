@@ -69,7 +69,9 @@
   body and gains "Inferred from code; not validated by interview or
   operational data". Without `--code-only` both are ordinary comments and are
   stripped from output like every other comment here, so a full-scope render is
-  unchanged. Parser: `src/report/code_only.rs`.
+  unchanged. Regions must not nest: a region that opens another region before
+  its own `code_only:end` is left untransformed and logged, exactly as one that
+  is never closed. Parser: `src/report/code_only.rs`.
 
   #6004 (LANDED, #6669): the Code Quality & Architecture / Security Posture /
   Performance & Scalability sections the generic template carries now render

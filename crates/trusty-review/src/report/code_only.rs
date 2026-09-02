@@ -12,9 +12,10 @@
 //! so, so a reader never mistakes them for validated.
 //! What: [`apply`] rewrites the template source before the fill engine sees it.
 //! A template marks its own regions with `<!-- code_only:non_code <reason> -->`
-//! or `<!-- code_only:partial -->`, each closed by `<!-- code_only:end -->`;
-//! nothing here hardcodes a section name, so a template author moves or adds a
-//! boundary without a Rust change. With code-only OFF the source is returned
+//! or `<!-- code_only:partial -->`, each closed by `<!-- code_only:end -->`
+//! and never nested inside another region; nothing here hardcodes a section
+//! name, so a template author moves or adds a boundary without a Rust change.
+//! With code-only OFF the source is returned
 //! byte-identical and the markers are stripped downstream as ordinary template
 //! comments, so an unaffected render stays exactly as it was.
 //! Test: `code_only_tests.rs`; end to end by
@@ -83,13 +84,15 @@ enum Kind {
 /// What: with `code_only` false, returns `template` unchanged. With it true,
 /// every `non_code` region's body is replaced by the out-of-scope block and
 /// every `partial` region gains [`PARTIAL_NOTE`] after its body; the marker
-/// comments themselves are consumed either way. A region left unclosed is
-/// logged and passed through untouched — a template typo must never truncate a
-/// report.
-/// Test: `code_only_tests::{disabled_returns_the_source_unchanged,
-/// non_code_body_is_replaced_by_the_boundary,
-/// partial_keeps_its_body_and_gains_the_note,
-/// an_unclosed_region_is_passed_through}`.
+/// comments themselves are consumed either way. Regions never nest: a region
+/// left unclosed, or one that opens another region before its own
+/// `code_only:end`, is logged and passed through untouched — a template typo
+/// must never truncate a report or rewrite a span the author did not mark.
+/// Test: `disabled_returns_the_source_unchanged`,
+/// `non_code_body_is_replaced_by_the_boundary`,
+/// `partial_keeps_its_body_and_gains_the_note`,
+/// `an_unclosed_region_is_passed_through`,
+/// `a_nested_region_leaves_the_outer_region_untransformed`.
 #[must_use]
 pub fn apply(template: &str, code_only: bool) -> String {
     if !code_only {
@@ -109,14 +112,26 @@ pub fn apply(template: &str, code_only: bool) -> String {
         };
         match opener(&rest[4..len - 3]) {
             Some((kind, reason)) => match region_end(template, start + len) {
-                Some((body_end, after)) => {
+                RegionEnd::Closed(body_end, after) => {
                     push_region(&mut out, &template[start + len..body_end], kind, &reason);
                     i = after;
                 }
-                None => {
+                // #6669: both malformed shapes fail open the same way — the
+                // opening marker is copied through as an ordinary comment and
+                // the scan resumes just after it.
+                RegionEnd::Unclosed => {
                     warn!(
                         marker = %kind.marker(),
                         "template code-only region is never closed by `code_only:end`; ignoring it"
+                    );
+                    out.push_str(&rest[..len]);
+                    i = start + len;
+                }
+                RegionEnd::Nested => {
+                    warn!(
+                        marker = %kind.marker(),
+                        "template code-only region opens another region before its own \
+                         `code_only:end`; regions do not nest, so this one is ignored"
                     );
                     out.push_str(&rest[..len]);
                     i = start + len;
@@ -151,8 +166,8 @@ impl Kind {
 /// team" are different facts and must not collapse into one generic line.
 /// What: `Some` for either opening marker; the reason is whitespace-normalized
 /// so a marker wrapped across template lines renders as one sentence.
-/// Test: `code_only_tests::{a_marker_reason_is_whitespace_normalized,
-/// a_non_code_marker_with_no_reason_uses_the_default}`.
+/// Test: `a_marker_reason_is_whitespace_normalized`,
+/// `a_non_code_marker_with_no_reason_uses_the_default`.
 fn opener(inner: &str) -> Option<(Kind, String)> {
     let trimmed = inner.trim();
     if let Some(reason) = trimmed.strip_prefix(NON_CODE_MARKER) {
@@ -170,22 +185,47 @@ fn opener(inner: &str) -> Option<(Kind, String)> {
     None
 }
 
-/// Byte offsets bounding the region body that starts at `from`.
+/// How the region opened at `from` ends.
 ///
-/// Returns `(body_end, after_end_marker)`: `body_end` is where the body stops,
-/// `after_end_marker` is where copying resumes. `None` when no
-/// `code_only:end` closes the region.
-fn region_end(template: &str, from: usize) -> Option<(usize, usize)> {
+/// Why: `Nested` exists because it used to be indistinguishable from
+/// `Closed` — the scan took the FIRST `code_only:end` it found, so an outer
+/// region closed at an inner region's end marker, the rest of the outer body
+/// flowed into the report as literal template text, and no warning fired
+/// because an end marker HAD been found (#6669).
+enum RegionEnd {
+    /// Closed: the body stops at `.0` and copying resumes at `.1`.
+    Closed(usize, usize),
+    /// Another region opens before this one's `code_only:end`.
+    Nested,
+    /// No `code_only:end` closes this region.
+    Unclosed,
+}
+
+/// Where the region body that starts at `from` ends.
+///
+/// What: the first marker comment after `from` decides — `code_only:end`
+/// closes the region, either opening marker means the template nested one
+/// region inside another, and any other comment is skipped over.
+/// Test: `an_unclosed_region_is_passed_through`,
+/// `a_nested_region_leaves_the_outer_region_untransformed`,
+/// `consecutive_regions_are_each_transformed`.
+fn region_end(template: &str, from: usize) -> RegionEnd {
     let mut i = from;
     while let Some(rel) = template[i..].find("<!--") {
         let start = i + rel;
-        let len = balanced_comment_len(&template[start..])?;
-        if template[start + 4..start + len - 3].trim() == END_MARKER {
-            return Some((start, start + len));
+        let Some(len) = balanced_comment_len(&template[start..]) else {
+            return RegionEnd::Unclosed;
+        };
+        let inner = &template[start + 4..start + len - 3];
+        if inner.trim() == END_MARKER {
+            return RegionEnd::Closed(start, start + len);
+        }
+        if opener(inner).is_some() {
+            return RegionEnd::Nested;
         }
         i = start + len;
     }
-    None
+    RegionEnd::Unclosed
 }
 
 /// Append one rewritten region to `out`.
