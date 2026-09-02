@@ -14,6 +14,12 @@
  * and over one `file_events` frame. No fetch, no DOM, and `now` is a parameter
  * so relative times are deterministic under test.
  *
+ * #6689 adds the lane-health block at the foot of this file. It exists because
+ * the same trap has a second, worse form: a semantic stage that says `ready`
+ * over an EMPTY vector store. `stageBadge` cannot see that — nothing in `stages`
+ * carries it — so the health functions read `search_capabilities` and
+ * `semantic_coverage` alongside the stage rather than the stage alone.
+ *
  * Test: `indexingPipeline.test.js`.
  */
 
@@ -206,4 +212,178 @@ export const FEED_LIMIT = 200;
  */
 export function pushFeedRow(rows, row) {
   return [row, ...(rows ?? [])].slice(0, FEED_LIMIT);
+}
+
+// ---------------------------------------------------------------------------
+// Lane health (#6689)
+// ---------------------------------------------------------------------------
+
+/**
+ * The vector-coverage fault an index is in, or `null` when its semantic lane is
+ * telling the truth.
+ *
+ * Why: `stages.semantic.status` is a claim about the last embedding PASS, not a
+ * measurement of what the vector store now holds, and the two come apart. Live,
+ * `tm-trusty-tools-19` (58,415 chunks) and `tm-trusty-tools-21` (58,167 chunks)
+ * report `semantic: "ready"` and advertise `vector` in `search_capabilities`
+ * while `semantic_coverage.vectors_present` is `0` — their `hnsw.usearch` files
+ * are 112 bytes against ~98 MB for healthy same-size siblings. Every vector
+ * query against them returns nothing, and a badge reading `status` alone paints
+ * both green. So this reads the three signals TOGETHER: the stage, the
+ * capability the daemon advertises off it, and the vectors that actually exist.
+ *
+ * What: `null`, or `{ code, label, detail }`. Two faults are reported.
+ * `empty_vector_store` is the one above — the daemon says vector search works
+ * and the store is empty. `count_unreadable` is the daemon's own word for a
+ * store that is attached but whose length errored, which `status.rs` classifies
+ * as "a real fault, not an absence".
+ *
+ * An index that was never meant to embed is not at fault for holding no
+ * vectors, so `skip_vector`, `lexical_only` and a `skipped` semantic stage all
+ * return `null` before anything is measured. So does `no_vector_store`, the
+ * daemon's answer for BM25-only, which its own comment calls "the correct,
+ * healthy answer". A lane still filling in is not a fault either:
+ * `search_capabilities` grows its `vector` entry only once semantic reports
+ * ready, so a mid-embedding index holding no vectors yet fails the capability
+ * test and is passed over rather than flagged for being unfinished.
+ *
+ * @param {object|null|undefined} status  A `GET /indexes/{id}/status` body
+ * @returns {{ code: string, label: string, detail: string }|null}
+ */
+export function vectorCoverageFault(status) {
+  if (!status || typeof status !== 'object') return null;
+  // Never meant to have a vector lane — nothing to be wrong about.
+  if (status.skip_vector === true || status.lexical_only === true) return null;
+  if (status.stages?.semantic?.status === 'skipped') return null;
+
+  const coverage = status.semantic_coverage;
+  if (!coverage || typeof coverage !== 'object') return null;
+
+  const present = coverage.vectors_present;
+  if (typeof present !== 'number') {
+    // #6689: `count_unreadable` is a store that exists and would not answer.
+    // `no_vector_store` is BM25-only and healthy; anything else is a daemon too
+    // old to carry the field, which is not evidence of a fault.
+    if (coverage.vectors_unavailable_reason === 'count_unreadable') {
+      return {
+        code: 'count_unreadable',
+        label: 'Unreadable',
+        detail:
+          'A vector store is attached but its size could not be read, so vector search cannot be trusted.'
+      };
+    }
+    return null;
+  }
+
+  const chunks =
+    typeof coverage.chunk_count === 'number' ? coverage.chunk_count : status.chunk_count;
+  const capabilities = Array.isArray(status.search_capabilities) ? status.search_capabilities : [];
+
+  if (present === 0 && typeof chunks === 'number' && chunks > 0 && capabilities.includes('vector')) {
+    return {
+      code: 'empty_vector_store',
+      label: 'Empty',
+      detail: `Reports ready and advertises vector search, but holds 0 vectors for ${chunks.toLocaleString()} chunks — every vector query returns nothing.`
+    };
+  }
+  return null;
+}
+
+/**
+ * The badge for one lane, with the vector-coverage cross-check folded in.
+ *
+ * Why: [`stageBadge`] maps the stage status and nothing else, which is right for
+ * the two lanes whose status is the whole story and wrong for `semantic`, where
+ * an empty store hides behind a `ready`. Callers rendering lane health reach for
+ * this; `stageBadge` stays the pure status mapping the pause logic and its tests
+ * are written against.
+ * What: `stageBadge(stage)` for `lexical` and `graph`. For `semantic`, the same
+ * unless [`vectorCoverageFault`] finds something, in which case a danger badge
+ * carrying the fault's label and a `detail` sentence for the row to show.
+ *
+ * The fault beats a `PAUSED` label rather than the other way round. In practice
+ * the two cannot collide — pausing leaves the stage `in_progress`, so the daemon
+ * withdraws the `vector` capability the fault requires — but if they ever did,
+ * an empty store is a fact about the index and a pause is a fact about the
+ * operator, and this row exists to show the first.
+ *
+ * @param {string} key  One of `lexical`, `semantic`, `graph`
+ * @param {object|null|undefined} status  A `GET /indexes/{id}/status` body
+ * @returns {{ tone: string, label: string, spinner: boolean, detail: string }}
+ */
+export function laneBadge(key, status) {
+  const badge = { ...stageBadge(status?.stages?.[key]), detail: '' };
+  if (key !== 'semantic') return badge;
+  const fault = vectorCoverageFault(status);
+  if (!fault) return badge;
+  return { tone: 'danger', label: fault.label, spinner: false, detail: fault.detail };
+}
+
+/**
+ * The whole index's health verdict, as the panel's banner renders it.
+ *
+ * Why: three lane badges make an operator read three things and combine them.
+ * The banner states the answer, and it is the one place that can say "this index
+ * is degraded" for a reason no single lane's status string carries.
+ * What: `{ tone, label, healthy, faults }`. `healthy` is `null` before a status
+ * has arrived, so a panel that has not loaded shows `Unknown` rather than a
+ * green it has not earned. `faults` lists every failed lane, carrying the
+ * daemon's own failure string when it sent one, plus any vector-coverage fault.
+ *
+ * @param {object|null|undefined} status  A `GET /indexes/{id}/status` body
+ * @returns {{ tone: string, label: string, healthy: boolean|null, faults: Array }}
+ */
+export function indexHealth(status) {
+  if (!status || typeof status !== 'object') {
+    return { tone: 'muted', label: 'Unknown', healthy: null, faults: [] };
+  }
+  const faults = [];
+  for (const { key, label } of STAGES) {
+    const lane = status.stages?.[key];
+    if (lane?.status === 'failed') {
+      faults.push({
+        lane: key,
+        label: `${label} lane failed`,
+        detail: lane.failure || 'The daemon reported this lane as failed.'
+      });
+    }
+  }
+  const coverage = vectorCoverageFault(status);
+  // A semantic lane already reported `failed` above says the same thing once.
+  if (coverage && status.stages?.semantic?.status !== 'failed') {
+    faults.push({
+      lane: 'semantic',
+      label: `Semantic lane ${coverage.label.toLowerCase()}`,
+      detail: coverage.detail
+    });
+  }
+  return faults.length === 0
+    ? { tone: 'success', label: 'Healthy', healthy: true, faults }
+    : { tone: 'danger', label: 'Degraded', healthy: false, faults };
+}
+
+/**
+ * The cumulative vector-coverage line the semantic lane shows, or `''`.
+ *
+ * `stageMeta`'s `embedded/total` counts THIS boot's pass — #4787's whole point
+ * is that a healthy index whose snapshot was already current reports `0` there.
+ * This is the cumulative pair beside it, so the row shows both and neither is
+ * mistaken for the other.
+ *
+ * @param {object|null|undefined} status  A `GET /indexes/{id}/status` body
+ * @returns {string}
+ */
+export function coverageMeta(status) {
+  const coverage = status?.semantic_coverage;
+  if (!coverage || typeof coverage !== 'object') return '';
+  const present = coverage.vectors_present;
+  if (typeof present !== 'number') {
+    return coverage.vectors_unavailable_reason
+      ? `vectors: ${coverage.vectors_unavailable_reason}`
+      : '';
+  }
+  const chunks = typeof coverage.chunk_count === 'number' ? coverage.chunk_count : null;
+  return chunks === null
+    ? `${present.toLocaleString()} vectors stored`
+    : `${present.toLocaleString()} / ${chunks.toLocaleString()} vectors stored`;
 }
