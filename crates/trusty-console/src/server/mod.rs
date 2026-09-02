@@ -90,6 +90,11 @@ pub struct AppState {
     /// host sampler (`crate::host_status`); served by
     /// `GET /api/console/machine-status`.
     host_metrics_cache: crate::host_status::HostMetricsCache,
+    /// Bounded 10-minute sample window + per-service transition log (#6641).
+    /// Written by `machine_history::sampler`; served by
+    /// `GET /api/console/machine-status/history` and its SSE stream. In-memory
+    /// only — a restart begins an empty window by design (owner ruling, #6516).
+    machine_history: crate::machine_history::MachineHistory,
     http_client: Arc<reqwest::Client>,
     /// The client the proxy uses for Server-Sent Events (#6155).
     ///
@@ -229,6 +234,7 @@ impl AppState {
             review_metrics_cache: MetricsCache::new(),
             mpm_metrics_cache: MetricsCache::new(),
             host_metrics_cache: crate::host_status::HostMetricsCache::new(),
+            machine_history: crate::machine_history::MachineHistory::new(),
             http_client: Arc::new(client),
             stream_client: Arc::new(stream_client),
             analyze_handle,
@@ -336,6 +342,18 @@ impl AppState {
     /// Test: `machine_status_route_cold_cache_returns_503`.
     pub fn host_metrics_cache(&self) -> &crate::host_status::HostMetricsCache {
         &self.host_metrics_cache
+    }
+
+    /// Access the bounded machine-status history (#6641).
+    ///
+    /// Why: `machine_history::sampler` writes every sample and every service
+    /// transition here; the history endpoint and the SSE stream read it. One
+    /// handle in the state means an open stream and a fresh page load are
+    /// looking at the same buffer.
+    /// What: returns a reference to the `MachineHistory` handle (cheap to clone).
+    /// Test: `machine_history_route_cold_cache_returns_empty_200`.
+    pub fn machine_history(&self) -> &crate::machine_history::MachineHistory {
+        &self.machine_history
     }
 
     /// Gather whichever per-service `ConsoleMetricsReport`s are currently cached
@@ -451,15 +469,44 @@ fn build_router_inner(
     let core = Router::new()
         .route("/health", get(health_handler))
         .route("/api/console/services", get(services_handler))
-        .route("/api/console/metrics/analyze", get(metrics_analyze_handler))
-        .route("/api/console/metrics/memory", get(metrics_memory_handler))
-        .route("/api/console/metrics/search", get(metrics_search_handler))
-        .route("/api/console/metrics/review", get(metrics_review_handler))
-        .route("/api/console/metrics/mpm", get(metrics_mpm_handler))
+        // The five per-service handlers moved to `crate::routes::metrics` when
+        // #6641's new routes pushed this file over the 500-SLOC cap.
+        .route(
+            "/api/console/metrics/analyze",
+            get(crate::routes::metrics::metrics_analyze_handler),
+        )
+        .route(
+            "/api/console/metrics/memory",
+            get(crate::routes::metrics::metrics_memory_handler),
+        )
+        .route(
+            "/api/console/metrics/search",
+            get(crate::routes::metrics::metrics_search_handler),
+        )
+        .route(
+            "/api/console/metrics/review",
+            get(crate::routes::metrics::metrics_review_handler),
+        )
+        .route(
+            "/api/console/metrics/mpm",
+            get(crate::routes::metrics::metrics_mpm_handler),
+        )
         // #6517: aggregated whole-machine host resources + per-service rollup.
         .route(
             "/api/console/machine-status",
             get(crate::routes::machine_status::machine_status_handler),
+        )
+        // #6641: the bounded 10-minute window behind the Phase 3 graphs, and the
+        // live stream that keeps an open dashboard moving. Both are static
+        // segments under `/machine-status`, so neither shadows nor is shadowed
+        // by the point-in-time route above.
+        .route(
+            "/api/console/machine-status/history",
+            get(crate::routes::machine_history::history_handler),
+        )
+        .route(
+            "/api/console/machine-status/stream",
+            get(crate::routes::machine_history::stream_handler),
         )
         // ── trusty-mpm session-manager surface (#1222: P2 tab + P3 front door) ──
         // The console is the SINGLE HTTP front door for the session REST API;
@@ -770,78 +817,6 @@ async fn services_handler(State(state): State<AppState>) -> axum::response::Resp
             tracing::error!("service detection task panicked: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
-    }
-}
-
-/// `GET /api/console/metrics/analyze` — return the latest metrics report.
-///
-/// Why: Surfaces trusty-analyze health/metrics to the SPA without per-request
-/// MCP calls (the background poller keeps the cache warm).
-/// What: Returns the cached `ConsoleMetricsReport` as JSON (200) or 503 when
-/// no poll has completed yet (binary absent or first boot).
-/// Test: `test_metrics_analyze_route_cold_cache_returns_503` below.
-async fn metrics_analyze_handler(State(state): State<AppState>) -> axum::response::Response {
-    match state.metrics_cache().get().await {
-        Some(report) => axum::Json(report).into_response(),
-        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
-}
-
-/// `GET /api/console/metrics/memory` — return the latest memory metrics report.
-///
-/// Why: Surfaces trusty-memory health/metrics to the SPA without per-request
-/// MCP calls (the background poller keeps the cache warm).
-/// What: Returns the cached `ConsoleMetricsReport` as JSON (200) or 503 when
-/// no poll has completed yet (binary absent or first boot).
-/// Test: `test_metrics_memory_route_cold_cache_returns_503` below.
-async fn metrics_memory_handler(State(state): State<AppState>) -> axum::response::Response {
-    match state.memory_metrics_cache().get().await {
-        Some(report) => axum::Json(report).into_response(),
-        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
-}
-
-/// `GET /api/console/metrics/search` — return the latest search metrics report.
-///
-/// Why: Surfaces trusty-search health/metrics to the SPA without per-request
-/// MCP calls (the background poller keeps the cache warm).
-/// What: Returns the cached `ConsoleMetricsReport` as JSON (200) or 503 when
-/// no poll has completed yet (binary absent or first boot).
-/// Test: `test_metrics_search_route_cold_cache_returns_503` below.
-async fn metrics_search_handler(State(state): State<AppState>) -> axum::response::Response {
-    match state.search_metrics_cache().get().await {
-        Some(report) => axum::Json(report).into_response(),
-        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
-}
-
-/// `GET /api/console/metrics/review` — return the latest review metrics report.
-///
-/// Why: Surfaces trusty-review health/metrics to the SPA without per-request
-/// MCP calls (the background poller keeps the cache warm).
-/// What: Returns the cached `ConsoleMetricsReport` as JSON (200) or 503 when
-/// no poll has completed yet (binary absent or first boot).
-/// Test: `test_metrics_review_route_cold_cache_returns_503` below.
-async fn metrics_review_handler(State(state): State<AppState>) -> axum::response::Response {
-    match state.review_metrics_cache().get().await {
-        Some(report) => axum::Json(report).into_response(),
-        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
-}
-
-/// `GET /api/console/metrics/mpm` — return the latest trusty-mpm metrics report.
-///
-/// Why: surfaces trusty-mpm session-fleet + supervisor health to the SPA without
-/// per-request MCP calls (the background poller keeps the cache warm). This is
-/// the coarse, low-frequency health cache; the Sessions tab polls the live
-/// `/api/console/sessions` list at a faster cadence for active monitoring.
-/// What: returns the cached `ConsoleMetricsReport` as JSON (200) or 503 when no
-/// poll has completed yet (binary absent or first boot).
-/// Test: `test_metrics_mpm_route_cold_cache_returns_503` below.
-async fn metrics_mpm_handler(State(state): State<AppState>) -> axum::response::Response {
-    match state.mpm_metrics_cache().get().await {
-        Some(report) => axum::Json(report).into_response(),
-        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }
 

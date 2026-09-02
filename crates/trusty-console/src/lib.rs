@@ -53,6 +53,9 @@ pub mod detect;
 // #6517: background whole-machine host-metrics sampler + cache feeding the
 // machine-status route.
 pub mod host_status;
+// #6641: the bounded 10-minute sample window, the per-service transition log,
+// and the SSE fan-out the Phase 3 graphs read.
+pub mod machine_history;
 pub mod mcp_handle;
 pub mod metrics_poller;
 pub mod poller;
@@ -184,6 +187,21 @@ pub struct ServeArgs {
     /// the stdio MCP `console_metrics` tool calls against trusty-analyze.
     #[arg(long, default_value_t = 15u64)]
     pub poll_interval: u64,
+
+    /// Host-metrics sampling interval in seconds (default: 5).
+    ///
+    /// #6641: the cadence of the real-time graphs, kept separate from
+    /// `--poll-interval` because they answer different questions. The service
+    /// pollers each spawn a stdio-MCP round trip, so 15 s is deliberate there;
+    /// a host sample is a local sysinfo refresh, and the owner's Phase 3 ruling
+    /// is a 10-minute window at 5 s (120 points). Raising this stretches the
+    /// window the same 120 points cover, and the history payload advertises the
+    /// value so the graph's x-axis follows.
+    #[arg(
+        long,
+        default_value_t = trusty_common::host_metrics::history::HOST_SAMPLE_INTERVAL_SECS
+    )]
+    pub host_sample_interval: u64,
 }
 
 // ─── public entry point ────────────────────────────────────────────────────
@@ -431,14 +449,16 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         }
     }
 
-    // ── whole-machine host-metrics sampler (#6517) ──────────────────────────
-    // Runs in the background and keeps `host_metrics_cache` warm so
-    // GET /api/console/machine-status serves the host snapshot without a
-    // per-request sysinfo refresh. Sampled on the same interval as the service
-    // pollers.
-    host_status::start(
-        state.host_metrics_cache().clone(),
-        Duration::from_secs(args.poll_interval),
+    // ── whole-machine host sampler (#6517) + history feed (#6641) ───────────
+    // One loop writes both the point-in-time cache
+    // (GET /api/console/machine-status) and the bounded 10-minute window
+    // (GET /api/console/machine-status/history and its SSE stream), so the two
+    // can never disagree about the newest sample. It runs on its own 5 s
+    // cadence rather than the service pollers' 15 s: a host sample is a local
+    // sysinfo refresh, not an MCP round trip.
+    machine_history::sampler::start(
+        state.clone(),
+        Duration::from_secs(args.host_sample_interval),
     );
 
     // #3269: trust the console's own non-loopback bind address(es) (e.g. the
@@ -554,6 +574,27 @@ mod tests {
                 assert!(!args.open);
                 assert!(!args.tailscale);
                 assert_eq!(args.poll_interval, 15);
+                // #6641: the owner's Phase 3 cadence — 5 s, distinct from the
+                // 15 s service poll.
+                assert_eq!(args.host_sample_interval, 5);
+            }
+            other => panic!("expected Serve, got {other:?}"),
+        }
+    }
+
+    /// Why (#6641): the 5 s cadence is the shipped default, not a hard-coded
+    /// constant — an operator who wants a longer window must be able to say so,
+    /// and the two intervals must stay independent.
+    /// What: parses `serve --host-sample-interval 10` and asserts only that
+    /// value moved.
+    /// Test: this test itself.
+    #[test]
+    fn test_serve_args_custom_host_sample_interval() {
+        let cli = Cli::parse_from(["trusty-console", "serve", "--host-sample-interval", "10"]);
+        match cli.command {
+            Commands::Serve(args) => {
+                assert_eq!(args.host_sample_interval, 10);
+                assert_eq!(args.poll_interval, 15, "the service poll is unaffected");
             }
             other => panic!("expected Serve, got {other:?}"),
         }

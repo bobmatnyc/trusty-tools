@@ -1034,3 +1034,159 @@ async fn machine_status_route_warm_cache_returns_json() {
     assert_eq!(status.services.ok, 1);
     assert!(status.host.cpu.logical_cores >= 1);
 }
+
+/// Why (#6641): the graph must render an empty axis before the first sample
+/// rather than an error. Unlike the point-in-time route above, "no samples yet"
+/// is a complete answer, so the history route answers 200 with empty arrays —
+/// this test pins that difference so a later change cannot quietly make it a 503.
+/// What: GET /api/console/machine-status/history on a fresh state, asserts 200
+/// and a body whose two arrays are empty while the capacities and interval are
+/// still advertised.
+/// Test: this test itself.
+#[tokio::test]
+async fn machine_history_route_cold_cache_returns_empty_200() {
+    let router = build_router(make_test_state());
+    let req = Request::builder()
+        .uri("/api/console/machine-status/history")
+        .body(Body::empty())
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "an empty window is a 200, not a 503"
+    );
+
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let snap: crate::machine_history::HistorySnapshot =
+        serde_json::from_slice(&bytes).expect("parse HistorySnapshot");
+    assert!(snap.samples.is_empty());
+    assert!(snap.transitions.is_empty());
+    assert_eq!(snap.sample_capacity, 120);
+    assert_eq!(snap.sample_interval_secs, 5);
+    assert_eq!(
+        snap.schema_version,
+        crate::machine_history::MACHINE_HISTORY_SCHEMA_VERSION
+    );
+}
+
+/// Why (#6641): the history endpoint is what a page load reads before it opens a
+/// stream, so it must return the recorded window oldest-first together with the
+/// transition log — not one or the other.
+/// What: records two samples and drives one service from `ok` to `error`, then
+/// asserts the JSON carries both samples and the single transition.
+/// Test: this test itself.
+#[tokio::test]
+async fn machine_history_route_returns_recorded_samples() {
+    use trusty_common::console_metrics::{ServiceHealth, make_report};
+    use trusty_common::host_metrics::HostSampler;
+
+    let state = make_test_state();
+    let mut sampler = HostSampler::new();
+    state
+        .machine_history()
+        .record_sample(sampler.sample())
+        .await;
+    state
+        .machine_history()
+        .record_sample(sampler.sample())
+        .await;
+    for status in [ServiceHealth::Ok, ServiceHealth::Error] {
+        state
+            .machine_history()
+            .observe_services(&[make_report(
+                "trusty-search",
+                "Trusty Search",
+                "1.0.0",
+                status,
+                serde_json::json!({}),
+                1,
+            )])
+            .await;
+    }
+
+    let router = build_router(state);
+    let req = Request::builder()
+        .uri("/api/console/machine-status/history")
+        .body(Body::empty())
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let snap: crate::machine_history::HistorySnapshot =
+        serde_json::from_slice(&bytes).expect("parse HistorySnapshot");
+    assert_eq!(snap.samples.len(), 2);
+    assert_eq!(
+        snap.transitions.len(),
+        1,
+        "only the ok→error change is logged, got {:?}",
+        snap.transitions
+    );
+    assert_eq!(
+        snap.transitions[0].to,
+        crate::machine_history::transitions::ServiceState::Down
+    );
+}
+
+/// Why (#6641): `EventSource` refuses any response whose content type is not
+/// `text/event-stream`, and a buffering reverse proxy turns a correct stream into
+/// a dead one — so the status and the three headers are the contract.
+/// What: GET /api/console/machine-status/stream, asserts 200 with the SSE
+/// content type, `no-cache`, and `X-Accel-Buffering: no`, then reads the first
+/// body frame and asserts it is the `history` event.
+/// Test: this test itself.
+#[tokio::test]
+async fn machine_history_stream_route_is_an_event_stream() {
+    let router = build_router(make_test_state());
+    let req = Request::builder()
+        .uri("/api/console/machine-status/stream")
+        .body(Body::empty())
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("text/event-stream")
+    );
+    assert_eq!(
+        resp.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-cache")
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-accel-buffering")
+            .and_then(|v| v.to_str().ok()),
+        Some("no")
+    );
+
+    // #6641: the stream never ends on its own, so read exactly the first frame
+    // rather than collecting the body.
+    let mut body = resp.into_body();
+    let frame = body
+        .frame()
+        .await
+        .expect("a first frame")
+        .expect("frame ok")
+        .into_data()
+        .expect("data frame");
+    let text = String::from_utf8(frame.to_vec()).expect("utf8 frame");
+    assert!(
+        text.starts_with("event: history\ndata: {"),
+        "the stream opens with the current window, got {text:?}"
+    );
+}
