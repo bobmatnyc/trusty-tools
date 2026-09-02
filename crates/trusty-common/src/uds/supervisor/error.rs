@@ -13,6 +13,19 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Render a captured stderr tail as a suffix, or nothing when there is none.
+///
+/// Why: `thiserror` formats one string per variant, and a bare "last stderr: "
+/// on a detached child — whose stderr is never captured — would read as a child
+/// that printed nothing rather than one nobody was listening to.
+fn format_stderr_tail(lines: &[String]) -> String {
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!(" — last stderr: {}", lines.join(" | "))
+    }
+}
+
 /// Why a supervised service could not be made available.
 ///
 /// `#[non_exhaustive]`: on an ENUM the attribute constrains *matching* — an
@@ -78,6 +91,33 @@ pub enum SupervisorError {
         socket: PathBuf,
         /// The budget that elapsed.
         budget: Duration,
+    },
+
+    /// The child exited before it bound its socket (#6600).
+    ///
+    /// Distinct from [`SupervisorError::SpawnTimeout`] because the remedies do
+    /// not overlap: a timeout points at the service's `spawn_probe` budget,
+    /// while this points at whatever the child itself refused to do. The
+    /// supervisor returns it within one probe interval rather than at the
+    /// budget boundary, so a child that dies in 100 ms is not reported 20 s
+    /// later as a slow bind.
+    #[error(
+        "{service} instance {key} exited before binding {socket}: {status}{}",
+        format_stderr_tail(.stderr)
+    )]
+    ChildExited {
+        /// Service label.
+        service: String,
+        /// Instance key.
+        key: String,
+        /// Socket the child was expected to bind.
+        socket: PathBuf,
+        /// How the child exited.
+        status: std::process::ExitStatus,
+        /// Last lines the child wrote to stderr. EMPTY for a detached child,
+        /// whose stderr is inherited rather than captured — see
+        /// `child::spawn_child` for why capturing it would kill the child.
+        stderr: Vec<String>,
     },
 
     /// Something is serving the socket, but it does not pass the

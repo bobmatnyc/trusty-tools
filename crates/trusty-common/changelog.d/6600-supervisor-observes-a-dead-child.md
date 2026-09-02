@@ -1,0 +1,17 @@
+Fixed
+
+- `UdsServiceSupervisor::ensure_running` now watches the child it spawned as
+  well as the socket, so a child that dies before binding is reported within one
+  poll interval instead of after the whole `ServiceTimeouts::spawn_probe` window
+  (#6600). The #6595 CI signature was a child that failed `FactStore::open` on a
+  held redb lock in ~100 ms and surfaced 20 s later as `SpawnTimeout`, whose
+  message blames the probe budget — a budget that had nothing to do with it.
+- New `SupervisorError::ChildExited` carries the child's exit status and the
+  last 20 lines it wrote to stderr. A supervised (non-detached) child's stderr is
+  piped and copied through to this process's stderr unchanged, so the operator's
+  log stream is unaffected while the tail stays quotable. A DETACHED child keeps
+  `Stdio::inherit()` and reports an empty tail: it outlives the process that
+  spawned it, and a pipe whose read end went with that process turns the child's
+  next log write into `EPIPE`.
+- A child that is alive but slow still gets the full probe window, and a
+  `try_wait` that errors is treated as "still running" rather than as a death.

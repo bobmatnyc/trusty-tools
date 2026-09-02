@@ -18,6 +18,10 @@
 //! **Two invariants a reader must not "simplify" away.**
 //!
 //! 1. Liveness is decided by the SOCKET, not by `try_wait()`. See `probe.rs`.
+//!    #6600 does not weaken this: the spawn probe asks the socket first on
+//!    every iteration and consults `try_wait` only to answer "has this child
+//!    already died", which is a reason to STOP waiting, never a reason to call
+//!    a still-running child dead.
 //! 2. The timeouts belong to the supervised service, not to supervision. See
 //!    `config.rs`.
 //!
@@ -50,6 +54,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 
 use child::{ChildHandle, remove_socket_file, spawn_child, terminate_child};
+
+// #6600: `wait_for_spawn` watches the child as well as the socket, so a child
+// that dies before binding is reported as `ChildExited` within one probe
+// interval instead of as a `SpawnTimeout` at the end of the whole budget.
 
 /// Supervisor that owns a keyed population of UDS-serving child processes.
 ///
@@ -185,8 +193,14 @@ impl UdsServiceSupervisor {
     /// [`SupervisorError::UntrustedSocket`] rather than a spawn that dies on
     /// EADDRINUSE.
     ///
+    /// A spawned child that EXITS before the socket answers is reported as
+    /// [`SupervisorError::ChildExited`], carrying its status and the tail of
+    /// its stderr, within one probe interval (#6600). Before that, such a child
+    /// spent the whole `spawn_probe` budget and then blamed the budget.
+    ///
     /// Test: `external_mode_skips_spawn`,
     /// `adoption_refuses_a_world_writable_socket`,
+    /// `a_child_that_exits_before_binding_reports_its_status_and_stderr`,
     /// `adoption_accepts_a_hardened_socket_without_spawning`,
     /// `a_serving_child_is_reused_without_a_spawn`, plus `trusty-memory`'s
     /// concurrency suite for the racing cases.
@@ -268,26 +282,54 @@ impl UdsServiceSupervisor {
             source,
         })?;
         let detached = self.config.detached;
-        let mut child = spawn_child(service, key, &spec, detached).await?;
+        let mut spawned = spawn_child(service, key, &spec, detached).await?;
         self.spawned.fetch_add(1, Ordering::Relaxed);
 
-        if !probe::wait_for_socket(socket_path, &self.config.timeouts).await {
-            // Explicit drop: `kill_on_drop` SIGKILLs the child that never bound.
-            // Nothing was acked to it, so there is nothing to flush.
-            // #6350: a DETACHED child was spawned without `kill_on_drop`, so
-            // dropping it would leave a process that never bound running with
-            // nothing left holding a handle to it. Terminate it here instead.
-            if detached {
-                let _ = terminate_child(&mut child, self.config.timeouts.sigterm_patience).await;
+        match probe::wait_for_spawn(socket_path, &self.config.timeouts, &mut spawned.child).await {
+            probe::SpawnWait::Bound => {}
+            // #6600: the child is already gone. Nothing to terminate, and the
+            // diagnosis the caller needs is its status and stderr — not the
+            // probe budget, which had nothing to do with it.
+            probe::SpawnWait::Exited(status) => {
+                let stderr = spawned.stderr_tail().await;
+                tracing::warn!(
+                    service = %service,
+                    instance = %key,
+                    socket = %socket_path.display(),
+                    ?status,
+                    "spawned child exited before binding its socket"
+                );
+                drop(spawned);
+                return Err(SupervisorError::ChildExited {
+                    service: service.to_string(),
+                    key: key.to_string(),
+                    socket: socket_path.to_path_buf(),
+                    status,
+                    stderr,
+                });
             }
-            drop(child);
-            return Err(SupervisorError::SpawnTimeout {
-                service: service.to_string(),
-                key: key.to_string(),
-                socket: socket_path.to_path_buf(),
-                budget: self.config.timeouts.spawn_probe,
-            });
+            probe::SpawnWait::TimedOut => {
+                // Explicit drop: `kill_on_drop` SIGKILLs the child that never
+                // bound. Nothing was acked to it, so there is nothing to flush.
+                // #6350: a DETACHED child was spawned without `kill_on_drop`, so
+                // dropping it would leave a process that never bound running with
+                // nothing left holding a handle to it. Terminate it here instead.
+                if detached {
+                    let _ =
+                        terminate_child(&mut spawned.child, self.config.timeouts.sigterm_patience)
+                            .await;
+                }
+                drop(spawned);
+                return Err(SupervisorError::SpawnTimeout {
+                    service: service.to_string(),
+                    key: key.to_string(),
+                    socket: socket_path.to_path_buf(),
+                    budget: self.config.timeouts.spawn_probe,
+                });
+            }
         }
+
+        let mut child = spawned.child;
 
         tracing::info!(
             service = %service,

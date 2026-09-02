@@ -336,17 +336,24 @@ async fn probe_verdict_reports_serving_for_a_bound_socket() {
 /// Why: the backoff loop must terminate on the service's own budget, not on a
 /// constant. A loop that ignored `spawn_probe` would hang a caller for whatever
 /// the old BM25 3 s value happened to be.
+///
+/// The child is alive throughout — a LIVE child that has not bound is the case
+/// the budget is for, and #6600's `try_wait` arm must not shorten it.
 /// Test: this test itself.
 #[serial_test::serial]
 #[tokio::test]
-async fn wait_for_socket_gives_up_within_the_spawn_budget() {
+async fn wait_for_spawn_gives_up_within_the_spawn_budget() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let missing = tmp.path().join("never.sock");
     let budget = Duration::from_millis(120);
     let timeouts = ServiceTimeouts::new(budget, Duration::from_millis(10), Duration::from_secs(1));
+    let mut child = stub_child();
 
     let started = std::time::Instant::now();
-    assert!(!super::probe::wait_for_socket(&missing, &timeouts).await);
+    assert!(matches!(
+        super::probe::wait_for_spawn(&missing, &timeouts, &mut child).await,
+        super::probe::SpawnWait::TimedOut
+    ));
     let elapsed = started.elapsed();
     assert!(
         elapsed >= budget,
@@ -363,11 +370,54 @@ async fn wait_for_socket_gives_up_within_the_spawn_budget() {
 /// Test: this test itself.
 #[serial_test::serial]
 #[tokio::test]
-async fn wait_for_socket_returns_once_the_socket_binds() {
+async fn wait_for_spawn_returns_once_the_socket_binds() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let sock = tmp.path().join("bound.sock");
     let _listener = tokio::net::UnixListener::bind(&sock).expect("bind listener");
-    assert!(super::probe::wait_for_socket(&sock, &TEST_TIMEOUTS).await);
+    let mut child = stub_child();
+    assert!(matches!(
+        super::probe::wait_for_spawn(&sock, &TEST_TIMEOUTS, &mut child).await,
+        super::probe::SpawnWait::Bound
+    ));
+}
+
+/// Why (#6600): a child that dies before binding is the case the loop was blind
+/// to. It has to be reported as its own outcome, and inside one poll interval —
+/// polling the socket for the whole budget and then reporting a timeout blames
+/// the budget for a failure the budget had nothing to do with.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn wait_for_spawn_reports_a_child_that_exited() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let missing = tmp.path().join("never.sock");
+    // A generous budget, so "returned early" is a claim the elapsed time can
+    // falsify rather than something the budget makes true on its own.
+    let budget = Duration::from_secs(3);
+    let timeouts = ServiceTimeouts::new(budget, Duration::from_millis(10), Duration::from_secs(1));
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exit 3"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn a child that exits at once");
+
+    let started = std::time::Instant::now();
+    let outcome = super::probe::wait_for_spawn(&missing, &timeouts, &mut child).await;
+    let elapsed = started.elapsed();
+
+    match outcome {
+        super::probe::SpawnWait::Exited(status) => {
+            assert_eq!(status.code(), Some(3), "the real exit status must survive")
+        }
+        _ => panic!("a child that exited must not be reported as a timeout"),
+    }
+    assert!(
+        elapsed < budget / 3,
+        "the answer must not wait out the spawn budget: {elapsed:?}"
+    );
 }
 
 // ── Child lifecycle ───────────────────────────────────────────────────────
@@ -425,10 +475,10 @@ async fn spawn_child_creates_requested_directories() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data = tmp.path().join("nested/data");
     let spec = SpawnSpec::new("/bin/echo").create_dir(&data);
-    let mut child = super::child::spawn_child("test-service", "k", &spec, false)
+    let mut spawned = super::child::spawn_child("test-service", "k", &spec, false)
         .await
         .expect("spawn");
-    let _ = child.wait().await;
+    let _ = spawned.child.wait().await;
     assert!(data.is_dir(), "the spec's directory must exist after spawn");
 }
 
@@ -809,6 +859,68 @@ async fn a_child_that_never_binds_fails_with_the_service_budget() {
         ),
         other => panic!("expected SpawnTimeout, got {other:?}"),
     }
+    assert_eq!(sup.spawned_count(), 1, "the launch itself did happen");
+    assert_eq!(
+        sup.supervised_count().await,
+        0,
+        "a child that never bound must not be registered"
+    );
+}
+
+/// Why (#6600): the #6595 CI signature was a child that died on a held redb
+/// lock in ~100 ms and was reported 20 s later as `SpawnTimeout`, whose message
+/// blames the spawn budget. `ensure_running` has to observe the child, not only
+/// the socket, so the operator gets the exit status and the child's own words.
+///
+/// What: a child that writes one line to stderr and exits 3, against a 3 s
+/// budget. Both halves of the fix are asserted — the VARIANT (not
+/// `SpawnTimeout`) and the LATENCY (well inside the budget, not at its
+/// boundary) — because either alone still passes on the pre-fix code path for
+/// one of the two reasons.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_child_that_exits_before_binding_reports_its_status_and_stderr() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("dead.sock");
+    let budget = Duration::from_secs(3);
+    let cfg = SupervisorConfig::new(
+        "test-service",
+        3,
+        ServiceTimeouts::new(budget, Duration::from_millis(10), Duration::from_secs(1)),
+    );
+    let sup = UdsServiceSupervisor::new(cfg);
+
+    let started = std::time::Instant::now();
+    let err = sup
+        .ensure_running("inst", &socket, || {
+            Ok(SpawnSpec::new("/bin/sh")
+                .arg("-c")
+                .arg("echo 'Database already open. Cannot acquire lock.' >&2; exit 3"))
+        })
+        .await
+        .expect_err("a child that exited must not be reported as running");
+    let elapsed = started.elapsed();
+
+    match &err {
+        SupervisorError::ChildExited { status, stderr, .. } => {
+            assert_eq!(status.code(), Some(3), "the real exit status must survive");
+            assert!(
+                stderr.iter().any(|l| l.contains("Cannot acquire lock")),
+                "the child's own diagnosis must reach the caller, got {stderr:?}"
+            );
+        }
+        other => panic!("expected ChildExited, got {other:?}"),
+    }
+    assert!(
+        elapsed < budget / 3,
+        "a dead child must be reported within a poll interval, not at the \
+         spawn budget: {elapsed:?}"
+    );
+    assert!(
+        err.to_string().contains("Cannot acquire lock"),
+        "the operator-facing message must quote the stderr tail: {err}"
+    );
     assert_eq!(sup.spawned_count(), 1, "the launch itself did happen");
     assert_eq!(
         sup.supervised_count().await,
