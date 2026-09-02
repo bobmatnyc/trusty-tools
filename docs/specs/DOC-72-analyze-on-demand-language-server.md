@@ -134,6 +134,14 @@ Python (`src/core/tool_impls/python.rs`) and `biome` for TypeScript
 Python or TypeScript repository analysed by this daemon gets no type verdict at
 all, while Rust gets one through `cargo clippy`, which compiles.
 
+**No Claude Code plugin, anywhere.** `tm` installs and provisions no Claude Code
+language-server plugin, and none is an opt-in path to this capability. The three
+plugins the #6589 trials used — `rust-analyzer-lsp`, `pyright-lsp`,
+`typescript-lsp` — were uninstalled on 2026-09-02. Every mention of a plugin in
+this document is historical: the A/B trials measured one, and that measurement is
+why the capability moved here (§0, §Why, §7). The capability ships as an analyze
+function reached the two ways §5 fixes.
+
 **What the measured evidence covers.** §7's numbers come from trials where the
 language server was available through the Claude Code plugin and the model was
 never told to call it — 0 of 30 explicit invocations. They size the cost of
@@ -335,6 +343,50 @@ names are bare snake_case, matching `complexity_hotspots` and `find_smells`.
 - `lsp_impact` is the refactoring primitive: it is `references` plus the type
   check that says which of those sites stop compiling.
 
+### 5.1 Two access paths, one implementation
+
+`trusty-analyze` owns the language-server lifecycle (§2) and answers every call.
+Nothing else supervises a server, and no second implementation of these methods
+exists. Two paths reach it.
+
+**(a) Direct.** A `trusty-analyze lsp <tool> …` CLI subcommand, plus the
+`analyze.lsp_*` RPC above over the daemon's socket. The subcommand is a thin
+client: it dials the socket through `trusty_common::uds::OnDemandAnalyze`, like
+every other analyze client, and prints the response. This is the path for an
+operator, a script, and the merge-chain gate.
+
+```
+trusty-analyze lsp diagnostics --scope workspace --version <n>
+trusty-analyze lsp impact --symbol <sym> --new-signature <sig> --version <n>
+trusty-analyze lsp analysed-at --version <n> --timeout-ms <ms>
+```
+
+**(b) With search.** `trusty-search` fronts the same functions on its own tool
+surface, so an agent already navigating with `search_kg`, `search_similar`, and
+`get_call_chain` asks for type-checked answers in the same tool family instead of
+switching daemons mid-investigation. The search-side names take the `search_lsp_`
+prefix, matching that surface's existing `search_*` convention:
+
+| Search-side tool | Fronts |
+|---|---|
+| `search_lsp_references` | `analyze.lsp_references` |
+| `search_lsp_definition` | `analyze.lsp_definition` |
+| `search_lsp_diagnostics` | `analyze.lsp_diagnostics` |
+| `search_lsp_impact` | `analyze.lsp_impact` |
+
+**Ownership is not shared.** `trusty-analyze` owns the lifecycle, the versioned
+store, the caps, and the answers. `trusty-search` only fronts them: it holds no
+language-server process, caches no result, and adds no semantics of its own. It
+reaches analyze over the socket using the adapter pattern `trusty-review` already
+uses (`crates/trusty-review/src/report/analyze_adapter.rs`, which dials through
+`OnDemandAnalyze`) — a third client of an existing seam, not a new one.
+
+The four fronted tools are the navigation-adjacent subset, because that is what a
+caller already in the search surface is doing. `lsp_call_hierarchy`,
+`lsp_implementations`, `lsp_type_at`, and `lsp_analysed_at` stay analyze-only;
+the barrier in particular belongs to the gate, not to a navigation flow. Whether
+that split holds is one of the things phase 0 observes (§9).
+
 ---
 
 ## {#SPEC-ANALYZELSP-06~draft} 6. Judicious-use policy
@@ -437,14 +489,18 @@ Four deliverables. The tools alone are not the capability; nothing calls them
 unless the skill and the instructions say when to.
 
 **(a) The tools.** §5's eight methods on `trusty-analyze`'s socket, mirrored as
-MCP tools, with the lifecycle of §2, the stamps of §3, and the events of §4.
+MCP tools, with the lifecycle of §2, the stamps of §3, and the events of §4 —
+reachable both ways §5.1 fixes: the `trusty-analyze lsp` CLI subcommand and the
+`search_lsp_*` tools `trusty-search` fronts.
 
 **(b) The analyze skill.** There is **no bundled `analyze` skill today** — the
 bundled skills live in `crates/trusty-mpm/src/assets/skills/` (flat
 `<name>.md`, with an optional `<name>/references/` directory) and mirror into
 `crates/trusty-code/src/assets/skills/<name>/SKILL.md`. This deliverable creates
 `analyze.md` there. It documents each tool of §5 and, for each, when to call it
-and when not to — §6 is the skill's spine, not an appendix.
+and when not to — §6 is the skill's spine, not an appendix. It teaches the two
+access paths of §5.1 — the `trusty-analyze lsp` subcommand and the
+`search_lsp_*` tools — and names no plugin, because none exists (§1).
 
 **(c) The base coding-agent instructions.**
 `crates/trusty-agents-common/src/assets/agents/BASE-ENGINEER.md` is the layer
@@ -457,6 +513,10 @@ agent to use these tools for:
   size it and after to confirm it;
 - **performance analysis** — `lsp_call_hierarchy` hot paths joined with
   `analyze.complexity_hotspots`.
+
+Each is written against the surface the agent actually has: `search_lsp_*` when
+it is already navigating in the search tools, and `trusty-analyze lsp` otherwise
+(§5.1). The instructions name no plugin.
 
 The section states the restraint in the same breath: not on every edit, not on
 session start, not for plain navigation. `BASE-AGENT.md` is not the right home —
@@ -674,29 +734,36 @@ references #6606.
    `Ready | TimedOut{version_seen}`, plus the `Stale` refusal (§3).
 5. `trusty-analyze`: the seven read methods of §5 on the socket, plus their MCP
    descriptors.
-6. `trusty-analyze`: the §4 event ring buffer and the `analyze.lsp_events` cursor
+6. `trusty-analyze`: the `trusty-analyze lsp <tool>` CLI subcommand, a thin
+   client dialing the socket through `OnDemandAnalyze` (§5.1a).
+7. `trusty-search`: front `search_lsp_references`, `search_lsp_definition`,
+   `search_lsp_diagnostics`, and `search_lsp_impact` on its tool surface, calling
+   analyze over the socket via the `analyze_adapter` pattern. No language-server
+   process, no cache, no added semantics; transport follows ADR-0032, adding no
+   new listener (§5.1b).
+8. `trusty-analyze`: the §4 event ring buffer and the `analyze.lsp_events` cursor
    method, with `dropped` on overflow.
-7. `trusty-console`: poll `analyze.lsp_events` in `metrics_poller.rs` and
+9. `trusty-console`: poll `analyze.lsp_events` in `metrics_poller.rs` and
    republish on `GET /api/console/events/analyze/lsp` (cursor JSON) and
    `…/lsp/stream` (SSE) (§4). No Cargo edge from analyze to
    `trusty-agents-common`.
-8. `trusty-analyze`: per-server RSS cap, kill, cool-off, and the
-   `CapacityExceeded` error (§7).
-9. `trusty-installer`: add the analysis tools to the `PREREQS` table behind
-   `analysis_tools.install` (default ON) — the three language servers plus `ruff`
-   and `biome`, with `rust-analyzer` installed per pinned toolchain and a probe
-   that detects the mise-shim recursion (§2).
-10. `trusty-installer`: the JavaScript-runtime scaffolding step — Bun if present,
+10. `trusty-analyze`: per-server RSS cap, kill, cool-off, and the
+    `CapacityExceeded` error (§7).
+11. `trusty-installer`: add the analysis tools to the `PREREQS` table behind
+    `analysis_tools.install` (default ON) — the three language servers plus
+    `ruff` and `biome`, with `rust-analyzer` installed per pinned toolchain and a
+    probe that detects the mise-shim recursion (§2).
+12. `trusty-installer`: the JavaScript-runtime scaffolding step — Bun if present,
     else Node if present, else install Node, with the `js_runtime` override (§2).
-11. `trusty-mpm`: create the bundled `analyze` skill documenting each tool and its
+13. `trusty-mpm`: create the bundled `analyze` skill documenting each tool and its
     trigger policy (§8b).
-12. `trusty-agents-common`: add the tool-use section to `BASE-ENGINEER.md` (§8c).
-13. `trusty-review`: extend `analyze_adapter.rs`'s fetch set with the audit's LSP
+14. `trusty-agents-common`: add the tool-use section to `BASE-ENGINEER.md` (§8c).
+15. `trusty-review`: extend `analyze_adapter.rs`'s fetch set with the audit's LSP
     fetches (§8d).
-14. **Phase 2 — audit tool-selection experiment (§9).** Run the three-repository
+16. **Phase 2 — audit tool-selection experiment (§9).** Run the three-repository
     size ladder with and without the LSP fetches, fill the per-tool table, and
     set `analyze_adapter.rs`'s default fetch set from the result.
-15. Phase 1 acceptance run: re-measure §7's Rust row under deliberate tool use
+17. Phase 1 acceptance run: re-measure §7's Rust row under deliberate tool use
     and record the A/B against the batch checker.
-16. Phase 3 (`pyright`) and phase 4 (`typescript-language-server`), one issue
+18. Phase 3 (`pyright`) and phase 4 (`typescript-language-server`), one issue
     each, gated on phase 1's acceptance (§9).
