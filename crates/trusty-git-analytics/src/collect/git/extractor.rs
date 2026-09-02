@@ -17,6 +17,7 @@ use crate::collect::collector::{FetchOutcome, PerRepoFetch};
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::git::diff::{compute_commit_diff, CommitDiff};
 use crate::collect::git::fetch::{fetch_and_record, fetch_remote};
+use crate::collect::git::walk_state;
 use crate::collect::ticket::{extract_ticket_id, is_ticketed};
 use crate::core::config::{expand_path, RepositoryConfig};
 use crate::core::db::Database;
@@ -293,6 +294,34 @@ impl GitCollector {
         since: Option<DateTime<Utc>>,
         until: Option<DateTime<Utc>>,
     ) -> Result<usize> {
+        self.collect_window_hiding(db, since, until, None)
+    }
+
+    /// [`Self::collect_window`], with everything reachable from `hide`
+    /// excluded from the revwalk.
+    ///
+    /// Why (#6073): a repository whose history was already walked to a
+    /// recorded commit does not need that ancestry walked again — hiding the
+    /// recorded tip turns the next collect into an incremental one. Every
+    /// commit the hidden ancestry contains is already in `commits`, because
+    /// the tip is only recorded after a walk that completed.
+    /// What: identical to [`Self::collect_window`] except for the
+    /// `revwalk.hide` call after seeding. `None` reproduces the full walk.
+    /// Test: `tests::advanced_head_walks_only_the_new_commits`.
+    ///
+    /// # Errors
+    ///
+    /// Any underlying git or database failure is propagated. A `hide` sha
+    /// that libgit2 cannot resolve is a [`CollectError::Git`] — the caller
+    /// checks reachability first (see
+    /// [`crate::collect::git::walk_state::base_is_reachable`]).
+    pub fn collect_window_hiding(
+        &self,
+        db: &mut Database,
+        since: Option<DateTime<Utc>>,
+        until: Option<DateTime<Utc>>,
+        hide: Option<git2::Oid>,
+    ) -> Result<usize> {
         let repo = Repository::open(&self.path)?;
         info!(
             repo = %self.name,
@@ -441,6 +470,17 @@ impl GitCollector {
                     }
                 }
             }
+        }
+
+        // #6073: everything reachable from the previously walked tip is
+        // already recorded, so hiding it is what makes this walk incremental.
+        if let Some(base) = hide {
+            revwalk.hide(base)?;
+            info!(
+                repo = %self.name,
+                base = %base,
+                "incremental walk: hiding the previously walked commit"
+            );
         }
 
         // Spinner-style progress bar — we stream the revwalk so we don't
@@ -624,6 +664,44 @@ impl GitCollector {
     pub fn until(&self) -> Option<DateTime<Utc>> {
         self.until
     }
+
+    /// This repository's current ref tips (#6073).
+    ///
+    /// Why: the collect pipeline compares these against the recorded walk
+    /// state to decide between skipping, walking incrementally, and walking
+    /// in full. Opening the repository is the collector's job, not the
+    /// pipeline's, so the pipeline never learns the on-disk path.
+    /// What: opens the repository and delegates to
+    /// [`crate::collect::git::walk_state::current_walk_tips`].
+    /// Test: `tests::unchanged_head_skips_the_walk`.
+    ///
+    /// # Errors
+    ///
+    /// [`CollectError::Git`] when the repository cannot be opened or its refs
+    /// cannot be listed.
+    pub fn walk_tips(&self) -> Result<walk_state::WalkTips> {
+        let repo = Repository::open(&self.path)?;
+        walk_state::current_walk_tips(&repo)
+    }
+
+    /// True when `base_sha` is still reachable from this repository's head.
+    ///
+    /// Why: a force-push or history rewrite strands the recorded tip, and
+    /// hiding a stranded commit would drop everything the rewrite replaced.
+    /// What: opens the repository and delegates to
+    /// [`crate::collect::git::walk_state::base_is_reachable`]. A repository
+    /// that cannot be opened reads as unreachable, which forces a full walk —
+    /// the safe direction.
+    /// Test: `tests::unreachable_base_forces_a_full_rewalk`.
+    pub fn base_is_reachable(&self, base_sha: &str) -> bool {
+        let Ok(repo) = Repository::open(&self.path) else {
+            return false;
+        };
+        let Ok(tips) = walk_state::current_walk_tips(&repo) else {
+            return false;
+        };
+        walk_state::base_is_reachable(&repo, base_sha, &tips.head_sha)
+    }
 }
 
 /// Parse an ISO-8601 date or datetime into a UTC timestamp.
@@ -672,7 +750,7 @@ mod tests {
     //! collector against it.
 
     use super::*;
-    use crate::core::config::RepositoryConfig;
+    use crate::core::config::{Config, RepositoryConfig};
     use crate::core::db::Database;
     use chrono::NaiveDateTime;
     use git2::{Repository, Signature, Time};
@@ -1511,5 +1589,292 @@ mod tests {
             prf.outcome,
             crate::collect::collector::FetchOutcome::Skipped { .. }
         ));
+    }
+
+    // ---- #6073: full-history walk bookkeeping -------------------------------
+
+    /// Drive one unbounded collect through the pipeline arm under test and
+    /// report how many commits it wrote.
+    ///
+    /// Why: the skip decision lives in `CollectionPipeline::collect_unbounded`,
+    /// not in the collector, so a test that called `collect` directly would
+    /// exercise the wrong code. Building the pipeline here keeps every #6073
+    /// case going through the same entry point a real `tga collect` uses.
+    fn run_unbounded(db: &mut Database, repo_path: &Path, force: bool) -> (usize, usize) {
+        let repo_cfg = make_repo_config(repo_path);
+        let collector = GitCollector::new(&repo_cfg)
+            .expect("collector")
+            .no_fetch(true);
+        let pipeline = crate::collect::collector::CollectionPipeline::new(Config {
+            repositories: vec![repo_cfg],
+            ..Config::default()
+        })
+        .with_no_fetch(true)
+        .with_force(force);
+        let mut stats = crate::collect::collector::CollectionStats::default();
+        pipeline.collect_unbounded(db, &collector, &mut stats);
+        assert!(
+            stats.stage_failures().is_empty(),
+            "collect must not fail: {:?}",
+            stats.errors
+        );
+        (stats.commits_collected, stats.repos_skipped)
+    }
+
+    fn recorded_state(db: &Database, repo: &str) -> Option<walk_state::WalkState> {
+        walk_state::load(db.connection(), repo).expect("load walk state")
+    }
+
+    /// (#6073) A second collect against an unchanged head must not walk at
+    /// all — this is the wasted full re-walk the issue measured.
+    #[test]
+    fn unchanged_head_skips_the_walk() {
+        let (tmp, repo) = init_repo("walk-skip");
+        for i in 0..3 {
+            commit_at(
+                &repo,
+                &tmp.path,
+                utc_seconds(2026, 1, 10 + i, 12, 0, 0),
+                0,
+                "c",
+            );
+        }
+        let name = tmp
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("repo name")
+            .to_string();
+
+        let mut db = open_in_memory_db();
+        let (first, skipped) = run_unbounded(&mut db, &tmp.path, false);
+        assert_eq!(first, 3, "the first walk must write every commit");
+        assert_eq!(skipped, 0, "the first run has nothing to skip");
+
+        let state = recorded_state(&db, &name).expect("the first walk must record its tip");
+        assert!(state.walk_complete, "a finished walk records complete");
+        assert!(
+            !state.head_sha.is_empty(),
+            "the walked head sha is recorded"
+        );
+        assert!(
+            state.head_ref.starts_with("refs/heads/"),
+            "the walked ref name is recorded, got {}",
+            state.head_ref
+        );
+
+        // Nothing moved, so the second run must skip rather than re-walk.
+        let tips = GitCollector::new(&make_repo_config(&tmp.path))
+            .expect("collector")
+            .walk_tips()
+            .expect("tips");
+        assert_eq!(
+            walk_state::plan(Some(&state), &tips, true),
+            walk_state::WalkPlan::Skip,
+            "an unchanged head must plan a skip"
+        );
+        // `commits_collected` alone cannot prove the skip — a full re-walk
+        // also inserts nothing the second time. `repos_skipped` is what
+        // separates "did not walk" from "walked and found nothing new".
+        let (second, second_skipped) = run_unbounded(&mut db, &tmp.path, false);
+        assert_eq!(second, 0, "the skipped run must write nothing");
+        assert_eq!(
+            second_skipped, 1,
+            "the second run must skip the walk, not re-walk it"
+        );
+    }
+
+    /// (#6073) `--force` restores the unconditional full walk.
+    #[test]
+    fn force_restores_the_full_rewalk() {
+        let (tmp, repo) = init_repo("walk-force");
+        commit_at(&repo, &tmp.path, utc_seconds(2026, 1, 10, 12, 0, 0), 0, "c");
+
+        let mut db = open_in_memory_db();
+        run_unbounded(&mut db, &tmp.path, false);
+
+        // The rows are already present, so a forced re-walk writes nothing new
+        // — what it must NOT do is take the skip path, which is observable as
+        // the walk state still being recorded fresh afterwards.
+        let name = tmp
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("repo name")
+            .to_string();
+        walk_state::record(
+            db.connection(),
+            &name,
+            &walk_state::WalkTips {
+                head_sha: "0".repeat(40),
+                head_ref: "refs/heads/main".to_string(),
+                tips_digest: "stale".to_string(),
+            },
+            true,
+        )
+        .expect("stale state");
+        run_unbounded(&mut db, &tmp.path, true);
+        let after = recorded_state(&db, &name).expect("state");
+        assert_ne!(
+            after.tips_digest, "stale",
+            "a forced walk must refresh the recorded state"
+        );
+    }
+
+    /// (#6073) When the head advanced, only the new commits are walked.
+    #[test]
+    fn advanced_head_walks_only_the_new_commits() {
+        let (tmp, repo) = init_repo("walk-incremental");
+        for i in 0..3 {
+            commit_at(
+                &repo,
+                &tmp.path,
+                utc_seconds(2026, 1, 10 + i, 12, 0, 0),
+                0,
+                "old",
+            );
+        }
+        let name = tmp
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("repo name")
+            .to_string();
+
+        let mut db = open_in_memory_db();
+        assert_eq!(run_unbounded(&mut db, &tmp.path, false), (3, 0));
+        let base = recorded_state(&db, &name).expect("state").head_sha;
+
+        for i in 0..2 {
+            commit_at(
+                &repo,
+                &tmp.path,
+                utc_seconds(2026, 2, 10 + i, 12, 0, 0),
+                0,
+                "new",
+            );
+        }
+
+        // The recorded base is still an ancestor, so the plan is incremental.
+        let collector = GitCollector::new(&make_repo_config(&tmp.path))
+            .expect("collector")
+            .no_fetch(true);
+        let tips = collector.walk_tips().expect("tips");
+        let state = recorded_state(&db, &name).expect("state");
+        assert_eq!(
+            walk_state::plan(Some(&state), &tips, collector.base_is_reachable(&base)),
+            walk_state::WalkPlan::Incremental {
+                base_sha: base.clone()
+            }
+        );
+
+        // Hiding the base must yield exactly the two new commits, and the DB
+        // must end up holding all five.
+        let mut fresh = open_in_memory_db();
+        let oid = git2::Oid::from_str(&base).expect("oid");
+        let walked = collector
+            .collect_window_hiding(&mut fresh, None, None, Some(oid))
+            .expect("incremental walk");
+        assert_eq!(
+            walked, 2,
+            "the incremental walk must cover only the commits added since the base"
+        );
+
+        assert_eq!(
+            run_unbounded(&mut db, &tmp.path, false),
+            (2, 0),
+            "an advanced head walks incrementally rather than skipping"
+        );
+        let total: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM commits", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(total, 5, "no commit may be lost by going incremental");
+    }
+
+    /// (#6073) A recorded base that is no longer reachable — the force-push
+    /// and history-rewrite case — falls back to a full re-walk.
+    #[test]
+    fn unreachable_base_forces_a_full_rewalk() {
+        let (tmp, repo) = init_repo("walk-unreachable");
+        commit_at(&repo, &tmp.path, utc_seconds(2026, 1, 10, 12, 0, 0), 0, "c");
+        let name = tmp
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("repo name")
+            .to_string();
+
+        let mut db = open_in_memory_db();
+        run_unbounded(&mut db, &tmp.path, false);
+
+        // A sha no object in this repository carries: the rewrite case.
+        let stranded = "0".repeat(40);
+        let collector = GitCollector::new(&make_repo_config(&tmp.path))
+            .expect("collector")
+            .no_fetch(true);
+        assert!(
+            !collector.base_is_reachable(&stranded),
+            "a stranded sha must never read as reachable"
+        );
+
+        let tips = collector.walk_tips().expect("tips");
+        let state = walk_state::WalkState {
+            head_sha: stranded.clone(),
+            head_ref: "refs/heads/main".to_string(),
+            tips_digest: "rewritten".to_string(),
+            walk_complete: true,
+        };
+        assert_eq!(
+            walk_state::plan(Some(&state), &tips, collector.base_is_reachable(&stranded)),
+            walk_state::WalkPlan::Full {
+                reason: walk_state::FullWalkReason::BaseUnreachable
+            },
+            "a stranded base must name the rewrite as the reason"
+        );
+
+        // End to end: the stale row must not stop the repository being walked.
+        walk_state::record(
+            db.connection(),
+            &name,
+            &walk_state::WalkTips {
+                head_sha: stranded,
+                head_ref: "refs/heads/main".to_string(),
+                tips_digest: "rewritten".to_string(),
+            },
+            true,
+        )
+        .expect("record stale");
+        let mut fresh = open_in_memory_db();
+        assert_eq!(
+            run_unbounded(&mut fresh, &tmp.path, false),
+            (1, 0),
+            "the full re-walk must still write the commit"
+        );
+    }
+
+    /// (#6073) A database created before migration v25 must open, migrate, and
+    /// read as never-walked rather than failing or claiming to be current.
+    #[test]
+    fn a_pre_v25_database_reads_as_never_walked() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        crate::core::db::migrations::run_through(&mut conn, 24).expect("migrate to v24");
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                r.get(0)
+            })
+            .expect("version");
+        assert_eq!(version, 24, "the fixture must be a real pre-#6073 database");
+        assert!(
+            walk_state::load(&conn, "anything").is_err(),
+            "before v25 the table does not exist"
+        );
+
+        crate::core::db::migrations::run(&mut conn).expect("migrate to head");
+        assert_eq!(
+            walk_state::load(&conn, "anything").expect("load after migrate"),
+            None,
+            "an upgraded database has no recorded walk, i.e. never walked"
+        );
     }
 }
