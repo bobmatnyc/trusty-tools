@@ -265,7 +265,13 @@
     color: var(--trusty-text-primary);
     cursor: none;
   }
-  :global(body) { margin: 0; overflow: hidden; }
+  /* #6658: this route used to clip `:global(body)`. Vite emits one CSS bundle
+     for the whole SPA, so that rule reached every console tab — later than
+     App.svelte's `body` rule at equal specificity — and nothing scrolled.
+     `.saver` above is `position: fixed; inset: 0; overflow: hidden`, so it
+     clips itself and takes no space in flow; App.svelte's `body` rule already
+     supplies `margin: 0` and a `min-height: 100vh` that leaves this route
+     exactly one viewport tall, with nothing to scroll behind the saver. */
 
   .saver-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 2rem; }
   /* BrandLockup sets its own type scale for a 1100px header; the screensaver is
