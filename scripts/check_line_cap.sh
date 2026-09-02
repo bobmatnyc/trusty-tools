@@ -30,6 +30,26 @@
 #   - allowlisted, applicable_cap < current SLOC <= budget       -> OK    (grandfathered, not growing)
 #   Exit non-zero on any FAIL; exit 0 when clean. Prints a one-line summary.
 #
+# PATH-LIST MODE (issue #6406 sweep): with one or more `.rs` paths as positional
+#   arguments, the scan set is those paths instead of the whole tracked tree.
+#   Same SLOC counter, same cap_for_path, same allowlist comparison — there is
+#   no second implementation, only a smaller input list. The pre-commit hook
+#   passes the staged `.rs` files this way (`pass_filenames: true`), which drops
+#   a commit's line-cap cost from ~34s over 4,363 files to well under a second.
+#   CI keeps calling the no-argument whole-tree form, which is unchanged.
+#
+#   Two whole-tree-only checks are deliberately skipped in path-list mode
+#   because a subset cannot answer them, and CI still runs both on every PR:
+#     - the #4618 scan floor (MIN_RS_FILES), whose whole job is to catch a
+#       broken enumeration of the FULL tree; a 1-file scan is not that.
+#     - the informational drift WARN for an allowlisted file that no longer
+#       exists, which would otherwise fire for every allowlisted file merely
+#       absent from the staged set.
+#   Every FAIL a path-list run can reach — new oversized file, allowlisted file
+#   grown past its frozen budget, allowlisted file now under cap — is decided
+#   per file, so a staged file that violates the cap fails the hook exactly as
+#   it fails the whole-tree run.
+#
 #   --update     regenerates the allowlist but only SAFELY: it may LOWER an
 #                existing budget or REMOVE entries that dropped <= applicable cap.
 #                It REFUSES to raise a budget or add a brand-new > cap file
@@ -96,9 +116,13 @@ set -euo pipefail
 PROD_CAP=500
 TEST_CAP=3000
 
-# Resolve repo root so the script works from any cwd.
+# Resolve repo root so the script works from any cwd. INVOCATION_DIR is captured
+# BEFORE the cd so a relative path argument still resolves against the caller's
+# cwd, not silently against the repo root (a path that resolved to nothing would
+# be skipped, and a gate that skips the file it was handed fails open).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+INVOCATION_DIR="$PWD"
 ALLOWLIST="$REPO_ROOT/.line-cap-allowlist.tsv"
 
 cd "$REPO_ROOT"
@@ -108,6 +132,8 @@ cd "$REPO_ROOT"
 # ---------------------------------------------------------------------------
 MODE="check"      # check | update
 ALLOW_GROW=0      # may add new >cap files / raise budgets (--seed or --force-add)
+PATH_MODE=0       # 1 when positional paths narrowed the scan set
+PATHS=()
 for arg in "$@"; do
   case "$arg" in
     --update)    MODE="update" ;;
@@ -117,13 +143,42 @@ for arg in "$@"; do
       grep '^#' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
-    *)
+    -*)
       echo "check_line_cap: unknown argument: $arg" >&2
-      echo "usage: check_line_cap.sh [--update | --seed | --force-add]" >&2
+      echo "usage: check_line_cap.sh [--update | --seed | --force-add] [path.rs ...]" >&2
       exit 2
+      ;;
+    *)
+      PATH_MODE=1
+      PATHS[${#PATHS[@]}]="$arg"
       ;;
   esac
 done
+
+# The allowlist is regenerated holistically — a subset of paths would drop every
+# entry it did not scan. Refuse the combination rather than silently truncate.
+if [ "$MODE" = "update" ] && [ "$PATH_MODE" -eq 1 ]; then
+  echo "check_line_cap: --update/--seed/--force-add regenerate the whole allowlist" >&2
+  echo "      and cannot take path arguments. Run them with no paths." >&2
+  exit 2
+fi
+
+# resolve_repo_path: print the repo-relative form of one path argument.
+# Tries the repo root first, then the caller's cwd; fails when the result lies
+# outside the repo, because the allowlist is keyed by repo-relative path.
+resolve_repo_path() {
+  local p="$1" abs
+  case "$p" in
+    /*) abs="$p" ;;
+    *)
+      if [ -e "$REPO_ROOT/$p" ]; then abs="$REPO_ROOT/$p"; else abs="$INVOCATION_DIR/$p"; fi
+      ;;
+  esac
+  case "$abs" in
+    "$REPO_ROOT"/*) printf '%s\n' "${abs#"$REPO_ROOT"/}" ;;
+    *) return 1 ;;
+  esac
+}
 
 # ---------------------------------------------------------------------------
 # SLOC counter: shared awk program that counts code lines (SLOC) in one file.
@@ -182,7 +237,21 @@ MIN_RS_FILES=500
 
 # The enumeration is materialised before the loop so its exit status is
 # observable; `git ls-files | while` hid a failing git behind an empty stream.
-if ! git ls-files '*.rs' > "$RSLIST"; then
+if [ "$PATH_MODE" -eq 1 ]; then
+  : > "$RSLIST"
+  for f in "${PATHS[@]}"; do
+    case "$f" in *.rs) ;; *) continue ;; esac
+    if ! rel="$(resolve_repo_path "$f")"; then
+      echo "FAIL: '$f' resolves outside the repository; the allowlist is keyed by" >&2
+      echo "      repo-relative path, so this file cannot be judged. NOT a pass." >&2
+      exit 1
+    fi
+    # A path that no longer exists is a deletion or a rename's old side; there
+    # is nothing to measure and nothing the cap can be violated by.
+    [ -f "$rel" ] || continue
+    printf '%s\n' "$rel" >> "$RSLIST"
+  done
+elif ! git ls-files '*.rs' > "$RSLIST"; then
   echo "FAIL: TOOL ERROR — 'git ls-files *.rs' exited non-zero; the file set could" >&2
   echo "      not be enumerated, so nothing was measured. NOT a pass (#4618)." >&2
   exit 1
@@ -196,7 +265,7 @@ while IFS= read -r f; do
 done < "$RSLIST" > "$CURRENT"
 
 RS_SCANNED="$(awk 'END{print NR}' "$CURRENT")"
-if [ "${RS_SCANNED:-0}" -lt "$MIN_RS_FILES" ]; then
+if [ "$PATH_MODE" -eq 0 ] && [ "${RS_SCANNED:-0}" -lt "$MIN_RS_FILES" ]; then
   echo "FAIL: SCAN FLOOR — only ${RS_SCANNED} tracked .rs file(s) were measured, below" >&2
   echo "      the declared minimum of ${MIN_RS_FILES} (MIN_RS_FILES in scripts/check_line_cap.sh)." >&2
   echo "      A gate that measures nothing reports '0 violations' and cannot fail;" >&2
@@ -338,7 +407,7 @@ done < "$RSLIST" > "$CAPMAP_CHK"
   awk 'BEGIN{FS=OFS="\t"} $0 !~ /^#/ && NF>=2 {print "A", $1, $2}' "$ALLOWLIST_READ"
   awk 'BEGIN{FS=OFS="\t"} NF>=2 {print "P", $1, $2}' "$CAPMAP_CHK"
   awk 'BEGIN{FS=OFS="\t"} NF>=2 {print "C", $1, $2}' "$CURRENT"
-} | awk -v prod_cap="$PROD_CAP" -v test_cap="$TEST_CAP" '
+} | awk -v prod_cap="$PROD_CAP" -v test_cap="$TEST_CAP" -v path_mode="$PATH_MODE" '
   BEGIN { FS = OFS = "\t" }
   # ----- allowlist rows: A <path> <budget> -----
   $1 == "A" { budget[$2] = $3; have[$2] = 1; next }
@@ -369,7 +438,9 @@ done < "$RSLIST" > "$CAPMAP_CHK"
   }
   END {
     # Allowlist entries whose file no longer exists (drift, informational).
-    for (p in have) if (!(p in seen)) {
+    # Undecidable from a subset — every allowlisted file outside the scanned
+    # paths is absent for that reason alone, so the whole-tree run owns it.
+    if (path_mode == 0) for (p in have) if (!(p in seen)) {
       printf "WARN: allowlisted %s no longer exists as a tracked .rs file. Remove it from .line-cap-allowlist.tsv.\n", p
     }
     printf "@SUMMARY\t%d\t%d\n", allowlisted+0, viol+0
@@ -391,12 +462,18 @@ while IFS= read -r line; do
   esac
 done < "$RESULT"
 
+if [ "$PATH_MODE" -eq 1 ]; then
+  SCOPE="$RS_SCANNED .rs path(s) given (subset scan; CI runs the whole tree)"
+else
+  SCOPE="$RS_SCANNED tracked .rs file(s) (floor $MIN_RS_FILES)"
+fi
+
 if [ "$violations" -gt 0 ]; then
-  echo "line-cap: measured $RS_SCANNED tracked .rs file(s); $allowlisted allowlisted, $violations violation(s) — FAILED." >&2
+  echo "line-cap: measured $SCOPE; $allowlisted allowlisted, $violations violation(s) — FAILED." >&2
   echo "Caps: ${PROD_CAP} SLOC (production) / ${TEST_CAP} SLOC (test/benchmark)." >&2
   echo "To re-freeze after an intentional split, run: scripts/check_line_cap.sh --update" >&2
   exit 1
 fi
 
-echo "line-cap: measured $RS_SCANNED tracked .rs file(s) (floor $MIN_RS_FILES); $allowlisted allowlisted, 0 violations — OK."
+echo "line-cap: measured $SCOPE; $allowlisted allowlisted, 0 violations — OK."
 exit 0
