@@ -983,6 +983,28 @@ fn pm_guard_denies_bare_container_root_deletion() {
 }
 
 #[test]
+fn pm_guard_denies_a_linux_users_home_root_like_its_macos_equivalent() {
+    // #4031 review pass 3: `is_user_home_root` recognized only
+    // `/Users/<name>` at first — `rm -rf /home/someoneelse` and its
+    // glob-suffixed form denied on macOS but allowed on Linux, the same
+    // hazard unenforced on half the platforms this guard runs on.
+    for command in ["rm -rf /home/someoneelse", "rm -rf /home/someoneelse/*"] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#
+        );
+        assert_denied(&run_pm_guard(&payload, &[]));
+    }
+}
+
+#[test]
+fn pm_guard_allows_an_ordinary_project_under_a_linux_user_home() {
+    // The companion allow case: a subdirectory INSIDE a Linux user's home is
+    // ordinary work, exactly like `/Users/bob/Projects/foo` on macOS.
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /home/x/project/target"}}"#;
+    assert_eq!(run_pm_guard(payload, &[]).trim(), "");
+}
+
+#[test]
 fn pm_guard_allows_wrapped_non_destructive_commands() {
     // Companion allow cases: a wrapper preceding a non-delete command, and a
     // delete verb whose target is genuinely benign, stay allowed.

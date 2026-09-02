@@ -6,8 +6,9 @@
 //! recursively delete another session's worktree or in-flight work via
 //! `rm -rf`, even though the guard already blocks `Edit`/`Write` on source.
 //! This closes the SAFETY subset only (owner ruling on #3973): recursive
-//! force-deletion of a filesystem root (`/`, `/root`, `/Users/<name>`,
-//! `$HOME`), a repository root, a `.git` directory, or a
+//! force-deletion of a filesystem root (`/`, `/root`, `/Users/<name>` on
+//! macOS, `/home/<name>` on Linux, `$HOME`), a repository root, a `.git`
+//! directory, or a
 //! `.claude/worktrees`/`.worktrees` entry. It deliberately does NOT block
 //! ordinary local cleanup (`rm stale.txt`), build-artifact cleanup
 //! (`cargo clean`), or local temp cleanup (`git clean -fd`) — none of those
@@ -99,8 +100,8 @@ use crate::commands::hook_rewrite::first_command_token;
 /// What: the `permissionDecisionReason` string emitted on this deny.
 pub(crate) const DESTRUCTIVE_DELETE_REASON: &str = "`rm`/`rmdir`/`unlink`/`find -delete` must \
      not target a filesystem root or bare container (`/`, `/root`, `/Users`, `/Users/<name>`, \
-     `/home`, `/Volumes`, `/private`, `/var`, `/etc`, `/usr`, `/opt`, `/Library`, `/System`, \
-     `/Applications`, `$HOME`, or `$HOME`'s parent directory), a repository root, a `.git` \
+     `/home`, `/home/<name>`, `/Volumes`, `/private`, `/var`, `/etc`, `/usr`, `/opt`, `/Library`, \
+     `/System`, `/Applications`, `$HOME`, or `$HOME`'s parent directory), a repository root, a `.git` \
      directory, or a `.claude/worktrees`/`.worktrees` entry (issue #4031) — each is either \
      unrecoverable data loss or another session's or workstream's uncommitted work. Ordinary file \
      and directory cleanup elsewhere (build artifacts, stale files, `git clean -fd`) is unaffected. \
@@ -286,7 +287,8 @@ fn delete_targets(program: &str, tail: &[String]) -> Vec<String> {
 /// What: `true` when `path` — after [`resolve_target_path`]'s expansion and
 /// lexical normalization, and after [`glob_parent`]'s glob-aware
 /// substitution — is exactly `/`, `/root`, `$HOME`'s resolved value, a
-/// single-level `/Users/<name>` home root, the checkout's own repository root
+/// single-level `/Users/<name>`/`/home/<name>` home root, the checkout's own
+/// repository root
 /// (`repo_root`, resolved once per segment by the caller via
 /// [`main_checkout_root`] — `None` for a worktree, whose own root is instead
 /// caught by [`is_worktree_root_or_container`]), a path whose basename is
@@ -330,9 +332,15 @@ fn is_denylisted_delete_target(path: &Path, repo_root: Option<&Path>, env: &Path
 
 /// Bare container directories — deleting the whole directory (not a specific
 /// entry inside it) destroys every user's / every app's / every mount's data
-/// at once (issue #4031 review, item 3). `/Users/<name>` (a SPECIFIC user's
-/// home) is [`is_user_home_root`]'s separate, narrower check; this list is
-/// the container ABOVE that.
+/// at once (issue #4031 review, item 3). `/Users/<name>` and `/home/<name>`
+/// (a SPECIFIC user's home, macOS and Linux respectively) is
+/// [`is_user_home_root`]'s separate, narrower check; this list is the
+/// container ABOVE that — both platform spellings (`/Users` AND `/home`) are
+/// listed here regardless of which OS this guard happens to be running on, so
+/// the macOS/Linux parity this list implies is real rather than aspirational
+/// (pass 3 of this review: `is_user_home_root` recognized only `/Users/<name>`
+/// at first, leaving `/home/<name>` unenforced even though this list already
+/// named the bare `/home` container).
 ///
 /// Why: round 1 of this review only denylisted a specific user's home root
 /// and the literal filesystem root — `rm -rf /Users` (every user's home at
@@ -386,16 +394,23 @@ fn glob_parent(path: &Path) -> &Path {
     }
 }
 
-/// Whether `path` is exactly a single-level `/Users/<name>` entry — someone's
-/// entire home directory on macOS.
+/// Whether `path` is exactly a single-level `/Users/<name>` (macOS) or
+/// `/home/<name>` (Linux) entry — someone's entire home directory.
 ///
-/// What: `true` only for `RootDir, Normal("Users"), Normal(_)` with nothing
-/// after — `/Users/bob/Projects/foo` (an ordinary subdirectory) is NOT
-/// matched, only `/Users/bob` itself.
+/// Why (#4031 review, pass 3): the first cut recognized only `/Users/<name>`,
+/// so `rm -rf /home/someoneelse` and its glob-suffixed form denied on macOS
+/// but allowed on Linux — the same hazard, unenforced on half the platforms
+/// this guard runs on. [`BARE_CONTAINER_ROOTS`] already lists both `/Users`
+/// and `/home` as the CONTAINER; this is the narrower, one-level-deeper check
+/// for a SPECIFIC user's home under either.
+/// What: `true` only for `RootDir, Normal("Users" | "home"), Normal(_)` with
+/// nothing after — `/Users/bob/Projects/foo` and `/home/bob/project` (an
+/// ordinary subdirectory) are NOT matched, only `/Users/bob`/`/home/bob`
+/// themselves.
 fn is_user_home_root(path: &Path) -> bool {
     let mut comps = path.components();
     matches!(comps.next(), Some(Component::RootDir))
-        && matches!(comps.next(), Some(Component::Normal(n)) if n.to_str() == Some("Users"))
+        && matches!(comps.next(), Some(Component::Normal(n)) if matches!(n.to_str(), Some("Users" | "home")))
         && matches!(comps.next(), Some(Component::Normal(_)))
         && comps.next().is_none()
 }
@@ -735,6 +750,37 @@ mod tests {
                 "expected deny for: {command}"
             );
         }
+    }
+
+    #[test]
+    fn denies_a_linux_users_home_root_like_its_macos_equivalent() {
+        // #4031 review pass 3: `is_user_home_root` recognized only
+        // `/Users/<name>` at first — `rm -rf /home/someoneelse` and its
+        // glob-suffixed form denied on macOS but allowed on Linux, the same
+        // hazard unenforced on half the platforms this guard runs on.
+        let env = env_with_home("/Users/agent");
+        for command in ["rm -rf /home/someoneelse", "rm -rf /home/someoneelse/*"] {
+            assert_eq!(
+                evaluate_destructive_delete_command_in(command, Path::new("/repo"), &env),
+                Some(DESTRUCTIVE_DELETE_REASON),
+                "expected deny for: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_an_ordinary_project_under_a_linux_user_home() {
+        // The companion allow case: a subdirectory INSIDE a Linux user's home
+        // is ordinary work, exactly like `/Users/bob/Projects/foo` on macOS.
+        let env = env_with_home("/Users/agent");
+        assert_eq!(
+            evaluate_destructive_delete_command_in(
+                "rm -rf /home/x/project/target",
+                Path::new("/repo"),
+                &env
+            ),
+            None
+        );
     }
 
     #[test]

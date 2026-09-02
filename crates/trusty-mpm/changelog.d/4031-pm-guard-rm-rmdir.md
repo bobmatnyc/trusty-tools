@@ -28,3 +28,6 @@ Fixed
   the `rm` guard's `cd`-tracker, so `command git apply -`, `command git
   worktree remove --force <path>`, and `\git reset --hard` reach the existing
   git guards where their plain forms already denied (#4031).
+- A specific user's home root now denies on Linux too — `rm -rf
+  /home/<name>` and its glob-suffixed form, previously recognized only as
+  `/Users/<name>` on macOS (#4031).
