@@ -78,7 +78,14 @@ name        = "trusty-review"
 # References` link path to be repo-root-relative. No public item changes
 # shape; the `PR version bump vs crates.io` gate (#4421) requires the bump
 # since `src/**` changed.
-version     = "0.31.1"
+#
+# 0.31.2 (#6669): PATCH bump — pre-empting a concurrent crates.io publish of
+# 0.31.1 (committed on main, not yet live at write time). This PR moves
+# `cli_report.rs`'s logic into a new `report/run.rs` module and adds
+# `report/code_only.rs`; `ReportRequest`/`run_report` are new public items,
+# purely additive. `cargo-semver-checks` reports no breaking changes against
+# the 0.31.0 baseline, so PATCH is correct.
+version     = "0.31.2"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

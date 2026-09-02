@@ -5,7 +5,13 @@ name        = "trusty-analyze"
 # 0.12.4 (issue #4421, #6595): PATCH — 0.12.3 is already live on crates.io and
 # this PR edits `src/**` (on-demand respawn lock fix) under it; no public
 # signature changed. Bumped so the `PR version bump vs crates.io` gate clears.
-version     = "0.12.4"
+#
+# 0.12.5 (#6669): PATCH — pre-empting a concurrent crates.io publish of 0.12.4
+# (committed on main, not yet live at write time). This PR adds the
+# `report`/`tr_report` verb and MCP tool over a code-only CAST template — new
+# public items, purely additive. `cargo-semver-checks` reports no breaking
+# changes against the 0.12.3 baseline, so PATCH is correct.
+version     = "0.12.5"
 edition     = "2021"
 license.workspace    = true
 authors.workspace    = true
