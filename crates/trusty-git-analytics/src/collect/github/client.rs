@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 use async_trait::async_trait;
 
 use crate::collect::errors::{CollectError, Result};
-use crate::collect::github::budget::{FetchBudget, MAX_PAGES};
+use crate::collect::github::budget::{RunBudget, MAX_PAGES};
 use crate::collect::github::repo_resolver::{build_http_client, parse_slug};
 use crate::collect::github::retry::retry_get;
 use crate::collect::github::types::{ApiPull, GitHubIssue, GitHubPrCommit, GitHubReview};
@@ -51,10 +51,16 @@ pub struct GitHubClient {
     /// client's credential (or lack of one) can see the primary repo — see
     /// [`Self::ensure_repo_visible`].
     repo_visible: tokio::sync::OnceCell<bool>,
-    /// #6084: the run-wide bound every call this client makes charges against.
-    /// One budget per client means the whole PR sweep — every page of every
-    /// repo, every review, every issue — shares one ceiling and one breaker.
-    budget: FetchBudget,
+    /// #6084: the bound every call this client makes charges against, so the
+    /// whole PR sweep — every page of every repo, every review, every issue —
+    /// shares one ceiling and one breaker.
+    ///
+    /// #6565: a HANDLE to the run's budget, not a budget of its own. A `collect`
+    /// builds several clients, so owning one charged the ceiling once per client
+    /// and let each start its own storm. Construction defaults to a fresh run
+    /// budget for standalone callers; a run hands its own in with
+    /// [`Self::with_run_budget`].
+    budget: RunBudget,
 }
 
 /// Compute the JSON-encoded `commit_shas` value for a PR row.
@@ -104,7 +110,7 @@ impl GitHubClient {
             repos: vec![(owner, repo)],
             api_base: GITHUB_API_BASE.to_string(),
             repo_visible: tokio::sync::OnceCell::new(),
-            budget: FetchBudget::new(),
+            budget: RunBudget::new(),
         })
     }
 
@@ -142,7 +148,7 @@ impl GitHubClient {
             repos,
             api_base: GITHUB_API_BASE.to_string(),
             repo_visible: tokio::sync::OnceCell::new(),
-            budget: FetchBudget::new(),
+            budget: RunBudget::new(),
         })
     }
 
@@ -170,8 +176,25 @@ impl GitHubClient {
             repos: Vec::new(),
             api_base: GITHUB_API_BASE.to_string(),
             repo_visible: tokio::sync::OnceCell::new(),
-            budget: FetchBudget::new(),
+            budget: RunBudget::new(),
         })
+    }
+
+    /// Charge this client's calls against `budget` instead of its own.
+    ///
+    /// Why (#6565): the sleep allowance is meant to bound a RUN. A `collect`
+    /// builds an org-discovery client, a PR client, and a reviewer client, so
+    /// while each owned its own budget the run could sleep the 120 s ceiling
+    /// once per client — and a rate limit that latched the breaker in one pass
+    /// left the next pass free to spiral again. Every client a run builds passes
+    /// through here so there is one ceiling and one breaker for the whole run.
+    /// What: replaces the budget handle with a clone of `budget`, which shares
+    /// the same underlying allowance, ledger, and breaker.
+    /// Test: `two_clients_draw_down_one_run_budget`.
+    #[must_use]
+    pub fn with_run_budget(mut self, budget: &RunBudget) -> Self {
+        self.budget = budget.clone();
+        self
     }
 
     /// Point every request at `base` instead of [`GITHUB_API_BASE`].
@@ -466,7 +489,7 @@ impl GitHubClient {
     /// against one run-wide ceiling (#6084).
     /// Test: covered indirectly by callers and by `wiremock` integration tests.
     async fn retry_request(&self, url: &str) -> Result<reqwest::Response> {
-        retry_get(&self.client, url, &self.budget).await
+        retry_get(&self.client, url, self.budget.shared()).await
     }
 
     /// Whether a paginated walk has reached [`MAX_PAGES`] and must stop.
@@ -489,7 +512,7 @@ impl GitHubClient {
             pages = MAX_PAGES,
             "GitHub listing hit the page cap; results for this scope are partial"
         );
-        self.budget.note_truncation(format!(
+        self.budget.shared().note_truncation(format!(
             "GitHub {endpoint} listing for {scope} stopped at the {MAX_PAGES}-page cap \
              ({} items); these results are PARTIAL",
             MAX_PAGES * PAGE_SIZE
@@ -502,7 +525,7 @@ impl GitHubClient {
     /// Empty when nothing was truncated. Non-empty means the data this client
     /// returned is incomplete and the caller must say so (#6084).
     pub(crate) fn fetch_notices(&self) -> Vec<String> {
-        self.budget.notices()
+        self.budget.shared().notices()
     }
 
     /// Fetch all reviews for a given pull request, paginating until exhausted.
