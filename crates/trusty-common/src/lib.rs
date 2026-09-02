@@ -244,6 +244,21 @@ pub mod launchd_activate;
 #[cfg(target_os = "macos")]
 pub mod launchd_grace;
 
+/// Bootout-completion waiting for a live launchd restart (#6618). macOS-only,
+/// like [`launchd`] itself.
+///
+/// Why: `launchctl bootout` returns when the unload is ACCEPTED, not when the
+/// job is gone. A restart that bootstraps immediately afterwards races its own
+/// bootout and launchd refuses it with `Bootstrap failed: 5: Input/output
+/// error`.
+/// What: [`launchd_restart::await_unload`] polls the label out of launchd, and
+/// [`launchd_restart::restart_sequence`] orders the whole bounce around that
+/// wait — reusing [`launchd_grace`]'s quiesce for the short-grace half of the
+/// same window.
+/// Test: `cargo test -p trusty-common --features unconditional-only launchd_restart`.
+#[cfg(target_os = "macos")]
+pub mod launchd_restart;
+
 /// Canonical launchd labels for every trusty-* LaunchAgent (#4919).
 ///
 /// Why: each daemon crate, the installer's mirror table, the Makefiles, and

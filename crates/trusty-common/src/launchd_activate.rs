@@ -417,9 +417,17 @@ impl LaunchdConfig {
     /// bootout that follows unloads an already-exited job. Advisory throughout:
     /// a quiesce that fails still falls through to the bootout, which is no
     /// worse than the behaviour this replaces.
+    ///
+    /// #6618: `tctl restart` needs this same guard for the same reason — its
+    /// bootout is bounded by the same loaded `ExitTimeOut` — so
+    /// [`crate::launchd_restart::restart_sequence`] calls THIS, rather than
+    /// growing a second copy. That is why it is crate-visible rather than
+    /// private to this module.
+    ///
     /// Test: the verdict and the wait are unit-tested in `launchd_grace`; the
-    /// wiring is exercised by `trusty-search service install`.
-    fn guard_short_grace(&self, required_secs: u64) {
+    /// wiring is exercised by `trusty-search service install` and `tctl
+    /// restart`.
+    pub(crate) fn guard_short_grace(&self, required_secs: u64) {
         use crate::launchd_grace::{GraceVerdict, Quiesce};
 
         let GraceVerdict::TooShort {
