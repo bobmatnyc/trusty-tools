@@ -847,6 +847,67 @@ pub fn with_targets(template: &str, targets: &[Target], path: &Path) -> Result<S
     Ok(rendered)
 }
 
+/// The TOML table holding the engagement's report selection.
+///
+/// Named once so [`with_report_selection`] and [`ReportSettings`] cannot drift
+/// apart.
+pub const REPORT_FIELD: &str = "report";
+
+/// Re-render `template` with a report template and scope selected (#5483).
+///
+/// Why: `[report] template = "cast"` and `code_only = true` are the two lines
+/// that turn an engagement's output into a CAST-style due-diligence report
+/// (#6669), and until now an auditor hand-added them to the template before
+/// running `taudit distribute`. A step done by hand before every handoff is a
+/// step that gets forgotten, and the run that forgets it renders the wrong
+/// report and exits 0. `taudit distribute --template cast` writes them here
+/// instead.
+///
+/// What: the same table substitution [`with_targets`] uses, one table deeper.
+/// Only the two keys are set — an `investigate_max_files` the template declared
+/// survives, because the preset selects WHICH report is produced and says
+/// nothing about how much of each repository is read. A `[report]` that is not
+/// a table is replaced rather than merged into: there is nothing to preserve in
+/// a value this crate cannot read, and refusing would strand an auditor over a
+/// typo in a file they can fix in the generated config anyway.
+///
+/// The result is parsed back through [`EngagementConfig::from_toml`], so a
+/// substitution that would produce an unloadable config fails HERE rather than
+/// on the recipient's machine.
+/// Test: `config_tests::selecting_a_report_writes_both_keys_and_keeps_the_budget`,
+/// `config_tests::selecting_a_report_preserves_every_other_field`.
+///
+/// # Errors
+///
+/// [`AuditError::Parse`] when `template` is not TOML, or when the substituted
+/// result is not a loadable engagement config; [`AuditError::Render`] when the
+/// table cannot be re-serialized.
+pub fn with_report_selection(
+    template: &str,
+    report_template: &str,
+    code_only: bool,
+    path: &Path,
+) -> Result<String, AuditError> {
+    let mut table = parse_template(template, path)?;
+    let mut report = match table.remove(REPORT_FIELD) {
+        Some(toml::Value::Table(existing)) => existing,
+        _ => toml::Table::new(),
+    };
+    report.insert(
+        "template".to_owned(),
+        toml::Value::String(report_template.to_owned()),
+    );
+    report.insert("code_only".to_owned(), toml::Value::Boolean(code_only));
+    table.insert(REPORT_FIELD.to_owned(), toml::Value::Table(report));
+
+    let rendered = toml::to_string_pretty(&table).map_err(|source| AuditError::Render {
+        what: "engagement config",
+        source: Box::new(source),
+    })?;
+    EngagementConfig::from_toml(&rendered, path)?;
+    Ok(rendered)
+}
+
 #[cfg(test)]
 mod config_tests {
     use super::*;
@@ -883,6 +944,58 @@ mod config_tests {
             declared.iter().map(Target::id).collect::<Vec<_>>(),
             vec!["acme/api", "jira:ACME"]
         );
+        assert_eq!(loaded.openrouter_key.expose(), "sk-or-v1-not-a-real-key");
+        assert_eq!(loaded.tools.trusty_review.version(), "0.15.1");
+        assert_eq!(loaded.client.as_deref(), Some("Acme"));
+        assert_eq!(
+            loaded
+                .boards
+                .linear
+                .as_ref()
+                .expect("linear survives")
+                .api_key
+                .expose(),
+            "lin_api_secret"
+        );
+    }
+
+    /// #5483: the two CAST keys land, and the investigation budget the template
+    /// declared is not collateral damage — the preset selects WHICH report is
+    /// produced, not how much of each repository is read.
+    #[test]
+    fn selecting_a_report_writes_both_keys_and_keeps_the_budget() {
+        let source = format!("{SAMPLE}\n[report]\ninvestigate_max_files = 240\n");
+        let path = Path::new("engagement.toml");
+        let text = with_report_selection(&source, "cast", true, path).expect("writes");
+
+        let loaded = EngagementConfig::from_toml(&text, path).expect("loads");
+        assert_eq!(loaded.report.template.as_deref(), Some("cast"));
+        assert_eq!(loaded.report.code_only, Some(true));
+        assert_eq!(loaded.report.investigate_max_files, Some(240));
+        assert_eq!(
+            loaded.report.child_env(),
+            vec![
+                (
+                    trusty_common::env_vars::ENV_AUDIT_REPORT_TEMPLATE,
+                    "cast".to_owned()
+                ),
+                (
+                    trusty_common::env_vars::ENV_AUDIT_REPORT_CODE_ONLY,
+                    "true".to_owned()
+                ),
+            ]
+        );
+    }
+
+    /// Selecting a report must not cost the recipient their pins, their key or a
+    /// board credential, for the same reason a registration must not.
+    #[test]
+    fn selecting_a_report_preserves_every_other_field() {
+        let source = format!("{SAMPLE}\n[boards.linear]\napi_key = \"lin_api_secret\"\n");
+        let path = Path::new("engagement.toml");
+        let text = with_report_selection(&source, "cast", true, path).expect("writes");
+
+        let loaded = EngagementConfig::from_toml(&text, path).expect("loads");
         assert_eq!(loaded.openrouter_key.expose(), "sk-or-v1-not-a-real-key");
         assert_eq!(loaded.tools.trusty_review.version(), "0.15.1");
         assert_eq!(loaded.client.as_deref(), Some("Acme"));

@@ -1,0 +1,6 @@
+Added
+
+- `taudit distribute` ships an `instructions/` directory beside the binary: `instructions/README.md` is the numbered sequence the recipient runs — install, register, the one-shot `audit`, `package` — with the macOS Full Disk Access and quarantine notes and an "If something fails" section naming the log locations, and `instructions/engagement.template.toml` documents every config key with the CAST report preset set. The root `README.md` is now a pointer at them rather than a second copy of the sequence.
+- `taudit distribute --prompt-for-key` builds a package carrying no credential: the generated `engagement.toml` has a blank `openrouter_key`, and the recipient's first `audit` asks for the key on the terminal and saves it. The flag beats `OPENROUTER_API_KEY` and the template's own key, so a stale variable cannot bake one in.
+- `taudit distribute --template cast` writes `[report] template = "cast"` and `code_only = true` into the generated config, so the CAST-style report no longer needs a hand-edited template before every handoff.
+- `taudit distribute --repos <file>` pre-populates the package's `[[targets]]`, from a `repos.txt` list or a previous engagement's `engagement.toml`. The recipient's `taudit audit` then audits exactly that list and asks them to pick nothing.

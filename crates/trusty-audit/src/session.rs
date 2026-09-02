@@ -1760,6 +1760,7 @@ trusty-review = "0.0.0-never-published"
             .execute(Command::Distribute(DistributeOptions {
                 output_dir: Some(tmp.join("packages")),
                 binary: Some(binary),
+                ..DistributeOptions::default()
             }))
             .await
             .expect("assembles");
@@ -1785,7 +1786,7 @@ trusty-review = "0.0.0-never-published"
             "the package lands where the operator asked"
         );
         assert!(package.path.is_file());
-        assert_eq!(package.files.len(), 4);
+        assert_eq!(package.files.len(), crate::distribute::MEMBER_COUNT);
         assert!(!package.platform.is_empty());
     }
 
@@ -1958,6 +1959,7 @@ trusty-review = "0.0.0-never-published"
             .execute(Command::Distribute(DistributeOptions {
                 output_dir: Some(out.clone()),
                 binary: None,
+                ..DistributeOptions::default()
             }))
             .await
             .expect_err("no template, no package");

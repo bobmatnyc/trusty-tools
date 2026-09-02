@@ -394,6 +394,48 @@ variant; whether one should exist is deferred (#5495), not solved. The remedy
 today is to allow the GitHub release-asset host, or to ask for a package built
 for that network.
 
+## Building a handoff package for a recipient
+
+`trusty-audit distribute` writes the zip you send. It carries the `taudit`
+binary, a launcher that runs it from wherever the recipient extracts it, a
+generated `engagement.toml`, and an `instructions/` directory holding the
+sequence they run and a commented reference for every config key.
+
+The normal handover — a CAST-style report, no credential in the package, and
+the repository list already declared:
+
+```
+taudit distribute \
+  --config ./engagement-template.toml \
+  --template cast \
+  --prompt-for-key \
+  --repos ./client-repos.txt \
+  --out ~/duetto/audit
+```
+
+- `--prompt-for-key` ships no credential. The generated config carries a blank
+  `openrouter_key`, and the recipient's first `audit` asks for the key on the
+  terminal and saves it. Send the key separately. The flag beats both
+  `OPENROUTER_API_KEY` and the template's own key, so a variable left over from
+  an earlier command cannot bake one in. Omit it to keep the existing
+  behaviour, where the key is read from the environment or the template.
+- `--template cast` writes `[report] template = "cast"` and `code_only = true`
+  into the generated config — the CAST methodology, scoped to what a repository
+  checkout can prove. Omit it and the template's own `[report]` table decides.
+- `--repos <file>` pre-populates `[[targets]]`. It takes a `repos.txt` — one
+  `owner/name`, absolute checkout path, or GitHub URL per line, `#` starting a
+  comment — or a previous engagement's `engagement.toml`, whose `[[targets]]`
+  are reused. The recipient's `taudit audit` then audits exactly that list and
+  asks them to pick nothing; without it they register each repository
+  themselves.
+- `--binary <path>` ships a build for the recipient's platform instead of the
+  running one. The default is right when you are packaging for a machine like
+  yours.
+
+It refuses rather than overwriting a package already in the output directory,
+and a template's `[boards.*]` credentials never travel — they belong to
+whichever engagement they were set for.
+
 ## Sending the deliverable back
 
 `trusty-audit package` turns what the sweep produced into one file:

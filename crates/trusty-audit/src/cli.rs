@@ -16,11 +16,11 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::chain::ChainOptions;
 use crate::clone::CloneOptions;
-use crate::distribute::DistributeOptions;
+use crate::distribute::{DistributeOptions, ReportPreset};
 use crate::registry::TargetKind;
 use crate::rerender::RerenderOptions;
 use crate::run::RunOptions;
@@ -67,6 +67,33 @@ pub struct Cli {
     /// Capability to run. Omit to enter the guided flow.
     #[command(subcommand)]
     pub verb: Option<Verb>,
+}
+
+/// The report preset `taudit distribute --template` accepts (#5483).
+///
+/// Why: a clap `ValueEnum` rather than a free-form string, so `--template cst`
+/// is a usage error naming the two accepted values instead of an engagement
+/// that renders a template nothing bundles. The set is deliberately narrow —
+/// this flag selects a PRESET, and an engagement wanting some other bundled
+/// template still writes `[report] template = "…"` in its own config.
+/// What: one variant per preset, converted into
+/// [`ReportPreset`](crate::distribute::ReportPreset) at the call site.
+/// Test: `super::cli_tests::the_cast_template_flag_selects_the_cast_preset`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReportTemplateArg {
+    /// CAST-style technical due diligence, scoped to the code.
+    Cast,
+    /// Leave the template's own `[report]` table in charge.
+    Default,
+}
+
+impl From<ReportTemplateArg> for ReportPreset {
+    fn from(arg: ReportTemplateArg) -> Self {
+        match arg {
+            ReportTemplateArg::Cast => ReportPreset::Cast,
+            ReportTemplateArg::Default => ReportPreset::Inherit,
+        }
+    }
 }
 
 /// One subcommand per capability.
@@ -199,6 +226,36 @@ pub enum Verb {
         /// platform instead.
         #[arg(long, value_name = "FILE")]
         binary: Option<PathBuf>,
+
+        /// Ship no OpenRouter key; the recipient is asked for one on first run.
+        ///
+        /// Use this whenever the key reaches the recipient out of band, which
+        /// is the normal handover — the package then carries a blank
+        /// `openrouter_key`, and the first `audit` asks for it on the terminal
+        /// and saves it. It beats `OPENROUTER_API_KEY` and the template's own
+        /// key, so a variable left over from an earlier command cannot bake one
+        /// in by accident.
+        #[arg(long)]
+        prompt_for_key: bool,
+
+        /// Which report the packaged engagement produces (default: whatever the
+        /// template's own `[report]` table says).
+        ///
+        /// `cast` writes `template = "cast"` and `code_only = true` into the
+        /// generated `engagement.toml` — the CAST-style technical due-diligence
+        /// report, scoped to what a repository checkout can prove.
+        #[arg(long = "template", value_name = "NAME", value_enum)]
+        report_template: Option<ReportTemplateArg>,
+
+        /// Pre-populate the package's repository list from a file.
+        ///
+        /// Takes a `repos.txt` — one `owner/name`, absolute checkout path, or
+        /// GitHub URL per line, `#` starting a comment — or an `engagement.toml`
+        /// from a previous engagement, whose `[[targets]]` are reused. The
+        /// generated config declares them, so `taudit audit` on the recipient's
+        /// machine audits exactly that list and asks them to pick nothing.
+        #[arg(long, value_name = "FILE")]
+        repos: Option<PathBuf>,
     },
     /// Regenerate the reports from a finished audit package.
     ///
@@ -332,9 +389,20 @@ impl Cli {
             }),
             // #5825: the inbound package. A separate variant from `Package`
             // because the two travel opposite ways — see `crate::distribute`.
-            Some(Verb::Distribute { out, binary }) => Command::Distribute(DistributeOptions {
+            Some(Verb::Distribute {
+                out,
+                binary,
+                prompt_for_key,
+                report_template,
+                repos,
+            }) => Command::Distribute(DistributeOptions {
                 output_dir: out.clone(),
                 binary: binary.clone(),
+                prompt_for_key: *prompt_for_key,
+                report_preset: report_template.map_or(ReportPreset::Inherit, Into::into),
+                // #5483: the PATH travels, not the parsed list — `to_command`
+                // cannot fail, so `distribute::assemble` does the read.
+                repos: repos.clone(),
             }),
             // #6080: every knob defaults — the source to the directory this was
             // run in — so `taudit render` is the whole invocation the recipient
@@ -664,6 +732,49 @@ mod cli_tests {
     fn a_bare_invocation_enters_the_guided_flow() {
         let cli = Cli::try_parse_from(["taudit"]).expect("bare invocation parses");
         assert_eq!(cli.to_command(), Command::Guided);
+    }
+
+    /// #5483: the three new knobs reach `DistributeOptions`, and a bare
+    /// `distribute` still means what it meant — no key mode, no preset, no
+    /// declared repositories.
+    #[test]
+    fn the_cast_template_flag_selects_the_cast_preset() {
+        let bare = Cli::try_parse_from(["taudit", "distribute"]).expect("parses");
+        assert_eq!(
+            bare.to_command(),
+            Command::Distribute(DistributeOptions::default())
+        );
+
+        let cli = Cli::try_parse_from([
+            "taudit",
+            "distribute",
+            "--prompt-for-key",
+            "--template",
+            "cast",
+            "--repos",
+            "/tmp/repos.txt",
+        ])
+        .expect("parses");
+        let Command::Distribute(options) = cli.to_command() else {
+            panic!("expected Distribute");
+        };
+        assert!(options.prompt_for_key);
+        assert_eq!(options.report_preset, ReportPreset::Cast);
+        assert_eq!(options.repos, Some(PathBuf::from("/tmp/repos.txt")));
+
+        // `--template default` is the explicit spelling of the default, not a
+        // second preset.
+        let cli =
+            Cli::try_parse_from(["taudit", "distribute", "--template", "default"]).expect("parses");
+        let Command::Distribute(options) = cli.to_command() else {
+            panic!("expected Distribute");
+        };
+        assert_eq!(options.report_preset, ReportPreset::Inherit);
+
+        assert!(
+            Cli::try_parse_from(["taudit", "distribute", "--template", "cst"]).is_err(),
+            "an unknown template must be a usage error, not a silent default"
+        );
     }
 
     #[test]
@@ -1168,6 +1279,8 @@ mod cli_tests {
             packaged_bytes: 5 * 1024 * 1024,
             platform: "macos-aarch64".to_owned(),
             key_from_environment,
+            prompts_for_key: false,
+            declared_repos: 0,
             dropped_board_credentials: vec!["boards.jira".to_owned()],
         };
 

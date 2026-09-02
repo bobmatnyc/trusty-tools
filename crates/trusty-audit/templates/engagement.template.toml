@@ -1,0 +1,142 @@
+# engagement.toml — every field this client accepts.
+#
+# The live copy of this file sits one directory up, beside `audit.sh`, and the
+# client reads it on every run. This copy is the reference: it names every key,
+# with the CAST report preset already set. Nothing reads THIS file — edit the
+# one beside `audit.sh`, or hand this one back to your auditor to rebuild the
+# package (`taudit distribute --config <this file>`).
+#
+# The file is plain TOML and is meant to be read. It is not encrypted and it is
+# not obfuscated: you can see exactly what the client is configured to do
+# before you run it. See #5473.
+
+# ---------------------------------------------------------------------------
+# Required
+# ---------------------------------------------------------------------------
+
+# The OpenRouter key this engagement runs inference with.
+#
+# Blank means the client asks for it on the terminal the first time it needs
+# one, and writes what you type back into the live `engagement.toml` with
+# owner-only permissions. That is the normal handover: the key reaches you out
+# of band, never in this package.
+#
+# `OPENROUTER_API_KEY` in the environment beats this field and skips the
+# prompt, which is what a scripted or CI run uses.
+openrouter_key = ""
+
+# What this engagement is asked to assess, in prose. Free-form; it steers the
+# report's emphasis and never authorizes inventing a fact.
+instructions = "Assess the maintainability, security posture and delivery risk of the repositories listed below."
+
+# Recorded in the report and shown in the package README. Both optional.
+#
+# These are top-level keys, so they must stay ABOVE the first `[table]` header
+# below — a bare key written after one belongs to that table, and `[models]`
+# refuses a key it does not know.
+client = "Acme"
+engagement = "2026-Q3"
+
+# The exact tool versions this engagement runs. All four are REQUIRED — there
+# is no "latest", because a new `tga` paired with an old `trusty-review`
+# produces a deterministic report and exits 0 (#5454).
+#
+# Replace these with the versions your auditor pinned for this engagement.
+[tools]
+tga = "5.0.3"
+trusty-search = "0.52.0"
+trusty-analyze = "0.12.5"
+trusty-review = "0.31.2"
+
+# A pin may name the artifact's digest as well as its version, in which case a
+# download whose bytes do not match is refused:
+#
+# [tools]
+# trusty-review = { version = "0.31.2", sha256 = "…" }
+
+# ---------------------------------------------------------------------------
+# Report selection — the CAST preset
+# ---------------------------------------------------------------------------
+
+# Which report the run produces (#6669). These two keys are what make the
+# output a CAST-style technical due-diligence report rather than the default
+# one. The client hands them to the renderer as `TRUSTY_AUDIT_REPORT_TEMPLATE`
+# and `TRUSTY_AUDIT_REPORT_CODE_ONLY`.
+[report]
+# `cast`, `default`, `generic`, or a full bundled template name.
+template = "cast"
+
+# Render the sections a repository checkout cannot answer — Peer Benchmark,
+# Next Steps, interviews, ops metrics, org chart — as stated out-of-scope
+# boundaries rather than leaving them silently blank. Only `true` has an
+# effect; the renderer's own flag can turn the mode on, never off.
+code_only = true
+
+# How much of each repository the investigation pass may read (#6247). Absent
+# means the compiled defaults apply.
+#
+# investigate_max_files = 240
+# investigate_max_bytes = 2457600
+
+# ---------------------------------------------------------------------------
+# Repositories and boards this engagement audits
+# ---------------------------------------------------------------------------
+
+# What to audit. `taudit add repo <owner>/<name>` appends to this list, and
+# `taudit audit` reads it — a non-empty list means the run never asks you to
+# pick anything. Declare it here to skip registration entirely.
+#
+# Uncomment and edit:
+#
+# [[targets]]
+# kind = "repo"
+# name_with_owner = "acme/api"
+#
+# [[targets]]
+# kind = "repo"
+# name_with_owner = "acme/web"
+#
+# A checkout already on this machine is a different variant, validated by
+# reading it rather than by asking GitHub:
+#
+# [[targets]]
+# kind = "local_repo"
+# path = "/Users/you/src/acme-legacy"
+#
+# A JIRA project or Linear team:
+#
+# [[targets]]
+# kind = "board"
+# provider = "jira"
+# key = "OPS"
+
+# The client's own board credentials, when the engagement collects from one.
+# These are YOUR credentials, not the auditor's — a package never ships
+# someone else's, and any the auditor's template carried are stripped when the
+# package is built (#5861).
+#
+# [boards.jira]
+# url = "https://acme.atlassian.net"
+# email = "you@acme.example"
+# token = "…"
+#
+# [boards.linear]
+# api_key = "lin_api_…"
+
+# ---------------------------------------------------------------------------
+# Inference identity
+# ---------------------------------------------------------------------------
+
+# Which provider and which model runs each review role. Every key is optional
+# and absent means the client's built-in defaults, which are the roles the CAST
+# runbook used. They are written out here so a model rename can be corrected in
+# this file rather than waiting on a release (#5671).
+#
+# An unknown key in this table is a parse error, deliberately: a typo silently
+# falling back to a default is exactly what naming the models is meant to stop.
+[models]
+provider = "openrouter"
+reviewer = "anthropic/claude-opus-4.8"
+verifier = "anthropic/claude-haiku-4.5"
+summarizer = "anthropic/claude-haiku-4.5"
+

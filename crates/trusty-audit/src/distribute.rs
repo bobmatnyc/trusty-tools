@@ -8,8 +8,9 @@
 //!
 //! What: [`assemble`] writes one zip holding the `taudit` binary, a launcher
 //! that runs it from wherever it was extracted, a generated `engagement.toml`,
-//! and a README naming the three commands in order. [`InstallPackage`] is what a
-//! front end renders.
+//! a root README pointing at the instructions, and an `instructions/` directory
+//! holding the sequence to run and a commented reference for every config key
+//! (#5483). [`InstallPackage`] is what a front end renders.
 //!
 //! ## Direction — the reason this is not [`crate::package`]
 //!
@@ -47,7 +48,10 @@ use crate::config::{self, EngagementConfig, SecretKey};
 use crate::error::AuditError;
 use crate::package::PackagedFile;
 use crate::progress::{Operation, Progress, UnitOutcome};
+use crate::registry::Target;
 use crate::run::ENV_INFERENCE_CREDENTIAL;
+
+pub mod instructions;
 
 /// Where the package lands when the operator names no directory.
 ///
@@ -80,6 +84,44 @@ pub const README_NAME: &str = "README.md";
 /// How much of the binary is read at a time while copying it.
 const CHUNK_BYTES: usize = 64 * 1024;
 
+/// How many members the package holds — the binary, the launcher, the config,
+/// the pointer README, and the two under `instructions/`.
+pub(crate) const MEMBER_COUNT: usize = 6;
+
+/// Which report the packaged engagement is set up to produce (#5483).
+///
+/// Why: the CAST methodology is two lines in the engagement config (#6669), and
+/// an auditor hand-adding them to their template before every handoff will
+/// eventually not. A run that forgets them renders the default report and exits
+/// 0, so the omission is invisible until the client reads the wrong document.
+/// What: an enum rather than a `--cast` boolean, because the report template is
+/// a NAME (`cast`, `default`, a bundled template) and the next preset is a
+/// variant rather than a second flag that contradicts the first.
+/// [`ReportPreset::Inherit`] is the default and writes nothing at all, so a
+/// `distribute` run that names no preset behaves exactly as it did.
+/// Test: `super::distribute_tests::the_cast_preset_writes_both_report_keys`,
+/// `super::distribute_tests::the_default_preset_leaves_the_templates_report_table_alone`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ReportPreset {
+    /// Whatever the template's own `[report]` table says. The default.
+    #[default]
+    Inherit,
+    /// CAST-style technical due diligence, scoped to what a checkout can prove:
+    /// `template = "cast"`, `code_only = true`.
+    Cast,
+}
+
+impl ReportPreset {
+    /// The `[report]` selection this preset writes, or `None` to write nothing.
+    fn selection(self) -> Option<(&'static str, bool)> {
+        match self {
+            Self::Inherit => None,
+            Self::Cast => Some(("cast", true)),
+        }
+    }
+}
+
 /// What the recipient chose about the package to build.
 ///
 /// Why: both fields are `Option` because both have a defensible default the
@@ -98,6 +140,33 @@ pub struct DistributeOptions {
     pub output_dir: Option<PathBuf>,
     /// The `taudit` binary to ship. `None` means the running executable.
     pub binary: Option<PathBuf>,
+    /// Ship NO credential, and let the recipient enter one (#5483).
+    ///
+    /// Why: the owner's handover conveys the key out of band, so the package
+    /// that travels by email should not carry it. `true` writes a blank
+    /// `openrouter_key`, which is exactly what
+    /// [`crate::cli::credential::resolve`] turns into the first-run terminal
+    /// prompt — there is no second mechanism, and no `key_env` indirection to
+    /// keep in step with the schema (#5478 retired that spelling).
+    /// What: it BEATS both the supplied key and the template's own, because it
+    /// is the operator saying explicitly not to ship one. `false` is the
+    /// existing behaviour, unchanged.
+    pub prompt_for_key: bool,
+    /// Which report the packaged engagement produces.
+    pub report_preset: ReportPreset,
+    /// A file naming the repositories the package declares (#5483).
+    ///
+    /// Why a PATH rather than a parsed list: `Cli::to_command` cannot fail, so
+    /// the CLI carries the operator's choice as data and the fallible read
+    /// happens here — the same shape `Command::AddTarget` uses for a target
+    /// spec, and the reason `registry::parse` rather than clap decides what a
+    /// target may be.
+    /// What: `None` is the existing behaviour — the package declares no
+    /// `targets` and the recipient registers each repository themselves. A path
+    /// is read by [`crate::cli::targets_file::read_repo_list`], the crate's one
+    /// repository-list parser, and written into the same `targets` key
+    /// `taudit add repo` writes.
+    pub repos: Option<PathBuf>,
 }
 
 /// The finished install package: what to send, and what it will run on.
@@ -108,7 +177,7 @@ pub struct DistributeOptions {
 /// built for the wrong target extracts and runs on nothing.
 /// What: the destination, every member, the sizes, and the host triple the
 /// binary was built for.
-/// Test: `super::distribute_tests::the_package_holds_the_four_members`.
+/// Test: `super::distribute_tests::the_package_holds_every_member`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct InstallPackage {
@@ -124,7 +193,18 @@ pub struct InstallPackage {
     pub platform: String,
     /// Whether the credential came from the environment rather than the
     /// template. Recorded so the operator can see which one they shipped.
+    ///
+    /// Always `false` when [`Self::prompts_for_key`] is set: no key shipped at
+    /// all, so it did not come from the environment either.
     pub key_from_environment: bool,
+    /// Whether the package ships no credential, leaving the recipient to enter
+    /// one on first run (#5483).
+    pub prompts_for_key: bool,
+    /// Repositories the generated `engagement.toml` declares (#5483).
+    ///
+    /// Reported so the operator can confirm the list reached the package before
+    /// they send it — the alternative is opening the zip.
+    pub declared_repos: usize,
     /// Board-credential fields the template held that did NOT ship (#5861).
     ///
     /// Empty for a template that names no board. Reported rather than silent:
@@ -210,14 +290,29 @@ pub fn destination(options: &DistributeOptions) -> Result<PathBuf, AuditError> {
 /// What: `supplied` when it is not blank, else the template's own key when it is
 /// not blank, else a refusal. The `bool` says which, so the operator can see
 /// which key they shipped without the value being printed.
+///
+/// #5483: `prompt_for_key` is the third answer and it comes FIRST, ahead of
+/// both. It is the operator saying not to ship a credential at all, which an
+/// exported `OPENROUTER_API_KEY` left over from an earlier command must not
+/// quietly override — that would bake a key into a package built precisely to
+/// avoid carrying one, and nothing downstream would say so. The blank key it
+/// returns is what [`crate::cli::credential::resolve`] reads as "ask the
+/// recipient", so the two halves meet at the config field rather than at a
+/// flag either side has to remember.
 /// Test: `super::distribute_tests::a_supplied_key_beats_the_templates`,
 /// `super::distribute_tests::a_blank_supplied_key_falls_back_to_the_template`,
-/// `super::distribute_tests::a_blank_credential_is_refused_and_leaves_no_file`.
+/// `super::distribute_tests::a_blank_credential_is_refused_and_leaves_no_file`,
+/// `super::distribute_tests::a_prompt_for_key_package_ships_no_credential`,
+/// `super::distribute_tests::prompting_for_the_key_beats_a_supplied_one`.
 fn resolve_key(
     supplied: Option<&SecretKey>,
     template: &EngagementConfig,
     template_path: &Path,
+    prompt_for_key: bool,
 ) -> Result<(SecretKey, bool), AuditError> {
+    if prompt_for_key {
+        return Ok((SecretKey::new(""), false));
+    }
     if let Some(key) = supplied
         && !key.is_empty()
     {
@@ -290,34 +385,59 @@ pub fn assemble(
             source,
         })?;
     let template = EngagementConfig::from_toml(&template_text, template_path)?;
-    let (key, key_from_environment) = resolve_key(supplied_key, &template, template_path)?;
+    let (key, key_from_environment) = resolve_key(
+        supplied_key,
+        &template,
+        template_path,
+        options.prompt_for_key,
+    )?;
     // #5861: this config belongs to an engagement the template does not, so the
     // template's board credentials — the previous CLIENT's — never travel.
-    let (config_text, dropped_board_credentials) =
+    let (mut config_text, dropped_board_credentials) =
         config::generate_for_new_engagement(&template_text, &key, template_path)?;
+    // #5483: both are substitutions over the same table, applied in the order
+    // an operator names them — what to audit, then which report to render.
+    let repos: Vec<Target> = match &options.repos {
+        Some(path) => crate::cli::targets_file::read_repo_list(path)?,
+        None => Vec::new(),
+    };
+    if !repos.is_empty() {
+        config_text = config::with_targets(&config_text, &repos, template_path)?;
+    }
+    if let Some((report_template, code_only)) = options.report_preset.selection() {
+        config_text =
+            config::with_report_selection(&config_text, report_template, code_only, template_path)?;
+    }
 
     let platform = host_platform();
-    let readme = render_readme(&template, &platform, options.binary.is_some());
-    let launcher = render_launcher();
+    let platform_line = platform_line(&platform, options.binary.is_some());
+    let declared_repos = repos.len();
+    let members = Members {
+        config: config_text,
+        launcher: render_launcher(),
+        readme: instructions::render_pointer(&template, &platform_line),
+        instructions: instructions::render_readme(
+            &template,
+            &platform_line,
+            options.prompt_for_key,
+            declared_repos,
+        ),
+        engagement_template: instructions::ENGAGEMENT_TEMPLATE.to_owned(),
+    };
 
-    progress.operation_started(Operation::Distribute, 4);
-    let result = write_archive(
-        &destination,
-        &binary,
-        Members {
-            config: config_text,
-            launcher,
-            readme,
-        },
-        progress,
-    );
+    progress.operation_started(Operation::Distribute, MEMBER_COUNT);
+    let result = write_archive(&destination, &binary, members, progress);
     // #5825: the failing MEMBER is announced by the site that failed, inside
     // `fill_archive`, because only that site knows which one it was. This used
     // to report `BINARY_NAME` for every failure, so a README that could not be
     // written surfaced as "taudit failed". A failure with no member in flight —
     // creating the directory, finishing the archive, the rename — belongs to no
     // unit and names none.
-    progress.operation_finished(Operation::Distribute, if result.is_ok() { 4 } else { 0 }, 4);
+    progress.operation_finished(
+        Operation::Distribute,
+        if result.is_ok() { MEMBER_COUNT } else { 0 },
+        MEMBER_COUNT,
+    );
     let (files, packaged_bytes) = result?;
 
     Ok(InstallPackage {
@@ -327,16 +447,33 @@ pub fn assemble(
         packaged_bytes,
         platform,
         key_from_environment,
+        prompts_for_key: options.prompt_for_key,
+        declared_repos,
         dropped_board_credentials,
     })
 }
 
-/// The three generated text members, kept together so [`write_archive`]'s
-/// signature does not grow three `String` parameters a caller can transpose.
+/// The line naming what the packaged binary runs on.
+///
+/// Why: the default binary is the running executable, so its target IS the
+/// host. When the operator names one explicitly they are asserting the match,
+/// and the line says so rather than claiming a triple nothing checked.
+fn platform_line(platform: &str, explicit_binary: bool) -> String {
+    if explicit_binary {
+        format!("- Built for: {platform} (binary supplied by the auditor)")
+    } else {
+        format!("- Built for: {platform}")
+    }
+}
+
+/// The generated text members, kept together so [`write_archive`]'s signature
+/// does not grow five `String` parameters a caller can transpose.
 struct Members {
     config: String,
     launcher: String,
     readme: String,
+    instructions: String,
+    engagement_template: String,
 }
 
 /// Fill a `.zip.part`, then rename it into place.
@@ -464,9 +601,9 @@ where
     W: std::io::Write + std::io::Seek,
 {
     let mut zip = zip::ZipWriter::new(sink);
-    let mut files = Vec::with_capacity(4);
+    let mut files = Vec::with_capacity(MEMBER_COUNT);
 
-    progress.unit_started(Operation::Distribute, BINARY_NAME, 1, 4);
+    progress.unit_started(Operation::Distribute, BINARY_NAME, 1, MEMBER_COUNT);
     let entry = entry_path(BINARY_NAME);
     let bytes = copy_binary(&mut zip, &entry, binary, temporary)
         .map_err(|e| failed_unit(progress, BINARY_NAME, e))?;
@@ -483,11 +620,21 @@ where
         (LAUNCHER_NAME, members.launcher, 0o755),
         (EngagementConfig::FILE_NAME, members.config, 0o600),
         (README_NAME, members.readme, 0o644),
+        (
+            instructions::INSTRUCTIONS_README,
+            members.instructions,
+            0o644,
+        ),
+        (
+            instructions::ENGAGEMENT_TEMPLATE_NAME,
+            members.engagement_template,
+            0o644,
+        ),
     ]
     .into_iter()
     .enumerate()
     {
-        progress.unit_started(Operation::Distribute, name, index + 2, 4);
+        progress.unit_started(Operation::Distribute, name, index + 2, MEMBER_COUNT);
         let entry = entry_path(name);
         start(&mut zip, &entry, mode, temporary).map_err(|e| failed_unit(progress, name, e))?;
         zip.write_all(text.as_bytes()).map_err(|source| {
@@ -597,100 +744,6 @@ fn render_launcher() -> String {
     )
 }
 
-/// The README the recipient reads first.
-///
-/// Why: #5825 asks for the three commands in order and nothing else. The
-/// quarantine paragraph is here because it is the difference between a package
-/// that runs and one that produces "cannot be opened because the developer
-/// cannot be verified" — Developer-ID signing (#5484) is a separate milestone,
-/// and until it lands the recipient needs the one command that clears the flag.
-/// Test: `super::distribute_tests::the_readme_names_the_three_commands_in_order`.
-fn render_readme(config: &EngagementConfig, platform: &str, explicit_binary: bool) -> String {
-    let engagement = match (&config.client, &config.engagement) {
-        (Some(client), Some(label)) => format!("{client} — {label}"),
-        (Some(client), None) => client.clone(),
-        (None, Some(label)) => label.clone(),
-        (None, None) => "unlabelled".to_owned(),
-    };
-    let platform_line = if explicit_binary {
-        format!("- Built for: {platform} (binary supplied by the auditor)")
-    } else {
-        format!("- Built for: {platform}")
-    };
-    format!(
-        "# Audit client — {engagement}\n\
-         \n\
-         Extract this folder anywhere and run the three commands below from inside it.\n\
-         Nothing is installed into your system directories.\n\
-         \n\
-         {platform_line}\n\
-         - Configuration: `{config_file}` (readable — open it before you run anything)\n\
-         - Working directory: `{work}`, created on first run\n\
-         \n\
-         The working directory holds the clones, the collected database and the\n\
-         tooling. It is NOT inside this folder — the code analysis cannot read a\n\
-         checkout under `~/Downloads`, `~/Desktop`, `~/Documents` or a temporary\n\
-         directory, which is where this folder usually lands. Override it with\n\
-         `--work-dir <path>` if you want it somewhere else.\n\
-         \n\
-         ## 1. Register what to audit\n\
-         \n\
-         ```sh\n\
-         ./{launcher} add repo <owner>/<name>\n\
-         ./{launcher} targets\n\
-         ```\n\
-         \n\
-         Each repository is checked against your own GitHub credential before it is\n\
-         registered, so a typo is refused here rather than halfway through the audit.\n\
-         Repeat for every repository. `targets` lists what is registered.\n\
-         \n\
-         ## 2. Run the audit\n\
-         \n\
-         ```sh\n\
-         ./{launcher} run\n\
-         ```\n\
-         \n\
-         This clones the registered repositories and analyses them. It may run for\n\
-         hours and prints progress as it goes. A repository that fails does not stop\n\
-         the rest, and a re-run resumes rather than starting over.\n\
-         \n\
-         ## 3. Return the results\n\
-         \n\
-         ```sh\n\
-         ./{launcher} package\n\
-         ```\n\
-         \n\
-         This writes one zip and prints its path. Open it before you send it — it is\n\
-         unencrypted on purpose, so you can see exactly what leaves your network. It\n\
-         carries reports and metadata, and it never carries the credential in\n\
-         `{config_file}`.\n\
-         \n\
-         ## 4. Remove it afterwards\n\
-         \n\
-         ```sh\n\
-         rm -rf {work}\n\
-         trusty-search index remove <each cloned repository path>\n\
-         ```\n\
-         \n\
-         Then delete this folder. The second command matters: to analyse your code the\n\
-         client approves each clone with `trusty-search`, and that approval is recorded\n\
-         in `trusty-search`'s own settings, outside the working directory. `run` prints\n\
-         each path it approves. `trusty-search index list` shows what is approved.\n\
-         \n\
-         ## If macOS refuses to run it\n\
-         \n\
-         A zip that arrived over the network is quarantined, and this build is not yet\n\
-         notarized. Clear the flag once, from inside the extracted folder:\n\
-         \n\
-         ```sh\n\
-         xattr -dr com.apple.quarantine .\n\
-         ```\n",
-        config_file = EngagementConfig::FILE_NAME,
-        launcher = LAUNCHER_NAME,
-        work = crate::workdir::DEFAULT_ROOT_DISPLAY,
-    )
-}
-
 #[cfg(test)]
 mod distribute_tests {
     use super::*;
@@ -752,6 +805,7 @@ trusty-review = "0.16.0"
             DistributeOptions {
                 output_dir: Some(self.out.clone()),
                 binary: Some(self.binary.clone()),
+                ..DistributeOptions::default()
             }
         }
 
@@ -844,6 +898,47 @@ trusty-review = "0.16.0"
         }
     }
 
+    /// A terminal that answers every hidden read with the same key.
+    ///
+    /// Local rather than reusing `credential_tests`' fake: that one lives in
+    /// another module's `#[cfg(test)]` body and is not reachable from here.
+    /// This drives the public [`crate::cli::credential::Tty`] trait, so it
+    /// proves the same seam.
+    struct FakeTty(String);
+
+    impl FakeTty {
+        fn answering(key: &str) -> Self {
+            Self(key.to_owned())
+        }
+    }
+
+    impl crate::cli::credential::Tty for FakeTty {
+        fn read_hidden(&mut self, _prompt: &str) -> std::io::Result<String> {
+            Ok(self.0.clone())
+        }
+
+        fn read_line(&mut self, _prompt: &str) -> std::io::Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn say(&mut self, _line: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn discard_typeahead(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// One member's extracted permission bits, or `None` off Unix.
+    fn mode_of(zip_path: &Path, name: &str) -> Option<u32> {
+        let file = std::fs::File::open(zip_path).expect("open package");
+        let mut archive = zip::ZipArchive::new(file).expect("read package");
+        let member = archive.by_name(&entry_path(name)).expect("member present");
+        // `unix_mode` carries the file-type bits too (0o100755, not 0o755).
+        member.unix_mode().map(|m| m & 0o777)
+    }
+
     /// Every entry name in a written package, in order.
     fn entries(zip_path: &Path) -> Vec<String> {
         let file = std::fs::File::open(zip_path).expect("open package");
@@ -854,7 +949,7 @@ trusty-review = "0.16.0"
     }
 
     #[test]
-    fn the_package_holds_the_four_members() {
+    fn the_package_holds_every_member() {
         let fixture = Fixture::new(TEMPLATE);
         let package = fixture.assemble().expect("assembles");
 
@@ -865,9 +960,11 @@ trusty-review = "0.16.0"
                 "trusty-audit/audit.sh",
                 "trusty-audit/engagement.toml",
                 "trusty-audit/README.md",
+                "trusty-audit/instructions/README.md",
+                "trusty-audit/instructions/engagement.template.toml",
             ],
         );
-        assert_eq!(package.files.len(), 4);
+        assert_eq!(package.files.len(), MEMBER_COUNT);
         assert!(package.packaged_bytes > 0);
         assert_eq!(package.platform, host_platform());
     }
@@ -1008,15 +1105,23 @@ api_key = "lin_api_client_a"
         );
     }
 
-    /// The README's uninstall instructions are the only place the recipient
-    /// learns that the tree is not beside the launcher and that approving a
-    /// clone wrote a row outside it (#5915).
+    /// Read the instructions member out of a written package.
+    fn instructions_of(package: &InstallPackage) -> String {
+        member(
+            &package.path,
+            &entry_path(instructions::INSTRUCTIONS_README),
+        )
+    }
+
+    /// The uninstall step is the only place the recipient learns that the tree
+    /// is not beside the launcher and that approving a clone wrote a row
+    /// outside it (#5915). It moved into `instructions/` with the rest (#5483).
     #[test]
-    fn the_readme_names_where_the_work_root_is_and_how_to_undo_the_approval() {
+    fn the_instructions_name_where_the_work_root_is_and_how_to_undo_the_approval() {
         let fixture = Fixture::new(TEMPLATE);
         let package = fixture.assemble().expect("assembles");
 
-        let readme = member(&package.path, "trusty-audit/README.md");
+        let readme = instructions_of(&package);
         assert!(
             readme.contains(crate::workdir::DEFAULT_ROOT_DISPLAY),
             "{readme}"
@@ -1026,29 +1131,100 @@ api_key = "lin_api_client_a"
             !readme.contains(
                 "deleting the folder\nremoves the client, its tooling, and everything it wrote"
             ),
-            "the README still promises a complete uninstall it cannot deliver: {readme}"
+            "the instructions still promise a complete uninstall they cannot deliver: {readme}"
         );
     }
 
+    /// #5483: the recipient is walked through install, then the ONE-SHOT
+    /// `audit` verb, then `package` — not the `run` + `package` pair the old
+    /// root README named, which predated `audit` (#5824) and left a
+    /// non-technical recipient a step they could forget or run too early.
+    ///
+    /// The Full Disk Access paragraph is here for the same reason the
+    /// quarantine one is: without it the code-analysis sections render empty
+    /// and nothing on the recipient's screen says why (root `CLAUDE.md`,
+    /// "macOS TCC scope split").
     #[test]
-    fn the_readme_names_the_three_commands_in_order() {
+    fn the_instructions_name_the_one_shot_verb_and_the_disk_access_prompt() {
         let fixture = Fixture::new(TEMPLATE);
         let package = fixture.assemble().expect("assembles");
 
-        let readme = member(&package.path, "trusty-audit/README.md");
-        let add = readme
-            .find("./audit.sh add repo")
-            .expect("registers targets");
-        let run = readme.find("./audit.sh run").expect("runs the audit");
+        let readme = instructions_of(&package);
+        let install = readme.find("./audit.sh install").expect("installs tools");
+        let audit = readme.find("./audit.sh audit").expect("runs the audit");
         let ret = readme
             .find("./audit.sh package")
             .expect("returns the package");
         assert!(
-            add < run && run < ret,
-            "the three commands are out of order"
+            install < audit && audit < ret,
+            "the commands are out of order: {readme}"
+        );
+        assert!(
+            !readme.contains("./audit.sh run"),
+            "the instructions still route through the two-step run: {readme}"
         );
         assert!(readme.contains("Acme — 2026-Q3"), "{readme}");
         assert!(readme.contains("com.apple.quarantine"), "{readme}");
+        assert!(readme.contains("Full Disk Access"), "{readme}");
+        assert!(readme.contains("gh auth login"), "{readme}");
+        // "If something fails" must name where the logs are, or a stopped run
+        // leaves the recipient with nothing to send back.
+        assert!(readme.contains("/logs/"), "{readme}");
+        assert!(readme.contains(&host_platform()), "{readme}");
+    }
+
+    /// #5483: one source of truth. The root README carries the platform and the
+    /// pointer, and must not grow a second copy of the sequence.
+    #[test]
+    fn the_root_readme_points_at_the_instructions() {
+        let fixture = Fixture::new(TEMPLATE);
+        let package = fixture.assemble().expect("assembles");
+
+        let readme = member(&package.path, "trusty-audit/README.md");
+        assert!(
+            readme.contains(instructions::INSTRUCTIONS_README),
+            "{readme}"
+        );
+        assert!(readme.contains("Acme — 2026-Q3"), "{readme}");
+        assert!(readme.contains(&host_platform()), "{readme}");
+        assert!(
+            !readme.contains("./audit.sh add repo"),
+            "the root README carries the sequence again: {readme}"
+        );
+    }
+
+    /// The shipped reference must be a config the client can actually load —
+    /// an auditor copies it, fills in the pins, and hands it back to
+    /// `taudit distribute --config`.
+    #[test]
+    fn the_shipped_config_reference_is_itself_loadable() {
+        let fixture = Fixture::new(TEMPLATE);
+        let package = fixture.assemble().expect("assembles");
+
+        let text = member(
+            &package.path,
+            &entry_path(instructions::ENGAGEMENT_TEMPLATE_NAME),
+        );
+        let loaded = EngagementConfig::from_toml(&text, Path::new("engagement.template.toml"))
+            .expect("the shipped reference loads");
+        assert!(
+            loaded.openrouter_key.is_empty(),
+            "the reference must ship no credential"
+        );
+        assert_eq!(loaded.report.template.as_deref(), Some("cast"));
+        assert_eq!(loaded.report.code_only, Some(true));
+        assert_eq!(loaded.models.provider.as_deref(), Some("openrouter"));
+        assert!(loaded.models.reviewer.is_some());
+        assert!(loaded.models.verifier.is_some());
+        assert!(loaded.models.summarizer.is_some());
+        assert!(
+            loaded.unsupported_keys().is_empty(),
+            "the reference declares a key this version ignores: {:?}",
+            loaded.unsupported_keys()
+        );
+        // The commented `[[targets]]` example the operator uncomments.
+        assert!(text.contains("name_with_owner = \"acme/api\""), "{text}");
+        assert!(text.contains("name_with_owner = \"acme/web\""), "{text}");
     }
 
     #[test]
@@ -1190,6 +1366,8 @@ api_key = "lin_api_client_a"
                 config: "openrouter_key = \"sk-or-v1-x\"\n".to_owned(),
                 launcher: "#!/bin/sh\n".to_owned(),
                 readme: "# Audit client\n".to_owned(),
+                instructions: "# Running the audit\n".to_owned(),
+                engagement_template: "openrouter_key = \"\"\n".to_owned(),
             },
             &progress,
         )
@@ -1236,7 +1414,7 @@ api_key = "lin_api_client_a"
             unit_verdicts(&recorder),
             vec![(BINARY_NAME.to_owned(), "failed")],
         );
-        assert_eq!(operation_verdict(&recorder), Some((0, 4)));
+        assert_eq!(operation_verdict(&recorder), Some((0, MEMBER_COUNT)));
     }
 
     #[test]
@@ -1266,6 +1444,231 @@ api_key = "lin_api_client_a"
         assert_eq!(loaded.openrouter_key.expose(), "sk-or-v1-per-engagement");
     }
 
+    /// 🔴 #5483: the package the owner hands over carries NO credential.
+    ///
+    /// The key reaches the recipient out of band and the config carries a blank
+    /// field, which is the exact state
+    /// [`crate::cli::credential::resolve`] turns into the first-run terminal
+    /// prompt. Scanning the whole member for `sk-or-` rather than checking the
+    /// parsed field is deliberate: a key that leaked into `instructions`, a
+    /// board credential, or a comment would pass the field check and still ship.
+    #[test]
+    fn a_prompt_for_key_package_ships_no_credential() {
+        let fixture = Fixture::new(TEMPLATE);
+        let mut options = fixture.options();
+        options.prompt_for_key = true;
+
+        let package = super::assemble(&fixture.template, &options, None, &Progress::none())
+            .expect("assembles without a key");
+        assert!(package.prompts_for_key);
+        assert!(!package.key_from_environment);
+
+        for entry in [
+            EngagementConfig::FILE_NAME,
+            README_NAME,
+            instructions::INSTRUCTIONS_README,
+            instructions::ENGAGEMENT_TEMPLATE_NAME,
+        ] {
+            let text = member(&package.path, &entry_path(entry));
+            assert!(
+                !text.contains("sk-or-"),
+                "{entry} carries a credential: {text}"
+            );
+        }
+
+        // The blank field is what selects the prompt, so prove the round trip
+        // rather than only the absence.
+        let text = member(&package.path, &entry_path(EngagementConfig::FILE_NAME));
+        let loaded =
+            EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("loads");
+        assert!(loaded.openrouter_key.is_empty());
+        let resolved = crate::cli::credential::resolve(
+            None,
+            Some(&loaded.openrouter_key),
+            Path::new("engagement.toml"),
+            Some(&mut FakeTty::answering("sk-or-v1-typed-by-the-recipient")),
+        )
+        .expect("the recipient is asked");
+        assert_eq!(
+            resolved.source(),
+            crate::cli::credential::CredentialSource::Prompt
+        );
+    }
+
+    /// The flag beats a key in the environment, because it is the operator
+    /// saying not to ship one — an `OPENROUTER_API_KEY` left over from an
+    /// earlier command must not silently bake a credential into a package
+    /// built to travel without one.
+    #[test]
+    fn prompting_for_the_key_beats_a_supplied_one() {
+        let fixture = Fixture::new(TEMPLATE);
+        let mut options = fixture.options();
+        options.prompt_for_key = true;
+        let supplied = SecretKey::new("sk-or-v1-from-the-environment");
+
+        let package = super::assemble(
+            &fixture.template,
+            &options,
+            Some(&supplied),
+            &Progress::none(),
+        )
+        .expect("assembles");
+
+        let text = member(&package.path, &entry_path(EngagementConfig::FILE_NAME));
+        assert!(!text.contains("sk-or-v1-from-the-environment"), "{text}");
+        assert!(!text.contains("sk-or-v1-template-key"), "{text}");
+    }
+
+    /// The instructions must set the right expectation for the package shape —
+    /// telling a recipient with a baked-in key to wait for a prompt that never
+    /// comes is the failure this covers.
+    #[test]
+    fn a_prompt_for_key_package_tells_the_recipient_to_expect_the_prompt() {
+        // Two fixtures: `assemble` refuses to overwrite a package, so both
+        // shapes cannot be built into one output directory.
+        let asking = Fixture::new(TEMPLATE);
+        let mut options = asking.options();
+        options.prompt_for_key = true;
+        let asks = super::assemble(&asking.template, &options, None, &Progress::none())
+            .expect("assembles");
+        let asks = instructions_of(&asks);
+        assert!(asks.contains("ask for the OpenRouter key"), "{asks}");
+
+        let fixture = Fixture::new(TEMPLATE);
+        let baked = instructions_of(&fixture.assemble().expect("assembles"));
+        assert!(baked.contains("already in `../engagement.toml`"), "{baked}");
+        assert!(!baked.contains("ask for the OpenRouter key"), "{baked}");
+    }
+
+    /// #5483: `--template cast` writes the two keys that make the output a
+    /// CAST-style report (#6669), so an auditor no longer hand-edits the
+    /// template before every handoff.
+    #[test]
+    fn the_cast_preset_writes_both_report_keys() {
+        let fixture = Fixture::new(TEMPLATE);
+        let mut options = fixture.options();
+        options.report_preset = ReportPreset::Cast;
+
+        let package = super::assemble(&fixture.template, &options, None, &Progress::none())
+            .expect("assembles");
+
+        let text = member(&package.path, &entry_path(EngagementConfig::FILE_NAME));
+        let loaded =
+            EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("loads");
+        assert_eq!(loaded.report.template.as_deref(), Some("cast"));
+        assert_eq!(loaded.report.code_only, Some(true));
+        // The pair the sweep hands down to `trusty-review report`.
+        assert_eq!(loaded.report.child_env().len(), 2);
+    }
+
+    /// The default preset must change nothing, or every existing engagement's
+    /// package silently switches report.
+    #[test]
+    fn the_default_preset_leaves_the_templates_report_table_alone() {
+        let fixture = Fixture::new(TEMPLATE);
+        let package = fixture.assemble().expect("assembles");
+
+        let text = member(&package.path, &entry_path(EngagementConfig::FILE_NAME));
+        let loaded =
+            EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("loads");
+        assert_eq!(loaded.report.template, None);
+        assert_eq!(loaded.report.code_only, None);
+        assert!(loaded.report.child_env().is_empty());
+    }
+
+    /// 🔴 The acceptance case, end to end: a CAST package with no key and a
+    /// pre-populated repository list, unzipped and inspected.
+    ///
+    /// This is the shape the handover actually ships, so it is asserted as one
+    /// package rather than as three independent properties that could each hold
+    /// while the combination does not.
+    #[test]
+    fn a_cast_package_with_a_repo_list_and_no_key_carries_all_three() {
+        let fixture = Fixture::new(TEMPLATE);
+        let mut options = fixture.options();
+        options.prompt_for_key = true;
+        options.report_preset = ReportPreset::Cast;
+        let list = fixture.template.with_file_name("repos.txt");
+        std::fs::write(
+            &list,
+            "# the auditor's list\nacme/api\nhttps://github.com/acme/web.git\n",
+        )
+        .expect("write repos.txt");
+        options.repos = Some(list);
+
+        let package = super::assemble(&fixture.template, &options, None, &Progress::none())
+            .expect("assembles");
+        assert_eq!(package.declared_repos, 2);
+
+        // Both instruction members are present.
+        for entry in [
+            instructions::INSTRUCTIONS_README,
+            instructions::ENGAGEMENT_TEMPLATE_NAME,
+        ] {
+            assert!(
+                entries(&package.path).contains(&entry_path(entry)),
+                "{entry} is missing from {:?}",
+                entries(&package.path)
+            );
+        }
+
+        // The root config: CAST keys, the declared repositories, no credential.
+        let text = member(&package.path, &entry_path(EngagementConfig::FILE_NAME));
+        assert!(!text.contains("sk-or-"), "{text}");
+        let loaded =
+            EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("loads");
+        assert_eq!(loaded.report.template.as_deref(), Some("cast"));
+        assert_eq!(loaded.report.code_only, Some(true));
+        assert!(loaded.openrouter_key.is_empty());
+        assert_eq!(
+            loaded
+                .declared_targets()
+                .expect("targets are declared")
+                .iter()
+                .map(Target::id)
+                .collect::<Vec<_>>(),
+            vec!["acme/api", "acme/web"],
+        );
+
+        // `taudit audit` reads exactly that list, with no picker — the property
+        // the instructions promise.
+        assert_eq!(
+            crate::registry::engagement_targets(
+                Some(&loaded),
+                &crate::workdir::WorkDir::new(fixture.out.join("work"))
+            )
+            .expect("reads the declared list")
+            .len(),
+            2,
+        );
+
+        // The launcher is executable, and the config is not.
+        #[cfg(unix)]
+        assert_eq!(mode_of(&package.path, LAUNCHER_NAME), Some(0o755));
+        #[cfg(unix)]
+        assert_eq!(
+            mode_of(&package.path, EngagementConfig::FILE_NAME),
+            Some(0o600)
+        );
+
+        let readme = instructions_of(&package);
+        assert!(readme.contains("2 repositories"), "{readme}");
+        assert!(
+            !readme.contains("register each repository"),
+            "the instructions still send the recipient to the picker: {readme}"
+        );
+    }
+
+    /// A package with no list keeps sending the recipient to the picker, which
+    /// is the fallback rather than the default.
+    #[test]
+    fn a_package_with_a_repo_list_says_the_targets_are_already_declared() {
+        let fixture = Fixture::new(TEMPLATE);
+        let readme = instructions_of(&fixture.assemble().expect("assembles"));
+        assert!(readme.contains("register each repository"), "{readme}");
+        assert!(readme.contains("./audit.sh add repo"), "{readme}");
+    }
+
     #[test]
     fn the_default_output_directory_is_under_home() {
         let Some(home) = dirs::home_dir() else {
@@ -1283,6 +1686,7 @@ api_key = "lin_api_client_a"
         let options = DistributeOptions {
             output_dir: Some(PathBuf::from("/tmp/elsewhere")),
             binary: None,
+            ..DistributeOptions::default()
         };
         assert_eq!(
             destination(&options).expect("resolves"),
