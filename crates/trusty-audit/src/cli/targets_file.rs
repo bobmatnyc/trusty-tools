@@ -226,6 +226,98 @@ pub fn detect(config_path: &Path) -> Result<Option<Detected>, AuditError> {
     Ok(Some(Detected { specs, sources }))
 }
 
+/// Read one NAMED file as this engagement's target list (#5483).
+///
+/// Why: `taudit distribute --repos <file>` pre-populates the package's
+/// `engagement.toml` so the recipient audits a list the auditor already has
+/// rather than registering twenty repositories at a prompt. That list must be
+/// read by the same parser [`detect`] uses, or the handoff would have a second
+/// repository-list format with its own normalization and its own bugs. This is
+/// that parser, pointed at a path the operator named instead of at a fixed
+/// filename beside the config.
+///
+/// What: two shapes, both already this crate's own. A file that parses as TOML
+/// and carries a `targets` array is an `engagement.toml` — its declared targets
+/// come back verbatim, so an auditor can hand over the previous engagement's
+/// config. Anything else is read as [`REPOS_FILE`]: one `owner/name`, absolute
+/// checkout path, or GitHub URL per line, `#` starting a comment, every line
+/// normalized and validated through [`registry::parse`].
+///
+/// All-or-nothing, for the reason [`detect`] is: a list that registers
+/// nineteen of twenty repositories produces an audit that reports success over
+/// the one it never saw. Every bad line is named with its number and its own
+/// reason, so one run fixes them all.
+/// Test: `super::targets_file_tests::a_named_repo_list_reads_the_line_format`,
+/// `super::targets_file_tests::a_named_repo_list_reads_an_engagement_config`,
+/// `super::targets_file_tests::one_bad_line_refuses_a_named_repo_list`.
+///
+/// # Errors
+///
+/// [`AuditError::Read`] when the file cannot be opened;
+/// [`AuditError::TargetsFileRefused`] when any line is not a repository.
+pub fn read_repo_list(path: &Path) -> Result<Vec<registry::Target>, AuditError> {
+    let text = std::fs::read_to_string(path)
+        .map(without_bom)
+        .map_err(|source| AuditError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    // An `engagement.toml` handed over from a previous engagement. Checked
+    // first because a repos.txt is not valid TOML, so there is no file both
+    // arms could claim.
+    if let Ok(table) = toml::from_str::<toml::Table>(&text)
+        && let Some(declared) = table.get(crate::config::TARGETS_FIELD)
+    {
+        return declared
+            .clone()
+            .try_into::<Vec<registry::Target>>()
+            .map_err(|source| AuditError::Parse {
+                path: path.to_path_buf(),
+                what: "engagement targets",
+                source: Box::new(source),
+            });
+    }
+
+    let name = path.file_name().map_or_else(
+        || REPOS_FILE.to_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let mut targets = Vec::new();
+    let mut bad = Vec::new();
+    for (offset, line) in text.lines().enumerate() {
+        let Some(entry) = meaningful(line) else {
+            continue;
+        };
+        match spec_of(TargetKind::Repo, entry) {
+            // `spec_of` already proved this parses; re-parsing is how the spec
+            // becomes the `Target` the config declares, with no second charset.
+            Ok(spec) => match registry::parse(Some(TargetKind::Repo), &spec) {
+                Ok(target) => targets.push(target),
+                Err(refusal) => bad.push(BadLine {
+                    file: name.clone(),
+                    line: offset + 1,
+                    entry: entry.to_owned(),
+                    reason: refusal.to_string(),
+                }),
+            },
+            Err(reason) => bad.push(BadLine {
+                file: name.clone(),
+                line: offset + 1,
+                entry: entry.to_owned(),
+                reason,
+            }),
+        }
+    }
+    if !bad.is_empty() {
+        return Err(AuditError::TargetsFileRefused {
+            bad: BadLines(bad),
+            unreadable: UnreadableFiles(Vec::new()),
+        });
+    }
+    Ok(targets)
+}
+
 /// A targets file that is there and could not be opened (#5993).
 ///
 /// Held rather than raised so [`detect`] can decide, once both files have been
@@ -452,6 +544,66 @@ fn issue_prefix(segment: &str) -> &str {
 #[cfg(test)]
 mod targets_file_tests {
     use super::*;
+
+    /// #5483: `--repos <file>` reads the same line format `repos.txt` uses,
+    /// through the same normalizer — a URL, a `.git` suffix and a short form
+    /// all reach the same target, and a comment is skipped.
+    #[test]
+    fn a_named_repo_list_reads_the_line_format() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("client-repos.txt");
+        std::fs::write(
+            &path,
+            "# the auditor's list\nacme/api\nhttps://github.com/acme/web.git\n\n",
+        )
+        .expect("write the list");
+
+        let targets = read_repo_list(&path).expect("reads");
+        assert_eq!(
+            targets.iter().map(registry::Target::id).collect::<Vec<_>>(),
+            vec!["acme/api", "acme/web"]
+        );
+    }
+
+    /// A previous engagement's config is the other shape an auditor has to
+    /// hand, and reusing its `[[targets]]` is what keeps this from being a
+    /// second repository-list format.
+    #[test]
+    fn a_named_repo_list_reads_an_engagement_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("previous-engagement.toml");
+        std::fs::write(
+            &path,
+            "openrouter_key = \"\"\ninstructions = \"x\"\n\n\
+             [tools]\ntga = \"5.0.3\"\ntrusty-search = \"0.52.0\"\n\
+             trusty-analyze = \"0.12.5\"\ntrusty-review = \"0.31.2\"\n\n\
+             [[targets]]\nkind = \"repo\"\nname_with_owner = \"acme/api\"\n",
+        )
+        .expect("write the config");
+
+        let targets = read_repo_list(&path).expect("reads");
+        assert_eq!(
+            targets.iter().map(registry::Target::id).collect::<Vec<_>>(),
+            vec!["acme/api"]
+        );
+    }
+
+    /// All-or-nothing, for the reason [`detect`] is: a list that registers
+    /// nineteen of twenty produces an audit reporting success over the one it
+    /// never saw.
+    #[test]
+    fn one_bad_line_refuses_a_named_repo_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("client-repos.txt");
+        std::fs::write(&path, "acme/api\nnot a repository\n").expect("write the list");
+
+        let error = read_repo_list(&path).expect_err("one bad line refuses the read");
+        let AuditError::TargetsFileRefused { bad, .. } = &error else {
+            panic!("{error}");
+        };
+        assert_eq!(bad.0.len(), 1);
+        assert_eq!(bad.0[0].line, 2);
+    }
 
     /// Write `repos.txt` / `boards.txt` beside a config path and read them.
     fn detected(dir: &Path, repos: Option<&str>, boards: Option<&str>) -> Option<Detected> {

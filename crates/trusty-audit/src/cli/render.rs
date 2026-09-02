@@ -386,11 +386,24 @@ fn render_install_package(package: &InstallPackage) -> String {
     }
     // #5825: which key shipped is the one thing about this package the
     // operator cannot check by opening it without reading a credential.
-    out.push_str(if package.key_from_environment {
-        "  credential: from OPENROUTER_API_KEY\n"
-    } else {
-        "  credential: from the template config\n"
-    });
+    // #5483: a package built with --prompt-for-key shipped none at all, and
+    // saying "from the template config" for it would be a false statement about
+    // a credential, which is the one line here that has to be exact.
+    out.push_str(
+        match (package.prompts_for_key, package.key_from_environment) {
+            (true, _) => "  credential: none — the recipient is asked on first run\n",
+            (false, true) => "  credential: from OPENROUTER_API_KEY\n",
+            (false, false) => "  credential: from the template config\n",
+        },
+    );
+    // #5483: the operator confirms the list reached the package here rather
+    // than by opening the zip.
+    if package.declared_repos > 0 {
+        out.push_str(&format!(
+            "  declares {}: the recipient registers nothing\n",
+            count_of(package.declared_repos, "repository", "repositories")
+        ));
+    }
     // #5861: the template's board credentials belong to whichever engagement
     // they were set for, so they do not ship. Said out loud, because an auditor
     // whose template carries one would otherwise expect that board to collect.
