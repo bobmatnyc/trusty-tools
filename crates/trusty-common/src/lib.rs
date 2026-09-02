@@ -228,6 +228,22 @@ pub mod launchd;
 #[cfg(target_os = "macos")]
 pub mod launchd_activate;
 
+/// Pre-bootout verification of the ACTIVE launchd unit's grace window (#6590).
+/// macOS-only, like [`launchd`] itself.
+///
+/// Why: launchd applies the `ExitTimeOut` of the job it has LOADED, and re-reads
+/// the plist only at `bootstrap` — so the corrected window
+/// [`launchd::LaunchdConfig::render_plist`] writes never governs the bootout
+/// that immediately precedes the bootstrap. A host whose loaded unit predates
+/// #4393 therefore still SIGKILLs the daemon 5 s into a 55 s snapshot flush.
+/// What: [`launchd_grace::grace_verdict`] over the window launchd will really
+/// grant, plus [`launchd_grace::quiesce_job`], which stops the process with a
+/// directly-delivered SIGTERM — bounded by nothing launchd controls — so the
+/// bootout finds it already gone.
+/// Test: `cargo test -p trusty-common --features unconditional-only launchd_grace`.
+#[cfg(target_os = "macos")]
+pub mod launchd_grace;
+
 /// Canonical launchd labels for every trusty-* LaunchAgent (#4919).
 ///
 /// Why: each daemon crate, the installer's mirror table, the Makefiles, and
