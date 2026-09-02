@@ -8,9 +8,11 @@
 #   fmt      – cargo fmt --all --check (stable)
 #   clippy   – cargo clippy --workspace --all-targets -D warnings (stable, SKIP_UI_BUILD=1)
 #   test-shard – cargo nextest run --workspace, split 8 ways (stable,
-#              SKIP_UI_BUILD=1, full clone for git tests). PUSH TO MAIN AND
-#              workflow_dispatch ONLY — it does not run on pull requests; see
-#              that job's `if:` for why and for how to run it on a branch.
+#              SKIP_UI_BUILD=1, full clone for git tests, .NET SDK installed
+#              for trusty-analyze's C# Roslyn adapter tests, #1008). PUSH TO
+#              MAIN AND workflow_dispatch ONLY — it does not run on pull
+#              requests; see that job's `if:` for why and for how to run it
+#              on a branch.
 #   test-doc – cargo test --doc, on its own runner (nextest has no doctest
 #              harness, so the shards cannot run them). Same trigger scope as
 #              test-shard.
@@ -584,6 +586,23 @@ jobs:
             build-essential \
             pkg-config \
             libssl-dev
+
+      # #1008: trusty-analyze's `RoslynTool` (crates/trusty-analyze/src/core/
+      # tool_impls/csharp/mod.rs) shells out to `dotnet build` to produce SARIF
+      # diagnostics, but no job installed the .NET SDK, so
+      # tests/csharp_roslyn_integration.rs's real-build path — the only test
+      # that exercises that spawn rather than a captured SARIF fixture — was
+      # never covered. This is the only job in this workflow that actually
+      # EXECUTES trusty-analyze's tests (`test-shard` runs on push to `main` /
+      # `workflow_dispatch`, not on pull requests — see this job's own `if:`
+      # above); the PR-time `clippy` job only compiles `--all-targets` and
+      # needs no dotnet SDK to do that. 8.0.x matches the fixture project's
+      # `net8.0` TargetFramework in testdata/csharp/Fixture.csproj.
+      - name: Install .NET SDK (for trusty-analyze's C# Roslyn adapter tests)
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
 
       # The official prebuilt binary (get.nexte.st) rather than `cargo install
       # cargo-nextest`, which would compile the tool itself on every runner and
