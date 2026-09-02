@@ -787,6 +787,35 @@ fn missed_ids(bus: &PeerBus, subscription_id: u64) -> Vec<String> {
         .collect()
 }
 
+/// Wait for a drainer to report `want` envelopes, or fail rather than hang.
+///
+/// Why: the two drain-and-account tests below used to spin on `yield_now`
+/// against a 10 s wall clock, which made "did the fast subscriber keep up"
+/// a question about the runner rather than about the bus — see #6638. The
+/// count is a completion signal the drainer publishes; the timeout is a hard
+/// bound on a hang, not the thing being measured.
+/// Test: `two_subscribers_one_lagging_account_exactly`,
+/// `a_wedged_client_does_not_refuse_publishes_for_a_healthy_co_subscriber`.
+async fn await_drained(drained: &mut tokio::sync::watch::Receiver<usize>, want: usize) {
+    // Generous against the work, which is `want` in-memory queue pops: only a
+    // wedged drainer can reach it.
+    let bound = std::time::Duration::from_secs(60);
+    let caught_up = tokio::time::timeout(bound, async {
+        while *drained.borrow_and_update() < want {
+            drained
+                .changed()
+                .await
+                .expect("the drainer must outlive the accounting");
+        }
+    })
+    .await;
+    assert!(
+        caught_up.is_ok(),
+        "the drainer never reported {want}: stopped at {} after {bound:?}",
+        *drained.borrow()
+    );
+}
+
 /// Publish `count` envelopes at one instance, ignoring refusals.
 fn burst(bus: &PeerBus, sender: &CallerIdentity, instance_id: &str, count: usize) {
     for i in 0..count {
@@ -978,12 +1007,11 @@ async fn a_wedged_client_does_not_refuse_publishes_for_a_healthy_co_subscriber()
     // asserted `refused: left: 36, right: 0`.
     //
     // Condition-based, never sleep-based: the drainer parks on its inbox's own
-    // waker and the accounting proceeds the instant the count is reached. The
-    // deadline exists only so a hang reports a failure.
+    // waker, publishing counts the publisher both paces itself against and
+    // finishes on. The deadline exists only so a hang reports a failure.
     const ROUNDS: usize = CLIENT_INBOX_CAPACITY + 36;
 
     let (_dir, bus) = bus();
-    let bus = Arc::new(bus);
     let target = bus.registry().register("cto-assistant", None).unwrap();
     let healthy = Arc::new(bus.subscribe(&target.instance_id).unwrap());
     // Attached and never polled until the accounting at the end.
@@ -991,41 +1019,48 @@ async fn a_wedged_client_does_not_refuse_publishes_for_a_healthy_co_subscriber()
     let sender = registered_sender(&bus, "izzie");
 
     let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    // #6638: the drainer's running count, published where the publisher can
+    // await it. A `watch` loses no wake-up; the `yield_now` spin it replaces
+    // gave the drainer no more than the runner happened to spare.
+    let (progress, mut drained) = tokio::sync::watch::channel(0usize);
     let drainer = tokio::spawn({
         let seen = Arc::clone(&seen);
         let healthy = Arc::clone(&healthy);
         async move {
             while let Some(item) = healthy.recv().await {
                 match item {
-                    InboxItem::Envelope(envelope) => seen.lock().unwrap().push(envelope.message_id),
+                    InboxItem::Envelope(envelope) => {
+                        let drained = {
+                            let mut seen = seen.lock().unwrap();
+                            seen.push(envelope.message_id);
+                            seen.len()
+                        };
+                        let _ = progress.send(drained);
+                    }
                     InboxItem::Lagged(n) => panic!("the healthy client must never lag: {n}"),
                 }
             }
         }
     });
 
-    let (accepted, refused) = tokio::task::spawn_blocking({
-        let bus = Arc::clone(&bus);
-        let instance_id = target.instance_id.clone();
-        move || {
-            let mut accepted = Vec::new();
-            let mut refused = 0usize;
-            for i in 0..ROUNDS {
-                match bus.publish(
-                    sender.clone(),
-                    &PeerTarget::Instance(instance_id.clone()),
-                    chat(&format!("round {i}")),
-                    None,
-                ) {
-                    Ok(envelope) => accepted.push(envelope.message_id),
-                    Err(_) => refused += 1,
-                }
-            }
-            (accepted, refused)
+    let mut accepted = Vec::new();
+    let mut refused = 0usize;
+    for i in 0..ROUNDS {
+        // #6638: hold the healthy client's unread backlog under its capacity,
+        // so this publish cannot displace an envelope it has not read. Whether
+        // it stayed inside its 64 slots used to be the runner's to decide, and
+        // a shard that starved the drainer lost envelopes for good.
+        await_drained(&mut drained, (i + 1).saturating_sub(CLIENT_INBOX_CAPACITY)).await;
+        match bus.publish(
+            sender.clone(),
+            &PeerTarget::Instance(target.instance_id.clone()),
+            chat(&format!("round {i}")),
+            None,
+        ) {
+            Ok(envelope) => accepted.push(envelope.message_id),
+            Err(_) => refused += 1,
         }
-    })
-    .await
-    .unwrap();
+    }
 
     assert_eq!(
         refused, 0,
@@ -1033,16 +1068,14 @@ async fn a_wedged_client_does_not_refuse_publishes_for_a_healthy_co_subscriber()
     );
     assert_eq!(accepted.len(), ROUNDS);
 
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    while seen.lock().unwrap().len() < ROUNDS {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the healthy co-subscriber never caught up: {} of {ROUNDS}",
-            seen.lock().unwrap().len()
-        );
-        tokio::task::yield_now().await;
-    }
+    await_drained(&mut drained, ROUNDS).await;
     drainer.abort();
+
+    assert_eq!(
+        healthy.evicted_total(),
+        0,
+        "a client the publisher never outran must lose nothing"
+    );
 
     assert_eq!(
         *seen.lock().unwrap(),
@@ -1076,58 +1109,60 @@ async fn two_subscribers_one_lagging_account_exactly() {
     const ROUNDS: usize = CLIENT_INBOX_CAPACITY + 36;
 
     let (_dir, bus) = bus();
-    let bus = Arc::new(bus);
     let target = bus.registry().register("cto-assistant", None).unwrap();
     let fast = Arc::new(bus.subscribe(&target.instance_id).unwrap());
     let lagging = bus.subscribe(&target.instance_id).unwrap();
     let sender = registered_sender(&bus, "izzie");
 
     let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    // #6638: see the twin drainer above — a published count, not a yield spin.
+    let (progress, mut drained) = tokio::sync::watch::channel(0usize);
     let drainer = tokio::spawn({
         let seen = Arc::clone(&seen);
         let fast = Arc::clone(&fast);
         async move {
             while let Some(item) = fast.recv().await {
-                if let InboxItem::Envelope(envelope) = item {
-                    seen.lock().unwrap().push(envelope.message_id);
+                match item {
+                    InboxItem::Envelope(envelope) => {
+                        let drained = {
+                            let mut seen = seen.lock().unwrap();
+                            seen.push(envelope.message_id);
+                            seen.len()
+                        };
+                        let _ = progress.send(drained);
+                    }
+                    InboxItem::Lagged(n) => panic!("the fast subscriber must never lag: {n}"),
                 }
             }
         }
     });
 
-    let accepted = tokio::task::spawn_blocking({
-        let bus = Arc::clone(&bus);
-        let instance_id = target.instance_id.clone();
-        move || {
-            let mut accepted = Vec::new();
-            for i in 0..ROUNDS {
-                let envelope = bus
-                    .publish(
-                        sender.clone(),
-                        &PeerTarget::Instance(instance_id.clone()),
-                        chat(&format!("round {i}")),
-                        None,
-                    )
-                    .expect("no publish may be refused by a lagging co-subscriber");
-                accepted.push(envelope.message_id);
-            }
-            accepted
-        }
-    })
-    .await
-    .unwrap();
-
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    while seen.lock().unwrap().len() < accepted.len() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the fast subscriber never caught up: {} of {}",
-            seen.lock().unwrap().len(),
-            accepted.len()
-        );
-        tokio::task::yield_now().await;
+    let mut accepted = Vec::new();
+    for i in 0..ROUNDS {
+        // #6638: what makes this subscriber the FAST one is that the publisher
+        // waits for it, not that the runner happened to schedule it. Against
+        // the pre-fix source a starved drainer ended 12 short of 100 with 12
+        // `InboxMiss` records to match, and no deadline could recover them.
+        await_drained(&mut drained, (i + 1).saturating_sub(CLIENT_INBOX_CAPACITY)).await;
+        let envelope = bus
+            .publish(
+                sender.clone(),
+                &PeerTarget::Instance(target.instance_id.clone()),
+                chat(&format!("round {i}")),
+                None,
+            )
+            .expect("no publish may be refused by a lagging co-subscriber");
+        accepted.push(envelope.message_id);
     }
+
+    await_drained(&mut drained, accepted.len()).await;
     drainer.abort();
+
+    assert_eq!(
+        fast.evicted_total(),
+        0,
+        "a subscriber the publisher never outran must lose nothing"
+    );
 
     assert_eq!(
         *seen.lock().unwrap(),
