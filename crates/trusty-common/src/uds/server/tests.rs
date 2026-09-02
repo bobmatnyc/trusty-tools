@@ -974,7 +974,10 @@ async fn frame_of_exactly_the_budget_including_its_newline_is_accepted() {
         serve_one_frame(body.clone(), budget)
             .await
             .expect("a frame that exactly fills the budget is accepted"),
-        Served::Answered { errored: false }
+        Served::Answered {
+            errored: false,
+            liveness: false
+        }
     );
 
     match serve_one_frame(body, budget - 1).await {
@@ -1022,7 +1025,13 @@ async fn handle_connection_reports_an_error_response_as_answered() {
     .await
     .expect("a refusal is still an answer");
 
-    assert_eq!(served, Served::Answered { errored: true });
+    assert_eq!(
+        served,
+        Served::Answered {
+            errored: true,
+            liveness: false
+        }
+    );
     writer.abort();
 }
 
@@ -1042,6 +1051,19 @@ fn spawn_idle_server(
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<ServeExit>,
 ) {
+    spawn_idle_server_with(dir, idle, greeting_router())
+}
+
+/// [`spawn_idle_server`] over a caller-supplied router (#6621).
+fn spawn_idle_server_with(
+    dir: &std::path::Path,
+    idle: Duration,
+    router: RpcRouter,
+) -> (
+    std::path::PathBuf,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<ServeExit>,
+) {
     let socket = dir.join("idle.sock");
     let (tx, rx) = tokio::sync::oneshot::channel();
     let bound = socket.clone();
@@ -1049,7 +1071,7 @@ fn spawn_idle_server(
         let listener = crate::uds::bind_hardened(&bound).expect("bind");
         let exit = serve_until_idle(
             &listener,
-            Arc::new(greeting_router()),
+            Arc::new(router),
             RpcServeOptions::default(),
             async move {
                 let _ = rx.await;
@@ -1136,6 +1158,143 @@ async fn serve_until_idle_ignores_liveness_probes() {
         .expect("probes must not hold the window open")
         .expect("join");
     assert_eq!(exit, ServeExit::Idle);
+}
+
+// ── liveness METHODS do not re-arm the idle window (#6621) ──────────────────
+
+/// A router whose `health` is marked liveness and whose `greet` is not.
+///
+/// The two names are the whole experiment: same socket, same cadence, same
+/// window — only the classification differs.
+fn liveness_router() -> RpcRouter {
+    greeting_router().typed_liveness(
+        "health",
+        |_req: ()| async move { Ok(json!({ "status": "ok" })) },
+    )
+}
+
+/// How often the pollers below dial, against a 200ms window.
+///
+/// Four dials per window: a loop that credited any of them would never let the
+/// window elapse, which is the difference the two tests read.
+const POLL_CADENCE: Duration = Duration::from_millis(50);
+
+/// The idle window both tests run against.
+const POLL_WINDOW: Duration = Duration::from_millis(200);
+
+/// Dial `method` on `socket` every [`POLL_CADENCE`] until aborted.
+///
+/// A failed call is ignored rather than panicking: the server under test is
+/// expected to exit out from under this task in the liveness case, and a
+/// panicking poller would report as a test failure of its own.
+fn spawn_poller(socket: std::path::PathBuf, method: &'static str) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let request = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": {} });
+            let _ = crate::uds::send_framed_request::<_, RpcResponse>(
+                &socket,
+                &request,
+                Duration::from_secs(2),
+            )
+            .await;
+            tokio::time::sleep(POLL_CADENCE).await;
+        }
+    })
+}
+
+/// REGRESSION (#6621): `trusty-console` polled `analyze.health` every 15s
+/// against a 600s idle window, so every poll re-armed the window and the
+/// on-demand `trusty-analyze` server it was watching stayed resident for 46
+/// hours. Monitoring alone must never keep an on-demand service alive.
+///
+/// Why the cadence is four dials per window: one dial per window would leave the
+/// result depending on where the dial landed. At this rate a loop that credits
+/// the answer can never reach its deadline, so a pass is unambiguous.
+/// What: a 200ms window under a `health` call every 50ms still exits idle.
+/// Test: this is the test.
+#[tokio::test]
+async fn serve_until_idle_ignores_a_registered_liveness_method() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, handle) =
+        spawn_idle_server_with(tmp.path(), POLL_WINDOW, liveness_router());
+    await_socket(&socket).await;
+
+    let poller = spawn_poller(socket.clone(), "health");
+    let exit = tokio::time::timeout(Duration::from_secs(10), handle).await;
+    poller.abort();
+
+    let exit = exit
+        .expect("a liveness method must not re-arm the idle window")
+        .expect("join");
+    assert_eq!(exit, ServeExit::Idle);
+}
+
+/// The control for [`serve_until_idle_ignores_a_registered_liveness_method`].
+///
+/// Why it is not optional: a loop that simply stopped crediting every answer
+/// would pass that test and kill a service under a client genuinely using it.
+/// This is what says the window still moves for real work.
+/// What: the same window and the same cadence against `greet`, which is not
+/// marked — the server is still running five windows later.
+/// Test: this is the test.
+#[tokio::test]
+async fn serve_until_idle_is_held_open_by_a_non_liveness_call() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, stop, handle) = spawn_idle_server_with(tmp.path(), POLL_WINDOW, liveness_router());
+    await_socket(&socket).await;
+
+    let poller = spawn_poller(socket.clone(), "greet");
+    tokio::time::sleep(POLL_WINDOW * 5).await;
+    let still_running = !handle.is_finished();
+    poller.abort();
+
+    assert!(
+        still_running,
+        "an unmarked method's answer must still restart the idle window"
+    );
+    stop.send(()).expect("signal shutdown");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("the loop must stop on the signal")
+            .expect("join"),
+        ServeExit::Shutdown
+    );
+}
+
+/// Why: the classification is the router's, so the router is where it is
+/// asserted — a service can read back what it marked.
+/// Test: this is the test.
+#[test]
+fn liveness_names_are_sorted_and_separate_from_the_method_table() {
+    let router = liveness_router();
+    assert_eq!(router.liveness_names().collect::<Vec<_>>(), vec!["health"]);
+    assert!(
+        router.method_names().any(|m| m == "health"),
+        "a liveness method is still a registered method: {router:?}"
+    );
+}
+
+/// Why: the loop asks the router this question once per frame, so a name that
+/// was never marked must answer false even when it looks like a health check.
+/// Test: this is the test.
+#[test]
+fn frame_is_liveness_reads_the_method_name_off_the_frame() {
+    let router = liveness_router();
+    assert!(router.frame_is_liveness(&frame(1, "health", json!({}))));
+    assert!(!router.frame_is_liveness(&frame(1, "greet", json!({ "name": "ada" }))));
+    assert!(
+        !router.frame_is_liveness(b"not json at all"),
+        "a frame about to be refused is not activity either way"
+    );
+}
+
+/// Why: every router that predates #6621 marks nothing, and must not pay a
+/// second parse or change behaviour.
+/// Test: this is the test.
+#[test]
+fn frame_is_liveness_is_false_for_a_router_that_marks_nothing() {
+    assert!(!greeting_router().frame_is_liveness(&frame(1, "greet", json!({ "name": "ada" }))));
 }
 
 /// Why: `serve_until` is the no-policy path every other daemon still uses, and

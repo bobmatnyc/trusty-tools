@@ -401,6 +401,11 @@ pub async fn handle_doctor(socket: &Path, facts_path: &Path) -> Result<()> {
         }
     }
 
+    // 4. A retired LaunchAgent plist left behind by a pre-#6350 install.
+    for line in stale_unit_warnings() {
+        println!("  {} {line}", "!".yellow());
+    }
+
     println!();
     if ok {
         println!("{} all checks passed", "✓".green());
@@ -411,9 +416,91 @@ pub async fn handle_doctor(socket: &Path, facts_path: &Path) -> Result<()> {
     }
 }
 
+/// Warn about each retired LaunchAgent plist still on disk (#6621).
+///
+/// Why: #6350 retired this daemon's LaunchAgent, and `service uninstall` —
+/// which `tctl install`/`upgrade` also run unattended — unloads and DELETES it.
+/// A host that has run neither still carries `~/Library/LaunchAgents/
+/// com.trusty.analyze.plist`, and that plist declares `KeepAlive: true`: the
+/// next `launchctl load`, or the next login on a host where it is still
+/// referenced, restarts a resident daemon that fights the idle exit. Nothing
+/// told the operator it was there, so `doctor` does.
+///
+/// What: a WARN per surviving plist, never a deletion and never a failure. This
+/// function observes; `service uninstall` is the one path that removes, and the
+/// warning names it. A plist path that cannot be resolved yields no line —
+/// there is nothing to report about a home directory that does not resolve, and
+/// the data-dir check above already fails on that.
+///
+/// Test: `stale_unit_warnings_name_the_retired_labels`,
+/// `stale_unit_warning_points_at_the_uninstall_command`.
+#[cfg(target_os = "macos")]
+fn stale_unit_warnings() -> Vec<String> {
+    trusty_common::launchd_labels::retired_labels_for_member(RETIRED_MEMBER)
+        .into_iter()
+        .filter_map(|label| {
+            let path = trusty_common::launchd::user_plist_path(label).ok()?;
+            path.exists().then(|| stale_unit_warning(&path))
+        })
+        .collect()
+}
+
+/// Nothing to warn about off macOS — there are no LaunchAgents there.
+#[cfg(not(target_os = "macos"))]
+fn stale_unit_warnings() -> Vec<String> {
+    Vec::new()
+}
+
+/// The member whose retired labels [`stale_unit_warnings`] looks for.
+const RETIRED_MEMBER: &str = "trusty-analyze";
+
+/// The warning text for one surviving plist.
+///
+/// Pure, so the message contract is asserted without a home directory that
+/// happens to have one — the filesystem walk above is what varies per host.
+fn stale_unit_warning(path: &Path) -> String {
+    format!(
+        "a retired LaunchAgent is still installed: {} \
+         (it declares KeepAlive and would fight the on-demand idle exit — \
+         clear it with `trusty-analyze service uninstall`)",
+        path.display()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (#6621): the issue's host still carried
+    /// `~/Library/LaunchAgents/com.trusty.analyze.plist` from a pre-#6350
+    /// install — `KeepAlive: true`, not currently loaded, and nothing told the
+    /// operator it was there. The check is only as good as the labels it looks
+    /// for, so this is what says it looks for the right ones.
+    /// Test: this is the test.
+    #[test]
+    fn stale_unit_warnings_name_the_retired_labels() {
+        let labels = trusty_common::launchd_labels::retired_labels_for_member(RETIRED_MEMBER);
+        assert!(
+            labels.contains(&"com.trusty.analyze"),
+            "the pre-#6350 label must be one doctor looks for: {labels:?}"
+        );
+    }
+
+    /// Why: `doctor` observes and never deletes — a check that removed a plist
+    /// would be doing `service uninstall`'s job behind an operator who typed a
+    /// read-only command. The message has to hand that job back.
+    /// Test: this is the test.
+    #[test]
+    fn stale_unit_warning_points_at_the_uninstall_command() {
+        let warning = stale_unit_warning(Path::new(
+            "/Users/x/Library/LaunchAgents/com.trusty.analyze.plist",
+        ));
+        assert!(warning.contains("com.trusty.analyze.plist"), "{warning}");
+        assert!(
+            warning.contains("trusty-analyze service uninstall"),
+            "the warning must name the command that clears it: {warning}"
+        );
+    }
 
     /// REGRESSION (#6287): `start` must hand the child a bare `serve`.
     ///

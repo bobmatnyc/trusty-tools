@@ -35,6 +35,12 @@ use crate::service::handlers::{analysis, deep, facts, graph, review, system};
 /// This is the method `trusty-console`'s `AnalyzeConnector` and `tctl`'s health
 /// probe dial. Renaming it breaks both, in crates that have no Cargo edge on
 /// this one.
+///
+/// #6621: registered with [`RpcRouter::typed_liveness`], so answering it does
+/// NOT restart the idle window. Every caller of this name is a monitor, and a
+/// monitor polling faster than the window kept this daemon resident for 46
+/// hours. Any method added here that does the caller's work must be registered
+/// with the ordinary [`RpcRouter::typed`].
 pub const METHOD_HEALTH: &str = "analyze.health";
 
 /// Every method this daemon serves, in registration order.
@@ -181,7 +187,9 @@ pub fn build_router(state: AnalyzerAppState) -> RpcRouter {
     let indexes_state = state.clone();
 
     let router = RpcRouter::new()
-        .typed::<NoParams, system::HealthResponse, _, _>(METHOD_HEALTH, move |_params| {
+        // #6621: `typed_liveness`, not `typed` — answering health must not
+        // re-arm the idle window, or a console poll keeps this process resident.
+        .typed_liveness::<NoParams, system::HealthResponse, _, _>(METHOD_HEALTH, move |_params| {
             let state = health_state.clone();
             async move { Ok(system::health(&state).await) }
         })

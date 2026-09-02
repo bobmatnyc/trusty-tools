@@ -60,6 +60,29 @@ pub enum KeepAlive {
 /// with this value.
 pub const LAUNCHD_FD_LIMIT: u32 = 8192;
 
+/// Where launchd looks for `label`'s per-user agent:
+/// `~/Library/LaunchAgents/<label>.plist`.
+///
+/// Why a free function beside [`LaunchdConfig::plist_path`]: a caller asking
+/// only "is this label's plist still on disk?" — `trusty-analyze doctor`'s
+/// stale-unit check (#6621) — has a label and nothing else, and building a whole
+/// [`LaunchdConfig`] with a fabricated exe path and log dir to reach the method
+/// would be inventing four fields to read one. The method delegates here, so
+/// install, uninstall and every reader still resolve one path.
+///
+/// # Errors
+///
+/// When the home directory cannot be resolved.
+///
+/// Test: `plist_path_layout`, `user_plist_path_matches_the_config_method`.
+pub fn user_plist_path(label: &str) -> Result<PathBuf> {
+    let home = dirs::home_dir().context("could not resolve home directory")?;
+    Ok(home
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{label}.plist")))
+}
+
 /// Declarative description of a launchd LaunchAgent.
 ///
 /// Why: assembling a plist by hand is error-prone (XML escaping, key ordering,
@@ -264,11 +287,7 @@ impl LaunchdConfig {
     /// cannot be resolved.
     /// Test: `plist_path_layout`.
     pub fn plist_path(&self) -> Result<PathBuf> {
-        let home = dirs::home_dir().context("could not resolve home directory")?;
-        Ok(home
-            .join("Library")
-            .join("LaunchAgents")
-            .join(format!("{}.plist", self.label)))
+        user_plist_path(&self.label)
     }
 
     /// Install the agent: write the plist and ensure the log directory exists.
@@ -610,6 +629,18 @@ mod tests {
     fn plist_path_layout() {
         let p = sample(KeepAlive::Always).plist_path().unwrap();
         assert!(p.ends_with("Library/LaunchAgents/com.trusty.search.plist"));
+    }
+
+    /// Why (#6621): a label-only caller must resolve the SAME path an install
+    /// wrote, or a staleness check reads a file launchd never had.
+    /// Test: this is the test.
+    #[test]
+    fn user_plist_path_matches_the_config_method() {
+        let cfg = sample(KeepAlive::Always);
+        assert_eq!(
+            user_plist_path(&cfg.label).unwrap(),
+            cfg.plist_path().unwrap()
+        );
     }
 
     #[test]

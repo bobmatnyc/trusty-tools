@@ -305,6 +305,15 @@ pub enum Served {
     Answered {
         /// Whether that response carried a JSON-RPC error.
         errored: bool,
+        /// Whether the method answered was marked with
+        /// [`RpcRouter::mark_liveness`] (#6621).
+        ///
+        /// An answer to a liveness method is a monitor asking whether the
+        /// process is up. It is a real answer — the client gets its frame — but
+        /// it is not work, so [`serve_until_idle`] does not credit it as
+        /// activity. Without this, a poller dialling faster than the idle window
+        /// keeps an on-demand service resident forever.
+        liveness: bool,
     },
     /// The peer connected and closed without sending a byte.
     LivenessProbe,
@@ -363,6 +372,9 @@ pub async fn handle_connection(
         }
     }
 
+    // #6621: classified BEFORE dispatch, off the frame the loop already read.
+    let liveness = router.frame_is_liveness(&frame);
+
     let errored = match router.dispatch_streaming(&frame).await {
         RpcOutcome::Single(response) => {
             let errored = response.is_error();
@@ -391,7 +403,7 @@ pub async fn handle_connection(
                 .map_err(|source| RpcServerError::Write { source })?
         }
     };
-    Ok(Served::Answered { errored })
+    Ok(Served::Answered { errored, liveness })
 }
 
 /// Accept and serve connections until `shutdown` resolves.
@@ -539,7 +551,16 @@ async fn drain_backlog(
     };
     let mut guard = IdleTracker::connection_opened(idle);
     let served = handle_connection(stream, Arc::clone(router), options).await;
-    let answered = matches!(served, Ok(Served::Answered { .. }));
+    // #6621: a liveness method caught in the drain is served, and the exit still
+    // stands — a poller must not be able to cancel the exit any more than it can
+    // re-arm the window.
+    let answered = matches!(
+        served,
+        Ok(Served::Answered {
+            liveness: false,
+            ..
+        })
+    );
     if let Err(e) = &served {
         tracing::warn!(error = %e, "uds rpc connection failed during idle drain");
     }
@@ -663,6 +684,11 @@ async fn drain_shutdown(listener: &UnixListener, open: &Arc<IdleTracker>, budget
 /// a response, which is what keeps a liveness-probe poll loop from pinning the
 /// process alive.
 ///
+/// #6621: a response to a method registered with [`RpcRouter::mark_liveness`]
+/// does not mark the guard either. A monitor that dials a health METHOD instead
+/// of connecting and closing was otherwise indistinguishable from a client doing
+/// work, and pinned an on-demand `trusty-analyze` process resident for 46 hours.
+///
 /// #6350: an expired window does not exit immediately. [`drain_backlog`] first
 /// gives the kernel backlog [`IDLE_EXIT_DRAIN`] to yield a connection that was
 /// queued before the window elapsed; one that appears is served like any other
@@ -676,6 +702,8 @@ async fn drain_shutdown(listener: &UnixListener, open: &Arc<IdleTracker>, budget
 /// Test: `serve_until_idle_exits_when_the_window_elapses`,
 /// `serve_until_idle_is_reset_by_an_answered_request`,
 /// `serve_until_idle_ignores_liveness_probes`,
+/// `serve_until_idle_ignores_a_registered_liveness_method`,
+/// `serve_until_idle_is_held_open_by_a_non_liveness_call`,
 /// `a_client_queued_when_the_idle_window_elapses_is_served_not_reset`,
 /// `shutdown_drains_an_in_flight_connection_before_it_returns`,
 /// `shutdown_refuses_a_connection_dialled_after_the_signal`,
@@ -750,7 +778,14 @@ pub async fn serve_until_idle(
             let inner = tokio::spawn(handle_connection(stream, router, options));
             let mut guard = guard;
             match inner.await {
-                Ok(Ok(Served::Answered { .. })) => guard.answered(),
+                Ok(Ok(Served::Answered {
+                    liveness: false, ..
+                })) => guard.answered(),
+                // #6621: a liveness METHOD was answered. The client has its
+                // frame; the window is deliberately left where it was.
+                Ok(Ok(Served::Answered { .. })) => {
+                    tracing::debug!("liveness method answered; the idle window is unchanged");
+                }
                 Ok(Ok(Served::LivenessProbe)) => {
                     tracing::debug!("liveness probe connected and closed without a frame");
                 }
