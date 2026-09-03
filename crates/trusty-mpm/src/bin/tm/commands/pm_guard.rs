@@ -213,6 +213,7 @@ use crate::commands::pm_guard_bash::{
     evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
     evaluate_removal_rechecks, evaluate_worktree_add_command, evaluate_worktree_remove_command,
     extract_shell_edit_target, head_move_deny_reason, main_checkout_head_move,
+    unclassifiable_command,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_cost;
@@ -396,6 +397,20 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             .and_then(|v| v.get("command"))
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        // ABSOLUTE guard (#6660) — FIRST, ahead of every Bash rule below and
+        // ahead of Guard 4's subagent short-circuit, because it answers a
+        // question those rules all presuppose: can the guard establish what
+        // this command would run at all? Each rule below reads the command
+        // through the shared segment splitter and skips what it cannot lex, so
+        // a wrapper with unbalanced quoting, `$'…'` quoting the lexer mangles,
+        // or nesting past the descent budget silently satisfied every one of
+        // them. Placing the refusal here rather than inside each rule is what
+        // keeps a rule added later from inheriting the same hole.
+        if let Some(reason) = unclassifiable_command(command) {
+            audit_denied_tool(url, session_id, tool_name, reason).await;
+            println!("{}", build_pretooluse_deny_response(reason));
+            return Ok(());
+        }
         if let Some(reason) = evaluate_worktree_add_command(command, &hook_cwd) {
             audit_denied_tool(url, session_id, tool_name, reason).await;
             println!("{}", build_pretooluse_deny_response(reason));

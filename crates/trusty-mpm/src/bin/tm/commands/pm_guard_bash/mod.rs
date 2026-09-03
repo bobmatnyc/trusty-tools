@@ -87,14 +87,82 @@ pub(crate) const UNLEXABLE_WRAPPER_REASON: &str = "this command's `sh -c`/`bash 
      `xargs` wrapper carries an inner command with unbalanced quoting, so the guard cannot \
      classify what would actually run. Run the command without the wrapper, or fix the quoting.";
 
-/// How many wrapper layers [`split_shell_segments`] descends through (#6660).
+/// Deny reason for `$'…'`/`$"…"` quoting the guard cannot decode (#6660 review).
+pub(crate) const ANSI_C_QUOTING_REASON: &str = "this command uses `$'…'`/`$\"…\"` quoting, which \
+     the guard's lexer cannot decode — it cannot establish which program would actually run \
+     (`sh -c $'git worktree remove x'` reads as `$git`, matching no rule). Rewrite the command \
+     with ordinary `'…'` or `\"…\"` quoting.";
+
+/// Deny reason for a wrapper nested past [`MAX_WRAPPER_DEPTH`] (#6660 review).
+pub(crate) const WRAPPER_DEPTH_REASON: &str = "this command nests `sh -c`/`bash -c`/`xargs` \
+     wrappers deeper than the guard will follow, so it cannot classify what would actually run. \
+     Run the command without the nesting.";
+
+/// How many wrapper layers the guard descends through (#6660).
 ///
 /// Why: `sh -c "bash -c '…'"` is a real shape, and an adversarial one nests
-/// without bound. Each layer is strictly shorter than the one above it, so the
-/// recursion terminates on its own — the cap turns a pathological input into a
-/// bounded (and still safe-direction) partial scan rather than trusting that.
-/// What: the budget threaded through [`expand_shell_segments`].
+/// without bound. The cap bounds the recursion; exhausting it DENIES rather
+/// than falling through, matching [`MAX_SUBSTITUTION_DEPTH`] — the first cut
+/// stopped recursing instead, which made a 9-layer wrapper an allow while an
+/// 8-layer one denied.
+/// What: the budget threaded through [`unclassifiable_command`] and
+/// [`expand_shell_segments`].
 const MAX_WRAPPER_DEPTH: usize = 8;
+
+/// Whether the guard is unable to establish what `command` would run (#6660).
+///
+/// Why: the three ABSOLUTE guards a dispatched subagent actually hits —
+/// `evaluate_worktree_remove_command`, the main-checkout destructive/commit/
+/// HEAD-move rules, and `evaluate_destructive_delete_command` — are reached
+/// from `pm_guard` BEFORE `payload_is_subagent_dispatch` short-circuits, and
+/// none of them routes through [`evaluate_bash_command`]. A fail-closed check
+/// that lived only in [`classify_bash_segment`] was therefore unreachable for
+/// exactly the caller #5791/#6660 exist to bind: `sh -c "git worktree remove
+/// 'unterminated"` from a subagent was allowed. Making this ONE function the
+/// answer, called from `pm_guard`'s ABSOLUTE band ahead of every Bash rule,
+/// is what stops a future rule from inheriting the same hole.
+/// What: `Some(reason)` when any segment, at any wrapper depth, carries
+/// `$'…'`/`$"…"` quoting the lexer mangles ([`shell_lex::has_live_ansi_c_quoting`]),
+/// a wrapper whose inner command will not lex
+/// ([`shell_lex::WrappedCommand::Unlexable`]), or a wrapper nested past
+/// [`MAX_WRAPPER_DEPTH`]. `None` — the ordinary case — leaves every rule to
+/// classify the command as before.
+/// Test: `unclassifiable_command_flags_ansi_c_quoting`,
+/// `unclassifiable_command_flags_an_unlexable_wrapper`,
+/// `unclassifiable_command_denies_past_the_depth_cap`,
+/// `unclassifiable_command_allows_ordinary_commands`, and end to end in
+/// `tests/tm_hook_pm_guard.rs`.
+pub(crate) fn unclassifiable_command(command: &str) -> Option<&'static str> {
+    unclassifiable_at(command, 0)
+}
+
+/// Depth-aware core of [`unclassifiable_command`].
+fn unclassifiable_at(command: &str, depth: usize) -> Option<&'static str> {
+    for raw in split_shell_segments_raw(command) {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if shell_lex::has_live_ansi_c_quoting(trimmed) {
+            return Some(ANSI_C_QUOTING_REASON);
+        }
+        match shell_lex::wrapped_command(trimmed) {
+            shell_lex::WrappedCommand::Unlexable => return Some(UNLEXABLE_WRAPPER_REASON),
+            shell_lex::WrappedCommand::Inner(inner) => {
+                // A wrapper AT the cap is refused, not skipped: the guard has
+                // run out of budget to see what it hides.
+                if depth >= MAX_WRAPPER_DEPTH {
+                    return Some(WRAPPER_DEPTH_REASON);
+                }
+                if let Some(reason) = unclassifiable_at(&inner, depth + 1) {
+                    return Some(reason);
+                }
+            }
+            shell_lex::WrappedCommand::None => {}
+        }
+    }
+    None
+}
 
 /// Maximum command-substitution recursion depth before conservatively denying.
 ///
@@ -140,6 +208,12 @@ fn evaluate_bash_command_inner(command: &str, depth: usize) -> Option<&'static s
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return None;
+    }
+    // #6660: refuse before classifying — a command the guard cannot lex is a
+    // command it cannot clear. The same check runs in `pm_guard`'s ABSOLUTE
+    // band for the callers that never reach here.
+    if let Some(reason) = unclassifiable_command(trimmed) {
+        return Some(reason);
     }
     for segment in split_shell_segments(trimmed) {
         if let Some(reason) = classify_bash_segment(&segment, depth) {
@@ -288,11 +362,6 @@ fn classify_bash_segment(segment: &str, depth: usize) -> Option<&'static str> {
     let trimmed = segment.trim();
     if trimmed.is_empty() {
         return None;
-    }
-    // #6660: a wrapper whose inner command will not lex is a command the guard
-    // cannot classify at all — fail closed, or broken quoting is the bypass.
-    if shell_lex::wrapped_command(trimmed) == shell_lex::WrappedCommand::Unlexable {
-        return Some(UNLEXABLE_WRAPPER_REASON);
     }
     if let Some(program) = first_command_token(trimmed) {
         match program {

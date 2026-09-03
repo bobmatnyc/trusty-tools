@@ -358,20 +358,9 @@ pub fn resolve_gh_env(config: Option<&GithubConfig>) -> Result<GhEnv, GhIdentity
     }
 
     // #6668: an identity strategy that resolved must also CLEAR every other
-    // identity var the child would otherwise inherit — gh reads `GH_TOKEN`
-    // ahead of `GH_CONFIG_DIR`, so leaving the shell's token in place applies
-    // the binding and still authenticates as the wrong account. Computed
-    // before `GH_HOST` is appended so a host-only binding (which selects no
-    // identity) removes nothing and stays exactly as ambient as before.
-    let unset: Vec<String> = if vars.is_empty() {
-        Vec::new()
-    } else {
-        GH_INHERITED_IDENTITY_ENV
-            .iter()
-            .filter(|name| !vars.iter().any(|(k, _)| k == *name))
-            .map(|name| (*name).to_string())
-            .collect()
-    };
+    // identity var the child would otherwise inherit. Computed before `GH_HOST`
+    // is appended, though `inherited_identity_to_clear` would ignore it anyway.
+    let unset = inherited_identity_to_clear(&vars);
 
     // --- Host is applied independently of the identity strategy. ------------
     if let Some(host) = cfg.host.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -379,6 +368,42 @@ pub fn resolve_gh_env(config: Option<&GithubConfig>) -> Result<GhEnv, GhIdentity
     }
 
     Ok(GhEnv { vars, unset })
+}
+
+/// Which inherited identity vars a child must NOT keep, given what is set on it.
+///
+/// Why (#6668): two places bind a gh identity onto a child and neither may
+/// decide this for itself — [`resolve_gh_env`] for a `gh`/git subprocess, and
+/// `runtime::claude_code_gh_env::write_gh_env_file` for the sourced env file
+/// every managed Claude Code / tmux session starts from. The second carries
+/// only a `Vec<(String, String)>` of vars to SET, so before this function it
+/// could not express a removal at all: a daemon started from a shell that
+/// exports `GH_TOKEN` handed that token to every spawned session, outranking
+/// the project's pinned `GH_CONFIG_DIR` for the session's whole lifetime.
+/// Deriving the answer from the set-vars, in one function both callers ask,
+/// keeps the precedence rule single-sourced rather than restated per site.
+/// What: EMPTY unless `set_vars` selects an identity (`GH_CONFIG_DIR` or
+/// `GH_TOKEN`) — a host-only or informational-only binding changes nothing.
+/// Otherwise every [`GH_INHERITED_IDENTITY_ENV`] entry `set_vars` does not
+/// itself set. `GH_USER` alone does not count as selecting an identity: it is
+/// `trusty-mpm`'s own informational var, not one gh reads.
+/// Test: `binding_removes_the_inherited_identity_vars`,
+/// `absent_config_and_host_only_binding_remove_nothing`,
+/// `inherited_identity_to_clear_ignores_an_informational_only_binding`,
+/// and `gh_env_file_unsets_an_inherited_token` in
+/// `runtime::claude_code_gh_env_tests`.
+pub fn inherited_identity_to_clear(set_vars: &[(String, String)]) -> Vec<String> {
+    let selects_identity = set_vars
+        .iter()
+        .any(|(k, _)| k == ENV_GH_CONFIG_DIR || k == ENV_GH_TOKEN);
+    if !selects_identity {
+        return Vec::new();
+    }
+    GH_INHERITED_IDENTITY_ENV
+        .iter()
+        .filter(|name| !set_vars.iter().any(|(k, _)| k == *name))
+        .map(|name| (*name).to_string())
+        .collect()
 }
 
 /// Resolve the token NAMEd by `token_env` from the process environment.
@@ -494,6 +519,28 @@ mod tests {
         );
         // The var this resolution SETS is never also removed.
         assert!(!unset.contains(&ENV_GH_CONFIG_DIR));
+    }
+
+    /// Why (#6668, review HIGH): `GH_USER` is trusty-mpm's own informational
+    /// var, not one gh reads, so a binding that emits only it selects no
+    /// identity and must leave the operator's ambient token alone. This is the
+    /// case that keeps the managed-session spawn file from clearing a token it
+    /// has nothing to replace with.
+    /// Test: itself.
+    #[test]
+    fn inherited_identity_to_clear_ignores_an_informational_only_binding() {
+        assert!(
+            inherited_identity_to_clear(&[("GH_USER".to_string(), "bobmatnyc".to_string())])
+                .is_empty()
+        );
+        assert!(inherited_identity_to_clear(&[]).is_empty());
+        // A config_dir pin alongside it DOES select an identity.
+        let cleared = inherited_identity_to_clear(&[
+            (ENV_GH_CONFIG_DIR.to_string(), "/cfg".to_string()),
+            ("GH_USER".to_string(), "bobmatnyc".to_string()),
+        ]);
+        assert!(cleared.contains(&ENV_GH_TOKEN.to_string()), "{cleared:?}");
+        assert!(!cleared.contains(&"GH_USER".to_string()), "{cleared:?}");
     }
 
     /// Why (#6668): the mirror case — a `token_env` binding sets `GH_TOKEN`, so

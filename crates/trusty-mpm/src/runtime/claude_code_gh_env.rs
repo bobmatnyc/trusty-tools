@@ -57,18 +57,32 @@ fn secure_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
 /// Why: isolates the file-write step so `ClaudeCodeAdapter::spawn`/
 /// `spawn_resume` stay a one-line call; testable without touching a real
 /// tmux pane.
+/// #6668: the file also carries `unset` lines. A `GH_CONFIG_DIR` pin binds
+/// nothing while the shell that started the daemon exported another account's
+/// `GH_TOKEN` — gh reads the env token first, so every `gh` call the spawned
+/// session makes for its whole lifetime used the wrong account. Which vars
+/// must go is NOT decided here: it comes from
+/// [`crate::core::gh_identity::inherited_identity_to_clear`], the same function
+/// `resolve_gh_env` uses, so the precedence rule has one definition.
 /// What: `gh_env.is_empty()` → `None` (no file, no regression for the common
-/// unconfigured case). Otherwise writes one line per pair, single-quoting
-/// each value via the shared [`shell_single_quote`], to
-/// `<tmp>/trusty-mpm-gh-env-<uuid>.sh`; returns `None` (logged) on any write
-/// failure so the spawn proceeds without `GH_TOKEN` rather than failing.
+/// unconfigured case). Otherwise writes the `unset NAME` lines FIRST — a
+/// removal after the export would clear the var just bound — then one
+/// `export NAME='value'` line per pair, single-quoting each value via the
+/// shared [`shell_single_quote`], to `<tmp>/trusty-mpm-gh-env-<uuid>.sh`;
+/// returns `None` (logged) on any write failure so the spawn proceeds without
+/// `GH_TOKEN` rather than failing.
 /// Test: `write_gh_env_file_writes_export_lines_in_order`, `write_gh_env_file_empty_is_none`,
-/// `write_gh_env_file_is_mode_0600`.
+/// `write_gh_env_file_is_mode_0600`, `gh_env_file_unsets_an_inherited_token`,
+/// `gh_env_file_unsets_nothing_without_an_identity_binding`.
 pub(super) fn write_gh_env_file(gh_env: &[(String, String)]) -> Option<PathBuf> {
     if gh_env.is_empty() {
         return None;
     }
     let mut content = String::new();
+    // #6668: removals first, then the exports.
+    for name in crate::core::gh_identity::inherited_identity_to_clear(gh_env) {
+        content.push_str(&format!("unset {name}\n"));
+    }
     for (name, value) in gh_env {
         content.push_str(&format!("export {name}={}\n", shell_single_quote(value)));
     }

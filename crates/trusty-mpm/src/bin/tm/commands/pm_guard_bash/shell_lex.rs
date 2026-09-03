@@ -64,6 +64,35 @@ const XARGS_OPTS_WITH_ARG: &[&str] = &[
     "--process-slot-var",
 ];
 
+/// Whether `segment` contains live `$'…'` or `$"…"` quoting (#6660 review).
+///
+/// Why: `shlex` 1.3.0 does not implement bash's ANSI-C (`$'…'`) or
+/// locale-translation (`$"…"`) quoting. It drops the quotes and keeps the `$`,
+/// so `sh -c $'git worktree remove x'` tokenizes as
+/// `["sh", "-c", "$git worktree remove x"]` and the program token becomes
+/// `$git`, which matches no rule. That is a one-character bypass of every
+/// git-verb rule, wrapper or not — `git $'worktree' remove x` mangles the same
+/// way with no wrapper at all. Since the guard cannot decode the escapes, the
+/// only correct answer is to refuse to classify the segment.
+/// What: true when a `$` immediately followed by `'` or `"` appears OUTSIDE any
+/// quoted span. An unbalanced-quote segment has an untrustworthy
+/// [`QuoteScan`] map, so every such `$` reads as live — the conservative
+/// direction. A `$'` that is itself quoted (`echo "cost: $'5'"`) is literal
+/// text and is not flagged; when it sits inside a wrapper's `-c` string the
+/// caller re-scans that string on its own, where it IS live.
+/// Test: `unclassifiable_command_flags_ansi_c_quoting`,
+/// `unclassifiable_command_allows_ordinary_commands`, and end to end in
+/// `pm_guard_denies_a_wrapped_command_it_cannot_classify_via_subagent_payload`.
+pub(super) fn has_live_ansi_c_quoting(segment: &str) -> bool {
+    let scan = QuoteScan::new(segment);
+    let bytes = segment.as_bytes();
+    bytes.iter().enumerate().any(|(i, b)| {
+        *b == b'$'
+            && matches!(bytes.get(i + 1), Some(b'\'') | Some(b'"'))
+            && (!scan.balanced || scan.is_unquoted(i))
+    })
+}
+
 /// What a segment's leading wrapper hides, if anything (#6660).
 ///
 /// Why: three answers, not two. A segment that is not a wrapper classifies

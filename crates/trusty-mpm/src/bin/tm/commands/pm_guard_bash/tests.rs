@@ -1456,6 +1456,135 @@ fn an_unparseable_wrapped_command_is_denied() {
     }
 }
 
+// ── #6660 review: the three shapes that reached the ABSOLUTE guards ─────────
+
+/// Why (#6660 review, CRITICAL 2): `shlex` 1.3.0 drops the quotes of `$'…'`
+/// and keeps the `$`, so `sh -c $'git worktree remove x'` lexes to a program
+/// token of `$git` and matches no rule. The critic confirmed the live bypass
+/// against the compiled binary. The guard cannot decode the escapes, so it
+/// must refuse — and the bypass needs no wrapper, which is why the bare `git`
+/// spelling is asserted too.
+/// Test: itself.
+#[test]
+fn unclassifiable_command_flags_ansi_c_quoting() {
+    for command in [
+        "sh -c $'git worktree remove /repo/.claude/worktrees/agent-x'",
+        "bash -c $'rm -rf /repo/.claude/worktrees/agent-x'",
+        "git $'worktree' remove /repo/.claude/worktrees/agent-x",
+        "env -S $'git worktree remove x'",
+        // Inside the wrapped string, where the outer quote map reads it as
+        // literal text — the recursion re-scans it where it is live.
+        "sh -c \"git $'worktree' remove /repo/.claude/worktrees/agent-x\"",
+        "$\"git\" worktree remove x",
+    ] {
+        assert_eq!(
+            unclassifiable_command(command),
+            Some(ANSI_C_QUOTING_REASON),
+            "ANSI-C quoting must be refused: {command}"
+        );
+    }
+}
+
+/// Why (#6660 review, CRITICAL 1): the fail-closed answer has to come from a
+/// function the ABSOLUTE guards' caller reaches, not only from
+/// `evaluate_bash_command`.
+/// Test: itself.
+#[test]
+fn unclassifiable_command_flags_an_unlexable_wrapper() {
+    for command in [
+        "sh -c \"git worktree remove 'unterminated\"",
+        "bash -c 'rm -rf \"unterminated'",
+        "xargs sh -c \"git worktree remove 'x\"",
+    ] {
+        assert_eq!(
+            unclassifiable_command(command),
+            Some(UNLEXABLE_WRAPPER_REASON),
+            "an unlexable wrapper must be refused: {command}"
+        );
+    }
+}
+
+/// Why (#6660 review, CRITICAL 3): the first cut STOPPED recursing at the cap
+/// instead of denying, so 8 nested layers denied and 9 allowed. Asserted at
+/// the exact boundary the critic measured.
+/// Test: itself.
+#[test]
+fn unclassifiable_command_denies_past_the_depth_cap() {
+    /// `sh -c <cmd>` wrapped `layers` deep around `inner`, shell-quoting at
+    /// each layer so every level is a legal single token (naive alternating
+    /// quotes stop nesting correctly past two levels).
+    fn nest(inner: &str, layers: usize) -> String {
+        let mut command = inner.to_string();
+        for _ in 0..layers {
+            let quoted = shlex::try_quote(&command).expect("quotable");
+            command = format!("sh -c {quoted}");
+        }
+        command
+    }
+    let inner = "git worktree remove /repo/.claude/worktrees/agent-x";
+
+    // Within budget: resolvable, so this function has no opinion — the
+    // worktree-remove rule classifies it (asserted below).
+    for layers in 1..=MAX_WRAPPER_DEPTH {
+        let command = nest(inner, layers);
+        assert_eq!(
+            unclassifiable_command(&command),
+            None,
+            "{layers} layers are within budget: {command}"
+        );
+    }
+    // Past budget: refused, not skipped.
+    for layers in [MAX_WRAPPER_DEPTH + 1, MAX_WRAPPER_DEPTH + 4] {
+        let command = nest(inner, layers);
+        assert_eq!(
+            unclassifiable_command(&command),
+            Some(WRAPPER_DEPTH_REASON),
+            "{layers} layers exhaust the budget and must be refused"
+        );
+    }
+    // And the rule that matters still denies on both sides of the boundary,
+    // through the guard entry point a subagent actually reaches.
+    let engineer = DispatchIdentity {
+        agent_id: Some("agent-abc123"),
+        agent_type: Some("rust-engineer"),
+    };
+    for layers in [MAX_WRAPPER_DEPTH, MAX_WRAPPER_DEPTH + 1] {
+        let command = nest(inner, layers);
+        let denied = unclassifiable_command(&command).is_some()
+            || matches!(
+                evaluate_worktree_remove_command(&command, true, engineer, Path::new("/repo")),
+                WorktreeRemoveVerdict::Deny(_)
+            );
+        assert!(denied, "{layers} layers must deny: {command}");
+    }
+}
+
+/// Why (#6660 review): the refusal must not swallow ordinary work — a guard
+/// that denies `bash -c 'cargo build'` is retried differently and worse
+/// (ADR-0048 decision 6).
+/// Test: itself.
+#[test]
+fn unclassifiable_command_allows_ordinary_commands() {
+    for command in [
+        "git status --porcelain",
+        "sh -c 'git status --porcelain'",
+        "bash -c \"cargo build\"",
+        "xargs git add",
+        "cargo test -p trusty-mpm && git log --oneline -5",
+        // A `$` that is not opening ANSI-C quoting stays fine.
+        "echo $HOME",
+        "git log --format='%h $ %s'",
+        // ...including a literal `$'` that is itself quoted into prose.
+        "git commit -m \"cost: $'5' per unit\"",
+    ] {
+        assert_eq!(
+            unclassifiable_command(command),
+            None,
+            "ordinary command must not be refused: {command}"
+        );
+    }
+}
+
 /// Why (#6660): the unwrapping must not turn ordinary wrapped work into a
 /// denial — a guard that denies `bash -c 'cargo build'` is retried differently
 /// and worse (ADR-0048 decision 6).
