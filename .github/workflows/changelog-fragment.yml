@@ -43,7 +43,10 @@ jobs:
     timeout-minutes: 5
     steps:
       # fetch-depth: 0 — the gate needs `git merge-base` against the base
-      # branch, which a shallow checkout cannot resolve.
+      # branch, which a shallow checkout cannot resolve. It also brings the
+      # TAGS, which the #6695 release-window evidence path reads to tell a
+      # pending `## [<version>]` cut from released history; with no tags in the
+      # checkout that path refuses rather than assuming (fail closed).
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
@@ -75,6 +78,18 @@ jobs:
       # blame-innocent-crates behaviour.
       - name: Stale-base selftest (must refuse a pinned base.sha)
         run: bash scripts/check_changelog_base_selftest.sh
+
+      # Release-window selftest (#6695): the fragment gate and
+      # check-changelog-assembled.sh demanded opposite states of the same PR. A
+      # source fix landing between a release cut and its publish must run
+      # `assemble-changelog.sh <crate> <version> --merge`, which consumes the
+      # fragment the same commit added — and this gate then read the fold as an
+      # omission (branch fix/prepublish-doc-links-20260902, ffe03c23c). This
+      # proves both gates now pass that shape, and that the new evidence path
+      # still rejects a bullet written into an already-tagged section, a bullet
+      # outside the cut section, and a fragment left stranded.
+      - name: Release-window selftest (both changelog gates must agree)
+        run: bash scripts/check_changelog_release_window_selftest.sh
 
       # Crate-attribution selftest (#4576): the gate selected nested crate
       # source with a `case` glob whose `*` spans `/`, then extracted the crate
