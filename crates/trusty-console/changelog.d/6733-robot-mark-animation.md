@@ -1,0 +1,2 @@
+Changed
+- The console robot mark animates: the three readouts on its panel light in sequence on a 1.8s loop, and the whole unit rocks a few degrees and settles once every 16s. Both are CSS keyframes on `BrandMark.svelte`, so the header lockup, the screensaver at `/ui/screensaver` and the overview loading panel all get them from one definition; both stop under `prefers-reduced-motion: reduce`, and only `transform` and `opacity` animate, so nothing on the page moves or resizes (#6733).
