@@ -174,6 +174,14 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "fact_pm_effort",
         sql: include_str!("../sql/0027_fact_pm_effort.sql"),
     },
+    // #6748: which detector generation produced each stored AI verdict. The
+    // DEFAULT of 0 marks every pre-existing row as older than any shipped
+    // generation, so the next collect re-classifies it.
+    Migration {
+        version: 28,
+        name: "commit_detector_version",
+        sql: include_str!("../sql/0028_commit_detector_version.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
@@ -1026,5 +1034,61 @@ mod tests {
     #[test]
     fn migration_v21_is_idempotent_when_agentic_mode_already_exists() {
         crate::core::db::migrations::v21::tests::migration_v21_is_idempotent_when_agentic_mode_already_exists();
+    }
+
+    /// Why: #6748 — every deployed `tga.db` predates `ai_detector_version`, and
+    /// the whole repair depends on those rows sorting as older than the shipped
+    /// detector. A column added with any other default, or a second `run` that
+    /// re-stamped rows the first pass had already advanced, would leave the
+    /// affected corpus unrepaired or repair it on every open forever.
+    /// What: builds a real v27 database, writes a commit the v27 collector's
+    /// way, upgrades to head, and asserts the column exists at 0 with the row
+    /// intact. Then runs the migrations a second time and asserts nothing
+    /// moved — neither the column value nor the `schema_migrations` row.
+    /// Test: this test itself.
+    #[test]
+    fn migration_v28_marks_an_existing_database_as_stale_and_is_idempotent() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        super::run_through(&mut conn, 27).expect("migrate to v27");
+
+        conn.execute(
+            "INSERT INTO commits \
+             (sha, author_name, author_email, timestamp, message, repository, \
+              is_ai_assisted, ai_tool, agentic_mode) \
+             VALUES ('v27sha', 'Ada', 'ada@example.com', '2026-01-01T00:00:00Z', \
+                     ?1, 'testrepo', 0, NULL, 'none')",
+            params!["feat: x\n\nCo-Authored-By: Claude <noreply@anthropic.com>"],
+        )
+        .expect("insert v27-era commit");
+
+        // The upgrade every existing database performs on next open.
+        super::run(&mut conn).expect("migrate to head");
+
+        fn read(conn: &rusqlite::Connection) -> (i64, i64, String) {
+            conn.query_row(
+                "SELECT ai_detector_version, is_ai_assisted, agentic_mode \
+                 FROM commits WHERE sha = 'v27sha'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("read migrated row")
+        }
+        assert_eq!(
+            read(&conn),
+            (0, 0, "none".to_string()),
+            "an existing row is stale, and its stored verdict is left untouched"
+        );
+
+        // Run it twice: the second pass must be a no-op.
+        super::run(&mut conn).expect("re-run is idempotent");
+        assert_eq!(read(&conn), (0, 0, "none".to_string()));
+        let applied: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 28",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count v28 rows");
+        assert_eq!(applied, 1, "v28 is recorded exactly once");
     }
 }

@@ -1,0 +1,7 @@
+Fixed
+
+- Commits classified by an older AI detector are re-classified on the next `tga collect` instead of keeping the retired detector's verdict forever ([#6748](https://github.com/bobmatnyc/trusty-tools/issues/6748)). Around 700 commits carrying a literal AI trailer sat at `is_ai_assisted = 0` in a downstream warehouse because they were walked before the #1334 detection fix landed; the discriminator was ingest date, not message content, and the consumer could not repair them because `fact_commits` has no message column ([duettoresearch/cto-reports#140](https://github.com/duettoresearch/cto-reports/issues/140)).
+  - Migration v28 adds `commits.ai_detector_version`, defaulting to 0. Every row in an existing database therefore sorts as older than the shipped detector generation and is re-classified once; rows already at the current generation are never re-read.
+  - The pass runs in 1000-row batches, one transaction each, so an interrupted run leaves every completed batch stamped and the next `tga collect` finishes the remainder. A row's verdict and its generation are written by the same statement, so neither can be stored without the other.
+  - The count goes to stderr as one line when anything was stale, and nothing is printed when the corpus is settled. Nothing is written to stdout.
+  - `tga backfill ai-detection-commits` stamps the current generation across the slice it scanned, so a hand-run repair is not redone by the automatic pass.

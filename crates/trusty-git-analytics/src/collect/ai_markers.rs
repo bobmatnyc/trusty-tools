@@ -73,6 +73,29 @@ pub struct Detection {
     pub mode: AgenticMode,
 }
 
+/// Generation number of the shipped detector, stamped onto every row it
+/// classifies (#6748).
+///
+/// Why: `tga collect` classifies once, at walk time, and persists the verdict.
+/// When the marker set gains an entry — as it did in #1334 and again in #5249 —
+/// every row already stored keeps the verdict the old set produced, and nothing
+/// re-reads it. Roughly 700 commits carrying a literal AI trailer sat in a
+/// downstream warehouse flagged `is_ai_assisted = 0` for that reason, and the
+/// consumer could not repair them because its schema drops `commits.message`.
+/// Storing the generation beside the verdict makes "classified by an older
+/// detector" a query rather than a guess about ingest dates.
+/// What: a monotonically increasing integer. Bump it in the same change that
+/// alters what [`detect`] returns; `commits.ai_detector_version` defaults to 0,
+/// so every row written before this column existed sorts as older than any
+/// shipped generation and is re-classified on the next collect.
+///
+/// This tracks the SHIPPED marker set only. Operator markers loaded from disk
+/// by [`crate::collect::ai_marker_config`] change without a rebuild, so a row
+/// they classified is not re-visited by a version bump alone — run
+/// `tga backfill ai-detection-commits` after editing the marker file.
+/// Test: `crate::collect::reclassify::tests::stale_rows_are_reclassified_and_current_rows_are_not`.
+pub const DETECTOR_VERSION: i64 = 1;
+
 /// Classify one commit against the marker set.
 ///
 /// Why: the single detection entry point for the collection walk

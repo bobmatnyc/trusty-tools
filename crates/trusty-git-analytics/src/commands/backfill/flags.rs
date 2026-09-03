@@ -6,7 +6,7 @@
 //! makes the shared `build_commits_filter_sql` helper easy to find.
 
 use rusqlite::params;
-use tga::collect::ai_markers::{detect, CommitSignals};
+use tga::collect::ai_markers::{detect, CommitSignals, DETECTOR_VERSION};
 use tga::collect::ticket::{extract_ticket_id, is_ticketed};
 use tga::core::db::Database;
 
@@ -431,6 +431,21 @@ pub(super) fn backfill_ai_detection_commits(
         for (id, is_ai, tool, mode) in &to_update {
             up.execute(params![is_ai, tool, mode, id])?;
         }
+    }
+    // #6748: every row this pass looked at now holds the current detector's
+    // verdict, whether or not it changed — so stamp the generation across the
+    // whole filtered slice. Without this the automatic pass on the next
+    // `tga collect` would re-detect all of them again. DETECTOR_VERSION is a
+    // compile-time integer constant, so inlining it into the SQL is safe and
+    // keeps the filter's own placeholders numbered from ?1.
+    {
+        let (stamp_sql, stamp_params) = build_commits_filter_sql(
+            &format!("UPDATE commits SET ai_detector_version = {DETECTOR_VERSION}"),
+            repos_filter,
+            since,
+            until,
+        );
+        tx.execute(&stamp_sql, rusqlite::params_from_iter(stamp_params.iter()))?;
     }
     tx.commit()?;
     println!(
