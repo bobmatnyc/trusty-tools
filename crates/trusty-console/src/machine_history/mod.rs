@@ -81,10 +81,28 @@ pub const TRANSITION_LOG_CAPACITY: usize = 256;
 /// Why: `tokio::sync::broadcast` keeps one shared ring; a receiver that falls
 /// further behind than this gets `RecvError::Lagged` with the dropped count,
 /// which the stream forwards as a `lagged` event (see [`events::lagged_frame`]).
-/// 128 absorbs a browser stalling for several minutes at the 5 s cadence.
-/// What: `128`.
-/// Test: `stream::tests::a_lagging_subscriber_is_told_what_it_missed`.
-pub const EVENT_BUFFER: usize = 128;
+///
+/// The arithmetic, for the cadence actually shipped (#6642): the sampler emits
+/// TWO events per tick — one `sample` for the host and one `services` for the
+/// roster — at one tick per second. 128 events was sized when a tick was one
+/// event every 5 s, which was 640 s of slack; at 2 events per second it is 64,
+/// so a browser that stalled for barely over a minute was told it lagged.
+///
+/// `HOST_HISTORY_CAPACITY * 2` restores the intended margin AND ties it to the
+/// window: a subscriber further behind than this has missed more than the rings
+/// retain, so the channel could not have caught it up anyway — it is better
+/// served by the `lagged` frame and the full window a reconnect brings. The two
+/// numbers move together, so a later cadence change cannot leave the buffer
+/// covering a different span than the graph.
+///
+/// Transitions share the channel but are not counted: they are recorded only
+/// when a service CHANGES state, which is rare next to the per-tick pair, and a
+/// machine flapping fast enough to matter overflows
+/// [`TRANSITION_LOG_CAPACITY`] first.
+/// What: `1200` — 600 ticks of both event kinds, which is the 10-minute window.
+/// Test: `a_subscriber_stalled_for_the_whole_window_is_not_lagged`,
+/// `stream::tests::a_lagging_subscriber_is_told_what_it_missed`.
+pub const EVENT_BUFFER: usize = HOST_HISTORY_CAPACITY * 2;
 
 /// The history payload served by the endpoint and by the stream's first event.
 ///
@@ -612,6 +630,65 @@ mod tests {
         let latest = h.latest_service_cpu().await;
         assert!(!latest.contains_key("trusty-search"));
         assert_eq!(latest["trusty-mpm"], 3.0);
+    }
+
+    /// REGRESSION (#6642): a subscriber that stalls for the length of the whole
+    /// window must still receive every event rather than being told it lagged.
+    ///
+    /// Why: `EVENT_BUFFER` was 128, sized when a tick emitted ONE event every
+    /// 5 s. #6642 made a tick emit TWO events every second, which cut the slack
+    /// from 640 s to 64 s — a browser tab backgrounded for barely over a minute
+    /// came back to a `lagged` frame and a hole in its graph. This test pins the
+    /// buffer against the cadence rather than against the number 1200: it fails
+    /// on the old constant and on any future cadence change that outruns it.
+    /// What: subscribes, records 200 full ticks (400 events — comfortably past
+    /// the old 128 and inside the new 1200) WITHOUT reading, then drains and
+    /// asserts every event arrived in order with no `Lagged`.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn a_subscriber_stalled_for_the_whole_window_is_not_lagged() {
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        const TICKS: u64 = 200;
+
+        let h = MachineHistory::new();
+        let (_snap, mut rx) = h.subscribe().await;
+
+        // Two events per tick, exactly as `sampler::start` emits them.
+        for seq in 0..TICKS {
+            h.record_sample(tagged_sample(seq)).await;
+            h.record_service_samples(service_batch("trusty-search", Some(1.0), seq))
+                .await;
+        }
+
+        let mut samples = 0u64;
+        let mut batches = 0u64;
+        loop {
+            match rx.try_recv() {
+                Ok(HistoryEvent::Sample(m)) => {
+                    assert_eq!(
+                        m.sampled_at_unix,
+                        Some(samples),
+                        "samples must arrive in order with no gap"
+                    );
+                    samples += 1;
+                }
+                Ok(HistoryEvent::Services(b)) => {
+                    assert_eq!(b.sampled_at_unix, batches);
+                    batches += 1;
+                }
+                Ok(HistoryEvent::Transition(_)) => {}
+                Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+                Err(TryRecvError::Lagged(n)) => panic!(
+                    "a subscriber stalled for {TICKS} ticks ({} events) was told it lagged by \
+                     {n}; EVENT_BUFFER is {EVENT_BUFFER}, which must cover two events per tick \
+                     across the whole {HOST_HISTORY_CAPACITY}-point window",
+                    TICKS * 2
+                ),
+            }
+        }
+        assert_eq!(samples, TICKS, "every host sample survived the stall");
+        assert_eq!(batches, TICKS, "every service batch survived the stall");
     }
 
     /// Why: an operator who slows the cadence would otherwise get a graph whose
