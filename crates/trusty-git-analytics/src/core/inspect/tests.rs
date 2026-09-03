@@ -353,13 +353,29 @@ fn attest_on_a_fresh_database_is_consistent() {
 
 /// Why: a scan that cannot find a diff proves nothing about the databases where
 /// one exists — the failing arm is what makes the passing arm evidence.
-/// What: pastes a unified diff into `commits.message` and a second one into
-/// `work_items.raw_json`, then asserts both are counted and the verdict flips.
+/// What: pastes a raw unified diff into `commits.message` and a
+/// `serde_json`-serialized one into `work_items.raw_json`, then asserts BOTH
+/// are counted and the verdict flips. The `raw_json` half is what the JSON
+/// escaping fix turns from 0 to 1 — the value reaching SQLite there carries the
+/// two-character escape `\n`, not a newline byte, so a newline-anchored
+/// predicate matches nothing.
 /// Test: this test itself.
 #[test]
 fn attest_flags_a_diff_pasted_into_a_commit_message() {
     let dir = temp_dir("attest-dirty");
     let path = migrated_db(&dir);
+    // Escaped by a real serializer, so the stored bytes are whatever the
+    // collector would actually have written — never a hand-built literal that
+    // could accidentally carry a real newline and pass for the wrong reason.
+    let payload = serde_json::to_string(&serde_json::json!({
+        "description": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+    }))
+    .expect("serialize");
+    assert!(
+        !payload.contains('\n'),
+        "the fixture must carry the JSON escape, not a newline byte: {payload}"
+    );
+
     {
         let db = Database::open(&path).expect("reopen");
         db.connection()
@@ -373,7 +389,7 @@ fn attest_flags_a_diff_pasted_into_a_commit_message() {
             .execute(
                 "INSERT INTO work_items (id, source, title, status, item_type, raw_json) \
                  VALUES ('W-1', 'jira', 'T', 'Done', 'Bug', ?1)",
-                ["{\"desc\":\"--- a/x\\n+++ b/x\"}"],
+                [&payload],
             )
             .expect("insert work item");
     }
@@ -394,7 +410,79 @@ fn attest_flags_a_diff_pasted_into_a_commit_message() {
     assert_eq!(message.populated, 1);
     assert!(message.max_len > 0);
 
+    let raw_json = report
+        .scanned_columns
+        .iter()
+        .find(|s| s.table == "work_items" && s.column == "raw_json")
+        .expect("work_items.raw_json scan");
+    assert_eq!(raw_json.populated, 1);
+    assert_eq!(
+        raw_json.diff_shaped_rows, 1,
+        "a diff serialized into JSON must be counted — its newlines are the \
+         two-character escape, so the scan has to normalise before matching"
+    );
+
     assert_eq!(report.verdict, super::attest::Verdict::Findings);
+}
+
+/// Why: the probe anchors four of its five markers on a newline BYTE, and the
+/// escaped forms that carry a diff into a text column have none. Each row below
+/// is a way a diff has actually reached a column, plus the prose that must NOT
+/// match — without the last one, normalising could be made to pass by widening
+/// the markers until everything matches.
+/// What: writes each fixture into `commits.message`, attests, and asserts the
+/// per-row verdict.
+/// Test: this test itself.
+#[test]
+fn diff_probe_normalises_json_escaped_newlines() {
+    let cases: &[(&str, &str, i64)] = &[
+        ("raw", "fix\n\ndiff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n", 1),
+        // JSON escaping: the byte sequence backslash-n, not a newline.
+        (
+            "json_lf",
+            r#"{"description":"--- a/x\n+++ b/x\n@@ -1 +1 @@"}"#,
+            1,
+        ),
+        // A Windows-authored diff serialized the same way.
+        (
+            "json_crlf",
+            r#"{"description":"--- a/x\r\n+++ b/x\r\n@@ -1 +1 @@"}"#,
+            1,
+        ),
+        // Prose that name-drops the markers mid-line must stay uncounted.
+        (
+            "prose",
+            "Reviewed the @@ hunk headers and the --- a/ prefix in passing",
+            0,
+        ),
+    ];
+
+    for (label, message, expected) in cases {
+        let dir = temp_dir(&format!("probe-{label}"));
+        let path = migrated_db(&dir);
+        {
+            let db = Database::open(&path).expect("reopen");
+            db.connection()
+                .execute(
+                    "INSERT INTO commits (sha, author_name, author_email, timestamp, message, repository) \
+                     VALUES ('s1', 'Ada', 'ada@example.com', '2026-01-01T00:00:00Z', ?1, 'r')",
+                    [message],
+                )
+                .expect("insert");
+        }
+        let conn = open_read_only(&path).expect("open");
+        let snap = snapshot(&conn).expect("snapshot");
+        let report = attest(&conn, &snap).expect("attest");
+        let scan = report
+            .scanned_columns
+            .iter()
+            .find(|s| s.table == "commits" && s.column == "message")
+            .expect("commits.message scan");
+        assert_eq!(
+            scan.diff_shaped_rows, *expected,
+            "case {label}: expected {expected} diff-shaped row(s) for {message:?}"
+        );
+    }
 }
 
 // ─── The enforced diff_for_commit caller check ────────────────────────────────

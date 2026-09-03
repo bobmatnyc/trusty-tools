@@ -15,7 +15,14 @@ Added
   quotes these two strings rather than paraphrasing them.
 - `work_items.raw_json` is read at runtime rather than cited from
   `0005_work_items.sql`. Today's writer serializes a struct with no description
-  field, but that is a property of the writer, not of the column.
+  field, but that is a property of the writer, not of the column. The diff probe
+  unescapes JSON line breaks before matching, because a diff serialized into
+  that column carries the two-character `\n` escape rather than a newline byte —
+  four of the five markers anchor on a real line start and would otherwise miss
+  the one column the attestation most needs to read. The probe reads plain text
+  and that escaping; a base64-encoded or compressed diff reads as opaque text
+  and is not counted, which is part of why the "not a claim that the database
+  contains no code" caveat is not optional.
 - Both subcommands open the database read-only and refuse a missing path, a
   directory, or a non-SQLite file, each naming the cause. The shared
   `Database::open` would have CREATED and migrated a missing file, so an

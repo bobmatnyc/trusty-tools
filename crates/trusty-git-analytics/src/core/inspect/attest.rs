@@ -9,6 +9,13 @@
 //! DOC-67 §10 quotes. [`attest`] pairs them with a scan for content-bearing
 //! columns, a runtime read of every free-text column, and the pinned inventory
 //! of [`DIFF_TEXT_CONSUMERS`].
+//!
+//! What the diff probe reaches: plain text, and the common text transforms that
+//! carry a diff into a text column — today, JSON escaping of line breaks (see
+//! `unescaped_newlines`). It is a detector, not a decision procedure. A diff
+//! that arrives base64-encoded, compressed, or otherwise obfuscated reads as
+//! opaque text and is not counted, which is one of the reasons
+//! [`NOT_A_NO_CODE_CLAIM`] travels with the claim rather than being optional.
 //! Test: `core::inspect::tests`.
 
 use rusqlite::Connection;
@@ -238,7 +245,8 @@ fn content_reason(name: &str, declared_type: &str) -> Option<String> {
 ///
 /// Each is anchored so an ordinary sentence cannot match: a hunk header and the
 /// two file headers must start a line, and `diff --git` is distinctive on its
-/// own. `char(10)` is the newline SQLite has no escape for.
+/// own. `char(10)` is the newline SQLite has no escape for. Every one is
+/// matched against [`unescaped_newlines`], not against the raw column.
 const DIFF_MARKER_PREDICATES: &[&str] = &[
     "LIKE '%diff --git %'",
     "LIKE '%' || char(10) || '@@ %'",
@@ -246,6 +254,27 @@ const DIFF_MARKER_PREDICATES: &[&str] = &[
     "LIKE '%' || char(10) || '--- a/%'",
     "LIKE '%' || char(10) || '+++ b/%'",
 ];
+
+/// A SQL expression for `column` with JSON-escaped line breaks turned back into
+/// real newline bytes.
+///
+/// Why: #5218 — four of the five markers above anchor on a newline BYTE, and a
+/// diff serialized into a JSON column never has one. `work_items.raw_json` is
+/// the column the attestation most needs to read, and every marker except
+/// `diff --git ` silently missed it: a diff stored as `{"d":"--- a/x\n+++ b/x"}`
+/// carries the two-character escape, so the scan reported zero and the
+/// attestation said "consistent".
+/// What: rewrites `\r\n` then `\n` — as `char(92)`, the backslash, followed by
+/// `char(114)`/`char(110)` — into `char(10)`, so the anchored markers see line
+/// starts. The longer sequence is replaced first, or its trailing `\n` would be
+/// consumed and leave a stray `\r`.
+/// Test: `core::inspect::tests::attest_flags_a_diff_pasted_into_a_commit_message`,
+/// `core::inspect::tests::diff_probe_normalises_json_escaped_newlines`.
+fn unescaped_newlines(column: &str) -> String {
+    let crlf = "char(92) || char(114) || char(92) || char(110)";
+    let lf = "char(92) || char(110)";
+    format!("REPLACE(REPLACE(\"{column}\", {crlf}, char(10)), {lf}, char(10))")
+}
 
 /// Read one column's live counts and diff-marker hits.
 fn scan_column(
@@ -272,9 +301,12 @@ fn scan_column(
         )
         .map_err(TgaError::from)?;
 
+    // #5218: match the unescaped form, so a diff serialized into a JSON column
+    // is seen. Computed once and reused across the five markers.
+    let scanned = unescaped_newlines(&c);
     let predicate = DIFF_MARKER_PREDICATES
         .iter()
-        .map(|p| format!("\"{c}\" {p}"))
+        .map(|p| format!("{scanned} {p}"))
         .collect::<Vec<_>>()
         .join(" OR ");
     let diff_shaped_rows: i64 = conn
