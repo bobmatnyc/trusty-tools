@@ -1013,6 +1013,37 @@ mod shutdown_reaper_tests {
         (state, dir)
     }
 
+    /// RAII guard restoring `$HOME` on drop, panic included (#6663).
+    ///
+    /// A copy of `session_manager::naming_tests`'s guard rather than a shared
+    /// one: module-private visibility does not cross sibling module trees, and
+    /// several other test modules in this crate carry the same copy for the
+    /// same reason. Callers MUST be `#[serial_test::serial]` — the guard makes
+    /// the mutation reversible, not atomic, and ~20 tests in this binary write
+    /// `$HOME`.
+    /// Test: used by
+    /// `orphan_gc_loop_leaves_the_home_session_dirs_alone_on_a_scratch_root`.
+    struct HomeGuard(Option<String>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: paired with `#[serial_test::serial]` — no other thread
+            // reads or writes the environment concurrently.
+            match self.0 {
+                Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
+    /// Point `$HOME` at `home` until the returned guard drops. Callers MUST be
+    /// `#[serial_test::serial]` — see [`HomeGuard`].
+    fn set_home(home: &std::path::Path) -> HomeGuard {
+        let prior = std::env::var("HOME").ok();
+        // SAFETY: serialized via `#[serial_test::serial]`.
+        unsafe { std::env::set_var("HOME", home) };
+        HomeGuard(prior)
+    }
+
     /// A tmux-origin session whose tmux name is certainly not live.
     fn dead_session() -> crate::core::session::Session {
         use crate::core::session::{ControlModel, Session, SessionId, SessionStatus};
@@ -1159,17 +1190,44 @@ mod shutdown_reaper_tests {
     /// tick of this loop. Unlike
     /// `orphan_gc_loop_ticks_cleanly_on_a_scratch_framework_root`, this test is
     /// DISCRIMINATING: it fails against that revision.
-    /// What: plants an empty UUID-named directory under the real home sessions
-    /// dir, drives one tick on a scratch-rooted state, and asserts the canary
-    /// survived. Two independent things must hold for that: the sweep resolves
-    /// `state.framework_root()` rather than the home directory, and it sits
-    /// below the host-state gate.
+    /// What: plants an empty UUID-named directory under the sessions dir of a
+    /// `$HOME` this test owns, drives the loop on a scratch-rooted state, and
+    /// asserts the canary survived. Two independent things must hold for that:
+    /// the sweep resolves `state.framework_root()` rather than the home
+    /// directory, and it sits below the host-state gate.
+    ///
+    /// #6663: the canary used to be planted under `dirs::home_dir()`, i.e. the
+    /// ambient `$HOME`. About twenty tests in this same lib binary redirect
+    /// `$HOME` to a `TempDir`, so a canary planted while one of those overrides
+    /// was live landed inside that fixture's directory and was deleted by its
+    /// `Drop` — the loop under test never touched it. Owning `$HOME` here makes
+    /// the canary's parent a directory this test holds for its whole duration,
+    /// so no sibling's cleanup can reach it. A sibling that clobbers `$HOME`
+    /// mid-test can now only send a BUGGY sweep somewhere else, which loses
+    /// discrimination rather than failing; under `cargo nextest` (one process
+    /// per test, the CI shards) even that cannot happen.
+    ///
+    /// The redirect is reversible and serialized — [`set_home`] plus
+    /// `#[serial_test::serial]`. Leaving `$HOME` pointing at this test's
+    /// `TempDir` after it returns would hand every later test in the binary a
+    /// deleted home, which is a worse fault than the one being fixed.
+    ///
+    /// This is the ONE test here that leaves the inherited-`$HOME` quadrant
+    /// `scratch_root_state` documents, and it stays discriminating anyway: the
+    /// revision this guards against swept ABOVE the host-state gate, so which
+    /// arm of that gate refuses does not decide the outcome — whether the sweep
+    /// resolved the home directory does.
     /// Test: this is the test.
     #[tokio::test]
+    #[serial_test::serial]
     async fn orphan_gc_loop_leaves_the_home_session_dirs_alone_on_a_scratch_root() {
-        let Some(home) = dirs::home_dir() else {
-            return; // No home to protect; nothing to assert.
-        };
+        // #6663: a `$HOME` this test owns, not the operator's. Declared BEFORE
+        // the guard so the guard drops FIRST — `$HOME` is restored while this
+        // directory still exists, never left naming a removed path.
+        let home_dir = tempfile::tempdir().expect("scratch home");
+        let home = home_dir.path().to_path_buf();
+        let _home = set_home(&home);
+
         let (state, dir) = scratch_root_state();
         assert!(
             host_state_refusal(&state).is_some(),
@@ -1182,7 +1240,7 @@ mod shutdown_reaper_tests {
         );
 
         // A canary the sweep would find reclaimable: empty, hyphenated-UUID
-        // named, directly under the real home sessions dir.
+        // named, directly under the home sessions dir.
         let canary = crate::core::session_store::sessions_root_in(&home)
             .join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(&canary).expect("plant the canary");
@@ -1192,17 +1250,28 @@ mod shutdown_reaper_tests {
             Arc::clone(&state),
             cancel.child_token(),
         ));
-        // `tokio::time::interval` fires its first tick immediately.
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        // #6663: poll for the failure instead of sleeping a fixed 250 ms and
+        // looking once. `tokio::time::interval` fires its first tick
+        // immediately, so a correct loop has already refused long before the
+        // budget expires, while a loaded machine gets the whole budget to get
+        // round to a tick that a fixed wait would have missed.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut survived = true;
+        while std::time::Instant::now() < deadline {
+            if !canary.is_dir() {
+                survived = false;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
         cancel.cancel();
         handle.await.expect("orphan_gc_loop must not panic");
 
-        let survived = canary.is_dir();
         // Clean up before asserting, so a failure does not also leave litter.
         let _ = std::fs::remove_dir(&canary);
         assert!(
             survived,
-            "a scratch-rooted daemon deleted {} out of the operator's real home",
+            "a scratch-rooted daemon deleted {} out of the home session tree",
             canary.display()
         );
     }

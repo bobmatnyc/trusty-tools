@@ -18,6 +18,11 @@
 use std::future::IntoFuture;
 use std::sync::Arc;
 
+// #6671: `DaemonState::project_registry()` seeds from
+// `~/.trusty-tools/trusty-mpm/config.yaml`, so an isolated framework root is not
+// enough — this target must own its `$HOME` too.
+mod common;
+
 use trusty_mpm::daemon::{api, state::DaemonState};
 use trusty_mpm::deliverable::{
     Deliverable, DeliverableId, DeliverableKind, DeliverableStatus, EstimationTier,
@@ -25,6 +30,17 @@ use trusty_mpm::deliverable::{
 use trusty_mpm::project::Project;
 use trusty_mpm::runtime::RuntimeKind;
 use trusty_mpm::session_manager::ManagedSessionId;
+
+/// A daemon state on a scratch framework root AND a scratch `$HOME` (#6671).
+///
+/// Why both: `with_root_isolated_managed` isolates the framework root, but the
+/// registry additionally seeds itself from the config file under `$HOME`, so a
+/// root-only fixture still reports the developer's registered projects.
+async fn isolated_state() -> Arc<DaemonState> {
+    common::scratch_home();
+    let root = tempfile::tempdir().unwrap().keep();
+    Arc::new(DaemonState::with_root_isolated_managed(root).await)
+}
 
 /// Serve the real router on an ephemeral loopback port; return its base URL.
 async fn serve(state: Arc<DaemonState>) -> String {
@@ -109,8 +125,7 @@ async fn seed_deliverable(state: &Arc<DaemonState>, project_name: &str, status: 
 /// in a default build with no `manager-memory` feature, per the §4 degrade bar).
 #[tokio::test]
 async fn manager_version_route_reports_capabilities() {
-    let root = tempfile::tempdir().unwrap().keep();
-    let state = Arc::new(DaemonState::with_root_isolated_managed(root).await);
+    let state = isolated_state().await;
     let base = serve(Arc::clone(&state)).await;
 
     let resp = reqwest::Client::new()
@@ -180,8 +195,7 @@ async fn manager_version_route_reports_capabilities() {
 /// name — the thing L2 cannot do, with no LLM call.
 #[tokio::test]
 async fn manager_status_route_rolls_up_all_projects() {
-    let root = tempfile::tempdir().unwrap().keep();
-    let state = Arc::new(DaemonState::with_root_isolated_managed(root).await);
+    let state = isolated_state().await;
 
     let beta_url = "https://github.com/acme/beta";
     let alpha_url = "https://github.com/acme/alpha";
@@ -231,8 +245,7 @@ async fn manager_status_route_rolls_up_all_projects() {
 /// is registered.
 #[tokio::test]
 async fn manager_status_route_empty_portfolio() {
-    let root = tempfile::tempdir().unwrap().keep();
-    let state = Arc::new(DaemonState::with_root_isolated_managed(root).await);
+    let state = isolated_state().await;
     let base = serve(Arc::clone(&state)).await;
 
     let resp = reqwest::Client::new()

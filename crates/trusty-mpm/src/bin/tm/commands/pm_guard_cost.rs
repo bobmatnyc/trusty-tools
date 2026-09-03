@@ -550,7 +550,21 @@ mod tests {
             "transcript_path": parent.to_str().expect("utf8"),
             "agent_id": "huge",
         });
-        let (status, tokens) = evaluate_agent_cost(&payload, &opted_in_stop()).await;
+        // #6663: `evaluate_agent_cost` wraps BOTH tail reads in one 200 ms
+        // `EVAL_TIMEOUT`, and this fixture is ~600 KiB read twice. Under a
+        // loaded `--no-fail-fast` run that budget expired, the guard failed
+        // open, and the test saw `(Ok, 0)` — a timing loss, not a behaviour
+        // change. Retrying is sound because the call is a pure read with no
+        // side effect, so an attempt that timed out changed nothing. The
+        // assertion is unchanged: the record must be found, and a guard that
+        // genuinely could not find it still fails at the deadline.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut measured = evaluate_agent_cost(&payload, &opted_in_stop()).await;
+        while measured == (BudgetStatus::Ok, 0) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            measured = evaluate_agent_cost(&payload, &opted_in_stop()).await;
+        }
+        let (status, tokens) = measured;
         assert_eq!(tokens, 500_000, "the larger window must find the record");
         assert_eq!(status, BudgetStatus::Exceeded);
     }

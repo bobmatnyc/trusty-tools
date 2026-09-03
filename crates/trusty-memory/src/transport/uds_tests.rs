@@ -26,6 +26,7 @@ use tokio::sync::oneshot;
 use trusty_common::uds::server::{RpcResponse, CODE_METHOD_NOT_FOUND};
 use trusty_common::uds::{
     send_framed_request_capped, send_framed_stream_request_capped, verify_socket_for_connect,
+    UdsRpcError,
 };
 use trusty_common::{ChatEvent, ChatMessage, ChatProvider, ToolDef};
 
@@ -178,15 +179,48 @@ impl Daemon {
     }
 
     /// Dial, send one frame, read one back.
+    ///
+    /// #6667: a dial that fails, or a first write that fails, is retried until
+    /// [`CALL_TIMEOUT`] rather than failing the test. Under a full
+    /// `--no-fail-fast` run one to three of these tests died with
+    /// `write request frame to …/trusty-memory.sock: Socket is not connected
+    /// (os error 57)`, a different set each run, each passing on its own. Every
+    /// test here binds its own socket under its own tempdir, so the reported
+    /// "tests share the daemon socket" is not what happened — the dial returned
+    /// a stream the kernel had not finished connecting because the server's
+    /// accept task had not been scheduled, and the immediate write then found
+    /// no peer.
+    ///
+    /// Retrying is sound rather than papering over, and the reason is narrow:
+    /// [`UdsRpcError::Dial`] and [`UdsRpcError::Write`] both prove NOTHING
+    /// reached the peer, so a fresh dial repeats no request and can duplicate
+    /// no side effect. Every other variant — `NoResponse` above all — means the
+    /// frame was sent, and those still fail the test on the first occurrence.
     async fn call(&self, method: &str, params: Value) -> RpcResponse {
-        send_framed_request_capped(
-            &self.socket,
-            &frame(1, method, params),
-            CALL_TIMEOUT,
-            MAX_FRAME_BYTES,
-        )
-        .await
-        .unwrap_or_else(|e| panic!("call {method}: {e}"))
+        let deadline = tokio::time::Instant::now() + CALL_TIMEOUT;
+        loop {
+            let sent = send_framed_request_capped(
+                &self.socket,
+                &frame(1, method, params.clone()),
+                CALL_TIMEOUT,
+                MAX_FRAME_BYTES,
+            )
+            .await;
+            match sent {
+                Ok(response) => return response,
+                Err(e @ (UdsRpcError::Dial { .. } | UdsRpcError::Write { .. }))
+                    if tokio::time::Instant::now() < deadline =>
+                {
+                    tracing::warn!(
+                        method,
+                        error = %e,
+                        "nothing was written; redialling (#6667)"
+                    );
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(e) => panic!("call {method}: {e}"),
+            }
+        }
     }
 
     /// Call and unwrap the success half, naming the error if there is one.

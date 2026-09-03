@@ -24,6 +24,11 @@ use trusty_mpm::daemon::managed_routes::{SpawnParams, spawn_managed};
 use trusty_mpm::daemon::state::DaemonState;
 use trusty_mpm::project::Project;
 
+// #6671: `spawn_managed` reaches `DaemonState::project_registry()`, which seeds
+// from the config file under `$HOME`, so an isolated framework root alone still
+// admits the developer's registered projects.
+mod common;
+
 /// Env var the daemon reads to force-enable MCP spawning (mirrors
 /// `daemon::managed_routes::mcp_spawn_gate::ALLOW_MCP_SPAWN_ENV`, duplicated
 /// here as a literal so this test file has no dependency on that private
@@ -100,6 +105,7 @@ fn base_params(repo_url: &str, mcp_initiated: bool) -> SpawnParams {
 async fn mcp_initiated_spawn_rejected_by_default_creates_nothing() {
     let _env = EnvGuard::unset();
 
+    common::scratch_home(); // #6671
     let root = TempDir::new().expect("root tempdir");
     let state = std::sync::Arc::new(
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
@@ -136,6 +142,7 @@ async fn mcp_initiated_spawn_rejected_by_default_creates_nothing() {
 async fn mcp_initiated_spawn_rejected_for_unregistered_repo_when_enabled() {
     let _env = EnvGuard::set("1");
 
+    common::scratch_home(); // #6671
     let root = TempDir::new().expect("root tempdir");
     let state = std::sync::Arc::new(
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
@@ -177,6 +184,7 @@ async fn mcp_initiated_spawn_rejected_for_unregistered_repo_when_enabled() {
 async fn mcp_initiated_spawn_rejects_repo_name_impersonation() {
     let _env = EnvGuard::set("1");
 
+    common::scratch_home(); // #6671
     let root = TempDir::new().expect("root tempdir");
     let state = std::sync::Arc::new(
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
@@ -235,6 +243,7 @@ async fn mcp_initiated_spawn_rejects_repo_name_impersonation() {
 async fn mcp_initiated_spawn_allowed_for_registered_project_reaches_provisioning() {
     let _env = EnvGuard::set("1");
 
+    common::scratch_home(); // #6671
     let root = TempDir::new().expect("root tempdir");
     let state = std::sync::Arc::new(
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
@@ -297,6 +306,7 @@ async fn mcp_initiated_spawn_allowed_for_registered_project_reaches_provisioning
 async fn cli_origin_spawn_bypasses_mcp_gate_even_when_disabled() {
     let _env = EnvGuard::unset();
 
+    common::scratch_home(); // #6671
     let root = TempDir::new().expect("root tempdir");
     let state = std::sync::Arc::new(
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,

@@ -21,7 +21,9 @@ name = "trusty-mpm"
 # #6579) edit `src/**` under it. Bumped on `main` first so the
 # `PR version bump vs crates.io` gate clears once each PR updates its branch
 # onto this commit.
-version = "1.5.16"
+# 1.5.17 (refs #6671, #6663, #6667, #6661): patch — test-flake stabilization
+# changes in the test suite under an already-published version.
+version = "1.5.17"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

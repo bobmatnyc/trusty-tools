@@ -30,11 +30,16 @@ use trusty_mpm::daemon::{api, state::DaemonState};
 use trusty_mpm::deliverable::{DeliverableKind, DeliverableStatus, EstimationTier};
 use trusty_mpm::project::Project;
 
+// #6671: the project registry seeds from the config file under `$HOME`, so this
+// target must own its `$HOME` as well as its framework root.
+mod common;
+
 /// Bind the real router on an ephemeral loopback port; return a client plus the
 /// backing [`DaemonState`] (some tests need to seed the store directly, bypassing
 /// HTTP, to set up state the HTTP request body cannot express — e.g. the
 /// per-project `github`/commit identity binding, #2184).
 async fn serve_with_state() -> (DaemonClient, Arc<DaemonState>) {
+    common::scratch_home(); // #6671
     let root = tempfile::tempdir().unwrap().keep();
     let state = Arc::new(DaemonState::with_root_isolated_managed(root).await);
     let router = api::router(Arc::clone(&state));
@@ -54,6 +59,7 @@ async fn serve() -> DaemonClient {
 /// must send a raw wire body the typed [`DaemonClient`] methods cannot
 /// express — `DaemonClient`'s `base` field is crate-private).
 async fn serve_with_base() -> (DaemonClient, String) {
+    common::scratch_home(); // #6671
     let root = tempfile::tempdir().unwrap().keep();
     let state = Arc::new(DaemonState::with_root_isolated_managed(root).await);
     let router = api::router(Arc::clone(&state));

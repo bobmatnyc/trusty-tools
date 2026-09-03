@@ -37,6 +37,9 @@ use trusty_mpm::project::Project;
 use trusty_mpm::runtime::RuntimeKind;
 use trusty_mpm::session_manager::ManagedSessionId;
 
+// #6671: the project registry seeds from the config file under `$HOME`.
+mod common;
+
 /// Serve the real router on an ephemeral loopback port; return its base URL.
 async fn serve(state: Arc<DaemonState>) -> String {
     let router = api::router(state);
@@ -48,6 +51,7 @@ async fn serve(state: Arc<DaemonState>) -> String {
 
 /// A fresh, hermetic daemon state under a temp framework root.
 async fn fresh_state() -> Arc<DaemonState> {
+    common::scratch_home(); // #6671
     let root = tempfile::tempdir().unwrap().keep();
     Arc::new(DaemonState::with_root_isolated_managed(root).await)
 }
