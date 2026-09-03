@@ -10,7 +10,7 @@ name = "trusty-audit"
 # the cut ships as 0.13.1 with that fragment folded in. This bump also carries
 # the `[tools]` pin refresh in templates/engagement.template.toml onto the
 # versions this cut publishes. No public API change.
-version = "0.13.2"
+version = "0.13.3"
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"
