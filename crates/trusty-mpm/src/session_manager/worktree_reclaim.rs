@@ -46,6 +46,10 @@ use super::worktree_reclaim_gh::{
 };
 use super::worktree_registry::{Admission, HarnessLockState, harness_lock_state};
 use super::worktree_safety::DirtyWorktree;
+// #6507: the verdict vocabulary lives next door so this file stays under the
+// SLOC cap; the re-export keeps every call site (and `super::*` in the tests)
+// unchanged.
+pub(crate) use super::worktree_reclaim_verdict::{ReclaimGate, ReclaimVerdict};
 
 /// Resolves the delegation registry's answer for the agent a sentinel names.
 ///
@@ -422,9 +426,24 @@ pub(crate) fn pr_state_for_branch(registry_root: &Path, branch: &str) -> BranchP
         .args(["--json", PR_JSON_FIELDS]);
     match run_with_timeout(cmd, GH_TIMEOUT) {
         Ok(stdout) => PrIndex::from_json(&stdout, PER_BRANCH_LIMIT).state_for(Some(branch)),
-        Err(reason) => BranchPrState::LookupFailed {
-            reason: format!("{reason} (resolved gh identity: {identity})"),
-        },
+        Err(reason) => {
+            // #6507: WARN, matching `PrIndex::from_gh`. This arm used to be
+            // silent at every level, so a per-branch failure — the path this
+            // repository's 4526-PR history forces every older branch through —
+            // left no trace in the log at all and the survey reported only a
+            // count.
+            tracing::warn!(
+                root = %registry_root.display(),
+                branch = %branch,
+                reason = %reason,
+                identity = %identity,
+                "worktree-reclaim: the per-branch pull-request lookup failed — this \
+                 branch will block, and the survey reports this reason (#6507)"
+            );
+            BranchPrState::LookupFailed {
+                reason: format!("{reason} (resolved gh identity: {identity})"),
+            }
+        }
     }
 }
 
@@ -582,60 +601,6 @@ pub(crate) fn agent_ownership_blocks(
 /// Test: `survey_separates_deadline_skips_from_lookup_failures`.
 pub(crate) const NOT_INSPECTED_REASON: &str = "survey deadline reached before inspection";
 
-/// Whether a worktree may be reclaimed, or the first reason it may not (#2919).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ReclaimVerdict {
-    /// Every gate passed; the named pull request is the landing evidence.
-    Reclaimable {
-        /// The merged pull request that proves the branch's work landed.
-        pr: u64,
-    },
-    /// Refused — `reason` names the FIRST gate that said no.
-    Blocked {
-        /// Operator-facing explanation of the refusal.
-        reason: String,
-    },
-    /// Refused by gate 4 because a DISPATCHED AGENT owns the worktree (#5829).
-    ///
-    /// Why a separate variant rather than a `Blocked` carrying agent wording:
-    /// the operator has to be TOLD about this one. Every other refusal leaves
-    /// a directory the operator can see and re-run against; this one spares a
-    /// tree an agent is working in right now, and a sweep that spared it
-    /// silently is indistinguishable from a sweep that found nothing to do —
-    /// which is what `--merged-prs --force` printed while the gate was working
-    /// correctly. Matching on the reason STRING to recover the distinction
-    /// would re-couple the operator surface to the wording of a refusal
-    /// message, so the survey records the kind instead.
-    /// Test: `survey_discloses_a_live_agents_spared_worktree`,
-    /// `classify_blocks_a_live_agents_worktree`.
-    BlockedByAgent {
-        /// Operator-facing explanation naming the agent being protected.
-        reason: String,
-    },
-}
-
-impl ReclaimVerdict {
-    /// Shorthand for a refusal.
-    pub(crate) fn blocked(reason: impl Into<String>) -> Self {
-        Self::Blocked {
-            reason: reason.into(),
-        }
-    }
-
-    /// Shorthand for gate 4's agent-ownership refusal (#5829).
-    pub(crate) fn blocked_by_agent(reason: impl Into<String>) -> Self {
-        Self::BlockedByAgent {
-            reason: reason.into(),
-        }
-    }
-
-    /// True when this verdict permits deletion.
-    pub(crate) fn is_reclaimable(&self) -> bool {
-        matches!(self, Self::Reclaimable { .. })
-    }
-}
-
 /// Decide whether one worktree may be reclaimed (#2919).
 ///
 /// Why: this is the whole safety argument in one function, deliberately
@@ -693,15 +658,18 @@ pub(crate) fn classify(
     // own verdict kind and reaches `ReclaimSurvey::agent_owned`. Every other
     // non-admitted verdict is an ordinary block, as before.
     if admission == Admission::HarnessAgentLock {
-        return ReclaimVerdict::blocked_by_agent(admission.reason());
+        return ReclaimVerdict::blocked_by_agent(ReclaimGate::Admission, admission.reason());
     }
     if admission != Admission::Admitted {
-        return ReclaimVerdict::blocked(admission.reason());
+        return ReclaimVerdict::blocked(ReclaimGate::Admission, admission.reason());
     }
     // Gate 2 (#2919): a live session can occupy a directory whose record reads
     // terminal — measured on this repo 2026-07-28. Never trust the state field.
     if live {
-        return ReclaimVerdict::blocked("a session still claims this workspace");
+        return ReclaimVerdict::blocked(
+            ReclaimGate::Liveness,
+            "a session still claims this workspace",
+        );
     }
     // Gate 3 (#2919): only worktrees trusty-mpm provisioned can actually be
     // removed. Classifying one it cannot remove as `Reclaimable` made
@@ -713,6 +681,7 @@ pub(crate) fn classify(
         // now act on it. What remains excluded is a path with none of the three
         // ownership marks.
         return ReclaimVerdict::blocked(
+            ReclaimGate::Removability,
             "not a trusty-mpm-removable worktree — no ownership sentinel, not under \
              `.worktrees/`, and not in the harness `.claude/worktrees/` store, so \
              `prune-worktrees` cannot remove it",
@@ -725,7 +694,7 @@ pub(crate) fn classify(
     // tree is the one refusal the operator must be told about by name — see
     // `ReclaimVerdict::BlockedByAgent`.
     if let Some(reason) = agent_ownership_blocks(path, agent_state) {
-        return ReclaimVerdict::blocked_by_agent(reason);
+        return ReclaimVerdict::blocked_by_agent(ReclaimGate::AgentOwnership, reason);
     }
     // Gate 5 (#2919): the merged PR is the landing evidence DOC-52 §3.4 makes
     // the reclamation trigger. Everything else — including "we could not find
@@ -733,16 +702,26 @@ pub(crate) fn classify(
     let merged_pr = match pr {
         BranchPrState::Merged { pr } => *pr,
         BranchPrState::Open { pr } => {
-            return ReclaimVerdict::blocked(format!("PR #{pr} is still open"));
+            return ReclaimVerdict::blocked(
+                ReclaimGate::PrState,
+                format!("PR #{pr} is still open"),
+            );
         }
         BranchPrState::ClosedUnmerged { pr } => {
-            return ReclaimVerdict::blocked(format!("PR #{pr} was closed without merging"));
+            return ReclaimVerdict::blocked(
+                ReclaimGate::PrState,
+                format!("PR #{pr} was closed without merging"),
+            );
         }
         BranchPrState::NoPr => {
-            return ReclaimVerdict::blocked("no pull request found for this branch");
+            return ReclaimVerdict::blocked(
+                ReclaimGate::PrState,
+                "no pull request found for this branch",
+            );
         }
         BranchPrState::Unknown => {
             return ReclaimVerdict::blocked(
+                ReclaimGate::PrState,
                 "pull-request state could not be determined (is `gh` installed \
                  and authenticated?)",
             );
@@ -751,14 +730,20 @@ pub(crate) fn classify(
         // operator can act on `gh exited 4: … gh auth login`; they cannot act
         // on "could not be determined".
         BranchPrState::LookupFailed { reason } => {
-            return ReclaimVerdict::blocked(format!("the pull-request lookup failed: {reason}"));
+            return ReclaimVerdict::blocked(
+                ReclaimGate::PrState,
+                format!("the pull-request lookup failed: {reason}"),
+            );
         }
     };
     // Gate 6 (#2919): a merged PR does NOT prove the directory holds nothing
     // novel — the 2026-07-21 salvage found merged-PR worktrees carrying real
     // unpushed source. This is the last gate and it fails toward dirty.
     if let Some(dirt) = probe_dirt(path) {
-        return ReclaimVerdict::blocked(format!("holds unsaved work: {}", dirt.reason));
+        return ReclaimVerdict::blocked(
+            ReclaimGate::UnsavedWork,
+            format!("holds unsaved work: {}", dirt.reason),
+        );
     }
     ReclaimVerdict::Reclaimable { pr: merged_pr }
 }
@@ -862,6 +847,18 @@ pub(crate) struct ReclaimSurvey {
     /// fails identically, so 261 copies of one line would bury the count.
     /// Test: `survey_counts_a_failed_lookup_apart_from_an_unknown_state`.
     pub lookup_failure: Option<String>,
+    /// One line per NON-RECLAIMABLE candidate, as
+    /// `"<path>: blocked at <gate>: <reason>"` (#6507).
+    ///
+    /// Why: `agent_owned` names gate 4's refusals and nothing else, so an
+    /// ordinary `Blocked` — every other gate — reached no log line and no field
+    /// of the prune reply. On 2026-09-03 that left a worktree whose work had
+    /// fully landed sitting unreclaimed with nothing anywhere saying which gate
+    /// refused it, and three verification passes attributed it by elimination
+    /// to the wrong gate. A refusal the operator cannot read is a refusal
+    /// nobody can debug.
+    /// Test: `survey_names_the_gate_that_blocked_each_candidate`.
+    pub blocked_reasons: Vec<String>,
 }
 
 impl ReclaimSurvey {
@@ -884,9 +881,20 @@ impl ReclaimSurvey {
             lookup_failed: 0,
             lookup_failure: None,
             agent_owned: Vec::new(),
+            blocked_reasons: Vec::new(),
             candidates: Vec::new(),
         };
         for c in &candidates {
+            // #6507: folded here, with the totals, for the same reason
+            // `agent_owned` is — a disclosed line that is derived anywhere else
+            // can disagree with the candidate list it claims to describe.
+            if let Some((gate, reason)) = c.verdict.refusal() {
+                out.blocked_reasons.push(format!(
+                    "{}: blocked at {}: {reason}",
+                    c.path.display(),
+                    gate.label()
+                ));
+            }
             match c.bytes {
                 Some(b) => {
                     out.total_bytes = out.total_bytes.saturating_add(b);
@@ -916,12 +924,19 @@ impl ReclaimSurvey {
             }
             // #5829: collected here, with the totals, so the disclosed list can
             // never disagree with the candidate list it is derived from.
-            if let ReclaimVerdict::BlockedByAgent { reason } = &c.verdict {
+            if let ReclaimVerdict::BlockedByAgent { reason, .. } = &c.verdict {
                 out.agent_owned
                     .push(format!("{}: {reason}", c.path.display()));
             }
-            if matches!(&c.verdict, ReclaimVerdict::Blocked { reason } if reason == NOT_INSPECTED_REASON)
-            {
+            // #6507: the deadline skip is now a gate of its own, so the count no
+            // longer depends on matching the refusal's wording.
+            if matches!(
+                &c.verdict,
+                ReclaimVerdict::Blocked {
+                    gate: ReclaimGate::Deadline,
+                    ..
+                }
+            ) {
                 out.not_inspected += 1;
             }
         }

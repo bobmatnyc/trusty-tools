@@ -102,7 +102,7 @@ fn wt() -> PathBuf {
 /// carries it (#5829).
 fn reason(v: &ReclaimVerdict) -> String {
     match v {
-        ReclaimVerdict::Blocked { reason } | ReclaimVerdict::BlockedByAgent { reason } => {
+        ReclaimVerdict::Blocked { reason, .. } | ReclaimVerdict::BlockedByAgent { reason, .. } => {
             reason.clone()
         }
         ReclaimVerdict::Reclaimable { pr } => panic!("expected a refusal, got Reclaimable {pr}"),
@@ -1176,7 +1176,7 @@ fn classify_blocks_a_failed_lookup_and_names_the_reason() {
         &no_agents,
     );
     assert!(!verdict.is_reclaimable());
-    let ReclaimVerdict::Blocked { reason } = verdict else {
+    let ReclaimVerdict::Blocked { reason, .. } = verdict else {
         panic!("a failed lookup is an ordinary block, not an agent refusal");
     };
     assert!(reason.contains("lookup failed"), "{reason}");

@@ -330,6 +330,13 @@ pub(crate) async fn prune_worktrees_core(
                         // protected a live agent's tree was indistinguishable
                         // from one that found nothing to reclaim.
                         "spared_agent_owned": o.survey.agent_owned,
+                        // #6507: one line per non-reclaimable candidate naming
+                        // the GATE that refused it. Without it a plain
+                        // `Blocked` — every gate but 4 — appears in no field of
+                        // this reply and in no log line, which is how a merged,
+                        // clean worktree sat unreclaimed with nothing saying
+                        // why.
+                        "blocked_reasons": o.survey.blocked_reasons,
                         "reclaimable": o.survey.reclaimable,
                         "reclaimable_measured": o.survey.reclaimable_measured,
                         "reclaimable_bytes": o.survey.reclaimable_bytes,

@@ -358,6 +358,88 @@ fn survey_reports_a_merged_worktree_as_reclaimable() {
     assert!(s.total_bytes > 0);
 }
 
+/// The live #6507 shape end to end: a branch whose TWO commits squash-merged
+/// into one, with the remote branch pruned, is reclaimable.
+///
+/// Why this needs the survey rather than a `classify` unit test: the refusal
+/// came from gate 6's real [`inspect_dirt`] probe, which `classify`'s tests
+/// stub out. Reproduced against the live worktree
+/// `.claude/worktrees/agent-aaa8224037483f135` (PR #6705, squash commit
+/// `7933d406d`) on 2026-09-03, where the survey said
+/// `holds unsaved work: 0 uncommitted/untracked file(s), 2 unpushed commit(s)`
+/// for a tree whose work was entirely on `main`.
+#[test]
+fn survey_reclaims_a_worktree_whose_two_commits_squash_merged_as_one() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("squash-6507");
+    fx.squash_merge_commits_to_origin(&path, &["first.rs", "second.rs"]);
+    let s = survey_with_index(
+        &fx.repos_root,
+        &[],
+        &|_: &Path| merged_index("session/squash-6507", 6705),
+        &no_agents,
+        SurveyBudget::default(),
+        false,
+    );
+    let found = s
+        .candidates
+        .iter()
+        .find(|c| c.path == path)
+        .unwrap_or_else(|| panic!("survey missed {}", path.display()));
+    assert_eq!(
+        found.verdict,
+        ReclaimVerdict::Reclaimable { pr: 6705 },
+        "a squash-merged branch whose upstream is pruned holds nothing unsaved; \
+         blocked_reasons was {:?}",
+        s.blocked_reasons
+    );
+}
+
+/// Every refusal names its gate, and a failed lookup names gate 5 (#6507).
+///
+/// Why: `agent_owned` disclosed gate 4 alone, so a plain `Blocked` reached no
+/// field of the prune reply and no log line — which is how the worktree above
+/// sat unreclaimed while three verification passes attributed its refusal, by
+/// elimination, to the wrong gate.
+#[test]
+fn survey_names_the_gate_that_blocked_each_candidate() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("blocked-6507");
+    land(&path);
+    let s = survey_with_index(
+        &fx.repos_root,
+        &[],
+        &|_: &Path| PrIndex::unavailable_because("gh exited 4: gh auth login".to_string()),
+        &no_agents,
+        SurveyBudget::default(),
+        false,
+    );
+    let line = s
+        .blocked_reasons
+        .iter()
+        .find(|l| l.starts_with(&format!("{}: ", path.display())))
+        .unwrap_or_else(|| {
+            panic!(
+                "every non-reclaimable candidate owes a line; got {:?}",
+                s.blocked_reasons
+            )
+        });
+    assert_eq!(
+        line,
+        &format!(
+            "{}: blocked at gate 5 (pull-request state): the pull-request lookup failed: \
+             gh exited 4: gh auth login",
+            path.display()
+        )
+    );
+    assert_eq!(
+        s.blocked_reasons.len(),
+        s.blocked,
+        "the disclosed lines and the blocked count are folded from one pass and \
+         may never disagree"
+    );
+}
+
 #[test]
 fn survey_excludes_a_worktree_trusty_mpm_cannot_remove() {
     // #2919 HIGH: a worktree the remover would refuse used to be classified
@@ -1129,7 +1211,7 @@ fn reclaim_never_offers_an_agent_worktree_whose_pr_is_open() {
         .expect("listed");
     assert_eq!(
         found.verdict,
-        ReclaimVerdict::blocked("PR #6563 is still open"),
+        ReclaimVerdict::blocked(ReclaimGate::PrState, "PR #6563 is still open"),
         "the refusal must be the landing-evidence gate's"
     );
 }
@@ -1159,7 +1241,7 @@ fn reclaim_never_offers_a_dirty_agent_worktree() {
         .find(|c| c.path == path)
         .expect("listed");
     assert!(
-        matches!(&found.verdict, ReclaimVerdict::Blocked { reason }
+        matches!(&found.verdict, ReclaimVerdict::Blocked { reason, .. }
             if reason.contains("holds unsaved work")),
         "the refusal must be the unsaved-work gate's: {:?}",
         found.verdict

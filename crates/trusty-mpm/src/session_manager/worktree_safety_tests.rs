@@ -850,6 +850,64 @@ fn inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned() {
     );
 }
 
+/// A squash of TWO commits clears too — the shape that survived the first fix.
+///
+/// Why: `git cherry` compares patch ids one commit at a time, and a squash
+/// carries the UNION of the branch's patches, so a two-commit branch matches
+/// nothing. Live on 2026-09-03: PR #6705 squashed `37540d9cb` and `4c8e11de8`
+/// into `7933d406d`, `git cherry refs/remotes/origin/main HEAD` marked both
+/// `+`, and gate 6 reported "2 unpushed commit(s)" for a fully landed worktree.
+#[test]
+fn inspect_dirt_clears_a_two_commit_squash_merge() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("squashed-two");
+    fx.squash_merge_commits_to_origin(&wt, &["first.rs", "second.rs"]);
+
+    // The pre-fix state, pinned: both commits are unreachable from every remote
+    // ref AND neither matches a landed commit's patch id on its own.
+    let reachability = git_stdout(&wt, &["rev-list", "--count", "HEAD", "--not", "--remotes"])
+        .expect("rev-list must run");
+    assert_eq!(
+        reachability.trim(),
+        "2",
+        "the fixture must reproduce a divergence of more than one commit"
+    );
+    let cherry =
+        git_stdout(&wt, &["cherry", "refs/remotes/origin/main", "HEAD"]).expect("cherry must run");
+    assert!(
+        !cherry.contains("- "),
+        "the per-commit comparison must find NO match — that is the whole bug; got {cherry}"
+    );
+
+    assert!(
+        inspect_dirt(&wt).is_none(),
+        "a branch whose two commits squash-merged as one holds no unsaved work; got {:?}",
+        inspect_dirt(&wt)
+    );
+}
+
+/// The control for the two-commit fix: work added AFTER the squash still counts.
+///
+/// Why: the aggregate comparison discounts a whole divergence at once, so it
+/// has to stop discounting the moment the divergence stops matching.
+#[test]
+fn inspect_dirt_reports_a_commit_added_after_a_two_commit_squash_merge() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("squashed-two-plus");
+    fx.squash_merge_commits_to_origin(&wt, &["first.rs", "second.rs"]);
+
+    std::fs::write(wt.join("never-landed.rs"), "work that exists only here\n").unwrap();
+    git_must(&wt, &["add", "never-landed.rs"]);
+    git_must(&wt, &["commit", "-m", "feat: never pushed anywhere"]);
+
+    let dirt = inspect_dirt(&wt).expect("a commit added after the squash must still read as dirty");
+    assert_eq!(
+        dirt.unpushed_commits, 3,
+        "an aggregate that no longer matches discounts nothing; reason was: {}",
+        dirt.reason
+    );
+}
+
 /// The control the #6507 fix may never break: a commit that landed NOWHERE is
 /// still unsaved work, in the same worktree, beside one that did land.
 #[test]

@@ -103,6 +103,35 @@ fn merged_pr_pass_diagnostics_keep_their_kinds_apart() {
     assert!(lines[2].contains("removal FAILED"), "{}", lines[2]);
 }
 
+/// Every refused candidate reaches the operator, naming its gate (#6507).
+///
+/// Why: the three families above disclose only what happened AFTER
+/// classification. A worktree refused DURING classification by any gate but 4
+/// appeared in no line at all, so `--merged-prs --dry-run` printed
+/// `0 worktree(s) reclaimable` and nothing about the tree it had just refused.
+#[test]
+fn merged_pr_pass_names_the_gate_that_blocked_each_candidate() {
+    let body = serde_json::json!({
+        "spared_agent_owned": [],
+        "refused_at_recheck": [],
+        "removal_failed": [],
+        "blocked_reasons": [
+            "/repo/.claude/worktrees/agent-aaa: blocked at gate 6 (unsaved work): \
+             holds unsaved work: 0 uncommitted/untracked file(s), 2 unpushed commit(s)",
+        ],
+    });
+    let lines = diagnostic_lines(&body);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].contains("blocked at gate 6 (unsaved work)"),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[0].contains("agent-aaa"), "{}", lines[0]);
+    // The summary line the operator already reads must be untouched by it.
+    print_merged_pr_pass(Some(&body), true);
+}
+
 #[test]
 fn merged_pr_pass_diagnostics_tolerate_absent_and_malformed_keys() {
     // An older daemon omits the key entirely; a malformed one sends a non-array
