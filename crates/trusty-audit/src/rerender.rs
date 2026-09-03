@@ -1792,12 +1792,17 @@ mod rerender_tests {
         let gaps = ground_present_checkouts(&unreachable_tools(), &manifest, &read).await;
 
         // #6079: the churn leg speaks for every checkout — this fixture holds no
-        // repository, and that is a line of its own. This test is about the
-        // daemon legs; `churn::churn_tests` owns the churn wording.
-        let gaps: Vec<String> = gaps
+        // repository, and that is a line of its own. Partitioned rather than
+        // filtered, so a leg that regressed to silence fails here instead of
+        // passing quietly; the wording stays `churn::churn_tests`'s to own.
+        let (churn_gaps, gaps): (Vec<String>, Vec<String>) = gaps
             .into_iter()
-            .filter(|gap| !gap.contains(crate::grounding::churn::COLLECTOR))
-            .collect();
+            .partition(|gap| gap.contains(crate::grounding::churn::COLLECTOR));
+        assert_eq!(
+            churn_gaps.len(),
+            1,
+            "the churn leg speaks exactly once per repository: {churn_gaps:?}"
+        );
         assert_eq!(gaps.len(), 1, "{gaps:?}");
         assert!(gaps[0].contains("acme/api"), "{gaps:?}");
         assert!(gaps[0].contains("trusty-search"), "{gaps:?}");
