@@ -192,9 +192,12 @@ pub(crate) fn synthesis_schema(top_risks_cap: usize, findings_cap: usize) -> Res
                     "type": "string",
                     "description": "ONE paragraph on code quality and architecture, grounded ONLY in the complexity/findings/LoC data provided. Empty string if the data supports nothing."
                 },
+                // #6075: narrowed, not dropped — the audit's cargo-audit
+                // collector reports dependency CVE exposure under Assurance
+                // Scans, so this paragraph no longer denies that a scan exists.
                 "security_summary": {
                     "type": "string",
-                    "description": "ONE paragraph characterising security posture from the evidence-inspected RED/AMBER findings ONLY — this is code-hygiene signal, not lint output and not a SAST/CVE/secrets scan. Empty string if the data supports nothing."
+                    "description": "ONE paragraph characterising security posture from the evidence-inspected RED/AMBER findings ONLY — this is code-hygiene signal, not lint output, not a SAST scan, not a license review, not a secrets scan and not a penetration test. Dependency CVE exposure belongs to the Assurance Scans section, not here. Empty string if the data supports nothing."
                 },
                 // #5453/#6004: high-level authorship/key-person-risk narrative slot.
                 "authorship_summary": {

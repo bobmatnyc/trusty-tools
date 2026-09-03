@@ -6,7 +6,7 @@
 //! `thiserror` loader means every malformed manifest fails loudly with a
 //! correctable message instead of silently producing an empty report.
 //! What: defines [`Manifest`], [`ReportSection`], [`RepositoryEntry`],
-//! [`InspectionPriority`], and the [`RepositorySource`] enum, plus
+//! [`InspectionPriority`], [`ManifestFinding`], and the [`RepositorySource`] enum, plus
 //! [`load_manifest`] which reads TOML, validates the exactly-one-of
 //! `path`/`remote` rule, and returns a resolved `Manifest`.  Per-repository
 //! `inspect_priority` (#6078) is the stable interface an external ranker writes
@@ -212,6 +212,23 @@ pub struct ReportSection {
     /// Test: `manifest_tests.rs::parse_declared_gaps`.
     #[serde(default)]
     pub gaps: Vec<String>,
+    /// Deterministic assurance-scan findings the producer collected (#6075).
+    ///
+    /// Why: `gaps`'s twin. An upstream orchestrator that ran a real scanner
+    /// against the target — `cargo audit` for #6075, and the license and
+    /// secrets scanners of #6076/#6077 next — holds results nothing inside
+    /// trusty-review can observe, and until this key existed it had nowhere to
+    /// put them. The report therefore disclaimed CVE exposure as an assurance
+    /// gap over a scan that had in fact run.
+    /// What: zero or more [`ManifestFinding`] rows, rendered as the report's
+    /// Assurance Scans section. Absent — the default, and every hand-written
+    /// manifest — leaves output byte-identical to a manifest without the key.
+    /// An EMPTY array is never written by a producer, so absence and "the scan
+    /// found nothing" do not have to be told apart here: a scan that ran clean
+    /// says so in `gaps`.
+    /// Test: `manifest_tests.rs::parse_declared_findings`.
+    #[serde(default)]
+    pub findings: Vec<ManifestFinding>,
     /// Optional path to the run's ticketing artifact (#5405).
     ///
     /// Why: `tga audit` correlates commits against the board items it synced,
@@ -260,6 +277,48 @@ pub struct ReportSection {
     /// Test: `manifest_tests.rs::parse_analyze_timeout_secs`.
     #[serde(default)]
     pub analyze_timeout_secs: Option<u64>,
+}
+
+/// One deterministic finding an external assurance collector recorded (#6075).
+///
+/// Why: the report's Security Posture paragraph is an LLM's reading of selected
+/// source files, and it disclaimed CVE exposure because nothing in this crate
+/// could measure it. `trusty-audit` can — it runs `cargo audit` against the
+/// target and writes the rows here (owner ruling 2026-08-19: the collectors run
+/// from trusty-audit, the manifest is the interface). This is the channel the
+/// rest of epic #6074 reuses: #6076's license rows and #6077's secrets rows
+/// arrive in the same array under a different `category`.
+/// What: `category` groups the rendered tables (`dependencies` for #6075);
+/// `id`, `package`, `version`, `severity` and `title` are the row; `url` is
+/// where to read the advisory when the collector knew one. `severity` is the
+/// producer's own band string, rendered verbatim rather than parsed — a band
+/// this crate does not recognise must still reach the page.
+/// Test: `manifest_tests.rs::parse_declared_findings`;
+/// `assurance_tests.rs::a_declared_finding_reaches_the_report`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[non_exhaustive]
+pub struct ManifestFinding {
+    /// Which collector produced it — `dependencies`, `license`, `secrets`.
+    #[serde(default)]
+    pub category: String,
+    /// The finding's identifier, e.g. `RUSTSEC-2024-0421`.
+    #[serde(default)]
+    pub id: String,
+    /// The affected component.
+    #[serde(default)]
+    pub package: String,
+    /// The version the target pins.
+    #[serde(default)]
+    pub version: String,
+    /// The producer's severity band, e.g. `RED` / `AMBER`.
+    #[serde(default)]
+    pub severity: String,
+    /// One-line summary of the finding.
+    #[serde(default)]
+    pub title: String,
+    /// Where to read it, when the producer knew.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// The weight the FIRST unweighted `inspect_priority` entry receives (#6078).

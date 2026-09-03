@@ -186,6 +186,7 @@ fn fixture_model(findings: Vec<MetricFinding>) -> ReportModel {
             crate_topology: None,
         }],
         gaps: Vec::new(),
+        findings: Vec::new(),
         synthesis: None,
         benchmark: None,
         investigation: None,
