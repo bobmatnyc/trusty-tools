@@ -119,7 +119,7 @@ pub struct InstallPlan {
     /// LLM API key, emitted only as a hint comment.
     pub llm_api_key: Option<Credential>,
     /// Operator-facing caveats written into the config as leading comments —
-    /// for example that Bitbucket workspace discovery is not implemented yet.
+    /// for example that a discovered workspace turned out to be empty.
     pub notes: Vec<String>,
 }
 
@@ -176,8 +176,13 @@ fn render_hosts(plan: &InstallPlan, out: &mut String) {
 
     if plan.bitbucket_workspace.is_some() || plan.bitbucket_token.is_some() {
         out.push_str("bitbucket:\n");
+        // #5220: emitted as the plural discovery list, not as the singular
+        // `workspace` — that one is half of a `workspace`/`repo_slug` coordinate
+        // and the validator would then demand a `repo_slug` this file has not
+        // got. `workspaces` says what actually happened: the set came from the
+        // API and is refreshed from it on every collect.
         if let Some(ws) = &plan.bitbucket_workspace {
-            out.push_str(&format!("  workspace: \"{ws}\"\n"));
+            out.push_str(&format!("  workspaces: [\"{ws}\"]\n"));
         }
         if let Some(token) = &plan.bitbucket_token {
             out.push_str(&format!("  token: \"{}\"\n", token.emitted));
@@ -347,14 +352,16 @@ mod tests {
             api_key: Credential::literal("lin_xxx"),
             team_keys: vec!["ENG".to_string(), "OPS".to_string()],
         });
-        plan.notes = vec!["workspace discovery is not available yet".to_string()];
+        plan.notes = vec!["the workspace looked empty".to_string()];
         let yaml = render_yaml(&plan);
         assert!(yaml.contains("bitbucket:"), "{yaml}");
-        assert!(yaml.contains("workspace: \"acme\""), "{yaml}");
+        // #5220: the plural discovery list, not the singular half-coordinate
+        // the validator would then demand a `repo_slug` alongside.
+        assert!(yaml.contains("workspaces: [\"acme\"]"), "{yaml}");
         assert!(yaml.contains("linear:"), "{yaml}");
         assert!(yaml.contains("team_keys: [\"ENG\", \"OPS\"]"), "{yaml}");
         assert!(
-            yaml.contains("# NOTE: workspace discovery is not available yet"),
+            yaml.contains("# NOTE: the workspace looked empty"),
             "{yaml}"
         );
     }

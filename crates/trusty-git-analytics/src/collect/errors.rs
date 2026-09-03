@@ -104,6 +104,27 @@ pub enum CollectError {
         message: String,
     },
 
+    /// A Bitbucket Cloud REST call returned a non-success status, with its
+    /// body kept.
+    ///
+    /// Why (#5220): workspace discovery must never answer "this workspace has
+    /// no repositories" when what actually happened is a rejected credential
+    /// or a rate limit. `error_for_status()` discards the body, and an empty
+    /// `Vec` discards the failure altogether — either way the operator reads a
+    /// clean run over a repository set that was never fetched. This variant
+    /// names the status and keeps Bitbucket's own explanation, which is where
+    /// the difference between "token lacks the `repository` scope" and "no
+    /// such workspace" is written.
+    #[error("Bitbucket API error (HTTP {status}) for {endpoint}: {message}")]
+    BitbucketApi {
+        /// HTTP status returned by Bitbucket.
+        status: u16,
+        /// URL that was called, for the operator to reproduce.
+        endpoint: String,
+        /// Bitbucket's response body, truncated when long.
+        message: String,
+    },
+
     /// A find-or-create issue lookup could not see every match GitHub reported.
     ///
     /// Why (#5465): the alternative to erroring here is treating "not on the

@@ -575,6 +575,9 @@ impl CollectionPipeline {
     /// `org_discovered` contains `(owner, repo)` pairs already fetched from
     /// the GitHub org-discovery pass (issue #742); they are unioned with the
     /// per-repo resolver output before the GitHub client is constructed.
+    /// `workspace_discovered` is the Bitbucket equivalent from the
+    /// `bitbucket.workspaces` pass (#5220), unioned with the singular
+    /// `workspace`/`repo_slug` pair the same way.
     ///
     /// Why: separating construction (sync) from org-discovery (async) keeps
     /// the async surface minimal — callers do discovery then hand the results
@@ -587,6 +590,7 @@ impl CollectionPipeline {
         &self,
         stats: &mut CollectionStats,
         org_discovered: &[(String, String)],
+        workspace_discovered: &[(String, String)],
     ) -> Vec<Box<dyn PrProvider + Send + Sync>> {
         let mut providers: Vec<Box<dyn PrProvider + Send + Sync>> = Vec::new();
 
@@ -672,9 +676,27 @@ impl CollectionPipeline {
         }
         if let Some(bb_cfg) = &self.config.bitbucket {
             if bb_cfg.fetch_prs {
-                match BitbucketClient::new(bb_cfg) {
-                    Ok(bb) => providers.push(Box::new(bb)),
-                    Err(e) => stats.fail_stage(format!("Bitbucket client init failed: {e}")),
+                // #5220: the repository set is the configured pair unioned with
+                // whatever workspace discovery could read.
+                let repos = crate::collect::bitbucket::resolve_bitbucket_repos(
+                    bb_cfg,
+                    workspace_discovered,
+                );
+                if repos.is_empty() {
+                    info!(
+                        "Bitbucket PR fetch skipped: no bitbucket.workspace/repo_slug pair \
+                         and bitbucket.workspaces discovery returned no repositories"
+                    );
+                } else {
+                    info!(
+                        repo_count = repos.len(),
+                        "Bitbucket PR fetcher will scan {} repo(s)",
+                        repos.len()
+                    );
+                    match BitbucketClient::new_for_repos(bb_cfg, repos) {
+                        Ok(bb) => providers.push(Box::new(bb)),
+                        Err(e) => stats.fail_stage(format!("Bitbucket client init failed: {e}")),
+                    }
                 }
             }
         }
@@ -705,7 +727,16 @@ impl CollectionPipeline {
             Vec::new()
         };
 
-        let providers = self.build_pr_providers(stats, &org_discovered);
+        // #5220: Bitbucket workspace discovery, same phase and same shape as
+        // the GitHub org pass above.
+        let workspace_discovered = match &self.config.bitbucket {
+            Some(bb_cfg) if bb_cfg.fetch_prs => {
+                crate::collect::bitbucket::run_workspace_discovery(bb_cfg).await
+            }
+            _ => Vec::new(),
+        };
+
+        let providers = self.build_pr_providers(stats, &org_discovered, &workspace_discovered);
         if providers.is_empty() {
             return;
         }

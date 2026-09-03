@@ -1183,6 +1183,9 @@ fn default_review_fetch_concurrency() -> u32 {
 // #5770: `Debug` is hand-written in `credential_debug`, not derived — the
 // derived one printed `app_password` and `token` in the clear.
 // #5775: `Serialize` is hand-written in `credential_serialize` for both fields.
+// #5220: deliberately NOT `#[non_exhaustive]`, unlike `GithubConfig` — the
+// crate's own `tests/bitbucket_live.rs` builds one as a struct literal, which
+// that attribute forbids from outside the library.
 #[derive(Clone, Default, Deserialize)]
 pub struct BitbucketConfig {
     /// Bitbucket account / workspace member username (required for Basic auth).
@@ -1207,8 +1210,30 @@ pub struct BitbucketConfig {
     #[serde(default)]
     pub workspace: Option<String>,
 
+    /// Workspace slugs whose repository list is discovered over the API
+    /// (#5220), the Bitbucket counterpart of [`GithubConfig::orgs`].
+    ///
+    /// Why: `workspace` + `repo_slug` names exactly one repository, so a
+    /// workspace of 200 repositories had to be transcribed by hand. Naming the
+    /// workspace here instead makes `tga` page
+    /// `GET /2.0/repositories/{workspace}` and collect from whatever the token
+    /// can see.
+    /// What: each entry is discovered independently and the results are unioned
+    /// with the singular `workspace`/`repo_slug` pair. A workspace listed here
+    /// needs no `repo_slug`, and the validator stops demanding one.
+    /// [`Self::workspace`] is deliberately NOT treated as a discovery source:
+    /// it is half of a repository coordinate, so promoting it would silently
+    /// widen every existing single-repository config to the whole workspace.
+    /// Test: `effective_workspaces_trims_and_deduplicates`,
+    /// `discovered_repos_union_with_the_configured_pair`.
+    #[serde(default)]
+    pub workspaces: Vec<String>,
+
     /// Repository slug, e.g. the `myrepo` in
     /// `bitbucket.org/myteam/myrepo`.
+    ///
+    /// Required when [`Self::workspaces`] is empty; with workspace discovery
+    /// configured the repository set comes from the API instead (#5220).
     #[serde(default)]
     pub repo_slug: Option<String>,
 
