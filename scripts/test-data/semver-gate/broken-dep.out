@@ -1,0 +1,41 @@
+    Building trusty-common v0.47.2 (current)
+error: running cargo-doc on crate 'trusty-common' failed with output:
+-----
+    [1 unrelated Checking/Compiling progress lines elided]
+    Checking tinyvec v1.13.0
+    [15 unrelated Checking/Compiling progress lines elided]
+error: cannot find macro `vec` in this scope
+   --> /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/tinyvec-1.13.0/src/tinyvec.rs:710:21
+    |
+710 |       TinyVec::Heap(vec![A::Item::default(); len])
+    |                     ^^^
+    |
+note: `vec` is imported here, but it is a module, not a macro
+   --> /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/tinyvec-1.13.0/src/tinyvec.rs:3:18
+    |
+  3 | use alloc::vec::{self, Vec};
+    |                  ^^^^
+help: consider importing one of these macros
+    |
+  1 + use crate::tinyvec::alloc::vec;
+    |
+  1 + use alloc::vec;
+    |
+
+error: could not compile `tinyvec` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+
+-----
+
+error: failed to build rustdoc for crate trusty-common v0.47.2
+note: this is usually due to a compilation error in the crate,
+      and is unlikely to be a bug in cargo-semver-checks
+note: the following command can be used to reproduce the error:
+      cargo new --lib example &&
+          cd example &&
+          echo '[workspace]' >> Cargo.toml &&
+          cargo add --path /REPO/crates/trusty-common --no-default-features --features axum-server,bedrock,bedrock-client,blocking-http,bm25,bug-capture,catchup,cli-help,codex-config,config-cli,console-metrics,crate-config,credentials,daemon-token,docgen,embedder,embedder-bundled-ort,embedder-candle,embedder-client,embedder-load-dynamic,embedder-test-support,gh-cli,host-metrics,inference-client,intent-source,keyring-store,log-drain,memory-core,memory-rpc,migrations,monitor-tui,palace-resolve,redb-open,rpc,search-index,session-naming,sld,stdio-mcp-client,symgraph,symgraph-parser,symgraph-server,tickets,uds,uds-supervisor,unconditional-only,update-check,webhook-hmac,webhook-relay &&
+          cargo check &&
+          cargo doc
+
+error: aborting due to failure to build rustdoc for crate trusty-common v0.47.2

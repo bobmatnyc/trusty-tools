@@ -139,6 +139,16 @@
 #   Case 8 is the other half: a non-excluded crate still runs a full clean
 #   comparison with the real exclusions file in place.
 #
+#   Case 29 (issue #6740) pins the DIAGNOSIS of a failure the gate already
+#   classified correctly. cargo-semver-checks regenerates the scratch project's
+#   Cargo.lock on every run, so it builds against the newest semver-compatible
+#   release of every transitive dependency while this workspace stays on its
+#   pin. tinyvec 1.13.0 does not compile at all; trusty-common's run died before
+#   a lint ran, and the one package name that explained it sat several hundred
+#   build lines up. The case asserts the classification is unchanged (NO VERDICT,
+#   exit 3, no version-bump remediation) AND that the package and its scratch
+#   version are named.
+#
 # Usage:  bash scripts/check_semver_selftest.sh
 # Exit:   0 when every case behaves; 1 (naming the case) when one does not.
 #
@@ -519,6 +529,48 @@ elif [[ "$out" != *"0 checks: 0 pass, 254 skip"* ]]; then
 else
   pass_case "a zero-check refusal names the cause and quotes the summary (#5440)"
 fi
+
+# --- 29. A DEPENDENCY THAT DOES NOT COMPILE MUST BE NAMED, NOT BURIED (#6740).
+#
+#         cargo-semver-checks builds in a scratch project whose Cargo.lock it
+#         regenerates on every run, so it takes the newest semver-compatible
+#         release of every transitive dependency while this workspace keeps
+#         building on its pin. tinyvec 1.13.0 shipped a `vec![]` call with only
+#         the `alloc::vec` MODULE imported, so it fails for every consumer of its
+#         `alloc` feature — and trusty-common's gate died before a single lint
+#         ran, several hundred build lines away from the one package name that
+#         explained it. The reporter went after toolchains for two runs.
+#
+#         The classification must not move: this is still NO VERDICT at exit 3,
+#         never a break and never a pass. What is added is the name, the scratch
+#         version, and this workspace's pin beside it.
+rc=0
+out="$(cd "$REPO_ROOT" && \
+  PATH="${STUB_DIR}:${PATH}" \
+  SEMVER_GATE_TOOLCHAIN_BIN='' \
+  SEMVER_SELFTEST_REAL_CARGO="$REAL_CARGO" \
+  SEMVER_SELFTEST_FIXTURE="${FIXTURES}/broken-dep.out" \
+  SEMVER_SELFTEST_RC=101 \
+  SEMVER_GATE_INDEX_BASE="http://127.0.0.1:${PORT}/v/${STUB_PREV}" \
+  bash "$GATE" --crate "$STUB_CRATE" 2>&1)" || rc=$?
+if [[ "$rc" -ne 3 ]]; then
+  fail_case "broken-dep: expected exit 3 (no verdict), got ${rc}" "$out"
+elif [[ "$out" != *"NO SEMVER VERDICT WAS COMPUTED"* ]]; then
+  fail_case "broken-dep: a dependency that would not build was not classified as NO VERDICT" "$out"
+elif [[ "$out" == *"requires a matching version bump"* ]]; then
+  fail_case "broken-dep: rendered a dependency build failure as a SemVer verdict" "$out"
+elif [[ "$out" != *"SCRATCH RESOLUTION"* ]]; then
+  fail_case "broken-dep: the run never reported which resolution failed" "$out"
+elif [[ "$out" != *"tinyvec — scratch 1.13.0"* ]]; then
+  # The package name and the scratch version both come from the fixture; the
+  # workspace pin beside them is read from this repo's Cargo.lock, so this
+  # assertion deliberately stops short of it — tinyvec leaving the lockfile must
+  # not turn this case red.
+  fail_case "broken-dep: the failing dependency and its scratch version were not named" "$out"
+else
+  pass_case "a dependency that does not compile is named, and stays NO VERDICT (#6740)"
+fi
+
 
 # ===========================================================================
 # 9-12. Which release is the baseline, and what happens when the bump is already
