@@ -8,7 +8,10 @@ name = "trusty-mcp"
 # release moves forward to a gate-clean commit instead.
 #
 # 0.1.2 -> 0.1.3: additive, feature-gated `daemon_bridge_json_rpc` (#6316).
-version = "0.1.3"
+# 0.1.3 -> 0.1.4: additive, feature-gated `trusty-mcp <service>` binary (#6316
+# slice 4). One bump per merged slice, so a release cut from any commit names
+# exactly what it carries.
+version = "0.1.4"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -22,6 +25,15 @@ homepage = "https://github.com/bobmatnyc/trusty-tools"
 
 [lib]
 crate-type = ["rlib"]
+
+# #6316: the one MCP stdio bridge, per the 2026-07-24 "no per-crate MCP
+# binaries" directive. `required-features` keeps `cargo check -p trusty-mcp` and
+# `cargo check --workspace` (both default-featured) free of `trusty-common` —
+# the bin is simply not a target then.
+[[bin]]
+name = "trusty-mcp"
+path = "src/bin/trusty-mcp.rs"
+required-features = ["daemon-bridge-json-rpc"]
 
 [dependencies]
 anyhow = { workspace = true }
