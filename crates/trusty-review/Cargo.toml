@@ -92,7 +92,7 @@ name        = "trusty-review"
 # to `report::index_registry` under #6677), and `trait_method_added` for
 # `SearchClient::index_status` (src/integrations/search_client.rs:229), which an
 # out-of-tree implementor of the trait would have to add.
-version     = "0.32.1"
+version     = "0.33.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
