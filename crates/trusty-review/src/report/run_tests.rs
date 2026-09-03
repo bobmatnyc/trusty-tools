@@ -219,6 +219,7 @@ fn defaults_match_the_cli() {
     assert!(!req.no_mermaid);
     assert!(req.template.is_none());
     assert!(req.corpus.is_none());
+    assert!(req.analyze_timeout_secs.is_none());
 }
 
 // ── Corpus and budget precedence ─────────────────────────────────────────────
@@ -232,6 +233,45 @@ fn the_explicit_corpus_beats_the_manifest() {
     req.corpus = Some(PathBuf::from("/tmp/corpus"));
     let dir = resolve_corpus_dir(&req, &manifest_with("")).expect("resolve");
     assert_eq!(dir, PathBuf::from("/tmp/corpus"));
+}
+
+/// Why (#6712): the corpus-scan budget has three tiers, and a flag that loses to
+/// the manifest is worse than no flag — an operator raising it on a slow run
+/// would see nothing change.
+/// What: the request wins; the manifest fills an unset request; neither set
+/// yields the default, and a `0` at either tier reads as unset.
+/// Test: this test itself.
+#[test]
+fn the_request_analyze_timeout_beats_the_manifest() {
+    use crate::report::analyze_endpoints::DEFAULT_CORPUS_BUDGET;
+    use std::time::Duration;
+
+    let mut req = ReportRequest::new("m.toml");
+    req.analyze_timeout_secs = Some(600);
+    let manifest = manifest_with("analyze_timeout_secs = 30");
+    assert_eq!(
+        resolve_analyze_budget(&req, &manifest),
+        Duration::from_secs(600),
+        "the flag wins over the manifest key"
+    );
+
+    let bare = ReportRequest::new("m.toml");
+    assert_eq!(
+        resolve_analyze_budget(&bare, &manifest),
+        Duration::from_secs(30),
+        "the manifest key fills an unset flag"
+    );
+    assert_eq!(
+        resolve_analyze_budget(&bare, &manifest_with("")),
+        DEFAULT_CORPUS_BUDGET,
+        "neither tier set leaves the default, which is what a 104k-chunk corpus \
+         scan needs"
+    );
+    assert_eq!(
+        resolve_analyze_budget(&bare, &manifest_with("analyze_timeout_secs = 0")),
+        DEFAULT_CORPUS_BUDGET,
+        "zero means unset, never give up instantly"
+    );
 }
 
 /// Why: the investigation budget resolves in the order request, manifest,

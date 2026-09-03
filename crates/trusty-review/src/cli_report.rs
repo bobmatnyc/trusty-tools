@@ -123,6 +123,17 @@ pub struct ReportArgs {
     /// `PR_INTELLIGENCE_ANALYZER_SOCKET` > the derived default (#6287).
     #[arg(long)]
     pub analyze: bool,
+
+    /// Seconds one corpus-scanning `--analyze` request may take (#6712).
+    /// Applies to the complexity histogram and the refactor list, whose cost
+    /// scales with the repository: grading a 104k-chunk index takes 41-46 s,
+    /// against the 15 s these endpoints used to be allowed, so the §7 complexity
+    /// table rendered unavailable on every large repository. Raises the
+    /// diagnostics budget too when it exceeds that endpoint's own deadline
+    /// ladder; the readiness probe keeps its short budget either way.
+    /// Precedence: this flag > manifest `[report].analyze_timeout_secs` > 180.
+    #[arg(long, value_name = "SECS")]
+    pub analyze_timeout_secs: Option<u64>,
 }
 
 impl ReportArgs {
@@ -147,6 +158,7 @@ impl ReportArgs {
         req.benchmark = self.benchmark;
         req.no_mermaid = self.no_mermaid;
         req.analyze = self.analyze;
+        req.analyze_timeout_secs = self.analyze_timeout_secs;
         req
     }
 }
@@ -228,6 +240,29 @@ mod tests {
             .expect("parse");
         assert!(args.analyze);
         assert!(args.to_request().analyze);
+        assert!(
+            args.to_request().analyze_timeout_secs.is_none(),
+            "#6712: unset defers to the manifest key, then the default"
+        );
+    }
+
+    /// Why (#6712): a flag that parses but never reaches the request leaves an
+    /// operator raising the budget on a slow repository with nothing changed.
+    /// What: `--analyze-timeout-secs` parses and lands on the request.
+    /// Test: this test itself.
+    #[test]
+    fn report_args_parse_analyze_timeout() {
+        let args = ReportArgs::try_parse_from([
+            "report",
+            "--manifest",
+            "m.toml",
+            "--analyze",
+            "--analyze-timeout-secs",
+            "600",
+        ])
+        .expect("parse");
+        assert_eq!(args.analyze_timeout_secs, Some(600));
+        assert_eq!(args.to_request().analyze_timeout_secs, Some(600));
     }
 
     /// Why (#6669): `--template cast --code-only` is the exact invocation the

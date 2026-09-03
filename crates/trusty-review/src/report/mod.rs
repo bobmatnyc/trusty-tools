@@ -14,6 +14,9 @@
 //! lives in `crates/trusty-review/tests/report_e2e.rs`.
 
 pub mod analyze_adapter;
+/// Filling a built model from a live analyze fetch (split from
+/// `analyze_adapter` under the SLOC cap, #6712).
+pub mod analyze_enrich;
 // #6041: per-endpoint paths, request budgets, and partial-fetch vocabulary.
 pub mod analyze_endpoints;
 // #6082: the per-finding half of the analyze mapping, split out under the cap.

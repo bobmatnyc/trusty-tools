@@ -11,6 +11,15 @@
 //! and what they found. The budgets therefore live beside the paths they apply
 //! to, so adding an endpoint forces a decision about its cost.
 //!
+//! #6712: that decision was made for diagnostics alone, and every other endpoint
+//! kept the 15 s constant on the premise that it read data already computed.
+//! `analyze.complexity_distribution` does not — it pulls the whole chunk corpus
+//! from trusty-search and grades every chunk, which measures 41–46 s on a
+//! 104k-chunk index. So the endpoint that fills the §7 table timed out on every
+//! run against a large repository, and the report said the distribution was
+//! unavailable. The cost of a corpus scan is a property of the REPOSITORY, not
+//! of this client, so its budget is configurable the way the diagnostics one is.
+//!
 //! What: [`AnalyzeEndpoint`] owns the path, the report-facing name, the
 //! consequence of losing it, and the request budget. [`AnalyzeCaveat`] and
 //! [`EndpointFailure`] carry a per-endpoint failure to the report's Gaps &
@@ -18,19 +27,58 @@
 //! fetch.
 //!
 //! Test: `analyze_adapter_tests.rs::{diagnostics_budget_outlives_the_daemon_deadline_ladder,
-//! caveat_labels_are_stable}`.
+//! a_corpus_scanning_endpoint_outlives_the_probe_budget,
+//! the_corpus_budget_falls_back_to_the_default, caveat_labels_are_stable}`.
 
 use std::fmt;
 use std::time::Duration;
 
 // ─── Request budgets ─────────────────────────────────────────────────────────
 
-/// Per-request budget for the endpoints that answer from data already computed.
+/// Per-request budget for the readiness probe.
 ///
-/// Why: `/indexes`, the complexity histogram, and the refactor list are reads
-/// over an in-memory corpus and answer in seconds. A short budget on them is
-/// what keeps an unreachable daemon from stalling a report for minutes.
-const CHEAP_BUDGET: Duration = Duration::from_secs(15);
+/// Why: `analyze.list_indexes` returns a registry the daemon already holds, so
+/// it answers in milliseconds at any corpus size. Keeping it short is what stops
+/// an unreachable daemon from holding a report open for minutes before the run
+/// falls back to scan.
+///
+/// #6712: the histogram and the refactor list used to share this budget on the
+/// premise that they too read computed data. They do not — see
+/// [`DEFAULT_CORPUS_BUDGET`].
+const PROBE_BUDGET: Duration = Duration::from_secs(15);
+
+/// Per-request budget for the endpoints that scan the whole chunk corpus, when
+/// the run configures none.
+///
+/// Why: `analyze.complexity_distribution` and `analyze.refactor_suggestions`
+/// each fetch every chunk of the index from trusty-search and then grade it, so
+/// their cost scales with the repository. Measured against the trusty-tools
+/// checkout (104,433 chunks / 77,148 graded / 4,384 files) the histogram takes
+/// 41–46 s — three times the 15 s these endpoints were given, so on a large
+/// repository the §7 table was never filled (#6712). 180 s is four times the
+/// measured cost, which leaves room for a corpus several times larger, and it
+/// matches the default deadline trusty-analyze already gives its own long
+/// operation. A starting point, not a measured optimum — the manifest key
+/// `[report].analyze_timeout_secs` and the CLI's `--analyze-timeout-secs`
+/// override it.
+pub const DEFAULT_CORPUS_BUDGET: Duration = Duration::from_secs(180);
+
+/// The budget a corpus-scanning endpoint gets, from what the run configured.
+///
+/// Why: taking the configured value as a parameter is what makes the budget
+/// injectable — a test proves the ordering and the honouring at millisecond
+/// scale instead of waiting out three minutes — and it is the same shape
+/// [`diagnostics_budget_for`] takes for the same reason.
+/// What: `None` and `Some(0)` both yield [`DEFAULT_CORPUS_BUDGET`]; zero would
+/// time out every request instantly, which is never what a `0` in a manifest
+/// means.
+/// Test: `the_corpus_budget_falls_back_to_the_default`.
+#[must_use]
+pub fn corpus_budget_from_secs(configured: Option<u64>) -> Duration {
+    configured
+        .filter(|&s| s > 0)
+        .map_or(DEFAULT_CORPUS_BUDGET, Duration::from_secs)
+}
 
 /// The environment variable trusty-analyze reads for its diagnostics deadline.
 ///
@@ -175,18 +223,26 @@ impl AnalyzeEndpoint {
         }
     }
 
-    /// The per-request timeout for this endpoint.
+    /// The per-request timeout for this endpoint, given the run's `corpus`
+    /// budget.
     ///
-    /// Why: diagnostics is the one endpoint that runs external tooling — a
-    /// project-scoped `cargo clippy` — under the daemon's own deadline, so its
-    /// budget is derived from that ladder. Everything else reads memory and
-    /// keeps the short budget, which is what stops a dead daemon from holding
-    /// the report open for minutes.
-    /// Test: `diagnostics_budget_outlives_the_daemon_deadline_ladder`.
-    pub fn budget(self) -> Duration {
+    /// Why: three costs, not two (#6712). The readiness probe reads a registry
+    /// and answers in milliseconds. The histogram and the refactor list scan the
+    /// whole corpus, so their cost is the repository's and the caller supplies
+    /// it. Diagnostics additionally runs external tooling under the daemon's own
+    /// deadline, so it takes the larger of that ladder and `corpus` — a run that
+    /// raises the corpus budget for a big repository must not leave the one
+    /// endpoint that spawns `cargo clippy` on a shorter leash, and taking the
+    /// max is what keeps the #6041 ordering invariant intact while doing it.
+    /// Test: `diagnostics_budget_outlives_the_daemon_deadline_ladder`,
+    /// `a_corpus_scanning_endpoint_outlives_the_probe_budget`.
+    pub fn budget(self, corpus: Duration) -> Duration {
         match self {
-            Self::Diagnostics => diagnostics_budget_for(configured_diagnostics_deadline()),
-            _ => CHEAP_BUDGET,
+            Self::IndexList => PROBE_BUDGET,
+            Self::ComplexityDistribution | Self::RefactorSuggestions => corpus,
+            Self::Diagnostics => {
+                diagnostics_budget_for(configured_diagnostics_deadline()).max(corpus)
+            }
         }
     }
 }
