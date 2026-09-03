@@ -272,8 +272,9 @@ that repo. For per-run date windowing, use the CLI flags `--weeks`, `--from`, `-
 | `username` | String | no | — | Bitbucket account username (required for Basic auth). |
 | `app_password` | String | no | `$BITBUCKET_APP_PASSWORD` | Bitbucket App Password (Basic auth). |
 | `token` | String | no | `$BITBUCKET_TOKEN` | Workspace or repository access token (Bearer auth). Takes precedence over `app_password`. |
-| `workspace` | String | conditional | — | Workspace slug. Required when `fetch_prs: true`. |
-| `repo_slug` | String | conditional | — | Repository slug. Required when `fetch_prs: true`. |
+| `workspace` | String | conditional | — | Workspace slug. Required when `fetch_prs: true` and `workspaces` is empty. |
+| `workspaces` | Vec\<String\> | conditional | — | Workspace slugs whose repository list is discovered over `GET /2.0/repositories/{workspace}` (#5220). An alternative to the `workspace`/`repo_slug` pair; discovered repositories are unioned with it. |
+| `repo_slug` | String | conditional | — | Repository slug. Required when `fetch_prs: true` and `workspaces` is empty. |
 | `fetch_prs` | bool | no | `false` | Fetch PR metadata from Bitbucket API. |
 | `api_base_url` | String | no | `https://api.bitbucket.org/2.0` | API base URL override. |
 

@@ -17,6 +17,7 @@
 //!   under pagination) per PR, same tradeoff GitHub's equivalent
 //!   `fetch_pr_commits` makes.
 
+use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -37,7 +38,7 @@ const USER_AGENT_VALUE: &str = "trusty-git-analytics/0.1";
 /// Default Bitbucket Cloud REST base URL.
 const BITBUCKET_API_BASE: &str = "https://api.bitbucket.org/2.0";
 /// Page size for paginated list endpoints (Bitbucket Cloud caps at 50).
-const PAGE_SIZE: u32 = 50;
+pub(crate) const PAGE_SIZE: u32 = 50;
 /// Maximum retry attempts for transient failures (5xx, 429).
 const MAX_RETRIES: u32 = 3;
 /// Base delay (in milliseconds) for exponential backoff: 1s, 2s, 4s.
@@ -146,13 +147,25 @@ fn resolve_auth(config: &BitbucketConfig, env: impl Fn(&str) -> Option<String>) 
 pub struct BitbucketClient {
     client: reqwest::Client,
     auth: BbAuth,
-    workspace: String,
-    repo_slug: String,
+    /// `(workspace, repo_slug)` pairs this client collects pull requests for.
+    ///
+    /// Empty for a client built by [`BitbucketClient::new_for_discovery`],
+    /// whose only job is to page `GET /2.0/repositories/{workspace}` (#5220).
+    repos: Vec<(String, String)>,
     api_base: String,
+    /// Transient-failure retry budget. Always [`MAX_RETRIES`] in production;
+    /// tests lower it so a permanent-429 case does not sleep for 7 seconds.
+    max_retries: u32,
+    /// Bounds this client hit, in operator-facing wording (#6084 shape).
+    ///
+    /// A workspace listing that stopped at the page cap returns a repository
+    /// set that reads exactly like a complete one; the notice recorded here is
+    /// what [`crate::collect::pr_pipeline`] turns into a visible run fault.
+    notices: Mutex<Vec<String>>,
 }
 
 impl BitbucketClient {
-    /// Build a client from a [`BitbucketConfig`].
+    /// Build a single-repository client from a [`BitbucketConfig`].
     ///
     /// Credential precedence:
     /// 1. Bearer `token` (config, then `BITBUCKET_TOKEN` env).
@@ -181,6 +194,52 @@ impl BitbucketClient {
             .ok_or_else(|| CollectError::Config("bitbucket.repo_slug is required".into()))?
             .to_string();
 
+        Self::build(config, vec![(workspace, repo_slug)])
+    }
+
+    /// Build a client over an explicit repository set (#5220).
+    ///
+    /// Why: workspace discovery answers with many `(workspace, repo_slug)`
+    /// pairs, and the collector must fetch pull requests for all of them — the
+    /// same shape `GitHubClient::new_for_prs` already takes.
+    /// What: same credential and base-URL resolution as [`Self::new`], with the
+    /// repository set supplied by the caller instead of read from
+    /// `workspace`/`repo_slug`.
+    /// Test: `fetch_pull_requests_covers_every_configured_repo`.
+    ///
+    /// # Errors
+    ///
+    /// - [`CollectError::Config`] if `repos` is empty or no usable auth mode is
+    ///   available.
+    /// - [`CollectError::Http`] if the `reqwest::Client` cannot be built.
+    pub fn new_for_repos(config: &BitbucketConfig, repos: Vec<(String, String)>) -> Result<Self> {
+        if repos.is_empty() {
+            return Err(CollectError::Config(
+                "bitbucket: no repositories to collect — set `repo_slug` or `workspaces`".into(),
+            ));
+        }
+        Self::build(config, repos)
+    }
+
+    /// Build a client that carries credentials but no repository set (#5220).
+    ///
+    /// Why: workspace discovery runs BEFORE any repository is known, and the
+    /// common-entry-point rule says it must not construct a second HTTP client
+    /// of its own — it borrows this one, headers, auth, retry and all.
+    /// What: [`Self::build`] with an empty repository set. Calling
+    /// [`Self::fetch_pull_requests`] on the result yields no pull requests,
+    /// which is correct: it collects nothing.
+    /// Test: `workspace_discovery_follows_next_cursor`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::new_for_repos`], minus the empty-repository-set case.
+    pub fn new_for_discovery(config: &BitbucketConfig) -> Result<Self> {
+        Self::build(config, Vec::new())
+    }
+
+    /// The one place a Bitbucket `reqwest::Client` is constructed.
+    fn build(config: &BitbucketConfig, repos: Vec<(String, String)>) -> Result<Self> {
         // Resolve credentials through the live process environment. The
         // env-coupled logic lives in `resolve_auth` so tests can exercise it
         // with an injected lookup instead of mutating `std::env` (issue #1653).
@@ -206,10 +265,83 @@ impl BitbucketClient {
         Ok(Self {
             client,
             auth,
-            workspace,
-            repo_slug,
+            repos,
             api_base,
+            max_retries: MAX_RETRIES,
+            notices: Mutex::new(Vec::new()),
         })
+    }
+
+    /// The REST root every URL this client builds is rooted at.
+    pub(crate) fn api_base(&self) -> &str {
+        &self.api_base
+    }
+
+    /// Carry forward the truncation notices an earlier pass recorded (#5220).
+    ///
+    /// Why: workspace discovery runs on its own short-lived client, so a
+    /// page-cap notice it recorded would die with that client. The collector
+    /// hands the notices to the client that actually reaches
+    /// [`crate::collect::pr_pipeline`], which is the only place they become a
+    /// visible run fault. Same purpose as the shared `RunBudget` the GitHub
+    /// clients pass around (#6565), without a second budget type.
+    /// What: appends `notices` to this client's ledger, which
+    /// [`Self::fetch_notices`] returns.
+    /// Test: `a_truncated_workspace_listing_reaches_the_run_stats`.
+    #[must_use]
+    pub fn with_notices(self, notices: Vec<String>) -> Self {
+        if let Ok(mut ledger) = self.notices.lock() {
+            ledger.extend(notices);
+        }
+        self
+    }
+
+    /// Record that a bound trimmed a result set (#6084).
+    ///
+    /// A poisoned lock drops the notice rather than panicking — losing one
+    /// operator message must not abort a collection run.
+    pub(crate) fn note_truncation(&self, message: impl Into<String>) {
+        if let Ok(mut ledger) = self.notices.lock() {
+            ledger.push(message.into());
+        }
+    }
+
+    /// Every truncation recorded so far, in the order it happened.
+    pub(crate) fn recorded_notices(&self) -> Vec<String> {
+        self.notices
+            .lock()
+            .map(|l| l.clone())
+            .unwrap_or_else(|_| Vec::new())
+    }
+
+    /// Authenticated GET with the shared backoff, for the sibling
+    /// `workspace_discovery` module (#5220).
+    ///
+    /// Why: discovery lives in its own file to keep `client.rs` under the SLOC
+    /// cap, but must reuse this client's headers, credentials and retry policy
+    /// rather than growing a second HTTP path.
+    /// What: delegates to [`Self::retry_request`]. The response is returned
+    /// unclassified — the caller decides what a non-success status means.
+    /// Test: `workspace_discovery_follows_next_cursor`.
+    ///
+    /// # Errors
+    ///
+    /// [`CollectError::Http`] once the transport has failed `max_retries` times.
+    pub(crate) async fn get_with_retry(&self, url: &str) -> Result<reqwest::Response> {
+        self.retry_request(url).await
+    }
+
+    /// Lower the retry budget so a test that always answers 429 finishes now.
+    ///
+    /// Why: [`Self::retry_request`] sleeps 1s, 2s then 4s before giving up, so
+    /// the rate-limit arm of the Fail-Open Check would cost 7 real seconds to
+    /// prove. This seam is `#[cfg(test)]` so no production path can reach it.
+    /// What: replaces [`Self::max_retries`], which defaults to [`MAX_RETRIES`].
+    /// Test: `workspace_discovery_names_a_rate_limit`.
+    #[cfg(test)]
+    pub(crate) fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
+        self
     }
 
     /// Apply the configured auth to a request builder.
@@ -220,7 +352,54 @@ impl BitbucketClient {
         }
     }
 
-    /// Fetch every pull request, following `next` cursors until exhausted.
+    /// Fetch every pull request of every configured repository.
+    ///
+    /// Why (#5220): a discovered workspace hands over many repositories, and
+    /// one 404 among them must not discard the other 199. This mirrors the
+    /// per-repo partial-success precedent the GitHub client set in #87.
+    /// What: calls [`Self::fetch_repo_pull_requests`] per repository, keeping
+    /// what succeeded. A repository that fails is logged and skipped — unless
+    /// EVERY repository failed, in which case the first error is returned so
+    /// the run never reports an empty result it did not observe.
+    /// Test: `fetch_pull_requests_covers_every_configured_repo`,
+    /// `one_failing_repo_does_not_discard_the_others`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CollectError::Http`] on transport or non-success HTTP
+    /// responses, and [`CollectError::Json`] on payload parse failures.
+    pub async fn fetch_pull_requests(&self) -> Result<Vec<PullRequest>> {
+        let mut out: Vec<PullRequest> = Vec::new();
+        let mut first_err: Option<CollectError> = None;
+        let mut ok = 0usize;
+        for (workspace, repo_slug) in &self.repos {
+            match self.fetch_repo_pull_requests(workspace, repo_slug).await {
+                Ok(prs) => {
+                    ok += 1;
+                    out.extend(prs);
+                }
+                Err(e) => {
+                    warn!(
+                        repository = %format!("{workspace}/{repo_slug}"),
+                        error = %e,
+                        "Bitbucket PR fetch failed for one repository; continuing"
+                    );
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+        if ok == 0 {
+            if let Some(e) = first_err {
+                return Err(e);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Fetch every pull request of one repository, following `next` cursors
+    /// until exhausted.
     ///
     /// State filter is `OPEN,MERGED,DECLINED,SUPERSEDED` — i.e. everything.
     /// Bitbucket's default is open-only, which would drop merged history.
@@ -229,12 +408,16 @@ impl BitbucketClient {
     ///
     /// Returns [`CollectError::Http`] on transport or non-success HTTP
     /// responses, and [`CollectError::Json`] on payload parse failures.
-    pub async fn fetch_pull_requests(&self) -> Result<Vec<PullRequest>> {
+    async fn fetch_repo_pull_requests(
+        &self,
+        workspace: &str,
+        repo_slug: &str,
+    ) -> Result<Vec<PullRequest>> {
         let initial = format!(
-            "{}/repositories/{}/{}/pullrequests\
+            "{}/repositories/{workspace}/{repo_slug}/pullrequests\
              ?state=OPEN&state=MERGED&state=DECLINED&state=SUPERSEDED\
              &pagelen={PAGE_SIZE}",
-            self.api_base, self.workspace, self.repo_slug
+            self.api_base
         );
 
         let mut out: Vec<PullRequest> = Vec::new();
@@ -256,11 +439,14 @@ impl BitbucketClient {
 
             let resp = resp.error_for_status()?;
             let page: BbPaged<BbPullRequest> = resp.json().await?;
-            let repository = format!("{}/{}", self.workspace, self.repo_slug);
+            let repository = format!("{workspace}/{repo_slug}");
             for pr in page.values {
                 let pr_number = pr.id;
                 let mut mapped = map_pr(pr, &repository);
-                match self.fetch_pr_commits(pr_number).await {
+                match self
+                    .fetch_pr_commits_in(workspace, repo_slug, pr_number)
+                    .await
+                {
                     Ok(shas) => {
                         mapped.commit_shas = encode_commit_shas(&shas)?;
                     }
@@ -292,19 +478,54 @@ impl BitbucketClient {
     /// and discards the PR's real commit composition (issue #841). This is
     /// the per-PR enrichment call `fetch_pull_requests` makes for every PR it
     /// returns.
+    /// What: delegates to [`Self::fetch_pr_commits_in`] against this client's
+    /// first configured repository — for a client built by [`Self::new`] that
+    /// is the `workspace`/`repo_slug` pair from the config, unchanged.
+    /// Test: `fetch_pr_commits_follows_next_cursor`,
+    /// `fetch_pull_requests_persists_full_commit_list`.
+    ///
+    /// # Errors
+    ///
+    /// [`CollectError::Config`] when the client has no configured repository —
+    /// only reachable through [`Self::new_for_discovery`], which collects
+    /// nothing. Otherwise as [`Self::fetch_pr_commits_in`].
+    pub async fn fetch_pr_commits(&self, pr_number: u64) -> Result<Vec<String>> {
+        // #5220: the signature stays one argument. A discovered workspace made
+        // the client multi-repository, and changing the arity here would have
+        // been a breaking API change for a caller that has exactly one.
+        let (workspace, repo_slug) = self.repos.first().ok_or_else(|| {
+            CollectError::Config(
+                "bitbucket: this client has no configured repository to read commits from".into(),
+            )
+        })?;
+        self.fetch_pr_commits_in(workspace, repo_slug, pr_number)
+            .await
+    }
+
+    /// [`Self::fetch_pr_commits`] against a caller-named repository (#5220).
+    ///
+    /// Why: one client now covers every repository a workspace discovery
+    /// returned, so the PR walk names the repository it is enriching rather
+    /// than reading a single pair off the client.
     /// What: `GET /2.0/repositories/{workspace}/{repo_slug}/pullrequests/{pr_number}/commits`,
     /// following `next` cursors exactly like [`Self::fetch_pull_requests`].
-    /// Test: `fetch_pr_commits_follows_next_cursor`,
+    /// Test: `fetch_pull_requests_covers_every_configured_repo`,
     /// `fetch_pull_requests_persists_full_commit_list`.
     ///
     /// # Errors
     ///
     /// Returns [`CollectError::Http`] on transport or non-success HTTP
     /// responses, and [`CollectError::Json`] on payload parse failures.
-    pub async fn fetch_pr_commits(&self, pr_number: u64) -> Result<Vec<String>> {
+    pub async fn fetch_pr_commits_in(
+        &self,
+        workspace: &str,
+        repo_slug: &str,
+        pr_number: u64,
+    ) -> Result<Vec<String>> {
         let initial = format!(
-            "{}/repositories/{}/{}/pullrequests/{pr_number}/commits?pagelen={PAGE_SIZE}",
-            self.api_base, self.workspace, self.repo_slug
+            "{}/repositories/{workspace}/{repo_slug}/pullrequests/{pr_number}/commits\
+             ?pagelen={PAGE_SIZE}",
+            self.api_base
         );
 
         let mut out: Vec<String> = Vec::new();
@@ -378,14 +599,14 @@ impl BitbucketClient {
     /// GET with exponential backoff on transient failures (429, 5xx).
     async fn retry_request(&self, url: &str) -> Result<reqwest::Response> {
         let mut last_err: Option<reqwest::Error> = None;
-        for attempt in 0..=MAX_RETRIES {
+        for attempt in 0..=self.max_retries {
             debug!(url = %url, attempt, "GET bitbucket (with retry)");
             match self.authed(self.client.get(url)).send().await {
                 Ok(resp) => {
                     let status = resp.status();
                     let transient =
                         status.as_u16() == 429 || (500..=599).contains(&status.as_u16());
-                    if !transient || attempt == MAX_RETRIES {
+                    if !transient || attempt == self.max_retries {
                         return Ok(resp);
                     }
                     let delay = RETRY_BASE_MS * (1u64 << attempt);
@@ -398,7 +619,7 @@ impl BitbucketClient {
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
                 Err(e) => {
-                    if attempt == MAX_RETRIES {
+                    if attempt == self.max_retries {
                         return Err(CollectError::Http(e));
                     }
                     let delay = RETRY_BASE_MS * (1u64 << attempt);
@@ -517,6 +738,12 @@ impl PrProvider for BitbucketClient {
         prs: &[PullRequest],
     ) -> crate::core::Result<usize> {
         BitbucketClient::store_pull_requests(self, db, prs)
+    }
+
+    /// #5220: surfaces the workspace-discovery page cap the same way the
+    /// GitHub client surfaces its listing caps (#6084).
+    fn fetch_notices(&self) -> Vec<String> {
+        self.recorded_notices()
     }
 }
 

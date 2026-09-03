@@ -486,6 +486,54 @@ fn config_validator_rejects_ado_with_no_projects() {
     );
 }
 
+/// Why (#5220): `workspaces` is the second way to name a repository set, and a
+/// config that uses it owes no `workspace`/`repo_slug` pair — the repository
+/// list comes from `GET /2.0/repositories/{workspace}` instead of the file.
+/// Before this, the validator rejected exactly the config `tga install --host
+/// bitbucket` generates.
+/// What: a Bitbucket block with PR fetching on, one workspace to discover, and
+/// neither singular field set, reports no incomplete-config error.
+/// Test: this test itself.
+#[test]
+fn bitbucket_workspaces_satisfy_the_workspace_and_repo_slug_checks() {
+    let mut cfg = empty_config();
+    cfg.bitbucket = Some(BitbucketConfig {
+        token: Some("bearer".into()),
+        workspaces: vec!["acme".into()],
+        fetch_prs: true,
+        ..Default::default()
+    });
+    let errors = ConfigValidator::new(&cfg).validate();
+    assert!(
+        !errors
+            .iter()
+            .any(|e| matches!(e, ConfigError::IncompleteBitbucketConfig { .. })),
+        "workspace discovery needs neither workspace nor repo_slug, got {errors:?}"
+    );
+}
+
+/// A whitespace-only workspaces entry is not a repository set (#5220).
+#[test]
+fn blank_bitbucket_workspaces_still_require_the_singular_pair() {
+    let mut cfg = empty_config();
+    cfg.bitbucket = Some(BitbucketConfig {
+        token: Some("bearer".into()),
+        workspaces: vec!["   ".into()],
+        fetch_prs: true,
+        ..Default::default()
+    });
+    let errors = ConfigValidator::new(&cfg).validate();
+    let missing: Vec<&str> = errors
+        .iter()
+        .filter_map(|e| match e {
+            ConfigError::IncompleteBitbucketConfig { field } => Some(field.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(missing.contains(&"workspace"), "got {errors:?}");
+    assert!(missing.contains(&"repo_slug"), "got {errors:?}");
+}
+
 #[test]
 fn bitbucket_block_off_is_fine() {
     // `fetch_prs` defaults off, so the check returns before it reads anything —

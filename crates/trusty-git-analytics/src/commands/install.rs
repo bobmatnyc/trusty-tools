@@ -32,7 +32,7 @@ pub enum InstallHost {
     Local,
     /// A GitHub org (or an explicit `owner/name` list).
     Github,
-    /// A Bitbucket Cloud workspace with an explicit `workspace/slug` list.
+    /// A Bitbucket Cloud workspace, discovered over the API (#5220).
     Bitbucket,
 }
 
@@ -59,8 +59,9 @@ On a terminal with no flags this walks through a series of prompts; press\n\
 <enter> at each to accept the default shown in brackets.\n\n\
 Given --host and --pm (or with stdin not a terminal) it runs non-interactively\n\
 from flags and environment variables instead, and never prompts. With --host\n\
-github and --org it discovers the org's repositories over the GitHub API and\n\
-writes them into the generated config.\n\n\
+github and --org — or --host bitbucket and --workspace — it discovers the\n\
+repositories over the provider's API and writes them into the generated\n\
+config.\n\n\
 Flag values win over environment variables. A credential taken from the\n\
 environment is written to the config as a ${VAR} reference, not as the secret.",
     after_help = "EXAMPLES:\n\
@@ -68,8 +69,8 @@ environment is written to the config as a ${VAR} reference, not as the secret.",
   tga install\n\n\
   # Zero-config org audit, no terminal required\n\
   GITHUB_TOKEN=ghp_… tga install --host github --org acme --pm github\n\n\
-  # Bitbucket Cloud — workspace discovery is not available yet (#5220), so name the repos\n\
-  tga install --host bitbucket --workspace acme --repo acme/widget --pm jira \\\n\
+  # Bitbucket Cloud — the workspace's repositories are discovered over the API\n\
+  BITBUCKET_TOKEN=… tga install --host bitbucket --workspace acme --pm jira \\\n\
     --jira-url https://acme.atlassian.net --jira-user me@acme.com\n\n\
   # Write config to a custom path, overwriting any existing file\n\
   tga install --output /etc/tga/config.yaml --force\n\n\
@@ -323,14 +324,16 @@ fn prompt_host<R: BufRead>(reader: &mut R, answers: &mut Answers) -> anyhow::Res
         }
         InstallHost::Bitbucket => {
             answers.workspace = Some(prompt(reader, "Bitbucket Cloud workspace", None)?);
-            println!(
-                "  Bitbucket workspace discovery is not available yet (#5220) — name the repositories."
+            // #5220: the workspace is paged over the API, so the explicit list
+            // is now an addition rather than the only source.
+            println!("  The workspace's repositories are discovered over the API.");
+            answers.repo_slugs = split_list(
+                &prompt_optional(
+                    reader,
+                    "Extra Bitbucket repositories (comma-separated <workspace>/<slug>, optional)",
+                )?
+                .unwrap_or_default(),
             );
-            answers.repo_slugs = split_list(&prompt(
-                reader,
-                "Bitbucket repositories (comma-separated <workspace>/<slug>)",
-                None,
-            )?);
             answers.host_token =
                 prompt_optional(reader, "Bitbucket token (optional, leave blank to skip)")?
                     .map(Credential::literal);
@@ -545,25 +548,39 @@ mod tests {
         assert!(yaml.contains("team_keys: [\"ENG\", \"OPS\"]"), "{yaml}");
     }
 
-    /// Why: the Bitbucket wizard branch must record the workspace and the
-    /// explicit repository list rather than producing an empty config.
-    /// What: drives the wizard through the Bitbucket answers.
+    /// Why: the Bitbucket wizard branch must record the workspace, keep the
+    /// optional explicit repository list, and — since #5220 — union both with
+    /// what the API discovers.
+    /// What: drives the wizard through the Bitbucket answers against a mock
+    /// workspace listing; no test here reaches bitbucket.org.
     /// Test: this test itself.
     #[tokio::test]
     async fn wizard_collects_bitbucket_workspace_and_repos() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repositories/acme"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "values": [{"full_name": "acme/sprocket", "slug": "sprocket"}],
+            })))
+            .mount(&server)
+            .await;
+
         let script = "bitbucket\nacme\nacme/widget, acme/gadget\nbb-token\nnone\n./out\nnone\n";
         let mut input = script.as_bytes();
-        let answers =
+        let mut answers =
             collect_answers(&mut input, &args_for_tests(&["tga"])).expect("wizard completes");
+        answers.bitbucket_api_base = Some(server.uri());
         let plan = plan_from_answers(answers).await.expect("plan");
         let yaml = render_yaml(&plan);
-        assert!(yaml.contains("workspace: \"acme\""), "{yaml}");
+        assert!(yaml.contains("workspaces: [\"acme\"]"), "{yaml}");
         assert!(yaml.contains("name: \"widget\""), "{yaml}");
         assert!(yaml.contains("name: \"gadget\""), "{yaml}");
         assert!(
-            plan.notes.iter().any(|n| n.contains("#5220")),
-            "{:?}",
-            plan.notes
+            yaml.contains("name: \"sprocket\""),
+            "the discovered repo: {yaml}"
         );
     }
 

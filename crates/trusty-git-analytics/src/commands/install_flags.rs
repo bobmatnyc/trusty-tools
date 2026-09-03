@@ -9,8 +9,8 @@
 //! What: [`resolve_plan`] is the entry point. [`answers_from_flags`] applies
 //! the precedence (flag value first, then the environment) and refuses with a
 //! list of exactly the missing flags rather than blocking on stdin.
-//! [`plan_from_answers`] runs GitHub org discovery and produces the
-//! [`InstallPlan`] both front ends render from.
+//! [`plan_from_answers`] runs GitHub org and Bitbucket workspace discovery
+//! (#5220) and produces the [`InstallPlan`] both front ends render from.
 //!
 //! Test: `missing_flags_are_named_not_prompted_for`,
 //! `flag_path_discovers_org_repos_and_writes_them` and the credential
@@ -18,12 +18,13 @@
 
 use std::path::PathBuf;
 
+use crate::collect::bitbucket::{discover_workspace_repos, BitbucketClient};
 use crate::collect::github::{build_http_client, discover_org_repos_at};
 use crate::commands::install::{split_list, InstallArgs, InstallHost, InstallPm};
 use crate::commands::install_plan::{
     env_var_for, Credential, InstallPlan, JiraSettings, LinearSettings, RepoEntry,
 };
-use crate::core::config::GithubConfig;
+use crate::core::config::{BitbucketConfig, GithubConfig};
 
 /// Environment variable holding the Bitbucket Cloud token.
 const ENV_BITBUCKET_TOKEN: &str = "BITBUCKET_TOKEN";
@@ -74,6 +75,9 @@ pub(crate) struct Answers {
     /// GitHub REST root override. `None` means api.github.com; tests point it
     /// at a local mock server.
     pub github_api_base: Option<String>,
+    /// Bitbucket REST root override (#5220). `None` means
+    /// api.bitbucket.org/2.0; tests point it at a local mock server.
+    pub bitbucket_api_base: Option<String>,
 }
 
 /// Resolve an [`InstallPlan`] from flags and the process environment.
@@ -166,6 +170,7 @@ pub(crate) fn answers_from_flags(
         llm_provider,
         output_dir: args.output_dir.clone(),
         github_api_base: None,
+        bitbucket_api_base: None,
     })
 }
 
@@ -204,13 +209,8 @@ fn missing_flags(args: &InstallArgs, has_token: bool, pm_creds: &[(&str, bool)])
             if args.workspace.is_none() {
                 missing.push("--workspace <WORKSPACE>".to_string());
             }
-            if args.repo.is_empty() {
-                missing.push(
-                    "--repo <WORKSPACE/SLUG> (repeatable — Bitbucket workspace discovery \
-                     is not available yet, see #5220)"
-                        .to_string(),
-                );
-            }
+            // #5220: workspace discovery derives the repository set, so an
+            // explicit `--repo` list is an addition rather than a requirement.
             if !has_token {
                 missing.push("--host-token <TOKEN> (or set $BITBUCKET_TOKEN)".to_string());
             }
@@ -236,15 +236,15 @@ fn missing_flags(args: &InstallArgs, has_token: bool, pm_creds: &[(&str, bool)])
 /// Why (#5216): "given an org and a token, tga derives the repo set itself" is
 /// the issue's closure condition, and [`discover_org_repos_at`] already knows
 /// how to page it — this is the call site that was missing.
-/// What: local paths pass through unchanged; a GitHub org is paged over the
-/// API and unioned with any explicit `--repo` slugs; a Bitbucket workspace
-/// takes the explicit list only, and records why.
+/// What: local paths pass through unchanged; a GitHub org and a Bitbucket
+/// workspace (#5220) are each paged over their own API and unioned with any
+/// explicit `--repo` slugs.
 /// Test: `flag_path_discovers_org_repos_and_writes_them` and
-/// `bitbucket_records_that_discovery_is_unavailable`.
+/// `flag_path_discovers_workspace_repos_and_writes_them`.
 ///
 /// # Errors
 ///
-/// Propagates a GitHub client-build or org-discovery failure.
+/// Propagates a client-build or discovery failure from either provider.
 pub(crate) async fn plan_from_answers(answers: Answers) -> anyhow::Result<InstallPlan> {
     let Answers {
         host,
@@ -261,6 +261,7 @@ pub(crate) async fn plan_from_answers(answers: Answers) -> anyhow::Result<Instal
         llm_provider,
         llm_api_key,
         github_api_base,
+        bitbucket_api_base,
     } = answers;
 
     let mut plan = InstallPlan {
@@ -297,14 +298,21 @@ pub(crate) async fn plan_from_answers(answers: Answers) -> anyhow::Result<Instal
             push_remote(&mut plan, &repo_cache, pairs);
         }
         InstallHost::Bitbucket => {
-            // #5216: non-interactive install path — Bitbucket workspace-to-repo
-            // discovery is #5220, so the explicit list is the repository set.
-            plan.notes.push(
-                "Bitbucket Cloud workspace discovery is not available yet (#5220); the \
-                 repositories listed here are the ones you named explicitly."
-                    .to_string(),
-            );
-            let pairs = parse_slugs(&repo_slugs, workspace.as_deref());
+            // #5220: the workspace is paged over the API, exactly as a GitHub
+            // org is above; explicit `--repo` slugs are unioned in.
+            let mut pairs = parse_slugs(&repo_slugs, workspace.as_deref());
+            if let Some(ws) = &workspace {
+                pairs.extend(
+                    discover_workspace(host_token.as_ref(), bitbucket_api_base.as_deref(), ws)
+                        .await?,
+                );
+                if pairs.is_empty() {
+                    plan.notes.push(format!(
+                        "Bitbucket workspace `{ws}` returned no repositories the supplied \
+                         token can see"
+                    ));
+                }
+            }
             plan.bitbucket_workspace = workspace;
             plan.bitbucket_token = host_token;
             push_remote(&mut plan, &repo_cache, pairs);
@@ -329,6 +337,36 @@ async fn discover(
     let http = build_http_client(&cfg)?;
     let base = api_base.unwrap_or("https://api.github.com");
     Ok(discover_org_repos_at(&http, base, org).await?)
+}
+
+/// Page `workspace`'s repositories over the Bitbucket Cloud API (#5220).
+///
+/// Why: this is the call site the `--host bitbucket` branch was missing — the
+/// note it used to write said discovery did not exist yet.
+/// What: builds a discovery-only [`BitbucketClient`] from the supplied token —
+/// the crate's one Bitbucket client constructor, never a second HTTP client —
+/// and hands it to [`discover_workspace_repos`]. `api_base` of `None` means
+/// api.bitbucket.org; tests point it at a mock server.
+/// Test: `flag_path_discovers_workspace_repos_and_writes_them`.
+///
+/// # Errors
+///
+/// Propagates a client-build failure (no usable credential) or a discovery
+/// failure — a rejected token and a rate limit both surface named, never as an
+/// empty repository set.
+async fn discover_workspace(
+    token: Option<&Credential>,
+    api_base: Option<&str>,
+    workspace: &str,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let cfg = BitbucketConfig {
+        token: token.map(|c| c.value.clone()),
+        workspaces: vec![workspace.to_string()],
+        api_base_url: api_base.map(str::to_string),
+        ..BitbucketConfig::default()
+    };
+    let client = BitbucketClient::new_for_discovery(&cfg)?;
+    Ok(discover_workspace_repos(&client, workspace).await?)
 }
 
 /// Append `pairs` as `repositories[]` entries under `cache`, deduplicating.
@@ -481,8 +519,8 @@ mod tests {
     /// What: `--host bitbucket --workspace acme` with no `--repo`.
     /// Test: this test itself.
     #[test]
-    fn bitbucket_without_repos_is_refused_and_says_why() {
-        let err = answers_from_flags(
+    fn bitbucket_needs_only_a_workspace_and_a_token() {
+        let answers = answers_from_flags(
             &args_for_tests(&[
                 "tga",
                 "--host",
@@ -496,10 +534,28 @@ mod tests {
             ]),
             &no_env,
         )
-        .expect_err("bitbucket without --repo must be refused");
-        let msg = err.to_string();
-        assert!(msg.contains("--repo <WORKSPACE/SLUG>"), "{msg}");
-        assert!(msg.contains("#5220"), "{msg}");
+        .expect("#5220: discovery derives the repository set, so --repo is optional");
+        assert_eq!(answers.workspace.as_deref(), Some("acme"));
+        assert!(answers.repo_slugs.is_empty());
+    }
+
+    /// A Bitbucket install still refuses without a token to discover with.
+    #[test]
+    fn bitbucket_without_a_token_is_refused() {
+        let err = answers_from_flags(
+            &args_for_tests(&[
+                "tga",
+                "--host",
+                "bitbucket",
+                "--workspace",
+                "acme",
+                "--pm",
+                "none",
+            ]),
+            &no_env,
+        )
+        .expect_err("no credential means nothing can be discovered");
+        assert!(err.to_string().contains("--host-token <TOKEN>"), "{err}");
     }
 
     /// Why: a JIRA or Linear choice with no credentials writes a config that
@@ -725,20 +781,41 @@ mod tests {
         );
     }
 
-    /// Why: the Bitbucket option must accept an explicit repo list and say
-    /// discovery is not available, not silently emit an empty config.
-    /// What: resolves a Bitbucket install with two explicit repos.
+    /// Why (#5220): a workspace plus a token must yield a populated config
+    /// with nothing transcribed by hand — the Bitbucket half of the closure
+    /// condition `flag_path_discovers_org_repos_and_writes_them` proves for
+    /// GitHub. Against a local mock; no test here reaches bitbucket.org.
+    /// What: serves two cursor-linked pages of `GET /2.0/repositories/acme`,
+    /// resolves the flag path against them, and asserts the discovered repos
+    /// AND the explicit `--repo` slug both reach the YAML.
     /// Test: this test itself.
     #[tokio::test]
-    async fn bitbucket_records_that_discovery_is_unavailable() {
+    async fn flag_path_discovers_workspace_repos_and_writes_them() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/repositories/acme"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [{"full_name": "acme/widget", "slug": "widget"}],
+                "next": format!("{base}/repositories/acme?page=2"),
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repositories/acme"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [{"full_name": "acme/sprocket", "slug": "sprocket"}],
+            })))
+            .mount(&server)
+            .await;
+
         let args = args_for_tests(&[
             "tga",
             "--host",
             "bitbucket",
             "--workspace",
             "acme",
-            "--repo",
-            "acme/widget",
             "--repo",
             "gadget",
             "--pm",
@@ -748,13 +825,59 @@ mod tests {
             "--repo-cache",
             "/cache",
         ]);
-        let answers = answers_from_flags(&args, &no_env).expect("resolves");
-        let plan = plan_from_answers(answers).await.expect("resolves");
+        let mut answers = answers_from_flags(&args, &no_env).expect("resolves");
+        answers.bitbucket_api_base = Some(base);
+        let plan = plan_from_answers(answers)
+            .await
+            .expect("discovery succeeds");
+
         let yaml = render_yaml(&plan);
-        assert!(yaml.contains("workspace: \"acme\""), "{yaml}");
-        assert!(yaml.contains("path: \"/cache/acme/widget\""), "{yaml}");
-        // A bare slug inherits the workspace.
+        assert!(yaml.contains("workspaces: [\"acme\"]"), "{yaml}");
+        // A bare `--repo` slug inherits the workspace and survives discovery.
         assert!(yaml.contains("path: \"/cache/acme/gadget\""), "{yaml}");
-        assert!(yaml.contains("#5220"), "{yaml}");
+        // Both cursor pages reach the repository set.
+        assert!(yaml.contains("path: \"/cache/acme/widget\""), "{yaml}");
+        assert!(yaml.contains("path: \"/cache/acme/sprocket\""), "{yaml}");
+        assert!(!yaml.contains("#5220"), "the stale caveat is gone: {yaml}");
+    }
+
+    /// Why (#5220): the Fail-Open Check at the install boundary — a rejected
+    /// token must stop the install with the status named, not write a config
+    /// whose repository list is silently empty.
+    /// What: the mock answers 401 for every request.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn a_rejected_workspace_token_fails_the_install() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repositories/acme"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("Invalid credentials"))
+            .mount(&server)
+            .await;
+
+        let args = args_for_tests(&[
+            "tga",
+            "--host",
+            "bitbucket",
+            "--workspace",
+            "acme",
+            "--pm",
+            "none",
+            "--host-token",
+            "bb-token",
+            "--repo-cache",
+            "/cache",
+        ]);
+        let mut answers = answers_from_flags(&args, &no_env).expect("resolves");
+        answers.bitbucket_api_base = Some(server.uri());
+        let err = plan_from_answers(answers)
+            .await
+            .expect_err("a 401 must not render an empty repository set");
+        let msg = err.to_string();
+        assert!(msg.contains("401"), "the status must be named: {msg}");
+        assert!(
+            msg.contains("Invalid credentials"),
+            "Bitbucket's own explanation must survive: {msg}"
+        );
     }
 }

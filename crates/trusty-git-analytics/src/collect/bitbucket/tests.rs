@@ -230,6 +230,8 @@ async fn fetch_pr_commits_follows_next_cursor() {
     })
     .expect("client builds");
 
+    // #5220: the one-argument form kept its meaning — the client's configured
+    // `workspace`/`repo_slug` pair.
     let shas = client.fetch_pr_commits(9).await.expect("fetch");
     assert_eq!(
         shas,
@@ -647,4 +649,180 @@ fn store_pull_requests_applies_genuinely_newer_fetched_at() {
         state, "open",
         "a genuinely newer fetched_at must overwrite the previous row"
     );
+}
+
+/// Every configured repository is fetched, not just the first (#5220).
+///
+/// Why: workspace discovery hands the client many `(workspace, repo_slug)`
+/// pairs. A loop that stopped after one would report a whole workspace's
+/// history as one repository's, and nothing downstream would notice.
+/// What: two repositories, one PR each, one client built through
+/// [`BitbucketClient::new_for_repos`].
+#[tokio::test]
+async fn fetch_pull_requests_covers_every_configured_repo() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    for (slug, id) in [("widgets", 1u64), ("gadgets", 2u64)] {
+        Mock::given(method("GET"))
+            .and(path(format!("/repositories/acme/{slug}/pullrequests")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "values": [{
+                    "id": id,
+                    "title": format!("PR in {slug}"),
+                    "state": "OPEN",
+                    "created_on": "2024-01-01T00:00:00Z",
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repositories/acme/{slug}/pullrequests/{id}/commits"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"values": []})),
+            )
+            .mount(&server)
+            .await;
+    }
+
+    let client = BitbucketClient::new_for_repos(
+        &BitbucketConfig {
+            token: Some("dummy".into()),
+            workspaces: vec!["acme".into()],
+            fetch_prs: true,
+            api_base_url: Some(base),
+            ..Default::default()
+        },
+        vec![
+            ("acme".to_string(), "widgets".to_string()),
+            ("acme".to_string(), "gadgets".to_string()),
+        ],
+    )
+    .expect("client builds");
+
+    let prs = client.fetch_pull_requests().await.expect("fetch");
+    let mut repositories: Vec<String> = prs.iter().map(|p| p.repository.clone()).collect();
+    repositories.sort();
+    assert_eq!(
+        repositories,
+        vec!["acme/gadgets".to_string(), "acme/widgets".to_string()]
+    );
+}
+
+/// One unreadable repository does not discard the readable one (#5220).
+///
+/// Why: a discovered workspace routinely contains a repository the token
+/// cannot read. Aborting the batch on the first 404 would throw away every
+/// other repository's pull requests. Mirrors the GitHub client's #87
+/// partial-success precedent.
+/// What: `widgets` answers 200, `locked` answers 403; the fetch keeps what it
+/// could read.
+#[tokio::test]
+async fn one_failing_repo_does_not_discard_the_others() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    Mock::given(method("GET"))
+        .and(path("/repositories/acme/widgets/pullrequests"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "values": [{
+                "id": 1,
+                "title": "readable",
+                "state": "OPEN",
+                "created_on": "2024-01-01T00:00:00Z",
+            }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repositories/acme/widgets/pullrequests/1/commits"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"values": []})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repositories/acme/locked/pullrequests"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+
+    let client = BitbucketClient::new_for_repos(
+        &BitbucketConfig {
+            token: Some("dummy".into()),
+            fetch_prs: true,
+            api_base_url: Some(base),
+            ..Default::default()
+        },
+        vec![
+            ("acme".to_string(), "widgets".to_string()),
+            ("acme".to_string(), "locked".to_string()),
+        ],
+    )
+    .expect("client builds");
+
+    let prs = client.fetch_pull_requests().await.expect("fetch");
+    assert_eq!(prs.len(), 1, "the readable repository still contributes");
+    assert_eq!(prs[0].repository, "acme/widgets");
+}
+
+/// When EVERY repository fails, the error surfaces rather than an empty list.
+///
+/// Why (#5220): partial success must not become silent total failure — a run
+/// that fetched nothing because the token was rejected has to say so.
+#[tokio::test]
+async fn every_repo_failing_returns_the_error_not_an_empty_list() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let client = BitbucketClient::new_for_repos(
+        &BitbucketConfig {
+            token: Some("dummy".into()),
+            fetch_prs: true,
+            api_base_url: Some(server.uri()),
+            ..Default::default()
+        },
+        vec![("acme".to_string(), "widgets".to_string())],
+    )
+    .expect("client builds");
+
+    let err = client
+        .fetch_pull_requests()
+        .await
+        .expect_err("a wholly failed fetch must not read as zero pull requests");
+    assert!(
+        err.to_string().contains("401"),
+        "the status must survive: {err}"
+    );
+}
+
+/// An empty repository set is refused at construction (#5220).
+#[test]
+fn new_for_repos_refuses_an_empty_repository_set() {
+    // `BitbucketClient` has no `Debug` (it holds a live credential), so the
+    // Ok arm is discarded by hand rather than through `expect_err`.
+    let built = BitbucketClient::new_for_repos(
+        &BitbucketConfig {
+            token: Some("dummy".into()),
+            ..Default::default()
+        },
+        Vec::new(),
+    );
+    match built {
+        Err(CollectError::Config(msg)) => assert!(msg.contains("no repositories"), "{msg}"),
+        Err(other) => panic!("expected a Config error, got {other:?}"),
+        Ok(_) => panic!("an empty repository set must not build a client"),
+    }
 }
