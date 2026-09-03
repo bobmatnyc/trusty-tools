@@ -43,7 +43,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::index_registry::resolve_report_index;
 use super::metrics::{
     AnalyzeMetrics, ComplexityBucket, ComplexityDistribution, MetricFinding, Severity,
 };
@@ -52,8 +51,12 @@ use crate::integrations::search_client::IndexInfo;
 // The per-endpoint paths, budgets, and failure vocabulary live one module over,
 // beside each other, so an endpoint's cost and its timeout cannot drift apart.
 pub use super::analyze_endpoints::{
-    AnalyzeCaveat, AnalyzeEndpoint, EndpointFailure, diagnostics_budget_for,
+    AnalyzeCaveat, AnalyzeEndpoint, DEFAULT_CORPUS_BUDGET, EndpointFailure,
+    corpus_budget_from_secs, diagnostics_budget_for,
 };
+// #6712: the model-enrichment half moved to `analyze_enrich` when this file
+// passed the SLOC cap; the paths callers already use resolve through here.
+pub use super::analyze_enrich::{enrich_with_analyze, enrich_with_analyze_gaps};
 
 // ─── Tunables ──────────────────────────────────────────────────────────────
 
@@ -322,7 +325,7 @@ fn map_distribution(env: &DistributionEnvelope) -> ComplexityDistribution {
     }
 }
 
-use super::analyze_findings::{diagnostic_finding, refactor_finding, relativize_components};
+use super::analyze_findings::{diagnostic_finding, refactor_finding};
 
 // ─── Pure mapping ────────────────────────────────────────────────────────────
 
@@ -503,6 +506,13 @@ pub struct HttpAnalyzeMetricsSource {
     /// What: `None` resolves the advertised daemon at read time — the production
     /// default, unchanged; `Some(url)` reads that URL instead.
     search_base_url: Option<String>,
+    /// Per-request budget for the endpoints that scan the whole corpus (#6712).
+    ///
+    /// Why a field rather than a constant: the cost of a corpus scan belongs to
+    /// the repository being reported on, so the run configures it — see
+    /// [`Self::with_corpus_budget`]. Holding it here is also what makes it
+    /// injectable at millisecond scale in a test.
+    corpus_budget: Duration,
 }
 
 impl HttpAnalyzeMetricsSource {
@@ -530,7 +540,28 @@ impl HttpAnalyzeMetricsSource {
             socket,
             started: tokio::sync::OnceCell::new(),
             search_base_url: None,
+            // #6712: the run overrides this through `with_corpus_budget`.
+            corpus_budget: DEFAULT_CORPUS_BUDGET,
         })
+    }
+
+    /// Give the corpus-scanning endpoints `budget` per request (#6712).
+    ///
+    /// Why: `analyze.complexity_distribution` grades every chunk in the index,
+    /// so how long it takes is a fact about the repository — 41–46 s on a
+    /// 104k-chunk checkout — and the caller is the only layer that knows which
+    /// repository this is. The CLI resolves the value from
+    /// `--analyze-timeout-secs`, the manifest's `[report].analyze_timeout_secs`,
+    /// and [`DEFAULT_CORPUS_BUDGET`], in that order.
+    /// What: consuming builder, matching [`Self::with_search_base_url`]. The
+    /// readiness probe is deliberately unaffected — a dead daemon must still be
+    /// declared dead in seconds.
+    /// Test: `a_corpus_endpoint_slower_than_the_probe_budget_still_arrives`,
+    /// `the_configured_corpus_budget_is_honoured_and_named_in_the_error`.
+    #[must_use]
+    pub fn with_corpus_budget(mut self, budget: Duration) -> Self {
+        self.corpus_budget = budget;
+        self
     }
 
     /// Read the trusty-search registry from `base_url` rather than from the
@@ -727,7 +758,9 @@ impl HttpAnalyzeMetricsSource {
     /// warning) from a transport error, per the indexing prerequisite (#2448).
     async fn index_served(&self, index_id: &str) -> AdapterResult<bool> {
         let endpoint = AnalyzeEndpoint::IndexList;
-        let indexes: Vec<ServedIndex> = self.call(endpoint, index_id, endpoint.budget()).await?;
+        let indexes: Vec<ServedIndex> = self
+            .call(endpoint, index_id, endpoint.budget(self.corpus_budget))
+            .await?;
         Ok(indexes.iter().any(|i| i.id == index_id))
     }
 
@@ -745,16 +778,34 @@ impl HttpAnalyzeMetricsSource {
     /// failure category, and returns `None`. The error text never reaches the
     /// caveat — it can quote a URL or a response body, and the artifact gets the
     /// category only.
+    /// #6712: a successful fetch logs how long it took at INFO. Until then the
+    /// only observable timing was a timeout, so an endpoint creeping up on its
+    /// budget looked identical to one answering instantly — and the histogram
+    /// had been over the old budget for the whole life of that budget with
+    /// nothing on the record saying so.
+    ///
     /// Test: `a_failing_endpoint_keeps_what_the_others_returned`,
-    /// `a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error`.
+    /// `a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error`,
+    /// `a_corpus_endpoint_slower_than_the_probe_budget_still_arrives`.
     async fn fetch_dataset<T: serde::de::DeserializeOwned>(
         &self,
         index_id: &str,
         endpoint: AnalyzeEndpoint,
         caveats: &mut Vec<AnalyzeCaveat>,
     ) -> Option<T> {
-        match self.call(endpoint, index_id, endpoint.budget()).await {
-            Ok(v) => Some(v),
+        let budget = endpoint.budget(self.corpus_budget);
+        let started = std::time::Instant::now();
+        match self.call(endpoint, index_id, budget).await {
+            Ok(v) => {
+                tracing::info!(
+                    index_id,
+                    endpoint = endpoint.as_str(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    budget_ms = budget.as_millis(),
+                    "--analyze: endpoint answered"
+                );
+                Some(v)
+            }
             Err(e) => {
                 let reason = classify_failure(&e);
                 tracing::warn!(index_id, endpoint = endpoint.as_str(), error = %e,
@@ -885,142 +936,6 @@ impl AnalyzeMetricsSource for HttpAnalyzeMetricsSource {
             }
         }
     }
-}
-
-// ─── Model enrichment (precedence seam, #2448) ───────────────────────────────
-
-/// Fill live analyze metrics into a built [`ReportModel`](crate::report::ReportModel), honouring the
-/// fail-open precedence: declared metrics file > `--analyze` live fetch > None.
-///
-/// Why: `--analyze` must populate the complexity chart + finding bands for a
-/// bare run, but must NEVER override a hand-authored metrics JSON, and must
-/// never abort the report — an unindexed repo or an unreachable daemon simply
-/// leaves the repo at its declared/scan state.
-/// What: for each repository that has NO declared metrics AND is a local
-/// checkout (remote repos are never indexed locally), derives the index id from
-/// the checkout path and fetches via `source`; a `Some` result populates
-/// `repo.metrics`. Repos with declared metrics or no local path are skipped.
-/// Test: `report_analyze_e2e.rs` drives this against an in-process HTTP mock.
-pub async fn enrich_with_analyze(
-    model: &mut super::model::ReportModel,
-    source: &dyn AnalyzeMetricsSource,
-) {
-    let _ = enrich_with_analyze_gaps(model, source).await;
-}
-
-/// Same enrichment, returning one Gaps & Caveats line per degraded condition
-/// (#5239, DOC-67 §9).
-///
-/// Why: fail-open is the right contract and fail-SILENT is not. A findings
-/// table that renders empty because the daemon was down is indistinguishable,
-/// on the page, from a codebase with no findings — so every repository the
-/// fetch could not populate is named, grouped by reason, in the report itself.
-/// The fetch contract is unchanged: nothing here aborts, and the report still
-/// renders from the built-in scan.
-/// What: walks the same repositories [`enrich_with_analyze`] does, using
-/// [`AnalyzeMetricsSource::fetch_named`]; returns at most one line per
-/// [`AnalyzeGap`] kind and one per [`AnalyzeCaveat`] kind, each naming the
-/// affected repositories in model order so two runs over the same state produce
-/// identical lines. Repositories with a declared metrics file, and remote
-/// entries, are skipped — neither is a gap. Returns an empty vec when every
-/// eligible repository was populated completely.
-/// Test: `analyze_adapter_tests.rs::{enrich_names_unreachable_repositories,
-/// enrich_reports_no_gaps_when_every_repo_is_populated,
-/// enrich_reports_caveats_for_partially_answered_repositories}`, plus
-/// `redact_tests.rs::enrich_scrubs_configured_credentials_from_findings` for
-/// the #5323 redaction boundary.
-pub async fn enrich_with_analyze_gaps(
-    model: &mut super::model::ReportModel,
-    source: &dyn AnalyzeMetricsSource,
-) -> Vec<String> {
-    // BTreeMap, not HashMap: the rendered line order must not depend on hash
-    // iteration order (DOC-67 §9's determinism requirement).
-    let mut missing: std::collections::BTreeMap<AnalyzeGap, Vec<String>> = Default::default();
-    let mut partial: std::collections::BTreeMap<AnalyzeCaveat, Vec<String>> = Default::default();
-    // #6137: one line per repository whose index described a different checkout.
-    let mut stale: Vec<String> = Vec::new();
-
-    // #5323: daemon-authored text lands in an acquirer-facing artifact, so it
-    // crosses the redaction boundary before it reaches the model. Resolved once
-    // per enrichment, not once per repository — it touches the filesystem.
-    let secrets = super::redact::report_secrets();
-    // #6677: one registry read for the whole walk — resolution needs the
-    // daemon's `root_path` values, and they do not change mid-enrichment.
-    let indexes = source.registered_indexes().await;
-
-    for repo in &mut model.repositories {
-        // Precedence: a declared metrics file always wins.
-        if repo.metrics.is_some() {
-            continue;
-        }
-        // Only local checkouts can be served by trusty-analyze/trusty-search.
-        let Some(path) = repo.local_path.as_ref() else {
-            continue;
-        };
-        // #6677: the derived id when the daemon holds it, otherwise the index
-        // registered at this checkout's root_path; `None` only for a path that
-        // derives to nothing, which is the skip this always made.
-        let Some(index_id) = resolve_report_index(path, &indexes).into_id() else {
-            continue;
-        };
-        match source.fetch_named(&index_id).await {
-            AnalyzeFetch::Fetched {
-                mut metrics,
-                caveats,
-            } => {
-                super::redact::scrub_metrics(&mut metrics, &secrets);
-                // #6082: the daemon reports absolute paths; the report cites
-                // repository-relative ones everywhere else.
-                relativize_components(&mut metrics, path);
-                // #6137: an index addressed by directory basename can serve a
-                // DIFFERENT checkout of the same repository. Data describing
-                // another tree is stale-index evidence, never a measurement of
-                // this one.
-                match super::analyze_scope::accept(&repo.name, &index_id, path, *metrics) {
-                    Ok(m) => {
-                        repo.metrics = Some(m);
-                        for caveat in caveats {
-                            partial.entry(caveat).or_default().push(repo.name.clone());
-                        }
-                    }
-                    Err(gap) => {
-                        // #6080: the investigation pass writes into the same
-                        // `metrics` struct, so a section reporting an
-                        // analyze-only figure needs this marker to tell a
-                        // measurement from an artefact of that sharing.
-                        repo.analyze_gap =
-                            Some(super::analyze_scope::STALE_INDEX_REMEDY.to_string());
-                        stale.push(gap);
-                    }
-                }
-            }
-            AnalyzeFetch::Missing(gap) => {
-                repo.analyze_gap = Some(super::analyze_scope::NO_ANALYZE_DATA_REMEDY.to_string());
-                missing.entry(gap).or_default().push(repo.name.clone());
-            }
-        }
-    }
-
-    let mut lines: Vec<String> = missing
-        .into_iter()
-        .map(|(gap, repos)| {
-            format!(
-                "{} — no analysis pass ran for: {}. \
-                 Those applications are described from the repository scan alone; \
-                 their findings, complexity, and health factors are not assessed, \
-                 not clean.",
-                gap.as_str(),
-                repos.join(", ")
-            )
-        })
-        .collect();
-    lines.extend(
-        partial
-            .into_iter()
-            .map(|(caveat, repos)| format!("{caveat} — affects: {}.", repos.join(", "))),
-    );
-    lines.extend(stale);
-    lines
 }
 
 #[cfg(test)]

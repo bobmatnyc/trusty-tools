@@ -243,6 +243,23 @@ pub struct ReportSection {
     /// value would dial a port nothing binds.
     #[serde(default)]
     pub analyze_socket: Option<String>,
+    /// Seconds one corpus-scanning analyze request may take (#6712).
+    ///
+    /// Why: `analyze.complexity_distribution` grades every chunk of the index,
+    /// so its cost belongs to the repository — 41–46 s on a 104k-chunk checkout,
+    /// against the 15 s the endpoint used to be given, which is why the §7 table
+    /// rendered unavailable on every large repository. A manifest describes one
+    /// engagement's repositories, so it is the right place to say how long
+    /// theirs need.
+    /// What: applies to the complexity histogram and the refactor list, and
+    /// raises the diagnostics budget when it exceeds that endpoint's own ladder.
+    /// The readiness probe keeps its short budget either way. Absent or `0`
+    /// yields [`crate::report::analyze_endpoints::DEFAULT_CORPUS_BUDGET`].
+    /// Precedence: the CLI's `--analyze-timeout-secs` wins when set; otherwise
+    /// this key; otherwise the default.
+    /// Test: `manifest_tests.rs::parse_analyze_timeout_secs`.
+    #[serde(default)]
+    pub analyze_timeout_secs: Option<u64>,
 }
 
 /// The weight the FIRST unweighted `inspect_priority` entry receives (#6078).

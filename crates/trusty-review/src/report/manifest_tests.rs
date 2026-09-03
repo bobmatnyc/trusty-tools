@@ -222,6 +222,33 @@ fn parse_ticketing_path() {
     );
 }
 
+/// Why (#6712): the corpus-scan budget is a property of the repositories a
+/// manifest describes, so an engagement over a large checkout declares it once
+/// here rather than passing a flag on every run.
+/// What: the key parses onto `[report]`, and its absence stays `None` so the
+/// default applies.
+/// Test: this test itself.
+#[test]
+fn parse_analyze_timeout_secs() {
+    let m = parse_manifest(
+        "[report]\ntitle = \"T\"\nanalyze_timeout_secs = 600\n\n\
+         [[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+        Path::new("m.toml"),
+    )
+    .expect("parses");
+    assert_eq!(m.report.analyze_timeout_secs, Some(600));
+
+    let none = parse_manifest(
+        "[report]\ntitle = \"T\"\n\n[[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+        Path::new("m.toml"),
+    )
+    .expect("parses");
+    assert!(
+        none.report.analyze_timeout_secs.is_none(),
+        "absent key defaults to None, which is what selects DEFAULT_CORPUS_BUDGET"
+    );
+}
+
 /// Why: `inspect_priority` is the interface trusty-audit writes its selection
 /// ranking to, and it must accept both a bare path list (hand-written) and a
 /// weighted table (generated) without a second key.

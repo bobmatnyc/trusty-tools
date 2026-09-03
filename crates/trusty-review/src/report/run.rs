@@ -72,6 +72,9 @@ pub struct ReportRequest {
     pub no_mermaid: bool,
     /// Populate metrics deterministically from the trusty-analyze daemon.
     pub analyze: bool,
+    /// Seconds one corpus-scanning analyze request may take; `None` defers to
+    /// the manifest key then the default (#6712).
+    pub analyze_timeout_secs: Option<u64>,
 }
 
 impl ReportRequest {
@@ -91,6 +94,7 @@ impl ReportRequest {
             benchmark: false,
             no_mermaid: false,
             analyze: false,
+            analyze_timeout_secs: None,
         }
     }
 }
@@ -208,7 +212,7 @@ pub async fn run_report(config_path: Option<&Path>, req: &ReportRequest) -> Resu
     // the live metrics).  Fully fail-open — populates only local-path repos that
     // declared no metrics, and only when their index is served.
     if req.analyze {
-        enrich_from_analyze(&mut model, &manifest, &config).await;
+        enrich_from_analyze(&mut model, req, &manifest, &config).await;
     }
 
     // LLM synthesis plus the repo-evidence investigation. #5454: required, so a
@@ -401,20 +405,47 @@ fn flag_is_truthy(raw: &str) -> bool {
     )
 }
 
+/// The per-request budget the corpus-scanning analyze endpoints get (#6712).
+///
+/// Why: a free function so the precedence is tested directly rather than
+/// restated inside the fetch, exactly as `resolve_code_only_from` is.
+/// What: the request's value, else the manifest's, else the default; a `0` at
+/// either tier reads as absent, since zero would time out every request.
+/// Test: `run_tests::the_request_analyze_timeout_beats_the_manifest`.
+fn resolve_analyze_budget(req: &ReportRequest, manifest: &Manifest) -> std::time::Duration {
+    crate::report::analyze_endpoints::corpus_budget_from_secs(
+        req.analyze_timeout_secs
+            .or(manifest.report.analyze_timeout_secs),
+    )
+}
+
 /// Run the opt-in deterministic analyze fetch, recording what it could not
 /// reach (#2445, #5239).
-async fn enrich_from_analyze(model: &mut ReportModel, manifest: &Manifest, config: &ReviewConfig) {
+///
+/// #6712: the corpus-scanning endpoints take their per-request budget from
+/// `--analyze-timeout-secs`, else the manifest's `[report].analyze_timeout_secs`,
+/// else the default — the same request-beats-manifest precedence `--code-only`
+/// and `--no-mermaid` already follow.
+/// Test: `run_tests::the_request_analyze_timeout_beats_the_manifest`.
+async fn enrich_from_analyze(
+    model: &mut ReportModel,
+    req: &ReportRequest,
+    manifest: &Manifest,
+    config: &ReviewConfig,
+) {
     let analyze_socket = manifest
         .report
         .analyze_socket
         .clone()
         .map_or_else(|| config.analyzer_socket.clone(), std::path::PathBuf::from);
+    let corpus_budget = resolve_analyze_budget(req, manifest);
     eprintln!(
-        "[trusty-review report] --analyze: fetching over {}",
+        "[trusty-review report] --analyze: fetching over {} (corpus endpoints allowed {corpus_budget:?} each)",
         analyze_socket.display()
     );
     match crate::report::HttpAnalyzeMetricsSource::new(analyze_socket) {
         Ok(source) => {
+            let source = source.with_corpus_budget(corpus_budget);
             // #5239: every repo the fetch could not populate is named in the
             // report, not only warned about on stderr — a dimension missing
             // because the daemon was down must not read as a clean pass.

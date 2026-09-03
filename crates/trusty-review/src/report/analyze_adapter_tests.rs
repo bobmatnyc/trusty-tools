@@ -9,6 +9,9 @@
 use std::path::Path;
 
 use super::*;
+// #6712: `relativize_components` was in scope through `analyze_adapter`'s own
+// import until the enrichment split took its last non-test caller.
+use crate::report::analyze_findings::relativize_components;
 
 // ─── Severity map ────────────────────────────────────────────────────────────
 
@@ -429,11 +432,78 @@ fn diagnostics_budget_outlives_the_daemon_deadline_ladder() {
              never reaches the report"
         );
     }
+    // #6712: the histogram is no longer a memory read, so it no longer sits at
+    // the probe budget. Diagnostics still outlives it, because it runs external
+    // tooling ON TOP of the corpus scan the histogram does.
     assert!(
-        AnalyzeEndpoint::Diagnostics.budget() > AnalyzeEndpoint::ComplexityDistribution.budget(),
+        AnalyzeEndpoint::Diagnostics.budget(DEFAULT_CORPUS_BUDGET)
+            > AnalyzeEndpoint::IndexList.budget(DEFAULT_CORPUS_BUDGET),
         "the endpoint that runs external tooling must not share a budget with a \
-         memory read"
+         registry read"
     );
+}
+
+/// Why (#6712): `analyze.complexity_distribution` was classed with the registry
+/// read on the premise that it answered from computed data. It does not — it
+/// pulls every chunk from trusty-search and grades it, which measures 41–46 s on
+/// the 104k-chunk trusty-tools index against a 15 s budget. So the §7 complexity
+/// table rendered `not stated in source data` on every run against a large
+/// repository, and the report credited analyze with no distribution.
+/// What: pins the classification — both corpus-scanning endpoints get the
+/// caller's budget, the probe keeps its own, and the default is at least the
+/// 180 s a repository of this size needs.
+/// Test: This is the test. Against the pre-fix `budget()` the histogram reads
+/// 15 s at every corpus budget, which is the failure the report showed.
+#[test]
+fn a_corpus_scanning_endpoint_outlives_the_probe_budget() {
+    let probe = AnalyzeEndpoint::IndexList.budget(DEFAULT_CORPUS_BUDGET);
+    assert!(
+        DEFAULT_CORPUS_BUDGET >= Duration::from_secs(180),
+        "the default must cover a 104k-chunk corpus scan measured at 41-46s, \
+         with room for a larger one: {DEFAULT_CORPUS_BUDGET:?}"
+    );
+    for endpoint in [
+        AnalyzeEndpoint::ComplexityDistribution,
+        AnalyzeEndpoint::RefactorSuggestions,
+    ] {
+        assert!(
+            endpoint.budget(DEFAULT_CORPUS_BUDGET) > probe,
+            "{}: an endpoint that grades the whole corpus must not share the \
+             readiness probe's budget",
+            endpoint.as_str()
+        );
+        // The budget is the CALLER's, not a second constant: a run that
+        // configures one must reach every corpus endpoint.
+        let configured = Duration::from_secs(600);
+        assert_eq!(endpoint.budget(configured), configured);
+    }
+    assert_eq!(
+        probe,
+        Duration::from_secs(15),
+        "a dead daemon must still be declared dead in seconds, not minutes"
+    );
+    // Raising the corpus budget past the diagnostics ladder raises diagnostics
+    // with it; leaving it at the default does not lower that ladder.
+    let huge = Duration::from_secs(86_400);
+    assert_eq!(AnalyzeEndpoint::Diagnostics.budget(huge), huge);
+    assert!(
+        AnalyzeEndpoint::Diagnostics.budget(Duration::from_secs(1))
+            >= diagnostics_budget_for(Duration::from_secs(180)),
+        "a small corpus budget must never cut the diagnostics ladder below the \
+         daemon's own deadline"
+    );
+}
+
+/// Why (#6712): a manifest or flag that says `0` means "unset", never "give up
+/// instantly" — the same reading `configured_diagnostics_deadline` already
+/// takes of its environment variable.
+/// What: absent and zero both fall back; any positive value is honoured.
+/// Test: This is the test.
+#[test]
+fn the_corpus_budget_falls_back_to_the_default() {
+    assert_eq!(corpus_budget_from_secs(None), DEFAULT_CORPUS_BUDGET);
+    assert_eq!(corpus_budget_from_secs(Some(0)), DEFAULT_CORPUS_BUDGET);
+    assert_eq!(corpus_budget_from_secs(Some(600)), Duration::from_secs(600));
 }
 
 /// A JSON-RPC result frame carrying `body`, which must itself be valid JSON.
@@ -467,6 +537,21 @@ fn rpc_error(code: i64, message: &str) -> String {
 /// `a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error`,
 /// `a_daemon_side_deadline_is_a_timeout_not_a_rejection`.
 async fn routing_stub(routes: Vec<(&'static str, String)>) -> (tempfile::TempDir, PathBuf) {
+    routing_stub_after(routes, Duration::ZERO).await
+}
+
+/// The same stub, waiting `delay` before it answers (#6712).
+///
+/// Why: the defect is an endpoint that ANSWERS, just not inside the budget it
+/// was given — a stub that either replies instantly or never replies cannot
+/// express that. `delay` is what lets a test drive the same shape the field hit
+/// at 41–46 s, at millisecond scale.
+/// Test: `a_corpus_endpoint_slower_than_the_probe_budget_still_arrives`,
+/// `the_configured_corpus_budget_is_honoured_and_named_in_the_error`.
+async fn routing_stub_after(
+    routes: Vec<(&'static str, String)>,
+    delay: Duration,
+) -> (tempfile::TempDir, PathBuf) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -486,6 +571,9 @@ async fn routing_stub(routes: Vec<(&'static str, String)>) -> (tempfile::TempDir
                     .iter()
                     .find(|(method, _)| request.contains(method))
                     .map(|(_, body)| body.clone());
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
                 match reply {
                     Some(r) if r.is_empty() => std::future::pending::<()>().await,
                     Some(r) => {
@@ -640,6 +728,155 @@ async fn a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error()
     assert!(
         matches!(err, AnalyzeAdapterError::Timeout(_)),
         "expected a timeout, got {err:?}"
+    );
+    assert_eq!(classify_failure(&err), EndpointFailure::TimedOut);
+}
+
+/// How long the scripted daemon takes to grade its corpus.
+///
+/// Stands in for the 41–46 s the real one takes on a 104k-chunk index — the
+/// ratios below are what the tests assert, so the wall-clock cost stays in the
+/// hundreds of milliseconds.
+const SCRIPTED_SCAN: Duration = Duration::from_millis(300);
+
+/// Every route a full fetch needs, with the histogram body the §7 table renders.
+fn full_routes() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "analyze.list_indexes",
+            rpc_result(r#"[{"id":"demo","root_path":"/tmp/demo"}]"#),
+        ),
+        (
+            "analyze.complexity_distribution",
+            rpc_result(DISTRIBUTION_BODY),
+        ),
+        (
+            "analyze.diagnostics",
+            rpc_result(r#"{"tools_run":["clippy"],"diagnostics":[]}"#),
+        ),
+        (
+            "analyze.refactor_suggestions",
+            rpc_result(r#"{"suggestions":[]}"#),
+        ),
+    ]
+}
+
+/// Why (#6712): the histogram answers, it is just slower than the budget it was
+/// given — 41–46 s of corpus grading against 15 s — so the §7 table rendered
+/// `not stated in source data` and the report said analyze contributed no
+/// distribution. The wall-clock numbers are not what a test can assert, so this
+/// drives the same SHAPE at millisecond scale: a daemon that answers after
+/// [`SCRIPTED_SCAN`], against a budget the run configured to outlast it. The
+/// default's own headroom over the field measurement is pinned separately by
+/// `a_corpus_scanning_endpoint_outlives_the_probe_budget`.
+/// What: asserts the five bands arrive, that no caveat was raised, and that the
+/// fetch really did wait — an assertion that passes vacuously if the stub
+/// answered instantly.
+/// Test: This is the test.
+#[tokio::test]
+async fn a_corpus_endpoint_slower_than_the_probe_budget_still_arrives() {
+    let (_tmp, socket) = routing_stub_after(full_routes(), SCRIPTED_SCAN).await;
+    let src = HttpAnalyzeMetricsSource::new(socket)
+        .expect("client builds")
+        .with_corpus_budget(SCRIPTED_SCAN * 20);
+
+    let started = std::time::Instant::now();
+    let fetched = src.fetch_named("demo").await;
+    let elapsed = started.elapsed();
+
+    match fetched {
+        AnalyzeFetch::Fetched { metrics, caveats } => {
+            assert_eq!(
+                metrics.complexity.buckets.len(),
+                5,
+                "a histogram that answers slower than the probe budget must still \
+                 fill the §7 table"
+            );
+            let counted: u64 = metrics.complexity.buckets.iter().map(|b| b.count).sum();
+            assert_eq!(counted, 100, "every band the daemon sent must survive");
+            let lines = caveats
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            assert!(
+                caveats.is_empty(),
+                "an endpoint that answered must raise no caveat: {lines}"
+            );
+        }
+        AnalyzeFetch::Missing(gap) => panic!("the slow endpoint answered: {gap:?}"),
+    }
+    assert!(
+        elapsed >= SCRIPTED_SCAN,
+        "the stub must actually have made the fetch wait: {elapsed:?}"
+    );
+}
+
+/// Why (#6712): the budget has to be the run's, not a constant the run cannot
+/// reach — otherwise `--analyze-timeout-secs` is decoration. And when it does
+/// run out, the error must name the budget, because "raise the deadline" is
+/// unactionable without knowing what the deadline was.
+/// What: the same slow daemon against a budget SHORTER than its scan. The fetch
+/// degrades cleanly — metrics still render from the endpoints that answered,
+/// with a caveat naming the histogram — and it gives up on the run's budget
+/// rather than on the old flat one, which the elapsed bound is what proves. The
+/// error text is read from a direct `call`, since `fetch_dataset` keeps it on
+/// stderr and out of the artifact.
+/// Test: This is the test. Pre-fix the histogram used a fixed 15 s, so the fetch
+/// answered rather than timing out and the elapsed bound blew by two orders of
+/// magnitude.
+#[tokio::test]
+async fn the_configured_corpus_budget_is_honoured_and_named_in_the_error() {
+    let budget = SCRIPTED_SCAN / 3;
+    let (_tmp, socket) = routing_stub_after(full_routes(), SCRIPTED_SCAN).await;
+    let src = HttpAnalyzeMetricsSource::new(socket)
+        .expect("client builds")
+        .with_corpus_budget(budget);
+
+    let started = std::time::Instant::now();
+    let fetched = src.fetch_named("demo").await;
+    let elapsed = started.elapsed();
+
+    match fetched {
+        AnalyzeFetch::Fetched { metrics, caveats } => {
+            assert!(
+                metrics.complexity.buckets.is_empty(),
+                "the histogram never arrived, so no band may be rendered"
+            );
+            let lines = caveats
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            assert!(
+                lines.contains("complexity distribution")
+                    && lines.contains("did not answer within the time allowed"),
+                "the gap must name the endpoint and say it ran out of time: {lines}"
+            );
+        }
+        AnalyzeFetch::Missing(gap) => {
+            panic!("diagnostics and refactors answered, so the fetch stands: {gap:?}")
+        }
+    }
+    assert!(
+        elapsed < SCRIPTED_SCAN * 10,
+        "the fetch must give up on the configured budget, not on a longer \
+         constant: {elapsed:?}"
+    );
+
+    // The budget the run configured is the one the message names.
+    let err = src
+        .call::<serde_json::Value>(
+            AnalyzeEndpoint::ComplexityDistribution,
+            "demo",
+            AnalyzeEndpoint::ComplexityDistribution.budget(budget),
+        )
+        .await
+        .expect_err("a 100ms budget cannot outlast a 300ms scan");
+    let text = err.to_string();
+    assert!(
+        text.contains("analyze.complexity_distribution") && text.contains(&format!("{budget:?}")),
+        "the timeout must name the endpoint and the budget it exhausted: {text}"
     );
     assert_eq!(classify_failure(&err), EndpointFailure::TimedOut);
 }
