@@ -11,6 +11,7 @@ Added
   the rest of the batch. (#5220)
 - `tga install --host bitbucket --workspace <WORKSPACE>` derives the repository
   set from the API, so `--repo` is now optional there. The generated config
-  emits `bitbucket.workspaces`, which is what makes it load back: the old output
-  named a `workspace` with no `repo_slug`, and the validator rejected exactly
-  that. (#5220)
+  emits `bitbucket.workspaces`, so `tga collect --validate-only` accepts it. The
+  generated block used to name a `workspace` with `fetch_prs: true` and no
+  `repo_slug` — it deserialized, but validation then refused it with "Bitbucket
+  config incomplete: repo_slug is required when fetch_prs = true". (#5220)

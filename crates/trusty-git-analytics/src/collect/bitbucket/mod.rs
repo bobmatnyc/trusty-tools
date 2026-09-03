@@ -12,5 +12,5 @@ pub mod workspace_discovery;
 pub use client::BitbucketClient;
 pub use workspace_discovery::{
     discover_workspace_repos, effective_workspaces, resolve_bitbucket_repos,
-    run_workspace_discovery,
+    run_workspace_discovery, WorkspaceDiscovery,
 };

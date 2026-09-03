@@ -230,10 +230,9 @@ async fn fetch_pr_commits_follows_next_cursor() {
     })
     .expect("client builds");
 
-    let shas = client
-        .fetch_pr_commits("acme", "widgets", 9)
-        .await
-        .expect("fetch");
+    // #5220: the one-argument form kept its meaning — the client's configured
+    // `workspace`/`repo_slug` pair.
+    let shas = client.fetch_pr_commits(9).await.expect("fetch");
     assert_eq!(
         shas,
         vec![

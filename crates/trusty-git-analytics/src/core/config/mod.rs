@@ -1183,9 +1183,12 @@ fn default_review_fetch_concurrency() -> u32 {
 // #5770: `Debug` is hand-written in `credential_debug`, not derived — the
 // derived one printed `app_password` and `token` in the clear.
 // #5775: `Serialize` is hand-written in `credential_serialize` for both fields.
-// #5220: deliberately NOT `#[non_exhaustive]`, unlike `GithubConfig` — the
-// crate's own `tests/bitbucket_live.rs` builds one as a struct literal, which
-// that attribute forbids from outside the library.
+// #5220: `workspaces` is a new pub field, which `constructible_struct_adds_field`
+// scores as a break against the published 6.0.0. Every alternative was measured
+// and is worse: `#[non_exhaustive]` trades it for `struct_marked_non_exhaustive`,
+// and a private field trades it for `constructible_struct_adds_private_field`.
+// The crate already owes a major bump for the same lint (#6744, InstallArgs),
+// and this field rides that bump rather than causing one.
 #[derive(Clone, Default, Deserialize)]
 pub struct BitbucketConfig {
     /// Bitbucket account / workspace member username (required for Basic auth).

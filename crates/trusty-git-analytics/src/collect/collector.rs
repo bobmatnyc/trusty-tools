@@ -590,7 +590,7 @@ impl CollectionPipeline {
         &self,
         stats: &mut CollectionStats,
         org_discovered: &[(String, String)],
-        workspace_discovered: &[(String, String)],
+        workspace_discovered: &crate::collect::bitbucket::WorkspaceDiscovery,
     ) -> Vec<Box<dyn PrProvider + Send + Sync>> {
         let mut providers: Vec<Box<dyn PrProvider + Send + Sync>> = Vec::new();
 
@@ -680,7 +680,7 @@ impl CollectionPipeline {
                 // whatever workspace discovery could read.
                 let repos = crate::collect::bitbucket::resolve_bitbucket_repos(
                     bb_cfg,
-                    workspace_discovered,
+                    &workspace_discovered.repos,
                 );
                 if repos.is_empty() {
                     info!(
@@ -693,7 +693,11 @@ impl CollectionPipeline {
                         "Bitbucket PR fetcher will scan {} repo(s)",
                         repos.len()
                     );
-                    match BitbucketClient::new_for_repos(bb_cfg, repos) {
+                    // #6084: a truncated discovery walk must reach the run's
+                    // faults, and `pr_pipeline` drains them off the provider.
+                    match BitbucketClient::new_for_repos(bb_cfg, repos)
+                        .map(|c| c.with_notices(workspace_discovered.notices.clone()))
+                    {
                         Ok(bb) => providers.push(Box::new(bb)),
                         Err(e) => stats.fail_stage(format!("Bitbucket client init failed: {e}")),
                     }
@@ -733,7 +737,7 @@ impl CollectionPipeline {
             Some(bb_cfg) if bb_cfg.fetch_prs => {
                 crate::collect::bitbucket::run_workspace_discovery(bb_cfg).await
             }
-            _ => Vec::new(),
+            _ => crate::collect::bitbucket::WorkspaceDiscovery::default(),
         };
 
         let providers = self.build_pr_providers(stats, &org_discovered, &workspace_discovered);

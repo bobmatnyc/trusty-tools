@@ -22,7 +22,8 @@
 //!
 //! Test: `workspace_discovery_follows_next_cursor`,
 //! `workspace_discovery_names_an_auth_failure`,
-//! `workspace_discovery_names_a_rate_limit`.
+//! `workspace_discovery_names_a_rate_limit`,
+//! `a_truncated_workspace_listing_reaches_the_run_stats`.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -115,12 +116,19 @@ pub async fn discover_workspace_repos(
         }
 
         if pages >= MAX_PAGES {
+            // #6084: a warn! alone is invisible in the run's output. The notice
+            // is what `pr_pipeline` turns into a recorded fault.
             warn!(
                 workspace = %workspace,
                 pages = MAX_PAGES,
                 repositories = out.len(),
                 "Bitbucket workspace discovery hit the page cap; the repository set is PARTIAL"
             );
+            client.note_truncation(format!(
+                "Bitbucket workspace listing for {workspace} stopped at the {MAX_PAGES}-page cap \
+                 ({} repositories); the repository set is PARTIAL",
+                MAX_PAGES * PAGE_SIZE
+            ));
             break;
         }
         next_url = page.next;
@@ -220,6 +228,23 @@ fn repo_pair(repo: &BbRepository, workspace: &str) -> Option<(String, String)> {
         .map(|s| (workspace.to_string(), s.to_string()))
 }
 
+/// What a discovery pass found, and what it could not finish.
+///
+/// Why (#6084): the repository set alone cannot say whether it is the whole
+/// workspace or the first 5 000 repositories of it. Returning the notices
+/// alongside is what lets the collector hand them to the client that reaches
+/// [`crate::collect::pr_pipeline`], where they become recorded run faults.
+/// What: `repos` is the deduplicated union across workspaces; `notices` is
+/// empty unless a listing was truncated.
+/// Test: `a_truncated_workspace_listing_reaches_the_run_stats`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct WorkspaceDiscovery {
+    /// `(workspace, repo_slug)` pairs, deduplicated, in discovery order.
+    pub repos: Vec<(String, String)>,
+    /// Operator-facing notes about bounds the walk hit, in order.
+    pub notices: Vec<String>,
+}
+
 /// Discover every configured workspace's repositories, in order.
 ///
 /// Why: the collector needs one repository set, not one per workspace, and a
@@ -229,18 +254,19 @@ fn repo_pair(repo: &BbRepository, workspace: &str) -> Option<(String, String)> {
 /// [`BitbucketClient::new_for_discovery`], walks each workspace from
 /// [`effective_workspaces`], and unions the results with duplicates removed. A
 /// workspace that fails is logged and skipped; the caller sees the repositories
-/// that were readable.
-/// Test: `run_workspace_discovery_skips_a_failing_workspace`.
-pub async fn run_workspace_discovery(config: &BitbucketConfig) -> Vec<(String, String)> {
+/// that were readable, plus every truncation notice the walk recorded.
+/// Test: `run_workspace_discovery_skips_a_failing_workspace`,
+/// `a_truncated_workspace_listing_reaches_the_run_stats`.
+pub async fn run_workspace_discovery(config: &BitbucketConfig) -> WorkspaceDiscovery {
     let workspaces = effective_workspaces(&config.workspaces);
     if workspaces.is_empty() {
-        return Vec::new();
+        return WorkspaceDiscovery::default();
     }
     let client = match BitbucketClient::new_for_discovery(config) {
         Ok(c) => c,
         Err(e) => {
             warn!("Bitbucket workspace discovery: could not build client: {e}");
-            return Vec::new();
+            return WorkspaceDiscovery::default();
         }
     };
 
@@ -268,7 +294,10 @@ pub async fn run_workspace_discovery(config: &BitbucketConfig) -> Vec<(String, S
             ),
         }
     }
-    all
+    WorkspaceDiscovery {
+        repos: all,
+        notices: client.recorded_notices(),
+    }
 }
 
 /// Union the configured `workspace`/`repo_slug` pair with discovered repos.
@@ -472,8 +501,86 @@ mod tests {
             .await;
 
         let cfg = discovery_config(server.uri(), &["acme", "locked", "acme"]);
-        let repos = run_workspace_discovery(&cfg).await;
-        assert_eq!(repos, vec![("acme".to_string(), "widget".to_string())]);
+        let found = run_workspace_discovery(&cfg).await;
+        assert_eq!(
+            found.repos,
+            vec![("acme".to_string(), "widget".to_string())]
+        );
+        assert!(
+            found.notices.is_empty(),
+            "a listing that completed records no truncation: {:?}",
+            found.notices
+        );
+    }
+
+    /// A listing that never ends stops at the page cap and says so, in the
+    /// run's own fault list rather than only in a log line.
+    ///
+    /// Why (#6084, #5220): 5 000 repositories of a larger workspace read
+    /// exactly like the whole workspace. The notice is the only thing that
+    /// distinguishes them, and it is worth nothing until it reaches
+    /// [`crate::collect::pr_pipeline`]'s drain.
+    /// What: the mock's every page carries a `next` cursor back to itself, so
+    /// the walk can only end at [`MAX_PAGES`]. The notice is then carried onto
+    /// the pull-request client and drained exactly as a real run drains it.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn a_truncated_workspace_listing_reaches_the_run_stats() {
+        use crate::collect::collector::CollectionStats;
+        use crate::collect::pr_provider::PrProvider;
+        use crate::core::db::Database;
+        use std::sync::Arc;
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/repositories/acme"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "values": [{"full_name": "acme/widget", "slug": "widget"}],
+                "next": format!("{base}/repositories/acme?cursor=endless"),
+            })))
+            .mount(&server)
+            .await;
+
+        let cfg = discovery_config(base, &["acme"]);
+        let found = run_workspace_discovery(&cfg).await;
+        assert_eq!(
+            found.notices.len(),
+            1,
+            "one bound was hit, so exactly one notice: {:?}",
+            found.notices
+        );
+        assert!(
+            found.notices[0].contains("PARTIAL") && found.notices[0].contains("acme"),
+            "the notice must name the workspace and say the set is partial: {:?}",
+            found.notices
+        );
+
+        // The collector carries the notices onto the client that collects, and
+        // `pr_pipeline` drains them into the run's faults. Drive that drain.
+        let client = BitbucketClient::new_for_repos(&cfg, found.repos.clone())
+            .expect("client builds")
+            .with_notices(found.notices.clone());
+        let providers: Vec<Arc<dyn PrProvider + Send + Sync>> = vec![Arc::new(client)];
+        let mut set: tokio::task::JoinSet<(String, crate::collect::errors::Result<Vec<_>>)> =
+            tokio::task::JoinSet::new();
+        set.spawn(async { ("bitbucket".to_string(), Ok(Vec::new())) });
+
+        let mut db = Database::open_in_memory().expect("open db");
+        let mut stats = CollectionStats::default();
+        crate::collect::pr_pipeline::drain_and_store_pull_requests(
+            set, &providers, &mut db, &mut stats,
+        )
+        .await;
+
+        assert!(
+            stats
+                .errors
+                .iter()
+                .any(|e| e.message.contains("PARTIAL") && e.message.contains("bitbucket")),
+            "the truncation must be a recorded run fault: {:?}",
+            stats.errors
+        );
     }
 
     #[test]

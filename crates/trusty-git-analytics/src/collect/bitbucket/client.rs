@@ -17,6 +17,7 @@
 //!   under pagination) per PR, same tradeoff GitHub's equivalent
 //!   `fetch_pr_commits` makes.
 
+use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -155,6 +156,12 @@ pub struct BitbucketClient {
     /// Transient-failure retry budget. Always [`MAX_RETRIES`] in production;
     /// tests lower it so a permanent-429 case does not sleep for 7 seconds.
     max_retries: u32,
+    /// Bounds this client hit, in operator-facing wording (#6084 shape).
+    ///
+    /// A workspace listing that stopped at the page cap returns a repository
+    /// set that reads exactly like a complete one; the notice recorded here is
+    /// what [`crate::collect::pr_pipeline`] turns into a visible run fault.
+    notices: Mutex<Vec<String>>,
 }
 
 impl BitbucketClient {
@@ -261,12 +268,50 @@ impl BitbucketClient {
             repos,
             api_base,
             max_retries: MAX_RETRIES,
+            notices: Mutex::new(Vec::new()),
         })
     }
 
     /// The REST root every URL this client builds is rooted at.
     pub(crate) fn api_base(&self) -> &str {
         &self.api_base
+    }
+
+    /// Carry forward the truncation notices an earlier pass recorded (#5220).
+    ///
+    /// Why: workspace discovery runs on its own short-lived client, so a
+    /// page-cap notice it recorded would die with that client. The collector
+    /// hands the notices to the client that actually reaches
+    /// [`crate::collect::pr_pipeline`], which is the only place they become a
+    /// visible run fault. Same purpose as the shared `RunBudget` the GitHub
+    /// clients pass around (#6565), without a second budget type.
+    /// What: appends `notices` to this client's ledger, which
+    /// [`Self::fetch_notices`] returns.
+    /// Test: `a_truncated_workspace_listing_reaches_the_run_stats`.
+    #[must_use]
+    pub fn with_notices(self, notices: Vec<String>) -> Self {
+        if let Ok(mut ledger) = self.notices.lock() {
+            ledger.extend(notices);
+        }
+        self
+    }
+
+    /// Record that a bound trimmed a result set (#6084).
+    ///
+    /// A poisoned lock drops the notice rather than panicking — losing one
+    /// operator message must not abort a collection run.
+    pub(crate) fn note_truncation(&self, message: impl Into<String>) {
+        if let Ok(mut ledger) = self.notices.lock() {
+            ledger.push(message.into());
+        }
+    }
+
+    /// Every truncation recorded so far, in the order it happened.
+    pub(crate) fn recorded_notices(&self) -> Vec<String> {
+        self.notices
+            .lock()
+            .map(|l| l.clone())
+            .unwrap_or_else(|_| Vec::new())
     }
 
     /// Authenticated GET with the shared backoff, for the sibling
@@ -398,7 +443,10 @@ impl BitbucketClient {
             for pr in page.values {
                 let pr_number = pr.id;
                 let mut mapped = map_pr(pr, &repository);
-                match self.fetch_pr_commits(workspace, repo_slug, pr_number).await {
+                match self
+                    .fetch_pr_commits_in(workspace, repo_slug, pr_number)
+                    .await
+                {
                     Ok(shas) => {
                         mapped.commit_shas = encode_commit_shas(&shas)?;
                     }
@@ -430,18 +478,45 @@ impl BitbucketClient {
     /// and discards the PR's real commit composition (issue #841). This is
     /// the per-PR enrichment call `fetch_pull_requests` makes for every PR it
     /// returns.
+    /// What: delegates to [`Self::fetch_pr_commits_in`] against this client's
+    /// first configured repository — for a client built by [`Self::new`] that
+    /// is the `workspace`/`repo_slug` pair from the config, unchanged.
+    /// Test: `fetch_pr_commits_follows_next_cursor`,
+    /// `fetch_pull_requests_persists_full_commit_list`.
+    ///
+    /// # Errors
+    ///
+    /// [`CollectError::Config`] when the client has no configured repository —
+    /// only reachable through [`Self::new_for_discovery`], which collects
+    /// nothing. Otherwise as [`Self::fetch_pr_commits_in`].
+    pub async fn fetch_pr_commits(&self, pr_number: u64) -> Result<Vec<String>> {
+        // #5220: the signature stays one argument. A discovered workspace made
+        // the client multi-repository, and changing the arity here would have
+        // been a breaking API change for a caller that has exactly one.
+        let (workspace, repo_slug) = self.repos.first().ok_or_else(|| {
+            CollectError::Config(
+                "bitbucket: this client has no configured repository to read commits from".into(),
+            )
+        })?;
+        self.fetch_pr_commits_in(workspace, repo_slug, pr_number)
+            .await
+    }
+
+    /// [`Self::fetch_pr_commits`] against a caller-named repository (#5220).
+    ///
+    /// Why: one client now covers every repository a workspace discovery
+    /// returned, so the PR walk names the repository it is enriching rather
+    /// than reading a single pair off the client.
     /// What: `GET /2.0/repositories/{workspace}/{repo_slug}/pullrequests/{pr_number}/commits`,
     /// following `next` cursors exactly like [`Self::fetch_pull_requests`].
-    /// The repository is a parameter rather than client state since #5220, when
-    /// one client started covering a whole discovered workspace.
-    /// Test: `fetch_pr_commits_follows_next_cursor`,
+    /// Test: `fetch_pull_requests_covers_every_configured_repo`,
     /// `fetch_pull_requests_persists_full_commit_list`.
     ///
     /// # Errors
     ///
     /// Returns [`CollectError::Http`] on transport or non-success HTTP
     /// responses, and [`CollectError::Json`] on payload parse failures.
-    pub async fn fetch_pr_commits(
+    pub async fn fetch_pr_commits_in(
         &self,
         workspace: &str,
         repo_slug: &str,
@@ -663,6 +738,12 @@ impl PrProvider for BitbucketClient {
         prs: &[PullRequest],
     ) -> crate::core::Result<usize> {
         BitbucketClient::store_pull_requests(self, db, prs)
+    }
+
+    /// #5220: surfaces the workspace-discovery page cap the same way the
+    /// GitHub client surfaces its listing caps (#6084).
+    fn fetch_notices(&self) -> Vec<String> {
+        self.recorded_notices()
     }
 }
 
