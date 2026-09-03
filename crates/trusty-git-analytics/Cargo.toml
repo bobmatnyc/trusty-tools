@@ -55,7 +55,11 @@ name = "tga"
 # `CollectionStats.repos_skipped` (src/collect/collector.rs:106). The struct is
 # publicly constructible and carries no `#[non_exhaustive]`, so a downstream
 # struct literal stops compiling. Post-1.0, a break sits in the MAJOR position.
-version = "6.0.0"
+# 6.0.0 -> 6.0.1 (#3916): PATCH. Adds a new `backfill pm-work` subcommand and a
+# new config table; nothing existing is removed or changed. `src/**` changed
+# while 6.0.0 was already live on crates.io, so the `PR version bump vs
+# crates.io` gate (#4421) requires the bump.
+version = "6.0.1"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
