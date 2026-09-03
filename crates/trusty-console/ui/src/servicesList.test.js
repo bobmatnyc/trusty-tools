@@ -12,6 +12,7 @@ import {
   cpuSeries,
   formatCpu,
   latestSample,
+  rowAriaLabel,
   serviceRows,
   sortByDisplayName,
 } from './servicesList.js';
@@ -102,6 +103,38 @@ test('only a service with a dashboard is marked clickable', () => {
   const clickable = rows.filter((r) => r.hasDashboard).map((r) => r.id);
   assert.deepEqual(clickable.sort(), ['trusty-memory', 'trusty-search']);
   assert.equal(rows.find((r) => r.id === 'trusty-agents').hasDashboard, false);
+});
+
+// ── #6642: the clickable row's accessible name ─────────────────────────────
+
+test("a clickable row's accessible name carries every column", () => {
+  const rows = serviceRows(ROSTER, {}, new Set(['trusty-search']));
+  const search = rows.find((r) => r.id === 'trusty-search');
+  assert.equal(
+    search.ariaLabel,
+    'Trusty Search, version 0.41.0, Running, 2.5% CPU — open dashboard',
+  );
+  // Every column a sighted reader sees survives into the name the aria-label
+  // replaces — that replacement is the whole hazard.
+  for (const part of [search.version, search.statusLabel, search.cpuLabel]) {
+    assert.ok(search.ariaLabel.includes(part), `label omits ${part}`);
+  }
+});
+
+test('an absent version and an unmeasured CPU are spelled out, not dashes', () => {
+  const label = rowAriaLabel({
+    displayName: 'Trusty Analyze',
+    version: DASH,
+    statusLabel: 'Ready',
+    cpuLabel: DASH,
+  });
+  assert.equal(label, 'Trusty Analyze, version unknown, Ready, CPU not measured — open dashboard');
+  assert.ok(!label.includes(`${DASH},`), 'no bare dash cell survives into the name');
+});
+
+test('an inert row overrides no accessible name at all', () => {
+  const rows = serviceRows(ROSTER, {}, new Set(['trusty-search']));
+  assert.equal(rows.find((r) => r.id === 'trusty-agents').ariaLabel, null);
 });
 
 test('an empty roster yields no rows rather than throwing', () => {

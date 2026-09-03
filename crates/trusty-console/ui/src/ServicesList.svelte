@@ -11,7 +11,9 @@
   computes every cell; this file is markup, the click handler, and the styling.
   Rows without a dashboard render as a plain `<div>`: not focusable, no pointer
   cursor, and carrying the reason on `title` plus a visually-hidden span so it
-  is available to a screen reader too.
+  is available to a screen reader too. A clickable row's `aria-label` replaces
+  the name its cells would compute, so `rowAriaLabel` restates every column in
+  it rather than announcing the service and the action alone.
   Test: `servicesList.test.js` covers the sort, the dash-not-zero rule, the
   live-sample overlay and which rows are clickable; `barGraph.test.js` covers
   the row graph's geometry.
@@ -82,7 +84,7 @@
           <button
             type="button"
             class="row link"
-            aria-label="{row.displayName} — open dashboard"
+            aria-label={row.ariaLabel}
             onclick={() => onOpen?.(row.id)}
           >
             <span class="name">{row.displayName}</span>

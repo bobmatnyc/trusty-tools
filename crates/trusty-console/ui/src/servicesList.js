@@ -81,6 +81,27 @@ export function latestSample(serviceSamples, id) {
 }
 
 /**
+ * The complete accessible name for a clickable row (#6642).
+ *
+ * Why: `aria-label` REPLACES the name a screen reader would otherwise assemble
+ * from the row's cells, so a label naming only the service and the action left
+ * a listener with no version, no status and no CPU figure — every column the
+ * row exists to carry. A row that navigates needs its action named, so the
+ * label stays and says everything instead.
+ *
+ * What: one sentence in the order the columns are read, with the dash
+ * placeholder spelled out — "em dash" announced for a missing version tells the
+ * listener nothing.
+ * Test: `a clickable row's accessible name carries every column`,
+ * `an absent version and an unmeasured CPU are spelled out, not dashes`.
+ */
+export function rowAriaLabel(row) {
+  const version = row.version === DASH ? 'version unknown' : `version ${row.version}`;
+  const cpu = row.cpuLabel === DASH ? 'CPU not measured' : `${row.cpuLabel} CPU`;
+  return `${row.displayName}, ${version}, ${row.statusLabel}, ${cpu} — open dashboard`;
+}
+
+/**
  * Every row the list renders, in display order.
  *
  * @param {object[]} services the `/api/console/services` roster
@@ -97,7 +118,7 @@ export function serviceRows(services, serviceSamples = {}, dashboards = new Set(
     const presentation = cardPresentation(merged);
     const cpu = live ? live.cpu_pct : service.cpu_pct;
 
-    return {
+    const row = {
       id: service.id,
       displayName: service.display_name || service.id,
       version: service.version || DASH,
@@ -108,5 +129,8 @@ export function serviceRows(services, serviceSamples = {}, dashboards = new Set(
       series: cpuSeries(serviceSamples, service.id),
       hasDashboard: dashboards.has(service.id),
     };
+    // #6642: only a clickable row overrides its accessible name. An inert row
+    // is a plain <div>, whose visible cells a screen reader reads as written.
+    return { ...row, ariaLabel: row.hasDashboard ? rowAriaLabel(row) : null };
   });
 }

@@ -38,6 +38,15 @@ test('a null renders as a gap, not a zero-height bar', () => {
   assert.equal(drawn, 2, 'the null slot emits no bar at all');
 });
 
+test('a window of nothing but nulls draws no bar in any band', () => {
+  const { drawn, paths, slots } = barPaths([null, null, null], { max: 100 });
+  assert.equal(drawn, 0);
+  assert.equal(slots, 3, 'the window keeps its width — the samples exist, the values do not');
+  assert.equal(paths.nominal, '');
+  assert.equal(paths.warning, '');
+  assert.equal(paths.critical, '');
+});
+
 test('a measured near-zero value keeps a floor so it differs from a gap', () => {
   const { paths } = barPaths([0], { max: 100 });
   assert.match(paths.nominal, new RegExp(`v${MIN_BAR_UNITS}h`), 'a zero sample is still drawn');
