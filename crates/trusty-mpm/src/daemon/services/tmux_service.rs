@@ -368,6 +368,8 @@ pub(crate) fn set_claude_lookup_override(value: Option<Option<String>>) -> Claud
 #[cfg(test)]
 mod tests {
     use super::*;
+    // #6736: the test below pins `$HOME` and must also hold the gate's opt-in still.
+    use crate::core::host_state_gate::ALLOW_HOST_STATE_ENV;
     use crate::core::session::{ControlModel, SessionId};
 
     #[test]
@@ -511,29 +513,94 @@ mod tests {
         );
     }
 
+    /// RAII guard restoring `$HOME` and the host-state opt-in on drop.
+    ///
+    /// Why: [`scratch_home`] moves both process-wide, and a test that left
+    /// either moved would hand the next test the very straddle #6736 is about.
+    /// What: remembers the prior values and puts them back on drop, including
+    /// on a panic-driven unwind; an absent variable is restored as absent.
+    /// Test: scaffolding for
+    /// `spawn_claude_without_tmux_is_unprocessable_when_tmux_missing`.
+    struct HostEnvGuard {
+        home: Option<std::ffi::OsString>,
+        opt_in: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for HostEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: every caller of `scratch_home` is `#[serial_test::serial]`,
+            // so no other test thread races this restore.
+            unsafe {
+                match self.home.take() {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+                match self.opt_in.take() {
+                    Some(v) => std::env::set_var(ALLOW_HOST_STATE_ENV, v),
+                    None => std::env::remove_var(ALLOW_HOST_STATE_ENV),
+                }
+            }
+        }
+    }
+
+    /// Pin `$HOME` at a fresh tempdir and clear the host-state opt-in.
+    ///
+    /// Why: the #5784 gate re-reads `$HOME` and `TRUSTY_MPM_ALLOW_HOST_STATE` on
+    /// EVERY call, so a test that needs one verdict for a whole call chain has
+    /// to hold both still. A tempdir can never be this uid's password-database
+    /// home, so the gate classifies it scratch and refuses — the same verdict on
+    /// every host, whether or not tmux is installed.
+    /// What: returns the `TempDir` (which the caller must keep bound — dropping
+    /// it removes the directory `$HOME` names) and the restore guard.
+    /// Test: scaffolding for
+    /// `spawn_claude_without_tmux_is_unprocessable_when_tmux_missing`.
+    fn scratch_home() -> (tempfile::TempDir, HostEnvGuard) {
+        let home = tempfile::tempdir().expect("temp dir for a pinned $HOME");
+        let guard = HostEnvGuard {
+            home: std::env::var_os("HOME"),
+            opt_in: std::env::var_os(ALLOW_HOST_STATE_ENV),
+        };
+        // SAFETY: caller is `#[serial_test::serial]`.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::remove_var(ALLOW_HOST_STATE_ENV);
+        }
+        (home, guard)
+    }
+
+    /// A host `spawn_claude` cannot reach tmux on answers 422, never 500.
+    ///
+    /// Why serial and a pinned `$HOME` (#6736): `spawn_claude` consults the
+    /// #5784 host-state gate twice — once in `TmuxDriver::discover`, again
+    /// inside `create_session` — and the gate re-reads `$HOME` on each call. A
+    /// sibling test moving `$HOME` process-wide between those two reads let
+    /// discover succeed against the operator's real home while the spawn was
+    /// refused against the sibling's tempdir, so the call returned
+    /// `Internal("tmux session creation refused: …")` while this test's own
+    /// `TmuxDriver::is_available()` probe — a THIRD read — answered false. Same
+    /// class as #6711, and it failed 5 of 5 runs beside `parity_doctor` at
+    /// `--test-threads=8`. Pinning `$HOME` at a tempdir makes the gate refuse at
+    /// the FIRST read on every host, so the outcome depends on neither sibling
+    /// order nor whether tmux is installed, and the host-branch probe is gone
+    /// with it. The pin is what holds under nextest, where every test gets its
+    /// own process and `#[serial]` orders nothing (#4162); `#[serial]` is what
+    /// holds under `cargo test`, where the `$HOME`-moving siblings share this
+    /// process. Nothing cross-process is shared — the refusal lands before any
+    /// tmux session is created — so `#[file_serial]` is not needed.
+    /// Test: this function IS the test.
+    #[serial_test::serial]
     #[test]
     fn spawn_claude_without_tmux_is_unprocessable_when_tmux_missing() {
-        // With the binary lookup forced positive but tmux generally absent in
-        // CI, the spawn must still degrade gracefully — never panic, and when
-        // tmux is missing surface `Unprocessable` rather than `Internal`.
+        // #6736: pinned BEFORE the spawn, and held across both of its gate reads.
+        let (_home, _home_guard) = scratch_home();
         let _guard = set_claude_lookup_override(Some(Some("/fake/claude".into())));
         let result = TmuxService::spawn_claude("tmpm-test-no-tmux", Path::new("/tmp"));
-        if TmuxDriver::is_available() {
-            // tmux IS available on this host: the call either succeeds or
-            // fails on send-keys (an `Internal` error); in any case it must
-            // not be a panic, so just exercising the path is enough.
-            // We clean up after ourselves if we did create a session.
-            if result.is_ok()
-                && let Ok(driver) = TmuxDriver::discover()
-            {
-                let _ = driver.kill_session("tmpm-test-no-tmux");
-            }
-        } else {
-            // tmux MISSING: 422 is the documented contract.
-            assert!(
-                matches!(result, Err(DaemonError::Unprocessable(_))),
-                "expected Unprocessable on no-tmux host, got {result:?}"
-            );
+        match result {
+            Err(DaemonError::Unprocessable(msg)) => assert!(
+                msg.contains("tmux unavailable for spawn"),
+                "the 422 must name the unreachable tmux: {msg}"
+            ),
+            other => panic!("expected Unprocessable on an unreachable-tmux host, got {other:?}"),
         }
     }
 }
