@@ -28,6 +28,7 @@
 //! | [`topology`] | reading a Cargo workspace's own crate graph (#6147) |
 //! | [`cve`] | scanning the pinned dependency set for advisories (#6075) |
 //! | [`license`] | banding that same set by license obligation (#6076) |
+//! | [`churn`] | reading the checkout's own git history for change hotspots (#6079) |
 //! | [`priority`] | writing that ranking, and the gaps, into the manifest |
 //!
 //! ## Fail-open, and never silently
@@ -57,6 +58,7 @@ use std::time::Duration;
 use crate::tools::RequiredTool;
 use crate::workdir::WorkDir;
 
+pub mod churn;
 pub mod cve;
 pub mod daemons;
 pub mod ecosystem;
@@ -183,18 +185,12 @@ pub struct Grounding {
     /// top-up (#6082). False on every degraded path, which is what keeps the
     /// heuristics available exactly when they are all that is left.
     pub attributed: bool,
-}
-
-impl Grounding {
-    /// A grounding that produced nothing but the reason it produced nothing.
-    fn gap(reason: String) -> Self {
-        Self {
-            index_id: None,
-            priorities: Vec::new(),
-            gaps: vec![reason],
-            attributed: false,
-        }
-    }
+    /// The repository's change hotspots, worst first (#6079). Empty whenever the
+    /// history could not be read, which is itself a named gap. Carried on the
+    /// value rather than written where it is measured because it is produced
+    /// inside [`ground`], which has no manifest, and written by
+    /// [`ground_manifest`], which does.
+    pub churn: Vec<churn::ChurnFile>,
 }
 
 /// Index `checkout`, search it per DD dimension, measure it, and rank its files.
@@ -230,49 +226,66 @@ pub async fn ground(
     budget: priority::Budget,
 ) -> Grounding {
     let caps = evidence::Caps::for_budget(budget.max_files);
+    // #6079: measured BEFORE the daemon gates, because it needs neither daemon.
+    // A repository whose trusty-search never answered still gets its change
+    // hotspots into the report, and a history that could not be read still gets
+    // its gap line — which is the whole point of doing it first rather than
+    // beside the two legs that do depend on a daemon.
+    let (churn_files, churn_gaps) = churn::ground(checkout, display);
+
     let Some(index_id) = index::index_id_for(checkout) else {
-        return Grounding::gap(format!(
-            "{display}: {} has no final path component, so no trusty-search index id could be \
-             derived — the report's code-analysis sections are not assessed for it",
-            checkout.display()
-        ));
+        return churn_only(
+            format!(
+                "{display}: {} has no final path component, so no trusty-search index id could be \
+                 derived — the report's code-analysis sections are not assessed for it",
+                checkout.display()
+            ),
+            None,
+            churn_files,
+            churn_gaps,
+        );
     };
 
     if let Err(cause) = daemons::ensure_search(tools).await {
-        return Grounding::gap(format!(
-            "{display}: {cause} — the report's findings, complexity distribution and health \
-             factors are not assessed for it, and its investigation pass ranks files by path \
-             name alone"
-        ));
-    }
-
-    if let Err(cause) = index::ensure_indexed(&tools.search, checkout, &index_id) {
-        return Grounding {
-            index_id: Some(index_id),
-            priorities: Vec::new(),
-            gaps: vec![format!(
+        return churn_only(
+            format!(
                 "{display}: {cause} — the report's findings, complexity distribution and health \
                  factors are not assessed for it, and its investigation pass ranks files by path \
                  name alone"
-            )],
-            attributed: false,
-        };
+            ),
+            None,
+            churn_files,
+            churn_gaps,
+        );
+    }
+
+    if let Err(cause) = index::ensure_indexed(&tools.search, checkout, &index_id) {
+        return churn_only(
+            format!(
+                "{display}: {cause} — the report's findings, complexity distribution and health \
+                 factors are not assessed for it, and its investigation pass ranks files by path \
+                 name alone"
+            ),
+            Some(index_id),
+            churn_files,
+            churn_gaps,
+        );
     }
 
     // #6082: an index id is a checkout basename, so a same-named checkout
     // elsewhere on this machine is served under it. Both legs below read that
     // index, so a wrong root poisons the evidence AND the measurements.
     if let Err(cause) = index::root_matches(&tools.search_socket, &index_id, checkout).await {
-        return Grounding {
-            index_id: Some(index_id),
-            priorities: Vec::new(),
-            gaps: vec![format!(
+        return churn_only(
+            format!(
                 "{display}: complexity data unavailable: index root mismatch — {cause}. Its \
                  evidence discovery and complexity hotspots are not assessed, and its \
                  investigation pass ranks files by path name alone"
-            )],
-            attributed: false,
-        };
+            ),
+            Some(index_id),
+            churn_files,
+            churn_gaps,
+        );
     }
 
     // #6082: the discovery leg. It asks the index where each DD dimension's
@@ -299,13 +312,21 @@ pub async fn ground(
     );
 
     let hotspots = complexity(tools, &index_id, checkout, display, &mut gaps).await;
-    let priorities = evidence::blend(&hotspots, &discovery.dimensions, caps.priority_paths);
+    // #6079: the churn lane is the third input, and an empty one reproduces the
+    // ranking exactly as `blend` produced it before this leg existed.
+    let priorities = evidence::blend_with(
+        &hotspots,
+        &discovery.dimensions,
+        &churn::lane(&churn_files),
+        caps.priority_paths,
+    );
     if priorities.is_empty() {
         gaps.push(format!(
             "{display}: neither the search index nor trusty-analyze named a file to inspect, so \
              the investigation pass ranks its files by path name alone"
         ));
     }
+    gaps.extend(churn_gaps);
     Grounding {
         index_id: Some(index_id),
         // #6082: the ranking may decline trusty-review's heuristic top-up only
@@ -315,6 +336,27 @@ pub async fn ground(
         attributed: search_answered && !priorities.is_empty(),
         priorities,
         gaps,
+        churn: churn_files,
+    }
+}
+
+/// A grounding carrying nothing but the churn leg's output and one other gap.
+///
+/// Why: #6079's collector needs no daemon and no index, so every arm of
+/// [`ground`] that returns before the daemon legs still has churn to report —
+/// and a churn gap it must not swallow. Spelled once rather than at each of the
+/// four early returns.
+fn churn_only(
+    gap: String,
+    index_id: Option<String>,
+    churn: Vec<churn::ChurnFile>,
+    churn_gaps: Vec<String>,
+) -> Grounding {
+    Grounding {
+        index_id,
+        gaps: std::iter::once(gap).chain(churn_gaps).collect(),
+        churn,
+        ..Grounding::default()
     }
 }
 
@@ -427,6 +469,10 @@ pub async fn ground_manifest(
     // channel and the same gap list for the reason the other two do — one leg's
     // write failing must cost only its own rows.
     manifest_leg_gaps.extend(secrets::ground_into(manifest, checkout, display));
+    // #6079: the churn hotspots were measured inside `ground` above, because
+    // they also feed the ranking. Only the write-back belongs here, on the same
+    // `[report].findings` channel and the same gap list as the three legs above.
+    manifest_leg_gaps.extend(churn::write_into(manifest, &grounding.churn, display));
     // #6082: read BEFORE the write, which is what would otherwise make the two
     // states indistinguishable afterwards.
     let already_rendered = investigation_exists(manifest);
@@ -451,7 +497,7 @@ pub async fn ground_manifest(
     {
         grounding.gaps.push(format!(
             "{display}: {cause} — the rendered report does not state why its crate topology, \
-             dependency CVE scan, license review, and secrets scan are missing"
+             dependency CVE scan, license review, secrets scan, and change hotspots are missing"
         ));
     }
     grounding.gaps.extend(manifest_leg_gaps);

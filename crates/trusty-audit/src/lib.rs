@@ -84,6 +84,10 @@ pub mod discover;
 // opposite rules about the credential — never one with a flag.
 pub mod distribute;
 pub mod error;
+// #6079: the one hardened `git` child this crate spawns — the ambient-repository
+// environment cleared and terminal prompting off, in one place rather than a
+// copy per caller (CLAUDE.md's common-entry-point rule).
+pub mod git;
 // #6081: indexing each audited repository in trusty-search, measuring it with
 // trusty-analyze, and writing the resulting ranking into the manifest — the
 // interface trusty-review's investigation pass reads (#6078).

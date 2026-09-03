@@ -315,6 +315,75 @@ fn the_ranking_is_capped() {
     assert!(blend(&[], &[], MIN_PRIORITY_PATHS).is_empty());
 }
 
+/// 🔴 #6079's optional-input closure condition, asserted as an equality: an
+/// absent churn lane produces the ranking `blend` produced before the lane
+/// existed, path for path and reason for reason.
+#[test]
+fn an_absent_churn_lane_reproduces_the_previous_ranking() {
+    let hotspots = hot(&["src/hot0.rs", "src/hot1.rs"]);
+    let dimensions = [
+        dimension("authentication & secrets", &["src/auth.rs"]),
+        dimension("error handling", &["src/err.rs"]),
+    ];
+
+    assert_eq!(
+        blend_with(&hotspots, &dimensions, &[], 60),
+        blend(&hotspots, &dimensions, 60),
+        "`blend` IS `blend_with` with no churn"
+    );
+}
+
+/// The lane's weight: one path per round, LAST in the round, so churn never
+/// displaces a measured hotspot or a dimension's evidence at the same rank. A
+/// churn path another signal already ranked costs no slot at all, and keeps the
+/// dimension that signal gave it.
+#[test]
+fn churn_enters_each_round_behind_every_other_signal() {
+    let hotspots = hot(&["src/hot0.rs", "src/hot1.rs"]);
+    let dimensions = [dimension("error handling", &["src/err.rs", "src/auth.rs"])];
+    let churn = vec![
+        Priority {
+            path: "src/auth.rs".into(),
+            dimension: None,
+            reason: Some("git-churn: 12 commits".into()),
+            hotspot: None,
+        },
+        Priority {
+            path: "src/config.rs".into(),
+            dimension: None,
+            reason: Some("git-churn: 30 commits".into()),
+            hotspot: None,
+        },
+    ];
+
+    let blended = blend_with(&hotspots, &dimensions, &churn, 60);
+    let paths: Vec<&str> = blended.iter().map(|p| p.path.as_str()).collect();
+
+    assert_eq!(
+        paths,
+        vec![
+            "src/hot0.rs",
+            "src/err.rs",
+            "src/auth.rs",
+            "src/hot1.rs",
+            "src/config.rs"
+        ],
+        "each round is hotspot, then every dimension, then one churn path"
+    );
+    let auth = blended
+        .iter()
+        .find(|p| p.path == "src/auth.rs")
+        .expect("src/auth.rs is ranked");
+    assert_eq!(
+        auth.dimension.as_deref(),
+        Some("error handling"),
+        "a churn path the search leg attributed keeps that dimension: {auth:?}"
+    );
+    let reason = auth.reason.as_deref().expect("a reason");
+    assert!(reason.contains("git-churn"), "{reason}");
+    assert!(reason.contains("trusty-search hit for"), "{reason}");
+}
+
 /// #6145: the measured function survives the blend — both as the structured key
 /// trusty-review reads and in the reason line a human reads. Pre-fix `blend`
 /// took paths only, so there was nothing to survive.
