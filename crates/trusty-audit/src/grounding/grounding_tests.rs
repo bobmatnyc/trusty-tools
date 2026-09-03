@@ -912,7 +912,7 @@ async fn a_manifest_that_cannot_be_written_is_a_named_gap() {
         "{gaps:?}"
     );
     assert!(
-        gaps[1].contains("secrets scan are missing"),
+        gaps[1].contains("secrets scan, and change hotspots are missing"),
         "the second names every leg whose reason went unwritten: {gaps:?}"
     );
 }

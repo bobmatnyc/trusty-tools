@@ -89,6 +89,11 @@ fn subsection_title(category: &str) -> String {
         "dependencies" => "Dependency CVE Exposure".to_string(),
         "license" => "License / IP Exposure".to_string(),
         "secrets" => "Secret Leakage".to_string(),
+        // #6079: git-churn hotspots. Not an assurance SCAN in the sense the
+        // other three are — nothing here is a vulnerability — but the same
+        // shape: a deterministic measurement of the target repository the
+        // report states verbatim rather than infers.
+        "churn" => "Change Hotspots".to_string(),
         "" => "Uncategorised Findings".to_string(),
         other => other.to_string(),
     }

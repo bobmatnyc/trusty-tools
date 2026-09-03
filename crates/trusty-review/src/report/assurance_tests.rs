@@ -174,6 +174,26 @@ fn a_second_category_gets_its_own_subsection() {
     assert!(section.contains("S-1"), "{section}");
 }
 
+/// #6079's category has a heading a due-diligence reader recognises. Without the
+/// mapping the section renders under the bare string `churn`, which reads as a
+/// producer bug rather than as a measurement.
+#[test]
+fn the_churn_category_renders_under_its_own_heading() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = model_from(
+        tmp.path(),
+        &manifest_declaring(
+            "findings = [\n  { category = \"churn\", id = \"churn-hotspot\", \
+             package = \"src/api.rs\", version = \"\", severity = \"RED\", \
+             title = \"31 commits by 4 author(s) in the last 180 days, +910/-402 lines\" },\n]",
+        ),
+    );
+    let section = report_section(&model);
+    assert!(section.contains("### Change Hotspots"), "{section}");
+    assert!(!section.contains("### churn"), "{section}");
+    assert!(section.contains("src/api.rs"), "{section}");
+}
+
 /// An advisory title is upstream prose. An unescaped pipe silently shifts every
 /// later cell into the wrong column, which is worse than a missing row.
 #[test]
