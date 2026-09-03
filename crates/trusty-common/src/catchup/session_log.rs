@@ -308,18 +308,32 @@ pub fn resolve_latest_snapshot(sessions_dir: &Path, ext: &str) -> Option<PathBuf
 /// Why: pause must never overwrite prior history; appending preserves every
 /// session's snapshots so a concurrent session's resume target survives.
 /// What: creates `sessions_dir` if needed, opens the log in append mode, and
-/// writes the serialized entry followed by a newline. Used by tooling and tests;
-/// the pause skill appends the same shape via the shell.
-/// Test: `append_then_read_roundtrips`, `append_is_additive`.
+/// writes the serialized entry AND its trailing newline in a single `write`.
+/// Used by tooling and tests; the pause skill appends the same shape via the
+/// shell.
+///
+/// #6732: the newline used to go out as its own `write(2)` — `writeln!` on a
+/// `File` formats piecewise, so one logical line cost two syscalls. `O_APPEND`
+/// makes each individual write atomically seek-to-end-and-write, but it says
+/// nothing about a PAIR of them, so two concurrent pauses could land as
+/// `<lineA><lineB>\n\n`: one unparseable line plus one blank, i.e. one lost
+/// record. Building the newline into the buffer makes one line one write, which
+/// `O_APPEND` then does guarantee is atomic against other appenders on a local
+/// filesystem.
+/// Test: `append_then_read_roundtrips`, `append_is_additive`,
+/// `append_leaves_other_sessions_bytes_untouched`,
+/// `concurrent_appends_never_lose_a_line`.
 pub fn append_entry(sessions_dir: &Path, entry: &SessionLogEntry) -> std::io::Result<()> {
     std::fs::create_dir_all(sessions_dir)?;
-    let line = serde_json::to_string(entry)
+    let mut line = serde_json::to_string(entry)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    // #6732: one line, one `write` — the newline must not be a second syscall.
+    line.push('\n');
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(sessions_dir.join(SESSION_LOG_FILENAME))?;
-    writeln!(f, "{line}")
+    f.write_all(line.as_bytes())
 }
 
 /// Read the legacy `LATEST-SESSION.txt` pointer, extracting a `session-*.<ext>`
@@ -465,6 +479,95 @@ mod tests {
             read_log(tmp.path()).len(),
             2,
             "second append does not truncate"
+        );
+    }
+
+    /// A pause by one session leaves every other session's line byte-identical.
+    ///
+    /// Why: #6732 — a pause dropped three lines belonging to two OTHER session
+    /// ids while adding its own, so a versioned read of the log saw a
+    /// destructive rewrite instead of an append.
+    /// What: writes B's and C's lines, snapshots the file's exact bytes, appends
+    /// A's line, then asserts the file still opens with those bytes and grew by
+    /// exactly A's serialized line.
+    #[test]
+    fn append_leaves_other_sessions_bytes_untouched() {
+        let tmp = TempDir::new().unwrap();
+        append_entry(tmp.path(), &entry("B", "pause", "B/session-1.md", "t1")).unwrap();
+        append_entry(tmp.path(), &entry("C", "pause", "C/session-2.md", "t2")).unwrap();
+
+        let log = tmp.path().join(SESSION_LOG_FILENAME);
+        let before = fs::read(&log).unwrap();
+
+        let a = entry("A", "pause", "A/session-3.md", "t3");
+        append_entry(tmp.path(), &a).unwrap();
+
+        let after = fs::read(&log).unwrap();
+        assert_eq!(
+            &after[..before.len()],
+            &before[..],
+            "prior sessions' bytes must be untouched by a later pause"
+        );
+        assert_eq!(
+            String::from_utf8(after[before.len()..].to_vec()).unwrap(),
+            format!("{}\n", serde_json::to_string(&a).unwrap()),
+            "a pause appends exactly its own line and nothing else"
+        );
+        assert_eq!(read_log(tmp.path()).len(), 3);
+    }
+
+    /// Concurrent appends from several sessions never lose or corrupt a line.
+    ///
+    /// Why: #6732 — `writeln!` on a `File` emits the payload and the newline as
+    /// two separate `write(2)` calls. `O_APPEND` makes each call atomic on its
+    /// own, but not the pair, so two concurrent pauses interleave into
+    /// `<lineA><lineB>\n\n`: one unparseable line plus one blank, which is one
+    /// lost record.
+    /// What: hammers `append_entry` from several threads, then asserts every
+    /// line in the file parses and every entry written is still present.
+    #[test]
+    fn concurrent_appends_never_lose_a_line() {
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 128;
+
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+        std::thread::scope(|scope| {
+            for t in 0..THREADS {
+                let dir = dir.clone();
+                scope.spawn(move || {
+                    for i in 0..PER_THREAD {
+                        append_entry(
+                            &dir,
+                            &entry(
+                                &format!("session-{t}"),
+                                "pause",
+                                &format!("session-{t}/session-2026090{}-0000{i:02}.md", t % 10),
+                                "2026-09-03T20:03:20.307912+00:00",
+                            ),
+                        )
+                        .unwrap();
+                    }
+                });
+            }
+        });
+
+        let raw = fs::read_to_string(dir.join(SESSION_LOG_FILENAME)).unwrap();
+        let bad: Vec<&str> = raw
+            .lines()
+            .filter(|l| serde_json::from_str::<SessionLogEntry>(l).is_err())
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "{} of {} lines were interleaved or truncated; first: {:?}",
+            bad.len(),
+            raw.lines().count(),
+            bad.first()
+        );
+        assert_eq!(
+            read_log(&dir).len(),
+            THREADS * PER_THREAD,
+            "every concurrent append must survive"
         );
     }
 
