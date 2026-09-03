@@ -1,10 +1,11 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import ServiceCard from './ServiceCard.svelte';
-  // #6518: the Overview tab leads with the whole-machine dashboard; the card
-  // grid below it stays because it is the only place a service that never
-  // reported — absent binary, never installed — is visible at all.
+  // #6642: the Overview tab is the whole-machine dashboard followed by ONE
+  // services section. The "Installed Services" ServiceCard grid and the
+  // dashboard's own rollup table were the two duplicates the owner's ruling
+  // removed; `ServicesList` replaces both.
   import MachineStatusPanel from './MachineStatusPanel.svelte';
+  import ServicesList from './ServicesList.svelte';
   import MemoryTab from './MemoryTab.svelte';
   import SearchTab from './SearchTab.svelte';
   import AnalyzeTab from './AnalyzeTab.svelte';
@@ -13,7 +14,6 @@
   import ConfigTab from './ConfigTab.svelte';
   import ThemeSelector from './ThemeSelector.svelte';
   import BrandLockup from './BrandLockup.svelte';
-  import BrandMark from './BrandMark.svelte';
   // #6519: opt-in idle entry to the screensaver route.
   import {
     IDLE_ENTRY_URL,
@@ -21,6 +21,8 @@
     idleExpiredAt,
     readIdleMinutes,
   } from './screensaver.js';
+  // #6642: one EventSource for the whole page — see machineStream.js.
+  import { createMachineStream, initialState } from './machineStream.js';
 
   // ── state ────────────────────────────────────────────────────────────────
 
@@ -28,6 +30,10 @@
   let loading = $state(true);
   let error = $state(null);
   let activeTab = $state('overview');
+  // #6642: the 1 s machine-status window every graph on this page draws from,
+  // and the single stream that fills it. Not `$state` — nothing renders it.
+  let history = $state(initialState());
+  let stream;
 
   const TABS = [
     { id: 'overview', label: 'Overview' },
@@ -39,9 +45,8 @@
     { id: 'config',   label: 'Config' },
   ];
 
-  // Single source of truth: maps service.id → console tab key.
-  // Services absent from this map will not show the "View details →" button.
-  // ServiceCard derives its `hasTab` check from the key set of this map —
+  // Single source of truth: maps service.id → console tab key. A service absent
+  // from this map has no dashboard, so `ServicesList` renders its row inert —
   // there is no separate TABBED_SERVICES literal anywhere in the codebase.
   const SERVICE_TAB_MAP = {
     'trusty-search':  'search',
@@ -51,14 +56,19 @@
     'trusty-mpm':     'sessions',
   };
 
-  // Derived set used by ServiceCard to decide whether to render the button.
-  // Kept in sync automatically — no manual mirroring required.
+  // Derived set `ServicesList` asks whether a row is clickable. Kept in sync
+  // automatically — no manual mirroring required.
   const tabbedServices = new Set(Object.keys(SERVICE_TAB_MAP));
 
   // ── data fetch ───────────────────────────────────────────────────────────
 
+  // #6642: the roster is fetched once so the list is not blank before the
+  // stream connects; `cpu_pct` already rides on it, so the %CPU column is
+  // populated on first paint and the graphs fill in as samples arrive.
   onMount(async () => {
     armIdleWatch();
+    stream = createMachineStream({ onState: (next) => (history = next) });
+    stream.start();
     try {
       const resp = await fetch('/api/console/services');
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -102,13 +112,14 @@
   }
 
   onDestroy(() => {
+    stream?.stop();
     clearInterval(idleTimer);
     for (const event of IDLE_EVENTS) {
       window.removeEventListener(event, noteInput);
     }
   });
 
-  // ── navigation callback for ServiceCard overview buttons ─────────────────
+  // ── navigation callback for the Services list ────────────────────────────
 
   /** Switch to the tab for the given service id (if one exists). */
   function handleViewDetails(serviceId) {
@@ -145,29 +156,16 @@
     {#if activeTab === 'overview'}
       <!-- The dashboard reads its own endpoint, so it renders whether or not
            the service probe below has answered. -->
-      <MachineStatusPanel />
-      <!-- Not "Services": the dashboard above already has a SERVICES card, and
-           two identical headings on one screen read as a duplicate. This grid
-           lists what is INSTALLED, reporting or not. -->
-      <h2 class="section-title">Installed Services</h2>
-      {#if loading}
-        <div class="loading">
-          <BrandMark size={28} />
-          <span>Detecting services…</span>
-        </div>
-      {:else if error}
-        <div class="error">Failed to load services: {error}</div>
-      {:else}
-        <div class="cards">
-          {#each services as service (service.id)}
-            <ServiceCard
-              {service}
-              {tabbedServices}
-              onViewDetails={tabbedServices.has(service.id) ? handleViewDetails : undefined}
-            />
-          {/each}
-        </div>
-      {/if}
+      <MachineStatusPanel samples={history.samples} />
+      <!-- #6642: the one services section on the page. -->
+      <ServicesList
+        {services}
+        serviceSamples={history.serviceSamples}
+        dashboards={tabbedServices}
+        onOpen={handleViewDetails}
+        {loading}
+        {error}
+      />
     {:else if activeTab === 'search'}
       <SearchTab />
     {:else if activeTab === 'memory'}
@@ -250,34 +248,4 @@
   .panel {
     min-height: 200px;
   }
-  /* #6518: names the surviving ServiceCard grid now that the machine-status
-     dashboard sits above it. Same Foundry display treatment as the dashboard's
-     own heading. */
-  .section-title {
-    margin: 0 0 1rem;
-    font-family: var(--trusty-display);
-    font-size: 1.25rem;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--trusty-text-primary);
-  }
-  .cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 1rem;
-  }
-  .loading,
-  .error {
-    padding: 1.5rem;
-    border-radius: 0.5rem;
-    background: var(--trusty-card-bg);
-    color: var(--trusty-text-secondary);
-  }
-  .loading {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-  }
-  .error { color: var(--trusty-danger); }
 </style>

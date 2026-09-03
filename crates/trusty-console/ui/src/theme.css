@@ -23,7 +23,7 @@
          "neutral/inactive" semantic), `--trusty-status-degraded` is a new rust-
          family value picked to sit between `--trusty-warning` and
          `--trusty-danger`. Status colors are tuned per palette so the 13%/27%
-         color-mix badge backgrounds (ServiceCard.svelte, ReviewTab.svelte) read
+         color-mix badge backgrounds (ServicesList.svelte, ReviewTab.svelte) read
          correctly on either surface.
    Test: Set <html data-theme="light"> and read getComputedStyle(root)
          .getPropertyValue('--trusty-content-bg') — assert it equals the light

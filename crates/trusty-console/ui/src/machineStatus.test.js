@@ -19,6 +19,7 @@ import {
   formatNetworkRates,
   formatPct,
   formatRateMBs,
+  hostGraphs,
   pressureTone,
   rollupTone,
   serviceHealthTone,
@@ -329,4 +330,41 @@ test('every other failure resolves rather than rejecting', async () => {
   }));
   assert.equal(unparseable.status, null);
   assert.equal(unparseable.error, 'not JSON');
+});
+
+// ── #6642: the per-card history series ─────────────────────────────────────
+
+test('hostGraphs projects one series per card, oldest first', () => {
+  const samples = [
+    {
+      cpu: { usage_pct: 10 },
+      memory: { usage_pct: 20 },
+      disks: { aggregate_usage_pct: 30 },
+      network: { rx_bytes_per_sec: 100, tx_bytes_per_sec: 25 },
+    },
+    {
+      cpu: { usage_pct: 11 },
+      memory: { usage_pct: 21 },
+      disks: { aggregate_usage_pct: 31 },
+      network: { rx_bytes_per_sec: 200, tx_bytes_per_sec: 50 },
+    },
+  ];
+  const graphs = hostGraphs(samples);
+  assert.deepEqual(graphs.cpu, [10, 11]);
+  assert.deepEqual(graphs.memory, [20, 21]);
+  assert.deepEqual(graphs.disk, [30, 31]);
+  assert.deepEqual(graphs.network, [125, 250], 'network is rx + tx bytes/sec');
+  assert.deepEqual(Object.keys(graphs).sort(), ['cpu', 'disk', 'memory', 'network']);
+});
+
+test('a sample missing a subsystem yields a gap, not a zero', () => {
+  const graphs = hostGraphs([{ cpu: { usage_pct: 5 } }]);
+  assert.deepEqual(graphs.cpu, [5]);
+  assert.deepEqual(graphs.memory, [null]);
+  assert.deepEqual(graphs.network, [null]);
+});
+
+test('hostGraphs on an empty or absent ring yields empty series', () => {
+  assert.deepEqual(hostGraphs([]).cpu, []);
+  assert.deepEqual(hostGraphs(undefined).network, []);
 });

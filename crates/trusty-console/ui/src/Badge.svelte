@@ -6,8 +6,9 @@
   What: markup and props are a verbatim copy of
   docs/design/UI/design-system-svelte/src/lib/Badge.svelte; the .badge and
   .badge-<tone> classes it composes are ported alongside it into foundry.css,
-  scoped under `.foundry`. ServiceCard's own hand-rolled pill badge is
-  untouched — the two coexist until a later phase converts that grid.
+  scoped under `.foundry`. `ServicesList`'s own hand-rolled status stamp is
+  untouched: its colour comes per-status from `statusPresentation.js`, which no
+  Foundry tone class can express.
   Test: `machineStatus.test.js` covers the tone each value maps to
   (`pressureTone`, `serviceHealthTone`, `rollupTone`).
 -->

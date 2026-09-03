@@ -274,3 +274,39 @@ export async function fetchMachineStatus(fetchImpl = fetch) {
     return { status: null, error: e.message, cold: false };
   }
 }
+
+/**
+ * The four host series the stat-card bar graphs draw (#6642).
+ *
+ * Why here: a series is one more projection of the same payload the cards above
+ * render, and deriving it beside `statCards` is what keeps the headline number
+ * and the newest bar reading the same field. The keys match `statCards`' `key`
+ * so the panel can look a series up by card without a second mapping.
+ *
+ * What: `samples` is the host ring from the history snapshot, oldest first.
+ * CPU, memory and disk are percentages and share the graph's 0–100 scale.
+ * Network has no percentage, so its series is TOTAL throughput —
+ * `rx + tx` bytes/sec — which the card then scales to the largest value in the
+ * window; the absolute figure stays on the card's value line. A sample missing
+ * a subsystem yields `null` at that slot, which the graph draws as a gap.
+ * Test: `hostGraphs projects one series per card, oldest first` and the
+ * null/empty cases beside it in `machineStatus.test.js`.
+ */
+export function hostGraphs(samples) {
+  const list = Array.isArray(samples) ? samples : [];
+  const at = (read) => list.map((s) => (isNum(read(s)) ? read(s) : null));
+  return {
+    cpu: at((s) => s?.cpu?.usage_pct),
+    memory: at((s) => s?.memory?.usage_pct),
+    disk: at((s) => s?.disks?.aggregate_usage_pct),
+    network: at((s) => totalRate(s?.network)),
+  };
+}
+
+/** Both directions summed, or `null` when neither is a readable number. */
+function totalRate(network) {
+  const rx = isNum(network?.rx_bytes_per_sec) ? network.rx_bytes_per_sec : null;
+  const tx = isNum(network?.tx_bytes_per_sec) ? network.tx_bytes_per_sec : null;
+  if (rx === null && tx === null) return null;
+  return (rx ?? 0) + (tx ?? 0);
+}
