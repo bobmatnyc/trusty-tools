@@ -58,7 +58,10 @@ name = "trusty-common"
 # MINOR/breaking position for the pre-existing #6562/#6573 changes above).
 # This PR only adds two new public constants to `env_vars.rs`; additive, no
 # existing item changed shape.
-version = "0.47.1"
+# 0.47.2 (#6316): patch — version bump only, to clear the "PR version bump vs
+# crates.io" CI gate after src/** changes landed at the same version already
+# published as 0.47.1.
+version = "0.47.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
