@@ -1190,6 +1190,22 @@ fn backfill_effort_tshirt_tiny_corpus_fallback() {
 
 /// Seed one `work_items` row with a JIRA-shaped `raw_json` payload.
 fn seed_work_item(db: &Database, id: &str, title: &str, reporter: &str, description: Option<&str>) {
+    seed_work_item_in_source(db, id, "jira", title, reporter, description);
+}
+
+/// Seed one `work_items` row under an explicit `source`.
+///
+/// Separate from [`seed_work_item`] so a test can put the SAME ticket key in
+/// two PM sources — `work_items` is keyed `(id, source)` precisely because
+/// ticket ids are unique per source, not globally.
+fn seed_work_item_in_source(
+    db: &Database,
+    id: &str,
+    source: &str,
+    title: &str,
+    reporter: &str,
+    description: Option<&str>,
+) {
     let raw = serde_json::json!({
         "fields": {
             "reporter": { "displayName": reporter },
@@ -1202,8 +1218,8 @@ fn seed_work_item(db: &Database, id: &str, title: &str, reporter: &str, descript
         .execute(
             "INSERT OR REPLACE INTO work_items \
              (id, source, title, status, item_type, raw_json) \
-             VALUES (?1, 'jira', ?2, 'Done', 'Task', ?3)",
-            params![id, title, raw],
+             VALUES (?1, ?2, ?3, 'Done', 'Task', ?4)",
+            params![id, source, title, raw],
         )
         .expect("insert work item");
 }
@@ -1222,14 +1238,19 @@ fn seed_transition(db: &Database, ticket: &str, author: &str) {
 
 /// Read back `(is_meaningful, exclusion_reason, formula_version)` for a ticket.
 fn read_verdict(db: &Database, id: &str) -> (i64, String, String) {
+    read_verdict_in_source(db, id, "jira")
+}
+
+/// Read back one verdict, scoped to an explicit `source`.
+fn read_verdict_in_source(db: &Database, id: &str, source: &str) -> (i64, String, String) {
     db.connection()
         .query_row(
             "SELECT is_meaningful, exclusion_reason, formula_version FROM fact_pm_work \
-             WHERE work_item_id = ?1 AND work_item_source = 'jira'",
-            params![id],
+             WHERE work_item_id = ?1 AND work_item_source = ?2",
+            params![id, source],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
-        .unwrap_or_else(|e| panic!("read verdict for {id}: {e}"))
+        .unwrap_or_else(|e| panic!("read verdict for {source}/{id}: {e}"))
 }
 
 /// Seed one ticket per exclusion reason plus one meaningful ticket, so a
@@ -1399,4 +1420,35 @@ fn backfill_pm_work_handles_a_payload_with_no_extractable_fields() {
         .expect("read");
     assert_eq!(pm_name, None, "no reporter in the payload");
     assert_eq!(week_key, None, "no creation date in the payload");
+}
+
+/// A ticket key is unique per PM source, not globally (`work_items` is keyed
+/// `(id, source)`), but `fact_ticket_transitions` carries no source column —
+/// every row in it comes from the JIRA sync (#3966). Looking a candidate up
+/// by bare ticket key therefore let a JIRA ticket's human transition leak
+/// onto a same-keyed ticket from another source, flipping that one from
+/// AUTO_GENERATED to BOT_FILED.
+#[test]
+fn a_human_transition_does_not_leak_across_pm_sources() {
+    let mut db = Database::open_in_memory().expect("db");
+    let title = "Retry budget exhausted on the rate-shop worker";
+    let body = Some("The worker gave up after 40 attempts.");
+    // Same key, two sources, both filed by a bot.
+    seed_work_item_in_source(&db, "ENG-42", "jira", title, "dependabot[bot]", body);
+    seed_work_item_in_source(&db, "ENG-42", "linear", title, "dependabot[bot]", body);
+    // Only the JIRA ticket was ever moved by a person.
+    seed_transition(&db, "ENG-42", "Charles Abbott");
+
+    backfill_pm_work(&mut db, false).expect("backfill");
+
+    assert_eq!(
+        read_verdict_in_source(&db, "ENG-42", "jira").1,
+        "BOT_FILED",
+        "the JIRA ticket really was transitioned by a human"
+    );
+    assert_eq!(
+        read_verdict_in_source(&db, "ENG-42", "linear").1,
+        "AUTO_GENERATED",
+        "the Linear ticket has no transitions of its own; JIRA's must not leak onto it"
+    );
 }

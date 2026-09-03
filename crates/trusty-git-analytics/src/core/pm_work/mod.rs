@@ -73,8 +73,11 @@ pub mod thresholds {
 
     /// Whole words that identify an automation account. Matched against
     /// alphanumeric tokens of the reporter name rather than as substrings,
-    /// because "bot" is a substring of ordinary surnames ("Abbott").
-    pub const BOT_NAME_TOKENS: &[&str] = &["bot", "bots", "robot", "system", "automation"];
+    /// because each is a substring of ordinary names — "bot" of "Abbott",
+    /// "ci" of "Lucia" and "Marie-Cindy". Token matching is what lets `ci`
+    /// catch the generic `release-ci` / `deploy-ci` / `ci-runner` accounts
+    /// without those false positives.
+    pub const BOT_NAME_TOKENS: &[&str] = &["bot", "bots", "robot", "system", "automation", "ci"];
 }
 
 /// Why a ticket was excluded from the meaningful-work subset.

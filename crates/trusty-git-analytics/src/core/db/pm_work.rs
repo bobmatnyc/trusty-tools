@@ -22,6 +22,23 @@ use tracing::debug;
 use crate::core::errors::{Result, TgaError};
 use crate::core::pm_work::{self, ExclusionReason, PmWorkVerdict};
 
+/// The `work_items.source` tag whose tickets `fact_ticket_transitions` holds.
+///
+/// Why: that table has no source column, and its only production writer is
+/// the JIRA sync — `upsert_ticket_transition` in `core::db::jira_facts`,
+/// called from `commands::jira` (#3966). A ticket key is unique per PM
+/// source, not globally, so matching a candidate on the bare key let a JIRA
+/// ticket's human transition decide the verdict for an unrelated ticket that
+/// happens to share its key in another source.
+/// What: the literal `work_items.source` tag JIRA rows carry
+/// (`sql/0005_work_items.sql`). Spelled here rather than imported from
+/// `collect::pm_adapter::PmSource` because `core` is the layer `collect`
+/// depends on, not the reverse. Should a second provider ever write
+/// transitions, that table needs its own source column and this constant
+/// goes away.
+/// Test: `a_human_transition_does_not_leak_across_pm_sources`.
+const TRANSITIONS_SOURCE: &str = "jira";
+
 /// One `work_items` row plus the transition signal the classifier needs.
 ///
 /// `raw_json` is carried verbatim rather than pre-parsed so the caller can
@@ -64,10 +81,12 @@ pub struct PmWorkRow {
 /// ever moved a bot-filed ticket, which lives in `fact_ticket_transitions`
 /// (migration v23) rather than on the ticket itself.
 /// What: one pass over `work_items` and one over the distinct transition
-/// authors, joined in memory. The author-side bot test is
-/// [`crate::core::pm_work::is_bot_account`], so a transition made by another
-/// bot does not count as human contact.
-/// Test: `pm_work_backfill_marks_a_bot_filed_ticket_when_a_human_moved_it`.
+/// authors, joined in memory on ticket key — but only for candidates whose
+/// source is [`TRANSITIONS_SOURCE`], since keys collide across sources. The
+/// author-side bot test is [`crate::core::pm_work::is_bot_account`], so a
+/// transition made by another bot does not count as human contact.
+/// Test: `pm_work_backfill_marks_a_bot_filed_ticket_when_a_human_moved_it`,
+/// `a_human_transition_does_not_leak_across_pm_sources`.
 ///
 /// # Errors
 ///
@@ -92,7 +111,9 @@ pub fn load_candidates(conn: &Connection) -> Result<Vec<PmWorkCandidate>> {
     let mut out = Vec::new();
     for row in rows {
         let (id, source, title, raw_json) = row.map_err(TgaError::from)?;
-        let human_transitioned = human_moved.contains(&id);
+        // #3916: scope the lookup by source — a bare ticket-key match let a
+        // JIRA ticket's human transition decide a same-keyed Linear ticket.
+        let human_transitioned = source == TRANSITIONS_SOURCE && human_moved.contains(&id);
         out.push(PmWorkCandidate {
             id,
             source,

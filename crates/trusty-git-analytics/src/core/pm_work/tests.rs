@@ -158,6 +158,9 @@ fn bot_detection_matches_automation_accounts() {
         "System",
         "Automation for Jira",
         "noreply@example.com",
+        "release-ci",
+        "deploy-ci",
+        "ci-runner",
     ] {
         assert!(
             is_bot_account(name),
@@ -174,6 +177,8 @@ fn bot_detection_does_not_misfire_on_human_names() {
         "Talbot Reynolds",
         "Roberta Systems-Lee",
         "Bo Tran",
+        "Lucia Moreau",
+        "Marie-Cindy Okafor",
     ] {
         assert!(!is_bot_account(name), "{name:?} must read as a person");
     }
