@@ -71,10 +71,16 @@
 #   fix/prepublish-doc-links-20260902 (ffe03c23c) passed the assembled gate for
 #   trusty-common and trusty-mpm and was failed here for both.
 #
-#   Four facts must all hold, and each rules out a way of faking the shape:
-#     - the crate's CHANGELOG.md gained a bullet, and that exact line sits
-#       INSIDE the `## [<version>]` section at HEAD — a bullet added anywhere
-#       else is not a record of the release being cut;
+#   Five facts must all hold, and each rules out a way of faking the shape:
+#     - the `## [<version>]` section existed ALREADY at the merge base, so the
+#       branch is landing inside a window someone else opened;
+#     - that section gained at least one bullet at HEAD that it did not carry
+#       at the merge base — the record has to be new;
+#     - it lost none, and none of the bullets it already carried was edited. A
+#       fold only ADDS. This is the fact a `+`-line test cannot see: rewording
+#       an existing bullet also produces a `+` bullet line inside the section,
+#       and the first cut of this path accepted a real `src/` change on that
+#       evidence with nothing describing it (found in review);
 #     - <version> is what `crates/<crate>/Cargo.toml` ships RIGHT NOW, so the
 #       section is the one about to be published;
 #     - no `<package>-v<version>` tag exists yet. After the tag that section is
@@ -177,8 +183,9 @@
 #   naming only A, and a genuinely missing fragment still fails.
 #   scripts/check_changelog_release_window_selftest.sh replays the #6695 shape:
 #   a crate whose pending fragments a --merge folded into its cut section
-#   passes this gate AND check-changelog-assembled.sh, while the same bullet
-#   under an already-tagged section still fails.
+#   passes this gate AND check-changelog-assembled.sh, while a reworded
+#   existing bullet, a bullet under an already-tagged section, a bullet outside
+#   the cut section, a stranded fragment and a tagless checkout all still fail.
 #   scripts/check_changelog_attribution_selftest.sh replays the #4576 shape:
 #   a nested crate source path must be attributed, not dropped, and an
 #   unattributable one must fail the gate. Fragment validation is covered by
@@ -426,6 +433,20 @@ fragment_crate() {
   echo "$crate"
 }
 
+# Prints the body of a CHANGELOG's `## [<version>]` section, or nothing.
+#
+# Literal prefix match, not a regex: the closing bracket terminates the version,
+# so `## [0.47.1]` cannot also match `## [0.47.10] — …`, and no escaped dots
+# have to survive an awk -v assignment. Same matching `assemble-changelog.sh`'s
+# own merge_into_section() uses, for the same reason.
+changelog_section() {
+  awk -v hdr="## [$2]" '
+    index($0, hdr) == 1 { inside = 1; next }
+    inside && index($0, "## [") == 1 { exit }
+    inside { print }
+  ' "$1"
+}
+
 # #6695 RELEASE WINDOW. Accepts the state an
 # `assemble-changelog.sh <crate> <version> --merge` run leaves behind, and only
 # that state. The header's "(3) is the RELEASE WINDOW" section states why each
@@ -442,7 +463,8 @@ assembled_into_cut_section() {
   local crate="$1"
   local manifest="crates/${crate}/Cargo.toml"
   local changelog="crates/${crate}/CHANGELOG.md"
-  local version pkg section added line assembled_err
+  local version pkg line assembled_err
+  local base_tmp head_section base_section base_heading base_bullets head_bullets
   ASSEMBLED_WHY=""
   ASSEMBLED_VERSION=""
 
@@ -472,36 +494,55 @@ assembled_into_cut_section() {
     return 1
   fi
 
-  # Literal prefix match, not a regex: the closing bracket terminates the
-  # version, so '## [0.47.1]' cannot also match '## [0.47.10] — …', and no
-  # escaped dots have to survive an awk -v assignment.
-  section="$(awk -v hdr="## [${version}]" '
-      index($0, hdr) == 1 { inside = 1; next }
-      inside && index($0, "## [") == 1 { exit }
-      inside { print }
-    ' "$changelog" || true)"
-  if [[ -z "$section" ]]; then
+  # The evidence is how the SECTION grew between the merge base and HEAD, never
+  # a `+` line in the diff. A `+` bullet says only that some bullet-shaped text
+  # is new: rewording a bullet the cut already carried produces one too, and
+  # that let a real `src/` change land with nothing describing it. What a fold
+  # does, and a reword does not, is grow the section while disturbing no line
+  # of it.
+  base_tmp="$(mktemp "${TMPDIR:-/tmp}/changelog.base.XXXXXX")"
+  if ! git show "${MERGE_BASE}:${changelog}" >"$base_tmp" 2>/dev/null; then
+    : >"$base_tmp"
+  fi
+  head_section="$(changelog_section "$changelog" "$version" || true)"
+  base_section="$(changelog_section "$base_tmp" "$version" || true)"
+  base_heading="$(awk -v hdr="## [${version}]" \
+    'index($0, hdr) == 1 { print "y"; exit }' "$base_tmp" || true)"
+  rm -f "$base_tmp"
+
+  if [[ -z "$head_section" ]]; then
     ASSEMBLED_WHY="${changelog} has no '## [${version}]' section to fold into"
     return 1
   fi
-
-  added="$(git diff --unified=0 --no-renames "$MERGE_BASE" HEAD -- "$changelog" |
-    grep -E '^\+[[:space:]]*-[[:space:]]' | sed 's/^+//' || true)"
-  if [[ -z "$added" ]]; then
-    ASSEMBLED_WHY="this branch adds no bullet to ${changelog}"
+  if [[ -z "$base_heading" ]]; then
+    ASSEMBLED_WHY="'## [${version}]' did not exist at the merge base ${MERGE_BASE:0:10}, so this branch is not landing inside a release window someone else opened"
     return 1
   fi
 
-  ASSEMBLED_WHY="this branch's ${changelog} bullets land outside the '## [${version}]' section"
+  # Bullet lines only. finalize() in assemble-changelog.sh re-emits a heading it
+  # parsed and normalises blank padding, so comparing every line would fail on a
+  # requoting the fold itself performed. The bullet is the record.
+  base_bullets="$(printf '%s\n' "$base_section" | grep -E '^[[:space:]]*-[[:space:]]' || true)"
+  head_bullets="$(printf '%s\n' "$head_section" | grep -E '^[[:space:]]*-[[:space:]]' || true)"
+
+  # `-e` on both greps: a bullet begins with `-`, which grep otherwise reads as
+  # an option and answers with a usage error instead of a mismatch.
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
-    # `-e` is required: a bullet begins with `-`, which grep reads as an
-    # option otherwise and then reports a usage error INSTEAD of a mismatch.
-    if printf '%s\n' "$section" | grep -qxF -e "$line"; then
+    if ! printf '%s\n' "$head_bullets" | grep -qxF -e "$line"; then
+      ASSEMBLED_WHY="a bullet '## [${version}]' already carried was edited or removed, which a fold never does — gone: ${line}"
+      return 1
+    fi
+  done <<<"$base_bullets"
+
+  ASSEMBLED_WHY="'## [${version}]' carries no bullet this branch added — every one of them was already there at the merge base"
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if ! printf '%s\n' "$base_bullets" | grep -qxF -e "$line"; then
       ASSEMBLED_WHY=""
       break
     fi
-  done <<<"$added"
+  done <<<"$head_bullets"
   [[ -n "$ASSEMBLED_WHY" ]] && return 1
 
   # Ask the other gate rather than re-deriving what it means by "assembled".

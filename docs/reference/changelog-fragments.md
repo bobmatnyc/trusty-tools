@@ -114,8 +114,10 @@ bash scripts/assemble-changelog.sh <crate-dir> <version> --merge
 `check_changelog_fragment.sh` accepts that as the crate's record when all four
 hold:
 
-- the branch adds a bullet to `crates/<crate>/CHANGELOG.md`, and that exact line
-  sits **inside** the `## [<version>]` section;
+- the `## [<version>]` section existed already at the merge base, and at HEAD it
+  carries at least one bullet it did not carry there;
+- it lost none, and none of the bullets it already carried was edited. A fold
+  only adds — rewording an existing bullet is not a record of anything;
 - `<version>` is what the crate's `Cargo.toml` ships right now;
 - no `<package>-v<version>` tag exists yet — after the tag the section is
   released history, and a bullet written into it back-dates the change;

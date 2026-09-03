@@ -28,6 +28,15 @@
 #                                section is released history, so a bullet
 #                                written into it is a back-dated record, not
 #                                evidence, and the gate still fails.
+#     no-tags-refused            the same tree in a checkout carrying NO tags.
+#                                Whether 0.1.1 shipped cannot be established
+#                                there, and an unknown fact is not an
+#                                exemption — the gate refuses.
+#     reword-only-fails          a real src change plus a cosmetic reword of a
+#                                bullet the cut section ALREADY carried. That
+#                                produces a `+` bullet line inside the section
+#                                and describes nothing that changed; a fold
+#                                only ADDS, so it must fail.
 #     stranded-fragment-fails    a hand-written bullet while another fragment
 #                                sits unconsumed in changelog.d/. The assembled
 #                                gate rejects that state, so the fragment gate
@@ -91,6 +100,7 @@ g config user.email selftest@example.invalid
 g config user.name "changelog release-window self-test"
 g add -A
 g commit -qm "M0: crate-a 0.1.0"
+M0="$(g rev-parse HEAD)"
 g tag crate-a-v0.1.0
 
 # The release cut (#6693's shape): version bumped, section written, fragments
@@ -195,7 +205,36 @@ assert_gate tagged-section-rejected 1 'is already tagged'
 g tag -d crate-a-v0.1.1 >/dev/null
 
 # ---------------------------------------------------------------------------
-# 3. THE OTHER DIRECTION. A hand-written bullet while a fragment still sits
+# 3. AN UNKNOWN FACT IS NOT AN EXEMPTION. With no tags in the checkout the gate
+#    cannot tell a pending cut from released history, so it refuses. HEAD is
+#    still the good fold from case 1 — the missing tags are the only difference.
+# ---------------------------------------------------------------------------
+g tag -d crate-a-v0.1.0 >/dev/null
+assert_gate no-tags-refused 1 'this checkout has no tags'
+g tag crate-a-v0.1.0 "$M0"
+
+# ---------------------------------------------------------------------------
+# 4. A REWORD IS NOT A RECORD. Rewording a bullet the cut section already
+#    carried puts a `+` bullet line inside that section, which is what the
+#    first cut of this evidence path tested for — and it let a real src change
+#    through describing nothing. A fold only ADDS.
+# ---------------------------------------------------------------------------
+reset_branch
+printf 'pub fn v() -> u32 { 7 }\n' >"$CRATE/src/lib.rs"
+python3 - "$CRATE/CHANGELOG.md" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace("- the bullet the release cut assembled",
+              "- the bullet the release cut assembled, reworded cosmetically")
+open(p, "w").write(s)
+PY
+g add -A
+g commit -qm "PR: src fix + a cosmetic reword of the cut section's own bullet"
+assert_gate reword-only-fails 1 'was edited or removed'
+
+# ---------------------------------------------------------------------------
+# 5. THE OTHER DIRECTION. A hand-written bullet while a fragment still sits
 #    unconsumed is the state the assembled gate fails on, so this gate must
 #    fail it too.
 # ---------------------------------------------------------------------------
@@ -227,7 +266,7 @@ g rm -q "crates/crate-a/changelog.d/9000-other.md"
 g commit -qm "M2: drop the stranded fragment"
 
 # ---------------------------------------------------------------------------
-# 4. THE SECTION MATTERS. A bullet under the previous, already-shipped section
+# 6. THE SECTION MATTERS. A bullet under the previous, already-shipped section
 #    records nothing about the cut about to be published.
 # ---------------------------------------------------------------------------
 reset_branch
@@ -241,10 +280,10 @@ open(p, "w").write(s)
 PY
 g add -A
 g commit -qm "PR: src fix + bullet under the old [0.1.0] section"
-assert_gate bullet-outside-cut-fails 1 'land outside'
+assert_gate bullet-outside-cut-fails 1 'carries no bullet this branch added'
 
 # ---------------------------------------------------------------------------
-# 5. STILL A GATE. No record at all must still fail.
+# 7. STILL A GATE. No record at all must still fail.
 # ---------------------------------------------------------------------------
 reset_branch
 printf 'pub fn v() -> u32 { 6 }\n' >"$CRATE/src/lib.rs"
