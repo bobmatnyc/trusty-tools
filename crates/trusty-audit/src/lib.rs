@@ -109,6 +109,10 @@ mod relay;
 // turning an `Outcome` into text; the verb the recipient types is `render`.
 pub mod rerender;
 pub mod run;
+// #6720: the one line a failed `trusty-search` invocation's stderr is worth
+// quoting. Shared by both refusal messages in this crate because both spawn
+// the same binary and both were masked by the same update-availability notice.
+pub(crate) mod search_stderr;
 pub mod session;
 pub mod tools;
 pub mod validate;
