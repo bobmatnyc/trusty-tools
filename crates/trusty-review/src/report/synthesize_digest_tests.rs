@@ -63,6 +63,7 @@ fn model_with(repos: Vec<RepositoryReport>, investigation: Option<Investigation>
         manifest_path: "m.toml".to_string(),
         repositories: repos,
         gaps: Vec::new(),
+        findings: Vec::new(),
         synthesis: None,
         benchmark: None,
         investigation,

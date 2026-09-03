@@ -1,0 +1,60 @@
+{
+  "database": { "advisory-count": 812, "last-commit": "0000000000000000000000000000000000000000" },
+  "lockfile": { "dependency-count": 3 },
+  "settings": { "target_arch": null, "target_os": null },
+  "vulnerabilities": {
+    "found": true,
+    "count": 1,
+    "list": [
+      {
+        "advisory": {
+          "id": "RUSTSEC-2024-0421",
+          "package": "idna",
+          "title": "`idna` accepts Punycode labels that do not produce any non-ASCII when decoded",
+          "description": "A long description cargo-audit also emits; the collector does not carry it.",
+          "date": "2024-12-09",
+          "aliases": ["CVE-2024-12224"],
+          "cvss": null,
+          "informational": null,
+          "url": "https://github.com/servo/rust-url/pull/1017",
+          "withdrawn": null
+        },
+        "versions": { "patched": [">=1.0.0"], "unaffected": [] },
+        "affected": null,
+        "package": {
+          "name": "idna",
+          "version": "0.5.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index"
+        }
+      }
+    ]
+  },
+  "warnings": {
+    "unmaintained": [
+      {
+        "kind": "unmaintained",
+        "package": { "name": "atk", "version": "0.18.2" },
+        "advisory": {
+          "id": "RUSTSEC-2024-0413",
+          "package": "atk",
+          "title": "gtk-rs GTK3 bindings - no longer maintained",
+          "date": "2024-03-04",
+          "cvss": null,
+          "informational": "unmaintained",
+          "url": "https://github.com/gtk-rs/gtk3-rs/commit/508a69b6"
+        },
+        "affected": null,
+        "versions": null
+      }
+    ],
+    "yanked": [
+      {
+        "kind": "yanked",
+        "package": { "name": "ghost-crate", "version": "1.0.1" },
+        "advisory": null,
+        "affected": null,
+        "versions": null
+      }
+    ]
+  }
+}

@@ -176,6 +176,9 @@ impl Reporter {
         // sections, plus the rejected-evidence note, are appended after polish so
         // their measured/inferred rows are never subject to omit-empty.
         out.push_str(&super::investigate::report_sections(model));
+        // #6075: the assurance-scan rows the manifest declared, appended for the
+        // same reason — a scanner's table must never be subject to omit-empty.
+        out.push_str(&super::assurance::report_section(model));
         // #6082 lap 7: the template signs off at its own end, which is no longer
         // the document's — three sections are appended above. Move the signature
         // down so nothing follows it.

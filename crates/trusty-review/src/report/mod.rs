@@ -22,6 +22,8 @@ pub mod analyze_endpoints;
 // #6082: the per-finding half of the analyze mapping, split out under the cap.
 pub(crate) mod analyze_findings;
 pub mod analyze_scope;
+// #6075: rendering the assurance-scan rows trusty-audit declares in the manifest.
+pub mod assurance;
 // #5453/#6004: the tga-authored authorship artifact, receiving half.
 pub mod authorship;
 pub mod benchmark;
@@ -115,8 +117,8 @@ pub use investigate::{
     Budget, Investigation, InvestigationStatus, RepoInvestigation, run_investigation,
 };
 pub use manifest::{
-    Manifest, ReportSection, RepositoryEntry, RepositorySource, load_manifest, parse_manifest,
-    slugify,
+    Manifest, ManifestFinding, ReportSection, RepositoryEntry, RepositorySource, load_manifest,
+    parse_manifest, slugify,
 };
 pub use mermaid::inject as inject_mermaid;
 pub use methodology::analysis_methodology;

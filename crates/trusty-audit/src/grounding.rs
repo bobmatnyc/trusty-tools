@@ -17,7 +17,7 @@
 //! investigation pass inspects the code a tool already flagged rather than the
 //! code whose PATH NAME looked interesting.
 //!
-//! What: four legs, in prerequisite order, each with one job.
+//! What: one leg per row below, in prerequisite order, each with one job.
 //!
 //! | Module | Owns |
 //! |---|---|
@@ -26,6 +26,7 @@
 //! | [`hotspots`] | asking trusty-analyze which files are worst, and ranking them |
 //! | [`evidence`] | asking trusty-search where each DD dimension's evidence is (#6082) |
 //! | [`topology`] | reading a Cargo workspace's own crate graph (#6147) |
+//! | [`cve`] | scanning the pinned dependency set for advisories (#6075) |
 //! | [`priority`] | writing that ranking, and the gaps, into the manifest |
 //!
 //! ## Fail-open, and never silently
@@ -55,6 +56,7 @@ use std::time::Duration;
 use crate::tools::RequiredTool;
 use crate::workdir::WorkDir;
 
+pub mod cve;
 pub mod daemons;
 pub mod evidence;
 pub mod hotspots;
@@ -404,7 +406,12 @@ pub async fn ground_manifest(
     // depends on neither daemon and is measured whether or not either answered.
     // It writes its own key, after the ranking, so one leg's write failure
     // cannot take the other's data with it.
-    let topology_gaps = topology::ground_into(manifest, checkout, display);
+    let mut manifest_leg_gaps = topology::ground_into(manifest, checkout, display);
+    // #6075: the CVE scan writes its own `[report].findings` key, after the
+    // ranking and for the same reason — one leg's write failure must not take
+    // the other's data with it. Its gaps join topology's rather than earning a
+    // third `priority::write_into` call.
+    manifest_leg_gaps.extend(cve::ground_into(manifest, checkout, display));
     // #6082: read BEFORE the write, which is what would otherwise make the two
     // states indistinguishable afterwards.
     let already_rendered = investigation_exists(manifest);
@@ -423,16 +430,16 @@ pub async fn ground_manifest(
     }
     // Recorded through the same `[report].gaps` key every other leg uses, which
     // `priority::write_into` above owns — so they are appended after it ran.
-    if !topology_gaps.is_empty()
+    if !manifest_leg_gaps.is_empty()
         && let Err(cause) =
-            priority::write_into(manifest, checkout, &[], None, false, &topology_gaps)
+            priority::write_into(manifest, checkout, &[], None, false, &manifest_leg_gaps)
     {
         grounding.gaps.push(format!(
             "{display}: {cause} — the rendered report does not state why its crate topology \
-             is missing"
+             and dependency CVE scan are missing"
         ));
     }
-    grounding.gaps.extend(topology_gaps);
+    grounding.gaps.extend(manifest_leg_gaps);
     if already_rendered && !grounding.priorities.is_empty() {
         // Returned to the caller and deliberately NOT written into
         // `[report].gaps`: the manifest now carries the ranking, so a re-render

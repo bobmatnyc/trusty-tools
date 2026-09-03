@@ -32,6 +32,7 @@ fn empty_model() -> crate::report::model::ReportModel {
         manifest_path: "manifest.toml".to_string(),
         repositories: Vec::new(),
         gaps: Vec::new(),
+        findings: Vec::new(),
         synthesis: None,
         benchmark: None,
         investigation: None,
