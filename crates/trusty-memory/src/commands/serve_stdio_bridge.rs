@@ -1,82 +1,64 @@
 //! Pure daemon-bridge for `trusty-memory serve --stdio` (issue #1078).
 //!
-//! Why: The prior `serve --stdio` path opened redb directly in the stdio
+//! Why: the prior `serve --stdio` path opened redb directly in the stdio
 //! process. When the daemon holds the exclusive write lock the stdio process
 //! fell back to a read-only snapshot, causing write failures and stale reads.
 //! This module makes the stdio path a pure proxy: every JSON-RPC request is
 //! forwarded to the running daemon and **the stdio process never opens redb**.
 //! Nothing below may reach for a store — see #1078.
 //!
-//! What: `run_stdio_bridge` (1) ensures the daemon is running via
-//! [`crate::commands::daemon_guard::ensure_daemon_running`], which starts it
-//! under an exclusive lock if absent (#5267) and polls the socket for
-//! readiness; (2) forwards each non-notification request over that socket and
-//! returns the daemon response verbatim to the MCP client.
+//! What (#6316): the forwarding itself is no longer written here. This module
+//! now (1) ensures the daemon is running via
+//! [`crate::commands::daemon_guard::ensure_daemon_running`], and (2) hands
+//! [`trusty_mcp::DaemonBridgeJsonRpc`] a [`trusty_mcp::UdsBridgeConfig`] plus
+//! one request rewriter. The bridge owns the socket exchange, the `jsonrpc`
+//! normalisation, the streaming-method refusal, notification suppression and
+//! the reply mapping — every one of which used to be a second copy here.
 //!
-//! ## What #6286 changed, and the two traps in it
+//! What the rewriter still owns, because it is trusty-memory's and nobody
+//! else's:
 //!
-//! The forward hop was `POST {base_url}/rpc` on a `reqwest::Client`, against an
-//! address read out of the `http_addr` discovery file. It is now one framed
-//! JSON-RPC exchange on `trusty_common::daemon_socket_path("trusty-memory")`.
-//! Because the bridge already forwarded a generic envelope byte-for-byte, this
-//! is one function rather than a per-method rewrite.
+//! - **`--palace`**: [`inject_default_palace`] stamps the CLI default into the
+//!   tool arguments a handler actually reads, for both wire shapes.
+//! - **Caller identity (DOC-53 §4.3)**: the daemon this bridge proxies to is
+//!   ONE shared process serving every concurrently-attached session — it cannot
+//!   tell which caller a request came from except from what the request
+//!   carries. THIS process is spawned fresh per `serve --stdio` invocation and
+//!   genuinely runs inside its caller's own process tree, so
+//!   [`crate::attribution::resolve_own_workstream_name`] resolved HERE is the
+//!   correct identity. [`inject_caller_context`] stamps it into every forwarded
+//!   request.
 //!
-//! **`jsonrpc` is normalised to `"2.0"` before forwarding.** `trusty_mcp::
-//! Request` declares `jsonrpc: Option<String>` and SERIALISES it as `null` when
-//! the client omitted it. `crate::transport::rpc::JsonRpcRequest` tolerated
-//! that; `trusty_common::uds::server::RpcRouter` does not — it refuses any
-//! frame whose `jsonrpc` is not exactly `"2.0"` with `CODE_PARSE_ERROR`. So a
-//! request that works today would break post-migration for a reason nothing in
-//! its body explains. [`normalise_jsonrpc`] is the fix and
-//! `forwarded_request_carries_jsonrpc_two_point_zero` is its regression test.
+//! `run_stdio` does not start the daemon, so the readiness guard stays this
+//! module's: [`ensure_daemon_up_for_stdio`] takes the same `StartLock` on the
+//! same lock file `trusty-memory start` uses, so the two paths cannot race
+//! (#5267).
 //!
-//! **A streamed method is refused rather than mis-answered.** `memory.chat`
-//! answers in many frames, and MCP stdio has no frame sequence to put them in:
-//! `run_stdio_loop` writes exactly one response per request. Rather than
-//! silently returning the first token, or hanging while the client waits for a
-//! shape it cannot parse, the bridge refuses a `tools/call` naming a streaming
-//! method with a JSON-RPC error that says so. See [`STREAMING_METHODS`].
-//!
-//! Caller-identity injection (DOC-53 §4.3, critical fix): the daemon this
-//! bridge proxies to is ONE shared process serving every concurrently-
-//! attached session — it cannot tell which caller a given request came from
-//! except from what the request itself carries. THIS bridge process, by
-//! contrast, is spawned fresh per `serve --stdio` invocation and genuinely does
-//! run inside its caller's own process tree/environment.
-//! `inject_caller_context` resolves this bridge's own workstream identity
-//! ONCE at startup (via [`crate::attribution::resolve_own_workstream_name`])
-//! and stamps it into every forwarded request's tool `arguments` (as
-//! `workstream`, alongside the bridge's own `cwd`) — mirroring
-//! `inject_default_palace`'s existing `--palace` injection — so the daemon's
-//! MCP dispatch handlers (`tools::helpers::attach_mcp_attribution`,
-//! `CreatorInfo::new_for_caller`) can attribute the write correctly without
-//! ever reading their own (shared, meaningless-per-caller) environment.
-//!
-//! STDOUT hygiene: NEVER write to stdout -- it is the JSON-RPC channel.
-//! All diagnostic output goes to stderr.
+//! STDOUT hygiene: never write to stdout — it is the JSON-RPC channel. All
+//! diagnostic output goes to stderr.
 //!
 //! Test: unit tests below; `tests/serve_stdio_e2e.rs` for the full e2e path.
 
 use anyhow::{anyhow, Result};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
-use trusty_mcp as mcp;
+use trusty_mcp::{DaemonBridgeJsonRpc, UdsBridgeConfig};
 
-/// Per-request forwarding timeout (60 s -- headroom for cold-start embedding).
+/// Per-request forwarding timeout (60 s — headroom for cold-start embedding).
 ///
 /// Why: a generous ceiling stops one hung request blocking the stdio loop while
 /// still letting a slow embedding operation finish.
-/// Test: `forward_reports_a_dead_socket_rather_than_hanging`.
+/// Test: `a_transport_failure_names_the_endpoint_and_does_not_hang`.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Methods that answer in many frames and therefore cannot be bridged.
 ///
-/// Why: MCP stdio is one response per request — `mcp::run_stdio_loop` writes
-/// exactly one `Response` per `Request`, and there is no frame sequence to put a
-/// token stream in. Three things could happen to a streamed call here, and two
-/// of them are silent: return the first item as if it were the answer, or hang
-/// while the client waits for a shape it will never get. This list is what makes
-/// the third — an error that names the problem — the one that happens.
+/// Why: MCP stdio is one response per request — the stdio loop writes exactly
+/// one response per request, and there is no frame sequence to put a token
+/// stream in. Three things could happen to a streamed call here, and two of
+/// them are silent: return the first item as if it were the answer, or hang
+/// while the client waits for a shape it will never get. This list is what
+/// makes the third — an error that names the problem — the one that happens.
 ///
 /// A caller that wants the stream dials the socket itself with
 /// `trusty_common::uds::send_framed_stream_request_capped`; the console does
@@ -95,106 +77,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// `bridge_streaming_methods_match_the_daemon`.
 pub const STREAMING_METHODS: &[&str] = &["memory.chat", "memory.activity_stream"];
 
-/// Rewrite a request's `jsonrpc` to `"2.0"` before it is forwarded (#6286).
-///
-/// Why: `mcp::Request` declares `jsonrpc: Option<String>` and serialises it as
-/// `null` when the client omitted it. The old `POST /rpc` path fed
-/// `crate::transport::rpc::JsonRpcRequest`, whose `jsonrpc` is `#[serde(default)]
-/// Option<String>` and which never checked the value. `RpcRouter` does check,
-/// and refuses anything that is not exactly `"2.0"` with `CODE_PARSE_ERROR` —
-/// so without this a request that works today becomes a parse error afterwards,
-/// for a reason nothing in its body explains.
-///
-/// What: sets the field unconditionally. A client that sent `"2.0"` is
-/// unchanged; one that sent `null`, omitted it, or sent something else gets the
-/// only version this transport speaks. Rewriting rather than refusing is
-/// deliberate — the bridge's contract with its client is unchanged by ADR-0032,
-/// and a version the client never set is not a thing to fail it on.
-///
-/// Test: `forwarded_request_carries_jsonrpc_two_point_zero`,
-/// `forwarded_request_normalises_an_absent_jsonrpc`.
-fn normalise_jsonrpc(mut req: serde_json::Value) -> serde_json::Value {
-    if let Some(obj) = req.as_object_mut() {
-        obj.insert(
-            "jsonrpc".to_string(),
-            serde_json::Value::String("2.0".to_string()),
-        );
-    }
-    req
-}
-
-/// The method a request will actually run, seeing through the `tools/call`
-/// envelope.
-///
-/// Why: a streamed method can arrive either way — as `{"method": "memory.chat"}`
-/// from a direct caller, or wrapped as `tools/call` with `params.name`. Checking
-/// only the outer field would let the wrapped form through.
-fn effective_method(req: &serde_json::Value) -> Option<&str> {
-    let method = req.get("method")?.as_str()?;
-    if method == "tools/call" {
-        return req
-            .get("params")
-            .and_then(|p| p.get("name"))
-            .and_then(|n| n.as_str())
-            .or(Some(method));
-    }
-    Some(method)
-}
-
-/// Forward one JSON-RPC request over the daemon's socket and return its answer.
-///
-/// Why: the core forwarding primitive. It returns the daemon's response
-/// verbatim so an MCP client sees the real tool output rather than a
-/// bridge-generated error.
-///
-/// What: normalises `jsonrpc`, refuses a streaming method (see
-/// [`STREAMING_METHODS`]), then writes one frame and reads one back. A transport
-/// failure — nothing serving, a timeout — is `Err`; a daemon that answered with
-/// a JSON-RPC error is `Ok`, because that error is the answer and belongs to the
-/// client unaltered.
-///
-/// # Errors
-///
-/// Only transport failures. See above for why a refusal is not one.
-///
-/// Test: `forward_reports_a_dead_socket_rather_than_hanging`,
-/// `streaming_method_is_refused_rather_than_half_answered`.
-pub(crate) async fn forward_rpc(
-    socket: &Path,
-    req: serde_json::Value,
-) -> Result<serde_json::Value> {
-    if let Some(method) = effective_method(&req) {
-        if STREAMING_METHODS.contains(&method) {
-            return Ok(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": req.get("id").cloned().unwrap_or(serde_json::Value::Null),
-                "error": {
-                    "code": mcp::error_codes::INVALID_REQUEST,
-                    "message": format!(
-                        "{method} answers as a stream, which MCP stdio cannot carry \
-                         (one response per request). Dial {} directly with a framed \
-                         streaming client to read it.",
-                        socket.display()
-                    ),
-                },
-            }));
-        }
-    }
-
-    let req = normalise_jsonrpc(req);
-    let response: trusty_common::uds::server::RpcResponse =
-        trusty_common::uds::send_framed_request_capped(
-            socket,
-            &req,
-            REQUEST_TIMEOUT,
-            crate::transport::uds::MAX_FRAME_BYTES,
-        )
-        .await
-        .map_err(|e| anyhow!("connection to the trusty-memory daemon failed: {e}"))?;
-
-    serde_json::to_value(response).map_err(|e| anyhow!("re-encode the daemon response: {e}"))
-}
-
 /// Ensure the daemon is running and return the socket to forward on.
 ///
 /// Why (#5267, superseding the `no_spawn: true` posture of #1152): a bridge
@@ -204,13 +86,16 @@ pub(crate) async fn forward_rpc(
 /// instead is start-if-not-running: the daemon's existence is ensured ONCE,
 /// under an exclusive lock, so seven bridges converge on one.
 ///
-/// What (#6286): `trusty_mcp::ensure_daemon_up_single_flight` is no longer
-/// reachable from here — its `DaemonBridgeConfig` is built around a `health_path`
-/// and a `base_url_fn`, and this daemon has neither. The exclusion it provided
-/// is preserved in [`crate::commands::daemon_guard::ensure_daemon_running`],
-/// which takes the same `StartLock` on the same lock file `trusty-memory start`
-/// uses, so the two paths still cannot race each other. Fails closed if the
-/// daemon does not become ready.
+/// What (#6316): [`trusty_mcp::DaemonBridgeJsonRpc::run_stdio`] deliberately
+/// does not probe or start anything, so this guard stays the caller's. It takes
+/// the same `StartLock` on the same lock file `trusty-memory start` uses, so
+/// the two paths still cannot race each other. Fails closed if the daemon does
+/// not become ready.
+///
+/// # Errors
+///
+/// The data directory cannot be resolved, or the daemon does not become ready
+/// inside `ensure_daemon_running`'s budget.
 ///
 /// Test: e2e in `tests/serve_stdio_e2e.rs` and
 /// `tests/serve_stdio_concurrent_e2e.rs`.
@@ -222,20 +107,43 @@ pub(crate) async fn ensure_daemon_up_for_stdio() -> Result<PathBuf> {
     Ok(socket)
 }
 
-/// Returns true if the request is a JSON-RPC notification.
+/// Build the shared bridge with trusty-memory's own request rewriter (#6316).
 ///
-/// Why: the MCP spec (section 4.1) forbids sending any response for a
-/// notification. Suppression must be decided from the REQUEST before forwarding
-/// to the daemon -- if we forwarded notifications, the daemon would return a
-/// valid `initialize`-like response and the bridge would emit it to stdout,
-/// corrupting the MCP channel. This predicate is the single canonical check: a
-/// notification has no `id` field, and/or its method begins with
-/// `"notifications/"`.
-/// What: returns true when `req.id` is `None` (absent in the wire JSON) or
-/// the method starts with `"notifications/"`.
-/// Test: `notification_requests_are_suppressed` unit test.
-fn is_notification(req: &mcp::Request) -> bool {
-    req.id.is_none() || req.method.starts_with("notifications/")
+/// Why: the bridge is constructed in two places — [`run_stdio_bridge`], and
+/// every unit test that drives `answer` without a live daemon. Building it once
+/// here is what keeps those tests exercising the same streaming list, frame
+/// budget and injection chain the real bridge runs.
+///
+/// What: sets the daemon label, the streaming refusal list, [`REQUEST_TIMEOUT`]
+/// and the daemon's own 32 MiB frame budget, then attaches a rewriter that runs
+/// [`inject_default_palace`] followed by [`inject_caller_context`]. The rewriter
+/// sees the normalised envelope and the bridge re-stamps `jsonrpc` after it, so
+/// neither injection can invalidate the frame.
+///
+/// Test: `streaming_method_is_refused_rather_than_half_answered`,
+/// `a_transport_failure_answers_the_request_that_caused_it`,
+/// `the_rewriter_reaches_the_forwarded_envelope`.
+pub(crate) fn build_bridge(
+    socket: PathBuf,
+    default_palace: Option<String>,
+    caller_workstream: Option<String>,
+    caller_cwd: Option<String>,
+) -> DaemonBridgeJsonRpc {
+    // #6316: the transport, the streaming refusal and the reply mapping live in
+    // trusty-mcp now; this crate supplies only what is its own.
+    let config = UdsBridgeConfig::new(socket, "trusty-memory")
+        .with_streaming_methods(STREAMING_METHODS.iter().copied())
+        .with_request_timeout(REQUEST_TIMEOUT)
+        .with_max_frame_bytes(crate::transport::uds::MAX_FRAME_BYTES);
+
+    DaemonBridgeJsonRpc::new(config).with_request_rewriter(move |envelope| {
+        let envelope = inject_default_palace(envelope, default_palace.as_deref());
+        inject_caller_context(
+            envelope,
+            caller_workstream.as_deref(),
+            caller_cwd.as_deref(),
+        )
+    })
 }
 
 /// Run the MCP stdio bridge.
@@ -244,147 +152,33 @@ fn is_notification(req: &mcp::Request) -> bool {
 /// under the daemon-bridge architecture (issue #1078). The prior direct-store
 /// path opened redb in the stdio process and hit the write-lock exclusion
 /// problem; this path never touches the store at all.
-/// What: (1) ensures the daemon is running under an exclusive lock with a 30 s
-/// readiness budget (#5267); (2) enters `run_stdio_loop` -- for each JSON-RPC
-/// request, detects and suppresses notifications (per MCP spec section 4.1),
-/// then forwards non-notification requests over the daemon's socket and returns
-/// the response verbatim. Hard-errors if the daemon cannot start.
+///
+/// What: (1) ensures the daemon is running under an exclusive lock (#5267);
+/// (2) resolves this process' own caller identity once, because neither the cwd
+/// nor `TM_WORKSTREAM_NAME` changes for the lifetime of a `serve --stdio`
+/// process; (3) hands both, plus the `--palace` default, to the shared bridge
+/// and runs its stdio loop. Hard-errors if the daemon cannot start.
+///
+/// # Errors
+///
+/// The daemon could not be started or did not become ready, or the stdio loop
+/// failed on an I/O error.
+///
 /// Test: `tests/serve_stdio_e2e.rs` spawns a real child, asserts bounded
 /// responses. Bridge-specific unit tests live in this module.
 pub async fn run_stdio_bridge(palace: Option<String>) -> Result<()> {
-    // Step 1: ensure the daemon is up. All output from this goes to stderr.
-    // Failure here is a hard error -- no silent fallback.
     let socket = ensure_daemon_up_for_stdio().await?;
 
-    // If a --palace default was supplied, forward it in every request via the
-    // `palace` field in the JSON-RPC `params`. We inject it only when the
-    // caller doesn't already include one.
-    let default_palace = palace;
-
-    // DOC-53 §4.3 (critical fix): resolve THIS bridge process' own identity
-    // once at startup -- see the module doc comment for why this process
-    // (unlike the shared daemon it proxies to) is the correct place to read
-    // `TM_WORKSTREAM_NAME`/cwd. Resolved once because neither changes for
-    // the lifetime of a `serve --stdio` process, mirroring `default_palace`
-    // above.
+    // DOC-53 §4.3: resolved HERE, once — see the module doc for why this
+    // process rather than the shared daemon is the correct place to read it.
     let caller_cwd = std::env::current_dir()
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
     let caller_workstream = crate::attribution::resolve_own_workstream_name(caller_cwd.as_deref());
 
-    // Step 2: enter the stdio loop. Every non-notification request is
-    // forwarded to the daemon. Notifications are suppressed here (per MCP
-    // spec section 4.1 -- the server MUST NOT reply to a notification).
-    //
-    // There is no client to build any more: each forward dials the socket for
-    // one exchange and closes it. That is deliberate rather than a regression
-    // of the HTTP keep-alive it replaces — the daemon spawns a task per
-    // connection, so a per-request connection is what lets concurrent bridges
-    // stay concurrent, and a local UDS connect costs microseconds.
-    let result = mcp::run_stdio_loop(move |req| {
-        let socket = socket.clone();
-        let default_palace = default_palace.clone();
-        let caller_cwd = caller_cwd.clone();
-        let caller_workstream = caller_workstream.clone();
-
-        async move {
-            answer_one_request(
-                &socket,
-                req,
-                default_palace.as_deref(),
-                caller_workstream.as_deref(),
-                caller_cwd.as_deref(),
-            )
-            .await
-        }
-    })
-    .await;
-
-    result
-}
-
-/// Answer exactly one MCP request: suppress, inject, forward, map.
-///
-/// Why (#6309): this was an inline closure body, and the transport-failure arm
-/// inside it built its error response with `id: None`. `mcp::Response` skips a
-/// `None` id when it serialises, so the frame reached the client with no `id`
-/// field at all — and a JSON-RPC client matches a response to its request by
-/// id, so an id-less error is never matched to anything. The bridge answered;
-/// the client went on waiting. That is the "hung with no response or progress"
-/// a session saw after its daemon was upgraded underneath it: not an unbounded
-/// wait in the bridge, an answer addressed to nobody.
-///
-/// What: returns [`mcp::Response::suppressed`] for a notification (MCP spec
-/// §4.1 — an id-less request gets no reply, which is the one case where an
-/// absent id is correct), otherwise injects the default palace and this
-/// bridge's caller identity, forwards over `socket`, and maps the daemon's
-/// answer back. A transport failure becomes a JSON-RPC error **carrying the
-/// request's own id**, so the client resolves that call instead of blocking on
-/// it, and the loop stays alive for the next request.
-///
-/// The failure is bounded by [`REQUEST_TIMEOUT`] and names the socket it could
-/// not reach: `send_framed_request_capped` wraps the connect in its timeout,
-/// and every `UdsRpcError` variant carries the path.
-///
-/// Test: `a_transport_failure_answers_the_request_that_caused_it`,
-/// `a_transport_failure_names_the_endpoint_and_does_not_hang`,
-/// `notification_requests_are_suppressed`.
-pub(crate) async fn answer_one_request(
-    socket: &Path,
-    req: mcp::Request,
-    default_palace: Option<&str>,
-    caller_workstream: Option<&str>,
-    caller_cwd: Option<&str>,
-) -> mcp::Response {
-    // Decide suppression from the REQUEST before touching the daemon.
-    // MCP spec section 4.1: a notification has no id -- the server MUST NOT
-    // reply. Forwarding the notification to the daemon would cause
-    // the daemon to return a response that we'd emit to stdout,
-    // corrupting the MCP channel.
-    if is_notification(&req) {
-        return mcp::Response::suppressed();
-    }
-
-    // #6309: captured BEFORE the forward, because it is what the error arm
-    // below owes the client — a response the client cannot match is a hang.
-    let id = req.id.clone();
-
-    // Serialise the MCP request envelope into the value we'll POST.
-    // We need to potentially inject a default palace into params,
-    // then this bridge's own resolved caller identity (DOC-53 §4.3)
-    // into the tool arguments so the daemon never has to guess.
-    let req_value = inject_default_palace(req_to_value(&req), default_palace);
-    let req_value = inject_caller_context(req_value, caller_workstream, caller_cwd);
-
-    match forward_rpc(socket, req_value).await {
-        Ok(resp_value) => value_to_mcp_response(resp_value),
-        Err(e) => {
-            // Transport-level failure (daemon down, timeout).
-            // Return a JSON-RPC internal error rather than crashing
-            // the loop -- the next request might succeed once the daemon
-            // recovers.
-            tracing::warn!("daemon bridge: transport error: {e:#}");
-            // #6309: `id`, never `None` — an id-less error frame matches no
-            // pending call, so the client waits instead of failing.
-            mcp::Response::err(
-                id,
-                mcp::error_codes::INTERNAL_ERROR,
-                format!("trusty-memory daemon unreachable: {e:#}"),
-            )
-        }
-    }
-}
-
-/// Convert a `trusty_mcp::Request` to a `serde_json::Value`.
-///
-/// Why: `forward_rpc` sends raw JSON to the daemon; the mcp::Request struct
-/// must be serialised first. Infallible because `mcp::Request` is always
-/// serialisable.
-/// What: uses `serde_json::to_value` and falls back to an empty object (which
-/// the daemon will reject with a parse error, but that's the correct behavior).
-/// Test: covered transitively by `forward_rpc_roundtrip`.
-fn req_to_value(req: &mcp::Request) -> serde_json::Value {
-    serde_json::to_value(req).unwrap_or_else(|_| serde_json::json!({}))
+    build_bridge(socket, palace, caller_workstream, caller_cwd)
+        .run_stdio()
+        .await
 }
 
 /// Inject `default_palace` into a JSON-RPC request's arguments when the
@@ -476,7 +270,7 @@ fn inject_default_palace(
 /// so its own `TM_WORKSTREAM_NAME`/cwd resolution
 /// ([`crate::attribution::resolve_own_workstream_name`], called once in
 /// [`run_stdio_bridge`]) is the correct caller identity to attach. Every
-/// non-notification request forwarded to `/rpc` gets this stamp, mirroring
+/// non-notification request forwarded to the daemon gets this stamp, mirroring
 /// [`inject_default_palace`]'s `--palace` injection.
 ///
 /// What: like [`inject_default_palace`] (which now mirrors this same
@@ -557,45 +351,6 @@ fn inject_caller_context(
     req
 }
 
-/// Convert the daemon's JSON-RPC response value into a `mcp::Response`.
-///
-/// Why: `run_stdio_loop` expects `mcp::Response`; the daemon returns a raw
-/// `serde_json::Value` which we must map. The daemon always returns the
-/// standard JSON-RPC 2.0 shape `{jsonrpc, id, result | error}`.
-/// What: extracts `id`, then returns `mcp::Response::ok` if `result` is
-/// present, `mcp::Response::err` if `error` is present, or an internal error
-/// if neither.
-/// Test: `value_to_mcp_response_ok`, `value_to_mcp_response_err`,
-/// `value_to_mcp_response_malformed`.
-pub(crate) fn value_to_mcp_response(v: serde_json::Value) -> mcp::Response {
-    let id = v.get("id").cloned().filter(|id| !id.is_null());
-
-    if let Some(result) = v.get("result").cloned() {
-        return mcp::Response::ok(id, result);
-    }
-
-    if let Some(err) = v.get("error") {
-        let code = err
-            .get("code")
-            .and_then(|c| c.as_i64())
-            .map(|c| c as i32)
-            .unwrap_or(mcp::error_codes::INTERNAL_ERROR);
-        let message = err
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("unknown daemon error")
-            .to_string();
-        return mcp::Response::err(id, code, &message);
-    }
-
-    // Neither result nor error -- malformed response from daemon.
-    mcp::Response::err(
-        id,
-        mcp::error_codes::INTERNAL_ERROR,
-        "daemon returned a response with neither result nor error",
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -604,6 +359,25 @@ pub(crate) fn value_to_mcp_response(v: serde_json::Value) -> mcp::Response {
 mod tests {
     use super::*;
     use serde_json::json;
+    use trusty_mcp::Request;
+
+    /// A bridge pointed at a socket nothing is serving.
+    fn dead_bridge(socket: PathBuf) -> DaemonBridgeJsonRpc {
+        build_bridge(socket, None, None, None)
+    }
+
+    /// The request a live session sends once its daemon is gone.
+    fn a_request_with_id(id: i64) -> Request {
+        Request {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(id)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "memory_remember",
+                "arguments": {"text": "anything"}
+            })),
+        }
+    }
 
     // -----------------------------------------------------------------------
     // inject_default_palace
@@ -838,138 +612,41 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // value_to_mcp_response
-    // -----------------------------------------------------------------------
-    /// Why: ok/err/malformed/null-id responses must map correctly.
-    /// Test: this test.
-    #[test]
-    fn value_to_mcp_response_variants() {
-        // ok path
-        let ok = value_to_mcp_response(json!({"jsonrpc":"2.0","id":42,"result":{"tools":[]}}));
-        assert!(!ok.suppress);
-        assert_eq!(ok.id, Some(json!(42)));
-        assert!(ok.error.is_none());
-        // err path
-        let err = value_to_mcp_response(
-            json!({"jsonrpc":"2.0","id":7,"error":{"code":-32601,"message":"Not found"}}),
-        );
-        assert_eq!(err.error.unwrap().code, -32601);
-        // malformed -- neither result nor error
-        let bad = value_to_mcp_response(json!({"jsonrpc":"2.0","id":1}));
-        assert_eq!(bad.error.unwrap().code, mcp::error_codes::INTERNAL_ERROR);
-        // null id -> None
-        let null_id = value_to_mcp_response(json!({"jsonrpc":"2.0","id":null,"result":{}}));
-        assert_eq!(null_id.id, None);
-    }
-
-    // -----------------------------------------------------------------------
-    // is_notification
-    // -----------------------------------------------------------------------
-    /// Why: notifications must be suppressed so the bridge never emits a
-    /// response for them -- that would corrupt the MCP stdio channel.
-    /// Test: this test.
-    #[test]
-    fn notification_requests_are_suppressed() {
-        // Normal request with id -- not a notification.
-        let normal = mcp::Request {
-            jsonrpc: Some("2.0".to_string()),
-            id: Some(json!(1)),
-            method: "tools/list".to_string(),
-            params: None,
-        };
-        assert!(!is_notification(&normal));
-        // No id -> notification.
-        let notif = mcp::Request {
-            jsonrpc: Some("2.0".to_string()),
-            id: None,
-            method: "notifications/initialized".to_string(),
-            params: None,
-        };
-        assert!(is_notification(&notif));
-        // notifications/ prefix even with id -> notification.
-        let notif_with_id = mcp::Request {
-            jsonrpc: Some("2.0".to_string()),
-            id: Some(json!(99)),
-            method: "notifications/cancelled".to_string(),
-            params: None,
-        };
-        assert!(is_notification(&notif_with_id));
-    }
-
-    // -----------------------------------------------------------------------
-    // jsonrpc normalisation (#6286)
-    // -----------------------------------------------------------------------
-
-    /// Why: this is the trap the migration introduced. `mcp::Request`
-    /// serialises `jsonrpc: null` when the client omitted the field, the old
-    /// `POST /rpc` path never checked it, and `RpcRouter` refuses anything that
-    /// is not exactly `"2.0"`. Without normalisation a request that works today
-    /// becomes `CODE_PARSE_ERROR` afterwards.
-    /// What: serialises a real `mcp::Request` with `jsonrpc: None` — the exact
-    /// value a client that omits the field produces — and asserts the forwarded
-    /// object carries `"2.0"`.
-    /// Test: itself.
-    #[test]
-    fn forwarded_request_carries_jsonrpc_two_point_zero() {
-        let req = mcp::Request {
-            jsonrpc: None,
-            id: Some(json!(1)),
-            method: "tools/list".to_string(),
-            params: None,
-        };
-        let raw = req_to_value(&req);
-        assert!(
-            raw["jsonrpc"].is_null(),
-            "the fixture must reproduce the null this fix exists for, got {raw}"
-        );
-        let forwarded = normalise_jsonrpc(raw);
-        assert_eq!(forwarded["jsonrpc"], "2.0");
-        assert_eq!(forwarded["method"], "tools/list", "nothing else changes");
-        assert_eq!(forwarded["id"], json!(1));
-    }
-
-    /// Why: a client that sends a wrong version, or none at all, must still be
-    /// forwarded rather than refused — the bridge's contract with its client is
-    /// unchanged by ADR-0032, and a version the client never set is not a thing
-    /// to fail it on.
-    /// Test: itself.
-    #[test]
-    fn forwarded_request_normalises_an_absent_jsonrpc() {
-        let absent = normalise_jsonrpc(json!({"id": 1, "method": "ping"}));
-        assert_eq!(absent["jsonrpc"], "2.0");
-        let wrong = normalise_jsonrpc(json!({"jsonrpc": "1.0", "id": 1, "method": "ping"}));
-        assert_eq!(wrong["jsonrpc"], "2.0");
-    }
-
-    // -----------------------------------------------------------------------
-    // streaming refusal
+    // the shared bridge, wired with this crate's rewriter (#6316)
     // -----------------------------------------------------------------------
 
     /// Why: `memory.chat` answers in many frames and MCP stdio writes one
     /// response per request. The two silent outcomes — returning the first
-    /// token as the answer, or hanging — are what this refusal prevents. Both
+    /// token as the answer, or hanging — are what the refusal prevents. Both
     /// wire shapes are checked because a caller can name the method directly or
     /// wrap it in `tools/call`, and checking only the outer field would let the
-    /// wrapped form through.
+    /// wrapped form through. The refusal lives in the shared bridge now, so
+    /// this also asserts [`build_bridge`] hands it [`STREAMING_METHODS`].
     /// Test: itself.
     #[tokio::test]
     async fn streaming_method_is_refused_rather_than_half_answered() {
-        let socket = std::path::Path::new("/nonexistent/trusty-memory.sock");
+        // Nothing is serving, so a refusal that reached the wire would come
+        // back as a transport error naming the socket instead.
+        let bridge = dead_bridge(PathBuf::from("/nonexistent/trusty-memory.sock"));
         for req in [
-            json!({"jsonrpc": "2.0", "id": 1, "method": "memory.chat", "params": {}}),
-            json!({
-                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                "params": {"name": "memory.chat", "arguments": {}}
-            }),
+            Request {
+                jsonrpc: Some("2.0".to_string()),
+                id: Some(json!(1)),
+                method: "memory.chat".to_string(),
+                params: Some(json!({})),
+            },
+            Request {
+                jsonrpc: Some("2.0".to_string()),
+                id: Some(json!(2)),
+                method: "tools/call".to_string(),
+                params: Some(json!({"name": "memory.chat", "arguments": {}})),
+            },
         ] {
-            // The socket does not exist, so a refusal that reached the wire
-            // would be a transport error instead.
-            let answer = forward_rpc(socket, req)
-                .await
-                .expect("the refusal is an answer, not a transport failure");
-            let message = answer["error"]["message"]
-                .as_str()
-                .expect("the refusal must carry a message");
+            let resp = bridge.answer(req).await;
+            let message = resp
+                .error
+                .expect("the refusal is an answer, not a transport failure")
+                .message;
             assert!(
                 message.contains("stream"),
                 "the refusal must say why: {message}"
@@ -977,66 +654,28 @@ mod tests {
         }
     }
 
-    /// Why: every other method must still reach the wire, and a dead socket has
-    /// to be reported promptly rather than by waiting out the 60 s budget — the
-    /// stdio loop is single-file, so a hung forward blocks every later request.
-    /// Test: itself.
-    #[tokio::test]
-    async fn forward_reports_a_dead_socket_rather_than_hanging() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let started = std::time::Instant::now();
-        let result = forward_rpc(
-            &tmp.path().join("absent.sock"),
-            json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}),
-        )
-        .await;
-        assert!(result.is_err(), "no listener means no answer");
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "a refused dial must not wait out REQUEST_TIMEOUT: {:?}",
-            started.elapsed()
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // #6309 — the endpoint vanishes mid-session
-    // -----------------------------------------------------------------------
-
-    /// Build the request a live session would send once its daemon is gone.
-    fn a_request_with_id(id: i64) -> mcp::Request {
-        mcp::Request {
-            jsonrpc: Some("2.0".to_string()),
-            id: Some(json!(id)),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "memory_remember",
-                "arguments": {"text": "anything"}
-            })),
-        }
-    }
-
-    /// Why (#6309): a JSON-RPC client matches a response to its request by
-    /// `id`. `mcp::Response` omits the field entirely when the id is `None`, so
-    /// an error built with `None` reaches the client as a frame belonging to no
-    /// pending call — the client keeps waiting and the session reads as hung,
-    /// which is exactly what a session saw when its daemon was upgraded
-    /// underneath it. The bridge had answered; nobody could tell.
-    /// What: forwards to a socket nothing is serving and asserts the error
-    /// carries the id of the request that caused it.
+    /// Why (#6309, the fail-open check): a JSON-RPC client matches a response
+    /// to its request by `id`, and `trusty_mcp::Response` omits the field
+    /// entirely when the id is `None` — so an error built without one reaches
+    /// the client as a frame belonging to no pending call, and the session
+    /// reads as hung. A daemon that is up when [`ensure_daemon_up_for_stdio`]
+    /// checks and gone by the time a request is forwarded must therefore
+    /// produce an error carrying that request's id, never an empty result.
+    /// What: forwards to a socket nothing is serving; asserts the answer is an
+    /// error, carries the id, and has no result.
     /// Test: itself.
     #[tokio::test]
     async fn a_transport_failure_answers_the_request_that_caused_it() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let resp = answer_one_request(
-            &tmp.path().join("vanished.sock"),
-            a_request_with_id(7),
-            None,
-            None,
-            None,
-        )
-        .await;
+        let resp = dead_bridge(tmp.path().join("vanished.sock"))
+            .answer(a_request_with_id(7))
+            .await;
 
         assert!(resp.error.is_some(), "an unreachable daemon is an error");
+        assert!(
+            resp.result.is_none(),
+            "an unreachable daemon must never read as an empty result"
+        );
         assert_eq!(
             resp.id,
             Some(json!(7)),
@@ -1059,7 +698,9 @@ mod tests {
         let socket = tmp.path().join("vanished.sock");
 
         let started = std::time::Instant::now();
-        let resp = answer_one_request(&socket, a_request_with_id(11), None, None, None).await;
+        let resp = dead_bridge(socket.clone())
+            .answer(a_request_with_id(11))
+            .await;
         let elapsed = started.elapsed();
 
         let message = resp
@@ -1076,20 +717,78 @@ mod tests {
         );
     }
 
-    /// Why: the id fix must not reach notifications — an id-less request gets
-    /// no reply at all (MCP spec §4.1), and emitting one would corrupt the
-    /// stdio channel. This is the one case where an absent id is correct.
+    /// Why: MCP spec §4.1 forbids a reply to a notification, and emitting one
+    /// would corrupt the stdio channel. This is the one case where an absent id
+    /// is correct, and it must be decided before the daemon is dialled.
     /// Test: itself.
     #[tokio::test]
-    async fn answer_one_request_suppresses_a_notification() {
+    async fn a_notification_is_suppressed_without_dialling() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let req = mcp::Request {
-            jsonrpc: Some("2.0".to_string()),
-            id: None,
-            method: "notifications/initialized".to_string(),
-            params: None,
-        };
-        let resp = answer_one_request(&tmp.path().join("absent.sock"), req, None, None, None).await;
+        let resp = dead_bridge(tmp.path().join("absent.sock"))
+            .answer(Request {
+                jsonrpc: Some("2.0".to_string()),
+                id: None,
+                method: "notifications/initialized".to_string(),
+                params: None,
+            })
+            .await;
         assert!(resp.suppress, "a notification must not be answered");
+    }
+
+    /// Why: [`inject_default_palace`] and [`inject_caller_context`] are tested
+    /// above as pure functions, which proves nothing about whether
+    /// [`build_bridge`] hands them to the bridge — and a rewriter that is never
+    /// attached fails silently, with `--palace` and every attribution stamp
+    /// quietly absent. This drives one real framed exchange and reads the
+    /// envelope the daemon actually received.
+    /// What: stands up a one-shot Unix listener that echoes the request back as
+    /// its `result`, forwards a `tools/call` through the bridge, and asserts the
+    /// forwarded arguments carry the palace, the workstream, the cwd, and a
+    /// `jsonrpc` of `"2.0"` re-stamped after the rewriter ran.
+    /// Test: itself.
+    #[tokio::test]
+    async fn the_rewriter_reaches_the_forwarded_envelope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("sockets").join("echo.sock");
+        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the echo socket");
+
+        // One connection, echoed back; the task dies with the test runtime.
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let Ok((mut conn, _)) = listener.accept().await else {
+                return;
+            };
+            let mut frame = Vec::new();
+            let _ = conn.read_to_end(&mut frame).await;
+            let seen: serde_json::Value = serde_json::from_slice(&frame).unwrap_or_default();
+            let body = json!({
+                "jsonrpc": "2.0",
+                "id": seen.get("id").cloned().unwrap_or_default(),
+                "result": {"seen": seen},
+            });
+            let mut bytes = serde_json::to_vec(&body).unwrap_or_default();
+            bytes.push(b'\n');
+            let _ = conn.write_all(&bytes).await;
+            let _ = conn.flush().await;
+        });
+
+        let bridge = build_bridge(
+            socket,
+            Some("owner-profile".to_string()),
+            Some("feat-x".to_string()),
+            Some("/x/.worktrees/feat-x".to_string()),
+        );
+        let resp = bridge.answer(a_request_with_id(3)).await;
+
+        let result = resp.result.expect("the echo server answered");
+        let seen = &result["seen"];
+        assert_eq!(
+            seen["jsonrpc"], "2.0",
+            "jsonrpc is re-stamped after the rewriter"
+        );
+        assert_eq!(seen["params"]["arguments"]["palace"], "owner-profile");
+        assert_eq!(seen["params"]["arguments"]["workstream"], "feat-x");
+        assert_eq!(seen["params"]["arguments"]["cwd"], "/x/.worktrees/feat-x");
+        assert_eq!(seen["params"]["arguments"]["text"], "anything");
     }
 }
