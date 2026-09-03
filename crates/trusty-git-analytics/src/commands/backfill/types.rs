@@ -161,6 +161,19 @@ pub enum BackfillSubcommand {
     /// No LLM required — quality scoring is a pure formula applied to
     /// per-bucket counts of reverts, bugfixes, and ticketed commits.
     Quality,
+    /// #3916: PM work meaningfulness tier — classify every `work_items` row
+    /// and persist the verdict to `fact_pm_work`.
+    ///
+    /// Filters raw ticket ACTIVITY down to meaningful WORK by excluding
+    /// terse decomposition stubs (`TERSE_TITLE`), tickets a bot filed and
+    /// nobody moved (`AUTO_GENERATED`), and tickets a bot filed that a human
+    /// later transitioned (`BOT_FILED`). Deterministic — no LLM tier in v1.
+    ///
+    /// Idempotent: UPSERT on `(work_item_id, work_item_source)`, so running
+    /// it twice produces the same rows. Supports --dry-run.
+    /// --repos/--since/--until/--weeks do not scope this operation: it reads
+    /// `work_items`, which carries no repository or commit-timestamp column.
+    PmWork,
 }
 
 /// Arguments for `tga backfill complexity`.
