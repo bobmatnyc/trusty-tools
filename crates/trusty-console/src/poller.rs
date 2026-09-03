@@ -220,6 +220,7 @@ mod tests {
                 url: self.url.map(|u| u.to_string()),
                 hint: None,
                 lifecycle: self.lifecycle(),
+                cpu_pct: None,
             }
         }
     }
@@ -273,6 +274,7 @@ mod tests {
                     url: Some("http://127.0.0.1:7878".to_string()),
                     hint: None,
                     lifecycle: ServiceLifecycle::Daemon,
+                    cpu_pct: None,
                 },
                 ServiceInfo {
                     id: "trusty-memory".to_string(),
@@ -282,6 +284,7 @@ mod tests {
                     url: None,
                     hint: None,
                     lifecycle: ServiceLifecycle::Daemon,
+                    cpu_pct: None,
                 },
             ],
             refreshed_at: Instant::now(),

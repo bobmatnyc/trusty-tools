@@ -182,6 +182,7 @@ impl SearchConnector {
                 hint,
                 // #6416: trusty-search is a resident daemon; `Available` means stopped.
                 lifecycle: ServiceLifecycle::Daemon,
+                cpu_pct: None,
             };
 
         if !binary_on_path(SEARCH_SERVICE) {

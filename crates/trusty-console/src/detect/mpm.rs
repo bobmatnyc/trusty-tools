@@ -150,6 +150,7 @@ impl ServiceConnector for MpmConnector {
                 url: None,
                 hint: None,
                 lifecycle: ServiceLifecycle::Daemon,
+                cpu_pct: None,
             };
         }
 
@@ -185,6 +186,7 @@ impl ServiceConnector for MpmConnector {
                     "daemon is running but pre-dates #1849 — restart to enable proxy".to_string(),
                 ),
                 lifecycle: ServiceLifecycle::Daemon,
+                cpu_pct: None,
             };
         }
 
@@ -197,6 +199,7 @@ impl ServiceConnector for MpmConnector {
             hint: None,
             // #6416: trusty-mpm is a resident daemon; `Available` means stopped.
             lifecycle: ServiceLifecycle::Daemon,
+            cpu_pct: None,
         }
     }
 }

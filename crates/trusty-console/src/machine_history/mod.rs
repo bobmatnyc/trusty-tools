@@ -30,9 +30,11 @@
 
 pub mod events;
 pub mod sampler;
+pub mod service_samples;
 pub mod stream;
 pub mod transitions;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -46,6 +48,7 @@ use trusty_common::host_metrics::history::{
 };
 
 use events::HistoryEvent;
+use service_samples::{ServiceSample, ServiceSampleBatch};
 use transitions::{SERVICE_REPORT_GRACE_SECS, ServiceTransition, TransitionTracker};
 
 /// The schema version the history payload advertises.
@@ -54,8 +57,14 @@ use transitions::{SERVICE_REPORT_GRACE_SECS, ServiceTransition, TransitionTracke
 /// shape change instead of silently mis-rendering one.
 /// What: a monotonically increasing integer, bumped on any breaking change to
 /// [`HistorySnapshot`].
+///
+/// `2` (#6642): the payload gained `service_samples` and
+/// `service_sample_capacity`, and the stream gained a `services` event. The
+/// addition is backward-compatible on the wire, but a client built against
+/// schema 1 renders no per-service graph at all, which is exactly the
+/// difference the version exists to announce.
 /// Test: `history_starts_empty`.
-pub const MACHINE_HISTORY_SCHEMA_VERSION: u32 = 1;
+pub const MACHINE_HISTORY_SCHEMA_VERSION: u32 = 2;
 
 /// Transitions retained before the oldest is evicted.
 ///
@@ -72,10 +81,28 @@ pub const TRANSITION_LOG_CAPACITY: usize = 256;
 /// Why: `tokio::sync::broadcast` keeps one shared ring; a receiver that falls
 /// further behind than this gets `RecvError::Lagged` with the dropped count,
 /// which the stream forwards as a `lagged` event (see [`events::lagged_frame`]).
-/// 128 absorbs a browser stalling for several minutes at the 5 s cadence.
-/// What: `128`.
-/// Test: `stream::tests::a_lagging_subscriber_is_told_what_it_missed`.
-pub const EVENT_BUFFER: usize = 128;
+///
+/// The arithmetic, for the cadence actually shipped (#6642): the sampler emits
+/// TWO events per tick — one `sample` for the host and one `services` for the
+/// roster — at one tick per second. 128 events was sized when a tick was one
+/// event every 5 s, which was 640 s of slack; at 2 events per second it is 64,
+/// so a browser that stalled for barely over a minute was told it lagged.
+///
+/// `HOST_HISTORY_CAPACITY * 2` restores the intended margin AND ties it to the
+/// window: a subscriber further behind than this has missed more than the rings
+/// retain, so the channel could not have caught it up anyway — it is better
+/// served by the `lagged` frame and the full window a reconnect brings. The two
+/// numbers move together, so a later cadence change cannot leave the buffer
+/// covering a different span than the graph.
+///
+/// Transitions share the channel but are not counted: they are recorded only
+/// when a service CHANGES state, which is rare next to the per-tick pair, and a
+/// machine flapping fast enough to matter overflows
+/// [`TRANSITION_LOG_CAPACITY`] first.
+/// What: `1200` — 600 ticks of both event kinds, which is the 10-minute window.
+/// Test: `a_subscriber_stalled_for_the_whole_window_is_not_lagged`,
+/// `stream::tests::a_lagging_subscriber_is_told_what_it_missed`.
+pub const EVENT_BUFFER: usize = HOST_HISTORY_CAPACITY * 2;
 
 /// The history payload served by the endpoint and by the stream's first event.
 ///
@@ -84,17 +111,28 @@ pub const EVENT_BUFFER: usize = 128;
 /// interval travel with the data because the graph's x-axis is derived from
 /// them — a UI that hard-coded 120 × 5 s would silently mis-scale the moment an
 /// operator changed the cadence.
-/// What: the sample ring and the transition log oldest-first, the two
-/// capacities, the configured sample interval, and the schema version.
-/// Test: `history_starts_empty`, `the_ring_bounds_what_history_returns`.
+/// What: the sample ring and the transition log oldest-first, the per-service
+/// sample rings keyed by service id (#6642), the capacities, the configured
+/// sample interval, and the schema version.
+/// Test: `history_starts_empty`, `the_ring_bounds_what_history_returns`,
+/// `the_snapshot_carries_a_ring_per_service`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistorySnapshot {
     /// Host samples, oldest first. Empty before the first sample.
     pub samples: Vec<HostMetrics>,
     /// Service state changes, oldest first. Empty until a service changes state.
     pub transitions: Vec<ServiceTransition>,
+    /// Per-service samples keyed by service id, oldest first within each id
+    /// (#6642).
+    ///
+    /// A `BTreeMap` rather than a `HashMap` so the JSON object's key order is
+    /// deterministic across responses; the UI still sorts for display, but a
+    /// stable payload makes a diff between two snapshots readable.
+    pub service_samples: BTreeMap<String, Vec<ServiceSample>>,
     /// Maximum samples retained (the ring's capacity).
     pub sample_capacity: usize,
+    /// Maximum samples retained PER SERVICE (#6642).
+    pub service_sample_capacity: usize,
     /// Maximum transitions retained.
     pub transition_capacity: usize,
     /// Seconds between samples, as the running sampler is configured.
@@ -107,6 +145,16 @@ pub struct HistorySnapshot {
 struct Inner {
     samples: MetricRing<HostMetrics>,
     transitions: MetricRing<ServiceTransition>,
+    /// One ring per service id, created on that service's first sample (#6642).
+    ///
+    /// A service that disappears from the roster keeps its ring rather than
+    /// having it dropped: the window is what the operator is looking at, and a
+    /// daemon that stopped 30 s ago is exactly the case where the last minute of
+    /// history matters. The map is bounded by the connector roster, which is a
+    /// compile-time list of six.
+    service_samples: BTreeMap<String, MetricRing<ServiceSample>>,
+    /// Capacity every per-service ring is built with.
+    service_capacity: usize,
     tracker: TransitionTracker,
 }
 
@@ -142,10 +190,12 @@ impl Default for MachineHistory {
 impl MachineHistory {
     /// Build a history sized to the owner's 10-minute window.
     ///
-    /// Why: the common case — 120 points at 5 s, 256 transitions, the 60 s
+    /// Why: the common case — 600 points at 1 s, 256 transitions, the 60 s
     /// report-staleness grace.
     /// What: delegates to [`MachineHistory::with_limits`] with the shipped
-    /// constants.
+    /// constants. The per-service rings get
+    /// [`SERVICE_HISTORY_CAPACITY`](service_samples::SERVICE_HISTORY_CAPACITY),
+    /// which IS the host capacity — one window, one number.
     /// Test: `history_starts_empty`.
     #[must_use]
     pub fn new() -> Self {
@@ -161,8 +211,13 @@ impl MachineHistory {
     ///
     /// Why: a test needs a ring it can overflow and a broadcast buffer it can
     /// outrun without producing thousands of samples.
-    /// What: constructs both rings, the tracker, and the broadcast channel.
+    /// What: constructs every ring, the tracker, and the broadcast channel. The
+    /// per-service rings take `sample_capacity` too, deliberately: the host
+    /// graph and the service graph share one x-axis, so a test that shrinks one
+    /// window must shrink the other or it is testing a shape production never
+    /// has.
     /// Test: `the_ring_bounds_what_history_returns`,
+    /// `the_service_ring_bounds_what_history_returns`,
     /// `stream::tests::a_lagging_subscriber_is_told_what_it_missed`.
     #[must_use]
     pub fn with_limits(
@@ -177,6 +232,8 @@ impl MachineHistory {
                 inner: RwLock::new(Inner {
                     samples: MetricRing::new(sample_capacity),
                     transitions: MetricRing::new(transition_capacity),
+                    service_samples: BTreeMap::new(),
+                    service_capacity: sample_capacity,
                     tracker: TransitionTracker::new(grace),
                 }),
                 events,
@@ -218,6 +275,65 @@ impl MachineHistory {
             .shared
             .events
             .send(HistoryEvent::Sample(Box::new(sample)));
+    }
+
+    /// Record one tick's worth of per-service samples — THE write path (#6642).
+    ///
+    /// Why one function for the whole batch: it mirrors
+    /// [`MachineHistory::record_sample`] for the host half, and it is what makes
+    /// the ring and the stream atomic against each other. Both happen under the
+    /// write lock, so a subscriber that took its snapshot between the ring push
+    /// and the broadcast cannot exist.
+    ///
+    /// Why a service with no ring gets one here: the roster is discovered at
+    /// runtime, and a service that appears mid-window (a binary installed while
+    /// the console runs) must start collecting immediately rather than waiting
+    /// for a restart.
+    /// What: pushes each [`ServiceSample`] onto its service's ring, creating the
+    /// ring on first sight, then broadcasts ONE
+    /// [`HistoryEvent::Services`](events::HistoryEvent::Services) carrying the
+    /// whole batch. A send with no live subscribers is not an error — the rings
+    /// are the durable half.
+    /// Test: `recording_service_samples_fans_out_to_subscribers`,
+    /// `the_service_ring_bounds_what_history_returns`,
+    /// `the_snapshot_carries_a_ring_per_service`.
+    pub async fn record_service_samples(&self, batch: ServiceSampleBatch) {
+        let mut inner = self.shared.inner.write().await;
+        let capacity = inner.service_capacity;
+        for sample in &batch.services {
+            inner
+                .service_samples
+                .entry(sample.id.clone())
+                .or_insert_with(|| MetricRing::new(capacity))
+                .push(sample.clone());
+        }
+        let _ = self
+            .shared
+            .events
+            .send(HistoryEvent::Services(Box::new(batch)));
+    }
+
+    /// The newest recorded `cpu_pct` for each service (#6642).
+    ///
+    /// Why: `GET /api/console/services` must render a CPU figure before the
+    /// stream connects, and the newest ring entry is exactly that figure. Taking
+    /// it from the ring rather than from a second cache means the list and the
+    /// graph cannot disagree about the same instant.
+    /// What: reads the last entry of every per-service ring under the read lock.
+    /// A service with no ring, or whose newest sample carries no measurement, is
+    /// absent from the map — the caller renders `null`, never `0.0`.
+    /// Test: `latest_service_cpu_reads_the_newest_sample`.
+    pub async fn latest_service_cpu(&self) -> std::collections::HashMap<String, f32> {
+        let inner = self.shared.inner.read().await;
+        inner
+            .service_samples
+            .iter()
+            .filter_map(|(id, ring)| {
+                ring.last()
+                    .and_then(|s| s.cpu_pct)
+                    .map(|cpu| (id.clone(), cpu))
+            })
+            .collect()
     }
 
     /// Fold one observation of the service report set into the transition log.
@@ -287,7 +403,13 @@ impl MachineHistory {
         HistorySnapshot {
             samples: inner.samples.snapshot(),
             transitions: inner.transitions.snapshot(),
+            service_samples: inner
+                .service_samples
+                .iter()
+                .map(|(id, ring)| (id.clone(), ring.snapshot()))
+                .collect(),
             sample_capacity: inner.samples.capacity(),
+            service_sample_capacity: inner.service_capacity,
             transition_capacity: inner.transitions.capacity(),
             sample_interval_secs: self.shared.sample_interval_secs.load(Ordering::Relaxed),
             schema_version: MACHINE_HISTORY_SCHEMA_VERSION,
@@ -397,6 +519,176 @@ mod tests {
         let snap = h.snapshot().await;
         assert_eq!(snap.transitions.len(), 1);
         assert_eq!(snap.transitions[0].to, transitions::ServiceState::Degraded);
+    }
+
+    /// Build a one-service batch.
+    fn service_batch(id: &str, cpu: Option<f32>, at: u64) -> ServiceSampleBatch {
+        use crate::connector::ServiceStatus;
+        ServiceSampleBatch {
+            sampled_at_unix: at,
+            services: vec![ServiceSample {
+                id: id.to_string(),
+                status: ServiceStatus::Running,
+                cpu_pct: cpu,
+            }],
+        }
+    }
+
+    /// Why (#6642): the per-service rings and the `services` broadcast are
+    /// written together; a batch that reached one but not the other would leave
+    /// an open stream and a fresh reload drawing different graphs.
+    /// What: subscribes, records one batch, and asserts both the receiver and
+    /// the rings saw it.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn recording_service_samples_fans_out_to_subscribers() {
+        let h = MachineHistory::new();
+        let (snap, mut rx) = h.subscribe().await;
+        assert!(snap.service_samples.is_empty());
+
+        h.record_service_samples(service_batch("trusty-search", Some(2.0), 10))
+            .await;
+
+        match rx.try_recv() {
+            Ok(HistoryEvent::Services(b)) => {
+                assert_eq!(b.sampled_at_unix, 10);
+                assert_eq!(b.services.len(), 1);
+            }
+            other => panic!("expected a services event, got {other:?}"),
+        }
+        let snap = h.snapshot().await;
+        assert_eq!(snap.service_samples["trusty-search"].len(), 1);
+    }
+
+    /// Why (#6642): each per-service ring must be bounded for the same reason
+    /// the host ring is — the console runs for weeks at one sample a second.
+    /// What: records four batches into a three-slot history and asserts the ring
+    /// holds three, oldest evicted, with the capacity reported honestly.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn the_service_ring_bounds_what_history_returns() {
+        let h = MachineHistory::with_limits(3, 4, 8, Duration::from_secs(60));
+        for at in 1..=4 {
+            h.record_service_samples(service_batch("trusty-search", Some(at as f32), at))
+                .await;
+        }
+        let snap = h.snapshot().await;
+        let ring = &snap.service_samples["trusty-search"];
+        assert_eq!(ring.len(), 3, "the ring bounds the per-service window");
+        assert_eq!(
+            ring.first().and_then(|s| s.cpu_pct),
+            Some(2.0),
+            "the oldest sample was evicted"
+        );
+        assert_eq!(snap.service_sample_capacity, 3);
+    }
+
+    /// Why: a service that appears mid-window — a binary installed while the
+    /// console runs — must start collecting immediately rather than waiting for
+    /// a restart, and each service must get its OWN ring.
+    /// What: records two services, then a third on a later tick, and asserts the
+    /// snapshot carries three independently-sized rings.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn the_snapshot_carries_a_ring_per_service() {
+        let h = MachineHistory::new();
+        h.record_service_samples(service_batch("trusty-search", Some(1.0), 1))
+            .await;
+        h.record_service_samples(service_batch("trusty-search", Some(2.0), 2))
+            .await;
+        h.record_service_samples(service_batch("trusty-mpm", None, 3))
+            .await;
+
+        let snap = h.snapshot().await;
+        assert_eq!(snap.service_samples.len(), 2);
+        assert_eq!(snap.service_samples["trusty-search"].len(), 2);
+        assert_eq!(snap.service_samples["trusty-mpm"].len(), 1);
+        assert_eq!(snap.schema_version, 2, "#6642 bumped the payload shape");
+    }
+
+    /// Why (#6642): the services route renders this number before the stream
+    /// connects, so it must be the NEWEST sample and must omit a service whose
+    /// newest sample carries no measurement.
+    /// What: records a measured sample then an unmeasurable one for the same
+    /// service, plus a measured one for another, and asserts the map.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn latest_service_cpu_reads_the_newest_sample() {
+        let h = MachineHistory::new();
+        h.record_service_samples(service_batch("trusty-search", Some(1.0), 1))
+            .await;
+        h.record_service_samples(service_batch("trusty-search", Some(9.5), 2))
+            .await;
+        h.record_service_samples(service_batch("trusty-mpm", Some(3.0), 2))
+            .await;
+        assert_eq!(h.latest_service_cpu().await["trusty-search"], 9.5);
+
+        // The daemon stops: its newest sample has no measurement, so it drops
+        // out of the map rather than reporting its last live figure forever.
+        h.record_service_samples(service_batch("trusty-search", None, 3))
+            .await;
+        let latest = h.latest_service_cpu().await;
+        assert!(!latest.contains_key("trusty-search"));
+        assert_eq!(latest["trusty-mpm"], 3.0);
+    }
+
+    /// REGRESSION (#6642): a subscriber that stalls for the length of the whole
+    /// window must still receive every event rather than being told it lagged.
+    ///
+    /// Why: `EVENT_BUFFER` was 128, sized when a tick emitted ONE event every
+    /// 5 s. #6642 made a tick emit TWO events every second, which cut the slack
+    /// from 640 s to 64 s — a browser tab backgrounded for barely over a minute
+    /// came back to a `lagged` frame and a hole in its graph. This test pins the
+    /// buffer against the cadence rather than against the number 1200: it fails
+    /// on the old constant and on any future cadence change that outruns it.
+    /// What: subscribes, records 200 full ticks (400 events — comfortably past
+    /// the old 128 and inside the new 1200) WITHOUT reading, then drains and
+    /// asserts every event arrived in order with no `Lagged`.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn a_subscriber_stalled_for_the_whole_window_is_not_lagged() {
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        const TICKS: u64 = 200;
+
+        let h = MachineHistory::new();
+        let (_snap, mut rx) = h.subscribe().await;
+
+        // Two events per tick, exactly as `sampler::start` emits them.
+        for seq in 0..TICKS {
+            h.record_sample(tagged_sample(seq)).await;
+            h.record_service_samples(service_batch("trusty-search", Some(1.0), seq))
+                .await;
+        }
+
+        let mut samples = 0u64;
+        let mut batches = 0u64;
+        loop {
+            match rx.try_recv() {
+                Ok(HistoryEvent::Sample(m)) => {
+                    assert_eq!(
+                        m.sampled_at_unix,
+                        Some(samples),
+                        "samples must arrive in order with no gap"
+                    );
+                    samples += 1;
+                }
+                Ok(HistoryEvent::Services(b)) => {
+                    assert_eq!(b.sampled_at_unix, batches);
+                    batches += 1;
+                }
+                Ok(HistoryEvent::Transition(_)) => {}
+                Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+                Err(TryRecvError::Lagged(n)) => panic!(
+                    "a subscriber stalled for {TICKS} ticks ({} events) was told it lagged by \
+                     {n}; EVENT_BUFFER is {EVENT_BUFFER}, which must cover two events per tick \
+                     across the whole {HOST_HISTORY_CAPACITY}-point window",
+                    TICKS * 2
+                ),
+            }
+        }
+        assert_eq!(samples, TICKS, "every host sample survived the stall");
+        assert_eq!(batches, TICKS, "every service batch survived the stall");
     }
 
     /// Why: an operator who slows the cadence would otherwise get a graph whose
@@ -537,7 +829,7 @@ mod tests {
             let first_live = loop {
                 match rx.try_recv() {
                     Ok(HistoryEvent::Sample(m)) => break m.sampled_at_unix.expect("tagged sample"),
-                    Ok(HistoryEvent::Transition(_)) => {}
+                    Ok(HistoryEvent::Transition(_) | HistoryEvent::Services(_)) => {}
                     Err(TryRecvError::Empty | TryRecvError::Closed) => panic!(
                         "subscription {nth} snapshotted through {last_snapshotted:?} of {TOTAL} \
                          samples and then received nothing live"

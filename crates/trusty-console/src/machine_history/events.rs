@@ -19,6 +19,7 @@ use axum::body::Bytes;
 use serde::Serialize;
 use trusty_common::host_metrics::HostMetrics;
 
+use super::service_samples::ServiceSampleBatch;
 use super::transitions::ServiceTransition;
 
 /// One event pushed to every open machine-status stream (#6641).
@@ -38,17 +39,28 @@ pub enum HistoryEvent {
     Sample(Box<HostMetrics>),
     /// A service changed state.
     Transition(Box<ServiceTransition>),
+    /// One tick's per-service status + CPU samples, whole roster (#6642).
+    ///
+    /// Why its own event rather than a field on `Sample`: the host sample is one
+    /// object and this is a list, and the #6284 transport inversion will have
+    /// services push their own samples — at which point the two halves arrive
+    /// from different producers on different schedules. Keeping them separate
+    /// events now means that cutover changes who sends, not what the browser
+    /// parses.
+    Services(Box<ServiceSampleBatch>),
 }
 
 impl HistoryEvent {
     /// The `event:` name this variant is delivered under.
     ///
-    /// Test: `a_frame_names_its_kind_on_one_line`.
+    /// Test: `a_frame_names_its_kind_on_one_line`,
+    /// `a_services_frame_carries_the_whole_roster`.
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
             HistoryEvent::Sample(_) => "sample",
             HistoryEvent::Transition(_) => "transition",
+            HistoryEvent::Services(_) => "services",
         }
     }
 
@@ -63,6 +75,7 @@ impl HistoryEvent {
         match self {
             HistoryEvent::Sample(m) => sse_frame("sample", m.as_ref()),
             HistoryEvent::Transition(t) => sse_frame("transition", t.as_ref()),
+            HistoryEvent::Services(b) => sse_frame("services", b.as_ref()),
         }
     }
 }
@@ -134,6 +147,52 @@ mod tests {
             .expect("sample frame shape");
         let parsed: serde_json::Value = serde_json::from_str(data).expect("sample json");
         assert_eq!(parsed["cpu"]["logical_cores"], cores);
+    }
+
+    /// Why (#6642): PR-B adds one `EventSource` listener per event name, so the
+    /// per-service batch must arrive under `services` with the roster intact —
+    /// a rename or a dropped field leaves the card graphs empty with nothing red
+    /// anywhere.
+    /// What: frames a two-service batch and asserts the kind line, the
+    /// timestamp, and both rows including an absent `cpu_pct` as null.
+    /// Test: this test.
+    #[test]
+    fn a_services_frame_carries_the_whole_roster() {
+        use crate::connector::ServiceStatus;
+        use crate::machine_history::service_samples::{ServiceSample, ServiceSampleBatch};
+
+        let event = HistoryEvent::Services(Box::new(ServiceSampleBatch {
+            sampled_at_unix: 1_700_000_000,
+            services: vec![
+                ServiceSample {
+                    id: "trusty-search".to_string(),
+                    status: ServiceStatus::Running,
+                    cpu_pct: Some(3.25),
+                },
+                ServiceSample {
+                    id: "trusty-review".to_string(),
+                    status: ServiceStatus::Available,
+                    cpu_pct: None,
+                },
+            ],
+        }));
+        assert_eq!(event.kind(), "services");
+
+        let text = String::from_utf8(event.frame().to_vec()).expect("utf8 frame");
+        let data = text
+            .strip_prefix("event: services\ndata: ")
+            .and_then(|r| r.strip_suffix("\n\n"))
+            .expect("services frame shape");
+        let parsed: serde_json::Value = serde_json::from_str(data).expect("services json");
+        assert_eq!(parsed["sampled_at_unix"], 1_700_000_000_u64);
+        assert_eq!(parsed["services"][0]["id"], "trusty-search");
+        assert_eq!(parsed["services"][0]["status"], "running");
+        assert_eq!(parsed["services"][0]["cpu_pct"], 3.25);
+        assert_eq!(parsed["services"][1]["id"], "trusty-review");
+        assert!(
+            parsed["services"][1]["cpu_pct"].is_null(),
+            "an unmeasurable service is null, never 0.0"
+        );
     }
 
     /// Why: a lag the viewer cannot see is a graph that lies about continuity.

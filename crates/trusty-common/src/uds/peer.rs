@@ -11,6 +11,8 @@
 //! What: [`peer_uid`] wraps the platform syscall — `SO_PEERCRED` on Linux,
 //! `getpeereid` on macOS and the BSDs — [`peer_uid_verdict`] is the pure
 //! comparison behind the refusal, and [`ensure_peer_is_self`] joins them.
+//! [`peer_pid`] (#6642) answers the adjacent question — WHICH process is on the
+//! other end — for a caller that wants to meter it rather than refuse it.
 //! Targets with neither syscall fail closed via
 //! [`UdsSecurityError::UnsupportedPlatform`] rather than compiling to an
 //! unchecked accept.
@@ -125,6 +127,93 @@ pub fn peer_uid(stream: &UnixStream) -> Result<u32, UdsSecurityError> {
         });
     }
     Ok(uid)
+}
+
+/// Read the pid of the process on the other end of `stream` (#6642).
+///
+/// Why: trusty-console has to answer "how much CPU is trusty-search using", and
+/// a UDS daemon publishes no pid anywhere — no pid file, no field in its health
+/// response. The kernel already knows, and the console already dials that exact
+/// socket to detect the service, so the connection it makes IS the identifier.
+/// This is the one implementation; a second consumer with the same question
+/// calls it rather than shelling out to `lsof`.
+///
+/// Why the return type is `Option` and not `Result`: every caller so far treats
+/// "cannot identify the peer" as a metric it simply does not have. There is no
+/// remediation to report and nothing to fail on, so the platform gap, the
+/// syscall error, and a nonsensical pid all collapse into the one answer the
+/// caller acts on. Contrast [`peer_uid`], whose failure MUST refuse a
+/// connection and therefore owes the caller a reason.
+///
+/// What: `getsockopt(SO_PEERCRED)`'s `ucred.pid` on Linux,
+/// `getsockopt(SOL_LOCAL, LOCAL_PEERPID)` on macOS/iOS. The other BSDs expose
+/// no peer-pid option, so they answer `None`. Like [`peer_uid`], the credentials
+/// are those captured at `connect` time.
+///
+/// The pid identifies the process that was listening when the connection was
+/// made. It can be reused after that process exits, so a caller holding one
+/// across time must re-verify the process still exists — see
+/// [`ProcessCpuSampler::refresh`](crate::sys_metrics::ProcessCpuSampler::refresh),
+/// which drops a vanished pid for exactly this reason.
+/// Test: `peer_pid_of_self_connection_is_this_process`.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn peer_pid(stream: &UnixStream) -> Option<u32> {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
+
+    // SAFETY: `stream` owns a live connected socket fd for the duration of the
+    // call; `cred` and `len` are a correctly-sized, correctly-typed
+    // out-parameter pair for SO_PEERCRED on SOL_SOCKET.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast::<libc::c_void>(),
+            &raw mut len,
+        )
+    };
+    if rc != 0 || cred.pid <= 0 {
+        return None;
+    }
+    u32::try_from(cred.pid).ok()
+}
+
+/// See the Linux variant for the contract; this is the Darwin syscall.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[must_use]
+pub fn peer_pid(stream: &UnixStream) -> Option<u32> {
+    let mut pid: libc::pid_t = 0;
+    let mut len = size_of::<libc::pid_t>() as libc::socklen_t;
+
+    // SAFETY: `stream` owns a live connected socket fd for the duration of the
+    // call; `pid` and `len` are a correctly-sized, correctly-typed
+    // out-parameter pair for LOCAL_PEERPID on SOL_LOCAL.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&raw mut pid).cast::<libc::c_void>(),
+            &raw mut len,
+        )
+    };
+    if rc != 0 || pid <= 0 {
+        return None;
+    }
+    u32::try_from(pid).ok()
+}
+
+/// No peer-pid option on this target — the caller has no measurement.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+#[must_use]
+pub fn peer_pid(_stream: &UnixStream) -> Option<u32> {
+    None
 }
 
 /// Fail closed on a unix target with neither `SO_PEERCRED` nor `getpeereid`.

@@ -203,6 +203,164 @@ impl Default for SysMetrics {
     }
 }
 
+/// CPU sampler for a SET of other processes, refreshed once per tick (#6642).
+///
+/// Why: [`SysMetrics`] answers "how much CPU am I using" and is bound to the
+/// current process, so a supervisor that wants a per-child figure has nothing to
+/// call. trusty-console needs exactly that — one `cpu_pct` per registered
+/// service, once per second — and the workspace's common-entry-point rule says
+/// the console must not grow a second `sysinfo::System`. This is the one
+/// implementation; a future supervisor with the same question calls it too.
+///
+/// Why a set rather than one pid per sampler: `sysinfo` derives CPU% from the
+/// delta in consumed CPU time between two refreshes, so the `System` must live
+/// across ticks. One `System` refreshed once for N pids costs one syscall batch;
+/// N samplers cost N of them and each keeps its own process table.
+///
+/// What: holds a `System` configured to refresh CPU only, plus the pid set the
+/// caller declared with [`ProcessCpuSampler::track`].
+/// [`ProcessCpuSampler::refresh`] updates ONLY those pids —
+/// `ProcessesToUpdate::Some`, never `All`, so the cost is proportional to what
+/// is tracked and not to how many processes the machine is running.
+/// [`ProcessCpuSampler::cpu_pct`] reads the last refresh's figure, and answers
+/// `None` for a pid that is not tracked or whose process is gone. `None` means
+/// "no measurement", never "measured zero" — a caller must not render it as 0.
+///
+/// CPU% follows `sysinfo`'s convention: `100.0` is one fully-saturated core, so
+/// a process spread over four cores can report above 100.
+/// Test: `process_cpu_sampler_measures_a_tracked_child`,
+/// `process_cpu_sampler_reports_none_for_a_vanished_pid`,
+/// `process_cpu_sampler_reports_none_for_an_untracked_pid`,
+/// `process_cpu_sampler_untrack_removes_a_pid`.
+pub struct ProcessCpuSampler {
+    sys: System,
+    tracked: Vec<Pid>,
+}
+
+impl ProcessCpuSampler {
+    /// An empty sampler tracking nothing.
+    ///
+    /// Why: the caller discovers pids over time (a daemon starts, another
+    /// exits), so the set is built with [`ProcessCpuSampler::track`] rather than
+    /// fixed at construction.
+    /// What: a `System` refreshing process CPU only — no memory, no disks, no
+    /// networks — because that is the whole measurement this type provides.
+    /// Test: `process_cpu_sampler_reports_none_for_an_untracked_pid`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            sys: System::new_with_specifics(
+                RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing().with_cpu()),
+            ),
+            tracked: Vec::new(),
+        }
+    }
+
+    /// Start tracking `pid`, priming its CPU baseline.
+    ///
+    /// Why the priming refresh: the first delta-based reading after a pid enters
+    /// the set has no previous sample to subtract, and `sysinfo` reports `0.0`
+    /// for it. Priming here means the caller's NEXT tick already carries a real
+    /// figure instead of a zero that looks like an idle daemon.
+    /// What: appends `pid` if absent (tracking is idempotent) and refreshes that
+    /// one pid. A pid that does not exist is still added — the next
+    /// [`ProcessCpuSampler::refresh`] drops it, which is the same path a process
+    /// that exits later takes.
+    /// Test: `process_cpu_sampler_measures_a_tracked_child`.
+    pub fn track(&mut self, pid: u32) {
+        let pid = Pid::from_u32(pid);
+        if self.tracked.contains(&pid) {
+            return;
+        }
+        self.tracked.push(pid);
+        self.sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_cpu(),
+        );
+    }
+
+    /// Stop tracking `pid`.
+    ///
+    /// Why: a service the caller no longer watches must not keep costing a
+    /// syscall on every tick.
+    /// Test: `process_cpu_sampler_untrack_removes_a_pid`.
+    pub fn untrack(&mut self, pid: u32) {
+        let pid = Pid::from_u32(pid);
+        self.tracked.retain(|p| *p != pid);
+    }
+
+    /// `true` when `pid` is in the tracked set.
+    ///
+    /// Test: `process_cpu_sampler_untrack_removes_a_pid`.
+    #[must_use]
+    pub fn is_tracked(&self, pid: u32) -> bool {
+        self.tracked.contains(&Pid::from_u32(pid))
+    }
+
+    /// How many pids are tracked.
+    ///
+    /// Test: `process_cpu_sampler_untrack_removes_a_pid`.
+    #[must_use]
+    pub fn tracked_count(&self) -> usize {
+        self.tracked.len()
+    }
+
+    /// Refresh every tracked pid, dropping the ones whose process is gone.
+    ///
+    /// Why the drop: a pid the caller keeps asking about after its process
+    /// exited would be refreshed forever, and on a busy machine the number could
+    /// be reused by an unrelated process — which would report that stranger's
+    /// CPU under the dead service's name. Forgetting a vanished pid makes
+    /// [`ProcessCpuSampler::cpu_pct`] answer `None` and lets the caller
+    /// rediscover the real one.
+    /// What: one `refresh_processes_specifics` over the tracked slice with
+    /// `remove_dead_processes = true`, then prunes the set to the pids the
+    /// refresh still resolves. Returns immediately when nothing is tracked, so
+    /// an idle sampler costs no syscall at all — and, critically, never falls
+    /// back to a whole-process-table refresh.
+    /// Test: `process_cpu_sampler_measures_a_tracked_child`,
+    /// `process_cpu_sampler_reports_none_for_a_vanished_pid`.
+    pub fn refresh(&mut self) {
+        if self.tracked.is_empty() {
+            return;
+        }
+        self.sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&self.tracked),
+            true,
+            ProcessRefreshKind::nothing().with_cpu(),
+        );
+        let sys = &self.sys;
+        self.tracked.retain(|pid| sys.process(*pid).is_some());
+    }
+
+    /// The CPU percentage recorded for `pid` by the last
+    /// [`ProcessCpuSampler::refresh`].
+    ///
+    /// Why `Option`: an untracked pid, a process that exited, and a permission
+    /// denial are all "no measurement". Collapsing them to `0.0` would draw an
+    /// idle daemon where there is no daemon at all.
+    /// What: reads the cached process entry. Never refreshes — the caller
+    /// refreshes once per tick and then reads every pid, so N reads cost one
+    /// refresh.
+    /// Test: `process_cpu_sampler_measures_a_tracked_child`,
+    /// `process_cpu_sampler_reports_none_for_a_vanished_pid`.
+    #[must_use]
+    pub fn cpu_pct(&self, pid: u32) -> Option<f32> {
+        let pid = Pid::from_u32(pid);
+        if !self.tracked.contains(&pid) {
+            return None;
+        }
+        self.sys.process(pid).map(sysinfo::Process::cpu_usage)
+    }
+}
+
+impl Default for ProcessCpuSampler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Maximum directory nesting the size walk will descend.
 ///
 /// Why (#4764): an explicit bound keeps a pathological or adversarially deep
@@ -408,6 +566,117 @@ mod tests {
         // pid 0 is the kernel scheduler on Linux and not addressable via
         // proc_pid_rusage on macOS; either way it must not yield a figure.
         assert_eq!(process_rss_mb(0), None);
+    }
+
+    /// Spawn a child that sleeps, so a test has a real pid it owns.
+    ///
+    /// Why `sleep` and not a spinner: this file's whole subject is CPU
+    /// measurement, and a test that generates machine-wide load to prove it
+    /// would slow every other test sharing the runner. A sleeping child is a
+    /// real process with a real pid; the assertions below are about the
+    /// measurement being TAKEN, not about it reaching a particular number.
+    #[cfg(unix)]
+    fn spawn_sleeper() -> std::process::Child {
+        std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a sleeping child")
+    }
+
+    /// Why (#6642): the console samples six daemons once a second off this type.
+    /// If tracking a live pid did not yield a reading, every service card would
+    /// render an empty bar and nothing would say why.
+    /// What: spawns a child, tracks it, refreshes, and asserts a non-negative
+    /// figure comes back — then kills and reaps the child.
+    /// Test: this test itself.
+    #[cfg(unix)]
+    #[test]
+    fn process_cpu_sampler_measures_a_tracked_child() {
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+
+        let mut sampler = ProcessCpuSampler::new();
+        sampler.track(pid);
+        sampler.refresh();
+        let cpu = sampler.cpu_pct(pid);
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let cpu = cpu.expect("a live tracked pid must yield a measurement");
+        assert!(cpu >= 0.0, "cpu usage must be non-negative, got {cpu}");
+    }
+
+    /// REGRESSION (#6642): a process that exits between two samples must read as
+    /// `None`, and the sampler must keep working afterwards.
+    ///
+    /// Why: `Some(0.0)` for a dead daemon draws a flat idle bar — visually
+    /// identical to a healthy but quiet service. The fail-open contract is that
+    /// an unmeasurable service reports nothing and the tick continues.
+    /// What: tracks a child, kills and reaps it, refreshes, and asserts the pid
+    /// reads `None`, is no longer tracked, and that a second refresh with an
+    /// empty set is still safe to call.
+    /// Test: this test itself.
+    #[cfg(unix)]
+    #[test]
+    fn process_cpu_sampler_reports_none_for_a_vanished_pid() {
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+
+        let mut sampler = ProcessCpuSampler::new();
+        sampler.track(pid);
+        sampler.refresh();
+
+        child.kill().expect("kill the sleeper");
+        child.wait().expect("reap the sleeper");
+
+        sampler.refresh();
+        assert_eq!(
+            sampler.cpu_pct(pid),
+            None,
+            "a vanished process must read as no-measurement, never as 0.0"
+        );
+        assert!(
+            !sampler.is_tracked(pid),
+            "a vanished pid must be dropped so a reused pid cannot be misread"
+        );
+        // The tick must not stop: refreshing an now-empty sampler is a no-op.
+        sampler.refresh();
+        assert_eq!(sampler.tracked_count(), 0);
+    }
+
+    /// Why: reading a pid the caller never declared would silently measure a
+    /// process the sampler is not paying for, and hide a bug in the caller's
+    /// discovery step.
+    /// What: asserts `cpu_pct` on an untracked pid is `None`, before and after a
+    /// refresh.
+    /// Test: this test itself.
+    #[test]
+    fn process_cpu_sampler_reports_none_for_an_untracked_pid() {
+        let mut sampler = ProcessCpuSampler::new();
+        assert_eq!(sampler.cpu_pct(std::process::id()), None);
+        sampler.refresh();
+        assert_eq!(sampler.cpu_pct(std::process::id()), None);
+    }
+
+    /// Why: a service the console stops watching must stop costing a syscall per
+    /// tick, and `track` must be idempotent so a re-discovered pid does not
+    /// enter the set twice.
+    /// What: tracks the current process twice, asserts one entry, then untracks.
+    /// Test: this test itself.
+    #[test]
+    fn process_cpu_sampler_untrack_removes_a_pid() {
+        let me = std::process::id();
+        let mut sampler = ProcessCpuSampler::new();
+        sampler.track(me);
+        sampler.track(me);
+        assert_eq!(sampler.tracked_count(), 1, "track must be idempotent");
+        assert!(sampler.is_tracked(me));
+
+        sampler.untrack(me);
+        assert_eq!(sampler.tracked_count(), 0);
+        assert!(!sampler.is_tracked(me));
+        assert_eq!(sampler.cpu_pct(me), None);
     }
 
     #[test]
