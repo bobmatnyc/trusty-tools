@@ -331,7 +331,7 @@ async fn run() -> anyhow::Result<()> {
     // config file. Handle it before the DB open call so a missing/locked
     // `tga.db` cannot block bootstrapping a fresh project.
     if let Commands::Install(args) = cli.command {
-        return commands::install::run(config, args);
+        return commands::install::run(config, args).await;
     }
 
     // #2405: the universal `config` command manages inference provider keys and

@@ -108,13 +108,33 @@ tga install
 ```
 
 The wizard prompts for:
-- Path(s) to your local git repositories
-- GitHub personal access token (optional — for PR metadata)
-- JIRA credentials (optional)
+- Code host — `local` (repositories you have already cloned), `github` (an org
+  it discovers repositories from) or `bitbucket` (a workspace plus an explicit
+  repository list)
+- The host's API token (optional for `local`)
+- Project-management system — `none`, `github`, `jira` or `linear` — and that
+  system's credentials
 - Output directory for reports
 - LLM provider for classification (optional)
 
 The wizard writes `config.yaml` in the current directory.
+
+#### Without a terminal
+
+`tga install` runs from flags instead of prompts when you supply `--host` and
+`--pm`, or whenever stdin is not a terminal — CI, a container, a script. Given
+a GitHub org and a token it discovers the org's repositories itself, so nothing
+has to be cloned first:
+
+```bash
+GITHUB_TOKEN=ghp_… tga install --host github --org acme --pm github
+```
+
+A flag value wins over its environment variable, and a credential read from the
+environment is written to the config as `${GITHUB_TOKEN}` rather than as the
+secret. Run it with a required flag missing and it names every missing flag at
+once instead of hanging on a prompt. The full flag list is in the
+[CLI reference](../requirements/cli-commands.md#tga-install).
 
 ### Step 3: Review config.yaml
 

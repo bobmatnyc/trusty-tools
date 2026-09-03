@@ -66,7 +66,7 @@ commands:
   profile:
     description: Longitudinal per-contributor quality profile
   install:
-    description: Interactive configuration wizard
+    description: Configuration wizard — interactive, or flag-driven with --host/--pm
   aliases:
     description: List or merge developer identities (aliases)
   backfill:
