@@ -55,6 +55,9 @@ use trusty_mpm::client::DaemonClient;
 use trusty_mpm::daemon::{api, state::DaemonState};
 use trusty_mpm::project::Project;
 
+// #6671: the project registry seeds from the config file under `$HOME`.
+mod common;
+
 /// Serve the REAL daemon router on an ephemeral loopback port; return its base URL.
 async fn serve_real(state: Arc<DaemonState>) -> String {
     let router = api::router(state);
@@ -66,6 +69,7 @@ async fn serve_real(state: Arc<DaemonState>) -> String {
 
 /// A fresh, hermetic daemon state under a temp framework root.
 async fn fresh_state() -> Arc<DaemonState> {
+    common::scratch_home(); // #6671
     let root = tempfile::tempdir().unwrap().keep();
     Arc::new(DaemonState::with_root_isolated_managed(root).await)
 }

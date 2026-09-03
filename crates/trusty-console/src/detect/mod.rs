@@ -43,10 +43,19 @@ use crate::connector::{ServiceConnector, ServiceInfo, ServiceStatus};
 /// clobber each other's override and race (#3331 regression: the agents tests
 /// racing the mpm lock-file test). A single shared lock in the common parent
 /// module serialises them all.
-/// What: a `std::sync::Mutex<()>` locked by every env-mutating connector test.
-/// Test: used by `agents::tests` and `mpm::tests`; not itself a test.
+///
+/// #6661: `lib.rs` kept a SECOND lock over the same variable, so its
+/// `remove_var` landed inside this lock's critical section and
+/// `mpm_connector_surfaces_url_via_http_addr` read the live daemon on 7880
+/// instead of its fixture. This is now the crate's ONE lock for
+/// `TRUSTY_DATA_DIR_OVERRIDE`; a new env-mutating test takes this one or it is
+/// not serialised at all. (Under `cargo nextest` each test owns its process,
+/// so the variable is not shared there and the lock is inert — see CLAUDE.md.)
+/// What: a `std::sync::Mutex<()>` locked by every env-mutating test in the crate.
+/// Test: used by `agents::tests`, `mpm::tests`, `search_uds::tests` and the
+/// `port` verb tests in `lib.rs`; not itself a test.
 #[cfg(test)]
-pub(super) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Return all connectors in display order.
 ///

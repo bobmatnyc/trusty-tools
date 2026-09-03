@@ -326,18 +326,26 @@ mod tests {
     // ── tcp_probe ───────────────────────────────────────────────────────────
 
     /// Why: a closed port must yield false (not panic or block).
-    /// What: binds port 0 (OS assigns a free port), captures the addr, drops
-    /// the listener so the port closes, then asserts tcp_probe returns false.
-    /// Using an OS-assigned port avoids CI flap from hardcoded port numbers.
+    ///
+    /// #6661: this used to bind `127.0.0.1:0`, drop the listener, and assert
+    /// nothing answered on the freed port. Dropping a listener returns its port
+    /// to the OS ephemeral pool, so a parallel test that binds `127.0.0.1:0` —
+    /// `mpm_connector_surfaces_url_via_http_addr` does exactly that — can be
+    /// handed the same port and start listening on it before the probe runs.
+    /// The premise "nothing can be here" then does not hold and the probe
+    /// correctly returns `true`.
+    /// What: probes loopback port 1 instead. Nothing listens there: binding it
+    /// needs root, and it sits below every ephemeral range the OS allocates
+    /// from (macOS 49152–65535, Linux's 32768–60999 default), so no other test
+    /// can be given it. The kernel answers `RST`, so the probe returns `false`
+    /// promptly rather than spending its 300 ms timeout.
     /// Test: this test itself.
     #[test]
     fn test_tcp_probe_unreachable() {
-        use std::net::TcpListener;
-        // Bind to get a free OS port, then drop so the port is closed.
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
-        let addr = listener.local_addr().expect("local_addr").to_string();
-        drop(listener);
-        assert!(!tcp_probe(&addr), "closed port must return false");
+        assert!(
+            !tcp_probe("127.0.0.1:1"),
+            "a privileged, non-ephemeral port nothing can bind must return false"
+        );
     }
 
     /// Why: a listening port must yield true.

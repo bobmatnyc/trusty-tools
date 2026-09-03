@@ -372,6 +372,16 @@ mod tests {
 
     /// Why: the leading field must resolve to the GitHub `owner/repo` slug parsed
     /// from the git remote (both scp-style and https), matching `source_id`.
+    ///
+    /// #6663: [`git_owner_repo`] gives its worker thread a 100 ms
+    /// `recv_timeout`, and that worker shells out to `git`. Under a loaded
+    /// `--no-fail-fast` run one `git` invocation can exceed 100 ms, so a single
+    /// call returned `None` and the test failed on a tree it had just passed
+    /// on. The retry below waits for the condition — a resolved slug — rather
+    /// than assuming one attempt fits in the budget. Each attempt re-arms the
+    /// production timeout, so this loosens nothing about what is asserted: the
+    /// slug must still be exactly right, and an unresolvable remote still fails
+    /// at the deadline.
     /// Test: itself (temp git repo; skipped when git is unavailable on the runner).
     #[test]
     fn git_owner_repo_reads_remote() {
@@ -396,8 +406,15 @@ mod tests {
             "git@github.com:bobmatnyc/trusty-tools.git",
         ]));
         let cwd = dir.to_string_lossy().to_string();
+        // #6663: poll the condition instead of trusting one 100 ms attempt.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut resolved = git_owner_repo(&cwd);
+        while resolved.is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            resolved = git_owner_repo(&cwd);
+        }
         assert_eq!(
-            git_owner_repo(&cwd).as_deref(),
+            resolved.as_deref(),
             Some("bobmatnyc/trusty-tools"),
             "scp-style remote → owner/repo slug"
         );

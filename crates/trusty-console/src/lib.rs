@@ -553,14 +553,11 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Serialises tests that mutate the `TRUSTY_DATA_DIR_OVERRIDE` env var.
-    ///
-    /// Why: `std::env::set_var`/`remove_var` are process-global; parallel test
-    /// threads racing on them cause flaky failures. A module-level mutex makes
-    /// the override-set / call / override-clear sequence atomic per test.
-    /// What: a `()` mutex acquired at the top of each env-mutating test.
-    /// Test: used by the `port` verb tests below.
-    static DATA_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // #6661: this module used to declare its own `TRUSTY_DATA_DIR_OVERRIDE`
+    // mutex. Two locks over one process-global variable serialise nothing
+    // between them, so a `remove_var` here landed inside the connector tests'
+    // critical section. `detect::ENV_LOCK` is the crate's single lock.
+    use crate::detect::ENV_LOCK as DATA_DIR_ENV_LOCK;
 
     /// Why: default http address must be 127.0.0.1:7788 and tailscale off.
     /// What: parses `serve` with no flags and checks all defaults.

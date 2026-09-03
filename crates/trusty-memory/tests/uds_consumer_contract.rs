@@ -38,6 +38,47 @@ use trusty_memory::AppState;
 /// Generous enough for a loaded machine; a local socket answers in microseconds.
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Block until `socket` ANSWERS a real request, not merely until it accepts one.
+///
+/// Why (#6667): the gate this replaces was `uds::socket_is_serving` — a bare
+/// connect-and-close. It proves the listener exists; it does not prove a client
+/// that dials can get a frame through. Under a full `--no-fail-fast` run
+/// `tctl_probe_sees_a_live_uds_daemon_as_serving` died on the first real call
+/// with `write request frame to …/trusty-memory.sock: Socket is not connected
+/// (os error 57)` — the dial returned a stream whose peer had not finished
+/// coming up, so nothing was written. Two known windows sit behind that gate:
+/// `bind_hardened` binds BEFORE it chmods, so a connect landing in between sees
+/// a socket a hardened dial would still refuse (#6315), and a connect that the
+/// server has not yet accepted has no peer to write to.
+///
+/// What: polls `memory.health` through the shared client until one call
+/// SUCCEEDS. That is the condition the tests actually depend on, and it cannot
+/// be satisfied by a half-open socket. Panics at the budget rather than letting
+/// the first assertion fail somewhere less legible.
+async fn wait_until_answering(socket: &std::path::Path) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut last: Option<String> = None;
+    while std::time::Instant::now() < deadline {
+        match call_memory_tool_at_with_timeout(
+            socket,
+            "memory.health",
+            json!({}),
+            Duration::from_secs(1),
+        )
+        .await
+        {
+            Ok(_) => return,
+            Err(e) => last = Some(format!("{e:#}")),
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "nothing answered memory.health on {} within the budget: {}",
+        socket.display(),
+        last.unwrap_or_else(|| "no error recorded".to_string())
+    );
+}
+
 /// A running daemon on a temp socket, and the handle that stops it.
 struct Daemon {
     socket: PathBuf,
@@ -78,13 +119,7 @@ impl Daemon {
                 .await;
         });
 
-        // Poll rather than sleep: the bind is fast but a loaded machine is not.
-        for _ in 0..200 {
-            if trusty_common::uds::socket_is_serving(&socket, Duration::from_millis(50)).await {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+        wait_until_answering(&socket).await;
 
         Self {
             socket,
@@ -462,15 +497,7 @@ async fn tctl_probe_sees_a_live_uds_daemon_as_serving() {
         .await
     });
 
-    let mut up = false;
-    for _ in 0..200 {
-        if trusty_common::uds::socket_is_serving(&socket, Duration::from_millis(50)).await {
-            up = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(up, "nothing came up on {}", socket.display());
+    wait_until_answering(&socket).await;
 
     let outcome = probe_daemon_http("trusty-memory", "trusty-memory").await;
     assert!(
