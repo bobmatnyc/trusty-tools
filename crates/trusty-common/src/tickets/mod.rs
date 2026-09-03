@@ -11,4 +11,8 @@
 
 pub mod api;
 pub mod server;
+// #6316: trusty-common must not depend on trusty-mcp (cycle). Private, so the
+// crate's public API is unchanged and `trusty_mcp` stays the shared loop for
+// every server outside this crate.
+mod stdio;
 pub mod tools;

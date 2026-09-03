@@ -58,7 +58,10 @@ name = "trusty-common"
 # MINOR/breaking position for the pre-existing #6562/#6573 changes above).
 # This PR only adds two new public constants to `env_vars.rs`; additive, no
 # existing item changed shape.
-version = "0.47.1"
+# 0.47.2 (#6316): patch — version bump only, to clear the "PR version bump vs
+# crates.io" CI gate after src/** changes landed at the same version already
+# published as 0.47.1.
+version = "0.47.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -374,11 +377,6 @@ globset = { workspace = true, optional = true }
 # claude-mpm session-registry SQLite DB. All other catch-up deps (chrono,
 # reqwest, dirs, serde, serde_json, anyhow, tokio) are already unconditional.
 rusqlite = { workspace = true, optional = true }
-
-# `tickets`' MCP stdio server speaks JSON-RPC through the shared primitives,
-# which ADR-0040 (#5803) moved out of this crate into `trusty-mcp`. Optional so
-# the 20-plus consumers that never enable `tickets` do not compile it.
-trusty-mcp = { workspace = true, optional = true }
 
 # libc on every unix target: the macOS `launchd` module needs getuid(2) for the
 # gui/<uid> domain, and (#5099) the `uds` module needs getuid(2) plus
@@ -711,8 +709,11 @@ embedder-client = ["dep:thiserror", "embedder", "uds"]
 # Enables the `tickets` module: unified ticketing MCP server with GitHub,
 # JIRA, and Linear backends (absorbed from the former standalone `trusty-tickets`
 # crate). Pulls in `chrono`, `uuid`, `base64`, `thiserror`, and `toml` as
-# additional optional deps. Pulls in `trusty-mcp` for the stdio loop.
-tickets = ["dep:trusty-mcp", "dep:uuid", "dep:base64", "dep:thiserror", "dep:toml", "gh-cli"]
+# additional optional deps. #6316: it must NOT pull in `trusty-mcp` — that crate
+# depends on this one, so the edge closed a cycle. The stdio loop the
+# `tickets-mcp` binary needs lives in `src/tickets/stdio.rs` instead, and
+# `tests/no_trusty_mcp_backedge.rs` fails if the dependency comes back.
+tickets = ["dep:uuid", "dep:base64", "dep:thiserror", "dep:toml", "gh-cli"]
 # Enables the `gh` module: the workspace's single entry point for invoking the
 # GitHub CLI (#5475). Pulls in `thiserror` only — `tokio/process`, `serde` and
 # `serde_json` are already unconditional here.
