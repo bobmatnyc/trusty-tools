@@ -1,4 +1,4 @@
-//! Filling a built [`ReportModel`](super::model::ReportModel) from a live
+//! Filling a built [`ReportModel`](crate::report::model::ReportModel) from a live
 //! analyze fetch, and naming every repository the fetch could not populate.
 //!
 //! Why: split out of `analyze_adapter.rs` when #6712 pushed that file past the
@@ -9,7 +9,8 @@
 //!
 //! What: [`enrich_with_analyze`] and [`enrich_with_analyze_gaps`], moved
 //! verbatim. Both are re-exported from
-//! [`super::analyze_adapter`], so every existing path to them still resolves.
+//! [`crate::report::analyze_adapter`], so every existing path to them still
+//! resolves.
 //!
 //! Test: `analyze_adapter_tests.rs::{enrich_names_unreachable_repositories,
 //! enrich_reports_no_gaps_when_every_repo_is_populated,
