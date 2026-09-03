@@ -109,6 +109,11 @@ const MAIN_TOLERANCE_PX = 1;
 // `ToolPage.svelte`, so it inherits none of that component's already-measured
 // containment. It is also the page that pushed the nav to four links, which is
 // the header's own wrap case at 320px.
+// `/install` (#5110) carries more `<pre>` blocks than any other page here —
+// every audience's commands are in the document at once, hidden panels
+// included — and a `<pre>` never wraps, so it is the strongest case for the
+// containment rule this file measures. It does not go through
+// `ToolPage.svelte` either.
 const ROUTES = [
 	'/whats-new',
 	'/',
@@ -117,7 +122,8 @@ const ROUTES = [
 	'/tools/trusty-search',
 	'/tools/trusty-git-analytics',
 	'/tools/trusty-git-analytics/audit',
-	'/claude-mpm-migration'
+	'/claude-mpm-migration',
+	'/install'
 ];
 const WIDTHS = [375, 320];
 

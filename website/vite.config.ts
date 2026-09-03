@@ -20,6 +20,15 @@ export default defineConfig({
 		projects: [
 			{
 				extends: true,
+				// #5110: the install walkthrough's test mounts a real component,
+				// and `mount()` only exists in Svelte's CLIENT build. Vitest
+				// resolves packages under the `ssr` conditions by default even in
+				// a jsdom environment, which hands the test `svelte/index-server`
+				// and fails with `mount(...) is not available on the server`. This
+				// is the resolution SvelteKit's own testing guidance prescribes,
+				// scoped to this project so the `smoke` project — which shells out
+				// to a real `vite build` — keeps the build's own conditions.
+				resolve: { conditions: ['browser'] },
 				test: {
 					name: 'unit',
 					environment: 'jsdom',
