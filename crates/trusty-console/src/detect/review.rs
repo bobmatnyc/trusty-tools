@@ -117,6 +117,7 @@ impl ServiceConnector for ReviewConnector {
                 // #6416: even the not-installed row must say this is not a daemon
                 // — the card's remediation text branches on it.
                 lifecycle: self.lifecycle(),
+                cpu_pct: None,
             };
         }
 
@@ -145,6 +146,7 @@ impl ServiceConnector for ReviewConnector {
             // #6416: `Available` is trusty-review's healthy resting state, not a
             // stopped daemon; this is what stops the card rendering it as a fault.
             lifecycle: self.lifecycle(),
+            cpu_pct: None,
         }
     }
 }

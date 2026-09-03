@@ -97,7 +97,7 @@ pub use on_demand::{
     DEFAULT_ANALYZE_IDLE_TIMEOUT, OnDemandAnalyze, analyze_idle_timeout,
     analyze_idle_timeout_from_env,
 };
-pub use peer::{ensure_peer_is_self, peer_uid, self_uid};
+pub use peer::{ensure_peer_is_self, peer_pid, peer_uid, self_uid};
 pub use probe::{SocketVerdict, probe_socket_verdict, socket_is_serving};
 pub use rpc::{
     MAX_FRAME_BYTES, UdsRpcError, encode_frame, send_framed_notification, send_framed_request,

@@ -98,6 +98,22 @@ pub struct ServiceInfo {
     /// so a payload written before #6416 still deserialises, as a daemon.
     #[serde(default)]
     pub lifecycle: ServiceLifecycle,
+    /// The newest per-second CPU sample for this service, if any (#6642).
+    ///
+    /// Why it is on this struct at all: the home-page list must render a CPU
+    /// figure on first paint, before the SSE stream connects. Detection cannot
+    /// produce it — a connector is a synchronous probe with no sampler — so the
+    /// route overlays it from the same per-service history the graph reads,
+    /// which is what keeps the number and the newest bar identical.
+    ///
+    /// Serialised UNCONDITIONALLY, as `null` when absent, unlike the optional
+    /// fields above. `None` means no measurement was taken (on-demand member,
+    /// stopped daemon, or a process the console cannot identify); rendering that
+    /// as `0.0` would draw an idle service where there is none. A key that is
+    /// sometimes missing and sometimes null would be two spellings of one fact.
+    /// `#[serde(default)]` so a payload written before #6642 still deserialises.
+    #[serde(default)]
+    pub cpu_pct: Option<f32>,
 }
 
 /// Per-service adapter contract.

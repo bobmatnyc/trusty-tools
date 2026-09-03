@@ -11,9 +11,13 @@
 //!      ONE write path; when the ring is full it evicts the oldest item before
 //!      appending, so capacity is never exceeded and insertion order is
 //!      preserved. [`HOST_HISTORY_CAPACITY`] and [`HOST_SAMPLE_INTERVAL_SECS`]
-//!      pin the owner's 10-minute window (120 points at 5 s). Nothing here
+//!      pin the owner's 10-minute window (600 points at 1 s). Nothing here
 //!      persists: the ring is in-memory only and a restart starts an empty
 //!      window by design (owner ruling, epic #6516 Phase 3).
+//!
+//! #6642: the cadence moved from 5 s to 1 s and the capacity from 120 to 600.
+//! The window is the same 10 minutes; each home-page card now draws one bar per
+//! second, which a 5 s sample cannot render.
 //! Test: the inline `tests` module — `push_evicts_oldest_at_capacity`,
 //!      `push_preserves_insertion_order`, `empty_ring_reads_empty`,
 //!      `host_window_is_the_owner_ruling`, `capacity_of_zero_is_clamped_to_one`.
@@ -22,24 +26,26 @@ use std::collections::VecDeque;
 
 use super::HostMetrics;
 
-/// Points retained per metric ring — 120 (#6641).
+/// Points retained per metric ring — 600 (#6641; raised from 120 by #6642).
 ///
-/// Why: the owner's Phase 3 ruling is a 10-minute window sampled every 5 s,
-///      which is exactly 120 points. Naming it once keeps the console, the
-///      history endpoint, and the UI from each hard-coding their own number.
-/// What: `120`.
+/// Why: the owner's ruling is a 10-minute window. #6641 sampled it every 5 s,
+///      which is 120 points; #6642 moved the cadence to 1 s, so the same ten
+///      minutes is 600 points. Naming it once keeps the console, the history
+///      endpoint, and the UI from each hard-coding their own number.
+/// What: `600`.
 /// Test: `host_window_is_the_owner_ruling`.
-pub const HOST_HISTORY_CAPACITY: usize = 120;
+pub const HOST_HISTORY_CAPACITY: usize = 600;
 
-/// Seconds between host samples — 5 (#6641).
+/// Seconds between host samples — 1 (#6641; lowered from 5 by #6642).
 ///
 /// Why: the other half of the owner's window ruling; the console's sampler
 ///      default and the `sample_interval_secs` the history payload advertises
 ///      both read it from here, so the graph's x-axis cannot disagree with the
-///      producer.
-/// What: `5`.
+///      producer. #6642 set it to 1 because each home-page card draws one bar
+///      per second.
+/// What: `1`.
 /// Test: `host_window_is_the_owner_ruling`.
-pub const HOST_SAMPLE_INTERVAL_SECS: u64 = 5;
+pub const HOST_SAMPLE_INTERVAL_SECS: u64 = 1;
 
 /// A fixed-capacity FIFO of metric samples, oldest first (#6641).
 ///
@@ -102,6 +108,19 @@ impl<T> MetricRing<T> {
         self.items.iter()
     }
 
+    /// The newest item, or `None` on an empty ring.
+    ///
+    /// Why (#6642): a caller that wants only the latest value — the console's
+    /// service list renders one number per service before its stream connects —
+    /// would otherwise call [`MetricRing::snapshot`] and take the last element,
+    /// cloning the whole 600-point window to read one point.
+    /// What: the back of the deque, borrowed.
+    /// Test: `last_reads_the_newest_item`.
+    #[must_use]
+    pub fn last(&self) -> Option<&T> {
+        self.items.back()
+    }
+
     /// Number of items currently held (never above [`MetricRing::capacity`]).
     ///
     /// Test: `push_evicts_oldest_at_capacity`.
@@ -144,7 +163,7 @@ impl<T: Clone> MetricRing<T> {
 impl MetricRing<HostMetrics> {
     /// A host-metrics ring sized to the owner's 10-minute window (#6641).
     ///
-    /// Why: the console should not restate `120`; the window is one ruling and
+    /// Why: the console should not restate `600`; the window is one ruling and
     ///      belongs to one constant.
     /// What: `MetricRing::new(HOST_HISTORY_CAPACITY)`.
     /// Test: `host_window_is_the_owner_ruling`.
@@ -160,8 +179,8 @@ mod tests {
 
     /// Why: the eviction rule is the whole point of a bounded ring — a ring that
     ///      grew past its capacity would leak in a long-lived daemon.
-    /// What: pushes `capacity + 1` items into a 120-slot ring and asserts the
-    ///      length stopped at 120, the oldest item is gone, and the newest is
+    /// What: pushes `capacity + 1` items into a 600-slot ring and asserts the
+    ///      length stopped at 600, the oldest item is gone, and the newest is
     ///      present.
     /// Test: this test.
     #[test]
@@ -173,7 +192,7 @@ mod tests {
         assert_eq!(ring.len(), HOST_HISTORY_CAPACITY);
         assert_eq!(ring.snapshot().first().copied(), Some(0));
 
-        // #6641: the 121st push must evict sample 0 and pin the length.
+        // #6642: the 601st push must evict sample 0 and pin the length.
         ring.push(HOST_HISTORY_CAPACITY as u32);
         assert_eq!(
             ring.len(),
@@ -204,11 +223,29 @@ mod tests {
         assert_eq!(ring.iter().copied().collect::<Vec<_>>(), vec![3, 4, 5]);
     }
 
+    /// Why (#6642): the console's service list renders the newest point per
+    ///      service. Reading it through `snapshot().last()` would clone the
+    ///      whole 600-point window per service per request.
+    /// What: asserts `last` follows the newest push, survives an eviction, and
+    ///      is `None` before the first push.
+    /// Test: this test.
+    #[test]
+    fn last_reads_the_newest_item() {
+        let mut ring: MetricRing<u32> = MetricRing::new(2);
+        assert_eq!(ring.last(), None, "an empty ring has no newest item");
+        ring.push(1);
+        assert_eq!(ring.last().copied(), Some(1));
+        ring.push(2);
+        ring.push(3);
+        assert_eq!(ring.snapshot(), vec![2, 3], "1 was evicted");
+        assert_eq!(ring.last().copied(), Some(3));
+    }
+
     /// Why: the history endpoint must answer `200` with an empty window before
-    ///      the first sample, so an empty ring has to read as empty rather than
-    ///      as an error or a panic.
+    /// the first sample, so an empty ring has to read as empty rather than as an
+    /// error or a panic.
     /// What: asserts `is_empty`, `len == 0`, and an empty snapshot on a fresh
-    ///      ring.
+    /// ring.
     /// Test: this test.
     #[test]
     fn empty_ring_reads_empty() {
@@ -222,17 +259,19 @@ mod tests {
 
     /// Why: the 10-minute window is an owner ruling; if the constants drift the
     ///      graph silently covers a different span than the UI labels claim.
-    /// What: pins 120 points × 5 s = 600 s and asserts the host-window
-    ///      constructor uses the constant.
+    /// What: pins 600 points × 1 s = 600 s and asserts the host-window
+    ///      constructor uses the constant. #6642 moved the pair from 120 × 5 to
+    ///      600 × 1; the PRODUCT is what the UI's x-axis depends on, so it is
+    ///      asserted separately from the two operands.
     /// Test: this test.
     #[test]
     fn host_window_is_the_owner_ruling() {
-        assert_eq!(HOST_HISTORY_CAPACITY, 120);
-        assert_eq!(HOST_SAMPLE_INTERVAL_SECS, 5);
+        assert_eq!(HOST_HISTORY_CAPACITY, 600);
+        assert_eq!(HOST_SAMPLE_INTERVAL_SECS, 1);
         assert_eq!(
             HOST_HISTORY_CAPACITY as u64 * HOST_SAMPLE_INTERVAL_SECS,
             600,
-            "120 points at 5s is the owner's 10-minute window"
+            "600 points at 1s is the owner's 10-minute window"
         );
         let ring = MetricRing::<HostMetrics>::host_window();
         assert_eq!(ring.capacity(), HOST_HISTORY_CAPACITY);

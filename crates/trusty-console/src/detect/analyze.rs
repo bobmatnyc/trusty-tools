@@ -381,6 +381,7 @@ impl AnalyzeConnector {
                 // `Available` is its resting state and the card must not offer
                 // to start a daemon.
                 lifecycle: self.lifecycle(),
+                cpu_pct: None,
             };
 
         if !binary_on_path(BINARY) {

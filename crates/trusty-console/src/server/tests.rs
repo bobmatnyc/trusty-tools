@@ -43,6 +43,7 @@ impl ServiceConnector for StubConnector {
             url: None,
             hint: None,
             lifecycle: self.lifecycle(),
+            cpu_pct: None,
         }
     }
 }
@@ -197,6 +198,7 @@ async fn test_services_route_returns_degraded_with_hint() {
                 url: None,
                 hint: Some("reachable but `console_metrics` tool not registered".to_string()),
                 lifecycle: self.lifecycle(),
+                cpu_pct: None,
             }
         }
     }
@@ -1067,8 +1069,22 @@ async fn machine_history_route_cold_cache_returns_empty_200() {
         serde_json::from_slice(&bytes).expect("parse HistorySnapshot");
     assert!(snap.samples.is_empty());
     assert!(snap.transitions.is_empty());
-    assert_eq!(snap.sample_capacity, 120);
-    assert_eq!(snap.sample_interval_secs, 5);
+    // #6642: read from the constants rather than restating 600 × 1, so the next
+    // cadence change fails in ONE place — history.rs's own window test.
+    assert_eq!(
+        snap.sample_capacity,
+        trusty_common::host_metrics::history::HOST_HISTORY_CAPACITY
+    );
+    assert_eq!(
+        snap.sample_interval_secs,
+        trusty_common::host_metrics::history::HOST_SAMPLE_INTERVAL_SECS
+    );
+    // #6642: the per-service rings share the host window and start empty.
+    assert!(snap.service_samples.is_empty());
+    assert_eq!(
+        snap.service_sample_capacity,
+        crate::machine_history::service_samples::SERVICE_HISTORY_CAPACITY
+    );
     assert_eq!(
         snap.schema_version,
         crate::machine_history::MACHINE_HISTORY_SCHEMA_VERSION

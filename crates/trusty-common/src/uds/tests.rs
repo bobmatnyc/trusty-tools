@@ -558,6 +558,33 @@ async fn peer_uid_of_self_connection_is_self() {
     );
 }
 
+/// Why (#6642): the console identifies a UDS daemon's process by asking the
+/// kernel who is on the other end of the connection it already makes. A stub
+/// returning `None` would leave every UDS service's CPU graph permanently
+/// empty, with nothing failing to say so.
+/// What: connects to a socket this process is also listening on, so the peer pid
+/// has one correct answer — this process's own.
+#[tokio::test]
+async fn peer_pid_of_self_connection_is_this_process() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("pid.sock");
+    let listener = bind_hardened(&sock).expect("bind");
+
+    let _client = UnixStream::connect(&sock).await.expect("connect");
+    let (accepted, _) = listener.accept().await.expect("accept");
+
+    // Darwin and Linux both implement this; every other target answers None by
+    // design, so the assertion is scoped to the two that must work.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+    assert_eq!(
+        super::peer::peer_pid(&accepted),
+        Some(std::process::id()),
+        "a connection from this process must report this process's pid"
+    );
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+    assert_eq!(super::peer::peer_pid(&accepted), None);
+}
+
 // ── singleton bind (#5182) ──────────────────────────────────────────────────
 
 #[tokio::test]
