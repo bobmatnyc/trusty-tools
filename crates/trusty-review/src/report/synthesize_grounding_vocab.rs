@@ -164,17 +164,17 @@ pub(super) const ABSENCE_NEGATIONS: &[&str] = &[
     "no ", "not ", "none", "nothing", "never", "n't", "zero ", "absent", "without",
 ];
 
-/// The two words every "no complexity distribution was provided" sentence is
-/// built around (#6691).
+/// The one word every claim about complexity data is built around (#6691).
 ///
-/// Two words rather than one phrase for the reason [`CLEAN_SIGNAL_WORDS`] is:
-/// the model puts its own qualifiers between them. Paired with
+/// One word, not the "complexity"+"distribution" pair the first fix used: that
+/// pair matched only the phrasing the graded report happened to use, so
+/// "complexity could not be measured" and "no complexity metrics were computed"
+/// — the same false claim, reworded — both shipped. Paired with
 /// [`ABSENCE_NEGATIONS`] and [`DATA_SUPPLY_WORDS`], which together are what
-/// separate "no complexity distribution was provided" (a claim about the DATA,
-/// and false when the Code Quality table renders one) from "the complexity
-/// distribution is not evenly spread" (a claim about its shape, which the
-/// guardrail has no business touching).
-pub(super) const COMPLEXITY_WORDS: (&str, &str) = ("complexity", "distribution");
+/// separate a claim about the DATA (false when the Code Quality table renders a
+/// distribution) from "the complexity distribution is not evenly spread" (a
+/// claim about its shape, which the guardrail has no business touching).
+pub(super) const COMPLEXITY_WORD: &str = "complexity";
 
 /// The verbs that make an absence sentence a claim about what the run was GIVEN.
 pub(super) const DATA_SUPPLY_WORDS: &[&str] = &[
@@ -186,6 +186,7 @@ pub(super) const DATA_SUPPLY_WORDS: &[&str] = &[
     "present",
     "reported",
     "computed",
+    "measured",
     "surfaced",
     "collected",
 ];

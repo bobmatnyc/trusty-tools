@@ -72,6 +72,8 @@ pub mod synthesize_guard;
 // prompt hints plus a fail-closed post-check for reachability and load-bearing
 // claims. Used only by `synthesize` and `synthesize_prompt`.
 pub(crate) mod synthesize_grounding;
+// #6691: the complexity-absence claim check, scoped per application.
+mod synthesize_grounding_complexity;
 mod synthesize_grounding_text;
 mod synthesize_grounding_vocab;
 mod synthesize_guardrail;
