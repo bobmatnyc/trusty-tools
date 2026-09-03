@@ -19,9 +19,26 @@
 
 ALTER TABLE commits ADD COLUMN ai_detector_version INTEGER NOT NULL DEFAULT 0;
 
--- The re-classification pass scans `WHERE ai_detector_version < ?` on every
--- collect. On a corpus of hundreds of thousands of commits that is a full table
--- scan per run once the backfill has settled; the index makes the settled case
--- a no-op lookup.
-CREATE INDEX IF NOT EXISTS idx_commits_ai_detector_version
-    ON commits(ai_detector_version);
+-- The re-classification pass runs
+--   WHERE ai_detector_version < ? ORDER BY ai_detector_version, id LIMIT ?
+-- on every collect. The index is COMPOSITE, and its column order is the query's
+-- ORDER BY, so one index range walk satisfies both the filter and the ordering:
+-- `SEARCH commits USING INDEX idx_commits_ai_detector_version
+-- (ai_detector_version<?)` with no temp b-tree and no table scan.
+--
+-- A single-column index on `ai_detector_version` alone is NOT enough. ANALYZE
+-- records `200000 200000` for it — one distinct value across the whole table —
+-- so the planner reads an index lookup as returning every row, and whether it
+-- picks the index or a rowid scan is a coin-flip that varies by SQLite build.
+-- With `ORDER BY id` it must then sort, which is a temp b-tree over the whole
+-- table. The query pins this index with `INDEXED BY` for the same reason: it
+-- turns "the planner will probably use it" into a prepare-time error if it
+-- cannot, so the settled-corpus cost cannot silently regress to a full scan.
+-- Test: `collect::reclassify::tests::the_scan_uses_the_index_on_a_populated_database`.
+--
+-- DROP first: an earlier build of this branch created the same index name over
+-- one column, and a database that already recorded migration 28 would never
+-- re-run this file.
+DROP INDEX IF EXISTS idx_commits_ai_detector_version;
+CREATE INDEX idx_commits_ai_detector_version
+    ON commits(ai_detector_version, id);

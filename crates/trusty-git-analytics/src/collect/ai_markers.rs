@@ -89,6 +89,12 @@ pub struct Detection {
 /// so every row written before this column existed sorts as older than any
 /// shipped generation and is re-classified on the next collect.
 ///
+/// Nothing derives this number from the marker table or checks that the two
+/// moved together: it is hand-maintained, so a change to [`BUILTIN`] that
+/// forgets to bump it silently skips re-classification, and the corpus keeps
+/// the old verdicts exactly as it did before #6748. Bumping it when nothing
+/// changed is harmless — one extra pass — so bump when in doubt.
+///
 /// This tracks the SHIPPED marker set only. Operator markers loaded from disk
 /// by [`crate::collect::ai_marker_config`] change without a rebuild, so a row
 /// they classified is not re-visited by a version bump alone — run

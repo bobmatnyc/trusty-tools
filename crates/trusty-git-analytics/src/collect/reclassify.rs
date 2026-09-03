@@ -12,10 +12,12 @@
 //! `ai_detector_version` is below [`DETECTOR_VERSION`], re-runs the detector
 //! over the stored message and author email, and writes the verdict and the
 //! current generation together. Rows already at the current generation are
-//! never read, so a settled corpus costs one indexed lookup. Work proceeds in
-//! batches, one transaction each, so an interrupted run leaves every completed
-//! batch stamped and the remainder still selectable — the next run finishes it
-//! rather than starting over.
+//! never read: the scan walks `idx_commits_ai_detector_version` over the stale
+//! range only, so its cost tracks the number of stale rows and not the table
+//! size — see [`reclassify_batch_with`] for why the index is pinned. Work
+//! proceeds in batches, one transaction each, so an interrupted run leaves
+//! every completed batch stamped and the remainder still selectable — the next
+//! run finishes it rather than starting over.
 //! Test: `tests` below.
 
 use rusqlite::params;
@@ -29,6 +31,19 @@ use crate::core::db::Database;
 /// Large enough that a hundred-thousand-row corpus is a few hundred
 /// transactions, small enough that an interrupted run loses little work.
 pub const RECLASSIFY_BATCH: usize = 1_000;
+
+/// The stale-row scan, as one constant so the query-plan test explains the
+/// string the pass actually prepares rather than a copy of it.
+///
+/// `ORDER BY ai_detector_version, id` is the index's own column order, so the
+/// range walk is already sorted and no temp b-tree is built. Ordering by `id`
+/// alone would need one. See [`reclassify_batch_with`] for why `INDEXED BY` is
+/// there.
+/// Test: `tests::the_scan_uses_the_index_on_a_populated_database`.
+const SCAN_SQL: &str = "SELECT id, message, ai_tool, agentic_mode, author_email FROM commits \
+     INDEXED BY idx_commits_ai_detector_version \
+     WHERE ai_detector_version < ?1 \
+     ORDER BY ai_detector_version, id LIMIT ?2";
 
 /// What one re-classification pass did.
 ///
@@ -108,7 +123,17 @@ where
 /// `detector` over each, then writes every scanned row — changed or not — with
 /// the current generation. Stamping the unchanged rows is what terminates the
 /// loop; without it the same batch would be selected forever.
-/// Test: `tests::an_interrupted_pass_resumes_from_where_it_stopped`.
+///
+/// The scan pins `idx_commits_ai_detector_version` with `INDEXED BY`, and
+/// orders by that index's own columns so the walk needs no sort. Left to
+/// itself the planner may read this as a full table scan: ANALYZE records one
+/// distinct value across the whole column on a settled corpus, so an index
+/// lookup and a rowid scan look equally expensive to it, and which one it
+/// picks varies by SQLite build. A full scan here reads every `message` in the
+/// table on every collect. `INDEXED BY` makes that a prepare-time error rather
+/// than a silent regression.
+/// Test: `tests::an_interrupted_pass_resumes_from_where_it_stopped`,
+/// `tests::the_scan_uses_the_index_on_a_populated_database`.
 ///
 /// # Errors
 ///
@@ -125,10 +150,7 @@ where
     let mut pending: Vec<(i64, i64, Option<String>, &'static str, bool)> = Vec::new();
     {
         let conn = db.connection();
-        let mut stmt = conn.prepare(
-            "SELECT id, message, ai_tool, agentic_mode, author_email FROM commits \
-             WHERE ai_detector_version < ?1 ORDER BY id LIMIT ?2",
-        )?;
+        let mut stmt = conn.prepare(SCAN_SQL)?;
         let rows: Vec<(i64, String, Option<String>, String, String)> = stmt
             .query_map(params![DETECTOR_VERSION, batch as i64], |row| {
                 Ok((
@@ -236,6 +258,94 @@ mod tests {
         assert_eq!(tool.as_deref(), Some("claude"));
         assert_eq!(mode, "full_agentic");
         assert_eq!(version, DETECTOR_VERSION);
+    }
+
+    /// Why: the settled-corpus claim is about a query PLAN, and a plan is not
+    /// provable from an empty table — SQLite has no statistics there and
+    /// answers whatever is cheapest for zero rows. On a populated, ANALYZE'd
+    /// database `sqlite_stat1` records `20000 20000` for this index: one
+    /// distinct value across the whole column, which reads to the planner as
+    /// "an index lookup returns every row". A single-column index with
+    /// `ORDER BY id` then leaves the choice between an index search and a full
+    /// rowid scan on a knife-edge that varies by SQLite build, and the losing
+    /// side reads every `message` in the table on every collect.
+    /// What: builds 20 000 rows all at the current generation, runs ANALYZE,
+    /// and asserts the plan of [`SCAN_SQL`] itself — searches the index, with
+    /// no `SCAN commits` and no sort.
+    /// Test: this test itself.
+    #[test]
+    fn the_scan_uses_the_index_on_a_populated_database() {
+        let path = std::env::temp_dir().join(format!(
+            "tga-6748-plan-{}-{:?}.db",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let db = Database::open(&path).expect("open db");
+        {
+            let conn = db.connection();
+            conn.execute_batch("BEGIN").expect("begin");
+            let mut insert = conn
+                .prepare(
+                    "INSERT INTO commits (sha, author_name, author_email, timestamp, \
+                     message, repository, is_ai_assisted, ai_tool, agentic_mode, \
+                     ai_detector_version) \
+                     VALUES (?1, 'Ada', 'ada@example.com', '2026-01-01T00:00:00Z', ?2, \
+                             'testrepo', 0, NULL, 'none', ?3)",
+                )
+                .expect("prepare insert");
+            for i in 0..20_000 {
+                insert
+                    .execute(params![
+                        format!("sha{i:08}"),
+                        format!("feat: commit {i} with a body long enough to be a real row"),
+                        DETECTOR_VERSION
+                    ])
+                    .expect("insert");
+            }
+            drop(insert);
+            conn.execute_batch("COMMIT; ANALYZE;").expect("analyze");
+
+            let stat: String = conn
+                .query_row(
+                    "SELECT stat FROM sqlite_stat1 \
+                     WHERE idx = 'idx_commits_ai_detector_version'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("the index must have statistics for the plan to be meaningful");
+            assert!(
+                stat.starts_with("20000 20000"),
+                "the pathological statistic this test exists for: {stat}"
+            );
+
+            let mut plan_stmt = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {SCAN_SQL}"))
+                .expect("prepare plan");
+            let plan = plan_stmt
+                .query_map(params![DETECTOR_VERSION, RECLASSIFY_BATCH as i64], |r| {
+                    r.get::<_, String>(3)
+                })
+                .expect("query plan")
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .expect("collect plan")
+                .join(" | ");
+
+            assert!(
+                plan.contains("USING INDEX idx_commits_ai_detector_version"),
+                "the scan must be an index range walk: {plan}"
+            );
+            assert!(
+                !plan.contains("SCAN commits"),
+                "a full table scan reads every message on every collect: {plan}"
+            );
+            assert!(
+                !plan.contains("TEMP B-TREE"),
+                "ordering by the index's own columns must need no sort: {plan}"
+            );
+        }
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Why: a row already at the current generation must not be re-detected.
