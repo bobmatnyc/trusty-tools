@@ -27,6 +27,7 @@
 //! | [`evidence`] | asking trusty-search where each DD dimension's evidence is (#6082) |
 //! | [`topology`] | reading a Cargo workspace's own crate graph (#6147) |
 //! | [`cve`] | scanning the pinned dependency set for advisories (#6075) |
+//! | [`license`] | banding that same set by license obligation (#6076) |
 //! | [`priority`] | writing that ranking, and the gaps, into the manifest |
 //!
 //! ## Fail-open, and never silently
@@ -58,9 +59,11 @@ use crate::workdir::WorkDir;
 
 pub mod cve;
 pub mod daemons;
+pub mod ecosystem;
 pub mod evidence;
 pub mod hotspots;
 pub mod index;
+pub mod license;
 pub mod priority;
 pub mod quality;
 pub mod search_rpc;
@@ -412,6 +415,10 @@ pub async fn ground_manifest(
     // the other's data with it. Its gaps join topology's rather than earning a
     // third `priority::write_into` call.
     manifest_leg_gaps.extend(cve::ground_into(manifest, checkout, display));
+    // #6076: the license review reuses the `[report].findings` channel #6075
+    // opened rather than adding a second one, and joins the same gap list for
+    // the same reason — its write failing must cost only its own rows.
+    manifest_leg_gaps.extend(license::ground_into(manifest, checkout, display));
     // #6082: read BEFORE the write, which is what would otherwise make the two
     // states indistinguishable afterwards.
     let already_rendered = investigation_exists(manifest);
@@ -435,8 +442,8 @@ pub async fn ground_manifest(
             priority::write_into(manifest, checkout, &[], None, false, &manifest_leg_gaps)
     {
         grounding.gaps.push(format!(
-            "{display}: {cause} — the rendered report does not state why its crate topology \
-             and dependency CVE scan are missing"
+            "{display}: {cause} — the rendered report does not state why its crate topology, \
+             dependency CVE scan, and license review are missing"
         ));
     }
     grounding.gaps.extend(manifest_leg_gaps);
