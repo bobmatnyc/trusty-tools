@@ -6,7 +6,9 @@ name = "trusty-mcp"
 # so it can never satisfy `check-publish-ready.sh` CHECK 7. #6178: a release tag
 # here cannot be moved or deleted, so the version number is spent and the
 # release moves forward to a gate-clean commit instead.
-version = "0.1.2"
+#
+# 0.1.2 -> 0.1.3: additive, feature-gated `daemon_bridge_json_rpc` (#6316).
+version = "0.1.3"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -34,11 +36,26 @@ reqwest = { workspace = true }
 # `daemon_bridge` spawns the daemon with `home_dir()` as its working directory,
 # so a relative path in the child never resolves against a caller's cwd.
 dirs = { workspace = true }
+# #6316: `daemon_bridge_json_rpc` forwards over a Unix socket with the shared
+# framed client. OPTIONAL, and this crate's only `trusty-common` edge — the lean
+# rlib every MCP server links (ADR-0040) must not gain a heavyweight dependency
+# it does not use. PR #6726 removed the `trusty-common` -> `trusty-mcp`
+# back-edge that would otherwise make this a cycle.
+trusty-common = { workspace = true, optional = true }
 
 # `single_flight` uses `flock(2)` directly: an advisory whole-file lock that the
 # kernel releases on process death, which is what makes the guard crash-safe.
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+[features]
+default = []
+# #6316: compiles `daemon_bridge_json_rpc`, the shared stdio<->UDS JSON-RPC
+# forwarder trusty-memory / trusty-analyze / trusty-search re-point onto. Off by
+# default because it is what pulls `trusty-common` into the graph; a consumer
+# that wants only the protocol primitives pays nothing for it. Unix-only in
+# practice — `trusty_common::uds` is itself gated on `cfg(unix)`.
+daemon-bridge-json-rpc = ["dep:trusty-common", "trusty-common/uds"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
