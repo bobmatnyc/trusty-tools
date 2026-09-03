@@ -584,6 +584,125 @@ mod tests {
         );
     }
 
+    /// Why: #3915 lands `fact_pm_effort` on databases that already hold v26
+    /// data — `work_items` rows and the `fact_pm_work` verdicts derived from
+    /// them. `migration_v27_creates_fact_pm_effort` only opens a brand-new
+    /// in-memory database, which runs every migration from v1 forward and so
+    /// never exercises the upgrade path a deployed database takes. A v27 that
+    /// dropped or rebuilt `fact_pm_work` would pass that test while silently
+    /// destroying every stored verdict.
+    /// What: builds a genuine v26 database (the schema shipped before #3915),
+    /// writes a `work_items` row and the `fact_pm_work` verdict for it,
+    /// upgrades to v27, then asserts both rows survive unchanged, a
+    /// `fact_pm_effort` row referencing that same ticket inserts, and the
+    /// registry reads 27. Mirrors
+    /// `migration_v24_preserves_an_existing_v23_database`.
+    /// Test: this test itself.
+    #[test]
+    fn migration_v27_preserves_an_existing_v26_database() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        // The pragma every real connection carries — see `Database::apply_pragmas`.
+        // Without it the new table's FOREIGN KEY is inert.
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("enable foreign keys");
+        super::run_through(&mut conn, 26).expect("migrate to v26");
+
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                r.get(0)
+            })
+            .expect("read version");
+        assert_eq!(version, 26, "the fixture must be a real pre-#3915 database");
+
+        // Rows written the way the v26 classifier wrote them, before
+        // `fact_pm_effort` existed.
+        conn.execute(
+            "INSERT INTO work_items (id, source, title, status, item_type) \
+             VALUES ('ML-2200', 'jira', 'ML Plat - Feature store rollout', 'Done', 'Epic')",
+            [],
+        )
+        .expect("insert v26-era work item");
+        conn.execute(
+            "INSERT INTO fact_pm_work \
+             (work_item_id, work_item_source, pm_name, week_key, is_meaningful, \
+              exclusion_reason, title_word_count, body_word_count, formula_version, computed_at) \
+             VALUES ('ML-2200', 'jira', 'Rohit Puntambekar', '2026-W20', 1, 'NONE', 5, 180, \
+                     'pm-work-1', 1700000000)",
+            [],
+        )
+        .expect("insert v26-era verdict");
+
+        // The upgrade every existing v26 database performs on next open.
+        super::run_through(&mut conn, 27).expect("migrate to v27");
+
+        let upgraded: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                r.get(0)
+            })
+            .expect("read version");
+        assert_eq!(upgraded, 27, "the registry must record the new migration");
+
+        // The seeded rows survive the new CREATE TABLE untouched.
+        let (title, status): (String, String) = conn
+            .query_row(
+                "SELECT title, status FROM work_items \
+                 WHERE id = 'ML-2200' AND source = 'jira'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("the pre-migration work item must still be readable");
+        assert_eq!(title, "ML Plat - Feature store rollout");
+        assert_eq!(status, "Done");
+
+        let (pm, week, meaningful, body_words, computed): (String, String, i64, i64, i64) = conn
+            .query_row(
+                "SELECT pm_name, week_key, is_meaningful, body_word_count, computed_at \
+                 FROM fact_pm_work WHERE work_item_id = 'ML-2200' AND work_item_source = 'jira'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("the pre-migration verdict must still be readable");
+        assert_eq!(pm, "Rohit Puntambekar");
+        assert_eq!(week, "2026-W20");
+        assert_eq!(meaningful, 1);
+        assert_eq!(body_words, 180);
+        assert_eq!(computed, 1_700_000_000);
+
+        let verdicts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fact_pm_work", [], |r| r.get(0))
+            .expect("count verdicts");
+        assert_eq!(verdicts, 1, "v27 must not drop or duplicate v26 rows");
+
+        // The new table accepts a score for that pre-existing ticket.
+        conn.execute(
+            "INSERT INTO fact_pm_effort \
+             (work_item_id, work_item_source, pm_name, week_key, effort_score, \
+              effort_bucket, score_status, epic_children_count, description_word_count, \
+              comment_count, transition_count, story_points, inputs_present, \
+              age_days_at_score, formula_version, computed_at) \
+             VALUES ('ML-2200', 'jira', 'Rohit Puntambekar', '2026-W20', 22.5, 'MEDIUM', \
+                     'SCORED', 4, 180, 3, 7, NULL, \
+                     'CHILDREN,DESCRIPTION,COMMENTS,TRANSITIONS', 90, 'pm-effort-1', \
+                     1700000001)",
+            [],
+        )
+        .expect("scoring a ticket the v26 database already knew must succeed");
+
+        let (score, bucket): (Option<f64>, Option<String>) = conn
+            .query_row(
+                "SELECT effort_score, effort_bucket FROM fact_pm_effort \
+                 WHERE work_item_id = 'ML-2200' AND work_item_source = 'jira'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("read the new row back");
+        assert_eq!(score, Some(22.5));
+        assert_eq!(bucket.as_deref(), Some("MEDIUM"));
+
+        // Re-running is a no-op, per the runner's idempotence contract.
+        super::run_through(&mut conn, 27).expect("re-run is idempotent");
+    }
+
     /// Why: regression guard for issue #445 batch B. Migration v18 creates
     /// `fact_weekly_quality` with all required columns and a PRIMARY KEY on
     /// (author_email, iso_year, iso_week, repository).
