@@ -50,7 +50,7 @@ engagement = "2026-Q3"
 tga = "6.0.0"
 trusty-search = "0.52.0"
 trusty-analyze = "0.12.5"
-trusty-review = "0.32.0"
+trusty-review = "0.33.0"
 
 # A pin may name the artifact's digest as well as its version, in which case a
 # download whose bytes do not match is refused:
