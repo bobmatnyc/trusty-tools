@@ -84,10 +84,10 @@ Minimum manifest for one local checkout at `<repo-path>`:
 ```toml
 # report-manifest.toml
 [report]
-title = "FLYR Technical DD"
+title = "Acme Technical DD"
 
 [[repositories]]
-name = "FLYR"
+name = "Acme"
 path = "<repo-path>"
 ```
 
@@ -100,12 +100,12 @@ Optional keys for a code-only run:
 
 ```toml
 [report]
-title = "FLYR Technical DD"
+title = "Acme Technical DD"
 analyst = "Matt"
 code_only = true
 
 [[repositories]]
-name = "FLYR"
+name = "Acme"
 path = "<repo-path>"
 ref  = "main"
 investigate_max_files = 40
