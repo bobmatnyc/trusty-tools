@@ -4,7 +4,9 @@ use super::*;
 use crate::report::investigate::{
     Investigation, InvestigationStatus, RepoInvestigation, VerifiedFinding,
 };
-use crate::report::metrics::{AnalyzeMetrics, MetricFinding, Severity};
+use crate::report::metrics::{
+    AnalyzeMetrics, ComplexityBucket, ComplexityDistribution, MetricFinding, Severity,
+};
 use crate::report::model::{ReportModel, RepositoryReport};
 use crate::report::synthesize_grounding_text::replace_ignore_case;
 use crate::report::topology::CrateNode;
@@ -653,6 +655,180 @@ fn prompt_facts_state_the_clean_signal_count() {
     let facts = Grounding::from_model(&clean_signal_model()).prompt_facts();
     assert!(facts.contains("credits 1 GREEN security finding(s)"));
     assert!(facts.contains("Never write that no clean signal was found"));
+}
+
+// --- #6691: a denied complexity distribution the table renders --------------
+
+/// The paragraph's own words from the 2026-09-02 CAST report, line 2189.
+const LIVE_NO_COMPLEXITY_CLAIM: &str = "No file or function counts were resolved (reported as 0), \
+     and no complexity distribution, code-smell taxonomy, or crate-topology/coupling data was \
+     provided, so module structure and dependency coupling cannot be commented on beyond the \
+     crate names surfaced in the finding paths.";
+
+/// A model carrying the distribution the Code Quality table renders — the same
+/// five bands, and the same counts, the graded report printed four lines under
+/// the paragraph that denied them.
+fn complexity_model() -> ReportModel {
+    let mut model = model_with(vec![repo("estate", Vec::new(), None)]);
+    model.repositories[0].metrics = Some(AnalyzeMetrics {
+        complexity: ComplexityDistribution {
+            buckets: [
+                ("A", 68618u64),
+                ("B", 5241),
+                ("C", 1836),
+                ("D", 720),
+                ("F", 733),
+            ]
+            .into_iter()
+            .map(|(label, count)| ComplexityBucket {
+                label: label.to_string(),
+                count,
+            })
+            .collect(),
+        },
+        ..AnalyzeMetrics::default()
+    });
+    model.gaps.clear();
+    model
+}
+
+/// The live contradiction (#6691): the synthesized paragraph denied the
+/// distribution the deterministic table beneath it rendered.
+///
+/// Fails before the fix: `check` knows nothing about the complexity buckets and
+/// returns `Clean`, so the sentence renders directly above the table refuting it.
+#[test]
+fn a_no_complexity_data_claim_is_dropped_when_the_table_renders_one() {
+    let prose = format!("Test coverage is thin across the estate. {LIVE_NO_COMPLEXITY_CLAIM}");
+    let GroundingOutcome::Rewritten(text, notes) =
+        Grounding::from_model(&complexity_model()).check(&prose, None)
+    else {
+        panic!("expected the false no-complexity-data claim to be dropped");
+    };
+    assert_eq!(text, "Test coverage is thin across the estate.");
+    assert_eq!(notes.len(), 1, "notes were: {notes:?}");
+    assert!(
+        notes[0].text.contains("renders one over 77148 functions"),
+        "the note must state the measured total: {}",
+        notes[0].text
+    );
+}
+
+/// The same sentence is CORRECT for a run that measured no bucket, and survives.
+#[test]
+fn a_no_complexity_data_claim_survives_when_no_bucket_was_measured() {
+    let model = model_with(vec![repo("estate", Vec::new(), None)]);
+    assert_eq!(
+        Grounding::from_model(&model).check(LIVE_NO_COMPLEXITY_CLAIM, None),
+        GroundingOutcome::Clean
+    );
+}
+
+/// A claim about the distribution's SHAPE is not a claim about what the run was
+/// given, and the guard must leave it alone.
+#[test]
+fn a_claim_about_the_distributions_shape_is_left_alone() {
+    assert_eq!(
+        Grounding::from_model(&complexity_model()).check(
+            "The complexity distribution is not evenly spread: the D and F bands cluster in one \
+             crate.",
+            None
+        ),
+        GroundingOutcome::Clean
+    );
+}
+
+/// Metrics carrying exactly the given complexity bands.
+fn metrics_with_buckets(bands: &[(&str, u64)]) -> AnalyzeMetrics {
+    AnalyzeMetrics {
+        complexity: ComplexityDistribution {
+            buckets: bands
+                .iter()
+                .map(|(label, count)| ComplexityBucket {
+                    label: (*label).to_string(),
+                    count: *count,
+                })
+                .collect(),
+        },
+        ..AnalyzeMetrics::default()
+    }
+}
+
+/// The paraphrases the first fix let through, each the same false claim in
+/// different words.
+///
+/// Fails before the fix: the matcher required the token `complexity` to precede
+/// the token `distribution` in one sentence, so none of these four matched and
+/// each shipped above the table that refutes it.
+#[test]
+fn every_paraphrase_of_the_absence_claim_is_dropped() {
+    for claim in [
+        "No per-function complexity figures were available.",
+        "Complexity could not be measured.",
+        "No complexity metrics were computed.",
+        "The distribution of code complexity was not resolved.",
+    ] {
+        let prose = format!("Test coverage is thin across the estate. {claim}");
+        let GroundingOutcome::Rewritten(text, notes) =
+            Grounding::from_model(&complexity_model()).check(&prose, None)
+        else {
+            panic!("expected {claim:?} to be dropped");
+        };
+        assert_eq!(
+            text, "Test coverage is thin across the estate.",
+            "{claim:?}"
+        );
+        assert_eq!(notes.len(), 1, "{claim:?} — notes were: {notes:?}");
+    }
+}
+
+/// A two-application estate; `second_has_metrics` decides whether the second
+/// application measured a distribution at all.
+fn two_app_model(second_has_metrics: bool) -> ReportModel {
+    let mut model = model_with(vec![
+        repo("Estate Core", Vec::new(), None),
+        repo("Ledger", Vec::new(), None),
+    ]);
+    model.repositories[0].metrics = Some(metrics_with_buckets(&[("A", 900), ("F", 100)]));
+    if second_has_metrics {
+        model.repositories[1].metrics = Some(metrics_with_buckets(&[("A", 40), ("F", 10)]));
+    }
+    model.gaps.clear();
+    model
+}
+
+/// An absence claim naming the application that HAS no distribution is TRUE and
+/// survives — the report-wide sum deleted it under a note quoting the other
+/// application's count.
+#[test]
+fn a_per_application_absence_claim_survives_when_that_app_has_none() {
+    assert_eq!(
+        Grounding::from_model(&two_app_model(false))
+            .check("No complexity distribution was provided for Ledger.", None),
+        GroundingOutcome::Clean
+    );
+}
+
+/// A report-wide claim stands as long as one application measured nothing; once
+/// every application has a distribution, the same claim is refuted.
+#[test]
+fn a_report_wide_absence_claim_survives_when_one_application_has_none() {
+    let claim = "No complexity distribution was provided.";
+    assert_eq!(
+        Grounding::from_model(&two_app_model(false)).check(claim, None),
+        GroundingOutcome::Clean
+    );
+    let GroundingOutcome::Rewritten(text, notes) =
+        Grounding::from_model(&two_app_model(true)).check(claim, None)
+    else {
+        panic!("every application measured one — the claim must be dropped");
+    };
+    assert_eq!(text, "");
+    assert!(
+        notes[0].text.contains("renders one over 1050 functions"),
+        "the note must sum the applications it is about: {}",
+        notes[0].text
+    );
 }
 
 // ─── #6082 lap 8: reachability is a property of the component ────────────────

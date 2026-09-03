@@ -37,6 +37,8 @@ pub mod index_registry;
 pub mod investigate;
 pub mod manifest;
 pub mod mermaid;
+// #6675: the §1 methodology row, generated from the run's own provenance.
+pub mod methodology;
 pub mod metrics;
 pub mod model;
 pub mod polish;
@@ -70,6 +72,8 @@ pub mod synthesize_guard;
 // prompt hints plus a fail-closed post-check for reachability and load-bearing
 // claims. Used only by `synthesize` and `synthesize_prompt`.
 pub(crate) mod synthesize_grounding;
+// #6691: the complexity-absence claim check, scoped per application.
+mod synthesize_grounding_complexity;
 mod synthesize_grounding_text;
 mod synthesize_grounding_vocab;
 mod synthesize_guardrail;
@@ -112,6 +116,7 @@ pub use manifest::{
     slugify,
 };
 pub use mermaid::inject as inject_mermaid;
+pub use methodology::analysis_methodology;
 pub use metrics::{AnalyzeMetrics, MetricFinding, Severity, load_metrics};
 pub use model::{ReportModel, RepositoryReport};
 pub use polish::{polish, polish_with_gaps, strip_template_comments};

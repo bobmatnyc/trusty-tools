@@ -151,13 +151,44 @@ pub(super) const REACHABILITY_WORDS: &[&str] = &["remote", "network", "internet"
 /// Two words rather than one phrase, because the model puts the dimension
 /// between them — the graded report wrote "No clean security signal is credited
 /// here", and a literal `clean signal` match misses that. Paired with
-/// [`CLEAN_SIGNAL_NEGATIONS`], which is what turns the noun phrase into a claim
+/// [`ABSENCE_NEGATIONS`], which is what turns the noun phrase into a claim
 /// of absence.
 pub(super) const CLEAN_SIGNAL_WORDS: (&str, &str) = ("clean", "signal");
 
-/// The negations that turn [`CLEAN_SIGNAL_WORDS`] into a claim of absence.
-pub(super) const CLEAN_SIGNAL_NEGATIONS: &[&str] = &[
+/// The negations that turn a noun phrase into a claim of absence.
+///
+/// Shared by the clean-signal check and the complexity-data check (#6691) —
+/// both ask the same question of a sentence, and one list is what keeps the two
+/// answers consistent.
+pub(super) const ABSENCE_NEGATIONS: &[&str] = &[
     "no ", "not ", "none", "nothing", "never", "n't", "zero ", "absent", "without",
+];
+
+/// The one word every claim about complexity data is built around (#6691).
+///
+/// One word, not the "complexity"+"distribution" pair the first fix used: that
+/// pair matched only the phrasing the graded report happened to use, so
+/// "complexity could not be measured" and "no complexity metrics were computed"
+/// — the same false claim, reworded — both shipped. Paired with
+/// [`ABSENCE_NEGATIONS`] and [`DATA_SUPPLY_WORDS`], which together are what
+/// separate a claim about the DATA (false when the Code Quality table renders a
+/// distribution) from "the complexity distribution is not evenly spread" (a
+/// claim about its shape, which the guardrail has no business touching).
+pub(super) const COMPLEXITY_WORD: &str = "complexity";
+
+/// The verbs that make an absence sentence a claim about what the run was GIVEN.
+pub(super) const DATA_SUPPLY_WORDS: &[&str] = &[
+    "provided",
+    "available",
+    "resolved",
+    "supplied",
+    "given",
+    "present",
+    "reported",
+    "computed",
+    "measured",
+    "surfaced",
+    "collected",
 ];
 
 /// Phrases that claim a crate is what the rest of the estate is built on.

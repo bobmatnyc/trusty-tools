@@ -486,12 +486,15 @@ pub(super) fn build_synthesis_prompt(
 /// (`reporter_fill::fill_profile`) but never the synthesis prompt.
 /// What: LoC and languages from `AnalyzeMetrics` when a `--analyze` run
 /// supplied it, else from `RepoScan`; file/function counts from whichever
-/// source carries them; and the scan's framework line rendered through
+/// source carries them; the complexity distribution as
+/// `reporter_codesec::bucket_summary` renders it into the Code Quality table
+/// (#6691); and the scan's framework line rendered through
 /// `reporter_fill::format_frameworks`, so the prompt and the report state the
 /// same manifests. Returns an empty string when neither source has anything —
 /// the caller then says so rather than emitting a headed but empty block.
 /// Test: `synthesize_tests.rs::{digest_carries_scan_profile_without_metrics,
-/// digest_names_build_manifests_as_component_evidence}`.
+/// digest_names_build_manifests_as_component_evidence,
+/// digest_carries_the_complexity_distribution_the_table_renders}`.
 fn repo_profile_lines(repo: &super::model::RepositoryReport) -> String {
     let metrics = repo.metrics.as_ref();
     let scan = repo.scan.as_ref();
@@ -516,13 +519,27 @@ fn repo_profile_lines(repo: &super::model::RepositoryReport) -> String {
         out.push_str(&format!("- Primary languages: {}\n", l.join(", ")));
     }
 
-    if let Some(m) = metrics {
-        out.push_str(&format!(
-            "- Files: {}; Functions: {}\n",
-            m.counts.files, m.counts.functions
-        ));
-    } else if let Some(s) = scan.filter(|s| s.file_count > 0) {
-        out.push_str(&format!("- Files: {}\n", s.file_count));
+    // #6691: a metrics artifact whose counts are zero used to print
+    // "Files: 0; Functions: 0", and the model reported those zeros as counts
+    // that could not be resolved — beside a Key Facts block rendering the scan's
+    // figures. Same metrics-then-scan precedence `reporter_facts::repo_files`
+    // uses, and a zero states nothing rather than stating a measurement.
+    let files = metrics
+        .map(|m| m.counts.files)
+        .filter(|n| *n > 0)
+        .or_else(|| scan.map(|s| s.file_count).filter(|n| *n > 0));
+    if let Some(n) = files {
+        out.push_str(&format!("- Files: {n}\n"));
+    }
+    if let Some(n) = metrics.map(|m| m.counts.functions).filter(|n| *n > 0) {
+        out.push_str(&format!("- Functions: {n}\n"));
+    }
+
+    // #6691: the same string the Code Quality table's `cq_complexity` cell
+    // renders, from the one function that renders it — the prose is written from
+    // the data the table shows, not from a digest that omitted it.
+    if let Some(summary) = metrics.and_then(super::reporter_codesec::bucket_summary) {
+        out.push_str(&format!("- Complexity distribution: {summary}\n"));
     }
 
     // #6030: the component evidence — which manifests exist, what project each

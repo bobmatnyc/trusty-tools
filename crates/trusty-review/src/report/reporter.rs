@@ -347,6 +347,16 @@ pub(super) fn build_scope(model: &ReportModel) -> Scope {
         tag(&model.vendor_methodology, Provenance::Measured),
     );
     root.set("report_version", tag(crate_version(), Provenance::Measured));
+    // #6675: the row states which lanes actually contributed, so a run that fell
+    // back to scan cannot render an unqualified trusty-analyze + trusty-search
+    // claim. Measured — read from the run's own recorded provenance.
+    root.set(
+        "analysis_methodology",
+        tag(
+            super::methodology::analysis_methodology(model),
+            Provenance::Measured,
+        ),
+    );
     // #6135: which models produced this report. Measured — the tool resolved it
     // and knows it. A model built outside the report command carries none, and
     // the row then says so rather than reading as a report with no inference.

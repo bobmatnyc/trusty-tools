@@ -213,7 +213,15 @@ pub fn push_security_violation_rows(root: &mut Scope, model: &ReportModel) {
 /// A compact "label: count (pct%)" complexity summary for one repository's
 /// `AnalyzeMetrics.complexity` — the per-app counterpart of
 /// `reporter_facts::complexity_profile`'s engagement-wide merge.
-fn bucket_summary(m: &AnalyzeMetrics) -> Option<String> {
+///
+/// #6691: `synthesize_prompt::repo_profile_lines` states this same string to the
+/// synthesis model. Reading it from here rather than re-deriving it is what
+/// makes the prose and the `cq_complexity` cell beside it the same measurement,
+/// so a paragraph denying the distribution the table renders cannot be written
+/// from data that omitted it.
+/// Test: `reporter_codesec_tests::code_quality_rows_reproject_metrics`,
+/// `synthesize_tests::digest_carries_the_complexity_distribution_the_table_renders`.
+pub(super) fn bucket_summary(m: &AnalyzeMetrics) -> Option<String> {
     let total: u64 = m.complexity.buckets.iter().map(|b| b.count).sum();
     if total == 0 {
         return None;

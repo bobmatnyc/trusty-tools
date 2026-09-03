@@ -78,6 +78,16 @@
 //! sends a doubled determiner or a self-contrast down the reject-and-disclose
 //! path instead. A visible withholding is the better of the two failures.
 //!
+//! #6691 added a fourth claim, in the lap-7 shape: a Code Quality paragraph
+//! saying no complexity distribution was provided, four lines above the
+//! deterministic table that renders one. The model wrote it in good faith — the
+//! digest never carried the distribution. Both halves are fixed:
+//! `synthesize_prompt::repo_profile_lines` now states the same string the
+//! `cq_complexity` cell renders, and [`Grounding::check_field`] drops the claim
+//! afterwards whatever the model was given — see
+//! [`super::synthesize_grounding_complexity`], which owns that check and scopes
+//! it to the applications a sentence is actually about.
+//!
 //! #6082 lap 11 made a disclosure name the finding whose field it is. The tier
 //! is read from the FILE, so [`Grounding::reachability`] resolves it through
 //! that file's first loopback record — and it quoted that record's title. The
@@ -95,13 +105,13 @@ use std::collections::BTreeSet;
 
 use super::investigate::ExposureIndex;
 use super::model::ReportModel;
+use super::synthesize_grounding_complexity::{ComplexityFacts, drop_false_absence};
 use super::synthesize_grounding_text::{
     asserts_reachability, asserts_reachability_claim, contains_name, grammar_debris,
     remove_sentence, rewrite_reachability, sentences, subject_tokens,
 };
 use super::synthesize_grounding_vocab::{
-    CLEAN_SIGNAL_NEGATIONS, CLEAN_SIGNAL_WORDS, LOAD_BEARING_PHRASES, LOOPBACK_MARKERS,
-    REMOTE_MARKERS,
+    ABSENCE_NEGATIONS, CLEAN_SIGNAL_WORDS, LOAD_BEARING_PHRASES, LOOPBACK_MARKERS, REMOTE_MARKERS,
 };
 use super::topology::CrateTopology;
 
@@ -211,6 +221,9 @@ pub(crate) struct Grounding {
     known_crates: Vec<String>,
     /// GREEN security findings the Security Posture section credits by name.
     clean_signals: usize,
+    /// Per-application complexity measurements (#6691), read from the same
+    /// buckets `reporter_codesec::bucket_summary` renders into `cq_complexity`.
+    complexity: ComplexityFacts,
 }
 
 impl Grounding {
@@ -285,6 +298,8 @@ impl Grounding {
         // `apply_investigation`, so after that pass both loops see the same
         // signals. The larger count is the real one either way.
         out.clean_signals = from_metrics.max(from_inv);
+        // #6691: read from the same buckets the Code Quality table renders.
+        out.complexity = ComplexityFacts::from_model(model);
         // #6191: the investigation's collected bind/exposure facts decide a
         // file's tier before any text marker gets a vote.
         let evidence = ExposureIndex::from_facts(
@@ -444,8 +459,10 @@ impl Grounding {
     /// can never be applied to one field and not another.
     /// What: runs the load-bearing check first (it can only reject, so there is
     /// nothing to rewrite afterwards), then drops any false no-clean-signal
-    /// claim, then runs the reachability check over what is left. Returns
-    /// `Clean` when none fired.
+    /// claim and any false no-complexity-data claim
+    /// ([`super::synthesize_grounding_complexity::drop_false_absence`], #6691),
+    /// then runs the reachability check over what is left. Returns `Clean` when
+    /// none fired.
     ///
     /// `owner` is the component of the finding this field belongs to, and `None`
     /// for report-level prose that belongs to no single finding — the executive,
@@ -475,6 +492,10 @@ impl Grounding {
             };
         }
         let (text, mut notes) = self.drop_false_no_clean_signal(text);
+        // #6691: the same shape, for a paragraph denying the complexity
+        // distribution the table under it renders.
+        let (text, complexity_notes) = drop_false_absence(&self.complexity, &text);
+        notes.extend(complexity_notes);
         match self.reachability(&text, owner, subject) {
             GroundingOutcome::Clean if notes.is_empty() => GroundingOutcome::Clean,
             GroundingOutcome::Clean => GroundingOutcome::Rewritten(text, notes),
@@ -497,7 +518,7 @@ impl Grounding {
     /// its absence in good faith.
     /// What: `(text, notes)` unchanged when the report credits no clean signal,
     /// which is the case the sentence is right about. Otherwise every sentence
-    /// carrying [`CLEAN_SIGNAL_WORDS`] under a [`CLEAN_SIGNAL_NEGATIONS`] word
+    /// carrying [`CLEAN_SIGNAL_WORDS`] under an [`ABSENCE_NEGATIONS`] word
     /// is cut out and one note records the cut. The rest of the paragraph
     /// survives: one contradicted sentence is not grounds to drop a paragraph of
     /// otherwise-grounded prose.
@@ -517,7 +538,7 @@ impl Grounding {
             if !lower[at..].contains(CLEAN_SIGNAL_WORDS.1) {
                 continue;
             }
-            if !CLEAN_SIGNAL_NEGATIONS.iter().any(|n| lower.contains(n)) {
+            if !ABSENCE_NEGATIONS.iter().any(|n| lower.contains(n)) {
                 continue;
             }
             out = remove_sentence(&out, sentence);
