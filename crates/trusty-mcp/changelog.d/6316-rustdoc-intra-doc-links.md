@@ -1,0 +1,3 @@
+Fixed
+
+- **The crate-level doc no longer links a feature-gated module.** `lib.rs` described `daemon_bridge_json_rpc` with a `[bracketed]` intra-doc link, but that module is compiled only under `daemon-bridge-json-rpc` and this crate's default feature set is empty. `scripts/check_rustdoc_links.sh` runs `cargo doc` with DEFAULT features, so the link had no item to resolve against and `#![deny(rustdoc::broken_intra_doc_links)]` turned it into a hard error — the gate reported `trusty-mcp has 1 broken link(s) and no baseline row`. The module is now named in a plain code span, which reads the same with the feature on or off ([#6316](https://github.com/bobmatnyc/trusty-tools/issues/6316))

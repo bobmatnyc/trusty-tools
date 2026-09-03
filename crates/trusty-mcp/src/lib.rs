@@ -11,7 +11,7 @@
 //! loop that accepts any `Fn(Request) -> Future<Output=Response>`.
 //!
 //! One capability is feature-gated: `daemon-bridge-json-rpc` compiles
-//! [`daemon_bridge_json_rpc`], the shared stdio↔UDS forwarder (#6316), and with
+//! `daemon_bridge_json_rpc`, the shared stdio↔UDS forwarder (#6316), and with
 //! it this crate's only `trusty-common` dependency. Off by default so the rlib
 //! every MCP server links stays as lean as ADR-0040 left it — see the README's
 //! Features table for the `cargo tree` proof that the edge is gated.
@@ -29,6 +29,11 @@
 // so a broken intra-doc link is baked into that version forever and only a new
 // release can correct it. Deny keeps this crate at zero rather than letting the
 // ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+//
+// #6316: that ratchet runs `cargo doc` with DEFAULT features, and this crate's
+// default set is empty. A `[bracketed]` link to a `daemon-bridge-json-rpc`-gated
+// item therefore resolves only when the feature is on and is a hard error when
+// it is off, so gated items are named in plain code spans above.
 #![deny(rustdoc::broken_intra_doc_links)]
 
 use serde::{Deserialize, Serialize};
