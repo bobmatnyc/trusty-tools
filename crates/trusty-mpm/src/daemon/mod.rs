@@ -1013,6 +1013,37 @@ mod shutdown_reaper_tests {
         (state, dir)
     }
 
+    /// RAII guard restoring `$HOME` on drop, panic included (#6663).
+    ///
+    /// A copy of `session_manager::naming_tests`'s guard rather than a shared
+    /// one: module-private visibility does not cross sibling module trees, and
+    /// several other test modules in this crate carry the same copy for the
+    /// same reason. Callers MUST be `#[serial_test::serial]` — the guard makes
+    /// the mutation reversible, not atomic, and ~20 tests in this binary write
+    /// `$HOME`.
+    /// Test: used by
+    /// `orphan_gc_loop_leaves_the_home_session_dirs_alone_on_a_scratch_root`.
+    struct HomeGuard(Option<String>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: paired with `#[serial_test::serial]` — no other thread
+            // reads or writes the environment concurrently.
+            match self.0 {
+                Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
+    /// Point `$HOME` at `home` until the returned guard drops. Callers MUST be
+    /// `#[serial_test::serial]` — see [`HomeGuard`].
+    fn set_home(home: &std::path::Path) -> HomeGuard {
+        let prior = std::env::var("HOME").ok();
+        // SAFETY: serialized via `#[serial_test::serial]`.
+        unsafe { std::env::set_var("HOME", home) };
+        HomeGuard(prior)
+    }
+
     /// A tmux-origin session whose tmux name is certainly not live.
     fn dead_session() -> crate::core::session::Session {
         use crate::core::session::{ControlModel, Session, SessionId, SessionStatus};
@@ -1175,15 +1206,27 @@ mod shutdown_reaper_tests {
     /// mid-test can now only send a BUGGY sweep somewhere else, which loses
     /// discrimination rather than failing; under `cargo nextest` (one process
     /// per test, the CI shards) even that cannot happen.
+    ///
+    /// The redirect is reversible and serialized — [`set_home`] plus
+    /// `#[serial_test::serial]`. Leaving `$HOME` pointing at this test's
+    /// `TempDir` after it returns would hand every later test in the binary a
+    /// deleted home, which is a worse fault than the one being fixed.
+    ///
+    /// This is the ONE test here that leaves the inherited-`$HOME` quadrant
+    /// `scratch_root_state` documents, and it stays discriminating anyway: the
+    /// revision this guards against swept ABOVE the host-state gate, so which
+    /// arm of that gate refuses does not decide the outcome — whether the sweep
+    /// resolved the home directory does.
     /// Test: this is the test.
     #[tokio::test]
+    #[serial_test::serial]
     async fn orphan_gc_loop_leaves_the_home_session_dirs_alone_on_a_scratch_root() {
-        // #6663: a `$HOME` this test owns, not the operator's.
+        // #6663: a `$HOME` this test owns, not the operator's. Declared BEFORE
+        // the guard so the guard drops FIRST — `$HOME` is restored while this
+        // directory still exists, never left naming a removed path.
         let home_dir = tempfile::tempdir().expect("scratch home");
         let home = home_dir.path().to_path_buf();
-        // SAFETY: `set_var` is process-local and this test only widens the
-        // isolation the surrounding suite already relies on.
-        unsafe { std::env::set_var("HOME", &home) };
+        let _home = set_home(&home);
 
         let (state, dir) = scratch_root_state();
         assert!(

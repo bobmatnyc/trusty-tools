@@ -53,6 +53,54 @@ fn hermetic() -> (Arc<DaemonState>, TempDir) {
     (Arc::new(DaemonState::with_paths(&paths)), dir)
 }
 
+/// RAII guard restoring `$HOME` on drop, panic included (#6671).
+///
+/// A copy of `session_manager::naming_tests`'s guard rather than a shared one:
+/// module-private visibility does not cross sibling module trees, and several
+/// other test modules in this crate carry the same copy for the same reason.
+/// Callers MUST be `#[serial_test::serial]` — the guard makes the mutation
+/// reversible, not atomic, and other tests in this binary write `$HOME`.
+/// Test: used by [`hermetic_isolated_home`]'s callers.
+struct HomeGuard(Option<String>);
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with `#[serial_test::serial]` — no other thread reads
+        // or writes the environment concurrently.
+        match self.0 {
+            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+/// [`hermetic`], plus a scratch `$HOME` for the caller's scope (#6671).
+///
+/// Why: a hermetic ROOT is not a hermetic REGISTRY.
+/// `DaemonState::project_registry()` seeds itself from
+/// `TrustyToolsConfig::load()`, which resolves
+/// `~/.trusty-tools/trusty-mpm/config.yaml` through `$HOME`, so the four callers
+/// below read the DEVELOPER's registered projects — they asserted
+/// `project_count == 1` on a machine answering 23. Same defect #6671 reports for
+/// five integration targets, here in the lib.
+/// What: returns [`hermetic`]'s state and root, the scratch home, and a
+/// [`HomeGuard`]. The caller binds all four, so `$HOME` is restored when the
+/// test returns or panics, and restored BEFORE the scratch home is removed —
+/// tuple bindings drop in reverse order, so the guard goes first.
+/// Test: `parity_manager_status_agrees_across_transports`,
+/// `parity_projects_registry_list_agrees_across_transports`,
+/// `parity_projects_registry_register_agrees_across_transports`,
+/// `rpc_projects_registry_register_rejects_a_blank_name`.
+fn hermetic_isolated_home() -> (Arc<DaemonState>, TempDir, TempDir, HomeGuard) {
+    let home = tempfile::tempdir().expect("scratch $HOME");
+    let prior = std::env::var("HOME").ok();
+    // SAFETY: serialized via `#[serial_test::serial]` on every caller.
+    unsafe { std::env::set_var("HOME", home.path()) };
+    let guard = HomeGuard(prior);
+    let (state, dir) = hermetic();
+    (state, dir, home, guard)
+}
+
 /// The RPC router this slice registers, over `state`.
 fn rpc_router(state: &Arc<DaemonState>) -> RpcRouter {
     register(RpcRouter::new(), state)
@@ -362,8 +410,10 @@ async fn seed_project(state: &Arc<DaemonState>, name: &str) {
 
 /// Test: this function IS the test.
 #[tokio::test]
+// #6671: reads the project registry, which seeds from `$HOME`.
+#[serial_test::serial]
 async fn parity_projects_registry_list_agrees_across_transports() {
-    let (state, _dir) = hermetic();
+    let (state, _dir, _home_dir, _home) = hermetic_isolated_home();
     seed_project(&state, "alpha").await;
 
     let (status, body) = http(&state, "GET", "/api/v1/projects", None).await;
@@ -383,8 +433,10 @@ async fn parity_projects_registry_list_agrees_across_transports() {
 /// call reached it.
 /// Test: this function IS the test.
 #[tokio::test]
+// #6671: reads the project registry, which seeds from `$HOME`.
+#[serial_test::serial]
 async fn parity_projects_registry_register_agrees_across_transports() {
-    let (state, _dir) = hermetic();
+    let (state, _dir, _home_dir, _home) = hermetic_isolated_home();
 
     let body_for = |name: &str| {
         json!({
@@ -568,8 +620,10 @@ async fn rpc_projects_registry_patch_rejects_a_blank_required_field() {
 /// Why: a blank name is rejected before the store is touched on both paths.
 /// Test: this function IS the test.
 #[tokio::test]
+// #6671: reads the project registry, which seeds from `$HOME`.
+#[serial_test::serial]
 async fn rpc_projects_registry_register_rejects_a_blank_name() {
-    let (state, _dir) = hermetic();
+    let (state, _dir, _home_dir, _home) = hermetic_isolated_home();
     let payload = json!({ "name": "   ", "repo_url": "https://example.invalid/r" });
 
     let (status, _) = http(&state, "POST", "/api/v1/projects", Some(payload.clone())).await;
@@ -1057,8 +1111,10 @@ async fn parity_manager_version_agrees_across_transports() {
 
 /// Test: this function IS the test.
 #[tokio::test]
+// #6671: reads the project registry, which seeds from `$HOME`.
+#[serial_test::serial]
 async fn parity_manager_status_agrees_across_transports() {
-    let (state, _dir) = hermetic();
+    let (state, _dir, _home_dir, _home) = hermetic_isolated_home();
     seed_project(&state, "alpha").await;
 
     let (status, body) = http(&state, "GET", "/api/v1/manager/status", None).await;
