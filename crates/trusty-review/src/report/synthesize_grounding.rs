@@ -78,6 +78,14 @@
 //! sends a doubled determiner or a self-contrast down the reject-and-disclose
 //! path instead. A visible withholding is the better of the two failures.
 //!
+//! #6691 added a fourth claim, in the lap-7 shape: a Code Quality paragraph
+//! saying no complexity distribution was provided, four lines above the
+//! deterministic table that renders one. The model wrote it in good faith — the
+//! digest never carried the distribution. Both halves are fixed:
+//! `synthesize_prompt::repo_profile_lines` now states the same string the
+//! `cq_complexity` cell renders, and [`Grounding::check_field`] drops the claim
+//! afterwards whatever the model was given.
+//!
 //! #6082 lap 11 made a disclosure name the finding whose field it is. The tier
 //! is read from the FILE, so [`Grounding::reachability`] resolves it through
 //! that file's first loopback record — and it quoted that record's title. The
@@ -100,8 +108,8 @@ use super::synthesize_grounding_text::{
     remove_sentence, rewrite_reachability, sentences, subject_tokens,
 };
 use super::synthesize_grounding_vocab::{
-    CLEAN_SIGNAL_NEGATIONS, CLEAN_SIGNAL_WORDS, LOAD_BEARING_PHRASES, LOOPBACK_MARKERS,
-    REMOTE_MARKERS,
+    ABSENCE_NEGATIONS, CLEAN_SIGNAL_WORDS, COMPLEXITY_WORDS, DATA_SUPPLY_WORDS,
+    LOAD_BEARING_PHRASES, LOOPBACK_MARKERS, REMOTE_MARKERS,
 };
 use super::topology::CrateTopology;
 
@@ -211,6 +219,12 @@ pub(crate) struct Grounding {
     known_crates: Vec<String>,
     /// GREEN security findings the Security Posture section credits by name.
     clean_signals: usize,
+    /// Functions the Code Quality table's complexity distribution accounts for.
+    ///
+    /// #6691: the same buckets `reporter_codesec::bucket_summary` renders into
+    /// the `cq_complexity` cell. Non-zero means the report states a distribution,
+    /// and a paragraph above that table saying none was provided contradicts it.
+    complexity_functions: u64,
 }
 
 impl Grounding {
@@ -285,6 +299,14 @@ impl Grounding {
         // `apply_investigation`, so after that pass both loops see the same
         // signals. The larger count is the real one either way.
         out.clean_signals = from_metrics.max(from_inv);
+        // #6691: read from the same buckets the Code Quality table renders.
+        out.complexity_functions = model
+            .repositories
+            .iter()
+            .filter_map(|r| r.metrics.as_ref())
+            .flat_map(|m| m.complexity.buckets.iter())
+            .map(|b| b.count)
+            .sum();
         // #6191: the investigation's collected bind/exposure facts decide a
         // file's tier before any text marker gets a vote.
         let evidence = ExposureIndex::from_facts(
@@ -444,8 +466,8 @@ impl Grounding {
     /// can never be applied to one field and not another.
     /// What: runs the load-bearing check first (it can only reject, so there is
     /// nothing to rewrite afterwards), then drops any false no-clean-signal
-    /// claim, then runs the reachability check over what is left. Returns
-    /// `Clean` when none fired.
+    /// claim and any false no-complexity-data claim (#6691), then runs the
+    /// reachability check over what is left. Returns `Clean` when none fired.
     ///
     /// `owner` is the component of the finding this field belongs to, and `None`
     /// for report-level prose that belongs to no single finding — the executive,
@@ -475,6 +497,10 @@ impl Grounding {
             };
         }
         let (text, mut notes) = self.drop_false_no_clean_signal(text);
+        // #6691: the same shape, for a paragraph denying the complexity
+        // distribution the table under it renders.
+        let (text, complexity_notes) = self.drop_false_no_complexity_data(&text);
+        notes.extend(complexity_notes);
         match self.reachability(&text, owner, subject) {
             GroundingOutcome::Clean if notes.is_empty() => GroundingOutcome::Clean,
             GroundingOutcome::Clean => GroundingOutcome::Rewritten(text, notes),
@@ -497,7 +523,7 @@ impl Grounding {
     /// its absence in good faith.
     /// What: `(text, notes)` unchanged when the report credits no clean signal,
     /// which is the case the sentence is right about. Otherwise every sentence
-    /// carrying [`CLEAN_SIGNAL_WORDS`] under a [`CLEAN_SIGNAL_NEGATIONS`] word
+    /// carrying [`CLEAN_SIGNAL_WORDS`] under an [`ABSENCE_NEGATIONS`] word
     /// is cut out and one note records the cut. The rest of the paragraph
     /// survives: one contradicted sentence is not grounds to drop a paragraph of
     /// otherwise-grounded prose.
@@ -517,7 +543,7 @@ impl Grounding {
             if !lower[at..].contains(CLEAN_SIGNAL_WORDS.1) {
                 continue;
             }
-            if !CLEAN_SIGNAL_NEGATIONS.iter().any(|n| lower.contains(n)) {
+            if !ABSENCE_NEGATIONS.iter().any(|n| lower.contains(n)) {
                 continue;
             }
             out = remove_sentence(&out, sentence);
@@ -528,6 +554,61 @@ impl Grounding {
                     "a sentence claiming no clean signal was credited was dropped — the Security \
                      Posture section credits {} of them, each with the file it was read from",
                     self.clean_signals
+                ),
+                subject: None,
+            });
+        }
+        (out.trim().to_string(), notes)
+    }
+
+    /// Remove any sentence claiming the run was given no complexity data, when
+    /// the Code Quality table renders a distribution (#6691).
+    ///
+    /// Why: the graded report's Code Quality paragraph said "no complexity
+    /// distribution, code-smell taxonomy, or crate-topology/coupling data was
+    /// provided", and four lines under it the deterministic table rendered
+    /// A 68618 / B 5241 / C 1836 / D 720 / F 733. Feeding the distribution into
+    /// the digest (`synthesize_prompt::repo_profile_lines`) is the derivation
+    /// half; this is the mechanical half, so the contradiction cannot ship even
+    /// when the model writes past its input.
+    /// What: `(text, notes)` unchanged when no repository contributed a bucket —
+    /// the case the sentence is right about. Otherwise every sentence carrying
+    /// [`COMPLEXITY_WORDS`] under an [`ABSENCE_NEGATIONS`] word AND a
+    /// [`DATA_SUPPLY_WORDS`] word is cut out and one note records the cut. The
+    /// three conditions together are what leave a sentence about the
+    /// distribution's SHAPE alone; only a claim about what the run was given is
+    /// this check's business.
+    /// Test: `synthesize_grounding_tests.rs::{a_no_complexity_data_claim_is_dropped_when_the_table_renders_one,
+    /// a_no_complexity_data_claim_survives_when_no_bucket_was_measured,
+    /// a_claim_about_the_distributions_shape_is_left_alone}`.
+    fn drop_false_no_complexity_data(&self, text: &str) -> (String, Vec<Correction>) {
+        if self.complexity_functions == 0 {
+            return (text.to_string(), Vec::new());
+        }
+        let mut out = text.to_string();
+        let mut notes = Vec::new();
+        for sentence in sentences(text) {
+            let lower = sentence.to_lowercase();
+            let Some(at) = lower.find(COMPLEXITY_WORDS.0) else {
+                continue;
+            };
+            if !lower[at..].contains(COMPLEXITY_WORDS.1) {
+                continue;
+            }
+            if !ABSENCE_NEGATIONS.iter().any(|n| lower.contains(n)) {
+                continue;
+            }
+            if !DATA_SUPPLY_WORDS.iter().any(|w| lower.contains(w)) {
+                continue;
+            }
+            out = remove_sentence(&out, sentence);
+            // The distribution is the report's own measurement, not any one
+            // §5.x finding, so there is no subject to number.
+            notes.push(Correction {
+                text: format!(
+                    "a sentence claiming no complexity distribution was provided was dropped — \
+                     the Code Quality table renders one over {} functions",
+                    self.complexity_functions
                 ),
                 subject: None,
             });

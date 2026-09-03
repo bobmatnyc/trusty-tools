@@ -37,6 +37,8 @@ pub mod index_registry;
 pub mod investigate;
 pub mod manifest;
 pub mod mermaid;
+// #6675: the §1 methodology row, generated from the run's own provenance.
+pub mod methodology;
 pub mod metrics;
 pub mod model;
 pub mod polish;
@@ -112,6 +114,7 @@ pub use manifest::{
     slugify,
 };
 pub use mermaid::inject as inject_mermaid;
+pub use methodology::analysis_methodology;
 pub use metrics::{AnalyzeMetrics, MetricFinding, Severity, load_metrics};
 pub use model::{ReportModel, RepositoryReport};
 pub use polish::{polish, polish_with_gaps, strip_template_comments};

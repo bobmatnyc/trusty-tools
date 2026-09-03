@@ -21,7 +21,8 @@ use async_trait::async_trait;
 
 use crate::llm::{LlmError, LlmProvider, LlmRequest, LlmResponse};
 use crate::report::metrics::{
-    AnalyzeMetrics, CountMetrics, LanguageLoc, LocMetrics, MetricFinding, Severity,
+    AnalyzeMetrics, ComplexityBucket, ComplexityDistribution, CountMetrics, LanguageLoc,
+    LocMetrics, MetricFinding, Severity,
 };
 use crate::report::model::{ReportModel, RepositoryReport};
 use crate::report::synthesize_guard::{
@@ -1911,6 +1912,65 @@ fn digest_carries_scan_profile_without_metrics() {
     assert!(
         !digest.contains("No metrics available"),
         "a scanned application is not a metrics-free one: {digest}"
+    );
+}
+
+/// Why (#6691): the Code Quality paragraph denied the complexity distribution
+/// the deterministic table four lines under it rendered. The model wrote it
+/// from a digest that carried no distribution at all — so the prose and the
+/// table were never reading the same data.
+/// What: metrics carry the five bands; asserts the digest states them in the
+/// SAME string `reporter_codesec::bucket_summary` renders into `cq_complexity`,
+/// and that a zero file/function count states nothing rather than a measured 0.
+///
+/// Fails before the fix: `repo_profile_lines` never emitted the distribution,
+/// and printed "Files: 0; Functions: 0" for a metrics artifact with none.
+#[test]
+fn digest_carries_the_complexity_distribution_the_table_renders() {
+    let mut model = fixture_model(vec![]);
+    let repo = model.repositories.first_mut().expect("one repository");
+    let metrics = repo.metrics.as_mut().expect("fixture metrics");
+    metrics.counts = CountMetrics {
+        files: 0,
+        functions: 0,
+    };
+    metrics.complexity = ComplexityDistribution {
+        buckets: vec![
+            ComplexityBucket {
+                label: "A".to_string(),
+                count: 90,
+            },
+            ComplexityBucket {
+                label: "F".to_string(),
+                count: 10,
+            },
+        ],
+    };
+    let rendered = crate::report::reporter_codesec::bucket_summary(
+        model.repositories[0].metrics.as_ref().expect("metrics"),
+    )
+    .expect("the table renders a summary");
+
+    let digest = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    )
+    .messages[0]
+        .content
+        .clone();
+    assert!(
+        digest.contains(&format!("Complexity distribution: {rendered}")),
+        "the digest must state the table's own string ({rendered}): {digest}"
+    );
+    assert!(
+        !digest.contains("Files: 0"),
+        "a zero count is not a measurement to report: {digest}"
+    );
+    assert!(
+        !digest.contains("Functions: 0"),
+        "a zero count is not a measurement to report: {digest}"
     );
 }
 

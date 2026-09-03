@@ -109,7 +109,7 @@ in the coverage data provided — and name it specifically.
 | Target / deal codename | {{target_codename}} |
 | Client | {{client_name}} |
 | Applications / systems assessed | {{applications_list}} |
-| Analysis methodology | Repository inspection via trusty-analyze (static code analysis, structural metrics, complexity measurement) + trusty-search (architecture context, KG-guided focus) |
+| Analysis methodology | {{analysis_methodology}} |
 | Audit scope | {{audit_scope}} |
 | Analyst (this instance) | {{analyst_name}} |
 | Analysis generated | {{analysis_generated_date}} |
