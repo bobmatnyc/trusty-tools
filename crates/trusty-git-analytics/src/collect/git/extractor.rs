@@ -12,7 +12,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rusqlite::params;
 use tracing::{debug, info, warn};
 
-use crate::collect::ai_markers::{detect, CommitSignals};
+use crate::collect::ai_markers::{detect, CommitSignals, DETECTOR_VERSION};
 use crate::collect::collector::{FetchOutcome, PerRepoFetch};
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::git::diff::{compute_commit_diff, CommitDiff};
@@ -611,8 +611,8 @@ impl GitCollector {
                 "INSERT OR IGNORE INTO commits \
                  (sha, author_name, author_email, timestamp, message, repository, \
                   files_changed, insertions, deletions, is_merge, ticketed, ticket_id, \
-                  is_ai_assisted, ai_tool, agentic_mode) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                  is_ai_assisted, ai_tool, agentic_mode, ai_detector_version) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     sha_str,
                     author_name,
@@ -629,6 +629,9 @@ impl GitCollector {
                     is_ai_assisted as i64,
                     ai_tool,
                     agentic_mode.as_str(),
+                    // #6748: record which detector generation produced this
+                    // verdict, so a later marker-set change can find the row.
+                    DETECTOR_VERSION,
                 ],
             )?;
 

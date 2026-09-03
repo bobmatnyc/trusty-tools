@@ -18,6 +18,7 @@ use crate::collect::identity::IdentityResolver;
 use crate::collect::linear_pipeline;
 use crate::collect::notify;
 use crate::collect::pr_provider::PrProvider;
+use crate::collect::reclassify::reclassify_stale;
 use crate::collect::weeks::{clamp_week_to_range, weeks_in_range};
 use crate::collect::work_item_pipeline;
 use crate::core::config::Config;
@@ -331,6 +332,34 @@ impl CollectionPipeline {
         &self.config
     }
 
+    /// Repair verdicts an older detector generation produced, and say so.
+    ///
+    /// Why: #6748 — a stored classification is only as good as the marker set
+    /// that produced it, and the operator has no way to know a set changed.
+    /// Running the pass at the head of every collect makes the repair
+    /// automatic; announcing the count makes it visible, because a silent
+    /// rewrite of historical rows is indistinguishable from a data bug when
+    /// the downstream numbers move.
+    /// What: one line to stderr (the bus, under a TUI) when anything was
+    /// stale, and nothing at all when the corpus is settled. Never stdout —
+    /// that stream carries the pipeline's own report.
+    /// Test: `crate::collect::tests::a_stale_commit_is_reclassified_before_the_walk`.
+    fn reclassify_stale_commits(&self, db: &mut Database) -> Result<()> {
+        let stats = reclassify_stale(db)?;
+        if stats.stamped > 0 {
+            notify::warning(
+                &self.progress,
+                "reclassify",
+                &format!(
+                    "Re-classified {} commit(s) stored by an older AI detector; \
+                     {} verdict(s) changed.",
+                    stats.stamped, stats.changed
+                ),
+            );
+        }
+        Ok(())
+    }
+
     /// Run the full collection sequence against `db`.
     ///
     /// Each repository is processed sequentially; per-repo failures are
@@ -342,6 +371,11 @@ impl CollectionPipeline {
     /// failures outside the per-repo loop.
     pub async fn run(&self, db: &mut Database) -> Result<CollectionStats> {
         let mut stats = CollectionStats::default();
+
+        // #6748: rows a previous release classified are repaired before the
+        // walk, so a database carried across a marker-set change stops
+        // reporting the verdict the retired detector produced.
+        self.reclassify_stale_commits(db)?;
 
         let resolver = IdentityResolver::from_config(&self.config);
 
