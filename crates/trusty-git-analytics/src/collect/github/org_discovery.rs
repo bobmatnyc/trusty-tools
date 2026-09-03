@@ -9,7 +9,8 @@
 //! the async pipeline can inject discovery results without a separate dedup
 //! pass.
 //!
-//! What: [`discover_org_repos`] paginates org repos; [`effective_orgs`]
+//! What: [`discover_org_repos`] paginates org repos ([`discover_org_repos_at`]
+//! is the same walk against a caller-supplied REST root); [`effective_orgs`]
 //! merges singular/plural config fields;
 //! [`resolve_github_repos_with_discovered`] unions the sync resolver output
 //! with org-discovery results and is called by the async pipeline after
@@ -59,7 +60,37 @@ pub async fn discover_org_repos(
     client: &reqwest::Client,
     org: &str,
 ) -> Result<Vec<(String, String)>> {
-    discover_org_repos_within(client, org, &FetchBudget::new()).await
+    discover_org_repos_inner(client, GITHUB_API_BASE, org, &FetchBudget::new()).await
+}
+
+/// [`discover_org_repos`] against a caller-supplied REST root.
+///
+/// Why (#5216): the non-interactive `tga install` path derives a config's
+/// repository set from this call, and a test of that path that reaches
+/// github.com is not a test. This is the same seam
+/// [`GitHubClient::with_api_base`](super::GitHubClient::with_api_base) gives
+/// the PR client; a GitHub Enterprise host would use it too.
+/// What: identical to [`discover_org_repos`], except the REST root is passed
+/// in. A trailing `/` is trimmed so a `wiremock` server URI can be handed over
+/// unchanged.
+/// Test: `flag_path_discovers_org_repos_and_writes_them` in
+/// `crate::commands::install_flags` drives a local mock through it.
+///
+/// # Errors
+///
+/// Same as [`discover_org_repos`].
+pub async fn discover_org_repos_at(
+    client: &reqwest::Client,
+    api_base: &str,
+    org: &str,
+) -> Result<Vec<(String, String)>> {
+    discover_org_repos_inner(
+        client,
+        api_base.trim_end_matches('/'),
+        org,
+        &FetchBudget::new(),
+    )
+    .await
 }
 
 /// [`discover_org_repos`] against a caller-supplied budget.
@@ -84,11 +115,29 @@ pub(crate) async fn discover_org_repos_within(
     org: &str,
     budget: &FetchBudget,
 ) -> Result<Vec<(String, String)>> {
+    discover_org_repos_inner(client, GITHUB_API_BASE, org, budget).await
+}
+
+/// The single page walk every `discover_org_repos*` wrapper funnels into.
+///
+/// Why: the three entry points differ only in which REST root and which budget
+/// they supply. One body is what stops the retry, rate-limit and page-cap
+/// handling from drifting apart between them.
+/// What: pages `GET {api_base}/orgs/{org}/repos?type=all` until a short page
+/// ends the list or [`MAX_PAGES`] caps it.
+/// Test: `api_org_repo_full_name_splits_correctly` below covers the parse;
+/// `flag_path_discovers_org_repos_and_writes_them` in
+/// `crate::commands::install_flags` covers the page walk against a mock server.
+async fn discover_org_repos_inner(
+    client: &reqwest::Client,
+    api_base: &str,
+    org: &str,
+    budget: &FetchBudget,
+) -> Result<Vec<(String, String)>> {
     let mut out = Vec::new();
     let mut page = 1u32;
     loop {
-        let url =
-            format!("{GITHUB_API_BASE}/orgs/{org}/repos?type=all&per_page={PAGE_SIZE}&page={page}");
+        let url = format!("{api_base}/orgs/{org}/repos?type=all&per_page={PAGE_SIZE}&page={page}");
         debug!(url = %url, "GET (org repo discovery)");
         // Route through the shared retry helper so transient 5xx/429 are
         // retried with the same backoff as the main PR client.
