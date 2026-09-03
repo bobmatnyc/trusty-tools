@@ -10,6 +10,7 @@
 //!   the process environment (#6405)
 //! - [`db`] — SQLite database wrapper with WAL mode and versioned migrations
 //! - [`errors`] — crate-wide error enum and `Result` alias
+//! - [`inspect`] — live schema reading and the data-handling attestation (#5218)
 //! - [`models`] — domain structs for commits, authors, classifications, etc.
 //! - [`pm_effort`] — PM ticket complexity scoring (#3915)
 //! - [`pm_work`] — PM ticket meaningfulness classification (#3916)
@@ -23,6 +24,7 @@ pub mod db;
 pub mod effort;
 pub mod effort_percentile;
 pub mod errors;
+pub mod inspect;
 pub mod models;
 pub mod pm_effort;
 pub mod pm_work;

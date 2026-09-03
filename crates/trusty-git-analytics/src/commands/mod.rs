@@ -15,6 +15,8 @@ pub mod date_range;
 pub mod deployments;
 pub mod dora;
 pub mod incidents;
+// #5218: read-only database inspection and the data-handling attestation.
+pub mod inspect;
 pub mod install;
 // #5216: the non-interactive install path and the config emission both front
 // ends share, split out to keep `install.rs` under the SLOC cap.
