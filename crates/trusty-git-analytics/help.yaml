@@ -36,6 +36,15 @@ commands:
     examples:
       - cmd: tga audit
       - cmd: tga audit --org acme --client "Acme Holdings" --weeks 26
+  inspect:
+    description: Show the live database schema, or attest what it holds (no file content, diffs, patches, hunks, or blobs)
+    flags:
+      - name: json
+        description: Emit JSON instead of the human-readable report
+    examples:
+      - cmd: tga inspect schema
+      - cmd: tga inspect attest
+      - cmd: tga inspect attest --json
   analyze:
     description: Run the full pipeline (collect → classify → report)
     flags:
