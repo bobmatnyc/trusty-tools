@@ -174,6 +174,26 @@ pub enum BackfillSubcommand {
     /// --repos/--since/--until/--weeks do not scope this operation: it reads
     /// `work_items`, which carries no repository or commit-timestamp column.
     PmWork,
+    /// #3915: PM effort tier — score every meaningful ticket's complexity
+    /// and persist it to `fact_pm_effort`.
+    ///
+    /// Scores the WORK tier's output: only tickets `fact_pm_work` marks
+    /// meaningful are scored, so `tga backfill pm-work` must run first. The
+    /// v1 formula sums capped terms for child count, description length,
+    /// comment count, transition count and story points; a missing input
+    /// drops its term rather than zeroing the score, and the row names which
+    /// terms fired. Deterministic — no LLM tier in v1.
+    ///
+    /// A ticket of a decomposable type younger than the 7-day recency floor
+    /// is recorded as `DEFERRED_RECENT` with a NULL score, never as a zero:
+    /// an epic filed yesterday has no children yet because nobody has broken
+    /// it down, not because it is simple.
+    ///
+    /// Idempotent: UPSERT on `(work_item_id, work_item_source)`, so running
+    /// it twice produces the same rows. Supports --dry-run.
+    /// --repos/--since/--until/--weeks do not scope this operation: it reads
+    /// `work_items`, which carries no repository or commit-timestamp column.
+    PmEffort,
 }
 
 /// Arguments for `tga backfill complexity`.

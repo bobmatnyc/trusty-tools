@@ -17,12 +17,14 @@
 //! - `flags`  — revert, ticket-ids, ticketed, ai-detection-commits, build SQL filter
 //! - `misc`   — reachability, complexity, top-level, quality
 //! - `pm_work` — #3916: PM ticket meaningfulness tier (`fact_pm_work`)
+//! - `pm_effort` — #3915: PM ticket complexity tier (`fact_pm_effort`)
 
 mod effort;
 mod effort_db;
 mod effort_git;
 mod flags;
 mod misc;
+mod pm_effort;
 mod pm_work;
 mod types;
 
@@ -118,5 +120,7 @@ pub async fn run(config: Config, db: &mut Database, args: BackfillArgs) -> anyho
         BackfillSubcommand::Quality => misc::backfill_quality(db, args.dry_run),
         // #3916: PM work meaningfulness tier.
         BackfillSubcommand::PmWork => pm_work::backfill_pm_work(db, args.dry_run),
+        // #3915: PM effort tier v1 — scores the pm-work tier's output.
+        BackfillSubcommand::PmEffort => pm_effort::backfill_pm_effort(db, args.dry_run),
     }
 }

@@ -168,6 +168,12 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "fact_pm_work",
         sql: include_str!("../sql/0026_fact_pm_work.sql"),
     },
+    // #3915: PM effort tier — `fact_pm_effort`.
+    Migration {
+        version: 27,
+        name: "fact_pm_effort",
+        sql: include_str!("../sql/0027_fact_pm_effort.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
@@ -382,6 +388,199 @@ mod tests {
         assert!(
             err.is_err(),
             "a verdict without its work_items parent must be rejected"
+        );
+    }
+
+    /// Why: #3915 — `fact_pm_effort` is the first fact table in this schema
+    /// whose measure columns are deliberately NULLABLE. A ticket inside the
+    /// recency floor stores NULL in `effort_score` and `effort_bucket` and
+    /// says why in `score_status`; a migration that made either column NOT
+    /// NULL would force the zero the issue exists to prevent, and would fail
+    /// only at backfill time on a real database.
+    /// What: opens an in-memory DB (running every migration through v27),
+    /// inserts the parent `work_items` row, writes one scored row and one
+    /// deferred row, reads every column back, then re-inserts the same grain
+    /// and asserts the row count is unchanged.
+    /// Test: this test itself.
+    #[test]
+    fn migration_v27_creates_fact_pm_effort() {
+        let db = Database::open_in_memory().expect("open db");
+        let conn = db.connection();
+
+        for id in ["ML-2314", "ML-2315"] {
+            conn.execute(
+                "INSERT INTO work_items (id, source, title, status, item_type) \
+                 VALUES (?1, 'jira', 'ML Plat - Observability', 'To Do', 'Epic')",
+                params![id],
+            )
+            .expect("insert parent work item");
+        }
+
+        let insert = "INSERT OR REPLACE INTO fact_pm_effort \
+             (work_item_id, work_item_source, pm_name, week_key, effort_score, effort_bucket, \
+              score_status, epic_children_count, description_word_count, comment_count, \
+              transition_count, story_points, inputs_present, age_days_at_score, \
+              formula_version, computed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)";
+        conn.execute(
+            insert,
+            params![
+                "ML-2314",
+                "jira",
+                "Rohit Puntambekar",
+                "2026-W28",
+                31.5_f64,
+                "HIGH",
+                "SCORED",
+                9_i64,
+                400_i64,
+                5_i64,
+                6_i64,
+                8.0_f64,
+                "CHILDREN,DESCRIPTION,COMMENTS,TRANSITIONS,STORY_POINTS",
+                45_i64,
+                "pm-effort-1",
+                1_000_000_i64,
+            ],
+        )
+        .expect("insert scored row");
+
+        // The deferred shape: NULL score and NULL bucket, with the reason in
+        // score_status and no story points.
+        conn.execute(
+            insert,
+            params![
+                "ML-2315",
+                "jira",
+                "Rohit Puntambekar",
+                "2026-W28",
+                None::<f64>,
+                None::<String>,
+                "DEFERRED_RECENT",
+                0_i64,
+                12_i64,
+                0_i64,
+                0_i64,
+                None::<f64>,
+                "NONE",
+                2_i64,
+                "pm-effort-1",
+                1_000_000_i64,
+            ],
+        )
+        .expect("insert deferred row");
+
+        /// Every column `migration_v27_creates_fact_pm_effort` reads back.
+        type ScoredRow = (
+            Option<f64>,
+            Option<String>,
+            String,
+            i64,
+            Option<f64>,
+            String,
+            Option<i64>,
+            String,
+        );
+        let (score, bucket, status, children, points, inputs, age, version): ScoredRow = conn
+            .query_row(
+                "SELECT effort_score, effort_bucket, score_status, epic_children_count, \
+                 story_points, inputs_present, age_days_at_score, formula_version \
+                 FROM fact_pm_effort WHERE work_item_id = 'ML-2314' AND work_item_source = 'jira'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                    ))
+                },
+            )
+            .expect("read scored row back");
+        assert_eq!(score, Some(31.5));
+        assert_eq!(bucket.as_deref(), Some("HIGH"));
+        assert_eq!(status, "SCORED");
+        assert_eq!(children, 9);
+        assert_eq!(points, Some(8.0));
+        assert_eq!(
+            inputs,
+            "CHILDREN,DESCRIPTION,COMMENTS,TRANSITIONS,STORY_POINTS"
+        );
+        assert_eq!(age, Some(45));
+        assert_eq!(version, "pm-effort-1");
+
+        let (deferred_score, deferred_bucket, deferred_status): (
+            Option<f64>,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT effort_score, effort_bucket, score_status FROM fact_pm_effort \
+                 WHERE work_item_id = 'ML-2315'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("read deferred row back");
+        assert_eq!(
+            deferred_score, None,
+            "a deferred ticket stores NULL, never a zero"
+        );
+        assert_eq!(deferred_bucket, None);
+        assert_eq!(deferred_status, "DEFERRED_RECENT");
+
+        // Re-running the scorer over the same ticket replaces the row.
+        conn.execute(
+            insert,
+            params![
+                "ML-2314",
+                "jira",
+                "Rohit Puntambekar",
+                "2026-W28",
+                12.0_f64,
+                "LOW",
+                "SCORED",
+                1_i64,
+                400_i64,
+                0_i64,
+                0_i64,
+                None::<f64>,
+                "CHILDREN,DESCRIPTION",
+                60_i64,
+                "pm-effort-1",
+                2_000_000_i64,
+            ],
+        )
+        .expect("upsert pm effort row");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fact_pm_effort", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 2, "UPSERT must not duplicate the grain row");
+    }
+
+    /// Why: same reasoning as `fact_pm_work_rejects_a_verdict_with_no_work_item`
+    /// — every `fact_pm_effort` row is DERIVED from a `work_items` row
+    /// (#3915), so one for a ticket the database has never seen is a bug.
+    /// What: writes a score whose parent grain does not exist and asserts
+    /// SQLite rejects it.
+    /// Test: this test itself.
+    #[test]
+    fn fact_pm_effort_rejects_a_score_with_no_work_item() {
+        let db = Database::open_in_memory().expect("open db");
+        let err = db.connection().execute(
+            "INSERT INTO fact_pm_effort \
+             (work_item_id, work_item_source, score_status, epic_children_count, \
+              description_word_count, comment_count, transition_count, inputs_present, \
+              formula_version, computed_at) \
+             VALUES ('NOPE-1', 'jira', 'SCORED', 0, 0, 0, 0, 'NONE', 'pm-effort-1', 1)",
+            [],
+        );
+        assert!(
+            err.is_err(),
+            "a score without its work_items parent must be rejected"
         );
     }
 

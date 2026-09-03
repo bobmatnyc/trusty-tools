@@ -292,6 +292,58 @@ future expansion to GitHub review requests.
 
 ---
 
+### `fact_pm_effort`
+
+PM effort tier (issue #3915): one row per meaningful PM ticket, carrying the
+complexity score that producing it required. Written by `tga backfill pm-effort`
+from `src/core/pm_effort/`. Migration `0027_fact_pm_effort.sql`.
+
+Only tickets `fact_pm_work` marks `is_meaningful = 1` are scored — an excluded
+ticket gets no row at all, and the backfill deletes a row whose ticket has since
+stopped being meaningful. `tga backfill pm-work` must therefore run first.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `work_item_id` | TEXT | no | PK part 1; FK → `work_items(id)` |
+| `work_item_source` | TEXT | no | PK part 2; FK → `work_items(source)`. `jira`, `azdo`, `github`, `linear` |
+| `pm_name` | TEXT | yes | Reporter display name from the upstream payload |
+| `week_key` | TEXT | yes | ISO week the ticket was created, `YYYY-Www` |
+| `effort_score` | REAL | yes | 1.0–50.0; NULL when `score_status <> 'SCORED'` |
+| `effort_bucket` | TEXT | yes | `LOW` (<15) / `MEDIUM` (15–30) / `HIGH` (≥30); NULL alongside a NULL score |
+| `score_status` | TEXT | no | `SCORED` or `DEFERRED_RECENT` |
+| `epic_children_count` | INTEGER | no | `work_items` rows in the same source naming this ticket as parent |
+| `description_word_count` | INTEGER | no | Words of plain-text description |
+| `comment_count` | INTEGER | no | `fact_jira_comment_detail` rows for this ticket |
+| `transition_count` | INTEGER | no | `fact_ticket_transitions` rows for this ticket |
+| `story_points` | REAL | yes | NULL when absent, unparseable, or outside 0.5–40 |
+| `inputs_present` | TEXT | no | Comma-separated contributing terms, or `NONE` |
+| `age_days_at_score` | INTEGER | yes | Ticket age in days when scored; NULL when the creation date is unknown |
+| `formula_version` | TEXT | no | Weight set that produced the score; `pm-effort-1` for v1 |
+| `computed_at` | INTEGER | no | Unix timestamp (seconds) of the write |
+
+**Indexes**: INDEX(`effort_bucket`), INDEX(`score_status`),
+INDEX(`pm_name`, `week_key`).
+
+**Recency floor.** A ticket of a decomposable type (epic, feature, initiative)
+younger than 7 days stores `score_status = 'DEFERRED_RECENT'` with NULL score
+and NULL bucket. A zero would read as "no complexity"; the correct record is
+"too early to tell", because that ticket's child count grows only as the team
+breaks it down. A bug or task has no such input, so the floor does not apply
+to it.
+
+**Story points degrade the score rather than zeroing it.** The field is 76%
+NULL across four per-project custom-field IDs on the source JIRA instance, so
+its term is simply dropped when absent and the other four still produce a
+score. `inputs_present` names which terms fired, so a consumer can compare
+like with like.
+
+**Scale separation.** `effort_score` here is counted in PM complexity points
+and `fact_commit_effort.effort_score` in commit effort points. The overlapping
+numeric ranges (1–50 and 2.5–45) are a coincidence of scaling, not a shared
+unit — the two must never share a visualization axis. See #3917.
+
+---
+
 ## Migration History
 
 Migrations are applied in order from `src/core/db/sql/`. Never modify an applied
