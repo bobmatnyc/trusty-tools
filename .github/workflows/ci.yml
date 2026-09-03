@@ -410,6 +410,79 @@ jobs:
         run: cargo clippy -p trusty-common --all-targets --features codex-config -- -D warnings
 
   # --------------------------------------------------------------------------
+  # rustdoc-links: broken intra-doc links, on the PR that writes them (#5973).
+  #
+  # The same ratchet `pre-publish.yml`'s Gate 1 runs — one script, one baseline,
+  # `scripts/check_rustdoc_links.sh`, which owns the cargo invocation and the
+  # `RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links"` it runs under. Nothing
+  # is re-derived here; a second spelling of those flags is how the two gates
+  # would start disagreeing.
+  #
+  # Why it also runs per PR: the pre-publish gate fires on a TAG PUSH, so a
+  # broken link is found at the release boundary, by which point it has been on
+  # main for days and is blocking a cut. #5973 was filed for four such links and
+  # reopened when four MORE reached main the same way — landed by #6626, #6676
+  # and #6683, each merging with every required check green, because no per-PR
+  # workflow ran `cargo doc` at all. docs.rs builds a release's documentation
+  # once and never rebuilds it, so a link that ships broken stays broken for
+  # that version.
+  #
+  # NOT a required context. Adding one wedges every open PR that predates it
+  # (they cannot produce a check run that did not exist when they were cut —
+  # see CLAUDE.md, "What CI actually gates"), so promoting this row is the
+  # repo owner's call, made once the open-PR backlog is drained.
+  #
+  # docs_only short-circuit and `!cancelled()` for the same reasons the fmt and
+  # clippy jobs carry them: a Cargo-inert PR pays runner startup and nothing
+  # else, and a broken classifier costs a full doc build rather than a silent
+  # skip. A `.rs` doc-comment edit is NOT docs-only — detect-docs-only.sh
+  # classifies any `.rs` path as Cargo-relevant — so the change class this gate
+  # exists for always runs it.
+  # --------------------------------------------------------------------------
+  rustdoc-links:
+    name: Rustdoc intra-doc links
+    needs: [changes]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space
+        if: needs.changes.outputs.docs_only != 'true'
+        run: bash scripts/ci-free-disk-space.sh
+
+      - name: Install stable toolchain
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          bash scripts/ci-apt-install.sh \
+            build-essential \
+            pkg-config \
+            libssl-dev
+
+      # Its own cache key, for the same reason every other job has one: a doc
+      # build's target dir is not interchangeable with clippy's or test's.
+      - name: Cache cargo artifacts
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: rustdoc-links
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # The script runs `cargo doc --workspace --no-deps --locked --keep-going`
+      # itself, under `-D rustdoc::broken_intra_doc_links`, and deletes the
+      # `doc-*` fingerprints first so a warm cache cannot produce a pass over a
+      # build rustdoc never ran. Exit 3 means it could not compute a verdict at
+      # all, which is a failure here exactly as it is at publish time.
+      - name: cargo doc + broken-link ratchet
+        if: needs.changes.outputs.docs_only != 'true'
+        run: bash scripts/check_rustdoc_links.sh
+
+  # --------------------------------------------------------------------------
   # test-shard: run all unit + integration tests (stable, no --include-ignored),
   # split four ways by nextest partition. The `test` job below aggregates these
   # into a single roll-up row, "Rust tests (pre-publish gate)" — see that
@@ -2067,6 +2140,7 @@ jobs:
         embedder-cuda-check,
         ui-checks,
         search-daemon-smoke,
+        rustdoc-links,
       ]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -2092,6 +2166,7 @@ jobs:
             embedder-cuda-check=${{ needs.changes.outputs.embedder_cuda_relevant != 'false' && needs['embedder-cuda-check'].result || 'success' }}
             ui-checks=${{ needs['ui-checks'].result }}
             search-daemon-smoke=${{ needs['search-daemon-smoke'].result }}
+            rustdoc-links=${{ needs['rustdoc-links'].result }}
         run: bash scripts/classify-ci-results.sh > /dev/null
 
       - name: File or update tracking issue

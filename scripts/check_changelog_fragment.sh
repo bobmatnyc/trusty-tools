@@ -26,6 +26,8 @@
 #     1. an ADDED-or-MODIFIED `crates/<crate>/changelog.d/<name>.md` fragment
 #        that the release assembler ACCEPTS                        (the rule)
 #     2. a `crates/<crate>/CHANGELOG.md` edit that adds a bullet   (TRANSITIONAL)
+#     3. a `crates/<crate>/CHANGELOG.md` bullet the assembler folded into the
+#        crate's already-cut `## [<version>]` section    (RELEASE WINDOW, #6695)
 #
 #   (1) is validated, not merely detected. Presence alone is worthless: a 0-byte
 #   file, a body with no bullet, an unknown category, a fragment one directory
@@ -57,6 +59,38 @@
 #   Every branch cut afterwards gets the strict rule with no dated deadline to
 #   maintain and no cleanup PR to remember. It also requires the diff to add a
 #   real bullet line, so a whitespace-only CHANGELOG.md touch is not evidence.
+#
+#   (3) is the RELEASE WINDOW, and it exists because this gate and
+#   `scripts/check-changelog-assembled.sh` demanded opposite states of the same
+#   PR (#6695). Once a release cut writes `## [<version>]`, a source fix landing
+#   before the tag must run `assemble-changelog.sh <crate> <version> --merge`,
+#   which folds the pending fragments into that section and DELETES them in the
+#   same operation — a survivor is exactly what the assembled gate fails on. The
+#   fragment is then gone from the diff, so this gate read the fold as an
+#   omission and failed the PR. Live instance: branch
+#   fix/prepublish-doc-links-20260902 (ffe03c23c) passed the assembled gate for
+#   trusty-common and trusty-mpm and was failed here for both.
+#
+#   Four facts must all hold, and each rules out a way of faking the shape:
+#     - the crate's CHANGELOG.md gained a bullet, and that exact line sits
+#       INSIDE the `## [<version>]` section at HEAD — a bullet added anywhere
+#       else is not a record of the release being cut;
+#     - <version> is what `crates/<crate>/Cargo.toml` ships RIGHT NOW, so the
+#       section is the one about to be published;
+#     - no `<package>-v<version>` tag exists yet. After the tag that section is
+#       released history, and writing into it back-dates a change into a
+#       version that never carried it. A checkout with NO tags at all cannot
+#       establish this, so it is refused rather than assumed (fail closed);
+#     - `scripts/check-changelog-assembled.sh <crate> <version>` exits 0 — no
+#       fragment survived and the section is really there. Asking the other
+#       gate is what makes the two agree BY CONSTRUCTION, the same reason this
+#       script asks the assembler instead of validating fragments itself.
+#
+#   NOT accepted as the signature: a deleted `changelog.d/*.md` in the diff,
+#   which #6695 proposed. `--merge` consumes the fragment the same commit added,
+#   so the net diff carries no changelog.d path at all — ffe03c23c changed five
+#   files and none of them was a fragment. Requiring the deletion would have
+#   left the reported case red.
 #
 # ATTRIBUTION BY STRUCTURE (#4576). The crate that owns a changed path is found
 #   by walking UP to the nearest ancestor directory holding a Cargo.toml, then
@@ -141,6 +175,10 @@
 #   changed and B's fragments consumed by a release on main since the fork
 #   point — and asserts the stale base is refused, the live branch base passes
 #   naming only A, and a genuinely missing fragment still fails.
+#   scripts/check_changelog_release_window_selftest.sh replays the #6695 shape:
+#   a crate whose pending fragments a --merge folded into its cut section
+#   passes this gate AND check-changelog-assembled.sh, while the same bullet
+#   under an already-tagged section still fails.
 #   scripts/check_changelog_attribution_selftest.sh replays the #4576 shape:
 #   a nested crate source path must be attributed, not dropped, and an
 #   unattributable one must fail the gate. Fragment validation is covered by
@@ -174,7 +212,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     -h | --help)
       # Through the exemption list — keep this range in step with the header.
-      sed -n '2,92p' "$0" >&2
+      sed -n '2,130p' "$0" >&2
       exit 0
       ;;
     *)
@@ -388,6 +426,97 @@ fragment_crate() {
   echo "$crate"
 }
 
+# #6695 RELEASE WINDOW. Accepts the state an
+# `assemble-changelog.sh <crate> <version> --merge` run leaves behind, and only
+# that state. The header's "(3) is the RELEASE WINDOW" section states why each
+# of the four facts below is required; this is the mechanism.
+#
+# Sets ASSEMBLED_VERSION on acceptance and ASSEMBLED_WHY on refusal, so the
+# failure line can name the missing fact instead of leaving an author who DID
+# run the assembler with nothing to act on.
+#
+# Test: scripts/check_changelog_release_window_selftest.sh.
+ASSEMBLED_WHY=""
+ASSEMBLED_VERSION=""
+assembled_into_cut_section() {
+  local crate="$1"
+  local manifest="crates/${crate}/Cargo.toml"
+  local changelog="crates/${crate}/CHANGELOG.md"
+  local version pkg section added line assembled_err
+  ASSEMBLED_WHY=""
+  ASSEMBLED_VERSION=""
+
+  if [[ ! -f "$manifest" || ! -f "$changelog" ]]; then
+    ASSEMBLED_WHY="${manifest} or ${changelog} is not in the working tree"
+    return 1
+  fi
+
+  version="$(grep -m1 -E '^version[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' "$manifest" |
+    sed -E 's/^version[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/' || true)"
+  pkg="$(grep -m1 -E '^name[[:space:]]*=[[:space:]]*"' "$manifest" |
+    sed -E 's/^name[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/' || true)"
+  if [[ -z "$version" || -z "$pkg" ]]; then
+    ASSEMBLED_WHY="could not read name/version from ${manifest}"
+    return 1
+  fi
+
+  # The release window is bounded by the tag. A checkout carrying no tags at
+  # all cannot answer "has this version shipped", and a fact this gate cannot
+  # establish is never an exemption (the #4618 rule).
+  if [[ -z "$(git for-each-ref --count=1 --format='%(refname)' refs/tags 2>/dev/null || true)" ]]; then
+    ASSEMBLED_WHY="this checkout has no tags, so whether ${pkg} ${version} already shipped cannot be established (fetch them: git fetch --tags origin)"
+    return 1
+  fi
+  if [[ -n "$(git tag --list "${pkg}-v${version}" 2>/dev/null || true)" ]]; then
+    ASSEMBLED_WHY="${pkg} ${version} is already tagged — '## [${version}]' is released history, not a pending cut"
+    return 1
+  fi
+
+  # Literal prefix match, not a regex: the closing bracket terminates the
+  # version, so '## [0.47.1]' cannot also match '## [0.47.10] — …', and no
+  # escaped dots have to survive an awk -v assignment.
+  section="$(awk -v hdr="## [${version}]" '
+      index($0, hdr) == 1 { inside = 1; next }
+      inside && index($0, "## [") == 1 { exit }
+      inside { print }
+    ' "$changelog" || true)"
+  if [[ -z "$section" ]]; then
+    ASSEMBLED_WHY="${changelog} has no '## [${version}]' section to fold into"
+    return 1
+  fi
+
+  added="$(git diff --unified=0 --no-renames "$MERGE_BASE" HEAD -- "$changelog" |
+    grep -E '^\+[[:space:]]*-[[:space:]]' | sed 's/^+//' || true)"
+  if [[ -z "$added" ]]; then
+    ASSEMBLED_WHY="this branch adds no bullet to ${changelog}"
+    return 1
+  fi
+
+  ASSEMBLED_WHY="this branch's ${changelog} bullets land outside the '## [${version}]' section"
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    # `-e` is required: a bullet begins with `-`, which grep reads as an
+    # option otherwise and then reports a usage error INSTEAD of a mismatch.
+    if printf '%s\n' "$section" | grep -qxF -e "$line"; then
+      ASSEMBLED_WHY=""
+      break
+    fi
+  done <<<"$added"
+  [[ -n "$ASSEMBLED_WHY" ]] && return 1
+
+  # Ask the other gate rather than re-deriving what it means by "assembled".
+  # This is what makes the two verdicts agree by construction (#6695), the same
+  # reason the fragment arm below asks the assembler.
+  if ! assembled_err="$(bash "${REPO_ROOT}/scripts/check-changelog-assembled.sh" \
+    "$crate" "$version" 2>&1 >/dev/null)"; then
+    ASSEMBLED_WHY="check-changelog-assembled.sh still rejects ${crate} ${version}: $(printf '%s' "$assembled_err" | grep -m1 '^FAIL' || true)"
+    return 1
+  fi
+
+  ASSEMBLED_VERSION="$version"
+  return 0
+}
+
 # Crates with a NON-test source change (these need evidence).
 needs=""
 # Crates with fragment evidence.
@@ -491,6 +620,11 @@ fi
 fail=0
 while IFS= read -r crate; do
   [[ -z "$crate" ]] && continue
+  ASSEMBLED_WHY=""
+  has_bullet=0
+  if printf '%s' "$has_changelog" | grep -qx "$crate"; then
+    has_bullet=1
+  fi
   if printf '%s' "$has_fragment" | grep -qx "$crate"; then
     # Ask the assembler, rather than trusting the filename. This is what turns a
     # presence check into a validation: an empty, bodyless, mis-categorised or
@@ -502,10 +636,17 @@ while IFS= read -r crate; do
       printf '%s\n' "$assemble_err" | sed 's/^/       /' >&2
       fail=1
     fi
-  elif [[ "$TRANSITIONAL" -eq 1 ]] && printf '%s' "$has_changelog" | grep -qx "$crate"; then
+  elif [[ "$has_bullet" -eq 1 ]] && assembled_into_cut_section "$crate"; then
+    echo "OK   ${crate}: bullet folded into the cut '## [${ASSEMBLED_VERSION}]' section (RELEASE WINDOW, #6695)"
+  elif [[ "$TRANSITIONAL" -eq 1 ]] && [[ "$has_bullet" -eq 1 ]]; then
     echo "OK   ${crate}: CHANGELOG.md entry (TRANSITIONAL — branch predates #4476)"
   else
     echo "FAIL ${crate}: crates/${crate}/src/** changed with no changelog record" >&2
+    # #6695: the author edited CHANGELOG.md and it was not accepted. Say which
+    # of the release-window facts was missing, so the next step is obvious.
+    if [[ -n "$ASSEMBLED_WHY" ]]; then
+      echo "       a CHANGELOG.md bullet is only a record inside a pending release cut: ${ASSEMBLED_WHY}" >&2
+    fi
     # #4576: name a nested path when that is what changed, so the reader is not
     # sent to crates/<crate>/src/ to find nothing there.
     sample="$(printf '%s' "$nested_samples" | grep -m1 "^${crate}	" || true)"
@@ -535,6 +676,12 @@ copied through verbatim, so a second category stacked into the same file renders
 as body text under the first. Split it, reusing the number with a different slug.
 Never edit the crate CHANGELOG.md by hand: release time assembles the fragments
 (scripts/assemble-changelog.sh).
+
+In the RELEASE WINDOW — the crate's Cargo.toml version already has a
+`## [<version>]` section and no `<package>-v<version>` tag exists yet — write the
+fragment as usual, then fold it in so both changelog gates agree (issue #6695):
+
+  bash scripts/assemble-changelog.sh <crate> <version> --merge
 
 Preview what will be released:  bash scripts/assemble-changelog.sh <crate> --stdout
 

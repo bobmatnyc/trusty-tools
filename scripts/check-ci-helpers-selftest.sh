@@ -676,9 +676,12 @@ assert_eq "df prints only a header"     "purge"    "$(disk_decision_real_df 'Ava
 # to be a `matrix.shard == 1` step). It does its own full workspace build and
 # so carries the same disk pressure the other four do, which is why it calls
 # the helper rather than being exempted from this count.
+#
+# 5 -> 6: the `rustdoc-links` job (#5973) builds the whole workspace's
+# documentation, so it carries that disk pressure too.
 assert_eq "ci.yml has no inlined SDK purge left" "0" \
   "$(grep -c 'sudo rm -rf /usr/share/dotnet' "${ci_wf}" || true)"
-assert_eq "all five disk-reclaim jobs call the helper" "5" \
+assert_eq "all six disk-reclaim jobs call the helper" "6" \
   "$(grep -c 'bash scripts/ci-free-disk-space.sh' "${ci_wf}" || true)"
 
 # ---------------------------------------------------------------------------
@@ -808,7 +811,7 @@ rm -rf "${ok_dir}" "${flaky_dir}" "${dead_dir}"
 # Wiring: the wrapper helps nobody while a job still inlines the raw pair.
 assert_eq "no raw apt-get left in ci.yml" "0" \
   "$(grep -cE '^ *sudo apt-get' .github/workflows/ci.yml || true)"
-assert_eq "every apt step routes through the wrapper" "11" \
+assert_eq "every apt step routes through the wrapper" "12" \
   "$(grep -c 'bash scripts/ci-apt-install.sh' .github/workflows/ci.yml || true)"
 
 # ---------------------------------------------------------------------------

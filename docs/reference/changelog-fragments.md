@@ -94,6 +94,39 @@ any category could not be placed. It refuses outright when there is no
 `## [<version>]` section to merge into. Hand-editing `CHANGELOG.md` remains
 banned either way.
 
+## The Release Window (`--merge` in the Same PR)
+
+Between a release cut merging and its tag being pushed, a crate's
+`## [<version>]` section already exists. A source fix landing in that gap cannot
+just add a fragment: `scripts/check-changelog-assembled.sh` — preflight CHECK 9,
+and the merge-time half in `changelog-fragment.yml` — fails on any fragment left
+unconsumed, so the fix would block the publish it is meant to unblock. Folding it
+in with `--merge` then deleted the fragment, and the per-PR fragment gate read
+that as an omission. Both gates were right and the PR could satisfy neither
+(issue #6695; observed on `fix/prepublish-doc-links-20260902`, `ffe03c23c`).
+
+Write the fragment as usual, then fold it in, in the same PR:
+
+```bash
+bash scripts/assemble-changelog.sh <crate-dir> <version> --merge
+```
+
+`check_changelog_fragment.sh` accepts that as the crate's record when all four
+hold:
+
+- the branch adds a bullet to `crates/<crate>/CHANGELOG.md`, and that exact line
+  sits **inside** the `## [<version>]` section;
+- `<version>` is what the crate's `Cargo.toml` ships right now;
+- no `<package>-v<version>` tag exists yet — after the tag the section is
+  released history, and a bullet written into it back-dates the change;
+- `check-changelog-assembled.sh <crate> <version>` exits 0. The fragment gate
+  asks that gate rather than re-deriving what "assembled" means, which is what
+  keeps the two verdicts in step.
+
+Outside that window nothing changes: a hand-written `CHANGELOG.md` bullet is
+still not a record, and the fragment is still the rule.
+`scripts/check_changelog_release_window_selftest.sh` holds both directions.
+
 ## git-cliff No Longer Touches `CHANGELOG.md`
 
 `scripts/generate-changelog.sh` is deleted; it ran `git cliff --unreleased
