@@ -65,6 +65,41 @@ fn a_declared_finding_reaches_the_report() {
     );
 }
 
+/// One `cargo-deny list` row, as `trusty_audit::grounding::license::write_into`
+/// spells it (#6076).
+const LICENSE_ROW: &str = "findings = [\n  { category = \"license\", id = \"AGPL-3.0-or-later\", \
+     package = \"libfoo-sys\", version = \"0.9.1\", severity = \"RED\", \
+     title = \"copyleft: linking this into a distributed work obliges releasing that work's \
+     source under the same license\", url = \"https://spdx.org/licenses/AGPL-3.0-or-later.html\" \
+     },\n]";
+
+/// #6076's deliverable, through the same channel #6075 opened: a license
+/// obligation trusty-audit wrote into the manifest reaches the report an
+/// acquirer reads, under its own subsection heading.
+#[test]
+fn a_declared_license_finding_reaches_the_report() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = model_from(tmp.path(), &manifest_declaring(LICENSE_ROW));
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("## Assurance Scans"), "{md}");
+    assert!(md.contains("### License / IP Exposure"), "{md}");
+    assert!(md.contains("AGPL-3.0-or-later"), "{md}");
+    assert!(md.contains("libfoo-sys"), "{md}");
+    assert!(md.contains("RED"), "{md}");
+    assert!(
+        md.contains("obliges releasing that work's source under the same license"),
+        "the obligation, not just the license name, reaches the page: {md}"
+    );
+    assert!(
+        md.contains("https://spdx.org/licenses/AGPL-3.0-or-later.html"),
+        "the license is linked so a reader can verify it: {md}"
+    );
+}
+
 /// The narrowed disclaimer must point at the section that now carries the
 /// answer, and must still deny everything the run genuinely does not cover.
 #[test]

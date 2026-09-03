@@ -109,6 +109,13 @@ pub struct Advisory {
 /// report's existing RED/AMBER vocabulary exactly.
 /// What: `Red` for every `vulnerabilities.list` row, `Amber` for every
 /// `warnings` row. There is no green band — a clean scan produces no rows.
+///
+/// // #6076: this is the whole band vocabulary trusty-review's `band_rank`
+/// reads, so the license leg reuses this type rather than declaring a second
+/// enum whose `as_str` returns the same two strings. The variant names below
+/// describe the CVE reading of each band; a collector that reuses them owes its
+/// own definition of what earns each one.
+///
 /// Test: `cve_tests::a_warning_becomes_an_amber_advisory`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -166,28 +173,6 @@ pub struct Run {
     /// Diagnostics, used only to explain a failure.
     pub stderr: String,
 }
-
-/// Marker files that identify a dependency ecosystem, and what to call it.
-///
-/// Why: the gap line owes the reader the LANGUAGE, not a filename — "no
-/// cargo-audit-equivalent for JavaScript/TypeScript" is actionable and "no
-/// package.json handler" is not. Ordered most-specific first so a polyglot
-/// repository is named by the ecosystem whose manifest sits at its root.
-const ECOSYSTEMS: &[(&str, &str)] = &[
-    ("package.json", "JavaScript/TypeScript"),
-    ("go.mod", "Go"),
-    ("pyproject.toml", "Python"),
-    ("requirements.txt", "Python"),
-    ("Pipfile", "Python"),
-    ("Gemfile", "Ruby"),
-    ("composer.json", "PHP"),
-    ("pom.xml", "Java"),
-    ("build.gradle", "Java/Kotlin"),
-    ("build.gradle.kts", "Java/Kotlin"),
-    ("mix.exs", "Elixir"),
-    ("pubspec.yaml", "Dart/Flutter"),
-    ("Package.swift", "Swift"),
-];
 
 /// Scan `checkout`, or say why there is no scan.
 ///
@@ -259,9 +244,10 @@ where
 /// there in both cases. `None` is reserved for the declared skip: no manifest
 /// this collector recognises, so no exposure it can claim to be missing.
 /// What: an unlocked Cargo workspace first, since a Rust repository is the one
-/// case where the tool exists and only the input is absent; then the first
-/// [`ECOSYSTEMS`] marker present at the root, spelled with the exact wording
-/// #6075 asks for.
+/// case where the tool exists and only the input is absent; then the language
+/// [`super::ecosystem::detect`] names, spelled with the exact wording #6075
+/// asks for. // #6076: the marker table moved to `super::ecosystem` when the
+/// license leg needed the same detection with different wording.
 /// Test: `cve_tests::{a_non_rust_repository_names_its_language,
 /// a_rust_repository_with_no_lockfile_says_so}`.
 fn not_scannable(checkout: &Path) -> Option<String> {
@@ -271,10 +257,8 @@ fn not_scannable(checkout: &Path) -> Option<String> {
              has no pinned dependency set to scan"
         ));
     }
-    ECOSYSTEMS
-        .iter()
-        .find(|(marker, _)| checkout.join(marker).is_file())
-        .map(|(_, language)| format!("{COLLECTOR}: no cargo-audit-equivalent for {language}"))
+    super::ecosystem::detect(checkout)
+        .map(|language| format!("{COLLECTOR}: no cargo-audit-equivalent for {language}"))
 }
 
 /// Reduce one `cargo audit --json` document to its advisories.
