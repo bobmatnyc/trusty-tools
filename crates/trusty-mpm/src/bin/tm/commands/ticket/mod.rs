@@ -171,11 +171,9 @@ pub(crate) async fn ticket(
     // (one for the backend's issue-level calls, one for repo-level `gh repo
     // view`) each carry the SAME resolved overrides.
     let gh_env = crate::gh_identity::load_gh_env()?;
-    let runner = RealCommandRunner::with_env(gh_env.vars().to_vec());
+    let runner = RealCommandRunner::with_gh_env(&gh_env);
     let backend = match system {
-        TicketSystemKind::Gh => {
-            GhTicketSystem::new(RealCommandRunner::with_env(gh_env.vars().to_vec()))
-        }
+        TicketSystemKind::Gh => GhTicketSystem::new(RealCommandRunner::with_gh_env(&gh_env)),
         TicketSystemKind::Jira => return Err(not_yet_supported("jira")),
         TicketSystemKind::Linear => return Err(not_yet_supported("linear")),
     };

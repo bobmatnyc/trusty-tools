@@ -82,6 +82,20 @@ pub(crate) const BUILD_TEST_REASON: &str = "PM must not run builds or tests dire
 pub(crate) const NETWORK_REASON: &str = "PM must not fetch over the network from Bash \
      (prohibition P-network). Use WebFetch/WebSearch or delegate the task.";
 
+/// Deny reason for a wrapper whose inner command cannot be lexed (#6660).
+pub(crate) const UNLEXABLE_WRAPPER_REASON: &str = "this command's `sh -c`/`bash -c`/`env -S`/\
+     `xargs` wrapper carries an inner command with unbalanced quoting, so the guard cannot \
+     classify what would actually run. Run the command without the wrapper, or fix the quoting.";
+
+/// How many wrapper layers [`split_shell_segments`] descends through (#6660).
+///
+/// Why: `sh -c "bash -c '…'"` is a real shape, and an adversarial one nests
+/// without bound. Each layer is strictly shorter than the one above it, so the
+/// recursion terminates on its own — the cap turns a pathological input into a
+/// bounded (and still safe-direction) partial scan rather than trusting that.
+/// What: the budget threaded through [`expand_shell_segments`].
+const MAX_WRAPPER_DEPTH: usize = 8;
+
 /// Maximum command-substitution recursion depth before conservatively denying.
 ///
 /// Why: [`classify_command_substitutions`] recurses through
@@ -128,7 +142,7 @@ fn evaluate_bash_command_inner(command: &str, depth: usize) -> Option<&'static s
         return None;
     }
     for segment in split_shell_segments(trimmed) {
-        if let Some(reason) = classify_bash_segment(segment, depth) {
+        if let Some(reason) = classify_bash_segment(&segment, depth) {
             return Some(reason);
         }
     }
@@ -162,7 +176,51 @@ fn evaluate_bash_command_inner(command: &str, depth: usize) -> Option<&'static s
 /// `split_shell_segments_splits_bare_ampersand`,
 /// `split_shell_segments_single_command`,
 /// `split_shell_segments_ignores_quoted_operators`.
-fn split_shell_segments(command: &str) -> Vec<&str> {
+///
+/// #6660: the returned list also carries the commands hidden inside a leading
+/// `sh -c` / `bash -c` / `env -S` / `xargs` wrapper — see
+/// [`expand_shell_segments`]. Every rule in this module reads its segments from
+/// here, which is what makes one descent reach all of them.
+fn split_shell_segments(command: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    expand_shell_segments(command, 0, &mut out);
+    out
+}
+
+/// Emit each of `command`'s segments, followed by the segments of whatever a
+/// leading command wrapper would run (#6660).
+///
+/// Why: `sh -c "git worktree remove …"` reached every rule as a segment whose
+/// program is `sh`, and no rule has an opinion about `sh`. Emitting the inner
+/// command as ADDITIONAL segments is additive by construction: every segment
+/// the caller saw before is still present, byte-identical and in the same
+/// order, so no existing classification changes and the wrapped command is now
+/// classified too.
+///
+/// The `cd`-tracking rules read these segments in order, so a `cd` inside a
+/// wrapped string leaks into the segments that follow the wrapper — a subshell
+/// `cd` does not really leak. That over-resolves a later relative path against
+/// the subshell's directory, which is the over-blocking direction this guard
+/// already prefers everywhere else.
+/// What: recurses through [`shell_lex::wrapped_command`] up to
+/// [`MAX_WRAPPER_DEPTH`] layers. An [`shell_lex::WrappedCommand::Unlexable`]
+/// wrapper contributes no inner segments; [`classify_bash_segment`] denies it
+/// instead.
+/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
+fn expand_shell_segments(command: &str, depth: usize, out: &mut Vec<String>) {
+    for raw in split_shell_segments_raw(command) {
+        out.push(raw.to_string());
+        if depth >= MAX_WRAPPER_DEPTH {
+            continue;
+        }
+        if let shell_lex::WrappedCommand::Inner(inner) = shell_lex::wrapped_command(raw.trim()) {
+            expand_shell_segments(&inner, depth + 1, out);
+        }
+    }
+}
+
+/// The composition-operator split itself, without the #6660 wrapper descent.
+fn split_shell_segments_raw(command: &str) -> Vec<&str> {
     let scan = QuoteScan::new(command);
     let quoted = |i: usize| scan.balanced && !scan.is_unquoted(i);
     let bytes = command.as_bytes();
@@ -230,6 +288,11 @@ fn classify_bash_segment(segment: &str, depth: usize) -> Option<&'static str> {
     let trimmed = segment.trim();
     if trimmed.is_empty() {
         return None;
+    }
+    // #6660: a wrapper whose inner command will not lex is a command the guard
+    // cannot classify at all — fail closed, or broken quoting is the bypass.
+    if shell_lex::wrapped_command(trimmed) == shell_lex::WrappedCommand::Unlexable {
+        return Some(UNLEXABLE_WRAPPER_REASON);
     }
     if let Some(program) = first_command_token(trimmed) {
         match program {

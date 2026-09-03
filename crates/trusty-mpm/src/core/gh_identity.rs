@@ -37,6 +37,19 @@
 //!
 //! `host` is applied independently of the identity strategy whenever set.
 //!
+//! ## Clearing the inherited identity (#6668)
+//!
+//! Selecting an identity is only half the job. `gh` reads `GH_TOKEN` (and its
+//! `GITHUB_TOKEN` / `*_ENTERPRISE_TOKEN` spellings) BEFORE it reads
+//! `GH_CONFIG_DIR`, so a `tm` invoked from a shell that exports one account's
+//! token authenticated as that account even with a per-project `config_dir`
+//! binding applied. Whenever an identity strategy resolves, every OTHER
+//! [`GH_INHERITED_IDENTITY_ENV`] var is therefore listed in
+//! [`GhEnv::unset_vars`] and removed from the child by
+//! [`GhEnv::apply_to`]. An unbound (`None`) config, and a binding that sets
+//! only `host`, remove nothing — an operator whose sole credential is an
+//! ambient `GH_TOKEN` is unaffected.
+//!
 //! ## `account`-strategy caveat (deliberate decision)
 //!
 //! `gh` has NO universal per-invocation `--user`/`--account` flag, and
@@ -87,6 +100,28 @@ const ENV_GH_TOKEN: &str = "GH_TOKEN";
 /// `GH_HOST` — the default host gh targets.
 const ENV_GH_HOST: &str = "GH_HOST";
 
+/// Every env var that can select a gh identity on its own (#6668).
+///
+/// Why: gh resolves auth from the environment BEFORE it reads a scoped config
+/// dir, so an inherited `GH_TOKEN` silently outranks the `GH_CONFIG_DIR` this
+/// resolver emits — the binding is applied and still loses. Naming the full
+/// set once is what keeps the removal complete: `GITHUB_TOKEN` is gh's
+/// documented fallback for `GH_TOKEN`, and the two `*_ENTERPRISE_TOKEN`
+/// spellings are the same pair for a GHE host.
+/// What: the removal candidates [`resolve_gh_env`] clears from a bound child.
+/// A var this resolution SETS is never also removed.
+/// Test: `binding_removes_the_inherited_identity_vars`,
+/// `token_env_binding_removes_the_config_dir`,
+/// `absent_config_and_host_only_binding_remove_nothing`.
+const GH_INHERITED_IDENTITY_ENV: &[&str] = &[
+    ENV_GH_TOKEN,
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    ENV_GH_CONFIG_DIR,
+    "GH_USER",
+];
+
 /// Typed failures from resolving a [`GithubConfig`] into a [`GhEnv`].
 ///
 /// Why: the `account`-only strategy cannot be honoured without mutating global
@@ -122,6 +157,9 @@ pub enum GhIdentityError {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GhEnv {
     vars: Vec<(String, String)>,
+    /// #6668: identity vars to REMOVE from the child so an inherited one
+    /// cannot outrank the binding in `vars`. Empty when nothing binds.
+    unset: Vec<String>,
 }
 
 impl GhEnv {
@@ -135,6 +173,44 @@ impl GhEnv {
         &self.vars
     }
 
+    /// The env vars to REMOVE from the child before applying [`vars`](Self::vars) (#6668).
+    ///
+    /// Why: setting `GH_CONFIG_DIR` is not enough to bind an identity. gh reads
+    /// `GH_TOKEN` (and its `GITHUB_TOKEN`/enterprise spellings) ahead of any
+    /// scoped config dir, so a shell that exports another account's token wins
+    /// over the project binding — the #6668 symptom was `tm session
+    /// prune-worktrees --merged-prs` reporting "Could not resolve to a
+    /// Repository" for every repo the shell token could not see. Every spawn
+    /// site must clear these before setting the binding's own vars.
+    /// What: the [`GH_INHERITED_IDENTITY_ENV`] entries this resolution does not
+    /// itself set, or EMPTY when no identity strategy resolved (ambient stays
+    /// ambient — an unbound `gh` call still inherits the operator's token).
+    /// Test: `binding_removes_the_inherited_identity_vars`,
+    /// `token_env_binding_removes_the_config_dir`,
+    /// `absent_config_and_host_only_binding_remove_nothing`.
+    pub fn unset_vars(&self) -> &[String] {
+        &self.unset
+    }
+
+    /// Apply this binding to `cmd`: remove the inherited identity, then set the
+    /// resolved overrides (#6668).
+    ///
+    /// Why: the removal must precede the set, and getting that order wrong at
+    /// one call site reintroduces the bug there alone. One applier is what
+    /// keeps every `std::process::Command` spawn site identical.
+    /// What: `env_remove` for each [`unset_vars`](Self::unset_vars) entry, then
+    /// `env` for each [`vars`](Self::vars) pair. A default (`is_empty`) `GhEnv`
+    /// touches nothing.
+    /// Test: `apply_to_removes_then_sets`.
+    pub fn apply_to(&self, cmd: &mut std::process::Command) {
+        for key in &self.unset {
+            cmd.env_remove(key);
+        }
+        for (key, value) in &self.vars {
+            cmd.env(key, value);
+        }
+    }
+
     /// Whether any override is set (i.e. an identity binding is active).
     ///
     /// Why: lets callers cheaply distinguish "bound" from "ambient" without
@@ -142,7 +218,7 @@ impl GhEnv {
     /// What: true when at least one override is present.
     /// Test: `resolve_absent_config_is_empty` asserts `is_empty()` for None.
     pub fn is_empty(&self) -> bool {
-        self.vars.is_empty()
+        self.vars.is_empty() && self.unset.is_empty()
     }
 
     /// One-line, secret-free description of the resolved overrides (#6623).
@@ -156,11 +232,13 @@ impl GhEnv {
     /// redacted.
     /// Test: `describe_empty_env`, `describe_config_dir`, `describe_redacts_token`.
     pub fn describe(&self) -> String {
-        if self.vars.is_empty() {
+        if self.is_empty() {
             return "no github: binding resolved — gh inherits the daemon's ambient \
                     environment"
                 .to_string();
         }
+        // #6668: the removals are named too — "GH_CONFIG_DIR=… " alone did not
+        // say whether an inherited token was still in play.
         self.vars
             .iter()
             .map(|(k, v)| {
@@ -170,6 +248,7 @@ impl GhEnv {
                     format!("{k}={v}")
                 }
             })
+            .chain(self.unset.iter().map(|k| format!("-{k}")))
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -239,7 +318,11 @@ pub fn select_config_for_origin<'a>(
 /// ALWAYS appends `GH_HOST` when `host` is set. The `account`-only case returns
 /// [`GhIdentityError::AccountStrategyUnsupported`] (see module docs). A
 /// `token_env` whose named var is ABSENT is skipped, falling through to the next
-/// strategy.
+/// strategy. #6668: when an identity strategy DOES resolve, every other
+/// [`GH_INHERITED_IDENTITY_ENV`] var is listed in
+/// [`GhEnv::unset_vars`] for the spawn site to remove — otherwise a shell
+/// exporting `GH_TOKEN` outranks the `GH_CONFIG_DIR` this emits and the binding
+/// loses. A host-only binding selects no identity and removes nothing.
 /// Test: `resolve_absent_config_is_empty`, `resolve_config_dir`,
 /// `resolve_token_env_present`, `resolve_token_env_absent_falls_through`,
 /// `precedence_config_dir_beats_token_env`,
@@ -274,12 +357,28 @@ pub fn resolve_gh_env(config: Option<&GithubConfig>) -> Result<GhEnv, GhIdentity
         ));
     }
 
+    // #6668: an identity strategy that resolved must also CLEAR every other
+    // identity var the child would otherwise inherit — gh reads `GH_TOKEN`
+    // ahead of `GH_CONFIG_DIR`, so leaving the shell's token in place applies
+    // the binding and still authenticates as the wrong account. Computed
+    // before `GH_HOST` is appended so a host-only binding (which selects no
+    // identity) removes nothing and stays exactly as ambient as before.
+    let unset: Vec<String> = if vars.is_empty() {
+        Vec::new()
+    } else {
+        GH_INHERITED_IDENTITY_ENV
+            .iter()
+            .filter(|name| !vars.iter().any(|(k, _)| k == *name))
+            .map(|name| (*name).to_string())
+            .collect()
+    };
+
     // --- Host is applied independently of the identity strategy. ------------
     if let Some(host) = cfg.host.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         vars.push((ENV_GH_HOST.to_string(), host.to_string()));
     }
 
-    Ok(GhEnv { vars })
+    Ok(GhEnv { vars, unset })
 }
 
 /// Resolve the token NAMEd by `token_env` from the process environment.
@@ -367,6 +466,103 @@ mod tests {
                 ENV_GH_CONFIG_DIR.to_string(),
                 "/home/bob/.config/gh-work".to_string()
             )]
+        );
+    }
+
+    /// Why (#6668): a `config_dir` binding that leaves an inherited `GH_TOKEN`
+    /// in the child is not a binding — gh reads the env token first, so the
+    /// scoped config dir is decorative and the wrong account answers. The
+    /// removal list must name every identity var this resolution did not set.
+    /// Test: itself.
+    #[test]
+    fn binding_removes_the_inherited_identity_vars() {
+        let c = GithubConfig {
+            config_dir: Some(PathBuf::from("/cfg/duetto")),
+            ..cfg()
+        };
+        let env = resolve_gh_env(Some(&c)).expect("ok");
+        let unset: Vec<&str> = env.unset_vars().iter().map(String::as_str).collect();
+        assert_eq!(
+            unset,
+            vec![
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "GH_ENTERPRISE_TOKEN",
+                "GITHUB_ENTERPRISE_TOKEN",
+                "GH_USER",
+            ]
+        );
+        // The var this resolution SETS is never also removed.
+        assert!(!unset.contains(&ENV_GH_CONFIG_DIR));
+    }
+
+    /// Why (#6668): the mirror case — a `token_env` binding sets `GH_TOKEN`, so
+    /// the var it must clear is the inherited `GH_CONFIG_DIR` (and the other
+    /// token spellings), not the one it just set.
+    /// Test: itself.
+    #[test]
+    fn token_env_binding_removes_the_config_dir() {
+        // SAFETY: single-threaded test setup for a name no other test reads.
+        unsafe { std::env::set_var("TM_TEST_6668_TOKEN", "t") };
+        let c = GithubConfig {
+            token_env: Some("TM_TEST_6668_TOKEN".to_string()),
+            ..cfg()
+        };
+        let env = resolve_gh_env(Some(&c)).expect("ok");
+        let unset: Vec<&str> = env.unset_vars().iter().map(String::as_str).collect();
+        assert!(unset.contains(&ENV_GH_CONFIG_DIR), "{unset:?}");
+        assert!(unset.contains(&"GITHUB_TOKEN"), "{unset:?}");
+        assert!(!unset.contains(&ENV_GH_TOKEN), "{unset:?}");
+        unsafe { std::env::remove_var("TM_TEST_6668_TOKEN") };
+    }
+
+    /// Why (#6668): removal is scoped to a resolved IDENTITY. An absent config
+    /// — and a binding that sets only `host` — must stay exactly as ambient as
+    /// before, or an operator whose only credential is `GH_TOKEN` loses it.
+    /// Test: itself.
+    #[test]
+    fn absent_config_and_host_only_binding_remove_nothing() {
+        assert!(resolve_gh_env(None).expect("ok").unset_vars().is_empty());
+        let c = GithubConfig {
+            host: Some("github.example.com".to_string()),
+            ..cfg()
+        };
+        assert!(
+            resolve_gh_env(Some(&c))
+                .expect("ok")
+                .unset_vars()
+                .is_empty()
+        );
+    }
+
+    /// Why (#6668): the removal must reach the spawned command, and it must run
+    /// BEFORE the set — the reverse order would clear the var just bound.
+    /// Test: itself.
+    #[test]
+    fn apply_to_removes_then_sets() {
+        let c = GithubConfig {
+            config_dir: Some(PathBuf::from("/cfg/duetto")),
+            ..cfg()
+        };
+        let env = resolve_gh_env(Some(&c)).expect("ok");
+        let mut cmd = std::process::Command::new("true");
+        env.apply_to(&mut cmd);
+        let seen: Vec<(String, Option<String>)> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(seen.contains(&("GH_TOKEN".to_string(), None)), "{seen:?}");
+        assert!(
+            seen.contains(&(
+                ENV_GH_CONFIG_DIR.to_string(),
+                Some("/cfg/duetto".to_string())
+            )),
+            "{seen:?}"
         );
     }
 
@@ -713,7 +909,13 @@ mod tests {
     #[test]
     fn describe_config_dir() {
         let env = resolve_gh_env(Some(&gh("/cfg/dir"))).expect("ok");
-        assert_eq!(env.describe(), "GH_CONFIG_DIR=/cfg/dir");
+        // #6668: a `-VAR` entry names each identity var the spawn removes, so
+        // the diagnostic says whether an inherited token was still in play.
+        assert_eq!(
+            env.describe(),
+            "GH_CONFIG_DIR=/cfg/dir, -GH_TOKEN, -GITHUB_TOKEN, -GH_ENTERPRISE_TOKEN, \
+             -GITHUB_ENTERPRISE_TOKEN, -GH_USER"
+        );
     }
 
     /// Why: `GH_TOKEN`'s VALUE must never appear in a diagnostic string.

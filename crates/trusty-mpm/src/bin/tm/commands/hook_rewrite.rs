@@ -363,7 +363,7 @@ pub(crate) fn first_command_token(command: &str) -> Option<&str> {
 /// an env assignment" rule has one definition.
 /// What: `KEY` must be non-empty, start with a letter or underscore, and
 /// contain only alphanumerics/underscores up to the first `=`.
-fn is_env_assignment(token: &str) -> bool {
+pub(crate) fn is_env_assignment(token: &str) -> bool {
     let Some((key, _value)) = token.split_once('=') else {
         return false;
     };

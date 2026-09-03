@@ -19,7 +19,224 @@
 //! leading env/`sudo` noise and git global options.
 //! Test: `shell_lex::tests`.
 
-use crate::commands::hook_rewrite::strip_wrapper_prefix;
+use crate::commands::hook_rewrite::{COMMAND_WRAPPERS, is_env_assignment, strip_wrapper_prefix};
+
+/// Shell programs that run their `-c` argument as a command string.
+///
+/// Why (#6660): the guard resolved a segment's program basename and required it
+/// to be `git`. `sh -c "git worktree remove …"` resolves to `sh`, so every rule
+/// built on [`git_subcommand`] — the #5791 worktree-remove deny, the ADR-0048
+/// main-checkout HEAD-move rule, the destructive-delete rule — saw a program it
+/// had no opinion about and allowed the command underneath. Naming the shells
+/// in one list is what stops the fix from covering a single spelling.
+/// What: the basenames whose `-c` argument is an inner command to re-classify.
+/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
+const DASH_C_SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];
+
+/// `xargs` options that consume the FOLLOWING token as their value.
+///
+/// Why: skipping only the flag would leave its value (`4` in `xargs -n 4 git …`)
+/// read as the program. The separated spelling is the one that needs a table;
+/// an attached (`-n4`) or `=`-joined (`--max-args=4`) value is one token and
+/// skips itself.
+/// What: the separated-value option spellings, short and long.
+/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
+const XARGS_OPTS_WITH_ARG: &[&str] = &[
+    "-a",
+    "-d",
+    "-E",
+    "-e",
+    "-I",
+    "-i",
+    "-L",
+    "-l",
+    "-n",
+    "-P",
+    "-s",
+    "--arg-file",
+    "--delimiter",
+    "--eof",
+    "--replace",
+    "--max-lines",
+    "--max-args",
+    "--max-procs",
+    "--max-chars",
+    "--process-slot-var",
+];
+
+/// What a segment's leading wrapper hides, if anything (#6660).
+///
+/// Why: three answers, not two. A segment that is not a wrapper classifies
+/// as-is; a wrapper hands back the inner command text to classify instead; and
+/// a wrapper whose inner text cannot be lexed is a command the guard cannot
+/// classify AT ALL, which must deny rather than fall through — otherwise broken
+/// quoting is the bypass.
+/// What: see the variants.
+/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`,
+/// `an_unparseable_wrapped_command_is_denied`,
+/// `wrappers_around_benign_commands_still_allow`.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum WrappedCommand {
+    /// No wrapper — classify the segment as given.
+    None,
+    /// The command text the wrapper would actually run.
+    Inner(String),
+    /// A wrapper carrying an inner command the guard cannot lex. Fail closed.
+    Unlexable,
+}
+
+/// Resolve the command a leading `sh -c` / `bash -c` / `env -S` / `xargs`
+/// wrapper would actually run (#6660).
+///
+/// Why: [`strip_wrapper_prefix`] advances past a wrapper TOKEN but never
+/// descends into an argument that is itself a command — a `-c` string or an
+/// `xargs` argv. Every rule downstream therefore classified the wrapper instead
+/// of the command. Doing the descent here, on the shared segment text, is what
+/// makes one fix reach all of them.
+/// What: shlex-splits `segment`, skips leading `KEY=value` assignments and
+/// [`COMMAND_WRAPPERS`] tokens, then: a [`DASH_C_SHELLS`] program yields the
+/// token after its `-c` (a short cluster ending in `c`, such as `-lc`, counts);
+/// `env` yields the value of `-S`/`--split-string` in any of its three
+/// spellings; `xargs` yields its argv past [`XARGS_OPTS_WITH_ARG`], re-joined.
+/// The result is [`WrappedCommand::Unlexable`] when the inner text will not
+/// shlex-split, and [`WrappedCommand::None`] when the segment carries no such
+/// wrapper — an unlexable OUTER segment included, since that case already falls
+/// back to the quote-unaware scan and is not this function's to change.
+/// Test: as [`WrappedCommand`].
+pub(super) fn wrapped_command(segment: &str) -> WrappedCommand {
+    let Some(argv) = shlex::split(segment) else {
+        return WrappedCommand::None;
+    };
+    let mut i = 0;
+    while i < argv.len() {
+        let raw = argv[i].as_str();
+        let tok = raw.strip_prefix('\\').unwrap_or(raw);
+        if is_env_assignment(tok) {
+            i += 1;
+            continue;
+        }
+        let base = tok.rsplit('/').next().unwrap_or(tok);
+        let rest = &argv[i + 1..];
+        if DASH_C_SHELLS.contains(&base) {
+            return inner_or_none(dash_c_argument(rest));
+        }
+        if base == "env" {
+            match env_split_string(rest) {
+                Some(inner) => return inner_or_none(Some(inner)),
+                // Plain `env` / `env FOO=1 cmd` — keep walking to the real
+                // program, exactly as `strip_wrapper_prefix` would.
+                None => {
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+        if base == "xargs" {
+            return inner_or_none(xargs_argument(rest));
+        }
+        if COMMAND_WRAPPERS.contains(&tok) {
+            i += 1;
+            continue;
+        }
+        return WrappedCommand::None;
+    }
+    WrappedCommand::None
+}
+
+/// Classify an extracted inner command string.
+///
+/// Why: the fail-closed decision lives in ONE place so no wrapper shape can
+/// forget it.
+/// What: lexable → [`WrappedCommand::Inner`], not → [`WrappedCommand::Unlexable`],
+/// absent or whitespace-only (it runs nothing) → [`WrappedCommand::None`].
+/// Test: `an_unparseable_wrapped_command_is_denied`.
+fn inner_or_none(inner: Option<String>) -> WrappedCommand {
+    let Some(inner) = inner else {
+        return WrappedCommand::None;
+    };
+    if inner.trim().is_empty() {
+        return WrappedCommand::None;
+    }
+    match shlex::split(&inner) {
+        Some(_) => WrappedCommand::Inner(inner),
+        None => WrappedCommand::Unlexable,
+    }
+}
+
+/// The command string a shell's `-c` option carries, if present.
+///
+/// Why: shells accept their options in any order and in clusters, so scanning
+/// for the exact token `-c` alone would miss `bash -lc "…"`, a spelling a
+/// wrapper script reaches for routinely.
+/// What: the token after the first `-c`, or after the first short cluster
+/// (`-`-led, not `--`-led) ending in `c`. `None` when the shell runs a script
+/// file instead, or when `-c` ends the argv.
+/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
+fn dash_c_argument(rest: &[String]) -> Option<String> {
+    for (n, tok) in rest.iter().enumerate() {
+        let cluster =
+            tok.starts_with('-') && !tok.starts_with("--") && tok.len() > 1 && tok.ends_with('c');
+        if tok == "-c" || cluster {
+            return rest.get(n + 1).cloned();
+        }
+    }
+    None
+}
+
+/// The command string `env -S` / `--split-string` carries, if present.
+///
+/// Why: `env -S "git worktree remove …"` runs the string as a command, and
+/// [`strip_wrapper_prefix`] refuses a wrapper followed by a flag — so this shape
+/// resolved to nothing at all and every rule allowed it.
+/// What: handles `-S <str>`, `-S<str>` and `--split-string=<str>`. `None` for a
+/// plain `env`, which stays an ordinary wrapper for the caller to walk past.
+/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
+fn env_split_string(rest: &[String]) -> Option<String> {
+    for (n, tok) in rest.iter().enumerate() {
+        if tok == "-S" || tok == "--split-string" {
+            return rest.get(n + 1).cloned();
+        }
+        if let Some(value) = tok.strip_prefix("--split-string=") {
+            return Some(value.to_string());
+        }
+        if let Some(value) = tok.strip_prefix("-S")
+            && !value.is_empty()
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// The command `xargs` would run, re-joined into a command string.
+///
+/// Why: `xargs git worktree remove <path>` runs `git`, and reading only the
+/// first token gave `xargs`. The stdin-supplied arguments are unknowable here,
+/// but the verb and every literal argument on the command line are not — and
+/// those are what the git-verb rules classify.
+/// What: skips xargs' own options (those in [`XARGS_OPTS_WITH_ARG`] consume the
+/// next token; attached and `=`-joined values consume none) and re-quotes the
+/// remaining argv with `shlex::try_join`. `None` when nothing follows the
+/// options, or when a token cannot be re-quoted (it contains a NUL).
+/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
+fn xargs_argument(rest: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < rest.len() {
+        let tok = rest[i].as_str();
+        if !tok.starts_with('-') || tok == "-" {
+            break;
+        }
+        if XARGS_OPTS_WITH_ARG.contains(&tok) {
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    if i >= rest.len() {
+        return None;
+    }
+    shlex::try_join(rest[i..].iter().map(String::as_str)).ok()
+}
 
 /// Quote context of a single byte of a shell command.
 ///

@@ -9,7 +9,9 @@
 //! `gh_identity` module) and sets them on every spawned `Command`, so the
 //! identity is bound centrally rather than at each of `tm`'s many `gh` call
 //! sites. config_dir/token_env bind the identity WITHOUT mutating global gh
-//! state (they only set `GH_CONFIG_DIR`/`GH_TOKEN`/`GH_HOST` on the child).
+//! state: they set `GH_CONFIG_DIR`/`GH_TOKEN`/`GH_HOST` on the child, and
+//! (#6668) remove from that child every other identity var gh would otherwise
+//! read ahead of them.
 //! What: the [`CommandRunner`] trait with one `run` method returning captured
 //! stdout/stderr/exit-status, a [`CommandOutput`] value type, and the
 //! [`RealCommandRunner`] that executes via `std::process::Command` after applying
@@ -85,32 +87,40 @@ pub(crate) trait CommandRunner {
 /// `GH_TOKEN`, `GH_HOST`) are set on the spawned child only — never on the
 /// parent process — so the binding does not mutate the operator's global gh
 /// state and cannot leak across unrelated invocations.
-/// What: holds an ordered list of `(name, value)` env overrides. The unit-style
-/// `RealCommandRunner::default()` / `RealCommandRunner::new` carry NO overrides
-/// (ambient identity, pre-#1265 behaviour); [`RealCommandRunner::with_env`]
+/// What: holds an ordered list of `(name, value)` env overrides plus the #6668
+/// removal list. The unit-style `RealCommandRunner::default()` carries NEITHER
+/// (ambient identity, pre-#1265 behaviour); [`RealCommandRunner::with_gh_env`]
 /// binds a resolved set. `run` spawns the program via
-/// `std::process::Command::output` with the overrides applied, capturing both
-/// streams; an inability to spawn (e.g. binary not installed) is surfaced as an
-/// actionable `anyhow` error rather than a panic.
+/// `std::process::Command::output` with the removals applied first and the
+/// overrides second, capturing both streams; an inability to spawn (e.g. binary
+/// not installed) is surfaced as an actionable `anyhow` error rather than a
+/// panic.
 /// Test: `real_runner_applies_env_overrides` asserts the child sees the vars; the
 /// no-override default is exercised by every existing live path.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RealCommandRunner {
     /// Per-project env overrides applied to each spawned child (#1265).
     env: Vec<(String, String)>,
+    /// #6668: inherited identity vars removed from each child before `env` is
+    /// applied, so a shell-exported `GH_TOKEN` cannot outrank the binding.
+    unset: Vec<String>,
 }
 
 impl RealCommandRunner {
-    /// Construct a runner that applies `env` overrides to every spawned child.
+    /// Construct a runner bound to a resolved
+    /// [`GhEnv`](trusty_mpm::core::gh_identity::GhEnv) (#6668).
     ///
-    /// Why: the #1265 entry points resolve the active project's `GhEnv` once
-    /// and bind it here so every `gh` call in that command uses the same
-    /// identity.
-    /// What: stores the `(name, value)` pairs; `run` calls `Command::env` for
-    /// each before spawning.
+    /// Why: the constructor this replaces took only the vars to SET, which is
+    /// what let an inherited `GH_TOKEN` beat a per-project `GH_CONFIG_DIR`.
+    /// Taking the whole `GhEnv` carries the removals with it, so a call site
+    /// cannot bind half the identity.
+    /// What: stores both the overrides and the removal list.
     /// Test: `real_runner_applies_env_overrides`.
-    pub(crate) fn with_env(env: Vec<(String, String)>) -> Self {
-        Self { env }
+    pub(crate) fn with_gh_env(gh_env: &trusty_mpm::core::gh_identity::GhEnv) -> Self {
+        Self {
+            env: gh_env.vars().to_vec(),
+            unset: gh_env.unset_vars().to_vec(),
+        }
     }
 }
 
@@ -118,6 +128,10 @@ impl CommandRunner for RealCommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> anyhow::Result<CommandOutput> {
         let mut cmd = std::process::Command::new(program);
         cmd.args(args);
+        // #6668: removals first, then the overrides.
+        for k in &self.unset {
+            cmd.env_remove(k);
+        }
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
@@ -138,29 +152,47 @@ mod tests {
 
     /// Why: the central #1265 guarantee — env overrides bound to a
     /// [`RealCommandRunner`] are actually applied to the spawned child (and only
-    /// the child, not the parent). We prove it by running `printenv` for a var
-    /// we set via `with_env` and asserting the child echoes the value.
+    /// the child, not the parent). We prove it by running `printenv` for the
+    /// var a `config_dir` binding resolves to and asserting the child echoes
+    /// the value. #6668 adds the other half: the same binding must strip the
+    /// inherited `GH_TOKEN`, which `printenv GH_TOKEN` proves by exiting
+    /// non-zero even when this process has one.
     /// Test: itself (uses the always-present `/usr/bin/env`-style `printenv`).
     #[test]
     fn real_runner_applies_env_overrides() {
-        let runner = RealCommandRunner::with_env(vec![(
-            "TM_TEST_GH_IDENTITY_VAR".to_string(),
-            "bound-value".to_string(),
-        )]);
+        let gh_env = trusty_mpm::core::gh_identity::resolve_gh_env(Some(
+            &trusty_mpm::core::trusty_tools_config::GithubConfig {
+                config_dir: Some(std::path::PathBuf::from("/cfg/project")),
+                ..Default::default()
+            },
+        ))
+        .expect("a config_dir binding resolves");
+        let runner = RealCommandRunner::with_gh_env(&gh_env);
         // `printenv VAR` prints the value and exits 0 when set. It is present on
         // Linux and macOS; skip gracefully if the platform lacks it.
-        match runner.run("printenv", &["TM_TEST_GH_IDENTITY_VAR"]) {
+        match runner.run("printenv", &["GH_CONFIG_DIR"]) {
             Ok(out) => {
                 assert!(out.success, "printenv failed: {}", out.stderr);
-                assert_eq!(out.stdout.trim(), "bound-value");
+                assert_eq!(out.stdout.trim(), "/cfg/project");
             }
             Err(_) => {
                 // `printenv` not available — the env-application path is still
                 // covered by the gh_identity resolution tests; nothing to assert.
             }
         }
-        // The override must NOT have leaked into the parent process.
-        assert!(std::env::var("TM_TEST_GH_IDENTITY_VAR").is_err());
+        if let Ok(out) = runner.run("printenv", &["GH_TOKEN"]) {
+            assert!(
+                !out.success,
+                "#6668: a bound child must not inherit GH_TOKEN, got {:?}",
+                out.stdout
+            );
+        }
+        // Neither the override nor the removal may leak into the parent.
+        assert_ne!(
+            std::env::var("GH_CONFIG_DIR").ok().as_deref(),
+            Some("/cfg/project"),
+            "the binding must apply to the child only"
+        );
     }
 
     /// Why: a default/ambient runner must apply no overrides (no regression).

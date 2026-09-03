@@ -218,6 +218,11 @@ impl RealGitBackend {
     fn command(&self) -> std::process::Command {
         let mut cmd = std::process::Command::new("git");
         cmd.args(self.identity.commit_config_args());
+        // #6668: clear the inherited identity before applying the bound one —
+        // a credential helper reads GH_TOKEN ahead of GH_CONFIG_DIR.
+        for key in &self.identity.env_remove {
+            cmd.env_remove(key);
+        }
         cmd.envs(self.identity.env.iter().cloned());
         cmd
     }

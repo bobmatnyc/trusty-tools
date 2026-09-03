@@ -101,6 +101,8 @@ pub(crate) trait GhRunner {
 pub(crate) struct RealGhRunner {
     /// `GH_*` overrides resolved from the active project's config.
     env: Vec<(String, String)>,
+    /// #6668: inherited identity vars removed before `env` is applied.
+    unset: Vec<String>,
 }
 
 impl RealGhRunner {
@@ -109,6 +111,8 @@ impl RealGhRunner {
         let gh_env = crate::gh_identity::load_gh_env()?;
         Ok(Self {
             env: gh_env.vars().to_vec(),
+            // #6668: an inherited GH_TOKEN outranks a resolved GH_CONFIG_DIR.
+            unset: gh_env.unset_vars().to_vec(),
         })
     }
 }
@@ -116,6 +120,10 @@ impl RealGhRunner {
 impl GhRunner for RealGhRunner {
     fn run(&self, args: &[String]) -> anyhow::Result<GhRun> {
         let mut cmd = trusty_common::gh::GhCommand::new(args);
+        // #6668: removals first, then the overrides.
+        for k in &self.unset {
+            cmd = cmd.env_remove(k);
+        }
         for (k, v) in &self.env {
             cmd = cmd.env(k, v);
         }

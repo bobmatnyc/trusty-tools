@@ -699,6 +699,70 @@ fn gh_command_applies_the_resolved_gh_env() {
     assert_eq!(value, "/cfg/daemon");
 }
 
+/// Why (#6668): `resolve_gh_env` set `GH_CONFIG_DIR` and nothing else, so a
+/// `gh` spawned from a shell that exports a DIFFERENT account's `GH_TOKEN`
+/// authenticated as that account — an env token outranks a scoped config dir
+/// in gh's own resolution order. The per-project binding lost to the shell,
+/// and `tm session prune-worktrees --merged-prs` reported "Could not resolve
+/// to a Repository" for every repo the shell token could not see. A resolved
+/// binding must therefore REMOVE the inherited identity vars from the child.
+/// Test: itself.
+#[test]
+fn gh_command_removes_an_inherited_token_when_a_config_dir_binds() {
+    let env = crate::core::gh_identity::resolve_gh_env(Some(
+        &crate::core::trusty_tools_config::GithubConfig {
+            config_dir: Some(PathBuf::from("/cfg/duetto")),
+            ..Default::default()
+        },
+    ))
+    .expect("ok");
+    let cmd = gh_command(Path::new("/tmp"), &env);
+    let removed: Vec<&str> = cmd
+        .get_envs()
+        .filter(|(_, v)| v.is_none())
+        .filter_map(|(k, _)| k.to_str())
+        .collect();
+    for key in [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+        "GH_USER",
+    ] {
+        assert!(
+            removed.contains(&key),
+            "{key} must be removed when a config_dir binds: {removed:?}"
+        );
+    }
+    let value = cmd
+        .get_envs()
+        .find(|(k, _)| *k == "GH_CONFIG_DIR")
+        .and_then(|(_, v)| v)
+        .expect("GH_CONFIG_DIR must still be set");
+    assert_eq!(value, "/cfg/duetto");
+}
+
+/// Why (#6668): with no binding the spawn must stay exactly as ambient as it
+/// was — removing an inherited token from an UNBOUND `gh` call would break
+/// every operator whose only credential is `GH_TOKEN`.
+/// Test: itself.
+#[test]
+fn gh_command_keeps_an_inherited_token_when_nothing_binds() {
+    let cmd = gh_command(
+        Path::new("/tmp"),
+        &crate::core::gh_identity::GhEnv::default(),
+    );
+    let removed: Vec<&str> = cmd
+        .get_envs()
+        .filter(|(_, v)| v.is_none())
+        .filter_map(|(k, _)| k.to_str())
+        .collect();
+    assert!(
+        !removed.contains(&"GH_TOKEN"),
+        "an unbound spawn must inherit GH_TOKEN: {removed:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Byte measurement
 // ---------------------------------------------------------------------------
