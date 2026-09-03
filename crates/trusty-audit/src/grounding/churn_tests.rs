@@ -16,6 +16,11 @@
 use super::*;
 use std::path::PathBuf;
 
+// #6079: one `git` test helper for the crate. `crate::git` owns the production
+// child, and this is its test-side counterpart — a second `Command::new("git")`
+// here would be the duplicate CLAUDE.md's common-entry-point rule forbids.
+use crate::local_repo::local_repo_tests::{init_repo, run_git};
+
 /// A manifest with the one `[report]` table the write-back edits.
 const MANIFEST: &str = "[report]\ntitle = \"Acme\"\n\n[[repositories]]\nname = \"acme-api\"\npath = \"/tmp/acme-api\"\n";
 
@@ -64,6 +69,23 @@ fn returns(
             shallow: false,
         })
     }
+}
+
+/// A run whose stream the test generated, for a window no literal can hold.
+fn streams(log: String) -> impl FnOnce(&Path) -> Result<Run, String> {
+    move |_| {
+        Ok(Run {
+            success: true,
+            log,
+            stderr: String::new(),
+            shallow: false,
+        })
+    }
+}
+
+/// A `--numstat` stream of `commits` commits, each touching one file once.
+fn window_of(commits: usize) -> String {
+    "\u{1}a@b.invalid\n\n1\t0\tsrc/api.rs\n".repeat(commits)
 }
 
 /// A run against a shallow clone, which prints history but a truncated one.
@@ -224,38 +246,22 @@ fn hotspots_are_ranked_deterministically() {
 
 // ─── The fixture repository ─────────────────────────────────────────────────
 
-/// Run `git -C <cwd> <args>`, failing the test with git's own message.
-fn run_git_in(cwd: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .output()
-        .expect("git is on PATH for this suite");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+/// The non-ASCII fixture path, which git C-quotes unless it is told not to.
+const ACCENTED: &str = "src/café.rs";
 
 /// A repository with real commits, built here rather than checked in.
 ///
-/// `src/hot.rs` gets [`MIN_COMMITS`] + 2 commits by two authors, `src/warm.rs`
-/// exactly [`MIN_COMMITS`], and `src/cold.rs` two — so the expected hotspot rows
-/// are the first two, in that order, and the third proves the floor.
+/// `src/hot.rs` gets [`MIN_COMMITS`] + 2 commits by two authors, [`ACCENTED`]
+/// and `src/warm.rs` exactly [`MIN_COMMITS`], and `src/cold.rs` two — so the
+/// expected hotspot rows are the first three and the fourth proves the floor.
 fn fixture_repo(root: &Path) {
     std::fs::create_dir_all(root.join("src")).expect("mkdir src");
-    run_git_in(root, &["init", "-q"]);
-    run_git_in(root, &["config", "user.email", "alice@example.invalid"]);
-    run_git_in(root, &["config", "user.name", "Alice"]);
+    init_repo(root);
 
     let commit = |file: &str, body: String, author: &str| {
         std::fs::write(root.join(file), body).expect("write the fixture file");
-        run_git_in(root, &["add", "-A"]);
-        run_git_in(
+        run_git(root, &["add", "-A"]);
+        run_git(
             root,
             &[
                 "-c",
@@ -282,6 +288,11 @@ fn fixture_repo(root: &Path) {
             format!("warm {round}\n"),
             "alice@example.invalid",
         );
+    }
+    // #6079: a real non-ASCII filename, so the quoting is exercised by git
+    // itself rather than by a fixture string this suite wrote.
+    for round in 0..MIN_COMMITS {
+        commit(ACCENTED, format!("café {round}\n"), "alice@example.invalid");
     }
     for round in 0..2 {
         commit(
@@ -312,11 +323,41 @@ fn a_fixture_repository_ranks_its_hotspots() {
         rows,
         vec![
             ("src/hot.rs", MIN_COMMITS + 2, 2),
+            (ACCENTED, MIN_COMMITS, 1),
             ("src/warm.rs", MIN_COMMITS, 1),
         ],
-        "the two files over the floor, worst first; src/cold.rs is under it"
+        "the three files over the floor, worst first; src/cold.rs is under it"
     );
     assert_eq!(files[0].severity(), Some(Severity::Amber));
+}
+
+/// 🔴 A non-ASCII filename reaches the report as itself. Git C-quotes every
+/// non-ASCII byte by default, so without `core.quotepath=false` this row names
+/// `"src/caf\303\251.rs"` — a path the reader cannot open, cannot grep for, and
+/// cannot match against anything else the report says about that file.
+#[test]
+fn a_non_ascii_path_reaches_the_report_unescaped() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("acme-api");
+    fixture_repo(&checkout);
+
+    let Outcome::Measured(files) = measure(&checkout) else {
+        panic!("a repository with real commits measures");
+    };
+
+    let accented = files
+        .iter()
+        .find(|f| f.path == ACCENTED)
+        .unwrap_or_else(|| panic!("the real filename, not an escape: {files:?}"));
+    assert!(
+        !accented.path.contains('\\') && !accented.path.contains('"'),
+        "neither the octal escape nor the quotes git wraps it in: {}",
+        accented.path
+    );
+    assert!(
+        lane(&files).iter().any(|p| p.path == ACCENTED),
+        "and the ranking lane carries the same openable path"
+    );
 }
 
 /// A repository with no commit at all is a NAMED gap, never an empty clean
@@ -325,8 +366,7 @@ fn a_fixture_repository_ranks_its_hotspots() {
 fn a_repository_with_no_history_is_a_named_gap() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let checkout = tmp.path().join("empty");
-    std::fs::create_dir_all(&checkout).expect("mkdir");
-    run_git_in(&checkout, &["init", "-q"]);
+    init_repo(&checkout);
 
     let (files, gaps) = ground(&checkout, "acme-api");
 
@@ -359,12 +399,13 @@ fn a_shallow_clone_is_a_named_gap() {
     );
 }
 
-/// A path holding no repository has no change history a collector could have
-/// missed, so it is a declared SKIP rather than a gap — the rule `cve` applies
-/// to a checkout declaring no dependency manifest. Both rungs of the ladder are
-/// driven, and neither spawns a child.
+/// 🔴 A path holding no repository is a NAMED gap. Every checkout reaches this
+/// leg through `local_repo`'s clone, so an absent `.git` is an anomaly — and
+/// reporting it as silence renders a Change Hotspots section a reader cannot
+/// tell apart from a repository nobody is rewriting. Both rungs of the ladder
+/// are driven, and neither spawns a child.
 #[test]
-fn a_path_holding_no_repository_is_a_declared_skip() {
+fn a_path_holding_no_repository_is_a_named_gap() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let absent = tmp.path().join("nowhere");
     let plain = tmp.path().join("not-a-repo");
@@ -372,16 +413,23 @@ fn a_path_holding_no_repository_is_a_declared_skip() {
 
     assert!(matches!(
         measure_with(&absent, refuses("must not be reached")),
-        Outcome::NotApplicable(ref why) if why.contains("is not a directory")
+        Outcome::Unavailable(ref why) if why.contains("is not a directory")
     ));
     assert!(matches!(
         measure_with(&plain, refuses("must not be reached")),
-        Outcome::NotApplicable(ref why) if why.contains("holds no git repository")
+        Outcome::Unavailable(ref why) if why.contains("holds no git repository")
     ));
-    assert_eq!(
-        ground_with(&plain, "acme-api", refuses("must not be reached")),
-        (Vec::new(), Vec::new()),
-        "nothing was missed, so there is nothing to name"
+
+    let (files, gaps) = ground_with(&plain, "acme-api", refuses("must not be reached"));
+
+    assert!(files.is_empty());
+    assert_eq!(gaps.len(), 1, "one line, not a stream");
+    assert!(
+        gaps[0].contains(COLLECTOR)
+            && gaps[0].contains("holds no git repository")
+            && gaps[0].contains("unmeasured"),
+        "the gap names the collector and refuses the clean reading: {}",
+        gaps[0]
     );
 }
 
@@ -452,6 +500,37 @@ fn an_empty_window_names_the_window() {
         gaps[0].contains(&format!("no commit in the last {WINDOW_DAYS} days")),
         "{}",
         gaps[0]
+    );
+}
+
+/// 🔴 `--max-count` truncates in silence — git reports nothing about the
+/// commits it did not print. A window deeper than [`MAX_COMMITS`] therefore
+/// produced full-confidence rows whose every count was a floor. The cap is now
+/// named, and a window one commit short of it is still a whole window.
+#[test]
+fn a_capped_window_names_the_cap() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = checkout_at(tmp.path());
+
+    let (files, gaps) = ground_with(&checkout, "acme-api", streams(window_of(MAX_COMMITS)));
+
+    assert_eq!(files.len(), 1, "the rows are still worth reporting");
+    assert_eq!(
+        files[0].commits,
+        u32::try_from(MAX_COMMITS).expect("the cap fits a commit count")
+    );
+    assert_eq!(gaps.len(), 1);
+    assert!(
+        gaps[0].contains(&MAX_COMMITS.to_string()) && gaps[0].contains("understates"),
+        "the caveat states the cap and what it does to every count: {}",
+        gaps[0]
+    );
+
+    let (_, whole) = ground_with(&checkout, "acme-api", streams(window_of(MAX_COMMITS - 1)));
+
+    assert!(
+        whole.is_empty(),
+        "one commit short of the cap is a window read whole: {whole:?}"
     );
 }
 

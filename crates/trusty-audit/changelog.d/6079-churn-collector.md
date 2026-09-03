@@ -23,13 +23,23 @@ Added
     unfiltered top ten was seven `Cargo.toml`s, a `.tsv` allowlist and a
     `CLAUDE.md`. The findings still report those, because a manifest rewritten
     200 times in six months is real dependency movement a reader wants.
-  - Fail-open, and never silently. A missing `git`, a path that is not a
+  - Fail-open, and never silently. A missing `git`, a path holding no
     repository, a shallow clone (whose counts stop at the graft point and would
     understate every hotspot), an empty window, a failed child, and an
     unwritable manifest each get a gap naming which it was — the collector's own
     diagnosis leading, with the child's first stderr line only ever as the
     parenthetical (#6720). A history that read clean states what its count does
-    not cover.
+    not cover. There is no not-applicable arm: every checkout arrives by `git
+    clone`, so a path with no `.git` is an anomaly the report names rather than
+    a leg that quietly does not apply.
+  - A window deeper than the 4000-commit read cap is reported too. `git log
+    --max-count` truncates in silence, so such a window is read to the cap and
+    its hotspots ship with a caveat stating that every count is a floor and that
+    a file whose work is entirely older than the read is missing outright.
+  - Paths are read with `core.quotepath=false`, so a non-ASCII filename such as
+    `src/café.rs` reaches the findings and the ranking as itself rather than as
+    git's default `"src/caf\303\251.rs"` — a path no reader can open or grep
+    for.
   - It needs neither daemon, so it is measured before the trusty-search and
     trusty-analyze gates: a repository whose daemons never answered still gets
     its change hotspots into the report.

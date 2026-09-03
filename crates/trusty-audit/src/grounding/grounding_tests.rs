@@ -253,13 +253,10 @@ async fn a_checkout_with_no_basename_never_reaches_a_daemon() {
     .await;
     assert!(out.index_id.is_none());
     assert!(out.priorities.is_empty());
-    assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("acme-api"), "{:?}", out.gaps);
-    assert!(
-        out.gaps[0].contains("no final path component"),
-        "{:?}",
-        out.gaps
-    );
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps);
+    assert!(gaps[0].contains("acme-api"), "{:?}", gaps);
+    assert!(gaps[0].contains("no final path component"), "{:?}", gaps);
 }
 
 /// #6081's headline case: the search daemon is the first link, and losing it
@@ -282,10 +279,11 @@ async fn a_search_daemon_that_will_not_start_is_a_named_gap() {
     )
     .await;
     assert!(out.priorities.is_empty());
-    assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("acme-api"), "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("trusty-search"), "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("not assessed"), "{:?}", out.gaps);
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps);
+    assert!(gaps[0].contains("acme-api"), "{:?}", gaps);
+    assert!(gaps[0].contains("trusty-search"), "{:?}", gaps);
+    assert!(gaps[0].contains("not assessed"), "{:?}", gaps);
 }
 
 /// A daemon that is already answering is not restarted, so a resumed sweep and
@@ -338,9 +336,10 @@ async fn an_unindexable_checkout_is_a_named_gap() {
         out.index_id,
         index::index_id_for(Path::new("/w/repos/acme-api"))
     );
-    assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("acme-api"), "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("not allowlisted"), "{:?}", out.gaps);
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps);
+    assert!(gaps[0].contains("acme-api"), "{:?}", gaps);
+    assert!(gaps[0].contains("not allowlisted"), "{:?}", gaps);
 }
 
 /// The second daemon. It is reached only once the index exists, and its loss is
@@ -366,9 +365,10 @@ async fn an_analyze_daemon_that_will_not_start_is_a_named_gap() {
         priority::Budget::from_env(),
     )
     .await;
-    assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("acme-api"), "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("trusty-analyze"), "{:?}", out.gaps);
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps);
+    assert!(gaps[0].contains("acme-api"), "{:?}", gaps);
+    assert!(gaps[0].contains("trusty-analyze"), "{:?}", gaps);
     assert!(
         !out.priorities.is_empty(),
         "search-derived evidence must survive a dead trusty-analyze"
@@ -402,19 +402,16 @@ async fn an_unreachable_hotspots_endpoint_is_a_named_gap() {
         priority::Budget::from_env(),
     )
     .await;
-    assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps);
     // #6287: the reachable-but-broken daemon answers a JSON-RPC error frame
     // where it used to answer HTTP 500. The gap must carry the daemon's own
     // reason either way — that is what separates it from an unreachable one.
+    assert!(gaps[0].contains("index is not loaded"), "{:?}", gaps);
     assert!(
-        out.gaps[0].contains("index is not loaded"),
+        gaps[0].contains("search-derived evidence only"),
         "{:?}",
-        out.gaps
-    );
-    assert!(
-        out.gaps[0].contains("search-derived evidence only"),
-        "{:?}",
-        out.gaps
+        gaps
     );
 }
 
@@ -439,12 +436,9 @@ async fn an_empty_hotspot_list_is_a_named_gap() {
         priority::Budget::from_env(),
     )
     .await;
-    assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
-    assert!(
-        out.gaps[0].contains("no complexity hotspot"),
-        "{:?}",
-        out.gaps
-    );
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps);
+    assert!(gaps[0].contains("no complexity hotspot"), "{:?}", gaps);
 }
 
 /// #6082: the index answers, and matches nothing. That is not the same as a
@@ -536,12 +530,9 @@ async fn a_daemon_that_binds_but_never_answers_is_a_named_gap() {
     )
     .await;
     assert!(out.priorities.is_empty());
-    assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
-    assert!(
-        out.gaps[0].contains("did not report healthy"),
-        "{:?}",
-        out.gaps
-    );
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps);
+    assert!(gaps[0].contains("did not report healthy"), "{:?}", gaps);
 }
 
 // ─── The happy path, end to end ──────────────────────────────────────────────
@@ -576,7 +567,7 @@ async fn hotspots_and_search_hits_become_ranked_inspect_priority_in_the_manifest
         priority::Budget::from_env(),
     )
     .await;
-    assert!(without_secrets_leg(gaps).is_empty());
+    assert!(without_churn_leg(without_secrets_leg(gaps)).is_empty());
 
     let written = std::fs::read_to_string(&manifest).expect("read back");
     let parsed: toml::Value = toml::from_str(&written).expect("still valid TOML");
@@ -811,6 +802,29 @@ fn the_brief_a_manifest_declares_is_read() {
 /// without the binary, its clean-scan scope statement on one with it. WHICH of
 /// the two depends on the machine; that there is exactly one does not, so these
 /// tests assert the count and leave the wording to `secrets_tests`.
+/// The gaps left once the churn leg's own line is removed, having checked it
+/// spoke exactly once.
+///
+/// // #6079: the churn leg has no not-applicable arm — `local_repo` gives every
+/// real checkout its history by `git clone`, so a fixture directory holding no
+/// repository is an anomaly it names rather than a state it passes over in
+/// silence. It therefore contributes exactly one line to every fixture here:
+/// "holds no git repository" for a bare directory, an empty-window or
+/// quiet-repository line for a real one. WHICH line depends on the fixture;
+/// that there is exactly one does not, so these tests assert the count and
+/// leave the wording to `churn::churn_tests`.
+fn without_churn_leg(gaps: Vec<String>) -> Vec<String> {
+    let marker = format!("{}:", churn::COLLECTOR);
+    let (spoken, rest): (Vec<String>, Vec<String>) =
+        gaps.into_iter().partition(|gap| gap.contains(&marker));
+    assert_eq!(
+        spoken.len(),
+        1,
+        "the churn leg speaks exactly once per repository: {spoken:?}"
+    );
+    rest
+}
+
 fn without_secrets_leg(gaps: Vec<String>) -> Vec<String> {
     let (spoken, rest): (Vec<String>, Vec<String>) = gaps
         .into_iter()
@@ -847,7 +861,7 @@ async fn a_gap_is_recorded_in_the_manifest_the_renderer_reads() {
         priority::Budget::from_env(),
     )
     .await;
-    let gaps = without_secrets_leg(gaps);
+    let gaps = without_churn_leg(without_secrets_leg(gaps));
     assert_eq!(gaps.len(), 1, "{gaps:?}");
 
     let written = std::fs::read_to_string(&manifest).expect("read back");
@@ -859,14 +873,24 @@ async fn a_gap_is_recorded_in_the_manifest_the_renderer_reads() {
         .map(|gap| gap.as_str().expect("string"))
         .collect();
     // The secrets leg's line is written through the SECOND `priority::write_into`
-    // call, so both legs' gaps reach the key the renderer reads (#6077).
-    assert_eq!(stated.len(), 2, "{written}");
+    // call, so both legs' gaps reach the key the renderer reads (#6077), and
+    // #6079's churn line rides the same key.
+    assert_eq!(stated.len(), 3, "{written}");
     assert!(
         stated.iter().any(|gap| gap.contains("trusty-search")),
         "{written}"
     );
     assert!(
         stated.iter().any(|gap| gap.contains("secrets-scan:")),
+        "{written}"
+    );
+    // #6079: a checkout holding no repository reaches the RENDERER as a gap.
+    // Stated anywhere short of this key, the report's Change Hotspots section is
+    // empty with nothing saying why.
+    assert!(
+        stated
+            .iter()
+            .any(|gap| gap.contains(churn::COLLECTOR) && gap.contains("holds no")),
         "{written}"
     );
 }
@@ -902,7 +926,7 @@ async fn a_manifest_that_cannot_be_written_is_a_named_gap() {
         priority::Budget::from_env(),
     )
     .await;
-    let gaps = without_secrets_leg(gaps);
+    let gaps = without_churn_leg(without_secrets_leg(gaps));
     // Two writes are attempted — the ranking, then the manifest legs' gaps — and
     // a directory in place of the manifest fails both (#6077).
     assert_eq!(gaps.len(), 2, "{gaps:?}");

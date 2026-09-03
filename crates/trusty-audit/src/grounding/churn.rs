@@ -33,11 +33,20 @@
 //! ## Fail-open, and never silently
 //!
 //! Five states produce no rows and each says which it was: `git` is not
-//! installed, the path is not a git repository, the clone is shallow (its counts
+//! installed, the path holds no git repository, the clone is shallow (its counts
 //! would be truncated, and a truncated count understates churn — the false-clean
 //! shape epic #6074 exists to remove), the window holds no commit, or the child
-//! failed. The collector's own diagnosis leads every one of them; the child's
-//! first stderr line is only ever the parenthetical (#6720).
+//! failed. A sixth produces rows AND a caveat: a window holding more commits
+//! than [`MAX_COMMITS`] is read only as far as the cap, so every count it
+//! produces understates and the gap line says so. The collector's own diagnosis
+//! leads every one of them; the child's first stderr line is only ever the
+//! parenthetical (#6720).
+//!
+//! There is deliberately no not-applicable arm. [`crate::local_repo`] gives
+//! every checkout its history by `git clone`, so a path with no `.git` at this
+//! leg is an anomaly rather than a leg that does not apply — and reporting it as
+//! silence renders a Change Hotspots section that reads exactly like a quiet
+//! repository's (#6079).
 //!
 //! Test: `churn_tests`.
 
@@ -67,6 +76,11 @@ pub const WINDOW_DAYS: u32 = 180;
 /// A bound on the work rather than a tuning knob: a monorepo with a decade of
 /// history would otherwise hand this process a `--numstat` stream measured in
 /// hundreds of megabytes, and the ranking it feeds is capped far below that.
+///
+/// Hitting it is reported, never absorbed: a window with more commits than this
+/// is read to the cap and the counts that come out understate every file, so
+/// the leg returns [`Outcome::Capped`] and the caller states the cap in a gap
+/// line (#6079).
 pub const MAX_COMMITS: usize = 4_000;
 /// Fewest commits in the window that make a file a hotspot at all.
 pub const MIN_COMMITS: u32 = 5;
@@ -166,25 +180,29 @@ impl ChurnFile {
 
 /// What the leg produced for one repository.
 ///
-/// Why: "no churn" has three meanings that must not share a variant. A path
-/// holding no git repository has no change history a collector could have
-/// missed, so it earns silence — the same rule [`super::cve::Outcome`] applies
-/// to a checkout declaring no dependency manifest. A measured window whose files
-/// all fall below [`MIN_COMMITS`] is a real, quiet repository. A window that
-/// could not be read at all is unassessed, and the report must not let the third
-/// read as the second.
-/// What: the ranked hotspots (possibly empty, which IS a quiet repository), a
-/// declared skip carrying why the leg does not apply, or the one line the caller
+/// Why: "no churn" has three meanings that must not share a variant. A measured
+/// window whose files all fall below [`MIN_COMMITS`] is a real, quiet
+/// repository. A window read only as far as [`MAX_COMMITS`] holds real hotspots
+/// whose counts are all understated. A window that could not be read at all is
+/// unassessed, and the report must not let the third read as the first.
+///
+/// Unlike [`super::cve::Outcome`] there is no not-applicable variant: a
+/// dependency manifest is something a checkout may honestly not have, whereas
+/// its own git history is something [`crate::local_repo`]'s clone always gives
+/// it, so an absent one is an anomaly the report names (#6079).
+/// What: the ranked hotspots (possibly empty, which IS a quiet repository), the
+/// same ranked hotspots marked as read under the cap, or the one line the caller
 /// turns into a gap.
 /// Test: `churn_tests::{a_shallow_clone_is_a_named_gap,
 /// a_repository_with_no_history_is_a_named_gap,
-/// a_path_holding_no_repository_is_a_declared_skip}`.
+/// a_path_holding_no_repository_is_a_named_gap, a_capped_window_names_the_cap}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// No git repository here; the reason the leg does not apply.
-    NotApplicable(String),
-    /// The history was read; these are its hotspots, worst first.
+    /// The history was read whole; these are its hotspots, worst first.
     Measured(Vec<ChurnFile>),
+    /// The read stopped at [`MAX_COMMITS`]; these are the hotspots of the
+    /// commits it did read, and every count in them understates.
+    Capped(Vec<ChurnFile>),
     /// The history could not be read, or is not complete enough to count; why.
     Unavailable(String),
 }
@@ -216,7 +234,8 @@ pub struct Run {
 /// Never panics. Reads only: `rev-parse` and `log` write nothing to the
 /// repository, and this collector creates no file anywhere.
 ///
-/// Test: `churn_tests::a_fixture_repository_ranks_its_hotspots`.
+/// Test: `churn_tests::{a_fixture_repository_ranks_its_hotspots,
+/// a_non_ascii_path_reaches_the_report_unescaped}`.
 #[must_use]
 pub fn measure(checkout: &Path) -> Outcome {
     measure_with(checkout, run_git)
@@ -225,27 +244,29 @@ pub fn measure(checkout: &Path) -> Outcome {
 /// [`measure`] with the git invocation supplied by the caller.
 ///
 /// Why: every arm below is a state a real repository can be in and a test cannot
-/// cheaply construct — a shallow clone, a git that fails mid-stream, a child
-/// whose stderr leads with an unrelated notice. The seam is what makes each one
-/// a test rather than a comment.
+/// cheaply construct — a shallow clone, a window deeper than [`MAX_COMMITS`], a
+/// git that fails mid-stream, a child whose stderr leads with an unrelated
+/// notice. The seam is what makes each one a test rather than a comment.
 ///
 /// Test: `churn_tests`, one test per arm.
 pub fn measure_with<F>(checkout: &Path, run: F) -> Outcome
 where
     F: FnOnce(&Path) -> Result<Run, String>,
 {
-    // The applicability check, before any child: a path holding no repository
-    // has no history to have missed. `.git` is a directory in a checkout and a
-    // FILE in a linked worktree, so `exists` is the test rather than `is_dir`.
+    // #6079: an absent repository is unassessed, not inapplicable — every
+    // checkout reaches this leg through `crate::local_repo`'s clone, so nothing
+    // here can be measured and the reader must be told which. `.git` is a
+    // directory in a checkout and a FILE in a linked worktree, so `exists` is
+    // the test rather than `is_dir`. Both rungs run before any child is spawned.
     if !checkout.is_dir() {
-        return Outcome::NotApplicable(format!(
-            "{COLLECTOR}: {} is not a directory",
+        return Outcome::Unavailable(format!(
+            "{COLLECTOR}: {} is not a directory, so there is no checkout to read a history from",
             checkout.display()
         ));
     }
     if !checkout.join(GIT_MARKER).exists() {
-        return Outcome::NotApplicable(format!(
-            "{COLLECTOR}: {} holds no git repository",
+        return Outcome::Unavailable(format!(
+            "{COLLECTOR}: {} holds no git repository, so it has no change history to read",
             checkout.display()
         ));
     }
@@ -274,7 +295,21 @@ where
              is no change history to rank"
         ));
     }
+    // #6079: `--max-count` truncates silently — a read that returned the cap is
+    // a window this leg did not see the whole of, and every count it produced
+    // is a floor rather than a measurement.
+    if commits_read(&output.log) >= MAX_COMMITS {
+        return Outcome::Capped(hotspots(measured));
+    }
     Outcome::Measured(hotspots(measured))
+}
+
+/// How many commits the stream holds, as its [`RECORD`] markers count them.
+///
+/// Read from the stream rather than from the child, because `--max-count` is
+/// the only thing that stopped it and git reports no truncation of its own.
+fn commits_read(log: &str) -> usize {
+    log.lines().filter(|line| line.starts_with(RECORD)).count()
 }
 
 /// Reduce a `git log --numstat` stream to per-file counts.
@@ -423,10 +458,18 @@ fn run_git(checkout: &Path) -> Result<Run, String> {
     // `--no-renames` so a rename is an add and a delete under two real paths
     // rather than git's `{old => new}` composite, which is not a path a reader
     // can open. `--no-merges` so a merge commit does not re-count its own side.
+    //
+    // #6079: `core.quotepath=false` because git's default C-quotes every
+    // non-ASCII byte, so `src/café.rs` reaches the findings and the ranking as
+    // `"src/caf\303\251.rs"` — a path no reader can open and no editor can find.
+    // The setting is passed per invocation rather than read from the repository,
+    // so the report does not depend on the audited checkout's own config.
     let output = crate::git::at(
         &binary,
         checkout,
         &[
+            "-c",
+            "core.quotepath=false",
             "log",
             "--no-merges",
             "--no-renames",
@@ -462,7 +505,8 @@ fn run_git(checkout: &Path) -> Result<Run, String> {
 /// a gap line or the quiet-repository scope line, never with silence.
 ///
 /// Test: `churn_tests::{a_quiet_repository_states_its_scope,
-/// a_shallow_clone_is_a_named_gap}`.
+/// a_shallow_clone_is_a_named_gap, a_path_holding_no_repository_is_a_named_gap,
+/// a_capped_window_names_the_cap}`.
 #[must_use]
 pub fn ground(checkout: &Path, display: &str) -> (Vec<ChurnFile>, Vec<String>) {
     ground_with(checkout, display, run_git)
@@ -476,8 +520,6 @@ where
     F: FnOnce(&Path) -> Result<Run, String>,
 {
     match measure_with(checkout, run) {
-        // Silent by design: nothing was missed, so there is nothing to name.
-        Outcome::NotApplicable(_) => (Vec::new(), Vec::new()),
         Outcome::Unavailable(cause) => (
             Vec::new(),
             vec![format!(
@@ -493,6 +535,17 @@ where
                  the last {WINDOW_DAYS} days, so it has no change hotspot to report. Work older \
                  than that window, and history rewritten by a squash or a filter, are not covered \
                  by that count"
+            )],
+        ),
+        // #6079: rows AND a caveat — the ranking is still worth having, and a
+        // reader who is not told the cap reads a floor as a measurement.
+        Outcome::Capped(files) => (
+            files,
+            vec![format!(
+                "{display}: {COLLECTOR}: the window holds more commits than the {MAX_COMMITS} this \
+                 leg reads, so every count below was taken from the newest {MAX_COMMITS} alone and \
+                 understates its file; a file whose work is entirely older than that read is \
+                 missing from the hotspots altogether"
             )],
         ),
         Outcome::Measured(files) => (files, Vec::new()),

@@ -1790,6 +1790,14 @@ mod rerender_tests {
         let read = AuditManifest::load(&manifest).expect("parses");
 
         let gaps = ground_present_checkouts(&unreachable_tools(), &manifest, &read).await;
+
+        // #6079: the churn leg speaks for every checkout — this fixture holds no
+        // repository, and that is a line of its own. This test is about the
+        // daemon legs; `churn::churn_tests` owns the churn wording.
+        let gaps: Vec<String> = gaps
+            .into_iter()
+            .filter(|gap| !gap.contains(crate::grounding::churn::COLLECTOR))
+            .collect();
         assert_eq!(gaps.len(), 1, "{gaps:?}");
         assert!(gaps[0].contains("acme/api"), "{gaps:?}");
         assert!(gaps[0].contains("trusty-search"), "{gaps:?}");
