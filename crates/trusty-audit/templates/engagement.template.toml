@@ -27,9 +27,13 @@ openrouter_key = ""
 
 # What this engagement is asked to assess, in prose. Free-form; it steers the
 # report's emphasis and never authorizes inventing a fact.
+#
+# Replace before running — this is a placeholder for the reference, not the
+# engagement's actual scope.
 instructions = "Assess the maintainability, security posture and delivery risk of the repositories listed below."
 
-# Recorded in the report and shown in the package README. Both optional.
+# Recorded in the report and shown in the package README. Both optional, and
+# both placeholders below — replace before running.
 #
 # These are top-level keys, so they must stay ABOVE the first `[table]` header
 # below — a bare key written after one belongs to that table, and `[models]`

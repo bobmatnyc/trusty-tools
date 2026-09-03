@@ -1173,6 +1173,53 @@ api_key = "lin_api_client_a"
         assert!(readme.contains(&host_platform()), "{readme}");
     }
 
+    /// #5473, #5483: the recipient must fill in the placeholder engagement
+    /// fields and register a repository BEFORE installing or auditing
+    /// anything, not after — a recipient who runs `install` first still has
+    /// no idea the config needs editing at all.
+    #[test]
+    fn the_engagement_setup_step_precedes_install_and_names_the_fields_to_replace() {
+        let fixture = Fixture::new(TEMPLATE);
+        let package = fixture.assemble().expect("assembles");
+
+        let readme = instructions_of(&package);
+        let setup = readme
+            .find("Fill in the engagement")
+            .expect("names the setup step");
+        let install = readme.find("./audit.sh install").expect("installs tools");
+        assert!(
+            setup < install,
+            "engagement setup must come before install: {readme}"
+        );
+
+        // (i) which fields to replace, with a worked example.
+        assert!(
+            readme.contains("Set `client`, `engagement`, and `instructions`"),
+            "{readme}"
+        );
+        assert!(readme.contains("client = \"Example Corp\""), "{readme}");
+
+        // (ii) the exact `[[targets]]` shape, for the paste-in alternative to
+        // `add repo`.
+        assert!(readme.contains("[[targets]]"), "{readme}");
+        assert!(readme.contains("kind = \"repo\""), "{readme}");
+        assert!(
+            readme.contains("name_with_owner = \"acme/api\""),
+            "{readme}"
+        );
+        assert!(readme.contains("./audit.sh remove"), "{readme}");
+
+        // (iii) private-repo access rides the recipient's own `gh` credential.
+        assert!(readme.contains("gh auth login"), "{readme}");
+
+        // (iv) what a zero-target run actually does.
+        assert!(readme.contains("nothing to audit"), "{readme}");
+        assert!(
+            readme.contains("resumes the existing selection"),
+            "the no-target note must name the fallback-to-prior-selection case: {readme}"
+        );
+    }
+
     /// #5483: one source of truth. The root README carries the platform and the
     /// pointer, and must not grow a second copy of the sequence.
     #[test]
