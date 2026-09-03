@@ -17,7 +17,9 @@ name        = "trusty-console"
 # for a 0.x crate. `preflight-publish.sh` CHECK 5 refused 0.9.3 against 0.9.2 on
 # two counts: `constructible_struct_adds_field` for `ServeArgs.host_sample_interval`
 # (src/lib.rs:204), and `function_missing` for `trusty_console::host_status::start`.
-version     = "0.10.0"
+# 0.10.1 (refs #6671, #6663, #6667, #6661): patch — test-flake stabilization
+# changes in the test suite under an already-published version.
+version     = "0.10.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
