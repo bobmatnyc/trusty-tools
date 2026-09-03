@@ -1,11 +1,14 @@
 # 0024. Assistants Are Level-0 Delegators; Sub-Agents Are In-Process, Single-Edge Leaves That Never Delegate
 
-- **Status:** Accepted
+- **Status:** Amended by [0058](0058-trusty-code-is-an-independent-product-owned-harness.md)
 - **Acceptance:** All six Decision clauses were ratified by the owner on
   2026-07-28 or 2026-07-29. Implementation remains incomplete for the
   three-tool-call router and assistant-to-assistant communication primitive;
   acceptance records the architectural choice, not implementation completion.
   See "Implementation status" for the clause-by-clause state.
+- **Current amendment:** ADR-0058 preserves this model for Trusty Agents L1
+  leaves and distinguishes a cross-product, daemon-owned Trusty Code coding task
+  from an in-process sub-agent.
 - **Date:** 2026-07-28
 - **Ratification:** L0-assistant clause recorded 2026-07-28;
   editable-whitelist clause recorded 2026-07-29

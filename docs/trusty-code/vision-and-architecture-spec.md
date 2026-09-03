@@ -3,8 +3,16 @@
 **Status:** FOUNDATIONAL SPEC — RE-VISION APPROVED  
 **Epic:** [#2052](https://github.com/bobmatnyc/trusty-tools/issues/2052) — trusty-code: original best-of-breed coding harness  
 **Owned by:** Bob Matsuoka (owner decision points marked below)  
-**Last updated:** 2026-07-06  
+**Last updated:** 2026-09-03  
 **Supersedes:** Epic #1039 (old benchmark harness scope)
+
+> **Implementation status:** This remains the accepted product vision, but its
+> dated phase tables and gap inventory are historical planning evidence. The
+> [spec/ADR reconciliation catalog](./spec-adr-reconciliation.md) is
+> authoritative for shipped, partial, deferred, and superseded requirements.
+> ADR-0058 makes `.trusty-code/` the native product root; the `.claude/` and
+> `.mcp.json` references below describe compatibility inputs until their R2/R3
+> adapters land.
 
 ---
 

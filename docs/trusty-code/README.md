@@ -20,6 +20,7 @@ documentation. The crate `README.md` and rustdoc stay in-crate.
 ## Where to start
 
 - **Vision & Architecture (RE-VISION approved)?** [`vision-and-architecture-spec.md`](vision-and-architecture-spec.md) — foundational spec for the re-visioned trusty-code: daemon-first token-efficient coding harness (supersedes old benchmark scope). Includes axioms, feature audit, phased roadmap, and open questions for owner decision.
+- **What is actually shipped now?** [`spec-adr-reconciliation.md`](spec-adr-reconciliation.md) — maintained contract catalog linking each requirement to implementation evidence, tests, roadmap ownership, and its ADR disposition.
 - **What is tcode and how does it relate to trusty-agents / Claude Code?**
   [`research/claude-compat-spec-2026-06-02.md`](research/claude-compat-spec-2026-06-02.md)
   — the authoritative compatibility specification, including the full

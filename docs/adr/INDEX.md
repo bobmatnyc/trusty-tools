@@ -1,6 +1,6 @@
 # ADR Index — All Decisions
 
-**Last updated:** 2026-08-17 | **Format version:** 1.1
+**Last updated:** 2026-09-03 | **Format version:** 1.1
 
 This index is the complete, concise vetting surface for workspace ADRs. The ADR
 files remain authoritative for full context, decision text, and consequences.
@@ -14,7 +14,7 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0001](0001-docs-live-top-level.md) | Documentation lives at top level | Accepted | Design, research, and ADR documentation lives under `docs/`. | Workspace |
 | [0002](0002-single-install-convention.md) | Single-install convention | Accepted | Major crates share one Cargo-based installation convention. | Workspace |
 | [0003](0003-msrv-and-edition-policy.md) | MSRV 1.88 and edition policy | Superseded by 0029 | The workspace MSRV drives each crate's Rust edition. | Workspace |
-| [0004](0004-three-harnesses-shared-event-driven-common.md) | Three event-driven harnesses | Accepted | `trusty-code`, `trusty-mpm`, and `trusty-agents` are peer harnesses sharing event infrastructure from `trusty-common`. | Workspace |
+| [0004](0004-three-harnesses-shared-event-driven-common.md) | Three event-driven harnesses | Amended by 0058 | `trusty-code`, `trusty-mpm`, and `trusty-agents` are peer harnesses sharing event infrastructure from `trusty-common`. | Workspace |
 | [0005](0005-harness-event-bus.md) | Shared harness event bus | Amended by 0019 | A common event envelope and process-global telemetry bus serve all harnesses; ADR-0019 adds durable messaging to that bus. | Workspace |
 | [0006](0006-trusty-controller-naming.md) | `trusty-controller` naming | Superseded by 0013 | The control plane was named `trusty-controller` with binary `tctl`. | Workspace |
 | [0007](0007-tool-contract-versioning-and-verb-model.md) | Tool contract versioning | Accepted | Tool contracts use monotonic integer versions and Base/Extended/Custom verb layers. | Workspace |
@@ -25,7 +25,7 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0012](0012-per-instance-guid-and-marker-file-identity.md) | Per-instance search identity | Amended by 0051 | A full-path primary key plus local UUID marker (`config.yaml` or `local.yaml`) identifies each search source instance. | Workspace |
 | [0013](0013-rename-trusty-controller-to-trusty-installer.md) | Rename controller to installer | Accepted | `trusty-controller` becomes `trusty-installer`; `tctl` is transitional. | Workspace |
 | [0014](0014-native-mcp-support.md) | Native MCP support | Amended by 0040, 0041 | Key MCP integrations remain in-workspace Rust services, with packaging and consumer boundaries refined later. | Workspace |
-| [0015](0015-three-product-agent-composition-model.md) | Unified agent composition | Proposed | Three orchestration products share an `.md` plus YAML `extends` format. | Workspace |
+| [0015](0015-three-product-agent-composition-model.md) | Unified agent composition | Superseded by 0059 | Three orchestration products share an `.md` plus YAML `extends` format. | Workspace |
 | [0016](0016-orchestration-hierarchy-lead-pm-assistant.md) | Lead / PM / Assistant hierarchy | Proposed | Engineering Lead, PM, and Assistant form the proposed orchestration hierarchy. | Workspace |
 | [0017](0017-shared-ingress-via-console-tailscale-funnel.md) | Shared webhook ingress | Proposed | External webhooks enter through trusty-console and Tailscale Funnel. | Workspace |
 | [0018](0018-loopback-only-doctrine.md) | Loopback-only service HTTP | Superseded by 0032 | Sibling daemons could expose loopback HTTP while only trusty-console bound off-loopback. | Workspace |
@@ -34,7 +34,7 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0021](0021-slack-inbound-hybrid-gateway-eventstream.md) | Slack hybrid inbound | Accepted | Socket Mode remains the reply path while inbound events are also mirrored to the generic event stream. | `trusty-agents` |
 | [0022](0022-knowledge-tree-sync-model.md) | Knowledge-tree synchronization | Accepted | Configuration stays in the monorepo while each knowledge store may sync through its own repository. | Workspace |
 | [0023](0023-worktree-authority-existence-vs-ownership.md) | Worktree authority split | Accepted | Git decides existence; a rebuildable, fail-closed index decides ownership. | `trusty-mpm` |
-| [0024](0024-subagents-in-process-only-assistants-communicate-not-delegate.md) | In-process leaf sub-agents | Accepted | Assistants delegate to in-process single-edge leaves; delegation authority follows agent kind. | `trusty-agents` |
+| [0024](0024-subagents-in-process-only-assistants-communicate-not-delegate.md) | In-process leaf sub-agents | Amended by 0058 | Assistants delegate to in-process single-edge leaves; delegation authority follows agent kind. | `trusty-agents` |
 | [0025](0025-collapse-agent-and-skill-tier-hierarchies.md) | Collapse deployment hierarchies | Proposed | Declared sources deploy to one target with precedence resolved at deployment time. | `trusty-mpm`, `trusty-agents-common` |
 | [0026](0026-credential-grants-do-not-survive-delegation.md) | Credential grants stop at delegation | Accepted | Every delegated agent is a distinct principal and receives no inherited credential grant. | `trusty-common`, `trusty-agents`, `trusty-code` |
 | [0027](0027-rooms-are-real-wings-are-scopes-closets-are-an-index.md) | Rooms, wings, and closets | Proposed | Rooms become persisted entities, wings are scope boundaries, and closets are indexes. | `trusty-common`, `trusty-memory` |
@@ -52,7 +52,7 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0039](0039-operator-named-sessions-unique-by-construction.md) | Unique operator-named sessions | Accepted | Operator names are unique and unsuffixed; serials remain for automatic creation. | `trusty-mpm` |
 | [0040](0040-trusty-mcp-services-absorbs-trusty-gworkspace.md) | Split MCP framework and services | Accepted | `trusty-mcp` holds protocol primitives and `trusty-mcp-services` initially absorbs gworkspace only. | Workspace |
 | [0041](0041-trusty-okg-native-crate-search-absorbs-okf-indexing.md) | Native trusty-okg with search indexing | Accepted | trusty-okg stays native, trusty-search owns OKF indexing, and an MCP service fronts agent reads. | Workspace |
-| [0042](0042-mcp-configuration-is-static-and-persistent.md) | Static persistent MCP configuration | Accepted | MCP declarations live once in user scope and are not injected into workspaces. | `trusty-mpm`, `trusty-search` |
+| [0042](0042-mcp-configuration-is-static-and-persistent.md) | Static persistent MCP configuration | Amended by 0058 | MCP declarations live once in user scope and are not injected into workspaces. | `trusty-mpm`, `trusty-search` |
 | [0043](0043-cargo-bin-policy.md) | Traceable `$CARGO_HOME/bin` provenance | Proposed | Registry installs, prebuilt placements, and user-managed files are classified explicitly; path installs are forbidden. | Workspace |
 | [0044](0044-main-checkout-write-boundary-and-agent-worktree-ownership.md) | Main-checkout write boundary | Amended by 0048, 0056 | Main-checkout sessions write only docs/config, and the harness—not trusty-mpm—owns agent worktree creation. | `trusty-mpm` |
 | [0045](0045-distinguish-absent-from-undeterminable-on-destructive-paths.md) | Absent vs undeterminable on destructive paths | Proposed | A probe feeding a destructive, enumerating, or operator-reporting operation propagates every error but `NotFound`. | Workspace |
@@ -68,6 +68,8 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0055](0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md) | Trusty-mpm stops creating worktrees; the sentinel becomes authoritative | Accepted | `session_new`'s clone-and-worktree path is removed and a non-local `repo_url` becomes a hard error naming the local-clone remedy; the `.trusty-mpm-worktree` sentinel stays and is extended to cover every worktree under `.claude/worktrees/`, not only the ones trusty-mpm creates. | `trusty-mpm` |
 | [0056](0056-main-checkout-write-access-is-granted-by-role.md) | Main-checkout write access is granted by role | Accepted | The `version-control` agent keeps the checkout it is dispatched into — it is neither diverted into an isolation worktree nor denied beside another writer — because its writes are the merge, the branch delete, and the worktree reclaim, none of which can be done from inside a worktree; it still counts as an occupant, and engineer source-write confinement is unchanged. | `trusty-mpm` |
 | [0057](0057-version-control-owns-worktree-removal.md) | version-control owns worktree removal | Accepted | A dispatched `version-control` agent may run `git worktree remove`, but only on a target the guard itself proves is a harness worktree, clean, fully pushed, held by no other live writer, and carrying a MERGED pull request on GitHub; `agent_type` counts only alongside an `agent_id`, every re-check fails closed, and `tm session prune-worktrees --merged-prs --force` stays the default sweep. | `trusty-mpm` |
+| [0058](0058-trusty-code-is-an-independent-product-owned-harness.md) | Trusty Code is an independent harness | Accepted | Trusty Code owns its daemon, `.trusty-code/` config and `~/.trusty-code/` private state, and durable delegated coding tasks; its client transport converges on UDS under ADR-0032 with the loopback TCP listener as a tracked interim, and `trusty-mpm` integrates only through a versioned structured API. | `trusty-code` |
+| [0059](0059-canonical-agent-behavior-has-generated-host-adapters.md) | Canonical agent behavior, generated adapters | Accepted | One host-neutral authored source represents each instruction, agent, and skill; `.trusty-code/`, `.claude/`, and `.codex/` layouts are deterministic generated adapters that carry provenance and are checked for drift. | Workspace |
 
 ## Notes
 
