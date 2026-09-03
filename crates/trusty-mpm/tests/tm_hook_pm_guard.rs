@@ -3437,3 +3437,101 @@ fn pm_guard_operator_escape_hatches_still_allow_a_head_move() {
         );
     }
 }
+
+// ── #6660 review: unclassifiable wrapped commands, through the subagent path ─
+
+/// A native Task/Agent subagent's Bash payload for `command`.
+///
+/// Why (#6660 review): the three CRITICAL findings were all reproduced from a
+/// genuine subagent dispatch, where `payload_is_subagent_dispatch` short-
+/// circuits Guard 4 before `evaluate_bash_command` is ever called. Only a
+/// payload carrying `agent_id` exercises that path, which is why the unit
+/// tests in `pm_guard_bash/tests.rs` did not catch any of them.
+/// What: the same shape as `pm_guard_denies_destructive_delete_of_filesystem_roots`,
+/// built through `serde_json` so a command with embedded quotes escapes
+/// correctly.
+/// Test: used by the three tests below.
+fn subagent_bash_payload(command: &str) -> String {
+    serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "agent_id": "agent-xyz789",
+        "agent_type": "rust-engineer",
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+    })
+    .to_string()
+}
+
+/// `sh -c <cmd>` wrapped `layers` deep, shell-quoting at each layer.
+fn nest_sh_c(inner: &str, layers: usize) -> String {
+    let mut command = inner.to_string();
+    for _ in 0..layers {
+        let quoted = shlex::try_quote(&command).expect("quotable");
+        command = format!("sh -c {quoted}");
+    }
+    command
+}
+
+/// Why (#6660 review, CRITICAL 1/2/3): each of these was live-confirmed as an
+/// ALLOW from a real subagent dispatch against the compiled binary — an
+/// unlexable wrapper, an ANSI-C-quoted wrapper, and one nested past the
+/// descent budget. All three reach the ABSOLUTE guard band, which never routes
+/// through `evaluate_bash_command`, so a unit test on that function proved
+/// nothing about them.
+/// Test: itself.
+#[test]
+fn pm_guard_denies_a_wrapped_command_it_cannot_classify_via_subagent_payload() {
+    let inner = "git worktree remove /repo/.claude/worktrees/agent-x";
+    let mut cases: Vec<String> = vec![
+        // CRITICAL 1 — unlexable inner command.
+        r#"sh -c "git worktree remove 'unterminated""#.to_string(),
+        r#"bash -c 'rm -rf "unterminated'"#.to_string(),
+        // CRITICAL 2 — ANSI-C quoting shlex mangles into `$git`.
+        format!("sh -c $'{inner}'"),
+        "git $'worktree' remove /repo/.claude/worktrees/agent-x".to_string(),
+    ];
+    // CRITICAL 3 — one layer past the descent budget, and well past it.
+    cases.push(nest_sh_c(inner, 9));
+    cases.push(nest_sh_c(inner, 12));
+
+    for command in &cases {
+        let stdout = run_pm_guard(&subagent_bash_payload(command), &[]);
+        assert_denied(&stdout);
+    }
+}
+
+/// Why (#6660 review, CRITICAL 3): the boundary itself. Eight layers stay
+/// classifiable and are denied by the #5791 worktree-remove rule; nine exhaust
+/// the budget and are denied by the refusal. Both must deny — the reported bug
+/// was that 8 denied and 9 allowed.
+/// Test: itself.
+#[test]
+fn pm_guard_denies_a_wrapped_worktree_remove_on_both_sides_of_the_depth_cap() {
+    let inner = "git worktree remove /repo/.claude/worktrees/agent-x";
+    for layers in [1, 8, 9] {
+        let command = nest_sh_c(inner, layers);
+        let stdout = run_pm_guard(&subagent_bash_payload(&command), &[]);
+        assert_denied(&stdout);
+    }
+}
+
+/// Why (#6660 review): the refusal denies what it cannot read, not ordinary
+/// wrapped work. A subagent's `sh -c 'git status'` must stay allowed, or the
+/// guard is retried differently and worse (ADR-0048 decision 6).
+/// Test: itself.
+#[test]
+fn pm_guard_allows_ordinary_wrapped_commands_via_subagent_payload() {
+    for command in [
+        "sh -c 'git status --porcelain'",
+        r#"bash -c "git log --oneline -5""#,
+        "sh -c 'cargo build'",
+        "xargs git add",
+        "echo $HOME",
+    ] {
+        assert_eq!(
+            run_pm_guard(&subagent_bash_payload(command), &[]).trim(),
+            "",
+            "expected allow for: {command}"
+        );
+    }
+}

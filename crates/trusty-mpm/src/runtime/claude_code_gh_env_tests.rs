@@ -63,6 +63,72 @@ fn write_gh_env_file_writes_export_lines_in_order() {
     );
 }
 
+/// Why (#6668, review HIGH): a `GH_CONFIG_DIR` pin binds nothing while the
+/// shell that started the daemon exported another account's `GH_TOKEN` — gh
+/// reads the env token ahead of the config dir, so every `gh` call the spawned
+/// session makes runs as the wrong account for its whole lifetime. The sourced
+/// env file could not express a removal at all before this; now it carries
+/// `unset` lines, and they must precede the exports or they would clear the
+/// var just bound.
+/// Test: itself.
+#[test]
+fn gh_env_file_unsets_an_inherited_token() {
+    let gh_env = vec![
+        (
+            "GH_CONFIG_DIR".to_string(),
+            "/Users/masa/.config/gh-duetto".to_string(),
+        ),
+        ("GH_USER".to_string(), "bob-duetto".to_string()),
+    ];
+    let file = write_gh_env_file(&gh_env).expect("file written");
+    let content = std::fs::read_to_string(&file).expect("read gh-env file");
+    let _ = std::fs::remove_file(&file);
+
+    for name in [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+    ] {
+        assert!(
+            content.contains(&format!("unset {name}\n")),
+            "{name} must be unset by a config_dir pin: {content}"
+        );
+    }
+    // A var this file SETS is never also unset.
+    assert!(
+        !content.contains("unset GH_CONFIG_DIR"),
+        "the pinned config dir must not be unset: {content}"
+    );
+    assert!(
+        !content.contains("unset GH_USER"),
+        "an emitted GH_USER must not be unset: {content}"
+    );
+    // Ordering: every unset precedes every export.
+    let last_unset = content.rfind("unset ").expect("an unset line");
+    let first_export = content.find("export ").expect("an export line");
+    assert!(
+        last_unset < first_export,
+        "unset lines must precede export lines: {content}"
+    );
+}
+
+/// Why (#6668): the removal is scoped to a resolved IDENTITY. `GH_USER` is
+/// trusty-mpm's own informational var, not one gh reads, so a file carrying
+/// only that must leave an operator's ambient token alone.
+/// Test: itself.
+#[test]
+fn gh_env_file_unsets_nothing_without_an_identity_binding() {
+    let gh_env = vec![("GH_USER".to_string(), "bobmatnyc".to_string())];
+    let file = write_gh_env_file(&gh_env).expect("file written");
+    let content = std::fs::read_to_string(&file).expect("read gh-env file");
+    let _ = std::fs::remove_file(&file);
+    assert!(
+        !content.contains("unset "),
+        "an informational-only binding must remove nothing: {content}"
+    );
+}
+
 /// Why (Unix only): the file must be mode 0600 — owner-read/write only,
 /// never group/world-readable, even momentarily. Matches the established
 /// `secure_write` contract this module mirrors from `core::oauth_token`.

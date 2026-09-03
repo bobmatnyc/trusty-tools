@@ -1358,3 +1358,250 @@ fn evaluate_bash_command_allows_quoted_process_substitution_prose() {
         );
     }
 }
+
+// ── #6660: wrapper spellings must not hide the inner command ────────────────
+
+/// Every wrapper spelling that runs `inner` as a real command.
+///
+/// `inner` must contain no quote characters — the nested-quoting shapes are
+/// asserted separately by each rule's own test so the quoting under test is
+/// visible at the assertion, not buried in a formatter.
+fn wrapper_spellings(inner: &str) -> Vec<String> {
+    vec![
+        format!("sh -c \"{inner}\""),
+        format!("bash -c '{inner}'"),
+        format!("zsh -c \"{inner}\""),
+        format!("/bin/sh -c \"{inner}\""),
+        format!("bash -lc \"{inner}\""),
+        format!("env -S \"{inner}\""),
+        format!("xargs {inner}"),
+        format!("xargs -0 {inner}"),
+        format!("xargs -n 4 {inner}"),
+        // A wrapper over a wrapper, and a shell over a shell.
+        format!("sudo sh -c \"{inner}\""),
+        format!("sh -c \"bash -c '{inner}'\""),
+        // Composition inside the wrapped string.
+        format!("sh -c \"true && {inner}\""),
+    ]
+}
+
+/// Why (#6660): `git_subcommand` required the resolved program basename to be
+/// `git`, and `strip_wrapper_prefix` never descended into a `-c` string or an
+/// `xargs` argv. Every rule built on that classifier — the #5791 worktree-remove
+/// deny, the ADR-0048 main-checkout HEAD-move rule, and the destructive-delete
+/// rule — therefore saw `sh`/`bash`/`zsh`/`env`/`xargs` and allowed the command
+/// underneath. One spelling handled is not a fix, so all three rules are
+/// asserted against every spelling in [`wrapper_spellings`] plus the nested
+/// quoting each rule can meet on its own.
+/// Test: itself.
+#[test]
+fn wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules() {
+    const WT: &str = "/repo/.claude/worktrees/agent-x";
+    let engineer = DispatchIdentity {
+        agent_id: Some("agent-abc123"),
+        agent_type: Some("rust-engineer"),
+    };
+
+    // --- Rule 1: `git worktree remove` by a non-version-control subagent. ---
+    let mut worktree_cases = wrapper_spellings(&format!("git worktree remove {WT}"));
+    // Nested quoting: the inner command quotes its own argument.
+    worktree_cases.push(format!("bash -c \"git worktree remove '{WT}'\""));
+    worktree_cases.push(format!("sh -c 'git worktree remove \"{WT}\"'"));
+    // A `cd` inside the wrapped string still moves the resolution base.
+    worktree_cases
+        .push("sh -c \"cd /repo && git worktree remove .claude/worktrees/agent-x\"".to_string());
+    for command in &worktree_cases {
+        let verdict = evaluate_worktree_remove_command(command, true, engineer, Path::new("/repo"));
+        assert!(
+            matches!(verdict, WorktreeRemoveVerdict::Deny(_)),
+            "the #5791 worktree-remove deny must see through: {command}"
+        );
+    }
+
+    // --- Rule 2: a HEAD move inside a main checkout (ADR-0048). ------------
+    let checkout = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(checkout.path().join(".git")).expect("mkdir .git");
+    for command in wrapper_spellings("git merge origin/main") {
+        let resolved = main_checkout_head_move(&command, checkout.path());
+        assert!(
+            resolved.is_some(),
+            "the main-checkout HEAD-move rule must see through: {command}"
+        );
+        assert_eq!(resolved.expect("resolved").0, "merge");
+    }
+
+    // --- Rule 3: destructive delete of a worktree root. --------------------
+    for command in wrapper_spellings(&format!("rm -rf {WT}")) {
+        assert!(
+            evaluate_destructive_delete_command(&command, Path::new("/repo")).is_some(),
+            "the destructive-delete rule must see through: {command}"
+        );
+    }
+}
+
+/// Why (#6660): a wrapped command whose inner string cannot be lexed is a
+/// command the guard cannot classify at all. Allowing it would make broken
+/// quoting the bypass, so the guard fails closed and denies.
+/// Test: itself.
+#[test]
+fn an_unparseable_wrapped_command_is_denied() {
+    for command in [
+        "sh -c \"git worktree remove 'unterminated\"",
+        "bash -c 'rm -rf \"unterminated'",
+    ] {
+        assert!(
+            evaluate_bash_command(command).is_some(),
+            "an unlexable wrapped command must deny: {command}"
+        );
+    }
+}
+
+// ── #6660 review: the three shapes that reached the ABSOLUTE guards ─────────
+
+/// Why (#6660 review, CRITICAL 2): `shlex` 1.3.0 drops the quotes of `$'…'`
+/// and keeps the `$`, so `sh -c $'git worktree remove x'` lexes to a program
+/// token of `$git` and matches no rule. The critic confirmed the live bypass
+/// against the compiled binary. The guard cannot decode the escapes, so it
+/// must refuse — and the bypass needs no wrapper, which is why the bare `git`
+/// spelling is asserted too.
+/// Test: itself.
+#[test]
+fn unclassifiable_command_flags_ansi_c_quoting() {
+    for command in [
+        "sh -c $'git worktree remove /repo/.claude/worktrees/agent-x'",
+        "bash -c $'rm -rf /repo/.claude/worktrees/agent-x'",
+        "git $'worktree' remove /repo/.claude/worktrees/agent-x",
+        "env -S $'git worktree remove x'",
+        // Inside the wrapped string, where the outer quote map reads it as
+        // literal text — the recursion re-scans it where it is live.
+        "sh -c \"git $'worktree' remove /repo/.claude/worktrees/agent-x\"",
+        "$\"git\" worktree remove x",
+    ] {
+        assert_eq!(
+            unclassifiable_command(command),
+            Some(ANSI_C_QUOTING_REASON),
+            "ANSI-C quoting must be refused: {command}"
+        );
+    }
+}
+
+/// Why (#6660 review, CRITICAL 1): the fail-closed answer has to come from a
+/// function the ABSOLUTE guards' caller reaches, not only from
+/// `evaluate_bash_command`.
+/// Test: itself.
+#[test]
+fn unclassifiable_command_flags_an_unlexable_wrapper() {
+    for command in [
+        "sh -c \"git worktree remove 'unterminated\"",
+        "bash -c 'rm -rf \"unterminated'",
+        "xargs sh -c \"git worktree remove 'x\"",
+    ] {
+        assert_eq!(
+            unclassifiable_command(command),
+            Some(UNLEXABLE_WRAPPER_REASON),
+            "an unlexable wrapper must be refused: {command}"
+        );
+    }
+}
+
+/// Why (#6660 review, CRITICAL 3): the first cut STOPPED recursing at the cap
+/// instead of denying, so 8 nested layers denied and 9 allowed. Asserted at
+/// the exact boundary the critic measured.
+/// Test: itself.
+#[test]
+fn unclassifiable_command_denies_past_the_depth_cap() {
+    /// `sh -c <cmd>` wrapped `layers` deep around `inner`, shell-quoting at
+    /// each layer so every level is a legal single token (naive alternating
+    /// quotes stop nesting correctly past two levels).
+    fn nest(inner: &str, layers: usize) -> String {
+        let mut command = inner.to_string();
+        for _ in 0..layers {
+            let quoted = shlex::try_quote(&command).expect("quotable");
+            command = format!("sh -c {quoted}");
+        }
+        command
+    }
+    let inner = "git worktree remove /repo/.claude/worktrees/agent-x";
+
+    // Within budget: resolvable, so this function has no opinion — the
+    // worktree-remove rule classifies it (asserted below).
+    for layers in 1..=MAX_WRAPPER_DEPTH {
+        let command = nest(inner, layers);
+        assert_eq!(
+            unclassifiable_command(&command),
+            None,
+            "{layers} layers are within budget: {command}"
+        );
+    }
+    // Past budget: refused, not skipped.
+    for layers in [MAX_WRAPPER_DEPTH + 1, MAX_WRAPPER_DEPTH + 4] {
+        let command = nest(inner, layers);
+        assert_eq!(
+            unclassifiable_command(&command),
+            Some(WRAPPER_DEPTH_REASON),
+            "{layers} layers exhaust the budget and must be refused"
+        );
+    }
+    // And the rule that matters still denies on both sides of the boundary,
+    // through the guard entry point a subagent actually reaches.
+    let engineer = DispatchIdentity {
+        agent_id: Some("agent-abc123"),
+        agent_type: Some("rust-engineer"),
+    };
+    for layers in [MAX_WRAPPER_DEPTH, MAX_WRAPPER_DEPTH + 1] {
+        let command = nest(inner, layers);
+        let denied = unclassifiable_command(&command).is_some()
+            || matches!(
+                evaluate_worktree_remove_command(&command, true, engineer, Path::new("/repo")),
+                WorktreeRemoveVerdict::Deny(_)
+            );
+        assert!(denied, "{layers} layers must deny: {command}");
+    }
+}
+
+/// Why (#6660 review): the refusal must not swallow ordinary work — a guard
+/// that denies `bash -c 'cargo build'` is retried differently and worse
+/// (ADR-0048 decision 6).
+/// Test: itself.
+#[test]
+fn unclassifiable_command_allows_ordinary_commands() {
+    for command in [
+        "git status --porcelain",
+        "sh -c 'git status --porcelain'",
+        "bash -c \"cargo build\"",
+        "xargs git add",
+        "cargo test -p trusty-mpm && git log --oneline -5",
+        // A `$` that is not opening ANSI-C quoting stays fine.
+        "echo $HOME",
+        "git log --format='%h $ %s'",
+        // ...including a literal `$'` that is itself quoted into prose.
+        "git commit -m \"cost: $'5' per unit\"",
+    ] {
+        assert_eq!(
+            unclassifiable_command(command),
+            None,
+            "ordinary command must not be refused: {command}"
+        );
+    }
+}
+
+/// Why (#6660): the unwrapping must not turn ordinary wrapped work into a
+/// denial — a guard that denies `bash -c 'cargo build'` is retried differently
+/// and worse (ADR-0048 decision 6).
+/// Test: itself.
+#[test]
+fn wrappers_around_benign_commands_still_allow() {
+    for command in [
+        "sh -c 'git status --porcelain'",
+        "bash -c \"git log --oneline -5\"",
+        "xargs git add",
+        "sh -c 'echo hello'",
+        "bash -c 'cargo build'",
+    ] {
+        assert_eq!(
+            evaluate_bash_command(command),
+            None,
+            "expected allow for benign wrapped command: {command}"
+        );
+    }
+}

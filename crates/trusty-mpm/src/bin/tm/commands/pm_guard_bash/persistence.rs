@@ -339,7 +339,7 @@ pub(crate) fn command_is_persistence_only(command: &str) -> bool {
             continue;
         }
         saw_one = true;
-        if !segment_is_persistence(segment) {
+        if !segment_is_persistence(&segment) {
             return false;
         }
     }

@@ -122,6 +122,12 @@ pub(crate) fn gh_command(dir: &Path, gh_env: &GhEnv) -> Command {
     for key in GH_STRIPPED_ENV {
         cmd = cmd.env_remove(key);
     }
+    // #6668: clear the inherited identity BEFORE applying the binding — gh
+    // reads an env token ahead of `GH_CONFIG_DIR`, so leaving the shell's
+    // `GH_TOKEN` in place left the binding decorative.
+    for key in gh_env.unset_vars() {
+        cmd = cmd.env_remove(key);
+    }
     for (key, value) in gh_env.vars() {
         cmd = cmd.env(key, value);
     }

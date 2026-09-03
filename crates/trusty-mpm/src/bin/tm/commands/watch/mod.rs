@@ -149,8 +149,8 @@ pub(crate) async fn poll(
 
     // #1265: bind the active project's GitHub identity to every `gh` call.
     let gh_env = load_gh_env()?;
-    let runner = RealCommandRunner::with_env(gh_env.vars().to_vec());
-    let lister = GhIssueLister::new(RealCommandRunner::with_env(gh_env.vars().to_vec()));
+    let runner = RealCommandRunner::with_gh_env(&gh_env);
+    let lister = GhIssueLister::new(RealCommandRunner::with_gh_env(&gh_env));
     run_poll_once(
         client,
         url,
@@ -246,9 +246,9 @@ pub(crate) async fn listen(
 
     // #1265: bind the active project's GitHub identity to every `gh` call.
     let gh_env = load_gh_env()?;
-    let runner = RealCommandRunner::with_env(gh_env.vars().to_vec());
+    let runner = RealCommandRunner::with_gh_env(&gh_env);
     let board = resolve_board_repo(&runner, &settings.repo, github.as_ref())?;
-    let lister = GhIssueLister::new(RealCommandRunner::with_env(gh_env.vars().to_vec()));
+    let lister = GhIssueLister::new(RealCommandRunner::with_gh_env(&gh_env));
     run_listen_loop(
         client,
         url,

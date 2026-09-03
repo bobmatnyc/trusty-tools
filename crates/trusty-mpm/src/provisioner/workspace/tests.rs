@@ -1047,6 +1047,7 @@ fn default_identity_produces_plain_git_command() {
 fn git_identity_env_applied_to_command() {
     let identity = crate::core::git_identity::GitIdentity {
         env: vec![("GH_CONFIG_DIR".to_string(), "/cfg/project".to_string())],
+        env_remove: vec!["GH_TOKEN".to_string()],
         commit_name: None,
         commit_email: None,
     };
@@ -1060,6 +1061,13 @@ fn git_identity_env_applied_to_command() {
         }),
         "GH_CONFIG_DIR override must be applied: {envs:?}"
     );
+    // #6668: a credential helper reads GH_TOKEN ahead of GH_CONFIG_DIR, so the
+    // removal has to reach the command too or the binding stays decorative.
+    assert!(
+        envs.iter()
+            .any(|(k, v)| *k == std::ffi::OsStr::new("GH_TOKEN") && v.is_none()),
+        "GH_TOKEN must be removed: {envs:?}"
+    );
 }
 
 /// Why: a resolved commit-identity override must render as `-c user.name=…`/
@@ -1070,6 +1078,7 @@ fn git_identity_env_applied_to_command() {
 fn git_identity_commit_args_applied_to_command() {
     let identity = crate::core::git_identity::GitIdentity {
         env: vec![],
+        env_remove: vec![],
         commit_name: Some("Bot".to_string()),
         commit_email: Some("bot@example.com".to_string()),
     };

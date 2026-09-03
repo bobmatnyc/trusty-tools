@@ -66,6 +66,10 @@ pub struct GitIdentity {
     /// `GH_TOKEN`, `GH_HOST`) so an HTTPS credential helper picks the right
     /// identity.
     pub env: Vec<(String, String)>,
+    /// #6668: identity vars REMOVED from the git subprocess before `env` is
+    /// applied. A credential helper resolves an inherited `GH_TOKEN` ahead of
+    /// the `GH_CONFIG_DIR` this identity binds, so setting alone is not enough.
+    pub env_remove: Vec<String>,
     /// Git commit author name override, applied as `-c user.name=<name>`.
     pub commit_name: Option<String>,
     /// Git commit author email override, applied as `-c user.email=<email>`.
@@ -80,7 +84,10 @@ impl GitIdentity {
     /// What: true when `env` is empty and both commit fields are `None`.
     /// Test: covered by `resolve_git_identity_none_when_nothing_configured`.
     pub fn is_empty(&self) -> bool {
-        self.env.is_empty() && self.commit_name.is_none() && self.commit_email.is_none()
+        self.env.is_empty()
+            && self.env_remove.is_empty()
+            && self.commit_name.is_none()
+            && self.commit_email.is_none()
     }
 
     /// Render the `-c user.name=…`/`-c user.email=…` args for a `git` command.
@@ -132,6 +139,9 @@ pub fn resolve_git_identity(
     let env = resolve_gh_env(selected)?;
     Ok(GitIdentity {
         env: env.vars().to_vec(),
+        // #6668: carry the removals with the overrides — a bound identity that
+        // leaves an inherited GH_TOKEN in place is not bound.
+        env_remove: env.unset_vars().to_vec(),
         commit_name: commit_name.map(str::to_string),
         commit_email: commit_email.map(str::to_string),
     })

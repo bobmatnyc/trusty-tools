@@ -44,9 +44,7 @@ pub(crate) fn issue(cmd: IssueCmd, system: TicketSystemKind) -> anyhow::Result<(
     // verb makes (empty binding → ambient gh identity, no regression).
     let gh_env = crate::gh_identity::load_gh_env()?;
     let backend = match system {
-        TicketSystemKind::Gh => {
-            GhTicketSystem::new(RealCommandRunner::with_env(gh_env.vars().to_vec()))
-        }
+        TicketSystemKind::Gh => GhTicketSystem::new(RealCommandRunner::with_gh_env(&gh_env)),
         TicketSystemKind::Jira => return Err(not_yet_supported("jira")),
         TicketSystemKind::Linear => return Err(not_yet_supported("linear")),
     };

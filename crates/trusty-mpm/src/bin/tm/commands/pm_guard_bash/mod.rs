@@ -82,6 +82,88 @@ pub(crate) const BUILD_TEST_REASON: &str = "PM must not run builds or tests dire
 pub(crate) const NETWORK_REASON: &str = "PM must not fetch over the network from Bash \
      (prohibition P-network). Use WebFetch/WebSearch or delegate the task.";
 
+/// Deny reason for a wrapper whose inner command cannot be lexed (#6660).
+pub(crate) const UNLEXABLE_WRAPPER_REASON: &str = "this command's `sh -c`/`bash -c`/`env -S`/\
+     `xargs` wrapper carries an inner command with unbalanced quoting, so the guard cannot \
+     classify what would actually run. Run the command without the wrapper, or fix the quoting.";
+
+/// Deny reason for `$'…'`/`$"…"` quoting the guard cannot decode (#6660 review).
+pub(crate) const ANSI_C_QUOTING_REASON: &str = "this command uses `$'…'`/`$\"…\"` quoting, which \
+     the guard's lexer cannot decode — it cannot establish which program would actually run \
+     (`sh -c $'git worktree remove x'` reads as `$git`, matching no rule). Rewrite the command \
+     with ordinary `'…'` or `\"…\"` quoting.";
+
+/// Deny reason for a wrapper nested past [`MAX_WRAPPER_DEPTH`] (#6660 review).
+pub(crate) const WRAPPER_DEPTH_REASON: &str = "this command nests `sh -c`/`bash -c`/`xargs` \
+     wrappers deeper than the guard will follow, so it cannot classify what would actually run. \
+     Run the command without the nesting.";
+
+/// How many wrapper layers the guard descends through (#6660).
+///
+/// Why: `sh -c "bash -c '…'"` is a real shape, and an adversarial one nests
+/// without bound. The cap bounds the recursion; exhausting it DENIES rather
+/// than falling through, matching [`MAX_SUBSTITUTION_DEPTH`] — the first cut
+/// stopped recursing instead, which made a 9-layer wrapper an allow while an
+/// 8-layer one denied.
+/// What: the budget threaded through [`unclassifiable_command`] and
+/// [`expand_shell_segments`].
+const MAX_WRAPPER_DEPTH: usize = 8;
+
+/// Whether the guard is unable to establish what `command` would run (#6660).
+///
+/// Why: the three ABSOLUTE guards a dispatched subagent actually hits —
+/// `evaluate_worktree_remove_command`, the main-checkout destructive/commit/
+/// HEAD-move rules, and `evaluate_destructive_delete_command` — are reached
+/// from `pm_guard` BEFORE `payload_is_subagent_dispatch` short-circuits, and
+/// none of them routes through [`evaluate_bash_command`]. A fail-closed check
+/// that lived only in [`classify_bash_segment`] was therefore unreachable for
+/// exactly the caller #5791/#6660 exist to bind: `sh -c "git worktree remove
+/// 'unterminated"` from a subagent was allowed. Making this ONE function the
+/// answer, called from `pm_guard`'s ABSOLUTE band ahead of every Bash rule,
+/// is what stops a future rule from inheriting the same hole.
+/// What: `Some(reason)` when any segment, at any wrapper depth, carries
+/// `$'…'`/`$"…"` quoting the lexer mangles ([`shell_lex::has_live_ansi_c_quoting`]),
+/// a wrapper whose inner command will not lex
+/// ([`shell_lex::WrappedCommand::Unlexable`]), or a wrapper nested past
+/// [`MAX_WRAPPER_DEPTH`]. `None` — the ordinary case — leaves every rule to
+/// classify the command as before.
+/// Test: `unclassifiable_command_flags_ansi_c_quoting`,
+/// `unclassifiable_command_flags_an_unlexable_wrapper`,
+/// `unclassifiable_command_denies_past_the_depth_cap`,
+/// `unclassifiable_command_allows_ordinary_commands`, and end to end in
+/// `tests/tm_hook_pm_guard.rs`.
+pub(crate) fn unclassifiable_command(command: &str) -> Option<&'static str> {
+    unclassifiable_at(command, 0)
+}
+
+/// Depth-aware core of [`unclassifiable_command`].
+fn unclassifiable_at(command: &str, depth: usize) -> Option<&'static str> {
+    for raw in split_shell_segments_raw(command) {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if shell_lex::has_live_ansi_c_quoting(trimmed) {
+            return Some(ANSI_C_QUOTING_REASON);
+        }
+        match shell_lex::wrapped_command(trimmed) {
+            shell_lex::WrappedCommand::Unlexable => return Some(UNLEXABLE_WRAPPER_REASON),
+            shell_lex::WrappedCommand::Inner(inner) => {
+                // A wrapper AT the cap is refused, not skipped: the guard has
+                // run out of budget to see what it hides.
+                if depth >= MAX_WRAPPER_DEPTH {
+                    return Some(WRAPPER_DEPTH_REASON);
+                }
+                if let Some(reason) = unclassifiable_at(&inner, depth + 1) {
+                    return Some(reason);
+                }
+            }
+            shell_lex::WrappedCommand::None => {}
+        }
+    }
+    None
+}
+
 /// Maximum command-substitution recursion depth before conservatively denying.
 ///
 /// Why: [`classify_command_substitutions`] recurses through
@@ -127,8 +209,14 @@ fn evaluate_bash_command_inner(command: &str, depth: usize) -> Option<&'static s
     if trimmed.is_empty() {
         return None;
     }
+    // #6660: refuse before classifying — a command the guard cannot lex is a
+    // command it cannot clear. The same check runs in `pm_guard`'s ABSOLUTE
+    // band for the callers that never reach here.
+    if let Some(reason) = unclassifiable_command(trimmed) {
+        return Some(reason);
+    }
     for segment in split_shell_segments(trimmed) {
-        if let Some(reason) = classify_bash_segment(segment, depth) {
+        if let Some(reason) = classify_bash_segment(&segment, depth) {
             return Some(reason);
         }
     }
@@ -162,7 +250,51 @@ fn evaluate_bash_command_inner(command: &str, depth: usize) -> Option<&'static s
 /// `split_shell_segments_splits_bare_ampersand`,
 /// `split_shell_segments_single_command`,
 /// `split_shell_segments_ignores_quoted_operators`.
-fn split_shell_segments(command: &str) -> Vec<&str> {
+///
+/// #6660: the returned list also carries the commands hidden inside a leading
+/// `sh -c` / `bash -c` / `env -S` / `xargs` wrapper — see
+/// [`expand_shell_segments`]. Every rule in this module reads its segments from
+/// here, which is what makes one descent reach all of them.
+fn split_shell_segments(command: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    expand_shell_segments(command, 0, &mut out);
+    out
+}
+
+/// Emit each of `command`'s segments, followed by the segments of whatever a
+/// leading command wrapper would run (#6660).
+///
+/// Why: `sh -c "git worktree remove …"` reached every rule as a segment whose
+/// program is `sh`, and no rule has an opinion about `sh`. Emitting the inner
+/// command as ADDITIONAL segments is additive by construction: every segment
+/// the caller saw before is still present, byte-identical and in the same
+/// order, so no existing classification changes and the wrapped command is now
+/// classified too.
+///
+/// The `cd`-tracking rules read these segments in order, so a `cd` inside a
+/// wrapped string leaks into the segments that follow the wrapper — a subshell
+/// `cd` does not really leak. That over-resolves a later relative path against
+/// the subshell's directory, which is the over-blocking direction this guard
+/// already prefers everywhere else.
+/// What: recurses through [`shell_lex::wrapped_command`] up to
+/// [`MAX_WRAPPER_DEPTH`] layers. An [`shell_lex::WrappedCommand::Unlexable`]
+/// wrapper contributes no inner segments; [`classify_bash_segment`] denies it
+/// instead.
+/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
+fn expand_shell_segments(command: &str, depth: usize, out: &mut Vec<String>) {
+    for raw in split_shell_segments_raw(command) {
+        out.push(raw.to_string());
+        if depth >= MAX_WRAPPER_DEPTH {
+            continue;
+        }
+        if let shell_lex::WrappedCommand::Inner(inner) = shell_lex::wrapped_command(raw.trim()) {
+            expand_shell_segments(&inner, depth + 1, out);
+        }
+    }
+}
+
+/// The composition-operator split itself, without the #6660 wrapper descent.
+fn split_shell_segments_raw(command: &str) -> Vec<&str> {
     let scan = QuoteScan::new(command);
     let quoted = |i: usize| scan.balanced && !scan.is_unquoted(i);
     let bytes = command.as_bytes();
