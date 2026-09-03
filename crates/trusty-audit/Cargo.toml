@@ -132,10 +132,15 @@ sha2 = { workspace = true }
 # file from outside the working directory into a package that leaves the
 # recipient's network.
 walkdir = { workspace = true }
+# #6077: `gitleaks` writes its findings to a file, and that file holds the
+# matched credentials UNREDACTED. A hand-rolled path under `std::env::temp_dir()`
+# lands 0644 on a world-readable /tmp for as long as the scan runs, so the
+# report goes inside a `TempDir` instead — 0700 on Unix, and removed by its own
+# drop on every return path. Promoted from dev-dependencies for this; the tests
+# that already used it cost no extra compilation.
+tempfile = { workspace = true }
 
 [dev-dependencies]
-# Real directories for the working-directory creation tests.
-tempfile = { workspace = true }
 # #5824: `tests/cli_end_to_end.rs` opens the return package the chain wrote and
 # reads its generated members, because what the recipient receives is the zip
 # rather than the console output that produced it. Already a dependency above,

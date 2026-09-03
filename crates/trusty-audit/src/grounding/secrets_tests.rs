@@ -210,6 +210,91 @@ fn an_empty_report_parses_to_no_leaks() {
 
 // ─── The redaction ──────────────────────────────────────────────────────────
 
+/// The raw report is the one artefact holding the matched credentials, so it
+/// lives where no other local account can read it and does not outlive the run.
+#[cfg(unix)]
+#[test]
+fn the_raw_report_lives_in_a_private_directory_and_does_not_outlive_the_run() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = private_report_dir().expect("a private directory");
+    let report = report_path_in(&dir);
+    let root = dir.path().to_path_buf();
+    let private = report
+        .parent()
+        .expect("the private subdirectory")
+        .to_owned();
+    let mode = std::fs::metadata(&private)
+        .expect("stat")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, PRIVATE_MODE,
+        "gitleaks writes the credentials unredacted, so only this user may read \
+         them — and `tempfile`'s own directory is 0755 under a 022 umask, which \
+         is why the report lives one level down"
+    );
+    std::fs::write(&report, FIXTURE).expect("a report in it");
+    drop(dir);
+    assert!(
+        !root.exists(),
+        "the directory and the report inside it go with the drop, on every return \
+         path from `run_gitleaks`"
+    );
+
+    // The REAL `run_gitleaks`, whichever arm this machine takes, leaves nothing.
+    // Asserted in the same test rather than its own so no sibling's live
+    // directory can race the sweep below.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = checkout_at(tmp.path());
+    let _ = scan(&checkout);
+    let lingering: Vec<PathBuf> = std::fs::read_dir(std::env::temp_dir())
+        .expect("read the temp dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|name| name.starts_with(REPORT_DIR_PREFIX))
+        })
+        .collect();
+    assert!(
+        lingering.is_empty(),
+        "no raw report survives a scan: {lingering:?}"
+    );
+}
+
+/// `Run` holds gitleaks' `Secret` and `Match` verbatim, so its `Debug` is
+/// hand-written and must never print them — a derived one would put a live
+/// credential into any `{:?}`, `tracing` field, or test panic.
+#[test]
+fn the_raw_run_never_debug_prints_its_content() {
+    let run = Run {
+        success: false,
+        report: FIXTURE.to_string(),
+        stderr: NOISY_STDERR.to_string(),
+    };
+
+    let rendered = format!("{run:?}");
+
+    for planted in PLANTED {
+        assert!(
+            !rendered.contains(planted),
+            "`Run`'s Debug printed the planted secret {planted}: {rendered}"
+        );
+    }
+    assert!(
+        !rendered.contains("Update available"),
+        "the child's stderr is not this process's to echo either: {rendered}"
+    );
+    assert!(
+        rendered.contains("bytes, withheld"),
+        "the size still reaches a diagnostic: {rendered}"
+    );
+}
+
 /// #6077's hardest requirement: the matched credential must never reach the
 /// document that ships. Asserted against the MANIFEST, not against the struct,
 /// because the manifest is what leaves the machine.

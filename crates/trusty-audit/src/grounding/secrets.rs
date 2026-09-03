@@ -33,6 +33,11 @@
 //! `-v` is deliberately NOT passed to gitleaks, because its verbose stderr
 //! prints matched secrets — and stderr's first line reaches a gap line.
 //!
+//! Two other places the raw value exists, both bounded: gitleaks' own report
+//! file, which lives in a 0700 [`TempDir`] its drop removes (see
+//! [`private_report_dir`]), and [`Run::report`], whose `Debug` is hand-written
+//! so no `{:?}` can print it.
+//!
 //! ## Scope, and why there is no ecosystem gate
 //!
 //! Unlike [`super::cve`] and [`super::license`], this leg reads no dependency
@@ -60,8 +65,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use tempfile::TempDir;
 use toml_edit::{InlineTable, Value};
 
 use super::cve::Severity;
@@ -173,7 +178,15 @@ pub enum Outcome {
 /// diagnostics. `report` is the file's content rather than stdout because
 /// gitleaks writes its findings to `--report-path`, never to stdout.
 /// Test: `secrets_tests::a_nonzero_exit_with_a_readable_report_is_still_a_scan`.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is HAND-WRITTEN, and must stay that way: `report` holds gitleaks'
+/// `Secret` and `Match` fields verbatim — the only place in this crate the
+/// matched credential exists outside [`parse`] — and `stderr` is a child
+/// process's output this module does not control. A derived `Debug` puts both
+/// into any `{:?}`, `tracing` field, or test panic that ever touches this
+/// struct. The impl below prints byte counts and nothing else.
+/// Test: `secrets_tests::the_raw_run_never_debug_prints_its_content`.
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct Run {
     /// Whether the process exited zero.
@@ -182,6 +195,25 @@ pub struct Run {
     pub report: String,
     /// Diagnostics, used only as the parenthetical of a gap line (#6720).
     pub stderr: String,
+}
+
+impl std::fmt::Debug for Run {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Run")
+            .field("success", &self.success)
+            .field("report", &Withheld(self.report.len()))
+            .field("stderr", &Withheld(self.stderr.len()))
+            .finish()
+    }
+}
+
+/// A field [`Run`]'s `Debug` states the size of rather than the content of.
+struct Withheld(usize);
+
+impl std::fmt::Debug for Withheld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes, withheld>", self.0)
+    }
 }
 
 /// Scan `checkout`'s working tree, or say why there is no scan.
@@ -351,15 +383,16 @@ fn relative(file: &str, checkout: &Path) -> String {
 /// a question the tree already answers — and the clean-scan gap line states that
 /// history is out of scope rather than letting the omission read as a clean
 /// history.
-/// What: the report goes to a uniquely-named file under the system temp
-/// directory, never under the target repository, and is removed before this
-/// returns. `output()` waits for the child, so the process is reaped here. Only
-/// v8's oldest and most stable flags are used, and `-v` is deliberately absent
-/// (it prints matched secrets to stderr, which reaches a gap line).
+/// What: the report goes inside a private [`TempDir`] (see
+/// [`private_report_dir`]) — never under the target repository, and never
+/// world-readable — which its own drop removes on every return path from here.
+/// `output()` waits for the child, so the process is reaped here. Only v8's
+/// oldest and most stable flags are used, and `-v` is deliberately absent (it
+/// prints matched secrets to stderr, which reaches a gap line).
 ///
 /// # Errors
 /// One line, leading with this module's own diagnosis, when the binary is not
-/// installed or the spawn fails (#6720).
+/// installed, no private directory can be made, or the spawn fails (#6720).
 fn run_gitleaks(checkout: &Path) -> Result<Run, String> {
     let binary = trusty_common::bin_resolve::resolve_binary(BINARY).ok_or_else(|| {
         format!(
@@ -367,7 +400,10 @@ fn run_gitleaks(checkout: &Path) -> Result<Run, String> {
              `{INSTALL_COMMAND}`)"
         )
     })?;
-    let report_path = report_path();
+    // Bound to a name so it lives until the report has been read, and drops —
+    // removing the report with it — however this function returns.
+    let dir = private_report_dir()?;
+    let report_path = report_path_in(&dir);
     let output = Command::new(&binary)
         .arg("detect")
         .arg("--source")
@@ -381,9 +417,6 @@ fn run_gitleaks(checkout: &Path) -> Result<Run, String> {
         .map_err(|e| format!("{COLLECTOR}: `{BINARY}` could not be run ({e})"))?;
 
     let report = std::fs::read_to_string(&report_path).unwrap_or_default();
-    // Best-effort: a temp file this process cannot remove is not worth failing a
-    // scan over, and it is outside the delivered package either way.
-    let _ = std::fs::remove_file(&report_path);
 
     Ok(Run {
         success: output.status.success(),
@@ -392,20 +425,73 @@ fn run_gitleaks(checkout: &Path) -> Result<Run, String> {
     })
 }
 
-/// A unique report path under the system temp directory.
+/// A directory only this user can read, for gitleaks to write its report into.
 ///
-/// Never under the target repository: the collector reads a checkout it does not
-/// own, and a report file dropped in it would show up as an untracked change in
-/// the recipient's own tree.
-fn report_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
-    std::env::temp_dir().join(format!(
-        "trusty-audit-{COLLECTOR}-{}-{nanos}.json",
-        std::process::id()
-    ))
+/// Why: the report is the one artefact in this pipeline holding the matched
+/// credentials UNREDACTED. A path composed by hand under [`std::env::temp_dir`]
+/// is created by gitleaks at its own umask — 0644 on a world-readable `/tmp` —
+/// and stays readable by every local account for as long as the scan runs.
+///
+/// Why two directories rather than one: `tempfile` supplies the unguessable name
+/// and the drop that removes the tree however the caller returns — including the
+/// early-return and panic paths a manual `remove_file` misses — but it creates
+/// its directory through `std::fs::create_dir`, which lands 0755 under the usual
+/// 022 umask. Chmod-ing it afterwards leaves a window in which another local
+/// account can open a descriptor on the directory and read, through that
+/// descriptor, files created in it after the mode changed. So the report goes in
+/// a SUBDIRECTORY made by `mkdir(2)` with an explicit 0700 — a umask can only
+/// clear bits, so that one is private from birth and there is no window at all.
+/// What: a `TempDir` named [`REPORT_DIR_PREFIX`]`<random>` holding a 0700
+/// [`REPORT_SUBDIR`]. The caller keeps it alive for exactly as long as it needs
+/// the report, and reads the path from [`report_path_in`].
+///
+/// # Errors
+/// One line, leading with this module's own diagnosis, when either directory
+/// cannot be created — the collector refuses to write the raw report anywhere
+/// less private rather than falling back (#6077).
+///
+/// Test: `secrets_tests::the_raw_report_lives_in_a_private_directory_and_does_not_outlive_the_run`.
+fn private_report_dir() -> Result<TempDir, String> {
+    let refuse = |what: &str, e: std::io::Error| {
+        format!(
+            "{COLLECTOR}: no private {what} could be made for `{BINARY}`'s raw report ({e}), and \
+             the collector will not write it anywhere less private"
+        )
+    };
+    let dir = tempfile::Builder::new()
+        .prefix(REPORT_DIR_PREFIX)
+        .tempdir()
+        .map_err(|e| refuse("directory", e))?;
+
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(PRIVATE_MODE);
+    }
+    builder
+        .create(dir.path().join(REPORT_SUBDIR))
+        .map_err(|e| refuse("subdirectory", e))?;
+    Ok(dir)
 }
+
+/// Where gitleaks writes its report inside `dir` — the private subdirectory.
+fn report_path_in(dir: &TempDir) -> PathBuf {
+    dir.path().join(REPORT_SUBDIR).join(REPORT_FILE)
+}
+
+/// Prefix of the private directory [`private_report_dir`] creates.
+const REPORT_DIR_PREFIX: &str = "trusty-audit-secrets-";
+
+/// The 0700 subdirectory the raw report actually lives in.
+const REPORT_SUBDIR: &str = "private";
+
+/// The report's name inside that subdirectory.
+const REPORT_FILE: &str = "report.json";
+
+/// Owner-only, the mode [`REPORT_SUBDIR`] is created with on Unix.
+#[cfg(unix)]
+const PRIVATE_MODE: u32 = 0o700;
 
 /// Record `leaks` in the manifest at `path` as `[report].findings`.
 ///

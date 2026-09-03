@@ -20,3 +20,11 @@ Added
     get a gap naming which it was, leading with the collector's own diagnosis
     rather than with the child's first stderr line (#6720). A scan that ran
     clean states what it did not cover — git history above all.
+  - gitleaks' own report file is the one artefact holding the matched
+    credentials unredacted. It is written into a 0700 subdirectory of a
+    `tempfile::TempDir`, whose drop removes it on every return path — including
+    the early returns a manual delete misses — and the mode is set by `mkdir(2)`
+    rather than by a later chmod, so there is no window in which another local
+    account can open the directory. `Run`'s `Debug` is hand-written for the same
+    reason: a derived one would put the raw report and the child's stderr into
+    any `{:?}`.
