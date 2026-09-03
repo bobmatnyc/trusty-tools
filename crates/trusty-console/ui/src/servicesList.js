@@ -29,7 +29,11 @@
  * from `crates/trusty-console/ui`.
  */
 
+import { windowMax } from './barGraph.js';
 import { cardPresentation } from './statusPresentation.js';
+
+/** The roster route both the home page and the screensaver read (#6643). */
+export const SERVICES_URL = '/api/console/services';
 
 /** The placeholder for an absent version or an unmeasurable CPU figure. */
 export const DASH = '—';
@@ -40,6 +44,36 @@ export const NO_DASHBOARD_HINT = 'No dashboard for this service';
 /** True only for a real, finite number — `null`, `undefined` and NaN are not. */
 function isNum(value) {
   return typeof value === 'number' && Number.isFinite(value);
+}
+
+/**
+ * Read the service roster, never rejecting (#6643).
+ *
+ * Why it lives here: two callers need the same roster — the home page for the
+ * list it renders, and the screensaver, which re-reads it on its own poll so a
+ * screen left up for hours notices a service that was installed or removed
+ * while nobody was watching. One wrapper is also what keeps a failed read
+ * shaped the same for both: an empty roster and a stated error, so neither
+ * caller has to decide what an exception means.
+ *
+ * What: resolves to `{ services, error }`. `error` is `null` on success, and on
+ * failure `services` is empty — the caller keeps whatever it was already
+ * showing if it would rather not blank the screen.
+ * Test: `fetchServices returns the roster on a 200`, `fetchServices reports a
+ * non-OK status without throwing`, `fetchServices reports a transport failure`.
+ *
+ * @param {typeof fetch} fetchImpl injected so `node --test` needs no browser
+ * @returns {Promise<{ services: object[], error: string | null }>}
+ */
+export async function fetchServices(fetchImpl = fetch) {
+  try {
+    const resp = await fetchImpl(SERVICES_URL);
+    if (!resp?.ok) return { services: [], error: `HTTP ${resp?.status}` };
+    const body = await resp.json();
+    return { services: Array.isArray(body) ? body : [], error: null };
+  } catch (e) {
+    return { services: [], error: e?.message ?? String(e) };
+  }
 }
 
 /**
@@ -132,5 +166,86 @@ export function serviceRows(services, serviceSamples = {}, dashboards = new Set(
     // #6642: only a clickable row overrides its accessible name. An inert row
     // is a plain <div>, whose visible cells a screen reader reads as written.
     return { ...row, ariaLabel: row.hasDashboard ? rowAriaLabel(row) : null };
+  });
+}
+
+/**
+ * The %CPU floor a row's bars are scaled against.
+ *
+ * A window of near-idle samples would otherwise magnify 0.2 % into a full-height
+ * bar, which reads as a busy daemon. Five percent is the smallest ceiling that
+ * still leaves a genuinely idle service looking idle.
+ */
+export const ROW_GRAPH_FLOOR_PCT = 5;
+
+/**
+ * Everything `BarGraph` needs to draw one service row's CPU graph (#6643).
+ *
+ * Why here: the home page's list and the screensaver's table draw the same row
+ * for the same service, and a per-row scale is only comparable if both compute
+ * it the same way. A shared scale across rows would instead flatten every row
+ * against whichever service happens to be compiling; per-row scaling answers
+ * "is this daemon busier than it was a minute ago", which is the question a
+ * row-height graph can actually answer. The absolute figure stays in the %CPU
+ * column.
+ *
+ * What: the row's own series, scaled to the busiest second in it, never below
+ * [`ROW_GRAPH_FLOOR_PCT`]. No thresholds — a busy daemon is not a fault.
+ * Test: `rowGraphSpec scales a row to its own busiest second`, `rowGraphSpec
+ * holds an idle row against the floor`.
+ *
+ * @param {{ series?: (number|null)[], displayName?: string }} row from `serviceRows`
+ * @returns {{ values: (number|null)[], max: number, label: string }}
+ */
+export function rowGraphSpec(row) {
+  const series = Array.isArray(row?.series) ? row.series : [];
+  return {
+    values: series,
+    max: windowMax(series, ROW_GRAPH_FLOOR_PCT),
+    label: `${row?.displayName ?? 'Service'} CPU, one bar per second`,
+  };
+}
+
+/**
+ * The order status labels are tallied in — worst last, so the eye lands on it.
+ *
+ * A label this list does not name is a status a newer daemon added; it sorts
+ * after these, alphabetically, rather than being dropped.
+ */
+export const STATUS_LABEL_ORDER = ['Running', 'Ready', 'Available', 'Degraded', 'Absent'];
+
+/**
+ * One tally per status label present in the rows (#6643).
+ *
+ * Why: the screensaver shows a count line on one frame and the list on another,
+ * and a count computed from a different payload than the list is how the two
+ * frames end up disagreeing about how many services exist. Tallying the rows
+ * themselves makes that impossible, and reusing their `statusLabel` and
+ * `statusVar` means the tally says the same words in the same colours the
+ * badges beneath it do.
+ *
+ * What: labels with a zero count are absent from the result — the line names
+ * what is there, not every state a service could be in.
+ * Test: `statusCounts tallies the rows by the label they display`,
+ * `statusCounts orders known labels by severity and unknown ones last`.
+ *
+ * @param {{ statusLabel: string, statusVar: string }[]} rows from `serviceRows`
+ * @returns {{ label: string, count: number, toneVar: string }[]}
+ */
+export function statusCounts(rows) {
+  const byLabel = new Map();
+  for (const row of rows ?? []) {
+    const label = row?.statusLabel ?? '';
+    const seen = byLabel.get(label);
+    if (seen) seen.count += 1;
+    else byLabel.set(label, { label, count: 1, toneVar: row?.statusVar ?? '' });
+  }
+  const rank = (label) => {
+    const index = STATUS_LABEL_ORDER.indexOf(label);
+    return index === -1 ? STATUS_LABEL_ORDER.length : index;
+  };
+  return [...byLabel.values()].sort((a, b) => {
+    if (rank(a.label) !== rank(b.label)) return rank(a.label) - rank(b.label);
+    return a.label.localeCompare(b.label);
   });
 }

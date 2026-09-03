@@ -19,11 +19,9 @@ import {
   formatNetworkRates,
   formatPct,
   formatRateMBs,
+  hostGraphSpec,
   hostGraphs,
   pressureTone,
-  rollupTone,
-  serviceHealthTone,
-  serviceRows,
   statCards,
   swapLine,
   toneLabel,
@@ -170,23 +168,6 @@ test('an unrecognised pressure is muted, never an alarm', () => {
   assert.equal(pressureTone('NOMINAL'), 'muted'); // the wire form is lowercase
 });
 
-test('serviceHealthTone maps ok/degraded/error and falls back to muted', () => {
-  assert.equal(serviceHealthTone('ok'), 'success');
-  assert.equal(serviceHealthTone('degraded'), 'warning');
-  assert.equal(serviceHealthTone('error'), 'danger');
-  assert.equal(serviceHealthTone('starting'), 'muted');
-  assert.equal(serviceHealthTone(undefined), 'muted');
-});
-
-test('rollupTone reports the worst health any service holds', () => {
-  assert.equal(rollupTone({ total: 3, ok: 3, degraded: 0, error: 0 }), 'success');
-  assert.equal(rollupTone({ total: 3, ok: 2, degraded: 1, error: 0 }), 'warning');
-  assert.equal(rollupTone({ total: 3, ok: 1, degraded: 1, error: 1 }), 'danger');
-  // One error outranks any number of degraded.
-  assert.equal(rollupTone({ total: 9, ok: 0, degraded: 8, error: 1 }), 'danger');
-  assert.equal(rollupTone(null), 'muted');
-});
-
 test('toneLabel names the value it stamps', () => {
   assert.equal(toneLabel('nominal'), 'NOMINAL');
   assert.equal(toneLabel('degraded'), 'DEGRADED');
@@ -250,38 +231,40 @@ test('with no host the grid keeps its four cards and shows placeholders', () => 
   }
 });
 
-// ── rollup rows ────────────────────────────────────────────────────────────
+// ── graph specs (#6643) ────────────────────────────────────────────────────
 
-test('serviceRows maps the rollup to table rows in the order sent', () => {
-  const now = 1_800_000_000;
-  const rows = serviceRows(machineStatusFixture(), now);
-
-  assert.equal(rows.length, 3);
-  assert.deepEqual(
-    rows.map((r) => r.displayName),
-    ['Trusty Search', 'Trusty Memory', 'Trusty MPM'],
-  );
-  assert.deepEqual(
-    rows.map((r) => r.tone),
-    ['success', 'warning', 'success'],
-  );
-  assert.deepEqual(
-    rows.map((r) => r.healthLabel),
-    ['OK', 'DEGRADED', 'OK'],
-  );
-  assert.equal(rows[0].version, '0.24.1');
-  // Relative time comes from lastUsed.js, so the buckets match the Search and
-  // Memory rosters rather than inventing a second vocabulary.
-  assert.equal(rows[0].collected, '2m ago');
-  assert.equal(rows[1].collected, '2h ago');
-  // A service that reported no collection time shows the same dash a
-  // never-used index does, not the unix epoch.
-  assert.equal(rows[2].collected, '—');
+test('hostGraphSpec bands cpu and memory against the server thresholds', () => {
+  // The card's badge is classified server-side at 80/95; bars that disagreed
+  // with the badge above them would be the contradiction this shares to avoid.
+  for (const key of ['cpu', 'memory']) {
+    const spec = hostGraphSpec(key, [10, 85, 97]);
+    assert.equal(spec.max, 100);
+    assert.deepEqual(spec.thresholds, { warning: 80, critical: 95 });
+    assert.equal(spec.label, `${key} usage %, one bar per second`);
+    assert.deepEqual(spec.values, [10, 85, 97]);
+  }
 });
 
-test('serviceRows is empty, not a throw, when nothing has reported', () => {
-  assert.deepEqual(serviceRows(null), []);
-  assert.deepEqual(serviceRows({ services: { total: 0, ok: 0, degraded: 0, error: 0, services: [] } }), []);
+test('hostGraphSpec bands disk later than cpu and memory', () => {
+  assert.deepEqual(hostGraphSpec('disk', []).thresholds, { warning: 85, critical: 95 });
+});
+
+test('hostGraphSpec scales the network card to the busiest second in the window', () => {
+  const spec = hostGraphSpec('network', [1_000_000, 4_000_000, null]);
+  assert.equal(spec.max, 4_000_000);
+  // No band: a busy link is not a fault, so nothing on this card turns amber.
+  assert.equal(spec.thresholds, null);
+  assert.equal(spec.label, 'Total throughput, one bar per second, peak 4.0 MB/s');
+});
+
+test('hostGraphSpec survives an absent series and an unknown card', () => {
+  const empty = hostGraphSpec('network', undefined);
+  assert.deepEqual(empty.values, []);
+  // windowMax's floor of 1 keeps an all-empty network window from dividing by
+  // zero.
+  assert.equal(empty.max, 1);
+  // A card a newer build added draws as a banded level rather than not at all.
+  assert.deepEqual(hostGraphSpec('gpu', [50]).thresholds, { warning: 80, critical: 95 });
 });
 
 // ── fetch branching ────────────────────────────────────────────────────────

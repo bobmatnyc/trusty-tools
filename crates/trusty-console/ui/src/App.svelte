@@ -23,6 +23,8 @@
   } from './screensaver.js';
   // #6642: one EventSource for the whole page — see machineStream.js.
   import { createMachineStream, initialState } from './machineStream.js';
+  // #6643: the roster read the screensaver shares.
+  import { fetchServices } from './servicesList.js';
 
   // ── state ────────────────────────────────────────────────────────────────
 
@@ -69,15 +71,10 @@
     armIdleWatch();
     stream = createMachineStream({ onState: (next) => (history = next) });
     stream.start();
-    try {
-      const resp = await fetch('/api/console/services');
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      services = await resp.json();
-    } catch (e) {
-      error = e.message;
-    } finally {
-      loading = false;
-    }
+    const roster = await fetchServices();
+    services = roster.services;
+    error = roster.error;
+    loading = false;
   });
 
   // ── idle entry to the screensaver (#6519) ────────────────────────────────

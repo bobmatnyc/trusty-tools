@@ -27,14 +27,9 @@
   import Badge from './Badge.svelte';
   import BarGraph from './BarGraph.svelte';
   import {
-    DISK_THRESHOLDS,
-    PCT_THRESHOLDS,
-    windowMax,
-  } from './barGraph.js';
-  import {
     fetchMachineStatus,
-    formatRateMBs,
     hostGraphs,
+    hostGraphSpec,
     pressureTone,
     statCards,
     toneLabel,
@@ -93,34 +88,10 @@
   let cards = $derived(statCards(host));
   let graphs = $derived(hostGraphs(samples));
 
-  /**
-   * The bar-graph settings for one card, keyed by `statCards`' `key`.
-   *
-   * CPU and memory band at 80/95 and disk at 85/95 — the same
-   * `HostThresholds::default()` numbers the pressure badge above the graph
-   * already uses, so a badge reading WARNING cannot sit over green bars.
-   * Network is a rate with no band; it is scaled to the busiest second in the
-   * window, and its label says so because a bar height alone would be read as
-   * a fraction of some fixed capacity.
-   */
-  function graphFor(key) {
-    const values = graphs[key] ?? [];
-    if (key === 'network') {
-      const max = windowMax(values, 1);
-      return {
-        values,
-        max,
-        thresholds: null,
-        label: `Total throughput, one bar per second, peak ${formatRateMBs(max)}`,
-      };
-    }
-    return {
-      values,
-      max: 100,
-      thresholds: key === 'disk' ? DISK_THRESHOLDS : PCT_THRESHOLDS,
-      label: `${key} usage %, one bar per second`,
-    };
-  }
+  // #6643: the scale and the bands moved to `hostGraphSpec` so the screensaver
+  // draws the same graph of the same metric. Nothing about what is drawn here
+  // changed.
+  const graphFor = (key) => hostGraphSpec(key, graphs[key]);
 </script>
 
 <section class="foundry machine-status">

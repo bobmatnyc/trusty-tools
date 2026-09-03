@@ -26,7 +26,7 @@
  * from `crates/trusty-console/ui`.
  */
 
-import { formatLastUsed } from './lastUsed.js';
+import { DISK_THRESHOLDS, PCT_THRESHOLDS, windowMax } from './barGraph.js';
 
 /** The phase-1 route this dashboard renders. */
 export const MACHINE_STATUS_URL = '/api/console/machine-status';
@@ -111,33 +111,6 @@ export function pressureTone(pressure) {
     default:
       return 'muted';
   }
-}
-
-/** The Foundry badge tone for one service's `ServiceHealth`. */
-export function serviceHealthTone(health) {
-  switch (health) {
-    case 'ok':
-      return 'success';
-    case 'degraded':
-      return 'warning';
-    case 'error':
-      return 'danger';
-    default:
-      return 'muted';
-  }
-}
-
-/**
- * The rollup card's tone: the worst health any service reports.
- *
- * Mirrors `Pressure::worst` on the host side — one error outranks any number of
- * degraded, so the card never reads healthier than its worst row.
- */
-export function rollupTone(rollup) {
-  if (!rollup) return 'muted';
-  if (rollup.error > 0) return 'danger';
-  if (rollup.degraded > 0) return 'warning';
-  return 'success';
 }
 
 /** A badge's text for an enum value: its own name, or `UNKNOWN` when absent. */
@@ -232,28 +205,6 @@ export function statCards(host) {
 }
 
 /**
- * One table row per service in the rollup, in the order the server sent.
- *
- * `collected_at_unix` is rendered through `formatLastUsed` rather than a second
- * relative-time implementation: the buckets ("just now", "4m ago", a date past
- * a month) are the ones the Search and Memory rosters already use, and a
- * console showing two different relative-time vocabularies is a defect. The
- * shim is the field rename — that function reads `last_used_unix`.
- */
-export function serviceRows(status, now = Math.floor(Date.now() / 1000)) {
-  const services = status?.services?.services ?? [];
-  return services.map((s) => ({
-    id: s.service_id,
-    displayName: s.display_name || s.service_id || UNKNOWN,
-    version: s.version || UNKNOWN,
-    health: s.status,
-    tone: serviceHealthTone(s.status),
-    healthLabel: toneLabel(s.status),
-    collected: formatLastUsed({ last_used_unix: s.collected_at_unix }, now),
-  }));
-}
-
-/**
  * Fetch the machine status, resolving to a `{ status, error, cold }` triple.
  *
  * Never rejects: the panel polls on an interval and a thrown error inside a
@@ -309,4 +260,48 @@ function totalRate(network) {
   const tx = isNum(network?.tx_bytes_per_sec) ? network.tx_bytes_per_sec : null;
   if (rx === null && tx === null) return null;
   return (rx ?? 0) + (tx ?? 0);
+}
+
+/**
+ * Everything `BarGraph` needs to draw one host card's graph (#6643).
+ *
+ * Why here rather than inside the component that draws it: the home page
+ * (`MachineStatusPanel`) and the screensaver put a graph on the bottom edge of
+ * the same four cards, and the scale and the colour bands are what make two
+ * graphs of one metric comparable. A second copy of these rules is a second
+ * place for the disk band to drift away from `HostThresholds::default()`.
+ *
+ * What: CPU, memory and disk are levels, so they keep the graph's 0–100 scale
+ * and take the server's bands — disk warns later than the other two, exactly as
+ * `crates/trusty-common/src/host_metrics.rs` classifies them. Network is a rate
+ * with no band, so it is scaled to the busiest second currently in the window
+ * and its label says so; a bar height on that card would otherwise read as a
+ * fraction of a fixed capacity that does not exist. An unknown key renders as a
+ * banded level, so a card added by a newer build draws something rather than
+ * nothing.
+ * Test: `hostGraphSpec bands cpu and memory against the server's thresholds`,
+ * `hostGraphSpec bands disk later than cpu and memory`, `hostGraphSpec scales
+ * the network card to the busiest second in the window`.
+ *
+ * @param {string} key one of `statCards`' `key` values
+ * @param {(number|null)[]} values that key's series from `hostGraphs`
+ * @returns {{ values: (number|null)[], max: number, thresholds: object|null, label: string }}
+ */
+export function hostGraphSpec(key, values) {
+  const series = Array.isArray(values) ? values : [];
+  if (key === 'network') {
+    const max = windowMax(series, 1);
+    return {
+      values: series,
+      max,
+      thresholds: null,
+      label: `Total throughput, one bar per second, peak ${formatRateMBs(max)}`,
+    };
+  }
+  return {
+    values: series,
+    max: 100,
+    thresholds: key === 'disk' ? DISK_THRESHOLDS : PCT_THRESHOLDS,
+    label: `${key} usage %, one bar per second`,
+  };
 }
