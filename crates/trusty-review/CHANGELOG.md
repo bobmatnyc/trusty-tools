@@ -6,6 +6,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.33.0] — 2026-09-03
+
+### Fixed
+
+- Report prose follows the rendered data and the recorded provenance
+  - The synthesis digest now states the complexity distribution in the same
+    string the Code Quality table renders, and a Code Quality paragraph claiming
+    no complexity data was provided is dropped with a Synthesis Status
+    disclosure when the table renders one — matched on the absence claim itself,
+    so a paraphrase ("complexity could not be measured") is caught too, and
+    scoped per application, so a true claim about an application that measured
+    nothing survives (#6691)
+  - The digest no longer reports a metrics artifact's zero file/function counts
+    as measurements; it falls through to the repository scan, as the Key Facts
+    block already did (#6691)
+  - The CAST report's §1 "Analysis methodology" row is generated per run from
+    what actually contributed — trusty-analyze metrics per application and
+    trusty-search trace anchors — instead of fixed template text asserting both
+    tools were used (#6675)
+- `--analyze` sizes each request to the work the endpoint actually does
+  - `analyze.complexity_distribution` and `analyze.refactor_suggestions` grade
+    every chunk of the index rather than reading computed data, which takes
+    41-46 s on a 104k-chunk checkout against the 15 s they were allowed. Both
+    now get a corpus budget defaulting to 180 s, so the §7 complexity table is
+    filled instead of rendering `not stated in source data` on every large
+    repository (#6712)
+  - `--analyze-timeout-secs` and the manifest key `[report].analyze_timeout_secs`
+    set that budget, in that order of precedence; it also raises the diagnostics
+    budget when it exceeds that endpoint's own deadline ladder. The readiness
+    probe keeps its 15 s, so an unreachable daemon is still declared unreachable
+    in seconds (#6712)
+  - A completed analyze request logs its elapsed time at INFO, and a request
+    that runs out of time still names the budget it exhausted (#6712)
+- The `analyze_enrich` module's doc comment links resolve again — the split that
+  created it wrote them as `super::`, which rustdoc reads from the crate root
+  rather than from `report/`, so `cargo doc` failed on two broken intra-doc
+  links (#6712)
+
 ## [0.32.0] — 2026-09-02
 
 ### Added
