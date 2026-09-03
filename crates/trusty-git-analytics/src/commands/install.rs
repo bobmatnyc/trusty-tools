@@ -78,6 +78,13 @@ TIPS:\n\
   - After running install, validate the config with `tga collect --validate-only`.\n\
   - Re-run at any time to regenerate the config from scratch."
 )]
+// #6744: every field below `force` is `pub(crate)`. They were added at the
+// unpublished 6.0.1 and are read only by `install_flags.rs` and by this file;
+// `main.rs` pattern-matches the whole struct and touches no field. Leaving them
+// `pub` made the crate exhaustively constructible with 17 more fields than
+// 6.0.0 exposed, which is the break `constructible_struct_adds_field` reports.
+// Narrowing does not clear the 6.0.0 baseline on its own — see the issue — but
+// it stops the next added flag from owing a major bump of its own.
 pub struct InstallArgs {
     /// Path to write the generated config to.
     ///
@@ -91,71 +98,71 @@ pub struct InstallArgs {
 
     /// Run from flags only, never prompting. Implied when stdin is not a terminal.
     #[arg(long, default_value_t = false)]
-    pub non_interactive: bool,
+    pub(crate) non_interactive: bool,
 
     /// Where repositories come from.
     #[arg(long, value_enum)]
-    pub host: Option<InstallHost>,
+    pub(crate) host: Option<InstallHost>,
 
     /// GitHub org to discover repositories from (`--host github`).
     #[arg(long, value_name = "ORG")]
-    pub org: Option<String>,
+    pub(crate) org: Option<String>,
 
     /// Bitbucket Cloud workspace (`--host bitbucket`).
     #[arg(long, value_name = "WORKSPACE")]
-    pub workspace: Option<String>,
+    pub(crate) workspace: Option<String>,
 
     /// Explicit remote repository, `owner/name` or `workspace/slug`. Repeatable.
     #[arg(long, value_name = "OWNER/NAME")]
-    pub repo: Vec<String>,
+    pub(crate) repo: Vec<String>,
 
     /// Already-cloned repository to collect from. Repeatable.
     #[arg(long, value_name = "PATH")]
-    pub repo_path: Vec<PathBuf>,
+    pub(crate) repo_path: Vec<PathBuf>,
 
     /// Directory remote repositories are expected under in the generated config.
     #[arg(long, value_name = "DIR", default_value = "./repos")]
-    pub repo_cache: PathBuf,
+    pub(crate) repo_cache: PathBuf,
 
     /// Host API token. Falls back to `$GITHUB_TOKEN` / `$BITBUCKET_TOKEN`.
     #[arg(long, value_name = "TOKEN")]
-    pub host_token: Option<String>,
+    pub(crate) host_token: Option<String>,
 
     /// Project-management system supplying work items.
     #[arg(long, value_enum)]
-    pub pm: Option<InstallPm>,
+    pub(crate) pm: Option<InstallPm>,
 
     /// JIRA base URL. Falls back to `$JIRA_URL`.
     #[arg(long, value_name = "URL")]
-    pub jira_url: Option<String>,
+    pub(crate) jira_url: Option<String>,
 
     /// JIRA username or email. Falls back to `$JIRA_EMAIL`.
     #[arg(long, value_name = "EMAIL")]
-    pub jira_user: Option<String>,
+    pub(crate) jira_user: Option<String>,
 
     /// JIRA API token. Falls back to `$JIRA_API_TOKEN`.
     #[arg(long, value_name = "TOKEN")]
-    pub jira_token: Option<String>,
+    pub(crate) jira_token: Option<String>,
 
     /// Linear API key. Falls back to `$LINEAR_API_KEY`.
     #[arg(long, value_name = "KEY")]
-    pub linear_api_key: Option<String>,
+    pub(crate) linear_api_key: Option<String>,
 
     /// Linear team key to scope issue fetches to. Repeatable.
     #[arg(long, value_name = "TEAM")]
-    pub linear_team: Vec<String>,
+    pub(crate) linear_team: Vec<String>,
 
     /// Directory reports are written to.
     #[arg(long, value_name = "DIR", default_value = "./tga-output")]
-    pub output_dir: String,
+    pub(crate) output_dir: String,
 
     /// LLM provider for Tier-4 classification: `none`, `openai` or `openrouter`.
     #[arg(long, value_name = "PROVIDER", default_value = "none")]
-    pub llm_provider: String,
+    pub(crate) llm_provider: String,
 
     /// LLM API key. Falls back to the provider's conventional env var.
     #[arg(long, value_name = "KEY")]
-    pub llm_api_key: Option<String>,
+    pub(crate) llm_api_key: Option<String>,
 }
 
 impl InstallArgs {
