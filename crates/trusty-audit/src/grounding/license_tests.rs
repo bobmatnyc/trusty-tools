@@ -204,6 +204,42 @@ fn spdx_qualifiers_do_not_defeat_the_policy() {
     }
 }
 
+/// A whole expression arriving as ONE license term, which `normalise` cannot
+/// take apart.
+///
+/// Why: pre-SPDX crate metadata wrote a dual license as the slash-joined
+/// `MIT/Apache-2.0`, and a vendored or hand-edited manifest still can — while
+/// `cargo-deny list` normally flattens an expression into separate terms, this
+/// module must not assume it always did. The permissive halves inside such a
+/// string are invisible to the policy tables, and the safe direction is to
+/// UNDER-clear: report the crate for a human rather than clear it on a
+/// substring nobody parsed. What must not happen is a panic, a silent clear, or
+/// an SPDX link built from a string SPDX does not define — `spdx_url` returning
+/// `Some` here would send the reader to an authoritative-looking 404.
+#[test]
+fn an_unparsed_compound_expression_is_reported_rather_than_cleared() {
+    let package = |license: &str| Package {
+        name: "x".to_string(),
+        version: "1.0.0".to_string(),
+        licenses: vec![license.to_string()],
+    };
+    // The legacy slash form, and a compound spelling no table lists.
+    for spelling in ["MIT/Apache-2.0", "Apache-2.0 OR LGPL-3.0"] {
+        let found = classify(&package(spelling))
+            .unwrap_or_else(|| panic!("{spelling} must not clear the crate"));
+        assert_eq!(found.license, spelling, "reported verbatim: {found:?}");
+        assert_eq!(found.severity, Severity::Amber, "{spelling}");
+        assert!(
+            found.obligation.contains("reviewed by hand"),
+            "{spelling}: {found:?}"
+        );
+        assert!(
+            found.url.is_none(),
+            "{spelling} is not an SPDX identifier and must get no link: {found:?}"
+        );
+    }
+}
+
 /// One row per crate at most, so the rendered table can never outgrow the
 /// dependency list it was built from.
 #[test]

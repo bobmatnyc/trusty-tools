@@ -413,6 +413,7 @@ pub fn parse(json: &str) -> Result<Vec<Package>, String> {
 /// a_weak_copyleft_dependency_is_an_amber_finding,
 /// a_dual_licensed_crate_takes_its_permissive_option,
 /// an_unrecognised_term_is_reported_rather_than_dropped,
+/// an_unparsed_compound_expression_is_reported_rather_than_cleared,
 /// a_crate_with_no_license_is_the_worst_finding}`.
 #[must_use]
 pub fn classify(package: &Package) -> Option<Finding> {

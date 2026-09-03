@@ -442,8 +442,8 @@ pub async fn ground_manifest(
             priority::write_into(manifest, checkout, &[], None, false, &manifest_leg_gaps)
     {
         grounding.gaps.push(format!(
-            "{display}: {cause} — the rendered report does not state why its crate topology \
-             dependency CVE scan and license review are missing"
+            "{display}: {cause} — the rendered report does not state why its crate topology, \
+             dependency CVE scan, and license review are missing"
         ));
     }
     grounding.gaps.extend(manifest_leg_gaps);
