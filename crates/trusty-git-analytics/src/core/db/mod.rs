@@ -41,6 +41,7 @@ pub mod collection_runs;
 pub mod correlation;
 pub mod jira_facts;
 pub mod migrations;
+pub mod pm_work;
 pub mod work_items;
 
 pub use azdo_iterations::{list_iterations, upsert_iteration};
@@ -53,6 +54,8 @@ pub use jira_facts::{
     upsert_ticket_transition, CommentDetailRow, FreshnessStatus, JiraSyncCursor,
     TicketTransitionRow,
 };
+// #3916: PM work meaningfulness tier.
+pub use pm_work::{load_candidates, summarize, upsert_pm_work, PmWorkCandidate, PmWorkRow};
 pub use work_items::{
     get_work_item, get_work_items_for_commit, link_commit_work_item, list_work_items,
     upsert_work_item, WorkItemRow,

@@ -15,6 +15,7 @@ use super::flags::{
     is_revert,
 };
 use super::misc::{backfill_complexity, backfill_quality, backfill_top_level};
+use super::pm_work::backfill_pm_work;
 use super::types::{ComplexityBackfillArgs, EffortBackfillArgs, EffortRow};
 
 fn seed(db: &Database, sha: &str, message: &str) {
@@ -1182,5 +1183,272 @@ fn backfill_effort_tshirt_tiny_corpus_fallback() {
     assert!(
         stored.is_none(),
         "no thresholds should be stored for tiny corpus"
+    );
+}
+
+// --- #3916: PM work meaningfulness tier ------------------------------------
+
+/// Seed one `work_items` row with a JIRA-shaped `raw_json` payload.
+fn seed_work_item(db: &Database, id: &str, title: &str, reporter: &str, description: Option<&str>) {
+    seed_work_item_in_source(db, id, "jira", title, reporter, description);
+}
+
+/// Seed one `work_items` row under an explicit `source`.
+///
+/// Separate from [`seed_work_item`] so a test can put the SAME ticket key in
+/// two PM sources — `work_items` is keyed `(id, source)` precisely because
+/// ticket ids are unique per source, not globally.
+fn seed_work_item_in_source(
+    db: &Database,
+    id: &str,
+    source: &str,
+    title: &str,
+    reporter: &str,
+    description: Option<&str>,
+) {
+    let raw = serde_json::json!({
+        "fields": {
+            "reporter": { "displayName": reporter },
+            "description": description,
+            "created": "2026-01-15T09:30:00.000+0000",
+        }
+    })
+    .to_string();
+    db.connection()
+        .execute(
+            "INSERT OR REPLACE INTO work_items \
+             (id, source, title, status, item_type, raw_json) \
+             VALUES (?1, ?2, ?3, 'Done', 'Task', ?4)",
+            params![id, source, title, raw],
+        )
+        .expect("insert work item");
+}
+
+/// Seed one `fact_ticket_transitions` row so the BOT_FILED split has input.
+fn seed_transition(db: &Database, ticket: &str, author: &str) {
+    db.connection()
+        .execute(
+            "INSERT OR REPLACE INTO fact_ticket_transitions \
+             (ticket_key, project_key, from_status, to_status, transitioned_at, author, synced_at) \
+             VALUES (?1, 'PM', 'To Do', 'In Progress', '2026-01-16T10:00:00Z', ?2, 1)",
+            params![ticket, author],
+        )
+        .expect("insert transition");
+}
+
+/// Read back `(is_meaningful, exclusion_reason, formula_version)` for a ticket.
+fn read_verdict(db: &Database, id: &str) -> (i64, String, String) {
+    read_verdict_in_source(db, id, "jira")
+}
+
+/// Read back one verdict, scoped to an explicit `source`.
+fn read_verdict_in_source(db: &Database, id: &str, source: &str) -> (i64, String, String) {
+    db.connection()
+        .query_row(
+            "SELECT is_meaningful, exclusion_reason, formula_version FROM fact_pm_work \
+             WHERE work_item_id = ?1 AND work_item_source = ?2",
+            params![id, source],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap_or_else(|e| panic!("read verdict for {source}/{id}: {e}"))
+}
+
+/// Seed one ticket per exclusion reason plus one meaningful ticket, so a
+/// single backfill run proves every branch of the classifier reaches the
+/// table with the reason the rule names.
+fn seed_pm_work_corpus(db: &Database) {
+    // TERSE_TITLE — the Fabiana sub-task case from issue #3916.
+    seed_work_item(db, "PM-10215", "Final", "Fabiana Calabrese", None);
+    // AUTO_GENERATED — bot reporter, nobody ever moved it.
+    seed_work_item(
+        db,
+        "PM-20001",
+        "Bump serde from 1.0.203 to 1.0.204 across the workspace",
+        "dependabot[bot]",
+        Some("Automated dependency update."),
+    );
+    // BOT_FILED — bot reporter, a human transitioned it afterwards.
+    seed_work_item(
+        db,
+        "PM-20002",
+        "Nightly integration suite failed on the pricing service",
+        "Jenkins Automation",
+        Some("Six assertions failed in the rate-shop regression pack."),
+    );
+    seed_transition(db, "PM-20002", "Fabiana Calabrese");
+    // NONE — a substantive story.
+    seed_work_item(
+        db,
+        "PM-30001",
+        "Blend the occupancy forecast across four comparable weeks",
+        "Fabiana Calabrese",
+        Some(
+            "As a revenue manager I want the occupancy forecast to blend the last four \
+             comparable weeks so that one anomalous weekend stops dominating next month's \
+             rate recommendations.",
+        ),
+    );
+}
+
+#[test]
+fn backfill_pm_work_classifies_each_exclusion_reason() {
+    let mut db = Database::open_in_memory().expect("db");
+    seed_pm_work_corpus(&db);
+
+    backfill_pm_work(&mut db, false).expect("backfill");
+
+    for (id, meaningful, reason) in [
+        ("PM-10215", 0, "TERSE_TITLE"),
+        ("PM-20001", 0, "AUTO_GENERATED"),
+        ("PM-20002", 0, "BOT_FILED"),
+        ("PM-30001", 1, "NONE"),
+    ] {
+        let (is_meaningful, stored_reason, version) = read_verdict(&db, id);
+        assert_eq!(is_meaningful, meaningful, "{id} is_meaningful");
+        assert_eq!(stored_reason, reason, "{id} exclusion_reason");
+        assert_eq!(version, "pm-work-1", "{id} formula_version");
+    }
+}
+
+/// The BOT_FILED / AUTO_GENERATED split reads `fact_ticket_transitions`, so
+/// the same bot-filed ticket must flip reason once a human moves it — and
+/// must NOT flip when the mover is another bot.
+#[test]
+fn pm_work_backfill_marks_a_bot_filed_ticket_when_a_human_moved_it() {
+    let mut db = Database::open_in_memory().expect("db");
+    seed_work_item(
+        &db,
+        "PM-40001",
+        "Dependency scan flagged three advisories in the pricing service",
+        "dependabot[bot]",
+        Some("Three advisories, one of them high severity."),
+    );
+
+    backfill_pm_work(&mut db, false).expect("first backfill");
+    assert_eq!(read_verdict(&db, "PM-40001").1, "AUTO_GENERATED");
+
+    // A second bot moving it is not human contact.
+    seed_transition(&db, "PM-40001", "github-actions");
+    backfill_pm_work(&mut db, false).expect("second backfill");
+    assert_eq!(
+        read_verdict(&db, "PM-40001").1,
+        "AUTO_GENERATED",
+        "a bot transition must not count as human triage"
+    );
+
+    seed_transition(&db, "PM-40001", "Charles Abbott");
+    backfill_pm_work(&mut db, false).expect("third backfill");
+    assert_eq!(read_verdict(&db, "PM-40001").1, "BOT_FILED");
+}
+
+/// Re-running the classifier over an unchanged corpus must rewrite the same
+/// rows and create none: the upsert is keyed on
+/// `(work_item_id, work_item_source)`.
+#[test]
+fn backfill_pm_work_is_idempotent() {
+    let mut db = Database::open_in_memory().expect("db");
+    seed_pm_work_corpus(&db);
+
+    backfill_pm_work(&mut db, false).expect("first run");
+    let first: Vec<(String, i64, String)> = read_all_verdicts(&db);
+    assert_eq!(first.len(), 4, "one row per work item");
+
+    backfill_pm_work(&mut db, false).expect("second run");
+    let second = read_all_verdicts(&db);
+    assert_eq!(
+        first, second,
+        "a second run must produce identical rows, not duplicates"
+    );
+}
+
+/// Every `(work_item_id, is_meaningful, exclusion_reason)` in id order.
+fn read_all_verdicts(db: &Database) -> Vec<(String, i64, String)> {
+    let conn = db.connection();
+    let mut stmt = conn
+        .prepare(
+            "SELECT work_item_id, is_meaningful, exclusion_reason FROM fact_pm_work \
+             ORDER BY work_item_id",
+        )
+        .expect("prepare");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .expect("query");
+    rows.map(|r| r.expect("row")).collect()
+}
+
+#[test]
+fn backfill_pm_work_dry_run_writes_nothing() {
+    let mut db = Database::open_in_memory().expect("db");
+    seed_pm_work_corpus(&db);
+
+    backfill_pm_work(&mut db, true).expect("dry run");
+
+    let count: i64 = db
+        .connection()
+        .query_row("SELECT COUNT(*) FROM fact_pm_work", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(count, 0, "--dry-run must not write any row");
+}
+
+/// A ticket whose payload carries no reporter, description, or created date
+/// must still get a row — the classifier treats an absent reporter as human,
+/// so only the title decides.
+#[test]
+fn backfill_pm_work_handles_a_payload_with_no_extractable_fields() {
+    let mut db = Database::open_in_memory().expect("db");
+    db.connection()
+        .execute(
+            "INSERT INTO work_items (id, source, title, status, item_type) \
+             VALUES ('PM-50001', 'jira', 'Historical Occupancy', 'Done', 'Sub-task')",
+            [],
+        )
+        .expect("insert");
+
+    backfill_pm_work(&mut db, false).expect("backfill");
+
+    let (meaningful, reason, _) = read_verdict(&db, "PM-50001");
+    assert_eq!(meaningful, 0);
+    assert_eq!(reason, "TERSE_TITLE");
+
+    let (pm_name, week_key): (Option<String>, Option<String>) = db
+        .connection()
+        .query_row(
+            "SELECT pm_name, week_key FROM fact_pm_work WHERE work_item_id = 'PM-50001'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("read");
+    assert_eq!(pm_name, None, "no reporter in the payload");
+    assert_eq!(week_key, None, "no creation date in the payload");
+}
+
+/// A ticket key is unique per PM source, not globally (`work_items` is keyed
+/// `(id, source)`), but `fact_ticket_transitions` carries no source column —
+/// every row in it comes from the JIRA sync (#3966). Looking a candidate up
+/// by bare ticket key therefore let a JIRA ticket's human transition leak
+/// onto a same-keyed ticket from another source, flipping that one from
+/// AUTO_GENERATED to BOT_FILED.
+#[test]
+fn a_human_transition_does_not_leak_across_pm_sources() {
+    let mut db = Database::open_in_memory().expect("db");
+    let title = "Retry budget exhausted on the rate-shop worker";
+    let body = Some("The worker gave up after 40 attempts.");
+    // Same key, two sources, both filed by a bot.
+    seed_work_item_in_source(&db, "ENG-42", "jira", title, "dependabot[bot]", body);
+    seed_work_item_in_source(&db, "ENG-42", "linear", title, "dependabot[bot]", body);
+    // Only the JIRA ticket was ever moved by a person.
+    seed_transition(&db, "ENG-42", "Charles Abbott");
+
+    backfill_pm_work(&mut db, false).expect("backfill");
+
+    assert_eq!(
+        read_verdict_in_source(&db, "ENG-42", "jira").1,
+        "BOT_FILED",
+        "the JIRA ticket really was transitioned by a human"
+    );
+    assert_eq!(
+        read_verdict_in_source(&db, "ENG-42", "linear").1,
+        "AUTO_GENERATED",
+        "the Linear ticket has no transitions of its own; JIRA's must not leak onto it"
     );
 }

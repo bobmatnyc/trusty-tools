@@ -165,6 +165,36 @@ Many-to-many join table linking commits to work items.
 
 ---
 
+### `fact_pm_work`
+
+PM ticket meaningfulness verdicts — the WORK tier of the Activity / Work / Effort
+model, filtering raw ticket activity down to the subset that represents real
+management labor (issue #3916). Populated by `tga backfill pm-work`.
+
+Rows here are counted in tickets; `fact_commit_effort` rows are counted in commit
+effort points. The two are incommensurable and must never share a visualization
+axis (issue #3917).
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `work_item_id` | TEXT | no | FK → `work_items(id)` |
+| `work_item_source` | TEXT | no | FK → `work_items(source)`; `jira`, `github`, `azdo`, `linear` |
+| `pm_name` | TEXT | yes | Reporter display name from the source payload |
+| `week_key` | TEXT | yes | ISO week the ticket was created, `YYYY-Www` |
+| `is_meaningful` | INTEGER | no | `0` or `1` |
+| `exclusion_reason` | TEXT | no | `NONE`, `TERSE_TITLE`, `AUTO_GENERATED`, or `BOT_FILED` |
+| `title_word_count` | INTEGER | no | |
+| `body_word_count` | INTEGER | no | Words in the extracted description body |
+| `formula_version` | TEXT | no | Threshold set that produced the verdict; `pm-work-1` for v1 |
+| `computed_at` | INTEGER | no | Unix timestamp (seconds) |
+
+**PK**: (`work_item_id`, `work_item_source`) — UPSERT semantics, so re-running the
+classifier replaces a verdict rather than accumulating one row per version.
+
+**Indexes**: INDEX(`is_meaningful`), INDEX(`exclusion_reason`), INDEX(`pm_name`, `week_key`).
+
+---
+
 ### `classification_overrides`
 
 Manual Tier 0 overrides. Entries here take absolute priority over all rule-based and

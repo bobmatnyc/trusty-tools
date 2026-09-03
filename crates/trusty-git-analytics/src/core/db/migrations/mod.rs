@@ -162,6 +162,12 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "repo_walk_state",
         sql: include_str!("../sql/0025_repo_walk_state.sql"),
     },
+    // #3916: PM work meaningfulness tier — `fact_pm_work`.
+    Migration {
+        version: 26,
+        name: "fact_pm_work",
+        sql: include_str!("../sql/0026_fact_pm_work.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
@@ -275,6 +281,109 @@ pub(crate) fn run_through(conn: &mut Connection, max_version: i64) -> Result<()>
 mod tests {
     use crate::core::db::Database;
     use rusqlite::params;
+
+    /// Why: #3916 — `fact_pm_work` carries a FOREIGN KEY back to
+    /// `work_items`, which no other fact table in this schema does. A
+    /// migration that created the table without the referenced grain, or
+    /// with the columns in a different order than the classifier writes,
+    /// would fail only at backfill time on a real database.
+    /// What: opens an in-memory DB (running every migration through v26),
+    /// inserts the parent `work_items` row, writes one verdict, reads every
+    /// column back, then re-inserts the same grain and asserts the row count
+    /// is still 1.
+    /// Test: this test itself.
+    #[test]
+    fn migration_v26_creates_fact_pm_work() {
+        let db = Database::open_in_memory().expect("open db");
+        let conn = db.connection();
+
+        conn.execute(
+            "INSERT INTO work_items (id, source, title, status, item_type) \
+             VALUES ('PM-10215', 'jira', 'Final', 'Done', 'Sub-task')",
+            [],
+        )
+        .expect("insert parent work item");
+
+        let insert = "INSERT OR REPLACE INTO fact_pm_work \
+             (work_item_id, work_item_source, pm_name, week_key, is_meaningful, \
+              exclusion_reason, title_word_count, body_word_count, formula_version, computed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
+        conn.execute(
+            insert,
+            params![
+                "PM-10215",
+                "jira",
+                "Fabiana Calabrese",
+                "2026-W03",
+                0_i64,
+                "TERSE_TITLE",
+                1_i64,
+                0_i64,
+                "pm-work-1",
+                1_000_000_i64,
+            ],
+        )
+        .expect("insert pm work row");
+
+        let (pm, week, meaningful, reason, version): (String, String, i64, String, String) = conn
+            .query_row(
+                "SELECT pm_name, week_key, is_meaningful, exclusion_reason, formula_version \
+                 FROM fact_pm_work WHERE work_item_id = 'PM-10215' AND work_item_source = 'jira'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("read back");
+        assert_eq!(pm, "Fabiana Calabrese");
+        assert_eq!(week, "2026-W03");
+        assert_eq!(meaningful, 0);
+        assert_eq!(reason, "TERSE_TITLE");
+        assert_eq!(version, "pm-work-1");
+
+        // Re-running the classifier over the same ticket replaces the row.
+        conn.execute(
+            insert,
+            params![
+                "PM-10215",
+                "jira",
+                "Fabiana Calabrese",
+                "2026-W03",
+                1_i64,
+                "NONE",
+                1_i64,
+                42_i64,
+                "pm-work-1",
+                2_000_000_i64,
+            ],
+        )
+        .expect("upsert pm work row");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fact_pm_work", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 1, "UPSERT must not duplicate the grain row");
+    }
+
+    /// Why: the FOREIGN KEY is the design decision that separates this fact
+    /// table from `fact_commit_effort` (#3916) — every verdict is DERIVED
+    /// from a `work_items` row, so one for a ticket the database has never
+    /// seen is a bug rather than a valid write ordering.
+    /// What: writes a verdict whose parent grain does not exist and asserts
+    /// SQLite rejects it.
+    /// Test: this test itself.
+    #[test]
+    fn fact_pm_work_rejects_a_verdict_with_no_work_item() {
+        let db = Database::open_in_memory().expect("open db");
+        let err = db.connection().execute(
+            "INSERT INTO fact_pm_work \
+             (work_item_id, work_item_source, is_meaningful, exclusion_reason, \
+              title_word_count, body_word_count, formula_version, computed_at) \
+             VALUES ('NOPE-1', 'jira', 1, 'NONE', 3, 40, 'pm-work-1', 1)",
+            [],
+        );
+        assert!(
+            err.is_err(),
+            "a verdict without its work_items parent must be rejected"
+        );
+    }
 
     /// Why: regression guard for issue #445 batch B. Migration v18 creates
     /// `fact_weekly_quality` with all required columns and a PRIMARY KEY on

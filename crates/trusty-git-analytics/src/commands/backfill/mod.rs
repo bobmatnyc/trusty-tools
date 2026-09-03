@@ -16,12 +16,14 @@
 //! - `effort` — effort scoring (db path, git path, persist, git notes, tshirt rebin)
 //! - `flags`  — revert, ticket-ids, ticketed, ai-detection-commits, build SQL filter
 //! - `misc`   — reachability, complexity, top-level, quality
+//! - `pm_work` — #3916: PM ticket meaningfulness tier (`fact_pm_work`)
 
 mod effort;
 mod effort_db;
 mod effort_git;
 mod flags;
 mod misc;
+mod pm_work;
 mod types;
 
 #[cfg(test)]
@@ -114,5 +116,7 @@ pub async fn run(config: Config, db: &mut Database, args: BackfillArgs) -> anyho
         BackfillSubcommand::TopLevel => misc::backfill_top_level(db, args.dry_run),
         BackfillSubcommand::EffortTshirt => effort::backfill_effort_tshirt(db, args.dry_run),
         BackfillSubcommand::Quality => misc::backfill_quality(db, args.dry_run),
+        // #3916: PM work meaningfulness tier.
+        BackfillSubcommand::PmWork => pm_work::backfill_pm_work(db, args.dry_run),
     }
 }
