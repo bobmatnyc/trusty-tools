@@ -1,0 +1,7 @@
+Added
+
+- **`trusty-mcp <service>` — one stdio MCP bridge binary for every trusty daemon.** `trusty-mcp memory`, `trusty-mcp search` and `trusty-mcp analyze` (each also spelled in full, `trusty-mcp trusty-memory`) read line-delimited JSON-RPC on stdin and forward it to that daemon's Unix socket, resolving the socket through `trusty_common::daemon_socket_path` — the same call the daemon makes to decide where to bind. This is the 2026-07-24 "no per-crate MCP binaries" directive: an MCP client config names one binary and a service rather than a different binary and a different verb per daemon ([#6316](https://github.com/bobmatnyc/trusty-tools/issues/6316))
+  - It starts nothing. A daemon's readiness guard stays that daemon's own, and a request arriving with nothing listening is answered with a JSON-RPC error carrying the request's id rather than silence (#6309, #1152)
+  - Stdout carries JSON-RPC frames and nothing else — the usage text, the startup line and every failure go to stderr, a `--help` included. An unknown service exits 2 with an empty stdout
+  - Behind `required-features = ["daemon-bridge-json-rpc"]`, so `cargo check -p trusty-mcp` and `cargo check --workspace` stay free of `trusty-common`
+  - Per-service streaming-method lists and frame budgets are a second copy of each daemon's own constants, because importing them would pull trusty-memory, trusty-search and trusty-analyze into this crate's build. `the_table_matches_each_daemons_own_constants` reads those crates' sources and fails on drift — the case #6286 showed goes silent otherwise
