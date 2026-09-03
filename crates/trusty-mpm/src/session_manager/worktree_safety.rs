@@ -100,8 +100,9 @@
 //! Test: `worktree_safety_tests`.
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde::Serialize;
 
@@ -579,10 +580,14 @@ fn is_worktree_root(path: &Path) -> Result<bool, String> {
 /// them all as unpushed, gate 6 of the merged-PR reclaim reports "holds unsaved
 /// work", and `prune-worktrees --merged-prs` reclaims nothing on a repository
 /// that squash-merges every PR. [`count_unlanded`] subtracts the commits whose
-/// PATCH is provably already on a remote landing branch.
+/// PATCH is provably already on a remote landing branch — per commit for a
+/// one-commit branch, and per whole divergence for the two-or-more-commit
+/// branch a squash collapses into a patch none of them matches
+/// ([`squashed_divergence`]).
 /// Test: `inspect_dirt_reports_unpushed_commit`,
 /// `inspect_dirt_clean_pushed_worktree_is_none`,
-/// `inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned`.
+/// `inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned`,
+/// `inspect_dirt_clears_a_two_commit_squash_merge`.
 fn count_unpushed(path: &Path) -> Result<usize, String> {
     let upstream = git_stdout(
         path,
@@ -694,7 +699,9 @@ fn count_unlanded(
 /// into "already landed". `git cherry <base> <tip>` marks a commit `-` when its
 /// patch id matches one on `base` — which is exactly what a squash merge
 /// produces — and `+` otherwise.
-/// What: the `-` SHAs, unioned over every [`landing_bases`] base and every tip.
+/// What: the `-` SHAs, unioned over every [`landing_bases`] base and every tip,
+/// plus whatever [`squashed_divergence`] proves landed as ONE squash commit —
+/// which is the only thing that clears a branch of two or more commits.
 /// An empty set on every failure path, which leaves the caller's count intact.
 ///
 /// Residual, stated rather than hidden: an EMPTY commit has an empty patch id,
@@ -702,7 +709,17 @@ fn count_unlanded(
 /// discounted. An empty commit carries no file content, so nothing recoverable
 /// is at risk. `git cherry` also skips merge commits, which therefore never
 /// appear here and stay counted — the conservative direction.
-/// Test: `inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned`.
+///
+/// The same residual runs through [`squashed_divergence`], one size larger
+/// (#6507). An exact patch-id match is CONTENT equivalence, not merge
+/// provenance: a landing commit whose diff is byte-identical to the branch's
+/// whole divergence discounts that divergence, whether or not it is the squash
+/// of it. The window keeps that narrow — the match has to land inside the
+/// [`SQUASH_CANDIDATE_MAX`] commits on the base that touch a path the branch
+/// touched — and a byte-identical diff means the branch's content is already on
+/// the landing branch either way, so nothing unique to the worktree is at risk.
+/// Test: `inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned`,
+/// `inspect_dirt_clears_a_two_commit_squash_merge`.
 fn landed_on_a_remote(path: &Path, tips: &[&str]) -> HashSet<String> {
     let mut landed = HashSet::new();
     for base in landing_bases(path) {
@@ -715,9 +732,140 @@ fn landed_on_a_remote(path: &Path, tips: &[&str]) -> HashSet<String> {
                     landed.insert(sha.trim().to_string());
                 }
             }
+            // #6507: `git cherry` compares one commit's patch at a time, so a
+            // squash of TWO OR MORE commits matches none of them. Ask the
+            // whole-divergence question too.
+            landed.extend(squashed_divergence(path, &base, tip));
         }
     }
     landed
+}
+
+/// How many landing-branch commits one squash probe patch-compares (#6507).
+///
+/// Why: the probe narrows candidates by a path the branch actually touched, so
+/// the true squash commit is always in the list; this only bounds how far back
+/// a match is looked for when many commits touch that path. A miss keeps the
+/// raw count, so the cap can only ever over-report.
+/// Test: `inspect_dirt_keeps_the_raw_count_when_the_squash_falls_outside_the_window`
+/// pins the boundary — 25 newer commits on the path hide the squash.
+const SQUASH_CANDIDATE_MAX: usize = 25;
+
+/// The commits in `<base>..<tip>` when the branch's WHOLE divergence is already
+/// on `base` as ONE squash commit (#6507).
+///
+/// Why: `git cherry` — the #6528 fix — compares commits pairwise, so it clears
+/// a branch that squash-merged from a SINGLE commit and nothing else. Live on
+/// 2026-09-03: PR #6705 squashed two commits (`37540d9cb`, `4c8e11de8`) into
+/// `7933d406d`, neither commit's patch id matched, and gate 6 of the merged-PR
+/// reclaim reported "0 uncommitted/untracked file(s), 2 unpushed commit(s)" for
+/// a worktree whose work had fully landed. A squash's patch is the UNION of the
+/// branch's commits, so the branch's aggregate diff is the only thing that can
+/// match it.
+/// What: `git diff <merge-base> <tip>` reduced to one patch id, compared
+/// against the patch ids of up to [`SQUASH_CANDIDATE_MAX`] commits on `base`
+/// that touch a path the branch touched. An exact match means every commit in
+/// `<merge-base>..<tip>` landed, and those SHAs are returned; anything else —
+/// no merge base, an empty diff, no candidate, a git failure — returns nothing
+/// and leaves the caller's count untouched.
+///
+/// The match is exact and aggregate, so a commit added AFTER the squash changes
+/// the aggregate diff and nothing is discounted: the fail-closed direction.
+/// Test: `inspect_dirt_clears_a_two_commit_squash_merge`,
+/// `inspect_dirt_reports_a_commit_added_after_a_two_commit_squash_merge`, and
+/// one per early return (#6507) —
+/// `inspect_dirt_keeps_the_raw_count_when_there_is_no_merge_base`,
+/// `inspect_dirt_keeps_the_raw_count_when_the_divergence_has_no_diff`,
+/// `inspect_dirt_keeps_the_raw_count_when_the_squash_falls_outside_the_window`.
+fn squashed_divergence(path: &Path, base: &str, tip: &str) -> Vec<String> {
+    let nothing = Vec::new();
+    let Ok(merge_base) = git_stdout(path, &["merge-base", base, tip]) else {
+        return nothing;
+    };
+    let merge_base = merge_base.trim().to_string();
+    if merge_base.is_empty() {
+        return nothing;
+    }
+    let Some((aggregate, _)) = patch_ids(path, &["diff", &merge_base, tip])
+        .into_iter()
+        .next()
+    else {
+        return nothing;
+    };
+    let Ok(names) = git_stdout(path, &["diff", "--name-only", &merge_base, tip]) else {
+        return nothing;
+    };
+    let Some(probe) = names.lines().map(str::trim).find(|l| !l.is_empty()) else {
+        return nothing;
+    };
+    let limit = SQUASH_CANDIDATE_MAX.to_string();
+    let range = format!("{merge_base}..{base}");
+    let Ok(listing) = git_stdout(
+        path,
+        &["log", "--format=%H", "-n", &limit, &range, "--", probe],
+    ) else {
+        return nothing;
+    };
+    let mut show: Vec<&str> = vec!["show"];
+    show.extend(listing.split_whitespace());
+    if show.len() == 1
+        || !patch_ids(path, &show)
+            .iter()
+            .any(|(id, _)| *id == aggregate)
+    {
+        return nothing;
+    }
+    let Ok(landed) = git_stdout(path, &["rev-list", &format!("{merge_base}..{tip}")]) else {
+        return nothing;
+    };
+    landed.split_whitespace().map(str::to_string).collect()
+}
+
+/// `git patch-id --stable` over the patch a git command prints (#6507).
+///
+/// Why: patch equivalence is the only signal that survives a squash, and
+/// `git patch-id` is the only thing that computes it. It reads a patch STREAM
+/// and emits one `<patch-id> <commit-id>` line per patch in it, so a single
+/// pair of subprocesses covers both `git diff` (one line, no commit) and
+/// `git show <sha>…` (one line per commit).
+/// What: runs `git <args>`, feeds its stdout to `git patch-id --stable`, and
+/// parses the reply. Every failure — the first command, the spawn, a non-zero
+/// exit — yields an empty vector, which discounts nothing.
+/// Test: `inspect_dirt_clears_a_two_commit_squash_merge`.
+fn patch_ids(path: &Path, args: &[&str]) -> Vec<(String, String)> {
+    let Ok(patch) = git_stdout(path, args) else {
+        return Vec::new();
+    };
+    if patch.trim().is_empty() {
+        return Vec::new();
+    }
+    let Ok(mut child) = git_command(path, &["patch-id", "--stable"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(patch.as_bytes());
+    }
+    let Ok(out) = child.wait_with_output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((
+                fields.next()?.to_string(),
+                fields.next().unwrap_or_default().to_string(),
+            ))
+        })
+        .collect()
 }
 
 /// Remote refs a squash merge could have landed on, deduplicated by commit

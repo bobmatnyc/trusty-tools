@@ -238,6 +238,35 @@ impl GitWorktreeFixture {
         git_ok(&self.repo, &["fetch", "--prune", "origin"]);
     }
 
+    /// Commit `files` as SEPARATE commits in `wt`, then squash-merge the branch
+    /// to `origin/main` and prune the refs that made them reachable (#6507).
+    ///
+    /// Why: [`Self::squash_merge_to_origin`] lands ONE commit, and one commit is
+    /// the only case a patch-id comparison per commit can clear — the squash
+    /// carries that commit's patch unchanged. Every real pull request with two
+    /// or more commits produces a squash whose patch matches none of them
+    /// individually, which is the shape PR #6705 was in when
+    /// `prune-worktrees --merged-prs` refused its worktree on 2026-09-03.
+    /// What: one commit per entry in `files`, then `merge --squash` +
+    /// `commit` + `push` on `main` in the owning checkout, then a pruning
+    /// fetch. The branch is never pushed, so it has no upstream — the same
+    /// pruned shape, with a divergence of more than one commit.
+    /// Test: `inspect_dirt_clears_a_two_commit_squash_merge`,
+    /// `survey_reclaims_a_worktree_whose_two_commits_squash_merged_as_one`.
+    pub(crate) fn squash_merge_commits_to_origin(&self, wt: &Path, files: &[&str]) {
+        let branch = git_stdout_ok(wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        for file in files {
+            std::fs::write(wt.join(file), format!("landed content of {file}\n"))
+                .expect("fixture: write file");
+            git_ok(wt, &["add", file]);
+            git_ok(wt, &["commit", "-m", &format!("feat: {file}")]);
+        }
+        git_ok(&self.repo, &["merge", "--squash", branch.trim()]);
+        git_ok(&self.repo, &["commit", "-m", "feat: squashed work (#6705)"]);
+        git_ok(&self.repo, &["push", "origin", "main"]);
+        git_ok(&self.repo, &["fetch", "--prune", "origin"]);
+    }
+
     /// Commit `file` in `wt`, PUSH that commit under `remote_branch`, and ALSO
     /// squash-merge its patch onto `origin/main` (#6507).
     ///

@@ -11,7 +11,9 @@
 use std::path::PathBuf;
 
 use super::*;
-use crate::session_manager::worktree_reclaim::{BranchPrState, ReclaimCandidate, ReclaimVerdict};
+use crate::session_manager::worktree_reclaim::{
+    BranchPrState, ReclaimCandidate, ReclaimGate, ReclaimVerdict,
+};
 
 /// Build a survey holding `candidates`, with the totals derived the same way
 /// the real survey derives them.
@@ -82,6 +84,7 @@ fn worktree_disk_check_warns_when_bytes_are_reclaimable() {
             Some(2 * 1024 * 1024 * 1024),
             BranchPrState::Open { pr: 9 },
             ReclaimVerdict::Blocked {
+                gate: ReclaimGate::PrState,
                 reason: "PR #9 is still open".into(),
             },
         ),
@@ -108,6 +111,7 @@ fn worktree_disk_check_is_unknown_when_no_pr_state_resolved() {
             Some(1024),
             BranchPrState::Unknown,
             ReclaimVerdict::Blocked {
+                gate: ReclaimGate::PrState,
                 reason: "unknown".into(),
             },
         ),
@@ -115,6 +119,7 @@ fn worktree_disk_check_is_unknown_when_no_pr_state_resolved() {
             Some(2048),
             BranchPrState::Unknown,
             ReclaimVerdict::Blocked {
+                gate: ReclaimGate::PrState,
                 reason: "unknown".into(),
             },
         ),
@@ -133,6 +138,7 @@ fn worktree_disk_check_is_ok_when_nothing_is_reclaimable() {
         Some(3 * 1024 * 1024),
         BranchPrState::Open { pr: 3 },
         ReclaimVerdict::Blocked {
+            gate: ReclaimGate::PrState,
             reason: "PR #3 is still open".into(),
         },
     )]);
@@ -151,6 +157,7 @@ fn worktree_disk_check_is_unknown_when_the_walk_is_incomplete() {
             Some(1024),
             BranchPrState::Open { pr: 1 },
             ReclaimVerdict::Blocked {
+                gate: ReclaimGate::PrState,
                 reason: "open".into(),
             },
         ),
@@ -158,6 +165,7 @@ fn worktree_disk_check_is_unknown_when_the_walk_is_incomplete() {
             None,
             BranchPrState::Open { pr: 2 },
             ReclaimVerdict::Blocked {
+                gate: ReclaimGate::PrState,
                 reason: "open".into(),
             },
         ),
@@ -183,6 +191,7 @@ fn worktree_disk_check_flags_an_undercounted_total() {
             Some(1024),
             BranchPrState::Open { pr: 1 },
             ReclaimVerdict::Blocked {
+                gate: ReclaimGate::PrState,
                 reason: "open".into(),
             },
         ),
@@ -190,6 +199,7 @@ fn worktree_disk_check_flags_an_undercounted_total() {
             None,
             BranchPrState::Open { pr: 2 },
             ReclaimVerdict::Blocked {
+                gate: ReclaimGate::PrState,
                 reason: "open".into(),
             },
         ),

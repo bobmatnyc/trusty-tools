@@ -38,9 +38,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::worktree_reclaim::{
-    AgentStateProbe, BranchPrState, NOT_INSPECTED_REASON, PrIndex, ReclaimCandidate, ReclaimMode,
-    ReclaimOutcome, ReclaimSurvey, ReclaimVerdict, agent_ownership_blocks, classify, is_live,
-    measure_bytes_until, pr_state_for_branch, tm_provisioned,
+    AgentStateProbe, BranchPrState, NOT_INSPECTED_REASON, PrIndex, ReclaimCandidate, ReclaimGate,
+    ReclaimMode, ReclaimOutcome, ReclaimSurvey, ReclaimVerdict, agent_ownership_blocks, classify,
+    is_live, measure_bytes_until, pr_state_for_branch, tm_provisioned,
 };
 use super::worktree_registry::{list_registered_worktrees, scan_registered_worktrees};
 use super::worktree_safety::inspect_dirt;
@@ -124,7 +124,7 @@ pub(crate) fn survey_with_index(
                 registry_root: scanned.registry_root,
                 bytes: None,
                 pr: BranchPrState::Unknown,
-                verdict: ReclaimVerdict::blocked(NOT_INSPECTED_REASON),
+                verdict: ReclaimVerdict::blocked(ReclaimGate::Deadline, NOT_INSPECTED_REASON),
             });
             continue;
         }

@@ -176,6 +176,14 @@ fn diagnostic_lines(merged: &serde_json::Value) -> Vec<String> {
     for s in strings("removal_failed") {
         out.push(format!("  removal FAILED (still on disk): {s}"));
     }
+    // #6507: every candidate the survey refused, naming the gate. The three
+    // families above disclose only what happened AFTER classification, so a
+    // worktree refused during classification by any gate but 4 appeared
+    // nowhere — which is why one merged, clean worktree read as simply absent
+    // from the report for three verification passes running.
+    for s in strings("blocked_reasons") {
+        out.push(format!("  {s}"));
+    }
     out
 }
 
