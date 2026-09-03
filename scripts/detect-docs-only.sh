@@ -89,6 +89,7 @@ is_inert_path() {
       .test-pointer-allowlist.tsv | \
       scripts/check_adr.sh | \
       scripts/check_doc_numbers.sh | \
+      scripts/check_trusty_code_specs.sh | \
       scripts/check_sld.sh | \
       scripts/check_test_pointers.sh | \
       scripts/check_token_drift.mjs | \

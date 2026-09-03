@@ -4,7 +4,13 @@
 **Version:** v2
 **Subsystem:** HARNESSES
 **Owner:** Engineering / Architecture
-**Last-updated:** 2026-08-07
+**Last-updated:** 2026-09-03
+
+> **Trusty Code boundary:** This page describes both shipped compatibility
+> readers and target architecture. ADR-0058 makes `.trusty-code/` the native
+> Code root; the `.claude/` paths below are compatibility inputs. See the
+> [reconciliation catalog](../trusty-code/spec-adr-reconciliation.md) for the
+> shipped, partial, and deferred status of each Code contract.
 
 ---
 
