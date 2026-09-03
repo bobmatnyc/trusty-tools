@@ -31,7 +31,44 @@ folder:
 xattr -dr com.apple.quarantine .
 ```
 
-## 2. Install the pinned tools
+## 2. Fill in the engagement
+
+`../{{CONFIG}}` ships with placeholder values for this engagement. It is
+already `chmod 0600` — open it in any text editor and edit it in place. Nothing
+reads `engagement.template.toml`, the reference beside it; that file exists to
+document every key, not to be run.
+
+1. Set `client`, `engagement`, and `instructions` to this engagement's real
+   values. For example:
+
+   ```toml
+   client = "Example Corp"
+   engagement = "2026-Q4"
+   ```
+
+2. {{TARGETS_STEP}}
+
+3. Repository access uses **your own GitHub credential**, not the auditor's.
+   If you have never authenticated `gh` on this machine, do it first — a
+   private repository is refused when you register it until you do, and this
+   credential never leaves your machine:
+
+   ```sh
+   gh auth login
+   ```
+
+`./{{LAUNCHER}} targets` prints what this engagement is registered to audit.
+Check the count before you start: `17 repositories, 2 boards` catches a
+truncated list at a glance.
+
+**If you skip this step:** step 4 below, with no repository registered,
+refuses to run rather than silently auditing nothing — it prints "nothing to audit … register one with `trusty-audit add repo <owner>/<name>`" (in
+this package, run `./{{LAUNCHER}} add repo <owner>/<name>`) and stops before
+touching the network. The one exception is a previously interrupted run that
+already cloned a repository: that resumes the existing selection instead of
+refusing.
+
+## 3. Install the pinned tools
 
 ```sh
 ./{{LAUNCHER}} install
@@ -46,22 +83,6 @@ installing part of it.
 It needs outbound HTTPS to `github.com` and `objects.githubusercontent.com`. A
 network that blocks binary downloads is the one failure that has no workaround
 inside this package — tell your auditor and they will send the binaries.
-
-## 3. Choose what to audit
-
-{{TARGETS_STEP}}
-
-Repository access uses **your own GitHub credential**, not the auditor's. If
-you have never authenticated `gh` on this machine, do it first — this is your
-credential and it never leaves your machine:
-
-```sh
-gh auth login
-```
-
-`./{{LAUNCHER}} targets` prints what this engagement is registered to audit.
-Check the count before you start: `17 repositories, 2 boards` catches a
-truncated list at a glance.
 
 ## 4. Run the audit
 
@@ -149,7 +170,7 @@ Four failures have a specific answer:
   quarantine flag. Step 1.
 - **The report's code-analysis sections are empty** — Full Disk Access. Step 4.
 - **A repository is refused when you register it** — `gh auth login`, or the
-  account you authenticated cannot read that repository. Step 3.
+  account you authenticated cannot read that repository. Step 2.
 - **A tool download is refused** — the version or digest did not match, or the
   network blocked it. Nothing in the package works around this; send your
   auditor the message.

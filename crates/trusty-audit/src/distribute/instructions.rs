@@ -75,7 +75,13 @@ fn key_step(prompts_for_key: bool) -> &'static str {
 /// `engagement.toml`, and telling that recipient to register repositories one
 /// at a time invites them to register the same set twice. The picker is the
 /// fallback for a package that shipped no list, not the default.
-/// Test: `super::distribute_tests::a_package_with_a_repo_list_says_the_targets_are_already_declared`.
+///
+/// #5483: the no-list branch now names both ways to register a repository —
+/// `add repo` and pasting `[[targets]]` TOML directly — plus `remove`, so a
+/// recipient reading only this step can add, list, and drop a target without
+/// hunting through the reference config.
+/// Test: `super::distribute_tests::a_package_with_a_repo_list_says_the_targets_are_already_declared`,
+/// `super::distribute_tests::the_engagement_setup_step_precedes_install_and_names_the_fields_to_replace`.
 fn targets_step(declared_repos: usize) -> String {
     if declared_repos > 0 {
         return format!(
@@ -100,15 +106,31 @@ fn targets_step(declared_repos: usize) -> String {
     format!(
         "This package ships no repository list, so register each repository you want\n\
          audited. Every one is checked against your GitHub credential before it is\n\
-         registered, so a typo is refused here rather than halfway through the audit:\n\
+         registered, so a typo is refused here rather than halfway through the audit —\n\
+         one command per repository, for example two placeholders:\n\
          \n\
          ```sh\n\
-         ./{LAUNCHER_NAME} add repo <owner>/<name>\n\
+         ./{LAUNCHER_NAME} add repo acme/api\n\
+         ./{LAUNCHER_NAME} add repo acme/web\n\
          ```\n\
          \n\
-         Repeat for each. If you already have the list, put a `repos.txt` beside\n\
-         `../{config}` instead — one `owner/name` per line, `#` starts a comment — and\n\
-         the client reads it rather than asking.",
+         Or paste `[[targets]]` blocks straight into `../{config}` instead — the exact\n\
+         shape `add repo` writes:\n\
+         \n\
+         ```toml\n\
+         [[targets]]\n\
+         kind = \"repo\"\n\
+         name_with_owner = \"acme/api\"\n\
+         \n\
+         [[targets]]\n\
+         kind = \"repo\"\n\
+         name_with_owner = \"acme/web\"\n\
+         ```\n\
+         \n\
+         If you already have the list, put a `repos.txt` beside `../{config}` instead —\n\
+         one `owner/name` per line, `#` starts a comment — and the client reads it rather\n\
+         than asking. List what is registered with `./{LAUNCHER_NAME} targets`, and drop\n\
+         one with `./{LAUNCHER_NAME} remove <owner>/<name>`.",
         config = EngagementConfig::FILE_NAME,
     )
 }
@@ -122,8 +144,14 @@ fn targets_step(declared_repos: usize) -> String {
 /// What: [`README_TEMPLATE`] with each `{{NAME}}` replaced. Every placeholder is
 /// replaced unconditionally, so a template that grows one this function does not
 /// know leaves it visible in the output rather than silently dropping it.
+///
+/// #5483: "Fill in the engagement" — replacing the placeholder `client`,
+/// `engagement`, and `instructions` and registering a repository — now sits at
+/// step 2, before install and audit, so the recipient edits the config before
+/// running anything that reads it.
 /// Test: `super::distribute_tests::the_instructions_name_the_one_shot_verb_and_the_disk_access_prompt`,
-/// `super::distribute_tests::a_prompt_for_key_package_tells_the_recipient_to_expect_the_prompt`.
+/// `super::distribute_tests::a_prompt_for_key_package_tells_the_recipient_to_expect_the_prompt`,
+/// `super::distribute_tests::the_engagement_setup_step_precedes_install_and_names_the_fields_to_replace`.
 pub fn render_readme(
     config: &EngagementConfig,
     platform_line: &str,
