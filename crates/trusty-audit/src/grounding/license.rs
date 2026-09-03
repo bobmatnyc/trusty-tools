@@ -67,9 +67,10 @@
 use std::path::Path;
 use std::process::Command;
 
-use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
+use toml_edit::{InlineTable, Value};
 
 use super::cve::{Run, Severity};
+use super::findings::first_line;
 
 /// The collector's name, as it appears at the head of every gap line it writes.
 pub const COLLECTOR: &str = "license-review";
@@ -543,21 +544,6 @@ fn run_cargo_deny(checkout: &Path) -> Result<Run, String> {
     })
 }
 
-/// The first non-empty line of a diagnostic stream, for a one-line gap.
-///
-/// // #6720: a leading informational line masking the real cause is the bug
-/// that issue records against `index::refusal`. cargo-deny writes no update
-/// notice, and this stream is quoted only ALONGSIDE a cause this module already
-/// determined ("exited non-zero without a listing") rather than standing in for
-/// it — so an unhelpful first line degrades the detail, never the diagnosis.
-fn first_line(stderr: &str) -> &str {
-    stderr
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("no diagnostic")
-}
-
 // ─── Writing ────────────────────────────────────────────────────────────────
 
 /// Record `findings` in the manifest at `path` as `[report].findings`.
@@ -573,11 +559,11 @@ fn first_line(stderr: &str) -> &str {
 /// trusty-review renders the Assurance Scans section from, and an empty array
 /// would put an empty table in the report. A clean review states itself through
 /// its `[report].gaps` scope line instead — see [`ground_into`].
-/// What: appends to `[report].findings`, skipping a row already declared under
-/// the same license/package/version so a resumed sweep does not restate it.
-/// Written format-preserving with `toml_edit`, exactly as
-/// [`super::cve::write_into`] writes its advisories, so the two other crates
-/// that own this document keep their key order and their comments.
+/// What: builds one row per finding and hands them to
+/// [`super::findings::append`], the shared writer — which skips a row already
+/// declared under the same license/package/version so a resumed sweep does not
+/// restate it. // #6077: that plumbing moved to `super::findings` when the
+/// secrets leg needed the identical thirty lines a third time.
 ///
 /// # Errors
 /// One line, safe to show the recipient, when the manifest cannot be read,
@@ -592,58 +578,17 @@ fn first_line(stderr: &str) -> &str {
 /// a_resumed_sweep_does_not_duplicate_a_row,
 /// a_cve_row_already_present_is_left_alone}`.
 pub fn write_into(path: &Path, findings: &[Finding]) -> Result<(), String> {
-    if findings.is_empty() {
-        return Ok(());
-    }
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("{} could not be read ({e})", path.display()))?;
-    let mut doc: DocumentMut = text
-        .parse()
-        .map_err(|e| format!("{} is not readable as TOML ({e})", path.display()))?;
-
-    let report = doc
-        .entry("report")
-        .or_insert_with(|| Item::Table(Table::new()));
-    let table = report
-        .as_table_like_mut()
-        .ok_or_else(|| "the manifest's `report` is not a table".to_string())?;
-    let item = table
-        .entry("findings")
-        .or_insert_with(|| Item::Value(Value::Array(Array::new())));
-    let array = item
-        .as_array_mut()
-        .ok_or_else(|| "the manifest's `report.findings` is not an array".to_string())?;
-
-    for finding in findings {
-        if array.iter().any(|declared| same_row(declared, finding)) {
-            continue;
-        }
-        let mut value = Value::InlineTable(row(finding));
-        value.decor_mut().set_prefix("\n    ");
-        array.push_formatted(value);
-    }
-    array.set_trailing("\n");
-    array.set_trailing_comma(true);
-
-    std::fs::write(path, doc.to_string())
-        .map_err(|e| format!("{} could not be written ({e})", path.display()))
+    let rows: Vec<InlineTable> = findings.iter().map(row).collect();
+    super::findings::append(path, &rows, IDENTITY)
 }
 
-/// Whether a declared row is this license against this pinned crate.
+/// The keys that identify one declared row, for the resumed-sweep skip.
 ///
 /// Identity is the triple, not the license: one copyleft term binds many crates
 /// in a sweep, and each is worth stating. The `category` is not compared —
 /// nothing else writes a `license`-banded row for the same crate and version,
 /// and comparing it would let a category rename duplicate every row.
-fn same_row(declared: &Value, finding: &Finding) -> bool {
-    let Some(table) = declared.as_inline_table() else {
-        return false;
-    };
-    let field = |key: &str| table.get(key).and_then(Value::as_str);
-    field("id") == Some(finding.license.as_str())
-        && field("package") == Some(finding.package.as_str())
-        && field("version") == Some(finding.version.as_str())
-}
+const IDENTITY: &[&str] = &["id", "package", "version"];
 
 /// One finding as the inline table trusty-review deserialises.
 ///

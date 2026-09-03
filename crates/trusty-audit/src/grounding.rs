@@ -61,12 +61,14 @@ pub mod cve;
 pub mod daemons;
 pub mod ecosystem;
 pub mod evidence;
+pub mod findings;
 pub mod hotspots;
 pub mod index;
 pub mod license;
 pub mod priority;
 pub mod quality;
 pub mod search_rpc;
+pub mod secrets;
 pub mod topology;
 
 #[cfg(test)]
@@ -419,6 +421,12 @@ pub async fn ground_manifest(
     // opened rather than adding a second one, and joins the same gap list for
     // the same reason — its write failing must cost only its own rows.
     manifest_leg_gaps.extend(license::ground_into(manifest, checkout, display));
+    // #6077: the secrets scan closes epic #6074's third leg. It reads no
+    // dependency manifest, so it runs against every repository in the sweep
+    // rather than only the Rust ones, and it joins the same `[report].findings`
+    // channel and the same gap list for the reason the other two do — one leg's
+    // write failing must cost only its own rows.
+    manifest_leg_gaps.extend(secrets::ground_into(manifest, checkout, display));
     // #6082: read BEFORE the write, which is what would otherwise make the two
     // states indistinguishable afterwards.
     let already_rendered = investigation_exists(manifest);
@@ -443,7 +451,7 @@ pub async fn ground_manifest(
     {
         grounding.gaps.push(format!(
             "{display}: {cause} — the rendered report does not state why its crate topology, \
-             dependency CVE scan, and license review are missing"
+             dependency CVE scan, license review, and secrets scan are missing"
         ));
     }
     grounding.gaps.extend(manifest_leg_gaps);

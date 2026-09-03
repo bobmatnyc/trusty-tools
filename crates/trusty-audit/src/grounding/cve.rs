@@ -51,7 +51,9 @@
 use std::path::Path;
 use std::process::Command;
 
-use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
+use toml_edit::{InlineTable, Value};
+
+use super::findings::first_line;
 
 /// The collector's name, as it appears at the head of every gap line it writes.
 pub const COLLECTOR: &str = "cve-scan";
@@ -379,15 +381,6 @@ fn run_cargo_audit(checkout: &Path) -> Result<Run, String> {
     })
 }
 
-/// The first non-empty line of a diagnostic stream, for a one-line gap.
-fn first_line(stderr: &str) -> &str {
-    stderr
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("no diagnostic")
-}
-
 /// Record `advisories` in the manifest at `path` as `[report].findings`.
 ///
 /// Why: the manifest is the interface (owner ruling 2026-08-19). A scan this
@@ -398,11 +391,11 @@ fn first_line(stderr: &str) -> &str {
 /// trusty-review renders the Assurance Scans section from, and an empty array
 /// would put an empty table in the report. A clean scan states itself through
 /// its `[report].gaps` scope line instead — see [`ground_into`].
-/// What: appends to `[report].findings`, skipping a row already declared under
-/// the same id/package/version so a resumed sweep does not restate it. Written
-/// format-preserving with `toml_edit`, exactly as
-/// [`super::priority::write_into`] writes its ranking, so the two other crates
-/// that own this document keep their key order and their comments.
+/// What: builds one row per advisory and hands them to
+/// [`super::findings::append`], the shared writer — which skips a row already
+/// declared under the same id/package/version so a resumed sweep does not
+/// restate it. // #6077: that plumbing moved to `super::findings` when the
+/// secrets leg needed the identical thirty lines a third time.
 ///
 /// # Errors
 /// One line, safe to show the recipient, when the manifest cannot be read,
@@ -416,56 +409,15 @@ fn first_line(stderr: &str) -> &str {
 /// Test: `cve_tests::{the_advisories_land_in_the_manifest,
 /// a_resumed_sweep_does_not_duplicate_a_row}`.
 pub fn write_into(path: &Path, advisories: &[Advisory]) -> Result<(), String> {
-    if advisories.is_empty() {
-        return Ok(());
-    }
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("{} could not be read ({e})", path.display()))?;
-    let mut doc: DocumentMut = text
-        .parse()
-        .map_err(|e| format!("{} is not readable as TOML ({e})", path.display()))?;
-
-    let report = doc
-        .entry("report")
-        .or_insert_with(|| Item::Table(Table::new()));
-    let table = report
-        .as_table_like_mut()
-        .ok_or_else(|| "the manifest's `report` is not a table".to_string())?;
-    let item = table
-        .entry("findings")
-        .or_insert_with(|| Item::Value(Value::Array(Array::new())));
-    let array = item
-        .as_array_mut()
-        .ok_or_else(|| "the manifest's `report.findings` is not an array".to_string())?;
-
-    for advisory in advisories {
-        if array.iter().any(|declared| same_row(declared, advisory)) {
-            continue;
-        }
-        let mut value = Value::InlineTable(row(advisory));
-        value.decor_mut().set_prefix("\n    ");
-        array.push_formatted(value);
-    }
-    array.set_trailing("\n");
-    array.set_trailing_comma(true);
-
-    std::fs::write(path, doc.to_string())
-        .map_err(|e| format!("{} could not be written ({e})", path.display()))
+    let rows: Vec<InlineTable> = advisories.iter().map(row).collect();
+    super::findings::append(path, &rows, IDENTITY)
 }
 
-/// Whether a declared row is this advisory against this pinned version.
+/// The keys that identify one declared row, for the resumed-sweep skip.
 ///
 /// Identity is the triple, not the id: one advisory can affect two members of
 /// the same sweep at two different versions, and both are worth stating.
-fn same_row(declared: &Value, advisory: &Advisory) -> bool {
-    let Some(table) = declared.as_inline_table() else {
-        return false;
-    };
-    let field = |key: &str| table.get(key).and_then(Value::as_str);
-    field("id") == Some(advisory.id.as_str())
-        && field("package") == Some(advisory.package.as_str())
-        && field("version") == Some(advisory.version.as_str())
-}
+const IDENTITY: &[&str] = &["id", "package", "version"];
 
 /// One advisory as the inline table trusty-review deserialises.
 fn row(advisory: &Advisory) -> InlineTable {
