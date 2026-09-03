@@ -57,16 +57,16 @@ pub(super) fn append(tools: &mut Vec<Value>) {
     ));
     tools.push(tool(
         "manage_drive_file",
-        "Create folders, rename/move/copy/trash/delete, or upload files in Drive.",
+        "Create folders, rename/move/copy/trash/delete, upload new files, or replace an existing Google Doc/Sheet/Slides file's content in place (update).",
         json!({
             "account": account_schema(),
-            "action": action_enum(&["create_folder", "rename", "trash", "delete", "copy", "move", "upload"]),
-            "file_id": { "type": "string" },
-            "name": { "type": "string", "description": "New/target file or folder name (required for create_folder, rename, upload)." },
+            "action": action_enum(&["create_folder", "rename", "trash", "delete", "copy", "move", "upload", "update"]),
+            "file_id": { "type": "string", "description": "Target file id (required for rename, trash, delete, copy, move, update)." },
+            "name": { "type": "string", "description": "New/target file or folder name (required for create_folder, rename, upload; optional for update, where it also renames the file)." },
             "parent_id": { "type": "string", "description": "Parent folder id (target for move/upload, optional for create_folder)." },
-            "local_path": { "type": "string", "description": "upload: read bytes from this local file." },
-            "content": { "type": "string", "description": "upload: inline text content (alternative to local_path)." },
-            "mime_type": { "type": "string", "description": "upload: MIME type of the content (guessed from local_path extension, else text/plain)." },
+            "local_path": { "type": "string", "description": "upload/update: read the content bytes from this local file." },
+            "content": { "type": "string", "description": "upload/update: inline text content (alternative to local_path)." },
+            "mime_type": { "type": "string", "description": "upload/update: MIME type of the SOURCE content, e.g. text/html or application/vnd.openxmlformats-officedocument.wordprocessingml.document (guessed from local_path extension, else text/plain). For update this is the format Drive converts FROM; the file keeps its own Google-native type." },
         }),
         &["action"],
     ));
