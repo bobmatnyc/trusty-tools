@@ -908,6 +908,108 @@ fn inspect_dirt_reports_a_commit_added_after_a_two_commit_squash_merge() {
     );
 }
 
+/// `squashed_divergence` arm 1 — NO MERGE BASE keeps the raw count (#6507).
+///
+/// Why: every arm of the aggregate probe has to fail toward "still unsaved", and
+/// this is the arm reached whenever the branch shares no ancestor with a landing
+/// branch. A probe that treated an unanswerable comparison as a match would
+/// discount commits that exist nowhere else.
+#[test]
+fn inspect_dirt_keeps_the_raw_count_when_there_is_no_merge_base() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("orphan-6507");
+    git_must(&wt, &["checkout", "--orphan", "unrelated-6507"]);
+    git_must(&wt, &["rm", "-rf", "."]);
+    std::fs::write(wt.join("only-here.rs"), "work that shares no ancestor\n").unwrap();
+    git_must(&wt, &["add", "only-here.rs"]);
+    git_must(&wt, &["commit", "-m", "feat: unrelated root commit"]);
+
+    // The precondition this arm needs: git can name no common ancestor at all.
+    assert!(
+        git_stdout(&wt, &["merge-base", "refs/remotes/origin/main", "HEAD"]).is_err(),
+        "the fixture must reproduce a history with no merge base"
+    );
+
+    let dirt = inspect_dirt(&wt).expect("an unrelated root commit is unsaved work");
+    assert_eq!(
+        dirt.unpushed_commits, 1,
+        "an unanswerable comparison discounts nothing; reason was: {}",
+        dirt.reason
+    );
+}
+
+/// `squashed_divergence` arm 2 — an EMPTY DIVERGENCE DIFF keeps the raw count
+/// (#6507).
+///
+/// Why: a branch that adds a file and then removes it has two real commits and
+/// no aggregate diff, so there is no patch to compare and no path to narrow
+/// candidates by. The probe returns before it lists a single candidate, and
+/// those two commits stay counted — they exist nowhere but this worktree.
+#[test]
+fn inspect_dirt_keeps_the_raw_count_when_the_divergence_has_no_diff() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("netzero-6507");
+    std::fs::write(wt.join("ephemeral.rs"), "added, then taken away\n").unwrap();
+    git_must(&wt, &["add", "ephemeral.rs"]);
+    git_must(&wt, &["commit", "-m", "feat: add a file"]);
+    git_must(&wt, &["rm", "ephemeral.rs"]);
+    git_must(&wt, &["commit", "-m", "fix: remove it again"]);
+
+    // The precondition: two commits whose AGGREGATE diff is empty, so the probe
+    // has no patch to match and no path to narrow the candidate list by.
+    let names = git_stdout(
+        &wt,
+        &["diff", "--name-only", "refs/remotes/origin/main", "HEAD"],
+    )
+    .expect("diff must run");
+    assert!(
+        names.trim().is_empty(),
+        "the divergence must cancel out; got {names}"
+    );
+
+    let dirt = inspect_dirt(&wt).expect("two commits that landed nowhere are unsaved work");
+    assert_eq!(
+        dirt.unpushed_commits, 2,
+        "an empty aggregate proves nothing landed; reason was: {}",
+        dirt.reason
+    );
+}
+
+/// `squashed_divergence` arm 3 — a squash BEYOND the candidate window keeps the
+/// raw count (#6507).
+///
+/// Why: the probe compares at most `SQUASH_CANDIDATE_MAX` (25) landing commits
+/// that touch a path the branch touched. This pins the boundary exactly: 25
+/// newer commits on `main` touch `first.rs`, so the squash is the 26th and the
+/// window never lists it. Missing it costs a reclaim, never a deletion.
+#[test]
+fn inspect_dirt_keeps_the_raw_count_when_the_squash_falls_outside_the_window() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("windowed-6507");
+    fx.squash_merge_commits_to_origin(&wt, &["first.rs", "second.rs"]);
+
+    // `first.rs` is the probe path — the first name the branch's aggregate diff
+    // lists — so commits touching it are what fill the window.
+    for i in 0..25 {
+        std::fs::write(fx.repo.join("first.rs"), format!("later edit {i}\n")).unwrap();
+        git_must(&fx.repo, &["add", "first.rs"]);
+        git_must(
+            &fx.repo,
+            &["commit", "-m", &format!("chore: later edit {i}")],
+        );
+    }
+    git_must(&fx.repo, &["push", "origin", "main"]);
+    git_must(&fx.repo, &["fetch", "--prune", "origin"]);
+
+    let dirt =
+        inspect_dirt(&wt).expect("a squash the window cannot reach is not proof the work landed");
+    assert_eq!(
+        dirt.unpushed_commits, 2,
+        "an exhausted window discounts nothing; reason was: {}",
+        dirt.reason
+    );
+}
+
 /// The control the #6507 fix may never break: a commit that landed NOWHERE is
 /// still unsaved work, in the same worktree, beside one that did land.
 #[test]

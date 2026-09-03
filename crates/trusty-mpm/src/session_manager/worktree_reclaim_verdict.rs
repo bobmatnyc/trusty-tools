@@ -84,8 +84,13 @@ pub(crate) enum ReclaimVerdict {
     /// correctly. Matching on the reason STRING to recover the distinction
     /// would re-couple the operator surface to the wording of a refusal
     /// message, so the survey records the kind instead.
+    ///
+    /// #6507: the survey discloses this kind through `ReclaimSurvey::agent_owned`
+    /// alone. `blocked_reasons` skips it by VARIANT rather than by gate, because
+    /// gate 1's harness lock builds it too, so no candidate is named twice.
     /// Test: `survey_discloses_a_live_agents_spared_worktree`,
-    /// `classify_blocks_a_live_agents_worktree`.
+    /// `classify_blocks_a_live_agents_worktree`,
+    /// `survey_lists_an_agent_held_candidate_in_exactly_one_place`.
     BlockedByAgent {
         /// Which gate refused (#6507) — gate 1 or gate 4.
         gate: ReclaimGate,
@@ -114,18 +119,5 @@ impl ReclaimVerdict {
     /// True when this verdict permits deletion.
     pub(crate) fn is_reclaimable(&self) -> bool {
         matches!(self, Self::Reclaimable { .. })
-    }
-
-    /// The gate that refused, and its message — `None` when nothing refused.
-    ///
-    /// Why: the survey folds one disclosure line per non-reclaimable candidate
-    /// and must not have to match on either verdict kind to build it (#6507).
-    pub(crate) fn refusal(&self) -> Option<(ReclaimGate, &str)> {
-        match self {
-            Self::Reclaimable { .. } => None,
-            Self::Blocked { gate, reason } | Self::BlockedByAgent { gate, reason } => {
-                Some((*gate, reason.as_str()))
-            }
-        }
     }
 }

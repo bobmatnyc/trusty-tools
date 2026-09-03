@@ -432,8 +432,11 @@ fn survey_names_the_gate_that_blocked_each_candidate() {
             path.display()
         )
     );
+    // #6507: the two lists partition the blocked set — an agent-held candidate
+    // is disclosed by `agent_owned` alone, so the sum is what may never
+    // disagree with the count. Both are folded in one pass.
     assert_eq!(
-        s.blocked_reasons.len(),
+        s.blocked_reasons.len() + s.agent_owned.len(),
         s.blocked,
         "the disclosed lines and the blocked count are folded from one pass and \
          may never disagree"

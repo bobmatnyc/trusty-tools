@@ -447,6 +447,132 @@ fn classify_reserves_the_agent_verdict_for_agent_refusals() {
     );
 }
 
+/// `agent_owned` and `blocked_reasons` PARTITION the blocked set (#6507).
+///
+/// Why: `blocked_reasons` was folded from every refusal, so a tree an agent
+/// holds was disclosed twice — once as the agent skip and once as an ordinary
+/// block — and an operator reading the prune reply counts one spared worktree
+/// as two separate refusals.
+///
+/// Both `BlockedByAgent` construction sites are exercised, because the harness
+/// lock builds that verdict at GATE 1 and the registry probe builds it at gate
+/// 4. An exclusion written against `ReclaimGate::AgentOwnership` alone leaves
+/// the harness-locked candidate in both lists and fails here.
+#[test]
+fn survey_lists_an_agent_held_candidate_in_exactly_one_place() {
+    let fx = GitWorktreeFixture::new();
+
+    // Gate 1: the harness holds the tree for the life of the agent.
+    let harness_held = agent_store_worktree(&fx, "harness-lock-6507");
+    GitWorktreeFixture::stamp_agent_sentinel(&harness_held, "agent-under-a-harness-lock");
+    fx.harness_lock_worktree(&harness_held, "agent-under-a-harness-lock");
+    let harness_verdict = classify_no_agent(
+        &harness_held,
+        Admission::HarnessAgentLock,
+        false,
+        &merged(6507),
+        &clean,
+    );
+    assert!(
+        matches!(
+            harness_verdict,
+            ReclaimVerdict::BlockedByAgent {
+                gate: ReclaimGate::Admission,
+                ..
+            }
+        ),
+        "gate 1's harness lock must build the agent verdict: {harness_verdict:?}"
+    );
+
+    // Gate 4: the registry reports the sentinel's agent as still working.
+    let registry_held = agent_store_worktree(&fx, "live-agent-6507");
+    GitWorktreeFixture::stamp_agent_sentinel(&registry_held, "agent-still-writing");
+    let registry_verdict = classify(
+        &registry_held,
+        Admission::Admitted,
+        false,
+        &merged(6508),
+        &inspect_dirt,
+        &agent_live,
+    );
+    assert!(
+        matches!(
+            registry_verdict,
+            ReclaimVerdict::BlockedByAgent {
+                gate: ReclaimGate::AgentOwnership,
+                ..
+            }
+        ),
+        "gate 4 must build the agent verdict: {registry_verdict:?}"
+    );
+
+    // The control: an ordinary refusal still owes a `blocked_reasons` line.
+    let dirty_tree = fx.add_worktree("dirty-6507");
+    let dirty_verdict = classify_no_agent(
+        &dirty_tree,
+        Admission::Admitted,
+        false,
+        &merged(6509),
+        &dirty,
+    );
+    assert!(
+        matches!(dirty_verdict, ReclaimVerdict::Blocked { .. }),
+        "the control must be an ordinary block: {dirty_verdict:?}"
+    );
+
+    let candidate = |path: &Path, verdict: ReclaimVerdict| ReclaimCandidate {
+        path: path.to_path_buf(),
+        branch: None,
+        registry_root: fx.repo.clone(),
+        bytes: Some(1),
+        pr: merged(6507),
+        verdict,
+    };
+    let survey = ReclaimSurvey::from_candidates(vec![
+        candidate(&harness_held, harness_verdict),
+        candidate(&registry_held, registry_verdict),
+        candidate(&dirty_tree, dirty_verdict),
+    ]);
+
+    let lines_for = |list: &[String], path: &Path| {
+        let prefix = format!("{}: ", path.display());
+        list.iter().filter(|l| l.starts_with(&prefix)).count()
+    };
+    for held in [&harness_held, &registry_held] {
+        assert_eq!(
+            lines_for(&survey.agent_owned, held),
+            1,
+            "an agent-held tree owes exactly one agent line; got {:?}",
+            survey.agent_owned
+        );
+        assert_eq!(
+            lines_for(&survey.blocked_reasons, held),
+            0,
+            "and it must not be disclosed a second time as an ordinary block; got {:?}",
+            survey.blocked_reasons
+        );
+    }
+    assert_eq!(
+        lines_for(&survey.blocked_reasons, &dirty_tree),
+        1,
+        "an ordinary refusal still owes its line; got {:?}",
+        survey.blocked_reasons
+    );
+    assert_eq!(
+        lines_for(&survey.agent_owned, &dirty_tree),
+        0,
+        "a dirty tree is nobody's agent skip; got {:?}",
+        survey.agent_owned
+    );
+    assert_eq!(
+        survey.agent_owned.len() + survey.blocked_reasons.len(),
+        survey.blocked,
+        "the two lists partition the blocked set: {:?} / {:?}",
+        survey.agent_owned,
+        survey.blocked_reasons
+    );
+}
+
 #[test]
 fn classify_allows_a_finished_agents_merged_worktree() {
     // The complement, and the whole reason the gate consults the registry

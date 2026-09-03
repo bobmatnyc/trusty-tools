@@ -847,8 +847,8 @@ pub(crate) struct ReclaimSurvey {
     /// fails identically, so 261 copies of one line would bury the count.
     /// Test: `survey_counts_a_failed_lookup_apart_from_an_unknown_state`.
     pub lookup_failure: Option<String>,
-    /// One line per NON-RECLAIMABLE candidate, as
-    /// `"<path>: blocked at <gate>: <reason>"` (#6507).
+    /// One line per candidate refused by an ordinary [`ReclaimVerdict::Blocked`],
+    /// as `"<path>: blocked at <gate>: <reason>"` (#6507).
     ///
     /// Why: `agent_owned` names gate 4's refusals and nothing else, so an
     /// ordinary `Blocked` — every other gate — reached no log line and no field
@@ -857,7 +857,16 @@ pub(crate) struct ReclaimSurvey {
     /// refused it, and three verification passes attributed it by elimination
     /// to the wrong gate. A refusal the operator cannot read is a refusal
     /// nobody can debug.
-    /// Test: `survey_names_the_gate_that_blocked_each_candidate`.
+    ///
+    /// This list and `agent_owned` PARTITION the blocked set: every
+    /// [`ReclaimVerdict::BlockedByAgent`] belongs to `agent_owned` alone, so a
+    /// candidate appears in exactly one of them and their lengths sum to
+    /// `blocked`. The exclusion is by VARIANT, never by gate — `BlockedByAgent`
+    /// is constructed at gate 1 (the harness agent lock) as well as at gate 4,
+    /// so excluding [`ReclaimGate::AgentOwnership`] would leave the harness-lock
+    /// candidate in both lists.
+    /// Test: `survey_names_the_gate_that_blocked_each_candidate`,
+    /// `survey_lists_an_agent_held_candidate_in_exactly_one_place`.
     pub blocked_reasons: Vec<String>,
 }
 
@@ -888,7 +897,10 @@ impl ReclaimSurvey {
             // #6507: folded here, with the totals, for the same reason
             // `agent_owned` is — a disclosed line that is derived anywhere else
             // can disagree with the candidate list it claims to describe.
-            if let Some((gate, reason)) = c.verdict.refusal() {
+            // Matched on the VARIANT so every `BlockedByAgent` — gate 1's
+            // harness lock as well as gate 4's — is left to `agent_owned` and
+            // no candidate is disclosed twice.
+            if let ReclaimVerdict::Blocked { gate, reason } = &c.verdict {
                 out.blocked_reasons.push(format!(
                     "{}: blocked at {}: {reason}",
                     c.path.display(),

@@ -709,6 +709,15 @@ fn count_unlanded(
 /// discounted. An empty commit carries no file content, so nothing recoverable
 /// is at risk. `git cherry` also skips merge commits, which therefore never
 /// appear here and stay counted — the conservative direction.
+///
+/// The same residual runs through [`squashed_divergence`], one size larger
+/// (#6507). An exact patch-id match is CONTENT equivalence, not merge
+/// provenance: a landing commit whose diff is byte-identical to the branch's
+/// whole divergence discounts that divergence, whether or not it is the squash
+/// of it. The window keeps that narrow — the match has to land inside the
+/// [`SQUASH_CANDIDATE_MAX`] commits on the base that touch a path the branch
+/// touched — and a byte-identical diff means the branch's content is already on
+/// the landing branch either way, so nothing unique to the worktree is at risk.
 /// Test: `inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned`,
 /// `inspect_dirt_clears_a_two_commit_squash_merge`.
 fn landed_on_a_remote(path: &Path, tips: &[&str]) -> HashSet<String> {
@@ -738,6 +747,8 @@ fn landed_on_a_remote(path: &Path, tips: &[&str]) -> HashSet<String> {
 /// the true squash commit is always in the list; this only bounds how far back
 /// a match is looked for when many commits touch that path. A miss keeps the
 /// raw count, so the cap can only ever over-report.
+/// Test: `inspect_dirt_keeps_the_raw_count_when_the_squash_falls_outside_the_window`
+/// pins the boundary — 25 newer commits on the path hide the squash.
 const SQUASH_CANDIDATE_MAX: usize = 25;
 
 /// The commits in `<base>..<tip>` when the branch's WHOLE divergence is already
@@ -761,7 +772,11 @@ const SQUASH_CANDIDATE_MAX: usize = 25;
 /// The match is exact and aggregate, so a commit added AFTER the squash changes
 /// the aggregate diff and nothing is discounted: the fail-closed direction.
 /// Test: `inspect_dirt_clears_a_two_commit_squash_merge`,
-/// `inspect_dirt_reports_a_commit_added_after_a_two_commit_squash_merge`.
+/// `inspect_dirt_reports_a_commit_added_after_a_two_commit_squash_merge`, and
+/// one per early return (#6507) —
+/// `inspect_dirt_keeps_the_raw_count_when_there_is_no_merge_base`,
+/// `inspect_dirt_keeps_the_raw_count_when_the_divergence_has_no_diff`,
+/// `inspect_dirt_keeps_the_raw_count_when_the_squash_falls_outside_the_window`.
 fn squashed_divergence(path: &Path, base: &str, tip: &str) -> Vec<String> {
     let nothing = Vec::new();
     let Ok(merge_base) = git_stdout(path, &["merge-base", base, tip]) else {
