@@ -20,8 +20,7 @@
 -->
 <script>
   import BarGraph from './BarGraph.svelte';
-  import { NO_DASHBOARD_HINT, serviceRows } from './servicesList.js';
-  import { windowMax } from './barGraph.js';
+  import { NO_DASHBOARD_HINT, rowGraphSpec, serviceRows } from './servicesList.js';
 
   /**
    * @type {{
@@ -43,18 +42,8 @@
   } = $props();
 
   let rows = $derived(serviceRows(services, serviceSamples, dashboards));
-
-  /**
-   * A row's bars are scaled to the busiest second in its own window.
-   *
-   * A shared scale would flatten every row against whichever service happens to
-   * be compiling; per-row scaling answers "is this daemon busier than it was a
-   * minute ago", which is the question a row-height graph can actually answer.
-   * The percentage in the %CPU column carries the absolute figure.
-   */
-  function scaleFor(series) {
-    return windowMax(series, 5);
-  }
+  // #6643: the per-row scale moved to `rowGraphSpec` so the screensaver's
+  // read-only table draws the same row the same way. Nothing drawn here changed.
 </script>
 
 <section class="foundry services">
@@ -77,6 +66,7 @@
       </div>
 
       {#each rows as row (row.id)}
+        {@const graph = rowGraphSpec(row)}
         {#if row.hasDashboard}
           <!-- #6642: the whole row opens the dashboard, so the row IS the
                button — same one-action-means-whole-card rule the card grid
@@ -97,10 +87,10 @@
             <span class="mono num">{row.cpuLabel}</span>
             <span class="graph">
               <BarGraph
-                values={row.series}
-                max={scaleFor(row.series)}
+                values={graph.values}
+                max={graph.max}
                 height="1.6rem"
-                label="{row.displayName} CPU, one bar per second"
+                label={graph.label}
               />
             </span>
           </button>
@@ -121,10 +111,10 @@
             <span class="mono num">{row.cpuLabel}</span>
             <span class="graph">
               <BarGraph
-                values={row.series}
-                max={scaleFor(row.series)}
+                values={graph.values}
+                max={graph.max}
                 height="1.6rem"
-                label="{row.displayName} CPU, one bar per second"
+                label={graph.label}
               />
             </span>
           </div>

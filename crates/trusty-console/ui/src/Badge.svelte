@@ -10,7 +10,8 @@
   untouched: its colour comes per-status from `statusPresentation.js`, which no
   Foundry tone class can express.
   Test: `machineStatus.test.js` covers the tone each value maps to
-  (`pressureTone`, `serviceHealthTone`, `rollupTone`).
+  (`pressureTone`). #6643 deleted `serviceHealthTone` and `rollupTone` with the
+  last rollup table that stamped them.
 -->
 <script>
   // tone: '' | 'success' | 'warning' | 'danger' | 'info' | 'muted'

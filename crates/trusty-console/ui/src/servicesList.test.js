@@ -9,12 +9,17 @@ import assert from 'node:assert/strict';
 
 import {
   DASH,
+  ROW_GRAPH_FLOOR_PCT,
+  SERVICES_URL,
   cpuSeries,
+  fetchServices,
   formatCpu,
   latestSample,
   rowAriaLabel,
+  rowGraphSpec,
   serviceRows,
   sortByDisplayName,
+  statusCounts,
 } from './servicesList.js';
 
 const ROSTER = [
@@ -140,4 +145,79 @@ test('an inert row overrides no accessible name at all', () => {
 test('an empty roster yields no rows rather than throwing', () => {
   assert.deepEqual(serviceRows(undefined), []);
   assert.deepEqual(serviceRows([]), []);
+});
+
+// ── shared with the screensaver (#6643) ────────────────────────────────────
+
+test('rowGraphSpec scales a row to its own busiest second', () => {
+  const spec = rowGraphSpec({ displayName: 'Trusty Search', series: [1, 12.5, null, 4] });
+  assert.equal(spec.max, 12.5);
+  assert.deepEqual(spec.values, [1, 12.5, null, 4]);
+  assert.equal(spec.label, 'Trusty Search CPU, one bar per second');
+});
+
+test('rowGraphSpec holds an idle row against the floor', () => {
+  // Without the floor a window of 0.2 % samples draws full-height bars and an
+  // idle daemon reads as a busy one.
+  assert.equal(rowGraphSpec({ series: [0.2, 0.1] }).max, ROW_GRAPH_FLOOR_PCT);
+  assert.equal(rowGraphSpec({}).max, ROW_GRAPH_FLOOR_PCT);
+  assert.deepEqual(rowGraphSpec(undefined).values, []);
+});
+
+test('statusCounts tallies the rows by the label they display', () => {
+  const counts = statusCounts(serviceRows(ROSTER, {}, new Set()));
+  assert.deepEqual(counts, [
+    { label: 'Running', count: 3, toneVar: 'var(--trusty-success)' },
+    { label: 'Ready', count: 1, toneVar: 'var(--trusty-success)' },
+  ]);
+  // Every row is counted exactly once, so the tally and the list can never
+  // report different populations.
+  assert.equal(
+    counts.reduce((sum, c) => sum + c.count, 0),
+    ROSTER.length,
+  );
+});
+
+test('statusCounts orders known labels by severity and unknown ones last', () => {
+  const counts = statusCounts([
+    { statusLabel: 'Absent', statusVar: 'var(--trusty-status-absent)' },
+    { statusLabel: 'Hibernating', statusVar: 'var(--trusty-text-muted)' },
+    { statusLabel: 'Degraded', statusVar: 'var(--trusty-status-degraded)' },
+    { statusLabel: 'Running', statusVar: 'var(--trusty-success)' },
+  ]);
+  assert.deepEqual(
+    counts.map((c) => c.label),
+    ['Running', 'Degraded', 'Absent', 'Hibernating'],
+  );
+  assert.deepEqual(statusCounts(undefined), []);
+});
+
+test('fetchServices returns the roster on a 200', async () => {
+  let asked = null;
+  const result = await fetchServices(async (url) => {
+    asked = url;
+    return { ok: true, status: 200, json: async () => ROSTER };
+  });
+  assert.equal(asked, SERVICES_URL);
+  assert.equal(result.error, null);
+  assert.equal(result.services.length, ROSTER.length);
+});
+
+test('fetchServices reports a failure without throwing', async () => {
+  // Both callers poll on a timer, where a rejected promise is unhandled.
+  const notOk = await fetchServices(async () => ({ ok: false, status: 503 }));
+  assert.deepEqual(notOk, { services: [], error: 'HTTP 503' });
+
+  const threw = await fetchServices(async () => {
+    throw new Error('network down');
+  });
+  assert.deepEqual(threw, { services: [], error: 'network down' });
+
+  // A body that is not an array is a build mismatch, not a roster.
+  const wrongShape = await fetchServices(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ services: [] }),
+  }));
+  assert.deepEqual(wrongShape, { services: [], error: null });
 });
