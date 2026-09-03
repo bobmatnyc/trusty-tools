@@ -34,6 +34,10 @@
 //! engineer-model resolution, LLM-client construction). It is a subcommand
 //! handler like every other file here, and was moved out of `main.rs` when
 //! that file reached 498 of the 500-SLOC cap; see its module docs.
+//! (#5441) [`bakeoff`] is the third: `bakeoff-gate` judges a retained
+//! bake-off evidence bundle entirely offline, so it starts no daemon and makes
+//! no JSON-RPC call at all. It is glue like the rest — every rule lives in
+//! `trusty_code::bakeoff`.
 //! Test: each submodule's own doc comments note its coverage; the full
 //! spawn+wire behaviour is covered end-to-end by `tests/cli_e2e.rs` against
 //! the real `tcode` binary — these handlers are too thin to usefully unit
@@ -41,6 +45,7 @@
 //! `trusty_code::cli_client`, which carries its own unit tests).
 
 pub mod attach;
+pub mod bakeoff;
 pub mod cancel;
 pub mod daemon_autospawn;
 pub mod legacy_run_task;
