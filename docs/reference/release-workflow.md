@@ -3,14 +3,22 @@
 Each crate is tagged independently using the pattern `<crate-name>-v<version>`,
 e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 
-> **`tga` tag aliases (issue #1128):** `trusty-git-analytics` publishes under the
-> short package name `tga`. The binary-release workflow accepts **both**
-> `tga-v<version>` and `trusty-git-analytics-v<version>` tags — they resolve to
-> the same build config and Homebrew formula. The parse step canonicalizes the
-> `tga` prefix to `trusty-git-analytics` for config/path lookups while keeping
-> changelog `--tag-pattern` matched to the literal pushed tag. Either form works;
-> you no longer need to push a second `trusty-git-analytics-v<version>` tag after
-> a `tga-v<version>` push.
+> **`tga` tag aliases (issue #1128) — read alias only, never push both:**
+> `trusty-git-analytics` publishes under the short package name `tga`, but the
+> tag to PUSH is **`trusty-git-analytics-v<version>`**, same as every other
+> crate — `tag_prefix_for()` in `scripts/check-publish-ready.sh` derives the
+> prefix from the crate directory name unconditionally, and the legacy short
+> form `tga-v<version>` is not what it generates or recommends. The
+> binary-release workflow, `check-publish-ready.sh` GUARD 2, and
+> `check-tag-publish-parity.sh` all still recognize `tga-v<version>` if that is
+> the tag they find on origin (they resolve to the same build config and
+> Homebrew formula, and the parse step canonicalizes the `tga` prefix to
+> `trusty-git-analytics` for config/path lookups while keeping changelog
+> `--tag-pattern` matched to the literal pushed tag) — that acceptance exists
+> for tags already pushed under the old convention, not as a second option to
+> choose from. Push only `trusty-git-analytics-v<version>`; pushing both
+> spellings for one release risks a TAG-SPLIT that cannot be repaired
+> afterward, because release tags here are immutable (#6178).
 
 ## Release Steps
 
