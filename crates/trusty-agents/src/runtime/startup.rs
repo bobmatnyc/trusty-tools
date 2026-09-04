@@ -212,6 +212,19 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
             .iter()
             .any(|a| matches!(a.as_str(), "--agent" | "--serve" | "--api" | "--workflow"));
         if !quiet_mode {
+            // #3844: a bundled file the refresh KEPT because it carries a local
+            // edit is the one thing here the operator has to know about — the
+            // shipped template did not reach it, and four silent reverts of live
+            // configuration are why this is printed rather than only logged.
+            if bundled_agents_report.preserved > 0 {
+                eprintln!(
+                    "[trusty-agents] kept {} hand-edited bundled agent file(s) in \
+                     ~/.trusty-agents/agents/ — the updated template was NOT applied to them. \
+                     Run `tagent agents repair` to overwrite them (current content archived \
+                     first).",
+                    bundled_agents_report.preserved
+                );
+            }
             if bundled_agents_report.total_touched() > 0 {
                 let refreshed_note = if bundled_agents_report.refreshed > 0 {
                     format!(
