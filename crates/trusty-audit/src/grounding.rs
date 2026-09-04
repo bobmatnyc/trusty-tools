@@ -68,6 +68,12 @@ pub mod findings;
 pub mod hotspots;
 pub mod index;
 pub mod license;
+// #6780: the opt-in OSV.dev lookup. Split in two because the two halves answer
+// different questions — `osv` decides what to ask and what an answer means,
+// `osv_query` decides how the asking happens (cache, batching, retry, offline).
+pub mod osv;
+pub mod osv_query;
+pub mod osv_rollup;
 pub mod priority;
 pub mod quality;
 pub mod search_rpc;

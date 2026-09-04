@@ -731,6 +731,17 @@ async fn run_one(
                 repo.name
             ));
         }
+        // #6780: the OSV.dev lookup over the dependency inventory the child
+        // measured. Opt-in, so a config that does not declare it runs exactly
+        // as it did. Last of the writers of this manifest, after grounding and
+        // the inference record, so the three serialise; fail-open like every
+        // other leg — a lookup that degrades adds gap lines and never a failed
+        // repository. It reads `investigation.json`, which the child wrote, so
+        // it cannot run before the child has exited.
+        if config.collectors.osv {
+            let settings = grounding::osv_query::Settings::for_engagement(&config.osv, work);
+            gaps.extend(grounding::osv::ground_into(&manifest, &settings, &repo.name).await);
+        }
     }
     // #6141: the marker is the LAST thing written, and only for a repository
     // that got all the way through. Until it is there the directory holds

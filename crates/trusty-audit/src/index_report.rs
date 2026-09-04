@@ -260,6 +260,19 @@ pub struct IndexReport {
     /// What: empty — which renders no table and an empty block — for a producer
     /// that read no manifests, or a run whose repositories declared nothing.
     pub debt: crate::debt_rollup::DebtRollup,
+    /// What the OSV lookup found across this run's repositories (#6780).
+    ///
+    /// All three producers pass `Some`: each reads the `osv.json` files that
+    /// hold the scans it is describing — the repository output directories for
+    /// the sweep and the package, and the SOURCE package's manifest directories
+    /// for a re-render, which writes into a fresh directory the collector never
+    /// touched. So the section states what the bundle CARRIES. An EMPTY roll-up
+    /// is what renders the "not run (opt-in)" line — the state that used to be
+    /// indistinguishable from a run that scanned and matched nothing.
+    ///
+    /// `None` is reserved for a caller with no directories to read at all, and
+    /// omits the section rather than claiming either way.
+    pub osv: Option<crate::grounding::osv_rollup::Rollup>,
 }
 
 /// The current local time with its UTC offset, e.g. `2026-08-19 22:40:11 -04:00`.
@@ -363,6 +376,11 @@ pub fn render(report: &IndexReport, dir: &Path) -> String {
     inference(report, &mut out);
     timings(report, &mut out);
     reports(report, dir, &mut out);
+    // #6780: before the contents table, because it is a finding about the run
+    // rather than a description of the directory.
+    out.push_str(&crate::grounding::osv_rollup::index_section(
+        report.osv.as_ref(),
+    ));
     contents(report.producer, &mut out);
     out
 }
@@ -852,6 +870,16 @@ pub fn write_sweep(
         entries,
         total: Some(total),
         debt,
+        // #6780: read back from the `osv.json` each repository's leg wrote, so
+        // the roll-up states what is on disk rather than what this process
+        // believes it did. An empty one renders the "not run (opt-in)" line.
+        osv: Some(crate::grounding::osv_rollup::rollup(
+            &report
+                .repos
+                .iter()
+                .map(|run| run.output.clone())
+                .collect::<Vec<_>>(),
+        )),
     };
     write(&index, &work.path(crate::workdir::Area::Output))
 }
@@ -929,6 +957,17 @@ pub fn write_render(
         entries,
         total: Some(total),
         debt,
+        // #6780: a re-render runs no collector, but the package it renders FROM
+        // carries whatever `osv.json` the sweep wrote — beside each source
+        // manifest, not in the fresh `--out` directory this render is filling.
+        // Omitting it made one bundle state "not run (opt-in)" in the re-render's
+        // index and report its advisories in the sweep's.
+        osv: Some(crate::grounding::osv_rollup::rollup(
+            &reports
+                .iter()
+                .filter_map(|rendered| rendered.manifest.parent().map(Path::to_path_buf))
+                .collect::<Vec<_>>(),
+        )),
     };
     write(&index, out_dir)
 }
@@ -1001,6 +1040,7 @@ mod index_tests {
             // #6781: no findings, so the fixture's index renders no debt table
             // and every earlier assertion over it still reads the same page.
             debt: crate::debt_rollup::DebtRollup::default(),
+            osv: None,
         }
     }
 
