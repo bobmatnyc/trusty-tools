@@ -41,6 +41,26 @@
 | `TRUSTY_SHUTDOWN_FLUSH_TIMEOUT_SECS` | `trusty-search` daemon (issues #874, #2922) | Explicit override for the graceful-shutdown per-index HNSW/corpus flush deadline, in seconds. When unset (the default), each index's deadline is instead scaled from its own on-disk HNSW snapshot size (`30s` floor + `1s` per 20 MB, capped at 20 minutes) so a multi-hundred-MB index gets a workable budget instead of the old flat `10s` — which was short enough to time out mid-write on large indexes before atomic tmp+rename hardening landed. Set this only to force an exact value (e.g. a constrained CI/test environment); any positive integer wins outright over size-based scaling for every index. `0` or unset falls back to size scaling. |
 | `TRUSTY_SHUTDOWN_FLUSH_CONCURRENCY` | `trusty-search` daemon (issue #2922) | Max number of indexes flushed concurrently during graceful shutdown. Default `4`. Previously all indexes flushed strictly sequentially, so total shutdown time was `N × per-index timeout`; running a bounded number in parallel keeps a fleet of small/fast indexes from queuing behind one large one while still bounding peak concurrent disk I/O. Must be a positive integer; `0` or unparseable falls back to the default. |
 
+### Measuring what these tune
+
+`scripts/measure-daemon-footprint.sh` is the one instrument for a before/after
+memory claim about either daemon — it prints one comparable phys-footprint
+number plus a category breakdown, the daemon's own `/health` `rss_mb`, its
+data-directory size, and its index or palace counts.
+
+```bash
+bash scripts/measure-daemon-footprint.sh search          # human table
+bash scripts/measure-daemon-footprint.sh memory --json   # stable key set
+bash scripts/measure-daemon-footprint.sh --pid 42054     # explicit pid
+```
+
+On macOS the number comes from `footprint -f bytes <pid>` (`vmmap -summary`
+when `footprint` is unavailable); on Linux from `/proc/<pid>/status`'s
+`RssAnon`, the same reading `TRUSTY_MEMORY_ENFORCE_MEASURE=anon` gates on,
+falling back to `VmRSS`. Never `ps` RSS — macOS undercounts it. Any path that
+cannot produce a number exits 2 instead of reporting 0. Fixtures:
+`scripts/measure-daemon-footprint_selftest.sh` ([#6819](https://github.com/bobmatnyc/trusty-tools/issues/6819)).
+
 ## trusty-audit
 
 | Variable | Required by | Purpose |
