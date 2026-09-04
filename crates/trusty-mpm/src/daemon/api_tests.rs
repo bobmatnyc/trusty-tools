@@ -1854,9 +1854,17 @@ impl Drop for HomeGuard {
 ///
 /// What: `<home>/.trusty-tools/trusty-mpm/claude-config/projects/<encoded
 /// cwd>/<id>.jsonl`, mirroring `managed_claude_config_dir` +
-/// `encode_project_dir`'s `/` → `-` encoding.
+/// `encode_project_dir`'s `[^A-Za-z0-9]` → `-` encoding. Every caller passes a
+/// cwd made only of `/` and alphanumerics, so the local fold below matches
+/// (#6777 — a cwd with a `.` in it would need the real encoder, which is
+/// private to `runtime::claude_code`).
 fn seed_fake_transcript(home: &std::path::Path, cwd: &std::path::Path, id: &str) {
-    let encoded = cwd.to_str().expect("utf8 cwd").replace('/', "-");
+    let encoded: String = cwd
+        .to_str()
+        .expect("utf8 cwd")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
     let dir = home
         .join(".trusty-tools")
         .join("trusty-mpm")

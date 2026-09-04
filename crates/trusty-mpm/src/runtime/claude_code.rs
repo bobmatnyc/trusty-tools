@@ -512,21 +512,99 @@ fn resume_command(
     cd_and_group(cwd, &body)
 }
 
+/// Length at which Claude Code truncates a project key and appends a path hash
+/// (its `MAX_SANITIZED_LENGTH`). Verified live: a 370-character cwd produced a
+/// 207-character directory name — 200 kept characters, `-`, then the hash.
+const MAX_PROJECT_KEY_LEN: usize = 200;
+
 /// Encode a workspace path the same way Claude Code names its project dir.
 ///
 /// Why: every on-disk lookup against a Claude Code session store — today only
 /// the `--resume <id>`-existence check ([`session_id_exists_in`]) — must derive
 /// the SAME project directory name for a given `cwd`. Sharing one helper makes
 /// two callers computing the encoding differently impossible.
-/// What: replaces every `/` in the path with `-` (Claude Code's project-dir
-/// naming scheme). A leading `/` becomes `-`, so `/private/tmp/foo` →
-/// `-private-tmp-foo`.
+///
+/// What: folds every character outside `[A-Za-z0-9]` to `-`, counting UTF-16
+/// code units rather than Rust `char`s, then truncates to
+/// [`MAX_PROJECT_KEY_LEN`] plus `-<base36 hash>` when the result is longer.
+/// Uppercase is preserved; `/`, `.`, `_`, space, `@`, `+`, `~`, quotes,
+/// brackets and every non-ASCII character all become `-`. So
+/// `/private/tmp/foo` → `-private-tmp-foo`, and
+/// `/repo/.worktrees/w1` → `-repo--worktrees-w1`.
+///
+/// // #6777: this used to fold `/` alone, so every path segment starting with
+/// a dot encoded one character short of the real directory name. Rule
+/// re-derived from Claude Code 2.1.260's `sanitizePath`
+/// (`s.replace(/[^a-zA-Z0-9]/g, "-")`, then `slice(0,200) + "-" + base36`) and
+/// confirmed against live probe runs — see the doc on [`js_path_hash`] for the
+/// hash half.
+///
 /// Test: `encode_project_dir_replaces_slashes`,
-/// `session_id_exists_true_for_real_jsonl_file`,
-/// `session_id_exists_finds_hardcoded_dir_name_for_known_cwd` (non-circular
-/// regression guard against encoding-scheme drift).
+/// `encode_project_dir_folds_dot_in_worktrees_path`,
+/// `encode_project_dir_folds_every_non_alphanumeric`,
+/// `encode_project_dir_folds_astral_char_to_two_dashes`,
+/// `encode_project_dir_truncates_and_hashes_a_long_path`,
+/// `session_id_exists_finds_hardcoded_dir_name_for_dotted_cwd` (non-circular
+/// regression guards against encoding-scheme drift).
 fn encode_project_dir(cwd: &Path) -> String {
-    cwd.to_string_lossy().replace('/', "-")
+    let path = cwd.to_string_lossy();
+    let mut key = String::with_capacity(path.len());
+    for c in path.chars() {
+        if c.is_ascii_alphanumeric() {
+            key.push(c);
+        } else {
+            // JavaScript's `String.prototype.replace` walks UTF-16 code units,
+            // so one astral `char` (a surrogate pair) yields TWO dashes.
+            for _ in 0..c.len_utf16() {
+                key.push('-');
+            }
+        }
+    }
+    if key.len() <= MAX_PROJECT_KEY_LEN {
+        return key;
+    }
+    // `key` is pure ASCII here, so a byte truncation is a character truncation.
+    key.truncate(MAX_PROJECT_KEY_LEN);
+    key.push('-');
+    key.push_str(&to_base36(js_path_hash(&path).unsigned_abs()));
+    key
+}
+
+/// Claude Code's 32-bit path hash, used only for the over-length key suffix.
+///
+/// Why: an over-length project key ends in `-<base36 of abs(hash)>`, so
+/// reproducing the directory name for a deep worktree requires the exact same
+/// hash. tm's own managed worktree paths already reach 188 characters, so this
+/// branch is reachable, not theoretical.
+/// What: ports `h = (h << 5) - h + unit | 0` over the path's UTF-16 code units.
+/// Every JS step truncates to int32, which is wrapping `i32` arithmetic here.
+/// Test: `encode_project_dir_truncates_and_hashes_a_long_path`.
+fn js_path_hash(path: &str) -> i32 {
+    let mut hash: i32 = 0;
+    for unit in path.encode_utf16() {
+        hash = hash
+            .wrapping_shl(5)
+            .wrapping_sub(hash)
+            .wrapping_add(i32::from(unit));
+    }
+    hash
+}
+
+/// Render `n` in lowercase base 36, matching JavaScript's `Number#toString(36)`.
+///
+/// Test: `encode_project_dir_truncates_and_hashes_a_long_path`.
+fn to_base36(mut n: u32) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if n == 0 {
+        return "0".to_string();
+    }
+    let mut out = Vec::new();
+    while n > 0 {
+        out.push(DIGITS[(n % 36) as usize]);
+        n /= 36;
+    }
+    out.reverse();
+    out.into_iter().map(char::from).collect()
 }
 
 // #6765: `has_prior_conversation` / `has_prior_conversation_in` used to live
@@ -573,7 +651,8 @@ fn projects_dir_for(config_dir: Option<&Path>) -> Option<std::path::PathBuf> {
 /// What: best-effort filesystem check — `true` only when
 /// `<projects_dir>/<encoded-cwd>/<id>.jsonl` exists as a regular file, where
 /// `projects_dir` is resolved via [`projects_dir_for`] and the cwd is encoded
-/// via the shared [`encode_project_dir`] helper (every `/` becomes `-`).
+/// via the shared [`encode_project_dir`] helper (every character outside
+/// `[A-Za-z0-9]` becomes `-`).
 /// #6765: this is now the ONLY conversation-store lookup either relaunch path
 /// makes — it is the check that consults the store the spawned process will
 /// actually use, which is exactly what the deleted `--continue` gate did not.
@@ -602,11 +681,13 @@ pub(crate) fn session_id_exists(cwd: &Path, config_dir: Option<&Path>, id: &str)
 ///
 /// Why: unit tests need to point at a temp directory rather than mutating
 /// `HOME`/`CLAUDE_CONFIG_DIR` process-globals.
-/// What: encodes `cwd` via [`encode_project_dir`] (every `/` → `-`) and checks
-/// `<projects_dir>/<encoded-cwd>/<id>.jsonl` is a regular file.
+/// What: encodes `cwd` via [`encode_project_dir`] (every character outside
+/// `[A-Za-z0-9]` → `-`) and checks `<projects_dir>/<encoded-cwd>/<id>.jsonl` is
+/// a regular file.
 /// Test: `session_id_exists_true_for_real_jsonl_file`,
 /// `session_id_exists_false_for_missing_id`,
-/// `session_id_exists_finds_hardcoded_dir_name_for_known_cwd`.
+/// `session_id_exists_finds_hardcoded_dir_name_for_known_cwd`,
+/// `session_id_exists_finds_hardcoded_dir_name_for_dotted_cwd`.
 fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
     projects_dir
         .join(encode_project_dir(cwd))

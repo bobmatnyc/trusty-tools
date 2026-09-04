@@ -1295,7 +1295,7 @@ fn spawn_resume_with_id_uses_resume_flag() {
     let cwd = Path::new("/tmp");
     let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir()
         .expect("config dir resolves under redirected HOME");
-    let encoded = cwd.to_string_lossy().replace('/', "-");
+    let encoded = encode_project_dir(cwd);
     let project_dir = config_dir.join("projects").join(&encoded);
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(project_dir.join("my-session-id.jsonl"), "{}").unwrap();
@@ -1556,7 +1556,9 @@ fn session_id_exists_true_for_real_jsonl_file() {
     let cwd = tmp.path().join("my-workspace");
     std::fs::create_dir_all(&cwd).unwrap();
     let projects_dir = tmp.path().join("projects");
-    let encoded = cwd.to_string_lossy().replace('/', "-");
+    // #6777: build the fixture through the ONE encoder — a hand-rolled
+    // `replace('/', "-")` here would not fold the `.` in a tempdir's name.
+    let encoded = encode_project_dir(&cwd);
     let project_dir = projects_dir.join(&encoded);
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(project_dir.join("abc-123.jsonl"), "{}").unwrap();
@@ -1575,7 +1577,9 @@ fn session_id_exists_false_for_missing_id() {
     let cwd = tmp.path().join("my-workspace");
     std::fs::create_dir_all(&cwd).unwrap();
     let projects_dir = tmp.path().join("projects");
-    let encoded = cwd.to_string_lossy().replace('/', "-");
+    // #6777: build the fixture through the ONE encoder — a hand-rolled
+    // `replace('/', "-")` here would not fold the `.` in a tempdir's name.
+    let encoded = encode_project_dir(&cwd);
     let project_dir = projects_dir.join(&encoded);
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(project_dir.join("other-session.jsonl"), "{}").unwrap();
@@ -1613,16 +1617,135 @@ fn encode_project_dir_replaces_slashes() {
 }
 
 #[test]
+fn encode_project_dir_folds_dot_in_worktrees_path() {
+    // Why (#6777): every tm-provisioned workspace sits under `.worktrees/` or
+    // `.claude/worktrees/`, and Claude Code folds the `.` to `-` exactly as it
+    // folds `/`. Encoding only `/` produced `…-.worktrees-<id>` while the real
+    // directory is `…--worktrees-<id>`, so `session_id_exists` answered false
+    // for every managed session and `--resume` was never passed (#6765).
+    //
+    // Both literals below are transcribed from the LIVE store at
+    // ~/.trusty-tools/trusty-mpm/claude-config/projects/, where 25 directories
+    // matched `--worktrees` and 0 matched `-.worktrees`.
+    assert_eq!(
+        encode_project_dir(Path::new(
+            "/Users/masa/trusty-mpm-projects/bobmatnyc/xflux/.worktrees/tm-xflux-01"
+        )),
+        "-Users-masa-trusty-mpm-projects-bobmatnyc-xflux--worktrees-tm-xflux-01"
+    );
+    assert_eq!(
+        encode_project_dir(Path::new(
+            "/Users/masa/Projects/claude-mpm/.claude/worktrees/agent-a0cdd0670f2217acb"
+        )),
+        "-Users-masa-Projects-claude-mpm--claude-worktrees-agent-a0cdd0670f2217acb"
+    );
+}
+
+#[test]
+fn encode_project_dir_folds_every_non_alphanumeric() {
+    // Why (#6777): the rule is `[^a-zA-Z0-9]` → `-`, not `/` → `-`, so every
+    // punctuation class a real path can carry must fold. Established by a live
+    // probe: `claude` launched in a directory literally named
+    // `a_b c@d+e.f~g'h(i)` created a project dir ending `a-b-c-d-e-f-g-h-i-`.
+    // Case is NOT folded — `/Users`, `/Volumes` and `Projects` all survive
+    // capitalised in the live store.
+    for (raw, expected) in [
+        ("/a.b", "-a-b"),
+        ("/a_b", "-a-b"),
+        ("/a b", "-a-b"),
+        ("/a@b", "-a-b"),
+        ("/a+b", "-a-b"),
+        ("/a~b", "-a-b"),
+        ("/a'b", "-a-b"),
+        ("/a(b)", "-a-b-"),
+        ("/a:b", "-a-b"),
+        ("/a#b", "-a-b"),
+        ("/a%b", "-a-b"),
+        ("/a=b", "-a-b"),
+        ("/a,b", "-a-b"),
+        // Already-legal characters pass through untouched.
+        ("/a-b", "-a-b"),
+        ("/AbZ9", "-AbZ9"),
+        // One BMP non-ASCII char is one UTF-16 unit, so one dash.
+        ("/café", "-caf-"),
+        ("/日本", "---"),
+    ] {
+        assert_eq!(
+            encode_project_dir(Path::new(raw)),
+            expected,
+            "encoding {raw} must fold to {expected}"
+        );
+    }
+}
+
+#[test]
+fn encode_project_dir_folds_astral_char_to_two_dashes() {
+    // Why (#6777): Claude Code runs the fold with a JavaScript regex, which
+    // walks UTF-16 code units. A non-BMP character is one Rust `char` but two
+    // UTF-16 units, so it must contribute TWO dashes, not one. Live probe: a
+    // directory named `emo-🚀x` produced a project dir ending `emo---x`.
+    assert_eq!(encode_project_dir(Path::new("/emo-🚀x")), "-emo---x");
+}
+
+#[test]
+fn encode_project_dir_truncates_and_hashes_a_long_path() {
+    // Why (#6777): past 200 characters Claude Code keeps the first 200 and
+    // appends `-<base36 of abs(int32 path hash)>`. tm's own managed worktree
+    // paths already reach 188 characters in the live store, so this branch is
+    // reachable. Both the cwd and the expected name below are transcribed from
+    // a live probe run against a throwaway CLAUDE_CONFIG_DIR — the encoder is
+    // never called to build the expectation.
+    let cwd = "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools/\
+b78af0a6-4985-419f-b85c-2ef5a67239f6/scratchpad/enc/seg00/seg01/seg02/seg03/seg04/seg05/seg06/\
+seg07/seg08/seg09/seg10/seg11/seg12/seg13/seg14/seg15/seg16/seg17/seg18/seg19/seg20/seg21/seg22/\
+seg23/seg24/seg25/seg26/seg27/seg28/seg29/seg30/seg31/seg32/seg33/seg34/seg35/seg36/seg37/seg38/\
+seg39";
+    let expected = "-private-tmp-claude-502--Users-masa-trusty-mpm-projects-bobmatnyc-trusty-\
+tools-b78af0a6-4985-419f-b85c-2ef5a67239f6-scratchpad-enc-seg00-seg01-seg02-seg03-seg04-seg05-\
+seg06-seg07-seg08-seg09-seg10-seg-3dhgpp";
+    let encoded = encode_project_dir(Path::new(cwd));
+    assert_eq!(
+        encoded, expected,
+        "an over-length cwd must truncate to 200 chars plus the base36 path hash"
+    );
+    assert_eq!(
+        encoded.len(),
+        207,
+        "200 kept characters, one separator, and a 6-character hash"
+    );
+}
+
+#[test]
+fn session_id_exists_finds_hardcoded_dir_name_for_dotted_cwd() {
+    // Why (#6777): the pre-existing hand-typed guard used a DOTLESS cwd, so it
+    // stayed green while every real tm worktree lookup missed. This one seeds
+    // the fixture under the hand-typed name a dotted cwd really produces; the
+    // pre-fix encoder yields `-repo-.worktrees-w1` and finds nothing.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let projects_dir = tmp.path().join("projects");
+    let project_dir = projects_dir.join("-repo--worktrees-w1");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::write(project_dir.join("dotted-id.jsonl"), "{}").unwrap();
+    assert!(
+        session_id_exists_in(Path::new("/repo/.worktrees/w1"), &projects_dir, "dotted-id"),
+        "a cwd under .worktrees/ must resolve to the '--worktrees-' directory \
+             Claude Code really creates"
+    );
+}
+
+#[test]
 fn session_id_exists_finds_hardcoded_dir_name_for_known_cwd() {
     // Why (#2013 cleanup, MEDIUM): the other session_id_exists tests build
-    // their expected path via the SAME formula the implementation uses
-    // (`cwd.to_string_lossy().replace('/', "-")` / `encode_project_dir`),
-    // so they cannot catch a future drift in the encoding scheme — the
-    // test and the code would drift together. This test instead types the
-    // expected directory name BY HAND as a literal, so if the encoding
-    // scheme ever changes (e.g. Claude Code starts hashing paths instead
-    // of dash-joining them), this assertion breaks independently of the
-    // implementation.
+    // their expected path via the SAME `encode_project_dir` the
+    // implementation uses, so they cannot catch a future drift in the
+    // encoding scheme — the test and the code would drift together. This
+    // test instead types the expected directory name BY HAND as a literal,
+    // so if the encoding scheme ever changes this assertion breaks
+    // independently of the implementation.
+    //
+    // #6777: this cwd is DOTLESS, which is why it stayed green through the
+    // dot-folding defect. `session_id_exists_finds_hardcoded_dir_name_for_\
+    // dotted_cwd` is the companion that covers a real worktree path.
     let tmp = tempfile::tempdir().expect("tempdir");
     let projects_dir = tmp.path().join("projects");
     // Hand-typed literal for cwd "/tmp/my-workspace" — NOT derived by
@@ -1950,7 +2073,9 @@ fn compose_inplace_args_uses_resume_for_existing_id() {
     let cwd = tmp.path().join("workspace");
     std::fs::create_dir_all(&cwd).unwrap();
     let config_dir = tmp.path().join("config");
-    let encoded = cwd.to_string_lossy().replace('/', "-");
+    // #6777: build the fixture through the ONE encoder — a hand-rolled
+    // `replace('/', "-")` here would not fold the `.` in a tempdir's name.
+    let encoded = encode_project_dir(&cwd);
     let project_dir = config_dir.join("projects").join(&encoded);
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(project_dir.join("existing-id.jsonl"), "{}").unwrap();
@@ -2443,7 +2568,9 @@ fn compose_inplace_args_never_continues_from_home_store() {
     let _home = HomeGuard::set();
     let home = dirs::home_dir().expect("home resolves under redirected HOME");
     let cwd = std::path::PathBuf::from("/tmp/inplace-6765-test");
-    let encoded = cwd.to_string_lossy().replace('/', "-");
+    // #6777: build the fixture through the ONE encoder — a hand-rolled
+    // `replace('/', "-")` here would not fold the `.` in a tempdir's name.
+    let encoded = encode_project_dir(&cwd);
     // Populate the OPERATOR store (the wrong one) with prior history.
     let home_project_dir = home.join(".claude").join("projects").join(&encoded);
     std::fs::create_dir_all(&home_project_dir).unwrap();
@@ -2501,7 +2628,9 @@ fn spawn_resume_never_sends_bare_continue() {
     let _home = HomeGuard::set();
     let home = dirs::home_dir().expect("home resolves under redirected HOME");
     let cwd = std::path::PathBuf::from("/tmp/tmux-6765-test");
-    let encoded = cwd.to_string_lossy().replace('/', "-");
+    // #6777: build the fixture through the ONE encoder — a hand-rolled
+    // `replace('/', "-")` here would not fold the `.` in a tempdir's name.
+    let encoded = encode_project_dir(&cwd);
     let home_project_dir = home.join(".claude").join("projects").join(&encoded);
     std::fs::create_dir_all(&home_project_dir).unwrap();
     std::fs::write(home_project_dir.join("some-other-session.jsonl"), "{}").unwrap();
