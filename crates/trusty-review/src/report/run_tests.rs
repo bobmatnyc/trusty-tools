@@ -472,6 +472,7 @@ fn snapshot_fixture() -> Investigation {
             status: InvestigationStatus::Available,
             findings: vec![VerifiedFinding {
                 trace_verdict: String::new(),
+                cwe_id: Vec::new(),
                 title: "Hardcoded credential".to_string(),
                 severity: crate::report::metrics::Severity::Red,
                 dimension: "security".to_string(),

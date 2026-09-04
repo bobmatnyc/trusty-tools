@@ -22,6 +22,7 @@
 
 pub mod analyze;
 mod batch;
+pub mod cwe;
 pub mod deps;
 pub mod exposure;
 mod regions;
@@ -693,6 +694,9 @@ fn scrubbed_prose(slug: &str, band: &str, f: &VerifiedFinding, secrets: &[String
         // is this crate's own composed text, not model prose over repository
         // content.
         trace_verdict: f.trace_verdict.clone(),
+        // #6779: mechanical too — an id resolved at ingestion, never prose, so
+        // the scrub below has nothing to find in it.
+        cwe_id: f.cwe_id.clone(),
     };
     super::redact::scrub_prose(&mut prose, secrets);
     prose
@@ -877,6 +881,7 @@ mod coverage_tests {
     fn green(dimension: &str) -> VerifiedFinding {
         VerifiedFinding {
             trace_verdict: String::new(),
+            cwe_id: Vec::new(),
             title: "Clean signal".to_string(),
             severity: Severity::Green,
             dimension: dimension.to_string(),

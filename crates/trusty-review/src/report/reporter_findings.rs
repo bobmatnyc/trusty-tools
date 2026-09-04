@@ -53,6 +53,11 @@ struct FindingRow {
     /// the verifier decided, so it carries no `inferred` tag and is never
     /// punctuation-deduped.
     trace_verdict: String,
+    /// The CWE ids for this finding's weakness classes (#6779), or empty.
+    /// Rendered as a `[CWE-89, CWE-20]` suffix on the title; empty when the
+    /// investigation could identify no weakness class, so an untagged finding
+    /// renders exactly as it did before the tag existed.
+    cwe_id: Vec<String>,
     business_impact: Option<String>,
     remediation: Option<String>,
     cost_effort: Option<String>,
@@ -108,6 +113,7 @@ impl FindingRow {
             evidence_quote: raw_evidence(&f.evidence),
             evidence_measured: f.evidence_measured,
             trace_verdict: f.trace_verdict.clone(),
+            cwe_id: f.cwe_id.clone(),
             business_impact: prose_field(&f.business_impact),
             remediation: prose_field(&f.remediation),
             cost_effort: prose_field(&f.cost_effort),
@@ -129,6 +135,7 @@ impl FindingRow {
         self.evidence_quote = raw_evidence(&f.evidence);
         self.evidence_measured = f.evidence_measured;
         self.trace_verdict = f.trace_verdict.clone();
+        self.cwe_id = f.cwe_id.clone();
         self.business_impact = prose_field(&f.business_impact);
         self.remediation = prose_field(&f.remediation);
         self.cost_effort = prose_field(&f.cost_effort);
@@ -143,7 +150,18 @@ impl FindingRow {
     fn into_scope(self, index: usize) -> Scope {
         let mut s = Scope::new();
         s.set("finding_index", index.to_string());
-        s.set("finding_title", self.title);
+        // #6779: the weakness class rides on the title so a reader scanning the
+        // finding list sees it without opening the evidence block. Appended
+        // HERE and not earlier: `push_finding_band` pairs a narrative with a row
+        // by exact title match, and a suffixed title would match nothing.
+        s.set(
+            "finding_title",
+            if self.cwe_id.is_empty() {
+                self.title.clone()
+            } else {
+                format!("{} [{}]", self.title, self.cwe_id.join(", "))
+            },
+        );
         s.set_opt("finding_category", self.category);
         s.set_opt("finding_description", self.description);
         s.set_opt("finding_business_impact", self.business_impact);

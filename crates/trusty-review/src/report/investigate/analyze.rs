@@ -111,6 +111,15 @@ pub struct RawFinding {
     /// Qualitative cost/effort framing.
     #[serde(default)]
     pub cost_effort: String,
+    /// The weakness classes this finding maps to, as ids or class names (#6779).
+    ///
+    /// Raw and untrusted, exactly like every other field here. `None` covers
+    /// both a missing key and an explicit `null`, which the nullable schema
+    /// property permits; the entries themselves are whatever strings the model
+    /// emitted. Verification runs the list through [`super::cwe::resolve_all`],
+    /// which drops every entry it cannot read mechanically.
+    #[serde(default)]
+    pub cwe_id: Option<Vec<String>>,
 }
 
 /// The raw investigation response (a `findings` array).
@@ -166,7 +175,22 @@ pub fn investigation_schema(max_findings: usize) -> ResponseSchema {
                             "description": {"type": "string", "description": "One concise sentence."},
                             "business_impact": {"type": "string", "description": "One concise sentence. Empty string if the code does not support one — never invent an impact to fill this field."},
                             "remediation": {"type": "string", "description": "One concise sentence."},
-                            "cost_effort": {"type": "string", "description": "Qualitative cost/effort framing; no invented figures. Empty string if unknown."}
+                            "cost_effort": {"type": "string", "description": "Qualitative cost/effort framing; no invented figures. Empty string if unknown."},
+                            // #6779: nullable for the same reason `line` is —
+                            // strict mode requires every property in `required`,
+                            // and "no identifiable weakness class" is a real
+                            // answer that an empty string would not distinguish
+                            // from a lazy one. The enumeration comes from
+                            // `cwe::WEAKNESS_CLASSES` so the vocabulary the model
+                            // is offered is the one ingestion reads back.
+                            "cwe_id": {
+                                "type": ["array", "null"],
+                                "items": {"type": "string"},
+                                "description": format!(
+                                    "Every CWE id this finding's weakness classes map to, each as CWE-<number> (e.g. [\"CWE-89\"]). Most findings have exactly one; give several only when the finding genuinely violates several. Empty array or null when the finding maps to no known weakness class — NEVER guess one. Known classes: {}.",
+                                    super::cwe::class_checklist()
+                                )
+                            }
                         }
                     }
                 }
