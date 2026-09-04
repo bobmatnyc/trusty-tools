@@ -219,7 +219,6 @@ fn resume_command_loads_the_user_tier_when_config_dir_is_relocated() {
             "/home/bob/.trusty-tools/trusty-mpm/claude-config",
         )),
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -403,7 +402,6 @@ fn resume_command_scrubs_inherited_session_markers() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -564,7 +562,6 @@ fn resume_command_sets_oauth_token_when_available() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         Some("sk-ant-oat01-fake-token"),
@@ -588,7 +585,6 @@ fn resume_command_omits_oauth_token_when_absent() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -611,7 +607,6 @@ fn resume_command_without_token_pins_the_exact_command() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -686,7 +681,6 @@ fn resume_command_defaults_the_alternate_screen_off() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -732,7 +726,6 @@ fn env_bin_prefix_quotes_config_dir_with_space() {
         "claude",
         Some(dir),
         None,
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1121,7 +1114,6 @@ fn resume_command_with_id_uses_resume_flag() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1153,7 +1145,6 @@ fn resume_command_exports_managed_session_id() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1189,7 +1180,6 @@ fn resume_command_sets_claude_config_dir() {
         "claude",
         Some(dir),
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1212,16 +1202,21 @@ fn resume_command_sets_claude_config_dir() {
 }
 
 #[test]
-fn resume_command_without_id_with_prior_conv_uses_continue() {
-    // Why (#1744 / #1840): when no claude_session_id is stored but prior
-    // conversation history exists, --continue resumes the most-recent
-    // conversation in the workspace rather than starting fresh.
+fn resume_command_without_id_never_uses_continue() {
+    // Why (#6765): this test replaces
+    // `resume_command_without_id_with_prior_conv_uses_continue`, which asserted
+    // the OPPOSITE — that a missing id falls back to `--continue`. The command
+    // exports the managed `CLAUDE_CONFIG_DIR`, so `--continue` resolved against
+    // a store the caller never inspected and could attach (or fail to attach)
+    // to an unrelated conversation. With no id there is no safe target: launch
+    // fresh.
     let cmd = resume_command(
         Path::new(TEST_CWD),
         "claude",
+        Some(Path::new(
+            "/home/bob/.trusty-tools/trusty-mpm/claude-config",
+        )),
         None,
-        None,
-        true,
         TEST_SESSION_ID,
         None,
         None,
@@ -1229,8 +1224,8 @@ fn resume_command_without_id_with_prior_conv_uses_continue() {
         &[],
     );
     assert!(
-        cmd.contains("--continue"),
-        "resume command without id + prior conv must use --continue: {cmd}"
+        !cmd.contains("--continue"),
+        "resume command without id must NEVER use --continue: {cmd}"
     );
     assert!(
         !cmd.contains("--resume"),
@@ -1248,7 +1243,6 @@ fn resume_command_without_id_no_prior_conv_uses_plain_spawn() {
         "claude",
         None,
         None,
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1269,45 +1263,12 @@ fn resume_command_without_id_no_prior_conv_uses_plain_spawn() {
     );
 }
 
-#[test]
-fn has_prior_conversation_returns_false_for_fresh_workspace() {
-    // Why (#1840): a fresh worktree has no Claude conversation history;
-    // has_prior_conversation must return false to avoid "No conversation found".
-    // Uses has_prior_conversation_in with a temp projects_dir — no HOME env
-    // mutation, making this test safe for parallel execution.
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let projects_dir = tmp.path().join("projects");
-    // projects_dir does not exist → always returns false.
-    assert!(
-        !has_prior_conversation_in(tmp.path(), &projects_dir),
-        "no projects dir → false"
-    );
-    // Create the projects dir but with no entry for this workspace → still false.
-    std::fs::create_dir_all(&projects_dir).unwrap();
-    assert!(
-        !has_prior_conversation_in(tmp.path(), &projects_dir),
-        "projects dir exists but no entry for this workspace → false"
-    );
-}
-
-#[test]
-fn has_prior_conversation_returns_true_when_jsonl_exists() {
-    // Why (#1840): verify the positive path — a workspace with a .jsonl file
-    // in its encoded project dir must return true.
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let cwd = tmp.path().join("my-workspace");
-    std::fs::create_dir_all(&cwd).unwrap();
-    let projects_dir = tmp.path().join("projects");
-    // Encode the cwd path as Claude does: replace '/' with '-'.
-    let encoded = cwd.to_string_lossy().replace('/', "-");
-    let project_dir = projects_dir.join(&encoded);
-    std::fs::create_dir_all(&project_dir).unwrap();
-    std::fs::write(project_dir.join("session.jsonl"), "{}").unwrap();
-    assert!(
-        has_prior_conversation_in(&cwd, &projects_dir),
-        "workspace with .jsonl must return true"
-    );
-}
+// #6765: `has_prior_conversation_returns_false_for_fresh_workspace` and
+// `has_prior_conversation_returns_true_when_jsonl_exists` were deleted with the
+// functions they covered. The `--continue` branch they gated is gone from both
+// relaunch paths, so there is no eligibility question left to answer; what
+// replaced them is `session_id_exists_*` (which reads the session's OWN store)
+// plus the two `#6765` never-a-bare-continue tests at the end of this file.
 
 #[serial_test::serial]
 #[test]
@@ -1697,7 +1658,6 @@ fn spawn_resume_without_id_no_prior_conv_sends_plain_spawn() {
         "__fake_claude__",
         None,
         None,
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1789,7 +1749,6 @@ fn resume_command_prefixes_cd_to_workdir() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1851,7 +1810,6 @@ fn resume_command_prints_relaunch_hint_after_claude_exits() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1881,7 +1839,6 @@ fn resume_command_with_prompt_file_contains_flag() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         Some(path),
         None,
@@ -1947,34 +1904,12 @@ fn compose_inplace_args_falls_back_for_missing_id() {
     );
 }
 
-#[serial_test::serial]
-#[test]
-fn compose_inplace_args_uses_continue_when_no_id_but_prior_conv() {
-    // has_prior_conversation (unlike session_id_exists) always looks under
-    // `~/.claude/projects` regardless of `config_dir` — mirroring exactly
-    // what `resume_command`'s own `has_prior_conv` computation does — so
-    // this test redirects $HOME rather than seeding under a config dir.
-    let _home = HomeGuard::set();
-    let home = dirs::home_dir().expect("home resolves under redirected HOME");
-    let cwd = std::path::PathBuf::from("/tmp/inplace-continue-test");
-    // Seed prior conversation history (a .jsonl under the encoded cwd dir)
-    // WITHOUT seeding the specific stale id, so has_prior_conversation is
-    // true but session_id_exists for "stale-id" is false.
-    let encoded = cwd.to_string_lossy().replace('/', "-");
-    let project_dir = home.join(".claude").join("projects").join(&encoded);
-    std::fs::create_dir_all(&project_dir).unwrap();
-    std::fs::write(project_dir.join("some-other-session.jsonl"), "{}").unwrap();
-
-    let args = compose_inplace_args(&cwd, None, Some("stale-id"), None);
-    assert!(
-        !args.contains(&"--resume".to_owned()),
-        "a stale id must not be passed to --resume: {args:?}"
-    );
-    assert!(
-        args.contains(&"--continue".to_owned()),
-        "prior conversation history exists: must fall back to --continue: {args:?}"
-    );
-}
+// #6765: `compose_inplace_args_uses_continue_when_no_id_but_prior_conv` was
+// deleted — it asserted the defect. It seeded `~/.claude/projects` (the
+// OPERATOR store) and required `--continue`, while the composed argv runs under
+// the MANAGED `CLAUDE_CONFIG_DIR`. Its replacement,
+// `compose_inplace_args_never_continues_from_home_store`, seeds the same wrong
+// store and requires a fresh launch instead.
 
 #[test]
 fn compose_inplace_args_carries_prompt_file_unquoted() {
@@ -2400,4 +2335,108 @@ fn prepare_managed_config_writes_no_mcp_json_and_no_approval() {
             "{name} must be declared in user scope: {servers:?}"
         );
     }
+}
+
+// ── #6765: a managed relaunch never emits a bare `--continue` ───────────
+
+#[serial_test::serial]
+#[test]
+fn compose_inplace_args_never_continues_from_home_store() {
+    // Why (#6765): the in-place relaunch exports the MANAGED
+    // `CLAUDE_CONFIG_DIR`, so `claude --continue` resolves "most recent
+    // conversation" against `<config_dir>/projects`, NOT `~/.claude/projects`.
+    // The old eligibility check read `~/.claude/projects` — always populated on
+    // an operator machine — so `--continue` fired unconditionally and attached
+    // to whatever the managed store held most recently. In the reported case
+    // that was a live `claude agents` daemon, which refused the second attach
+    // and exited 0, dropping the pane to a bare shell.
+    //
+    // With no usable id the only safe selection is a FRESH launch: never a bare
+    // `--continue`, whatever `~/.claude` happens to contain.
+    let _home = HomeGuard::set();
+    let home = dirs::home_dir().expect("home resolves under redirected HOME");
+    let cwd = std::path::PathBuf::from("/tmp/inplace-6765-test");
+    let encoded = cwd.to_string_lossy().replace('/', "-");
+    // Populate the OPERATOR store (the wrong one) with prior history.
+    let home_project_dir = home.join(".claude").join("projects").join(&encoded);
+    std::fs::create_dir_all(&home_project_dir).unwrap();
+    std::fs::write(home_project_dir.join("some-other-session.jsonl"), "{}").unwrap();
+    // The managed store the spawned process will actually read stays empty.
+    let config_dir = home.join("managed-config-6765");
+    std::fs::create_dir_all(config_dir.join("projects")).unwrap();
+
+    // (a) a null claude_session_id starts fresh — neither flag.
+    let args = compose_inplace_args(&cwd, Some(&config_dir), None, None);
+    assert!(
+        !args.contains(&"--continue".to_owned()),
+        "a null claude_session_id must never emit a bare --continue: {args:?}"
+    );
+    assert!(
+        !args.contains(&"--resume".to_owned()),
+        "a null claude_session_id must not emit --resume either: {args:?}"
+    );
+
+    // (b) an id absent from the session's OWN store also starts fresh.
+    let args = compose_inplace_args(&cwd, Some(&config_dir), Some("stale-id-6765"), None);
+    assert!(
+        !args.contains(&"--continue".to_owned()),
+        "a stale id must fall back to a fresh launch, not --continue: {args:?}"
+    );
+    assert!(
+        !args.contains(&"--resume".to_owned()),
+        "a stale id must not be passed to --resume: {args:?}"
+    );
+
+    // (c) an id that DOES exist in the session's own store still resumes by id.
+    let managed_project_dir = config_dir.join("projects").join(&encoded);
+    std::fs::create_dir_all(&managed_project_dir).unwrap();
+    std::fs::write(managed_project_dir.join("live-id-6765.jsonl"), "{}").unwrap();
+    let args = compose_inplace_args(&cwd, Some(&config_dir), Some("live-id-6765"), None);
+    assert!(
+        args.windows(2).any(|w| w == ["--resume", "live-id-6765"]),
+        "an id present in the session's own store must resume by id: {args:?}"
+    );
+    assert!(
+        !args.contains(&"--continue".to_owned()),
+        "--resume must never be paired with --continue: {args:?}"
+    );
+}
+
+#[serial_test::serial]
+#[test]
+fn spawn_resume_never_sends_bare_continue() {
+    // Why (#6765): the tmux-pane relaunch half of the same defect. The pane
+    // command exports the managed `CLAUDE_CONFIG_DIR`, so a bare `--continue`
+    // resolves against the managed store while eligibility was decided from
+    // `~/.claude/projects`. A record with `claude_session_id: null` must
+    // produce a plain spawn even when the operator's home store is full of
+    // transcripts for the same cwd.
+    let _home = HomeGuard::set();
+    let home = dirs::home_dir().expect("home resolves under redirected HOME");
+    let cwd = std::path::PathBuf::from("/tmp/tmux-6765-test");
+    let encoded = cwd.to_string_lossy().replace('/', "-");
+    let home_project_dir = home.join(".claude").join("projects").join(&encoded);
+    std::fs::create_dir_all(&home_project_dir).unwrap();
+    std::fs::write(home_project_dir.join("some-other-session.jsonl"), "{}").unwrap();
+
+    let Some(_claude_bin) = ClaudeCodeAdapter::resolve_claude() else {
+        return; // adapter path needs the real binary; the pure test above does not
+    };
+    let fake = FakeTmux::new();
+    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    adapter
+        .spawn_resume("tmpm-6765", None, &cwd, "task", None, TEST_SESSION_ID, &[])
+        .expect("spawn_resume with a null claude_session_id");
+    let sends = fake.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    assert!(
+        !sends[0].1.contains("--continue"),
+        "a null claude_session_id must never emit a bare --continue: {}",
+        sends[0].1
+    );
+    assert!(
+        !sends[0].1.contains("--resume"),
+        "a null claude_session_id must not emit --resume either: {}",
+        sends[0].1
+    );
 }

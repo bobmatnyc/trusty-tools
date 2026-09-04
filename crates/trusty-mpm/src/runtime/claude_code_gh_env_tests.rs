@@ -236,7 +236,6 @@ fn resume_command_sources_gh_env_file_before_env_invocation() {
         "claude",
         None,
         None,
-        false,
         TEST_SESSION_ID,
         None,
         None,
