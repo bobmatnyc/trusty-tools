@@ -4,10 +4,11 @@
 //! fake, so nothing here touches the network, a live `gh`, or a real PR.
 
 use super::body::{self, ATTRIBUTION_FOOTER, FIELDS, Field, IssueLink};
+use super::merge;
 use super::open::{self, ChangelogVerdict, Preflight};
 use super::queue_check;
 use super::{GhRun, GhRunner, repo_slug};
-use crate::cli::{PrOpenArgs, PrQueueCheckArgs};
+use crate::cli::{PrMergeArgs, PrOpenArgs, PrQueueCheckArgs};
 
 // ── fakes ────────────────────────────────────────────────────────────────
 
@@ -681,4 +682,295 @@ fn first_reason(view_json: &str) -> Option<String> {
     let required = queue_check::required_contexts(&gh, "o/r", "main").expect("contexts");
     let verdicts = queue_check::verdicts(&gh, "o/r", &required, &[1]).expect("verdicts");
     verdicts.into_iter().next().and_then(|v| v.reason)
+}
+
+// ── tm pr merge (#6808) ──────────────────────────────────────────────────
+
+/// Default `tm pr merge` flags for PR 42.
+fn merge_args() -> PrMergeArgs {
+    PrMergeArgs {
+        pr: 42,
+        auto: false,
+        no_delete_branch: false,
+        repo: None,
+    }
+}
+
+/// A `gh pr view` payload for PR 42, with `patch`'s keys overriding the
+/// clean-and-approved defaults.
+fn merge_view(body: &str, patch: serde_json::Value) -> merge::MergeView {
+    let mut v = serde_json::json!({
+        "number": 42,
+        "title": "feat(x): a thing",
+        "body": body,
+        "isDraft": false,
+        "labels": [],
+        "reviewDecision": "APPROVED",
+        "mergeStateStatus": "CLEAN",
+        "mergeable": "MERGEABLE",
+        "headRefName": "feat/6808-x",
+    });
+    let obj = v.as_object_mut().expect("object");
+    for (k, val) in patch.as_object().expect("patch is an object") {
+        obj.insert(k.clone(), val.clone());
+    }
+    serde_json::from_value(v).expect("view parses")
+}
+
+/// The decision `tm pr merge` would reach for this view.
+fn merge_decision(view: &merge::MergeView) -> merge::Decision {
+    let failures = body::validate(&view.body).failures();
+    merge::decide(view, &failures)
+}
+
+/// The refusal reason, or `None` when the decision was to merge.
+fn merge_refusal(view: &merge::MergeView) -> Option<String> {
+    match merge_decision(view) {
+        merge::Decision::Merge => None,
+        merge::Decision::Refuse(r) => Some(r),
+    }
+}
+
+/// [`full_body`] with the attribution footer stripped off the end.
+fn body_without_footer() -> String {
+    let mut s = String::new();
+    for f in FIELDS {
+        s.push_str(&format!("## {}\n\nsomething real.\n\n", f.heading()));
+    }
+    s
+}
+
+#[test]
+fn merge_valid_body_merges() {
+    let view = merge_view(&full_body(), serde_json::json!({}));
+    assert_eq!(merge_decision(&view), merge::Decision::Merge);
+}
+
+#[test]
+fn merge_refuses_missing_footer() {
+    let view = merge_view(&body_without_footer(), serde_json::json!({}));
+    let reason = merge_refusal(&view).expect("refused");
+    assert!(reason.contains("attribution footer"), "{reason}");
+    assert!(reason.contains("tm pr open"), "{reason}");
+}
+
+#[test]
+fn merge_refuses_draft() {
+    let view = merge_view(&full_body(), serde_json::json!({"isDraft": true}));
+    assert_eq!(merge_refusal(&view).as_deref(), Some("the PR is a draft"));
+}
+
+#[test]
+fn merge_refuses_do_not_merge_label_any_case() {
+    for name in ["do-not-merge", "DO-NOT-MERGE", "Do-Not-Merge"] {
+        let view = merge_view(
+            &full_body(),
+            serde_json::json!({"labels": [{"name": name}]}),
+        );
+        let reason = merge_refusal(&view).unwrap_or_else(|| panic!("`{name}` must refuse"));
+        assert!(reason.contains(name), "{reason}");
+    }
+}
+
+#[test]
+fn merge_refuses_changes_requested() {
+    let view = merge_view(
+        &full_body(),
+        serde_json::json!({"reviewDecision": "CHANGES_REQUESTED"}),
+    );
+    let reason = merge_refusal(&view).expect("refused");
+    assert!(reason.contains("CHANGES_REQUESTED"), "{reason}");
+}
+
+#[test]
+fn merge_behind_is_not_a_refusal() {
+    // Repo rule: a BEHIND branch merges fine, so only CONFLICTING stops here.
+    let view = merge_view(
+        &full_body(),
+        serde_json::json!({"mergeStateStatus": "BEHIND"}),
+    );
+    assert_eq!(merge_decision(&view), merge::Decision::Merge);
+}
+
+/// `CONFLICTING` is a `MergeableState` value, never a `MergeStateStatus` one
+/// (#6808) — reading it off `mergeStateStatus` let every conflicted PR through.
+#[test]
+fn merge_refuses_conflicting_with_update_branch_hint() {
+    let view = merge_view(
+        &full_body(),
+        serde_json::json!({"mergeable": "CONFLICTING"}),
+    );
+    let reason = merge_refusal(&view).expect("refused");
+    assert!(reason.contains("mergeable CONFLICTING"), "{reason}");
+    assert!(reason.contains("gh pr update-branch 42"), "{reason}");
+}
+
+/// `DIRTY` is how the same conflict spells itself in `mergeStateStatus`.
+#[test]
+fn merge_refuses_dirty_merge_state_with_update_branch_hint() {
+    let view = merge_view(
+        &full_body(),
+        serde_json::json!({"mergeStateStatus": "DIRTY", "mergeable": "UNKNOWN"}),
+    );
+    let reason = merge_refusal(&view).expect("refused");
+    assert!(reason.contains("mergeStateStatus DIRTY"), "{reason}");
+    assert!(reason.contains("gh pr update-branch 42"), "{reason}");
+}
+
+/// Every other merge state and review decision is `gh pr merge`'s to judge —
+/// which is what makes `--auto` on a still-checking PR the intended path.
+#[test]
+fn merge_other_merge_states_fall_through_to_gh() {
+    for state in ["BLOCKED", "UNSTABLE", "HAS_HOOKS", "UNKNOWN"] {
+        let view = merge_view(&full_body(), serde_json::json!({"mergeStateStatus": state}));
+        assert_eq!(
+            merge_decision(&view),
+            merge::Decision::Merge,
+            "mergeStateStatus {state} must not refuse"
+        );
+    }
+    for decision in [
+        serde_json::json!(null),
+        serde_json::json!("REVIEW_REQUIRED"),
+    ] {
+        let view = merge_view(
+            &full_body(),
+            serde_json::json!({"reviewDecision": decision}),
+        );
+        assert_eq!(merge_decision(&view), merge::Decision::Merge);
+    }
+}
+
+/// A `gh pr view` stdout payload for PR 42.
+fn merge_view_json(body: &str, patch: serde_json::Value) -> String {
+    let mut v = serde_json::json!({
+        "number": 42,
+        "title": "feat(x): a thing",
+        "body": body,
+        "isDraft": false,
+        "labels": [],
+        "reviewDecision": "APPROVED",
+        "mergeStateStatus": "CLEAN",
+        "mergeable": "MERGEABLE",
+        "headRefName": "feat/6808-x",
+    });
+    let obj = v.as_object_mut().expect("object");
+    for (k, val) in patch.as_object().expect("patch is an object") {
+        obj.insert(k.clone(), val.clone());
+    }
+    v.to_string()
+}
+
+#[test]
+fn merge_argv_carries_squash_delete_and_body_file() {
+    let gh = FakeGh::new()
+        .on(
+            "pr view",
+            &merge_view_json(&full_body(), serde_json::json!({})),
+        )
+        .on("pr merge", "");
+    assert_eq!(
+        merge::run(&gh, &merge_args()).expect("runs"),
+        super::EXIT_OK
+    );
+
+    let calls = gh.calls();
+    let merge_call = calls
+        .iter()
+        .find(|a| {
+            a.first().map(String::as_str) == Some("pr")
+                && a.get(1).map(String::as_str) == Some("merge")
+        })
+        .expect("gh pr merge was called");
+    let joined = merge_call.join(" ");
+    assert!(
+        joined.starts_with("pr merge 42 --squash --delete-branch"),
+        "{joined}"
+    );
+    assert!(!merge_call.contains(&"--auto".to_string()), "{joined}");
+
+    let subject = merge_call
+        .iter()
+        .position(|a| a == "--subject")
+        .map(|i| merge_call[i + 1].clone())
+        .expect("--subject supplied");
+    assert_eq!(subject, "feat(x): a thing (#42)");
+
+    let body_file = merge_call
+        .iter()
+        .position(|a| a == "--body-file")
+        .map(|i| merge_call[i + 1].clone())
+        .expect("--body-file supplied");
+    assert!(!body_file.is_empty(), "--body-file needs a path");
+}
+
+#[test]
+fn merge_argv_honours_auto_and_no_delete_branch() {
+    let gh = FakeGh::new()
+        .on(
+            "pr view",
+            &merge_view_json(&full_body(), serde_json::json!({})),
+        )
+        .on("pr merge", "");
+    let args = PrMergeArgs {
+        pr: 42,
+        auto: true,
+        no_delete_branch: true,
+        repo: Some("o/r".to_string()),
+    };
+    assert_eq!(merge::run(&gh, &args).expect("runs"), super::EXIT_OK);
+
+    let calls = gh.calls();
+    let merge_call = calls.last().expect("a call");
+    let joined = merge_call.join(" ");
+    assert!(joined.contains("--auto"), "{joined}");
+    assert!(joined.contains("--repo o/r"), "{joined}");
+    assert!(!joined.contains("--delete-branch"), "{joined}");
+}
+
+#[test]
+fn merge_refuses_without_calling_gh_merge() {
+    let gh = FakeGh::new().on(
+        "pr view",
+        &merge_view_json(&full_body(), serde_json::json!({"isDraft": true})),
+    );
+    assert_eq!(
+        merge::run(&gh, &merge_args()).expect("runs"),
+        super::EXIT_BLOCKED
+    );
+    assert!(
+        gh.calls()
+            .iter()
+            .all(|a| a.get(1).map(String::as_str) != Some("merge")),
+        "gh pr merge must not be called on a refusal: {:?}",
+        gh.calls()
+    );
+}
+
+/// A failed `gh pr view` is an error, not a silent merge (#6808).
+#[test]
+fn merge_errors_when_gh_view_fails() {
+    let gh = FakeGh::new().on_fail("pr view", "could not resolve to a PullRequest");
+    let err = merge::run(&gh, &merge_args()).expect_err("must not swallow the failure");
+    assert!(format!("{err:#}").contains("could not resolve"), "{err:#}");
+    assert!(
+        gh.calls()
+            .iter()
+            .all(|a| a.get(1).map(String::as_str) != Some("merge")),
+        "gh pr merge must not run after a failed view: {:?}",
+        gh.calls()
+    );
+}
+
+/// A failed `gh pr merge` is an error, never a reported success (#6808).
+#[test]
+fn merge_errors_when_gh_merge_fails() {
+    let gh = FakeGh::new()
+        .on(
+            "pr view",
+            &merge_view_json(&full_body(), serde_json::json!({})),
+        )
+        .on_fail("pr merge", "Pull request is not mergeable");
+    let err = merge::run(&gh, &merge_args()).expect_err("must not swallow the failure");
+    assert!(format!("{err:#}").contains("not mergeable"), "{err:#}");
 }

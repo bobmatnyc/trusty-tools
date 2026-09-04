@@ -374,6 +374,25 @@ pub mod verify_gate;
 /// Test: `redundant_run::tests::*`.
 pub mod redundant_run;
 
+/// L1-L3 bake-off milestone exit gate (#5441).
+///
+/// Why: [`verify_gate`] and [`redundant_run`] act inside a single run; this
+/// acts on the evidence a whole milestone's bake-off left behind. #5441 makes
+/// a real L1-L3 run the condition for closing a Trusty Code milestone, and the
+/// first qualification attempt showed prose cannot enforce it — three passing
+/// levels were still disqualified because nothing mechanically checked that the
+/// retained metadata identified the candidate build, the runner, or the sources
+/// it consumed.
+/// What: [`bakeoff::preflight()`] rejects incomplete L1-L3 coverage, missing
+/// artifacts or provenance, mock-only evidence, a stale runner, and results
+/// produced by a different `tcode` build; [`bakeoff::compare_against_baseline`]
+/// blocks correctness and completion regressions against the previous accepted
+/// baseline and requires a written disposition for cost/token/turn/duration
+/// changes outside tolerance. Entirely offline — it reads a retained bundle and
+/// never runs a model. Operator surface: `tcode bakeoff-gate`.
+/// Test: `bakeoff::tests::*`, plus `tests/bakeoff_gate_e2e.rs`.
+pub mod bakeoff;
+
 /// DOC-28 catch-up context injection for the PM prompt (#1762, PR2).
 ///
 /// Why: The PM agent needs recent project-activity context (paused sessions,
