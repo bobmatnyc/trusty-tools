@@ -130,7 +130,7 @@ the drawing code rather than navigation callbacks. **It needs no console
 daemon**: each mode builds its own endpoint.
 
 ```bash
-swiftc -swift-version 5 -o target/console-saver/harness/paintharness \
+swiftc -O -swift-version 5 -o target/console-saver/harness/paintharness \
   crates/trusty-console/macos/saver/PaintHarness.swift
 
 for mode in offline slow preview; do
@@ -139,11 +139,22 @@ for mode in offline slow preview; do
 done
 ```
 
+`-O` matters: the pixel loop reads a million samples per frame and an
+unoptimised build spends over a second in it.
+
 | Mode | Endpoint | Asserts |
 |---|---|---|
-| `offline` | a closed port | within 1 s of `startAnimation()`, ≥98% of pixels are non-black and ≥2% carry drawn content (the text wordmark alone reaches ~0.4%) |
+| `offline` | a closed port | ≥98% of pixels non-black and ≥2% carrying drawn content, both before `startAnimation()` and after |
 | `slow` | a listener that accepts and never answers | the same, plus ≥3 connection attempts in 34 s — i.e. the load timed out and retried instead of hanging on `URLRequest`'s 60 s default |
 | `preview` | none (`isPreview: true`) | the bundled asset draws, and no `WKWebView` is built for a tile |
+
+Measured ink ratios at 1280×800, unfixed bundle → fixed:
+
+| Mode | Unfixed | Fixed |
+|---|---|---|
+| `offline` | 0.0034 | 0.0417 |
+| `slow` | 0.0034 | 0.0417 |
+| `preview` | 0.0022 | 0.1152 |
 
 Exit 0 passes; 9 is an assertion failure (every failed assertion is printed);
 2–6 and 8 are setup failures (bundle, principal class, endpoint, bitmap). Like
@@ -151,7 +162,8 @@ Exit 0 passes; 9 is an assertion failure (every failed assertion is printed);
 sandboxed host.
 
 The `slow` mode is the regression guard for #6838: against an unfixed bundle it
-reports one connection attempt, because nothing bounded the load.
+reports **one** connection attempt in 34 s, because nothing bounded the load.
+The fixed bundle reports four.
 
 ### Manual verification (still owed)
 
