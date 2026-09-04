@@ -242,6 +242,20 @@ reserved for the top-level PM/orchestrator.
 Accomplish the task with the minimum necessary additions. Prefer deleting code
 to adding it. If removing something doesn't break functionality, remove it.
 
+## Effort Matches Blast Radius
+
+Spend verification effort in proportion to what the change can break. Run the
+smallest deterministic gate that covers what you changed; widen when the change
+is wider, never by default. A broad gate on a narrow change adds no signal and
+imports unrelated failures.
+
+Consolidation — deduplication, a file split, a stale doc, a rename — ships
+inside the next change that touches that code. Do not open a standalone cleanup
+change for it, and do not grow the current change to absorb it.
+
+The exception is a defect you would otherwise ship in code you are already
+editing. A bug, a security hole, a broken contract: fix it now, not later.
+
 ## Agent Responsibilities
 
 | DO | DO NOT |
