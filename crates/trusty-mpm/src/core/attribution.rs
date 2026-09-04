@@ -13,7 +13,8 @@
 //! writes the tm-owned `CLAUDE_CONFIG_DIR` copy, which only the `claude` child
 //! tm spawns can see (`CLAUDE_CONFIG_DIR` is set per-command and never
 //! exported), and
-//! [`crate::core::session_launch::settings::write_output_style`] writes the
+//! `core::session_launch::settings::write_output_style` (private to that
+//! module, so not linkable) writes the
 //! project-tier `.claude/settings.json`, which any `claude` launched in the
 //! project reads. Both seed absent-only. `tm pr open`'s body validator checks
 //! the same constant so a hand-written body matches what the setting produces.
