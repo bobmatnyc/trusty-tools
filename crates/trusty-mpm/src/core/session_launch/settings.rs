@@ -163,15 +163,27 @@ pub(super) fn deploy_output_style(root: &Path) -> Result<PathBuf, PrepError> {
 /// What: reads an existing `<project>/.claude/settings.json` (preserving all
 /// other keys), sets `outputStyle` to `active_style` (the resolved active id;
 /// `None` → [`OUTPUT_STYLE`] default), enables `spinnerTipsEnabled`, sets
-/// `spinnerTipsOverride.tips` to [`SPINNER_TIPS`], and writes it back
-/// pretty-printed. Creates the file and `.claude/` directory when absent. The
-/// caller resolves+validates the id (via
-/// [`crate::core::output_style::resolve_active_style`]); an empty/whitespace id
-/// is treated as "unset" and falls back to the default here defensively.
+/// `spinnerTipsOverride.tips` to [`SPINNER_TIPS`], seeds `attribution` when
+/// absent (#6807, see below), and writes it back pretty-printed. Creates the
+/// file and `.claude/` directory when absent. The caller resolves+validates the
+/// id (via [`crate::core::output_style::resolve_active_style`]); an
+/// empty/whitespace id is treated as "unset" and falls back to the default here
+/// defensively.
+///
+/// The `attribution` seed is deliberately duplicated from
+/// [`crate::core::standalone::settings_defaults::ensure_settings_defaults`],
+/// which writes the same key into the tm-owned `CLAUDE_CONFIG_DIR`. That copy
+/// reaches only the `claude` child tm spawns — `CLAUDE_CONFIG_DIR` is set
+/// per-command and never exported — whereas the project tier is read by any
+/// `claude` launched in this directory, tm-orchestrated or not. Both seeds are
+/// absent-only and share one constant, so an operator-set value survives either
+/// path.
 /// Test: `prepare_session_sets_output_style`,
 /// `write_output_style_preserves_existing_keys`,
 /// `write_output_style_sets_spinner_tips`,
-/// `write_output_style_sets_active_style`.
+/// `write_output_style_sets_active_style`,
+/// `write_output_style_seeds_attribution`,
+/// `write_output_style_preserves_operator_attribution`.
 pub(super) fn write_output_style(
     project_dir: &Path,
     active_style: Option<&str>,
@@ -200,6 +212,20 @@ pub(super) fn write_output_style(
     settings["outputStyle"] = serde_json::Value::String(style.to_string());
     settings["spinnerTipsEnabled"] = serde_json::Value::Bool(true);
     settings["spinnerTipsOverride"] = serde_json::json!({ "tips": SPINNER_TIPS });
+
+    // #6807: the tm-owned CLAUDE_CONFIG_DIR copy of this key reaches only the
+    // `claude` child tm spawns, because `CLAUDE_CONFIG_DIR` is set per-command
+    // (`standalone::run`) and never exported. A bare `claude` launched in this
+    // project reads the project tier regardless, so seed it here too — absent
+    // only, so an operator-set `attribution` survives.
+    if let Some(obj) = settings.as_object_mut() {
+        obj.entry("attribution").or_insert_with(|| {
+            serde_json::json!({
+                "commit": crate::core::attribution::ATTRIBUTION_FOOTER,
+                "pr": crate::core::attribution::ATTRIBUTION_FOOTER,
+            })
+        });
+    }
 
     let serialized = serde_json::to_string_pretty(&settings)
         .map_err(|err| PrepError::Deploy(err.to_string()))?;
