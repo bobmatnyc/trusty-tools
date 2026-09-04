@@ -74,6 +74,22 @@ pub(super) struct IndexDetailEntry {
     /// (`list_last_used_tests.rs`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_used_unix: Option<u64>,
+    /// Vector-lane health, flattened onto this entry (#6699).
+    ///
+    /// Why: the console's Indexes view showed a zero-vector index green. The
+    /// verdict #6689 built for the expanded panel needs `vectors_present`
+    /// against `chunk_count`, plus the stage status and advertised
+    /// capabilities that separate a genuine fault from a BM25-only index —
+    /// and this row carried none of them. Flattened rather than nested so a
+    /// row and a `GET /indexes/{id}/status` body carry the same key names at
+    /// the same depth, and one predicate reads either.
+    /// What: [`super::vector_health::VectorLaneHealth`], computed by the same
+    /// function the per-index endpoint calls. Purely additive: every field
+    /// above keeps its name, type and presence rule.
+    /// Test: `list_and_status_agree_on_vector_lane_health`,
+    /// `list_indexes_details_reports_zero_vectors` (`list_vector_health_tests.rs`).
+    #[serde(flatten)]
+    pub vector_health: super::vector_health::VectorLaneHealth,
 }
 
 #[derive(Deserialize)]

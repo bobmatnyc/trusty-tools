@@ -186,7 +186,7 @@ pub(super) async fn list_indexes_handler(
     State(state): State<Arc<SearchAppState>>,
     Query(params): Query<ListIndexesParams>,
 ) -> Response {
-    Json(list_indexes_report(&state, &params)).into_response()
+    Json(list_indexes_report(&state, &params).await).into_response()
 }
 
 /// The body `GET /indexes` serves, without the transport (#6285 slice 2).
@@ -197,10 +197,11 @@ pub(super) async fn list_indexes_handler(
 /// handler above wraps it in `Json` and the RPC registration returns it as the
 /// frame's `result`.
 /// What: [`list_indexes_handler`]'s whole former body, returning the value it
-/// used to serialise. Not `async` — nothing here awaits.
+/// used to serialise. `async` since #6699 — the `?details=true` arm reads each
+/// handle's stage snapshot and live vector count, both behind `RwLock`s.
 /// Test: `indexes_list_over_the_socket_matches_the_http_body` in
 /// `service::rpc::reads::tests`.
-pub(crate) fn list_indexes_report(
+pub(crate) async fn list_indexes_report(
     state: &Arc<SearchAppState>,
     params: &ListIndexesParams,
 ) -> serde_json::Value {
@@ -232,29 +233,34 @@ pub(crate) fn list_indexes_report(
         let handles = state.registry.list_handles();
         // #6424: one registry load now carries repo_identity AND last_used_unix.
         let facts = resolve_persisted_facts(state, &handles);
-        let entries: Vec<IndexDetailEntry> = handles
-            .into_iter()
-            .filter_map(|handle| {
-                let row = facts.get(&handle.id.0).cloned().unwrap_or_default();
-                let repo_identity = row.repo_identity;
-                if let Some(target) = &identity_filter {
-                    if repo_identity.as_ref() != Some(target) {
-                        return None;
-                    }
+        let mut entries: Vec<IndexDetailEntry> = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let row = facts.get(&handle.id.0).cloned().unwrap_or_default();
+            let repo_identity = row.repo_identity;
+            if let Some(target) = &identity_filter {
+                if repo_identity.as_ref() != Some(target) {
+                    continue;
                 }
-                // #4706: sum both storage layouts — a colocated index kept its
-                // bytes outside the global dir and so reported 0, not null.
-                let (size_bytes, _) = index_disk_and_mtime(&handle.id.0, &handle.root_path);
-                let root_path = handle.root_path.to_str().map(|s| s.to_string());
-                Some(IndexDetailEntry {
-                    id: handle.id.0.clone(),
-                    root_path,
-                    size_bytes,
-                    repo_identity,
-                    last_used_unix: row.last_used_unix,
-                })
-            })
-            .collect();
+            }
+            // #4706: sum both storage layouts — a colocated index kept its
+            // bytes outside the global dir and so reported 0, not null.
+            let (size_bytes, _) = index_disk_and_mtime(&handle.id.0, &handle.root_path);
+            let root_path = handle.root_path.to_str().map(|s| s.to_string());
+            // #6699: the roster showed a zero-vector index green because this
+            // row carried no lane health at all. Two O(1) reads per index —
+            // `Index::size()` on the wired store and a redb `table.len()` —
+            // beside the directory walk `index_disk_and_mtime` above already
+            // pays. No corpus scan.
+            let vector_health = super::vector_health::vector_lane_health(&handle).await;
+            entries.push(IndexDetailEntry {
+                id: handle.id.0.clone(),
+                root_path,
+                size_bytes,
+                repo_identity,
+                last_used_unix: row.last_used_unix,
+                vector_health,
+            });
+        }
         serde_json::json!({ "indexes": entries })
     } else if let Some(target) = &identity_filter {
         // Flat list, but scoped to one repo identity (DOC-37).
