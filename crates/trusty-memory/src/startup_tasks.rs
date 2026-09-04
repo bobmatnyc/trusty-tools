@@ -4,8 +4,9 @@
 //! against the 500 cap. This function was the largest self-contained unit
 //! there and depends only on the public `trusty_memory` surface, so it moves
 //! without touching the CLI definition or the dispatch table.
-//! What: `spawn_startup_tasks` — embedder warm-up, palace hydration, dream
-//! scheduler, BM25 sweeps, alias discovery, update check, and the pin scan.
+//! What: `spawn_startup_tasks` — the #6820 machine-tier log line, embedder
+//! warm-up, palace hydration, dream scheduler, BM25 sweeps, alias discovery,
+//! update check, and the pin scan.
 //! Test: `startup_task_tests::spawn_startup_tasks_populates_pin_map`.
 
 use trusty_memory::AppState;
@@ -42,6 +43,11 @@ use trusty_memory::AppState;
 ///       and populates the map; the log emission is confirmed by the throwaway
 ///       daemon run documented in the session notes.
 pub(crate) fn spawn_startup_tasks(state: &AppState) {
+    // #6820: report the detected machine tier before hydration starts, and warn
+    // when the host is below the documented 16 GB minimum. Nothing is retuned off
+    // it yet — #6823 is what makes `max_open_palaces` read `state.machine.tier`.
+    log_machine_budget(&state.machine);
+
     // Issue #1529: build watch channel for the autonomous dream scheduler.
     // The sender (`dtx`) is intentionally held here and moved into the
     // hydration task — the shutdown bridge is only wired AFTER
@@ -234,4 +240,29 @@ pub(crate) fn spawn_startup_tasks(state: &AppState) {
             }
         }
     });
+}
+/// Report the detected machine tier and budget at daemon startup (#6820).
+///
+/// Why: trusty-memory previously logged nothing about the host it was sizing
+/// itself for, because it detected nothing — the palace cap was a fixed 64 on
+/// every machine. An operator diagnosing memory pressure now sees the same tier
+/// line trusty-search prints, from the same shared module, plus a one-line
+/// advisory when the host is under the documented 16 GB minimum.
+/// What: two `tracing` lines — the budget at `info`, and the sub-minimum
+/// advisory at `warn` when `MachineBudget::minimum_advisory` returns one. Never
+/// writes to stdout: this process speaks MCP JSON-RPC there.
+/// Test: covered by `trusty_common::machine_tier::tests` for the values;
+/// this function only formats them.
+fn log_machine_budget(budget: &trusty_common::machine_tier::MachineBudget) {
+    tracing::info!(
+        "trusty-memory: detected {} MB RAM → tier={} \
+         (daemon memory_limit_mb={}, index memory_limit_mb={})",
+        budget.total_ram_mb,
+        budget.tier,
+        budget.memory_limit_mb,
+        budget.index_memory_limit_mb,
+    );
+    if let Some(advisory) = budget.minimum_advisory() {
+        tracing::warn!("trusty-memory: {advisory}");
+    }
 }

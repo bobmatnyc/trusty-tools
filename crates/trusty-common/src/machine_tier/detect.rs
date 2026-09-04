@@ -1,11 +1,15 @@
 //! Platform-specific total RAM detection.
 //!
 //! Why: tier selection drives every memory cap; we'd rather fall back to the
-//! conservative Medium tier than guess wrong on an unsupported OS.
+//! conservative default than guess wrong on an unsupported OS. Moved here from
+//! `trusty-search`'s `core::memory_policy::detect` by #6820 so `trusty-memory`
+//! reads the SAME number — including the cgroup clamp, which `sysinfo`'s
+//! `total_memory()` (used by `host_metrics` for live telemetry) does
+//! not apply.
 //! What: dispatches to a `#[cfg]`-gated platform implementation
 //! (`sysctl hw.memsize` on macOS, `/proc/meminfo` parsing on Linux, clamped to
 //! any enclosing cgroup memory ceiling on Linux — issue #3657).
-//! Test: `test_ram_detection_returns_nonzero` in `super::tests` asserts > 0
+//! Test: `ram_detection_returns_nonzero` in `super::tests` asserts > 0
 //! on the host running the suite (CI runs Linux/macOS, both supported); the
 //! cgroup resolution + parsing logic has its own pure-function/fabricated-
 //! filesystem unit tests below, runnable on every platform (no `cfg` gate —
@@ -15,10 +19,10 @@
 /// path is not implemented or the detection command failed.
 ///
 /// Why: tier selection drives every memory cap; we'd rather fall back to the
-/// conservative Medium tier than guess wrong on an unsupported OS.
+/// conservative default than guess wrong on an unsupported OS.
 /// What: dispatches to a `#[cfg]`-gated platform implementation
 /// (`sysctl hw.memsize` on macOS, `/proc/meminfo` parsing on Linux).
-/// Test: `test_ram_detection_returns_nonzero` asserts > 0 on the host
+/// Test: `ram_detection_returns_nonzero` asserts > 0 on the host
 /// running the suite (CI runs Linux/macOS, both supported).
 pub fn detect_total_ram_mb() -> Option<u64> {
     #[cfg(target_os = "macos")]
@@ -167,10 +171,12 @@ fn detect_cgroup_memory_limit_mb_with_roots(
         Some(nested) => format!("{}/memory.max", join_cgroup_mount(v2_mount_root, &nested)),
         None => format!("{}/memory.max", v2_mount_root.trim_end_matches('/')),
     };
-    if let Ok(text) = std::fs::read_to_string(&v2_max_path) {
-        if let Some(mb) = parse_cgroup_v2_max(&text) {
-            return Some(mb);
-        }
+    // #6820: a let-chain, not a nested `if` — trusty-common is edition 2024,
+    // where clippy's `collapsible_if` fires on the trusty-search original.
+    if let Ok(text) = std::fs::read_to_string(&v2_max_path)
+        && let Some(mb) = parse_cgroup_v2_max(&text)
+    {
+        return Some(mb);
     }
 
     // cgroup v1: same idea, using the memory-controller's own line.
@@ -187,10 +193,10 @@ fn detect_cgroup_memory_limit_mb_with_roots(
             v1_mount_root.trim_end_matches('/')
         ),
     };
-    if let Ok(text) = std::fs::read_to_string(&v1_limit_path) {
-        if let Some(mb) = parse_cgroup_v1_limit(&text, host_ram_mb) {
-            return Some(mb);
-        }
+    if let Ok(text) = std::fs::read_to_string(&v1_limit_path)
+        && let Some(mb) = parse_cgroup_v1_limit(&text, host_ram_mb)
+    {
+        return Some(mb);
     }
 
     None

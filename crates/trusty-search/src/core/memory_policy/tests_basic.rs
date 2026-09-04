@@ -6,23 +6,20 @@
 //! tier default tables.
 //! Test: run with `cargo test -p trusty-search`.
 
-use super::compute::{
+use super::tier::tier_defaults;
+// #6820: the tier bands, the RAM read, and the proportional formulas moved to
+// trusty-common. These tests still pin the numbers THIS daemon resolves, so a
+// regression in either crate fails here.
+use trusty_common::machine_tier::{
     compute_index_memory_limit_mb, compute_max_batch_size, compute_max_chunks,
-    compute_memory_limit_mb,
+    compute_memory_limit_mb, MemoryTier, INDEX_MEMORY_LIMIT_CEIL_MB, INDEX_MEMORY_LIMIT_FLOOR_MB,
+    MAX_CHUNKS_FLOOR, MAX_COMPUTED_BATCH_SIZE, MEMORY_LIMIT_CEIL_MB, MIN_COMPUTED_BATCH_SIZE,
 };
-use super::constants::{
-    INDEX_MEMORY_LIMIT_CEIL_MB, INDEX_MEMORY_LIMIT_FLOOR_MB, MAX_CHUNKS_FLOOR,
-    MAX_COMPUTED_BATCH_SIZE, MEMORY_LIMIT_CEIL_MB, MIN_COMPUTED_BATCH_SIZE,
-};
-use super::tier::MemoryTier;
 
 #[test]
 fn test_tier_selection() {
-    // Boundary table: 16 GB Medium, 32 GB Large, 64 GB XLarge.
-    // The daemon enforces a 16 GB hard minimum at startup, so sub-16 GB
-    // RAM should never reach tier selection in normal operation. If it
-    // does (e.g. tests, library consumers), we return Medium as a safe
-    // fallback rather than panic.
+    // Boundary table: 16 GB Medium, 32 GB Large, 64 GB XLarge — unchanged by
+    // the #6820 move into trusty-common.
     assert_eq!(MemoryTier::from_total_ram_mb(16 * 1024), MemoryTier::Medium);
     assert_eq!(MemoryTier::from_total_ram_mb(31 * 1024), MemoryTier::Medium);
     assert_eq!(MemoryTier::from_total_ram_mb(32 * 1024), MemoryTier::Large);
@@ -33,12 +30,25 @@ fn test_tier_selection() {
         MemoryTier::XLarge
     );
 
-    // Defensive fallback: sub-16 GB should not be reachable in production
-    // (the daemon exits at startup), but the tier function must still
-    // return something well-defined. We map to Medium.
-    assert_eq!(MemoryTier::from_total_ram_mb(15 * 1024), MemoryTier::Medium);
-    assert_eq!(MemoryTier::from_total_ram_mb(8 * 1024), MemoryTier::Medium);
-    assert_eq!(MemoryTier::from_total_ram_mb(4 * 1024), MemoryTier::Medium);
+    // #6820: sub-16 GB now resolves to the Degraded band. It used to map to
+    // Medium and the daemon then hard-exited before serving anything, so a
+    // 12 GB host got no search at all; it now runs with reduced caps.
+    assert_eq!(
+        MemoryTier::from_total_ram_mb(15 * 1024),
+        MemoryTier::Degraded
+    );
+    assert_eq!(
+        MemoryTier::from_total_ram_mb(12 * 1024),
+        MemoryTier::Degraded
+    );
+    assert_eq!(
+        MemoryTier::from_total_ram_mb(8 * 1024),
+        MemoryTier::Degraded
+    );
+    assert_eq!(
+        MemoryTier::from_total_ram_mb(4 * 1024),
+        MemoryTier::Degraded
+    );
 }
 
 #[test]
@@ -52,7 +62,8 @@ fn test_tier_defaults_table() {
     // size. Note: max_batch_size is now derived from the *index* memory
     // limit (75% of RAM), not the global daemon limit (25%).
     let d = |ram_mb: u64, tier: MemoryTier| {
-        tier.defaults(
+        tier_defaults(
+            tier,
             compute_memory_limit_mb(ram_mb),
             compute_index_memory_limit_mb(ram_mb),
         )
@@ -207,4 +218,59 @@ fn test_compute_max_batch_size_from_limit() {
     // First value above the clamp boundary:
     // floor(21_846 * 0.75 / 32) = 512, anything above stays clamped at 512.
     assert_eq!(compute_max_batch_size(22_000), MAX_COMPUTED_BATCH_SIZE);
+}
+
+/// #6820: the Degraded band's caps must be SMALLER than Medium's on every
+/// index-size-driven field, and its derived caps must still be non-zero — a
+/// sub-minimum host runs smaller, not broken.
+#[test]
+fn test_degraded_tier_defaults_are_reduced() {
+    let degraded = tier_defaults(
+        MemoryTier::Degraded,
+        compute_memory_limit_mb(12 * 1024),
+        compute_index_memory_limit_mb(12 * 1024),
+    );
+    let medium = tier_defaults(
+        MemoryTier::Medium,
+        compute_memory_limit_mb(16 * 1024),
+        compute_index_memory_limit_mb(16 * 1024),
+    );
+
+    assert!(degraded.embedding_cache < medium.embedding_cache);
+    assert!(degraded.bm25_corpus_cap < medium.bm25_corpus_cap);
+    assert!(degraded.max_kg_nodes < medium.max_kg_nodes);
+    assert!(degraded.memory_limit_mb < medium.memory_limit_mb);
+    assert!(degraded.max_chunks <= medium.max_chunks);
+
+    // Reduced, not empty.
+    assert!(degraded.embedding_cache > 0);
+    assert!(degraded.bm25_corpus_cap > 0);
+    assert!(degraded.max_kg_nodes > 0);
+    assert!(degraded.max_chunks >= MAX_CHUNKS_FLOOR);
+    assert!(degraded.max_batch_size >= MIN_COMPUTED_BATCH_SIZE);
+}
+
+/// #6820 acceptance criterion, read through trusty-search's own resolution path:
+/// a 24 GB host resolves to Medium with the 6144 MB / 18432 MB pair the
+/// proportional formula already produced, plus the caps derived from it.
+#[test]
+fn test_supported_24gb_target_defaults() {
+    let tier = MemoryTier::from_total_ram_mb(24 * 1024);
+    assert_eq!(
+        tier,
+        MemoryTier::Medium,
+        "24 GB is inside the Medium band; it needs no boundary of its own"
+    );
+    let d = tier_defaults(
+        tier,
+        compute_memory_limit_mb(24 * 1024),
+        compute_index_memory_limit_mb(24 * 1024),
+    );
+    assert_eq!(d.memory_limit_mb, 6_144);
+    assert_eq!(d.index_memory_limit_mb, 18_432);
+    // max_chunks = clamp(6144 * 50, 50_000, 800_000) = 307_200
+    assert_eq!(d.max_chunks, 307_200);
+    // max_batch_size tracks the INDEX limit: floor(18432 * 0.75 / 32) = 432
+    assert_eq!(d.max_batch_size, 432);
+    assert_eq!(d.embedding_cache, 1_000);
 }

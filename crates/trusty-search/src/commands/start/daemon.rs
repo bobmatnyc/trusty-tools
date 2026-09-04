@@ -297,19 +297,13 @@ pub async fn handle_start(
     // SAFETY: invoked before tokio spawns any indexing workers.
     let policy = crate::core::MemoryPolicy::detect();
 
-    // Hard 16 GB minimum: trusty-search is designed for developer workstations.
-    const MIN_RAM_MB: u64 = 16 * 1024;
-    if policy.total_ram_mb < MIN_RAM_MB
-        && std::env::var("TRUSTY_SKIP_RAM_CHECK").as_deref() != Ok("1")
-    {
-        anyhow::bail!(
-            "trusty-search requires at least 16 GB of RAM.\n\
-             Detected: {} MB ({:.1} GB)\n\
-             Indexing large codebases on machines with less memory is not supported.\n\
-             To bypass on this host set TRUSTY_SKIP_RAM_CHECK=1 in the daemon environment.",
-            policy.total_ram_mb,
-            policy.total_ram_mb as f64 / 1024.0
-        );
+    // #6820: below the 16 GB minimum the daemon now DEGRADES instead of exiting.
+    // It used to `bail!` here, so a 12 GB host got no search at all rather than a
+    // smaller one. See `ram_minimum_advisory` for the posture and the retained
+    // TRUSTY_SKIP_RAM_CHECK escape hatch.
+    if let Some(advisory) = ram_minimum_advisory(policy.total_ram_mb) {
+        tracing::warn!("{advisory}");
+        eprintln!("trusty-search: {advisory}");
     }
 
     policy.log_summary();
@@ -572,4 +566,69 @@ pub async fn handle_start(
     // match for how the embedder sidecar is still reaped on this path despite
     // `exit(0)` bypassing `Drop`.
     std::process::exit(0)
+}
+
+/// The startup advisory a sub-16 GB host earns, or `None` at or above the
+/// minimum.
+///
+/// Why (#6820): this used to be an `anyhow::bail!` in `run_daemon_inner` — a
+/// 12 GB laptop got no search at all rather than a smaller one. The suite's bar
+/// is now "24 GB supported, 16 GB minimum, documented degrade below", so the
+/// daemon warns once and keeps serving on the reduced
+/// `trusty_common::machine_tier::MemoryTier::Degraded` caps. Returning an
+/// `Option<String>` rather than a `Result` is what makes the no-abort contract
+/// visible in the signature and testable without booting a daemon.
+/// What: delegates the wording to `MachineBudget::minimum_advisory` so
+/// trusty-search and trusty-memory say the same thing. `TRUSTY_SKIP_RAM_CHECK=1`
+/// still suppresses it — the flag used to bypass the exit and now silences the
+/// advisory, for an operator who has already accepted the trade.
+/// Test: `degraded_host_earns_an_advisory_and_does_not_error`,
+/// `supported_host_earns_no_advisory`, `skip_ram_check_suppresses_the_advisory`.
+fn ram_minimum_advisory(total_ram_mb: u64) -> Option<String> {
+    if std::env::var("TRUSTY_SKIP_RAM_CHECK").as_deref() == Ok("1") {
+        return None;
+    }
+    trusty_common::machine_tier::MachineBudget::from_total_ram_mb(total_ram_mb).minimum_advisory()
+}
+
+#[cfg(test)]
+mod ram_minimum_tests {
+    use super::ram_minimum_advisory;
+
+    /// The #6820 regression test: a 12 GB host produces an advisory MESSAGE, and
+    /// there is no error path to produce at all. Before this the same input
+    /// reached `anyhow::bail!` and the daemon exited before binding.
+    #[test]
+    fn degraded_host_earns_an_advisory_and_does_not_error() {
+        let msg = ram_minimum_advisory(12 * 1024).expect("12 GB is below the minimum");
+        assert!(msg.contains("12288 MB"), "{msg}");
+        assert!(msg.contains("16 GB minimum"), "{msg}");
+        assert!(msg.contains("Degraded"), "{msg}");
+    }
+
+    #[test]
+    fn supported_host_earns_no_advisory() {
+        for mb in [16 * 1024, 24 * 1024, 128 * 1024] {
+            assert_eq!(ram_minimum_advisory(mb), None, "{mb} MB is supported");
+        }
+    }
+
+    /// `TRUSTY_SKIP_RAM_CHECK=1` keeps working: it silences the advisory now that
+    /// there is no exit left for it to bypass.
+    #[test]
+    #[serial_test::serial]
+    fn skip_ram_check_suppresses_the_advisory() {
+        let prior = std::env::var("TRUSTY_SKIP_RAM_CHECK").ok();
+        // SAFETY: serialized against every other env-mutating test in this
+        // binary by `#[serial_test::serial]`.
+        unsafe { std::env::set_var("TRUSTY_SKIP_RAM_CHECK", "1") };
+        let suppressed = ram_minimum_advisory(12 * 1024);
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("TRUSTY_SKIP_RAM_CHECK", v),
+                None => std::env::remove_var("TRUSTY_SKIP_RAM_CHECK"),
+            }
+        }
+        assert_eq!(suppressed, None);
+    }
 }

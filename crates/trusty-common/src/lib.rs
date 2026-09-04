@@ -564,6 +564,25 @@ pub mod stdio_mcp_client;
 #[cfg(feature = "host-metrics")]
 pub mod host_metrics;
 
+/// Machine-tier detection + the proportional memory budget (#6820).
+///
+/// Why: the suite's supported-hardware bar — 24 GB supported, 16 GB minimum,
+/// documented degrade below (epic #6802) — needs one enforcement point.
+/// `trusty-search` held the RAM read, the tier bands, and the proportional
+/// formulas privately; `trusty-memory` had none of them and sized its palace cap
+/// off a fixed constant regardless of the host. The common-entry rule gives that
+/// capability exactly one implementation.
+/// What: gated behind the `machine-tier` feature, which pulls in no new
+/// dependencies. Exposes [`machine_tier::detect_total_ram_mb`] (cgroup-clamped
+/// on Linux), [`machine_tier::MemoryTier`] with its 16/32/64 GB bands and the
+/// sub-16 GB `Degraded` posture, the four proportional formulas, and
+/// [`machine_tier::MachineBudget`] which ties them together. Distinct from the
+/// `host_metrics` module, which samples LIVE pressure through `sysinfo` and
+/// applies no cgroup clamp.
+/// Test: `cargo test -p trusty-common --features machine-tier --no-fail-fast`.
+#[cfg(feature = "machine-tier")]
+pub mod machine_tier;
+
 /// Upload trusty-* log files to object storage (#6533).
 ///
 /// Why: every trusty daemon writes logs to a local path that nothing prunes and

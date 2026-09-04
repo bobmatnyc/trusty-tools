@@ -23,6 +23,32 @@
 |---|---|---|
 | `RUST_LOG` | all daemons | Tracing filter, e.g. `RUST_LOG=debug` or `RUST_LOG=trusty_search=debug,warn`. |
 
+## Machine tier — supported hardware and the degrade posture
+
+The suite targets **24 GB**, supports a **16 GB minimum**, and **degrades below
+16 GB rather than refusing to run** (#6820, epic #6802). One module answers
+"how much RAM is really here" for every daemon:
+`trusty_common::machine_tier`, behind the `machine-tier` feature. It reads
+`hw.memsize` on macOS and `/proc/meminfo` on Linux, clamped on Linux to any
+enclosing cgroup ceiling (#3657), then resolves a tier and two proportional soft
+limits. Nothing else in the workspace reads total RAM for sizing — `sysinfo`'s
+`total_memory()` in `trusty_common::host_metrics` is live telemetry and applies
+no cgroup clamp, so it reports the host's RAM inside a capped container.
+
+| Tier | Total RAM | Posture |
+|---|---|---|
+| `Degraded` | < 16 GB | Runs with reduced caps. One startup warning. Not a supported configuration — a working one. |
+| `Medium` | 16–31 GB | Minimum supported (16 GB) and the primary target (24 GB → 6144 MB / 18432 MB). |
+| `Large` | 32–63 GB | — |
+| `XLarge` | ≥ 64 GB | — |
+
+| Variable | Required by | Purpose |
+|---|---|---|
+| `TRUSTY_SKIP_RAM_CHECK` | `trusty-search start` | Set to `1` to silence the sub-16 GB startup advisory. Before #6820 this bypassed a hard exit; the exit is gone, so it now only suppresses the warning. Nothing else changes — the `Degraded` caps still apply. |
+
+Per-tier caps: [trusty-search's memory-tuning table](../../crates/trusty-search/CLAUDE.md#memory-tuning-environment-variables).
+Measure the effect on a live daemon with `scripts/measure-daemon-footprint.sh`.
+
 ## trusty-search — Indexing, Memory & GPU
 
 | Variable | Required by | Purpose |

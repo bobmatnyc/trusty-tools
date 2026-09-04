@@ -129,6 +129,24 @@ async fn app_state_default_constructs() {
     assert!(s.default_palace.is_none());
 }
 
+/// #6820: trusty-memory had no tier detection at all — the palace cap was a
+/// fixed 64 whatever the host. This asserts the shared budget is resolved on
+/// `AppState` and is internally consistent, which is the field #6823 reads to
+/// size `max_open_palaces`.
+#[tokio::test]
+async fn machine_budget_is_detected_and_self_consistent() {
+    use trusty_common::machine_tier::{MachineBudget, MemoryTier, MEMORY_LIMIT_FLOOR_MB};
+    let (s, _tmp) = test_state();
+    let m = s.machine;
+    assert!(m.total_ram_mb > 0, "a budget of zero RAM is never correct");
+    assert_eq!(m.tier, MemoryTier::from_total_ram_mb(m.total_ram_mb));
+    assert!(m.memory_limit_mb >= MEMORY_LIMIT_FLOOR_MB as usize);
+    assert!(m.index_memory_limit_mb >= m.memory_limit_mb);
+    // The whole budget follows from the one reading — nothing on AppState
+    // re-derives a field independently.
+    assert_eq!(m, MachineBudget::from_total_ram_mb(m.total_ram_mb));
+}
+
 /// Why (issue #225): the previous implementation called `.expect()` on the
 /// tempdir fallback, which panicked the daemon at startup on hosts where
 /// neither the data root nor `std::env::temp_dir()` is writable
