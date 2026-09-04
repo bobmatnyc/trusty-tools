@@ -20,9 +20,9 @@
 use std::io::IsTerminal as _;
 
 use super::session_picker::{
-    PickerScope, SessionFilter, SessionSortArg, fetch_live_sessions, filter_sessions_by_term,
-    run_tty_picker, sort_sessions,
+    PickerScope, SessionFilter, SessionSortArg, fetch_live_sessions, run_tty_picker,
 };
+use super::session_picker_order::{filter_sessions_by_term, sort_sessions};
 
 /// Decide whether `tm ls` should open the interactive picker or print statically.
 ///
