@@ -199,16 +199,25 @@ fn diagnostic_lines(merged: &serde_json::Value) -> Vec<String> {
 /// dirty-tree gate refused to touch (path + reason) to stderr so a skip is
 /// never silent — a skipped worktree still holds work the operator needs to
 /// deal with by hand.
+///
+/// #6806: the request carries `invoking_session`, so the merged-PR pass's
+/// liveness gate can tell the caller's own claim on a worktree from another
+/// session's. Without it every claim reads as foreign and a session blocks its
+/// own trees. It is a PARAMETER rather than an inline `$TM_MANAGED_SESSION_ID`
+/// read so this function performs no process-global env work — the call site in
+/// `commands::session` resolves the id.
 /// Test: HTTP path covered by integration test; CLI parse by
 /// `cli_parses_session_prune_worktrees` and
 /// `cli_prune_worktrees_discard_dirty_is_opt_in`; the #5830 timeout override by
-/// `merged_pr_request_outlives_the_default_client_timeout`.
+/// `merged_pr_request_outlives_the_default_client_timeout`; the caller id by
+/// `prune_worktrees_sends_the_invoking_session`.
 pub(crate) async fn session_prune_worktrees(
     client: &reqwest::Client,
     url: &str,
     dry_run: bool,
     discard_dirty: bool,
     merged_prs: bool,
+    invoking_session: Option<String>,
 ) -> anyhow::Result<()> {
     let mut request = client
         .post(format!("{url}/api/v1/sessions/managed/prune-worktrees"))
@@ -217,6 +226,10 @@ pub(crate) async fn session_prune_worktrees(
             "discard_dirty": discard_dirty,
             // #2919: the merged-PR reclaim pass, off unless explicitly asked for.
             "merged_prs": merged_prs,
+            // #6806: the daemon occupies no pane and cannot discover who is
+            // asking, so the caller names itself. Absent outside a managed
+            // session, which leaves every claim foreign — the pre-#6806 gate.
+            "invoking_session": invoking_session,
         }));
     if merged_prs {
         // #5830: the merged-PR survey runs synchronously in the handler and

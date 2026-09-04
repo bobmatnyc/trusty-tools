@@ -144,6 +144,17 @@ Run this as part of session wrap-up when `tm doctor` reports orphaned
 worktrees, and always before ending a long working session that spawned
 managed sessions.
 
+**`--force` and the liveness gate (#6806).** `--force` means "actually delete",
+not "override a gate". A worktree another live session claims stays spared no
+matter how the command is invoked — to reclaim it, stop the session that holds
+it. The CALLING session's own claim is the exception: the command sends
+`$TM_MANAGED_SESSION_ID`, so the worktrees a session created under its own
+workspace are reclaimable from inside that session, subject to the merged-PR
+and unsaved-work gates as usual. The caller's own workspace directory is still
+refused. Every liveness refusal names the claiming session and says whether it
+is the caller, so `gate 2 (liveness)` on your own tree is now readable rather
+than a dead end.
+
 **Worktree Architecture:** For the design of the session↔worktree 1:1 model,
 semantic naming, and per-worktree search-index lifecycle, see
 `docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md` § 2 (session↔worktree model)

@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 use crate::session_manager::worktree_ownership::{AgentDelegationState, AgentWorktreeOwner};
+use crate::session_manager::worktree_reclaim_claim::WorkspaceClaim;
 
 /// Put the worktree in the state a merged PR leaves behind: one commit, pushed.
 ///
@@ -41,6 +42,11 @@ fn merged_index(branch: &str, pr: u64) -> PrIndex {
         &format!(r#"[{{"number": {pr}, "headRefName": "{branch}", "state": "MERGED"}}]"#),
         400,
     )
+}
+
+/// An empty claim set with no caller — nothing claims anything (#6806).
+fn nobody() -> LiveClaims {
+    LiveClaims::default()
 }
 
 /// A delegation registry that has never heard of any agent (#5661).
@@ -89,12 +95,39 @@ fn recheck_refuses_a_worktree_a_session_claims_now() {
     land(&path);
     let reason = recheck_before_delete(
         &path,
-        Some(std::slice::from_ref(&path)),
+        Some(&LiveClaims::foreign(vec![WorkspaceClaim::new(
+            "tm-other-01",
+            &path,
+        )])),
         &merged(1),
         &no_agents,
     )
     .expect("a claimed worktree must refuse");
     assert!(reason.contains("claims this workspace now"), "{reason}");
+    assert!(
+        reason.contains("tm-other-01"),
+        "names the claimant: {reason}"
+    );
+}
+
+/// #6806: the re-check agrees with gate 2 rather than contradicting it. A
+/// worktree the CALLER alone claims — nested inside the workspace its own
+/// session record holds — was refused here too, so a candidate could never
+/// survive both. Fails on `origin/main`.
+#[test]
+fn recheck_permits_a_worktree_claimed_only_by_the_calling_session() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("caller-claimed-6806");
+    land(&path);
+    let claims = LiveClaims {
+        claims: vec![WorkspaceClaim::new("tm-client-03", &fx.repo)],
+        caller: Some("tm-client-03".to_string()),
+    };
+    assert_eq!(
+        recheck_before_delete(&path, Some(&claims), &merged(1), &no_agents),
+        None,
+        "the caller's own claim on the enclosing workspace must not refuse"
+    );
 }
 
 #[test]
@@ -108,11 +141,11 @@ fn recheck_refuses_a_worktree_locked_after_the_survey() {
     let path = fx.add_worktree("locked-2919");
     land(&path);
     assert!(
-        recheck_before_delete(&path, Some(&[]), &merged(1), &no_agents).is_none(),
+        recheck_before_delete(&path, Some(&nobody()), &merged(1), &no_agents).is_none(),
         "precondition: the worktree is reclaimable before the lock"
     );
     fx.lock_worktree(&path);
-    let reason = recheck_before_delete(&path, Some(&[]), &merged(1), &no_agents)
+    let reason = recheck_before_delete(&path, Some(&nobody()), &merged(1), &no_agents)
         .expect("a locked worktree must refuse");
     assert!(reason.contains("git-locked"), "{reason}");
 }
@@ -124,7 +157,7 @@ fn recheck_refuses_a_path_git_no_longer_lists() {
     let fx = GitWorktreeFixture::new();
     let plain = fx.repo.join("not-a-worktree");
     std::fs::create_dir_all(&plain).expect("mkdir");
-    let reason = recheck_before_delete(&plain, Some(&[]), &merged(1), &no_agents)
+    let reason = recheck_before_delete(&plain, Some(&nobody()), &merged(1), &no_agents)
         .expect("an unlisted path must refuse");
     assert!(reason.contains("no longer lists"), "{reason}");
 }
@@ -134,7 +167,7 @@ fn recheck_refuses_when_git_cannot_be_queried() {
     // Outside any repository, git answers nothing — which must refuse, not
     // pass for lack of a contradiction.
     let tmp = tempfile::tempdir().expect("tempdir");
-    let reason = recheck_before_delete(tmp.path(), Some(&[]), &merged(1), &no_agents)
+    let reason = recheck_before_delete(tmp.path(), Some(&nobody()), &merged(1), &no_agents)
         .expect("an unqueryable path must refuse");
     assert!(reason.contains("could not be queried"), "{reason}");
 }
@@ -151,7 +184,7 @@ fn recheck_refuses_a_worktree_that_lost_its_ownership_marker() {
     let fx = GitWorktreeFixture::new();
     let parent = fx.repo.join("elsewhere");
     let path = fx.add_worktree_at(&parent, "unowned-2919");
-    let reason = recheck_before_delete(&path, Some(&[]), &merged(1), &no_agents)
+    let reason = recheck_before_delete(&path, Some(&nobody()), &merged(1), &no_agents)
         .expect("an unowned worktree must refuse");
     assert!(reason.contains("ownership marker"), "{reason}");
 }
@@ -167,7 +200,7 @@ fn recheck_refuses_when_the_pr_is_no_longer_merged() {
         BranchPrState::NoPr,
         BranchPrState::Unknown,
     ] {
-        let reason = recheck_before_delete(&path, Some(&[]), &state, &no_agents)
+        let reason = recheck_before_delete(&path, Some(&nobody()), &state, &no_agents)
             .unwrap_or_else(|| panic!("{state:?} must refuse"));
         assert!(reason.contains("no longer a merge"), "{reason}");
     }
@@ -179,11 +212,11 @@ fn recheck_refuses_a_worktree_dirtied_after_the_survey() {
     let path = fx.add_worktree("dirtied-2919");
     land(&path);
     assert!(
-        recheck_before_delete(&path, Some(&[]), &merged(1), &no_agents).is_none(),
+        recheck_before_delete(&path, Some(&nobody()), &merged(1), &no_agents).is_none(),
         "precondition: clean before the write"
     );
     std::fs::write(path.join("appeared.rs"), "fn main() {}\n").expect("write");
-    let reason = recheck_before_delete(&path, Some(&[]), &merged(1), &no_agents)
+    let reason = recheck_before_delete(&path, Some(&nobody()), &merged(1), &no_agents)
         .expect("a dirtied worktree must refuse");
     assert!(reason.contains("unsaved work"), "{reason}");
 }
@@ -199,11 +232,11 @@ fn recheck_refuses_a_worktree_an_agent_claimed_after_the_survey() {
     let path = fx.add_worktree("agent-race-5661");
     land(&path);
     assert!(
-        recheck_before_delete(&path, Some(&[]), &merged(1), &no_agents).is_none(),
+        recheck_before_delete(&path, Some(&nobody()), &merged(1), &no_agents).is_none(),
         "precondition: permitted before the agent claims it"
     );
     GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-arrived-mid-sweep");
-    let reason = recheck_before_delete(&path, Some(&[]), &merged(1), &agent_live)
+    let reason = recheck_before_delete(&path, Some(&nobody()), &merged(1), &agent_live)
         .expect("a tree an agent claimed mid-sweep must refuse");
     assert!(reason.contains("agent-arrived-mid-sweep"), "{reason}");
 }
@@ -223,7 +256,7 @@ fn reclaim_remove_mode_spares_a_live_agents_merged_worktree() {
         &fx.repos_root,
         &FreshProbes {
             agent_state: &agent_live,
-            in_use_now: &|| Some(Vec::new()),
+            in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/live-agent-sweep-5661", 5661),
         },
         ReclaimMode::Remove,
@@ -260,7 +293,7 @@ fn survey_discloses_a_live_agents_spared_worktree() {
         &fx.repos_root,
         &FreshProbes {
             agent_state: &agent_live,
-            in_use_now: &|| Some(Vec::new()),
+            in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/spared-agent-5829", 5829),
         },
         ReclaimMode::Remove,
@@ -299,7 +332,7 @@ fn survey_discloses_nothing_when_no_agent_was_spared() {
         &fx.repos_root,
         &FreshProbes {
             agent_state: &no_agents,
-            in_use_now: &|| Some(Vec::new()),
+            in_use_now: &|| Some(nobody()),
             // `add_worktree` names the branch `session/<name>`, unlike
             // `add_worktree_at`'s `wt/<name>`.
             index_for: &|_: &Path| merged_index("session/no-agent-5829", 5830),
@@ -326,7 +359,7 @@ fn recheck_permits_a_clean_merged_owned_worktree() {
     let path = fx.add_worktree("permitted-2919");
     land(&path);
     assert_eq!(
-        recheck_before_delete(&path, Some(&[]), &merged(1), &no_agents),
+        recheck_before_delete(&path, Some(&nobody()), &merged(1), &no_agents),
         None
     );
 }
@@ -342,7 +375,7 @@ fn survey_reports_a_merged_worktree_as_reclaimable() {
     land(&path);
     let s = survey_with_index(
         &fx.repos_root,
-        &[],
+        &nobody(),
         &|_: &Path| merged_index("session/survey-2919", 21),
         &no_agents,
         SurveyBudget::default(),
@@ -356,6 +389,81 @@ fn survey_reports_a_merged_worktree_as_reclaimable() {
     assert_eq!(found.verdict, ReclaimVerdict::Reclaimable { pr: 21 });
     assert_eq!(s.reclaimable, 1);
     assert!(s.total_bytes > 0);
+}
+
+/// #6806, the reported defect end to end: a session surveying from inside its
+/// own workspace must reclaim the merged worktrees it created under it. On
+/// `origin/main` every one of these came back `gate 2 (liveness)`.
+#[test]
+fn survey_reclaims_a_worktree_claimed_only_by_the_calling_session() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("caller-survey-6806");
+    land(&path);
+    let claims = LiveClaims {
+        claims: vec![WorkspaceClaim::new("tm-client-03", &fx.repo)],
+        caller: Some("tm-client-03".to_string()),
+    };
+    let s = survey_with_index(
+        &fx.repos_root,
+        &claims,
+        &|_: &Path| merged_index("session/caller-survey-6806", 61),
+        &no_agents,
+        SurveyBudget::default(),
+        false,
+    );
+    let found = s
+        .candidates
+        .iter()
+        .find(|c| c.path == path)
+        .unwrap_or_else(|| panic!("survey missed {}", path.display()));
+    assert_eq!(found.verdict, ReclaimVerdict::Reclaimable { pr: 61 });
+}
+
+/// The other half: the same worktree, claimed by a DIFFERENT live session, is
+/// still refused — and the refusal names that session and denies it is the
+/// caller (#6806 closure criterion 2).
+#[test]
+fn survey_still_blocks_a_worktree_a_foreign_session_claims() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("foreign-survey-6806");
+    land(&path);
+    let claims = LiveClaims {
+        claims: vec![WorkspaceClaim::new("tm-other-01", &fx.repo)],
+        caller: Some("tm-client-03".to_string()),
+    };
+    let s = survey_with_index(
+        &fx.repos_root,
+        &claims,
+        &|_: &Path| merged_index("session/foreign-survey-6806", 62),
+        &no_agents,
+        SurveyBudget::default(),
+        false,
+    );
+    let found = s
+        .candidates
+        .iter()
+        .find(|c| c.path == path)
+        .unwrap_or_else(|| panic!("survey missed {}", path.display()));
+    let ReclaimVerdict::Blocked { gate, reason } = &found.verdict else {
+        panic!("expected a gate-2 refusal, got {:?}", found.verdict);
+    };
+    assert_eq!(*gate, ReclaimGate::Liveness);
+    assert!(
+        reason.contains("tm-other-01"),
+        "names the claimant: {reason}"
+    );
+    assert!(
+        reason.contains("not the calling session"),
+        "denies it is the caller: {reason}"
+    );
+    // #6507's disclosure carries the same text to the operator.
+    assert!(
+        s.blocked_reasons
+            .iter()
+            .any(|r| r.contains("tm-other-01") && r.contains("gate 2 (liveness)")),
+        "{:?}",
+        s.blocked_reasons
+    );
 }
 
 /// The live #6507 shape end to end: a branch whose TWO commits squash-merged
@@ -375,7 +483,7 @@ fn survey_reclaims_a_worktree_whose_two_commits_squash_merged_as_one() {
     fx.squash_merge_commits_to_origin(&path, &["first.rs", "second.rs"]);
     let s = survey_with_index(
         &fx.repos_root,
-        &[],
+        &nobody(),
         &|_: &Path| merged_index("session/squash-6507", 6705),
         &no_agents,
         SurveyBudget::default(),
@@ -408,7 +516,7 @@ fn survey_names_the_gate_that_blocked_each_candidate() {
     land(&path);
     let s = survey_with_index(
         &fx.repos_root,
-        &[],
+        &nobody(),
         &|_: &Path| PrIndex::unavailable_because("gh exited 4: gh auth login".to_string()),
         &no_agents,
         SurveyBudget::default(),
@@ -458,7 +566,7 @@ fn survey_excludes_a_worktree_trusty_mpm_cannot_remove() {
     let path = fx.add_worktree_at(&parent, "harness-2919");
     let s = survey_with_index(
         &fx.repos_root,
-        &[],
+        &nobody(),
         &|_: &Path| merged_index("wt/harness-2919", 55),
         &no_agents,
         SurveyBudget::default(),
@@ -496,7 +604,7 @@ fn survey_refuses_an_unattributed_agent_store_worktree() {
     land(&path);
     let s = survey_with_index(
         &fx.repos_root,
-        &[],
+        &nobody(),
         &|_: &Path| merged_index("wt/agent-6561", 759),
         &no_agents,
         SurveyBudget::default(),
@@ -525,7 +633,7 @@ fn survey_past_its_classify_deadline_reclaims_nothing() {
     land(&path);
     let s = survey_with_index(
         &fx.repos_root,
-        &[],
+        &nobody(),
         &|_: &Path| merged_index("session/deadline-2919", 40),
         &no_agents,
         SurveyBudget {
@@ -549,7 +657,7 @@ fn survey_past_its_measure_deadline_still_classifies() {
     land(&path);
     let s = survey_with_index(
         &fx.repos_root,
-        &[],
+        &nobody(),
         &|_: &Path| merged_index("session/measure-2919", 41),
         &no_agents,
         SurveyBudget {
@@ -581,7 +689,7 @@ fn reclaim_report_mode_removes_nothing() {
         &fx.repos_root,
         &FreshProbes {
             agent_state: &no_agents,
-            in_use_now: &|| Some(Vec::new()),
+            in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("session/report-2919", 30),
         },
         ReclaimMode::Report,
@@ -607,9 +715,14 @@ fn reclaim_remove_mode_refuses_a_worktree_claimed_after_the_survey() {
         // Call 1 is the survey's snapshot; every later call is a per-candidate
         // re-read inside the delete loop.
         if *n == 1 {
-            Some(Vec::new())
+            Some(nobody())
         } else {
-            Some(vec![claimed.clone()])
+            // #6806: a session OTHER than the caller — the claim that must
+            // still refuse.
+            Some(LiveClaims::foreign(vec![WorkspaceClaim::new(
+                "tm-other-01",
+                claimed.clone(),
+            )]))
         }
     };
     let out = reclaim_with_probes(
@@ -645,7 +758,7 @@ fn reclaim_remove_mode_refuses_a_worktree_dirtied_after_the_survey() {
         if *n > 1 {
             std::fs::write(to_dirty.join("rescued.rs"), "fn main() {}\n").expect("write");
         }
-        Some(Vec::new())
+        Some(nobody())
     };
     let out = reclaim_with_probes(
         &fx.repos_root,
@@ -684,7 +797,7 @@ fn reclaim_remove_mode_refuses_a_worktree_locked_after_the_survey() {
                 .arg(&locked_path)
                 .output();
         }
-        Some(Vec::new())
+        Some(nobody())
     };
     let out = reclaim_with_probes(
         &fx.repos_root,
@@ -722,7 +835,7 @@ fn reclaim_remove_mode_refuses_when_the_pr_reopens_after_the_survey() {
         &fx.repos_root,
         &FreshProbes {
             agent_state: &no_agents,
-            in_use_now: &|| Some(Vec::new()),
+            in_use_now: &|| Some(nobody()),
             index_for: &index,
         },
         ReclaimMode::Remove,
@@ -741,7 +854,7 @@ fn reclaim_remove_mode_refuses_when_the_live_set_cannot_be_read() {
     let in_use_now = || {
         let mut n = calls.borrow_mut();
         *n += 1;
-        if *n == 1 { Some(Vec::new()) } else { None }
+        if *n == 1 { Some(nobody()) } else { None }
     };
     let out = reclaim_with_probes(
         &fx.repos_root,
@@ -768,7 +881,7 @@ fn reclaim_remove_mode_reclaims_a_clean_merged_worktree() {
         &fx.repos_root,
         &FreshProbes {
             agent_state: &no_agents,
-            in_use_now: &|| Some(Vec::new()),
+            in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("session/reclaim-2919", 37),
         },
         ReclaimMode::Remove,
@@ -825,7 +938,7 @@ fn e2e_survey_against_a_real_store() {
         measure: Some(std::time::Duration::from_secs(20)),
         classify: None,
     };
-    let s = survey(&root, &[], &no_agents, budget, true);
+    let s = survey(&root, &nobody(), &no_agents, budget, true);
     println!("--- #2919 e2e survey of {} ---", root.display());
     println!("elapsed           = {:?}", started.elapsed());
     println!("candidates        = {}", s.candidates.len());
@@ -880,7 +993,7 @@ fn survey_measures_reclaimable_worktrees_before_blocked_ones() {
     ]"#;
     let s = survey_with_index(
         &fx.repos_root,
-        &[],
+        &nobody(),
         &|_: &Path| PrIndex::from_json(rows, 400),
         &no_agents,
         SurveyBudget::default(),
@@ -903,7 +1016,7 @@ fn survey_measures_reclaimable_worktrees_before_blocked_ones() {
     // cannot be mistaken for "reclaimable ones ignore the deadline".
     let starved = survey_with_index(
         &fx.repos_root,
-        &[],
+        &nobody(),
         &|_: &Path| PrIndex::from_json(rows, 400),
         &no_agents,
         SurveyBudget {
@@ -936,7 +1049,7 @@ fn survey_discloses_a_partially_measured_reclaimable_set() {
     // Fully measured: measured count equals the reclaimable count.
     let full = survey_with_index(
         &fx.repos_root,
-        &[],
+        &nobody(),
         &|_: &Path| PrIndex::from_json(rows, 400),
         &no_agents,
         SurveyBudget::default(),
@@ -952,7 +1065,7 @@ fn survey_discloses_a_partially_measured_reclaimable_set() {
     // be readable as the whole set's size.
     let starved = survey_with_index(
         &fx.repos_root,
-        &[],
+        &nobody(),
         &|_: &Path| PrIndex::from_json(rows, 400),
         &no_agents,
         SurveyBudget {
@@ -1020,7 +1133,7 @@ fn survey_separates_deadline_skips_from_lookup_failures() {
     // Deadline expired: counted as NOT INSPECTED, and as pr_state_unknown too.
     let skipped = survey_with_index(
         &fx.repos_root,
-        &[],
+        &nobody(),
         &|_: &Path| merged_index("session/cause-split-2919", 80),
         &no_agents,
         SurveyBudget {
@@ -1042,7 +1155,7 @@ fn survey_separates_deadline_skips_from_lookup_failures() {
     // indeterminate answer, not a skip and not a failure.
     let unresolved = survey_with_index(
         &fx.repos_root,
-        &[],
+        &nobody(),
         &|_: &Path| PrIndex::from_json(r#"[]"#, 0),
         &no_agents,
         SurveyBudget::default(),
@@ -1078,7 +1191,7 @@ fn survey_counts_a_failed_lookup_apart_from_an_unknown_state() {
 
     let out = survey_with_index(
         &fx.repos_root,
-        &[],
+        &nobody(),
         &|_: &Path| {
             PrIndex::unavailable_because(
                 "`gh` exited 4: To get started with GitHub CLI, please run:  gh auth login"
@@ -1145,7 +1258,7 @@ fn survey_offers_a_merged_agent_worktree_the_harness_released() {
         &fx.repos_root,
         &FreshProbes {
             agent_state: &restarted_registry,
-            in_use_now: &|| Some(Vec::new()),
+            in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/agent-6561e2e", 6561),
         },
         ReclaimMode::Report,
@@ -1176,7 +1289,7 @@ fn reclaim_reclaims_a_merged_agent_worktree_the_harness_released() {
         &fx.repos_root,
         &FreshProbes {
             agent_state: &restarted_registry,
-            in_use_now: &|| Some(Vec::new()),
+            in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/agent-6561reclaim", 6562),
         },
         ReclaimMode::Remove,
@@ -1199,7 +1312,7 @@ fn reclaim_never_offers_an_agent_worktree_whose_pr_is_open() {
         &fx.repos_root,
         &FreshProbes {
             agent_state: &restarted_registry,
-            in_use_now: &|| Some(Vec::new()),
+            in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| open_index("wt/agent-6561open", 6563),
         },
         ReclaimMode::Remove,
@@ -1230,7 +1343,7 @@ fn reclaim_never_offers_a_dirty_agent_worktree() {
         &fx.repos_root,
         &FreshProbes {
             agent_state: &restarted_registry,
-            in_use_now: &|| Some(Vec::new()),
+            in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/agent-6561dirty", 6564),
         },
         ReclaimMode::Remove,
@@ -1266,7 +1379,7 @@ fn survey_discloses_a_harness_locked_agent_worktree() {
         &fx.repos_root,
         &FreshProbes {
             agent_state: &restarted_registry,
-            in_use_now: &|| Some(Vec::new()),
+            in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/agent-6561locked", 6565),
         },
         ReclaimMode::Remove,
