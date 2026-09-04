@@ -59,7 +59,7 @@ name = "tga"
 # new config table; nothing existing is removed or changed. `src/**` changed
 # while 6.0.0 was already live on crates.io, so the `PR version bump vs
 # crates.io` gate (#4421) requires the bump.
-version = "6.0.1"
+version = "7.0.0"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for

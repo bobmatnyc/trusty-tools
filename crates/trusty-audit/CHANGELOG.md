@@ -10,6 +10,119 @@ edit this file by hand (see
 
 ---
 
+## [0.13.3] — 2026-09-03
+
+### Added
+
+- The audit sweep now scans each Rust repository's `Cargo.lock` with
+  `cargo audit` and writes every advisory into the report manifest's
+  `[report].findings`, so the DD report states dependency CVE exposure instead
+  of disclaiming it (#6075).
+  - Fail-open, and never silently: a target with no `cargo-audit` installed
+    gets a gap naming the binary and `cargo install cargo-audit`; a non-Rust
+    target gets `cve-scan: no cargo-audit-equivalent for <language>`; a scan
+    that ran clean states what its lockfile scan did not cover. A repository
+    declaring no dependency manifest at all is a declared skip and says nothing.
+- The audit sweep now reviews each Rust repository's dependency licenses with
+  `cargo-deny list` and writes every copyleft, unlicensed, or unrecognised term
+  into the report manifest's `[report].findings` under the `license` category,
+  so the DD report states license/IP exposure instead of disclaiming it (#6076).
+  - Strong copyleft (AGPL, GPL, SSPL, OSL, EUPL) bands RED; weak copyleft
+    (MPL, LGPL, EPL, CDDL) and any license the policy table does not recognise
+    band AMBER; a crate declaring no license at all bands RED. A crate offering
+    any permissive term is cleared, so a `GPL OR MIT` dual license is not a
+    finding.
+  - Fail-open, and never silently: a target with no `cargo-deny` installed gets
+    a gap naming the binary and `cargo install cargo-deny`; a non-Rust target
+    gets `license-review: no cargo-deny-equivalent for <language>`; a non-zero
+    exit or unreadable output names which it was; a review that ran clean states
+    what it did not cover. A repository declaring no dependency manifest at all
+    is a declared skip and says nothing.
+- The audit sweep now scans each repository's working tree for leaked
+  credentials with `gitleaks detect --no-git` and writes every match into the
+  report manifest's `[report].findings` under the `secrets` category, so the DD
+  report's Secret Leakage section states what is in the tree instead of
+  disclaiming it (#6077). This is a different question from the crate's existing
+  `credential_scan`, which checks the operator's own outbound package.
+  - The matched credential is NEVER written. Each row carries `file:line` plus
+    `trusty_common::credentials::redact_secret`'s masked preview, produced at
+    the parse boundary so no other function in the collector ever holds the
+    value; `-v` is not passed to gitleaks, whose verbose stderr prints matches.
+  - A provider's own credential format (an AWS key id, a private key) bands RED;
+    an entropy-only `generic-api-key` match bands AMBER, because that is the
+    rule a reader has to triage by hand.
+  - Unlike the CVE and license legs this one reads no dependency manifest, so it
+    runs against every repository in a sweep rather than only the Rust ones.
+  - Fail-open, and never silently: a missing binary, a failed spawn, a non-zero
+    exit with no report, an unreadable report, and an unwritable manifest each
+    get a gap naming which it was, leading with the collector's own diagnosis
+    rather than with the child's first stderr line (#6720). A scan that ran
+    clean states what it did not cover — git history above all.
+  - gitleaks' own report file is the one artefact holding the matched
+    credentials unredacted. It is written into a 0700 subdirectory of a
+    `tempfile::TempDir`, whose drop removes it on every return path — including
+    the early returns a manual delete misses — and the mode is set by `mkdir(2)`
+    rather than by a later chmod, so there is no window in which another local
+    account can open the directory. `Run`'s `Debug` is hand-written for the same
+    reason: a derived one would put the raw report and the child's stderr into
+    any `{:?}`.
+- The audit sweep now reads each repository's own git history and reports its
+  change hotspots — the files a team keeps rewriting — into the report
+  manifest's `[report].findings` under the `churn` category, so the DD report
+  states them instead of leaving the reader to guess where the work is (#6079).
+  - The history is read by a direct `git log --numstat` shell-out from this
+    crate. No tga dependency is added: the owner ruled 2026-08-19 that
+    trusty-review must run independently of tga, and that all collector
+    intelligence lives in trusty-audit so iteration is a single-crate rebuild.
+  - Every threshold is a documented `pub const` in one place: a 180-day window,
+    a 4000-commit read cap, 5 commits to be a hotspot at all, 20 to band RED, 20
+    rows written and 10 offered to the ranking.
+  - Churn is also an OPTIONAL third input to the evidence ranking
+    (`evidence::blend_with`), entering each round behind the complexity hotspot
+    and every dimension — the smallest non-zero weight that structure can
+    express. An absent churn lane reproduces the previous ranking exactly, which
+    `blend` now delegates for.
+  - Lockfiles and changelogs are excluded by basename: their churn measures a
+    generator rather than the code, and they would otherwise take the top of
+    both outputs in every repository. The RANKING additionally declines
+    configuration and prose by extension — measured against this workspace, the
+    unfiltered top ten was seven `Cargo.toml`s, a `.tsv` allowlist and a
+    `CLAUDE.md`. The findings still report those, because a manifest rewritten
+    200 times in six months is real dependency movement a reader wants.
+  - Fail-open, and never silently. A missing `git`, a path holding no
+    repository, a shallow clone (whose counts stop at the graft point and would
+    understate every hotspot), an empty window, a failed child, and an
+    unwritable manifest each get a gap naming which it was — the collector's own
+    diagnosis leading, with the child's first stderr line only ever as the
+    parenthetical (#6720). A history that read clean states what its count does
+    not cover. There is no not-applicable arm: every checkout arrives by `git
+    clone`, so a path with no `.git` is an anomaly the report names rather than
+    a leg that quietly does not apply.
+  - A window deeper than the 4000-commit read cap is reported too. `git log
+    --max-count` truncates in silence, so such a window is read to the cap and
+    its hotspots ship with a caveat stating that every count is a floor and that
+    a file whose work is entirely older than the read is missing outright.
+  - Paths are read with `core.quotepath=false`, so a non-ASCII filename such as
+    `src/café.rs` reaches the findings and the ranking as itself rather than as
+    git's default `"src/caf\303\251.rs"` — a path no reader can open or grep
+    for.
+  - It needs neither daemon, so it is measured before the trusty-search and
+    trusty-analyze gates: a repository whose daemons never answered still gets
+    its change hotspots into the report.
+
+### Changed
+
+- The `[report].findings` writer the CVE (#6075) and license (#6076) collectors
+  each carried privately is now one shared `grounding::findings::append`, taking
+  the row-identity key set as a parameter. Behaviour is unchanged; the third
+  copy #6077 would have added does not exist.
+- The hardened `git` child `local_repo` carried privately — the ambient
+  `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` /
+  `GIT_ALTERNATE_OBJECT_DIRECTORIES` cleared and `GIT_TERMINAL_PROMPT=0` set —
+  is now `trusty_audit::git`, with a synchronous constructor beside the
+  asynchronous one #6079's churn collector needs. One list of ambient variables
+  rather than a copy per caller; behaviour is unchanged.
+
 ## [0.13.2] — 2026-09-03
 
 ### Fixed
