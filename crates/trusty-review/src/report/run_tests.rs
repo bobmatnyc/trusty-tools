@@ -515,6 +515,41 @@ fn investigation_snapshot_is_written_and_reloadable() {
     assert_eq!(parsed["repos"][0]["findings"][0]["file"], "src/auth.rs");
 }
 
+/// Why: #6788 — the inventory was capped at 30 rows BEFORE this snapshot was
+/// written, so trusty-audit's OSV lookup read 30 packages from a repository
+/// declaring 134 and reported partial coverage as complete.
+/// What: builds a real inventory from a 35-dependency Cargo.toml, persists an
+/// investigation carrying it, and asserts all 35 rows reach
+/// `investigation.json` with the total intact.
+/// Test: this test itself.
+#[test]
+fn investigation_snapshot_carries_every_dependency_row() {
+    use crate::report::investigate::deps::build_inventory;
+
+    let repo = tempfile::tempdir().expect("repo dir");
+    let mut toml = String::from("[package]\nname = \"x\"\n[dependencies]\n");
+    for i in 0..35 {
+        toml.push_str(&format!("dep{i:02} = \"1.0\"\n"));
+    }
+    std::fs::write(repo.path().join("Cargo.toml"), toml).expect("manifest");
+
+    let mut inv = snapshot_fixture();
+    inv.repos[0].deps = build_inventory(repo.path());
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    persist_investigation(dir.path(), &inv);
+
+    let raw = std::fs::read_to_string(dir.path().join(INVESTIGATION_SNAPSHOT_FILENAME))
+        .expect("the snapshot must exist");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+    let rows = parsed["repos"][0]["deps"]["deps"]
+        .as_array()
+        .expect("deps array");
+    assert_eq!(rows.len(), 35, "the snapshot must carry the full inventory");
+    assert_eq!(rows[34]["name"], "dep34");
+    assert_eq!(parsed["repos"][0]["deps"]["total"], 35);
+}
+
 /// Why: a recovery aid must never turn a run that would have succeeded into a
 /// failure of its own.
 /// What: points the snapshot at a path that cannot be a directory (an existing

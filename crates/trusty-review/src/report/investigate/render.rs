@@ -99,9 +99,14 @@ fn empty_inventory_line(inv: &Investigation) -> String {
 }
 
 /// Render one repository's dependency table (capped, with an "and N more" line).
+///
+/// #6788: the cap lives here, not in the inventory — `inv.deps` carries every
+/// row for `investigation.json`, and `rendered()` is the 30-row table view.
+/// Test: `render_tests::{dependency_table_caps_and_overflows,
+/// dependency_table_draws_only_max_rows_of_a_full_inventory}`.
 fn dependency_table(inv: &DependencyInventory) -> String {
     let mut out = String::from("| Package | Ecosystem | Declared | Locked |\n|---|---|---|---|\n");
-    for d in &inv.deps {
+    for d in inv.rendered() {
         let spec = if d.spec.is_empty() { "—" } else { &d.spec };
         let locked = d.locked.as_deref().unwrap_or("—");
         out.push_str(&format!(

@@ -264,6 +264,34 @@ fn dependency_table_caps_and_overflows() {
     assert!(out.contains("and 3 more"));
 }
 
+/// Why: #6788 uncapped the stored inventory so `investigation.json` carries
+/// every dependency; the rendered table must still stop at `MAX_ROWS` rather
+/// than printing 134 rows into an acquirer's report.
+/// What: a 35-row inventory renders exactly 30 package rows plus "and 5 more",
+/// and the 31st package never appears.
+/// Test: this test itself.
+#[test]
+fn dependency_table_draws_only_max_rows_of_a_full_inventory() {
+    use crate::report::investigate::deps::MAX_ROWS;
+
+    let deps: Vec<_> = (0..35).map(|i| dep(&format!("dep{i:02}"), None)).collect();
+    let inv = DependencyInventory {
+        total: deps.len(),
+        deps,
+        manifests_examined: vec!["Cargo.toml".to_string()],
+    };
+    let out = dependency_table(&inv);
+
+    let rows = out.lines().filter(|l| l.contains("| cargo |")).count();
+    assert_eq!(rows, MAX_ROWS, "the table must stay capped: {out}");
+    assert!(out.contains("| dep29 | cargo |"), "last kept row: {out}");
+    assert!(
+        !out.contains("| dep30 | cargo |"),
+        "first dropped row: {out}"
+    );
+    assert!(out.contains("and 5 more"), "{out}");
+}
+
 /// Why: the coverage section is the honesty surface.
 /// What: asserts examined/total, a not-investigated dimension, and the rejected
 /// note in the exact `investigation: N finding(s) rejected` form.
