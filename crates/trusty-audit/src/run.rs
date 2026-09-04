@@ -1201,6 +1201,89 @@ trusty-review = "0.15.1"
         assert!(index.contains("../extract/<NN>-<repo>.db"), "{index}");
     }
 
+    /// A stub `tga` whose manifest declares `[report].findings` in both bands
+    /// and two dimensions — what the assurance collectors leave behind.
+    fn writes_findings() -> String {
+        r#"#!/bin/sh
+out=""
+while [ $# -gt 0 ]; do
+  case "$1" in --output) out="$2"; shift;; esac
+  shift
+done
+mkdir -p "$out"
+cat > "$out/manifest.toml" <<'MANIFEST'
+[report]
+title = "Acme"
+findings = [
+  { category = "dependencies", id = "RUSTSEC-1", severity = "RED" },
+  { category = "dependencies", id = "RUSTSEC-2", severity = "AMBER" },
+  { category = "secrets", id = "leak", severity = "RED" },
+]
+
+[[repositories]]
+name = "acme"
+path = "/r"
+MANIFEST
+exit 0
+"#
+        .to_owned()
+    }
+
+    /// 🔴 #6781: the sweep rolls its repositories' findings up ONCE and delivers
+    /// the counts two ways — `out/report.json` for machine consumers, and the
+    /// index's own table — so neither has to re-derive a total.
+    ///
+    /// Against `origin/main` at aec14c919 this fails on its first read: `out/`
+    /// carried no `report.json` at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sweep_rolls_its_findings_up_into_report_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_findings());
+        make_repo(&work, "acme-api");
+        make_repo(&work, "acme-web");
+        select(
+            &work,
+            &[
+                ("acme-api", "repos/acme-api"),
+                ("acme-web", "repos/acme-web"),
+            ],
+        );
+
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let json = std::fs::read_to_string(
+            work.path(Area::Output)
+                .join(crate::debt_rollup::REPORT_FILE),
+        )
+        .expect("the sweep writes report.json beside its index");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let block = &parsed["debt_rollup"];
+        assert_eq!(block["total"], 6, "{json}");
+        assert_eq!(block["by_tier"]["RED"], 4, "{json}");
+        assert_eq!(block["by_tier"]["AMBER"], 2, "{json}");
+        assert_eq!(block["by_dimension"]["dependencies"], 4, "{json}");
+        assert_eq!(block["by_dimension"]["secrets"], 2, "{json}");
+        assert_eq!(block["by_repo"]["acme-api"]["RED"], 2, "{json}");
+        assert_eq!(
+            block["by_tier_dimension"]["AMBER"]["dependencies"], 2,
+            "{json}"
+        );
+
+        // The index states the same counts, taken from the same value.
+        let index = index_of(&work);
+        assert!(index.contains("## Technical debt by tier"), "{index}");
+        assert!(
+            index.contains("| **all repositories** | **4** | **2** | **6** |"),
+            "{index}"
+        );
+        assert!(index.contains("| acme-api | 2 | 1 | 3 |"), "{index}");
+    }
+
     /// #6080: the checkpoint records how long each repository took, so a resumed
     /// sweep can report the run that did the work rather than the second it took
     /// to verify the output.
