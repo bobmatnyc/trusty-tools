@@ -76,6 +76,11 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
    trusty-common 0.46.1 and 0.46.3 in one week. Full rationale and the
    `--check-only`/full-mode split:
    [`.claude/skills/cargo-publish/SKILL.md`, "Step 2b"](../../.claude/skills/cargo-publish/SKILL.md#step-2b-pre-tag-gate-mandatory-issue-6508).
+4c. Releasing `trusty-audit`? Run `scripts/refresh-engagement-pins.sh` first and
+   commit the result, so `crates/trusty-audit/templates/engagement.template.toml`
+   pins the sibling versions this train ships rather than the previous ones —
+   `preflight-publish.sh` CHECK 10 fails the release when a pin lags a sibling
+   whose workspace version is not yet published (#6772).
 5. Create the tag: `git tag <crate-name>-v<version>`.
 6. Push the tag: `git push origin <crate-name>-v<version>`.
 7. Run `scripts/check-publish-ready.sh <crate-name>` (or

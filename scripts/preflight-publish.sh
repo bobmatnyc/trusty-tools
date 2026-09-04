@@ -233,6 +233,37 @@
 #     the assembler for you, or assemble directly at the version you intend to
 #     ship (`scripts/assemble-changelog.sh <crate-dir> <version>`).
 #
+#   CHECK 10 (the engagement template's sibling pins, #6772): trusty-audit only.
+#     Runs `scripts/refresh-engagement-pins.sh --check`, which compares each
+#     `[tools]` pin in `crates/trusty-audit/templates/engagement.template.toml`
+#     with that package's current workspace version, then decides per stale pin
+#     by asking crates.io whether the workspace version is published.
+#
+#     THE RULE: a pin must equal the sibling's current workspace version when
+#     that version is NOT yet on crates.io — the sibling is shipping in this
+#     same release train, so the pin is stale the moment the binary is built.
+#     When the sibling's workspace version IS already published, the sibling is
+#     not part of this train and a pin naming an older published version is a
+#     legitimate engagement choice: reported as a WARN, never a block.
+#
+#     WHY THIS IS NOT ALREADY COVERED: the template is `include_str!`-ed into
+#     `instructions::ENGAGEMENT_TEMPLATE` and written out verbatim by `taudit
+#     distribute`, so the packaged copy is only as fresh as the binary — and
+#     nothing in checks 1-9 reads it. At 7cfeda52d the template pinned tga
+#     6.0.0 / trusty-analyze 0.12.5 / trusty-review 0.33.0 while that same train
+#     published tga 7.0.0 / 0.12.6 / 0.33.1, with every other check green
+#     (#6772; PR #6723 was the previous instance).
+#
+#     FAILS CLOSED ON A RESULT IT CANNOT READ. Any exit but 0 or 1 means the
+#     pins could not be read at all. Exit 1 means stale pins EXIST, so at least
+#     one `STALE <pkg> pinned=<x> workspace=<y>` line must parse out of the
+#     output; if none does, the two scripts disagree about that line's format
+#     and this check has no idea which pins are stale — a FAIL, not the WARN the
+#     empty-list path used to reach.
+#
+#     No override flag. The remedy is one command:
+#     `scripts/refresh-engagement-pins.sh`, then commit the template.
+#
 # Crate + version resolution: accepts EITHER
 #     scripts/preflight-publish.sh <crate-name-or-dir> [version]
 #   or, when [version] is omitted, reads the version from that crate's
@@ -247,7 +278,7 @@
 #   check-publish-ready.sh does, to avoid a second, divergent lookup
 #   convention in this workspace.
 #
-#   --check-only     run all 9 checks unconditionally (never short-circuits)
+#   --check-only     run all 10 checks unconditionally (never short-circuits)
 #                     and print one [PASS]/[FAIL] line per check, then a
 #                     one-line summary. Useful to preview status without
 #                     assuming you are mid-publish. Exit code is still
@@ -268,7 +299,12 @@
 #   half a four-minute rustdoc run had kept untested. Check 6 has
 #   scripts/check-tag-publish-parity-selftest.sh and check 7 has
 #   scripts/check-ui-bundle-freshness-selftest.sh; both drive every failure
-#   branch of the delegated script against fixtures.
+#   branch of the delegated script against fixtures. Check 10 has TWO, for the
+#   same reason check 5 does: scripts/refresh-engagement-pins-selftest.sh drives
+#   the delegated comparison over synthetic workspaces, and
+#   scripts/preflight-check10-selftest.sh drives THIS script's decision over
+#   that comparison's output — every arm including the fail-closed one, with a
+#   stub gate on REPO_ROOT and a stub curl standing in for crates.io.
 #   Verified by construction:
 #     (a) FAIL mode — run from an unmerged feature branch (HEAD != origin/main)
 #         to demonstrate check 1 failing.
@@ -1512,6 +1548,106 @@ check9_changelog_assembled() {
   return 1
 }
 
+# ===========================================================================
+# CHECK 10 — the engagement template's sibling pins (#6772), trusty-audit only
+# ===========================================================================
+# The comparison is delegated to scripts/refresh-engagement-pins.sh, which has
+# its own self-test; what lives HERE is the one judgement that needs the
+# network — whether a stale pin names a sibling that is shipping in this same
+# release train. See the header comment for the rule and the #6772 history.
+check10_engagement_pins() {
+  if [ "$PKG_NAME" != "trusty-audit" ]; then
+    echo "[PASS] engagement-pins: n/a — only trusty-audit compiles the engagement template." >&2
+    return 0
+  fi
+
+  local log="${TMP_PINS}" rc=0
+  bash "${REPO_ROOT}/scripts/refresh-engagement-pins.sh" --check > "$log" 2>&1 || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    echo "[PASS] engagement-pins: every [tools] pin names its crate's workspace version." >&2
+    return 0
+  fi
+
+  # Any exit but 1 means the gate could not READ the pins (missing template,
+  # unreadable [tools] table, cargo metadata failure). Fail closed — an
+  # unreadable table is exactly the state a silent pass would hide.
+  if [ "$rc" -ne 1 ]; then
+    echo "[FAIL] engagement-pins: could not read the template's [tools] pins (rc=${rc}):" >&2
+    sed 's/^/       /' "$log" >&2
+    return 1
+  fi
+
+  local blocking="" lagging="" unverified=""
+  local name pinned wanted http url
+  while read -r _tag name pinned_kv wanted_kv; do
+    pinned="${pinned_kv#pinned=}"
+    wanted="${wanted_kv#workspace=}"
+    url="https://crates.io/api/v1/crates/${name}/${wanted}"
+    http="$(curl -sS -A "$CRATE_UA" -o "$TMP_PIN_BODY" -w "%{http_code}" "$url")" || http="000"
+    case "$http" in
+      404)
+        blocking="${blocking}         ${name}: pinned ${pinned}, workspace ${wanted} — ${wanted} is NOT published, so it ships with this train"$'\n'
+        ;;
+      200)
+        lagging="${lagging}         ${name}: pinned ${pinned}, workspace ${wanted} — ${wanted} is already published, so this pin may lag"$'\n'
+        ;;
+      *)
+        unverified="${unverified}         ${name}: HTTP ${http} from ${url}"$'\n'
+        ;;
+    esac
+  done < <(grep '^STALE ' "$log" || true)
+
+  # #6772: rc=1 is refresh-engagement-pins.sh saying "stale pins exist", so at
+  # least one STALE line MUST have parsed. All three buckets empty means the
+  # grep matched nothing — the two scripts disagree about that line's format —
+  # and every guard below is skipped, landing on the unconditional WARN with an
+  # empty list. Fail closed instead: a stale-pins result must never pass.
+  if [ -z "$blocking" ] && [ -z "$lagging" ] && [ -z "$unverified" ]; then
+    echo "[FAIL] engagement-pins: refresh-engagement-pins.sh --check reported stale" >&2
+    echo "       pins (exit 1), but no 'STALE <pkg> pinned=<x> workspace=<y>' line" >&2
+    echo "       parsed out of its output, so this gate cannot say WHICH pins are" >&2
+    echo "       stale or whether their siblings ship in this train." >&2
+    echo "       The two scripts disagree about that line's format. Full output" >&2
+    echo "       (${log}):" >&2
+    sed 's/^/       /' "$log" >&2
+    return 1
+  fi
+
+  if [ -n "$unverified" ]; then
+    echo "[FAIL] engagement-pins: crates.io would not say whether a stale pin's sibling" >&2
+    echo "       is shipping in this train:" >&2
+    printf '%s' "$unverified" >&2
+    echo "       Cannot verify pin freshness — refusing to pass this check." >&2
+    return 1
+  fi
+
+  if [ -n "$blocking" ]; then
+    echo "[FAIL] engagement-pins: crates/trusty-audit/templates/engagement.template.toml" >&2
+    echo "       pins a sibling BEHIND the version shipping in this same release train:" >&2
+    printf '%s' "$blocking" >&2
+    echo "       THE RULE: a [tools] pin must equal the sibling's current workspace" >&2
+    echo "       version when that version is not yet on crates.io — the sibling is" >&2
+    echo "       about to ship beside this publish, so the pin is stale the moment the" >&2
+    echo "       binary is built. When the sibling's workspace version IS already" >&2
+    echo "       published it is not part of this train, and a pin naming an older" >&2
+    echo "       published version is a legitimate engagement choice (WARN, not FAIL)." >&2
+    echo "       This matters because the template is include_str!-ed into" >&2
+    echo "       instructions::ENGAGEMENT_TEMPLATE and written out verbatim by" >&2
+    echo "       'taudit distribute', so a stale pin ships inside the binary (#6772)." >&2
+    echo "       Fix: scripts/refresh-engagement-pins.sh, then commit the template and" >&2
+    echo "       rebuild." >&2
+    return 1
+  fi
+
+  echo "[WARN] engagement-pins: pin(s) lag a sibling that is NOT in this release train:" >&2
+  printf '%s' "$lagging" >&2
+  echo "       Permitted — each named version is already published, so the pin is a" >&2
+  echo "       deliberate engagement choice rather than release drift. Run" >&2
+  echo "       scripts/refresh-engagement-pins.sh if you meant to track the workspace." >&2
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Scratch temp file for check 4's curl response body. Created once up front
 # and cleaned up via a script-scoped EXIT trap (matches check_line_cap.sh's
@@ -1522,10 +1658,12 @@ TMP_SEMVER="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.semver.XXXXXX")"
 TMP_PARITY="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.parity.XXXXXX")"
 TMP_UIBUNDLE="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.uibundle.XXXXXX")"
 TMP_CHANGELOG="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.changelog.XXXXXX")"
-trap 'rm -f "$TMP_BODY" "$TMP_SEMVER" "$TMP_PARITY" "$TMP_UIBUNDLE" "$TMP_CHANGELOG"' EXIT
+TMP_PINS="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.pins.XXXXXX")"
+TMP_PIN_BODY="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.pinbody.XXXXXX")"
+trap 'rm -f "$TMP_BODY" "$TMP_SEMVER" "$TMP_PARITY" "$TMP_UIBUNDLE" "$TMP_CHANGELOG" "$TMP_PINS" "$TMP_PIN_BODY"' EXIT
 
 # ---------------------------------------------------------------------------
-# Run all 9 checks. Always run every check (rather than short-circuiting) so
+# Run all 10 checks. Always run every check (rather than short-circuiting) so
 # --check-only and normal mode share one code path and a single run always
 # reports the full picture — a partial preflight is how gaps get missed.
 # ---------------------------------------------------------------------------
@@ -1540,6 +1678,7 @@ check6_tag_parity;          [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check7_ui_bundle;           [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check8_prepublish_gate;     [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check9_changelog_assembled; [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check10_engagement_pins;    [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 set -e
 
 if [ "$FAILURES" -gt 0 ]; then
@@ -1551,18 +1690,18 @@ if [ -n "${SEMVER_NOT_VERIFIED:-}" ]; then
   # #5620: "passed all 7 checks" must not absorb a check-5 outcome that verified
   # nothing. The same distinction the check line draws, drawn again at the line
   # an operator is most likely to read on its own.
-  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 9 checks, but the" >&2
+  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks, but the" >&2
   echo "  public API was NOT VERIFIED: ${SEMVER_NOT_VERIFIED}. See the check 5 line above." >&2
 elif [ -n "${SEMVER_TYPES_ADVISORY:-}" ]; then
   # The type differ blocks nothing, so without this the summary would say
   # "safe to publish" over a listed set of type changes nobody has confirmed.
-  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 9 checks." >&2
+  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks." >&2
   echo "  ADVISORY, not blocking: ${SEMVER_TYPES_ADVISORY}. See the semver-types line above." >&2
 else
-  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 9 checks. Safe to publish." >&2
+  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks. Safe to publish." >&2
 fi
 if [ -n "${GATE_NOT_VERIFIED:-}" ]; then
-  # Same reasoning as the SEMVER_NOT_VERIFIED line above: "passed all 9 checks"
+  # Same reasoning as the SEMVER_NOT_VERIFIED line above: "passed all 10 checks"
   # must not absorb a check-8 outcome that read nothing.
   echo "preflight-publish: NOTE — ${GATE_NOT_VERIFIED}. See the check 8 line above." >&2
 fi
