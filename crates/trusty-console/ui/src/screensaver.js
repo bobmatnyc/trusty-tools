@@ -101,19 +101,48 @@ export function enteredFromIdle(search) {
 }
 
 /**
- * Which rotation frame is showing after `elapsedMs` on the route.
+ * Which rotation frame the schedule shows at wall-clock instant `nowMs`.
  *
- * Derived from elapsed time rather than counted per tick so a missed timer —
- * a sleeping laptop, a throttled background tab — resumes on the frame the
- * clock says, not the one a lost tick would have left behind. Anything
- * unusable (no frames, a non-positive interval, a negative or non-finite
- * elapsed) yields frame 0, which always exists.
+ * Why: this took time since MOUNT until #6828. System Settings' screensaver
+ * Preview rebuilds the WKWebView and reloads the page every 4-15 s, so every
+ * mount restarted at frame 0 and frame 1 — the services table, 20 s in — was
+ * unreachable in the Preview, which is where an operator normally looks. A
+ * frame read off the wall clock belongs to the schedule rather than to one
+ * page's lifetime, so a reload lands on whichever frame is current.
+ *
+ * What: floor-divided rather than counted per tick, for the reason it always
+ * was — a missed timer, a sleeping laptop, a throttled background tab resumes
+ * on the frame the clock names, not the one a lost tick would have left behind.
+ * Anything unusable (no frames, a non-positive interval, a negative or
+ * non-finite instant) yields frame 0, which always exists.
+ * Test: `rotationIndexAt advances exactly on the interval boundary`,
+ * `a page remounted every 5s across 24s still reaches the services frame`.
  */
-export function rotationIndexAt(elapsedMs, intervalMs, frameCount) {
+export function rotationIndexAt(nowMs, intervalMs, frameCount) {
   if (!isNum(frameCount) || frameCount < 1) return 0;
   if (!isNum(intervalMs) || intervalMs <= 0) return 0;
-  if (!isNum(elapsedMs) || elapsedMs < 0) return 0;
-  return Math.floor(elapsedMs / intervalMs) % Math.floor(frameCount);
+  if (!isNum(nowMs) || nowMs < 0) return 0;
+  return Math.floor(nowMs / intervalMs) % Math.floor(frameCount);
+}
+
+/**
+ * How long from `nowMs` until the rotation's next schedule boundary.
+ *
+ * Why: #6828 — with the frame anchored to the wall clock, a timer that fires
+ * `intervalMs` after its OWN mount transitions off-schedule: the page shows the
+ * right frame on load, then holds it for a full period past the boundary.
+ * Waiting out the remainder of the current frame first puts every page, however
+ * recently it mounted, on the same transitions.
+ *
+ * What: the result is always in `(0, intervalMs]`. Exactly on a boundary
+ * returns a whole period, because the frame that boundary selects has only just
+ * started; zero would spin the timer.
+ * Test: `msUntilNextRotation waits out the remainder of the current frame`.
+ */
+export function msUntilNextRotation(nowMs, intervalMs = ROTATE_MS) {
+  const interval = isNum(intervalMs) && intervalMs > 0 ? intervalMs : ROTATE_MS;
+  if (!isNum(nowMs) || nowMs < 0) return interval;
+  return interval - (nowMs % interval);
 }
 
 /**

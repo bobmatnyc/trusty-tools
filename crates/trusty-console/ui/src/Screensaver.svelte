@@ -27,6 +27,14 @@
   #6773 added the MEM column and the memory graph beside the CPU one, from the
   same row specs the home page uses — a service row that read differently here
   than on the home page would be the drift this shared module exists to prevent.
+
+  #6828 moved the rotation off this page's own lifetime and onto the wall clock.
+  System Settings' screensaver Preview rebuilds the WKWebView every 4-15 s, so a
+  mount-relative rotation restarted at frame 0 on every rebuild and the services
+  frame never came up there at all. `rotateNow` below is a wall-clock instant and
+  the timer that advances it waits out the remainder of the current frame first,
+  so a page that mounts mid-frame shows that frame and transitions with every
+  other page rather than 20 s after itself.
   Test: `screensaver.test.js` covers the rotation, idle, backoff and routing
   decisions; `machineStatus.test.js` and `servicesList.test.js` cover the graph
   specs and the rows; the rendered screen is verified by the binary smoke run
@@ -64,6 +72,7 @@
     POLL_BASE_MS,
     ROTATE_MS,
     enteredFromIdle,
+    msUntilNextRotation,
     nextPollDelayMs,
     rotationIndexAt,
   } from './screensaver.js';
@@ -81,14 +90,15 @@
   let services = $state([]);
   let lastOkUnix = $state(null);
   let loading = $state(true);
-  let elapsedMs = $state(0);
+  // #6828: the wall-clock instant the frame is read from, advanced on the
+  // schedule's boundaries rather than on this page's own 20 s anniversary.
+  let rotateNow = $state(Date.now());
   let now = $state(new Date());
   let showHint = $state(false);
   // #6643: the 1 s window every graph on this route draws from.
   let history = $state(initialState());
 
   let consecutiveFailures = 0;
-  let startedAt = 0;
   let pollTimer;
   let clockTimer;
   let rotateTimer;
@@ -123,6 +133,22 @@
     if (roster.error === null) services = roster.services;
     loading = false;
     pollTimer = setTimeout(poll, nextPollDelayMs(consecutiveFailures, POLL_BASE_MS));
+  }
+
+  /**
+   * Advance the rotation at the next schedule boundary, then every period.
+   *
+   * #6828: a self-rescheduling `setTimeout`, not a `setInterval`, because the
+   * FIRST wait is short — whatever is left of the frame already on screen — and
+   * a `setInterval` cannot have a different first period. Re-reading the clock
+   * on each hop also keeps a late or coalesced timer from dragging every later
+   * transition off the schedule with it.
+   */
+  function scheduleRotation() {
+    rotateTimer = setTimeout(() => {
+      rotateNow = Date.now();
+      scheduleRotation();
+    }, msUntilNextRotation(Date.now(), ROTATE_MS));
   }
 
   /**
@@ -164,7 +190,6 @@
     document.documentElement.setAttribute('data-theme', 'dark');
     fromIdle = enteredFromIdle(window.location.search);
 
-    startedAt = Date.now();
     // #6643: the graphs' one connection. `history` frames seed the whole window
     // on connect, so the bars are populated on the first paint after the stream
     // opens rather than filling in over the next ten minutes.
@@ -181,7 +206,7 @@
 
     poll();
     clockTimer = setInterval(() => (now = new Date()), CLOCK_MS);
-    rotateTimer = setInterval(() => (elapsedMs = Date.now() - startedAt), ROTATE_MS);
+    scheduleRotation();
 
     if (!fromIdle && document.fullscreenEnabled) {
       showHint = true;
@@ -194,12 +219,14 @@
   onDestroy(() => {
     clearTimeout(pollTimer);
     clearTimeout(hintTimer);
+    clearTimeout(rotateTimer);
     clearInterval(clockTimer);
-    clearInterval(rotateTimer);
     stream?.stop();
   });
 
-  let frame = $derived(rotationIndexAt(elapsedMs, ROTATE_MS, FRAME_COUNT));
+  // #6828: a wall-clock instant, so a page rebuilt by the Preview host shows
+  // the frame the schedule is on rather than restarting at frame 0.
+  let frame = $derived(rotationIndexAt(rotateNow, ROTATE_MS, FRAME_COUNT));
   // #6643: the newest streamed sample wins over the 15 s poll, so the headline
   // number and the rightmost bar are the same second — the rule
   // `MachineStatusPanel` follows on the home page. The polled `status.host` is
