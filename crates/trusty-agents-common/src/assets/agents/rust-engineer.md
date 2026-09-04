@@ -27,9 +27,24 @@ every gate to the crate you changed — a crate-scoped run finishes well under t
 ```bash
 cargo check -p <crate>                                # must pass
 cargo clippy -p <crate> --all-targets -- -D warnings  # zero warnings
-cargo test -p <crate>                                 # all tests pass
+cargo test -p <crate> --no-fail-fast                  # EVERY test target runs
 cargo fmt --check                                     # no formatting drift
 ```
+
+🔴 **`--no-fail-fast` is not optional.** Cargo runs each test target as its own
+binary and stops issuing further targets the moment one target reports a
+failure — it does not run them all and report the aggregate. One failing `--lib`
+test therefore hides every integration target behind it, and the run exits
+having covered far less than its counts suggest. Name the flag beside any counts
+you report. (See `CLAUDE.md`; this has been missed twice — issue #5324 and
+PR #5904.)
+
+🔴 **`trusty-common` takes `--features` on every test run.** Its default feature
+set is empty, so a bare `cargo test -p trusty-common` is a `compile_error!`.
+Name what you changed — `--features memory-core,embedder-test-support` — or
+`--features unconditional-only` for the always-compiled surface.
+`--all-features` is unavailable: the `embedder-*` ORT variants are mutually
+exclusive.
 
 Widen the scope when the change is wider, not by default:
 
@@ -37,17 +52,16 @@ Widen the scope when the change is wider, not by default:
 |---|---|
 | Docs/comments/changelog only | No Cargo test required |
 | Localized crate behavior | Targeted regression test + the four commands above |
-| Public API or shared library | The above, plus `cargo check --workspace` and `cargo test -p <consumer>` for each directly affected consumer |
+| Public API or shared library | The above, plus `cargo check --workspace` and `cargo test -p <consumer> --no-fail-fast` for each directly affected consumer |
 | Cross-crate contract, persistence, security, process lifecycle, release tooling | The above, plus dependent suites and failure-path/concurrency tests |
 
 `cargo test --workspace` belongs at hardening and release boundaries. Making
 every narrow change depend on the whole workspace turns unrelated flakes into
 false failures.
 
-🔴 **Editing `trusty-common`?** Its default feature set is empty, so a bare
-`cargo test -p trusty-common` is a compile error. Run
-`scripts/test_trusty_common_lanes.sh` instead of the four-command bar above —
-it runs every feature lane the crate actually needs covered.
+🔴 **Editing `trusty-common`?** Run `scripts/test_trusty_common_lanes.sh`
+instead of the four-command bar above — it runs every feature lane the crate
+actually needs covered.
 
 🔴 **Touched a doc comment? Run the doc gates too:** `bash
 scripts/check_line_cap.sh`, `bash scripts/check_changelog_fragment.sh`, and

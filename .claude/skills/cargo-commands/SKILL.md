@@ -14,7 +14,8 @@ when_to_use: When you need a cargo invocation beyond the five everyday one-liner
 🔴 **Single-path workflows — use exactly these commands.**
 
 The five everyday one-liners (`cargo build`, `cargo check -p <crate>`,
-`cargo test -p <crate>`, `cargo clippy -p <crate> --all-targets -- -D warnings`,
+`cargo test -p <crate> --no-fail-fast`,
+`cargo clippy -p <crate> --all-targets -- -D warnings`,
 `cargo fmt`) are resident in the root `CLAUDE.md` and are not repeated here.
 This skill is the exhaustive variant list.
 
@@ -23,6 +24,23 @@ Rust Test Ladder in `CLAUDE.md`, with the per-rung command chains in
 [docs/reference/test-ladder-baseline.md](../../../docs/reference/test-ladder-baseline.md).
 This skill tells you how to *spell* a command, not whether you owe it.
 
+## Two Rules That Apply to Every `cargo test` Here
+
+🔴 **`--no-fail-fast` is not optional.** Cargo runs each test target as its own
+binary and stops issuing further targets the moment one target reports a
+failure — it does not run them all and report the aggregate. One failing `--lib`
+test therefore hides every integration target behind it, and the run exits
+having covered far less than its counts suggest. Name the flag beside any counts
+you report. (See `CLAUDE.md`; this has been missed twice — issue #5324 and
+PR #5904.)
+
+🔴 **`trusty-common` takes `--features` on every test run.** Its default feature
+set is empty, so a bare `cargo test -p trusty-common` is a `compile_error!`.
+Name what you changed — `--features memory-core,embedder-test-support` — or
+`--features unconditional-only` for the always-compiled surface.
+`--all-features` is unavailable: the `embedder-*` ORT variants are mutually
+exclusive. `cargo build` and `cargo check -p trusty-common` are unaffected.
+
 ## Workspace-wide
 
 ```bash
@@ -30,7 +48,7 @@ This skill tells you how to *spell* a command, not whether you owe it.
 cargo build --release
 
 # Run all tests across the workspace
-cargo test
+cargo test --no-fail-fast
 
 # Lint workspace-wide, all targets
 cargo clippy --workspace --all-targets -- -D warnings
@@ -40,7 +58,7 @@ cargo fmt --check
 cargo fmt
 
 # Run ONNX-backed integration tests (slow; skipped in CI)
-cargo test -- --include-ignored
+cargo test --no-fail-fast -- --include-ignored
 
 # Update dependencies (review the Cargo.lock diff before committing)
 cargo update
@@ -60,7 +78,7 @@ cargo build --release -p trusty-search
 cargo build --release -p trusty-mpm
 
 # Test a single crate with a specific feature
-cargo test -p trusty-common --features axum-server
+cargo test -p trusty-common --features axum-server --no-fail-fast
 
 # Test a single test by name within a crate
 cargo test -p trusty-search -- my_test_name
@@ -69,7 +87,7 @@ cargo test -p trusty-search -- my_test_name
 cargo test -p <crate> <test> -- --exact --nocapture
 
 # Test a single crate including its #[ignore]-tagged tests
-cargo test -p trusty-embedderd -- --include-ignored
+cargo test -p trusty-embedderd --no-fail-fast -- --include-ignored
 
 # Run a binary from a specific crate
 cargo run -p trusty-search -- start
