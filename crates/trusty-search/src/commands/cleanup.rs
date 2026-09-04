@@ -48,6 +48,25 @@ struct EmptyIndex {
     root_path: String,
 }
 
+/// Flags for `trusty-search cleanup`.
+///
+/// Why they live here, not in `main.rs`'s `Commands` enum (#6822): `main.rs`
+/// sits on a frozen line-cap budget, and a subcommand's flags belong beside the
+/// handler that reads them regardless. The CLI surface is unchanged — a
+/// `clap::Args` struct in a tuple variant derives the same flags the inline
+/// fields did.
+/// Test: `handle_cleanup`'s existing coverage in this module.
+#[derive(clap::Args, Debug, Clone)]
+pub struct CleanupArgs {
+    /// Skip the confirmation prompt and remove empty indexes immediately
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
+    /// Show what would be removed without deleting anything (overrides --yes)
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
 /// Why: extracted so `main()` doesn't inline the multi-step cleanup pipeline.
 /// What: lists indexes, filters to those with `chunk_count == 0`, prints a
 /// table, prompts unless `yes`, then deletes them. Returns `Err` only on

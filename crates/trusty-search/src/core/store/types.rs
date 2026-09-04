@@ -61,6 +61,40 @@ pub enum StagedSwapOutcome {
     Aborted,
 }
 
+/// What one scalar-precision backfill run did, or would do (issue #6822).
+///
+/// Why: the backfill is a durable, one-way re-encode of an index's whole vector
+/// arena, so an operator has to be able to see what it will touch BEFORE it
+/// runs — which index precision is current, how many vectors, how many bytes.
+/// The same record serves the dry run and the applied run, so the confirmation
+/// an operator reads is literally the report of the work.
+/// What: a plain serialisable record. `current` is `None` only for a scalar
+/// kind [`crate::core::store_config::VectorQuant`] cannot express. `applied` is
+/// `false` for a dry run AND for a no-op (already at the target precision), so
+/// callers distinguish the two by `dry_run`.
+/// Test: `tests/vector_quant_default_6822.rs::backfill_dry_run_reports_without_writing`.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct RequantizeReport {
+    /// Precision the index holds right now, e.g. `"f32 (none)"`.
+    pub current: Option<&'static str>,
+    /// Precision requested, e.g. `"f16"`.
+    pub target: &'static str,
+    /// Vectors the live index holds.
+    pub vectors: usize,
+    /// Keys the key map named that the graph could not return; skipped.
+    pub missing: usize,
+    /// On-disk snapshot bytes before the run; `None` when no snapshot exists.
+    pub bytes_before: Option<u64>,
+    /// On-disk snapshot bytes after the run; equals `bytes_before` when nothing
+    /// was written.
+    pub bytes_after: Option<u64>,
+    /// `true` only when the index was actually converted and published.
+    pub applied: bool,
+    /// `true` when this run was a report-only dry run.
+    pub dry_run: bool,
+}
+
 /// Abstract vector store interface. Concrete impls (in-process HNSW today,
 /// possibly remote tomorrow) plug in here so the rest of the indexer never
 /// imports `usearch` directly.
@@ -255,5 +289,38 @@ pub trait VectorStore: Send + Sync {
             out.push(self.contains(id).await);
         }
         out
+    }
+
+    /// Scalar-precision label the LIVE store actually holds (issue #6822).
+    ///
+    /// Why: `GET /indexes/:id/status` must report the precision of the index
+    /// that answers queries, not the `TRUSTY_VECTOR_QUANT` value the daemon
+    /// happens to be running with — those differ for every index built before
+    /// the #6822 default flip, which is the whole point of reporting it.
+    /// What: default `None` (mock / BM25-only stores have no scalar precision);
+    /// `UsearchStore` overrides by reading `Index::scalar_kind()`.
+    /// Test: `tests/vector_quant_default_6822.rs::opening_an_existing_f32_snapshot_keeps_it_f32`.
+    async fn vector_quant_label(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Re-encode this store's vectors at `target` precision, in place
+    /// (issue #6822).
+    ///
+    /// Why: the #6822 default flip applies at index CREATION only, so it saves
+    /// nothing on an index that already exists — and a forced reindex does not
+    /// help, because it upserts into the store object built at warm-boot. This
+    /// is the explicit, operator-run backfill that closes that gap.
+    /// What: default `Ok(None)` — "this backend has no scalar precision to
+    /// convert", which a caller reports rather than treating as success.
+    /// `UsearchStore` overrides via [`super::UsearchStore::requantize`]. With
+    /// `dry_run` the report describes what WOULD happen and nothing is written.
+    /// Test: `tests/vector_quant_default_6822.rs::backfill_converts_an_f32_index_to_f16_and_keeps_recall`.
+    async fn requantize(
+        &self,
+        _target: crate::core::store_config::VectorQuant,
+        _dry_run: bool,
+    ) -> Result<Option<RequantizeReport>> {
+        Ok(None)
     }
 }

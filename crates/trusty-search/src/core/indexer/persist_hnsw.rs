@@ -107,6 +107,51 @@ impl CodeIndexer {
         Ok(count)
     }
 
+    /// Scalar-precision label the wired vector store actually holds, or `None`
+    /// when no store is wired or the backend has no precision to report
+    /// (issue #6822).
+    ///
+    /// Why: `GET /indexes/:id/status` reports what the LIVE index holds, which
+    /// for every index built before the #6822 default flip differs from the
+    /// daemon's current `TRUSTY_VECTOR_QUANT` value — reporting the env var
+    /// would tell an operator the opposite of the truth on exactly the indexes
+    /// the backfill exists for.
+    /// What: forwards to [`crate::core::store::VectorStore::vector_quant_label`].
+    /// Test: `status_reports_the_live_vector_quantization` in
+    /// `service::server::tests_quantize_6822`.
+    pub async fn vector_quant_label(&self) -> Option<&'static str> {
+        self.store.as_ref()?.vector_quant_label().await
+    }
+
+    /// Re-encode the wired vector store at `target` precision (issue #6822).
+    ///
+    /// Why: the operator-run backfill for indexes built before the f16 default.
+    /// It lives beside `save_vector_store` because it is the same kind of
+    /// operation — a durable write of the vector arena — and shares its
+    /// quarantine refusal.
+    /// What: `Ok(None)` when no store is wired, when the index is
+    /// write-quarantined (#4226 — a quarantined index performs no durable
+    /// write of any kind), or when the backend has no precision to convert.
+    /// Otherwise forwards to
+    /// [`crate::core::store::VectorStore::requantize`], which reports without
+    /// writing when `dry_run` is set.
+    /// Test: `service::server::tests_quantize_6822::quantize_converts_the_live_index_and_reports_the_chunk_count`.
+    pub async fn requantize_vectors(
+        &self,
+        target: crate::core::store_config::VectorQuant,
+        dry_run: bool,
+    ) -> Result<Option<crate::core::store::RequantizeReport>> {
+        // #4226: a quarantined index performs no durable write of any kind. A
+        // dry run writes nothing, so it stays readable.
+        if !dry_run && self.refuse_durable_write("requantize_vectors", target.label()) {
+            return Ok(None);
+        }
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        store.requantize(target, dry_run).await
+    }
+
     /// Install a pre-loaded `VectorStore` (typically a restored `UsearchStore`)
     /// onto this indexer. Used by the warm-boot path so the persisted HNSW
     /// graph is wired in before `load_chunks_from_disk` runs.

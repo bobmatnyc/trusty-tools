@@ -439,6 +439,11 @@ impl UsearchStore {
         let options = IndexOptions {
             dimensions: dim,
             metric: MetricKind::Cos,
+            // #6822: this is the ONLY place the env default reaches an index,
+            // and it applies to creation only. `load_from` builds its options
+            // here too, but usearch's `view`/`load` then rebuild the metric and
+            // casts from the snapshot's own header — so an existing f32 index
+            // opened under the f16 default is still read as f32.
             quantization: VectorQuant::from_env().scalar_kind(),
             connectivity,
             expansion_add,
@@ -846,6 +851,12 @@ impl UsearchStore {
             }
         }
 
+        // #6822: the options this builds carry the env-selected quantization,
+        // but the `view()` below overwrites the metric and casts from the
+        // snapshot's `head.kind_scalar` (usearch `index_dense.hpp`, both the
+        // `load` and `view` paths). An existing f32 snapshot therefore stays
+        // f32 under the f16 default — the default-flip cannot re-quantize or
+        // re-interpret a byte of an already-built index.
         let store = Self::with_capacity_hint(key_map.dim, expected_chunks)?;
         let hnsw_str = match hnsw_path.to_str() {
             Some(s) => s,

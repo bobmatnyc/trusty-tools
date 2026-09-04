@@ -34,6 +34,8 @@ mod index_config;
 mod index_resolve;
 mod indexes;
 mod indexes_relocate;
+// #6822: the scalar-precision backfill route.
+mod quantize_handlers;
 mod reindex_handlers;
 mod router;
 mod routing;
@@ -68,6 +70,9 @@ mod tests_2984;
 mod tests_3304;
 #[cfg(test)]
 mod tests_allowlist_gate_767;
+#[cfg(test)]
+// #6822: the quantize route + the live-precision status field.
+mod tests_quantize_6822;
 #[cfg(test)]
 mod tests_same_id_root_mismatch;
 // #3049: DELETE must quiesce in-flight writers and report what it actually did.
@@ -173,6 +178,7 @@ use files::{get_index_chunks_handler, index_file_handler, remove_file_handler};
 use health::health_handler;
 use index_config::{index_config_handler, patch_index_config_handler};
 use indexes::{create_index_handler, list_indexes_handler, relocate_index_handler};
+use quantize_handlers::quantize_handler;
 use reindex_handlers::{reindex_handler, reindex_stream_handler};
 use routing::search_similar_handler;
 use search::{delete_index_handler, global_search_handler, search_handler};
@@ -360,6 +366,9 @@ pub fn build_router_on(
         .route("/indexes/{id}/index-file", post(index_file_handler))
         .route("/indexes/{id}/remove-file", post(remove_file_handler))
         .route("/indexes/{id}/reindex", post(reindex_handler))
+        // #6822: a whole-arena re-encode, so it belongs in the bulk lane with
+        // reindex rather than under the per-request query deadline.
+        .route("/indexes/{id}/quantize", post(quantize_handler))
         // Contributed-graph ingest (ADR-0009): bulk lane (store + graph
         // rebuild can run for seconds). Body limit 64 MiB — observed maxima
         // from large pilot corpora are ~20 MB, so this is ~3x headroom while

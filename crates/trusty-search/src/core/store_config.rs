@@ -22,8 +22,12 @@ use usearch::ScalarKind;
 pub const HNSW_MMAP_SERVE_ENV: &str = "TRUSTY_HNSW_MMAP_SERVE";
 
 /// Environment variable selecting the scalar precision new HNSW indexes are
-/// built with. Applied only at index *creation* time; changing it requires a
-/// forced reindex (existing snapshots keep the precision they were built with).
+/// built with. Applied only at index *creation* time; an existing snapshot
+/// keeps the precision it was built with, and only the explicit backfill
+/// (`trusty-search quantize`, issue #6822) converts one in place.
+///
+/// #6822: unset now resolves to [`VectorQuant::F16`], not `f32`. Set this to
+/// `f32` (or `none`) to keep full precision for indexes built from now on.
 pub const VECTOR_QUANT_ENV: &str = "TRUSTY_VECTOR_QUANT";
 
 /// Environment variable gating the idle-sweep HNSW re-view (demotion) added
@@ -103,25 +107,38 @@ impl MmapServeMode {
     }
 }
 
-/// Scalar precision a new HNSW index is built with (issue #709, quick win #2).
+/// Scalar precision a new HNSW index is built with (issue #709, quick win #2;
+/// default flipped to `F16` by issue #6822).
 ///
 /// Why: usearch can store vectors at reduced precision, trading a small recall
 /// loss for a large reduction in resident + on-disk footprint. `F16` halves the
-/// per-vector bytes (≈2× smaller), `I8` quarters them (≈4× smaller). Exposing
-/// this as a create-time knob lets operators shrink large indexes that don't
-/// need full `f32` precision, while the default stays `None` (`f32`) so existing
-/// behaviour and recall are unchanged unless explicitly opted in.
+/// per-vector bytes (≈2× smaller), `I8` quarters them (≈4× smaller).
+///
+/// Why `F16` is the default (issue #6822): the `ooc_quick_wins` fixture measures
+/// recall@10 = 1.00 for f16 against the same 1.00 f32 baseline — no measured
+/// loss — so leaving every new index at `f32` spent twice the vector bytes for
+/// nothing. `I8` stays opt-in: its measured recall (≈0.96 in the same fixture)
+/// is a real cost an operator must choose.
 /// What: a three-state enum resolved from [`VECTOR_QUANT_ENV`], mapped onto
 /// usearch's [`ScalarKind`] via [`Self::scalar_kind`]. The HNSW `search` API
 /// still takes `&[f32]` queries regardless of internal precision — usearch
 /// quantizes the query internally — so only the index build options change.
-/// Test: `tests::vector_quant_*`.
+///
+/// Scope of the default: index **creation** only. An existing snapshot records
+/// its own scalar kind in its header, and usearch's `load`/`view` rebuild the
+/// metric and casts from that header — so opening an f32 index under the f16
+/// default reads it as f32 and rewrites nothing. Converting one is the explicit
+/// operator action [`super::store::UsearchStore::requantize`] performs.
+/// Test: `tests::vector_quant_*`, plus
+/// `tests/vector_quant_default_6822.rs::default_quant_for_a_new_index_is_f16`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VectorQuant {
-    /// Full 32-bit float precision. **Default** — no recall loss.
-    #[default]
+    /// Full 32-bit float precision — no recall loss. Opt in with
+    /// `TRUSTY_VECTOR_QUANT=f32`.
     None,
-    /// 16-bit half precision — ≈2× smaller vectors, small recall cost.
+    /// 16-bit half precision — ≈2× smaller vectors, no measured recall loss.
+    /// **Default** since issue #6822.
+    #[default]
     F16,
     /// 8-bit integer quantization — ≈4× smaller vectors, larger recall cost.
     I8,
@@ -132,10 +149,11 @@ impl VectorQuant {
     ///
     /// Why: centralises the operator-facing string → enum mapping so index
     /// creation has a single source of truth.
-    /// What: unset / `none` / `f32` → `None`; `f16` / `fp16` / `half` → `F16`;
-    /// `i8` / `int8` → `I8` (case-insensitive, trimmed). Any other value falls
-    /// back to `None` with a `tracing::warn!`.
-    /// Test: `tests::vector_quant_from_env_*`.
+    /// What: unset or empty → the default (`F16` since #6822); `none` / `f32` /
+    /// `fp32` / `full` → `None`; `f16` / `fp16` / `half` → `F16`; `i8` / `int8`
+    /// → `I8` (case-insensitive, trimmed). Any other value falls back to the
+    /// default with a `tracing::warn!`.
+    /// Test: `tests::vector_quant_parse_*`.
     pub fn from_env() -> Self {
         match std::env::var(VECTOR_QUANT_ENV) {
             Ok(raw) => Self::parse(&raw),
@@ -144,18 +162,65 @@ impl VectorQuant {
     }
 
     /// Pure parser split out from [`Self::from_env`] for testability.
+    ///
+    /// #6822: an empty value means "unset" and now resolves to the default
+    /// (`F16`) rather than to `f32` — a shell that exports the variable empty
+    /// must not silently opt out of the new default. Only the explicit `f32` /
+    /// `none` spellings select full precision.
     fn parse(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "" | "none" | "f32" | "fp32" | "full" => Self::None,
+            "" => Self::default(),
+            "none" | "f32" | "fp32" | "full" => Self::None,
             "f16" | "fp16" | "half" => Self::F16,
             "i8" | "int8" => Self::I8,
             other => {
                 tracing::warn!(
                     "{VECTOR_QUANT_ENV}={other:?} is not a recognised quantization kind \
-                     (expected none|f16|i8); defaulting to none (f32)"
+                     (expected f32|f16|i8); defaulting to {}",
+                    Self::default().label()
                 );
                 Self::default()
             }
+        }
+    }
+
+    /// Strict parse of an operator-supplied precision, for a REQUEST rather
+    /// than an env var.
+    ///
+    /// Why (#6822): [`Self::parse`] deliberately degrades an unrecognised env
+    /// value to the default with a warning — an unset-ish environment must
+    /// never fail a daemon start. A request is the opposite case: an operator
+    /// who types `--to fp8` on a one-way, whole-arena conversion must be told
+    /// it is wrong, not silently given f16.
+    /// What: the same spellings [`Self::parse`] accepts, minus the empty and
+    /// fallback arms; anything else is `None` for the caller to reject.
+    /// Test: `tests::vector_quant_parse_operator_value_rejects_garbage`.
+    pub fn parse_operator_value(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "none" | "f32" | "fp32" | "full" => Some(Self::None),
+            "f16" | "fp16" | "half" => Some(Self::F16),
+            "i8" | "int8" => Some(Self::I8),
+            _ => Option::None,
+        }
+    }
+
+    /// Recover the quantization kind an already-built index actually holds.
+    ///
+    /// Why (#6822): reporting whether an index is quantized — on
+    /// `GET /indexes/:id/status` and in the backfill's dry run — has to read
+    /// the LIVE index, never the env var. The env var says what the NEXT index
+    /// will be built with; a warm-booted snapshot carries its own scalar kind
+    /// in its header and usearch restores the metric from there.
+    /// What: the inverse of [`Self::scalar_kind`]. Returns `None` for a scalar
+    /// kind this knob cannot express (usearch supports several this crate never
+    /// builds), so a caller reports "unknown" rather than guessing.
+    /// Test: `tests::vector_quant_round_trips_through_scalar_kind`.
+    pub fn from_scalar_kind(kind: ScalarKind) -> Option<Self> {
+        match kind {
+            ScalarKind::F32 => Some(Self::None),
+            ScalarKind::F16 => Some(Self::F16),
+            ScalarKind::I8 => Some(Self::I8),
+            _ => Option::None,
         }
     }
 
@@ -251,15 +316,20 @@ mod tests {
         assert_eq!(MmapServeMode::parse("banana"), MmapServeMode::Mmap);
     }
 
+    /// #6822: the default is `F16`, and an EMPTY value means "unset" rather
+    /// than "full precision" — a shell exporting the variable empty must not
+    /// silently opt out of the new default.
     #[test]
-    fn vector_quant_default_is_none() {
-        assert_eq!(VectorQuant::default(), VectorQuant::None);
-        assert_eq!(VectorQuant::None.scalar_kind(), ScalarKind::F32);
+    fn vector_quant_default_is_f16() {
+        assert_eq!(VectorQuant::default(), VectorQuant::F16);
+        assert_eq!(VectorQuant::default().scalar_kind(), ScalarKind::F16);
+        assert_eq!(VectorQuant::parse(""), VectorQuant::F16);
+        assert_eq!(VectorQuant::parse("   "), VectorQuant::F16);
     }
 
     #[test]
     fn vector_quant_parse_spellings() {
-        for s in ["", "none", "f32", "FP32", " full "] {
+        for s in ["none", "f32", "FP32", " full "] {
             assert_eq!(VectorQuant::parse(s), VectorQuant::None, "{s:?}");
         }
         for s in ["f16", "FP16", " half "] {
@@ -270,10 +340,43 @@ mod tests {
         }
     }
 
+    /// #6822: an unrecognised spelling falls back to the DEFAULT, which is now
+    /// f16 — the warn line names it so a typo is visible in the log.
     #[test]
-    fn vector_quant_parse_garbage_defaults_to_none() {
-        assert_eq!(VectorQuant::parse("bf16"), VectorQuant::None);
-        assert_eq!(VectorQuant::parse("q4"), VectorQuant::None);
+    fn vector_quant_parse_garbage_defaults_to_f16() {
+        assert_eq!(VectorQuant::parse("bf16"), VectorQuant::F16);
+        assert_eq!(VectorQuant::parse("q4"), VectorQuant::F16);
+    }
+
+    /// #6822: an operator-supplied value on a one-way whole-arena conversion is
+    /// rejected, never silently defaulted the way an env var is.
+    #[test]
+    fn vector_quant_parse_operator_value_rejects_garbage() {
+        assert_eq!(
+            VectorQuant::parse_operator_value("f16"),
+            Some(VectorQuant::F16)
+        );
+        assert_eq!(
+            VectorQuant::parse_operator_value(" F32 "),
+            Some(VectorQuant::None)
+        );
+        assert_eq!(
+            VectorQuant::parse_operator_value("int8"),
+            Some(VectorQuant::I8)
+        );
+        for bad in ["", "  ", "fp8", "bf16", "q4"] {
+            assert_eq!(VectorQuant::parse_operator_value(bad), None, "{bad:?}");
+        }
+    }
+
+    /// #6822: `from_scalar_kind` is how a live index's actual precision is
+    /// reported, so it must invert `scalar_kind` exactly for all three states.
+    #[test]
+    fn vector_quant_round_trips_through_scalar_kind() {
+        for q in [VectorQuant::None, VectorQuant::F16, VectorQuant::I8] {
+            assert_eq!(VectorQuant::from_scalar_kind(q.scalar_kind()), Some(q));
+        }
+        assert_eq!(VectorQuant::from_scalar_kind(ScalarKind::F64), None);
     }
 
     #[test]

@@ -1007,7 +1007,37 @@ daemon falls back to the Tiny tier (8 GB assumption) with a `tracing::warn!`.
 | `TRUSTY_MAX_RESIDENT_INDEXES` | Usage-based resident-index cap (issue #2161). Unset (default) disables the feature entirely — no index is ever evicted at runtime, matching pre-#2161 behaviour. When set to `N`, a periodic sweep (`TRUSTY_RESIDENCY_SWEEP_SECS`) ranks every currently-**resident** index by the same recency key used at boot-time selective warm-boot (`max(last_queried_unix, last_indexed_unix)`, issue #993) and cold-parks everything beyond the top `N` — a **non-destructive** detach that only removes the in-memory `IndexHandle` from the registry; `indexes.toml`, `roots.toml`, and every on-disk artifact (redb corpus, HNSW snapshot) are left untouched. The next query against a parked index reloads it lazily via the same cold-load path a never-yet-warm-booted index uses (subject to `TRUSTY_INDEX_COLD_RELOAD_TIMEOUT_SECS`). `0` parks every resident index on the next sweep. An index with an in-flight reindex is never parked. This is the runtime counterpart to `TRUSTY_WARMBOOT_MAX_INDEXES`, which only bounds how many indexes are loaded *eagerly at boot* — without this cap, an index that is queried even once stays resident for the daemon's entire lifetime. |
 | `TRUSTY_RESIDENCY_SWEEP_SECS` | Interval (seconds) between residency-cap sweeps (issue #2161). Default `120`. `0` disables the sweep ticker outright (it never spawns), independent of `TRUSTY_MAX_RESIDENT_INDEXES`. Has no effect — the sweep is a cheap per-tick no-op — when `TRUSTY_MAX_RESIDENT_INDEXES` is unset. |
 | `TRUSTY_HNSW_MMAP_SERVE` | **Out-of-core quick win #1 (#709).** Controls whether warm-booted HNSW snapshots are served directly from the memory-mapped `Index::view` (low RSS — the OS page cache holds the graph) or eagerly promoted to a heap-resident copy at load time. Default **enabled** (`1`/`true`/`yes`/`on`): search serves from the view and never duplicates the graph onto the heap; promotion to a mutable heap copy happens lazily only on the first *write* (index_file / reindex / add / remove). Set to `0`/`false`/`no`/`off` to opt out — `load_from` then promotes immediately so all serving is heap-resident (higher RSS, but no cold page-fault latency on the first queries). **Trade-off:** mmap serving lowers RSS but the first touch of a cold page faults it in from disk; on EFS/NFS-backed snapshot storage that fault is a network round-trip and can add noticeable tail latency to the first few queries after a restart — opt out on such hosts if cold-start latency matters more than RSS. |
-| `TRUSTY_VECTOR_QUANT` | **Out-of-core quick win #2 (#709).** Scalar precision new HNSW indexes are built with: `none` (default, `f32`) \| `f16` (≈2× smaller vectors, small recall cost) \| `i8` (≈4× smaller vectors, larger recall cost). Applied only at index **creation** time and maps onto usearch's `ScalarKind`. The `search` API still takes `f32` queries regardless (usearch quantizes the query internally). **Changing this requires a reindex** — existing snapshots keep the precision they were built with; a forced reindex (`--force` / `reindex`) adopts the new setting. There is no in-place migration. Recall@10 stays within tolerance (≥0.9 in the `ooc_quick_wins` fixture: f16=1.00, i8≈0.96 vs f32=1.00). The whole-snapshot on-disk reduction is diluted by fixed HNSW graph + key-map overhead at small dimensionality but approaches the per-vector 2×/4× ideal at the production 384-dim embedding size. |
+| `TRUSTY_VECTOR_QUANT` | **Out-of-core quick win #2 (#709); default flipped to `f16` by #6822.** Scalar precision new HNSW indexes are built with: `f16` (**default** — ≈2× smaller vectors, recall@10 = 1.00 in the `ooc_quick_wins` fixture, no measured loss) \| `f32` / `none` (full precision — opt in to keep the pre-#6822 behaviour) \| `i8` (≈4× smaller vectors, recall ≈0.96 — stays opt-in). An empty value means unset and resolves to the default; an unrecognised value warns and falls back to the default. Applied only at index **creation** time and maps onto usearch's `ScalarKind`. The `search` API still takes `f32` queries regardless (usearch quantizes the query internally). **An existing index is never re-quantized by this knob** — usearch writes the scalar kind into the snapshot header and `load`/`view` rebuild the metric and casts from there, so opening an f32 index under the f16 default reads it as f32 and rewrites nothing. **A forced reindex does not adopt the new setting either** (#6822 corrects the earlier claim here): the store object is built once at warm-boot by `service::persistence_loader::build_store_for_entry` and a reindex upserts into that same handle, so `reindex --force` re-embeds at the OLD precision. Converting an existing index is the explicit backfill below. The whole-snapshot on-disk reduction is diluted by fixed HNSW graph + key-map overhead at small dimensionality; at the production 384-dim size the vector-byte reduction measures exactly 2.000× (`tests/vector_quant_default_6822.rs::backfill_halves_the_vector_bytes_within_five_percent`). |
+
+### Backfilling an existing index to `f16` (issue #6822)
+
+🔴 **`reindex --force` cannot change an existing index's precision.** The vector
+store is built once at warm-boot and a reindex upserts into it, so a forced
+reindex re-embeds at the precision the store already holds. The one-shot
+conversion is its own command:
+
+```bash
+trusty-search quantize --dry-run              # names the index, root, chunk count, vectors, bytes
+trusty-search quantize --to f16               # prompts, then converts
+trusty-search quantize --to f16 --yes         # scripted fleet run
+trusty-search quantize --to f32               # undo, same machinery
+```
+
+- HTTP equivalent: `POST /indexes/:id/quantize` with `{"quant":"f16","dry_run":true}`.
+- Idempotent — a conversion to the precision the index already holds reports
+  `applied: false` and writes nothing, so re-running it across a fleet is safe.
+- Read the result back on `GET /indexes/:id/status` as
+  `semantic_coverage.vector_quant`; that field reads the LIVE index, not the env
+  var, which is the only reading that is true for an index built before the flip.
+- 🟡 **Why this is not a `reindex --quant` flag (#402):** a reindex resolves a
+  root and walks a tree — the machinery that let #402 hijack another index's
+  corpus and prune it. `quantize` accepts no root, performs no walk, and never
+  re-registers a handle; it is addressed by index id through `state.registry.get`
+  alone and rewrites only that index's own vector arena. It also refuses while a
+  reindex is running (the same `ReindexStatus::Running` check
+  `service::shutdown_flush` uses, #1717 / #3970), and its single durable write
+  goes through `UsearchStore::save`, keeping that function's #1711
+  empty-over-populated and #1717 shrink guards.
 
 Additional internal caps (not env-tunable):
 

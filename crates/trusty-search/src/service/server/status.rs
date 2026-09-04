@@ -405,9 +405,16 @@ pub(crate) async fn index_status_report(
         // count and that is the correct, healthy answer.
         (None, false) => serde_json::Value::String("no_vector_store".into()),
     };
+    // #6822: the precision the LIVE index holds, read from the index itself —
+    // NOT from `TRUSTY_VECTOR_QUANT`, which says what the NEXT index will be
+    // built with and therefore reads the opposite of the truth on exactly the
+    // indexes the `quantize` backfill exists for. `null` for a BM25-only /
+    // `skip_vector` index, which has no precision to report.
+    let vector_quant = indexer.vector_quant_label().await;
     let semantic_coverage = serde_json::json!({
         "vectors_present": vectors_present,
         "vectors_unavailable_reason": vectors_unavailable_reason,
+        "vector_quant": vector_quant,
         "chunk_count": chunk_count,
         // The same number `stages.semantic.embedded` carries, restated here
         // under a name that says what it measures. The field over in `stages`

@@ -814,7 +814,6 @@ crates/trusty-search/src/core/search/hierarchy.rs	nested_dedup_keeps_sub_index_h
 crates/trusty-search/src/core/store/types.rs	test_rewrite_keys_to_relative
 crates/trusty-search/src/core/store/usearch_impl.rs	test_rewrite_keys_to_relative
 crates/trusty-search/src/core/store_config.rs	mmap_serve_mode_from_env_*
-crates/trusty-search/src/core/store_config.rs	vector_quant_from_env_*
 crates/trusty-search/src/core/symbol_graph/build.rs	test_update_file_drops_old_edges
 crates/trusty-search/src/mcp/tools/http.rs	delete_index
 crates/trusty-search/src/mcp/tools/http.rs	list_chunks
