@@ -67,14 +67,32 @@ fn agent_ended(_: &AgentWorktreeOwner) -> AgentDelegationState {
 
 /// [`classify`] with the refusing agent probe, for the tests whose subject is a
 /// different gate (#5661).
+///
+/// Since #6806 the gate-2 argument is a [`ClaimState`] rather than a bool;
+/// [`claim`] builds the two states the pre-#6806 `live: bool` stood for.
 fn classify_no_agent(
     path: &Path,
     admission: Admission,
-    live: bool,
+    claim: &ClaimState,
     pr: &BranchPrState,
     probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
 ) -> ReclaimVerdict {
-    classify(path, admission, live, pr, probe_dirt, &no_agents)
+    classify(path, admission, claim, pr, probe_dirt, &no_agents)
+}
+
+/// The gate-2 claim state a `live: bool` used to stand for (#6806).
+///
+/// `true` becomes a FOREIGN session's claim — the strictest gate-2 answer — so
+/// every test aimed at another gate keeps the verdict it always had.
+fn claim(live: bool) -> ClaimState {
+    if live {
+        ClaimState::Foreign {
+            session: "tm-other-01".to_string(),
+            caller: Some("tm-apex-03".to_string()),
+        }
+    } else {
+        ClaimState::Unclaimed
+    }
 }
 
 /// A real git worktree in the harness agent store, landed and pushed — the
@@ -130,7 +148,7 @@ fn classify_blocks_non_admitted_worktree() {
         Admission::OutsideProject,
         Admission::OutsideReposRoot,
     ] {
-        let v = classify_no_agent(&wt(), admission, false, &merged(1), &clean);
+        let v = classify_no_agent(&wt(), admission, &claim(false), &merged(1), &clean);
         assert!(
             !v.is_reclaimable(),
             "{admission:?} must never be reclaimable, even with a merged PR"
@@ -148,7 +166,13 @@ fn classify_blocks_live_session_workspace() {
     // The strongest gate: a merged PR plus a clean tree still loses to a
     // session that claims the path. A live session can sit in a directory whose
     // record reads terminal — measured on this repo 2026-07-28.
-    let v = classify_no_agent(&wt(), Admission::Admitted, true, &merged(42), &clean);
+    let v = classify_no_agent(
+        &wt(),
+        Admission::Admitted,
+        &claim(true),
+        &merged(42),
+        &clean,
+    );
     assert!(!v.is_reclaimable());
     assert!(
         reason(&v).contains("claims this workspace"),
@@ -157,31 +181,69 @@ fn classify_blocks_live_session_workspace() {
     );
 }
 
+/// #6806 closure criterion 2: the refusal names the claiming session and says
+/// it is not the caller. Fails on `origin/main`, where gate 2's refusal was the
+/// fixed string "a session still claims this workspace".
 #[test]
-fn live_check_matches_exact_ancestor_and_descendant_paths() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
-    let candidate = root.join("wt");
-    let inside = candidate.join("nested");
-    std::fs::create_dir_all(&inside).expect("mkdir");
+fn classify_names_the_foreign_session_that_blocked_a_candidate() {
+    let v = classify_no_agent(
+        &wt(),
+        Admission::Admitted,
+        &claim(true),
+        &merged(42),
+        &clean,
+    );
+    let reason = reason(&v);
+    assert!(
+        reason.contains("tm-other-01"),
+        "names the claimant: {reason}"
+    );
+    assert!(reason.contains("tm-apex-03"), "names the caller: {reason}");
+    assert!(
+        reason.contains("not the calling session"),
+        "says the claim is not the caller's: {reason}"
+    );
+}
 
-    assert!(
-        is_live(&candidate, std::slice::from_ref(&candidate)),
-        "exact match"
+/// #6806 closure criteria 1 and 4: a worktree the CALLER alone claims — the
+/// nested `.worktrees/<name>` shape a session creates inside its own workspace
+/// — passes gate 2 and reaches the merged-PR and unsaved-work gates. Fails on
+/// `origin/main`, where any claim at all blocked.
+#[test]
+fn classify_allows_a_worktree_claimed_only_by_the_calling_session() {
+    let v = classify(
+        &wt(),
+        Admission::Admitted,
+        &ClaimState::CallerNested {
+            session: "tm-apex-03".to_string(),
+        },
+        &merged(42),
+        &clean,
+        &no_agents,
     );
-    assert!(
-        is_live(&candidate, std::slice::from_ref(&inside)),
-        "a session sitting INSIDE the candidate must protect it"
+    assert_eq!(
+        v,
+        ReclaimVerdict::Reclaimable { pr: 42 },
+        "the caller's own claim must not block its own nested worktree"
     );
-    assert!(
-        is_live(&inside, std::slice::from_ref(&candidate)),
-        "a candidate inside a claimed path must be protected"
+}
+
+/// The caller's own WORKSPACE is not a worktree it may reclaim, however it
+/// asked — the guard that keeps #6806 from becoming a self-deletion.
+#[test]
+fn classify_blocks_the_callers_own_workspace() {
+    let v = classify(
+        &wt(),
+        Admission::Admitted,
+        &ClaimState::CallerWorkspace {
+            session: "tm-apex-03".to_string(),
+        },
+        &merged(42),
+        &clean,
+        &no_agents,
     );
-    assert!(
-        !is_live(&candidate, &[root.join("unrelated")]),
-        "an unrelated sibling must not protect it"
-    );
-    assert!(!is_live(&candidate, &[]), "nothing claimed means not live");
+    assert!(!v.is_reclaimable());
+    assert!(reason(&v).contains("IS the caller"), "{}", reason(&v));
 }
 
 // ---------------------------------------------------------------------------
@@ -193,7 +255,7 @@ fn classify_blocks_open_pr() {
     let v = classify_no_agent(
         &wt(),
         Admission::Admitted,
-        false,
+        &claim(false),
         &BranchPrState::Open { pr: 9 },
         &clean,
     );
@@ -208,7 +270,7 @@ fn classify_blocks_closed_unmerged_pr() {
     let v = classify_no_agent(
         &wt(),
         Admission::Admitted,
-        false,
+        &claim(false),
         &BranchPrState::ClosedUnmerged { pr: 11 },
         &clean,
     );
@@ -221,7 +283,7 @@ fn classify_blocks_no_pr() {
     let v = classify_no_agent(
         &wt(),
         Admission::Admitted,
-        false,
+        &claim(false),
         &BranchPrState::NoPr,
         &clean,
     );
@@ -236,7 +298,7 @@ fn classify_blocks_unknown_pr_state() {
     let v = classify_no_agent(
         &wt(),
         Admission::Admitted,
-        false,
+        &claim(false),
         &BranchPrState::Unknown,
         &clean,
     );
@@ -257,7 +319,13 @@ fn classify_blocks_dirty_worktree() {
     // A merged PR does not prove the directory holds nothing novel. The
     // 2026-07-21 salvage found merged-PR worktrees carrying real unpushed
     // source; this gate is why they survive.
-    let v = classify_no_agent(&wt(), Admission::Admitted, false, &merged(5), &dirty);
+    let v = classify_no_agent(
+        &wt(),
+        Admission::Admitted,
+        &claim(false),
+        &merged(5),
+        &dirty,
+    );
     assert!(!v.is_reclaimable());
     assert!(reason(&v).contains("unsaved work"), "{}", reason(&v));
 }
@@ -269,7 +337,13 @@ fn classify_blocks_a_really_dirty_worktree() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("dirty-2919");
     std::fs::write(path.join("scratch.rs"), "fn main() {}\n").expect("write untracked file");
-    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(5), &inspect_dirt);
+    let v = classify_no_agent(
+        &path,
+        Admission::Admitted,
+        &claim(false),
+        &merged(5),
+        &inspect_dirt,
+    );
     assert!(
         !v.is_reclaimable(),
         "a real untracked file must block: {v:?}"
@@ -283,7 +357,13 @@ fn classify_blocks_a_worktree_with_unpushed_commits() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("unpushed-2919");
     GitWorktreeFixture::commit_unpushed(&path);
-    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(6), &inspect_dirt);
+    let v = classify_no_agent(
+        &path,
+        Admission::Admitted,
+        &claim(false),
+        &merged(6),
+        &inspect_dirt,
+    );
     assert!(!v.is_reclaimable(), "an unpushed commit must block: {v:?}");
 }
 
@@ -301,7 +381,7 @@ fn classify_allows_clean_pushed_merged_worktree() {
     let v = classify_no_agent(
         &path,
         Admission::Admitted,
-        false,
+        &claim(false),
         &merged(77),
         &inspect_dirt,
     );
@@ -325,7 +405,7 @@ fn classify_blocks_a_live_agents_worktree() {
     let v = classify(
         &path,
         Admission::Admitted,
-        false,
+        &claim(false),
         &merged(101),
         &inspect_dirt,
         &agent_live,
@@ -359,7 +439,7 @@ fn classify_blocks_an_agent_the_harness_still_holds_after_a_restart() {
     let v = classify(
         &path,
         Admission::Admitted,
-        false,
+        &claim(false),
         &merged(102),
         &inspect_dirt,
         &no_agents,
@@ -404,7 +484,7 @@ fn classify_records_an_agent_refusal_as_its_own_verdict_kind() {
         let v = classify(
             &path,
             Admission::Admitted,
-            false,
+            &claim(false),
             &merged(105),
             &inspect_dirt,
             probe,
@@ -426,7 +506,7 @@ fn classify_reserves_the_agent_verdict_for_agent_refusals() {
     let dirty_tree = classify_no_agent(
         &wt(),
         Admission::Admitted,
-        false,
+        &claim(false),
         &merged(106),
         &dirty as &dyn Fn(&Path) -> Option<DirtyWorktree>,
     );
@@ -437,7 +517,7 @@ fn classify_reserves_the_agent_verdict_for_agent_refusals() {
     let open_pr = classify_no_agent(
         &wt(),
         Admission::Admitted,
-        false,
+        &claim(false),
         &BranchPrState::Open { pr: 107 },
         &clean,
     );
@@ -469,7 +549,7 @@ fn survey_lists_an_agent_held_candidate_in_exactly_one_place() {
     let harness_verdict = classify_no_agent(
         &harness_held,
         Admission::HarnessAgentLock,
-        false,
+        &claim(false),
         &merged(6507),
         &clean,
     );
@@ -490,7 +570,7 @@ fn survey_lists_an_agent_held_candidate_in_exactly_one_place() {
     let registry_verdict = classify(
         &registry_held,
         Admission::Admitted,
-        false,
+        &claim(false),
         &merged(6508),
         &inspect_dirt,
         &agent_live,
@@ -511,7 +591,7 @@ fn survey_lists_an_agent_held_candidate_in_exactly_one_place() {
     let dirty_verdict = classify_no_agent(
         &dirty_tree,
         Admission::Admitted,
-        false,
+        &claim(false),
         &merged(6509),
         &dirty,
     );
@@ -585,7 +665,7 @@ fn classify_allows_a_finished_agents_merged_worktree() {
     let v = classify(
         &path,
         Admission::Admitted,
-        false,
+        &claim(false),
         &merged(103),
         &inspect_dirt,
         &agent_ended,
@@ -610,7 +690,7 @@ fn classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel() {
     let v = classify(
         &garbled,
         Admission::Admitted,
-        false,
+        &claim(false),
         &merged(104),
         &inspect_dirt,
         &agent_ended,
@@ -625,7 +705,7 @@ fn classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel() {
     let v = classify(
         &denied,
         Admission::Admitted,
-        false,
+        &claim(false),
         &merged(105),
         &inspect_dirt,
         &agent_ended,
@@ -646,7 +726,7 @@ fn classify_leaves_a_session_owned_worktree_alone() {
     let v = classify(
         &path,
         Admission::Admitted,
-        false,
+        &claim(false),
         &merged(106),
         &inspect_dirt,
         &no_agents,
@@ -941,7 +1021,13 @@ fn classify_blocks_a_worktree_trusty_mpm_does_not_own() {
     // on is a worktree parked somewhere with no sentinel at all.
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree_at(&fx.repo.join("elsewhere"), "unowned-2919");
-    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(9), &clean);
+    let v = classify_no_agent(
+        &path,
+        Admission::Admitted,
+        &claim(false),
+        &merged(9),
+        &clean,
+    );
     assert!(!v.is_reclaimable(), "{v:?}");
     assert!(
         reason(&v).contains("not a trusty-mpm-removable worktree"),
@@ -1027,7 +1113,13 @@ fn an_unattributed_agent_store_worktree_is_never_reclaimable() {
     // No sentinel of any kind: nothing attributes this tree to an agent and
     // nothing says whether one is still working in it. Merged and clean, so
     // gates 5 and 6 both pass and only the ownership gate stands.
-    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
+    let v = classify_no_agent(
+        &path,
+        Admission::Admitted,
+        &claim(false),
+        &merged(759),
+        &clean,
+    );
     assert!(
         !v.is_reclaimable(),
         "an unattributed agent-store tree must never be deleted on merged+clean alone: {v:?}"
@@ -1058,7 +1150,13 @@ fn classify_allows_a_merged_agent_tree_the_harness_released() {
     GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-6561released");
     // No `harness_lock_worktree` call: the harness released this tree when its
     // agent ended, which is what `git worktree list` now reports.
-    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
+    let v = classify_no_agent(
+        &path,
+        Admission::Admitted,
+        &claim(false),
+        &merged(759),
+        &clean,
+    );
     assert_eq!(
         v,
         ReclaimVerdict::Reclaimable { pr: 759 },
@@ -1077,7 +1175,13 @@ fn classify_blocks_an_agent_tree_git_cannot_be_asked_about() {
     let path = agent_store_worktree(&fx, "agent-6561unaskable");
     GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-6561unaskable");
     let _restore = deny_all(&path.join(".git"));
-    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
+    let v = classify_no_agent(
+        &path,
+        Admission::Admitted,
+        &claim(false),
+        &merged(759),
+        &clean,
+    );
     assert!(!v.is_reclaimable(), "two silences are not an answer: {v:?}");
 }
 
@@ -1092,7 +1196,7 @@ fn classify_discloses_a_harness_locked_agent_tree_as_agent_owned() {
     let v = classify_no_agent(
         &wt(),
         Admission::HarnessAgentLock,
-        false,
+        &claim(false),
         &merged(760),
         &clean,
     );
@@ -1113,7 +1217,13 @@ fn a_dirty_agent_store_worktree_is_still_refused() {
         &fx.repo.join(".claude").join("worktrees"),
         "agent-6561dirty",
     );
-    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &dirty);
+    let v = classify_no_agent(
+        &path,
+        Admission::Admitted,
+        &claim(false),
+        &merged(759),
+        &dirty,
+    );
     assert!(
         !v.is_reclaimable(),
         "unsaved work outranks a merged PR, in the harness store as anywhere: {v:?}"
@@ -1136,7 +1246,13 @@ fn an_unreadable_agent_sentinel_still_blocks_an_agent_store_worktree() {
         b"{not json",
     )
     .expect("write garbage sentinel");
-    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
+    let v = classify_no_agent(
+        &path,
+        Admission::Admitted,
+        &claim(false),
+        &merged(759),
+        &clean,
+    );
     assert!(!v.is_reclaimable(), "{v:?}");
     assert!(
         reason(&v).contains("names no owner"),
@@ -1162,7 +1278,7 @@ fn pr_index_skips_fork_pull_requests() {
         !classify_no_agent(
             &wt(),
             Admission::Admitted,
-            false,
+            &claim(false),
             &idx.state_for(Some("feat/x")),
             &clean
         )
@@ -1294,7 +1410,7 @@ fn classify_blocks_a_failed_lookup_and_names_the_reason() {
     let verdict = classify(
         &path,
         Admission::Admitted,
-        false,
+        &claim(false),
         &BranchPrState::LookupFailed {
             reason: "`gh` exited 4: gh auth login".to_string(),
         },

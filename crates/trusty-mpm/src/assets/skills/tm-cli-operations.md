@@ -370,8 +370,19 @@ harness-provisioned worktrees live under `.claude/worktrees/` (see
 `prune`/`prune-idle` act immediately unless you pass `--dry-run` yourself.
 `prune --include-active` is the only explicit override to also touch RUNNING
 sessions; `prune-idle`'s idle/done verdict policy inherently leaves
-working/blocked sessions alone, and `prune-worktrees` only ever removes
-directories that have no active session at all.
+working/blocked sessions alone.
+
+**`--force` against the liveness gate (#6806).** `--force` selects the
+destructive mode. It overrides no gate, and specifically it never overrides
+another live session's claim on a worktree — a worktree some OTHER session
+claims stays spared however you invoke the command; stop that session to
+reclaim its trees. What `--force` does not have to fight is the CALLER's own
+claim: the command sends `$TM_MANAGED_SESSION_ID`, so the nested
+`.worktrees/<name>` trees a session created inside its own workspace are
+reclaimable from inside that session. The caller's own workspace DIRECTORY is
+still refused — a session may prune worktrees inside its workspace, never the
+workspace it is sitting in. Every liveness refusal names the session holding
+the claim and says whether that session is the caller.
 
 ---
 
