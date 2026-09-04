@@ -37,7 +37,7 @@ fn finding(severity: Severity) -> VerifiedFinding {
         remediation: "r".to_string(),
         cost_effort: "low".to_string(),
         trace_verdict: String::new(),
-        cwe_id: None,
+        cwe_id: Vec::new(),
     }
 }
 

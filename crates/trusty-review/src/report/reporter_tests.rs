@@ -466,7 +466,7 @@ fn reporter_injects_synthesis_prose() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: String::new(),
-            cwe_id: None,
+            cwe_id: Vec::new(),
             app_slug: slug,
             title: "Injection risk".to_string(),
             severity: "RED".to_string(),
@@ -752,7 +752,7 @@ fn render_with_finding(f: crate::report::synthesize::FindingProse) -> String {
 fn restating_finding() -> crate::report::synthesize::FindingProse {
     crate::report::synthesize::FindingProse {
         trace_verdict: String::new(),
-        cwe_id: None,
+        cwe_id: Vec::new(),
         app_slug: String::new(),
         title: "Extract method — hnsw_store".to_string(),
         severity: "AMBER".to_string(),
@@ -888,7 +888,7 @@ fn evidence_renders_as_fenced_block() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: String::new(),
-            cwe_id: None,
+            cwe_id: Vec::new(),
             app_slug: slug,
             title: "SQL injection".to_string(),
             severity: "RED".to_string(),
@@ -945,7 +945,7 @@ fn a_trace_verdict_renders_under_the_evidence_fence() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: "cleared-by-trace: the query is parameterised at line 61".to_string(),
-            cwe_id: None,
+            cwe_id: Vec::new(),
             app_slug: slug,
             title: "SQL injection".to_string(),
             severity: "RED".to_string(),
@@ -979,8 +979,9 @@ fn a_trace_verdict_renders_under_the_evidence_fence() {
 /// only in `investigation.json`. It rides on the title, and a finding with no
 /// identifiable class must render EXACTLY as it did before the tag existed —
 /// no empty brackets, no placeholder.
-/// What: two findings through one render; the tagged one gains a ` [CWE-89]`
-/// suffix on its title and the untagged one gains nothing.
+/// What: three findings through one render; the single-class one gains a
+/// ` [CWE-89]` suffix, the multi-class one a comma-separated ` [CWE-798,
+/// CWE-532]`, and the untagged one gains nothing.
 /// Test: this test itself.
 #[test]
 fn a_weakness_class_renders_next_to_the_finding_title() {
@@ -989,7 +990,7 @@ fn a_weakness_class_renders_next_to_the_finding_title() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
     let slug = model.repositories[0].slug.clone();
-    let prose = |title: &str, cwe_id: Option<String>| FindingProse {
+    let prose = |title: &str, cwe_id: Vec<String>| FindingProse {
         trace_verdict: String::new(),
         cwe_id,
         app_slug: slug.clone(),
@@ -1010,8 +1011,12 @@ fn a_weakness_class_renders_next_to_the_finding_title() {
         executive_summary: None,
         top_risks: vec![],
         findings: vec![
-            prose("SQL injection", Some("CWE-89".to_string())),
-            prose("Unclear session lifetime", None),
+            prose("SQL injection", vec!["CWE-89".to_string()]),
+            prose(
+                "Hardcoded token logged on the error path",
+                vec!["CWE-798".to_string(), "CWE-532".to_string()],
+            ),
+            prose("Unclear session lifetime", Vec::new()),
         ],
         notes: vec![],
     });
@@ -1022,6 +1027,10 @@ fn a_weakness_class_renders_next_to_the_finding_title() {
     let md = Reporter::new(tmp.path()).render(&model, &template);
 
     assert!(md.contains("SQL injection [CWE-89]"), "md:\n{md}");
+    assert!(
+        md.contains("Hardcoded token logged on the error path [CWE-798, CWE-532]"),
+        "md:\n{md}"
+    );
     assert!(md.contains("Unclear session lifetime"), "md:\n{md}");
     assert!(
         !md.contains("Unclear session lifetime ["),
@@ -1053,7 +1062,7 @@ fn evidence_with_blank_line_fences_cleanly() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: String::new(),
-            cwe_id: None,
+            cwe_id: Vec::new(),
             app_slug: slug,
             title: "SQL injection".to_string(),
             severity: "RED".to_string(),
@@ -1113,7 +1122,7 @@ fn evidence_containing_triple_backticks_uses_longer_fence() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: String::new(),
-            cwe_id: None,
+            cwe_id: Vec::new(),
             app_slug: slug,
             title: "SQL injection".to_string(),
             severity: "RED".to_string(),
@@ -1192,7 +1201,7 @@ fn evidence_with_adjacent_hash_comment_lines_renders_byte_identical() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: String::new(),
-            cwe_id: None,
+            cwe_id: Vec::new(),
             app_slug: slug,
             title: "ALLOWED_OAUTH_DOMAINS fails closed but is undocumented".to_string(),
             severity: "RED".to_string(),
@@ -1260,7 +1269,7 @@ fn evidence_with_blank_line_full_render_has_no_fenced_splice() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: String::new(),
-            cwe_id: None,
+            cwe_id: Vec::new(),
             app_slug: slug,
             title: "AI Gateway secrets".to_string(),
             severity: "RED".to_string(),
@@ -1439,7 +1448,7 @@ fn reporter_merges_synthesis_prose_onto_deterministic_finding() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: String::new(),
-            cwe_id: None,
+            cwe_id: Vec::new(),
             app_slug: slug,
             title: "SQL injection".to_string(),
             severity: "RED".to_string(),
@@ -3183,7 +3192,7 @@ fn amber_prose(
 ) -> crate::report::synthesize::FindingProse {
     crate::report::synthesize::FindingProse {
         trace_verdict: String::new(),
-        cwe_id: None,
+        cwe_id: Vec::new(),
         app_slug: String::new(),
         title: title.to_string(),
         severity: "AMBER".to_string(),

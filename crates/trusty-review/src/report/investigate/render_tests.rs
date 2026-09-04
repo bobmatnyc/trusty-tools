@@ -53,7 +53,7 @@ fn dep(name: &str, locked: Option<&str>) -> Dependency {
 fn finding() -> VerifiedFinding {
     VerifiedFinding {
         trace_verdict: String::new(),
-        cwe_id: None,
+        cwe_id: Vec::new(),
         title: "Hardcoded secret".to_string(),
         severity: Severity::Red,
         dimension: "authentication & secrets".to_string(),

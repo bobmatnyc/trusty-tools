@@ -62,16 +62,17 @@ pub struct VerifiedFinding {
     /// — keeps this empty and renders exactly as it did before the pass existed.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub trace_verdict: String,
-    /// The CWE id for this finding's weakness class, when one is identifiable
-    /// (#6779).
+    /// The CWE ids for this finding's weakness classes, when any are
+    /// identifiable (#6779).
     ///
-    /// `None` — and so ABSENT from `investigation.json` — whenever the model
-    /// named no weakness class, named one this crate cannot read mechanically,
-    /// or the finding is GREEN (a strength has no weakness class). The field
-    /// only ever appears when it says something, which is what keeps a
-    /// structural-flaw count off findings that were never classified.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwe_id: Option<String>,
+    /// EMPTY — and so ABSENT from `investigation.json` — whenever the model
+    /// named no weakness class, named only ones this crate cannot read
+    /// mechanically, or the finding is GREEN (a strength has no weakness
+    /// class). The field only ever appears when it says something, which is what
+    /// keeps a structural-flaw count off findings that were never classified.
+    /// A list, not one id: a finding can violate several classes at once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cwe_id: Vec<String>,
 }
 
 /// The outcome of verifying one repository's raw findings.
@@ -234,9 +235,9 @@ pub fn verify_findings(raw: Vec<RawFinding>, selection: &Selection) -> VerifyOut
                 // class — the same blanking its prose gets. Every other band
                 // keeps whatever `resolve` can read, and nothing else.
                 cwe_id: if green {
-                    None
+                    Vec::new()
                 } else {
-                    super::cwe::resolve(f.cwe_id.as_deref().unwrap_or_default())
+                    super::cwe::resolve_all(f.cwe_id.as_deref().unwrap_or_default())
                 },
             }),
             None => {

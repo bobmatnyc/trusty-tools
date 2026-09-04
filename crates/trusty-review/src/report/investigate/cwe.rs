@@ -8,17 +8,21 @@
 //! them. Deriving a CWE id from the dimension alone would be a guess, and #6779
 //! says never guess.
 //!
-//! So the weakness class comes from the model, which is the only party that saw
+//! So the weakness classes come from the model, which is the only party that saw
 //! the code, and this module is the ingestion gate on that field: an id the model
 //! emits is admitted only when it is well formed, and a class NAME the model
-//! emits instead of an id is resolved through [`WEAKNESS_CLASSES`]. Anything
-//! else resolves to `None`, and a `None` never reaches the serialised finding at
-//! all.
+//! emits instead of an id is resolved through [`WEAKNESS_CLASSES`]. Everything
+//! else is dropped, and an all-dropped list leaves the finding with an empty
+//! `cwe_id` that never reaches `investigation.json` at all.
 //!
-//! What: [`resolve`], the one entry point both branches run through;
-//! [`class_checklist`], which renders the same table into the prompt so the
-//! model chooses from the set this module can read back rather than inventing a
-//! spelling. One table, two consumers, no drift.
+//! The field is a LIST because one finding can violate more than one weakness
+//! class — a hardcoded credential logged on the error path is CWE-798 and
+//! CWE-532 at once, and picking one of the two would discard a real fact.
+//!
+//! What: [`resolve_all`], the entry point ingestion calls; [`class_checklist`],
+//! which renders the same table into the prompt so the model chooses from the
+//! set this module can read back rather than inventing a spelling. One table,
+//! two consumers, no drift.
 //!
 //! Test: `super::cwe_tests`.
 
@@ -94,11 +98,41 @@ const WEAKNESS_CLASSES: &[(&str, &str)] = &[
     ("unchecked error condition", "CWE-390"),
 ];
 
-/// Resolve what the model put in `cwe_id` into a CWE id, or `None`.
+/// Resolve every weakness class the model declared, dropping what it cannot.
 ///
-/// Why: this is the single gate #6779's "never guessed" rule is enforced at. A
-/// caller that gets `None` omits the field entirely, so an unidentifiable
-/// weakness class costs the finding nothing and states nothing.
+/// Why: this is the single gate #6779's "never guessed" rule is enforced at, and
+/// it is per element so one unreadable entry costs only itself — a list of
+/// `["CWE-798", "not a class"]` still tags the finding CWE-798 rather than
+/// losing both. The finding itself is never rejected for this field.
+///
+/// What: [`resolve`] on each entry, dropping every `None`, then de-duplicating
+/// while keeping first-seen order (two spellings of one class — `cwe-79` and
+/// `Cross-Site Scripting` — must not render as two tags). A list whose every
+/// entry drops returns empty, which the caller serialises as no field at all.
+///
+/// # Postconditions
+/// Every returned id matches `^CWE-\d+$` and appears once. The result is never
+/// longer than `raw`.
+///
+/// Test: `super::cwe_tests::{several_classes_survive_together,
+/// duplicate_spellings_collapse_to_one_tag,
+/// an_all_unresolvable_list_becomes_empty}`.
+pub fn resolve_all(raw: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in raw {
+        if let Some(id) = resolve(entry)
+            && !out.contains(&id)
+        {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// Resolve ONE declared weakness class into a CWE id, or `None`.
+///
+/// Why: the per-element half of [`resolve_all`], kept separate because the two
+/// admission branches are the part worth testing directly.
 ///
 /// What: two branches, in order. A well-formed `CWE-<digits>` id is admitted and
 /// upper-cased, whatever case the model used. Otherwise the text is reduced by
@@ -114,7 +148,7 @@ const WEAKNESS_CLASSES: &[(&str, &str)] = &[
 /// Test: `super::cwe_tests::{a_well_formed_id_is_admitted_and_upper_cased,
 /// a_malformed_id_is_dropped, the_class_table_round_trips_a_sample,
 /// every_table_id_is_well_formed}`.
-pub fn resolve(raw: &str) -> Option<String> {
+fn resolve(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;

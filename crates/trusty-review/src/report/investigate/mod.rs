@@ -881,7 +881,7 @@ mod coverage_tests {
     fn green(dimension: &str) -> VerifiedFinding {
         VerifiedFinding {
             trace_verdict: String::new(),
-            cwe_id: None,
+            cwe_id: Vec::new(),
             title: "Clean signal".to_string(),
             severity: Severity::Green,
             dimension: dimension.to_string(),

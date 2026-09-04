@@ -1,14 +1,19 @@
 //! Tests for CWE weakness-class tagging (#6779).
 //!
-//! Why: the field is only trustworthy if it is dropped whenever the model's
-//! answer is not mechanically readable — a repaired or guessed id would be
-//! exactly the fabrication #6779 forbids. These cases pin both halves: what is
-//! admitted, and what is silently dropped.
-//! What: covers id validation, the class table, the prompt checklist, and the
+//! Why: the field is only trustworthy if an entry is dropped whenever the
+//! model's answer is not mechanically readable — a repaired or guessed id would
+//! be exactly the fabrication #6779 forbids. These cases pin both halves: what
+//! is admitted, and what is silently dropped.
+//! What: covers per-entry id validation, the class table, list assembly
+//! (several classes, de-duplication, all-dropped), the prompt checklist, and the
 //! end-to-end serialisation shape through `verify_findings`.
 //! Test: included as `#[cfg(test)] mod cwe_tests` from `cwe.rs`.
 
 use super::*;
+
+fn list(entries: &[&str]) -> Vec<String> {
+    entries.iter().map(|e| (*e).to_string()).collect()
+}
 
 /// Why: models write `cwe-79` as readily as `CWE-79`; one class must not render
 /// as two tags.
@@ -71,6 +76,45 @@ fn every_table_id_is_well_formed() {
     }
 }
 
+// ── List assembly ────────────────────────────────────────────────────────────
+
+/// Why: the field is a list because one finding can violate several classes at
+/// once — a hardcoded credential logged on the error path is CWE-798 and
+/// CWE-532. Both must survive, in the order the model gave them, and the id and
+/// class-name branches must mix freely within one list.
+#[test]
+fn several_classes_survive_together() {
+    assert_eq!(
+        resolve_all(&list(&["CWE-798", "information exposure through logs"])),
+        vec!["CWE-798".to_string(), "CWE-532".to_string()]
+    );
+}
+
+/// Why: `cwe-79` and `Cross-Site Scripting` are one claim written twice. Two
+/// tags for one class would inflate any structural-flaw count built on this
+/// field.
+#[test]
+fn duplicate_spellings_collapse_to_one_tag() {
+    assert_eq!(
+        resolve_all(&list(&["cwe-79", "Cross-Site Scripting", "CWE-79"])),
+        vec!["CWE-79".to_string()]
+    );
+}
+
+/// Why: one unreadable entry must cost only itself. The finding keeps the tags
+/// that did resolve, and a list where nothing resolves becomes empty — which is
+/// what makes the field vanish from the serialised finding.
+#[test]
+fn an_all_unresolvable_list_becomes_empty() {
+    assert!(resolve_all(&list(&["SQL-89", "not a weakness class", ""])).is_empty());
+    assert!(resolve_all(&[]).is_empty());
+    assert_eq!(
+        resolve_all(&list(&["not a weakness class", "CWE-22"])),
+        vec!["CWE-22".to_string()],
+        "a bad entry must not take a good one with it"
+    );
+}
+
 /// Why: the prompt spends tokens per entry, and the alternate spellings exist
 /// for ingestion, not for the model to read back.
 #[test]
@@ -126,9 +170,9 @@ fn parse(findings_json: &str) -> Vec<crate::report::investigate::analyze::RawFin
         .findings
 }
 
-/// Why: this is #6779's closure condition end to end — a declared weakness class
-/// reaches `investigation.json`, and a finding without one carries NO field at
-/// all rather than a null or an empty string.
+/// Why: this is #6779's closure condition end to end — declared weakness classes
+/// reach `investigation.json`, and a finding without one carries NO field at all
+/// rather than a null or an empty array.
 ///
 /// This is the case that fails on `main`: the serialised finding there has no
 /// `cwe_id` key for either input, because nothing in the pipeline carries one.
@@ -138,12 +182,12 @@ fn a_declared_weakness_class_reaches_the_serialised_finding() {
     let sel = selection("auth.rs", content);
     let raw = parse(
         r#"{"findings": [
-            {"title": "Hardcoded token", "severity": "red",
+            {"title": "Hardcoded token logged on the error path", "severity": "red",
              "dimension": "authentication & secrets", "file": "auth.rs",
              "evidence_quote": "let token = \"hunter2\";",
              "description": "d", "business_impact": "b",
              "remediation": "r", "cost_effort": "low",
-             "cwe_id": "CWE-798"},
+             "cwe_id": ["CWE-798", "information exposure through logs"]},
             {"title": "Unclear query construction", "severity": "amber",
              "dimension": "state management", "file": "auth.rs",
              "evidence_quote": "let q = build(input);",
@@ -153,11 +197,14 @@ fn a_declared_weakness_class_reaches_the_serialised_finding() {
     );
     let out = verify_findings(raw, &sel);
     assert_eq!(out.verified.len(), 2, "notes: {:?}", out.notes);
-    assert_eq!(out.verified[0].cwe_id.as_deref(), Some("CWE-798"));
-    assert_eq!(out.verified[1].cwe_id, None);
+    assert_eq!(out.verified[0].cwe_id, vec!["CWE-798", "CWE-532"]);
+    assert!(out.verified[1].cwe_id.is_empty());
 
     let tagged = serde_json::to_string(&out.verified[0]).expect("serialises");
-    assert!(tagged.contains(r#""cwe_id":"CWE-798""#), "{tagged}");
+    assert!(
+        tagged.contains(r#""cwe_id":["CWE-798","CWE-532"]"#),
+        "{tagged}"
+    );
     let untagged = serde_json::to_string(&out.verified[1]).expect("serialises");
     assert!(
         !untagged.contains("cwe_id"),
@@ -167,10 +214,11 @@ fn a_declared_weakness_class_reaches_the_serialised_finding() {
 
 /// Why: a malformed id must not survive ingestion, and it must not reject the
 /// finding either — the weakness class is an addition to a finding, never a
-/// precondition for it.
+/// precondition for it. An explicit `null` is the other shape the nullable
+/// schema property permits, and it must parse rather than error.
 #[test]
 fn a_malformed_declared_id_is_dropped_and_the_finding_survives() {
-    let content = "let token = \"hunter2\";\n";
+    let content = "let token = \"hunter2\";\nlet q = build(input);\n";
     let sel = selection("auth.rs", content);
     let raw = parse(
         r#"{"findings": [
@@ -179,18 +227,26 @@ fn a_malformed_declared_id_is_dropped_and_the_finding_survives() {
              "evidence_quote": "let token = \"hunter2\";",
              "description": "d", "business_impact": "b",
              "remediation": "r", "cost_effort": "low",
-             "cwe_id": "SQL-89"}
+             "cwe_id": ["SQL-89"]},
+            {"title": "Unclear query construction", "severity": "amber",
+             "dimension": "state management", "file": "auth.rs",
+             "evidence_quote": "let q = build(input);",
+             "description": "d", "business_impact": "b",
+             "remediation": "r", "cost_effort": "low",
+             "cwe_id": null}
         ]}"#,
     );
     let out = verify_findings(raw, &sel);
-    assert_eq!(out.verified.len(), 1, "notes: {:?}", out.notes);
-    assert_eq!(out.verified[0].cwe_id, None);
-    let json = serde_json::to_string(&out.verified[0]).expect("serialises");
-    assert!(!json.contains("cwe_id"), "{json}");
+    assert_eq!(out.verified.len(), 2, "notes: {:?}", out.notes);
+    for f in &out.verified {
+        assert!(f.cwe_id.is_empty(), "{}", f.title);
+        let json = serde_json::to_string(f).expect("serialises");
+        assert!(!json.contains("cwe_id"), "{json}");
+    }
 }
 
 /// Why: a GREEN finding names a strength. A strength has no weakness class, so
-/// the tag is blanked on that band exactly as its prose is (#6080).
+/// the tags are blanked on that band exactly as its prose is (#6080).
 #[test]
 fn a_green_finding_carries_no_weakness_class() {
     let content = "let token = read_secret();\n";
@@ -200,22 +256,27 @@ fn a_green_finding_carries_no_weakness_class() {
             {"title": "Secrets read from the environment", "severity": "green",
              "dimension": "authentication & secrets", "file": "auth.rs",
              "evidence_quote": "let token = read_secret();",
-             "cwe_id": "CWE-798"}
+             "cwe_id": ["CWE-798"]}
         ]}"#,
     );
     let out = verify_findings(raw, &sel);
     assert_eq!(out.verified.len(), 1, "notes: {:?}", out.notes);
-    assert_eq!(out.verified[0].cwe_id, None);
+    assert!(out.verified[0].cwe_id.is_empty());
 }
 
 /// Why: the schema is what makes the field reachable at all, and strict mode
 /// requires the property to be declared nullable rather than merely omitted
-/// (the `line` precedent, #5675).
+/// (the `line` precedent, #5675). It is an ARRAY of strings, not a string.
 #[test]
-fn the_schema_declares_a_nullable_cwe_id() {
+fn the_schema_declares_a_nullable_cwe_id_array() {
     let schema = crate::report::investigate::analyze::investigation_schema(8);
     let json = serde_json::to_value(&schema).expect("schema serialises");
-    let text = json.to_string();
-    assert!(text.contains("cwe_id"), "{text}");
-    assert!(text.contains("hardcoded credentials (CWE-798)"), "{text}");
+    let property = &json["schema"]["properties"]["findings"]["items"]["properties"]["cwe_id"];
+    assert_eq!(property["type"], serde_json::json!(["array", "null"]));
+    assert_eq!(property["items"]["type"], "string");
+    let description = property["description"].as_str().expect("description");
+    assert!(
+        description.contains("hardcoded credentials (CWE-798)"),
+        "{description}"
+    );
 }

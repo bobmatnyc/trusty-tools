@@ -53,11 +53,11 @@ struct FindingRow {
     /// the verifier decided, so it carries no `inferred` tag and is never
     /// punctuation-deduped.
     trace_verdict: String,
-    /// The CWE id for this finding's weakness class (#6779), or `None`. Rendered
-    /// as a `[CWE-89]` suffix on the title; absent when the investigation could
-    /// identify no weakness class, so an untagged finding renders exactly as it
-    /// did before the tag existed.
-    cwe_id: Option<String>,
+    /// The CWE ids for this finding's weakness classes (#6779), or empty.
+    /// Rendered as a `[CWE-89, CWE-20]` suffix on the title; empty when the
+    /// investigation could identify no weakness class, so an untagged finding
+    /// renders exactly as it did before the tag existed.
+    cwe_id: Vec<String>,
     business_impact: Option<String>,
     remediation: Option<String>,
     cost_effort: Option<String>,
@@ -156,9 +156,10 @@ impl FindingRow {
         // by exact title match, and a suffixed title would match nothing.
         s.set(
             "finding_title",
-            match &self.cwe_id {
-                Some(id) => format!("{} [{id}]", self.title),
-                None => self.title.clone(),
+            if self.cwe_id.is_empty() {
+                self.title.clone()
+            } else {
+                format!("{} [{}]", self.title, self.cwe_id.join(", "))
             },
         );
         s.set_opt("finding_category", self.category);

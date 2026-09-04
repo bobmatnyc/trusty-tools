@@ -111,14 +111,15 @@ pub struct RawFinding {
     /// Qualitative cost/effort framing.
     #[serde(default)]
     pub cost_effort: String,
-    /// The weakness class this finding maps to, as an id or a class name (#6779).
+    /// The weakness classes this finding maps to, as ids or class names (#6779).
     ///
-    /// Raw and untrusted, exactly like every other field here: `None` when the
-    /// model omits it, and whatever string it emitted otherwise. Verification
-    /// runs it through [`super::cwe::resolve`], which drops anything it cannot
-    /// read mechanically.
+    /// Raw and untrusted, exactly like every other field here. `None` covers
+    /// both a missing key and an explicit `null`, which the nullable schema
+    /// property permits; the entries themselves are whatever strings the model
+    /// emitted. Verification runs the list through [`super::cwe::resolve_all`],
+    /// which drops every entry it cannot read mechanically.
     #[serde(default)]
-    pub cwe_id: Option<String>,
+    pub cwe_id: Option<Vec<String>>,
 }
 
 /// The raw investigation response (a `findings` array).
@@ -183,9 +184,10 @@ pub fn investigation_schema(max_findings: usize) -> ResponseSchema {
                             // `cwe::WEAKNESS_CLASSES` so the vocabulary the model
                             // is offered is the one ingestion reads back.
                             "cwe_id": {
-                                "type": ["string", "null"],
+                                "type": ["array", "null"],
+                                "items": {"type": "string"},
                                 "description": format!(
-                                    "The CWE id for this finding's weakness class, as CWE-<number> (e.g. CWE-89). null when the finding maps to no known weakness class — NEVER guess one. Known classes: {}.",
+                                    "Every CWE id this finding's weakness classes map to, each as CWE-<number> (e.g. [\"CWE-89\"]). Most findings have exactly one; give several only when the finding genuinely violates several. Empty array or null when the finding maps to no known weakness class — NEVER guess one. Known classes: {}.",
                                     super::cwe::class_checklist()
                                 )
                             }
