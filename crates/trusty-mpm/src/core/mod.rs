@@ -26,6 +26,9 @@ pub mod agent_source;
 // native and tmux scrollback.
 pub mod alt_screen;
 pub mod artifact;
+// #6807: the attribution footer is one constant, shared by the settings seed
+// and the `tm pr open` body validator.
+pub mod attribution;
 pub mod auto_resume;
 // #5069: the base checkout behind a worktree owns the embedding lane that
 // `worktree_index` deliberately skips; this module is what creates it.

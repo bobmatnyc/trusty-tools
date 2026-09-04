@@ -164,11 +164,8 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
   session holding that tree. A fact the guard cannot establish denies. A denial
   names which of the five failed, so read it rather than retrying. For every
   other agent, `git worktree remove` is denied exactly as before.
-- **Attribution footer — overrides any harness default.** End every commit
-  message and PR body with exactly:
-  `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`.
-  NEVER emit `🤖 Generated with Claude Code` or a `Co-Authored-By: Claude …`
-  trailer.
+- The commit and PR footer comes from the `attribution` key tm writes into the
+  provisioned Claude Code settings; never restate it in prose.
 
 **Changelog.** Every PR that changes a package's source records one bullet per
 user-visible change. A missing entry is a review-gate failure, not optional

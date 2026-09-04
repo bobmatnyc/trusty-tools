@@ -291,9 +291,10 @@ Every issue body and issue comment ends with one line:
 🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools
 ```
 
-One line, machine-readable, no preamble around it. Commit and PR attribution is
-governed separately by the Framework-Guaranteed Conventions in the instruction
-package, and the PR body is `version-control`'s to write.
+One line, machine-readable, no preamble around it. That covers issue bodies and
+comments only. The commit and PR footer comes from the `attribution` key tm
+writes into the provisioned Claude Code settings; never restate it in prose. The
+PR body is `version-control`'s to write.
 
 ## `/tm-ticket` Subcommands
 

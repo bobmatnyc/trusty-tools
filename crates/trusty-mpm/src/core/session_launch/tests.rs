@@ -1013,6 +1013,63 @@ fn write_output_style_preserves_existing_keys() {
     assert_eq!(value["theme"], serde_json::json!("dark"));
 }
 
+/// #6807: the project tier is the only one a bare `claude` reads — the tm-owned
+/// `CLAUDE_CONFIG_DIR` copy reaches only the child tm spawns — so the footer
+/// must land here too.
+#[test]
+fn write_output_style_seeds_attribution() {
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+
+    write_output_style(project, None).expect("write succeeds");
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        value["attribution"]["commit"].as_str(),
+        Some(crate::core::attribution::ATTRIBUTION_FOOTER),
+        "attribution.commit must be the shared trusty-mpm footer"
+    );
+    assert_eq!(
+        value["attribution"]["pr"].as_str(),
+        Some(crate::core::attribution::ATTRIBUTION_FOOTER),
+        "attribution.pr must be the shared trusty-mpm footer"
+    );
+}
+
+/// #6807: seeding is absent-only on this path too, matching
+/// `ensure_settings_defaults`.
+#[test]
+fn write_output_style_preserves_operator_attribution() {
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"attribution":{"commit":"operator text","pr":""}}"#,
+    )
+    .unwrap();
+
+    write_output_style(project, None).expect("write succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        value["attribution"]["commit"].as_str(),
+        Some("operator text"),
+        "an operator-set attribution.commit must survive the seed"
+    );
+    assert_eq!(
+        value["attribution"]["pr"].as_str(),
+        Some(""),
+        "an operator-set attribution.pr must survive the seed"
+    );
+}
+
 #[test]
 fn write_output_style_sets_active_style() {
     // Why: HR-4 — an explicitly resolved active style id must be written into
