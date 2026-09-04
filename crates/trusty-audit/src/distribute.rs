@@ -1274,6 +1274,76 @@ api_key = "lin_api_client_a"
         assert!(text.contains("name_with_owner = \"acme/web\""), "{text}");
     }
 
+    /// The constant `taudit distribute` ships is the file on disk, not a copy.
+    ///
+    /// Why: #6772 — `scripts/refresh-engagement-pins.sh` and its
+    /// `preflight-publish.sh` CHECK 10 both edit and read the FILE, while every
+    /// packaged copy comes from the CONSTANT. `include_str!` already makes
+    /// those the same bytes at compile time, so this assertion is close to
+    /// tautological; what it actually guards is the provenance, catching a
+    /// future edit that replaces the `include_str!` with an inline literal and
+    /// puts the release gate back to checking a file nothing ships.
+    #[test]
+    fn the_compiled_engagement_template_is_the_file_on_disk() {
+        // #6772: the release gate edits this path; the binary ships the constant.
+        let on_disk = std::fs::read_to_string(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/templates/engagement.template.toml"
+        )))
+        .expect("the template is a tracked file in this crate");
+
+        assert_eq!(
+            instructions::ENGAGEMENT_TEMPLATE,
+            on_disk,
+            "ENGAGEMENT_TEMPLATE no longer comes from \
+             templates/engagement.template.toml, so refreshing that file would \
+             leave the packaged copy stale (#6772)"
+        );
+    }
+
+    /// Every `[tools]` pin the shipped reference carries is a version triple.
+    ///
+    /// Why: #6772 left the template pinning tga 6.0.0 while the same release
+    /// train published 7.0.0. `scripts/refresh-engagement-pins.sh` rewrites
+    /// these literals with an awk substitution, so a mangled rewrite would
+    /// otherwise ship a pin like `7.1.0"` that no download can resolve. This
+    /// asserts the shape the client's own installer needs, on the constant the
+    /// client actually gets.
+    #[test]
+    fn every_tool_pin_in_the_shipped_template_is_a_semver_triple() {
+        // #6772: refresh-engagement-pins.sh rewrites these literals in place.
+        let loaded = EngagementConfig::from_toml(
+            instructions::ENGAGEMENT_TEMPLATE,
+            Path::new("engagement.template.toml"),
+        )
+        .expect("the shipped reference loads");
+
+        let pins = [
+            ("tga", loaded.tools.tga.version()),
+            ("trusty-search", loaded.tools.trusty_search.version()),
+            ("trusty-analyze", loaded.tools.trusty_analyze.version()),
+            ("trusty-review", loaded.tools.trusty_review.version()),
+        ];
+
+        for (name, version) in pins {
+            assert!(
+                is_version_triple(version),
+                "the {name} pin is not a version triple: {version:?}"
+            );
+        }
+    }
+
+    /// `MAJOR.MINOR.PATCH`, with SemVer's optional `-pre` and `+build` tails.
+    fn is_version_triple(version: &str) -> bool {
+        let core = version.split('+').next().unwrap_or_default();
+        let core = core.split('-').next().unwrap_or_default();
+        let parts: Vec<&str> = core.split('.').collect();
+        parts.len() == 3
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    }
+
     #[test]
     fn a_missing_binary_is_refused_and_leaves_no_file() {
         let fixture = Fixture::new(TEMPLATE);
