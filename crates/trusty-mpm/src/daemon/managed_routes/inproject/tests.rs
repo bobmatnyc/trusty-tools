@@ -682,6 +682,8 @@ fn worktree_path_for_honours_configured_base() {
 
 #[test]
 fn session_worktree_path_uses_dot_prefix() {
+    // See #4162: env-var reader must hold the same lock as the setter
+    let _g = crate::core::trusty_tools_config::env_test_lock();
     // create_session_worktree must place the worktree at
     // <base>/.worktrees/<worktree_name> (dot-prefixed) so it is gitignored via
     // .git/info/exclude (#1803). Since #2032 `worktree_name` is the resolved

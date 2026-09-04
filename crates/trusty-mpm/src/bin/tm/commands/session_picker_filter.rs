@@ -312,7 +312,7 @@ pub(crate) async fn run_f_command(
 
     let mut sessions =
         super::session_picker::fetch_live_sessions(client, url, sid.as_deref(), false).await?;
-    super::session_picker::sort_sessions(&mut sessions, SessionSortArg::Recent);
+    super::session_picker_order::sort_sessions(&mut sessions, SessionSortArg::Recent);
     if sessions.is_empty() {
         super::managed_render::render_session_table(&sessions, sid.as_deref());
         return Ok(());

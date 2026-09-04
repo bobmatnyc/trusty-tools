@@ -115,6 +115,7 @@ pub(crate) mod session;
 pub(crate) mod session_ls_connector;
 pub(crate) mod session_picker;
 pub(crate) mod session_picker_filter;
+pub(crate) mod session_picker_order;
 pub(crate) mod session_picker_prune;
 pub(crate) mod session_picker_rename;
 pub(crate) mod session_picker_render;

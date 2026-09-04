@@ -79,6 +79,8 @@ on:
       - "scripts/check_source_class_selftest.sh"
       - "scripts/check_scan_floor_selftest.sh"
       - "scripts/check_version_bump_verdict_selftest.sh"
+      - "scripts/check_workspace_dep_versions.sh"
+      - "scripts/check_workspace_dep_versions_selftest.sh"
       - ".github/workflows/version-parity.yml"
   # Every three hours. Fine-grained enough that a publish is caught in one
   # working session, coarse enough to stay well inside crates.io's API-usage
@@ -246,6 +248,25 @@ jobs:
       - name: Source-classification selftest (both gates share one definition)
         if: github.event_name == 'pull_request'
         run: bash scripts/check_source_class_selftest.sh
+
+      # Internal `[workspace.dependencies]` requirement drift (#6776). A
+      # DIFFERENT question from this job's own gate: not "is this version
+      # already live on crates.io" but "does the root table's requirement even
+      # accept the member crate's own version". No cargo command in-tree can
+      # answer it — the row's `path` wins over its `version`, so the drift is
+      # invisible until `cargo publish` or an external consumer resolves the
+      # crate from the registry (`trusty-console` sat at `^0.9.0` against a
+      # 0.11.0 crate; `tga` at `^6.0.1` against 7.1.0). It lives in this job
+      # because this is the publish-safety job that runs unconditionally on
+      # every PR. Pure shell over two manifests: no cargo, no network, well
+      # under a second. Selftest first, for the same reason as the gates above.
+      - name: Workspace-dep version selftest (must reject a drifted row)
+        if: github.event_name == 'pull_request'
+        run: bash scripts/check_workspace_dep_versions_selftest.sh
+
+      - name: Check internal workspace.dependencies version requirements
+        if: github.event_name == 'pull_request'
+        run: bash scripts/check_workspace_dep_versions.sh
 
       # #4688: diff against the base branch AS IT IS NOW, not the frozen
       # `base.sha` snapshot. checkout leaves refs/remotes/origin/<base> at

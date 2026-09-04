@@ -218,6 +218,53 @@ A milestone is not a label and not a project view. An issue holds many labels an
 exactly one milestone, so parking a workstream or a theme there evicts the real
 release slot. `ws/<session-name>` is always a label.
 
+## Relationships (native, never prose)
+
+Use GitHub's own sub-issue and dependency APIs for every issue relationship.
+Never express one only in prose — a task list, a "see also", or a `Closes #N`
+used for anything but the literal fix link.
+
+- Sub-issue: parent/child — an epic, a milestone tracking issue, an umbrella
+  bug with individual fixes underneath.
+- Blocked-by: sequencing — this issue cannot land until that one does, no
+  parent/child implied.
+- `Refs #N` in a PR body: fix linkage only, never an issue-to-issue relationship.
+- "Companion" or "related" in prose is not a relationship. Use sub-issue,
+  blocked-by, or nothing.
+
+**Commands.** Both endpoints take the child/blocker's numeric database id, not
+its issue number. `-F` sends a field as an integer; `-f` sends it as a string
+and the call fails.
+
+```bash
+CHILD_ID=$(gh api repos/OWNER/REPO/issues/CHILD_NUM --jq .id)   # number -> id
+
+# sub-issue: add / remove
+gh api --method POST repos/OWNER/REPO/issues/PARENT_NUM/sub_issues -F sub_issue_id="$CHILD_ID"
+gh api --method DELETE repos/OWNER/REPO/issues/PARENT_NUM/sub_issue -F sub_issue_id="$CHILD_ID"
+
+# blocked-by: add / remove (remove takes the id in the path, not a body field)
+BLOCKER_ID=$(gh api repos/OWNER/REPO/issues/BLOCKER_NUM --jq .id)
+gh api --method POST repos/OWNER/REPO/issues/ISSUE_NUM/dependencies/blocked_by -F issue_id="$BLOCKER_ID"
+gh api --method DELETE repos/OWNER/REPO/issues/ISSUE_NUM/dependencies/blocked_by/$BLOCKER_ID
+```
+
+**On filing.** When the brief names a parent or a blocker, set the
+relationship in the same dispatch that files the issue, and report it —
+"filed #N as a sub-issue of #P", or "filed #N, blocked-by #B".
+
+**On closing a parent.** List its open sub-issues first. Refuse to close while
+any are open unless the user explicitly says to close anyway.
+
+**Reading them back:**
+```bash
+gh api repos/OWNER/REPO/issues/PARENT_NUM/sub_issues --paginate --jq '.[].number'
+gh api repos/OWNER/REPO/issues/ISSUE_NUM/dependencies/blocked_by --paginate --jq '.[].number'
+```
+
+`gh api` pages at 30 items by default — add `--paginate` (used above) on every
+listing call.
+
 ## Lifecycle — open → in-progress → coded → merged → tested → closed
 
 Four mutually exclusive labels carry the middle of an issue's life, between
@@ -291,9 +338,10 @@ Every issue body and issue comment ends with one line:
 🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools
 ```
 
-One line, machine-readable, no preamble around it. Commit and PR attribution is
-governed separately by the Framework-Guaranteed Conventions in the instruction
-package, and the PR body is `version-control`'s to write.
+One line, machine-readable, no preamble around it. That covers issue bodies and
+comments only. The commit and PR footer comes from the `attribution` key tm
+writes into the provisioned Claude Code settings; never restate it in prose. The
+PR body is `version-control`'s to write.
 
 ## `/tm-ticket` Subcommands
 

@@ -10,7 +10,8 @@
 //! where skipping one under time pressure is the recorded failure mode. A
 //! command that returns an exit code removes both.
 //!
-//! What: [`run`] dispatches the two verbs to [`open`] and [`queue_check`].
+//! What: [`run`] dispatches the three verbs to [`open`], [`merge`] and
+//! [`queue_check`].
 //! Every `gh` call in this module goes through [`GhRunner`], whose production
 //! implementation is [`RealGhRunner`] over `trusty_common::gh::GhCommand` —
 //! this workspace's single `gh` entry point (#5475), carrying the
@@ -24,11 +25,13 @@
 //! | verb | 0 | 1 | 2 |
 //! |---|---|---|---|
 //! | `open` | PR created (or `--dry-run` printed the argv) | — | a pre-flight check failed; `gh` was never called |
+//! | `merge` | squash-merged, or auto-merge armed | a hold signal or a failed body check refused it; `gh pr merge` was never called | usage or `gh` error |
 //! | `queue-check` | every listed PR is mergeable | at least one is blocked | usage or `gh` error |
 //!
 //! Test: the sibling `tests.rs`; `cli_parses_pr_*` in `tests.rs`.
 
 pub(crate) mod body;
+pub(crate) mod merge;
 pub(crate) mod open;
 pub(crate) mod queue_check;
 
@@ -198,6 +201,8 @@ fn run_inner(cmd: PrCmd) -> anyhow::Result<i32> {
     let gh = RealGhRunner::new()?;
     match cmd {
         PrCmd::Open(args) => open::run(&gh, &args, &open::RealPreflight),
+        // #6808: merge from the validated body, not GitHub's raw-message squash.
+        PrCmd::Merge(args) => merge::run(&gh, &args),
         PrCmd::QueueCheck(args) => queue_check::run(&gh, &args),
     }
 }

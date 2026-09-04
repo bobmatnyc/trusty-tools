@@ -459,14 +459,16 @@ fn stack_profile_neutral_when_undetected() {
 #[test]
 fn framework_guaranteed_conventions_survive_every_override_combination() {
     // Issue #3374 (mirrors `primary_directive_mandate_not_duplicated_across_
-    // channels` in instruction_pipeline.rs): the commit/PR attribution
-    // footer, the proportional-documentation policy, and the ticket-
-    // attribution-at-change-site convention must live in the BASE_PM floor
-    // and therefore survive EVERY override combination — including the
-    // full-PM-replacement branch, where every bundled body section is
-    // discarded but the floor is still appended.
+    // channels` in instruction_pipeline.rs): the proportional-documentation
+    // policy and the ticket-attribution-at-change-site convention must live in
+    // the BASE_PM floor and therefore survive EVERY override combination —
+    // including the full-PM-replacement branch, where every bundled body
+    // section is discarded but the floor is still appended.
+    //
+    // #6807: the commit/PR attribution footer is no longer one of them — it is
+    // delivered by Claude Code's own `attribution` setting, which tm seeds in
+    // `ensure_settings_defaults`, so it must NOT appear in the prompt at all.
     const MARKERS: &[&str] = &[
-        "Generated with trusty-mpm",
         "Proportional documentation",
         "Ticket attribution at the change site",
     ];
@@ -528,6 +530,19 @@ fn framework_guaranteed_conventions_survive_every_override_combination() {
     );
     // The other half of the survival set the floor guarantees.
     assert!(prompt3.contains("## Trusty Tool Priority (Non-Overridable)"));
+
+    // #6807: the footer is delivered by the `attribution` setting, so no
+    // override combination may reintroduce it into the prompt prose.
+    for (label, p) in [
+        ("no-override", &prompt),
+        ("fully-overridden", &prompt2),
+        ("retired-files", &prompt3),
+    ] {
+        assert!(
+            !p.contains("Generated with trusty-mpm"),
+            "the {label} prompt must not restate the attribution footer (#6807)"
+        );
+    }
 }
 
 #[test]

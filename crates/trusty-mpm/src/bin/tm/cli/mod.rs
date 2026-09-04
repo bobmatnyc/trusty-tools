@@ -846,7 +846,7 @@ pub(crate) enum Command {
         system: crate::commands::ticket::system::TicketSystemKind,
     },
 
-    /// Deterministic pull-request gates: open a PR, or check the merge queue.
+    /// Deterministic pull-request gates: open a PR, merge one, or check the merge queue.
     ///
     /// Why (#6653): `version-control` assembles every `gh pr create` by hand
     /// and re-derives four mechanical judgments each time — is the seven-field
@@ -860,7 +860,10 @@ pub(crate) enum Command {
     /// (and the changelog gate, unless `--docs-only`) and refuses with exit 2,
     /// naming the failed check, BEFORE `gh` is spawned; `queue-check` prints
     /// one `MERGEABLE` / `BLOCKED: <reason>` line per open PR on a base branch
-    /// and exits 1 when any is blocked.
+    /// and exits 1 when any is blocked; `merge` (#6808) re-validates the PR's
+    /// own body and squash-merges from it, refusing with exit 1 on a draft, a
+    /// `do-not-merge` label, a CHANGES_REQUESTED review, or a CONFLICTING
+    /// merge state.
     /// Test: `cli_parses_pr_*` in `tests.rs`; the semantics live in
     /// `commands::pr`.
     Pr {

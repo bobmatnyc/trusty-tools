@@ -183,12 +183,12 @@ fn pipeline_creates_claude_md() {
     let on_disk = fs::read_to_string(&input.claude_md_path).unwrap();
     assert!(on_disk.contains("# Project Instructions"));
     assert!(on_disk.contains("trusty-mpm will never modify this file again"));
-    // The seeded stub carries the attribution convention so every new
-    // trusty-mpm project inherits the footer override at the framework
-    // level (issue #2876) rather than relying on a per-project hand-edit.
+    // #6807: the footer left the stub for Claude Code's `attribution` setting,
+    // which tm seeds in `ensure_settings_defaults`. A stub that still restated
+    // it would be a second, drift-prone source of the same string.
     assert!(
-        on_disk.contains("🤖🤖🤖 Generated with trusty-mpm"),
-        "seeded stub must carry the attribution footer: {on_disk}"
+        !on_disk.contains("Generated with trusty-mpm"),
+        "seeded stub must not restate the attribution footer: {on_disk}"
     );
 }
 

@@ -272,6 +272,48 @@ enum Command {
         #[command(subcommand)]
         action: WorkstreamCommand,
     },
+
+    /// Judge a retained L1-L3 bake-off evidence bundle against the milestone
+    /// exit gate (#5441).
+    ///
+    /// Entirely offline: it reads the bundle a frozen candidate's real
+    /// bake-off already produced and never runs a model, a daemon, or the
+    /// runner. Exits 0 when the milestone may close on this evidence, 1 when
+    /// the gate refuses, and 2 when it could not reach a verdict at all.
+    /// Bundle layout and a worked invocation:
+    /// `docs/reference/bakeoff-exit-gate.md`.
+    BakeoffGate {
+        /// Root of the candidate bundle — the directory holding `L1/`, `L2/`,
+        /// `L3/` and an optional `dispositions.json`.
+        #[arg(long, value_name = "PATH")]
+        bundle: PathBuf,
+
+        /// Root of the previous accepted milestone's bundle. Without it the
+        /// preflight still runs, but no regression comparison is performed.
+        #[arg(long, value_name = "PATH")]
+        baseline: Option<PathBuf>,
+
+        /// The frozen candidate's git commit. Every level must report it.
+        #[arg(long, value_name = "SHA")]
+        expect_commit: Option<String>,
+
+        /// SHA-256 of the binary built from that commit.
+        #[arg(long, value_name = "HEX")]
+        expect_binary_sha256: Option<String>,
+
+        /// The bake-off runner revision the invocation was defined against.
+        #[arg(long, value_name = "REV")]
+        expect_runner_revision: Option<String>,
+
+        /// Percentage a cost/token/turn/duration metric may move before it
+        /// needs a documented disposition.
+        #[arg(long, value_name = "PCT", default_value_t = trusty_code::bakeoff::compare::DEFAULT_TOLERANCE_PCT)]
+        tolerance_pct: f64,
+
+        /// Emit the verdict as one JSON document instead of a human summary.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `tcode workstream <action>` / `tcode ws <action>` subcommands (#3296,
@@ -540,6 +582,31 @@ async fn main() -> Result<()> {
                 run_thin_client(cli::workstream::close(&project, &id), "workstream close").await
             }
         },
+
+        // #5441: the only subcommand that neither starts nor calls a daemon —
+        // it judges evidence a frozen candidate's bake-off already retained.
+        Command::BakeoffGate {
+            bundle,
+            baseline,
+            expect_commit,
+            expect_binary_sha256,
+            expect_runner_revision,
+            tolerance_pct,
+            json,
+        } => {
+            let pins = trusty_code::bakeoff::Pins::new(
+                expect_commit,
+                expect_binary_sha256,
+                expect_runner_revision,
+            );
+            process::exit(cli::bakeoff::run(
+                &bundle,
+                baseline.as_deref(),
+                pins,
+                tolerance_pct,
+                json,
+            ));
+        }
     }
 }
 
