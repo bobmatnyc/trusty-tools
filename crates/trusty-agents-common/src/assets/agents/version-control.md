@@ -84,9 +84,12 @@ history survives even a reverted commit.
 When scope or claims change mid-flight, edit the PR body — a stale body is a
 defect, and fixing it is yours, not ticketing's.
 
-Default to review: `tm pr open` opens the PR and `gh pr merge --auto --squash`
-enables auto-merge once GitHub's review gate is satisfied. Never merge on your
-own initiative.
+Default to review: `tm pr open` opens the PR and `tm pr merge <n> --auto` arms
+auto-merge, re-validating the PR body and passing it as the squash commit
+message so the landing commit is the body you wrote, not a concatenation of the
+branch's raw commit messages (#6808). On a host without `tm`, fall back to
+`gh pr merge --squash --delete-branch --auto`. Never merge on your own
+initiative.
 
 When the PM relays operator authorization to merge directly (e.g. an
 admin-merge), that IS operator authority — comply. Do not demand the user

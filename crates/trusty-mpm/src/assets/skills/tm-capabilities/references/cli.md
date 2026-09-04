@@ -73,7 +73,8 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `overseer` — Inspect the session overseer
   - `status` — Show the overseer's enabled status and handler type
 - `path` — Print the stable repo path for a loaded alias (DOC-24 IDE-attach)
-- `pr` — Deterministic pull-request gates: open a PR, or check the merge queue
+- `pr` — Deterministic pull-request gates: open a PR, merge one, or check the merge queue
+  - `merge` — Squash-merge a PR with its validated body as the commit message
   - `open` — Validate a PR body against the seven-field contract, then open the PR
   - `queue-check` — Report, per open PR on a base branch, whether it is mergeable
 - `project` — Define and manage projects (registered working directories)

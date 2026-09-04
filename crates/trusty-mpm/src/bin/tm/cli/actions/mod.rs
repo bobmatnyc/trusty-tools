@@ -59,7 +59,7 @@ pub(crate) use memory::MemoryAction;
 pub(crate) use meta::MetaAction;
 pub(crate) use optimizer::{CliCompressionLevel, OptimizerAction};
 pub(crate) use overseer::OverseerAction;
-pub(crate) use pr::{PrCmd, PrOpenArgs, PrQueueCheckArgs};
+pub(crate) use pr::{PrCmd, PrMergeArgs, PrOpenArgs, PrQueueCheckArgs};
 pub(crate) use project::ProjectAction;
 pub(crate) use projects::{
     ClearableConfigField, ConfigAction, ProjectsAction, SettableConfigField,
