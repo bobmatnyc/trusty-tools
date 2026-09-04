@@ -459,22 +459,29 @@ If 404 after 120s, something went wrong. Check:
 cargo search <crate> --limit 1
 ```
 
-## Tag Pattern: <crate-package-name>-v<version>
+## Tag Pattern: <crate-directory-name>-v<version>
 
-Use the **crate package name** from `Cargo.toml`, NOT the directory name.
+Use the **crate directory name** under `crates/`, NOT the package name from
+`Cargo.toml`. This matches `tag_prefix_for()` in `scripts/check-publish-ready.sh`,
+which derives the prefix from the directory unconditionally.
 
 **Reference: Abbreviations table from CLAUDE.md**:
-- `trusty-git-analytics` → `-p tga` → tag: **`tga-v1.4.2`** ✓
+- `trusty-git-analytics` → `-p tga` → tag: **`trusty-git-analytics-v1.4.2`** ✓
 - `trusty-search` → `-p trusty-search` → tag: **`trusty-search-v0.13.1`** ✓
 - `trusty-common` → `-p trusty-common` → tag: **`trusty-common-v0.8.0`** ✓
 - `trusty-agents` → `-p trusty-agents` → tag: **`trusty-agents-v0.2.3`** ✓
 
-> **tga tag aliases (issue #1128):** the binary-release workflow accepts **both**
-> `tga-v<version>` and `trusty-git-analytics-v<version>` — they resolve to the
-> same build config and Homebrew formula (the parse step canonicalizes the `tga`
-> prefix to `trusty-git-analytics`). The documented form above (`tga-v<version>`,
-> matching the published package name) is preferred; you no longer need a second
-> `trusty-git-analytics-v<version>` tag to trigger a successful binary release.
+> **tga tag aliases (issue #1128) — read alias only, never push both:** the tag
+> to PUSH for `trusty-git-analytics` is **`trusty-git-analytics-v<version>`**,
+> same as every other crate. `check-publish-ready.sh` GUARD 2 and
+> `check-tag-publish-parity.sh` additionally recognize the legacy short form
+> `tga-v<version>` if that is the tag they find on origin, and the binary-release
+> workflow resolves either spelling to the same build config and Homebrew
+> formula. That acceptance exists for compatibility with tags already pushed
+> under the old convention — it is not a second option to choose from. Pushing
+> both spellings for one release risks a TAG-SPLIT
+> (`scripts/check-tag-publish-parity.sh`), which cannot be repaired afterward
+> because release tags here are immutable (#6178).
 
 The crate name **always** comes from the `name` field in `Cargo.toml`:
 
