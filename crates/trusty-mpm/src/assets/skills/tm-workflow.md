@@ -546,7 +546,8 @@ the feature branch immediately after. No merge commits, no rebase-merge, for PRs
 landing on `main`.
 
 ```bash
-gh pr merge <PR> --squash --delete-branch
+tm pr merge <PR>                                  # validated body becomes the squash commit (#6808)
+gh pr merge <PR> --squash --delete-branch         # fallback on a host without `tm`
 ```
 
 After a squash-merge the local feature branch shows as "unmerged" to git (the

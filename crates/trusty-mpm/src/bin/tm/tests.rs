@@ -2462,6 +2462,74 @@ fn cli_parses_pr_open() {
     assert!(!args.closes, "Closes is opt-in, never the default");
 }
 
+/// `tm pr merge <n>` parses its number and its three switches (#6808).
+#[test]
+fn cli_parses_pr_merge() {
+    use crate::cli::PrCmd;
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "pr",
+        "merge",
+        "6808",
+        "--auto",
+        "--no-delete-branch",
+        "--repo",
+        "bobmatnyc/trusty-tools",
+    ])
+    .unwrap();
+    let Some(Command::Pr {
+        cmd: PrCmd::Merge(args),
+    }) = cli.command
+    else {
+        panic!("expected pr merge");
+    };
+    assert_eq!(args.pr, 6808);
+    assert!(args.auto);
+    assert!(args.no_delete_branch);
+    assert_eq!(args.repo.as_deref(), Some("bobmatnyc/trusty-tools"));
+
+    let bare = Cli::try_parse_from(["trusty-mpm", "pr", "merge", "6808"]).unwrap();
+    let Some(Command::Pr {
+        cmd: PrCmd::Merge(args),
+    }) = bare.command
+    else {
+        panic!("expected pr merge");
+    };
+    assert!(!args.auto, "auto-merge is opt-in");
+    assert!(
+        !args.no_delete_branch,
+        "the remote branch is deleted by default"
+    );
+}
+
+/// `tm pr merge --help` names every refusal and the `--auto` semantics (#6808).
+#[test]
+fn cli_pr_merge_help_states_the_refusals() {
+    use clap::CommandFactory as _;
+    let mut root = Cli::command();
+    let help = root
+        .find_subcommand_mut("pr")
+        .expect("pr group")
+        .find_subcommand_mut("merge")
+        .expect("merge verb")
+        .render_long_help()
+        .to_string();
+    for needle in [
+        "draft",
+        "do-not-merge",
+        "CHANGES_REQUESTED",
+        "CONFLICTING",
+        "gh pr update-branch",
+        "BEHIND is NOT a refusal",
+        "auto-merge fires",
+    ] {
+        assert!(
+            help.contains(needle),
+            "`--help` must state {needle}:\n{help}"
+        );
+    }
+}
+
 /// `--rung` outside 1-6 is rejected at parse time.
 #[test]
 fn cli_rejects_pr_open_rung_out_of_range() {
