@@ -724,7 +724,7 @@ fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::Path
 /// exactly what the caller (the `tm` CLI binary) needs to construct that
 /// [`std::process::Command`] itself.
 /// What: `claude_bin` (resolved absolute path), `args` (the isolation flags
-/// plus `--resume <id>`/`--continue`/neither, mirroring [`resume_command`]'s
+/// plus `--resume <id>` or neither, mirroring [`resume_command`]'s
 /// selection — see [`compose_inplace_args`]), `config_dir` (the tm-owned
 /// `CLAUDE_CONFIG_DIR`, when resolved), and `oauth_token` (issue #2246 — the
 /// resolved [`crate::core::oauth_token::resolve_oauth_token`] value, when
@@ -737,7 +737,7 @@ fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::Path
 pub struct InPlaceResumeCommand {
     /// Resolved `claude` binary (absolute path).
     pub claude_bin: String,
-    /// Full argv (isolation flags + resume/continue selection), EXCLUDING the
+    /// Full argv (isolation flags + resume-or-fresh selection), EXCLUDING the
     /// binary itself.
     pub args: Vec<String>,
     /// The tm-owned `CLAUDE_CONFIG_DIR`, when resolved (`None` when home is
