@@ -27,6 +27,21 @@ use crate::manifest::AuditManifest;
 /// only way this client can tell "assessed" from "assessed nothing".
 const COLLECT_FAILED_MARKER: &str = "stage `collect` did not complete";
 
+/// The words `tga` opens a stale-refs gap line with (`tga::audit::gaps`'s
+/// `STALE_FETCH_HEADLINE`, #6782).
+///
+/// Why: a repository fetched from nothing still produces a full report — every
+/// section populated, every figure describing whatever the clone held when it
+/// was made. That is worse than an empty section, because nothing on the page
+/// looks wrong. The index states it per repository so a reader sees it before
+/// they open the report.
+/// What: matched against the gap lines [`verify_output`] returns, the same
+/// textual seam and the same brittleness as [`COLLECT_FAILED_MARKER`] — this
+/// crate does not depend on `tga`, so its prose is the only channel. A reworded
+/// marker stops the headline, never the gap line itself, which is rendered
+/// either way.
+pub(crate) const STALE_FETCH_MARKER: &str = "git history is stale: fetch failed";
+
 /// What a zero exit is allowed to mean.
 ///
 /// Why: the finding that made this necessary. `tga audit` returns `Ok` whenever

@@ -593,8 +593,10 @@ fn init_repo_with_dead_origin(path: &std::path::Path, remote_url: &str) {
 /// The stale-refs line travels the same redaction path a stage message does,
 /// and it needs to: git2 quotes the remote URL back in the error, so an HTTPS
 /// remote with an embedded token puts that token in the manifest and the
-/// delivered report. Also pins the ordering — failed stages first, then the
-/// repositories that were collected anyway.
+/// delivered report. Also pins the ordering — since #6782 the repositories
+/// collected on stale refs come FIRST, ahead of the failed stages, because a
+/// failed stage leaves an empty section a reader notices and a stale fetch
+/// leaves a full one that is quietly wrong.
 #[test]
 fn a_credential_in_a_fetch_error_never_reaches_the_gap_line() {
     let mut stats = AuditSweepStats::default();
@@ -613,12 +615,43 @@ fn a_credential_in_a_fetch_error_never_reaches_the_gap_line() {
     let lines = crate::audit::sweep_gap_lines(&stats, &["ghp_SECRETVALUE"]);
 
     assert_eq!(lines.len(), 2, "{lines:#?}");
-    assert!(lines[0].contains("`dora`"), "{}", lines[0]);
-    assert!(lines[1].contains("acme-service"), "{}", lines[1]);
+    assert!(lines[0].contains("acme-service"), "{}", lines[0]);
+    assert!(lines[1].contains("`dora`"), "{}", lines[1]);
     assert!(
-        !lines[1].contains("ghp_SECRETVALUE"),
+        !lines[0].contains("ghp_SECRETVALUE"),
         "the token survived into the report: {}",
-        lines[1]
+        lines[0]
+    );
+}
+
+/// Why (#6782): #5321 put the stale-refs fallback on the page as one sentence
+/// mid-list, phrased as a repository fact — a due-diligence reader taking the
+/// commit and PR figures at face value had nothing to stop them.
+/// What: the line opens with [`crate::audit::STALE_FETCH_HEADLINE`], carries
+/// the fetch error, and is emphasised, so it reads as a verdict rather than as
+/// one more caveat.
+/// Test: this is the test.
+#[test]
+fn a_stale_fetch_line_leads_with_the_headline() {
+    let mut stats = AuditSweepStats::default();
+    stats.record_stale_fetch(crate::audit::StaleFetch {
+        repo: "acme-service".to_string(),
+        remote: "origin".to_string(),
+        error: "unsupported URL protocol; class=Net (12)".to_string(),
+    });
+
+    let lines = crate::audit::sweep_gap_lines(&stats, NO_SECRETS);
+
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert!(
+        lines[0].starts_with(&format!("**{}", crate::audit::STALE_FETCH_HEADLINE)),
+        "the line does not lead with the headline: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("unsupported URL protocol"),
+        "the line must carry the fetch error: {}",
+        lines[0]
     );
 }
 
