@@ -689,3 +689,129 @@ fn store_banner_marks_a_transient_read_failure_as_stale_not_corrupt() {
         "a transient failure must not be called corruption: {banner}"
     );
 }
+
+// ── #6753: the picker's FIRST menu is ordered like every later one ──────────
+
+/// A session fixture with the state, slot and attachment the ordering turns on.
+///
+/// Why: the defect is only visible when `attached` and `slot` disagree about
+/// position — the daemon hands the list in ascending slot order and the attached
+/// session is usually the HIGHEST slot, so it printed last.
+fn ordered_session(
+    name: &str,
+    state: &str,
+    slot: u32,
+    attached: bool,
+    last_activity_at: &str,
+) -> ManagedSessionSummary {
+    let mut s = session(name, state, slot);
+    s.attached = attached;
+    s.last_activity_at = Some(last_activity_at.to_string());
+    s
+}
+
+/// The daemon's own answer shape: ascending slot, attached session last.
+///
+/// Why: `daemon/managed_routes/summary.rs` returns managed sessions in
+/// ascending-slot order, so this is exactly what `guided::try_show_picker` used
+/// to hand straight to the first render. The timestamps run OPPOSITE to the slot
+/// order so the recency half of the sort is exercised too: the daemon's order is
+/// least-recent-first, which is the order the operator was shown.
+fn daemon_ascending_slot_order() -> Vec<ManagedSessionSummary> {
+    vec![
+        ordered_session("oldest", "stopped", 1, false, "2026-09-01T00:00:00Z"),
+        ordered_session("middle", "stopped", 2, false, "2026-09-02T00:00:00Z"),
+        ordered_session("attached-now", "active", 3, true, "2026-09-03T00:00:00Z"),
+    ]
+}
+
+#[test]
+fn prepare_menu_orders_the_first_render_like_every_later_one() {
+    // #6753: `prepare_menu` is what `run_tty_picker` renders from, so asserting
+    // on it asserts on the FIRST menu. Pre-fix the first render used this vec
+    // unchanged and the attached session printed LAST at slot 3.
+    let scope = super::PickerScope::project("owner/repo", "/repo");
+    let menu =
+        crate::commands::session_picker_order::prepare_menu(daemon_ascending_slot_order(), &scope);
+    let names: Vec<&str> = menu.sessions.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["attached-now", "middle", "oldest"],
+        "attached leads, then the rest by recency — the same order every later menu uses"
+    );
+    assert_eq!(
+        menu.sessions[0].slot, 3,
+        "and each row keeps its stable daemon slot"
+    );
+}
+
+#[test]
+fn prepare_menu_bare_enter_targets_the_attached_session() {
+    // #6753's reported effect. `first_needs_restart` drives both the default hint
+    // and `parse_picker_choice`'s bare-Enter branch, and it reads position 0: on
+    // the un-normalized vec that was `oldest`, a STOPPED session, so bare Enter
+    // fired `ConfirmRestart` while the hint read "resume most recent".
+    let scope = super::PickerScope::project("owner/repo", "/repo");
+    let raw = daemon_ascending_slot_order();
+    assert!(
+        crate::commands::guided_resume::needs_restart(&raw[0].state),
+        "fixture check: position 0 of the daemon's order is a stopped session"
+    );
+
+    let menu = crate::commands::session_picker_order::prepare_menu(raw, &scope);
+    assert!(
+        !menu.first_needs_restart,
+        "position 0 must be resumable, so bare Enter resumes rather than restarting"
+    );
+    assert_eq!(
+        super::decide_for_index(&menu.sessions, 0, menu.first_needs_restart),
+        PickerDecision::Resume(0),
+        "bare Enter must resume the attached session, not confirm a restart of the oldest"
+    );
+}
+
+#[test]
+fn prepare_menu_is_idempotent() {
+    // #6753's closure condition: the first menu is ordered identically to every
+    // subsequent one. The loop prepares on every iteration, including after a
+    // `continue` that skipped the re-fetch, so preparing twice must not move a
+    // row — otherwise the list would reorder under the operator exactly as it did
+    // when only the loop bottom normalized.
+    let scope = super::PickerScope::project("owner/repo", "/repo");
+    let once =
+        crate::commands::session_picker_order::prepare_menu(daemon_ascending_slot_order(), &scope);
+    let names_once: Vec<String> = once.sessions.iter().map(|s| s.name.clone()).collect();
+    let twice = crate::commands::session_picker_order::prepare_menu(once.sessions, &scope);
+    let names_twice: Vec<String> = twice.sessions.iter().map(|s| s.name.clone()).collect();
+    assert_eq!(names_once, names_twice);
+    assert_eq!(once.new_idx, twice.new_idx);
+    assert_eq!(once.first_needs_restart, twice.first_needs_restart);
+}
+
+#[test]
+fn prepare_menu_launch_slot_is_the_maximum_not_the_last() {
+    // #3723's guarantee, re-pinned through the seam that now owns it: the reorder
+    // `prepare_menu` applies is exactly the one that could make `.last().slot + 1`
+    // collide with a real session's slot.
+    let scope = super::PickerScope::project("owner/repo", "/repo");
+    let menu =
+        crate::commands::session_picker_order::prepare_menu(daemon_ascending_slot_order(), &scope);
+    assert_eq!(menu.new_idx, 4, "max slot 3, plus one");
+    assert!(!menu.stale_slots, "these fixtures carry real slots");
+}
+
+#[test]
+fn prepare_menu_applies_the_scopes_term_filter() {
+    // The filter half of the pair: it ran at the loop bottom too, so the first
+    // menu of a filtered `tm ls <term>` showed rows the later menus dropped.
+    let scope = super::PickerScope {
+        source_id: None,
+        repo_url: None,
+        sort: super::SessionSortArg::Recent,
+        term: Some(super::SessionFilter::visible("attached")),
+    };
+    let menu =
+        crate::commands::session_picker_order::prepare_menu(daemon_ascending_slot_order(), &scope);
+    assert_eq!(menu.sessions.len(), 1, "only the matching row survives");
+    assert_eq!(menu.sessions[0].name, "attached-now");
+}

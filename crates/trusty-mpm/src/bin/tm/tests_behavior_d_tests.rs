@@ -1068,9 +1068,8 @@ fn ls_connector_should_show_picker_attached_static() {
 // `parse_ls_terms` is the pure grammar seam; `filter_sessions_by_term` and
 // `sort_sessions` are the pure list operations it feeds.
 
-use crate::commands::session_picker::{
-    SessionFilter, SessionSortArg, filter_sessions_by_term, parse_ls_terms, sort_sessions,
-};
+use crate::commands::session_picker::{SessionFilter, SessionSortArg, parse_ls_terms};
+use crate::commands::session_picker_order::{filter_sessions_by_term, sort_sessions};
 
 /// Bare `tm ls` (no positional words) → default sort, no filter.
 #[test]

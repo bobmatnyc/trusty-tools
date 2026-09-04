@@ -307,10 +307,10 @@ pub(crate) async fn session_ls_at(
         &listing.dead_ids,
     );
     let sessions =
-        crate::commands::session_picker::filter_sessions_by_term(sessions, term.as_ref());
+        crate::commands::session_picker_order::filter_sessions_by_term(sessions, term.as_ref());
     // `tm ls -a`: keep only what a tmux client is on RIGHT NOW.
     let mut sessions = filter_attached(sessions, attached);
-    crate::commands::session_picker::sort_sessions(&mut sessions, sort);
+    crate::commands::session_picker_order::sort_sessions(&mut sessions, sort);
     if attached && sessions.is_empty() {
         // An empty table under `-a` is a real answer, not a failure — say so
         // explicitly and exit 0 rather than printing a bare header.
