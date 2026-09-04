@@ -10,6 +10,57 @@ edit this file by hand (see
 
 ---
 
+## [0.14.0] — 2026-09-04
+
+### Added
+
+- An opt-in OSV.dev lookup over the dependency inventory each repository's report already measures (#6780). `[collectors] osv = true` in `engagement.toml` turns it on; a config that does not declare it runs exactly as before. Each repository's directory gains an `osv.json` carrying `{package, ecosystem, version, vulns: [{id, aliases, summary, severity}]}` plus `queried`, `matched` and `errors`; the advisories also reach `[report].findings`, which a re-render renders under a "Known vulnerabilities (OSV)" section; and `index.md` gains a severity count table with the worst advisories beneath it, or a "not run (opt-in)" line when the collector is off.
+  - Queries go to `POST /v1/querybatch` in chunks of 1000, the cap OSV documents, retrying a 429 or a 5xx three times with exponential backoff and stopping at a per-repository time cap (`[osv] time_cap_secs`, default 120).
+  - Answers are cached under the working directory's `state/osv-cache/`, keyed by `(ecosystem, name, version)` with a TTL (`[osv] cache_ttl_hours`, default 168). `[osv] offline = true` — or `TRUSTY_AUDIT_OSV_OFFLINE` in the environment — answers from that cache alone and opens no socket, recording each miss as a named gap.
+  - Every degradation is named twice, in the run's gap list and in `osv.json`'s `errors`: a package with no locked version, an ecosystem the collector does not map onto OSV, a batch that went unanswered, and the row cap the renderer applies to the inventory this scan reads. A repository whose every batch failed says it has no OSV coverage rather than shipping an empty scan that reads as clean.
+  - Every OSV request carries an explicit timeout of the repository's remaining budget, so an endpoint that accepts a connection and never answers cannot outlive the cap or block the sweep; response bodies are accumulated against an 8 MiB ceiling rather than read whole; a 429 is paced by the server's own `Retry-After` when it states a usable one; and a response carrying fewer results than the batch had queries names the coordinates it left unanswered instead of dropping them.
+  - `TRUSTY_AUDIT_OSV_OFFLINE` recognises only truthy spellings (`1`, `true`, `yes`, `on`). Any non-empty value used to turn offline on, so `=false` silently cost a run every answer it had not cached.
+  - A re-render's `index.md` states the OSV result of the package it rendered FROM, so one bundle can no longer read as "not run (opt-in)" in one index and report its advisories in another.
+- A bundle-level technical-debt roll-up (#6781). A sweep, a re-render, and a
+  return package now write `report.json` beside `index.md`, carrying counts of
+  every declared finding by tier, by dimension, by repository, and by
+  tier × dimension, plus the total they all sum to. The tiers are the
+  collectors' own `RED` / `AMBER` bands and the dimensions their own
+  `dependencies` / `license` / `secrets` / `churn` categories — nothing is
+  re-banded or re-labelled.
+  - `index.md` gains a "Technical debt by tier" table across repositories,
+    rendered from that one computed value rather than counting the findings a
+    second time, so the table and `report.json` cannot state different numbers.
+
+### Fixed
+
+- The engagement template's `[tools]` pins now name the versions this release
+  train ships. `scripts/refresh-engagement-pins.sh` sets each pin to its crate's
+  current workspace version and `--check` reports the stale ones;
+  `scripts/preflight-publish.sh` CHECK 10 runs that check when publishing
+  trusty-audit and fails the release when a pin lags a sibling whose workspace
+  version is not yet on crates.io, so the copy compiled into
+  `instructions::ENGAGEMENT_TEMPLATE` and written out by `taudit distribute`
+  can no longer ship a version behind the one that just published (#6772).
+- The run index and the return package's `reports/index.md` now state, in a
+  repository's own section, that its git history is stale because the fetch
+  failed. The fact reached the recipient only as one bullet inside section 9 of
+  that repository's report, which is read after its commit and pull-request
+  figures rather than before them (#6782).
+- A `409 Conflict` from `POST /indexes` no longer costs a repository its whole
+  search-derived evidence tier. trusty-audit reads the daemon's registry, reuses
+  the registration that already names this checkout, deregisters the stale row
+  when one holds the id at another root or holds this tree under an obsolete id,
+  and retries the create once. Deregistration never destroys the corpus and is
+  guarded by the root it was decided on (#6783).
+- Every arm that loses the search index now leads with one phrase —
+  `evidence tier degraded: search index unavailable (<error>)` — and names the
+  trusty-analyze pass that did not run with it, so a skipped analyze pass is the
+  same headline rather than a separate silent gap (#6783).
+- A run's `index.md` counts the repositories audited without search evidence and
+  qualifies its coverage line, so an "M of M" run whose search tier was empty no
+  longer reads as complete (#6783).
+
 ## [0.13.3] — 2026-09-03
 
 ### Added
