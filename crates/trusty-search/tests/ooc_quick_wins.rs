@@ -7,6 +7,10 @@
 //!   the resident/on-disk footprint. A recall@10 sanity check guards against a
 //!   quantization regression.
 //!
+//! #6822 flipped the default to `f16`, so every f32 baseline in this file names
+//! `f32` explicitly. The default's own coverage lives in
+//! `tests/vector_quant_default_6822.rs`.
+//!
 //! These live in a dedicated integration test (rather than `store::tests`)
 //! because `store.rs` is at its frozen line-cap budget and cannot grow.
 //!
@@ -248,7 +252,10 @@ async fn quantization_shrinks_on_disk_snapshot() {
         }
     };
 
-    let f32_size = save(build_store(None, n).await, "f32.usearch").await;
+    // #6822: the f32 baseline is now an EXPLICIT opt-in — an unset
+    // `TRUSTY_VECTOR_QUANT` builds f16, so passing `None` here would compare
+    // f16 against itself and assert nothing.
+    let f32_size = save(build_store(Some("f32"), n).await, "f32.usearch").await;
     let f16_size = save(build_store(Some("f16"), n).await, "f16.usearch").await;
     let i8_size = save(build_store(Some("i8"), n).await, "i8.usearch").await;
 

@@ -319,15 +319,21 @@ enum Commands {
     ///   trusty-search cleanup --yes
     ///   trusty-search cleanup --dry-run
     #[command(display_order = 13)]
-    Cleanup {
-        /// Skip the confirmation prompt and remove empty indexes immediately
-        #[arg(short = 'y', long)]
-        yes: bool,
+    Cleanup(commands::cleanup::CleanupArgs),
 
-        /// Show what would be removed without deleting anything (overrides --yes)
-        #[arg(long)]
-        dry_run: bool,
-    },
+    /// Re-encode an index's vectors at a different scalar precision  (#6822)
+    ///
+    /// One-shot backfill for an index built before `f16` became the default.
+    /// The default reaches an index at creation time only, and a forced reindex
+    /// re-embeds at the old precision, so this is the ONLY way an existing
+    /// index becomes quantized. Reports before it writes; nothing is converted
+    /// without `--yes` or an answered prompt.
+    ///
+    /// Examples:
+    ///   trusty-search quantize --dry-run
+    ///   trusty-search quantize --to f16 --yes
+    #[command(display_order = 14)]
+    Quantize(commands::quantize::QuantizeArgs),
 
     /// Full reindex of current project (see `index --force`)
     ///
@@ -1300,8 +1306,12 @@ async fn run() -> Result<()> {
 
         Commands::Remove { file } => commands::remove::handle_remove(&cli.index, file).await?,
 
-        Commands::Cleanup { yes, dry_run } => {
-            commands::cleanup::handle_cleanup(yes, dry_run).await?;
+        Commands::Cleanup(args) => {
+            commands::cleanup::handle_cleanup(args.yes, args.dry_run).await?;
+        }
+
+        Commands::Quantize(args) => {
+            commands::quantize::handle_quantize(&cli.index, &args, cli.json).await?;
         }
 
         Commands::Reindex { path, timeout } => {

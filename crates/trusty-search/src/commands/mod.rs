@@ -57,8 +57,10 @@ pub mod migrate_storage;
 pub mod monitor;
 pub mod port;
 pub(crate) mod prior_index_count;
+// #6822: the scalar-precision backfill command.
 pub mod prune;
 pub mod prune_orphans;
+pub mod quantize;
 pub mod query;
 pub mod reindex;
 pub mod remove;

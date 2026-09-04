@@ -13,6 +13,8 @@ use std::sync::atomic::Ordering;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
+use super::super::store_config::VectorQuant;
+use super::types::RequantizeReport;
 use super::types::StagedSwapOutcome;
 use super::types::VectorHit;
 use super::types::VectorStore;
@@ -569,5 +571,24 @@ impl VectorStore for UsearchStore {
     ) -> Result<()> {
         self.resolve_staged_snapshot_inner(staged, live, outcome)
             .await
+    }
+
+    /// #6822: report the precision the LIVE index holds. See
+    /// [`UsearchStore::live_quant`].
+    async fn vector_quant_label(&self) -> Option<&'static str> {
+        self.live_quant().await.map(|q| q.label())
+    }
+
+    /// #6822: the operator-run scalar-precision backfill. See
+    /// [`UsearchStore::requantize`].
+    async fn requantize(
+        &self,
+        target: VectorQuant,
+        dry_run: bool,
+    ) -> Result<Option<RequantizeReport>> {
+        // Fully qualified so this never resolves back to itself.
+        UsearchStore::requantize(self, target, dry_run)
+            .await
+            .map(Some)
     }
 }

@@ -21,7 +21,10 @@ mod usearch_impl;
 // Issue #4707: snapshot-adoption recovery for the #1711 guard. Kept in its own
 // file so `usearch_store.rs` stays under the 500-SLOC production cap.
 mod usearch_recover;
+// #6822: the in-place scalar-precision backfill. Its own file so
+// `usearch_store.rs` stays under the 500-SLOC production cap.
+mod usearch_requant;
 mod usearch_store;
 
-pub use self::types::{StagedSwapOutcome, VectorHit, VectorStore};
+pub use self::types::{RequantizeReport, StagedSwapOutcome, VectorHit, VectorStore};
 pub use self::usearch_store::UsearchStore;
