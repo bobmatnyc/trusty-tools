@@ -26,8 +26,8 @@ impl SessionManager {
     /// UUID via `CLAUDE_SESSION_ID`. Persisting it lets `resume` pass
     /// `--resume <id>` to the new `claude` process, restoring the prior
     /// conversation even after an ungraceful exit (terminal kill, tmux pane
-    /// closed without `/quit`). Without this id, resume falls back to
-    /// `--continue` (most-recent conversation) or a fresh launch.
+    /// closed without `/quit`). Without this id, resume launches FRESH — #6765
+    /// removed the `--continue` fallback.
     /// What: looks up the record, sets `claude_session_id`, and persists.
     /// No tmux I/O — the hook handler calls this after correlating the
     /// `SessionStart` event to the right managed session.

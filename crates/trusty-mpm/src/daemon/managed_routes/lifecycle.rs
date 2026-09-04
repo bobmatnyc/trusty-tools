@@ -1574,8 +1574,8 @@ pub async fn resume_managed(
     let tmux_arc = mgr.tmux_driver();
     let adapter = build_adapter(record.runtime, tmux_arc);
     // #1744: prefer --resume <id> when a claude_session_id was captured at
-    // SessionStart; fall back to --continue (most-recent conversation in the
-    // workspace) when the id is absent. ClaudeCodeAdapter overrides spawn_resume
+    // SessionStart; launch fresh when the id is absent or stale (#6765 — no
+    // --continue fallback). ClaudeCodeAdapter overrides spawn_resume
     // to implement this; TcodeAdapter's default delegates to plain spawn.
     // Sibling-window hijack fix (follow-up to #2456): pass the record's OWN
     // `record.pane_id` through so the adapter targets that SPECIFIC pane

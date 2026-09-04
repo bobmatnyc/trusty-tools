@@ -109,8 +109,9 @@ pub trait RuntimeAdapter: Send + Sync {
     /// Why (#1744): when resuming a managed session that exited ungracefully
     /// (tmux pane killed, terminal closed without `/quit`), the operator wants
     /// the prior conversation restored. Passing `--resume <claude_session_id>`
-    /// restores the exact Claude Code conversation; `--continue` resumes the
-    /// most-recent one when the id is unknown; plain `spawn` starts fresh.
+    /// restores the exact Claude Code conversation; an unknown or stale id
+    /// starts fresh (#6765 removed the `--continue` fallback, which resolved
+    /// against the managed store rather than the intended conversation).
     /// The default implementation delegates to [`Self::spawn`] (no resume flag),
     /// which is correct for the `tcode` adapter and any other runtime that does
     /// not support conversation continuity.

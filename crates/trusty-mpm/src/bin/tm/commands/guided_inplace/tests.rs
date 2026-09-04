@@ -732,11 +732,14 @@ fn inplace_exec_command_forwards_every_arg_in_order() {
     // #4336 core regression: the Command handed to `exec` must carry the
     // composed argv VERBATIM. An empty (or truncated) `get_args()` here is
     // precisely the reported "execs claude with zero args" defect.
+    // #6765: `--resume <id>`, not `--continue` — the composer no longer emits a
+    // bare `--continue`, so the sample argv tracks what it really produces.
     let resume = synthetic_resume(&[
         "--setting-sources",
         "project,local",
         "--dangerously-skip-permissions",
-        "--continue",
+        "--resume",
+        "abc-123",
     ]);
     let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"));
 
@@ -750,7 +753,8 @@ fn inplace_exec_command_forwards_every_arg_in_order() {
             "--setting-sources",
             "project,local",
             "--dangerously-skip-permissions",
-            "--continue"
+            "--resume",
+            "abc-123"
         ],
         "the exec seam must forward the composed argv verbatim and in order"
     );
