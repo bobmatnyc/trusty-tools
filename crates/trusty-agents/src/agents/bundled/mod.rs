@@ -82,6 +82,7 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 mod lock;
+mod provenance;
 mod stamp;
 
 /// Embeds this crate's own `.trusty-agents/agents/` tree — the shared
@@ -191,14 +192,20 @@ fn bundled_assets<E: rust_embed::RustEmbed>() -> Result<Vec<(String, Vec<u8>)>> 
 /// What: `written` counts brand-new files, `refreshed` counts existing
 /// bundled files whose content was updated to match the current embedded
 /// template, `backed_up` counts how many of those refreshes archived a
-/// differing prior copy to `<file>.stale.<digest>.bak` first.
+/// differing prior copy to `<file>.stale.<digest>.bak` first, and `preserved`
+/// counts files the automatic path declined to overwrite because they no longer
+/// match what this module last wrote there (#3844) — a hand edit the operator
+/// gets told about instead of losing.
 /// Test: `deploy_writes_missing_files_only`, `stale_stamp_triggers_refresh`,
-/// `refresh_backs_up_differing_content` (tests.rs).
+/// `refresh_backs_up_differing_content`,
+/// `a_hand_edited_bundled_file_survives_a_stale_stamp_refresh` (tests.rs).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ReprovisionReport {
     pub written: usize,
     pub refreshed: usize,
     pub backed_up: usize,
+    /// #3844: bundled files left alone because they carry a local edit.
+    pub preserved: usize,
 }
 
 impl ReprovisionReport {
@@ -231,7 +238,34 @@ impl ReprovisionReport {
 /// `deploy_never_overwrites_existing_file`,
 /// `deploy_writes_directory_package_agents` (tests.rs).
 pub fn deploy_bundled_agents(target_dir: &Path) -> Result<usize> {
-    Ok(reprovision_bundled_agents(target_dir, false)?.written)
+    Ok(reprovision_bundled_agents(target_dir, RefreshPolicy::WriteMissingOnly)?.written)
+}
+
+/// What a reprovision pass may do to a bundled file that is already on disk
+/// (#3844).
+///
+/// Why: the pass used to take a `refresh_stale: bool`, which could express only
+/// "leave every existing file alone" or "overwrite every divergent one". The
+/// automatic upgrade path needs the third case in between — refresh a file this
+/// module itself last wrote, keep one the operator edited — and `tagent agents
+/// repair` still needs the unconditional overwrite, so the two can no longer
+/// share one flag.
+/// What: three variants, applied only to a path that already exists (a missing
+/// file is always written).
+/// Test: `deploy_never_overwrites_existing_file` (`WriteMissingOnly`),
+/// `a_hand_edited_bundled_file_survives_a_stale_stamp_refresh` and
+/// `a_stale_deploy_this_tool_wrote_is_still_refreshed` (`KeepHandEdits`),
+/// `force_reprovision_overwrites_even_when_stamp_matches` (`Overwrite`) (tests.rs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshPolicy {
+    /// Never revisit a file that is already there.
+    WriteMissingOnly,
+    /// Refresh a divergent file only when the provenance manifest vouches that
+    /// its current content is what this module last wrote at that path.
+    KeepHandEdits,
+    /// Overwrite every divergent file, archiving its content first — the
+    /// explicit `tagent agents repair` escape hatch.
+    Overwrite,
 }
 
 /// Shared core of every deploy/refresh entry point in this module (#3556),
@@ -249,9 +283,12 @@ pub fn deploy_bundled_agents(target_dir: &Path) -> Result<usize> {
 /// [`reprovision_embedded_locked`].
 /// Test: `deploy_writes_missing_files_only`, `deploy_never_overwrites_existing_file`,
 /// `deploy_is_idempotent_on_rerun`, `deploy_writes_directory_package_agents` (tests.rs).
-fn reprovision_bundled_agents(target_dir: &Path, refresh_stale: bool) -> Result<ReprovisionReport> {
+fn reprovision_bundled_agents(
+    target_dir: &Path,
+    policy: RefreshPolicy,
+) -> Result<ReprovisionReport> {
     let guard = lock::acquire(target_dir)?;
-    reprovision_embedded_locked::<BundledAgents>(&guard, target_dir, refresh_stale)
+    reprovision_embedded_locked::<BundledAgents>(&guard, target_dir, policy)
 }
 
 /// The actual write-side loop over `BundledAgents::iter()`, REQUIRING an
@@ -273,41 +310,79 @@ fn reprovision_bundled_agents(target_dir: &Path, refresh_stale: bool) -> Result<
 /// terminal while an older `tagent` is mid-startup in another — could leave
 /// a stamp that doesn't match the content actually on disk).
 /// What: for each embedded file, writes it when missing (`written`); when
-/// present and `refresh_stale` is `false`, skips it untouched; when present
-/// and `refresh_stale` is `true`, compares on-disk bytes to the embedded
-/// bytes — identical content is skipped, differing content is archived to
-/// the content-addressed [`stale_backup_path`] (`backed_up`) and then
-/// overwritten (`refreshed`) via `crate::state_writer::atomic_write`
-/// (tmp-file + rename, so a crash mid-write leaves the original file/backup
-/// intact rather than torn). The backup write is skipped only when that
-/// exact path already exists, which — because the path is derived from the
-/// bytes — means those bytes are already archived. Only ever touches paths
-/// that are part of the embedded bundle — a user's own non-bundled file at
-/// `target_dir` is never read, backed up, or written.
+/// present, acts on `policy`. [`RefreshPolicy::WriteMissingOnly`] skips it
+/// untouched. The other two compare on-disk bytes to the embedded bytes —
+/// identical content is skipped, and differing content is archived to the
+/// content-addressed [`stale_backup_path`] (`backed_up`) and then overwritten
+/// (`refreshed`) via `crate::state_writer::atomic_write` (tmp-file + rename, so
+/// a crash mid-write leaves the original file/backup intact rather than torn).
+/// The backup write is skipped only when that exact path already exists, which —
+/// because the path is derived from the bytes — means those bytes are already
+/// archived. Only ever touches paths that are part of the embedded bundle — a
+/// user's own non-bundled file at `target_dir` is never read, backed up, or
+/// written.
+///
+/// #3844: under [`RefreshPolicy::KeepHandEdits`] — every automatic pass — a
+/// divergent file is overwritten ONLY when [`provenance`]'s manifest vouches
+/// that its current content is what this module last wrote there. Content it
+/// cannot vouch for is the operator's, so the file is left exactly as it is and
+/// counted in `preserved`, with a `warn` naming the file and the one command
+/// that does overwrite it. [`RefreshPolicy::Overwrite`] is that command's path
+/// and asks no such question.
+///
+/// The manifest is rewritten at the end of the pass, still inside the caller's
+/// lock, and only when the pass actually changed it — so the matching-stamp fast
+/// path stays a true no-op with zero disk writes.
 /// Test: `stale_stamp_triggers_refresh`, `refresh_backs_up_differing_content`,
 /// `non_bundled_user_file_untouched_by_refresh`,
 /// `existing_stale_backup_is_never_clobbered`,
 /// `repeated_divergence_is_recoverable_across_reprovisions`,
-/// `pristine_files_are_reprovisioned_without_littering_backups` (tests.rs);
+/// `pristine_files_are_reprovisioned_without_littering_backups`,
+/// `a_hand_edited_bundled_file_survives_a_stale_stamp_refresh`,
+/// `a_stale_deploy_this_tool_wrote_is_still_refreshed`,
+/// `a_preserved_hand_edit_is_never_archived_or_rewritten`,
+/// `repair_still_overwrites_a_hand_edit_the_automatic_pass_kept` (tests.rs);
 /// `pass_lock_serializes_concurrent_reprovision_calls` (`lock`'s own tests)
 /// pins the underlying mutual-exclusion primitive.
 fn reprovision_embedded_locked<E: rust_embed::RustEmbed>(
     _guard: &lock::ProvisionLock,
     target_dir: &Path,
-    refresh_stale: bool,
+    policy: RefreshPolicy,
 ) -> Result<ReprovisionReport> {
     let mut report = ReprovisionReport::default();
+    // #3844: what this module last wrote at each path, read once per pass.
+    let known = provenance::read(target_dir);
+    let mut recorded = known.clone();
     // #5226: a path the bundle does not own is never materialised here.
     for (rel, bytes) in bundled_assets::<E>()? {
         let dest = target_dir.join(&rel);
 
         if dest.exists() {
-            if !refresh_stale {
+            if policy == RefreshPolicy::WriteMissingOnly {
                 continue;
             }
             let current = std::fs::read(&dest)
                 .with_context(|| format!("failed to read existing {}", dest.display()))?;
             if current == bytes {
+                // Already the shipped content, so this path is ours whatever a
+                // pre-#3844 manifest says (or fails to say) about it.
+                recorded.insert(rel.clone(), provenance::digest(&bytes));
+                continue;
+            }
+            // #3844: the divergence is the operator's unless the manifest says
+            // this module wrote it. Refusing here is what stopped four
+            // consecutive `cargo install`s from reverting live configuration.
+            if policy == RefreshPolicy::KeepHandEdits
+                && !provenance::vouches_for(&known, &rel, &current)
+            {
+                tracing::warn!(
+                    file = %dest.display(),
+                    "keeping the on-disk bundled file: its content is not what was \
+                     last deployed there, so it carries a local edit. The shipped \
+                     template was NOT applied to it — run `tagent agents repair` to \
+                     overwrite it (the current content is archived first)"
+                );
+                report.preserved += 1;
                 continue;
             }
             // #4461: the backup name carries the digest of the bytes being
@@ -331,13 +406,18 @@ fn reprovision_embedded_locked<E: rust_embed::RustEmbed>(
             }
             crate::state_writer::atomic_write(&dest, &bytes)
                 .with_context(|| format!("failed to refresh {}", dest.display()))?;
+            recorded.insert(rel.clone(), provenance::digest(&bytes));
             report.refreshed += 1;
             continue;
         }
 
         crate::state_writer::atomic_write(&dest, &bytes)
             .with_context(|| format!("failed to write {}", dest.display()))?;
+        recorded.insert(rel.clone(), provenance::digest(&bytes));
         report.written += 1;
+    }
+    if recorded != known {
+        provenance::write(target_dir, &recorded)?;
     }
     Ok(report)
 }
@@ -415,9 +495,9 @@ fn current_bundle_stamp<E: rust_embed::RustEmbed>() -> Result<String> {
 /// What: computes the current binary's bundle stamp, compares it to the
 /// stamp on disk (`target_dir/.bundled-stamp`, via [`stamp::read`]) — a
 /// missing or differing stamp means "stale", triggering
-/// `reprovision_embedded_locked(&guard, target_dir, true)` (refresh
-/// path) followed by writing the new stamp; a matching stamp takes the fast
-/// never-overwrite path (`refresh_stale = false`) and leaves the stamp file
+/// `reprovision_embedded_locked(&guard, target_dir, RefreshPolicy::KeepHandEdits)`
+/// (refresh path) followed by writing the new stamp; a matching stamp takes the
+/// fast `RefreshPolicy::WriteMissingOnly` path and leaves the stamp file
 /// untouched. A lock-acquire failure propagates as `Err` (unchanged
 /// contract: the caller, `ensure_bundled_agents_deployed`, is the one that
 /// fails soft on `$HOME` resolution — this function itself is not best
@@ -454,7 +534,14 @@ fn ensure_embedded_deployed_in<E: rust_embed::RustEmbed>(
     let on_disk_stamp = stamp::read(target_dir);
     let is_stale = on_disk_stamp.as_deref() != Some(current_stamp.as_str());
 
-    let report = reprovision_embedded_locked::<E>(&guard, target_dir, is_stale)?;
+    // #3844: a stale stamp refreshes what this module last wrote and keeps what
+    // the operator edited; a matching stamp still never revisits an existing file.
+    let policy = if is_stale {
+        RefreshPolicy::KeepHandEdits
+    } else {
+        RefreshPolicy::WriteMissingOnly
+    };
+    let report = reprovision_embedded_locked::<E>(&guard, target_dir, policy)?;
     if is_stale {
         stamp::write(target_dir, &current_stamp)?;
     }
@@ -525,7 +612,8 @@ pub fn ensure_bundled_agents_deployed() -> Result<ReprovisionReport> {
 /// concurrent `ensure_*`/`repair` pair over the same `target_dir` can never
 /// interleave.
 /// What: unconditionally runs the refresh path
-/// (`reprovision_embedded_locked(&guard, target_dir, true)`), then
+/// (`reprovision_embedded_locked(&guard, target_dir, RefreshPolicy::Overwrite)`),
+/// then
 /// writes the current bundle stamp so a subsequent automatic startup check
 /// treats the roster as up to date. Errors (including a lock-acquire
 /// failure) propagate loudly to the caller — this function has no fail-soft
@@ -535,7 +623,8 @@ pub fn ensure_bundled_agents_deployed() -> Result<ReprovisionReport> {
 /// `existing_stale_backup_is_never_clobbered` (tests.rs).
 pub fn force_reprovision_bundled_agents(target_dir: &Path) -> Result<ReprovisionReport> {
     let guard = lock::acquire(target_dir)?;
-    let report = reprovision_embedded_locked::<BundledAgents>(&guard, target_dir, true)?;
+    let report =
+        reprovision_embedded_locked::<BundledAgents>(&guard, target_dir, RefreshPolicy::Overwrite)?;
     let current_stamp = current_bundle_stamp::<BundledAgents>()?;
     stamp::write(target_dir, &current_stamp)?;
     Ok(report)

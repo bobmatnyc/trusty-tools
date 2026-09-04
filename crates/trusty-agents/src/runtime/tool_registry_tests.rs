@@ -1050,12 +1050,17 @@ fn deployed_assistant_config_survives_scoping_with_delegate_to_agent() {
     let stale_content = "[agent]\nname = \"assistant\"\nrole = \"assistant\"\n\n[tools]\nallow = [\"web_search\"]\n";
     std::fs::write(&assistant_toml, stale_content).unwrap();
 
-    // Drive the REAL refresh path (#3556) — a stale/missing stamp must
-    // rewrite the stale file to match the CURRENT embedded template. This is
-    // the assertion that actually closes the gap: without the refresh
-    // mechanism, `stale_content` (no `delegate_to_agent`) would still be on
-    // disk below.
-    let report = crate::agents::bundled::ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    // Drive the REAL refresh path (#3556) — it must rewrite the stale file to
+    // match the CURRENT embedded template. This is the assertion that actually
+    // closes the gap: without the refresh mechanism, `stale_content` (no
+    // `delegate_to_agent`) would still be on disk below.
+    //
+    // #3844: the force path, because the automatic one now KEEPS a divergent
+    // file it cannot attribute to its own prior deploy, and `std::fs::write`
+    // above is indistinguishable from an operator's hand edit. What this test is
+    // about is the refreshed file's journey through the resolver and the scoping
+    // chain, not which entry point performed the refresh.
+    let report = crate::agents::bundled::force_reprovision_bundled_agents(tmp.path()).unwrap();
     assert!(
         report.refreshed > 0,
         "seeded stale assistant/agent.toml must trigger a refresh, got: {report:?}"

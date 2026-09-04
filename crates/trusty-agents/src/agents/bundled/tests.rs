@@ -92,6 +92,26 @@ fn all_backup_files(root: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// Record `content` as what this module last deployed at `rel` (#3844).
+///
+/// Why: the refresh path now separates a STALE DEPLOY (content an older binary
+/// wrote, which is this module's to replace) from a HAND EDIT (content the
+/// operator wrote, which is not). A test that puts bytes on disk with
+/// `std::fs::write` has produced a hand edit; standing in for an older binary's
+/// deploy means recording that content the way the deploy would have. Going
+/// through `provenance`'s own API rather than composing the file by hand keeps
+/// these tests honest about the format.
+/// What: merges one `rel -> digest(content)` entry into whatever manifest is
+/// already at `target`.
+/// Test: used by `stale_stamp_triggers_refresh`,
+/// `a_stale_deploy_this_tool_wrote_is_still_refreshed`,
+/// `concurrent_ensure_calls_over_stale_target_converge_to_one_consistent_refresh`.
+fn record_as_deployed(target: &Path, rel: &str, content: &str) {
+    let mut recorded = provenance::read(target);
+    recorded.insert(rel.to_string(), provenance::digest(content.as_bytes()));
+    provenance::write(target, &recorded).expect("record the deployed baseline");
+}
+
 /// Why: the core contract — a fresh empty target directory gets every
 /// embedded file, and the count matches what was actually written.
 /// Test: itself.
@@ -187,6 +207,10 @@ fn stale_stamp_triggers_refresh() {
     let assistant_toml = tmp.path().join("assistant").join("agent.toml");
     let stale_content = "[agent]\nname = \"assistant\"\nrole = \"assistant\"\n\n[tools]\nallow = [\"web_search\"]\n";
     std::fs::write(&assistant_toml, stale_content).unwrap();
+    // #3844: an older BINARY deployed this, so it is this module's to replace —
+    // recorded as such, because bytes with no recorded provenance are the
+    // operator's and would now be kept.
+    record_as_deployed(tmp.path(), "assistant/agent.toml", stale_content);
 
     // A stamp that does not match the current binary's bundle content.
     stamp::write(tmp.path(), "deadbeef-not-the-real-stamp").unwrap();
@@ -199,6 +223,7 @@ fn stale_stamp_triggers_refresh() {
         "only the deliberately-staled assistant/agent.toml should refresh"
     );
     assert_eq!(report.backed_up, 1);
+    assert_eq!(report.preserved, 0, "nothing here carries a local edit");
 
     let refreshed = std::fs::read_to_string(&assistant_toml).unwrap();
     assert_ne!(refreshed, stale_content, "stale content must be replaced");
@@ -213,6 +238,199 @@ fn stale_stamp_triggers_refresh() {
         new_stamp.as_deref(),
         Some(current_bundle_stamp::<BundledAgents>().unwrap().as_str()),
         "stamp must be updated to the current bundle content hash"
+    );
+}
+
+// ─── #3844: the automatic path keeps a hand edit ─────────────────────────────
+
+/// Why (#3844 — the defect this test would have caught): every `cargo install`
+/// changes the bundle stamp, and the refresh that follows used to overwrite any
+/// bundled file whose bytes differed from the template. An operator's edit and an
+/// older binary's deploy look identical from bytes alone, so the pass archived
+/// the edit to a `.bak` nobody was told about and wrote the template over it.
+/// That happened four times in one week and reverted a model routing decision, a
+/// `[tools]` block, the `scopes` line that reaches gworkspace, and whole persona
+/// sections — with no error, because an agent that loses its memory grants simply
+/// behaves as though it has no memory.
+/// What: deploys, hand-edits `assistant/agent.toml` WITHOUT recording that
+/// content as deployed, staleness the stamp, and asserts the automatic pass left
+/// the file byte-identical and said so. Against the pre-fix code the file is
+/// overwritten and `refreshed` is 1.
+/// Test: itself.
+#[test]
+fn a_hand_edited_bundled_file_survives_a_stale_stamp_refresh() {
+    let tmp = tempfile::tempdir().unwrap();
+    ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+
+    let assistant_toml = tmp.path().join("assistant").join("agent.toml");
+    let hand_edited = "# operator edit: the memory grants live here\n[agent]\nname = \"assistant\"\n\n[tools]\nallow = [\"memory_recall\", \"memory_remember\"]\n";
+    std::fs::write(&assistant_toml, hand_edited).unwrap();
+
+    // Exactly what a `cargo install` of a binary with a changed bundle produces.
+    stamp::write(tmp.path(), "deadbeef-a-new-binary").unwrap();
+    let report = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&assistant_toml).unwrap(),
+        hand_edited,
+        "the operator's edit must still be the file's content"
+    );
+    assert_eq!(report.refreshed, 0, "nothing was refreshed: {report:?}");
+    assert_eq!(report.preserved, 1, "the edit is reported: {report:?}");
+}
+
+/// Why: keeping a hand edit must be a genuine no-op on that path, not a quieter
+/// overwrite — a pass that archived the edit "just in case" would put the
+/// operator's configuration into a `.bak` the agent listers hide, which is the
+/// half-measure #4461 already showed is not a protection.
+/// What: same setup as
+/// `a_hand_edited_bundled_file_survives_a_stale_stamp_refresh`, asserting no
+/// backup was written anywhere under the target and the file's mtime-independent
+/// content is untouched across two passes.
+/// Test: itself.
+#[test]
+fn a_preserved_hand_edit_is_never_archived_or_rewritten() {
+    let tmp = tempfile::tempdir().unwrap();
+    ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+
+    let assistant_toml = tmp.path().join("assistant").join("agent.toml");
+    let hand_edited = "# operator edit\n[agent]\nname = \"assistant\"\n";
+    std::fs::write(&assistant_toml, hand_edited).unwrap();
+
+    for stamp_value in ["deadbeef-one", "deadbeef-two"] {
+        stamp::write(tmp.path(), stamp_value).unwrap();
+        let report = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+        assert_eq!(report.backed_up, 0, "no archive on a keep: {report:?}");
+        assert_eq!(report.preserved, 1);
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(&assistant_toml).unwrap(),
+        hand_edited
+    );
+    let backups = all_backup_files(tmp.path());
+    assert!(
+        backups.is_empty(),
+        "keeping a file must not archive it: {backups:?}"
+    );
+}
+
+/// Why: #3556's whole reason for existing is that a changed bundled template has
+/// to reach a machine still holding an older binary's copy. #3844 must not buy
+/// hand-edit safety by breaking that — a file whose content is what this module
+/// last wrote is still the module's to replace.
+/// What: records stale content as deployed (what an older binary would have
+/// done), stales the stamp, and asserts the automatic pass refreshed it to the
+/// current template and archived the prior bytes.
+/// Test: itself.
+#[test]
+fn a_stale_deploy_this_tool_wrote_is_still_refreshed() {
+    let tmp = tempfile::tempdir().unwrap();
+    ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+
+    let assistant_toml = tmp.path().join("assistant").join("agent.toml");
+    let older_template = "[agent]\nname = \"assistant\"\nrole = \"assistant\"\n";
+    std::fs::write(&assistant_toml, older_template).unwrap();
+    record_as_deployed(tmp.path(), "assistant/agent.toml", older_template);
+
+    stamp::write(tmp.path(), "deadbeef-a-new-binary").unwrap();
+    let report = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+
+    assert_eq!(report.refreshed, 1, "{report:?}");
+    assert_eq!(report.preserved, 0, "{report:?}");
+    let refreshed = std::fs::read_to_string(&assistant_toml).unwrap();
+    assert_ne!(refreshed, older_template);
+    assert!(
+        refreshed.contains("delegate_to_agent"),
+        "must be the CURRENT template: {refreshed}"
+    );
+}
+
+/// Why: refusing to overwrite is only acceptable while a way to overwrite
+/// remains, and the warning the automatic path emits names `tagent agents
+/// repair` by name. If that command stopped overwriting, the warning would be
+/// wrong and an operator who WANTS the shipped template would have no route to
+/// it.
+/// What: keeps an edit through the automatic path, then runs the force path and
+/// asserts the template landed with the edit archived.
+/// Test: itself.
+#[test]
+fn repair_still_overwrites_a_hand_edit_the_automatic_pass_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+
+    let assistant_toml = tmp.path().join("assistant").join("agent.toml");
+    let hand_edited = "# operator edit\n[agent]\nname = \"assistant\"\n";
+    std::fs::write(&assistant_toml, hand_edited).unwrap();
+    stamp::write(tmp.path(), "deadbeef-a-new-binary").unwrap();
+    assert_eq!(
+        ensure_bundled_agents_deployed_in(tmp.path())
+            .unwrap()
+            .preserved,
+        1
+    );
+
+    let repaired = force_reprovision_bundled_agents(tmp.path()).unwrap();
+
+    assert_eq!(repaired.refreshed, 1, "{repaired:?}");
+    assert_eq!(repaired.backed_up, 1, "{repaired:?}");
+    assert_eq!(repaired.preserved, 0, "repair asks no such question");
+    assert_ne!(
+        std::fs::read_to_string(&assistant_toml).unwrap(),
+        hand_edited
+    );
+    assert_eq!(
+        stale_backup_contents(&assistant_toml),
+        vec![hand_edited.to_string()],
+        "the edit repair replaced is still recoverable"
+    );
+}
+
+/// Why: every machine already in the field has no provenance manifest, so the
+/// transitional pass is the one that matters — it is exactly the "first boot of a
+/// new binary" that clobbered configuration four times. An unvouched divergent
+/// file must be kept, and a file that already matches the template must be
+/// vouched by that pass so later template changes reach it normally.
+/// What: deploys with no manifest at all (`deploy_bundled_agents`, then deletes
+/// the manifest), diverges one file, and asserts the divergent file is kept while
+/// an untouched sibling is refreshable on the NEXT pass.
+/// Test: itself.
+#[test]
+fn a_target_with_no_manifest_keeps_its_edits_and_vouches_the_rest() {
+    let tmp = tempfile::tempdir().unwrap();
+    deploy_bundled_agents(tmp.path()).unwrap();
+    // Stand in for a machine provisioned before #3844 existed.
+    std::fs::remove_file(tmp.path().join(".bundled-provenance")).unwrap();
+
+    let assistant_toml = tmp.path().join("assistant").join("agent.toml");
+    let hand_edited = "# operator edit made before this protection shipped\n";
+    std::fs::write(&assistant_toml, hand_edited).unwrap();
+
+    let first = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    assert_eq!(
+        first.preserved, 1,
+        "the pre-existing edit is kept: {first:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&assistant_toml).unwrap(),
+        hand_edited
+    );
+
+    // A sibling nobody touched was vouched by that pass, so an older binary's
+    // copy of it is still this module's to replace afterwards.
+    let ctrl_toml = tmp.path().join("ctrl.toml");
+    let older_template = "[agent]\nname = \"ctrl\"\n";
+    std::fs::write(&ctrl_toml, older_template).unwrap();
+    record_as_deployed(tmp.path(), "ctrl.toml", older_template);
+    stamp::write(tmp.path(), "deadbeef-yet-another-binary").unwrap();
+
+    let second = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    assert_eq!(second.refreshed, 1, "{second:?}");
+    assert_eq!(second.preserved, 1, "the edit is STILL kept: {second:?}");
+    assert_ne!(std::fs::read_to_string(&ctrl_toml).unwrap(), older_template);
+    assert_eq!(
+        std::fs::read_to_string(&assistant_toml).unwrap(),
+        hand_edited
     );
 }
 
@@ -518,6 +736,9 @@ fn concurrent_ensure_calls_over_stale_target_converge_to_one_consistent_refresh(
     let assistant_toml = tmp.path().join("assistant").join("agent.toml");
     let stale_content = "[agent]\nname = \"assistant\"\nrole = \"assistant\"\n\n[tools]\nallow = [\"web_search\"]\n";
     std::fs::write(&assistant_toml, stale_content).unwrap();
+    // #3844: as in `stale_stamp_triggers_refresh` — an older binary's deploy, so
+    // the refresh this test races is one the pass is allowed to perform.
+    record_as_deployed(tmp.path(), "assistant/agent.toml", stale_content);
     stamp::write(tmp.path(), "deadbeef-not-the-real-stamp").unwrap();
 
     let dir = std::sync::Arc::new(tmp.path().to_path_buf());
@@ -817,7 +1038,12 @@ impl rust_embed::RustEmbed for StrayAssetTree {
 fn stray_files_in_the_asset_tree_are_never_deployed() {
     let tmp = tempfile::tempdir().unwrap();
     let guard = lock::acquire(tmp.path()).unwrap();
-    let report = reprovision_embedded_locked::<StrayAssetTree>(&guard, tmp.path(), false).unwrap();
+    let report = reprovision_embedded_locked::<StrayAssetTree>(
+        &guard,
+        tmp.path(),
+        RefreshPolicy::WriteMissingOnly,
+    )
+    .unwrap();
 
     assert!(
         tmp.path().join("assistant/agent.toml").is_file(),

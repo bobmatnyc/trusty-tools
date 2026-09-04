@@ -217,15 +217,30 @@ pub(super) async fn run_agents_subcommand(args: &[String]) -> Result<()> {
 /// happened is identical, so it's pulled out once rather than duplicated.
 /// What: prints a one-line summary distinguishing "nothing to do" from a
 /// written/refreshed/backed-up breakdown, prefixed with `verb` ("Deployed"
-/// or "Repaired").
+/// or "Repaired"). #3844: a leading line names any file the pass KEPT because it
+/// carries a local edit, and suppresses the "nothing to do" line — a pass that
+/// declined to apply the shipped template did not do nothing.
 /// Test: covered indirectly via `agents::bundled`'s `ReprovisionReport`
 /// tests; this is thin, side-effect-only `println!` formatting.
 fn print_reprovision_report(verb: &str, report: &agents::bundled::ReprovisionReport) {
-    if report.total_touched() == 0 {
+    // #3844: a file kept because it carries a local edit is the operator's to act
+    // on, so it is printed whether or not anything else changed.
+    if report.preserved > 0 {
         println!(
-            "Bundled agents in ~/.trusty-agents/agents/ already match the compiled template \
-             set — nothing to do."
+            "Kept {} bundled file(s) in ~/.trusty-agents/agents/ that no longer match what was \
+             last deployed there — the shipped template was NOT applied to them. Run `tagent \
+             agents repair` to overwrite them (the current content is archived as \
+             *.stale.<digest>.bak first).",
+            report.preserved
         );
+    }
+    if report.total_touched() == 0 {
+        if report.preserved == 0 {
+            println!(
+                "Bundled agents in ~/.trusty-agents/agents/ already match the compiled template \
+                 set — nothing to do."
+            );
+        }
         return;
     }
     let backup_note = if report.backed_up > 0 {

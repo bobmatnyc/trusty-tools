@@ -263,8 +263,13 @@ fn a_configured_policy_survives_differing_ambient_credentials() {
 /// operator config and applying it at LOAD is what makes this test pass, so
 /// this is the test that would fail an in-template implementation.
 /// What: deploys the bundle into a tempdir, records the policy-resolved
-/// provider for `ctrl.toml`, forces a genuine stamp-mismatch refresh (an
-/// on-disk edit plus a stale `.bundled-stamp`), and re-resolves.
+/// provider for `ctrl.toml`, edits the deployed file and forces a genuine refresh
+/// over it, and re-resolves.
+///
+/// #3844: the force path (`tagent agents repair`) is what drives the refresh
+/// here. The automatic path now KEEPS a divergent file it cannot attribute to its
+/// own prior deploy, so a hand edit plus a stale stamp no longer refreshes
+/// anything — and this test's subject is the refresh, not which pass triggers it.
 /// Test: itself.
 #[test]
 fn a_reprovision_cannot_regress_the_policy_resolved_provider() {
@@ -284,20 +289,18 @@ fn a_reprovision_cannot_regress_the_policy_resolved_provider() {
     let before = resolve();
     assert_eq!(before.1.as_deref(), Some(TEST_POLICY));
 
-    // A hand-edit plus a stale stamp is exactly the state
-    // `ensure_bundled_agents_deployed_in` refreshes from.
+    // An on-disk divergence for the refresh to act on.
     let edited = format!(
         "{}\n# local edit\n",
         std::fs::read_to_string(&deployed).expect("read deployed")
     );
     std::fs::write(&deployed, edited).expect("write the edited template");
-    std::fs::write(target.join(".bundled-stamp"), "stale-stamp").expect("write a stale stamp");
 
     let report =
-        crate::agents::bundled::ensure_bundled_agents_deployed_in(target).expect("refresh pass");
+        crate::agents::bundled::force_reprovision_bundled_agents(target).expect("refresh pass");
     assert!(
         report.refreshed >= 1,
-        "the stale stamp must have driven a real refresh: {report:?}"
+        "the force path must have driven a real refresh: {report:?}"
     );
 
     assert_eq!(
