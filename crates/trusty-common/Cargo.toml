@@ -61,7 +61,10 @@ name = "trusty-common"
 # 0.47.2 (#6316): patch — version bump only, to clear the "PR version bump vs
 # crates.io" CI gate after src/** changes landed at the same version already
 # published as 0.47.1.
-version = "0.47.2"
+# 0.47.3 (#6773): patch — additive only. `ProcessCpuSampler` gained
+# `rss_bytes`, `sys_metrics` gained `physical_footprint_bytes`, and the sampler
+# now refreshes process memory alongside CPU. No existing signature changed.
+version = "0.47.3"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
