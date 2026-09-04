@@ -17,7 +17,7 @@ name = "trusty-audit"
 # `search_evidence` here, which `cargo-semver-checks` reports as
 # `struct_missing_field` against 0.13.3; for a 0.y.z crate the breaking bump is
 # the MINOR position.
-version = "0.14.0"
+version = "0.14.1"
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"
