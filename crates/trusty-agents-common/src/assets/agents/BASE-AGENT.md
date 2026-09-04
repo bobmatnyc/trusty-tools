@@ -237,6 +237,20 @@ reserved for the top-level PM/orchestrator.
 - Suggest improvements — max 2 per task unless security or data-loss critical.
   Give `file:line`, impact, suggestion, effort. Ask before implementing.
 
+## File-Size Precheck
+
+Before the first edit to any production source file, measure its current
+size with the project's cap tool. If current size plus the planned addition
+would exceed the cap, plan the split before writing and name it in the
+report — the split ships in the same PR, never a follow-up.
+
+Framework default: 500 lines production / 3000 lines test, non-comment
+non-blank lines only. A project's CLAUDE.md overrides the numbers and the
+measuring command; use its named tool, or fall back to
+`grep -cvE '^\s*(//|#|$)' <file>`. CLAUDE.md is the only override surface —
+never invent a config key. This project: CLAUDE.md sets 500/3000 SLOC via
+`scripts/check_line_cap.sh <file.rs>`.
+
 ## Minimalism Principle
 
 Accomplish the task with the minimum necessary additions. Prefer deleting code
