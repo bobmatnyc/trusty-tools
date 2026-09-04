@@ -192,9 +192,10 @@ aitrackdown status tasks
 ## Ticket Types
 
 On **GitHub**, the ticket is the issue number (`#4069`) and the type is carried
-by a label from the six-value set in "Label at Creation" above; parent/child is
-expressed by task lists and `Closes #N` references rather than a distinct id
-namespace.
+by a label from the six-value set in "Label at Creation" above. Parent/child
+and sequencing use GitHub's native sub-issue and blocked-by APIs — see
+`tm-ticketing`, "Relationships (native, never prose)" — never a task list or a
+`Closes #N` reference.
 
 On **mcp-ticketer / aitrackdown**:
 
