@@ -81,3 +81,6 @@
 {"session_id":"tm-trusty-tools-02-0-at5288-20260902","event":"pause","snapshot":"tm-trusty-tools-02-0-at5288-20260902/session-20260902-210316.md","timestamp":"2026-09-02T21:03:16.995522+00:00"}
 {"session_id":"tm-trusty-tools-02-0-at5288-20260902","event":"pause","snapshot":"tm-trusty-tools-02-0-at5288-20260902/session-20260903-022128.md","timestamp":"2026-09-03T02:21:28.822853+00:00"}
 {"session_id":"tm-trusty-tools-02-0-at5288-20260902","event":"pause","snapshot":"tm-trusty-tools-02-0-at5288-20260902/session-20260903-075149.md","timestamp":"2026-09-03T07:51:49.975689+00:00"}
+{"session_id":"tm-trusty-tools-02","event":"pause","snapshot":"tm-trusty-tools-02/session-20260904-010646.md","timestamp":"2026-09-04T01:06:46.645155+00:00"}
+{"session_id":"tm-dogfood","event":"pause","snapshot":"tm-dogfood/session-20260904-014836.md","timestamp":"2026-09-04T01:48:36.322682+00:00"}
+{"session_id":"tm-dogfood-0-at7067","event":"pause","snapshot":"tm-dogfood-0-at7067/session-20260904-113943.md","timestamp":"2026-09-04T11:39:43.428679+00:00"}
