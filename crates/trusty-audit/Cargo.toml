@@ -10,7 +10,14 @@ name = "trusty-audit"
 # the cut ships as 0.13.1 with that fragment folded in. This bump also carries
 # the `[tools]` pin refresh in templates/engagement.template.toml onto the
 # versions this cut publishes. No public API change.
-version = "0.13.3"
+# 0.13.3 -> 0.14.0 (milestone 71, #6783): MINOR. 0.13.3 is already on crates.io,
+# and this PR is the first of the milestone to change `src/**`, so it carries the
+# bump for the set. MINOR rather than PATCH because the siblings landing under
+# the same version add public fields — `index_report::IndexEntry` alone gains
+# `search_evidence` here, which `cargo-semver-checks` reports as
+# `struct_missing_field` against 0.13.3; for a 0.y.z crate the breaking bump is
+# the MINOR position.
+version = "0.14.0"
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"

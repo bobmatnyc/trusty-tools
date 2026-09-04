@@ -210,6 +210,15 @@ pub struct IndexEntry {
     pub carried_over: bool,
     /// Wall clock around this unit, or `None` when this run did not measure it.
     pub duration: Option<Duration>,
+    /// Whether the search-derived evidence tier survived for this unit (#6783).
+    ///
+    /// `false` means trusty-search never indexed this repository, so its
+    /// findings, complexity distribution and health factors are unassessed and
+    /// no trusty-analyze pass ran for it. Each producer reads it off that unit's
+    /// gaps with [`crate::grounding::search_tier_degraded`], which is the same
+    /// line the report itself leads with — one fact with one source, rather than
+    /// a flag that can disagree with the prose beside it.
+    pub search_evidence: bool,
 }
 
 /// Everything the index states, before it is rendered against a directory.
@@ -345,12 +354,33 @@ fn summary(report: &IndexReport, out: &mut String) {
         "- Produced by: trusty-audit {}\n",
         env!("CARGO_PKG_VERSION")
     ));
+    // #6783: a repository with no search index still produces a report, so the
+    // count above says nothing about whether that report was assessed. When any
+    // unit lost the tier the coverage line is qualified rather than left to read
+    // as complete, and the next line names the number.
+    let unassessed = report.entries.iter().filter(|e| !e.search_evidence).count();
+    let coverage = if unassessed == 0 {
+        String::new()
+    } else {
+        " — not fully assessed, see the next line".to_owned()
+    };
     out.push_str(&format!(
-        "- Reports: {} of {} {}\n",
+        "- Reports: {} of {} {}{}\n",
         produced,
         report.entries.len(),
-        unit
+        unit,
+        coverage
     ));
+    if unassessed > 0 {
+        out.push_str(&format!(
+            "- Search evidence: {} of {} {} audited WITHOUT search evidence — trusty-search never \
+             indexed them, so their findings, complexity distribution and health factors are not \
+             assessed and no trusty-analyze pass ran for them. Each report states its own reason.\n",
+            unassessed,
+            report.entries.len(),
+            unit
+        ));
+    }
     match report.total {
         Some(total) => out.push_str(&format!("- Total wall clock: {}\n\n", human(total))),
         None => out.push_str("- Total wall clock: not recorded\n\n"),
@@ -749,6 +779,9 @@ pub fn write_sweep(
             },
             carried_over: run.resumed,
             duration: run.duration_ms.map(Duration::from_millis),
+            // #6783: read off the gaps this repository actually stated, which a
+            // resumed entry carries forward with the rest of its record.
+            search_evidence: !crate::grounding::search_tier_degraded(&run.gaps),
         })
         .collect();
     let index = IndexReport {
@@ -810,6 +843,9 @@ pub fn write_render(
             },
             carried_over: false,
             duration: rendered.duration_ms.map(Duration::from_millis),
+            // #6783: a re-render indexes any checkout present on this machine,
+            // so it loses the tier the same way a sweep does and says so here.
+            search_evidence: !crate::grounding::search_tier_degraded(&rendered.gaps),
         })
         .collect();
     let index = IndexReport {
@@ -841,6 +877,7 @@ mod index_tests {
             failure: None,
             carried_over: false,
             duration: Some(Duration::from_millis(1_500)),
+            search_evidence: true,
         }
     }
 
@@ -884,6 +921,53 @@ mod index_tests {
             text.contains("[00-acme-api/00-acme-api.md](00-acme-api/00-acme-api.md)"),
             "the one report must be linked relatively: {text}"
         );
+    }
+
+    /// #6783: a repository whose search index never registered still produces a
+    /// report, so the coverage line said "59 of 59" over 59 hollow reports. When
+    /// any unit lost the tier the line is qualified and the count is named.
+    #[test]
+    fn a_run_that_lost_the_search_tier_qualifies_its_coverage_line() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("out");
+        let one = dir.join("00-acme-api");
+        let two = dir.join("01-acme-web");
+        std::fs::create_dir_all(&one).expect("mkdir");
+        std::fs::create_dir_all(&two).expect("mkdir");
+
+        let mut degraded = entry("acme/api", one);
+        degraded.search_evidence = false;
+        let text = render(
+            &report(Producer::Sweep, vec![degraded, entry("acme/web", two)]),
+            &dir,
+        );
+
+        assert!(
+            text.contains("Reports: 2 of 2 repositories — not fully assessed"),
+            "the coverage line must not read as complete: {text}"
+        );
+        assert!(
+            text.contains("Search evidence: 1 of 2 repositories audited WITHOUT search evidence"),
+            "{text}"
+        );
+    }
+
+    /// The other side of it: a run that kept the tier says nothing extra, so the
+    /// qualifier stays a signal rather than boilerplate.
+    #[test]
+    fn a_run_that_kept_the_search_tier_says_nothing_about_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("out");
+        let unit = dir.join("00-acme-api");
+        std::fs::create_dir_all(&unit).expect("mkdir");
+
+        let text = render(
+            &report(Producer::Sweep, vec![entry("acme/api", unit)]),
+            &dir,
+        );
+
+        assert!(text.contains("- Reports: 1 of 1 repository\n"), "{text}");
+        assert!(!text.contains("WITHOUT search evidence"), "{text}");
     }
 
     /// Why: #6135, owner ruling 2026-08-21 — "The report should include which

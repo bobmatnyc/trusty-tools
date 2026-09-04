@@ -59,6 +59,7 @@ use crate::tools::RequiredTool;
 use crate::workdir::WorkDir;
 
 pub mod churn;
+pub mod conflict;
 pub mod cve;
 pub mod daemons;
 pub mod ecosystem;
@@ -75,6 +76,31 @@ pub mod topology;
 
 #[cfg(test)]
 mod grounding_tests;
+
+/// The phrase every search-index degradation leads with (#6783).
+///
+/// Why: until #6783 each arm that lost the index wrote its own sentence, and the
+/// only reader who could tell that a report had no search evidence was one who
+/// read all four sentences and knew what they had in common. A run's index
+/// counts these, `trusty-review`'s gap section leads with them, and both need
+/// ONE phrase to key on rather than four to keep in step.
+/// What: the literal every arm below interpolates, and the substring
+/// [`search_tier_degraded`] matches. It is a report-facing string and a
+/// cross-module contract at once, so it is spelled here once.
+/// Test: `grounding_tests::every_search_tier_gap_leads_with_the_headline`.
+pub const SEARCH_TIER_HEADLINE: &str = "evidence tier degraded: search index unavailable";
+
+/// True when these gaps say this unit was audited without search evidence.
+///
+/// Why: the analyze pass reads the same index, so a repository that lost the
+/// index lost its findings, its complexity distribution and its health factors
+/// together — one fact, not four. `crate::index_report` counts units by this
+/// predicate so the run's completion line cannot read as unqualified coverage.
+/// Test: `grounding_tests::every_search_tier_gap_leads_with_the_headline`.
+#[must_use]
+pub fn search_tier_degraded(gaps: &[String]) -> bool {
+    gaps.iter().any(|gap| gap.contains(SEARCH_TIER_HEADLINE))
+}
 
 /// The two daemons this module drives: where they are, and what starts them.
 ///
@@ -235,10 +261,12 @@ pub async fn ground(
 
     let Some(index_id) = index::index_id_for(checkout) else {
         return churn_only(
-            format!(
-                "{display}: {} has no final path component, so no trusty-search index id could be \
-                 derived — the report's code-analysis sections are not assessed for it",
-                checkout.display()
+            search_tier_gap(
+                display,
+                &format!(
+                    "{} has no final path component, so no trusty-search index id could be derived",
+                    checkout.display()
+                ),
             ),
             None,
             churn_files,
@@ -248,24 +276,22 @@ pub async fn ground(
 
     if let Err(cause) = daemons::ensure_search(tools).await {
         return churn_only(
-            format!(
-                "{display}: {cause} — the report's findings, complexity distribution and health \
-                 factors are not assessed for it, and its investigation pass ranks files by path \
-                 name alone"
-            ),
+            search_tier_gap(display, &cause),
             None,
             churn_files,
             churn_gaps,
         );
     }
 
-    if let Err(cause) = index::ensure_indexed(&tools.search, checkout, &index_id) {
+    // #6783: a `409` here is a stale registration from an earlier run, not a
+    // reason to give up the whole evidence tier — the collision is cleared and
+    // the create retried before anything is reported.
+    if let Err(cause) =
+        index::ensure_indexed_resolved(&tools.search, &tools.search_socket, checkout, &index_id)
+            .await
+    {
         return churn_only(
-            format!(
-                "{display}: {cause} — the report's findings, complexity distribution and health \
-                 factors are not assessed for it, and its investigation pass ranks files by path \
-                 name alone"
-            ),
+            search_tier_gap(display, &cause),
             Some(index_id),
             churn_files,
             churn_gaps,
@@ -277,11 +303,7 @@ pub async fn ground(
     // index, so a wrong root poisons the evidence AND the measurements.
     if let Err(cause) = index::root_matches(&tools.search_socket, &index_id, checkout).await {
         return churn_only(
-            format!(
-                "{display}: complexity data unavailable: index root mismatch — {cause}. Its \
-                 evidence discovery and complexity hotspots are not assessed, and its \
-                 investigation pass ranks files by path name alone"
-            ),
+            search_tier_gap(display, &format!("index root mismatch — {cause}")),
             Some(index_id),
             churn_files,
             churn_gaps,
@@ -338,6 +360,25 @@ pub async fn ground(
         gaps,
         churn: churn_files,
     }
+}
+
+/// The one line every arm that lost the search index reports (#6783).
+///
+/// Why: four arms of [`ground`] end with the same consequence — no index means
+/// no per-dimension evidence, and the trusty-analyze pass reads that same index,
+/// so its findings, complexity distribution and health factors go with it. A run
+/// that stated the consequence four ways let the 2026-09 client sweep hollow out
+/// 59 reports without any one line, or any count, saying the tier was gone.
+/// What: `<display>: <SEARCH_TIER_HEADLINE> (<cause>) — <what the report loses>`,
+/// always one line. [`search_tier_degraded`] matches it and
+/// `crate::index_report` counts it.
+/// Test: `grounding_tests::every_search_tier_gap_leads_with_the_headline`.
+fn search_tier_gap(display: &str, cause: &str) -> String {
+    format!(
+        "{display}: {SEARCH_TIER_HEADLINE} ({cause}) — the report's findings, complexity \
+         distribution and health factors are not assessed for it, no trusty-analyze pass ran for \
+         it, and its investigation pass ranks files by path name alone"
+    )
 }
 
 /// A grounding carrying nothing but the churn leg's output and one other gap.
