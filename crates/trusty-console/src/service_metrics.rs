@@ -6,9 +6,12 @@
 //! this module.
 //!
 //! Why one sampler for both figures (#6773): the owner's ruling puts a CPU graph
-//! and a memory graph side by side in every row. Both are read off ONE `sysinfo`
-//! refresh per tick, so the pair always shows the same second — a second sampler
-//! or a second timer is the one way side-by-side graphs can lie.
+//! and a memory graph side by side in every row. Both are read on ONE tick, from
+//! one `ProcessCpuSampler`, so the pair always shows the same second — a
+//! second sampler or a second timer is the one way side-by-side graphs can lie.
+//! (Within that tick the two are separate reads, and on macOS the memory one is
+//! a live syscall rather than the CPU refresh's snapshot; see
+//! `ProcessCpuSampler::rss_bytes`. Microseconds apart, at 1 s resolution.)
 //!
 //! Why pid discovery is a separate step from sampling: a pid costs I/O to find
 //! (a lock file to read, a socket to dial) and a reading costs a syscall on
@@ -217,9 +220,12 @@ impl ServiceMetricsSampler {
     /// its daemon stopped would leave the graph frozen at its last value rather
     /// than showing the gap.
     /// What: refreshes every tracked pid in ONE `sysinfo` call — the tracked
-    /// pids only, never the process table — then reads BOTH figures per service
-    /// off that one refresh (#6773), so the CPU graph and the memory graph in a
-    /// row always show the same second. A service whose pid vanished has already
+    /// pids only, never the process table — then reads both figures per service
+    /// against that refresh (#6773), so the CPU graph and the memory graph in a
+    /// row always show the same second. The two are separate reads: on macOS the
+    /// memory one is a live `proc_pid_rusage` syscall rather than the refresh's
+    /// snapshot ([`ProcessCpuSampler::rss_bytes`]), so the pair is microseconds
+    /// apart within a 1 s tick. A service whose pid vanished has already
     /// been dropped by the refresh, so it reads `None` and its entry is
     /// forgotten here, which lets
     /// [`ServiceMetricsSampler::pending_lookups`] rediscover it after a restart.
@@ -234,8 +240,8 @@ impl ServiceMetricsSampler {
 
         let mut samples = Vec::with_capacity(services.len());
         for service in services {
-            // #6773: one lookup, both figures — a second read path could hand
-            // the two graphs different seconds.
+            // #6773: one pid lookup and one tick feed both figures — a second
+            // sampler could hand the two graphs different seconds.
             let (cpu_pct, rss_bytes) = match self.pids.get(&service.id) {
                 Some(pid) => (self.cpu.cpu_pct(*pid), self.cpu.rss_bytes(*pid)),
                 None => (None, None),

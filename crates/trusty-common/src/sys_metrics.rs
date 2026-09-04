@@ -251,10 +251,12 @@ impl Default for SysMetrics {
 /// [`ProcessCpuSampler::refresh`] updates ONLY those pids —
 /// `ProcessesToUpdate::Some`, never `All`, so the cost is proportional to what
 /// is tracked and not to how many processes the machine is running.
-/// [`ProcessCpuSampler::cpu_pct`] and [`ProcessCpuSampler::rss_bytes`] read the
-/// last refresh's figures, and answer `None` for a pid that is not tracked or
-/// whose process is gone. `None` means "no measurement", never "measured zero" —
-/// a caller must not render it as 0.
+/// [`ProcessCpuSampler::cpu_pct`] and [`ProcessCpuSampler::rss_bytes`] both
+/// answer `None` for a pid that is not tracked or whose process is gone —
+/// `None` means "no measurement", never "measured zero", so a caller must not
+/// render it as 0. `cpu_pct` reads the refresh snapshot; on macOS `rss_bytes`
+/// reads a live `proc_pid_rusage` syscall instead, for the reason its own doc
+/// gives.
 ///
 /// CPU% follows `sysinfo`'s convention: `100.0` is one fully-saturated core, so
 /// a process spread over four cores can report above 100.
@@ -386,8 +388,8 @@ impl ProcessCpuSampler {
         self.sys.process(pid).map(sysinfo::Process::cpu_usage)
     }
 
-    /// The resident memory recorded for `pid` by the last
-    /// [`ProcessCpuSampler::refresh`], in bytes (#6773).
+    /// The resident memory of `pid` in bytes, for a pid the last
+    /// [`ProcessCpuSampler::refresh`] still resolves (#6773).
     ///
     /// Why bytes rather than megabytes: the caller graphs this at 1 s cadence,
     /// and rounding to whole megabytes turns a small daemon's curve into a
@@ -395,13 +397,24 @@ impl ProcessCpuSampler {
     /// [`ProcessCpuSampler::cpu_pct`]: an untracked pid, an exited process and
     /// a permission denial are all "no measurement", and a service using zero
     /// bytes does not exist.
-    /// What: reads the cached process entry — never refreshes. On macOS the
-    /// figure is the physical footprint (the counter `vmmap` and the kernel's
-    /// Jetsam logic use), falling back to `sysinfo`'s resident size if the
-    /// `libproc` call fails; elsewhere it is `sysinfo`'s reading, which on Linux
-    /// is `/proc/<pid>/status`'s `VmRSS`. This mirrors
-    /// [`SysMetrics::sample`], so a service's self-reported `rss_mb` and this
-    /// figure cannot describe memory two different ways.
+    ///
+    /// What: the tracked set and the last refresh decide WHETHER there is a
+    /// measurement — an untracked pid, or one the refresh dropped, returns
+    /// `None` and no further call is made. The VALUE is read per platform, and
+    /// on macOS it does NOT come from that refresh: each call issues a fresh
+    /// `proc_pid_rusage` syscall for the physical footprint (the counter
+    /// `vmmap` and the kernel's Jetsam logic use), falling back to the
+    /// refresh's `sysinfo` resident size only when that syscall fails. Off
+    /// macOS the value IS the refresh snapshot's `sysinfo` reading, which on
+    /// Linux is `/proc/<pid>/status`'s `VmRSS`. Matching [`SysMetrics::sample`]
+    /// is deliberate: a daemon's self-reported `rss_mb` and this figure must
+    /// not describe memory two different ways.
+    ///
+    /// What that costs a caller reading both figures: at the back-to-back call
+    /// site in trusty-console's `service_metrics::ServiceMetricsSampler::sample`
+    /// the macOS CPU and memory numbers are two reads microseconds apart, not
+    /// one instant. Both land inside the same 1 s tick, which is the resolution
+    /// the graphs draw.
     /// Test: `process_cpu_sampler_measures_memory_of_a_tracked_child`,
     /// `process_cpu_sampler_reports_none_for_a_vanished_pid`.
     #[must_use]
