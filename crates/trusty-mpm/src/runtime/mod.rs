@@ -29,6 +29,10 @@ mod tcode;
 pub(crate) mod test_helpers;
 
 pub(crate) use claude_code::session_id_exists;
+// #6777: the ONE project-dir encoder. Re-exported so nothing outside
+// `claude_code` re-derives Claude Code's `[^A-Za-z0-9]` → `-` fold by hand.
+#[cfg(test)]
+pub(crate) use claude_code::encode_project_dir;
 // #4467: re-exported so the `transcript_saving` doctor check can read the scrub
 // set out of the REAL managed-spawn env prefix rather than restating the marker
 // constant — a check that compared the constant against itself could not fail.

@@ -1334,6 +1334,52 @@ fn spawn_resume_with_id_uses_resume_flag() {
 
 #[serial_test::serial]
 #[test]
+fn spawn_resume_uses_resume_flag_for_a_worktree_cwd() {
+    // Why (#6777): the closure condition for this fix, end to end. Every
+    // tm-provisioned workspace sits under `.worktrees/`, and the sibling
+    // `spawn_resume_with_id_uses_resume_flag` uses a DOTLESS `/tmp`, so it
+    // stayed green while every real managed relaunch dropped `--resume` and
+    // started a fresh conversation. The transcript is seeded under the
+    // hand-typed directory name Claude Code really creates for this cwd —
+    // the pre-fix encoder looked under `-tmp-tm6777-proj-.worktrees-w1` and
+    // found nothing.
+    let _home = HomeGuard::set();
+    if ClaudeCodeAdapter::resolve_claude().is_none() {
+        return;
+    };
+    let cwd = Path::new("/tmp/tm6777-proj/.worktrees/w1");
+    let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir()
+        .expect("config dir resolves under redirected HOME");
+    let project_dir = config_dir
+        .join("projects")
+        .join("-tmp-tm6777-proj--worktrees-w1");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::write(project_dir.join("worktree-session-id.jsonl"), "{}").unwrap();
+
+    let fake = FakeTmux::new();
+    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    adapter
+        .spawn_resume(
+            "tmpm-test",
+            None,
+            cwd,
+            "task",
+            Some("worktree-session-id"),
+            TEST_SESSION_ID,
+            &[],
+        )
+        .expect("spawn_resume");
+    let sends = fake.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    assert!(
+        sends[0].1.contains("--resume worktree-session-id"),
+        "a cwd under .worktrees/ must still reach --resume: {}",
+        sends[0].1
+    );
+}
+
+#[serial_test::serial]
+#[test]
 fn spawn_resume_sends_prompt_file_when_binary_available() {
     // #2230: spawn_resume must inject --append-system-prompt-file just
     // like spawn() does — before this fix, every resume path (including
@@ -1624,20 +1670,18 @@ fn encode_project_dir_folds_dot_in_worktrees_path() {
     // directory is `…--worktrees-<id>`, so `session_id_exists` answered false
     // for every managed session and `--resume` was never passed (#6765).
     //
-    // Both literals below are transcribed from the LIVE store at
-    // ~/.trusty-tools/trusty-mpm/claude-config/projects/, where 25 directories
-    // matched `--worktrees` and 0 matched `-.worktrees`.
+    // Both expected names below are transcribed from a LIVE probe: `claude`
+    // was launched in each of these two directories against a throwaway
+    // CLAUDE_CONFIG_DIR, and these are the project directories it created.
     assert_eq!(
-        encode_project_dir(Path::new(
-            "/Users/masa/trusty-mpm-projects/bobmatnyc/xflux/.worktrees/tm-xflux-01"
-        )),
-        "-Users-masa-trusty-mpm-projects-bobmatnyc-xflux--worktrees-tm-xflux-01"
+        encode_project_dir(Path::new("/private/tmp/tm6777/proj/.worktrees/tm-proj-01")),
+        "-private-tmp-tm6777-proj--worktrees-tm-proj-01"
     );
     assert_eq!(
         encode_project_dir(Path::new(
-            "/Users/masa/Projects/claude-mpm/.claude/worktrees/agent-a0cdd0670f2217acb"
+            "/private/tmp/tm6777/tool/.claude/worktrees/agent-0123456789abcdef0"
         )),
-        "-Users-masa-Projects-claude-mpm--claude-worktrees-agent-a0cdd0670f2217acb"
+        "-private-tmp-tm6777-tool--claude-worktrees-agent-0123456789abcdef0"
     );
 }
 
@@ -1695,14 +1739,12 @@ fn encode_project_dir_truncates_and_hashes_a_long_path() {
     // reachable. Both the cwd and the expected name below are transcribed from
     // a live probe run against a throwaway CLAUDE_CONFIG_DIR — the encoder is
     // never called to build the expectation.
-    let cwd = "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools/\
-b78af0a6-4985-419f-b85c-2ef5a67239f6/scratchpad/enc/seg00/seg01/seg02/seg03/seg04/seg05/seg06/\
-seg07/seg08/seg09/seg10/seg11/seg12/seg13/seg14/seg15/seg16/seg17/seg18/seg19/seg20/seg21/seg22/\
-seg23/seg24/seg25/seg26/seg27/seg28/seg29/seg30/seg31/seg32/seg33/seg34/seg35/seg36/seg37/seg38/\
-seg39";
-    let expected = "-private-tmp-claude-502--Users-masa-trusty-mpm-projects-bobmatnyc-trusty-\
-tools-b78af0a6-4985-419f-b85c-2ef5a67239f6-scratchpad-enc-seg00-seg01-seg02-seg03-seg04-seg05-\
-seg06-seg07-seg08-seg09-seg10-seg-3dhgpp";
+    let cwd = "/private/tmp/tm6777/deep/seg00/seg01/seg02/seg03/seg04/seg05/seg06/seg07/seg08/\
+seg09/seg10/seg11/seg12/seg13/seg14/seg15/seg16/seg17/seg18/seg19/seg20/seg21/seg22/seg23/seg24/\
+seg25/seg26/seg27/seg28/seg29/seg30/seg31/seg32/seg33/seg34/seg35/seg36/seg37/seg38/seg39";
+    let expected = "-private-tmp-tm6777-deep-seg00-seg01-seg02-seg03-seg04-seg05-seg06-seg07-\
+seg08-seg09-seg10-seg11-seg12-seg13-seg14-seg15-seg16-seg17-seg18-seg19-seg20-seg21-seg22-seg23-\
+seg24-seg25-seg26-seg27-seg28-s-fy7046";
     let encoded = encode_project_dir(Path::new(cwd));
     assert_eq!(
         encoded, expected,

@@ -544,9 +544,14 @@ const MAX_PROJECT_KEY_LEN: usize = 200;
 /// `encode_project_dir_folds_every_non_alphanumeric`,
 /// `encode_project_dir_folds_astral_char_to_two_dashes`,
 /// `encode_project_dir_truncates_and_hashes_a_long_path`,
-/// `session_id_exists_finds_hardcoded_dir_name_for_dotted_cwd` (non-circular
-/// regression guards against encoding-scheme drift).
-fn encode_project_dir(cwd: &Path) -> String {
+/// `session_id_exists_finds_hardcoded_dir_name_for_dotted_cwd`,
+/// `spawn_resume_uses_resume_flag_for_a_worktree_cwd` (non-circular regression
+/// guards against encoding-scheme drift).
+///
+/// `pub(crate)` (#6777): the daemon's `SessionStart` correlation tests seed
+/// transcripts under this same directory name, and a second hand-rolled fold
+/// there would drift — it did, and it silently omitted the truncation branch.
+pub(crate) fn encode_project_dir(cwd: &Path) -> String {
     let path = cwd.to_string_lossy();
     let mut key = String::with_capacity(path.len());
     for c in path.chars() {
