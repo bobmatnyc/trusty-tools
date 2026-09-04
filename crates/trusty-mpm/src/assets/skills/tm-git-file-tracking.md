@@ -49,11 +49,9 @@ ONLY NOW: mark the todo complete
 ## Commit Message Format
 
 Follow this repo's conventional-commit style (see the root `CLAUDE.md` git
-workflow section). Every trusty-mpm commit and PR body **ends with the
-trusty-mpm attribution footer** (a Framework-Guaranteed Convention in the
-instruction package) — this overrides any
-harness default (do **not** emit `🤖 Generated with Claude Code` or a
-`Co-Authored-By: Claude …` trailer). A typical agent-tracked commit:
+workflow section). The commit and PR footer comes from the `attribution` key tm
+writes into the provisioned Claude Code settings; never restate it in prose. A
+typical agent-tracked commit:
 
 ```
 feat(trusty-mpm): add skill-source doctor probe (A2)
@@ -61,8 +59,6 @@ feat(trusty-mpm): add skill-source doctor probe (A2)
 - Adds check_skill_source() mirroring the check_agents pattern
 - Warns via tracing::warn! on missing/empty skill source
 - Part of the /tm- skills portfolio epic
-
-🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools
 ```
 
 ## Before Ending Any Session
@@ -91,9 +87,7 @@ git status
 #   modified:   src/<module>/<file-b>
 
 git add src/<module>/<file-a> src/<module>/<file-b>
-git commit -m "fix(<scope>): warn instead of silent no-op on empty input
-
-🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools"
+git commit -m "fix(<scope>): warn instead of silent no-op on empty input"
 
 git status   # clean
 ```
