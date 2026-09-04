@@ -70,35 +70,19 @@ fn session_id_export_prefix(session_id: &str) -> String {
     )
 }
 
-/// The one-line hint printed to the pane AFTER `claude` exits (#2023 component D).
-///
-/// Why: component A leaves the pane alive as a bare shell when the runtime
-/// exits, and component C lets a bare `tm` run from inside that pane relaunch
-/// the same session in place — but neither is discoverable unless the pane
-/// itself says so. Backticks are used around the literal command name; they
-/// have no special meaning inside the single-quoted `echo` argument this is
-/// embedded in (see [`on_exit_hint_suffix`]), so no escaping is needed.
-/// What: a short, single-line, non-panicking string.
-/// Test: `spawn_command_prints_relaunch_hint_after_claude_exits`,
-/// `resume_command_prints_relaunch_hint_after_claude_exits`.
-const RELAUNCH_HINT: &str = "tm: run `tm` to relaunch this session";
+// #6766: the on-exit report used to be an unconditional `; echo '<hint>'`, so
+// a `claude` that refused the launch and quit printed the same "run `tm` to
+// relaunch" line as a session the operator worked in and exited. The hint, the
+// two failure lines, and the status/elapsed branch that chooses between them
+// now live in `claude_code_exit_hint` — a sibling submodule for the same reason
+// `claude_code_gh_env` is one (this file carries a frozen SLOC budget, #2398).
+use claude_code_exit_hint::{exit_dispatch_suffix, launch_clock_prefix};
 
-/// Build the `; echo '<hint>'` suffix appended AFTER every managed
-/// launch/resume command (#2023 component D).
-///
-/// Why: `;` sequences the `echo` to run only once the preceding `claude`
-/// invocation exits (successfully or not) and control returns to the pane's
-/// shell — exactly the moment component A leaves the pane idle at, and
-/// exactly what the in-place relaunch (component C) needs advertised.
-/// What: `; echo '<RELAUNCH_HINT>'`, single-quoted via [`shell_single_quote`]
-/// for the same reason [`env_bin_prefix`] quotes `CLAUDE_CONFIG_DIR` — a
-/// literal constant with no shell metacharacters, but quoting defensively
-/// costs nothing and matches this file's established convention.
-/// Test: `spawn_command_prints_relaunch_hint_after_claude_exits`,
-/// `resume_command_prints_relaunch_hint_after_claude_exits`.
-fn on_exit_hint_suffix() -> String {
-    format!("; echo {}", shell_single_quote(RELAUNCH_HINT))
-}
+/// Status-branched on-exit reporting for the pane (#6766) — see its module doc
+/// for why the refusal is detected by elapsed time rather than by matching
+/// Claude Code's own wording.
+#[path = "claude_code_exit_hint.rs"]
+mod claude_code_exit_hint;
 
 /// Wrap a managed launch/resume command so it is rooted at `cwd` regardless
 /// of the tmux pane shell's actual starting directory (#2250).
@@ -298,10 +282,11 @@ fn prompt_file_flag(prompt_file: Option<&Path>) -> String {
 /// same mechanism the CLI `tm launch` / client `/connect` paths already use —
 /// so this, previously the one driver missing it, can no longer silently spawn
 /// vanilla Claude Code.
-/// What: [`session_id_export_prefix`] followed by [`env_bin_prefix`], the
-/// optional [`prompt_file_flag`], the two shared flag constants, followed by
-/// [`on_exit_hint_suffix`] (#2023 component D — `; echo '<hint>'`, which only
-/// runs once `claude` exits and control returns to the pane); piped to
+/// What: [`launch_clock_prefix`] (#6766) and [`session_id_export_prefix`]
+/// followed by [`env_bin_prefix`], the optional [`prompt_file_flag`], the two
+/// shared flag constants, followed by [`exit_dispatch_suffix`] (#2023 component
+/// D, status-branched by #6766 — it runs once `claude` exits and control
+/// returns to the pane, and reports WHICH way it exited); piped to
 /// `tmux send-keys … Enter`. `claude_bin` is the resolved binary — an absolute
 /// path under launchd so the pane (which inherits the daemon's minimal `PATH`)
 /// does not need `claude` on its own `PATH` (#1298). `session_id` is the
@@ -315,7 +300,7 @@ fn prompt_file_flag(prompt_file: Option<&Path>) -> String {
 /// `spawn_command_uses_resolved_binary`,
 /// `spawn_command_sets_claude_config_dir`,
 /// `spawn_command_exports_managed_session_id`,
-/// `spawn_command_prints_relaunch_hint_after_claude_exits`,
+/// `spawn_command_dispatches_on_the_claude_exit_status`,
 /// `spawn_command_with_prompt_file_contains_flag`,
 /// `spawn_command_without_prompt_file_omits_flag`,
 /// `spawn_command_prefixes_cd_to_workdir`,
@@ -334,8 +319,13 @@ fn spawn_command(
     mcp_env: &[(String, String)],
 ) -> String {
     let body = format!(
-        "{}{}{}{} {} {}{}",
+        "{}{}{}{}{} {} {}{}",
         session_id_export_prefix(session_id),
+        // #6766: stamp the launch second here, between the two prefixes whose
+        // positions are already pinned — the `export` stays the group's first
+        // statement (#2023 B), and the gh-env source-and-delete stays
+        // immediately before `env` (#3025).
+        launch_clock_prefix(),
         claude_code_gh_env::gh_env_source_prefix(gh_env_file),
         env_bin_prefix(claude_bin, config_dir, oauth_token, mcp_env),
         prompt_file_flag(prompt_file),
@@ -343,7 +333,7 @@ fn spawn_command(
         // `CLAUDE_CONFIG_DIR/agents` (the bundled roster) lives.
         crate::core::model_inject::setting_sources_flag(config_dir),
         crate::core::model_inject::PERMISSION_MODE_FLAG,
-        on_exit_hint_suffix(),
+        exit_dispatch_suffix(),
     );
     cd_and_group(cwd, &body)
 }
@@ -457,9 +447,10 @@ fn build_prompt_file(project_dir: &Path, session_id: Option<&str>) -> Option<std
 /// What: `Some(id)` → `--resume <id>`; `None` → plain spawn (no resume flag), so
 /// the session starts a fresh conversation. Both share the same env prefix
 /// (scrub + `CLAUDE_CONFIG_DIR`) and isolation flags as [`spawn_command`], and
-/// both get [`on_exit_hint_suffix`] appended (#2023 component D) so the pane
-/// always prints the relaunch hint once
-/// `claude` exits, whichever branch fired. `prompt_file` (#2230) carries the
+/// both get [`launch_clock_prefix`] prepended and [`exit_dispatch_suffix`]
+/// appended (#2023 component D, status-branched by #6766) so the pane reports
+/// how `claude` exited — the relaunch hint for a session that ran, a named
+/// failure for a launch that was refused — whichever branch fired. `prompt_file` (#2230) carries the
 /// PM system prompt via `--append-system-prompt-file` the same way
 /// [`spawn_command`] does, so resumed/guided-resume/crash-recovery sessions
 /// get the identical carrier a fresh spawn gets instead of falling back to a
@@ -469,7 +460,7 @@ fn build_prompt_file(project_dir: &Path, session_id: Option<&str>) -> Option<std
 /// `resume_command_without_id_no_prior_conv_uses_plain_spawn`,
 /// `resume_command_sets_claude_config_dir`,
 /// `resume_command_exports_managed_session_id`,
-/// `resume_command_prints_relaunch_hint_after_claude_exits`,
+/// `resume_command_dispatches_on_the_claude_exit_status`,
 /// `resume_command_with_prompt_file_contains_flag`,
 /// `resume_command_prefixes_cd_to_workdir`,
 /// `resume_command_sets_oauth_token_when_available`,
@@ -499,8 +490,11 @@ fn resume_command(
     mcp_env: &[(String, String)],
 ) -> String {
     let base = format!(
-        "{}{}{}{} {} {}",
+        "{}{}{}{}{} {} {}",
         session_id_export_prefix(session_id),
+        // #6766: same launch stamp, same position as `spawn_command` — the
+        // resume path is the one the refused relaunch was observed on.
+        launch_clock_prefix(),
         claude_code_gh_env::gh_env_source_prefix(gh_env_file),
         env_bin_prefix(claude_bin, config_dir, oauth_token, mcp_env),
         prompt_file_flag(prompt_file),
@@ -514,7 +508,7 @@ fn resume_command(
         // managed store this process did not choose. No usable id → start fresh.
         None => base,
     };
-    let body = format!("{cmd}{}", on_exit_hint_suffix());
+    let body = format!("{cmd}{}", exit_dispatch_suffix());
     cd_and_group(cwd, &body)
 }
 
