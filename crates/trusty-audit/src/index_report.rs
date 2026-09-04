@@ -268,7 +268,7 @@ pub struct IndexReport {
     /// sweep always passes `Some`, and an EMPTY roll-up there is what renders
     /// the "not run (opt-in)" line — the state that used to be indistinguishable
     /// from a run that scanned and matched nothing.
-    pub osv: Option<crate::grounding::osv::Rollup>,
+    pub osv: Option<crate::grounding::osv_rollup::Rollup>,
 }
 
 /// The current local time with its UTC offset, e.g. `2026-08-19 22:40:11 -04:00`.
@@ -374,7 +374,9 @@ pub fn render(report: &IndexReport, dir: &Path) -> String {
     reports(report, dir, &mut out);
     // #6780: before the contents table, because it is a finding about the run
     // rather than a description of the directory.
-    out.push_str(&crate::grounding::osv::index_section(report.osv.as_ref()));
+    out.push_str(&crate::grounding::osv_rollup::index_section(
+        report.osv.as_ref(),
+    ));
     contents(report.producer, &mut out);
     out
 }
@@ -867,7 +869,7 @@ pub fn write_sweep(
         // #6780: read back from the `osv.json` each repository's leg wrote, so
         // the roll-up states what is on disk rather than what this process
         // believes it did. An empty one renders the "not run (opt-in)" line.
-        osv: Some(crate::grounding::osv::rollup(
+        osv: Some(crate::grounding::osv_rollup::rollup(
             &report
                 .repos
                 .iter()

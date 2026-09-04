@@ -203,7 +203,7 @@ pub(super) fn render_index(
         // #6780: read back from the same `osv.json` files this package is about
         // to carry, so the index a recipient opens states the run's OSV result
         // rather than sending them into the per-repository files to add it up.
-        osv: Some(crate::grounding::osv::rollup(
+        osv: Some(crate::grounding::osv_rollup::rollup(
             &report
                 .repos
                 .iter()

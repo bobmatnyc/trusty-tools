@@ -73,6 +73,7 @@ pub mod license;
 // `osv_query` decides how the asking happens (cache, batching, retry, offline).
 pub mod osv;
 pub mod osv_query;
+pub mod osv_rollup;
 pub mod priority;
 pub mod quality;
 pub mod search_rpc;

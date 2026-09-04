@@ -16,6 +16,8 @@
 
 use super::*;
 use crate::grounding::osv_query::{self, Settings};
+use crate::grounding::osv_rollup::{INDEX_HEADING, Rollup, TopItem, index_section, rollup};
+use std::path::PathBuf;
 use std::time::Duration;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
