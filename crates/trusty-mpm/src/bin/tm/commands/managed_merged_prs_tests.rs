@@ -225,7 +225,7 @@ async fn merged_pr_request_outlives_the_default_client_timeout() {
         .expect("build a short-bounded test client");
 
     let (url, server) = slow_prune_server(SERVER_DELAY).await;
-    let overridden = session_prune_worktrees(&client, &url, true, false, true).await;
+    let overridden = session_prune_worktrees(&client, &url, true, false, true, None).await;
     server.await.expect("server task must not panic");
     assert!(
         overridden.is_ok(),
@@ -235,7 +235,7 @@ async fn merged_pr_request_outlives_the_default_client_timeout() {
 
     // CONTROL: without the opt-in the client default still bounds the call.
     let (url, server) = slow_prune_server(SERVER_DELAY).await;
-    let plain = session_prune_worktrees(&client, &url, true, false, false).await;
+    let plain = session_prune_worktrees(&client, &url, true, false, false, None).await;
     server.await.expect("server task must not panic");
     assert!(
         plain.is_err(),
@@ -284,6 +284,101 @@ async fn slow_prune_server(delay: std::time::Duration) -> (String, tokio::task::
         let _ = sock.write_all(head.as_bytes()).await;
         let _ = sock.write_all(body).await;
         let _ = sock.flush().await;
+    });
+    (url, handle)
+}
+
+/// #6806: the caller names itself, so the daemon's liveness gate can tell the
+/// caller's own claim from another session's.
+///
+/// Why a wire test rather than a unit one: the id lands in a JSON body and
+/// dropping it is silent — the daemon defaults it to absent and blocks every one
+/// of the caller's own worktrees, which is the shipped defect this fixes.
+/// What: a one-shot server captures the POST body and hands it back; the
+/// assertion is on the parsed `invoking_session`. The CONTROL run passes `None`
+/// and asserts the field is `null`, so the test cannot pass merely because any
+/// value at all is serialised.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn prune_worktrees_sends_the_invoking_session() {
+    const ID: &str = "6f1c2a5e-0000-4000-8000-000000006806";
+
+    let client = reqwest::Client::new();
+    let (url, server) = capturing_prune_server().await;
+    let sent =
+        session_prune_worktrees(&client, &url, true, false, false, Some(ID.to_string())).await;
+    let body = server.await.expect("server task must not panic");
+    assert!(sent.is_ok(), "{sent:?}");
+    assert_eq!(
+        body.get("invoking_session").and_then(|v| v.as_str()),
+        Some(ID),
+        "the caller must name itself: {body}"
+    );
+
+    // CONTROL: outside a managed session the field is present and null, never a
+    // borrowed id — an id the caller does not hold would discount a stranger's
+    // claim.
+    let (url, server) = capturing_prune_server().await;
+    let sent = session_prune_worktrees(&client, &url, true, false, false, None).await;
+    let body = server.await.expect("server task must not panic");
+    assert!(sent.is_ok(), "{sent:?}");
+    assert!(
+        body.get("invoking_session")
+            .is_some_and(serde_json::Value::is_null),
+        "outside a managed session the caller names none: {body}"
+    );
+}
+
+/// A one-shot HTTP server that answers a prune-worktrees POST and returns the
+/// request body it received (#6806).
+///
+/// Reads the headers, then exactly `Content-Length` bytes of body, so the
+/// captured JSON is complete rather than whatever happened to arrive first.
+async fn capturing_prune_server() -> (String, tokio::task::JoinHandle<serde_json::Value>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind capturing prune server");
+    let url = format!("http://{}", listener.local_addr().expect("local_addr"));
+    let handle = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.expect("accept one connection");
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 1024];
+        let head_end = loop {
+            match seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                Some(i) => break i + 4,
+                None => match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => panic!("connection closed before the request headers ended"),
+                    Ok(n) => seen.extend_from_slice(&buf[..n]),
+                },
+            }
+        };
+        let head = String::from_utf8_lossy(&seen[..head_end]).to_lowercase();
+        let len: usize = head
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .and_then(|v| v.trim().parse().ok())
+            .expect("the POST must carry a Content-Length");
+        while seen.len() < head_end + len {
+            match sock.read(&mut buf).await {
+                Ok(0) | Err(_) => panic!("connection closed mid-body"),
+                Ok(n) => seen.extend_from_slice(&buf[..n]),
+            }
+        }
+        let body: serde_json::Value =
+            serde_json::from_slice(&seen[head_end..head_end + len]).expect("the body is JSON");
+
+        let reply = br#"{"dry_run":true,"paths":[],"skipped_dirty":[],"merged_prs":null}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n",
+            reply.len()
+        );
+        let _ = sock.write_all(resp.as_bytes()).await;
+        let _ = sock.write_all(reply).await;
+        let _ = sock.flush().await;
+        body
     });
     (url, handle)
 }
