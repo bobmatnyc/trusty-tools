@@ -11503,6 +11503,7 @@ dependencies = [
  "trusty-installer",
  "trusty-progress",
  "walkdir",
+ "wiremock",
  "zip 2.4.2",
 ]
 

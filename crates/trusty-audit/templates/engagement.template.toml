@@ -83,6 +83,37 @@ code_only = true
 # investigate_max_bytes = 2457600
 
 # ---------------------------------------------------------------------------
+# Optional collectors
+# ---------------------------------------------------------------------------
+
+# Collectors that are OFF unless this table turns them on (#6780). Every key
+# defaults to false, so leaving this table out runs exactly what the client ran
+# before it existed.
+#
+# `osv` asks OSV.dev whether any of the dependencies the report already
+# inventories has a published advisory. It is the one collector that tells a
+# third party your dependency NAMES and versions — no source, no paths — which
+# is why it is a decision rather than a default. It writes `osv.json` into each
+# repository's directory, adds a "Known vulnerabilities (OSV)" section to a
+# re-rendered report, and summarises the run in `index.md`.
+#
+# [collectors]
+# osv = true
+
+# How that lookup runs, once it is on. Every key is optional.
+#
+# [osv]
+# # Answer from the local cache only and open no socket — the air-gapped mode.
+# # `TRUSTY_AUDIT_OSV_OFFLINE=1` in the environment forces this on as well, for
+# # a machine whose config was written somewhere with a network.
+# offline = true
+# # How long a cached answer is trusted. Default 168 (one week).
+# cache_ttl_hours = 168
+# # Wall clock ONE repository may spend on OSV before the rest of its packages
+# # are recorded as unqueried. Default 120.
+# time_cap_secs = 120
+
+# ---------------------------------------------------------------------------
 # Repositories and boards this engagement audits
 # ---------------------------------------------------------------------------
 

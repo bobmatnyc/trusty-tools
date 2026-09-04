@@ -288,6 +288,17 @@ declares it. `trusty-review` stops reading at whichever of the two binds first,
 so raising files alone used to read fewer files than it asked for and say
 nothing about it.
 
+**The OSV lookup (#6780), which is opt-in.** Set `osv = true` under
+`[collectors]` in `engagement.toml` and the client asks OSV.dev whether any
+dependency in the inventory the report already measures has a published
+advisory. It writes `osv.json` into each repository's directory, adds a "Known
+vulnerabilities (OSV)" section to a re-rendered report, and summarises the run
+in `index.md`. It is off by default because it is the one leg that tells a third
+party your dependency names and versions. `[osv] offline = true` (or
+`TRUSTY_AUDIT_OSV_OFFLINE` in the environment) answers from the cache under
+`state/osv-cache/` alone and opens no socket, which is what an air-gapped run
+uses; each miss is then a named gap rather than a silent absence.
+
 Every leg of that is fail-open: a daemon that will not start, a checkout
 `trusty-search` refuses, an index that matches no evidence, an index with
 nothing complex in it. None of them fails the repository, and none of them is

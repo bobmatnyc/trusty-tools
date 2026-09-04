@@ -200,6 +200,16 @@ pub(super) fn render_index(
                 run.output.join(crate::manifest::AuditManifest::FILE_NAME),
             )
         })),
+        // #6780: read back from the same `osv.json` files this package is about
+        // to carry, so the index a recipient opens states the run's OSV result
+        // rather than sending them into the per-repository files to add it up.
+        osv: Some(crate::grounding::osv::rollup(
+            &report
+                .repos
+                .iter()
+                .map(|run| run.output.clone())
+                .collect::<Vec<_>>(),
+        )),
     };
     (
         crate::index_report::render(&index, Path::new(REPORTS_PREFIX)),

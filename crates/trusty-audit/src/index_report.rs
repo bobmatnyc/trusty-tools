@@ -260,6 +260,15 @@ pub struct IndexReport {
     /// What: empty — which renders no table and an empty block — for a producer
     /// that read no manifests, or a run whose repositories declared nothing.
     pub debt: crate::debt_rollup::DebtRollup,
+    /// What the OSV lookup found across this run's repositories (#6780).
+    ///
+    /// `None` is "this producer knows nothing about the leg", not "the leg did
+    /// not run": a re-render and the return package have no scan data to read
+    /// and must not claim either way, so the section is omitted for them. The
+    /// sweep always passes `Some`, and an EMPTY roll-up there is what renders
+    /// the "not run (opt-in)" line — the state that used to be indistinguishable
+    /// from a run that scanned and matched nothing.
+    pub osv: Option<crate::grounding::osv::Rollup>,
 }
 
 /// The current local time with its UTC offset, e.g. `2026-08-19 22:40:11 -04:00`.
@@ -363,6 +372,9 @@ pub fn render(report: &IndexReport, dir: &Path) -> String {
     inference(report, &mut out);
     timings(report, &mut out);
     reports(report, dir, &mut out);
+    // #6780: before the contents table, because it is a finding about the run
+    // rather than a description of the directory.
+    out.push_str(&crate::grounding::osv::index_section(report.osv.as_ref()));
     contents(report.producer, &mut out);
     out
 }
@@ -852,6 +864,16 @@ pub fn write_sweep(
         entries,
         total: Some(total),
         debt,
+        // #6780: read back from the `osv.json` each repository's leg wrote, so
+        // the roll-up states what is on disk rather than what this process
+        // believes it did. An empty one renders the "not run (opt-in)" line.
+        osv: Some(crate::grounding::osv::rollup(
+            &report
+                .repos
+                .iter()
+                .map(|run| run.output.clone())
+                .collect::<Vec<_>>(),
+        )),
     };
     write(&index, &work.path(crate::workdir::Area::Output))
 }
@@ -929,6 +951,9 @@ pub fn write_render(
         entries,
         total: Some(total),
         debt,
+        // #6780: a re-render runs no collector, so it has nothing to say about
+        // the OSV leg and says nothing rather than claiming it did not run.
+        osv: None,
     };
     write(&index, out_dir)
 }
@@ -1001,6 +1026,7 @@ mod index_tests {
             // #6781: no findings, so the fixture's index renders no debt table
             // and every earlier assertion over it still reads the same page.
             debt: crate::debt_rollup::DebtRollup::default(),
+            osv: None,
         }
     }
 

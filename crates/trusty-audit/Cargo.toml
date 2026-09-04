@@ -148,6 +148,12 @@ walkdir = { workspace = true }
 tempfile = { workspace = true }
 
 [dev-dependencies]
+# #6780: the OSV lookup's cache, retry and offline arms are all assertions about
+# what did or did not reach the network, so the tests drive a local mock server
+# and never api.osv.dev. `wiremock` is the workspace's answer for a hermetic
+# reqwest test (trusty-common, tga and four other crates reach for it), so this
+# is the shared choice rather than a hand-rolled `TcpListener`.
+wiremock = { workspace = true }
 # #5824: `tests/cli_end_to_end.rs` opens the return package the chain wrote and
 # reads its generated members, because what the recipient receives is the zip
 # rather than the console output that produced it. Already a dependency above,
