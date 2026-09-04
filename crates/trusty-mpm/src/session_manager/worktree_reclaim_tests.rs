@@ -88,7 +88,7 @@ fn claim(live: bool) -> ClaimState {
     if live {
         ClaimState::Foreign {
             session: "tm-other-01".to_string(),
-            caller: Some("tm-apex-03".to_string()),
+            caller: Some("tm-client-03".to_string()),
         }
     } else {
         ClaimState::Unclaimed
@@ -198,7 +198,10 @@ fn classify_names_the_foreign_session_that_blocked_a_candidate() {
         reason.contains("tm-other-01"),
         "names the claimant: {reason}"
     );
-    assert!(reason.contains("tm-apex-03"), "names the caller: {reason}");
+    assert!(
+        reason.contains("tm-client-03"),
+        "names the caller: {reason}"
+    );
     assert!(
         reason.contains("not the calling session"),
         "says the claim is not the caller's: {reason}"
@@ -215,7 +218,7 @@ fn classify_allows_a_worktree_claimed_only_by_the_calling_session() {
         &wt(),
         Admission::Admitted,
         &ClaimState::CallerNested {
-            session: "tm-apex-03".to_string(),
+            session: "tm-client-03".to_string(),
         },
         &merged(42),
         &clean,
@@ -236,7 +239,7 @@ fn classify_blocks_the_callers_own_workspace() {
         &wt(),
         Admission::Admitted,
         &ClaimState::CallerWorkspace {
-            session: "tm-apex-03".to_string(),
+            session: "tm-client-03".to_string(),
         },
         &merged(42),
         &clean,

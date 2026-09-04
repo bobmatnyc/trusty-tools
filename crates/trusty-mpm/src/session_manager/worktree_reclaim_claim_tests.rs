@@ -63,18 +63,18 @@ fn claim_state_matches_exact_ancestor_and_descendant_paths() {
 #[test]
 fn claims_from_the_caller_alone_do_not_block() {
     let (_tmp, root) = tree();
-    let workspace = root.join("apex");
+    let workspace = root.join("client");
     let worktree = workspace.join(".worktrees").join("rb-1");
     std::fs::create_dir_all(&worktree).expect("mkdir");
 
     let claims = LiveClaims {
-        claims: vec![WorkspaceClaim::new("tm-apex-03", &workspace)],
-        caller: Some("tm-apex-03".to_string()),
+        claims: vec![WorkspaceClaim::new("tm-client-03", &workspace)],
+        caller: Some("tm-client-03".to_string()),
     };
     assert_eq!(
         claims.claim_state(&worktree),
         ClaimState::CallerNested {
-            session: "tm-apex-03".to_string()
+            session: "tm-client-03".to_string()
         }
     );
     assert!(
@@ -88,18 +88,18 @@ fn claims_from_the_caller_alone_do_not_block() {
 #[test]
 fn a_caller_may_not_reclaim_its_own_workspace() {
     let (_tmp, root) = tree();
-    let workspace = root.join("apex");
+    let workspace = root.join("client");
     std::fs::create_dir_all(&workspace).expect("mkdir");
 
     let claims = LiveClaims {
-        claims: vec![WorkspaceClaim::new("tm-apex-03", &workspace)],
-        caller: Some("tm-apex-03".to_string()),
+        claims: vec![WorkspaceClaim::new("tm-client-03", &workspace)],
+        caller: Some("tm-client-03".to_string()),
     };
     let reason = claims
         .claim_state(&workspace)
         .refusal(false)
         .expect("a caller's own workspace must still refuse");
-    assert!(reason.contains("tm-apex-03"), "{reason}");
+    assert!(reason.contains("tm-client-03"), "{reason}");
     assert!(reason.contains("IS the caller"), "{reason}");
 
     // Same refusal when the candidate CONTAINS the caller's workspace.
@@ -114,12 +114,12 @@ fn a_caller_may_not_reclaim_its_own_workspace() {
 #[test]
 fn a_foreign_sessions_claim_still_blocks() {
     let (_tmp, root) = tree();
-    let worktree = root.join("apex").join(".worktrees").join("rb-1");
+    let worktree = root.join("client").join(".worktrees").join("rb-1");
     std::fs::create_dir_all(&worktree).expect("mkdir");
 
     let claims = LiveClaims {
-        claims: vec![WorkspaceClaim::new("tm-other-01", root.join("apex"))],
-        caller: Some("tm-apex-03".to_string()),
+        claims: vec![WorkspaceClaim::new("tm-other-01", root.join("client"))],
+        caller: Some("tm-client-03".to_string()),
     };
     assert!(
         claims.claim_state(&worktree).refusal(false).is_some(),
@@ -136,7 +136,7 @@ fn a_foreign_refusal_names_the_claimant_and_denies_it_is_the_caller() {
 
     let claims = LiveClaims {
         claims: vec![WorkspaceClaim::new("tm-other-01", &worktree)],
-        caller: Some("tm-apex-03".to_string()),
+        caller: Some("tm-client-03".to_string()),
     };
     let reason = claims
         .claim_state(&worktree)
@@ -146,7 +146,10 @@ fn a_foreign_refusal_names_the_claimant_and_denies_it_is_the_caller() {
         reason.contains("tm-other-01"),
         "names the claimant: {reason}"
     );
-    assert!(reason.contains("tm-apex-03"), "names the caller: {reason}");
+    assert!(
+        reason.contains("tm-client-03"),
+        "names the caller: {reason}"
+    );
     assert!(
         reason.contains("not the calling session"),
         "says it is not the caller: {reason}"
@@ -175,13 +178,13 @@ fn a_foreign_refusal_says_when_the_caller_named_no_session() {
 #[test]
 fn a_foreign_claim_outranks_the_callers_own() {
     let (_tmp, root) = tree();
-    let workspace = root.join("apex");
+    let workspace = root.join("client");
     let worktree = workspace.join(".worktrees").join("rb-1");
     std::fs::create_dir_all(&worktree).expect("mkdir");
 
     for order in [0usize, 1] {
         let mut claims = vec![
-            WorkspaceClaim::new("tm-apex-03", &workspace),
+            WorkspaceClaim::new("tm-client-03", &workspace),
             WorkspaceClaim::new("tm-other-01", &worktree),
         ];
         if order == 1 {
@@ -189,7 +192,7 @@ fn a_foreign_claim_outranks_the_callers_own() {
         }
         let live = LiveClaims {
             claims,
-            caller: Some("tm-apex-03".to_string()),
+            caller: Some("tm-client-03".to_string()),
         };
         let state = live.claim_state(&worktree);
         assert!(
