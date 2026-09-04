@@ -573,10 +573,10 @@ pub mod host_metrics;
 /// off a fixed constant regardless of the host. The common-entry rule gives that
 /// capability exactly one implementation.
 /// What: gated behind the `machine-tier` feature, which pulls in no new
-/// dependencies. Exposes [`machine_tier::detect_total_ram_mb`] (cgroup-clamped
-/// on Linux), [`machine_tier::MemoryTier`] with its 16/32/64 GB bands and the
+/// dependencies. Exposes `machine_tier::detect_total_ram_mb` (cgroup-clamped
+/// on Linux), `machine_tier::MemoryTier` with its 16/32/64 GB bands and the
 /// sub-16 GB `Degraded` posture, the four proportional formulas, and
-/// [`machine_tier::MachineBudget`] which ties them together. Distinct from the
+/// `machine_tier::MachineBudget` which ties them together. Distinct from the
 /// `host_metrics` module, which samples LIVE pressure through `sysinfo` and
 /// applies no cgroup clamp.
 /// Test: `cargo test -p trusty-common --features machine-tier --no-fail-fast`.

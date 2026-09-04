@@ -27,7 +27,7 @@ pub struct MemoryPolicy {
     pub tier: MemoryTier,
     pub memory_limit_mb: usize,
     /// Separate soft cap applied *only* while the indexing pipeline is running
-    /// (see [`compute_index_memory_limit_mb`] and `core::memguard`).
+    /// (see `trusty_common::machine_tier::compute_index_memory_limit_mb` and `core::memguard`).
     /// Always at least as large as `memory_limit_mb`. Lets the reindex
     /// orchestrator absorb CoreML unified-memory spikes without OOM-aborting
     /// under the global daemon ceiling.

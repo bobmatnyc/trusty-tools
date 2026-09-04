@@ -9,15 +9,15 @@
 //! regardless of the host, so the two daemons could not agree on the machine
 //! they shared. A second copy of these formulas is a defect — see CLAUDE.md,
 //! "Common entry point, clean domain demarcation".
-//! What: [`detect_total_ram_mb`] (the cgroup-aware RAM read), [`MemoryTier`]
-//! (the 16/32/64 GB bands plus the new sub-16 GB [`MemoryTier::Degraded`]
-//! posture), the four proportional formulas, and [`MachineBudget`] which ties
+//! What: `detect_total_ram_mb` (the cgroup-aware RAM read), `MemoryTier`
+//! (the 16/32/64 GB bands plus the new sub-16 GB `MemoryTier::Degraded`
+//! posture), the four proportional formulas, and `MachineBudget` which ties
 //! them together. Every number is moved verbatim from `trusty-search`, so a
 //! 16/32/64/128 GB host resolves exactly as it did before; the only behaviour
 //! change is that below 16 GB now names a tier instead of aborting startup.
 //! What this module is NOT: per-daemon tunables. Chunk caps, embedding caches,
 //! palace caps, and their env-var overrides stay in the daemon that owns them —
-//! `trusty-search`'s `MemoryPolicy` layers on top of [`MachineBudget`].
+//! `trusty-search`'s `MemoryPolicy` layers on top of `MachineBudget`.
 //! Nor is it live telemetry: `host_metrics` samples current CPU/memory
 //! pressure through `sysinfo` and applies no cgroup clamp, which is a different
 //! question from the one-shot startup budget answered here.
