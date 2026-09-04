@@ -1237,3 +1237,27 @@ async fn session_manager_refuses_tmux_on_a_scratch_framework_root() {
         "a scratch framework root must leave tmux unobservable, got {live:?}"
     );
 }
+
+/// `caller = None` is the fail-closed value: a HEAD-write query that names no
+/// session of its own hears about every record, exactly as it did before #6797
+/// gave the question a caller. Pinned so a future caller that cannot identify
+/// itself degrades toward the deny rather than toward the allow.
+#[test]
+fn head_write_without_a_caller_excludes_nothing() {
+    let (state, _dir) = hermetic_state();
+    let session = crate::core::session::SessionId(uuid::Uuid::new_v4());
+    let cwd = std::path::PathBuf::from("/repo/main");
+    state.upsert_delegation(unisolated_running_delegation(session, &cwd));
+
+    assert_eq!(
+        state.live_shared_tree_writers_excluding(&cwd, None, None),
+        vec!["rust-engineer".to_string()],
+        "an unidentified caller must still be told about the writer"
+    );
+    assert!(
+        state
+            .live_shared_tree_writers_excluding(&cwd, None, Some(session))
+            .is_empty(),
+        "and naming that session must exclude its own record"
+    );
+}

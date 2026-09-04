@@ -156,7 +156,15 @@ pub enum SharedTreeQuestion {
     /// "Is anyone writing here right now?" — a commit, a merge, or a rebase
     /// about to move a shared HEAD. Answered with the records still positively
     /// live, so a record #6556 reconciled stops blocking.
-    HeadWrite,
+    ///
+    /// `caller` is the session asking, and its own delegations are excluded from
+    /// the answer (#6797). The identity travels WITH this variant rather than
+    /// beside it because [`Self::Dispatch`] must never use it: whether a tree is
+    /// safe for a new AGENT to enter cannot vary with who is asking, while
+    /// whether a HEAD move would surprise another workstream turns entirely on
+    /// that. `None` is the fail-closed value — a caller that named no session is
+    /// told about every record, exactly as before this field existed.
+    HeadWrite { caller: Option<SessionId> },
 }
 
 /// Does a record staled by AGENT TYPE still occupy the tree it was dispatched
@@ -768,7 +776,41 @@ impl DaemonState {
         cwd: &std::path::Path,
         exclude_tool_use_id: Option<&str>,
     ) -> Vec<String> {
-        self.shared_tree_agents(cwd, exclude_tool_use_id, false)
+        self.shared_tree_agents(cwd, exclude_tool_use_id, false, None)
+    }
+
+    /// [`Self::live_shared_tree_writers`], minus the asking session's own
+    /// delegations (#6797).
+    ///
+    /// Why: the cross-session widening ADR-0048 decision 10 chose was about
+    /// ANOTHER session — "moving it changes the branch another session's
+    /// uncommitted work is sitting on". Reading it as "every session including
+    /// the caller's" made a session's own subagent a foreign live writer, and the
+    /// ADR-0049 documents-only commit it was dispatched to make was refused,
+    /// naming an agent of the very session that was committing. Observed
+    /// 2026-09-04: three records in one main checkout, all owned by the calling
+    /// session, blocking its own docs commits for the six hours of
+    /// [`RUNNING_STALE_AFTER_SECS`].
+    ///
+    /// What the exclusion does NOT weaken: the admission answer. Whether two
+    /// unisolated file-mutating agents may share a main checkout is decided by
+    /// [`Self::shared_tree_occupants`] through
+    /// [`SharedTreeQuestion::Dispatch`], which never sees `caller` and is
+    /// unchanged — ADR-0048 decision 3's grant and #4480's claim keep that pair
+    /// out of the checkout before a commit is ever reached. Any OTHER session's
+    /// record still blocks, unconditionally and with no liveness guess of its own.
+    /// What: the [`Self::live_shared_tree_writers`] filter plus
+    /// `d.session != caller`. `caller = None` excludes nothing.
+    /// Test: `head_write_excludes_the_calling_sessions_own_delegation`,
+    /// `head_write_still_reports_another_sessions_delegation`,
+    /// `head_write_without_a_caller_excludes_nothing`.
+    pub fn live_shared_tree_writers_excluding(
+        &self,
+        cwd: &std::path::Path,
+        exclude_tool_use_id: Option<&str>,
+        caller: Option<SessionId>,
+    ) -> Vec<String> {
+        self.shared_tree_agents(cwd, exclude_tool_use_id, false, caller)
     }
 
     /// Agents whose work would COLLIDE with a new file-mutating dispatch into
@@ -795,21 +837,26 @@ impl DaemonState {
         cwd: &std::path::Path,
         exclude_tool_use_id: Option<&str>,
     ) -> Vec<String> {
-        self.shared_tree_agents(cwd, exclude_tool_use_id, true)
+        // #6797: never caller-scoped. Whether a tree is safe for a new agent to
+        // enter cannot vary with who is asking — see
+        // `live_shared_tree_writers_excluding`.
+        self.shared_tree_agents(cwd, exclude_tool_use_id, true, None)
     }
 
-    /// The one filter both shared-tree queries run, differing only in whether a
-    /// type-reconciled record counts (#6556 critic round).
+    /// The one filter every shared-tree query runs (#6556 critic round, #6797).
     ///
     /// Why: two copies of this predicate would drift, and a drift here is a
     /// guard that admits a writer or denies ordinary work. `include_reconciled`
-    /// is the single axis on which the two callers disagree.
-    /// Test: as the two public wrappers.
+    /// and `exclude_session` are the two axes the callers disagree on: only a
+    /// dispatch counts a reconciled record, and only a HEAD write is scoped to
+    /// exclude its own session (#6797).
+    /// Test: as the three public wrappers.
     fn shared_tree_agents(
         &self,
         cwd: &std::path::Path,
         exclude_tool_use_id: Option<&str>,
         include_reconciled: bool,
+        exclude_session: Option<SessionId>,
     ) -> Vec<String> {
         let now = chrono::Utc::now();
         self.delegations
@@ -820,6 +867,9 @@ impl DaemonState {
                     d.status.is_live() || (include_reconciled && type_reconciled_occupant(d, now));
                 counts
                     && d.cwd.as_deref() == Some(cwd)
+                    // #6797: the asking session's own agents are its own
+                    // workstream, not a foreign writer a HEAD move would surprise.
+                    && exclude_session != Some(d.session)
                     && !(exclude_tool_use_id.is_some()
                         && d.tool_use_id.as_deref() == exclude_tool_use_id)
                     // #6556: the agent reported a tree of its own AND is still
@@ -911,10 +961,13 @@ impl DaemonState {
         }
         // #6556: only a dispatch hears the occupants. A commit hears the live
         // writers, or the reconciliation that unblocks it would be undone here.
+        // #6797: and it hears them minus its OWN session's — see
+        // `live_shared_tree_writers_excluding`. The claim above is untouched by
+        // that scoping: it is decided from `occupants`, which never sees a caller.
         let names = match question {
             SharedTreeQuestion::Dispatch => occupants,
-            SharedTreeQuestion::HeadWrite => {
-                self.live_shared_tree_writers(cwd, exclude_tool_use_id)
+            SharedTreeQuestion::HeadWrite { caller } => {
+                self.live_shared_tree_writers_excluding(cwd, exclude_tool_use_id, caller)
             }
         };
         (names, claimed)

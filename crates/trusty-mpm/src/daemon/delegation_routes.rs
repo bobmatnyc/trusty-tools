@@ -304,10 +304,17 @@ pub fn shared_tree_dispatch_op(
     // reconciled, or the commit they exist to unblock stays denied. The tool
     // name is the discriminator, not `eligible`: an isolated or read-only
     // dispatch is still a dispatch.
+    // #6797: a HEAD write carries the asking session, so its own agents are not
+    // reported to it as foreign live writers. The id is the path's, which this
+    // route already parsed and which `tm hook --pm-guard` fills from the
+    // payload's `session_id` — the same id space a delegation's `session` field
+    // holds, so the comparison is exact rather than heuristic.
     let question = if is_dispatch {
         SharedTreeQuestion::Dispatch
     } else {
-        SharedTreeQuestion::HeadWrite
+        SharedTreeQuestion::HeadWrite {
+            caller: Some(session),
+        }
     };
 
     let (names, claimed) =

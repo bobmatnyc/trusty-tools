@@ -174,12 +174,18 @@ async fn the_commit_query_and_the_dispatch_query_disagree_on_one_record() {
 /// The control: with no type reconciliation in play the two questions agree, so
 /// the split cannot be hiding a live writer from the commit guard. A genuinely
 /// `Running` record denies both.
+///
+/// #6797: the writer is another SESSION's. It used to be inserted under the
+/// asking session, which the commit query could not tell from a foreign writer;
+/// now it can, and this test is about the foreign one — the caller's own record
+/// is covered by `head_write_excludes_the_calling_sessions_own_delegation` and
+/// `a_dispatch_still_sees_the_callers_own_occupant`.
 #[tokio::test]
 async fn a_live_writer_is_reported_to_both_questions() {
     let (state, _dir, session) = hermetic();
     insert(
         &state,
-        session,
+        SessionId(uuid::Uuid::new_v4()),
         "rust-engineer",
         "/repo",
         None,
@@ -739,10 +745,14 @@ async fn shared_tree_dispatch_route_answers_a_bash_query_without_claiming() {
     // It must ANSWER: a `git merge` beside a live writer is the deny this exists
     // for. And it must claim NOTHING: a pull is not a dispatch, and a claim it
     // took would occupy a directory no `SubagentStop` will ever release.
+    //
+    // #6797: the writer is another SESSION's, which is what "a live writer" meant
+    // here all along — a HEAD write no longer hears its own session's agents.
     let (state, _dir, session) = hermetic();
+    let stranger = SessionId(uuid::Uuid::new_v4());
     insert(
         &state,
-        session,
+        stranger,
         "rust-engineer",
         "/repo",
         None,
@@ -761,10 +771,14 @@ async fn shared_tree_dispatch_route_answers_a_bash_query_without_claiming() {
     assert_eq!(body.total, 1, "the live writer must be reported");
     assert_eq!(body.agents[0].agent, "rust-engineer");
     assert!(!body.claimed, "a Bash query must never claim the tree");
+    assert!(
+        state.delegations_for(session).is_empty(),
+        "a Bash query must add no record for the session that asked"
+    );
     assert_eq!(
-        state.delegations_for(session).len(),
+        state.delegations_for(stranger).len(),
         1,
-        "no record may be added by a Bash query"
+        "and must leave the writer's own record exactly as it found it"
     );
 }
 
@@ -900,4 +914,127 @@ async fn shared_tree_dispatch_route_claim_is_idempotent_on_redelivery() {
         assert_eq!(body.total, 0, "a redelivery must stay admitted");
     }
     assert_eq!(state.delegations_for(session).len(), 1);
+}
+
+// ── #6797: a session's own subagent is not a foreign live writer ────────────
+
+/// The reported incident. A session dispatches an agent into its main checkout,
+/// the agent's record stays `Running` because no `SubagentStop` closed it, and
+/// the session's next ADR-0049 documents-only commit is refused — naming an agent
+/// of the very session that is committing.
+///
+/// Live reproduction 2026-09-04 against the running daemon: the commit query for
+/// `/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools` answered
+/// `{"agents":[{"agent":"qa","count":2},{"agent":"rust-engineer","count":1}]}`,
+/// and every one of those records carried the CALLING session's id.
+#[tokio::test]
+async fn head_write_excludes_the_calling_sessions_own_delegation() {
+    let (state, _dir, session) = hermetic();
+    insert(
+        &state,
+        session,
+        "rust-engineer",
+        "/repo",
+        None,
+        Some("toolu_own"),
+        DelegationStatus::Running,
+    );
+
+    let commit = call(&state, session, commit_query("/repo")).await;
+    assert!(
+        commit.agents.is_empty(),
+        "a session's own agent must not be reported to it as a foreign live writer: {:?}",
+        commit.agents
+    );
+    assert_eq!(commit.total, 0);
+    assert!(!commit.claimed, "a Bash query never claims the tree");
+}
+
+/// The fail-closed half, and the reason the exclusion is scoped to the caller
+/// rather than applied to every record. ADR-0048 decision 10's hazard is ANOTHER
+/// session's uncommitted work, so another session's record must still deny.
+#[tokio::test]
+async fn head_write_still_reports_another_sessions_delegation() {
+    let (state, _dir, caller) = hermetic();
+    let stranger = SessionId(uuid::Uuid::new_v4());
+    insert(
+        &state,
+        stranger,
+        "rust-engineer",
+        "/repo",
+        None,
+        Some("toolu_other"),
+        DelegationStatus::Running,
+    );
+
+    let commit = call(&state, caller, commit_query("/repo")).await;
+    assert_eq!(
+        commit.agents.len(),
+        1,
+        "another session's live writer must still deny: {:?}",
+        commit.agents
+    );
+    assert_eq!(commit.agents[0].agent, "rust-engineer");
+    assert_eq!(commit.total, 1);
+}
+
+/// The exclusion must not weaken the ADMISSION answer. Whether two unisolated
+/// file-mutating agents may share one main checkout cannot vary with who is
+/// asking, so the dispatch query still sees the caller's own occupant and denies
+/// the second dispatch — ADR-0048 decision 3 and #4480 unchanged.
+#[tokio::test]
+async fn a_dispatch_still_sees_the_callers_own_occupant() {
+    let (state, _dir, session) = hermetic();
+    insert(
+        &state,
+        session,
+        "rust-engineer",
+        "/repo",
+        None,
+        Some("toolu_own"),
+        DelegationStatus::Running,
+    );
+
+    let disp = call(
+        &state,
+        session,
+        dispatch("/repo", "qa", None, Some("toolu_second")),
+    )
+    .await;
+    assert_eq!(
+        disp.total, 1,
+        "a second unisolated writer must still be denied by the caller's own occupant: {:?}",
+        disp.agents
+    );
+    assert!(
+        !disp.claimed,
+        "and the tree must not be claimed for a dispatch that is denied"
+    );
+}
+
+/// A commit and a dispatch from the same session, over the same record, must
+/// disagree — which is the whole reason the caller identity rides on
+/// `SharedTreeQuestion::HeadWrite` rather than sitting beside the question.
+#[tokio::test]
+async fn the_two_questions_disagree_about_the_callers_own_record() {
+    let (state, _dir, session) = hermetic();
+    insert(
+        &state,
+        session,
+        "rust-engineer",
+        "/repo",
+        None,
+        Some("toolu_own"),
+        DelegationStatus::Running,
+    );
+
+    let commit = call(&state, session, commit_query("/repo")).await;
+    let disp = call(
+        &state,
+        session,
+        dispatch("/repo", "qa", None, Some("toolu_second")),
+    )
+    .await;
+    assert_eq!(commit.total, 0, "the commit hears nothing of its own agent");
+    assert_eq!(disp.total, 1, "the dispatch still hears the occupant");
 }
