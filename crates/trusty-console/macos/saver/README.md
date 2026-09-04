@@ -15,7 +15,9 @@ or runs on Linux, and no CI job covers it (see "Not covered" below).
 |---|---|
 | `TrustyConsoleSaver.swift` | The `ScreenSaverView` subclass. The whole implementation. |
 | `Info.plist` | Bundle plist template. `__CONSOLE_VERSION__` is replaced at build time. |
+| `Resources/ConsolePreview.png` | Static render of the dashboard's services frame — the gallery tile and the offline fallback (#6839). Generated, committed, copied into `Contents/Resources/` at build time. |
 | `LoadHarness.swift` | Bundle-load smoke test — resolves the principal class and asserts the page loads. |
+| `PaintHarness.swift` | Paint regression harness — reads the rendered bitmap in the offline, slow-daemon and preview states (#6838). |
 
 The bundle is assembled by `scripts/build-console-saver.sh` and copied into place
 by `scripts/install-console-saver.sh`, both at the repo root.
@@ -29,7 +31,9 @@ bash scripts/build-console-saver.sh
 Produces `target/console-saver/TrustyConsole.saver` and a `ditto` zip beside it.
 The build reads the crate version from `crates/trusty-console/Cargo.toml` and
 injects it as `CFBundleShortVersionString`, so the bundle and the crate never
-disagree. Every run rebuilds in place.
+disagree. It also copies `Resources/ConsolePreview.png` into
+`Contents/Resources/` and fails fast if that file is absent. Every run rebuilds
+in place.
 
 Two environment variables:
 
@@ -48,6 +52,30 @@ bundle is a different codesign shape and is signed by this script instead.
 
 **Ad-hoc is enough to run it locally.** Developer ID and notarization matter only
 for distribution past Gatekeeper — see "What the spike proved".
+
+## Static preview asset
+
+`Resources/ConsolePreview.png` is what the System Settings gallery tile and the
+offline fallback draw. It is a real capture of `/ui/screensaver`'s services
+frame, not a mock, so it goes stale when the dashboard changes. Regenerate it:
+
+```bash
+bash scripts/render-console-saver-preview.sh              # console must be running
+bash scripts/build-console-saver.sh                       # copies it into the bundle
+```
+
+The script drives the Chromium that `website/`'s Playwright install already
+caches (`pnpm install` inside `website/` if `node_modules` is absent), waits for
+the 20 s rotation to reach the services frame with a populated roster, captures
+1920×1080, and downscales with `sips` if the PNG lands over 500 KB. Overrides:
+
+```bash
+CONSOLE_URL=http://127.0.0.1:7790/ui/screensaver bash scripts/render-console-saver-preview.sh
+PREVIEW_MAX_BYTES=300000 bash scripts/render-console-saver-preview.sh
+```
+
+Commit the regenerated PNG — the build copies it from the source tree, and a
+bundle without it is rejected before the compile starts.
 
 ## Install
 
@@ -93,6 +121,38 @@ the module's own defaults domain and restores the previous values before exiting
 The harness runs **unsandboxed**, so a pass proves the bundle, the class name and
 the URL — not that the sandboxed screen-saver host can reach the console.
 
+### Paint harness (automated, #6838/#6839)
+
+`LoadHarness` proves the happy path. `PaintHarness` proves the three states that
+have no live page — the states the black screen was reported in. It reads the
+view's own rendered bitmap through `cacheDisplay` and measures it, so it tests
+the drawing code rather than navigation callbacks. **It needs no console
+daemon**: each mode builds its own endpoint.
+
+```bash
+swiftc -swift-version 5 -o target/console-saver/harness/paintharness \
+  crates/trusty-console/macos/saver/PaintHarness.swift
+
+for mode in offline slow preview; do
+  ./target/console-saver/harness/paintharness "$mode" \
+    target/console-saver/TrustyConsole.saver || echo "FAILED: $mode"
+done
+```
+
+| Mode | Endpoint | Asserts |
+|---|---|---|
+| `offline` | a closed port | within 1 s of `startAnimation()`, ≥98% of pixels are non-black and ≥2% carry drawn content (the text wordmark alone reaches ~0.4%) |
+| `slow` | a listener that accepts and never answers | the same, plus ≥3 connection attempts in 34 s — i.e. the load timed out and retried instead of hanging on `URLRequest`'s 60 s default |
+| `preview` | none (`isPreview: true`) | the bundled asset draws, and no `WKWebView` is built for a tile |
+
+Exit 0 passes; 9 is an assertion failure (every failed assertion is printed);
+2–6 and 8 are setup failures (bundle, principal class, endpoint, bitmap). Like
+`LoadHarness` it runs **unsandboxed**, so it proves the drawing, not the
+sandboxed host.
+
+The `slow` mode is the regression guard for #6838: against an unfixed bundle it
+reports one connection attempt, because nothing bounded the load.
+
 ### Manual verification (still owed)
 
 The in-host run cannot be scripted. One operator step remains:
@@ -129,11 +189,23 @@ configuration sheet this phase (`hasConfigureSheet` is `false`).
   loads it; `stopAnimation()` navigates to `about:blank`, which tears down the
   SPA and stops its metrics polling; the web view is released in `deinit`.
 - **Offline** — on `didFailProvisionalNavigation` / `didFail` / a dead WebContent
-  process, the web view is hidden and the view paints a native fallback: the
-  Foundry dark background (`#201612`) with monospace `TRUSTY CONSOLE · offline`.
-  It retries the load every 15 s while animating.
+  process / a load that has not finished in 6 s (a 5 s request timeout plus the
+  view's own 1 s watchdog grace), the web view is hidden and the
+  view paints `Resources/ConsolePreview.png` scaled to fit at 35% over the
+  Foundry dark background (`#201612`), with a `TRUSTY CONSOLE · OFFLINE` banner
+  over a scrim so a photograph of old numbers cannot read as live ones. Retries
+  every 5 s for the first 3 minutes of an outage, then every 30 s, and switches
+  to the live page the moment one succeeds — no saver restart.
 - **Preview** — the System Settings thumbnail (`isPreview == true`) never
-  constructs a web view; it paints the wordmark in Foundry accent (`#d97742`).
+  constructs a web view; it paints the same asset at full opacity, with no
+  banner.
+- **Never black** — `animateOneFrame()` invalidates the view once per second
+  while the live page is not on screen, so a first paint the full-screen host
+  drops repaints within one tick rather than persisting until the next
+  navigation callback (#6838).
+- **No asset** — if `ConsolePreview.png` is missing from the bundle the view
+  falls back to the monospace `TRUSTY CONSOLE · offline` wordmark. The build
+  script refuses to produce such a bundle, so this is a defensive path.
 - **Hourly reload** while animating, for long-run memory hygiene. The SPA polls
   its own data, so this is not a freshness mechanism.
 - **Multi-display** — the framework instantiates one view per screen, so each
