@@ -6,6 +6,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.47.2] — 2026-09-03
+
+### Added
+
+- `sys_metrics::ProcessCpuSampler` measures CPU for a SET of other processes.
+  `SysMetrics` only ever measured the current process, so a supervisor asking
+  "how much CPU is this child using" had nothing to call. One `sysinfo::System`
+  is refreshed once per tick over the tracked pids only — never the whole
+  process table — and a pid whose process exits is dropped, so `cpu_pct` answers
+  `None` rather than reporting a recycled pid's stranger under the old name
+  ([#6642](https://github.com/bobmatnyc/trusty-tools/issues/6642)).
+- `uds::peer_pid` reads which process is on the other end of a Unix-domain
+  connection (`SO_PEERCRED` on Linux, `LOCAL_PEERPID` on Darwin). A UDS daemon
+  publishes no pid anywhere, so the connection a client already makes is the
+  only identifier available. It returns `Option` rather than `Result` because
+  every caller treats "cannot identify the peer" as a metric it does not have —
+  unlike `peer_uid`, whose failure must refuse a connection
+  ([#6642](https://github.com/bobmatnyc/trusty-tools/issues/6642)).
+- `host_metrics::history::MetricRing::last` borrows the newest item, so a caller
+  that wants one point no longer clones the whole 600-point window through
+  `snapshot()` ([#6642](https://github.com/bobmatnyc/trusty-tools/issues/6642)).
+
+### Fixed
+
+- `catchup::session_log::append_entry` writes a log line and its trailing
+  newline in one `write` instead of two. `writeln!` on a `File` formats
+  piecewise, so each pause cost two `write(2)` calls; `O_APPEND` makes an
+  individual write atomic but not a pair of them, so two concurrent pauses could
+  interleave into `<lineA><lineB>\n\n` — one unparseable line plus one blank,
+  which `read_log` skips as malformed and the record is gone
+  ([#6732](https://github.com/bobmatnyc/trusty-tools/issues/6732)). A run of
+  1024 concurrent appends corrupted 439 lines before the change and none after.
+
+### Changed
+
+- The `tickets` feature no longer depends on `trusty-mcp`. That edge closed a
+  dependency cycle — `trusty-mcp` depends on this crate — and blocked the shared
+  stdio↔UDS JSON-RPC forwarder ([#6316](https://github.com/bobmatnyc/trusty-tools/issues/6316)).
+  The `tickets-mcp` binary now runs on a private, dependency-free JSON-RPC stdio
+  loop in `tickets::stdio`; `trusty_mcp::run_stdio_loop` stays the shared loop
+  for every MCP server outside this crate. The public API of
+  `trusty_common::tickets` is unchanged — `server::run_stdio`,
+  `server::handle_message` and `server::handle_tool_call` keep their signatures,
+  and the wire behaviour (handshake, notification suppression, error codes) is
+  byte-identical.
+- The host-metric window is sampled every second instead of every five:
+  `HOST_SAMPLE_INTERVAL_SECS` is `1` and `HOST_HISTORY_CAPACITY` is `600`. The
+  span it covers is the same ten minutes; the console's home-page cards draw a
+  bar per second, which a five-second sample cannot render
+  ([#6642](https://github.com/bobmatnyc/trusty-tools/issues/6642)).
+
 ## [0.47.1] — 2026-09-02
 
 ### Added

@@ -6,6 +6,167 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [7.0.0] — 2026-09-03
+
+### Added
+
+- `tga backfill pm-effort` scores the complexity of every meaningful PM ticket
+  into the new `fact_pm_effort` table (#3915) — the EFFORT tier of the
+  Activity / Work / Effort model, above the `fact_pm_work` tier #3916 added.
+  The v1 formula (`formula_version = "pm-effort-1"`) sums a base of 1.0 with
+  five independently capped terms — child count, description length, comment
+  count, status-transition count and story points — into a 1.0–50.0 score,
+  bucketed LOW / MEDIUM / HIGH. Every weight, cap and boundary lives in one
+  `core::pm_effort::thresholds` block, because issue #3915 marks them all "TBD,
+  refine with product": a retune ships as a new `formula_version` string, never
+  as an edit of the v1 values, so a stored score always names the weight set
+  that produced it.
+- Two guards the raw formula does not provide. A ticket of a decomposable type
+  (epic, feature, initiative) younger than 7 days is recorded as
+  `DEFERRED_RECENT` with a NULL score rather than a low one — an epic filed
+  yesterday has no children because nobody has broken it down yet, not because
+  it is simple. And only tickets `fact_pm_work` marks meaningful are scored at
+  all: an excluded ticket gets no row, and one that later becomes excluded
+  loses the row an earlier run wrote.
+- Story points degrade rather than zero the score. They are 76% NULL across
+  four per-project custom-field IDs on the source JIRA instance, so the term is
+  simply dropped when absent, out of range, or unparseable, and the row's
+  `inputs_present` column names which terms actually fired. The offline
+  extractor reuses `JiraClient::get_story_point_field`'s discovery shape —
+  match by field name first, then fall back to the known ID list — because one
+  global lookup cannot cover four spellings.
+- `tga backfill pm-work` classifies every `work_items` row's meaningfulness and persists the verdict to the new `fact_pm_work` table, the PM-side WORK tier of the Activity/Work/Effort model ([#3916](https://github.com/bobmatnyc/trusty-tools/issues/3916))
+  - Deterministic v1 rules (`formula_version = "pm-work-1"`) exclude terse decomposition stubs (`TERSE_TITLE`), tickets a bot filed that nobody moved (`AUTO_GENERATED`), and tickets a bot filed that a human later transitioned (`BOT_FILED`). No LLM tier.
+  - Idempotent: UPSERT on `(work_item_id, work_item_source)`, so a re-run rewrites the same rows and adds none. `--dry-run` reports the candidate count without writing.
+  - PM work rows are counted in tickets and must never share a visualization axis with `fact_commit_effort` rows ([#3917](https://github.com/bobmatnyc/trusty-tools/issues/3917)).
+- `tga install` runs without a terminal. `--host <local|github|bitbucket>` and
+  `--pm <none|github|jira|linear>` select the non-interactive path, along with
+  `--org`, `--workspace`, `--repo`, `--repo-path`, `--repo-cache`,
+  `--host-token`, the `--jira-*` / `--linear-*` credentials, `--output-dir`,
+  `--llm-provider` and `--llm-api-key`; `--non-interactive` forces it, and stdin
+  not being a terminal implies it. A flag value wins over its environment
+  variable (`GITHUB_TOKEN`, `BITBUCKET_TOKEN`, `JIRA_URL`, `JIRA_EMAIL`,
+  `JIRA_API_TOKEN`, `LINEAR_API_KEY`), and a credential taken from the
+  environment is written to the config as a `${VAR}` reference rather than in
+  the clear. Run with no terminal and no flags, install now names every missing
+  flag at once instead of blocking on the first prompt. (#5216)
+- `tga install --host github --org <ORG>` derives the repository set from the
+  GitHub API — `discover_org_repos` was already paging `GET /orgs/{org}/repos`
+  for PR collection and is now what populates a generated config's
+  `repositories:` list, so an operator no longer has to name paths that already
+  exist locally. An org the token cannot see records that in the config instead
+  of emitting a silently empty one. (#5216)
+- Linear joins JIRA and GitHub Issues in the project-management choices, and
+  Bitbucket Cloud joins GitHub in the host choices, in both the wizard and the
+  flag path. Bitbucket takes an explicit `--repo <workspace/slug>` list and says
+  workspace discovery is not available yet (#5220) rather than producing an
+  empty repository set. (#5216)
+- `tga inspect schema` prints every table, view, and column the database in
+  front of you actually holds, with row counts and the free-text columns marked
+  (#5218). It reads the file rather than the migration set, because a database
+  collected by an older `tga` is missing later tables and nothing in
+  `src/core/db/sql/` says so.
+- `tga inspect attest` states the data-handling claim — "tga's database stores
+  no file content, diffs, patches, hunks, or blobs" — and prints the live
+  evidence for it: the scan that found no BLOB and no diff-named column, and a
+  per-column reading of every free-text column in that database. The claim is
+  never "contains no code", because a pasted snippet in a commit message is
+  stored verbatim; the caveat saying so travels with it, and
+  `claim_never_says_no_code` fails if a later edit loosens either. DOC-67 §10
+  quotes these two strings rather than paraphrasing them.
+- `work_items.raw_json` is read at runtime rather than cited from
+  `0005_work_items.sql`. Today's writer serializes a struct with no description
+  field, but that is a property of the writer, not of the column. The diff probe
+  unescapes JSON line breaks before matching, because a diff serialized into
+  that column carries the two-character `\n` escape rather than a newline byte —
+  four of the five markers anchor on a real line start and would otherwise miss
+  the one column the attestation most needs to read. The probe reads plain text
+  and that escaping; a base64-encoded or compressed diff reads as opaque text
+  and is not counted, which is part of why the "not a claim that the database
+  contains no code" caveat is not optional.
+- Both subcommands open the database read-only and refuse a missing path, a
+  directory, or a non-SQLite file, each naming the cause. The shared
+  `Database::open` would have CREATED and migrated a missing file, so an
+  inspection routed through it would print a complete, empty, freshly-minted
+  schema and exit 0 for a database the caller cannot read. `attest` also exits
+  non-zero when its verdict is `findings`, so a hand-over script can gate on it.
+- Two standing guards replace one-time reads. `every_text_column_is_classified`
+  fails when a migration adds a `TEXT` column that is in none of the three
+  inventories in `core::inspect::text_columns`, so the free-text list cannot go
+  stale silently. `diff_for_commit_callers_match_the_attestation` re-derives the
+  non-test callers of `collect::git::diff::diff_for_commit` from the source tree
+  and compares them against the pinned list — #5218 asked for "zero callers",
+  which #5465 has since made false, so the enforceable property is now "these
+  callers and no others".
+- Bitbucket Cloud workspace-to-repository discovery. `bitbucket.workspaces` is a
+  new config list whose every entry is paged over
+  `GET /2.0/repositories/{workspace}` — Bitbucket's `next`-cursor convention,
+  the same shape `discover_org_repos` has had for a GitHub org since #742. The
+  discovered repositories are unioned with the singular
+  `bitbucket.workspace`/`repo_slug` pair, and one `BitbucketClient` now collects
+  pull requests across the whole set instead of one repository. A workspace that
+  fails is logged and skipped, and a repository that fails no longer discards
+  the rest of the batch. (#5220)
+- `tga install --host bitbucket --workspace <WORKSPACE>` derives the repository
+  set from the API, so `--repo` is now optional there. The generated config
+  emits `bitbucket.workspaces`, so `tga collect --validate-only` accepts it. The
+  generated block used to name a `workspace` with `fetch_prs: true` and no
+  `repo_slug` — it deserialized, but validation then refused it with "Bitbucket
+  config incomplete: repo_slug is required when fetch_prs = true". (#5220)
+
+### Fixed
+
+- A Bitbucket workspace that cannot be read no longer reads as a workspace with
+  no repositories. A rejected credential surfaces as `CollectError::BitbucketApi`
+  carrying the HTTP status and Bitbucket's own explanation, a rate limit as
+  `CollectError::Throttled` with any `Retry-After` hint, and the 5 000-repository
+  page cap logs that the set is partial. (#5220)
+- Commits classified by an older AI detector are re-classified on the next `tga collect` instead of keeping the retired detector's verdict forever ([#6748](https://github.com/bobmatnyc/trusty-tools/issues/6748)). Around 700 commits carrying a literal AI trailer sat at `is_ai_assisted = 0` in a downstream warehouse because they were walked before the #1334 detection fix landed; the discriminator was ingest date, not message content, and the consumer could not repair them because `fact_commits` has no message column ([duettoresearch/cto-reports#140](https://github.com/duettoresearch/cto-reports/issues/140)).
+  - Migration v28 adds `commits.ai_detector_version`, defaulting to 0. Every row in an existing database therefore sorts as older than the shipped detector generation and is re-classified once; rows already at the current generation are never re-read. The composite index `(ai_detector_version, id)` and the query's matching `ORDER BY` keep the settled-corpus scan an index range walk over the stale rows only — no sort, and no full table read of every commit message. The query pins the index with `INDEXED BY`, because the statistics on a settled corpus leave an unpinned planner free to choose a full scan instead.
+  - `DETECTOR_VERSION` is a hand-maintained constant. Nothing ties it to the marker table, so a change to the marker set that forgets to bump it silently skips re-classification; bump it in the same change that alters what the detector returns.
+  - The pass runs in 1000-row batches, one transaction each, so an interrupted run leaves every completed batch stamped and the next `tga collect` finishes the remainder. A row's verdict and its generation are written by the same statement, so neither can be stored without the other.
+  - The count goes to stderr as one line when anything was stale, and nothing is printed when the corpus is settled. Nothing is written to stdout.
+  - `tga backfill ai-detection-commits` stamps the current generation across the slice it scanned, so a hand-run repair is not redone by the automatic pass.
+
+### Changed
+
+- The wizard and the flag path render config through one function. Both collect
+  the same answers and hand them to `commands::install_plan::render_yaml`, so a
+  scripted install and a hand-walked one produce identical output for identical
+  answers. (#5216)
+- `bitbucket.repo_slug` and `bitbucket.workspace` are required only when
+  `bitbucket.workspaces` is empty. A config that names workspaces to discover
+  supplies neither. (#5220)
+- `BitbucketClient::fetch_pr_commits` takes the workspace and repository slug as
+  arguments rather than reading them off the client, which now covers many
+  repositories. (#5220)
+- `InstallArgs` exposes only `output` and `force` publicly again. The 17 flag
+  fields #5216 added at the unpublished 6.0.1 are `pub(crate)`: they are read by
+  `commands::install` and `commands::install_flags` and by nothing else, and
+  `main.rs` pattern-matches the whole struct without touching a field (#6744).
+  This does not clear the 6.0.0 baseline — a struct that was exhaustively
+  constructible cannot gain a private field without a major bump either, so
+  `bash scripts/check_semver.sh --crate tga` still reports BREAK and tga still
+  owes 7.0.0 at its next publish. What it buys is that the flag after this one
+  costs nothing: from 7.0.0 on, `InstallArgs` is no longer constructible from
+  outside the crate, so adding a field to it stops being a public-API change.
+
+### Documentation
+
+- `docs/trusty-git-analytics/requirements/database-schema.md` is rebuilt from
+  the migrations. The migration-history table stopped at 0013 and now runs
+  through 0027, one row per migration naming its file; two of the rows it did
+  have were wrong (`0012` is `pull_requests_repository`, not
+  `repository_analysis_status`, and `0013` puts `complexity` on
+  `classifications`, not on `commits`). Thirteen tables and all four DORA views
+  had no section at all. Eight existing sections described columns the shipped
+  schema does not have — `work_items` still listed the `provider` /
+  `external_id` / `work_item_type` / `state` shape migration 0005 never used,
+  `linear_issues` named `issue_id` instead of `identifier`, `commit_work_items`
+  and `classification_overrides` described integer keys where both use composite
+  text ones, `repository_analysis_status` named four columns it does not have,
+  and `pull_requests` listed a `merge_commit_sha` that has never existed.
+
 ## [6.0.0] — 2026-09-02
 
 ### Added
