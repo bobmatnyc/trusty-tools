@@ -1,5 +1,5 @@
 /**
- * Tests for the home page's Services list data layer (#6642).
+ * Tests for the home page's Services list data layer (#6642, #6773).
  *
  * Run: `node --test src/servicesList.test.js` from `crates/trusty-console/ui`.
  */
@@ -10,23 +10,30 @@ import assert from 'node:assert/strict';
 import {
   DASH,
   ROW_GRAPH_FLOOR_PCT,
+  ROW_MEMORY_FLOOR_BYTES,
   SERVICES_URL,
   cpuSeries,
   fetchServices,
   formatCpu,
+  formatMemory,
   latestSample,
+  memorySeries,
   rowAriaLabel,
-  rowGraphSpec,
+  rowCpuGraphSpec,
+  rowMemoryGraphSpec,
   serviceRows,
   sortByDisplayName,
   statusCounts,
 } from './servicesList.js';
 
+/** One mebibyte, so the fixtures below read as the figures the column shows. */
+const MIB = 1024 * 1024;
+
 const ROSTER = [
-  { id: 'trusty-search', display_name: 'Trusty Search', status: 'running', version: '0.41.0', cpu_pct: 2.5 },
-  { id: 'trusty-agents', display_name: 'trusty agents', status: 'running', version: '0.3.0', cpu_pct: null },
-  { id: 'trusty-memory', display_name: 'Trusty Memory', status: 'running', version: '0.9.1', cpu_pct: 0 },
-  { id: 'trusty-analyze', display_name: 'Trusty Analyze', status: 'available', lifecycle: 'on_demand', cpu_pct: null },
+  { id: 'trusty-search', display_name: 'Trusty Search', status: 'running', version: '0.41.0', cpu_pct: 2.5, rss_bytes: 142 * MIB },
+  { id: 'trusty-agents', display_name: 'trusty agents', status: 'running', version: '0.3.0', cpu_pct: null, rss_bytes: null },
+  { id: 'trusty-memory', display_name: 'Trusty Memory', status: 'running', version: '0.9.1', cpu_pct: 0, rss_bytes: 0 },
+  { id: 'trusty-analyze', display_name: 'Trusty Analyze', status: 'available', lifecycle: 'on_demand', cpu_pct: null, rss_bytes: null },
 ];
 
 test('the list is alphabetical by display name, case-insensitive', () => {
@@ -67,6 +74,41 @@ test('a null cpu_pct survives into the series as a gap', () => {
   assert.deepEqual(cpuSeries(samples, 'nobody'), []);
 });
 
+test('formatMemory picks the largest unit the figure fills', () => {
+  assert.equal(formatMemory(142 * MIB), '142 MiB');
+  assert.equal(formatMemory(13.4 * 1024 * MIB), '13.4 GiB');
+  assert.equal(formatMemory(4096), '4 KiB');
+  assert.equal(formatMemory(512), '512 B');
+});
+
+test('formatMemory dashes an absent measurement but not a measured zero', () => {
+  // The same rule `formatCpu` holds: an unmeasurable service and a daemon
+  // holding almost nothing must not read the same.
+  assert.equal(formatMemory(null), DASH);
+  assert.equal(formatMemory(undefined), DASH);
+  assert.equal(formatMemory(NaN), DASH);
+  assert.equal(formatMemory(-1), DASH, 'a negative byte count is not a measurement');
+  assert.equal(formatMemory(0), '0 B', 'a measured zero is a number, not a dash');
+});
+
+test('a null rss_bytes survives into the memory series as a gap', () => {
+  const samples = {
+    'trusty-search': [
+      { id: 'trusty-search', status: 'running', cpu_pct: 1, rss_bytes: 10 * MIB },
+      { id: 'trusty-search', status: 'running', cpu_pct: null, rss_bytes: null },
+      { id: 'trusty-search', status: 'running', cpu_pct: 3, rss_bytes: 12 * MIB },
+    ],
+  };
+  assert.deepEqual(memorySeries(samples, 'trusty-search'), [10 * MIB, null, 12 * MIB]);
+  assert.deepEqual(memorySeries(samples, 'nobody'), []);
+  // REGRESSION (#6773): both graphs read one ring, so the series must have the
+  // same length — the bar at index i is the same second in both.
+  assert.equal(
+    memorySeries(samples, 'trusty-search').length,
+    cpuSeries(samples, 'trusty-search').length,
+  );
+});
+
 test('latestSample reads the newest entry, which is last', () => {
   const samples = { x: [{ cpu_pct: 1 }, { cpu_pct: 9 }] };
   assert.equal(latestSample(samples, 'x').cpu_pct, 9);
@@ -81,16 +123,18 @@ test('a row renders version, status and CPU, and a missing version is a dash', (
   assert.equal(search.version, '0.41.0');
   assert.equal(search.statusLabel, 'Running');
   assert.equal(search.cpuLabel, '2.5%');
+  assert.equal(search.memoryLabel, '142 MiB');
   assert.equal(analyze.version, DASH, 'no version reported → dash');
   assert.equal(analyze.cpuLabel, DASH, 'an on-demand member has no CPU to show');
+  assert.equal(analyze.memoryLabel, DASH, 'and no memory to show either');
   assert.equal(analyze.statusLabel, 'Ready', 'on-demand at rest is ready, not a warning');
 });
 
 test('the newest stream sample wins over the roster snapshot', () => {
   const samples = {
     'trusty-search': [
-      { id: 'trusty-search', status: 'running', cpu_pct: 2.5 },
-      { id: 'trusty-search', status: 'degraded', cpu_pct: 41.25 },
+      { id: 'trusty-search', status: 'running', cpu_pct: 2.5, rss_bytes: 142 * MIB },
+      { id: 'trusty-search', status: 'degraded', cpu_pct: 41.25, rss_bytes: 900 * MIB },
     ],
   };
   const [row] = serviceRows(
@@ -99,8 +143,11 @@ test('the newest stream sample wins over the roster snapshot', () => {
     new Set(),
   );
   assert.equal(row.cpuLabel, '41.3%', 'the live figure, rounded — not the fetched 2.5');
+  // #6773: the memory column follows the same rule off the same sample.
+  assert.equal(row.memoryLabel, '900 MiB', 'the live figure — not the fetched 142 MiB');
   assert.equal(row.statusLabel, 'Degraded');
   assert.deepEqual(row.series, [2.5, 41.25]);
+  assert.deepEqual(row.memorySeries, [142 * MIB, 900 * MIB]);
 });
 
 test('only a service with a dashboard is marked clickable', () => {
@@ -117,23 +164,27 @@ test("a clickable row's accessible name carries every column", () => {
   const search = rows.find((r) => r.id === 'trusty-search');
   assert.equal(
     search.ariaLabel,
-    'Trusty Search, version 0.41.0, Running, 2.5% CPU — open dashboard',
+    'Trusty Search, version 0.41.0, Running, 2.5% CPU, 142 MiB memory — open dashboard',
   );
   // Every column a sighted reader sees survives into the name the aria-label
   // replaces — that replacement is the whole hazard.
-  for (const part of [search.version, search.statusLabel, search.cpuLabel]) {
+  for (const part of [search.version, search.statusLabel, search.cpuLabel, search.memoryLabel]) {
     assert.ok(search.ariaLabel.includes(part), `label omits ${part}`);
   }
 });
 
-test('an absent version and an unmeasured CPU are spelled out, not dashes', () => {
+test('an absent version and unmeasured figures are spelled out, not dashes', () => {
   const label = rowAriaLabel({
     displayName: 'Trusty Analyze',
     version: DASH,
     statusLabel: 'Ready',
     cpuLabel: DASH,
+    memoryLabel: DASH,
   });
-  assert.equal(label, 'Trusty Analyze, version unknown, Ready, CPU not measured — open dashboard');
+  assert.equal(
+    label,
+    'Trusty Analyze, version unknown, Ready, CPU not measured, memory not measured — open dashboard',
+  );
   assert.ok(!label.includes(`${DASH},`), 'no bare dash cell survives into the name');
 });
 
@@ -149,19 +200,58 @@ test('an empty roster yields no rows rather than throwing', () => {
 
 // ── shared with the screensaver (#6643) ────────────────────────────────────
 
-test('rowGraphSpec scales a row to its own busiest second', () => {
-  const spec = rowGraphSpec({ displayName: 'Trusty Search', series: [1, 12.5, null, 4] });
+test('rowCpuGraphSpec scales a row to its own busiest second', () => {
+  const spec = rowCpuGraphSpec({ displayName: 'Trusty Search', series: [1, 12.5, null, 4] });
   assert.equal(spec.max, 12.5);
   assert.deepEqual(spec.values, [1, 12.5, null, 4]);
   assert.equal(spec.label, 'Trusty Search CPU, one bar per second');
 });
 
-test('rowGraphSpec holds an idle row against the floor', () => {
+test('rowCpuGraphSpec holds an idle row against the floor', () => {
   // Without the floor a window of 0.2 % samples draws full-height bars and an
   // idle daemon reads as a busy one.
-  assert.equal(rowGraphSpec({ series: [0.2, 0.1] }).max, ROW_GRAPH_FLOOR_PCT);
-  assert.equal(rowGraphSpec({}).max, ROW_GRAPH_FLOOR_PCT);
-  assert.deepEqual(rowGraphSpec(undefined).values, []);
+  assert.equal(rowCpuGraphSpec({ series: [0.2, 0.1] }).max, ROW_GRAPH_FLOOR_PCT);
+  assert.equal(rowCpuGraphSpec({}).max, ROW_GRAPH_FLOOR_PCT);
+  assert.deepEqual(rowCpuGraphSpec(undefined).values, []);
+});
+
+// ── #6773: the memory graph beside the CPU one ──────────────────────
+
+test('rowMemoryGraphSpec scales a row to its own peak, not to 100', () => {
+  // REGRESSION (#6773): a byte count has no percentage to be a percentage OF.
+  // Scaling it against 100 draws every daemon's memory as one full-height bar.
+  const spec = rowMemoryGraphSpec({
+    displayName: 'Trusty Search',
+    memorySeries: [400 * MIB, 900 * MIB, null, 600 * MIB],
+  });
+  assert.equal(spec.max, 900 * MIB);
+  assert.deepEqual(spec.values, [400 * MIB, 900 * MIB, null, 600 * MIB]);
+  assert.equal(spec.label, 'Trusty Search memory, one bar per second');
+});
+
+test('rowMemoryGraphSpec holds a gap-only row against the floor', () => {
+  // A window of pure gaps must not divide by zero, and a daemon holding a few
+  // kilobytes must not draw as the busiest row on the page.
+  assert.equal(rowMemoryGraphSpec({ memorySeries: [null, null] }).max, ROW_MEMORY_FLOOR_BYTES);
+  assert.equal(rowMemoryGraphSpec({ memorySeries: [4096] }).max, ROW_MEMORY_FLOOR_BYTES);
+  assert.equal(rowMemoryGraphSpec({}).max, ROW_MEMORY_FLOOR_BYTES);
+  assert.deepEqual(rowMemoryGraphSpec(undefined).values, []);
+});
+
+test('the two row graphs read the same window and each carries its own scale', () => {
+  const samples = {
+    'trusty-search': [
+      { id: 'trusty-search', status: 'running', cpu_pct: 1, rss_bytes: 10 * MIB },
+      { id: 'trusty-search', status: 'running', cpu_pct: 2, rss_bytes: 20 * MIB },
+      { id: 'trusty-search', status: 'running', cpu_pct: 3, rss_bytes: 30 * MIB },
+    ],
+  };
+  const [row] = serviceRows([ROSTER[0]], samples, new Set());
+  const cpu = rowCpuGraphSpec(row);
+  const memory = rowMemoryGraphSpec(row);
+  assert.equal(cpu.values.length, memory.values.length, 'one x-axis, two graphs');
+  assert.equal(cpu.max, ROW_GRAPH_FLOOR_PCT);
+  assert.equal(memory.max, 30 * MIB);
 });
 
 test('statusCounts tallies the rows by the label they display', () => {

@@ -118,6 +118,7 @@ impl ServiceConnector for ReviewConnector {
                 // — the card's remediation text branches on it.
                 lifecycle: self.lifecycle(),
                 cpu_pct: None,
+                rss_bytes: None,
             };
         }
 
@@ -147,6 +148,7 @@ impl ServiceConnector for ReviewConnector {
             // stopped daemon; this is what stops the card rendering it as a fault.
             lifecycle: self.lifecycle(),
             cpu_pct: None,
+            rss_bytes: None,
         }
     }
 }

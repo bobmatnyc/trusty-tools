@@ -7,12 +7,18 @@
 //! levels) and the host sample cannot either (it is one number for the whole
 //! machine).
 //!
-//! Why `cpu_pct` is an `Option` and never `0.0` for an absent service: a service
-//! that is not installed, is on-demand and idle, or whose process the console
-//! could not identify has NO measurement. Rendering that as zero draws a flat
-//! idle bar, which is visually identical to a healthy service doing nothing —
-//! the one reading the operator must be able to tell apart. `None` is the honest
-//! answer and the UI renders it as a gap.
+//! Why `cpu_pct` and `rss_bytes` are `Option` and never `0` for an absent
+//! service: a service that is not installed, is on-demand and idle, or whose
+//! process the console could not identify has NO measurement. Rendering that as
+//! zero draws a flat idle bar, which is visually identical to a healthy service
+//! doing nothing — the one reading the operator must be able to tell apart.
+//! `None` is the honest answer and the UI renders it as a gap.
+//!
+//! Why memory rides on the SAME sample as CPU (#6773): the owner's ruling puts
+//! a CPU graph and a memory graph side by side in every service row. A second
+//! sampler, a second ring or a second event would each let the two graphs show
+//! different seconds, which is the one way a side-by-side pair can lie. One
+//! sample, one tick, one ring, one event.
 //!
 //! What: [`ServiceSample`] is one service at one instant; [`ServiceSampleBatch`]
 //! is the whole roster at one instant, which is what the sampler produces per
@@ -21,7 +27,8 @@
 //! [`SERVICE_HISTORY_CAPACITY`] sizes those rings to the same 10-minute window
 //! the host ring covers.
 //! Test: `a_sample_serialises_the_shape_the_ui_reads`,
-//! `an_absent_cpu_serialises_as_null`, `a_batch_names_its_services`.
+//! `an_absent_cpu_serialises_as_null`, `an_absent_memory_serialises_as_null`,
+//! `a_batch_names_its_services`.
 //!
 //! [`MachineHistory::record_service_samples`]:
 //!     crate::machine_history::MachineHistory::record_service_samples
@@ -41,17 +48,20 @@ use crate::connector::ServiceStatus;
 /// Test: `the_service_window_matches_the_host_window`.
 pub const SERVICE_HISTORY_CAPACITY: usize = HOST_HISTORY_CAPACITY;
 
-/// One service's state and CPU at one instant (#6642).
+/// One service's state, CPU and memory at one instant (#6642, #6773).
 ///
-/// Why: the card needs both halves together. CPU alone cannot say whether a
-/// missing bar means "idle" or "stopped", and status alone cannot draw a graph.
+/// Why: the row needs all three together. CPU alone cannot say whether a
+/// missing bar means "idle" or "stopped", status alone cannot draw a graph, and
+/// a memory figure sampled on a different tick than the CPU figure would put two
+/// different seconds beside each other in one row.
 /// What: the service id (the same `ServiceInfo::id` the services route serves,
-/// so the UI joins the two by string), the status the poller last detected, and
-/// the CPU percentage — `None` whenever no measurement was taken. The percentage
-/// follows `sysinfo`'s convention: `100.0` is one fully-saturated core, so a
-/// multi-threaded daemon can exceed 100.
+/// so the UI joins the two by string), the status the poller last detected, the
+/// CPU percentage, and the resident-memory figure in bytes — each `None`
+/// whenever no measurement was taken. The percentage follows `sysinfo`'s
+/// convention: `100.0` is one fully-saturated core, so a multi-threaded daemon
+/// can exceed 100.
 /// Test: `a_sample_serialises_the_shape_the_ui_reads`,
-/// `an_absent_cpu_serialises_as_null`.
+/// `an_absent_cpu_serialises_as_null`, `an_absent_memory_serialises_as_null`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceSample {
     /// Stable service identifier, e.g. `"trusty-search"`.
@@ -66,6 +76,21 @@ pub struct ServiceSample {
     /// sometimes `null` is two spellings of the same fact for the client to
     /// handle.
     pub cpu_pct: Option<f32>,
+    /// Process resident memory in bytes, or `None` when nothing was measured.
+    ///
+    /// Why it rides on this struct rather than on a second event (#6773): the
+    /// owner's ruling puts a CPU graph and a memory graph side by side in one
+    /// row, and two events would let the two graphs show different seconds. One
+    /// sample carries both, so they cannot disagree.
+    ///
+    /// Why bytes: the UI formats to `MiB`/`GiB`, and a megabyte-granular figure
+    /// quantises a small daemon's 1 s curve into a staircase.
+    ///
+    /// Same `null`-not-zero contract as `cpu_pct`, for the same reason and with
+    /// the same unconditional serialisation. `#[serde(default)]` so a payload
+    /// written before #6773 still deserialises.
+    #[serde(default)]
+    pub rss_bytes: Option<u64>,
 }
 
 /// The whole service roster at one instant (#6642).
@@ -95,6 +120,9 @@ mod tests {
             id: id.to_string(),
             status: ServiceStatus::Running,
             cpu_pct: cpu,
+            // #6773: a measured service carries both figures; the memory-absent
+            // case has its own test below.
+            rss_bytes: cpu.map(|_| 142 * 1024 * 1024),
         }
     }
 
@@ -111,8 +139,28 @@ mod tests {
                 "id": "trusty-search",
                 "status": "running",
                 "cpu_pct": 12.5,
+                "rss_bytes": 142 * 1024 * 1024,
             })
         );
+    }
+
+    /// REGRESSION (#6773): an unmeasurable service must serialise `rss_bytes` as
+    /// an explicit `null`, not omit the key and not report `0`.
+    ///
+    /// Why: this is the memory half of `an_absent_cpu_serialises_as_null`. A
+    /// zero draws a bar at the bottom of the memory graph, which reads as a
+    /// daemon holding almost nothing rather than as a daemon that is not there.
+    /// What: serialises a sample with no measurement and asserts the key is
+    /// present and null.
+    /// Test: this test itself.
+    #[test]
+    fn an_absent_memory_serialises_as_null() {
+        let json = serde_json::to_value(sample("trusty-review", None)).expect("serialise");
+        assert!(
+            json.get("rss_bytes").is_some(),
+            "the key must be present so the client has one shape to parse"
+        );
+        assert!(json["rss_bytes"].is_null(), "absent must be null, not 0");
     }
 
     /// REGRESSION (#6642): an unmeasurable service must serialise `cpu_pct` as

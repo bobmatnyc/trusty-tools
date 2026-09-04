@@ -221,6 +221,7 @@ mod tests {
                 hint: None,
                 lifecycle: self.lifecycle(),
                 cpu_pct: None,
+                rss_bytes: None,
             }
         }
     }
@@ -275,6 +276,7 @@ mod tests {
                     hint: None,
                     lifecycle: ServiceLifecycle::Daemon,
                     cpu_pct: None,
+                    rss_bytes: None,
                 },
                 ServiceInfo {
                     id: "trusty-memory".to_string(),
@@ -285,6 +287,7 @@ mod tests {
                     hint: None,
                     lifecycle: ServiceLifecycle::Daemon,
                     cpu_pct: None,
+                    rss_bytes: None,
                 },
             ],
             refreshed_at: Instant::now(),
