@@ -353,11 +353,17 @@ fn spawn_command_without_token_pins_the_exact_command() {
     // the scrub segment is — this pins its POSITION, while its literal text is
     // pinned in `core::alt_screen`'s `shell_assignment_pins_the_defaulting_form`.
     let alt = crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT;
+    // #6766 replaced the unconditional `; echo '<hint>'` with a status/elapsed
+    // branch, and added the launch clock that feeds it. Both are interpolated
+    // from production code for the same reason the scrub and alt-screen
+    // segments are — this test pins their POSITION; their literal text is
+    // pinned by `claude_code_exit_hint`'s own executing tests.
+    let clock = super::claude_code_exit_hint::launch_clock_prefix();
+    let dispatch = super::claude_code_exit_hint::exit_dispatch_suffix();
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
-             env -u ANTHROPIC_API_KEY{scrub} {alt} claude \
-             --setting-sources project,local --dangerously-skip-permissions; \
-             echo 'tm: run `tm` to relaunch this session'; }}"
+             {clock}env -u ANTHROPIC_API_KEY{scrub} {alt} claude \
+             --setting-sources project,local --dangerously-skip-permissions{dispatch}; }}"
     );
     assert_eq!(cmd, expected, "no-token command shape must stay pinned");
 }
@@ -615,11 +621,14 @@ fn resume_command_without_token_pins_the_exact_command() {
     );
     let scrub = crate::core::claude_env_scrub::env_unset_flags();
     let alt = crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT;
+    // #6766: see the spawn-path pin above for why these two are interpolated.
+    let clock = super::claude_code_exit_hint::launch_clock_prefix();
+    let dispatch = super::claude_code_exit_hint::exit_dispatch_suffix();
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
-             env -u ANTHROPIC_API_KEY{scrub} {alt} claude \
-             --setting-sources project,local --dangerously-skip-permissions --resume abc-123; \
-             echo 'tm: run `tm` to relaunch this session'; }}"
+             {clock}env -u ANTHROPIC_API_KEY{scrub} {alt} claude \
+             --setting-sources project,local --dangerously-skip-permissions --resume abc-123\
+             {dispatch}; }}"
     );
     assert_eq!(
         cmd, expected,
@@ -1773,15 +1782,44 @@ fn cd_and_group_quotes_workdir_with_space() {
     assert_eq!(cmd, "cd '/Users/John Doe/work' && { echo hi; }");
 }
 
-// ── #2023 component D: on-exit relaunch hint ────────────────────────────
+// ── #2023 component D / #6766: what the pane reports when claude exits ──
+
+/// The relaunch hint as the pane prints it — hard-coded here on purpose.
+///
+/// Why: deriving it from `claude_code_exit_hint::RELAUNCH_HINT` would make the
+/// "a failed launch must NOT print this" assertions below pass even if the
+/// constant were emptied, which is exactly the silent failure #6766 is about.
+const PANE_RELAUNCH_HINT: &str = "tm: run `tm` to relaunch this session";
+
+/// Run a composed pane command through `/bin/sh` and return its stdout.
+///
+/// Why: #6766 is a defect in what an operator SEES in the pane, and the
+/// pre-fix command satisfied every string assertion anyone had written about
+/// it. Executing the real composed command is the only assertion that
+/// distinguishes "the hint is somewhere in the string" from "the hint is what
+/// the pane actually printed for this exit".
+/// What: `sh -c <cmd>`, stdout trimmed. `cwd` is `/tmp` so the leading `cd`
+/// resolves on every platform this crate builds for.
+fn run_pane_command(cmd: &str) -> String {
+    let out = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .expect("/bin/sh must be executable");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
 
 #[test]
-fn spawn_command_prints_relaunch_hint_after_claude_exits() {
-    // The hint must appear AFTER the claude invocation, separated by `;` so
-    // it only runs once claude exits and control returns to the pane shell.
+fn spawn_command_dispatches_on_the_claude_exit_status() {
+    // #6766: a spawn whose runtime failed outright must say so. Before this
+    // fix the `; echo '<hint>'` suffix was unconditional, so this pane printed
+    // "run `tm` to relaunch this session" and nothing else — indistinguishable
+    // from a session the operator had worked in and exited.
     let cmd = spawn_command(
-        Path::new(TEST_CWD),
-        "claude",
+        Path::new("/tmp"),
+        // `false` stands in for a `claude` that refuses and exits non-zero.
+        // `env` resolves it from PATH, so this needs no absolute path.
+        "false",
         None,
         TEST_SESSION_ID,
         None,
@@ -1789,22 +1827,75 @@ fn spawn_command_prints_relaunch_hint_after_claude_exits() {
         None,
         &[],
     );
+    let printed = run_pane_command(&cmd);
     assert!(
-        cmd.contains("; echo 'tm: run `tm` to relaunch this session'"),
-        "spawn command must print the relaunch hint after claude exits: {cmd}"
+        !printed.contains(PANE_RELAUNCH_HINT),
+        "a failed spawn must not print the clean-exit relaunch hint, got {printed:?}"
     );
-    let claude_pos = cmd.find(" claude ").expect("claude invocation present");
-    let hint_pos = cmd.find("; echo").expect("relaunch hint present");
     assert!(
-        claude_pos < hint_pos,
-        "relaunch hint must come AFTER the claude invocation: {cmd}"
+        printed.contains("tm: claude exited with status"),
+        "a failed spawn must report the exit status, got {printed:?}"
     );
 }
 
 #[test]
-fn resume_command_prints_relaunch_hint_after_claude_exits() {
-    // Same invariant for the resume path (--resume branch here; the
-    // --continue/plain-spawn branches share the same trailing suffix).
+fn resume_command_dispatches_on_the_claude_exit_status() {
+    // Same invariant on the resume path — the one #6766 was reported against.
+    let cmd = resume_command(
+        Path::new("/tmp"),
+        "false",
+        None,
+        Some("abc-123"),
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+    );
+    let printed = run_pane_command(&cmd);
+    assert!(
+        !printed.contains(PANE_RELAUNCH_HINT),
+        "a failed relaunch must not print the clean-exit relaunch hint, got {printed:?}"
+    );
+    assert!(
+        printed.contains("tm: claude exited with status"),
+        "a failed relaunch must report the exit status, got {printed:?}"
+    );
+}
+
+#[test]
+fn resume_command_reports_an_immediate_zero_exit_as_a_refused_relaunch() {
+    // #6766, the observed #6765 transcript: Claude Code declined to attach,
+    // printed why, and exited ZERO. Exit status alone cannot see that, so the
+    // elapsed floor must — otherwise this pane is byte-identical to a clean
+    // exit and the operator is told to relaunch a session that never started.
+    let cmd = resume_command(
+        Path::new("/tmp"),
+        // `true` stands in for a claude that refuses but exits successfully.
+        "true",
+        None,
+        Some("abc-123"),
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+    );
+    let printed = run_pane_command(&cmd);
+    assert!(
+        !printed.contains(PANE_RELAUNCH_HINT),
+        "a refused relaunch must not print the clean-exit relaunch hint, got {printed:?}"
+    );
+    assert!(
+        printed.contains("this launch was refused"),
+        "a refused relaunch must name the refusal, got {printed:?}"
+    );
+}
+
+#[test]
+fn resume_command_reports_after_the_claude_invocation() {
+    // The report must still be sequenced AFTER the runtime, so it only runs
+    // once claude exits and control returns to the pane shell (#2023 D).
     let cmd = resume_command(
         Path::new(TEST_CWD),
         "claude",
@@ -1816,15 +1907,11 @@ fn resume_command_prints_relaunch_hint_after_claude_exits() {
         None,
         &[],
     );
-    assert!(
-        cmd.contains("; echo 'tm: run `tm` to relaunch this session'"),
-        "resume command must print the relaunch hint after claude exits: {cmd}"
-    );
     let resume_pos = cmd.find("--resume").expect("--resume flag present");
-    let hint_pos = cmd.find("; echo").expect("relaunch hint present");
+    let report_pos = cmd.find("; __tm_rc=$?").expect("exit dispatch present");
     assert!(
-        resume_pos < hint_pos,
-        "relaunch hint must come AFTER --resume: {cmd}"
+        resume_pos < report_pos,
+        "the on-exit report must come AFTER --resume: {cmd}"
     );
 }
 
