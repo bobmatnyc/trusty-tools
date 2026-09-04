@@ -14,8 +14,9 @@
 #   engagement.template.toml`, and runs the gate against them with `--repo`.
 #   Asserts exit status and output for both modes, that a rewrite is
 #   idempotent to the byte, that the commented `# [tools]` digest example is
-#   never rewritten, and that an unreadable table fails closed. The last case
-#   runs `--check` against the REAL checked-out template.
+#   never rewritten, and that an unreadable table — or an unreadable
+#   `cargo metadata` — fails closed. The last case runs `--check` against the
+#   REAL checked-out template.
 #
 # Test: this IS the test. Run directly:
 #   bash scripts/refresh-engagement-pins-selftest.sh
@@ -220,6 +221,18 @@ run_case "missing [tools] table" 2 "no readable pins" "$repo" --check
 repo="$(mkrepo notemplate tga=7.1.0)"
 rm -f "$(template_path "$repo")"
 run_case "missing template file" 2 "no template at" "$repo" --check
+
+# `cargo metadata` is the only source of workspace versions, so a run that
+# cannot get one has nothing to compare a pin against. The template here is
+# readable and its pins parse — the failure is downstream of that, which is the
+# arm a fixture with a broken template would never reach.
+repo="$(mkrepo badmetadata tga=7.1.0)"
+cat > "$(template_path "$repo")" <<'EOF'
+[tools]
+tga = "7.1.0"
+EOF
+printf '[workspace\nmembers = [\n' > "${repo}/Cargo.toml"
+run_case "unreadable cargo metadata" 2 "'cargo metadata --no-deps' failed" "$repo" --check
 
 # ===========================================================================
 # 7. THE LIVE REPO. Proves the checked-out template is current, rather than

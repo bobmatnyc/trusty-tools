@@ -1274,15 +1274,20 @@ api_key = "lin_api_client_a"
         assert!(text.contains("name_with_owner = \"acme/web\""), "{text}");
     }
 
-    /// The constant `taudit distribute` ships is the file on disk, not a copy.
+    /// The constant `taudit distribute` ships still matches the file on disk.
     ///
     /// Why: #6772 — `scripts/refresh-engagement-pins.sh` and its
     /// `preflight-publish.sh` CHECK 10 both edit and read the FILE, while every
-    /// packaged copy comes from the CONSTANT. `include_str!` already makes
-    /// those the same bytes at compile time, so this assertion is close to
-    /// tautological; what it actually guards is the provenance, catching a
-    /// future edit that replaces the `include_str!` with an inline literal and
-    /// puts the release gate back to checking a file nothing ships.
+    /// packaged copy comes from the CONSTANT. While the `include_str!` is
+    /// there this assertion is tautological: the two are the same bytes by
+    /// construction at compile time.
+    ///
+    /// What it catches is the NEXT DIVERGENCE after someone freezes a copy.
+    /// An inline literal replacing the `include_str!` passes for as long as it
+    /// holds the bytes it was copied from, so this test does not fire on the
+    /// edit itself. It fires the first time the file moves out from under that
+    /// copy — the next `refresh-engagement-pins.sh` run — which is when the
+    /// release gate would otherwise go back to checking a file nothing ships.
     #[test]
     fn the_compiled_engagement_template_is_the_file_on_disk() {
         // #6772: the release gate edits this path; the binary ships the constant.

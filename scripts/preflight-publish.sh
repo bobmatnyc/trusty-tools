@@ -254,6 +254,13 @@
 #     published tga 7.0.0 / 0.12.6 / 0.33.1, with every other check green
 #     (#6772; PR #6723 was the previous instance).
 #
+#     FAILS CLOSED ON A RESULT IT CANNOT READ. Any exit but 0 or 1 means the
+#     pins could not be read at all. Exit 1 means stale pins EXIST, so at least
+#     one `STALE <pkg> pinned=<x> workspace=<y>` line must parse out of the
+#     output; if none does, the two scripts disagree about that line's format
+#     and this check has no idea which pins are stale — a FAIL, not the WARN the
+#     empty-list path used to reach.
+#
 #     No override flag. The remedy is one command:
 #     `scripts/refresh-engagement-pins.sh`, then commit the template.
 #
@@ -292,11 +299,12 @@
 #   half a four-minute rustdoc run had kept untested. Check 6 has
 #   scripts/check-tag-publish-parity-selftest.sh and check 7 has
 #   scripts/check-ui-bundle-freshness-selftest.sh; both drive every failure
-#   branch of the delegated script against fixtures. Check 10 has
-#   scripts/refresh-engagement-pins-selftest.sh, which drives the delegated
-#   comparison over synthetic workspaces; THIS script's published/unpublished
-#   decision over that comparison's output is bound to the live crates.io
-#   registry, like checks 1-4, and is exercised by running the script.
+#   branch of the delegated script against fixtures. Check 10 has TWO, for the
+#   same reason check 5 does: scripts/refresh-engagement-pins-selftest.sh drives
+#   the delegated comparison over synthetic workspaces, and
+#   scripts/preflight-check10-selftest.sh drives THIS script's decision over
+#   that comparison's output — every arm including the fail-closed one, with a
+#   stub gate on REPO_ROOT and a stub curl standing in for crates.io.
 #   Verified by construction:
 #     (a) FAIL mode — run from an unmerged feature branch (HEAD != origin/main)
 #         to demonstrate check 1 failing.
@@ -1589,6 +1597,22 @@ check10_engagement_pins() {
         ;;
     esac
   done < <(grep '^STALE ' "$log" || true)
+
+  # #6772: rc=1 is refresh-engagement-pins.sh saying "stale pins exist", so at
+  # least one STALE line MUST have parsed. All three buckets empty means the
+  # grep matched nothing — the two scripts disagree about that line's format —
+  # and every guard below is skipped, landing on the unconditional WARN with an
+  # empty list. Fail closed instead: a stale-pins result must never pass.
+  if [ -z "$blocking" ] && [ -z "$lagging" ] && [ -z "$unverified" ]; then
+    echo "[FAIL] engagement-pins: refresh-engagement-pins.sh --check reported stale" >&2
+    echo "       pins (exit 1), but no 'STALE <pkg> pinned=<x> workspace=<y>' line" >&2
+    echo "       parsed out of its output, so this gate cannot say WHICH pins are" >&2
+    echo "       stale or whether their siblings ship in this train." >&2
+    echo "       The two scripts disagree about that line's format. Full output" >&2
+    echo "       (${log}):" >&2
+    sed 's/^/       /' "$log" >&2
+    return 1
+  fi
 
   if [ -n "$unverified" ]; then
     echo "[FAIL] engagement-pins: crates.io would not say whether a stale pin's sibling" >&2
