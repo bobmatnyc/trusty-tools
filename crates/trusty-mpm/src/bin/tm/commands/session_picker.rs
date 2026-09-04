@@ -488,107 +488,6 @@ impl SessionFilter {
     }
 }
 
-/// Apply a [`SessionFilter`] to a session list (#3483).
-///
-/// Why: the static table and the interactive picker must filter identically, so
-/// both call this rather than open-coding the predicate.
-/// What: keeps the sessions [`SessionFilter::matches`] accepts. `filter = None`
-/// is a no-op (returns `sessions` unchanged).
-/// Test: `filter_sessions_by_term_matches_name`,
-/// `filter_sessions_by_term_matches_task`,
-/// `filter_sessions_by_term_matches_source_id`,
-/// `filter_sessions_by_term_is_case_insensitive`,
-/// `filter_sessions_by_term_no_match_returns_empty`,
-/// `filter_sessions_by_term_none_is_noop`,
-/// `filter_sessions_by_name_ignores_non_name_columns`.
-pub(crate) fn filter_sessions_by_term(
-    sessions: Vec<ManagedSessionSummary>,
-    filter: Option<&SessionFilter>,
-) -> Vec<ManagedSessionSummary> {
-    let Some(filter) = filter else {
-        return sessions;
-    };
-    sessions.into_iter().filter(|s| filter.matches(s)).collect()
-}
-
-/// The attached→active→everything-else group a session belongs in (owner
-/// request 2026-07-29).
-///
-/// Why: Bob's ask — the listing should group attached sessions first, then
-/// active ones, then the rest (stopped/errored/provisioning/etc.) — ABOVE
-/// whatever `recent`/`alpha` secondary order the operator picked, so a
-/// session they're actively connected to never scrolls below a merely-recent
-/// stopped one.
-/// What: `0` when `s.attached` (a client is connected RIGHT NOW — the
-/// strongest signal, mirrors [`session_picker_render::state_color`](crate::commands::session_picker_render::state_color)'s own
-/// precedence); `1` for `state == "active"` (not attached); `2` for every
-/// other state. Lower sorts first.
-/// Test: `sort_sessions_recent_groups_attached_before_active_before_stopped`,
-/// `sort_sessions_alpha_groups_attached_before_active_before_stopped`.
-fn group_rank(s: &ManagedSessionSummary) -> u8 {
-    if s.attached {
-        0
-    } else if s.state == "active" {
-        1
-    } else {
-        2
-    }
-}
-
-/// Sort `sessions` in place per [`SessionSortArg`] (#3483), grouped
-/// attached→active→everything-else (owner request 2026-07-29).
-///
-/// Why: shared by the static table (`tm ls` / `tm sessions ls`) and the
-/// interactive picker so both views order sessions identically.
-/// What: primary key is [`group_rank`] (attached, then active, then the
-/// rest); within each group, `Recent` sorts descending by [`recency_key`]
-/// (most recent first) and `Alpha` sorts ascending, case-insensitively, by
-/// `name`. Both use the stable `sort_by`, so equal keys preserve the
-/// daemon's original relative order.
-/// Test: `sort_sessions_recent_orders_by_last_activity`,
-/// `sort_sessions_recent_falls_back_to_created_at`,
-/// `sort_sessions_alpha_orders_by_name_case_insensitive`,
-/// `sort_sessions_recent_groups_attached_before_active_before_stopped`,
-/// `sort_sessions_alpha_groups_attached_before_active_before_stopped`.
-pub(crate) fn sort_sessions(sessions: &mut [ManagedSessionSummary], sort: SessionSortArg) {
-    match sort {
-        SessionSortArg::Recent => {
-            sessions.sort_by(|a, b| {
-                group_rank(a)
-                    .cmp(&group_rank(b))
-                    .then_with(|| recency_key(b).cmp(recency_key(a)))
-            });
-        }
-        SessionSortArg::Alpha => {
-            sessions.sort_by(|a, b| {
-                group_rank(a)
-                    .cmp(&group_rank(b))
-                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            });
-        }
-    }
-}
-
-/// Best-available recency signal for a session (#3483).
-///
-/// Why: `last_activity_at` reflects actual usage (the daemon updates it on
-/// every interaction), which is the signal an operator scanning `tm ls`
-/// actually wants — a session touched five minutes ago should outrank one
-/// merely CREATED first. `created_at` is the fallback for legacy/additive
-/// records that predate the activity timestamp; a session with neither sorts
-/// last (empty string is the lexicographic minimum).
-/// What: RFC 3339 timestamps compare correctly as plain strings because the
-/// daemon always emits them in the same normalized (UTC, fixed-precision)
-/// form.
-/// Test: covered indirectly by `sort_sessions_recent_orders_by_last_activity`
-/// and `sort_sessions_recent_falls_back_to_created_at`.
-fn recency_key(s: &ManagedSessionSummary) -> &str {
-    s.last_activity_at
-        .as_deref()
-        .or(s.created_at.as_deref())
-        .unwrap_or("")
-}
-
 /// Fetch and filter managed sessions in one call — the shared picker fetch path.
 ///
 /// Why: the interactive picker (both call sites) needs the deserialized, filtered
@@ -975,10 +874,18 @@ pub(crate) fn parse_picker_choice(
 /// without requiring the operator to remember session names or UUIDs. After a
 /// detach, the picker is redisplayed rather than exiting to the shell — the
 /// common "pick → Ctrl-b d → pick again" flow stays in one command.
-/// What: loops: print menu, read one line, dispatch, then re-fetch the session
-/// list (via [`fetch_live_sessions`], honoring the scope) so the next iteration
-/// shows current state. Exits cleanly on `Quit`, EOF (Ctrl-D), or unrecognised
-/// input; propagates attach/launch errors.
+/// What: loops: derive the render state through [`prepare_menu`], print menu,
+/// read one line, dispatch, then re-fetch the session list (via
+/// [`fetch_live_sessions`], honoring the scope) so the next iteration shows
+/// current state. Exits cleanly on `Quit`, EOF (Ctrl-D), or unrecognised input;
+/// propagates attach/launch errors.
+///
+/// **The caller need not pre-sort (#6753).** [`prepare_menu`] runs at the top of
+/// the loop and owns the order, so the FIRST menu is ordered exactly like every
+/// later one whatever order the caller hands in. Normalization used to run at the
+/// bottom only, which left the bare-`tm` path rendering its first menu in the
+/// daemon's ascending-slot order while `tm ls` — whose connector sorted before
+/// calling — rendered the scope's.
 ///   • `Resume(i)` → [`super::guided_resume::resume_guided_session`] which
 ///     handles daemon restart when needed and then attaches internally;
 ///   • `LaunchNew(req)` → [`super::guided_launch::launch_new_session_and_attach`]
@@ -1040,36 +947,20 @@ pub(crate) async fn run_tty_picker(
     // is honored even though `should_show_picker` already gates on a TTY.
     let use_color = super::session_picker_render::picker_use_color(std::io::stderr().is_terminal());
     loop {
+        // #6753: the whole render state — the ORDER included — comes from
+        // `prepare_menu`, at the TOP of the loop. The normalization used to run
+        // at the bottom only, so the first menu printed the daemon's
+        // ascending-slot order while every later one printed the scope's. The
+        // menu numbers are still each session's STABLE daemon-assigned slot
+        // (#3034) with `slots_are_stale`'s positional fallback for a daemon that
+        // reports none (#3678), and the launch number is still the MAXIMUM slot
+        // rather than the last row's (#3723) — see `prepare_menu` and
+        // `next_launch_slot`.
+        let menu = super::session_picker_order::prepare_menu(sessions, scope);
+        sessions = menu.sessions;
+        let (stale_slots, new_idx, first_needs_restart) =
+            (menu.stale_slots, menu.new_idx, menu.first_needs_restart);
         eprintln!();
-        // #3034: the menu number is each session's STABLE daemon-assigned
-        // slot, never a recomputed positional index — a tombstoned row keeps
-        // its slot in the printed menu too, so an operator who typed that
-        // number from an earlier listing sees exactly why it no longer
-        // resolves to a session, rather than it silently vanishing.
-        //
-        // #3678: THAT guarantee only holds when the daemon actually reports
-        // real slots. A daemon process that predates #3034 (i.e. hasn't been
-        // restarted since the `tm` binary was upgraded) omits `slot`
-        // entirely, and `#[serde(default)]` silently decodes it to `0` for
-        // every row — `slots_are_stale` detects exactly that shape, and
-        // `shown_slot`/the `next_slot` fallback below keep the printed
-        // numbers distinct and incrementing (positional-only, not stable
-        // across a re-fetch) instead of every row printing `[0]`.
-        let stale_slots = slots_are_stale(&sessions);
-        // #3723: see `next_launch_slot`'s doc — MUST be the maximum slot
-        // across the whole (possibly reordered) slice, never
-        // `sessions.last().slot + 1`, to avoid colliding with an existing
-        // session's own slot after a `sort_sessions` reorder.
-        let new_idx = next_launch_slot(&sessions);
-        // #2148: bare Enter must not silently restart (kill+recreate the tmux
-        // pane of) a stopped/errored session — only used to pick the menu's
-        // default hint and to gate `parse_picker_choice`'s bare-Enter branch.
-        // A tombstoned position 0 is never `stopped`/`errored` in this sense
-        // (`decide_for_index` checks `deleted` first, ahead of this flag).
-        let first_needs_restart = sessions
-            .first()
-            .map(|s| !s.deleted && super::guided_resume::needs_restart(&s.state))
-            .unwrap_or(false);
         // #4965: the `[key] description` legend is built by
         // `session_picker_render::command_legend` — column-aligned in BOTH
         // menus (the populated one used to be ragged), and pure so its wording
@@ -1308,11 +1199,11 @@ pub(crate) async fn run_tty_picker(
 
         // Detached or session ended — re-fetch the list before redisplaying.
         // #1809: the shared fetch path applies the same live-only tombstone filter.
-        // Issue TBD: re-apply the scope's filter/sort so the redisplayed menu
-        // never drifts from the one the operator picked against.
+        // #6753: the scope's filter/sort is NOT re-applied here any more — the top
+        // of the loop does it for this fresh vec exactly as it did for the
+        // caller's. Normalizing in one place is what makes the first menu and
+        // every later one the same order rather than two orders to keep in step.
         sessions = fetch_live_sessions(client, url, scope.source_id.as_deref(), false).await?;
-        sessions = filter_sessions_by_term(sessions, scope.term.as_ref());
-        sort_sessions(&mut sessions, scope.sort);
     }
     Ok(())
 }
