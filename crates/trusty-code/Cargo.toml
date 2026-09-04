@@ -9,7 +9,7 @@ name = "trusty-code"
 # 0.5.1 (#6657): patch — `fs_browse::mpm_registry::parse_owner_repo` (a
 # private fn) now delegates to `trusty_common::github_path::parse_remote_url`
 # instead of its own split logic; no public item changed shape.
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 rust-version.workspace = true
 # license.workspace resolves to "MIT"; LICENSE is kept in-crate for correctness.
