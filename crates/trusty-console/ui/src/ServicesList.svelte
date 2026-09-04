@@ -14,13 +14,22 @@
   is available to a screen reader too. A clickable row's `aria-label` replaces
   the name its cells would compute, so `rowAriaLabel` restates every column in
   it rather than announcing the service and the action alone.
+  #6773: each row now carries TWO graphs side by side, CPU first and memory
+  second, drawn from the one per-service ring so the bar at any x is the same
+  second in both. Each has its own scale — a percentage and a byte count share
+  no axis — and `servicesList.js` computes both.
   Test: `servicesList.test.js` covers the sort, the dash-not-zero rule, the
-  live-sample overlay and which rows are clickable; `barGraph.test.js` covers
-  the row graph's geometry.
+  live-sample overlay, both graph scales and which rows are clickable;
+  `barGraph.test.js` covers the row graph's geometry.
 -->
 <script>
   import BarGraph from './BarGraph.svelte';
-  import { NO_DASHBOARD_HINT, rowGraphSpec, serviceRows } from './servicesList.js';
+  import {
+    NO_DASHBOARD_HINT,
+    rowCpuGraphSpec,
+    rowMemoryGraphSpec,
+    serviceRows,
+  } from './servicesList.js';
 
   /**
    * @type {{
@@ -62,11 +71,16 @@
         <span>Version</span>
         <span>Status</span>
         <span class="num">%CPU</span>
-        <span class="graph-head">CPU · last 10 min</span>
+        <span class="num">MEM</span>
+        <span class="graphs">
+          <span class="graph-head">CPU · last 10 min</span>
+          <span class="graph-head">MEM · last 10 min</span>
+        </span>
       </div>
 
       {#each rows as row (row.id)}
-        {@const graph = rowGraphSpec(row)}
+        {@const cpuGraph = rowCpuGraphSpec(row)}
+        {@const memGraph = rowMemoryGraphSpec(row)}
         {#if row.hasDashboard}
           <!-- #6642: the whole row opens the dashboard, so the row IS the
                button — same one-action-means-whole-card rule the card grid
@@ -85,12 +99,21 @@
               </span>
             </span>
             <span class="mono num">{row.cpuLabel}</span>
-            <span class="graph">
+            <span class="mono num">{row.memoryLabel}</span>
+            <!-- #6773: CPU first, memory second, in one container so the pair
+                 stays side by side and equal-width at every viewport. -->
+            <span class="graphs">
               <BarGraph
-                values={graph.values}
-                max={graph.max}
+                values={cpuGraph.values}
+                max={cpuGraph.max}
                 height="1.6rem"
-                label={graph.label}
+                label={cpuGraph.label}
+              />
+              <BarGraph
+                values={memGraph.values}
+                max={memGraph.max}
+                height="1.6rem"
+                label={memGraph.label}
               />
             </span>
           </button>
@@ -109,12 +132,21 @@
               </span>
             </span>
             <span class="mono num">{row.cpuLabel}</span>
-            <span class="graph">
+            <span class="mono num">{row.memoryLabel}</span>
+            <!-- #6773: CPU first, memory second, in one container so the pair
+                 stays side by side and equal-width at every viewport. -->
+            <span class="graphs">
               <BarGraph
-                values={graph.values}
-                max={graph.max}
+                values={cpuGraph.values}
+                max={cpuGraph.max}
                 height="1.6rem"
-                label={graph.label}
+                label={cpuGraph.label}
+              />
+              <BarGraph
+                values={memGraph.values}
+                max={memGraph.max}
+                height="1.6rem"
+                label={memGraph.label}
               />
             </span>
           </div>
@@ -154,11 +186,12 @@
     overflow: hidden;
   }
 
-  /* One track per column. The graph takes the remaining width so it is the
-     widest cell — a 600-bar window needs the room. */
+  /* One track per column; the last one holds BOTH graphs and takes the
+     remaining width — a 600-bar window needs the room. */
   .row {
     display: grid;
-    grid-template-columns: minmax(9rem, 1.2fr) minmax(4rem, auto) 6.5rem 4.5rem minmax(8rem, 2fr);
+    grid-template-columns:
+      minmax(8rem, 1.1fr) minmax(4rem, auto) 6.5rem 4.5rem 5rem minmax(12rem, 2fr);
     align-items: center;
     gap: var(--trusty-space-4);
     width: 100%;
@@ -199,7 +232,19 @@
   .name { font-weight: 600; color: var(--trusty-text-primary); }
   .mono { font-family: var(--trusty-mono); font-size: var(--trusty-fs-xs); }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .graph { display: block; min-width: 0; }
+
+  /* #6773: the graph pair is its own two-track grid, CPU left and memory right.
+     Equal `1fr` tracks mean the two share one x-scale at every viewport width —
+     a reader comparing a CPU bar to the memory bar above it must not be reading
+     two different time compressions. `min-width: 0` on both the container and
+     its children is what lets an SVG that wants to be wide actually shrink. */
+  .graphs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--trusty-space-3);
+    min-width: 0;
+  }
+  .graphs > :global(*) { min-width: 0; }
 
   /* The same theme-adaptive stamp ServiceCard used, kept because it is the one
      badge in this crate whose colour is chosen per status by
@@ -235,12 +280,15 @@
     border: 0;
   }
 
-  @media (max-width: 720px) {
-    /* Below this width five columns crush; the graph moves to its own row. */
+  @media (max-width: 900px) {
+    /* Below this width six columns crush, so the graph PAIR drops to its own
+       row — still side by side there, because the owner's ruling is that the
+       two are read together and stacking them would break that at every width
+       a laptop actually uses. */
     .row {
-      grid-template-columns: minmax(7rem, 1fr) auto 5.5rem 3.5rem;
+      grid-template-columns: minmax(7rem, 1fr) auto 5.5rem 3.5rem 4.5rem;
     }
-    .graph { grid-column: 1 / -1; }
-    .row.head .graph-head { display: none; }
+    .graphs { grid-column: 1 / -1; }
+    .row.head .graphs { display: none; }
   }
 </style>

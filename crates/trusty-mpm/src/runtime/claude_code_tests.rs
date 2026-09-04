@@ -219,7 +219,6 @@ fn resume_command_loads_the_user_tier_when_config_dir_is_relocated() {
             "/home/bob/.trusty-tools/trusty-mpm/claude-config",
         )),
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -354,11 +353,17 @@ fn spawn_command_without_token_pins_the_exact_command() {
     // the scrub segment is — this pins its POSITION, while its literal text is
     // pinned in `core::alt_screen`'s `shell_assignment_pins_the_defaulting_form`.
     let alt = crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT;
+    // #6766 replaced the unconditional `; echo '<hint>'` with a status/elapsed
+    // branch, and added the launch clock that feeds it. Both are interpolated
+    // from production code for the same reason the scrub and alt-screen
+    // segments are — this test pins their POSITION; their literal text is
+    // pinned by `claude_code_exit_hint`'s own executing tests.
+    let clock = super::claude_code_exit_hint::launch_clock_prefix();
+    let dispatch = super::claude_code_exit_hint::exit_dispatch_suffix();
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
-             env -u ANTHROPIC_API_KEY{scrub} {alt} claude \
-             --setting-sources project,local --dangerously-skip-permissions; \
-             echo 'tm: run `tm` to relaunch this session'; }}"
+             {clock}env -u ANTHROPIC_API_KEY{scrub} {alt} claude \
+             --setting-sources project,local --dangerously-skip-permissions{dispatch}; }}"
     );
     assert_eq!(cmd, expected, "no-token command shape must stay pinned");
 }
@@ -403,7 +408,6 @@ fn resume_command_scrubs_inherited_session_markers() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -564,7 +568,6 @@ fn resume_command_sets_oauth_token_when_available() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         Some("sk-ant-oat01-fake-token"),
@@ -588,7 +591,6 @@ fn resume_command_omits_oauth_token_when_absent() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -611,7 +613,6 @@ fn resume_command_without_token_pins_the_exact_command() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -620,11 +621,14 @@ fn resume_command_without_token_pins_the_exact_command() {
     );
     let scrub = crate::core::claude_env_scrub::env_unset_flags();
     let alt = crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT;
+    // #6766: see the spawn-path pin above for why these two are interpolated.
+    let clock = super::claude_code_exit_hint::launch_clock_prefix();
+    let dispatch = super::claude_code_exit_hint::exit_dispatch_suffix();
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
-             env -u ANTHROPIC_API_KEY{scrub} {alt} claude \
-             --setting-sources project,local --dangerously-skip-permissions --resume abc-123; \
-             echo 'tm: run `tm` to relaunch this session'; }}"
+             {clock}env -u ANTHROPIC_API_KEY{scrub} {alt} claude \
+             --setting-sources project,local --dangerously-skip-permissions --resume abc-123\
+             {dispatch}; }}"
     );
     assert_eq!(
         cmd, expected,
@@ -686,7 +690,6 @@ fn resume_command_defaults_the_alternate_screen_off() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -732,7 +735,6 @@ fn env_bin_prefix_quotes_config_dir_with_space() {
         "claude",
         Some(dir),
         None,
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1121,7 +1123,6 @@ fn resume_command_with_id_uses_resume_flag() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1153,7 +1154,6 @@ fn resume_command_exports_managed_session_id() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1189,7 +1189,6 @@ fn resume_command_sets_claude_config_dir() {
         "claude",
         Some(dir),
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1212,16 +1211,21 @@ fn resume_command_sets_claude_config_dir() {
 }
 
 #[test]
-fn resume_command_without_id_with_prior_conv_uses_continue() {
-    // Why (#1744 / #1840): when no claude_session_id is stored but prior
-    // conversation history exists, --continue resumes the most-recent
-    // conversation in the workspace rather than starting fresh.
+fn resume_command_without_id_never_uses_continue() {
+    // Why (#6765): this test replaces
+    // `resume_command_without_id_with_prior_conv_uses_continue`, which asserted
+    // the OPPOSITE — that a missing id falls back to `--continue`. The command
+    // exports the managed `CLAUDE_CONFIG_DIR`, so `--continue` resolved against
+    // a store the caller never inspected and could attach (or fail to attach)
+    // to an unrelated conversation. With no id there is no safe target: launch
+    // fresh.
     let cmd = resume_command(
         Path::new(TEST_CWD),
         "claude",
+        Some(Path::new(
+            "/home/bob/.trusty-tools/trusty-mpm/claude-config",
+        )),
         None,
-        None,
-        true,
         TEST_SESSION_ID,
         None,
         None,
@@ -1229,8 +1233,8 @@ fn resume_command_without_id_with_prior_conv_uses_continue() {
         &[],
     );
     assert!(
-        cmd.contains("--continue"),
-        "resume command without id + prior conv must use --continue: {cmd}"
+        !cmd.contains("--continue"),
+        "resume command without id must NEVER use --continue: {cmd}"
     );
     assert!(
         !cmd.contains("--resume"),
@@ -1248,7 +1252,6 @@ fn resume_command_without_id_no_prior_conv_uses_plain_spawn() {
         "claude",
         None,
         None,
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1269,45 +1272,12 @@ fn resume_command_without_id_no_prior_conv_uses_plain_spawn() {
     );
 }
 
-#[test]
-fn has_prior_conversation_returns_false_for_fresh_workspace() {
-    // Why (#1840): a fresh worktree has no Claude conversation history;
-    // has_prior_conversation must return false to avoid "No conversation found".
-    // Uses has_prior_conversation_in with a temp projects_dir — no HOME env
-    // mutation, making this test safe for parallel execution.
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let projects_dir = tmp.path().join("projects");
-    // projects_dir does not exist → always returns false.
-    assert!(
-        !has_prior_conversation_in(tmp.path(), &projects_dir),
-        "no projects dir → false"
-    );
-    // Create the projects dir but with no entry for this workspace → still false.
-    std::fs::create_dir_all(&projects_dir).unwrap();
-    assert!(
-        !has_prior_conversation_in(tmp.path(), &projects_dir),
-        "projects dir exists but no entry for this workspace → false"
-    );
-}
-
-#[test]
-fn has_prior_conversation_returns_true_when_jsonl_exists() {
-    // Why (#1840): verify the positive path — a workspace with a .jsonl file
-    // in its encoded project dir must return true.
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let cwd = tmp.path().join("my-workspace");
-    std::fs::create_dir_all(&cwd).unwrap();
-    let projects_dir = tmp.path().join("projects");
-    // Encode the cwd path as Claude does: replace '/' with '-'.
-    let encoded = cwd.to_string_lossy().replace('/', "-");
-    let project_dir = projects_dir.join(&encoded);
-    std::fs::create_dir_all(&project_dir).unwrap();
-    std::fs::write(project_dir.join("session.jsonl"), "{}").unwrap();
-    assert!(
-        has_prior_conversation_in(&cwd, &projects_dir),
-        "workspace with .jsonl must return true"
-    );
-}
+// #6765: `has_prior_conversation_returns_false_for_fresh_workspace` and
+// `has_prior_conversation_returns_true_when_jsonl_exists` were deleted with the
+// functions they covered. The `--continue` branch they gated is gone from both
+// relaunch paths, so there is no eligibility question left to answer; what
+// replaced them is `session_id_exists_*` (which reads the session's OWN store)
+// plus the two `#6765` never-a-bare-continue tests at the end of this file.
 
 #[serial_test::serial]
 #[test]
@@ -1325,7 +1295,7 @@ fn spawn_resume_with_id_uses_resume_flag() {
     let cwd = Path::new("/tmp");
     let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir()
         .expect("config dir resolves under redirected HOME");
-    let encoded = cwd.to_string_lossy().replace('/', "-");
+    let encoded = encode_project_dir(cwd);
     let project_dir = config_dir.join("projects").join(&encoded);
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(project_dir.join("my-session-id.jsonl"), "{}").unwrap();
@@ -1359,6 +1329,52 @@ fn spawn_resume_with_id_uses_resume_flag() {
             && key == "TM_MANAGED_SESSION_ID"
             && value == TEST_SESSION_ID),
         "spawn_resume must call tmux set-environment with TM_MANAGED_SESSION_ID: {env_sets:?}"
+    );
+}
+
+#[serial_test::serial]
+#[test]
+fn spawn_resume_uses_resume_flag_for_a_worktree_cwd() {
+    // Why (#6777): the closure condition for this fix, end to end. Every
+    // tm-provisioned workspace sits under `.worktrees/`, and the sibling
+    // `spawn_resume_with_id_uses_resume_flag` uses a DOTLESS `/tmp`, so it
+    // stayed green while every real managed relaunch dropped `--resume` and
+    // started a fresh conversation. The transcript is seeded under the
+    // hand-typed directory name Claude Code really creates for this cwd —
+    // the pre-fix encoder looked under `-tmp-tm6777-proj-.worktrees-w1` and
+    // found nothing.
+    let _home = HomeGuard::set();
+    if ClaudeCodeAdapter::resolve_claude().is_none() {
+        return;
+    };
+    let cwd = Path::new("/tmp/tm6777-proj/.worktrees/w1");
+    let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir()
+        .expect("config dir resolves under redirected HOME");
+    let project_dir = config_dir
+        .join("projects")
+        .join("-tmp-tm6777-proj--worktrees-w1");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::write(project_dir.join("worktree-session-id.jsonl"), "{}").unwrap();
+
+    let fake = FakeTmux::new();
+    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    adapter
+        .spawn_resume(
+            "tmpm-test",
+            None,
+            cwd,
+            "task",
+            Some("worktree-session-id"),
+            TEST_SESSION_ID,
+            &[],
+        )
+        .expect("spawn_resume");
+    let sends = fake.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    assert!(
+        sends[0].1.contains("--resume worktree-session-id"),
+        "a cwd under .worktrees/ must still reach --resume: {}",
+        sends[0].1
     );
 }
 
@@ -1586,7 +1602,9 @@ fn session_id_exists_true_for_real_jsonl_file() {
     let cwd = tmp.path().join("my-workspace");
     std::fs::create_dir_all(&cwd).unwrap();
     let projects_dir = tmp.path().join("projects");
-    let encoded = cwd.to_string_lossy().replace('/', "-");
+    // #6777: build the fixture through the ONE encoder — a hand-rolled
+    // `replace('/', "-")` here would not fold the `.` in a tempdir's name.
+    let encoded = encode_project_dir(&cwd);
     let project_dir = projects_dir.join(&encoded);
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(project_dir.join("abc-123.jsonl"), "{}").unwrap();
@@ -1605,7 +1623,9 @@ fn session_id_exists_false_for_missing_id() {
     let cwd = tmp.path().join("my-workspace");
     std::fs::create_dir_all(&cwd).unwrap();
     let projects_dir = tmp.path().join("projects");
-    let encoded = cwd.to_string_lossy().replace('/', "-");
+    // #6777: build the fixture through the ONE encoder — a hand-rolled
+    // `replace('/', "-")` here would not fold the `.` in a tempdir's name.
+    let encoded = encode_project_dir(&cwd);
     let project_dir = projects_dir.join(&encoded);
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(project_dir.join("other-session.jsonl"), "{}").unwrap();
@@ -1643,16 +1663,131 @@ fn encode_project_dir_replaces_slashes() {
 }
 
 #[test]
+fn encode_project_dir_folds_dot_in_worktrees_path() {
+    // Why (#6777): every tm-provisioned workspace sits under `.worktrees/` or
+    // `.claude/worktrees/`, and Claude Code folds the `.` to `-` exactly as it
+    // folds `/`. Encoding only `/` produced `…-.worktrees-<id>` while the real
+    // directory is `…--worktrees-<id>`, so `session_id_exists` answered false
+    // for every managed session and `--resume` was never passed (#6765).
+    //
+    // Both expected names below are transcribed from a LIVE probe: `claude`
+    // was launched in each of these two directories against a throwaway
+    // CLAUDE_CONFIG_DIR, and these are the project directories it created.
+    assert_eq!(
+        encode_project_dir(Path::new("/private/tmp/tm6777/proj/.worktrees/tm-proj-01")),
+        "-private-tmp-tm6777-proj--worktrees-tm-proj-01"
+    );
+    assert_eq!(
+        encode_project_dir(Path::new(
+            "/private/tmp/tm6777/tool/.claude/worktrees/agent-0123456789abcdef0"
+        )),
+        "-private-tmp-tm6777-tool--claude-worktrees-agent-0123456789abcdef0"
+    );
+}
+
+#[test]
+fn encode_project_dir_folds_every_non_alphanumeric() {
+    // Why (#6777): the rule is `[^a-zA-Z0-9]` → `-`, not `/` → `-`, so every
+    // punctuation class a real path can carry must fold. Established by a live
+    // probe: `claude` launched in a directory literally named
+    // `a_b c@d+e.f~g'h(i)` created a project dir ending `a-b-c-d-e-f-g-h-i-`.
+    // Case is NOT folded — `/Users`, `/Volumes` and `Projects` all survive
+    // capitalised in the live store.
+    for (raw, expected) in [
+        ("/a.b", "-a-b"),
+        ("/a_b", "-a-b"),
+        ("/a b", "-a-b"),
+        ("/a@b", "-a-b"),
+        ("/a+b", "-a-b"),
+        ("/a~b", "-a-b"),
+        ("/a'b", "-a-b"),
+        ("/a(b)", "-a-b-"),
+        ("/a:b", "-a-b"),
+        ("/a#b", "-a-b"),
+        ("/a%b", "-a-b"),
+        ("/a=b", "-a-b"),
+        ("/a,b", "-a-b"),
+        // Already-legal characters pass through untouched.
+        ("/a-b", "-a-b"),
+        ("/AbZ9", "-AbZ9"),
+        // One BMP non-ASCII char is one UTF-16 unit, so one dash.
+        ("/café", "-caf-"),
+        ("/日本", "---"),
+    ] {
+        assert_eq!(
+            encode_project_dir(Path::new(raw)),
+            expected,
+            "encoding {raw} must fold to {expected}"
+        );
+    }
+}
+
+#[test]
+fn encode_project_dir_folds_astral_char_to_two_dashes() {
+    // Why (#6777): Claude Code runs the fold with a JavaScript regex, which
+    // walks UTF-16 code units. A non-BMP character is one Rust `char` but two
+    // UTF-16 units, so it must contribute TWO dashes, not one. Live probe: a
+    // directory named `emo-🚀x` produced a project dir ending `emo---x`.
+    assert_eq!(encode_project_dir(Path::new("/emo-🚀x")), "-emo---x");
+}
+
+#[test]
+fn encode_project_dir_truncates_and_hashes_a_long_path() {
+    // Why (#6777): past 200 characters Claude Code keeps the first 200 and
+    // appends `-<base36 of abs(int32 path hash)>`. tm's own managed worktree
+    // paths already reach 188 characters in the live store, so this branch is
+    // reachable. Both the cwd and the expected name below are transcribed from
+    // a live probe run against a throwaway CLAUDE_CONFIG_DIR — the encoder is
+    // never called to build the expectation.
+    let cwd = "/private/tmp/tm6777/deep/seg00/seg01/seg02/seg03/seg04/seg05/seg06/seg07/seg08/\
+seg09/seg10/seg11/seg12/seg13/seg14/seg15/seg16/seg17/seg18/seg19/seg20/seg21/seg22/seg23/seg24/\
+seg25/seg26/seg27/seg28/seg29/seg30/seg31/seg32/seg33/seg34/seg35/seg36/seg37/seg38/seg39";
+    let expected = "-private-tmp-tm6777-deep-seg00-seg01-seg02-seg03-seg04-seg05-seg06-seg07-\
+seg08-seg09-seg10-seg11-seg12-seg13-seg14-seg15-seg16-seg17-seg18-seg19-seg20-seg21-seg22-seg23-\
+seg24-seg25-seg26-seg27-seg28-s-fy7046";
+    let encoded = encode_project_dir(Path::new(cwd));
+    assert_eq!(
+        encoded, expected,
+        "an over-length cwd must truncate to 200 chars plus the base36 path hash"
+    );
+    assert_eq!(
+        encoded.len(),
+        207,
+        "200 kept characters, one separator, and a 6-character hash"
+    );
+}
+
+#[test]
+fn session_id_exists_finds_hardcoded_dir_name_for_dotted_cwd() {
+    // Why (#6777): the pre-existing hand-typed guard used a DOTLESS cwd, so it
+    // stayed green while every real tm worktree lookup missed. This one seeds
+    // the fixture under the hand-typed name a dotted cwd really produces; the
+    // pre-fix encoder yields `-repo-.worktrees-w1` and finds nothing.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let projects_dir = tmp.path().join("projects");
+    let project_dir = projects_dir.join("-repo--worktrees-w1");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::write(project_dir.join("dotted-id.jsonl"), "{}").unwrap();
+    assert!(
+        session_id_exists_in(Path::new("/repo/.worktrees/w1"), &projects_dir, "dotted-id"),
+        "a cwd under .worktrees/ must resolve to the '--worktrees-' directory \
+             Claude Code really creates"
+    );
+}
+
+#[test]
 fn session_id_exists_finds_hardcoded_dir_name_for_known_cwd() {
     // Why (#2013 cleanup, MEDIUM): the other session_id_exists tests build
-    // their expected path via the SAME formula the implementation uses
-    // (`cwd.to_string_lossy().replace('/', "-")` / `encode_project_dir`),
-    // so they cannot catch a future drift in the encoding scheme — the
-    // test and the code would drift together. This test instead types the
-    // expected directory name BY HAND as a literal, so if the encoding
-    // scheme ever changes (e.g. Claude Code starts hashing paths instead
-    // of dash-joining them), this assertion breaks independently of the
-    // implementation.
+    // their expected path via the SAME `encode_project_dir` the
+    // implementation uses, so they cannot catch a future drift in the
+    // encoding scheme — the test and the code would drift together. This
+    // test instead types the expected directory name BY HAND as a literal,
+    // so if the encoding scheme ever changes this assertion breaks
+    // independently of the implementation.
+    //
+    // #6777: this cwd is DOTLESS, which is why it stayed green through the
+    // dot-folding defect. `session_id_exists_finds_hardcoded_dir_name_for_\
+    // dotted_cwd` is the companion that covers a real worktree path.
     let tmp = tempfile::tempdir().expect("tempdir");
     let projects_dir = tmp.path().join("projects");
     // Hand-typed literal for cwd "/tmp/my-workspace" — NOT derived by
@@ -1697,7 +1832,6 @@ fn spawn_resume_without_id_no_prior_conv_sends_plain_spawn() {
         "__fake_claude__",
         None,
         None,
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1789,7 +1923,6 @@ fn resume_command_prefixes_cd_to_workdir() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
@@ -1814,15 +1947,44 @@ fn cd_and_group_quotes_workdir_with_space() {
     assert_eq!(cmd, "cd '/Users/John Doe/work' && { echo hi; }");
 }
 
-// ── #2023 component D: on-exit relaunch hint ────────────────────────────
+// ── #2023 component D / #6766: what the pane reports when claude exits ──
+
+/// The relaunch hint as the pane prints it — hard-coded here on purpose.
+///
+/// Why: deriving it from `claude_code_exit_hint::RELAUNCH_HINT` would make the
+/// "a failed launch must NOT print this" assertions below pass even if the
+/// constant were emptied, which is exactly the silent failure #6766 is about.
+const PANE_RELAUNCH_HINT: &str = "tm: run `tm` to relaunch this session";
+
+/// Run a composed pane command through `/bin/sh` and return its stdout.
+///
+/// Why: #6766 is a defect in what an operator SEES in the pane, and the
+/// pre-fix command satisfied every string assertion anyone had written about
+/// it. Executing the real composed command is the only assertion that
+/// distinguishes "the hint is somewhere in the string" from "the hint is what
+/// the pane actually printed for this exit".
+/// What: `sh -c <cmd>`, stdout trimmed. `cwd` is `/tmp` so the leading `cd`
+/// resolves on every platform this crate builds for.
+fn run_pane_command(cmd: &str) -> String {
+    let out = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .expect("/bin/sh must be executable");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
 
 #[test]
-fn spawn_command_prints_relaunch_hint_after_claude_exits() {
-    // The hint must appear AFTER the claude invocation, separated by `;` so
-    // it only runs once claude exits and control returns to the pane shell.
+fn spawn_command_dispatches_on_the_claude_exit_status() {
+    // #6766: a spawn whose runtime failed outright must say so. Before this
+    // fix the `; echo '<hint>'` suffix was unconditional, so this pane printed
+    // "run `tm` to relaunch this session" and nothing else — indistinguishable
+    // from a session the operator had worked in and exited.
     let cmd = spawn_command(
-        Path::new(TEST_CWD),
-        "claude",
+        Path::new("/tmp"),
+        // `false` stands in for a `claude` that refuses and exits non-zero.
+        // `env` resolves it from PATH, so this needs no absolute path.
+        "false",
         None,
         TEST_SESSION_ID,
         None,
@@ -1830,43 +1992,91 @@ fn spawn_command_prints_relaunch_hint_after_claude_exits() {
         None,
         &[],
     );
+    let printed = run_pane_command(&cmd);
     assert!(
-        cmd.contains("; echo 'tm: run `tm` to relaunch this session'"),
-        "spawn command must print the relaunch hint after claude exits: {cmd}"
+        !printed.contains(PANE_RELAUNCH_HINT),
+        "a failed spawn must not print the clean-exit relaunch hint, got {printed:?}"
     );
-    let claude_pos = cmd.find(" claude ").expect("claude invocation present");
-    let hint_pos = cmd.find("; echo").expect("relaunch hint present");
     assert!(
-        claude_pos < hint_pos,
-        "relaunch hint must come AFTER the claude invocation: {cmd}"
+        printed.contains("tm: claude exited with status"),
+        "a failed spawn must report the exit status, got {printed:?}"
     );
 }
 
 #[test]
-fn resume_command_prints_relaunch_hint_after_claude_exits() {
-    // Same invariant for the resume path (--resume branch here; the
-    // --continue/plain-spawn branches share the same trailing suffix).
+fn resume_command_dispatches_on_the_claude_exit_status() {
+    // Same invariant on the resume path — the one #6766 was reported against.
+    let cmd = resume_command(
+        Path::new("/tmp"),
+        "false",
+        None,
+        Some("abc-123"),
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+    );
+    let printed = run_pane_command(&cmd);
+    assert!(
+        !printed.contains(PANE_RELAUNCH_HINT),
+        "a failed relaunch must not print the clean-exit relaunch hint, got {printed:?}"
+    );
+    assert!(
+        printed.contains("tm: claude exited with status"),
+        "a failed relaunch must report the exit status, got {printed:?}"
+    );
+}
+
+#[test]
+fn resume_command_reports_an_immediate_zero_exit_as_a_refused_relaunch() {
+    // #6766, the observed #6765 transcript: Claude Code declined to attach,
+    // printed why, and exited ZERO. Exit status alone cannot see that, so the
+    // elapsed floor must — otherwise this pane is byte-identical to a clean
+    // exit and the operator is told to relaunch a session that never started.
+    let cmd = resume_command(
+        Path::new("/tmp"),
+        // `true` stands in for a claude that refuses but exits successfully.
+        "true",
+        None,
+        Some("abc-123"),
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+    );
+    let printed = run_pane_command(&cmd);
+    assert!(
+        !printed.contains(PANE_RELAUNCH_HINT),
+        "a refused relaunch must not print the clean-exit relaunch hint, got {printed:?}"
+    );
+    assert!(
+        printed.contains("this launch was refused"),
+        "a refused relaunch must name the refusal, got {printed:?}"
+    );
+}
+
+#[test]
+fn resume_command_reports_after_the_claude_invocation() {
+    // The report must still be sequenced AFTER the runtime, so it only runs
+    // once claude exits and control returns to the pane shell (#2023 D).
     let cmd = resume_command(
         Path::new(TEST_CWD),
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         None,
         None,
         None,
         &[],
     );
-    assert!(
-        cmd.contains("; echo 'tm: run `tm` to relaunch this session'"),
-        "resume command must print the relaunch hint after claude exits: {cmd}"
-    );
     let resume_pos = cmd.find("--resume").expect("--resume flag present");
-    let hint_pos = cmd.find("; echo").expect("relaunch hint present");
+    let report_pos = cmd.find("; __tm_rc=$?").expect("exit dispatch present");
     assert!(
-        resume_pos < hint_pos,
-        "relaunch hint must come AFTER --resume: {cmd}"
+        resume_pos < report_pos,
+        "the on-exit report must come AFTER --resume: {cmd}"
     );
 }
 
@@ -1881,7 +2091,6 @@ fn resume_command_with_prompt_file_contains_flag() {
         "claude",
         None,
         Some("abc-123"),
-        false,
         TEST_SESSION_ID,
         Some(path),
         None,
@@ -1906,7 +2115,9 @@ fn compose_inplace_args_uses_resume_for_existing_id() {
     let cwd = tmp.path().join("workspace");
     std::fs::create_dir_all(&cwd).unwrap();
     let config_dir = tmp.path().join("config");
-    let encoded = cwd.to_string_lossy().replace('/', "-");
+    // #6777: build the fixture through the ONE encoder — a hand-rolled
+    // `replace('/', "-")` here would not fold the `.` in a tempdir's name.
+    let encoded = encode_project_dir(&cwd);
     let project_dir = config_dir.join("projects").join(&encoded);
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(project_dir.join("existing-id.jsonl"), "{}").unwrap();
@@ -1947,34 +2158,12 @@ fn compose_inplace_args_falls_back_for_missing_id() {
     );
 }
 
-#[serial_test::serial]
-#[test]
-fn compose_inplace_args_uses_continue_when_no_id_but_prior_conv() {
-    // has_prior_conversation (unlike session_id_exists) always looks under
-    // `~/.claude/projects` regardless of `config_dir` — mirroring exactly
-    // what `resume_command`'s own `has_prior_conv` computation does — so
-    // this test redirects $HOME rather than seeding under a config dir.
-    let _home = HomeGuard::set();
-    let home = dirs::home_dir().expect("home resolves under redirected HOME");
-    let cwd = std::path::PathBuf::from("/tmp/inplace-continue-test");
-    // Seed prior conversation history (a .jsonl under the encoded cwd dir)
-    // WITHOUT seeding the specific stale id, so has_prior_conversation is
-    // true but session_id_exists for "stale-id" is false.
-    let encoded = cwd.to_string_lossy().replace('/', "-");
-    let project_dir = home.join(".claude").join("projects").join(&encoded);
-    std::fs::create_dir_all(&project_dir).unwrap();
-    std::fs::write(project_dir.join("some-other-session.jsonl"), "{}").unwrap();
-
-    let args = compose_inplace_args(&cwd, None, Some("stale-id"), None);
-    assert!(
-        !args.contains(&"--resume".to_owned()),
-        "a stale id must not be passed to --resume: {args:?}"
-    );
-    assert!(
-        args.contains(&"--continue".to_owned()),
-        "prior conversation history exists: must fall back to --continue: {args:?}"
-    );
-}
+// #6765: `compose_inplace_args_uses_continue_when_no_id_but_prior_conv` was
+// deleted — it asserted the defect. It seeded `~/.claude/projects` (the
+// OPERATOR store) and required `--continue`, while the composed argv runs under
+// the MANAGED `CLAUDE_CONFIG_DIR`. Its replacement,
+// `compose_inplace_args_never_continues_from_home_store`, seeds the same wrong
+// store and requires a fresh launch instead.
 
 #[test]
 fn compose_inplace_args_carries_prompt_file_unquoted() {
@@ -2400,4 +2589,112 @@ fn prepare_managed_config_writes_no_mcp_json_and_no_approval() {
             "{name} must be declared in user scope: {servers:?}"
         );
     }
+}
+
+// ── #6765: a managed relaunch never emits a bare `--continue` ───────────
+
+#[serial_test::serial]
+#[test]
+fn compose_inplace_args_never_continues_from_home_store() {
+    // Why (#6765): the in-place relaunch exports the MANAGED
+    // `CLAUDE_CONFIG_DIR`, so `claude --continue` resolves "most recent
+    // conversation" against `<config_dir>/projects`, NOT `~/.claude/projects`.
+    // The old eligibility check read `~/.claude/projects` — always populated on
+    // an operator machine — so `--continue` fired unconditionally and attached
+    // to whatever the managed store held most recently. In the reported case
+    // that was a live `claude agents` daemon, which refused the second attach
+    // and exited 0, dropping the pane to a bare shell.
+    //
+    // With no usable id the only safe selection is a FRESH launch: never a bare
+    // `--continue`, whatever `~/.claude` happens to contain.
+    let _home = HomeGuard::set();
+    let home = dirs::home_dir().expect("home resolves under redirected HOME");
+    let cwd = std::path::PathBuf::from("/tmp/inplace-6765-test");
+    // #6777: build the fixture through the ONE encoder — a hand-rolled
+    // `replace('/', "-")` here would not fold the `.` in a tempdir's name.
+    let encoded = encode_project_dir(&cwd);
+    // Populate the OPERATOR store (the wrong one) with prior history.
+    let home_project_dir = home.join(".claude").join("projects").join(&encoded);
+    std::fs::create_dir_all(&home_project_dir).unwrap();
+    std::fs::write(home_project_dir.join("some-other-session.jsonl"), "{}").unwrap();
+    // The managed store the spawned process will actually read stays empty.
+    let config_dir = home.join("managed-config-6765");
+    std::fs::create_dir_all(config_dir.join("projects")).unwrap();
+
+    // (a) a null claude_session_id starts fresh — neither flag.
+    let args = compose_inplace_args(&cwd, Some(&config_dir), None, None);
+    assert!(
+        !args.contains(&"--continue".to_owned()),
+        "a null claude_session_id must never emit a bare --continue: {args:?}"
+    );
+    assert!(
+        !args.contains(&"--resume".to_owned()),
+        "a null claude_session_id must not emit --resume either: {args:?}"
+    );
+
+    // (b) an id absent from the session's OWN store also starts fresh.
+    let args = compose_inplace_args(&cwd, Some(&config_dir), Some("stale-id-6765"), None);
+    assert!(
+        !args.contains(&"--continue".to_owned()),
+        "a stale id must fall back to a fresh launch, not --continue: {args:?}"
+    );
+    assert!(
+        !args.contains(&"--resume".to_owned()),
+        "a stale id must not be passed to --resume: {args:?}"
+    );
+
+    // (c) an id that DOES exist in the session's own store still resumes by id.
+    let managed_project_dir = config_dir.join("projects").join(&encoded);
+    std::fs::create_dir_all(&managed_project_dir).unwrap();
+    std::fs::write(managed_project_dir.join("live-id-6765.jsonl"), "{}").unwrap();
+    let args = compose_inplace_args(&cwd, Some(&config_dir), Some("live-id-6765"), None);
+    assert!(
+        args.windows(2).any(|w| w == ["--resume", "live-id-6765"]),
+        "an id present in the session's own store must resume by id: {args:?}"
+    );
+    assert!(
+        !args.contains(&"--continue".to_owned()),
+        "--resume must never be paired with --continue: {args:?}"
+    );
+}
+
+#[serial_test::serial]
+#[test]
+fn spawn_resume_never_sends_bare_continue() {
+    // Why (#6765): the tmux-pane relaunch half of the same defect. The pane
+    // command exports the managed `CLAUDE_CONFIG_DIR`, so a bare `--continue`
+    // resolves against the managed store while eligibility was decided from
+    // `~/.claude/projects`. A record with `claude_session_id: null` must
+    // produce a plain spawn even when the operator's home store is full of
+    // transcripts for the same cwd.
+    let _home = HomeGuard::set();
+    let home = dirs::home_dir().expect("home resolves under redirected HOME");
+    let cwd = std::path::PathBuf::from("/tmp/tmux-6765-test");
+    // #6777: build the fixture through the ONE encoder — a hand-rolled
+    // `replace('/', "-")` here would not fold the `.` in a tempdir's name.
+    let encoded = encode_project_dir(&cwd);
+    let home_project_dir = home.join(".claude").join("projects").join(&encoded);
+    std::fs::create_dir_all(&home_project_dir).unwrap();
+    std::fs::write(home_project_dir.join("some-other-session.jsonl"), "{}").unwrap();
+
+    let Some(_claude_bin) = ClaudeCodeAdapter::resolve_claude() else {
+        return; // adapter path needs the real binary; the pure test above does not
+    };
+    let fake = FakeTmux::new();
+    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    adapter
+        .spawn_resume("tmpm-6765", None, &cwd, "task", None, TEST_SESSION_ID, &[])
+        .expect("spawn_resume with a null claude_session_id");
+    let sends = fake.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    assert!(
+        !sends[0].1.contains("--continue"),
+        "a null claude_session_id must never emit a bare --continue: {}",
+        sends[0].1
+    );
+    assert!(
+        !sends[0].1.contains("--resume"),
+        "a null claude_session_id must not emit --resume either: {}",
+        sends[0].1
+    );
 }

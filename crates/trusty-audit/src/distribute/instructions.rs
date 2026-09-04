@@ -44,7 +44,15 @@ const README_TEMPLATE: &str = include_str!("../../templates/instructions-README.
 /// It is a LOADABLE config as well as a reference — required keys present,
 /// optional ones commented — so an auditor can copy it, fill in the pins, and
 /// hand it straight back to `taudit distribute --config`.
-/// Test: `super::distribute_tests::the_shipped_config_reference_is_itself_loadable`.
+///
+/// The `[tools]` pins inside it are held at the workspace versions by
+/// `scripts/refresh-engagement-pins.sh`, which edits the FILE — and this
+/// constant is what `taudit distribute` ships, so a build older than the last
+/// refresh packages stale pins (#6772). `scripts/preflight-publish.sh` CHECK 10
+/// is the release-time gate.
+/// Test: `super::distribute_tests::the_shipped_config_reference_is_itself_loadable`,
+/// `super::distribute_tests::the_compiled_engagement_template_is_the_file_on_disk`,
+/// `super::distribute_tests::every_tool_pin_in_the_shipped_template_is_a_semver_triple`.
 pub const ENGAGEMENT_TEMPLATE: &str = include_str!("../../templates/engagement.template.toml");
 
 /// What the recipient is told about obtaining the OpenRouter key.

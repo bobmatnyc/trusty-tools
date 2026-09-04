@@ -37,6 +37,8 @@ pub mod inproject_cold_start;
 pub mod inproject_hygiene;
 mod inproject_start_point;
 mod launch_on_main;
+/// Post-send "did the relaunch actually take?" status check (#6766).
+mod launch_verify;
 mod lifecycle;
 pub mod managed_checkout;
 mod mcp_spawn_gate;

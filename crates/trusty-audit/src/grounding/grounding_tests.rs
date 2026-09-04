@@ -968,3 +968,246 @@ fn the_installed_copies_are_preferred_over_the_path() {
     // so what is asserted is only that it did NOT resolve to the tools/ copy.
     assert_ne!(t.analyze, RequiredTool::TrustyAnalyze.path_in(&work));
 }
+
+// ─── #6783: a 409 from the create route is resolved, never skipped ───────────
+
+/// A socket that records what it was asked and answers the conflict-resolution
+/// pair (#6783).
+///
+/// `registry` is the `search.indexes.list` result; `search.index.delete` always
+/// succeeds and `search.index.status` reports `root`, so the root backstop
+/// passes once the collision has been cleared.
+fn recording_search_socket(
+    dir: &Path,
+    registry: serde_json::Value,
+    root: &Path,
+) -> (PathBuf, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&seen);
+    let root = root.display().to_string();
+    let socket = answering_socket(dir, "recording-search", move |request| {
+        sink.lock()
+            .expect("the stub log is not poisoned")
+            .push(request.to_owned());
+        if request.contains("search.health") {
+            r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"0.0.0","indexes":1}}"#
+                .to_owned()
+        } else if request.contains("search.indexes.list") {
+            format!(r#"{{"jsonrpc":"2.0","id":1,"result":{registry}}}"#)
+        } else if request.contains("search.index.delete") {
+            r#"{"jsonrpc":"2.0","id":1,"result":{"deleted":true}}"#.to_owned()
+        } else if request.contains("search.index.status") {
+            format!(r#"{{"jsonrpc":"2.0","id":1,"result":{{"root_path":"{root}"}}}}"#)
+        } else {
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"no such index"}}"#
+                .to_owned()
+        }
+    });
+    (socket, seen)
+}
+
+/// A `trusty-search` whose `index` verb 409s once and then succeeds.
+///
+/// `index add` always approves and `index-status` always reports the index as
+/// unserved, so every call reaches the create. The marker file is what makes the
+/// second create succeed — the shape of a stale registration having been cleared
+/// between the two attempts.
+#[cfg(unix)]
+fn search_that_conflicts_once(at: &Path, marker: &Path) -> PathBuf {
+    stub_binary(
+        at,
+        "trusty-search",
+        &format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = 'index-status' ]; then exit 1; fi\n\
+             if [ \"$2\" = 'add' ]; then exit 0; fi\n\
+             if [ -f '{marker}' ]; then exit 0; fi\n\
+             : > '{marker}'\n\
+             echo 'daemon returned 409 Conflict for POST /indexes' >&2\n\
+             exit 1\n",
+            marker = marker.display()
+        ),
+    )
+}
+
+/// A `trusty-search` whose `index` verb always fails, with `reason` on stderr.
+#[cfg(unix)]
+fn search_that_always_fails(at: &Path, reason: &str) -> PathBuf {
+    stub_binary(
+        at,
+        "trusty-search",
+        &format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = 'index-status' ]; then exit 1; fi\n\
+             if [ \"$2\" = 'add' ]; then exit 0; fi\n\
+             echo '{reason}' >&2\n\
+             exit 1\n"
+        ),
+    )
+}
+
+/// Tools pointing at one stub binary and one recording socket.
+#[cfg(unix)]
+fn conflict_tools(search: PathBuf, socket: PathBuf, tmp: &Path) -> Tools {
+    tools(
+        search,
+        socket,
+        PathBuf::from("/nonexistent/trusty-analyze"),
+        dead_socket(tmp),
+    )
+}
+
+/// #6783's headline case, and the one a client run hit 59 times: #6149 changed
+/// the id derivation, so an earlier run's row owns this tree under its old
+/// basename id. The row is dropped and the create retried — the tier survives.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_409_registration_conflict_clears_the_stale_row_and_retries() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("repos").join("acme-api");
+    std::fs::create_dir_all(&checkout).expect("create the checkout");
+    let search = search_that_conflicts_once(tmp.path(), &tmp.path().join("conflicted"));
+    // The stale row: the SAME tree, registered under the pre-#6149 basename id.
+    let registry = serde_json::json!({
+        "indexes": [{ "id": "acme-api", "root_path": checkout.display().to_string() }]
+    });
+    let (socket, seen) = recording_search_socket(tmp.path(), registry, &checkout);
+    let t = conflict_tools(search, socket, tmp.path());
+
+    let out = ground(
+        &t,
+        &checkout,
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
+
+    assert!(
+        !search_tier_degraded(&out.gaps),
+        "the collision was resolvable, so nothing may report the tier as lost: {:?}",
+        out.gaps
+    );
+    let asked = seen.lock().expect("the stub log is not poisoned").clone();
+    assert!(
+        asked.iter().any(|r| r.contains("search.indexes.list")),
+        "the registry must be read before anything is deleted: {asked:?}"
+    );
+    let deleted: Vec<&String> = asked
+        .iter()
+        .filter(|r| r.contains("search.index.delete"))
+        .collect();
+    assert_eq!(deleted.len(), 1, "exactly one stale row goes: {asked:?}");
+    assert!(deleted[0].contains("\"acme-api\""), "{:?}", deleted[0]);
+    assert!(
+        deleted[0].contains("expected_root_path"),
+        "the delete is guarded by the root it was decided on: {:?}",
+        deleted[0]
+    );
+    assert!(
+        !deleted[0].contains("delete_data"),
+        "deregistration never destroys the corpus: {:?}",
+        deleted[0]
+    );
+}
+
+/// The other half of the fail-open contract: when the registry does not explain
+/// the refusal there is nothing to clear, and the run says so in the headline
+/// rather than shipping a report whose evidence tier is quietly empty.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unresolvable_409_degrades_the_evidence_tier_out_loud() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("repos").join("acme-api");
+    std::fs::create_dir_all(&checkout).expect("create the checkout");
+    let search =
+        search_that_always_fails(tmp.path(), "daemon returned 409 Conflict for POST /indexes");
+    let (socket, seen) =
+        recording_search_socket(tmp.path(), serde_json::json!({ "indexes": [] }), &checkout);
+    let t = conflict_tools(search, socket, tmp.path());
+
+    let out = ground(
+        &t,
+        &checkout,
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
+
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(gaps[0].contains(SEARCH_TIER_HEADLINE), "{:?}", gaps[0]);
+    assert!(gaps[0].contains("acme-api"), "{:?}", gaps[0]);
+    assert!(gaps[0].contains("409"), "{:?}", gaps[0]);
+    assert!(
+        gaps[0].contains("no trusty-analyze pass ran"),
+        "{:?}",
+        gaps[0]
+    );
+    assert_eq!(
+        gaps[0].lines().count(),
+        1,
+        "must stay one line: {:?}",
+        gaps[0]
+    );
+    let asked = seen.lock().expect("the stub log is not poisoned").clone();
+    assert!(
+        asked.iter().any(|r| r.contains("search.indexes.list")),
+        "the resolution must have been attempted: {asked:?}"
+    );
+    assert!(
+        !asked.iter().any(|r| r.contains("search.index.delete")),
+        "a registry that explains nothing licenses no delete: {asked:?}"
+    );
+}
+
+/// A refusal that is not a collision — an unapproved root, a dead embedder — is
+/// not a stale row, so nothing is read and nothing is deleted on its account.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_non_conflict_index_failure_is_not_retried() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("repos").join("acme-api");
+    std::fs::create_dir_all(&checkout).expect("create the checkout");
+    let search = search_that_always_fails(tmp.path(), "indexing refused: root is not allowlisted");
+    let registry = serde_json::json!({
+        "indexes": [{ "id": "acme-api", "root_path": checkout.display().to_string() }]
+    });
+    let (socket, seen) = recording_search_socket(tmp.path(), registry, &checkout);
+    let t = conflict_tools(search, socket, tmp.path());
+
+    let out = ground(
+        &t,
+        &checkout,
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
+
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(gaps[0].contains("root is not allowlisted"), "{:?}", gaps[0]);
+    let asked = seen.lock().expect("the stub log is not poisoned").clone();
+    assert!(
+        !asked.iter().any(|r| r.contains("search.indexes.list")),
+        "only a collision is worth a registry read: {asked:?}"
+    );
+}
+
+/// Every arm that loses the index leads with one phrase, because
+/// `crate::index_report` counts on it and the report's gap section leads with
+/// it. Four sentences that merely meant the same thing is what #6783 replaced.
+#[test]
+fn every_search_tier_gap_leads_with_the_headline() {
+    let line = search_tier_gap("acme-api", "daemon returned 409 Conflict for POST /indexes");
+    assert!(line.starts_with("acme-api: "), "{line}");
+    assert!(line.contains(SEARCH_TIER_HEADLINE), "{line}");
+    assert_eq!(line.lines().count(), 1, "must stay one line: {line}");
+    assert!(search_tier_degraded(&[line]));
+    assert!(!search_tier_degraded(&[
+        "acme-api: trusty-analyze is unreachable".to_owned()
+    ]));
+    assert!(!search_tier_degraded(&[]));
+}

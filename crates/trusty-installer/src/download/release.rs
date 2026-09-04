@@ -7,7 +7,10 @@
 //! in CI.
 //!
 //! What: [`resolve_latest_tag`] calls the public Releases API, filters by crate
-//! prefix, and returns the tag name + bare version for the highest semver.
+//! prefix, and returns the tag name + bare version for the highest semver. A
+//! crate whose tag spelling differs from its package name (`tga`, tagged
+//! `trusty-git-analytics-v*` by the publish gate) matches under EITHER spelling
+//! — see [`tag_name_candidates`] and #6771.
 //! [`asset_url`] / [`sha256_url`] build the download URLs deterministically from a
 //! tag + version + target. Network calls carry a `reqwest::Client` so tests can
 //! inject a mock URL without needing real GitHub.
@@ -51,6 +54,28 @@ struct GhRelease {
     tag_name: String,
     #[serde(default)]
     prerelease: bool,
+    /// The commit (or branch) the release points at. `None` on older payloads.
+    #[serde(default)]
+    target_commitish: Option<String>,
+    /// Published assets, used to compare two spellings of the same release.
+    #[serde(default)]
+    assets: Vec<GhAsset>,
+}
+
+/// One published release asset (only the fields the split check reads).
+///
+/// Why: #6771 needs to tell "the same release under two tag spellings" from
+/// "two different releases that happen to share a version". Identical asset
+/// digests are the strongest available evidence of the first.
+/// What: `name` is the filename; `digest` is GitHub's `sha256:<hex>` string,
+/// absent on older payloads and on assets uploaded before digests existed.
+/// Test: `tests::pinned_tag_resolves_when_both_spellings_agree`,
+/// `tests::pinned_tag_errors_when_spellings_carry_different_digests`.
+#[derive(Debug, Deserialize)]
+struct GhAsset {
+    name: String,
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 /// Resolve the release-asset filename prefix for a crate, handling
@@ -75,6 +100,142 @@ fn asset_name_for_tag(crate_name: &str) -> &str {
         "tga" => "trusty-git-analytics",
         other => other,
     }
+}
+
+/// Every `<name>-v*` tag spelling that may carry this crate's releases (#6771).
+///
+/// Why: the release tag and the crate name disagree for `tga`.
+/// `scripts/check-publish-ready.sh` derives the tag from the crate DIRECTORY
+/// (`trusty-git-analytics-v*`) while a `tga` pin looked only for `tga-v*`, so a
+/// normally-published tga release was invisible to the installer and
+/// `taudit install` reported it as unpublished. Resolution now accepts either
+/// spelling instead of requiring a hand-pushed alias tag.
+///
+/// What: returns the candidate names in preference order — the caller's own
+/// spelling first, then aliases. Every crate without an alias yields exactly
+/// its own name, so the common path is unchanged.
+///
+/// Test: `tests::tag_name_candidates_covers_both_tga_spellings`,
+/// `tests::tag_name_candidates_defaults_to_crate_name`.
+fn tag_name_candidates(crate_name: &str) -> Vec<&str> {
+    match crate_name {
+        "tga" => vec!["tga", "trusty-git-analytics"],
+        "trusty-git-analytics" => vec!["trusty-git-analytics", "tga"],
+        other => vec![other],
+    }
+}
+
+/// Every stable release matching any tag spelling for `crate_name` (#6771).
+///
+/// Why: both selectors need the same "which releases are this crate's" answer,
+/// including the alias spellings, and both must skip prereleases identically.
+///
+/// What: returns `(candidate index, version, release)` for each stable match,
+/// where the candidate index is the position in [`tag_name_candidates`] and so
+/// orders preference when one version exists under two spellings. Prereleases
+/// are skipped on both the API flag and semver pre-release identifiers.
+///
+/// Test: `tests::pinned_tag_resolves_from_directory_name_tag`,
+/// `tests::latest_tag_spans_both_spellings`.
+fn stable_matches<'r>(
+    releases: &'r [GhRelease],
+    crate_name: &str,
+) -> Vec<(usize, Version, &'r GhRelease)> {
+    let candidates = tag_name_candidates(crate_name);
+    let mut out = Vec::new();
+    for release in releases {
+        if release.prerelease {
+            continue;
+        }
+        for (rank, candidate) in candidates.iter().enumerate() {
+            let prefix = format!("{candidate}-v");
+            let Some(ver_str) = release.tag_name.strip_prefix(&prefix) else {
+                continue;
+            };
+            let Ok(ver) = Version::parse(ver_str) else {
+                break;
+            };
+            if ver.pre.is_empty() {
+                out.push((rank, ver, release));
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// Whether two releases at the same version are the SAME release (#6771).
+///
+/// Why: accepting either tag spelling must not silently pick one when the two
+/// tags name genuinely different builds — that would install an artifact the
+/// operator never pinned. This decides whether a pick is safe.
+///
+/// What: two full 40-hex commit SHAs that differ are a split. A release cut
+/// from an existing tag can carry a BRANCH name in `target_commitish`, so any
+/// other pair of values is not comparable evidence and is ignored. An asset
+/// published under both tags with differing digests is a split regardless.
+///
+/// Test: `tests::pinned_tag_resolves_when_both_spellings_agree`,
+/// `tests::pinned_tag_errors_when_spellings_carry_different_digests`.
+fn releases_agree(a: &GhRelease, b: &GhRelease) -> bool {
+    let is_sha = |s: &String| s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit());
+    if let (Some(x), Some(y)) = (&a.target_commitish, &b.target_commitish) {
+        if is_sha(x) && is_sha(y) && x != y {
+            return false;
+        }
+    }
+    !a.assets.iter().any(|asset| {
+        let Some(left) = asset.digest.as_ref() else {
+            return false;
+        };
+        b.assets.iter().any(|other| {
+            other.name == asset.name && other.digest.as_ref().is_some_and(|r| r != left)
+        })
+    })
+}
+
+/// Pick the one release to install from the matches at a single version (#6771).
+///
+/// Why: with alias spellings accepted, one version can appear under two tags.
+/// Agreement makes the pick safe; disagreement must surface as an error naming
+/// BOTH tags rather than a coin flip.
+///
+/// # Postconditions
+/// On `Ok`, the returned tag is one of `matches`' tags and its version equals
+/// theirs. On `Err`, the message names every tag involved.
+///
+/// What: returns the lowest-ranked (most preferred) spelling when every match
+/// agrees with it; otherwise a TAG-SPLIT error listing the tags.
+///
+/// Test: `tests::pinned_tag_resolves_when_both_spellings_agree`,
+/// `tests::pinned_tag_errors_when_spellings_carry_different_digests`.
+fn pick_agreeing(
+    matches: &[(usize, Version, &GhRelease)],
+    crate_name: &str,
+) -> Result<ResolvedTag, String> {
+    let Some((_, version, best)) = matches.iter().min_by_key(|(rank, _, _)| *rank) else {
+        return Err(format!("no stable {crate_name}-v* release found"));
+    };
+    if let Some((_, _, other)) = matches.iter().find(|(_, _, r)| !releases_agree(best, r)) {
+        let mut tags: Vec<&str> = matches
+            .iter()
+            .map(|(_, _, r)| r.tag_name.as_str())
+            .collect();
+        tags.sort_unstable();
+        tags.dedup();
+        return Err(format!(
+            "TAG-SPLIT: {crate_name} {version} is published under more than one tag and they \
+             disagree — {} names a different commit or asset digest than {}; tags involved: {}. \
+             Nothing was installed; resolve the duplicate release before retrying.",
+            other.tag_name,
+            best.tag_name,
+            tags.join(", ")
+        ));
+    }
+    Ok(ResolvedTag {
+        tag: best.tag_name.clone(),
+        version: version.to_string(),
+    })
 }
 
 /// Build the download URL for a prebuilt asset tarball.
@@ -153,38 +314,13 @@ pub fn asset_filename(crate_name: &str, version: &str, target: &str) -> String {
 ///
 /// Test: `tests::select_highest_semver`, `tests::select_skips_prerelease`.
 fn select_highest_semver(releases: &[GhRelease], crate_name: &str) -> anyhow::Result<ResolvedTag> {
-    let prefix = format!("{crate_name}-v");
-    let mut best: Option<(Version, ResolvedTag)> = None;
-
-    for release in releases {
-        if release.prerelease {
-            continue;
-        }
-        let tag = &release.tag_name;
-        let Some(ver_str) = tag.strip_prefix(&prefix) else {
-            continue;
-        };
-        let Ok(ver) = Version::parse(ver_str) else {
-            continue;
-        };
-        // Skip any semver with pre-release identifiers (conservative: stable only).
-        if !ver.pre.is_empty() {
-            continue;
-        }
-        let is_better = best.as_ref().is_none_or(|(best_ver, _)| &ver > best_ver);
-        if is_better {
-            best = Some((
-                ver.clone(),
-                ResolvedTag {
-                    tag: tag.clone(),
-                    version: ver.to_string(),
-                },
-            ));
-        }
-    }
-
-    best.map(|(_, rt)| rt)
-        .ok_or_else(|| anyhow!("no stable {crate_name}-v* release found"))
+    // #6771: match every tag spelling for this crate, not just its own name.
+    let all = stable_matches(releases, crate_name);
+    let Some(highest) = all.iter().map(|(_, v, _)| v).max().cloned() else {
+        return Err(anyhow!("no stable {crate_name}-v* release found"));
+    };
+    let at_highest: Vec<_> = all.into_iter().filter(|(_, v, _)| *v == highest).collect();
+    pick_agreeing(&at_highest, crate_name).map_err(|msg| anyhow!(msg))
 }
 
 /// Optional GitHub auth token from the environment.
@@ -278,6 +414,9 @@ pub(crate) enum ResolveError {
         /// Every stable version published for the crate, ascending.
         available: Vec<String>,
     },
+    /// The version is published under two disagreeing tag spellings (#6771).
+    #[error("{0}")]
+    TagSplit(String),
 }
 
 /// Select the release matching an EXACT pinned version (#5491).
@@ -307,36 +446,26 @@ fn select_exact_version(
     crate_name: &str,
     version: &str,
 ) -> Result<ResolvedTag, ResolveError> {
-    let prefix = format!("{crate_name}-v");
     // Normalise through semver so `2.9.4` and a tag written `2.9.4` compare by
     // value rather than by string — and so a caller-supplied non-semver pin is
     // rejected here rather than 404ing later against a URL built from garbage.
     let wanted = Version::parse(version).ok();
-    let mut available: Vec<Version> = Vec::new();
+    // #6771: a `tga` pin also matches `trusty-git-analytics-v*`, and the
+    // published-version list below spans both spellings.
+    let all = stable_matches(releases, crate_name);
 
-    for release in releases {
-        if release.prerelease {
-            continue;
-        }
-        let Some(ver_str) = release.tag_name.strip_prefix(&prefix) else {
-            continue;
-        };
-        let Ok(ver) = Version::parse(ver_str) else {
-            continue;
-        };
-        if !ver.pre.is_empty() {
-            continue;
-        }
-        if wanted.as_ref() == Some(&ver) {
-            return Ok(ResolvedTag {
-                tag: release.tag_name.clone(),
-                version: ver.to_string(),
-            });
-        }
-        available.push(ver);
+    let matched: Vec<_> = all
+        .iter()
+        .filter(|(_, ver, _)| wanted.as_ref() == Some(ver))
+        .cloned()
+        .collect();
+    if !matched.is_empty() {
+        return pick_agreeing(&matched, crate_name).map_err(ResolveError::TagSplit);
     }
 
+    let mut available: Vec<Version> = all.into_iter().map(|(_, ver, _)| ver).collect();
     available.sort();
+    available.dedup();
     Err(ResolveError::NotPublished {
         available: available.iter().map(Version::to_string).collect(),
     })
@@ -406,8 +535,28 @@ mod tests {
         GhRelease {
             tag_name: tag.to_owned(),
             prerelease,
+            target_commitish: None,
+            assets: Vec::new(),
         }
     }
+
+    /// A release carrying the identity fields the #6771 split check reads.
+    fn tga_release(tag: &str, commit: &str, digest: &str) -> GhRelease {
+        GhRelease {
+            tag_name: tag.to_owned(),
+            prerelease: false,
+            target_commitish: Some(commit.to_owned()),
+            assets: vec![GhAsset {
+                name: "trusty-git-analytics-7.0.0-aarch64-apple-darwin.tar.gz".to_owned(),
+                digest: Some(digest.to_owned()),
+            }],
+        }
+    }
+
+    const COMMIT_A: &str = "0123456789abcdef0123456789abcdef01234567";
+    const COMMIT_B: &str = "fedcba9876543210fedcba9876543210fedcba98";
+    const DIGEST_A: &str = "sha256:aaaa";
+    const DIGEST_B: &str = "sha256:bbbb";
 
     /// Why: The highest semver must win regardless of list order; chronological
     /// order from the API must not fool the selection.
@@ -651,6 +800,131 @@ mod tests {
     fn select_exact_version_rejects_non_semver_pin() {
         let releases = vec![release("trusty-search-v0.25.0", false)];
         assert!(select_exact_version(&releases, "trusty-search", "latest").is_err());
+    }
+
+    /// Why: A `tga` pin must accept the tag the publish gate actually pushes,
+    /// which is derived from the crate DIRECTORY — this is #6771 verbatim, the
+    /// case that made `taudit install` report tga 7.0.0 as unpublished.
+    /// What: Publishes only `trusty-git-analytics-v7.0.0`; pins `tga` 7.0.0;
+    /// asserts the directory-name tag resolves.
+    /// Test: This is the test.
+    #[test]
+    fn pinned_tag_resolves_from_directory_name_tag() {
+        let releases = vec![release("trusty-git-analytics-v7.0.0", false)];
+        let rt = select_exact_version(&releases, "tga", "7.0.0").expect("alias tag must resolve");
+        assert_eq!(rt.tag, "trusty-git-analytics-v7.0.0");
+        assert_eq!(rt.version, "7.0.0");
+    }
+
+    /// Why: The package-name spelling stayed valid — earlier tga releases are
+    /// tagged `tga-v*` and must keep resolving.
+    /// What: Publishes only `tga-v7.0.0`; asserts it resolves.
+    /// Test: This is the test.
+    #[test]
+    fn pinned_tag_resolves_from_package_name_tag() {
+        let releases = vec![release("tga-v7.0.0", false)];
+        let rt = select_exact_version(&releases, "tga", "7.0.0").expect("own tag must resolve");
+        assert_eq!(rt.tag, "tga-v7.0.0");
+    }
+
+    /// Why: The mitigation for #6771 pushed an alias tag at the same commit, so
+    /// both spellings exist for tga 7.0.0; agreeing tags must resolve rather
+    /// than trip the split guard.
+    /// What: Publishes both tags at one commit with one digest; asserts the
+    /// package-name spelling (first candidate) wins.
+    /// Test: This is the test.
+    #[test]
+    fn pinned_tag_resolves_when_both_spellings_agree() {
+        let releases = vec![
+            tga_release("trusty-git-analytics-v7.0.0", COMMIT_A, DIGEST_A),
+            tga_release("tga-v7.0.0", COMMIT_A, DIGEST_A),
+        ];
+        let rt = select_exact_version(&releases, "tga", "7.0.0").expect("agreeing tags resolve");
+        assert_eq!(rt.tag, "tga-v7.0.0");
+    }
+
+    /// Why: Two tags at one version naming different artifacts must never be
+    /// silently picked between — the installer would ship an artifact nobody
+    /// pinned.
+    /// What: Publishes both spellings at different commits with different asset
+    /// digests; asserts a TAG-SPLIT error naming BOTH tags.
+    /// Test: This is the test.
+    #[test]
+    fn pinned_tag_errors_when_spellings_carry_different_digests() {
+        let releases = vec![
+            tga_release("tga-v7.0.0", COMMIT_A, DIGEST_A),
+            tga_release("trusty-git-analytics-v7.0.0", COMMIT_B, DIGEST_B),
+        ];
+        let err = select_exact_version(&releases, "tga", "7.0.0")
+            .expect_err("disagreeing tags must not resolve");
+        let ResolveError::TagSplit(detail) = err else {
+            panic!("expected TagSplit, got {err:?}");
+        };
+        assert!(detail.contains("tga-v7.0.0"), "got: {detail}");
+        assert!(
+            detail.contains("trusty-git-analytics-v7.0.0"),
+            "got: {detail}"
+        );
+    }
+
+    /// Why: #6771's closure condition 2 — the "not a published stable release"
+    /// message must list what IS published under either spelling, or it tells
+    /// the operator a released version does not exist.
+    /// What: Publishes 6.0.0 as `tga-v*` and 7.0.0 as `trusty-git-analytics-v*`;
+    /// pins 9.9.9; asserts both versions are reported.
+    /// Test: This is the test.
+    #[test]
+    fn not_published_lists_versions_from_both_spellings() {
+        let releases = vec![
+            release("tga-v6.0.0", false),
+            release("trusty-git-analytics-v7.0.0", false),
+        ];
+        let err = select_exact_version(&releases, "tga", "9.9.9").expect_err("9.9.9 is absent");
+        match err {
+            ResolveError::NotPublished { available } => {
+                assert_eq!(available, vec!["6.0.0".to_owned(), "7.0.0".to_owned()]);
+            }
+            other => panic!("expected NotPublished, got {other:?}"),
+        }
+    }
+
+    /// Why: The `latest` path resolves the same crate and must see the same
+    /// releases the pinned path does.
+    /// What: Publishes 6.0.0 under one spelling and 7.0.0 under the other;
+    /// asserts the highest wins with its own tag.
+    /// Test: This is the test.
+    #[test]
+    fn latest_tag_spans_both_spellings() {
+        let releases = vec![
+            release("tga-v6.0.0", false),
+            release("trusty-git-analytics-v7.0.0", false),
+        ];
+        let rt = select_highest_semver(&releases, "tga").expect("7.0.0 must resolve");
+        assert_eq!(rt.tag, "trusty-git-analytics-v7.0.0");
+        assert_eq!(rt.version, "7.0.0");
+    }
+
+    /// Why: The candidate table is the whole fix; pin both directions so a
+    /// `tga` pin and a `trusty-git-analytics` pin resolve the same releases.
+    /// What: Asserts both spellings are offered for either input.
+    /// Test: This is the test.
+    #[test]
+    fn tag_name_candidates_covers_both_tga_spellings() {
+        assert_eq!(tag_name_candidates("tga"), ["tga", "trusty-git-analytics"]);
+        assert_eq!(
+            tag_name_candidates("trusty-git-analytics"),
+            ["trusty-git-analytics", "tga"]
+        );
+    }
+
+    /// Why: Every crate without an alias must resolve exactly as before.
+    /// What: Asserts unaliased crate names yield only themselves.
+    /// Test: This is the test.
+    #[test]
+    fn tag_name_candidates_defaults_to_crate_name() {
+        for c in ["trusty-search", "trusty-memory", "trusty-installer"] {
+            assert_eq!(tag_name_candidates(c), [c]);
+        }
     }
 
     /// Why: Live integration proof that the GitHub API is reachable and returns a

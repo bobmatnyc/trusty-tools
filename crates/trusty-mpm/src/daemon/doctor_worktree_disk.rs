@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::session_manager::worktree_ownership::AgentDelegationState;
-use crate::session_manager::worktree_reclaim::ReclaimSurvey;
+use crate::session_manager::worktree_reclaim::{LiveClaims, ReclaimSurvey, WorkspaceClaim};
 use crate::session_manager::worktree_reclaim_sweep::{SurveyBudget, survey};
 
 /// Wall-clock budget for the survey this probe runs.
@@ -249,7 +249,16 @@ pub(super) async fn check_worktree_disk(
         );
     }
     let root = root.to_path_buf();
-    let active: Vec<PathBuf> = active_workspace_paths.to_vec();
+    // #6806: gate 2 now resolves WHOSE claim blocks a candidate. This probe is
+    // report-only, has no caller identity, and reads paths through a helper
+    // shared by four doctor checks that carries no session ids — so every claim
+    // it builds is unattributed and therefore foreign, exactly as before.
+    let active = LiveClaims::foreign(
+        active_workspace_paths
+            .iter()
+            .map(WorkspaceClaim::unattributed)
+            .collect(),
+    );
     // #2919: the deadline is passed INTO the blocking task, not wrapped around
     // it. `tokio::time::timeout` cannot cancel `spawn_blocking`, so an outer
     // timeout returns a verdict on schedule while the walk keeps running — and

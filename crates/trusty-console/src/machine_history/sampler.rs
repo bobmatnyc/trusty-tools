@@ -43,7 +43,7 @@ use tracing::{debug, error, info};
 use trusty_common::host_metrics::HostSampler;
 
 use crate::server::AppState;
-use crate::service_cpu::{ServiceCpuSampler, resolve_pid};
+use crate::service_metrics::{ServiceMetricsSampler, resolve_pid};
 
 /// Render a caught panic payload as text.
 ///
@@ -71,7 +71,7 @@ fn panic_text(payload: &(dyn Any + Send)) -> String {
 ///
 /// Why `AssertUnwindSafe` is sound here: the state crossing the boundary is the
 /// `AppState` handles (`tokio::sync::RwLock`, which has no poisoning — a panic
-/// while a guard is held releases it) and the `&mut ServiceCpuSampler`, whose
+/// while a guard is held releases it) and the `&mut ServiceMetricsSampler`, whose
 /// fields are two maps and a `Vec` with no invariant a half-finished tick
 /// breaks. The next tick re-reads both from scratch.
 /// What: awaits `body` under `catch_unwind`. Returns `true` when it completed,
@@ -110,14 +110,14 @@ async fn guarded<F: Future<Output = ()>>(step: &'static str, body: F) -> bool {
 /// [`resolve_pid`] for each on the blocking pool, feeds the answers back, then
 /// records the batch through
 /// [`MachineHistory::record_service_samples`](super::MachineHistory::record_service_samples).
-/// Test: `service_cpu::tests` covers the sampler's own behaviour; this function
+/// Test: `service_metrics::tests` covers the sampler's own behaviour; this function
 /// is the wiring, exercised whenever the daemon runs.
 async fn sample_services(
     state: &AppState,
-    service_cpu: &mut ServiceCpuSampler,
+    service_metrics: &mut ServiceMetricsSampler,
     services: &[crate::connector::ServiceInfo],
 ) {
-    let pending = service_cpu.pending_lookups(services, Instant::now());
+    let pending = service_metrics.pending_lookups(services, Instant::now());
     if !pending.is_empty() {
         let found = tokio::task::spawn_blocking(move || {
             pending
@@ -133,13 +133,13 @@ async fn sample_services(
             debug!("machine_history: service pid lookup task failed: {e}");
             Vec::new()
         });
-        service_cpu.record_lookups(found, Instant::now());
+        service_metrics.record_lookups(found, Instant::now());
     }
 
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let batch = service_cpu.sample(services, now_unix);
+    let batch = service_metrics.sample(services, now_unix);
     state.machine_history().record_service_samples(batch).await;
 }
 
@@ -165,12 +165,12 @@ pub fn start(state: AppState, interval: Duration) {
         let mut sampler = HostSampler::new();
         // #6642: one sampler across ticks — `sysinfo` derives CPU% from the
         // delta between two refreshes, so it cannot be rebuilt per tick.
-        let mut service_cpu = ServiceCpuSampler::new();
+        let mut service_metrics = ServiceMetricsSampler::new();
         loop {
             // #6642: each half is guarded separately, so a panic in one leaves a
             // gap in that series rather than freezing every graph.
             guarded("host", host_tick(&state, &mut sampler)).await;
-            guarded("services", service_tick(&state, &mut service_cpu)).await;
+            guarded("services", service_tick(&state, &mut service_metrics)).await;
             tokio::time::sleep(interval).await;
         }
     });
@@ -212,9 +212,9 @@ async fn host_tick(state: &AppState, sampler: &mut HostSampler) {
 ///
 /// Why the status comes from the health poller's cache and not a fresh detection
 /// pass: this runs every second and a detection pass dials six services.
-/// Test: `service_cpu::tests` for the sampling; `machine_history::tests` for the
+/// Test: `service_metrics::tests` for the sampling; `machine_history::tests` for the
 /// log.
-async fn service_tick(state: &AppState, service_cpu: &mut ServiceCpuSampler) {
+async fn service_tick(state: &AppState, service_metrics: &mut ServiceMetricsSampler) {
     let reports = state.collect_service_reports().await;
     for change in state.machine_history().observe_services(&reports).await {
         info!(
@@ -226,7 +226,7 @@ async fn service_tick(state: &AppState, service_cpu: &mut ServiceCpuSampler) {
     }
 
     if let Some(snapshot) = state.poller_cache().snapshot().await {
-        sample_services(state, service_cpu, &snapshot.services).await;
+        sample_services(state, service_metrics, &snapshot.services).await;
     }
 }
 
@@ -365,6 +365,7 @@ mod tests {
                         id: "trusty-search".to_string(),
                         status: ServiceStatus::Running,
                         cpu_pct: Some(2.0),
+                        rss_bytes: Some(64 * 1024 * 1024),
                     }],
                 })
                 .await;

@@ -403,6 +403,7 @@ fn control_routes_investigation() -> Investigation {
             status: InvestigationStatus::Available,
             findings: vec![VerifiedFinding {
                 trace_verdict: String::new(),
+                cwe_id: Vec::new(),
                 title: "Control-plane HTTP handlers have no authentication or authorization"
                     .to_string(),
                 severity: Severity::Red,
@@ -505,6 +506,7 @@ fn network_claim_investigation() -> Investigation {
     inv.repos[0].findings[0].business_impact = LIVE_NETWORK_IMPACT.to_string();
     inv.repos[0].findings.push(VerifiedFinding {
         trace_verdict: String::new(),
+        cwe_id: Vec::new(),
         title: "Admin stop endpoint trusts every caller with no authentication".to_string(),
         severity: Severity::Amber,
         dimension: "authentication & secrets".to_string(),

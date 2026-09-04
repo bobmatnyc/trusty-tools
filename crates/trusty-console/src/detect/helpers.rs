@@ -249,6 +249,7 @@ pub(super) fn detect_service(
             hint: None,
             lifecycle: ServiceLifecycle::Daemon,
             cpu_pct: None,
+            rss_bytes: None,
         };
     }
 
@@ -270,6 +271,7 @@ pub(super) fn detect_service(
             hint: None,
             lifecycle: ServiceLifecycle::Daemon,
             cpu_pct: None,
+            rss_bytes: None,
         };
     }
 
@@ -282,6 +284,7 @@ pub(super) fn detect_service(
         hint: None,
         lifecycle: ServiceLifecycle::Daemon,
         cpu_pct: None,
+        rss_bytes: None,
     }
 }
 

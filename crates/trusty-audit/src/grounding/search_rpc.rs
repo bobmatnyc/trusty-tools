@@ -56,6 +56,18 @@ pub const METHOD_HEALTH: &str = "search.health";
 /// One index's stages, capabilities and footprint — `GET /indexes/{id}/status`.
 pub const METHOD_INDEX_STATUS: &str = "search.index.status";
 
+/// Every registered index — `GET /indexes`. With `{"details": true}` each entry
+/// carries its `root_path`, which is what makes a registration conflict
+/// diagnosable (#6783).
+pub const METHOD_INDEXES_LIST: &str = "search.indexes.list";
+
+/// Deregister one index — `DELETE /indexes/{id}` (#6783).
+///
+/// `{"index_id": id}` deregisters and leaves the corpus on disk;
+/// `expected_root_path` makes the delete refuse unless the registration still
+/// has the root the caller just read.
+pub const METHOD_INDEX_DELETE: &str = "search.index.delete";
+
 /// Hybrid search within one index — `POST /indexes/{id}/search`.
 pub const METHOD_QUERY: &str = "search.query";
 
@@ -240,6 +252,9 @@ mod search_rpc_tests {
         assert_eq!(METHOD_HEALTH, "search.health");
         assert_eq!(METHOD_INDEX_STATUS, "search.index.status");
         assert_eq!(METHOD_QUERY, "search.query");
+        // #6783: the registration-conflict pair.
+        assert_eq!(METHOD_INDEXES_LIST, "search.indexes.list");
+        assert_eq!(METHOD_INDEX_DELETE, "search.index.delete");
         assert_eq!(ENV_SEARCH_SOCKET, "TRUSTY_SEARCH_SOCKET");
     }
 

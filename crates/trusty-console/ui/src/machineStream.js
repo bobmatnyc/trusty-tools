@@ -26,8 +26,8 @@
  *   - Capacity is the server's, not a constant here. The snapshot reports
  *     `sample_capacity` and `service_sample_capacity`; [`DEFAULT_CAPACITY`] is
  *     only the value used before the first snapshot arrives.
- *   - `cpu_pct` may be `null`, and `null` is not `0`. It survives into the
- *     series so the graph can draw a gap rather than an idle bar.
+ *   - `cpu_pct` and `rss_bytes` may be `null`, and `null` is not `0`. Each
+ *     survives into its series so the graph draws a gap rather than an idle bar.
  *
  * Test: `machineStream.test.js` — run `node --test src/machineStream.test.js`
  * from `crates/trusty-console/ui`.
@@ -46,7 +46,7 @@ export const STREAM_URL = '/api/console/machine-status/stream';
  * older or newer daemon still carries the fields the graphs read, and blanking
  * the page over a version integer would be worse than rendering what parsed.
  */
-export const EXPECTED_SCHEMA_VERSION = 2;
+export const EXPECTED_SCHEMA_VERSION = 3;
 
 /** Ring size assumed before the first snapshot states the server's. */
 export const DEFAULT_CAPACITY = 600;
@@ -58,7 +58,7 @@ export const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
  * The store every consumer renders from.
  *
  * `samples` are whole `HostMetrics` objects oldest-first; `serviceSamples` maps
- * a service id to its own oldest-first `{ id, status, cpu_pct }` list.
+ * a service id to its own oldest-first `{ id, status, cpu_pct, rss_bytes }` list.
  * `connected` drives nothing but a diagnostic today — it exists so a future
  * "stream offline" notice does not need a second source of truth.
  */

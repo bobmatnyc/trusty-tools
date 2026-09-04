@@ -41,6 +41,12 @@ pub(super) struct Generated {
     pub(super) metadata: String,
     /// [`super::INDEX_ENTRY`] — what the reports are, and a link to each.
     pub(super) index: String,
+    /// [`super::DEBT_ENTRY`] — the index's counts, machine-readable (#6781).
+    ///
+    /// Rendered from the same [`crate::index_report::IndexReport`] the index is,
+    /// so the table a recipient reads and the block a consumer parses are the
+    /// same numbers rather than two derivations of them.
+    pub(super) debt: String,
     /// [`super::FAILURES_ENTRY`] — every repository that failed, and why.
     ///
     /// `None` when the sweep had no failures: a `failures/` directory holding
@@ -120,13 +126,19 @@ struct PackagedRepo {
 /// [`crate::index_report::Producer::Package`]. Rendered against
 /// [`REPORTS_PREFIX`], which is where the member lands, so `<stem>/report.md`
 /// and `../extract/<stem>.db` both resolve inside the archive.
+///
+/// Returns the index AND its machine-readable twin, `reports/report.json`
+/// (#6781), because both are rendered from one [`crate::index_report::IndexReport`]
+/// — one timestamp and one roll-up, so the two members cannot disagree about
+/// either.
 /// Test: `super::package_tests::the_package_carries_an_index_of_its_reports`,
-/// `super::package_tests::the_package_index_links_resolve_inside_the_zip`.
+/// `super::package_tests::the_package_index_links_resolve_inside_the_zip`,
+/// `super::package_tests::the_package_carries_the_debt_rollup`.
 pub(super) fn render_index(
     work: &WorkDir,
     report: &RunReport,
     collected: &[(String, PathBuf)],
-) -> String {
+) -> (String, String) {
     let entries = report
         .repos
         .iter()
@@ -149,8 +161,20 @@ pub(super) fn render_index(
                     crate::run::RepoResult::Failed { reason } => Some(reason.clone()),
                     crate::run::RepoResult::Succeeded => None,
                 },
+                // #6782: the recipient's copy of the same headline. This index
+                // is the one they open, so leaving it to the sweep's `out/`
+                // index would state it only to the operator.
+                stale: run
+                    .gaps
+                    .iter()
+                    .filter(|gap| gap.contains(crate::run::STALE_FETCH_MARKER))
+                    .cloned()
+                    .collect(),
                 carried_over: run.resumed,
                 duration: run.duration_ms.map(std::time::Duration::from_millis),
+                // #6783: the recipient's copy of the coverage count, read off
+                // the same gaps the sweep's own index reads.
+                search_evidence: !crate::grounding::search_tier_degraded(&run.gaps),
             }
         })
         .collect::<Vec<_>>();
@@ -167,8 +191,30 @@ pub(super) fn render_index(
         inference: declared_inference(report),
         entries,
         total: (measured > 0).then(|| std::time::Duration::from_millis(measured)),
+        // #6781: read from the sweep's own manifests on disk, not the zip
+        // members — the counts describe the same repositories either way, and
+        // the archive is still being written when this renders.
+        debt: crate::debt_rollup::from_manifests(report.repos.iter().map(|run| {
+            (
+                run.repo.name.clone(),
+                run.output.join(crate::manifest::AuditManifest::FILE_NAME),
+            )
+        })),
+        // #6780: read back from the same `osv.json` files this package is about
+        // to carry, so the index a recipient opens states the run's OSV result
+        // rather than sending them into the per-repository files to add it up.
+        osv: Some(crate::grounding::osv_rollup::rollup(
+            &report
+                .repos
+                .iter()
+                .map(|run| run.output.clone())
+                .collect::<Vec<_>>(),
+        )),
     };
-    crate::index_report::render(&index, Path::new(REPORTS_PREFIX))
+    (
+        crate::index_report::render(&index, Path::new(REPORTS_PREFIX)),
+        crate::debt_rollup::to_json(&index.debt, &index.generated_at),
+    )
 }
 
 /// The inference identity the packaged manifests declare (#6135).

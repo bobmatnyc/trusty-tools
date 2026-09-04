@@ -92,7 +92,13 @@ name        = "trusty-review"
 # to `report::index_registry` under #6677), and `trait_method_added` for
 # `SearchClient::index_status` (src/integrations/search_client.rs:229), which an
 # out-of-tree implementor of the trait would have to add.
-version     = "0.33.1"
+# 0.33.1 -> 0.34.0 (#6779): MINOR, the breaking position for a 0.x crate. The
+# weakness-class tag adds a public field to `report::investigate::VerifiedFinding`
+# and to `report::synthesize::FindingProse`, both of which have public fields and
+# neither of which is `#[non_exhaustive]` — an out-of-tree struct literal for
+# either stops compiling. `cargo-semver-checks` reports this as
+# `struct_missing_field`-class breakage against the 0.33.1 baseline.
+version     = "0.34.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

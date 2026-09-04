@@ -114,6 +114,16 @@ pub struct ServiceInfo {
     /// `#[serde(default)]` so a payload written before #6642 still deserialises.
     #[serde(default)]
     pub cpu_pct: Option<f32>,
+    /// The newest per-second resident-memory sample, in bytes, if any (#6773).
+    ///
+    /// The same first-paint argument as `cpu_pct` above, for the memory column
+    /// and the memory graph beside it: overlaid by the route from the same
+    /// per-service ring the graph reads, so the number and the newest bar cannot
+    /// disagree. Serialised unconditionally as `null` when absent — `None` means
+    /// no measurement, never zero bytes — and `#[serde(default)]` so a payload
+    /// written before #6773 still deserialises.
+    #[serde(default)]
+    pub rss_bytes: Option<u64>,
 }
 
 /// Per-service adapter contract.

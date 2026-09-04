@@ -1,25 +1,28 @@
 /**
- * The home page's Services list, as data (#6642).
+ * The home page's Services list, as data (#6642, #6773).
  *
  * Why: the owner replaced the "Installed Services" card grid with one
- * alphabetical list carrying version, status, %CPU and a per-row CPU graph. All
- * four columns are projections of two payloads — `GET /api/console/services`
- * for the roster, and the machine-status stream's per-service rings for the
- * live figures — and every one of the rules worth getting wrong (the sort, the
- * dash-not-zero rule, which rows are clickable) is a pure function. Keeping
- * them here makes them testable under `node --test`, leaving
- * `ServicesList.svelte` as markup.
+ * alphabetical list carrying version, status, %CPU, MEM and a per-row CPU graph
+ * beside a per-row memory graph. Every column is a projection of two payloads —
+ * `GET /api/console/services` for the roster, and the machine-status stream's
+ * per-service rings for the live figures — and every one of the rules worth
+ * getting wrong (the sort, the dash-not-zero rule, each graph's scale, which
+ * rows are clickable) is a pure function. Keeping them here makes them testable
+ * under `node --test`, leaving `ServicesList.svelte` as markup.
  *
  * What: `serviceRows` is the one entry point the component calls; the rest are
  * its pieces, exported because each is worth asserting on its own.
  *
- * Three rules this module exists to hold:
+ * Four rules this module exists to hold:
  *   - Sort is case-insensitive on `display_name`, with the id as tie-break, so
  *     the order is stable across renders and does not depend on the order the
  *     server happened to send.
- *   - `cpu_pct` of `null` renders a dash, never `0.0`. An on-demand member with
- *     no resident process and a daemon idling at zero are different facts
- *     (#6642 acceptance).
+ *   - `cpu_pct` and `rss_bytes` of `null` render a dash, never `0`. An
+ *     on-demand member with no resident process and a daemon idling at zero are
+ *     different facts (#6642 acceptance).
+ *   - The two graphs read the SAME sample. Both series come from one per-service
+ *     ring, so the CPU bar and the memory bar at any x are the same second
+ *     (#6773).
  *   - The newest stream sample wins over the roster's snapshot. The roster is
  *     fetched once for first paint; after that the 1 Hz `services` event is the
  *     fresher number, and showing the stale one beside a live graph would be a
@@ -95,17 +98,67 @@ export function formatCpu(cpuPct) {
   return isNum(cpuPct) ? `${cpuPct.toFixed(1)}%` : DASH;
 }
 
+/** Binary units, largest first — the unit a figure gets is the first it fills. */
+const MEMORY_UNITS = [
+  ['GiB', 1024 ** 3],
+  ['MiB', 1024 ** 2],
+  ['KiB', 1024],
+];
+
 /**
- * One service's CPU history, oldest first, `null` where nothing was measured.
+ * A byte count in human binary units, or the dash when nothing was measured
+ * (#6773).
+ *
+ * Why binary units rather than MB/GB: every other memory figure in this suite —
+ * `rss_mb`, the host memory card, `TRUSTY_MEMORY_LIMIT_MB` — is a power-of-two
+ * figure, and mixing decimal megabytes into one screen would make two numbers
+ * describing the same daemon differ by 5%.
+ *
+ * Why one decimal above a gibibyte and none below: `13.4 GiB` is the reading an
+ * operator acts on, while `142.0 MiB` is noise in a column refreshed every
+ * second. Under a kibibyte the raw byte count is shown, because a daemon
+ * reporting three digits of bytes is a bug worth seeing exactly.
+ * Test: `formatMemory picks the largest unit the figure fills`, `formatMemory
+ * dashes an absent measurement`.
+ */
+export function formatMemory(bytes) {
+  if (!isNum(bytes) || bytes < 0) return DASH;
+  for (const [unit, size] of MEMORY_UNITS) {
+    if (bytes >= size) {
+      const value = bytes / size;
+      return `${unit === 'GiB' ? value.toFixed(1) : Math.round(value)} ${unit}`;
+    }
+  }
+  return `${Math.round(bytes)} B`;
+}
+
+/**
+ * One service's history of `field`, oldest first, `null` where nothing was
+ * measured.
  *
  * The nulls are preserved rather than filtered: `BarGraph` draws them as gaps,
  * and dropping them would slide unrelated seconds together into a graph that
  * claims continuity it does not have.
+ *
+ * Why one reader for both fields (#6773): the CPU graph and the memory graph
+ * must have the same length and the same slot-to-second mapping, or the two
+ * bars a reader compares at one x are different moments. Reading both off the
+ * one ring with one function makes that structural rather than a convention.
  */
-export function cpuSeries(serviceSamples, id) {
+function seriesOf(serviceSamples, id, field) {
   const list = serviceSamples?.[id];
   if (!Array.isArray(list)) return [];
-  return list.map((sample) => (isNum(sample?.cpu_pct) ? sample.cpu_pct : null));
+  return list.map((sample) => (isNum(sample?.[field]) ? sample[field] : null));
+}
+
+/** One service's CPU history, oldest first, `null` where nothing was measured. */
+export function cpuSeries(serviceSamples, id) {
+  return seriesOf(serviceSamples, id, 'cpu_pct');
+}
+
+/** One service's memory history in bytes, oldest first, `null` for a gap. */
+export function memorySeries(serviceSamples, id) {
+  return seriesOf(serviceSamples, id, 'rss_bytes');
 }
 
 /** The newest per-service sample the stream delivered, or `null`. */
@@ -132,7 +185,11 @@ export function latestSample(serviceSamples, id) {
 export function rowAriaLabel(row) {
   const version = row.version === DASH ? 'version unknown' : `version ${row.version}`;
   const cpu = row.cpuLabel === DASH ? 'CPU not measured' : `${row.cpuLabel} CPU`;
-  return `${row.displayName}, ${version}, ${row.statusLabel}, ${cpu} — open dashboard`;
+  // #6773: the memory column joins the sentence for the same reason every other
+  // column is in it — an aria-label replaces the cells, so a column left out is
+  // a column a listener never hears.
+  const memory = row.memoryLabel === DASH ? 'memory not measured' : `${row.memoryLabel} memory`;
+  return `${row.displayName}, ${version}, ${row.statusLabel}, ${cpu}, ${memory} — open dashboard`;
 }
 
 /**
@@ -150,7 +207,10 @@ export function serviceRows(services, serviceSamples = {}, dashboards = new Set(
     // has, so the two are merged rather than swapped.
     const merged = live ? { ...service, status: live.status } : service;
     const presentation = cardPresentation(merged);
+    // #6773: both figures come off the SAME newest sample, so the two columns
+    // and the two graphs beside them cannot describe different seconds.
     const cpu = live ? live.cpu_pct : service.cpu_pct;
+    const memory = live ? live.rss_bytes : service.rss_bytes;
 
     const row = {
       id: service.id,
@@ -160,7 +220,9 @@ export function serviceRows(services, serviceSamples = {}, dashboards = new Set(
       statusLabel: presentation.label,
       statusVar: presentation.toneVar,
       cpuLabel: formatCpu(cpu),
+      memoryLabel: formatMemory(memory),
       series: cpuSeries(serviceSamples, service.id),
+      memorySeries: memorySeries(serviceSamples, service.id),
       hasDashboard: dashboards.has(service.id),
     };
     // #6642: only a clickable row overrides its accessible name. An inert row
@@ -179,6 +241,17 @@ export function serviceRows(services, serviceSamples = {}, dashboards = new Set(
 export const ROW_GRAPH_FLOOR_PCT = 5;
 
 /**
+ * The memory floor a row's memory bars are scaled against, in bytes (#6773).
+ *
+ * Why a floor at all: `windowMax` would otherwise divide by zero on a window of
+ * pure gaps, and a daemon holding a few hundred kilobytes would be magnified
+ * into a full-height bar that reads as the busiest service on the page. 16 MiB
+ * is below every resident trusty-* daemon, so it only ever applies to a row
+ * with no real measurement to scale against.
+ */
+export const ROW_MEMORY_FLOOR_BYTES = 16 * 1024 * 1024;
+
+/**
  * Everything `BarGraph` needs to draw one service row's CPU graph (#6643).
  *
  * Why here: the home page's list and the screensaver's table draw the same row
@@ -191,18 +264,47 @@ export const ROW_GRAPH_FLOOR_PCT = 5;
  *
  * What: the row's own series, scaled to the busiest second in it, never below
  * [`ROW_GRAPH_FLOOR_PCT`]. No thresholds — a busy daemon is not a fault.
- * Test: `rowGraphSpec scales a row to its own busiest second`, `rowGraphSpec
- * holds an idle row against the floor`.
+ * Test: `rowCpuGraphSpec scales a row to its own busiest second`,
+ * `rowCpuGraphSpec holds an idle row against the floor`.
  *
  * @param {{ series?: (number|null)[], displayName?: string }} row from `serviceRows`
  * @returns {{ values: (number|null)[], max: number, label: string }}
  */
-export function rowGraphSpec(row) {
+export function rowCpuGraphSpec(row) {
   const series = Array.isArray(row?.series) ? row.series : [];
   return {
     values: series,
     max: windowMax(series, ROW_GRAPH_FLOOR_PCT),
     label: `${row?.displayName ?? 'Service'} CPU, one bar per second`,
+  };
+}
+
+/**
+ * Everything `BarGraph` needs to draw one service row's memory graph (#6773).
+ *
+ * Why its own scale rather than the CPU graph's: memory has no percentage to be
+ * a percentage OF. A CPU bar can be measured against 100 % of a core; a
+ * resident-set figure can only be measured against how much this same daemon
+ * held a minute ago, which is exactly the question the graph beside a live MEM
+ * column should answer. Scaling every row against the busiest service instead
+ * would flatten five rows to nothing whenever trusty-search is holding 13 GiB.
+ *
+ * What: the row's own memory series, scaled to its own busiest second, never
+ * below [`ROW_MEMORY_FLOOR_BYTES`]. No thresholds — the suite has no per-service
+ * memory budget to colour against, and inventing one here would put a red bar
+ * under a daemon nothing is complaining about.
+ * Test: `rowMemoryGraphSpec scales a row to its own peak, not to 100`,
+ * `rowMemoryGraphSpec holds a gap-only row against the floor`.
+ *
+ * @param {{ memorySeries?: (number|null)[], displayName?: string }} row from `serviceRows`
+ * @returns {{ values: (number|null)[], max: number, label: string }}
+ */
+export function rowMemoryGraphSpec(row) {
+  const series = Array.isArray(row?.memorySeries) ? row.memorySeries : [];
+  return {
+    values: series,
+    max: windowMax(series, ROW_MEMORY_FLOOR_BYTES),
+    label: `${row?.displayName ?? 'Service'} memory, one bar per second`,
   };
 }
 

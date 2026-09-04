@@ -98,6 +98,7 @@ impl ServiceConnector for AgentsConnector {
             // installed but stopped, which is what the card should say.
             lifecycle: ServiceLifecycle::Daemon,
             cpu_pct: None,
+            rss_bytes: None,
         }
     }
 }

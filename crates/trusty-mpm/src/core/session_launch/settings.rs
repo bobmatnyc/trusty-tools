@@ -905,7 +905,7 @@ fn resolve_statusline_binary() -> String {
 /// Why: separating the resolution PRIORITY from the actual `current_exe()` /
 /// PATH syscalls lets each branch (current-exe hit, PATH-lookup fallback, bare
 /// last resort) be exercised deterministically, mirroring the
-/// `has_prior_conversation_in` injected-I/O-root pattern used elsewhere in
+/// `session_id_exists_in` injected-I/O-root pattern used elsewhere in
 /// this crate (`crate::runtime::claude_code`).
 /// What: returns `current_exe()`'s path as a `String` when it resolves to
 /// valid UTF-8 AND is not an ephemeral build/worktree path (#2229 — a

@@ -17,12 +17,16 @@
   #6643 changed what the frames draw, not how the route behaves. Both frames now
   read the SAME 1 Hz history the home page graphs — one `machineStream.js`
   EventSource for this page, `BarGraph.svelte` for every graph, `hostGraphSpec`
-  and `rowGraphSpec` for their scales — so a card here and the same card on the
-  home page cannot disagree about a second. The service frame is the roster from
-  `servicesList.js`, rendered as an inert table: the screensaver takes no input
-  it does not already handle at the window, so nothing in it is a button and
-  nothing in it is focusable. Idle entry, the fullscreen gesture and the poll
-  backoff are untouched.
+  and the `rowCpuGraphSpec`/`rowMemoryGraphSpec` pair for their scales — so a
+  card here and the same card on the home page cannot disagree about a second.
+  The service frame is the roster from `servicesList.js`, rendered as an inert
+  table: the screensaver takes no input it does not already handle at the
+  window, so nothing in it is a button and nothing in it is focusable. Idle
+  entry, the fullscreen gesture and the poll backoff are untouched.
+
+  #6773 added the MEM column and the memory graph beside the CPU one, from the
+  same row specs the home page uses — a service row that read differently here
+  than on the home page would be the drift this shared module exists to prevent.
   Test: `screensaver.test.js` covers the rotation, idle, backoff and routing
   decisions; `machineStatus.test.js` and `servicesList.test.js` cover the graph
   specs and the rows; the rendered screen is verified by the binary smoke run
@@ -50,7 +54,8 @@
   // the markup below differs, because a row here neither clicks nor focuses.
   import {
     fetchServices,
-    rowGraphSpec,
+    rowCpuGraphSpec,
+    rowMemoryGraphSpec,
     serviceRows,
     statusCounts,
   } from './servicesList.js';
@@ -289,12 +294,15 @@
               <th>Version</th>
               <th>Status</th>
               <th class="num">%CPU</th>
+              <th class="num">MEM</th>
               <th>CPU · last 10 min</th>
+              <th>MEM · last 10 min</th>
             </tr>
           </thead>
           <tbody>
             {#each rows as row (row.id)}
-              {@const graph = rowGraphSpec(row)}
+              {@const cpuGraph = rowCpuGraphSpec(row)}
+              {@const memGraph = rowMemoryGraphSpec(row)}
               <tr>
                 <td class="name">{row.displayName}</td>
                 <td class="mono">{row.version}</td>
@@ -304,11 +312,22 @@
                   </span>
                 </td>
                 <td class="mono num">{row.cpuLabel}</td>
+                <td class="mono num">{row.memoryLabel}</td>
+                <!-- #6773: the same CPU-then-memory pair the home page draws,
+                     from the same specs, so the two views cannot drift. -->
                 <td class="graph">
                   <BarGraph
-                    values={graph.values}
-                    max={graph.max}
-                    label={graph.label}
+                    values={cpuGraph.values}
+                    max={cpuGraph.max}
+                    label={cpuGraph.label}
+                    height="clamp(1.4rem, 3.2vh, 2.6rem)"
+                  />
+                </td>
+                <td class="graph">
+                  <BarGraph
+                    values={memGraph.values}
+                    max={memGraph.max}
+                    label={memGraph.label}
                     height="clamp(1.4rem, 3.2vh, 2.6rem)"
                   />
                 </td>
@@ -472,8 +491,9 @@
   .name { font-weight: 600; }
   .mono { font-family: var(--trusty-mono); }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
-  /* #6643: the graph is the widest cell, because 600 bars need the room. */
-  .graph { width: 40%; }
+  /* #6643: the graphs are the widest cells, because 600 bars need the room.
+     #6773: two of them now, so each takes half of what the one used to. */
+  .graph { width: 24%; }
 
   /* #6643: the same per-status stamp the home page's rows draw, at room scale.
      Its colour comes from `statusPresentation.js` as a CSS variable, which no
