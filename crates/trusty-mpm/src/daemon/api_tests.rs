@@ -1996,6 +1996,70 @@ async fn session_end_hook_clears_claude_session_id() {
 }
 
 #[tokio::test]
+async fn session_end_stales_the_dead_harness_sessions_delegations() {
+    // #6797: a harness session's subagents cannot outlive it, so its live records
+    // name agents that are gone. While they read as live, ADR-0048 decision 10 and
+    // ADR-0049 decision 3 deny a merge, a rebase, or a documents-only commit in
+    // that checkout for the six hours of RUNNING_STALE_AFTER_SECS. #6497 covers a
+    // session the tmux reaper buries; the reaper walks MANAGED sessions and skips
+    // non-tmux origins, while a delegation's `session` is the HARNESS id — so a
+    // plain `claude` run's agents were never reached, which is what this covers.
+    //
+    // No managed record is created here deliberately: that is exactly the case the
+    // reaper misses, and the disposition must not be gated on one.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let paths = crate::core::paths::FrameworkPaths::under(dir.path());
+    let state = Arc::new(DaemonState::with_paths(&paths));
+
+    let claude_id = "550e8400-e29b-41d4-a716-446655440099";
+    let session = crate::core::session::SessionId(
+        uuid::Uuid::parse_str(claude_id).expect("fixture id parses"),
+    );
+    let mut d = crate::core::agent::Delegation::observed(
+        session,
+        "rust-engineer",
+        "task",
+        Some("toolu_orphan".to_string()),
+    );
+    d.cwd = Some(std::path::PathBuf::from("/repo"));
+    d.status = crate::core::agent::DelegationStatus::Running;
+    state.upsert_delegation(d);
+    assert_eq!(
+        state.live_shared_tree_writers(std::path::Path::new("/repo"), None),
+        vec!["rust-engineer".to_string()],
+        "fixture check: the record blocks a HEAD write before the session ends"
+    );
+
+    let post = HookPost {
+        session_id: claude_id.to_string(),
+        event: HookEvent::SessionEnd,
+        payload: serde_json::json!({}),
+    };
+    let _ = ingest_hook(State(Arc::clone(&state)), Json(post))
+        .await
+        .expect("ingest_hook(SessionEnd) must succeed");
+
+    assert!(
+        state
+            .live_shared_tree_writers(std::path::Path::new("/repo"), None)
+            .is_empty(),
+        "the ended session's agents must stop counting as live writers (#6797)"
+    );
+    // Stale, never Completed: tracking gave up; the agent is not reported as
+    // having finished, and the record stays resolvable by a late SubagentStop.
+    let records = state.delegations_for(session);
+    assert_eq!(records.len(), 1, "the record is staled, never evicted");
+    assert_eq!(
+        records[0].status,
+        crate::core::agent::DelegationStatus::Stale
+    );
+    assert!(
+        records[0].ended_at.is_none(),
+        "a staled record must not be stamped with a terminal end time"
+    );
+}
+
+#[tokio::test]
 async fn session_start_hook_ordering_race_self_heals_via_session_end() {
     // Why (#4337, critic finding 3): if a subagent's SessionStart wins the
     // race and lands FIRST — the record has no claude_session_id yet, so its

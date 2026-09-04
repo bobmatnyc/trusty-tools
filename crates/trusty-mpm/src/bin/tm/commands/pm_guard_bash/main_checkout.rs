@@ -568,8 +568,9 @@ pub(crate) fn head_move_deny_reason(verb: &str, target: &Path, live: &[String]) 
     format!(
         "HEAD-moving git command denied in a shared main checkout (ADR-0048): `git {verb}` moves \
          HEAD and writes the working tree of {}, and the daemon's delegation records name {} as \
-         running there with no worktree of its own — possibly dispatched by a different session \
-         standing in the same directory. Moving HEAD under a live writer changes the branch its \
+         running there with no worktree of its own, dispatched by a DIFFERENT session standing in \
+         the same directory (#6797: your own session's agents are excluded from this answer, so \
+         this is not you). Moving HEAD under a live writer changes the branch its \
          uncommitted work sits on, and git reports no error when it happens. If you \
          believe that record is stale — the agent finished without its stop signal reaching the \
          daemon — report it to the PM rather than retrying this command. If you only need this \
@@ -696,7 +697,8 @@ pub(crate) fn docs_commit_deny_reason(target: &Path, live: &[String]) -> String 
         "Documents-only commit denied in a SHARED main checkout (ADR-0049): the staged set is \
          documents and configuration, which may be committed in {} — but a commit moves HEAD, \
          and the daemon's delegation records name {} as running there with no worktree of its \
-         own, possibly dispatched by a different session standing in the same directory. Moving \
+         own, dispatched by a DIFFERENT session standing in the same directory (#6797: your own \
+         session's agents are excluded from this answer, so this is not one of yours). Moving \
          HEAD under a live writer changes the branch its uncommitted work sits on, and git \
          reports no error when it happens. The content is not the problem here and unstaging it \
          will not help. Wait for that agent to finish and commit then, or commit from a worktree: \
