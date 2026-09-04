@@ -795,7 +795,7 @@ async fn services_handler(State(state): State<AppState>) -> axum::response::Resp
     if let Some(snap) = state.poller_cache().snapshot().await {
         let mut services = snap.services;
         apply_handle_overrides(&mut services, &handles).await;
-        crate::service_cpu::apply_cpu_overlay(&mut services, state.machine_history()).await; // #6642
+        crate::service_metrics::apply_metrics_overlay(&mut services, state.machine_history()).await; // #6642
         // #6370: sort AFTER the overrides so a service demoted to Degraded here
         // ranks as degraded, not as the Running the poller recorded.
         crate::detect::order_for_display(&mut services);
@@ -811,7 +811,8 @@ async fn services_handler(State(state): State<AppState>) -> axum::response::Resp
     {
         Ok(mut infos) => {
             apply_handle_overrides(&mut infos, &handles).await;
-            crate::service_cpu::apply_cpu_overlay(&mut infos, state.machine_history()).await; // #6642
+            crate::service_metrics::apply_metrics_overlay(&mut infos, state.machine_history())
+                .await; // #6642
             crate::detect::order_for_display(&mut infos); // #6370
             axum::Json(infos).into_response()
         }

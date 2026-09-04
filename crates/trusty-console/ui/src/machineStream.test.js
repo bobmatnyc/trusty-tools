@@ -133,26 +133,34 @@ test('appending past the capacity drops the oldest sample, never the newest', ()
   assert.equal(state.samples[0].cpu.usage_pct, 1, 'sample 0 aged out');
 });
 
-test('a service batch appends per id and keeps a null cpu_pct as null', () => {
+test('a service batch appends per id and keeps a null measurement as null', () => {
   let state = initialState();
   state = applyServices(state, {
     sampled_at_unix: 1,
     services: [
-      { id: 'trusty-search', status: 'running', cpu_pct: 2.5 },
-      { id: 'trusty-review', status: 'available', cpu_pct: null },
+      { id: 'trusty-search', status: 'running', cpu_pct: 2.5, rss_bytes: 148_897_792 },
+      { id: 'trusty-review', status: 'available', cpu_pct: null, rss_bytes: null },
     ],
   });
   state = applyServices(state, {
     sampled_at_unix: 2,
-    services: [{ id: 'trusty-search', status: 'running', cpu_pct: 3.5 }],
+    services: [{ id: 'trusty-search', status: 'running', cpu_pct: 3.5, rss_bytes: 157_286_400 }],
   });
 
   assert.deepEqual(
     state.serviceSamples['trusty-search'].map((s) => s.cpu_pct),
     [2.5, 3.5],
   );
+  // REGRESSION (#6773): the memory figure rides the SAME event, so one batch
+  // feeds both of a row's graphs and neither can lag the other by a tick.
+  assert.deepEqual(
+    state.serviceSamples['trusty-search'].map((s) => s.rss_bytes),
+    [148_897_792, 157_286_400],
+  );
   assert.equal(state.serviceSamples['trusty-review'][0].cpu_pct, null);
   assert.notEqual(state.serviceSamples['trusty-review'][0].cpu_pct, 0);
+  assert.equal(state.serviceSamples['trusty-review'][0].rss_bytes, null);
+  assert.notEqual(state.serviceSamples['trusty-review'][0].rss_bytes, 0);
 });
 
 test('a per-service ring caps at its own capacity', () => {

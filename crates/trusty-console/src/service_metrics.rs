@@ -1,15 +1,24 @@
-//! Per-service CPU sampling for the home-page card graphs (#6642).
+//! Per-service CPU and memory sampling for the home-page graphs (#6642, #6773).
 //!
 //! Why: `GET /api/console/services` says WHETHER each service is running. The
-//! owner's home-page ruling needs how HARD it is running, once a second. Nothing
-//! in the console measured another process before this module.
+//! owner's home-page ruling needs how HARD it is running and how much memory it
+//! holds, once a second. Nothing in the console measured another process before
+//! this module.
+//!
+//! Why one sampler for both figures (#6773): the owner's ruling puts a CPU graph
+//! and a memory graph side by side in every row. Both are read on ONE tick, from
+//! one `ProcessCpuSampler`, so the pair always shows the same second — a
+//! second sampler or a second timer is the one way side-by-side graphs can lie.
+//! (Within that tick the two are separate reads, and on macOS the memory one is
+//! a live syscall rather than the CPU refresh's snapshot; see
+//! `ProcessCpuSampler::rss_bytes`. Microseconds apart, at 1 s resolution.)
 //!
 //! Why pid discovery is a separate step from sampling: a pid costs I/O to find
-//! (a lock file to read, a socket to dial) and a CPU reading costs a syscall on
+//! (a lock file to read, a socket to dial) and a reading costs a syscall on
 //! an already-known pid. Doing both every tick would put a file read and six
-//! socket dials on a one-second loop. [`ServiceCpuSampler::pending_lookups`]
+//! socket dials on a one-second loop. [`ServiceMetricsSampler::pending_lookups`]
 //! names the services that still need a pid, [`resolve_pid`] does the I/O off
-//! the reactor, and [`ServiceCpuSampler::record_lookups`] feeds the answers
+//! the reactor, and [`ServiceMetricsSampler::record_lookups`] feeds the answers
 //! back — so steady state is one `sysinfo` refresh per second and nothing else.
 //!
 //! Which services yield a pid, and why the rest do not:
@@ -137,19 +146,19 @@ fn socket_peer_pid(socket: PathBuf) -> Option<u32> {
 /// lookups that failed. Not `Clone` — it carries mutable sampling state and is
 /// owned by the one sampler task.
 /// Test: see the inline `tests` module.
-pub struct ServiceCpuSampler {
+pub struct ServiceMetricsSampler {
     cpu: ProcessCpuSampler,
     pids: HashMap<String, u32>,
     retry_after: HashMap<String, Instant>,
 }
 
-impl Default for ServiceCpuSampler {
+impl Default for ServiceMetricsSampler {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ServiceCpuSampler {
+impl ServiceMetricsSampler {
     /// An empty sampler that has resolved nothing yet.
     #[must_use]
     pub fn new() -> Self {
@@ -211,27 +220,36 @@ impl ServiceCpuSampler {
     /// its daemon stopped would leave the graph frozen at its last value rather
     /// than showing the gap.
     /// What: refreshes every tracked pid in ONE `sysinfo` call — the tracked
-    /// pids only, never the process table — then reads a figure per service. A
-    /// service whose pid vanished has already been dropped by the refresh, so it
-    /// reads `None` and its entry is forgotten here, which lets
-    /// [`ServiceCpuSampler::pending_lookups`] rediscover it after a restart.
+    /// pids only, never the process table — then reads both figures per service
+    /// against that refresh (#6773), so the CPU graph and the memory graph in a
+    /// row always show the same second. The two are separate reads: on macOS the
+    /// memory one is a live `proc_pid_rusage` syscall rather than the refresh's
+    /// snapshot ([`ProcessCpuSampler::rss_bytes`]), so the pair is microseconds
+    /// apart within a 1 s tick. A service whose pid vanished has already
+    /// been dropped by the refresh, so it reads `None` and its entry is
+    /// forgotten here, which lets
+    /// [`ServiceMetricsSampler::pending_lookups`] rediscover it after a restart.
     /// Never returns an error and never panics: an unmeasurable service is one
     /// `None` among the others.
     /// Test: `a_vanished_pid_samples_as_none_and_the_tick_continues`,
-    /// `every_service_gets_a_sample`.
+    /// `every_service_gets_a_sample`,
+    /// `a_live_pid_samples_cpu_and_memory_on_one_tick`.
     #[must_use]
     pub fn sample(&mut self, services: &[ServiceInfo], sampled_at_unix: u64) -> ServiceSampleBatch {
         self.cpu.refresh();
 
         let mut samples = Vec::with_capacity(services.len());
         for service in services {
-            let cpu_pct = match self.pids.get(&service.id) {
-                Some(pid) => self.cpu.cpu_pct(*pid),
-                None => None,
+            // #6773: one pid lookup and one tick feed both figures — a second
+            // sampler could hand the two graphs different seconds.
+            let (cpu_pct, rss_bytes) = match self.pids.get(&service.id) {
+                Some(pid) => (self.cpu.cpu_pct(*pid), self.cpu.rss_bytes(*pid)),
+                None => (None, None),
             };
             // #6642: a tracked pid whose process is gone reads None; forget it
             // so the next tick can rediscover the restarted daemon.
             if cpu_pct.is_none()
+                && rss_bytes.is_none()
                 && let Some(pid) = self.pids.remove(&service.id)
             {
                 self.cpu.untrack(pid);
@@ -240,6 +258,7 @@ impl ServiceCpuSampler {
                 id: service.id.clone(),
                 status: service.status.clone(),
                 cpu_pct,
+                rss_bytes,
             });
         }
 
@@ -258,25 +277,29 @@ impl ServiceCpuSampler {
     }
 }
 
-/// Stamp each entry with the newest CPU sample the history holds (#6642).
+/// Stamp each entry with the newest sample the history holds (#6642, #6773).
 ///
 /// Why here rather than in the route handler: it belongs to this module's
 /// subject, and `server::mod` is at its SLOC cap. Why on the ROUTE rather than
 /// in detection: a connector is a synchronous probe with no sampler, and the
-/// number must come from the same rings the graph reads or the list and the
+/// numbers must come from the same rings the graphs read or the list and the
 /// newest bar could disagree.
-/// What: overwrites `ServiceInfo::cpu_pct` for every entry the history has a
-/// measurement for, and leaves the rest `None` — which the route serialises as
-/// an explicit `null`. Before the first tick the history is empty and every
-/// entry stays `None`, which is the correct reading of "not measured yet".
+/// What: overwrites `ServiceInfo::cpu_pct` and `ServiceInfo::rss_bytes` from the
+/// newest per-service sample, and leaves the rest `None` — which the route
+/// serialises as an explicit `null`. Before the first tick the history is empty
+/// and every entry stays `None`, which is the correct reading of "not measured
+/// yet". Both fields come from ONE sample, so the two columns cannot describe
+/// different seconds.
 /// Test: `the_overlay_stamps_only_the_services_with_a_measurement`.
-pub async fn apply_cpu_overlay(
+pub async fn apply_metrics_overlay(
     services: &mut [ServiceInfo],
     history: &crate::machine_history::MachineHistory,
 ) {
-    let latest = history.latest_service_cpu().await;
+    let latest = history.latest_service_metrics().await;
     for service in services.iter_mut() {
-        service.cpu_pct = latest.get(&service.id).copied();
+        let newest = latest.get(&service.id);
+        service.cpu_pct = newest.and_then(|s| s.cpu_pct);
+        service.rss_bytes = newest.and_then(|s| s.rss_bytes);
     }
 }
 
@@ -305,6 +328,7 @@ mod tests {
             hint: None,
             lifecycle: ServiceLifecycle::Daemon,
             cpu_pct: None,
+            rss_bytes: None,
         }
     }
 
@@ -333,7 +357,7 @@ mod tests {
             info("trusty-analyze", ServiceStatus::Absent),
             info("trusty-agents", ServiceStatus::Degraded),
         ];
-        let batch = ServiceCpuSampler::new().sample(&services, 42);
+        let batch = ServiceMetricsSampler::new().sample(&services, 42);
 
         assert_eq!(batch.sampled_at_unix, 42);
         assert_eq!(batch.services.len(), 4);
@@ -358,7 +382,7 @@ mod tests {
             info("trusty-review", ServiceStatus::Absent),
             info("trusty-mpm", ServiceStatus::Degraded),
         ];
-        let mut pending = ServiceCpuSampler::new().pending_lookups(&services, Instant::now());
+        let mut pending = ServiceMetricsSampler::new().pending_lookups(&services, Instant::now());
         pending.sort();
         assert_eq!(pending, vec!["trusty-mpm", "trusty-search"]);
     }
@@ -376,7 +400,7 @@ mod tests {
     fn a_failed_lookup_is_not_retried_immediately() {
         let services = vec![info("trusty-agents", ServiceStatus::Running)];
         let now = Instant::now();
-        let mut sampler = ServiceCpuSampler::new();
+        let mut sampler = ServiceMetricsSampler::new();
 
         assert_eq!(sampler.pending_lookups(&services, now).len(), 1);
         sampler.record_lookups(vec![("trusty-agents".to_string(), None)], now);
@@ -404,7 +428,7 @@ mod tests {
         let pid = child.id();
         let services = vec![info("trusty-search", ServiceStatus::Running)];
 
-        let mut sampler = ServiceCpuSampler::new();
+        let mut sampler = ServiceMetricsSampler::new();
         sampler.record_lookups(
             vec![("trusty-search".to_string(), Some(pid))],
             Instant::now(),
@@ -421,6 +445,45 @@ mod tests {
         assert!(
             cpu.is_some(),
             "a live tracked process must produce a measurement"
+        );
+    }
+
+    /// REGRESSION (#6773): ONE `sample` call must carry both figures for a live
+    /// service, so the row's two graphs always draw the same second.
+    ///
+    /// Why: before #6773 the sampler asked `sysinfo` for CPU only. Adding the
+    /// memory graph without this would leave `rss_bytes` `None` on every tick —
+    /// a permanently empty memory graph beside a working CPU graph, with nothing
+    /// red anywhere to say so. Sampling memory on a second tick would instead
+    /// let the two graphs disagree about which second they show.
+    /// What: tracks a real child, takes one tick, and asserts both fields of
+    /// that single sample are present with a plausible byte figure.
+    /// Test: this test itself.
+    #[test]
+    fn a_live_pid_samples_cpu_and_memory_on_one_tick() {
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        let services = vec![info("trusty-search", ServiceStatus::Running)];
+
+        let mut sampler = ServiceMetricsSampler::new();
+        sampler.record_lookups(
+            vec![("trusty-search".to_string(), Some(pid))],
+            Instant::now(),
+        );
+        let batch = sampler.sample(&services, 1);
+        let sample = batch.services[0].clone();
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(sample.cpu_pct.is_some(), "the CPU half of the tick");
+        let rss = sample
+            .rss_bytes
+            .expect("the memory half of the SAME tick — one refresh serves both");
+        assert!(rss > 0, "a live process occupies memory, got {rss} bytes");
+        assert!(
+            rss < 1024 * 1024 * 1024 * 1024,
+            "implausibly large ({rss}) — the unit must be bytes"
         );
     }
 
@@ -443,7 +506,7 @@ mod tests {
             info("trusty-agents", ServiceStatus::Running),
         ];
 
-        let mut sampler = ServiceCpuSampler::new();
+        let mut sampler = ServiceMetricsSampler::new();
         sampler.record_lookups(
             vec![("trusty-search".to_string(), Some(pid))],
             Instant::now(),
@@ -475,12 +538,13 @@ mod tests {
         assert_eq!(sampler.sample(&services, 3).services.len(), 2);
     }
 
-    /// Why (#6642): the list must render a CPU figure on first paint, and a
-    /// service with no measurement must stay `None` rather than inherit a
-    /// neighbour's number or fall back to zero.
+    /// Why (#6642, #6773): the list must render its CPU and memory figures on
+    /// first paint, and a service with no measurement must stay `None` rather
+    /// than inherit a neighbour's number or fall back to zero.
     /// What: records one measured and one unmeasurable service into a real
     /// history, then overlays a three-entry list and asserts exactly one entry
-    /// was stamped.
+    /// was stamped — in BOTH fields, since the memory column is overlaid the
+    /// same way and from the same sample.
     /// Test: this test itself.
     #[tokio::test]
     async fn the_overlay_stamps_only_the_services_with_a_measurement() {
@@ -493,11 +557,13 @@ mod tests {
                         id: "trusty-search".to_string(),
                         status: ServiceStatus::Running,
                         cpu_pct: Some(7.5),
+                        rss_bytes: Some(148_897_792),
                     },
                     ServiceSample {
                         id: "trusty-review".to_string(),
                         status: ServiceStatus::Available,
                         cpu_pct: None,
+                        rss_bytes: None,
                     },
                 ],
             })
@@ -508,17 +574,23 @@ mod tests {
             info("trusty-review", ServiceStatus::Available),
             info("trusty-agents", ServiceStatus::Absent),
         ];
-        apply_cpu_overlay(&mut services, &history).await;
+        apply_metrics_overlay(&mut services, &history).await;
 
         assert_eq!(services[0].cpu_pct, Some(7.5));
+        assert_eq!(services[0].rss_bytes, Some(148_897_792));
         assert_eq!(
             services[1].cpu_pct, None,
             "a sampled-but-unmeasurable service stays null"
         );
         assert_eq!(
+            services[1].rss_bytes, None,
+            "a sampled-but-unmeasurable service stays null in memory too"
+        );
+        assert_eq!(
             services[2].cpu_pct, None,
             "a service the history never saw stays null"
         );
+        assert_eq!(services[2].rss_bytes, None);
     }
 
     /// Why: the three services with no discovery artifact must cost no I/O at

@@ -66,7 +66,7 @@ pub mod search_uds;
 pub mod server;
 pub mod service;
 // #6642: per-service pid discovery + CPU sampling for the home-page graphs.
-pub mod service_cpu;
+pub mod service_metrics;
 // #6155: the trusty-search SPA, mounted under /tools/search/.
 pub mod tools_ui;
 pub mod webhook;

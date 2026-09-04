@@ -63,8 +63,12 @@ use transitions::{SERVICE_REPORT_GRACE_SECS, ServiceTransition, TransitionTracke
 /// addition is backward-compatible on the wire, but a client built against
 /// schema 1 renders no per-service graph at all, which is exactly the
 /// difference the version exists to announce.
+///
+/// `3` (#6773): every `ServiceSample` gained `rss_bytes`. Additive on the wire
+/// for the same reason and announced for the same one — a client built against
+/// schema 2 draws the CPU graph and leaves the memory graph beside it empty.
 /// Test: `history_starts_empty`.
-pub const MACHINE_HISTORY_SCHEMA_VERSION: u32 = 2;
+pub const MACHINE_HISTORY_SCHEMA_VERSION: u32 = 3;
 
 /// Transitions retained before the oldest is evicted.
 ///
@@ -313,26 +317,28 @@ impl MachineHistory {
             .send(HistoryEvent::Services(Box::new(batch)));
     }
 
-    /// The newest recorded `cpu_pct` for each service (#6642).
+    /// The newest recorded sample for each service (#6642, #6773).
     ///
-    /// Why: `GET /api/console/services` must render a CPU figure before the
-    /// stream connects, and the newest ring entry is exactly that figure. Taking
-    /// it from the ring rather than from a second cache means the list and the
-    /// graph cannot disagree about the same instant.
-    /// What: reads the last entry of every per-service ring under the read lock.
-    /// A service with no ring, or whose newest sample carries no measurement, is
-    /// absent from the map — the caller renders `null`, never `0.0`.
-    /// Test: `latest_service_cpu_reads_the_newest_sample`.
-    pub async fn latest_service_cpu(&self) -> std::collections::HashMap<String, f32> {
+    /// Why: `GET /api/console/services` must render the CPU and memory figures
+    /// before the stream connects, and the newest ring entry is exactly those
+    /// figures. Taking them from the ring rather than from a second cache means
+    /// the list and the graphs cannot disagree about the same instant.
+    ///
+    /// Why the whole sample rather than the two numbers (#6773): a tuple grown
+    /// one field per graph is a shape every caller has to re-learn. Returning
+    /// the sample the ring already holds means adding a third measurement later
+    /// changes nothing here.
+    /// What: clones the last entry of every per-service ring under the read
+    /// lock. A service with no ring at all is absent from the map; a service
+    /// whose newest sample carries no measurement is PRESENT with `None` fields,
+    /// which the caller renders as `null`, never as zero.
+    /// Test: `latest_service_metrics_reads_the_newest_sample`.
+    pub async fn latest_service_metrics(&self) -> std::collections::HashMap<String, ServiceSample> {
         let inner = self.shared.inner.read().await;
         inner
             .service_samples
             .iter()
-            .filter_map(|(id, ring)| {
-                ring.last()
-                    .and_then(|s| s.cpu_pct)
-                    .map(|cpu| (id.clone(), cpu))
-            })
+            .filter_map(|(id, ring)| ring.last().map(|s| (id.clone(), s.clone())))
             .collect()
     }
 
@@ -521,7 +527,8 @@ mod tests {
         assert_eq!(snap.transitions[0].to, transitions::ServiceState::Degraded);
     }
 
-    /// Build a one-service batch.
+    /// Build a one-service batch. `cpu` of `None` means the tick measured
+    /// nothing at all, so the memory figure is absent too (#6773).
     fn service_batch(id: &str, cpu: Option<f32>, at: u64) -> ServiceSampleBatch {
         use crate::connector::ServiceStatus;
         ServiceSampleBatch {
@@ -530,6 +537,7 @@ mod tests {
                 id: id.to_string(),
                 status: ServiceStatus::Running,
                 cpu_pct: cpu,
+                rss_bytes: cpu.map(|c| (c as u64 + 1) * 1024 * 1024),
             }],
         }
     }
@@ -603,17 +611,19 @@ mod tests {
         assert_eq!(snap.service_samples.len(), 2);
         assert_eq!(snap.service_samples["trusty-search"].len(), 2);
         assert_eq!(snap.service_samples["trusty-mpm"].len(), 1);
-        assert_eq!(snap.schema_version, 2, "#6642 bumped the payload shape");
+        assert_eq!(snap.schema_version, 3, "#6773 bumped the payload shape");
     }
 
-    /// Why (#6642): the services route renders this number before the stream
-    /// connects, so it must be the NEWEST sample and must omit a service whose
-    /// newest sample carries no measurement.
+    /// Why (#6642, #6773): the services route renders the CPU and memory
+    /// figures from this map before the stream connects, so it must return the
+    /// NEWEST sample and must not report a stopped daemon's last live figures
+    /// forever.
     /// What: records a measured sample then an unmeasurable one for the same
-    /// service, plus a measured one for another, and asserts the map.
+    /// service, plus a measured one for another, and asserts both fields of the
+    /// newest sample each time.
     /// Test: this test itself.
     #[tokio::test]
-    async fn latest_service_cpu_reads_the_newest_sample() {
+    async fn latest_service_metrics_reads_the_newest_sample() {
         let h = MachineHistory::new();
         h.record_service_samples(service_batch("trusty-search", Some(1.0), 1))
             .await;
@@ -621,15 +631,20 @@ mod tests {
             .await;
         h.record_service_samples(service_batch("trusty-mpm", Some(3.0), 2))
             .await;
-        assert_eq!(h.latest_service_cpu().await["trusty-search"], 9.5);
+        let latest = h.latest_service_metrics().await;
+        assert_eq!(latest["trusty-search"].cpu_pct, Some(9.5));
+        // #6773: the memory figure comes from the SAME newest sample, so the
+        // %CPU and MEM columns can never describe different seconds.
+        assert_eq!(latest["trusty-search"].rss_bytes, Some(10 * 1024 * 1024));
 
-        // The daemon stops: its newest sample has no measurement, so it drops
-        // out of the map rather than reporting its last live figure forever.
+        // The daemon stops: its newest sample carries no measurement at all, so
+        // both figures read `None` rather than its last live numbers.
         h.record_service_samples(service_batch("trusty-search", None, 3))
             .await;
-        let latest = h.latest_service_cpu().await;
-        assert!(!latest.contains_key("trusty-search"));
-        assert_eq!(latest["trusty-mpm"], 3.0);
+        let latest = h.latest_service_metrics().await;
+        assert_eq!(latest["trusty-search"].cpu_pct, None);
+        assert_eq!(latest["trusty-search"].rss_bytes, None);
+        assert_eq!(latest["trusty-mpm"].cpu_pct, Some(3.0));
     }
 
     /// REGRESSION (#6642): a subscriber that stalls for the length of the whole

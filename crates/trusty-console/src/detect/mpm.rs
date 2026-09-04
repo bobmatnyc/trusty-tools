@@ -151,6 +151,7 @@ impl ServiceConnector for MpmConnector {
                 hint: None,
                 lifecycle: ServiceLifecycle::Daemon,
                 cpu_pct: None,
+                rss_bytes: None,
             };
         }
 
@@ -187,6 +188,7 @@ impl ServiceConnector for MpmConnector {
                 ),
                 lifecycle: ServiceLifecycle::Daemon,
                 cpu_pct: None,
+                rss_bytes: None,
             };
         }
 
@@ -200,6 +202,7 @@ impl ServiceConnector for MpmConnector {
             // #6416: trusty-mpm is a resident daemon; `Available` means stopped.
             lifecycle: ServiceLifecycle::Daemon,
             cpu_pct: None,
+            rss_bytes: None,
         }
     }
 }

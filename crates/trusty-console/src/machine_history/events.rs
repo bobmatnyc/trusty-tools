@@ -154,7 +154,9 @@ mod tests {
     /// a rename or a dropped field leaves the card graphs empty with nothing red
     /// anywhere.
     /// What: frames a two-service batch and asserts the kind line, the
-    /// timestamp, and both rows including an absent `cpu_pct` as null.
+    /// timestamp, and both rows — including that ONE event carries the CPU and
+    /// memory figures the row's two graphs need (#6773), and that an absent
+    /// measurement of either is null.
     /// Test: this test.
     #[test]
     fn a_services_frame_carries_the_whole_roster() {
@@ -168,11 +170,13 @@ mod tests {
                     id: "trusty-search".to_string(),
                     status: ServiceStatus::Running,
                     cpu_pct: Some(3.25),
+                    rss_bytes: Some(148_897_792),
                 },
                 ServiceSample {
                     id: "trusty-review".to_string(),
                     status: ServiceStatus::Available,
                     cpu_pct: None,
+                    rss_bytes: None,
                 },
             ],
         }));
@@ -188,10 +192,17 @@ mod tests {
         assert_eq!(parsed["services"][0]["id"], "trusty-search");
         assert_eq!(parsed["services"][0]["status"], "running");
         assert_eq!(parsed["services"][0]["cpu_pct"], 3.25);
+        // REGRESSION (#6773): one `services` event carries BOTH figures, so a
+        // client never has to join two streams to draw the row's two graphs.
+        assert_eq!(parsed["services"][0]["rss_bytes"], 148_897_792_u64);
         assert_eq!(parsed["services"][1]["id"], "trusty-review");
         assert!(
             parsed["services"][1]["cpu_pct"].is_null(),
             "an unmeasurable service is null, never 0.0"
+        );
+        assert!(
+            parsed["services"][1]["rss_bytes"].is_null(),
+            "an unmeasurable service is null, never 0"
         );
     }
 

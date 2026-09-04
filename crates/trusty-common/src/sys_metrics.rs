@@ -49,6 +49,28 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 /// cannot be reliably induced in a unit test.
 #[cfg(target_os = "macos")]
 pub fn physical_footprint_mb(pid: u32) -> Option<u64> {
+    // #6773: the megabyte figure is the byte figure divided down. One reader of
+    // `proc_pid_rusage`, not two.
+    Some(physical_footprint_bytes(pid)? / (1024 * 1024))
+}
+
+/// True physical memory footprint of a process, in BYTES (macOS only).
+///
+/// Why bytes as well as megabytes (#6773): the console's per-service memory
+/// graph draws a 10-minute window at 1 s cadence, and whole megabytes quantise
+/// a small daemon's curve into a staircase. The megabyte reading stays because
+/// the `TRUSTY_MEMORY_LIMIT_MB` guardrail is stated in megabytes; this is the
+/// same counter without the division.
+/// What: reads `ri_phys_footprint` from `proc_pid_rusage(RUSAGE_INFO_V0)` — the
+/// figure `vmmap`/`footprint` report, which counts pages the macOS memory
+/// compressor holds and `pti_resident_size` omits (#2165). Returns `None` on
+/// any failure (invalid pid, cross-user permission denial) rather than
+/// panicking or returning a garbage value.
+/// Test: `self_physical_footprint_is_plausible`,
+/// `physical_footprint_bytes_agrees_with_the_megabyte_reading`.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn physical_footprint_bytes(pid: u32) -> Option<u64> {
     // SAFETY: `info` is a zero-initialised, `#[repr(C)]` struct matching the
     // kernel ABI for `RUSAGE_INFO_V0`. The C API's `buffer` parameter is
     // typed `rusage_info_t *` (`rusage_info_t` itself being `void *`), and
@@ -69,7 +91,7 @@ pub fn physical_footprint_mb(pid: u32) -> Option<u64> {
     if ret != 0 {
         return None;
     }
-    Some(info.ri_phys_footprint / (1024 * 1024))
+    Some(info.ri_phys_footprint)
 }
 
 /// Resident memory of an **arbitrary** process, in megabytes.
@@ -217,21 +239,32 @@ impl Default for SysMetrics {
 /// across ticks. One `System` refreshed once for N pids costs one syscall batch;
 /// N samplers cost N of them and each keeps its own process table.
 ///
-/// What: holds a `System` configured to refresh CPU only, plus the pid set the
-/// caller declared with [`ProcessCpuSampler::track`].
+/// Why it reads memory too, under a name that says CPU (#6773): the console's
+/// service rows draw a CPU graph and a memory graph off ONE tick, and a second
+/// `System` refreshing the same pids for the other half would double the
+/// syscalls and let the two graphs disagree about which second they show. The
+/// type keeps its name because renaming a published type buys nothing a doc
+/// line does not, and costs every caller a breaking change.
+///
+/// What: holds a `System` configured to refresh process CPU and memory, plus
+/// the pid set the caller declared with [`ProcessCpuSampler::track`].
 /// [`ProcessCpuSampler::refresh`] updates ONLY those pids —
 /// `ProcessesToUpdate::Some`, never `All`, so the cost is proportional to what
 /// is tracked and not to how many processes the machine is running.
-/// [`ProcessCpuSampler::cpu_pct`] reads the last refresh's figure, and answers
-/// `None` for a pid that is not tracked or whose process is gone. `None` means
-/// "no measurement", never "measured zero" — a caller must not render it as 0.
+/// [`ProcessCpuSampler::cpu_pct`] and [`ProcessCpuSampler::rss_bytes`] both
+/// answer `None` for a pid that is not tracked or whose process is gone —
+/// `None` means "no measurement", never "measured zero", so a caller must not
+/// render it as 0. `cpu_pct` reads the refresh snapshot; on macOS `rss_bytes`
+/// reads a live `proc_pid_rusage` syscall instead, for the reason its own doc
+/// gives.
 ///
 /// CPU% follows `sysinfo`'s convention: `100.0` is one fully-saturated core, so
 /// a process spread over four cores can report above 100.
 /// Test: `process_cpu_sampler_measures_a_tracked_child`,
 /// `process_cpu_sampler_reports_none_for_a_vanished_pid`,
 /// `process_cpu_sampler_reports_none_for_an_untracked_pid`,
-/// `process_cpu_sampler_untrack_removes_a_pid`.
+/// `process_cpu_sampler_untrack_removes_a_pid`,
+/// `process_cpu_sampler_measures_memory_of_a_tracked_child`.
 pub struct ProcessCpuSampler {
     sys: System,
     tracked: Vec<Pid>,
@@ -243,14 +276,15 @@ impl ProcessCpuSampler {
     /// Why: the caller discovers pids over time (a daemon starts, another
     /// exits), so the set is built with [`ProcessCpuSampler::track`] rather than
     /// fixed at construction.
-    /// What: a `System` refreshing process CPU only — no memory, no disks, no
-    /// networks — because that is the whole measurement this type provides.
+    /// What: a `System` refreshing process CPU and memory only — no disks, no
+    /// networks — because those two are the whole measurement this type
+    /// provides.
     /// Test: `process_cpu_sampler_reports_none_for_an_untracked_pid`.
     #[must_use]
     pub fn new() -> Self {
         Self {
             sys: System::new_with_specifics(
-                RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing().with_cpu()),
+                RefreshKind::nothing().with_processes(process_refresh()),
             ),
             tracked: Vec::new(),
         }
@@ -276,7 +310,7 @@ impl ProcessCpuSampler {
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             true,
-            ProcessRefreshKind::nothing().with_cpu(),
+            process_refresh(),
         );
     }
 
@@ -328,7 +362,7 @@ impl ProcessCpuSampler {
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::Some(&self.tracked),
             true,
-            ProcessRefreshKind::nothing().with_cpu(),
+            process_refresh(),
         );
         let sys = &self.sys;
         self.tracked.retain(|pid| sys.process(*pid).is_some());
@@ -353,6 +387,63 @@ impl ProcessCpuSampler {
         }
         self.sys.process(pid).map(sysinfo::Process::cpu_usage)
     }
+
+    /// The resident memory of `pid` in bytes, for a pid the last
+    /// [`ProcessCpuSampler::refresh`] still resolves (#6773).
+    ///
+    /// Why bytes rather than megabytes: the caller graphs this at 1 s cadence,
+    /// and rounding to whole megabytes turns a small daemon's curve into a
+    /// staircase. Why the same `Option` contract as
+    /// [`ProcessCpuSampler::cpu_pct`]: an untracked pid, an exited process and
+    /// a permission denial are all "no measurement", and a service using zero
+    /// bytes does not exist.
+    ///
+    /// What: the tracked set and the last refresh decide WHETHER there is a
+    /// measurement — an untracked pid, or one the refresh dropped, returns
+    /// `None` and no further call is made. The VALUE is read per platform, and
+    /// on macOS it does NOT come from that refresh: each call issues a fresh
+    /// `proc_pid_rusage` syscall for the physical footprint (the counter
+    /// `vmmap` and the kernel's Jetsam logic use), falling back to the
+    /// refresh's `sysinfo` resident size only when that syscall fails. Off
+    /// macOS the value IS the refresh snapshot's `sysinfo` reading, which on
+    /// Linux is `/proc/<pid>/status`'s `VmRSS`. Matching [`SysMetrics::sample`]
+    /// is deliberate: a daemon's self-reported `rss_mb` and this figure must
+    /// not describe memory two different ways.
+    ///
+    /// What that costs a caller reading both figures: at the back-to-back call
+    /// site in trusty-console's `service_metrics::ServiceMetricsSampler::sample`
+    /// the macOS CPU and memory numbers are two reads microseconds apart, not
+    /// one instant. Both land inside the same 1 s tick, which is the resolution
+    /// the graphs draw.
+    /// Test: `process_cpu_sampler_measures_memory_of_a_tracked_child`,
+    /// `process_cpu_sampler_reports_none_for_a_vanished_pid`.
+    #[must_use]
+    pub fn rss_bytes(&self, pid: u32) -> Option<u64> {
+        let sysinfo_bytes = {
+            let key = Pid::from_u32(pid);
+            if !self.tracked.contains(&key) {
+                return None;
+            }
+            self.sys.process(key).map(sysinfo::Process::memory)?
+        };
+        #[cfg(target_os = "macos")]
+        {
+            Some(physical_footprint_bytes(pid).unwrap_or(sysinfo_bytes))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Some(sysinfo_bytes)
+        }
+    }
+}
+
+/// What one `refresh_processes_specifics` call asks `sysinfo` for.
+///
+/// Why a helper (#6773): the three call sites — construction, `track`, and
+/// `refresh` — must ask for the SAME fields, or a pid primed without memory
+/// reads `None` on its first graphed tick. One spelling makes that impossible.
+fn process_refresh() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing().with_cpu().with_memory()
 }
 
 impl Default for ProcessCpuSampler {
@@ -605,6 +696,51 @@ mod tests {
 
         let cpu = cpu.expect("a live tracked pid must yield a measurement");
         assert!(cpu >= 0.0, "cpu usage must be non-negative, got {cpu}");
+    }
+
+    /// REGRESSION (#6773): a tracked pid must yield a memory reading off the
+    /// SAME refresh that yields its CPU reading.
+    ///
+    /// Why: the console's service row draws a CPU graph and a memory graph from
+    /// one tick. Before #6773 the sampler asked `sysinfo` for CPU only, so
+    /// `rss_bytes` had nothing to read and every memory graph would be empty
+    /// with nothing red anywhere to say so.
+    /// What: spawns a child, tracks it, refreshes ONCE, and asserts both figures
+    /// come back — memory non-zero and below a terabyte, so a unit slip
+    /// (kilobytes, pages) fails here rather than in the UI.
+    /// Test: this test itself.
+    #[cfg(unix)]
+    #[test]
+    fn process_cpu_sampler_measures_memory_of_a_tracked_child() {
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+
+        let mut sampler = ProcessCpuSampler::new();
+        sampler.track(pid);
+        sampler.refresh();
+        let cpu = sampler.cpu_pct(pid);
+        let rss = sampler.rss_bytes(pid);
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(cpu.is_some(), "one refresh must serve both figures");
+        let rss = rss.expect("a live tracked pid must yield a memory measurement");
+        assert!(rss > 0, "a live process occupies memory, got {rss} bytes");
+        assert!(
+            rss < 1024 * 1024 * 1024 * 1024,
+            "implausibly large ({rss}) — the unit must be bytes"
+        );
+    }
+
+    /// Why: `rss_bytes` has the same three-way "no measurement" contract as
+    /// `cpu_pct`, and an untracked pid is the branch a caller hits first.
+    /// What: asserts an untracked live pid — this test process — reads `None`.
+    /// Test: this test itself.
+    #[test]
+    fn process_cpu_sampler_reports_no_memory_for_an_untracked_pid() {
+        let sampler = ProcessCpuSampler::new();
+        assert_eq!(sampler.rss_bytes(std::process::id()), None);
     }
 
     /// REGRESSION (#6642): a process that exits between two samples must read as
@@ -865,6 +1001,27 @@ mod tests {
         assert!(
             mb < 1024 * 1024,
             "physical footprint implausibly large ({mb} MB) — unit must be MB"
+        );
+    }
+
+    /// Why (#6773): the megabyte reading is now the byte reading divided down,
+    /// so a unit slip in either would let the `TRUSTY_MEMORY_LIMIT_MB` guardrail
+    /// and the console's memory graph describe the same process differently.
+    /// What: reads both for this process and asserts the bytes floor-divide to
+    /// within one megabyte of the megabyte figure — the two calls are separate
+    /// `proc_pid_rusage` samples, so the footprint can move a little between
+    /// them.
+    /// Test: this test itself.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn physical_footprint_bytes_agrees_with_the_megabyte_reading() {
+        let pid = std::process::id();
+        let bytes = physical_footprint_bytes(pid).expect("bytes reading");
+        let mb = physical_footprint_mb(pid).expect("megabyte reading");
+        let bytes_as_mb = bytes / (1024 * 1024);
+        assert!(
+            bytes_as_mb.abs_diff(mb) <= 1,
+            "bytes ({bytes_as_mb} MB) and mb ({mb} MB) must be the same counter"
         );
     }
 
