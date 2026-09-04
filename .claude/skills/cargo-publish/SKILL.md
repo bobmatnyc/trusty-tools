@@ -59,9 +59,9 @@ local ref):
 
 1. **GUARD 1 (merged-main)**: current HEAD is `origin/main` itself or an
    ancestor of it.
-2. **GUARD 2 (version tag)**: the release tag `<crate>-v<version>` (accepts
-   `tga-v<version>` too, for `trusty-git-analytics`) has been pushed to origin
-   and its commit is on merged main.
+2. **GUARD 2 (version tag)**: the release tag `<crate>-v<version>` has been
+   pushed to origin and its commit is on merged main. For `trusty-git-analytics`,
+   push only `trusty-git-analytics-v<version>`; never push a `tga-v*` alias.
 
 **Why this exists**: issue #2209 — a publish ran from an unmerged feature
 branch that was missing a P0 fix. That branch's build became the crates.io
@@ -156,17 +156,18 @@ version instead). Runs six checks and fails loud on any of them:
    `.github/workflows/semver-checks.yml` runs the same check on the tag push
    (step 4), so a red run there is visible before you reach step 6.
 
-6. **tag/publish-commit parity**: the release tag `<crate>-v<version>` (or the
-   `tga-v<version>` alias) must name EXACTLY the commit this publish will ship.
-   Delegates to `scripts/check-tag-publish-parity.sh`. No override.
+6. **tag/publish-commit parity**: the release tag `<crate>-v<version>` must
+   name EXACTLY the commit this publish will ship. For `trusty-git-analytics`,
+   this is always `trusty-git-analytics-v<version>`. Delegates to
+   `scripts/check-tag-publish-parity.sh`. No override.
 
    **Why this is not already covered by 1-5 or by `check-publish-ready.sh`:**
    nothing bound the tag to the upload. GUARD 2 asks whether the tag is an
    ANCESTOR of `origin/main`; CHECK 1 asks whether HEAD EQUALS `origin/main`.
    A tag several commits behind HEAD satisfies both — which is where a release
    run lands whenever main moves and the run is fast-forwarded to satisfy CHECK
-   1. On 2026-08-11 that shipped `tga-v2.17.0` tagged at `246e4ca2` while the
-   published `.cargo_vcs_info.json` recorded `7d5cf82e1`, with every gate green.
+   1. On 2026-08-11 an earlier tga tag pointed at an older commit while the
+   published `.cargo_vcs_info.json` recorded a later one, with every gate green.
 
    🔴 **If you fast-forward this checkout after tagging, reset back onto the
    tag before publishing.** `git reset --hard <tag>`, then re-run preflight.
@@ -475,18 +476,17 @@ which derives the prefix from the directory unconditionally.
 - `trusty-common` → `-p trusty-common` → tag: **`trusty-common-v0.8.0`** ✓
 - `trusty-agents` → `-p trusty-agents` → tag: **`trusty-agents-v0.2.3`** ✓
 
-> **tga tag aliases (issue #1128) — until #6771 lands, push BOTH spellings at
-> the SAME commit:** push `trusty-git-analytics-v<version>` first, because
-> `check-publish-ready.sh` GUARD 2 accepts only that spelling and the publish
-> must pass it. After `cargo publish` succeeds, push `tga-v<version>` at the
-> identical commit, because the installer bundled in `trusty-audit` resolves
-> the tga release by the `tga-v<version>` tag
-> (`crates/trusty-installer/src/download/release.rs:310`), and its `tga` alias
-> rewrites only the asset filename, not the tag it resolves against. Both tags
-> at one commit is not a TAG-SPLIT. A TAG-SPLIT is the two spellings at
-> DIFFERENT commits (`scripts/check-tag-publish-parity.sh`), so verify the
-> commit before each push — release tags here are immutable (#6178). See #6771
-> for the tracking issue; the second push becomes unnecessary once it lands.
+> **tga tag aliases (issue #1128) — push ONLY the canonical tag:** push
+> `trusty-git-analytics-v<version>` only. Never push a `tga-v*` alias tag.
+> Since #6771 landed in trusty-installer 0.13.5 (PR #6799), the installer
+> resolves either spelling correctly, and two tags mean two independent
+> non-reproducible builds whose digests differ — the installer refuses this as
+> TAG-SPLIT (#1128, #6771). If an alias was pushed by mistake, delete its
+> GitHub Release object with `gh release delete tga-v<version> --yes` (no
+> --cleanup-tag; the tag is immutable and harmless without a Release). Then
+> verify `bobmatnyc/homebrew-trusty` Formula/trusty-git-analytics.rb points at
+> the canonical release's URLs and digests, because whichever CI run finished
+> last wrote the formula. Release tags are immutable (#6178).
 
 The crate name **always** comes from the `name` field in `Cargo.toml`:
 
