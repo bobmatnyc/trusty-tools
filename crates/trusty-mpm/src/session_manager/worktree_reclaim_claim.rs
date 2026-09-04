@@ -5,7 +5,7 @@
 //! and a session that ran `tm session prune-worktrees --merged-prs --force`
 //! from inside its own workspace therefore blocked every worktree it had just
 //! created, because those worktrees sit under the workspace path its own
-//! session record claims. Observed 2026-09-04 in `duettoresearch/apex`: 31
+//! session record claims. Observed 2026-09-04 in a client monorepo: 31
 //! clean, pushed, merged worktrees, all refused at `gate 2 (liveness)`, the
 //! claimant being the caller. One bit cannot express "claimed, but by you",
 //! so the claim set now carries session identity and the caller names itself.
