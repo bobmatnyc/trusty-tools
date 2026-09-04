@@ -3,22 +3,18 @@
 Each crate is tagged independently using the pattern `<crate-name>-v<version>`,
 e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 
-> **`tga` tag aliases (issue #1128) — read alias only, never push both:**
-> `trusty-git-analytics` publishes under the short package name `tga`, but the
-> tag to PUSH is **`trusty-git-analytics-v<version>`**, same as every other
-> crate — `tag_prefix_for()` in `scripts/check-publish-ready.sh` derives the
-> prefix from the crate directory name unconditionally, and the legacy short
-> form `tga-v<version>` is not what it generates or recommends. The
-> binary-release workflow, `check-publish-ready.sh` GUARD 2, and
-> `check-tag-publish-parity.sh` all still recognize `tga-v<version>` if that is
-> the tag they find on origin (they resolve to the same build config and
-> Homebrew formula, and the parse step canonicalizes the `tga` prefix to
-> `trusty-git-analytics` for config/path lookups while keeping changelog
-> `--tag-pattern` matched to the literal pushed tag) — that acceptance exists
-> for tags already pushed under the old convention, not as a second option to
-> choose from. Push only `trusty-git-analytics-v<version>`; pushing both
-> spellings for one release risks a TAG-SPLIT that cannot be repaired
-> afterward, because release tags here are immutable (#6178).
+> **`tga` tag aliases (issue #1128) — until #6771 lands, push BOTH spellings at
+> the SAME commit:** push `trusty-git-analytics-v<version>` first, because
+> `check-publish-ready.sh` GUARD 2 accepts only that spelling and the publish
+> must pass it. After `cargo publish` succeeds, push `tga-v<version>` at the
+> identical commit, because the installer bundled in `trusty-audit` resolves
+> the tga release by the `tga-v<version>` tag
+> (`crates/trusty-installer/src/download/release.rs:310`), and its `tga` alias
+> rewrites only the asset filename, not the tag it resolves against. Both tags
+> at one commit is not a TAG-SPLIT. A TAG-SPLIT is the two spellings at
+> DIFFERENT commits, so verify the commit before each push — release tags here
+> are immutable (#6178). See #6771 for the tracking issue; the second push
+> becomes unnecessary once it lands.
 
 ## Release Steps
 
