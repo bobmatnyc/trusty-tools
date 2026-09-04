@@ -3,18 +3,17 @@
 Each crate is tagged independently using the pattern `<crate-name>-v<version>`,
 e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 
-> **`tga` tag aliases (issue #1128) — until #6771 lands, push BOTH spellings at
-> the SAME commit:** push `trusty-git-analytics-v<version>` first, because
-> `check-publish-ready.sh` GUARD 2 accepts only that spelling and the publish
-> must pass it. After `cargo publish` succeeds, push `tga-v<version>` at the
-> identical commit, because the installer bundled in `trusty-audit` resolves
-> the tga release by the `tga-v<version>` tag
-> (`crates/trusty-installer/src/download/release.rs:310`), and its `tga` alias
-> rewrites only the asset filename, not the tag it resolves against. Both tags
-> at one commit is not a TAG-SPLIT. A TAG-SPLIT is the two spellings at
-> DIFFERENT commits, so verify the commit before each push — release tags here
-> are immutable (#6178). See #6771 for the tracking issue; the second push
-> becomes unnecessary once it lands.
+> **`tga` tag aliases (issue #1128) — push ONLY the canonical tag:** push
+> `trusty-git-analytics-v<version>` only. Never push a `tga-v*` alias tag.
+> Since #6771 landed in trusty-installer 0.13.5 (PR #6799), the installer
+> resolves either spelling correctly, and two tags mean two independent
+> non-reproducible builds whose digests differ — the installer refuses this as
+> TAG-SPLIT (#1128, #6771). If an alias was pushed by mistake, delete its
+> GitHub Release object with `gh release delete tga-v<version> --yes` (no
+> --cleanup-tag; the tag is immutable and harmless without a Release). Then
+> verify `bobmatnyc/homebrew-trusty` Formula/trusty-git-analytics.rb points at
+> the canonical release's URLs and digests, because whichever CI run finished
+> last wrote the formula. Release tags are immutable (#6178).
 
 ## Release Steps
 
@@ -125,8 +124,8 @@ refs/heads/main` (never trusting a possibly-stale local
 1. **GUARD 1 (merged-main)** — current HEAD must be `origin/main` itself or an
    ancestor of it (`git merge-base --is-ancestor`).
 2. **GUARD 2 (version tag on main)** — the release tag `<crate>-v<version>`
-   (or `tga-v<version>` for `trusty-git-analytics`) must be pushed to origin
-   and its commit must be an ancestor of origin/main.
+   must be pushed to origin and its commit must be an ancestor of origin/main.
+   For `trusty-git-analytics`, this is `trusty-git-analytics-v<version>` only.
 
 Either guard failing aborts with an actionable message and a non-zero exit
 code; both passing prints an "OK — safe to publish" line and exits 0.

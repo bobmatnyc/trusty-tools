@@ -38,9 +38,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::worktree_reclaim::{
-    AgentStateProbe, BranchPrState, NOT_INSPECTED_REASON, PrIndex, ReclaimCandidate, ReclaimGate,
-    ReclaimMode, ReclaimOutcome, ReclaimSurvey, ReclaimVerdict, agent_ownership_blocks, classify,
-    is_live, measure_bytes_until, pr_state_for_branch, tm_provisioned,
+    AgentStateProbe, BranchPrState, LiveClaims, NOT_INSPECTED_REASON, PrIndex, ReclaimCandidate,
+    ReclaimGate, ReclaimMode, ReclaimOutcome, ReclaimSurvey, ReclaimVerdict,
+    agent_ownership_blocks, classify, measure_bytes_until, pr_state_for_branch, tm_provisioned,
 };
 use super::worktree_registry::{list_registered_worktrees, scan_registered_worktrees};
 use super::worktree_safety::inspect_dirt;
@@ -106,7 +106,7 @@ impl SurveyBudget {
 /// `survey_past_its_classify_deadline_reclaims_nothing`.
 pub(crate) fn survey_with_index(
     repos_root: &Path,
-    in_use: &[PathBuf],
+    in_use: &LiveClaims,
     index_for: &dyn Fn(&Path) -> PrIndex,
     agent_state: AgentStateProbe<'_>,
     budget: SurveyBudget,
@@ -149,7 +149,8 @@ pub(crate) fn survey_with_index(
         let verdict = classify(
             &scanned.path,
             scanned.admission,
-            is_live(&scanned.path, in_use),
+            // #6806: WHOSE claim, not merely whether one exists.
+            &in_use.claim_state(&scanned.path),
             &pr,
             &inspect_dirt,
             agent_state,
@@ -216,7 +217,7 @@ fn measure_reclaimable_first(candidates: &mut [ReclaimCandidate], deadline: Opti
 /// Test: covered through [`survey_with_index`].
 pub(crate) fn survey(
     repos_root: &Path,
-    in_use: &[PathBuf],
+    in_use: &LiveClaims,
     agent_state: AgentStateProbe<'_>,
     budget: SurveyBudget,
     per_branch_fallback: bool,
@@ -301,15 +302,18 @@ fn git_still_permits(path: &Path) -> Result<(), String> {
 /// `recheck_permits_a_clean_merged_owned_worktree`.
 pub(crate) fn recheck_before_delete(
     path: &Path,
-    in_use_now: Option<&[PathBuf]>,
+    in_use_now: Option<&LiveClaims>,
     pr_now: &BranchPrState,
     agent_state: AgentStateProbe<'_>,
 ) -> Option<String> {
     let Some(in_use_now) = in_use_now else {
         return Some("the live session set could not be re-read — refusing to delete".into());
     };
-    if is_live(path, in_use_now) {
-        return Some("a session claims this workspace now".into());
+    // #6806: the same owner-aware resolution the survey's gate 2 applies, so
+    // the re-check can neither refuse a candidate gate 2 admitted nor admit one
+    // it refused.
+    if let Some(reason) = in_use_now.claim_state(path).refusal(true) {
+        return Some(reason);
     }
     if let Err(reason) = git_still_permits(path) {
         return Some(reason);
@@ -344,13 +348,14 @@ pub(crate) fn recheck_before_delete(
 /// re-check at all. The previous test claimed to do this and did not: it fed
 /// the same `in_use` to the survey, so the candidate was blocked during
 /// classification and the delete loop never ran.
-/// What: `in_use_now` re-reads the workspace paths sessions claim, returning
-/// `None` when that cannot be determined (which refuses). `index_for` rebuilds
-/// a repository's pull-request index.
+/// What: `in_use_now` re-reads the workspace claims sessions hold — WITH the
+/// invoking session's id, since #6806 — returning `None` when that cannot be
+/// determined (which refuses). `index_for` rebuilds a repository's
+/// pull-request index.
 /// Test: used by every `reclaim_remove_mode_*` test.
 pub(crate) struct FreshProbes<'a> {
     /// Re-read the claimed workspace paths; `None` means "could not determine".
-    pub in_use_now: &'a dyn Fn() -> Option<Vec<PathBuf>>,
+    pub in_use_now: &'a dyn Fn() -> Option<LiveClaims>,
     /// Rebuild a repository's pull-request index.
     pub index_for: &'a dyn Fn(&Path) -> PrIndex,
     /// Ask the delegation registry about the agent a sentinel names (#5661).
@@ -436,7 +441,7 @@ pub(crate) fn reclaim_with_probes(
         // re-check that judges it.
         let in_use_now = (probes.in_use_now)();
         if let Some(reason) =
-            recheck_before_delete(&path, in_use_now.as_deref(), &pr_now, probes.agent_state)
+            recheck_before_delete(&path, in_use_now.as_ref(), &pr_now, probes.agent_state)
         {
             tracing::warn!(
                 path = %path.display(),
@@ -487,7 +492,7 @@ pub(crate) fn reclaim_with_probes(
 /// Test: exercised through `reclaim_with_probes`' tests.
 pub(crate) fn reclaim_merged_pr_worktrees(
     repos_root: &Path,
-    in_use_paths: &dyn Fn() -> Option<Vec<PathBuf>>,
+    in_use_paths: &dyn Fn() -> Option<LiveClaims>,
     agent_state: AgentStateProbe<'_>,
     mode: ReclaimMode,
 ) -> ReclaimOutcome {
