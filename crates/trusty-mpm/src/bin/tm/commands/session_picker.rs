@@ -874,13 +874,13 @@ pub(crate) fn parse_picker_choice(
 /// without requiring the operator to remember session names or UUIDs. After a
 /// detach, the picker is redisplayed rather than exiting to the shell — the
 /// common "pick → Ctrl-b d → pick again" flow stays in one command.
-/// What: loops: derive the render state through [`prepare_menu`], print menu,
+/// What: loops: derive the render state through [`prepare_menu`](super::session_picker_order::prepare_menu), print menu,
 /// read one line, dispatch, then re-fetch the session list (via
 /// [`fetch_live_sessions`], honoring the scope) so the next iteration shows
 /// current state. Exits cleanly on `Quit`, EOF (Ctrl-D), or unrecognised input;
 /// propagates attach/launch errors.
 ///
-/// **The caller need not pre-sort (#6753).** [`prepare_menu`] runs at the top of
+/// **The caller need not pre-sort (#6753).** [`prepare_menu`](super::session_picker_order::prepare_menu) runs at the top of
 /// the loop and owns the order, so the FIRST menu is ordered exactly like every
 /// later one whatever order the caller hands in. Normalization used to run at the
 /// bottom only, which left the bare-`tm` path rendering its first menu in the

@@ -46,7 +46,7 @@ pub(crate) fn filter_sessions_by_term(
 /// Put a freshly-obtained session list into the order and scope the picker
 /// renders (#6753).
 ///
-/// Why: [`run_tty_picker`] applied [`filter_sessions_by_term`] and
+/// Why: [`run_tty_picker`](super::session_picker::run_tty_picker) applied [`filter_sessions_by_term`] and
 /// [`sort_sessions`] at the BOTTOM of its loop only, so its FIRST menu showed
 /// the daemon's ascending-slot order while every later menu showed the scope's
 /// order. The attached session — usually the highest slot — printed last, bare
@@ -73,7 +73,7 @@ pub(crate) fn normalize_for_scope(
 /// Everything one render of the picker menu is decided by (#6753).
 ///
 /// Why: the three values below were computed inline at the top of
-/// [`run_tty_picker`]'s loop, from whatever order `sessions` happened to be in.
+/// [`run_tty_picker`](super::session_picker::run_tty_picker)'s loop, from whatever order `sessions` happened to be in.
 /// That made the ORDER an input nothing named and nothing could test, which is
 /// how the first render came to disagree with every later one. Naming the
 /// prepared list and its derived values together means a render cannot be
@@ -96,7 +96,7 @@ pub(crate) struct Menu {
 ///
 /// Why: this is the ONE place a menu is derived, so the first menu and every
 /// later one are the same computation rather than two that must be kept in step.
-/// [`run_tty_picker`] used to normalize at the BOTTOM of its loop only: its first
+/// [`run_tty_picker`](super::session_picker::run_tty_picker) used to normalize at the BOTTOM of its loop only: its first
 /// menu therefore printed the daemon's ascending-slot order, in which the
 /// attached session — usually the highest slot — came LAST. Bare Enter targets
 /// position 0, so it aimed at the oldest session (usually stopped, so it fired
@@ -105,7 +105,7 @@ pub(crate) struct Menu {
 /// What: [`normalize_for_scope`] first, then [`slots_are_stale`],
 /// [`next_launch_slot`] and the `first_needs_restart` flag off the NORMALIZED
 /// list. A deleted position 0 is never `first_needs_restart`, because
-/// [`decide_for_index`] checks `deleted` ahead of this flag.
+/// [`decide_for_index`](super::session_picker::decide_for_index) checks `deleted` ahead of this flag.
 /// Test: `prepare_menu_orders_the_first_render_like_every_later_one`,
 /// `prepare_menu_bare_enter_targets_the_attached_session`,
 /// `prepare_menu_is_idempotent`, `prepare_menu_applies_the_scopes_term_filter`,
