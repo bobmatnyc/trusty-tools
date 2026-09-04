@@ -293,6 +293,76 @@ fn rejects_garbage() {
     assert!(parse_findings("not json at all {{{").is_none());
 }
 
+// ── #6784: the response shapes that used to fail the whole batch ─────────────
+
+/// #6784: a captured failure shape. The provider prefixed one sentence of prose to
+/// an otherwise conforming bare object; the old parser required the object to be
+/// the whole trimmed body or to sit in a ```json fence, so the batch — and every
+/// file it carried — was dropped. Before the fix this returns `None`.
+#[test]
+fn parses_an_object_behind_a_prose_preamble() {
+    let raw = parse_findings(
+        "Here is the analysis for this batch:\n\n\
+         {\"findings\": [{\"title\": \"Hardcoded token\", \"severity\": \"red\", \
+         \"file\": \"src/auth.rs\", \"evidence_quote\": \"let t = \\\"abc\\\";\"}]}",
+    )
+    .expect("a prose preamble must not drop the batch");
+    assert_eq!(raw.findings.len(), 1);
+    assert_eq!(raw.findings[0].title, "Hardcoded token");
+}
+
+/// #6784: a captured failure shape — a fence with no language tag, which some
+/// providers emit even under a forced schema. `rfind("```json")` never matched it.
+#[test]
+fn parses_an_untagged_fence() {
+    let raw = parse_findings("```\n{\"findings\": []}\n```")
+        .expect("an untagged fence must not drop the batch");
+    assert!(raw.findings.is_empty());
+}
+
+/// #6784: a captured failure shape — a complete object followed by a closing
+/// sentence. `serde_json::from_str` rejects trailing characters, so the whole batch
+/// was lost to one line of politeness.
+#[test]
+fn parses_an_object_with_trailing_prose() {
+    let raw = parse_findings("{\"findings\": []}\n\nLet me know if you want more detail.")
+        .expect("trailing prose must not drop the batch");
+    assert!(raw.findings.is_empty());
+}
+
+/// #6784: a response cut off mid-object is a TRUNCATION, not garbage — the
+/// distinction is what routes it to the concise retry instead of failing closed.
+#[test]
+fn a_cut_off_object_reads_as_truncated() {
+    assert!(looks_truncated(
+        "{\"findings\": [{\"title\": \"Hardcoded token\", \"severity\": \"re"
+    ));
+    assert!(looks_truncated("{\"findings\": [{\"title\": \"T\"}"));
+}
+
+/// #6784: a complete object is never reported as truncated, so a parse failure on
+/// well-formed-but-wrong JSON does not burn a retry as a truncation.
+#[test]
+fn a_complete_object_is_not_truncated() {
+    assert!(!looks_truncated("{\"findings\": []}"));
+    // A brace inside a string literal must not shift the balance.
+    assert!(!looks_truncated(
+        "{\"findings\": [], \"note\": \"a { brace\"}"
+    ));
+    // An escaped quote must not end the string early.
+    assert!(!looks_truncated("{\"note\": \"say \\\"hi\\\" {\"}"));
+}
+
+/// #6784: prose with no object in it is a refusal, not a truncation — it fails
+/// closed rather than spending a second call.
+#[test]
+fn prose_without_braces_is_not_truncated() {
+    assert!(!looks_truncated(
+        "I cannot analyse these files without more context."
+    ));
+    assert!(!looks_truncated(""));
+}
+
 /// An explicit `"line": null` deserializes, and the newly-required prose fields
 /// accept an empty string.
 ///

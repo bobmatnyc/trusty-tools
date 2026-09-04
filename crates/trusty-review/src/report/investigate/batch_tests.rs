@@ -337,3 +337,100 @@ async fn all_batches_can_fail_independently() {
         }
     }
 }
+
+// ── #6784: an unparseable batch is retried, not dropped ─────────────────────
+
+/// #6784: the reported shape. 37 of 59 repositories in one engagement logged
+/// `unparseable response` on at least one batch, and every such batch failed closed
+/// with no second attempt — so the files it carried were never read and
+/// investigation coverage collapsed. An unparseable first answer now earns the same
+/// single retry a truncated one gets. Before the fix the provider is called once,
+/// the batch is `Unavailable`, and no finding survives.
+#[tokio::test]
+async fn an_unparseable_batch_is_retried_not_dropped() {
+    let a = selfile("src/a.rs", "let secret_a = 1;\n");
+    let selection = full_selection(std::slice::from_ref(&a));
+    let batches = vec![FileBatch {
+        index: 1,
+        files: vec![a],
+    }];
+
+    let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(ScriptedLlm::new(vec![
+        // A complete, non-truncated answer that no parse strategy decodes.
+        Script::Ok("I was unable to produce structured output for this batch.".to_string()),
+        Script::Ok(ok_body("src/a.rs", "Finding A", "let secret_a = 1;")),
+    ]));
+
+    let (findings, _rejected, outcomes) =
+        run_batches(provider, "stub/model", "App", &batches, 1, None, &selection).await;
+
+    assert_eq!(
+        outcomes[0].status,
+        BatchStatus::Completed,
+        "the retry's clean answer must complete the batch"
+    );
+    assert_eq!(
+        findings.len(),
+        1,
+        "the retried batch's finding must survive: {findings:?}"
+    );
+    assert_eq!(findings[0].title, "Finding A");
+}
+
+/// #6784: the retry is a SINGLE retry. A batch still unparseable on the second
+/// answer fails closed, and the reason says the retry happened so a reader does not
+/// think one was skipped.
+#[tokio::test]
+async fn an_unparseable_batch_that_stays_unparseable_fails_closed() {
+    let a = selfile("src/a.rs", "let secret_a = 1;\n");
+    let selection = full_selection(std::slice::from_ref(&a));
+    let batches = vec![FileBatch {
+        index: 1,
+        files: vec![a],
+    }];
+
+    let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(ScriptedLlm::new(vec![
+        Script::Ok("no structured output".to_string()),
+        Script::Ok("still no structured output".to_string()),
+        // A third scripted answer proves the runner did NOT keep retrying: were it
+        // consumed, the batch would complete.
+        Script::Ok(ok_body("src/a.rs", "Finding A", "let secret_a = 1;")),
+    ]));
+
+    let (findings, _rejected, outcomes) =
+        run_batches(provider, "stub/model", "App", &batches, 1, None, &selection).await;
+
+    assert!(findings.is_empty(), "{findings:?}");
+    match &outcomes[0].status {
+        BatchStatus::Unavailable(reason) => {
+            assert!(reason.contains("unparseable"), "{reason}");
+            assert!(reason.contains("after one retry"), "{reason}");
+        }
+        other => panic!("expected Unavailable, got {other:?}"),
+    }
+}
+
+/// #6784: a response the provider cut off mid-object WITHOUT setting
+/// `finish_reason` used to read as an unparseable answer, so it never reached the
+/// concise retry built for truncation. It now does, and the retry recovers it.
+#[tokio::test]
+async fn a_silent_truncation_reaches_the_concise_retry() {
+    let a = selfile("src/a.rs", "let secret_a = 1;\n");
+    let selection = full_selection(std::slice::from_ref(&a));
+    let batches = vec![FileBatch {
+        index: 1,
+        files: vec![a],
+    }];
+
+    let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(ScriptedLlm::new(vec![
+        // finish_reason is "stop", but the object was never closed.
+        Script::Ok("{\"findings\": [{\"title\": \"Hardcoded tok".to_string()),
+        Script::Ok(ok_body("src/a.rs", "Finding A", "let secret_a = 1;")),
+    ]));
+
+    let (findings, _rejected, outcomes) =
+        run_batches(provider, "stub/model", "App", &batches, 1, None, &selection).await;
+
+    assert_eq!(outcomes[0].status, BatchStatus::Completed);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+}

@@ -1057,9 +1057,11 @@ async fn an_unregistered_repo_is_still_fetched_by_its_derived_id() {
     let gaps = enrich_with_analyze_gaps(&mut model, &source).await;
 
     assert_eq!(source.asked.lock().expect("lock").as_slice(), [derived]);
-    assert_eq!(
-        gaps.len(),
-        1,
+    // #6811 added the lane-coverage record ahead of the per-reason lines, so the
+    // not-indexed gap is located by its text rather than by position.
+    assert!(
+        gaps.iter()
+            .any(|g| g.starts_with("trusty-analyze index not built")),
         "the not-indexed gap is still named: {gaps:?}"
     );
 }
@@ -1205,17 +1207,23 @@ async fn enrich_names_unreachable_repositories() {
 
     let gaps = enrich_with_analyze_gaps(&mut model, &source).await;
 
-    assert_eq!(gaps.len(), 1, "one line per gap kind: {gaps:?}");
-    assert!(
-        gaps[0].starts_with("trusty-analyze unreachable"),
-        "{}",
-        gaps[0]
+    // #6811 prepends the lane-coverage record, so this is one line per gap kind
+    // PLUS that record.
+    let reason = gaps
+        .iter()
+        .find(|g| g.starts_with("trusty-analyze unreachable"))
+        .unwrap_or_else(|| panic!("the unreachable gap kind must be named: {gaps:?}"));
+    assert_eq!(
+        gaps.iter()
+            .filter(|g| g.starts_with("trusty-analyze unreachable"))
+            .count(),
+        1,
+        "one line per gap kind: {gaps:?}"
     );
-    assert!(gaps[0].contains("Northwind Web"), "{}", gaps[0]);
+    assert!(reason.contains("Northwind Web"), "{reason}");
     assert!(
-        gaps[0].contains("not assessed, not clean"),
-        "the line must refuse to read as a clean pass: {}",
-        gaps[0]
+        reason.contains("not assessed, not clean"),
+        "the line must refuse to read as a clean pass: {reason}"
     );
     assert!(model.repositories[0].metrics.is_none());
 }
@@ -1251,6 +1259,151 @@ async fn enrich_ignores_repositories_with_no_local_checkout() {
             .await
             .is_empty()
     );
+}
+
+// ── #6811: the analyze lane's own outcome, not only its per-repo reasons ─────
+
+/// A model carrying `names.len()` local checkouts, each with a distinct path so
+/// every one derives its own index id.
+fn model_with_local_repos(names: &[&str]) -> crate::report::model::ReportModel {
+    let mut manifest_src = String::from("[report]\ntitle = \"T\"\n");
+    for name in names {
+        manifest_src.push_str(&format!(
+            "\n[[repositories]]\nname = \"{name}\"\npath = \".\"\n"
+        ));
+    }
+    let manifest =
+        crate::report::manifest::parse_manifest(&manifest_src, std::path::Path::new("m.toml"))
+            .expect("fixture manifest parses");
+    let mut model = crate::report::model::ReportModel::build(
+        &manifest,
+        std::path::Path::new("m.toml"),
+        "report-technical-dd",
+        None,
+    )
+    .expect("model builds");
+    for (i, repo) in model.repositories.iter_mut().enumerate() {
+        repo.local_path = Some(std::path::PathBuf::from(format!("/tmp/repo-{i}")));
+    }
+    model
+}
+
+/// A source whose answer depends on how many times it has been asked, so one
+/// enrichment can mix successes and failures.
+struct AlternatingSource {
+    calls: std::sync::Mutex<usize>,
+    /// Every call at an index in this set fails; the rest succeed.
+    failing: Vec<usize>,
+}
+
+impl AlternatingSource {
+    fn new(failing: Vec<usize>) -> Self {
+        Self {
+            calls: std::sync::Mutex::new(0),
+            failing,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AnalyzeMetricsSource for AlternatingSource {
+    async fn fetch(&self, index_id: &str) -> Option<AnalyzeMetrics> {
+        match self.fetch_named(index_id).await {
+            AnalyzeFetch::Fetched { metrics, .. } => Some(*metrics),
+            AnalyzeFetch::Missing(_) => None,
+        }
+    }
+
+    async fn fetch_named(&self, _index_id: &str) -> AnalyzeFetch {
+        let mut guard = self.calls.lock().expect("lock");
+        let n = *guard;
+        *guard += 1;
+        if self.failing.contains(&n) {
+            AnalyzeFetch::Missing(AnalyzeGap::Unreachable)
+        } else {
+            AnalyzeFetch::Fetched {
+                metrics: Box::new(map_metrics(None, &[], &[])),
+                caveats: Vec::new(),
+            }
+        }
+    }
+}
+
+/// #6811: the shape that shipped. Every repository's analyze fetch failed, and the
+/// report carried only a per-reason line naming them — which is what a partially
+/// degraded run also carries, so a reader could not tell that NO static-analysis
+/// pass contributed anything. Before the fix the returned lines carry no such
+/// record and this assertion fails.
+#[tokio::test]
+async fn a_lane_that_failed_every_repository_is_recorded() {
+    let mut model = model_with_local_repos(&["Northwind Web", "Northwind API", "Northwind Jobs"]);
+    let source = StubSource(|| AnalyzeFetch::Missing(AnalyzeGap::Unreachable));
+
+    let gaps = enrich_with_analyze_gaps(&mut model, &source).await;
+
+    let record = gaps
+        .iter()
+        .find(|g| g.contains("trusty-analyze lane DID NOT RUN"))
+        .unwrap_or_else(|| {
+            panic!("a lane that assessed nothing must record that as a fact: {gaps:?}")
+        });
+    assert!(
+        record.contains("0 of 3 application(s) assessed"),
+        "the record states attempted and succeeded: {record}"
+    );
+    assert!(
+        record.contains("3 failed"),
+        "the record states the failure count: {record}"
+    );
+    assert!(
+        record.contains("UNASSESSED, not clean"),
+        "the record must refuse to read as a clean pass: {record}"
+    );
+    assert_eq!(
+        gaps.first(),
+        Some(record),
+        "the lane record leads the gap list: {gaps:?}"
+    );
+    // The per-repo fail-open contract is untouched: nothing aborted and no repo
+    // carries metrics it did not get.
+    assert!(model.repositories.iter().all(|r| r.metrics.is_none()));
+}
+
+/// #6811: a lane that worked for some repositories states the denominator instead
+/// of claiming the whole run collapsed.
+#[tokio::test]
+async fn a_partly_degraded_lane_states_the_denominator() {
+    let mut model = model_with_local_repos(&["A", "B", "C", "D"]);
+    let source = AlternatingSource::new(vec![1, 3]);
+
+    let gaps = enrich_with_analyze_gaps(&mut model, &source).await;
+
+    let record = gaps
+        .iter()
+        .find(|g| g.contains("trusty-analyze lane partially degraded"))
+        .unwrap_or_else(|| panic!("a degraded lane must state its coverage: {gaps:?}"));
+    assert!(
+        record.contains("2 of 4 application(s) assessed"),
+        "{record}"
+    );
+    assert!(record.contains("2 failed"), "{record}");
+    assert!(
+        !gaps.iter().any(|g| g.contains("DID NOT RUN")),
+        "a lane that assessed two applications did run: {gaps:?}"
+    );
+}
+
+/// #6811: a lane that populated everything it attempted has no degradation to
+/// state, so it adds no line — a clean report stays clean.
+#[tokio::test]
+async fn a_fully_successful_lane_records_nothing() {
+    let mut model = model_with_local_repos(&["A", "B"]);
+    let source = AlternatingSource::new(Vec::new());
+
+    let gaps = enrich_with_analyze_gaps(&mut model, &source).await;
+
+    assert!(gaps.is_empty(), "no degradation, no line: {gaps:?}");
+    assert!(model.repositories.iter().all(|r| r.metrics.is_some()));
 }
 
 // ── #6177: the Python class-body region ─────────────────────────────────────

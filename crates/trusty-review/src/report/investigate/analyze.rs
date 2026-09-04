@@ -340,9 +340,20 @@ fn build_digest(
 /// Why: forced structured output returns a bare JSON object, but a fenced block is
 /// accepted defensively (matching the synthesizer) so a non-conforming provider
 /// does not silently fail.
-/// What: tries a direct object parse, then a ```json fenced block; `None` when
-/// neither yields a decodable object.
-/// Test: `analyze_tests::{parses_bare_object, parses_fenced_block, rejects_garbage}`.
+/// What: tries a direct object parse, then a ```json fenced block, then an
+/// untagged ``` fence, then the outermost `{`…`}` span of the response; `None`
+/// when none of them yields a decodable object.
+///
+/// #6784: the first three shapes below all failed before, and each one is a
+/// response a conforming provider actually returned in the field — 37 of 59
+/// repositories in one engagement logged `unparseable response` on at least one
+/// batch, and every failed batch's files went unread. The old body required the
+/// object to be the WHOLE trimmed response or to sit inside a ```json fence, so
+/// one sentence of preamble ("Here is the analysis:") dropped a whole batch.
+///
+/// Test: `analyze_tests::{parses_bare_object, parses_fenced_block, rejects_garbage,
+/// parses_an_object_behind_a_prose_preamble, parses_an_untagged_fence,
+/// parses_an_object_with_trailing_prose}`.
 pub fn parse_findings(text: &str) -> Option<RawInvestigation> {
     let body = text.trim();
     if body.starts_with('{')
@@ -350,10 +361,67 @@ pub fn parse_findings(text: &str) -> Option<RawInvestigation> {
     {
         return Some(r);
     }
-    let fence_start = body.rfind("```json")?;
-    let after = &body[fence_start + 7..];
-    let fence_end = after.find("```")?;
-    serde_json::from_str::<RawInvestigation>(after[..fence_end].trim()).ok()
+    // #6784: the tagged fence first, then an untagged one — some providers emit
+    // ``` with no language when the schema is forced.
+    for opener in ["```json", "```"] {
+        if let Some(start) = body.rfind(opener) {
+            let after = &body[start + opener.len()..];
+            if let Some(end) = after.find("```")
+                && let Ok(r) = serde_json::from_str::<RawInvestigation>(after[..end].trim())
+            {
+                return Some(r);
+            }
+        }
+    }
+    // #6784: last resort — the outermost brace span, which survives prose on
+    // either side of a complete object.
+    let start = body.find('{')?;
+    let end = body.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    serde_json::from_str::<RawInvestigation>(&body[start..=end]).ok()
+}
+
+/// Whether `text` looks like a JSON object the provider stopped emitting mid-way.
+///
+/// Why: #6784. A provider that truncates without setting `finish_reason` to
+/// `length`/`max_tokens` — OpenRouter does this for some upstreams — delivered a
+/// half-written object that the batch runner classified as an unparseable response
+/// and failed closed, so the concise retry that exists for exactly this case never
+/// fired. Brace balance is what tells a cut-off object from genuine garbage.
+/// What: counts `{` and `}` outside string literals (honouring `\` escapes) and
+/// reports `true` when an object was opened and never closed. Text with no `{` at
+/// all is never a truncation, so a provider that answered in prose still fails
+/// closed rather than burning a retry.
+/// Test: `analyze_tests::{a_cut_off_object_reads_as_truncated,
+/// a_complete_object_is_not_truncated, prose_without_braces_is_not_truncated}`.
+pub fn looks_truncated(text: &str) -> bool {
+    let mut depth = 0i32;
+    let mut opened = false;
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in text.chars() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => {
+                depth += 1;
+                opened = true;
+            }
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    opened && (depth > 0 || in_string)
 }
 
 #[cfg(test)]
