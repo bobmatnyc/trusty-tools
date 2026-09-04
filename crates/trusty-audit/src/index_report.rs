@@ -254,9 +254,10 @@ pub struct IndexReport {
     /// The findings every unit declared, counted once (#6781).
     ///
     /// Why: the index's "Technical debt by tier" table and the `report.json`
-    /// [`write`] leaves beside it are two views of ONE count. Carrying the
-    /// computed value here rather than letting each renderer walk the manifests
-    /// is what makes it impossible for them to disagree.
+    /// [`debt_rollup::write`](crate::debt_rollup::write) leaves beside it are
+    /// two views of ONE count. Carrying the computed value here rather than
+    /// letting each renderer walk the manifests is what makes it impossible for
+    /// them to disagree.
     /// What: empty — which renders no table and an empty block — for a producer
     /// that read no manifests, or a run whose repositories declared nothing.
     pub debt: crate::debt_rollup::DebtRollup,

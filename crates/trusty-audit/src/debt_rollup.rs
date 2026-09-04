@@ -12,7 +12,7 @@
 //! tier × dimension, plus their shared [`DebtRollup::total`]. It is computed
 //! ONCE per run — [`from_manifests`] reads each repository's manifest — and both
 //! consumers read that one value: `crate::index_report` renders its "Technical
-//! debt by tier" table from it, and [`write`] serialises it to `report.json`
+//! debt by tier" table from it, and [`write()`] serialises it to `report.json`
 //! beside the index.
 //!
 //! ## The taxonomy is the producer's, not this module's
