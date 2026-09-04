@@ -1286,6 +1286,57 @@ mod rerender_tests {
         );
     }
 
+    /// 🔴 #6780: a re-render's index states the OSV result the package carries.
+    /// It runs no collector and writes into a fresh directory, so reading its
+    /// own `--out` would find nothing and print "not run (opt-in)" over a
+    /// package whose scan DID run — the same bundle contradicting itself between
+    /// two indexes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_re_render_index_states_the_packages_own_osv_result() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let package = tmp.path().join("package");
+        let source = report_dir(&package.join("reports"), "01-acme-api");
+        // The scan the sweep left beside the manifest this render reads.
+        std::fs::write(
+            source.join(crate::grounding::osv::SCAN_FILE),
+            r#"{"queried":2,"matched":1,"errors":[],"packages":[{"package":"acme-parser",
+               "ecosystem":"crates.io","version":"1.2.3","vulns":[{"id":"GHSA-rr","aliases":[],
+               "summary":"Buffer overflow","severity":"HIGH"}]}]}"#,
+        )
+        .expect("write osv.json");
+        let review = stub_review(tmp.path(), WRITES_A_REPORT);
+
+        let report = run(&package, &review, &work_in(tmp.path())).await;
+
+        let index = index_of(&report);
+        assert!(
+            index.contains("## Known vulnerabilities (OSV)"),
+            "the section is present: {index}"
+        );
+        assert!(index.contains("| HIGH | 1 |"), "{index}");
+        assert!(index.contains("GHSA-rr"), "the advisory is named: {index}");
+        assert!(
+            !index.contains("Not run (opt-in)"),
+            "a package that DID scan must never read as opt-in-disabled: {index}"
+        );
+    }
+
+    /// A package carrying no scan reads as "not run (opt-in)" rather than
+    /// silently omitting the section.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_re_render_of_an_unscanned_package_says_the_leg_did_not_run() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let package = tmp.path().join("package");
+        report_dir(&package.join("reports"), "01-acme-api");
+        let review = stub_review(tmp.path(), WRITES_A_REPORT);
+
+        let index = index_of(&run(&package, &review, &work_in(tmp.path())).await);
+
+        assert!(index.contains("Not run (opt-in)"), "{index}");
+    }
+
     /// 🔴 A report that would not render still gets an entry, with the failure
     /// named and its log linked. An index that simply omits the failure is how a
     /// partial re-render reads as a whole one.

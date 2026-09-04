@@ -262,12 +262,16 @@ pub struct IndexReport {
     pub debt: crate::debt_rollup::DebtRollup,
     /// What the OSV lookup found across this run's repositories (#6780).
     ///
-    /// `None` is "this producer knows nothing about the leg", not "the leg did
-    /// not run": a re-render and the return package have no scan data to read
-    /// and must not claim either way, so the section is omitted for them. The
-    /// sweep always passes `Some`, and an EMPTY roll-up there is what renders
-    /// the "not run (opt-in)" line — the state that used to be indistinguishable
-    /// from a run that scanned and matched nothing.
+    /// All three producers pass `Some`: each reads the `osv.json` files that
+    /// hold the scans it is describing — the repository output directories for
+    /// the sweep and the package, and the SOURCE package's manifest directories
+    /// for a re-render, which writes into a fresh directory the collector never
+    /// touched. So the section states what the bundle CARRIES. An EMPTY roll-up
+    /// is what renders the "not run (opt-in)" line — the state that used to be
+    /// indistinguishable from a run that scanned and matched nothing.
+    ///
+    /// `None` is reserved for a caller with no directories to read at all, and
+    /// omits the section rather than claiming either way.
     pub osv: Option<crate::grounding::osv_rollup::Rollup>,
 }
 
@@ -953,9 +957,17 @@ pub fn write_render(
         entries,
         total: Some(total),
         debt,
-        // #6780: a re-render runs no collector, so it has nothing to say about
-        // the OSV leg and says nothing rather than claiming it did not run.
-        osv: None,
+        // #6780: a re-render runs no collector, but the package it renders FROM
+        // carries whatever `osv.json` the sweep wrote — beside each source
+        // manifest, not in the fresh `--out` directory this render is filling.
+        // Omitting it made one bundle state "not run (opt-in)" in the re-render's
+        // index and report its advisories in the sweep's.
+        osv: Some(crate::grounding::osv_rollup::rollup(
+            &reports
+                .iter()
+                .filter_map(|rendered| rendered.manifest.parent().map(Path::to_path_buf))
+                .collect::<Vec<_>>(),
+        )),
     };
     write(&index, out_dir)
 }

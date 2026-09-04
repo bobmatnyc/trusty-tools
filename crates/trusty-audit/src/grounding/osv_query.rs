@@ -1,16 +1,19 @@
 //! How an OSV answer is obtained: cache first, then the batch endpoint (#6780).
 //!
 //! Why: [`super::osv`] decides WHAT to ask and what the answer means. This
-//! module decides how the asking happens, because the three rules that govern
-//! it are all about the transport and none about vulnerabilities — an
-//! air-gapped run must never open a socket, a rate-limited batch must be
-//! retried rather than dropped, and no repository may spend an unbounded amount
-//! of a sweep's wall clock on one endpoint.
+//! module decides how the asking happens, because the rules that govern it are
+//! all about the transport and none about vulnerabilities — an air-gapped run
+//! must never open a socket, a rate-limited batch must be retried rather than
+//! dropped, and no repository may spend an unbounded amount of a sweep's wall
+//! clock, or of its memory, on one endpoint.
 //!
 //! What: [`resolve`], which answers every coordinate from the on-disk cache,
 //! then (unless [`Settings::offline`]) asks OSV for the rest in chunks of
-//! `super::osv::MAX_QUERIES_PER_BATCH`, retrying a 429 or a 5xx with
-//! exponential backoff and stopping at [`Settings::time_cap`].
+//! `super::osv::MAX_QUERIES_PER_BATCH`. Every request carries an explicit
+//! timeout of the repository's remaining budget; a 429 or a 5xx is retried
+//! after the server's own `Retry-After` when it states a usable one and after
+//! exponential backoff otherwise; and a response body is accumulated against
+//! [`MAX_RESPONSE_BYTES`] rather than read whole.
 //!
 //! ## Offline
 //!
@@ -64,6 +67,20 @@ pub const MAX_ATTEMPTS: u32 = 3;
 /// Backoff before the second attempt; doubled before each one after it.
 pub const FIRST_BACKOFF: Duration = Duration::from_millis(250);
 
+/// Longest pause a `Retry-After` header may ask this client to take.
+///
+/// A header past this reads as absent and the ordinary backoff applies. The
+/// remaining-budget check bounds the wait regardless; this only keeps an absurd
+/// value from being treated as a considered instruction.
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// Largest response body this collector will accumulate, per batch.
+///
+/// A `querybatch` answer for 1000 queries is far under this; the ceiling exists
+/// so a wrong or hostile endpoint cannot make the process allocate without
+/// bound in the middle of a sweep.
+pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
 /// Directory under the working directory's `state/` area holding the cache.
 pub const CACHE_DIR: &str = "osv-cache";
 
@@ -101,8 +118,8 @@ impl Settings {
     /// re-fetchable, and never part of the deliverable.
     /// What: the declared values, each falling back to the compiled default
     /// when absent or zero. `offline` is `true` when the config says so or
-    /// [`ENV_OFFLINE`] is set to a non-empty value — the escape hatch for an
-    /// air-gapped machine whose config was written elsewhere.
+    /// [`ENV_OFFLINE`] holds a truthy value ([`flag_is_truthy`]) — the escape
+    /// hatch for an air-gapped machine whose config was written elsewhere.
     /// Test: `super::osv::osv_tests::an_engagement_can_turn_the_collector_on`.
     #[must_use]
     pub fn for_engagement(
@@ -130,9 +147,28 @@ impl Settings {
 /// Forces [`Settings::offline`] on, whatever the engagement config declares.
 pub const ENV_OFFLINE: &str = "TRUSTY_AUDIT_OSV_OFFLINE";
 
-/// Whether an environment variable is set to something non-empty.
+/// True when `name` holds a recognised truthy value.
 fn env_flag(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| !value.trim().is_empty())
+    std::env::var(name).is_ok_and(|raw| flag_is_truthy(&raw))
+}
+
+/// True for the recognised truthy spellings, case- and whitespace-insensitive.
+///
+/// Why: an unrecognised value must read as ABSENT rather than as `true`.
+/// Treating any non-empty value as true made `TRUSTY_AUDIT_OSV_OFFLINE=false`
+/// turn offline ON, which silently costs a run every OSV answer it did not have
+/// cached — the failure this variable exists to let an operator avoid.
+/// What: the same four spellings `trusty_review::report::run::flag_is_truthy`
+/// recognises. // See that function: nothing in `trusty-common` exports the
+/// rule, so the two copies are kept in step by hand rather than by a call.
+/// A free function so the recognised set is tested directly.
+/// Test: `super::osv::osv_tests::only_a_truthy_env_value_turns_offline_on`.
+#[must_use]
+pub fn flag_is_truthy(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 /// One cached answer, with the moment it was fetched.
@@ -196,6 +232,20 @@ pub async fn resolve(
         }
         match fetch(&client, settings, batch, started).await {
             Ok(results) => {
+                // #6780: `zip` TRUNCATES. A response carrying fewer results
+                // than the batch had queries would otherwise drop its tail with
+                // no cache write and no error line, and `outcome_gaps` reports a
+                // shortfall only when NOTHING matched — so a partial answer read
+                // as a complete one.
+                if results.len() < batch.len() {
+                    errors.push(format!(
+                        "OSV answered {} of the {} package(s) in a batch, so {} of them are \
+                         unassessed",
+                        results.len(),
+                        batch.len(),
+                        batch.len() - results.len()
+                    ));
+                }
                 for (coordinate, vulns) in batch.iter().zip(results) {
                     write_cached(settings, coordinate, &vulns);
                     fetched.push((coordinate.clone(), vulns));
@@ -238,12 +288,23 @@ fn cache_miss(missing: &[Coordinate]) -> String {
 /// is exactly the shape that trips it. Dropping the batch on the first 429
 /// would leave a whole repository unassessed over a condition that clears in a
 /// quarter of a second.
-/// What: exponential backoff from [`FIRST_BACKOFF`], bounded by attempts AND by
-/// the caller's remaining time cap — whichever binds first. A 4xx that is not
-/// 429 is not retried: it will not become a different answer.
+/// What: every attempt carries an explicit per-request timeout of the
+/// repository's REMAINING budget, so no single call can outlive the cap — the
+/// bound `crate::validate` applies for the same reason, because
+/// `trusty_installer::download::http_client` builds a client with no timeout of
+/// its own (it also serves multi-megabyte downloads). Between attempts the wait
+/// is the server's `Retry-After` when it states a usable one, else exponential
+/// backoff from [`FIRST_BACKOFF`]; either is refused when the cap leaves no room
+/// for it. A 4xx that is not 429 is not retried: it will not become a different
+/// answer. A timeout is not retried either — the budget it exhausted is the same
+/// budget the next attempt would get.
 ///
 /// # Errors
-/// One line naming the last status or transport failure.
+/// One line naming the last status, the transport failure, or the budget.
+///
+/// Test: `super::osv::osv_tests::{a_rate_limited_batch_is_retried_and_then_answers,
+/// a_server_that_never_answers_is_bounded_by_the_time_cap,
+/// a_retry_after_header_sets_the_pause}`.
 async fn fetch(
     client: &reqwest::Client,
     settings: &Settings,
@@ -254,32 +315,132 @@ async fn fetch(
     let mut backoff = FIRST_BACKOFF;
     let mut last = String::from("no attempt was made");
     for attempt in 1..=MAX_ATTEMPTS {
-        if attempt > 1 {
-            if started.elapsed() + backoff >= settings.time_cap {
-                return Err(format!("{last}, and the time cap left no room to retry"));
-            }
-            tokio::time::sleep(backoff).await;
-            backoff *= 2;
-        }
-        match client.post(&settings.endpoint).json(&body).send().await {
+        let Some(budget) = remaining(settings, started) else {
+            return Err(format!(
+                "{last}, and this repository's {}s OSV budget was spent",
+                settings.time_cap.as_secs()
+            ));
+        };
+        // #6780: the timeout is the whole point of this line. Without it a
+        // server that accepts the connection and never responds parks
+        // `.send()` forever, past every cap, and blocks the sweep.
+        let sent = client
+            .post(&settings.endpoint)
+            .timeout(budget)
+            .json(&body)
+            .send()
+            .await;
+        let pause = match sent {
             Ok(response) if response.status().is_success() => {
-                let text = response
-                    .text()
-                    .await
-                    .map_err(|e| format!("the OSV response body could not be read ({e})"))?;
-                return parse(&text);
+                return parse(&read_capped(response).await?);
             }
             Ok(response) => {
                 let status = response.status();
-                last = format!("OSV answered {status}");
                 if !(status.as_u16() == 429 || status.is_server_error()) {
-                    return Err(last);
+                    return Err(format!("OSV answered {status}"));
                 }
+                last = format!("OSV answered {status}");
+                retry_after(response.headers()).unwrap_or(backoff)
             }
-            Err(e) => last = format!("the OSV request failed ({e})"),
+            Err(e) if e.is_timeout() => {
+                return Err(format!(
+                    "OSV did not answer within this repository's remaining {}s budget",
+                    budget.as_secs()
+                ));
+            }
+            Err(e) => {
+                last = format!("the OSV request failed ({e})");
+                backoff
+            }
+        };
+        backoff = backoff.saturating_mul(2);
+        if attempt == MAX_ATTEMPTS {
+            break;
         }
+        if remaining(settings, started).is_none_or(|left| left <= pause) {
+            return Err(format!(
+                "{last}, and the time cap left no room to wait {}ms before retrying",
+                pause.as_millis()
+            ));
+        }
+        tokio::time::sleep(pause).await;
     }
     Err(format!("{last} after {MAX_ATTEMPTS} attempt(s)"))
+}
+
+/// What is left of this repository's OSV budget, or `None` when it is spent.
+fn remaining(settings: &Settings, started: std::time::Instant) -> Option<Duration> {
+    settings
+        .time_cap
+        .checked_sub(started.elapsed())
+        .filter(|left| !left.is_zero())
+}
+
+/// The pause `Retry-After` asks for, when it states one this run can read.
+///
+/// Why: a 429 carrying `Retry-After` is the server telling this client exactly
+/// how long to wait. Ignoring it and using a 250ms backoff spends two of three
+/// attempts on requests the server has already said it will refuse.
+/// What: the delta-seconds form, else the HTTP-date form (RFC 2822, which is
+/// what an IMF-fixdate is) resolved against the current clock. A value that is
+/// unparseable, in the past, or past [`MAX_RETRY_AFTER`] reads as absent, so the
+/// caller's own backoff applies and the remaining-budget check still bounds it.
+/// Test: `super::osv::osv_tests::a_retry_after_header_sets_the_pause`.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .to_owned();
+    let seconds = match raw.parse::<u64>() {
+        Ok(seconds) => seconds,
+        Err(_) => {
+            let when = chrono::DateTime::parse_from_rfc2822(&raw).ok()?;
+            u64::try_from(
+                when.timestamp()
+                    .checked_sub(chrono::Utc::now().timestamp())?,
+            )
+            .ok()?
+        }
+    };
+    (seconds > 0 && seconds <= MAX_RETRY_AFTER.as_secs()).then(|| Duration::from_secs(seconds))
+}
+
+/// Read a successful response body, refusing one past [`MAX_RESPONSE_BYTES`].
+///
+/// Why: `Response::text()` buffers whatever arrives. The endpoint is named in
+/// configuration, so an unbounded read is an unbounded allocation this process
+/// does not control — a wrong or hostile endpoint could exhaust the machine
+/// mid-sweep. A batch of 1000 queries answers in well under the ceiling.
+/// What: the declared `Content-Length` is refused up front when it is over;
+/// then the body is accumulated chunk by chunk against the same budget, because
+/// a chunked response declares no length. Over-cap is a batch ERROR line — one
+/// batch of a repository's coverage — never a panic.
+/// Test: `super::osv::osv_tests::an_oversized_response_is_a_batch_error`.
+async fn read_capped(mut response: reqwest::Response) -> Result<String, String> {
+    if let Some(declared) = response.content_length()
+        && declared > MAX_RESPONSE_BYTES as u64
+    {
+        return Err(format!(
+            "the OSV response declares {declared} bytes, over this collector's \
+             {MAX_RESPONSE_BYTES}-byte ceiling"
+        ));
+    }
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("the OSV response body could not be read ({e})"))?
+    {
+        if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(format!(
+                "the OSV response exceeded this collector's {MAX_RESPONSE_BYTES}-byte ceiling"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).map_err(|e| format!("the OSV response is not valid UTF-8 ({e})"))
 }
 
 /// The `querybatch` request document for one batch.
@@ -302,9 +463,10 @@ pub fn request_body(batch: &[Coordinate]) -> serde_json::Value {
 ///
 /// `results` is positional: OSV answers the i-th query at the i-th index, and a
 /// package with no advisories is an entry with no `vulns` key rather than an
-/// omission. A response with fewer results than queries is short-padded with
-/// empty lists by the caller's `zip`, which drops the unanswered tail rather
-/// than misaligning it onto the wrong package.
+/// omission. A short response is returned short — nothing is padded here. The
+/// caller's `zip` then truncates rather than misaligning answers onto the wrong
+/// packages, and [`resolve`] states the shortfall as an error line, because a
+/// truncated tail is unassessed rather than clean.
 ///
 /// # Errors
 /// One line when the body is not JSON or declares no `results` array.
@@ -453,4 +615,14 @@ pub(crate) fn seed_cache(
 #[cfg(test)]
 pub(crate) fn cached_path(settings: &Settings, coordinate: &Coordinate) -> PathBuf {
     cache_path(settings, coordinate)
+}
+
+/// [`retry_after`], for a test driving the header forms directly.
+///
+/// Exposed rather than tested only end-to-end because the arms that matter —
+/// a past HTTP-date, an absurd delta, an unparseable value — cannot all be
+/// reached through a mock server without one test per arm.
+#[cfg(test)]
+pub(crate) fn retry_after_for_test(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    retry_after(headers)
 }

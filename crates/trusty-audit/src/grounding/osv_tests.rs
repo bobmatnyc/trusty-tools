@@ -406,6 +406,219 @@ async fn a_client_error_is_not_retried() {
     assert!(errors[0].contains("400"), "{}", errors[0]);
 }
 
+/// 🔴 A server that accepts the connection and never responds must not park
+/// the sweep. `http_client()` builds a client with no timeout, so without the
+/// per-request bound `.send()` waits forever, past every cap, and `run.rs`
+/// never reaches the next repository.
+#[tokio::test]
+async fn a_server_that_never_answers_is_bounded_by_the_time_cap() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(ANSWER)
+                .set_delay(Duration::from_secs(30)),
+        )
+        .mount(&server)
+        .await;
+    let mut settings = settings(&format!("{}/v1/querybatch", server.uri()), tmp.path());
+    settings.time_cap = Duration::from_millis(400);
+
+    let started = std::time::Instant::now();
+    let resolved = tokio::time::timeout(
+        Duration::from_secs(10),
+        osv_query::resolve(&settings, &pair()),
+    )
+    .await
+    .expect("resolve returned rather than hanging past the cap");
+    let elapsed = started.elapsed();
+
+    let (answers, errors) = resolved;
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the cap bounded the call: {elapsed:?}"
+    );
+    assert!(answers.iter().all(Option::is_none));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("budget"),
+        "the gap names the budget it spent: {}",
+        errors[0]
+    );
+}
+
+/// 🔴 A response body is read against a ceiling. The endpoint is named in
+/// configuration, so an unbounded read is an unbounded allocation this process
+/// does not control — and it must degrade to one batch's error line, not a
+/// crash.
+#[tokio::test]
+async fn an_oversized_response_is_a_batch_error() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("x".repeat(osv_query::MAX_RESPONSE_BYTES + 1)),
+        )
+        .mount(&server)
+        .await;
+    let mut settings = settings(&format!("{}/v1/querybatch", server.uri()), tmp.path());
+    settings.time_cap = Duration::from_secs(30);
+
+    let (answers, errors) = osv_query::resolve(&settings, &pair()).await;
+
+    assert!(
+        answers.iter().all(Option::is_none),
+        "nothing is answered from a body that was refused"
+    );
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("ceiling"),
+        "the refusal names the ceiling rather than crashing: {}",
+        errors[0]
+    );
+    assert!(
+        errors[0].contains(&osv_query::MAX_RESPONSE_BYTES.to_string()),
+        "{}",
+        errors[0]
+    );
+}
+
+/// 🔴 `TRUSTY_AUDIT_OSV_OFFLINE=false` used to turn offline ON, because any
+/// non-empty value read as true — silently costing a run every OSV answer it
+/// did not have cached.
+#[test]
+fn only_a_truthy_env_value_turns_offline_on() {
+    for yes in ["1", "true", "TRUE", " yes ", "on"] {
+        assert!(
+            osv_query::flag_is_truthy(yes),
+            "{yes:?} must turn offline on"
+        );
+    }
+    for no in ["false", "0", "no", "off", "", "  ", "maybe"] {
+        assert!(
+            !osv_query::flag_is_truthy(no),
+            "{no:?} must read as absent, not as true"
+        );
+    }
+    // Unset, without mutating the environment: `set_var` is unsafe in edition
+    // 2024 and unsound under the parallel harness.
+    let settings = Settings::for_engagement(
+        &crate::config::OsvSettings::default(),
+        &crate::workdir::WorkDir::new(std::path::PathBuf::from("/tmp/osv-unset-6780")),
+    );
+    assert!(
+        !settings.offline,
+        "an undeclared config and an unset variable leave the lookup online"
+    );
+}
+
+/// 🔴 A response with fewer results than the batch had queries drops its tail
+/// through `zip`. The dropped packages are unassessed and must be named — the
+/// clean-scan gap only fires when NOTHING matched, so a partial answer would
+/// otherwise read as a complete one.
+#[tokio::test]
+async fn a_short_response_names_the_coordinates_it_left_unanswered() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    // Two queries go out; OSV answers one.
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"results":[{"vulns":[{"id":"GHSA-a"}]}]}"#),
+        )
+        .mount(&server)
+        .await;
+    let settings = settings(&format!("{}/v1/querybatch", server.uri()), tmp.path());
+    let coordinates = pair();
+
+    let (answers, errors) = osv_query::resolve(&settings, &coordinates).await;
+
+    assert!(answers[0].is_some(), "the answered half lands");
+    assert_eq!(answers[1], None, "the unanswered half stays unanswered");
+    assert_eq!(errors.len(), 1, "the shortfall is stated once: {errors:?}");
+    assert!(
+        errors[0].contains("answered 1 of the 2"),
+        "the gap counts it: {}",
+        errors[0]
+    );
+    assert!(errors[0].contains("unassessed"), "{}", errors[0]);
+    assert!(
+        !osv_query::cached_path(&settings, &coordinates[1]).is_file(),
+        "an unanswered coordinate is never cached as if it were clean"
+    );
+}
+
+/// 🔴 A 429 carrying `Retry-After` is the server saying how long to wait.
+/// Ignoring it spends two of three attempts on requests it has already refused.
+#[tokio::test]
+async fn a_retry_after_header_sets_the_pause() {
+    assert_eq!(
+        header_pause("1"),
+        Some(Duration::from_secs(1)),
+        "the delta-seconds form is honoured"
+    );
+    assert_eq!(
+        header_pause("0"),
+        None,
+        "a zero pause falls back to the backoff"
+    );
+    assert_eq!(
+        header_pause("99999"),
+        None,
+        "an absurd pause reads as absent rather than as an instruction"
+    );
+    assert_eq!(header_pause("soon"), None, "an unparseable value is absent");
+    let future = chrono::Utc::now() + chrono::Duration::seconds(2);
+    assert!(
+        header_pause(&future.to_rfc2822()).is_some(),
+        "the HTTP-date form resolves against the clock"
+    );
+    assert_eq!(
+        header_pause(&(chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc2822()),
+        None,
+        "a date in the past is absent, not a negative wait"
+    );
+
+    // And end to end: a 429 with a Retry-After the cap can afford still answers.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(ANSWER))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut settings = settings(&format!("{}/v1/querybatch", server.uri()), tmp.path());
+    settings.time_cap = Duration::from_secs(20);
+
+    let started = std::time::Instant::now();
+    let (answers, errors) = osv_query::resolve(&settings, &pair()).await;
+
+    assert!(errors.is_empty(), "the paced retry succeeded: {errors:?}");
+    assert_eq!(answers[0].as_ref().map(Vec::len), Some(1));
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "the client actually waited the second the server asked for"
+    );
+}
+
+/// The pause a `Retry-After` of `raw` asks for.
+fn header_pause(raw: &str) -> Option<Duration> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::RETRY_AFTER,
+        reqwest::header::HeaderValue::from_str(raw).expect("a header value"),
+    );
+    osv_query::retry_after_for_test(&headers)
+}
+
 /// `querybatch` is an index over ids and may answer with the id alone. That is
 /// still a vulnerability and must reach the report as one.
 #[test]
