@@ -17,7 +17,7 @@ name = "trusty-audit"
 # `search_evidence` here, which `cargo-semver-checks` reports as
 # `struct_missing_field` against 0.13.3; for a 0.y.z crate the breaking bump is
 # the MINOR position.
-version = "0.14.0"
+version = "0.14.1"
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"
@@ -148,6 +148,12 @@ walkdir = { workspace = true }
 tempfile = { workspace = true }
 
 [dev-dependencies]
+# #6789: `secrets_tests::the_raw_report_lives_in_a_private_directory_and_does_not_outlive_the_run`
+# reads `std::env::temp_dir()`, one real path every process on the host shares, so
+# it needs a lock two PROCESSES contend on rather than an in-process mutex — CI's
+# nextest shards give every test its own process, where `#[serial]` serialises
+# nothing (CLAUDE.md #4162). `file_locks` is what supplies `#[file_serial]`.
+serial_test = { workspace = true, features = ["file_locks"] }
 # #6780: the OSV lookup's cache, retry and offline arms are all assertions about
 # what did or did not reach the network, so the tests drive a local mock server
 # and never api.osv.dev. `wiremock` is the workspace's answer for a hermetic

@@ -13,6 +13,7 @@
 //! Test: this file.
 
 use super::*;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 /// A gitleaks report carrying one row per shape this collector must handle: a
@@ -214,6 +215,10 @@ fn an_empty_report_parses_to_no_leaks() {
 /// lives where no other local account can read it and does not outlive the run.
 #[cfg(unix)]
 #[test]
+// #6789: the sweep at the end reads `std::env::temp_dir()`, one real path every
+// process on the host shares, so a file lock is the only thing that can keep a
+// concurrent copy of THIS test out of the listing.
+#[serial_test::file_serial(trusty_audit_secrets_report_dirs)]
 fn the_raw_report_lives_in_a_private_directory_and_does_not_outlive_the_run() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -246,10 +251,27 @@ fn the_raw_report_lives_in_a_private_directory_and_does_not_outlive_the_run() {
     // The REAL `run_gitleaks`, whichever arm this machine takes, leaves nothing.
     // Asserted in the same test rather than its own so no sibling's live
     // directory can race the sweep below.
+    //
+    // #6789: the claim is about what THIS scan ADDED, so the listing is read
+    // once before it and once after and the two are differenced. A `taudit` run
+    // started by hand holds no file lock, and its live directory was in the
+    // listing the whole time — the earlier absolute sweep read that as a leak.
+    let before = report_dirs_in_temp();
     let tmp = tempfile::tempdir().expect("tempdir");
     let checkout = checkout_at(tmp.path());
     let _ = scan(&checkout);
-    let lingering: Vec<PathBuf> = std::fs::read_dir(std::env::temp_dir())
+    let lingering: Vec<PathBuf> = report_dirs_in_temp().difference(&before).cloned().collect();
+    assert!(
+        lingering.is_empty(),
+        "no raw report survives a scan: {lingering:?}"
+    );
+}
+
+/// Every [`REPORT_DIR_PREFIX`] directory the shared temp directory holds right
+/// now, as a set two readings can be differenced across (#6789).
+#[cfg(unix)]
+fn report_dirs_in_temp() -> BTreeSet<PathBuf> {
+    std::fs::read_dir(std::env::temp_dir())
         .expect("read the temp dir")
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -259,11 +281,7 @@ fn the_raw_report_lives_in_a_private_directory_and_does_not_outlive_the_run() {
                 .and_then(std::ffi::OsStr::to_str)
                 .is_some_and(|name| name.starts_with(REPORT_DIR_PREFIX))
         })
-        .collect();
-    assert!(
-        lingering.is_empty(),
-        "no raw report survives a scan: {lingering:?}"
-    );
+        .collect()
 }
 
 /// `Run` holds gitleaks' `Secret` and `Match` verbatim, so its `Debug` is
