@@ -160,8 +160,9 @@ pub struct BatchOutcome {
 /// that is the whole point of batching over one large request.
 /// What: for each batch, calls the provider under [`BATCH_TIMEOUT`]; on
 /// `finish_reason = length`/`max_tokens`, retries ONCE with
-/// [`RETRY_MAX_FINDINGS`] and a concise directive; a still-truncated retry, a
-/// provider error, or an unparseable response fails THAT BATCH closed
+/// [`RETRY_MAX_FINDINGS`] and a concise directive; on an unparseable answer,
+/// retries ONCE at the same size (#6784). A still-truncated or still-unparseable
+/// retry, or a provider error, fails THAT BATCH closed
 /// ([`BatchStatus::Truncated`] / [`BatchStatus::Unavailable`]) while later
 /// batches still run.  Findings are verified against `selection` (the full
 /// per-repo file set, not just the batch) so any well-formed cross-batch
@@ -209,8 +210,32 @@ pub async fn run_batches(
     (merge_dedupe(all_verified), total_rejected, outcomes)
 }
 
-/// Run one batch to completion: initial attempt, then (on truncation only) one
-/// concise retry, returning its status + verified findings + rejected count.
+/// Verify one parsed batch response and report it as a completed batch.
+///
+/// Why: #6784 gave the initial attempt and the retry the same success handling, and
+/// two copies of it drift.
+/// What: runs `verify::verify_findings` and pairs its output with
+/// [`BatchStatus::Completed`].
+/// Test: covered through `batch_tests::retry_recovers_from_truncation`.
+fn completed(
+    raw: Vec<analyze::RawFinding>,
+    selection: &Selection,
+) -> (BatchStatus, Vec<VerifiedFinding>, usize) {
+    let outcome = verify::verify_findings(raw, selection);
+    (BatchStatus::Completed, outcome.verified, outcome.rejected)
+}
+
+/// Run one batch to completion: initial attempt, then one retry when the first
+/// answer was truncated or unparseable, returning its status + verified findings +
+/// rejected count.
+///
+/// #6784: an unparseable first answer used to fail the batch closed with no second
+/// attempt, so every file it carried went unread — 37 of 59 repositories in one
+/// engagement lost batches that way. It now gets the same single retry truncation
+/// gets; only truncation shrinks the ask, because only truncation is evidence the
+/// response did not fit.
+/// Test: `batch_tests::{an_unparseable_batch_is_retried_not_dropped,
+/// an_unparseable_batch_that_stays_unparseable_fails_closed}`.
 #[allow(clippy::too_many_arguments)]
 async fn run_one_batch(
     provider: Arc<dyn LlmProvider>,
@@ -235,15 +260,23 @@ async fn run_one_batch(
     )
     .await
     {
-        Attempt::Ok(raw) => {
-            let outcome = verify::verify_findings(raw, selection);
-            (BatchStatus::Completed, outcome.verified, outcome.rejected)
-        }
-        Attempt::Truncated => {
+        Attempt::Ok(raw) => completed(raw, selection),
+        // A provider/timeout error is not retried here: the provider layer already
+        // retries transport faults, and a second call would just spend the budget.
+        Attempt::Failed(reason) => (BatchStatus::Unavailable(reason), Vec::new(), 0),
+        // #6784: truncated and unparseable both earn one more attempt.
+        retryable => {
+            let truncated = matches!(retryable, Attempt::Truncated);
+            let (max_findings, concise) = if truncated {
+                (RETRY_MAX_FINDINGS, true)
+            } else {
+                (MAX_FINDINGS_PER_BATCH, false)
+            };
             warn!(
                 batch = batch.index,
                 total = batch_count,
-                "investigation: batch truncated — retrying once, concise"
+                truncated,
+                "investigation: batch response unusable — retrying once"
             );
             match try_batch(
                 provider,
@@ -253,15 +286,12 @@ async fn run_one_batch(
                 batch_count,
                 total_files,
                 instructions,
-                RETRY_MAX_FINDINGS,
-                true,
+                max_findings,
+                concise,
             )
             .await
             {
-                Attempt::Ok(raw) => {
-                    let outcome = verify::verify_findings(raw, selection);
-                    (BatchStatus::Completed, outcome.verified, outcome.rejected)
-                }
+                Attempt::Ok(raw) => completed(raw, selection),
                 Attempt::Truncated => {
                     warn!(
                         batch = batch.index,
@@ -269,10 +299,14 @@ async fn run_one_batch(
                     );
                     (BatchStatus::Truncated, Vec::new(), 0)
                 }
+                Attempt::Unparseable => (
+                    BatchStatus::Unavailable("unparseable response (after one retry)".to_string()),
+                    Vec::new(),
+                    0,
+                ),
                 Attempt::Failed(reason) => (BatchStatus::Unavailable(reason), Vec::new(), 0),
             }
         }
-        Attempt::Failed(reason) => (BatchStatus::Unavailable(reason), Vec::new(), 0),
     }
 }
 
@@ -280,9 +314,16 @@ async fn run_one_batch(
 enum Attempt {
     /// Parsed cleanly; carries the raw (unverified) findings.
     Ok(Vec<analyze::RawFinding>),
-    /// The response was truncated at the output-token ceiling.
+    /// The response was truncated at the output-token ceiling — either the
+    /// provider said so, or the body is a JSON object that was never closed
+    /// (#6784).
     Truncated,
-    /// A provider/timeout/parse error — not a truncation.
+    /// The response arrived whole and no parse strategy decoded it (#6784).
+    ///
+    /// Separate from [`Self::Failed`] because the remedy differs: this earns one
+    /// retry, where a provider or timeout error does not.
+    Unparseable,
+    /// A provider or timeout error — the call itself did not complete.
     Failed(String),
 }
 
@@ -325,7 +366,11 @@ async fn try_batch(
 
     match analyze::parse_findings(&resp.text) {
         Some(raw) => Attempt::Ok(raw.findings),
-        None => Attempt::Failed("unparseable response".to_string()),
+        // #6784: a provider that truncates WITHOUT setting `finish_reason` leaves a
+        // half-written object here, which used to read as an unparseable response and
+        // skip the concise retry built for exactly this case.
+        None if analyze::looks_truncated(&resp.text) => Attempt::Truncated,
+        None => Attempt::Unparseable,
     }
 }
 
