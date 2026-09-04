@@ -471,17 +471,18 @@ which derives the prefix from the directory unconditionally.
 - `trusty-common` → `-p trusty-common` → tag: **`trusty-common-v0.8.0`** ✓
 - `trusty-agents` → `-p trusty-agents` → tag: **`trusty-agents-v0.2.3`** ✓
 
-> **tga tag aliases (issue #1128) — read alias only, never push both:** the tag
-> to PUSH for `trusty-git-analytics` is **`trusty-git-analytics-v<version>`**,
-> same as every other crate. `check-publish-ready.sh` GUARD 2 and
-> `check-tag-publish-parity.sh` additionally recognize the legacy short form
-> `tga-v<version>` if that is the tag they find on origin, and the binary-release
-> workflow resolves either spelling to the same build config and Homebrew
-> formula. That acceptance exists for compatibility with tags already pushed
-> under the old convention — it is not a second option to choose from. Pushing
-> both spellings for one release risks a TAG-SPLIT
-> (`scripts/check-tag-publish-parity.sh`), which cannot be repaired afterward
-> because release tags here are immutable (#6178).
+> **tga tag aliases (issue #1128) — until #6771 lands, push BOTH spellings at
+> the SAME commit:** push `trusty-git-analytics-v<version>` first, because
+> `check-publish-ready.sh` GUARD 2 accepts only that spelling and the publish
+> must pass it. After `cargo publish` succeeds, push `tga-v<version>` at the
+> identical commit, because the installer bundled in `trusty-audit` resolves
+> the tga release by the `tga-v<version>` tag
+> (`crates/trusty-installer/src/download/release.rs:310`), and its `tga` alias
+> rewrites only the asset filename, not the tag it resolves against. Both tags
+> at one commit is not a TAG-SPLIT. A TAG-SPLIT is the two spellings at
+> DIFFERENT commits (`scripts/check-tag-publish-parity.sh`), so verify the
+> commit before each push — release tags here are immutable (#6178). See #6771
+> for the tracking issue; the second push becomes unnecessary once it lands.
 
 The crate name **always** comes from the `name` field in `Cargo.toml`:
 
