@@ -466,6 +466,7 @@ fn reporter_injects_synthesis_prose() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: String::new(),
+            cwe_id: None,
             app_slug: slug,
             title: "Injection risk".to_string(),
             severity: "RED".to_string(),
@@ -751,6 +752,7 @@ fn render_with_finding(f: crate::report::synthesize::FindingProse) -> String {
 fn restating_finding() -> crate::report::synthesize::FindingProse {
     crate::report::synthesize::FindingProse {
         trace_verdict: String::new(),
+        cwe_id: None,
         app_slug: String::new(),
         title: "Extract method — hnsw_store".to_string(),
         severity: "AMBER".to_string(),
@@ -886,6 +888,7 @@ fn evidence_renders_as_fenced_block() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: String::new(),
+            cwe_id: None,
             app_slug: slug,
             title: "SQL injection".to_string(),
             severity: "RED".to_string(),
@@ -942,6 +945,7 @@ fn a_trace_verdict_renders_under_the_evidence_fence() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: "cleared-by-trace: the query is parameterised at line 61".to_string(),
+            cwe_id: None,
             app_slug: slug,
             title: "SQL injection".to_string(),
             severity: "RED".to_string(),
@@ -971,6 +975,60 @@ fn a_trace_verdict_renders_under_the_evidence_fence() {
     );
 }
 
+/// Why (#6779): the weakness class has to be visible where a reader scans, not
+/// only in `investigation.json`. It rides on the title, and a finding with no
+/// identifiable class must render EXACTLY as it did before the tag existed —
+/// no empty brackets, no placeholder.
+/// What: two findings through one render; the tagged one gains a ` [CWE-89]`
+/// suffix on its title and the untagged one gains nothing.
+/// Test: this test itself.
+#[test]
+fn a_weakness_class_renders_next_to_the_finding_title() {
+    use crate::report::synthesize::{FindingProse, Synthesis};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    let slug = model.repositories[0].slug.clone();
+    let prose = |title: &str, cwe_id: Option<String>| FindingProse {
+        trace_verdict: String::new(),
+        cwe_id,
+        app_slug: slug.clone(),
+        title: title.to_string(),
+        severity: "RED".to_string(),
+        description: "Unsanitised query parameters".to_string(),
+        evidence: "let query = `SELECT * FROM users WHERE id = ${id}`;".to_string(),
+        component: "lib/auth/session.ts:58".to_string(),
+        business_impact: "customer data exposure".to_string(),
+        remediation: "use parameterised queries".to_string(),
+        cost_effort: "low".to_string(),
+        evidence_measured: true,
+    };
+    model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
+        authorship_summary: None,
+        executive_summary: None,
+        top_risks: vec![],
+        findings: vec![
+            prose("SQL injection", Some("CWE-89".to_string())),
+            prose("Unclear session lifetime", None),
+        ],
+        notes: vec![],
+    });
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("SQL injection [CWE-89]"), "md:\n{md}");
+    assert!(md.contains("Unclear session lifetime"), "md:\n{md}");
+    assert!(
+        !md.contains("Unclear session lifetime ["),
+        "an unclassified finding must carry no bracket; md:\n{md}"
+    );
+}
+
 /// Why: this is the direct regression test for defect #3 — a blank line
 /// inside the evidence quote must never be read as a section boundary and
 /// must never splice a "No data available" line mid-quote.
@@ -995,6 +1053,7 @@ fn evidence_with_blank_line_fences_cleanly() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: String::new(),
+            cwe_id: None,
             app_slug: slug,
             title: "SQL injection".to_string(),
             severity: "RED".to_string(),
@@ -1054,6 +1113,7 @@ fn evidence_containing_triple_backticks_uses_longer_fence() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: String::new(),
+            cwe_id: None,
             app_slug: slug,
             title: "SQL injection".to_string(),
             severity: "RED".to_string(),
@@ -1132,6 +1192,7 @@ fn evidence_with_adjacent_hash_comment_lines_renders_byte_identical() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: String::new(),
+            cwe_id: None,
             app_slug: slug,
             title: "ALLOWED_OAUTH_DOMAINS fails closed but is undocumented".to_string(),
             severity: "RED".to_string(),
@@ -1199,6 +1260,7 @@ fn evidence_with_blank_line_full_render_has_no_fenced_splice() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: String::new(),
+            cwe_id: None,
             app_slug: slug,
             title: "AI Gateway secrets".to_string(),
             severity: "RED".to_string(),
@@ -1377,6 +1439,7 @@ fn reporter_merges_synthesis_prose_onto_deterministic_finding() {
         top_risks: vec![],
         findings: vec![FindingProse {
             trace_verdict: String::new(),
+            cwe_id: None,
             app_slug: slug,
             title: "SQL injection".to_string(),
             severity: "RED".to_string(),
@@ -3120,6 +3183,7 @@ fn amber_prose(
 ) -> crate::report::synthesize::FindingProse {
     crate::report::synthesize::FindingProse {
         trace_verdict: String::new(),
+        cwe_id: None,
         app_slug: String::new(),
         title: title.to_string(),
         severity: "AMBER".to_string(),

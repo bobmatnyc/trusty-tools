@@ -76,6 +76,7 @@ fn model_with(repos: Vec<RepositoryReport>, investigation: Option<Investigation>
 fn verified_finding(title: &str, file: &str, line: u64, description: &str) -> VerifiedFinding {
     VerifiedFinding {
         trace_verdict: String::new(),
+        cwe_id: None,
         title: title.to_string(),
         severity: Severity::Red,
         dimension: "authentication & secrets".to_string(),

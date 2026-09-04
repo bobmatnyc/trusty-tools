@@ -45,6 +45,10 @@ fn raw(severity: &str, file: &str, quote: &str, line: Option<u64>) -> RawFinding
         business_impact: "impact".to_string(),
         remediation: "fix".to_string(),
         cost_effort: "low".to_string(),
+        // #6779: the weakness-class cases live in `cwe_tests`; every case here
+        // predates the field and must stay untagged so it still proves what it
+        // was written to prove.
+        cwe_id: None,
     }
 }
 

@@ -40,6 +40,7 @@ fn finding(description: &str, line: u64) -> VerifiedFinding {
         remediation: String::new(),
         cost_effort: String::new(),
         trace_verdict: String::new(),
+        cwe_id: None,
     }
 }
 

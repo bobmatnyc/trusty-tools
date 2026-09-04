@@ -2618,6 +2618,7 @@ fn two_findings_on_one_file_model() -> ReportModel {
 fn grounded_finding(business_impact: &str) -> super::FindingProse {
     super::FindingProse {
         trace_verdict: String::new(),
+        cwe_id: None,
         app_slug: "acme-web".to_string(),
         title: "Run handler executes an arbitrary caller-supplied executable".to_string(),
         severity: "RED".to_string(),
@@ -2840,6 +2841,7 @@ fn control_routes_investigation() -> crate::report::investigate::Investigation {
             status: InvestigationStatus::Available,
             findings: vec![VerifiedFinding {
                 trace_verdict: String::new(),
+                cwe_id: None,
                 title: "Control-plane HTTP handlers have no authentication or authorization"
                     .to_string(),
                 severity: Severity::Red,

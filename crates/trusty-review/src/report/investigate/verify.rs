@@ -62,6 +62,16 @@ pub struct VerifiedFinding {
     /// — keeps this empty and renders exactly as it did before the pass existed.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub trace_verdict: String,
+    /// The CWE id for this finding's weakness class, when one is identifiable
+    /// (#6779).
+    ///
+    /// `None` — and so ABSENT from `investigation.json` — whenever the model
+    /// named no weakness class, named one this crate cannot read mechanically,
+    /// or the finding is GREEN (a strength has no weakness class). The field
+    /// only ever appears when it says something, which is what keeps a
+    /// structural-flaw count off findings that were never classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwe_id: Option<String>,
 }
 
 /// The outcome of verifying one repository's raw findings.
@@ -220,6 +230,14 @@ pub fn verify_findings(raw: Vec<RawFinding>, selection: &Selection) -> VerifyOut
                 cost_effort: green_blank(green, &f.cost_effort),
                 // #6166 leg 2: the verdict pass writes this, never verification.
                 trace_verdict: String::new(),
+                // #6779: a GREEN names a strength, so it carries no weakness
+                // class — the same blanking its prose gets. Every other band
+                // keeps whatever `resolve` can read, and nothing else.
+                cwe_id: if green {
+                    None
+                } else {
+                    super::cwe::resolve(f.cwe_id.as_deref().unwrap_or_default())
+                },
             }),
             None => {
                 out.rejected += 1;

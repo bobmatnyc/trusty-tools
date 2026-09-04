@@ -285,6 +285,14 @@ pub struct FindingProse {
     /// travel with it to reach the rendered evidence block.
     #[serde(default)]
     pub trace_verdict: String,
+    /// The CWE id for this finding's weakness class, or `None` (#6779).
+    ///
+    /// Never LLM-authored HERE: synthesis has no schema field for it, so every
+    /// synthesis response deserialises with `None`. It travels on this row
+    /// because the investigation's prose is the row that wins for a verified
+    /// finding, and the tag has to reach the rendered title with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwe_id: Option<String>,
 }
 
 // ─── Synthesizer ────────────────────────────────────────────────────────────

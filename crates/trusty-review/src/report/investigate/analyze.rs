@@ -111,6 +111,14 @@ pub struct RawFinding {
     /// Qualitative cost/effort framing.
     #[serde(default)]
     pub cost_effort: String,
+    /// The weakness class this finding maps to, as an id or a class name (#6779).
+    ///
+    /// Raw and untrusted, exactly like every other field here: `None` when the
+    /// model omits it, and whatever string it emitted otherwise. Verification
+    /// runs it through [`super::cwe::resolve`], which drops anything it cannot
+    /// read mechanically.
+    #[serde(default)]
+    pub cwe_id: Option<String>,
 }
 
 /// The raw investigation response (a `findings` array).
@@ -166,7 +174,21 @@ pub fn investigation_schema(max_findings: usize) -> ResponseSchema {
                             "description": {"type": "string", "description": "One concise sentence."},
                             "business_impact": {"type": "string", "description": "One concise sentence. Empty string if the code does not support one — never invent an impact to fill this field."},
                             "remediation": {"type": "string", "description": "One concise sentence."},
-                            "cost_effort": {"type": "string", "description": "Qualitative cost/effort framing; no invented figures. Empty string if unknown."}
+                            "cost_effort": {"type": "string", "description": "Qualitative cost/effort framing; no invented figures. Empty string if unknown."},
+                            // #6779: nullable for the same reason `line` is —
+                            // strict mode requires every property in `required`,
+                            // and "no identifiable weakness class" is a real
+                            // answer that an empty string would not distinguish
+                            // from a lazy one. The enumeration comes from
+                            // `cwe::WEAKNESS_CLASSES` so the vocabulary the model
+                            // is offered is the one ingestion reads back.
+                            "cwe_id": {
+                                "type": ["string", "null"],
+                                "description": format!(
+                                    "The CWE id for this finding's weakness class, as CWE-<number> (e.g. CWE-89). null when the finding maps to no known weakness class — NEVER guess one. Known classes: {}.",
+                                    super::cwe::class_checklist()
+                                )
+                            }
                         }
                     }
                 }
