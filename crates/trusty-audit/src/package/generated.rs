@@ -151,6 +151,9 @@ pub(super) fn render_index(
                 },
                 carried_over: run.resumed,
                 duration: run.duration_ms.map(std::time::Duration::from_millis),
+                // #6783: the recipient's copy of the coverage count, read off
+                // the same gaps the sweep's own index reads.
+                search_evidence: !crate::grounding::search_tier_degraded(&run.gaps),
             }
         })
         .collect::<Vec<_>>();

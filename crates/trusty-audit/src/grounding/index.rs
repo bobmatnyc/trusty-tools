@@ -131,7 +131,11 @@ pub async fn root_matches(socket: &Path, index_id: &str, checkout: &Path) -> Res
 /// Falls back to a separator-normalised string compare when either path cannot
 /// be canonicalised, which is the case in tests and for a root the daemon holds
 /// but this machine cannot stat.
-fn same_tree(served: &Path, checkout: &Path) -> bool {
+///
+/// Shared with [`super::conflict`] (#6783), which asks the same question of the
+/// same registry rows: a second answer to "is this the tree we audited" is how
+/// the root backstop and the conflict resolver would drift apart.
+pub(super) fn same_tree(served: &Path, checkout: &Path) -> bool {
     match (served.canonicalize(), checkout.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => {
@@ -199,6 +203,57 @@ pub fn ensure_indexed(
     match refusal(checkout, index_id, &output) {
         Some(reason) => Err(reason),
         None => Ok(IndexStatus::Indexed),
+    }
+}
+
+/// [`ensure_indexed`], resolving a registration conflict rather than reporting it.
+///
+/// Why: `POST /indexes` answers `409` when a stale row from an earlier run on
+/// this machine holds either the id or the tree, and until #6783 that refusal
+/// went straight to a gap — 59 repositories in one client sweep lost their
+/// findings, complexity and health factors to rows the daemon would have given
+/// up on request. A stale row is recoverable; see [`super::conflict`] for the
+/// policy and why re-creating under the derived id beats adopting another.
+/// What: runs [`ensure_indexed`]; on a `409` asks [`super::conflict::resolve`]
+/// to clear the collision and runs it again, ONCE. Every other failure is
+/// returned untouched, and a resolution that itself fails is reported beside the
+/// refusal that prompted it rather than replacing it.
+///
+/// A [`super::conflict::Resolution::Reuse`] does not re-run the create: the
+/// daemon is already serving this checkout under this id, and `trusty-search
+/// index` reindexes as part of its own retry, so the only case that needs a
+/// second spawn is the one that follows a drop.
+///
+/// # Errors
+///
+/// One line, safe to show the recipient. The caller turns it into the gap
+/// headline; nothing here fails a run.
+///
+/// Test: `super::grounding_tests::{a_409_registration_conflict_clears_the_stale_row_and_retries,
+/// an_unresolvable_409_degrades_the_evidence_tier_out_loud,
+/// a_non_conflict_index_failure_is_not_retried}`.
+pub async fn ensure_indexed_resolved(
+    search: &Path,
+    socket: &Path,
+    checkout: &Path,
+    index_id: &str,
+) -> Result<IndexStatus, String> {
+    let refusal = match ensure_indexed(search, checkout, index_id) {
+        Ok(status) => return Ok(status),
+        Err(reason) => reason,
+    };
+    // #6783: only a registration collision is worth a second attempt.
+    if !super::conflict::is_registration_conflict(&refusal) {
+        return Err(refusal);
+    }
+    match super::conflict::resolve(socket, index_id, checkout).await {
+        Ok(super::conflict::Resolution::Reuse) => Ok(IndexStatus::AlreadyServed),
+        Ok(super::conflict::Resolution::Dropped { id }) => {
+            ensure_indexed(search, checkout, index_id).map_err(|retry| {
+                format!("{refusal}; the stale registration '{id}' was cleared and {retry}")
+            })
+        }
+        Err(cause) => Err(format!("{refusal}; {cause}")),
     }
 }
 
