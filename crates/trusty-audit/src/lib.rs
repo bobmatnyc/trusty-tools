@@ -78,6 +78,10 @@ pub mod chain;
 pub mod cli;
 pub mod clone;
 pub mod config;
+// #6781: the bundle-level technical-debt roll-up — counts by tier, dimension,
+// repository, and tier x dimension, computed once per run and read by BOTH the
+// index's table and `report.json`, so the two cannot disagree.
+pub mod debt_rollup;
 pub mod discover;
 // #5825: the INBOUND package, built on the auditor's machine. `package` is the
 // outbound one built on the recipient's. Two modules, opposite directions,

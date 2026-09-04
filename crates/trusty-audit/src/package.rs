@@ -131,6 +131,15 @@ pub const REPORTS_PREFIX: &str = "reports";
 /// Test: `super::package_tests::the_package_index_links_resolve_inside_the_zip`.
 pub const INDEX_ENTRY: &str = "reports/index.md";
 
+/// The generated member carrying the index's counts, machine-readable (#6781).
+///
+/// Why: beside [`INDEX_ENTRY`] and in the same frame, because it states the same
+/// facts for a different reader. Its `debt_rollup` block is what a downstream
+/// consumer reads instead of re-deriving totals from each manifest's raw
+/// findings, which is the whole point of computing them once.
+/// Test: `super::package_tests::the_package_carries_the_debt_rollup`.
+pub const DEBT_ENTRY: &str = "reports/report.json";
+
 /// Directory inside the zip holding the tga extract databases (#5479).
 pub const EXTRACT_PREFIX: &str = "extract";
 
@@ -362,13 +371,17 @@ pub fn assemble(
     // asks of it — what is NOT in here — and because silence about an ignored
     // request is indistinguishable from a request never made.
     excluded.extend(config.unsupported_declaration());
+    // #6781: one render, two members — the index and its machine-readable twin
+    // come out of one `IndexReport`, so they share a timestamp and a roll-up.
+    let (index, debt) = render_index(work, report, &collected);
     let generated = Generated {
         metadata: render_metadata(work, config, report, &audited, unattempted)?,
         readme: render_readme(config, &audited, &excluded),
         // #6080: built from `collected`, so the index links the members that are
         // actually going into this archive rather than the files the sweep left
         // on disk. Before `fill_archive`, because it is one of the members.
-        index: render_index(work, report, &collected),
+        index,
+        debt,
         // #6245: `None` on a clean sweep — a `failures/` directory holding an
         // index that says "none" is worse than no directory.
         failures: render_failures(report, &collected),
@@ -674,6 +687,10 @@ fn fill_archive(
         (README_ENTRY, Some(generated.readme)),
         (METADATA_ENTRY, Some(generated.metadata)),
         (INDEX_ENTRY, Some(generated.index)),
+        // #6781: written unconditionally, exactly as the index is — a run whose
+        // repositories declared no findings ships a roll-up whose total is 0,
+        // which is a statement, where an absent file would be a question.
+        (DEBT_ENTRY, Some(generated.debt)),
         // #6245: absent on a clean sweep — see `Generated::failures`.
         (FAILURES_ENTRY, generated.failures),
     ];
@@ -988,6 +1005,69 @@ trusty-review = "0.15.1"
         assert!(index.contains("| acme-api | 12m 32s |"), "{index}");
         // And no log is offered, because the archive carries none.
         assert!(!index.contains("- log:"), "{index}");
+    }
+
+    /// Declare `[report].findings` on a repository the sweep already audited.
+    fn declares_findings(run: &RepoRun, rows: &[(&str, &str)]) {
+        let mut text = String::from("[report]\ntitle = \"Acme\"\nfindings = [\n");
+        for (severity, category) in rows {
+            text.push_str(&format!(
+                "  {{ category = \"{category}\", id = \"X\", severity = \"{severity}\" }},\n"
+            ));
+        }
+        text.push_str("]\n\n[[repositories]]\nname = \"acme\"\npath = \"/r\"\n");
+        std::fs::write(run.output.join("manifest.toml"), text).expect("write manifest");
+    }
+
+    /// 🔴 #6781: the delivered package carries the roll-up as a member, so the
+    /// recipient's consumers read one total instead of re-deriving it from every
+    /// manifest's raw findings — and the index's table states the same numbers.
+    ///
+    /// Against `origin/main` at aec14c919 this fails on the first assertion:
+    /// `reports/report.json` was not a member of the archive.
+    #[test]
+    fn the_package_carries_the_debt_rollup() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let api = audited(&work, "00-acme-api", "acme-api");
+        let web = audited(&work, "01-acme-web", "acme-web");
+        declares_findings(&api, &[("RED", "dependencies"), ("AMBER", "secrets")]);
+        declares_findings(&web, &[("RED", "license")]);
+        let report = RunReport::of(vec![api, web]);
+        let destination = default_destination(&work);
+
+        let package =
+            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assert!(
+            package.files.iter().any(|f| f.entry == DEBT_ENTRY),
+            "the roll-up must be reported as a member: {:?}",
+            package.files
+        );
+
+        let json = read_entry(&destination, DEBT_ENTRY);
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let block = &parsed["debt_rollup"];
+        assert_eq!(block["total"], 3, "{json}");
+        assert_eq!(block["by_tier"]["RED"], 2, "{json}");
+        assert_eq!(block["by_dimension"]["secrets"], 1, "{json}");
+        assert_eq!(block["by_repo"]["acme-web"]["RED"], 1, "{json}");
+        assert_eq!(block["by_tier_dimension"]["AMBER"]["secrets"], 1, "{json}");
+
+        let index = read_entry(&destination, INDEX_ENTRY);
+        assert!(
+            index.contains("| **all repositories** | **2** | **1** | **3** |"),
+            "{index}"
+        );
+        // One render, so both members carry one timestamp.
+        assert_eq!(
+            parsed["generated_at"].as_str().expect("a timestamp"),
+            index
+                .lines()
+                .find_map(|l| l.strip_prefix("- Generated: "))
+                .expect("the index states one"),
+            "{index}"
+        );
     }
 
     /// 🔴 Every link the packaged index writes must name a member that is
