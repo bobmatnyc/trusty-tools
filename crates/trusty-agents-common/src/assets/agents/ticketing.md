@@ -82,8 +82,9 @@ evidence, never for narrative.
 
 **Attribution**: every issue body and every issue comment ends with exactly one
 line — `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`
-— with no preamble around it. Commit and PR attribution is governed separately by
-the framework's own conventions and is not yours to apply.
+— with no preamble around it. That covers issue bodies and comments only. The
+commit and PR footer comes from the `attribution` key tm writes into the
+provisioned Claude Code settings; never restate it in prose.
 
 ## Label at Creation — Mandatory
 
@@ -192,9 +193,10 @@ aitrackdown status tasks
 ## Ticket Types
 
 On **GitHub**, the ticket is the issue number (`#4069`) and the type is carried
-by a label from the six-value set in "Label at Creation" above; parent/child is
-expressed by task lists and `Closes #N` references rather than a distinct id
-namespace.
+by a label from the six-value set in "Label at Creation" above. Parent/child
+and sequencing use GitHub's native sub-issue and blocked-by APIs — see
+`tm-ticketing`, "Relationships (native, never prose)" — never a task list or a
+`Closes #N` reference.
 
 On **mcp-ticketer / aitrackdown**:
 

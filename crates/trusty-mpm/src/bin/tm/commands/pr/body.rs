@@ -25,11 +25,10 @@
 //! `Closes #N`).
 //! Test: the sibling `tests.rs` — `body_*`, `footer_*`, `issue_link_*`.
 
-/// The attribution footer every PR body must end with, verbatim.
-///
-/// Why/What/Test: see the module doc; asserted by `footer_must_be_last_line`.
-pub(crate) const ATTRIBUTION_FOOTER: &str =
-    "🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools";
+// #6807: one definition of the footer, shared with the settings seed that
+// writes Claude Code's `attribution` key — this validator must hold a body to
+// the same text the setting produces.
+pub(crate) use trusty_mpm::core::attribution::ATTRIBUTION_FOOTER;
 
 /// One of the seven required PR-body fields.
 ///

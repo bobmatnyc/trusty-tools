@@ -618,16 +618,9 @@ the `version-control` delegation brief:
   families that stack on them, are `tm-ticketing`'s — do not restate them in a
   version-control brief.
 
-- **Attribution footer** — every commit message and PR body ends with exactly:
-
-  ```
-  🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools
-  ```
-
-  NEVER emit `🤖 Generated with Claude Code` or a `Co-Authored-By: Claude …`
-  trailer. This is a Framework-Guaranteed Convention stated in the instruction
-  package; it is repeated here because it must appear verbatim in the delegation
-  brief.
+- **Attribution footer** — the commit and PR footer comes from the `attribution`
+  key tm writes into the provisioned Claude Code settings; never restate it in
+  prose.
 
 On a repository with `tm pr open`, `version-control` gets all three defaults —
 the assignee, both labels, and the attribution footer — attached automatically,
