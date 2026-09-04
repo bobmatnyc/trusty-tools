@@ -25,10 +25,12 @@ on:
     paths:
       - "docs/specs/**"
       - "docs/adr/**"
+      - "docs/trusty-code/**"
       - "docs/trusty-installer/research/02-design/**"
       - ".doc-number-allowlist.tsv"
       - "scripts/check_doc_numbers.sh"
       - "scripts/check_adr.sh"
+      - "scripts/check_trusty_code_specs.sh"
       - "scripts/check_scan_floor_selftest.sh"
       - ".github/workflows/doc-numbers.yml"
   pull_request:
@@ -42,10 +44,12 @@ on:
     paths:
       - "docs/specs/**"
       - "docs/adr/**"
+      - "docs/trusty-code/**"
       - "docs/trusty-installer/research/02-design/**"
       - ".doc-number-allowlist.tsv"
       - "scripts/check_doc_numbers.sh"
       - "scripts/check_adr.sh"
+      - "scripts/check_trusty_code_specs.sh"
       - "scripts/check_scan_floor_selftest.sh"
       - ".github/workflows/doc-numbers.yml"
 
@@ -88,3 +92,6 @@ jobs:
 
       - name: Check ADR corpus consistency
         run: bash scripts/check_adr.sh
+
+      - name: Check Trusty Code architecture reconciliation
+        run: bash scripts/check_trusty_code_specs.sh

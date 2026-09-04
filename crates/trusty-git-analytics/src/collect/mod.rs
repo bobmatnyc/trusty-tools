@@ -19,6 +19,7 @@
 //!   or to the progress bus when a consumer owns the terminal (#5197)
 //! - [`ai_markers`] — the agentic-marker set behind `agentic_mode` detection
 //! - [`ai_marker_config`] — operator-supplied markers, read from a file (#5414)
+//! - [`reclassify`] — re-runs detection over rows an older detector classified (#6748)
 //! - [`errors`] — module-level error type ([`CollectError`])
 //! - [`fault`] — severity-tagged non-fatal faults ([`CollectionFault`], #5655)
 //! - [`work_item_pipeline`] — the provider-agnostic `work_items` pull that
@@ -46,6 +47,8 @@ pub mod pm_adapter;
 // #5734: the concurrent PR fetch drain, split out of `collector` (frozen SLOC).
 mod pr_pipeline;
 pub mod pr_provider;
+// #6748: the detector-generation re-classification pass, run before the walk.
+pub mod reclassify;
 pub mod ticket;
 pub mod weeks;
 // #5219: the provider-agnostic `work_items` pull, and the only production
@@ -61,6 +64,7 @@ pub use pm_adapter::{
     PmError, PmSource, PmTicket,
 };
 pub use pr_provider::PrProvider;
+pub use reclassify::{reclassify_stale, ReclassifyStats};
 
 #[cfg(test)]
 mod tests {
@@ -95,6 +99,63 @@ mod tests {
     fn pipeline_constructs_with_default_config() {
         let cfg = Config::default();
         let _pipeline = CollectionPipeline::new(cfg);
+    }
+
+    /// #6748: a database carried across a detector change repairs itself at
+    /// the head of the collect, and the operator is told the count.
+    ///
+    /// Why: the repair rewrites historical rows, so a downstream figure moves
+    /// with no command having asked for it. A silent rewrite is
+    /// indistinguishable from a data bug. The line goes to the pipeline's
+    /// warning channel — stderr on a plain CLI run, the bus under a TUI —
+    /// never stdout, which carries the pipeline's own report.
+    /// What: seeds one commit with a Claude trailer stored the way a
+    /// pre-#6748 collector stored it, runs a pipeline over no repositories,
+    /// and asserts the repaired verdict plus the notice.
+    /// Test: this test itself.
+    #[test]
+    fn a_stale_commit_is_reclassified_before_the_walk() {
+        let bus = crate::core::progress::ProgressBus::bounded(16);
+        let mut db = crate::core::db::Database::open_in_memory().expect("open");
+        // No `ai_detector_version` in the column list on purpose: this is the
+        // INSERT a pre-#6748 collector wrote, and the migration's DEFAULT of 0
+        // is what makes the row stale. The test therefore also compiles on a
+        // tree without the column, where it fails.
+        db.connection()
+            .execute(
+                "INSERT INTO commits \
+                 (sha, author_name, author_email, timestamp, message, repository, \
+                  is_ai_assisted, ai_tool, agentic_mode) \
+                 VALUES ('stale', 'Ada', 'ada@example.com', '2026-01-01T00:00:00Z', \
+                         ?1, 'testrepo', 0, NULL, 'none')",
+                rusqlite::params!["feat: x\n\nCo-Authored-By: Claude <noreply@anthropic.com>"],
+            )
+            .expect("seed a pre-#6748 row");
+
+        let pipeline = CollectionPipeline::new(Config::default()).with_progress(bus.clone());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(pipeline.run(&mut db)).expect("run");
+
+        let (is_ai, mode): (i64, String) = db
+            .connection()
+            .query_row(
+                "SELECT is_ai_assisted, agentic_mode FROM commits WHERE sha = 'stale'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("read repaired row");
+        assert_eq!((is_ai, mode.as_str()), (1, "full_agentic"));
+
+        let events = bus.drain();
+        assert!(
+            events.iter().any(|e| e.detail.as_deref().is_some_and(|d| d
+                == "Re-classified 1 commit(s) stored by an older AI \
+                                       detector; 1 verdict(s) changed.")),
+            "the operator is told the count on the warning channel: {events:?}"
+        );
     }
 
     /// #5197: the bus is opt-in, so an untouched pipeline publishes nothing.

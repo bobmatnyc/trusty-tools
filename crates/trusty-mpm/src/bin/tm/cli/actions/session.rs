@@ -529,11 +529,30 @@ pub(crate) enum SessionAction {
     /// permits deletion only when the registry can positively call the agent
     /// finished; a registry that cannot answer refuses. Every worktree it spares
     /// is now reported with the agent it was spared for.
+    ///
+    /// #6806 — what `--force` does and does not mean against the LIVENESS gate.
+    /// `--force` selects the destructive mode; it is not an override of any
+    /// gate, and specifically it never overrides another live session's claim.
+    /// The session-record gate spares a worktree when a session OTHER than the
+    /// caller claims it, and `--force` leaves that refusal exactly as it is; to
+    /// reclaim such a worktree, stop the session that holds it. What did change
+    /// is attribution: the caller sends its own `$TM_MANAGED_SESSION_ID`, so a
+    /// worktree claimed only by the CALLER — the nested `.worktrees/<name>`
+    /// trees a session creates inside its own workspace — falls through to the
+    /// merged-PR and unsaved-work gates instead of being blocked by the
+    /// caller's own claim. The caller's own workspace directory is still
+    /// refused, and every refusal now names the session that holds the claim
+    /// and says whether it is the caller.
     /// Test: `cli_parses_session_prune_worktrees`,
     /// `cli_prune_worktrees_discard_dirty_is_opt_in`,
     /// `cli_prune_worktrees_merged_prs_is_opt_in`.
     PruneWorktrees {
         /// Actually delete orphaned dirs (default: dry-run / preview only).
+        ///
+        /// Selects the destructive mode; it overrides no gate. In particular it
+        /// never overrides a live session's claim on a worktree (#6806) — a
+        /// worktree another session claims stays spared, and only the CALLING
+        /// session's own claim is discounted.
         #[arg(long)]
         force: bool,
         /// ALSO delete worktrees that still hold uncommitted or unpushed work

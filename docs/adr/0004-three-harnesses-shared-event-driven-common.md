@@ -1,9 +1,11 @@
 # 0004. Three distinct harnesses (coding / meta / agentic) on a shared event-driven trusty-common foundation
 
-- **Status:** Accepted
+- **Status:** Amended by [0058](0058-trusty-code-is-an-independent-product-owned-harness.md)
 - **Date:** 2026-06-05
 - **Scope:** Workspace-wide (all harness crates + `trusty-common`)
-- **Supersedes / Superseded by:** —
+- **Supersedes / Superseded by:** ADR-0058 defines the now-implemented Trusty
+  Code ownership, state, transport, and integration boundary. The three-peer
+  harness decision remains in force.
 
 ## Context
 

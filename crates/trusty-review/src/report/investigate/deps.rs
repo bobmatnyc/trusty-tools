@@ -17,6 +17,9 @@ use std::path::Path;
 use serde::Serialize;
 
 /// The maximum number of dependency rows rendered before an "and N more" line.
+///
+/// #6788: a RENDER cap only. [`DependencyInventory::deps`] holds every row;
+/// [`DependencyInventory::rendered`] applies this at table-build time.
 pub const MAX_ROWS: usize = 30;
 
 /// One declared dependency with its locked version when a lockfile resolved it.
@@ -42,17 +45,21 @@ pub struct Dependency {
 
 /// The deterministic dependency inventory for one repository.
 ///
-/// Why: the reporter renders this as a `measured` "Dependency Inventory" section;
-/// tracking the true total separately from the capped rows lets it print an
-/// honest "and N more" line rather than silently dropping dependencies.
-/// What: `deps` are the (capped) rows in stable order; `total` is the full count
-/// before the cap.
-/// Test: `deps_tests::caps_rows_with_overflow_count`.
+/// Why: the reporter renders this as a `measured` "Dependency Inventory"
+/// section, capped at [`MAX_ROWS`] for readability — but the same struct is
+/// serialised into `investigation.json`, which machine consumers read (#6788:
+/// trusty-audit's OSV lookup queried 30 of a 134-dependency workspace because
+/// the cap was applied before serialisation). Keeping the full inventory here
+/// and capping at render time serves both.
+/// What: `deps` holds EVERY discovered row in stable order; `total` is that
+/// same count; [`Self::rendered`] is the capped view the table draws.
+/// Test: `deps_tests::{inventory_keeps_every_row_past_the_render_cap,
+/// rendered_caps_at_max_rows}`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DependencyInventory {
-    /// Dependency rows, capped at [`MAX_ROWS`], stable-sorted.
+    /// Every dependency row discovered, stable-sorted and uncapped (#6788).
     pub deps: Vec<Dependency>,
-    /// Total dependencies discovered across all ecosystems (pre-cap).
+    /// Total dependencies discovered across all ecosystems.
     pub total: usize,
     /// The manifest filenames actually read at the checkout root (#6137).
     ///
@@ -72,9 +79,22 @@ impl DependencyInventory {
         self.total == 0
     }
 
-    /// The count of rows omitted by the [`MAX_ROWS`] cap (0 when all fit).
+    /// The rows the markdown table draws: the first [`MAX_ROWS`] of [`Self::deps`].
+    ///
+    /// Why: the table stays readable at 30 rows while the serialised inventory
+    /// keeps all of them (#6788).
+    /// What: a slice of at most [`MAX_ROWS`] rows, in the inventory's order.
+    /// Test: `deps_tests::rendered_caps_at_max_rows`.
+    pub fn rendered(&self) -> &[Dependency] {
+        &self.deps[..self.deps.len().min(MAX_ROWS)]
+    }
+
+    /// The count of rows the [`MAX_ROWS`] render cap omits (0 when all fit).
+    ///
+    /// #6788: measured against the RENDERED rows — `deps` now carries the
+    /// full inventory, so `total - deps.len()` would always be 0.
     pub fn overflow(&self) -> usize {
-        self.total.saturating_sub(self.deps.len())
+        self.total.saturating_sub(self.rendered().len())
     }
 }
 
@@ -85,10 +105,12 @@ impl DependencyInventory {
 /// for a local checkout.
 /// What: collects direct dependencies from package.json, Cargo.toml, pyproject.toml,
 /// and go.mod, enriches each with a locked version from the matching lockfile when
-/// one parses, sorts by (ecosystem, name), and caps to [`MAX_ROWS`]. Records which
-/// of those manifests existed in `manifests_examined` (#6137), so a zero total can
-/// be told apart from a root where nothing was read.
-/// Test: `deps_tests::{multi_ecosystem_inventory, records_the_manifests_it_examined}`.
+/// one parses, and sorts by (ecosystem, name). Every row is kept (#6788); the
+/// [`MAX_ROWS`] cap is applied by [`DependencyInventory::rendered`] at table-build
+/// time. Records which of those manifests existed in `manifests_examined` (#6137),
+/// so a zero total can be told apart from a root where nothing was read.
+/// Test: `deps_tests::{multi_ecosystem_inventory, records_the_manifests_it_examined,
+/// inventory_keeps_every_row_past_the_render_cap}`.
 pub fn build_inventory(root: &Path) -> DependencyInventory {
     let mut all: Vec<Dependency> = Vec::new();
     all.extend(npm_deps(root));
@@ -101,8 +123,8 @@ pub fn build_inventory(root: &Path) -> DependencyInventory {
             .cmp(&b.ecosystem)
             .then_with(|| a.name.cmp(&b.name))
     });
+    // #6788: no truncation here — the snapshot must carry every row.
     let total = all.len();
-    all.truncate(MAX_ROWS);
     DependencyInventory {
         deps: all,
         total,

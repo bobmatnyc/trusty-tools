@@ -100,7 +100,10 @@ path = "src/bin/mcp_bridge.rs"
 # the index itself rather than a UDS client for a subprocess that holds it.
 # `uds-supervisor` is NOT dropped — trusty-console and trusty-agents still
 # depend on the shared `UdsServiceSupervisor` for trusty-review / trusty-analyze.
-trusty-mcp = { workspace = true }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
+# JSON-RPC / MCP primitives (ADR-0040, #5803). #6316: `daemon-bridge-json-rpc`
+# compiles the shared stdio<->UDS forwarder `commands::serve_stdio_bridge` runs
+# instead of a second copy of the transport.
+trusty-mcp = { workspace = true, features = ["daemon-bridge-json-rpc"] }
 # `uds` (#6286) is what this crate now serves on: `trusty_common::uds::server`
 # supplies the bind, the peer check, the framing and the accept loop, and
 # `uds::stream_client` the reader `memory.chat` needs. It replaces

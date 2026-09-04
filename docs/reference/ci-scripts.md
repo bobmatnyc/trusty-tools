@@ -2,7 +2,7 @@
 
 (Plus two operator scripts no workflow runs at all — see the last section.)
 
-Eight scripts in `scripts/` run in a GitHub Actions workflow and nowhere else —
+Nine scripts in `scripts/` run in a GitHub Actions workflow and nowhere else —
 no pre-commit hook, no `Makefile` target, no other doc page. Each was written
 for a specific failure and none of them announced itself anywhere a reader
 would look, so a change to one of the workflows below could drop it with
@@ -27,11 +27,12 @@ what it stops; the header says why it exists.
 | `classify-ci-results.sh` | `ci.yml`, `red-main-notify.yml` | Turns a set of job conclusions into the red-main verdict. `cancelled` is not `failure`, so the previous `contains(needs.*.result, 'failure')` test let an all-cancelled run report main verified (#4179). |
 | `ci-create-local-main.sh` | `ci.yml`, `pre-publish.yml` | Creates the local `main` branch the `trusty-agents` git tests need, and fails the step when creation genuinely fails. The `git fetch origin main:main \|\| true` it replaced swallowed a GitHub 500 and produced an unrelated test failure eleven minutes later (#5693). |
 | `detect-embedder-cuda-relevant.sh` | `ci.yml` | Decides whether a change can affect the `trusty-common` `embedder-cuda` build, so the CUDA leg runs when it is relevant and is skipped when it is not. |
+| `check_workspace_dep_versions.sh` | `version-parity.yml` (`pr-version-bump`) | Asserts every internal `[workspace.dependencies]` row's `version` requirement actually accepts the member crate's own version, under Cargo's caret rules. The row's `path` wins in-tree, so no cargo command in the workspace can see the drift — `trusty-console` sat at `^0.9.0` against a 0.11.0 crate and `tga` at `^6.0.1` against 7.1.0, both invisible until `cargo publish` or an external consumer resolved from the registry (#6776, same class as #4088). |
 | `check_token_drift.mjs` | `token-drift.yml` | Compares each Tailwind app's hand-transcribed `--color-*` RGB triples against the canonical Foundry `tokens.css`. `ci.yml` deliberately does NOT duplicate it (`ci.yml`, `ui-checks` job): `token-drift.yml` already runs it across all seven crates directly rather than through each `package.json`. |
 
 ## Self-tests
 
-Six of the eight have a companion test that proves the gate can still fail — a
+Seven of the nine have a companion test that proves the gate can still fail — a
 gate that cannot fail makes its own green meaningless:
 
 | Script | Its test |
@@ -42,6 +43,7 @@ gate that cannot fail makes its own green meaningless:
 | `classify-ci-results.sh` | `scripts/check-ci-helpers-selftest.sh` |
 | `detect-embedder-cuda-relevant.sh` | `scripts/check-ci-helpers-selftest.sh` |
 | `check_token_drift.mjs` | `scripts/check_token_drift.test.mjs`, a `node:test` suite `token-drift.yml` runs before the gate |
+| `check_workspace_dep_versions.sh` | `scripts/check_workspace_dep_versions_selftest.sh`, run as the step before the gate in the same job |
 
 `check_deny_duplicates.sh` and `ci-create-local-main.sh` have no test of their
 own. Both carry a frozen baseline or a fetch that can fail open, which is the
@@ -49,9 +51,11 @@ shape a self-test exists to pin, so both are candidates if either is edited.
 
 ## Which of these block a merge
 
-None of these workflows appear in `main`'s required-status-check contexts as of
-2026-09-02. Read the list live before relying on any of them to stop a merge —
-a hand-copied list already cost
+One does: `check_workspace_dep_versions.sh` runs as a step of `version-parity.yml`'s
+`pr-version-bump` job, whose context `PR version bump vs crates.io (issue #4421)`
+is required, so a drifted workspace row fails a required check (#6776). The rest
+did not appear in `main`'s required contexts as of 2026-09-04. Read the list live
+before relying on any of them to stop a merge — a hand-copied list already cost
 [#5836](https://github.com/bobmatnyc/trusty-tools/pull/5836) a merge:
 
 ```bash

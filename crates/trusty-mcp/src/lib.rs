@@ -10,8 +10,15 @@
 //! helper to build the `initialize` payload, and an async stdio dispatch
 //! loop that accepts any `Fn(Request) -> Future<Output=Response>`.
 //!
-//! Test: `cargo test -p trusty-mcp` covers Response construction + the stdio
-//! loop round-trip behaviour with an in-memory dispatcher.
+//! One capability is feature-gated: `daemon-bridge-json-rpc` compiles
+//! `daemon_bridge_json_rpc`, the shared stdio↔UDS forwarder (#6316), and with
+//! it this crate's only `trusty-common` dependency. Off by default so the rlib
+//! every MCP server links stays as lean as ADR-0040 left it — see the README's
+//! Features table for the `cargo tree` proof that the edge is gated.
+//!
+//! Test: `cargo test -p trusty-mcp --all-features --no-fail-fast` covers Response
+//! construction, the stdio loop round-trip with an in-memory dispatcher, and the
+//! forwarder against a real `UnixListener`.
 //!
 //! These primitives lived in `trusty_mcp` until ADR-0040 (#5803) moved
 //! them here. `memory_rpc` did not come with them: it reaches
@@ -22,17 +29,30 @@
 // so a broken intra-doc link is baked into that version forever and only a new
 // release can correct it. Deny keeps this crate at zero rather than letting the
 // ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+//
+// #6316: that ratchet runs `cargo doc` with DEFAULT features, and this crate's
+// default set is empty. A `[bracketed]` link to a `daemon-bridge-json-rpc`-gated
+// item therefore resolves only when the feature is on and is a hard error when
+// it is off, so gated items are named in plain code spans above.
 #![deny(rustdoc::broken_intra_doc_links)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub mod daemon_bridge;
+// #6316: shared stdio↔UDS forwarder. Behind `daemon-bridge-json-rpc` because
+// it is the crate's only `trusty-common` consumer — see the README's Features
+// table for why the default rlib stays free of that edge.
+#[cfg(feature = "daemon-bridge-json-rpc")]
+pub mod daemon_bridge_json_rpc;
 pub mod openrpc;
 pub mod service;
 pub mod single_flight;
 
 pub use daemon_bridge::{DaemonBridgeConfig, ensure_daemon_up};
+// #6316: shared stdio↔UDS forwarder.
+#[cfg(feature = "daemon-bridge-json-rpc")]
+pub use daemon_bridge_json_rpc::{DaemonBridgeJsonRpc, UdsBridgeConfig, run_stdio_bridge};
 pub use service::ServiceDescriptor;
 pub use single_flight::{StartLock, ensure_daemon_up_single_flight};
 

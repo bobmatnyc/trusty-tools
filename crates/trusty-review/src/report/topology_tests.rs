@@ -59,6 +59,7 @@ fn model_with(repos: Vec<RepositoryReport>) -> ReportModel {
         manifest_path: "manifest.toml".to_string(),
         repositories: repos,
         gaps: vec![],
+        findings: Vec::new(),
         synthesis: None,
         benchmark: None,
         investigation: None,

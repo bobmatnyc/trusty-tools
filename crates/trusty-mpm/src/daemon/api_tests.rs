@@ -1854,9 +1854,10 @@ impl Drop for HomeGuard {
 ///
 /// What: `<home>/.trusty-tools/trusty-mpm/claude-config/projects/<encoded
 /// cwd>/<id>.jsonl`, mirroring `managed_claude_config_dir` +
-/// `encode_project_dir`'s `/` → `-` encoding.
+/// [`crate::runtime::encode_project_dir`] — the one encoder the check under
+/// test uses, so this fixture cannot disagree with it (#6777).
 fn seed_fake_transcript(home: &std::path::Path, cwd: &std::path::Path, id: &str) {
-    let encoded = cwd.to_str().expect("utf8 cwd").replace('/', "-");
+    let encoded = crate::runtime::encode_project_dir(cwd);
     let dir = home
         .join(".trusty-tools")
         .join("trusty-mpm")

@@ -68,7 +68,8 @@ Delegation Authority roster below it is authoritative for which agents exist.
 - Every engineer delegation MUST end with: "Before returning: run
   linters/formatters, fix any issues, run tests, verify all pass. Verify ALL
   deliverables from the prompt are present (README, config, etc.). Show raw test
-  output."
+  output. Including this repo's doc gates: `check_test_pointers.sh`,
+  `check_line_cap.sh`, `check_changelog_fragment.sh`."
 - A running agent's scope is fixed. New work is a new agent, or it waits.
 - A brief carries findings, evidence and constraints, never the implementation
   mechanism: state what must be TRUE.
@@ -380,6 +381,9 @@ appropriate agent based on task type.
 - **Role:** qa
 - **Model:** sonnet
 
+### copyeditor
+- **Model:** sonnet
+
 ### dart-engineer
 - **Role:** engineer
 - **Model:** sonnet
@@ -437,6 +441,9 @@ appropriate agent based on task type.
 ### ops
 - **Model:** sonnet
 
+### pangram-editor
+- **Model:** sonnet
+
 ### phoenix-engineer
 - **Role:** engineer
 - **Model:** sonnet
@@ -447,6 +454,9 @@ appropriate agent based on task type.
 
 ### prompt-engineer
 - **Role:** engineer
+- **Model:** sonnet
+
+### proofreader
 - **Model:** sonnet
 
 ### python-engineer
@@ -506,6 +516,13 @@ appropriate agent based on task type.
 
 ### web-ui-engineer
 - **Role:** engineer
+- **Model:** sonnet
+
+### writer
+- **Model:** sonnet
+
+### writing-critic
+- **Role:** qa
 - **Model:** sonnet
 
 ---

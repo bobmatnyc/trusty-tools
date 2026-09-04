@@ -19,7 +19,7 @@ use tracing::warn;
 
 use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
-use crate::session_manager::worktree_reclaim::ReclaimMode;
+use crate::session_manager::worktree_reclaim::{LiveClaims, ReclaimMode, WorkspaceClaim};
 use crate::session_manager::worktree_reclaim_sweep::reclaim_merged_pr_worktrees;
 use crate::session_manager::{DirtyWorktreePolicy, PruneFilter};
 
@@ -153,6 +153,23 @@ pub struct PruneWorktreesRequest {
     /// unsaved work under any combination of flags.
     #[serde(default)]
     pub merged_prs: bool,
+    /// The managed session id this sweep was invoked FROM (#6806).
+    ///
+    /// Why: gate 2 refuses a worktree any live session claims, and a session
+    /// pruning worktrees it created inside its own workspace was blocked by
+    /// its OWN claim — 31 clean, pushed, merged worktrees in one observed run.
+    /// The daemon cannot discover the caller (it occupies no pane), so the
+    /// caller supplies it, exactly as `PruneRequest::invoking_session` does.
+    /// The CLI sends `$TM_MANAGED_SESSION_ID`. Absent means "the caller is not
+    /// a session", which is correct for the MCP tool and an ad-hoc shell, and
+    /// leaves every claim foreign — the pre-#6806 behaviour.
+    ///
+    /// A value present but unparseable is REJECTED rather than dropped:
+    /// silently ignoring it would run the sweep with the self-attribution the
+    /// caller asked for switched off, and report every one of its own
+    /// worktrees as blocked by a stranger.
+    #[serde(default)]
+    pub invoking_session: Option<String>,
 }
 
 fn default_dry_run() -> bool {
@@ -177,6 +194,7 @@ fn default_dry_run() -> bool {
 /// only path to a destructive removal of unsaved work.
 /// Test: `prune_worktrees_route_dry_run`,
 /// `prune_worktrees_request_defaults_to_skip_dirty`,
+/// `prune_worktrees_route_rejects_an_unparseable_invoking_session` (#6806),
 /// `prune_spares_a_stopped_records_workspace` (#4288).
 pub async fn prune_worktrees_route(
     State(state): State<Arc<DaemonState>>,
@@ -194,6 +212,19 @@ pub(crate) async fn prune_worktrees_core(
     state: &Arc<DaemonState>,
     req: PruneWorktreesRequest,
 ) -> RouteOutcome {
+    // #6806: reject a present-but-unparseable caller id before any work, for
+    // the reason #6118 gives — dropping it would run the sweep with the
+    // self-attribution the caller asked for silently switched off, and report
+    // every one of the caller's own worktrees as blocked by a stranger.
+    if let Some(raw) = req.invoking_session.as_deref()
+        && raw.parse::<uuid::Uuid>().is_err()
+    {
+        let msg = "invalid invoking_session: not a UUID — refusing the prune rather than \
+                   running it without the requested caller attribution (#6806)"
+            .to_string();
+        warn!("prune-worktrees route: {msg}");
+        return RouteOutcome::text(400, msg);
+    }
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
     // #4288 (item 4 of #4207): DELIBERATELY UNFILTERED. Do NOT "tidy this up"
@@ -275,6 +306,9 @@ pub(crate) async fn prune_worktrees_core(
                 } else {
                     ReclaimMode::Remove
                 };
+                // #6806: the caller's own id, so gate 2 can tell its claim from
+                // a stranger's. Validated ABOVE, before any survey work.
+                let caller = req.invoking_session.clone();
                 let root = repos_root.clone();
                 // #2919: a HANDLE to the manager, not a captured path list. The
                 // delete loop calls this closure per candidate and needs the
@@ -289,7 +323,7 @@ pub(crate) async fn prune_worktrees_core(
                 // classifier as a probe rather than as a captured list.
                 let state_for_agents = Arc::clone(state);
                 match tokio::task::spawn_blocking(move || {
-                    let in_use_now = move || -> Option<Vec<std::path::PathBuf>> {
+                    let in_use_now = move || -> Option<LiveClaims> {
                         // `None` means "could not be determined", which REFUSES
                         // the delete. `SessionManager::list` is itself
                         // infallible, so the only way to fail here is to have no
@@ -302,13 +336,20 @@ pub(crate) async fn prune_worktrees_core(
                         // Blocking on the runtime is legal from a blocking-pool
                         // thread (not a runtime worker), and is the only way to
                         // re-read an async store from the synchronous loop.
-                        Some(
-                            handle
+                        // #6806: each claim carries the session that holds
+                        // it, so gate 2 can tell the caller's own claim from a
+                        // foreign one and name the claimant when it refuses.
+                        Some(LiveClaims {
+                            claims: handle
                                 .block_on(mgr_for_probe.list())
                                 .into_iter()
-                                .filter_map(|r| r.workspace_path)
+                                .filter_map(|r| {
+                                    r.workspace_path
+                                        .map(|p| WorkspaceClaim::new(r.id.to_string(), p))
+                                })
                                 .collect(),
-                        )
+                            caller: caller.clone(),
+                        })
                     };
                     let agent_state = move |owner: &crate::session_manager::worktree_ownership::AgentWorktreeOwner| {
                         crate::daemon::services::agent_worktree_reap::delegation_state_for_agent(
@@ -490,6 +531,58 @@ mod tests {
     /// asserts 400. The CONTROL sends the same body with the field ABSENT and
     /// asserts it is accepted, so the test cannot pass merely because the route
     /// rejects everything.
+    /// #6806: the same refusal for the WORKTREE sweep's caller id.
+    ///
+    /// Why: dropping a malformed value here leaves every claim foreign, so the
+    /// caller's own worktrees come back blocked by a stranger — the shipped
+    /// defect, silently reinstated. The failure arm has to be louder than the
+    /// success arm it protects.
+    /// What: posts a body whose `invoking_session` is not a UUID and asserts
+    /// 400. The CONTROL sends the field ABSENT and asserts acceptance, so the
+    /// test cannot pass merely because the route rejects everything.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn prune_worktrees_route_rejects_an_unparseable_invoking_session() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+
+        let bad = prune_worktrees_route(
+            State(state.clone()),
+            Json(PruneWorktreesRequest {
+                dry_run: true,
+                discard_dirty: false,
+                merged_prs: false,
+                invoking_session: Some("not-a-uuid".into()),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(
+            bad.status(),
+            StatusCode::BAD_REQUEST,
+            "a malformed caller id must stop the sweep, not be dropped"
+        );
+
+        // CONTROL: absent is legitimate (an ad-hoc shell, the MCP tool).
+        let ok = prune_worktrees_route(
+            State(state),
+            Json(PruneWorktreesRequest {
+                dry_run: true,
+                discard_dirty: false,
+                merged_prs: false,
+                invoking_session: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_ne!(
+            ok.status(),
+            StatusCode::BAD_REQUEST,
+            "an absent caller id is legitimate and must be accepted"
+        );
+    }
+
     /// Test: this function IS the test.
     #[tokio::test]
     async fn prune_route_rejects_an_unparseable_invoking_session() {
@@ -693,6 +786,7 @@ mod tests {
                     dry_run: true,
                     discard_dirty: false,
                     merged_prs: false,
+                    invoking_session: None,
                 }),
             )
             .await

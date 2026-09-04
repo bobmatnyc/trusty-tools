@@ -405,8 +405,9 @@ pub struct SessionRecord {
     /// conversation by passing `--resume <id>` to the new `claude` process.
     /// This field holds the UUID that Claude Code assigns to its own session,
     /// delivered via the `CLAUDE_SESSION_ID` env var and forwarded through the
-    /// `SessionStart` hook. Without it, resume falls back to `--continue`
-    /// (most-recent conversation in the workspace) or a fresh launch.
+    /// `SessionStart` hook. Without it, resume launches FRESH — #6765 removed
+    /// the `--continue` fallback, which resolved against the managed store
+    /// rather than the conversation the caller meant.
     ///
     /// `#[serde(default)]` keeps records persisted before this field existed
     /// deserializable — they load with `claude_session_id = None`, which is

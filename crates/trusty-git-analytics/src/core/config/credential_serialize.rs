@@ -121,15 +121,17 @@ impl Serialize for BitbucketConfig {
             app_password,
             token,
             workspace,
+            workspaces,
             repo_slug,
             fetch_prs,
             api_base_url,
         } = self;
-        let mut s = serializer.serialize_struct("BitbucketConfig", 7)?;
+        let mut s = serializer.serialize_struct("BitbucketConfig", 8)?;
         s.serialize_field("username", username)?;
         s.serialize_field("app_password", &mask(app_password.as_ref()))?;
         s.serialize_field("token", &mask(token.as_ref()))?;
         s.serialize_field("workspace", workspace)?;
+        s.serialize_field("workspaces", workspaces)?;
         s.serialize_field("repo_slug", repo_slug)?;
         s.serialize_field("fetch_prs", fetch_prs)?;
         s.serialize_field("api_base_url", api_base_url)?;

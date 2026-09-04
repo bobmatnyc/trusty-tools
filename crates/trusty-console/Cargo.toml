@@ -19,7 +19,13 @@ name        = "trusty-console"
 # (src/lib.rs:204), and `function_missing` for `trusty_console::host_status::start`.
 # 0.10.1 (refs #6671, #6663, #6667, #6661): patch — test-flake stabilization
 # changes in the test suite under an already-published version.
-version     = "0.10.1"
+# 0.11.0 (#6642): MINOR, the breaking position for a 0.x crate.
+# `cargo-semver-checks` refuses 0.10.1 against 0.10.0 on two counts:
+# `constructible_struct_adds_field` for `ServiceInfo.cpu_pct`
+# (src/connector.rs:100) and `enum_variant_added` for
+# `machine_history::events::HistoryEvent::Services`. Both are the shape the
+# console's per-service graphs are read from, so neither is avoidable.
+version     = "0.11.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

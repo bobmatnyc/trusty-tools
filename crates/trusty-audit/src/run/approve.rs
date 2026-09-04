@@ -87,16 +87,23 @@ fn index_add_args(checkout: &Path) -> Vec<OsString> {
 /// in what the recipient must do about them — a denylisted path needs a different
 /// working directory, an unreadable allowlist needs a permissions fix — and only
 /// `trusty-search` knows which one fired.
+///
+/// Which line is quoted is [`crate::search_stderr::reason`]'s decision, shared
+/// with `crate::grounding::index`'s refusal because both spawn the same binary
+/// and #6720 masked both the same way: `trusty-search` prints an
+/// update-availability notice ahead of every human-facing subcommand, and the
+/// first non-empty stderr line was therefore that notice rather than the
+/// refusal.
+///
+/// Test: `approve_tests::{a_refusal_names_the_checkout_and_quotes_what_search_said,
+/// an_update_notice_never_masks_the_real_approval_refusal,
+/// an_approval_refusal_reporting_only_a_notice_says_so}`.
 fn refusal(checkout: &Path, output: &Output) -> Option<String> {
     if output.status.success() {
         return None;
     }
-    let said = String::from_utf8_lossy(&output.stderr);
-    let detail = said
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("no reason given");
+    // #6720: the update-availability notice is informational, never the refusal.
+    let detail = crate::search_stderr::reason(&output.stderr);
     Some(format!(
         "`trusty-search index add {}` refused ({}): {detail} — the code analysis \
          would have read nothing for this repository",
@@ -171,6 +178,36 @@ mod approve_tests {
         let reason = refusal(Path::new("/w/repos/xsv"), &output(2, ""))
             .expect("a non-zero exit is a refusal");
         assert!(reason.contains("no reason given"), "{reason}");
+    }
+
+    /// #6720 on the approval leg. `index add` is a human-facing subcommand too,
+    /// so the update-availability notice lands ahead of its refusal exactly as
+    /// it does ahead of `index`'s.
+    #[test]
+    fn an_update_notice_never_masks_the_real_approval_refusal() {
+        let said = "Update available: trusty-search 0.49.1 (you have 0.47.0) — run: cargo \
+                    install trusty-search --locked\n\
+                    indexing refused: path is under a temporary directory\n";
+        let reason = refusal(Path::new("/w/repos/xsv"), &output(1, said))
+            .expect("a non-zero exit is a refusal");
+        assert!(
+            reason.contains("indexing refused: path is under a temporary directory"),
+            "{reason}"
+        );
+        assert!(!reason.contains("Update available"), "{reason}");
+        assert_eq!(reason.lines().count(), 1, "must stay one line: {reason}");
+    }
+
+    /// The notice alone is not a refusal reason — the recipient is told the
+    /// child said nothing usable rather than pointed at an upgrade.
+    #[test]
+    fn an_approval_refusal_reporting_only_a_notice_says_so() {
+        let said = "Update available: trusty-search 0.49.1 (you have 0.47.0) — run: cargo \
+                    install trusty-search --locked\n";
+        let reason = refusal(Path::new("/w/repos/xsv"), &output(1, said))
+            .expect("a non-zero exit is a refusal");
+        assert!(reason.contains("no reason given"), "{reason}");
+        assert!(!reason.contains("cargo install"), "{reason}");
     }
 
     /// The spawn itself, not just the two pure halves: a stub standing in for

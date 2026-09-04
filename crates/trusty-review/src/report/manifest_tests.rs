@@ -189,6 +189,58 @@ fn parse_declared_gaps() {
     assert!(none.report.gaps.is_empty(), "absent key defaults to empty");
 }
 
+/// Why: #6075 — `gaps`'s twin. An assurance collector's rows reach the report
+/// only through this key, and a manifest declaring none must behave exactly as
+/// it did before the key existed.
+/// Test: itself.
+#[test]
+fn parse_declared_findings() {
+    let m = parse_manifest(
+        "[report]\ntitle = \"T\"\nfindings = [\n  { category = \"dependencies\", \
+         id = \"RUSTSEC-2024-0421\", package = \"idna\", version = \"0.5.0\", \
+         severity = \"RED\", title = \"Punycode labels\", \
+         url = \"https://rustsec.org/advisories/RUSTSEC-2024-0421.html\" },\n]\n\n\
+         [[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+        Path::new("m.toml"),
+    )
+    .expect("parses");
+    assert_eq!(m.report.findings.len(), 1);
+    let row = &m.report.findings[0];
+    assert_eq!(row.category, "dependencies");
+    assert_eq!(row.id, "RUSTSEC-2024-0421");
+    assert_eq!(row.package, "idna");
+    assert_eq!(row.version, "0.5.0");
+    assert_eq!(row.severity, "RED");
+    assert_eq!(row.title, "Punycode labels");
+    assert!(row.url.as_deref().expect("a url").starts_with("https://"));
+
+    let none = parse_manifest(
+        "[report]\ntitle = \"T\"\n\n[[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+        Path::new("m.toml"),
+    )
+    .expect("parses");
+    assert!(
+        none.report.findings.is_empty(),
+        "absent key defaults to empty"
+    );
+}
+
+/// A row missing every optional field still parses: the producer owns the
+/// vocabulary, and a partially-written row must render rather than fail the
+/// whole manifest — the same rule `FunctionHotspot` follows.
+#[test]
+fn a_partial_finding_row_still_parses() {
+    let m = parse_manifest(
+        "[report]\ntitle = \"T\"\nfindings = [{ id = \"X-1\" }]\n\n\
+         [[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+        Path::new("m.toml"),
+    )
+    .expect("parses");
+    assert_eq!(m.report.findings[0].id, "X-1");
+    assert!(m.report.findings[0].url.is_none());
+    assert!(m.report.findings[0].category.is_empty());
+}
+
 /// #5405: the ticketing artifact rides on `[report]`, and `metrics` rides on a
 /// repository entry. The fixture declares both, so each must land in its own
 /// field with the other's value untouched — `metrics` is asserted nowhere else

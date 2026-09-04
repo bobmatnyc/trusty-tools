@@ -5,6 +5,7 @@ import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { installCommand, TOOLS } from '../src/lib/tools';
 import { RELEASED_FLAGSHIPS } from '../src/lib/site';
+import { AUDIENCES } from '../src/lib/install/audiences';
 
 /**
  * Why: every other test here reads source files. None of them prove the site
@@ -73,6 +74,26 @@ const AUDIT_ROUTE = '/tools/trusty-git-analytics/audit';
  */
 const MIGRATION_PAGE = 'claude-mpm-migration.html';
 const MIGRATION_ROUTE = '/claude-mpm-migration';
+
+/**
+ * The nine-audience install walkthrough (#5110).
+ *
+ * Like the two above, it is a route with no `TOOLS` record. Its panels are
+ * rendered into the prerendered HTML and hidden with the `hidden` attribute
+ * rather than mounted on selection, so every audience's commands are in this
+ * artifact whether or not JavaScript ever runs — which is what makes asserting
+ * them here worth anything.
+ */
+const INSTALL_PAGE = 'install.html';
+const INSTALL_ROUTE = '/install';
+
+/** One audience's panel, sliced out of the built page by its anchor id. */
+function installPanel(html: string, id: string): string {
+	const start = html.indexOf(`id="panel-${id}"`);
+	if (start < 0) return '';
+	const next = html.indexOf('id="panel-', start + 1);
+	return html.slice(start, next < 0 ? undefined : next);
+}
 
 /** Prerendered doc artifacts on disk, as paths relative to the static root. */
 function docPages(): Set<string> {
@@ -369,6 +390,55 @@ describe('production build', () => {
 	});
 
 	/**
+	 * Why: `src/lib/install/render.test.ts` proves the walkthrough renders in
+	 * jsdom. It cannot prove the route PRERENDERS — a page that only assembles
+	 * after hydration ships nothing to a reader with JavaScript off and nothing
+	 * to a crawler, and the whole point of holding the nine audiences in one
+	 * static document is that they arrive as HTML.
+	 * What: the artifact, its own `<title>` (it does not use `ToolPage.svelte`,
+	 * so nothing else pins that), every install command from the data module,
+	 * the macOS permission invariant read off the built panels, and the round
+	 * trip from the landing page.
+	 */
+	it('prerenders every install audience, with the permission split intact', () => {
+		expect(existsSync(path.join(STATIC, INSTALL_PAGE)), INSTALL_PAGE).toBe(true);
+		const html = readFileSync(path.join(STATIC, INSTALL_PAGE), 'utf8');
+
+		const title = html.match(/<title>([\s\S]*?)<\/title>/);
+		expect(title?.[1], 'install page title').toContain('Install');
+
+		const text = visibleText(html);
+		for (const audience of AUDIENCES) {
+			expect(text, `${audience.id} is missing`).toContain(audience.label);
+			for (const step of audience.steps) {
+				for (const block of step.commands) {
+					expect(text, `${audience.id} → ${block.label}`).toContain(
+						block.command.replace(/\s+/g, ' ')
+					);
+				}
+			}
+		}
+		// The shared setup, rendered once above the picker.
+		expect(text, 'the tctl bootstrap is missing').toContain(
+			'curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh'
+		);
+
+		// `tm` and `tagent` take the App Data category and must never be offered
+		// the disk-wide one; trusty-search is the only product that gets it.
+		for (const id of ['trusty-mpm', 'trusty-agents']) {
+			const panel = visibleText(installPanel(html, id));
+			expect(panel.length, `${id} panel`).toBeGreaterThan(0);
+			expect(panel, `${id} is offered Full Disk Access`).not.toContain('Full Disk Access');
+			expect(panel, `${id} does not name its own category`).toContain('App Data');
+		}
+		expect(visibleText(installPanel(html, 'trusty-search'))).toContain('Full Disk Access');
+
+		expect(landingPage, 'the landing page does not link the walkthrough').toContain(
+			`href="${INSTALL_ROUTE}"`
+		);
+	});
+
+	/**
 	 * Why: the binary still ships under both `trusty-audit` and `taudit`, and the
 	 * alias is being dropped. `src/lib/tools.test.ts` guards the RECORDS; this
 	 * guards the rendered PAGES, which is where the prose actually lives.
@@ -387,6 +457,7 @@ describe('production build', () => {
 			'docs.html',
 			AUDIT_PAGE,
 			MIGRATION_PAGE,
+			INSTALL_PAGE,
 			...docPages(),
 			...toolPages()
 		]) {

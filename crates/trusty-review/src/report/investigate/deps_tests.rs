@@ -112,21 +112,48 @@ fn go_mod_requires() {
     assert!(inv.deps.iter().any(|d| d.name == "golang.org/x/sync"));
 }
 
-/// Why: the report caps rows and must report the overflow count honestly.
-/// What: 35 cargo deps → 30 rows + overflow 5.
-/// Test: this test itself.
-#[test]
-fn caps_rows_with_overflow_count() {
-    let tmp = tempfile::TempDir::new().unwrap();
+/// Write a Cargo.toml at `root` declaring `count` dependencies, `dep00`-up.
+fn cargo_manifest_with(root: &Path, count: usize) {
     let mut toml = String::from("[package]\nname = \"x\"\n[dependencies]\n");
-    for i in 0..35 {
+    for i in 0..count {
         toml.push_str(&format!("dep{i:02} = \"1.0\"\n"));
     }
-    write(tmp.path(), "Cargo.toml", &toml);
+    write(root, "Cargo.toml", &toml);
+}
+
+/// Why: the report caps rows and must report the overflow count honestly.
+/// What: 35 cargo deps → 30 rendered rows + overflow 5.
+/// Test: this test itself.
+#[test]
+fn rendered_caps_at_max_rows() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    cargo_manifest_with(tmp.path(), 35);
     let inv = build_inventory(tmp.path());
     assert_eq!(inv.total, 35);
-    assert_eq!(inv.deps.len(), MAX_ROWS);
+    assert_eq!(inv.rendered().len(), MAX_ROWS);
     assert_eq!(inv.overflow(), 35 - MAX_ROWS);
+}
+
+/// Why: #6788 — `build_inventory` truncated to [`MAX_ROWS`] before the
+/// inventory was serialised into `investigation.json`, so trusty-audit's OSV
+/// lookup saw 30 packages per repository however many the manifest declared.
+/// What: 35 cargo deps → every row is kept in `deps` and survives a serde
+/// round-trip, in order, while `total` still reports 35.
+/// Test: this test itself.
+#[test]
+fn inventory_keeps_every_row_past_the_render_cap() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    cargo_manifest_with(tmp.path(), 35);
+    let inv = build_inventory(tmp.path());
+
+    assert_eq!(inv.total, 35);
+    assert_eq!(inv.deps.len(), 35, "the inventory must not be truncated");
+
+    let json = serde_json::to_value(&inv).expect("inventory serialises");
+    let rows = json["deps"].as_array().expect("deps array");
+    assert_eq!(rows.len(), 35, "every row must reach the snapshot");
+    assert_eq!(rows[34]["name"], "dep34", "the last row is the 35th");
+    assert_eq!(json["total"], 35);
 }
 
 /// Why: an absent/malformed manifest must contribute nothing, never error.

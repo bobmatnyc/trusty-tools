@@ -162,6 +162,26 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "repo_walk_state",
         sql: include_str!("../sql/0025_repo_walk_state.sql"),
     },
+    // #3916: PM work meaningfulness tier — `fact_pm_work`.
+    Migration {
+        version: 26,
+        name: "fact_pm_work",
+        sql: include_str!("../sql/0026_fact_pm_work.sql"),
+    },
+    // #3915: PM effort tier — `fact_pm_effort`.
+    Migration {
+        version: 27,
+        name: "fact_pm_effort",
+        sql: include_str!("../sql/0027_fact_pm_effort.sql"),
+    },
+    // #6748: which detector generation produced each stored AI verdict. The
+    // DEFAULT of 0 marks every pre-existing row as older than any shipped
+    // generation, so the next collect re-classifies it.
+    Migration {
+        version: 28,
+        name: "commit_detector_version",
+        sql: include_str!("../sql/0028_commit_detector_version.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
@@ -275,6 +295,421 @@ pub(crate) fn run_through(conn: &mut Connection, max_version: i64) -> Result<()>
 mod tests {
     use crate::core::db::Database;
     use rusqlite::params;
+
+    /// Why: #3916 — `fact_pm_work` carries a FOREIGN KEY back to
+    /// `work_items`, which no other fact table in this schema does. A
+    /// migration that created the table without the referenced grain, or
+    /// with the columns in a different order than the classifier writes,
+    /// would fail only at backfill time on a real database.
+    /// What: opens an in-memory DB (running every migration through v26),
+    /// inserts the parent `work_items` row, writes one verdict, reads every
+    /// column back, then re-inserts the same grain and asserts the row count
+    /// is still 1.
+    /// Test: this test itself.
+    #[test]
+    fn migration_v26_creates_fact_pm_work() {
+        let db = Database::open_in_memory().expect("open db");
+        let conn = db.connection();
+
+        conn.execute(
+            "INSERT INTO work_items (id, source, title, status, item_type) \
+             VALUES ('PM-10215', 'jira', 'Final', 'Done', 'Sub-task')",
+            [],
+        )
+        .expect("insert parent work item");
+
+        let insert = "INSERT OR REPLACE INTO fact_pm_work \
+             (work_item_id, work_item_source, pm_name, week_key, is_meaningful, \
+              exclusion_reason, title_word_count, body_word_count, formula_version, computed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
+        conn.execute(
+            insert,
+            params![
+                "PM-10215",
+                "jira",
+                "Fabiana Calabrese",
+                "2026-W03",
+                0_i64,
+                "TERSE_TITLE",
+                1_i64,
+                0_i64,
+                "pm-work-1",
+                1_000_000_i64,
+            ],
+        )
+        .expect("insert pm work row");
+
+        let (pm, week, meaningful, reason, version): (String, String, i64, String, String) = conn
+            .query_row(
+                "SELECT pm_name, week_key, is_meaningful, exclusion_reason, formula_version \
+                 FROM fact_pm_work WHERE work_item_id = 'PM-10215' AND work_item_source = 'jira'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("read back");
+        assert_eq!(pm, "Fabiana Calabrese");
+        assert_eq!(week, "2026-W03");
+        assert_eq!(meaningful, 0);
+        assert_eq!(reason, "TERSE_TITLE");
+        assert_eq!(version, "pm-work-1");
+
+        // Re-running the classifier over the same ticket replaces the row.
+        conn.execute(
+            insert,
+            params![
+                "PM-10215",
+                "jira",
+                "Fabiana Calabrese",
+                "2026-W03",
+                1_i64,
+                "NONE",
+                1_i64,
+                42_i64,
+                "pm-work-1",
+                2_000_000_i64,
+            ],
+        )
+        .expect("upsert pm work row");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fact_pm_work", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 1, "UPSERT must not duplicate the grain row");
+    }
+
+    /// Why: the FOREIGN KEY is the design decision that separates this fact
+    /// table from `fact_commit_effort` (#3916) — every verdict is DERIVED
+    /// from a `work_items` row, so one for a ticket the database has never
+    /// seen is a bug rather than a valid write ordering.
+    /// What: writes a verdict whose parent grain does not exist and asserts
+    /// SQLite rejects it.
+    /// Test: this test itself.
+    #[test]
+    fn fact_pm_work_rejects_a_verdict_with_no_work_item() {
+        let db = Database::open_in_memory().expect("open db");
+        let err = db.connection().execute(
+            "INSERT INTO fact_pm_work \
+             (work_item_id, work_item_source, is_meaningful, exclusion_reason, \
+              title_word_count, body_word_count, formula_version, computed_at) \
+             VALUES ('NOPE-1', 'jira', 1, 'NONE', 3, 40, 'pm-work-1', 1)",
+            [],
+        );
+        assert!(
+            err.is_err(),
+            "a verdict without its work_items parent must be rejected"
+        );
+    }
+
+    /// Why: #3915 — `fact_pm_effort` is the first fact table in this schema
+    /// whose measure columns are deliberately NULLABLE. A ticket inside the
+    /// recency floor stores NULL in `effort_score` and `effort_bucket` and
+    /// says why in `score_status`; a migration that made either column NOT
+    /// NULL would force the zero the issue exists to prevent, and would fail
+    /// only at backfill time on a real database.
+    /// What: opens an in-memory DB (running every migration through v27),
+    /// inserts the parent `work_items` row, writes one scored row and one
+    /// deferred row, reads every column back, then re-inserts the same grain
+    /// and asserts the row count is unchanged.
+    /// Test: this test itself.
+    #[test]
+    fn migration_v27_creates_fact_pm_effort() {
+        let db = Database::open_in_memory().expect("open db");
+        let conn = db.connection();
+
+        for id in ["ML-2314", "ML-2315"] {
+            conn.execute(
+                "INSERT INTO work_items (id, source, title, status, item_type) \
+                 VALUES (?1, 'jira', 'ML Plat - Observability', 'To Do', 'Epic')",
+                params![id],
+            )
+            .expect("insert parent work item");
+        }
+
+        let insert = "INSERT OR REPLACE INTO fact_pm_effort \
+             (work_item_id, work_item_source, pm_name, week_key, effort_score, effort_bucket, \
+              score_status, epic_children_count, description_word_count, comment_count, \
+              transition_count, story_points, inputs_present, age_days_at_score, \
+              formula_version, computed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)";
+        conn.execute(
+            insert,
+            params![
+                "ML-2314",
+                "jira",
+                "Rohit Puntambekar",
+                "2026-W28",
+                31.5_f64,
+                "HIGH",
+                "SCORED",
+                9_i64,
+                400_i64,
+                5_i64,
+                6_i64,
+                8.0_f64,
+                "CHILDREN,DESCRIPTION,COMMENTS,TRANSITIONS,STORY_POINTS",
+                45_i64,
+                "pm-effort-1",
+                1_000_000_i64,
+            ],
+        )
+        .expect("insert scored row");
+
+        // The deferred shape: NULL score and NULL bucket, with the reason in
+        // score_status and no story points.
+        conn.execute(
+            insert,
+            params![
+                "ML-2315",
+                "jira",
+                "Rohit Puntambekar",
+                "2026-W28",
+                None::<f64>,
+                None::<String>,
+                "DEFERRED_RECENT",
+                0_i64,
+                12_i64,
+                0_i64,
+                0_i64,
+                None::<f64>,
+                "NONE",
+                2_i64,
+                "pm-effort-1",
+                1_000_000_i64,
+            ],
+        )
+        .expect("insert deferred row");
+
+        /// Every column `migration_v27_creates_fact_pm_effort` reads back.
+        type ScoredRow = (
+            Option<f64>,
+            Option<String>,
+            String,
+            i64,
+            Option<f64>,
+            String,
+            Option<i64>,
+            String,
+        );
+        let (score, bucket, status, children, points, inputs, age, version): ScoredRow = conn
+            .query_row(
+                "SELECT effort_score, effort_bucket, score_status, epic_children_count, \
+                 story_points, inputs_present, age_days_at_score, formula_version \
+                 FROM fact_pm_effort WHERE work_item_id = 'ML-2314' AND work_item_source = 'jira'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                    ))
+                },
+            )
+            .expect("read scored row back");
+        assert_eq!(score, Some(31.5));
+        assert_eq!(bucket.as_deref(), Some("HIGH"));
+        assert_eq!(status, "SCORED");
+        assert_eq!(children, 9);
+        assert_eq!(points, Some(8.0));
+        assert_eq!(
+            inputs,
+            "CHILDREN,DESCRIPTION,COMMENTS,TRANSITIONS,STORY_POINTS"
+        );
+        assert_eq!(age, Some(45));
+        assert_eq!(version, "pm-effort-1");
+
+        let (deferred_score, deferred_bucket, deferred_status): (
+            Option<f64>,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT effort_score, effort_bucket, score_status FROM fact_pm_effort \
+                 WHERE work_item_id = 'ML-2315'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("read deferred row back");
+        assert_eq!(
+            deferred_score, None,
+            "a deferred ticket stores NULL, never a zero"
+        );
+        assert_eq!(deferred_bucket, None);
+        assert_eq!(deferred_status, "DEFERRED_RECENT");
+
+        // Re-running the scorer over the same ticket replaces the row.
+        conn.execute(
+            insert,
+            params![
+                "ML-2314",
+                "jira",
+                "Rohit Puntambekar",
+                "2026-W28",
+                12.0_f64,
+                "LOW",
+                "SCORED",
+                1_i64,
+                400_i64,
+                0_i64,
+                0_i64,
+                None::<f64>,
+                "CHILDREN,DESCRIPTION",
+                60_i64,
+                "pm-effort-1",
+                2_000_000_i64,
+            ],
+        )
+        .expect("upsert pm effort row");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fact_pm_effort", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 2, "UPSERT must not duplicate the grain row");
+    }
+
+    /// Why: same reasoning as `fact_pm_work_rejects_a_verdict_with_no_work_item`
+    /// — every `fact_pm_effort` row is DERIVED from a `work_items` row
+    /// (#3915), so one for a ticket the database has never seen is a bug.
+    /// What: writes a score whose parent grain does not exist and asserts
+    /// SQLite rejects it.
+    /// Test: this test itself.
+    #[test]
+    fn fact_pm_effort_rejects_a_score_with_no_work_item() {
+        let db = Database::open_in_memory().expect("open db");
+        let err = db.connection().execute(
+            "INSERT INTO fact_pm_effort \
+             (work_item_id, work_item_source, score_status, epic_children_count, \
+              description_word_count, comment_count, transition_count, inputs_present, \
+              formula_version, computed_at) \
+             VALUES ('NOPE-1', 'jira', 'SCORED', 0, 0, 0, 0, 'NONE', 'pm-effort-1', 1)",
+            [],
+        );
+        assert!(
+            err.is_err(),
+            "a score without its work_items parent must be rejected"
+        );
+    }
+
+    /// Why: #3915 lands `fact_pm_effort` on databases that already hold v26
+    /// data — `work_items` rows and the `fact_pm_work` verdicts derived from
+    /// them. `migration_v27_creates_fact_pm_effort` only opens a brand-new
+    /// in-memory database, which runs every migration from v1 forward and so
+    /// never exercises the upgrade path a deployed database takes. A v27 that
+    /// dropped or rebuilt `fact_pm_work` would pass that test while silently
+    /// destroying every stored verdict.
+    /// What: builds a genuine v26 database (the schema shipped before #3915),
+    /// writes a `work_items` row and the `fact_pm_work` verdict for it,
+    /// upgrades to v27, then asserts both rows survive unchanged, a
+    /// `fact_pm_effort` row referencing that same ticket inserts, and the
+    /// registry reads 27. Mirrors
+    /// `migration_v24_preserves_an_existing_v23_database`.
+    /// Test: this test itself.
+    #[test]
+    fn migration_v27_preserves_an_existing_v26_database() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        // The pragma every real connection carries — see `Database::apply_pragmas`.
+        // Without it the new table's FOREIGN KEY is inert.
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("enable foreign keys");
+        super::run_through(&mut conn, 26).expect("migrate to v26");
+
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                r.get(0)
+            })
+            .expect("read version");
+        assert_eq!(version, 26, "the fixture must be a real pre-#3915 database");
+
+        // Rows written the way the v26 classifier wrote them, before
+        // `fact_pm_effort` existed.
+        conn.execute(
+            "INSERT INTO work_items (id, source, title, status, item_type) \
+             VALUES ('ML-2200', 'jira', 'ML Plat - Feature store rollout', 'Done', 'Epic')",
+            [],
+        )
+        .expect("insert v26-era work item");
+        conn.execute(
+            "INSERT INTO fact_pm_work \
+             (work_item_id, work_item_source, pm_name, week_key, is_meaningful, \
+              exclusion_reason, title_word_count, body_word_count, formula_version, computed_at) \
+             VALUES ('ML-2200', 'jira', 'Rohit Puntambekar', '2026-W20', 1, 'NONE', 5, 180, \
+                     'pm-work-1', 1700000000)",
+            [],
+        )
+        .expect("insert v26-era verdict");
+
+        // The upgrade every existing v26 database performs on next open.
+        super::run_through(&mut conn, 27).expect("migrate to v27");
+
+        let upgraded: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                r.get(0)
+            })
+            .expect("read version");
+        assert_eq!(upgraded, 27, "the registry must record the new migration");
+
+        // The seeded rows survive the new CREATE TABLE untouched.
+        let (title, status): (String, String) = conn
+            .query_row(
+                "SELECT title, status FROM work_items \
+                 WHERE id = 'ML-2200' AND source = 'jira'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("the pre-migration work item must still be readable");
+        assert_eq!(title, "ML Plat - Feature store rollout");
+        assert_eq!(status, "Done");
+
+        let (pm, week, meaningful, body_words, computed): (String, String, i64, i64, i64) = conn
+            .query_row(
+                "SELECT pm_name, week_key, is_meaningful, body_word_count, computed_at \
+                 FROM fact_pm_work WHERE work_item_id = 'ML-2200' AND work_item_source = 'jira'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("the pre-migration verdict must still be readable");
+        assert_eq!(pm, "Rohit Puntambekar");
+        assert_eq!(week, "2026-W20");
+        assert_eq!(meaningful, 1);
+        assert_eq!(body_words, 180);
+        assert_eq!(computed, 1_700_000_000);
+
+        let verdicts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fact_pm_work", [], |r| r.get(0))
+            .expect("count verdicts");
+        assert_eq!(verdicts, 1, "v27 must not drop or duplicate v26 rows");
+
+        // The new table accepts a score for that pre-existing ticket.
+        conn.execute(
+            "INSERT INTO fact_pm_effort \
+             (work_item_id, work_item_source, pm_name, week_key, effort_score, \
+              effort_bucket, score_status, epic_children_count, description_word_count, \
+              comment_count, transition_count, story_points, inputs_present, \
+              age_days_at_score, formula_version, computed_at) \
+             VALUES ('ML-2200', 'jira', 'Rohit Puntambekar', '2026-W20', 22.5, 'MEDIUM', \
+                     'SCORED', 4, 180, 3, 7, NULL, \
+                     'CHILDREN,DESCRIPTION,COMMENTS,TRANSITIONS', 90, 'pm-effort-1', \
+                     1700000001)",
+            [],
+        )
+        .expect("scoring a ticket the v26 database already knew must succeed");
+
+        let (score, bucket): (Option<f64>, Option<String>) = conn
+            .query_row(
+                "SELECT effort_score, effort_bucket FROM fact_pm_effort \
+                 WHERE work_item_id = 'ML-2200' AND work_item_source = 'jira'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("read the new row back");
+        assert_eq!(score, Some(22.5));
+        assert_eq!(bucket.as_deref(), Some("MEDIUM"));
+
+        // Re-running is a no-op, per the runner's idempotence contract.
+        super::run_through(&mut conn, 27).expect("re-run is idempotent");
+    }
 
     /// Why: regression guard for issue #445 batch B. Migration v18 creates
     /// `fact_weekly_quality` with all required columns and a PRIMARY KEY on
@@ -599,5 +1034,61 @@ mod tests {
     #[test]
     fn migration_v21_is_idempotent_when_agentic_mode_already_exists() {
         crate::core::db::migrations::v21::tests::migration_v21_is_idempotent_when_agentic_mode_already_exists();
+    }
+
+    /// Why: #6748 — every deployed `tga.db` predates `ai_detector_version`, and
+    /// the whole repair depends on those rows sorting as older than the shipped
+    /// detector. A column added with any other default, or a second `run` that
+    /// re-stamped rows the first pass had already advanced, would leave the
+    /// affected corpus unrepaired or repair it on every open forever.
+    /// What: builds a real v27 database, writes a commit the v27 collector's
+    /// way, upgrades to head, and asserts the column exists at 0 with the row
+    /// intact. Then runs the migrations a second time and asserts nothing
+    /// moved — neither the column value nor the `schema_migrations` row.
+    /// Test: this test itself.
+    #[test]
+    fn migration_v28_marks_an_existing_database_as_stale_and_is_idempotent() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        super::run_through(&mut conn, 27).expect("migrate to v27");
+
+        conn.execute(
+            "INSERT INTO commits \
+             (sha, author_name, author_email, timestamp, message, repository, \
+              is_ai_assisted, ai_tool, agentic_mode) \
+             VALUES ('v27sha', 'Ada', 'ada@example.com', '2026-01-01T00:00:00Z', \
+                     ?1, 'testrepo', 0, NULL, 'none')",
+            params!["feat: x\n\nCo-Authored-By: Claude <noreply@anthropic.com>"],
+        )
+        .expect("insert v27-era commit");
+
+        // The upgrade every existing database performs on next open.
+        super::run(&mut conn).expect("migrate to head");
+
+        fn read(conn: &rusqlite::Connection) -> (i64, i64, String) {
+            conn.query_row(
+                "SELECT ai_detector_version, is_ai_assisted, agentic_mode \
+                 FROM commits WHERE sha = 'v27sha'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("read migrated row")
+        }
+        assert_eq!(
+            read(&conn),
+            (0, 0, "none".to_string()),
+            "an existing row is stale, and its stored verdict is left untouched"
+        );
+
+        // Run it twice: the second pass must be a no-op.
+        super::run(&mut conn).expect("re-run is idempotent");
+        assert_eq!(read(&conn), (0, 0, "none".to_string()));
+        let applied: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 28",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count v28 rows");
+        assert_eq!(applied, 1, "v28 is recorded exactly once");
     }
 }

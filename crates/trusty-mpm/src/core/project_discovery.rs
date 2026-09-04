@@ -128,10 +128,18 @@ fn scan_sessions(dir: &Path) -> (usize, Option<SystemTime>) {
 
 /// Decode a Claude Code projects directory name back into a filesystem path.
 ///
-/// Why: Claude Code encodes a project's absolute path by replacing every `/`
-/// with `-`. Because real directory names may *also* contain `-`, a blind
-/// "replace all `-` with `/`" can produce a path that does not exist; the
-/// decoder must verify the result and fall back to a smarter search.
+/// Why: Claude Code encodes a project's absolute path by replacing every
+/// character outside `[A-Za-z0-9]` with `-` (#6777 — not `/` alone, as this
+/// doc used to say). Because real directory names may *also* contain `-`, a
+/// blind "replace all `-` with `/`" can produce a path that does not exist;
+/// the decoder must verify the result and fall back to a smarter search.
+///
+/// // #6777: the greedy walk below only ever re-attaches a segment with a
+/// literal `-`, so it cannot reconstruct a `.`-prefixed component such as
+/// `.worktrees`. Decoding is best-effort and lossy by construction (the
+/// encoding is not injective); widening the candidate set is a separate
+/// change. `encode_project_dir` in `runtime::claude_code` is the exact
+/// forward direction and is the one used for every store lookup.
 /// What: the directory name begins with `-` (the leading `/`). First tries the
 /// simple decoding (all `-` → `/`) and returns it if that path exists. Otherwise
 /// walks the segments greedily: starting from `/`, it joins segments one at a

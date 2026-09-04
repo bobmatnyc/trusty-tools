@@ -508,20 +508,11 @@ async fn rev_parse_lenient(path: &Path, args: &[&str]) -> Vec<String> {
 
 /// A `git` child with the ambient repository environment cleared.
 ///
-/// An inherited `GIT_DIR` or `GIT_WORK_TREE` redirects a clone at whatever the
-/// parent shell was pointed at, which for an agent-run or hook-run invocation is
-/// somebody else's repository. `GIT_TERMINAL_PROMPT=0` keeps a source that
-/// unexpectedly wants credentials from hanging an unattended sweep.
+/// // #6079: the hygiene itself moved to [`crate::git`], which #6079's churn
+/// collector needs in its synchronous form. One list of ambient variables, two
+/// constructors over it; this stays as the name the module's call sites use.
 fn git(argv: Vec<OsString>) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new("git");
-    command
-        .args(argv)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .env("GIT_TERMINAL_PROMPT", "0");
-    command
+    crate::git::spawn(argv)
 }
 
 #[cfg(test)]

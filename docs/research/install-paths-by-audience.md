@@ -215,8 +215,10 @@ isn't Tier-1 — VERIFIED, `crates/trusty-common/src/update/upgrade.rs:179-193`.
   VERIFIED via `git ls-files`), so `pnpm` is not required to install the
   published crate.
 - **Post-install**: MCP wiring `command: trusty-analyze, args: ["serve",
-  "--mcp"]` — INFERRED from `crates/trusty-analyze/README.md` (not
-  independently confirmed against a CLI parse test in this pass).
+  "--mcp"]` — VERIFIED, `crates/trusty-analyze/src/commands/setup.rs:32`
+  (`const MCP_SERVER_ARGS: &[&str] = &["serve", "--mcp"];`, the literal
+  generator constant `setup.rs`'s `.mcp.json`-writing code consumes), with a
+  matching CLI-parse assertion at `setup.rs:345-346,366`.
 - **macOS TCC**: **No Full Disk Access needed** — same explicit carve-out as
   trusty-memory: "reads `$HOME` locations only" —
   VERIFIED, `docs/reference/release-workflow.md:176-178`.
@@ -250,19 +252,23 @@ isn't Tier-1 — VERIFIED, `crates/trusty-common/src/update/upgrade.rs:179-193`.
   trusty-analyze's deep pass) — VERIFIED,
   `docs/distribution/INSTALL-CONVENTION.md:250-263`: `OPENROUTER_API_KEY`
   default, AWS Bedrock alternative via the same two env vars as trusty-analyze.
-- **Post-install**: MCP wiring `command: trusty-review, args: ["serve",
-  "--stdio"]` — INFERRED from `crates/trusty-review/README.md` (not
-  independently confirmed against a CLI parse test).
-- **macOS TCC**: **UNKNOWN whether any category applies.** trusty-review is
-  absent from both the FDA/App-Data carve-out list in
-  `release-workflow.md:173-179` AND the `SIGNABLE_BINARIES` Developer-ID table
-  in `macos_signing/mod.rs`. The most likely read is "no TCC category needed"
-  (it reads only project-local repo/PR data, same class as trusty-analyze) —
-  but that is an inference, not a citation, because no doc or code comment
-  states it explicitly the way it does for trusty-memory/trusty-analyze/
-  trusty-mpm/trusty-search. Settling this would mean either finding an
-  explicit statement in the codebase or running trusty-review under launchd on
-  a clean macOS host and observing whether any TCC prompt fires.
+- **Post-install**: MCP wiring `command: trusty-review, args: ["mcp"]` —
+  VERIFIED, `crates/trusty-review/src/main.rs:145-149` (the `.mcp.json`
+  snippet in the `Mcp` variant's own doc comment). `["serve", "--stdio"]`
+  still parses — kept as a back-compat alias for every `.mcp.json` written
+  before #6290 (`#[command(alias = "serve")]`, `main.rs:158`; both spellings
+  land on `Commands::Mcp`, proven by
+  `main.rs::tests::serve_is_still_accepted_as_an_alias`, `main.rs:223-240`) —
+  but `["mcp"]` is the current canonical form to publish.
+- **macOS TCC**: **No category needed.** VERIFIED,
+  `crates/trusty-installer/src/commands/macos_signing/mod.rs:97-99`:
+  trusty-review "was evaluated under the same test [as trusty-memory/
+  trusty-analyze] and EXCLUDED: it makes no `$HOME` walk and reads no other
+  app's files, so there is no grant for a stable identity to preserve." This
+  is consistent with, and explains, its absence from both the FDA/App-Data
+  carve-out list in `release-workflow.md:173-179` and the `SIGNABLE_BINARIES`
+  table in the same `macos_signing/mod.rs` — the absence is a documented
+  exclusion, not an oversight.
 - **Dependencies on other products**: requires trusty-search + trusty-analyze
   at runtime (hard gate, not soft). Install order does not matter for `tctl`
   (it resolves the closure and orders topologically automatically); if
@@ -330,17 +336,41 @@ isn't Tier-1 — VERIFIED, `crates/trusty-common/src/update/upgrade.rs:179-193`.
   itself is "optional but recommended" — INFERRED,
   `docs/distribution/INSTALL-CONVENTION.md:310-315`. No Svelte UI (no
   `build.rs` in `crates/trusty-code/`, confirmed by absence — VERIFIED,
-  directory listing shows no `build.rs`), so no `pnpm` requirement at all.
+  directory listing shows no `build.rs`), so no `pnpm` requirement at all. No
+  API key is required to start `tcode serve` itself — VERIFIED,
+  `crates/trusty-code/src/llm/dispatch.rs:14-20` (module doc: "no key is
+  required at construction … a missing key only surfaces if a slug that needs
+  it is actually dispatched"). A key becomes required only lazily, the first
+  time a chat/task actually dispatches to a provider that needs one; the
+  default route is OpenRouter, so `OPENROUTER_API_KEY` is the one most
+  operators hit first — VERIFIED, `crates/trusty-code/src/llm/client.rs:329-337`
+  (the exact `MissingConfig` error raised inside `build_adapter`, only at chat
+  time). Routing a model to `fireworks/*`/`together/*`/`atlascloud/*`/
+  `bedrock/*` substitutes that provider's own key instead.
 - **Post-install**: one `tcode serve` process per project's `.claude/` root —
   VERIFIED, `crates/trusty-code/README.md:14-16`.
-- **macOS TCC**: **UNKNOWN.** trusty-code appears nowhere in the FDA/App-Data
-  carve-out list or the `SIGNABLE_BINARIES` table. No persistent-identity
-  signing script exists for it either (only `install-trusty-search-signed.sh`,
-  `install-trusty-mpm-signed.sh`, `install-trusty-agents-signed.sh` exist
-  under `scripts/`). Most likely no TCC category applies (project-local file
-  access only, same shape as trusty-analyze/trusty-review), but this is
-  unconfirmed. Settling it needs either an explicit statement in the code or
-  a live macOS TCC-prompt observation.
+- **macOS TCC**: **INFERRED: no category applies.** trusty-code appears
+  nowhere in the FDA/App-Data carve-out list or the `SIGNABLE_BINARIES` table
+  (VERIFIED — the full 11-row table in
+  `crates/trusty-installer/src/commands/macos_signing/mod.rs:207-253` has no
+  `trusty-code`/`tcode` entry), and it makes no
+  `discover_claude_settings`/`$HOME`-walk call anywhere in its source
+  (VERIFIED — no match for `discover_claude_settings` or `claude_config`
+  under `crates/trusty-code/src`), which is the pattern that earns
+  trusty-memory/trusty-analyze their Files-and-Folders exposure. Its
+  `fs_browse` daemon module (the UI's project picker) reads whichever
+  directory the operator navigates to, but by its own doc explicitly
+  implements no TCC permission layer: "There is likewise no macOS TCC
+  permission-state machine: the app inherits whatever entitlements it is
+  granted, and an OS-level refusal surfaces as an ordinary typed error" —
+  VERIFIED, `crates/trusty-code/src/fs_browse/mod.rs:23-34`. No
+  persistent-identity signing script exists for it either (only
+  `install-trusty-search-signed.sh`, `install-trusty-mpm-signed.sh`,
+  `install-trusty-agents-signed.sh` exist under `scripts/`). Inference: same
+  "None" class as trusty-analyze/trusty-review — no automatic other-app-
+  container read, no built-in permission model, and no signable-set entry to
+  preserve a grant across reinstalls. Settling this to VERIFIED would still
+  need a live launchd run on a clean macOS host.
 - **Dependencies on other products**: none identified; it is a per-project
   harness, independent of the tctl stable set.
 
@@ -379,17 +409,29 @@ isn't Tier-1 — VERIFIED, `crates/trusty-common/src/update/upgrade.rs:179-193`.
   `build.rs` writes a placeholder `index.html` so the build still succeeds,
   but the embedded UI is non-functional — VERIFIED,
   `crates/trusty-agents/build.rs:1-19` (`RustEmbed` needs SOME directory to
-  exist; issue #112). Model-routing API keys — `OPENROUTER_API_KEY` is the
-  primary one per current provider policy (all core agents route through
-  OpenRouter); `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` usage is
-  present in the source tree (28 files reference at least one of the three
-  key names) but which is REQUIRED vs optional for a bare `tagent` install is
-  UNKNOWN from static inspection alone — would need a clean-environment run
-  to see which key the CLI actually demands at first launch.
-- **Post-install**: no MCP stdio server pattern like the others; `tagent`'s
-  own CLI/daemon model was not independently traced in this pass beyond
-  confirming it exists (`main.rs` is a 20-line entry point delegating to the
-  library) — **UNKNOWN** whether/how it registers as an MCP server.
+  exist; issue #112). Model-routing API keys: none is strictly required to
+  launch `tagent` — VERIFIED,
+  `crates/trusty-agents/src/llm/credentials.rs:108` (`pick_credentials`
+  returns `None` when nothing resolves; test
+  `pick_returns_none_when_nothing_set`, same file). Any ONE of
+  `CLAUDE_CODE_OAUTH_TOKEN` > `ANTHROPIC_API_KEY` > `OPENROUTER_API_KEY`
+  (checked in that priority order, each resolved via env >
+  project/user `.env.local` > the secure `tagent config keys set` store)
+  suffices; a `/provider bedrock` or `/provider local` (Ollama) run needs
+  neither. Absence prints an onboarding banner recommending OpenRouter rather
+  than failing startup — VERIFIED,
+  `crates/trusty-agents/src/runtime/cli_def.rs:319-345`
+  (`any_credential_resolves`, the banner predicate).
+- **Post-install**: `tagent mcp-serve` runs a stdio MCP server exposing
+  trusty-agents itself to external MCP clients (Claude Code, etc.) —
+  VERIFIED, `crates/trusty-agents/src/runtime/mcp_serve.rs:1-30` (module
+  doc). It reuses the same `trusty_mcp::run_stdio_loop` framework
+  trusty-memory and trusty-search already ship against, exposing a static
+  two-tool surface (`list_agents`, `dispatch_task`). Dispatch is a raw argv
+  check ahead of clap parsing — VERIFIED,
+  `crates/trusty-agents/src/runtime/mod.rs:203-204`
+  (`if args.len() > 1 && args[1] == "mcp-serve"`). MCP wiring:
+  `command: tagent, args: ["mcp-serve"]`.
   There is also a separate desktop shell, `Trusty Agents.app`
   (`crates/trusty-agents/ui/src-tauri`), built via `pnpm tauri build` and
   signed through Tauri's own `APPLE_SIGNING_IDENTITY` mechanism — VERIFIED,
@@ -442,9 +484,18 @@ isn't Tier-1 — VERIFIED, `crates/trusty-common/src/update/upgrade.rs:179-193`.
   `cp`/`mv` over a PATH binary.
 - **Prerequisites**: git (git2), SQLite bundled (no external install) —
   VERIFIED, `docs/distribution/INSTALL-CONVENTION.md:292-296`.
-- **Post-install**: config at `tga.yaml` or `~/.config/tga/config.yaml` —
-  INFERRED from `docs/distribution/INSTALL-CONVENTION.md:298-300`, not
-  independently confirmed against source in this pass. **No MCP transport at
+- **Post-install**: config resolution is a single `-c`/`--config` CLI flag,
+  global across every subcommand, defaulting to `config.yaml` resolved
+  relative to the current working directory when omitted — VERIFIED,
+  `crates/trusty-git-analytics/src/main.rs:53-55`
+  (`#[arg(short, long, default_value = "config.yaml", global = true)]`).
+  There is no `~/.config/tga/config.yaml` fallback, no `tga.yaml` alternate
+  name, and no environment-variable override anywhere in source — VERIFIED,
+  no `dirs::config_dir`/`XDG_CONFIG_HOME`/`TGA_CONFIG` reference exists
+  anywhere under `crates/trusty-git-analytics/src`.
+  `docs/distribution/INSTALL-CONVENTION.md:298-300`'s claim of that fallback
+  path does not match the code and should not be copied into the walkthrough.
+  **No MCP transport at
   all** — VERIFIED, `crates/trusty-git-analytics/src/main.rs:268`: "tga has no
   MCP stdio transport — all other subcommands are [handled directly]." tga is
   a pure CLI analytics tool.
@@ -465,10 +516,10 @@ isn't Tier-1 — VERIFIED, `crates/trusty-common/src/update/upgrade.rs:179-193`.
 | 2. trusty-search | No (prebuilt/crates.io) | No (UI pre-built, committed) | No | 16 GB | **FDA** (external-volume indexes only) |
 | 3. search + memory | No | No | Optional (memory chat) | 16 GB (max of the two) | FDA for search only |
 | 4. trusty-analyze | No | No (UI pre-built, committed) | Optional (deep-analysis pass) | 8 GB | None |
-| 5. trusty-review | No | N/A (no UI) | **Required** (`OPENROUTER_API_KEY` or Bedrock) | 8 GB | UNKNOWN (likely none) |
+| 5. trusty-review | No | N/A (no UI) | **Required** (`OPENROUTER_API_KEY` or Bedrock) | 8 GB | None (VERIFIED — evaluated and excluded) |
 | 6. trusty-mpm (`tm`) | Optional (fallback only) | N/A (no UI) | N/A directly (agents it launches may need one) | none stated | **App Data**, never FDA |
-| 7. trusty-code | No | N/A (no UI) | UNKNOWN | none stated | UNKNOWN (likely none) |
-| 8. trusty-agents (`tagent`) | **Yes, mandatory** (no prebuilt, no crates.io) | Recommended (UI is a placeholder without it) | `OPENROUTER_API_KEY` primary per current provider policy; exact requirement UNKNOWN | none stated | **App Data**, never FDA |
+| 7. trusty-code | No | N/A (no UI) | Optional — lazy, only when a chat/task actually dispatches (default provider OpenRouter) | none stated | None (INFERRED) |
+| 8. trusty-agents (`tagent`) | **Yes, mandatory** (no prebuilt, no crates.io) | Recommended (UI is a placeholder without it) | Optional — any ONE of `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`/`OPENROUTER_API_KEY` (priority order); none is strictly required to launch | none stated | **App Data**, never FDA |
 | 9. tga | No | N/A (no UI) | No | none stated | None (inferred) |
 
 Shared across all nine: **Rust 1.94 MSRV** if building from source at all
@@ -567,17 +618,22 @@ misrepresent trusty-agents/trusty-code as being on the same footing as the
 other seven when they demonstrably are not (no tctl membership, and for
 trusty-agents, no crates.io package or GitHub Release at all).
 
-## Everything marked UNKNOWN, and what would settle it
+## Formerly UNKNOWN, now resolved against source (#5116)
 
-| Claim | What would settle it |
-|---|---|
-| trusty-review's macOS TCC category (Audience 5) | Explicit statement in `macos_signing/mod.rs` or `release-workflow.md`, or a live launchd run on a clean macOS host, watching for a TCC prompt |
-| trusty-code's macOS TCC category (Audience 7) | Same as above, scoped to `tcode` |
-| trusty-code's required vs. optional API keys (Audience 7) | A clean-environment `tcode serve` run with no keys set, observing whether it exits or degrades |
-| tagent's MCP server registration story (Audience 8) | Reading `crates/trusty-agents/src/mcp/` or `src/lib.rs`'s command dispatch beyond the 20-line `main.rs` entry point |
-| tagent's required vs. optional API key at first launch (Audience 8) | A clean-environment `tagent` run with no keys set |
-| tga's exact config file resolution order (`tga.yaml` vs `~/.config/tga/config.yaml`, precedence) | Reading `crates/trusty-git-analytics/src/config` directly (not done in this pass — INSTALL-CONVENTION.md was the only source consulted) |
-| trusty-analyze's and trusty-review's exact MCP CLI flags (`serve --mcp` / `serve --stdio`) | A CLI parse test analogous to `trusty-memory`'s `cli_tests.rs`, or `--help` output captured from a built binary |
+The seven facts below were UNKNOWN as of the pass that produced this
+document. All seven are now VERIFIED or INFERRED directly against crate
+source — see the per-audience sections linked for the full citation and
+reasoning; this table is only an index.
+
+| Claim | Resolution | Citation |
+|---|---|---|
+| trusty-review's macOS TCC category (Audience 5) | VERIFIED — none; explicitly evaluated and excluded | `crates/trusty-installer/src/commands/macos_signing/mod.rs:97-99` |
+| trusty-code's macOS TCC category (Audience 7) | INFERRED — none | `crates/trusty-code/src/fs_browse/mod.rs:23-34`; absence confirmed across `macos_signing/mod.rs:207-253` |
+| trusty-code's required vs. optional API keys (Audience 7) | VERIFIED — optional, resolved lazily at first chat/task dispatch, not at startup | `crates/trusty-code/src/llm/dispatch.rs:14-20`, `crates/trusty-code/src/llm/client.rs:329-337` |
+| tagent's MCP server registration story (Audience 8) | VERIFIED — `tagent mcp-serve`, a stdio MCP server over the shared `trusty_mcp` framework | `crates/trusty-agents/src/runtime/mcp_serve.rs:1-30`, `crates/trusty-agents/src/runtime/mod.rs:203-204` |
+| tagent's required vs. optional API key at first launch (Audience 8) | VERIFIED — optional; any one of three credentials in priority order, none strictly required | `crates/trusty-agents/src/llm/credentials.rs:108`, `crates/trusty-agents/src/runtime/cli_def.rs:319-345` |
+| tga's exact config file resolution order (Audience 9) | VERIFIED — single `--config` flag, default `./config.yaml`, no `~/.config/tga/` fallback exists | `crates/trusty-git-analytics/src/main.rs:53-55` |
+| trusty-analyze's and trusty-review's exact MCP CLI flags (Audiences 4, 5) | VERIFIED — `["serve", "--mcp"]` for trusty-analyze; `["mcp"]` (canonical) / `["serve", "--stdio"]` (back-compat alias) for trusty-review | `crates/trusty-analyze/src/commands/setup.rs:32`, `crates/trusty-review/src/main.rs:145-158` |
 
 ## Gates run
 

@@ -50,6 +50,8 @@ use super::worktree_safety::DirtyWorktree;
 // SLOC cap; the re-export keeps every call site (and `super::*` in the tests)
 // unchanged.
 pub(crate) use super::worktree_reclaim_verdict::{ReclaimGate, ReclaimVerdict};
+// #6806: gate 2's claim vocabulary, re-exported for the same reason.
+pub(crate) use super::worktree_reclaim_claim::{ClaimState, LiveClaims, WorkspaceClaim};
 
 /// Resolves the delegation registry's answer for the agent a sentinel names.
 ///
@@ -612,8 +614,11 @@ pub(crate) const NOT_INSPECTED_REASON: &str = "survey deadline reached before in
 /// 1. **Existence/eligibility** — git's own [`Admission`] verdict (ADR-0023
 ///    point 1). Excludes the main checkout, bare records, operator-LOCKED
 ///    worktrees, and anything outside the managed project.
-/// 2. **Liveness** — a path any session record still claims is never touched,
-///    whatever that record's persisted state says (#4288).
+/// 2. **Liveness** — a path a session record still claims is never touched,
+///    whatever that record's persisted state says (#4288) — EXCEPT when the
+///    only claimant is the calling session and the candidate sits inside that
+///    session's workspace (#6806). See [`ClaimState`], which resolves that
+///    distinction and words the refusal.
 /// 3. **Removability** — [`tm_provisioned`]: the classifier applies exactly the
 ///    ownership predicate the REMOVER applies, so nothing is ever advertised as
 ///    reclaimable that `remove_session_worktree` would refuse.
@@ -633,6 +638,8 @@ pub(crate) const NOT_INSPECTED_REASON: &str = "survey deadline reached before in
 ///
 /// Test: one refusal test per gate — `classify_blocks_non_admitted_worktree`,
 /// `classify_blocks_live_session_workspace`,
+/// `classify_allows_a_worktree_claimed_only_by_the_calling_session`,
+/// `classify_names_the_foreign_session_that_blocked_a_candidate`,
 /// `classify_blocks_a_worktree_trusty_mpm_does_not_own`,
 /// `classify_blocks_a_live_agents_worktree`,
 /// `classify_blocks_an_agent_the_harness_still_holds_after_a_restart`,
@@ -647,7 +654,7 @@ pub(crate) const NOT_INSPECTED_REASON: &str = "survey deadline reached before in
 pub(crate) fn classify(
     path: &Path,
     admission: Admission,
-    live: bool,
+    claim: &ClaimState,
     pr: &BranchPrState,
     probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
     agent_state: AgentStateProbe<'_>,
@@ -665,11 +672,12 @@ pub(crate) fn classify(
     }
     // Gate 2 (#2919): a live session can occupy a directory whose record reads
     // terminal — measured on this repo 2026-07-28. Never trust the state field.
-    if live {
-        return ReclaimVerdict::blocked(
-            ReclaimGate::Liveness,
-            "a session still claims this workspace",
-        );
+    // #6806: the claim's OWNER decides, not merely its existence. A session
+    // pruning worktrees it created inside its own workspace was refused by its
+    // own claim, so the only escape was `git worktree remove --force`, which
+    // bypasses every gate below this one.
+    if let Some(reason) = claim.refusal(false) {
+        return ReclaimVerdict::blocked(ReclaimGate::Liveness, reason);
     }
     // Gate 3 (#2919): only worktrees trusty-mpm provisioned can actually be
     // removed. Classifying one it cannot remove as `Reclaimable` made
@@ -1017,35 +1025,6 @@ pub(crate) fn measure_bytes_until(path: &Path, deadline: Option<Instant>) -> Opt
         }
     }
     Some(total)
-}
-
-/// Does any session still claim `path` (#2919)?
-///
-/// Why: `git worktree list` cannot see a live session, and a session record's
-/// persisted state is bookkeeping rather than a liveness signal (#4288). The
-/// only defensible test is containment in BOTH directions: a claimed path
-/// inside the candidate means the candidate is a live session's parent, and a
-/// candidate inside a claimed path means it is a live session's subdirectory.
-/// What: compares canonical AND raw spellings of every claimed path — if
-/// canonicalization fails on either side the raw form still protects, so a
-/// failed observation can only ever spare a worktree, never expose one.
-/// Test: `live_check_matches_exact_ancestor_and_descendant_paths`.
-pub(crate) fn is_live(path: &Path, in_use: &[PathBuf]) -> bool {
-    let candidates = [
-        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
-        path.to_path_buf(),
-    ];
-    in_use.iter().any(|claimed| {
-        let claimed_forms = [
-            std::fs::canonicalize(claimed).unwrap_or_else(|_| claimed.clone()),
-            claimed.clone(),
-        ];
-        claimed_forms.iter().any(|c| {
-            candidates
-                .iter()
-                .any(|p| c == p || c.starts_with(p) || p.starts_with(c))
-        })
-    })
 }
 
 /// Whether a reclamation run may delete anything (#2919).

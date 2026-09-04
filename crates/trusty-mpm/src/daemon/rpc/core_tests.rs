@@ -51,7 +51,12 @@
 //! The allowlist is the second guard, not the first. `parity_doctor_*` pins
 //! `$HOME` at a fresh tempdir for the whole test, so every probe resolving a
 //! path under it reads a directory no other process on the machine knows
-//! (#6622).
+//! (#6622). Every route that resolves a path under `$HOME` needs that same
+//! guard, not just the doctor: `mpm.claude_config.get` reads
+//! `~/.claude/settings*.json` and `~/.claude/agents` on each call, and without
+//! a pinned home its two reads straddled a sibling's `$HOME` move (#6711). A
+//! new `parity_*` case whose route touches `$HOME` takes `#[serial]` and
+//! [`pinned_home`] too.
 //!
 //! Nothing else is excused. Every other method is compared whole, `pid`
 //! included — the two transports run in one process, so a `pid` that differed
@@ -738,9 +743,28 @@ async fn parity_report_bug_preview_agrees_across_transports() {
     assert_same("mpm.report_bug", body, result, &[]);
 }
 
+/// Why serial and a pinned `$HOME` (#6711): `get_claude_config_op` resolves
+/// `ClaudeConfigReader::paths_for_project`, which reads `dirs::home_dir()` — the
+/// live `$HOME` — to locate `~/.claude/settings*.json` and `~/.claude/agents`.
+/// Both transports call that one function, so they cannot disagree; what
+/// disagrees is `$HOME` itself between the two calls. A sibling test moving
+/// `$HOME` process-wide (`pinned_home` here, `test_support`'s `override_home`
+/// elsewhere) lands between them, and the HTTP read answers `has_agents: true,
+/// has_hooks: true` off the operator's real home while the socket read answers
+/// `false, false` off a tempdir. Observed 1 of 20 runs of the `parity_` filter
+/// at `--test-threads=4`. The crate-wide serial group orders this binary's own
+/// tests; the pinned tempdir additionally makes the answer independent of what
+/// a concurrent `tm install` writes into the real `~/.claude`, and is the only
+/// guard that also holds under nextest, where every test gets its own process
+/// and `#[serial]` serializes nothing (#4162). Both returned values stay bound
+/// for the test's body — dropping the `TempDir` removes the directory `$HOME`
+/// names.
 /// Test: this function IS the test.
+#[serial_test::serial]
 #[tokio::test]
 async fn parity_claude_config_get_agrees_across_transports() {
+    // #6711: pinned BEFORE the two calls, and held across both.
+    let (_home, _home_guard) = pinned_home();
     let (state, dir) = hermetic();
     let project = dir.path().display().to_string();
     let (status, body) = http(

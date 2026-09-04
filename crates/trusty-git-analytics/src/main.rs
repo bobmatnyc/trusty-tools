@@ -30,6 +30,7 @@ use crate::commands::audit::AuditArgs;
 use crate::commands::author::AuthorArgs;
 use crate::commands::backfill::BackfillArgs;
 use crate::commands::dora::DoraArgs;
+use crate::commands::inspect::InspectArgs;
 use crate::commands::install::InstallArgs;
 use crate::commands::override_cmd::OverrideArgs;
 use crate::commands::pr_metrics::PrMetricsArgs;
@@ -150,6 +151,8 @@ enum Commands {
     Tui(TuiArgs),
     /// One-shot acquisition-diligence sweep over an org or configured repo set (#5235).
     Audit(AuditArgs),
+    /// Show the live database schema, or attest what it holds (#5218).
+    Inspect(InspectArgs),
 
     /// Manage inference provider configuration (API keys) — the universal
     /// `config keys set/list/test/unset` surface shared by every trusty-*
@@ -331,7 +334,7 @@ async fn run() -> anyhow::Result<()> {
     // config file. Handle it before the DB open call so a missing/locked
     // `tga.db` cannot block bootstrapping a fresh project.
     if let Commands::Install(args) = cli.command {
-        return commands::install::run(config, args);
+        return commands::install::run(config, args).await;
     }
 
     // #2405: the universal `config` command manages inference provider keys and
@@ -373,6 +376,15 @@ async fn run() -> anyhow::Result<()> {
     // shared open below rather than sharing a `&mut Database` across threads.
     if let Commands::Tui(args) = cli.command {
         return commands::tui::run(config, &db_path, args, log_capture).await;
+    }
+
+    // #5218: inspection reads the operator's database as it stands. The shared
+    // `Database::open` below CREATES and migrates a missing file, so an
+    // inspection routed through it would print a complete, empty, freshly-minted
+    // schema and exit 0 for a database the caller cannot read. It is dispatched
+    // here instead, through a read-only open that names the cause and fails.
+    if let Commands::Inspect(args) = cli.command {
+        return commands::inspect::run(&db_path, args);
     }
 
     // #5465: `tga profile` opens the database through `ContributorSelector`,
@@ -417,6 +429,7 @@ async fn run() -> anyhow::Result<()> {
         // Handled above — match is exhaustive.
         Commands::Tui(_) => unreachable!("tui dispatched above"),
         Commands::Profile(_) => unreachable!("profile dispatched above"),
+        Commands::Inspect(_) => unreachable!("inspect dispatched above"),
         Commands::Install(_) => unreachable!("install dispatched above"),
         Commands::Config(_) => unreachable!("config dispatched above"),
     }

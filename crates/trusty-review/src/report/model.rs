@@ -204,6 +204,19 @@ pub struct ReportModel {
     /// `polish_tests.rs::declared_gaps_render_as_bullets`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<String>,
+    /// Deterministic assurance-scan findings the manifest declared (#6075).
+    ///
+    /// Why: `gaps`'s twin, and it travels the same way. The rows come from a
+    /// scanner that ran BEFORE this process (`cargo audit`, via trusty-audit),
+    /// so they reach the renderer only by riding the model — and recording them
+    /// here keeps the JSON twin a faithful record of what the assurance section
+    /// was built from.
+    /// What: seeded from the manifest's `[report].findings` and never appended
+    /// to at run time; this crate runs no scanner of its own. Empty is the
+    /// common case and renders exactly as before.
+    /// Test: `assurance_tests.rs::a_declared_finding_reaches_the_report`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<super::manifest::ManifestFinding>,
     /// The verified LLM synthesis result.
     ///
     /// Why: recording it on the model keeps the JSON twin a faithful record of
@@ -409,6 +422,8 @@ impl ReportModel {
             // report; the analyze pass appends its named gaps to the same list.
             // #5453/#6004: per-repository authorship-load failures joined in above.
             gaps,
+            // #6075: the collector's rows, as the producer wrote them.
+            findings: manifest.report.findings.clone(),
             synthesis: None,
             benchmark: None,
             investigation: None,

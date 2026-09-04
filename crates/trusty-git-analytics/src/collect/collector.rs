@@ -18,6 +18,7 @@ use crate::collect::identity::IdentityResolver;
 use crate::collect::linear_pipeline;
 use crate::collect::notify;
 use crate::collect::pr_provider::PrProvider;
+use crate::collect::reclassify::reclassify_stale;
 use crate::collect::weeks::{clamp_week_to_range, weeks_in_range};
 use crate::collect::work_item_pipeline;
 use crate::core::config::Config;
@@ -331,6 +332,34 @@ impl CollectionPipeline {
         &self.config
     }
 
+    /// Repair verdicts an older detector generation produced, and say so.
+    ///
+    /// Why: #6748 — a stored classification is only as good as the marker set
+    /// that produced it, and the operator has no way to know a set changed.
+    /// Running the pass at the head of every collect makes the repair
+    /// automatic; announcing the count makes it visible, because a silent
+    /// rewrite of historical rows is indistinguishable from a data bug when
+    /// the downstream numbers move.
+    /// What: one line to stderr (the bus, under a TUI) when anything was
+    /// stale, and nothing at all when the corpus is settled. Never stdout —
+    /// that stream carries the pipeline's own report.
+    /// Test: `crate::collect::tests::a_stale_commit_is_reclassified_before_the_walk`.
+    fn reclassify_stale_commits(&self, db: &mut Database) -> Result<()> {
+        let stats = reclassify_stale(db)?;
+        if stats.stamped > 0 {
+            notify::warning(
+                &self.progress,
+                "reclassify",
+                &format!(
+                    "Re-classified {} commit(s) stored by an older AI detector; \
+                     {} verdict(s) changed.",
+                    stats.stamped, stats.changed
+                ),
+            );
+        }
+        Ok(())
+    }
+
     /// Run the full collection sequence against `db`.
     ///
     /// Each repository is processed sequentially; per-repo failures are
@@ -342,6 +371,11 @@ impl CollectionPipeline {
     /// failures outside the per-repo loop.
     pub async fn run(&self, db: &mut Database) -> Result<CollectionStats> {
         let mut stats = CollectionStats::default();
+
+        // #6748: rows a previous release classified are repaired before the
+        // walk, so a database carried across a marker-set change stops
+        // reporting the verdict the retired detector produced.
+        self.reclassify_stale_commits(db)?;
 
         let resolver = IdentityResolver::from_config(&self.config);
 
@@ -575,6 +609,9 @@ impl CollectionPipeline {
     /// `org_discovered` contains `(owner, repo)` pairs already fetched from
     /// the GitHub org-discovery pass (issue #742); they are unioned with the
     /// per-repo resolver output before the GitHub client is constructed.
+    /// `workspace_discovered` is the Bitbucket equivalent from the
+    /// `bitbucket.workspaces` pass (#5220), unioned with the singular
+    /// `workspace`/`repo_slug` pair the same way.
     ///
     /// Why: separating construction (sync) from org-discovery (async) keeps
     /// the async surface minimal — callers do discovery then hand the results
@@ -587,6 +624,7 @@ impl CollectionPipeline {
         &self,
         stats: &mut CollectionStats,
         org_discovered: &[(String, String)],
+        workspace_discovered: &crate::collect::bitbucket::WorkspaceDiscovery,
     ) -> Vec<Box<dyn PrProvider + Send + Sync>> {
         let mut providers: Vec<Box<dyn PrProvider + Send + Sync>> = Vec::new();
 
@@ -672,9 +710,31 @@ impl CollectionPipeline {
         }
         if let Some(bb_cfg) = &self.config.bitbucket {
             if bb_cfg.fetch_prs {
-                match BitbucketClient::new(bb_cfg) {
-                    Ok(bb) => providers.push(Box::new(bb)),
-                    Err(e) => stats.fail_stage(format!("Bitbucket client init failed: {e}")),
+                // #5220: the repository set is the configured pair unioned with
+                // whatever workspace discovery could read.
+                let repos = crate::collect::bitbucket::resolve_bitbucket_repos(
+                    bb_cfg,
+                    &workspace_discovered.repos,
+                );
+                if repos.is_empty() {
+                    info!(
+                        "Bitbucket PR fetch skipped: no bitbucket.workspace/repo_slug pair \
+                         and bitbucket.workspaces discovery returned no repositories"
+                    );
+                } else {
+                    info!(
+                        repo_count = repos.len(),
+                        "Bitbucket PR fetcher will scan {} repo(s)",
+                        repos.len()
+                    );
+                    // #6084: a truncated discovery walk must reach the run's
+                    // faults, and `pr_pipeline` drains them off the provider.
+                    match BitbucketClient::new_for_repos(bb_cfg, repos)
+                        .map(|c| c.with_notices(workspace_discovered.notices.clone()))
+                    {
+                        Ok(bb) => providers.push(Box::new(bb)),
+                        Err(e) => stats.fail_stage(format!("Bitbucket client init failed: {e}")),
+                    }
                 }
             }
         }
@@ -705,7 +765,16 @@ impl CollectionPipeline {
             Vec::new()
         };
 
-        let providers = self.build_pr_providers(stats, &org_discovered);
+        // #5220: Bitbucket workspace discovery, same phase and same shape as
+        // the GitHub org pass above.
+        let workspace_discovered = match &self.config.bitbucket {
+            Some(bb_cfg) if bb_cfg.fetch_prs => {
+                crate::collect::bitbucket::run_workspace_discovery(bb_cfg).await
+            }
+            _ => crate::collect::bitbucket::WorkspaceDiscovery::default(),
+        };
+
+        let providers = self.build_pr_providers(stats, &org_discovered, &workspace_discovered);
         if providers.is_empty() {
             return;
         }

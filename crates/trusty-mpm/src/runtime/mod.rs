@@ -29,6 +29,10 @@ mod tcode;
 pub(crate) mod test_helpers;
 
 pub(crate) use claude_code::session_id_exists;
+// #6777: the ONE project-dir encoder. Re-exported so nothing outside
+// `claude_code` re-derives Claude Code's `[^A-Za-z0-9]` → `-` fold by hand.
+#[cfg(test)]
+pub(crate) use claude_code::encode_project_dir;
 // #4467: re-exported so the `transcript_saving` doctor check can read the scrub
 // set out of the REAL managed-spawn env prefix rather than restating the marker
 // constant — a check that compared the constant against itself could not fail.
@@ -109,8 +113,9 @@ pub trait RuntimeAdapter: Send + Sync {
     /// Why (#1744): when resuming a managed session that exited ungracefully
     /// (tmux pane killed, terminal closed without `/quit`), the operator wants
     /// the prior conversation restored. Passing `--resume <claude_session_id>`
-    /// restores the exact Claude Code conversation; `--continue` resumes the
-    /// most-recent one when the id is unknown; plain `spawn` starts fresh.
+    /// restores the exact Claude Code conversation; an unknown or stale id
+    /// starts fresh (#6765 removed the `--continue` fallback, which resolved
+    /// against the managed store rather than the intended conversation).
     /// The default implementation delegates to [`Self::spawn`] (no resume flag),
     /// which is correct for the `tcode` adapter and any other runtime that does
     /// not support conversation continuity.

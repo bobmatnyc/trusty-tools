@@ -206,10 +206,29 @@ pub struct IndexEntry {
     pub log: Option<PathBuf>,
     /// Why this unit produced no report, or `None` when it produced one.
     pub failure: Option<String>,
+    /// Gap lines saying this unit's git history is stale (#6782), verbatim.
+    ///
+    /// Why: a repository whose fetch failed produces a report that looks
+    /// complete and is quietly describing a clone of unknown age. It reaches
+    /// the index because the index is what a reader opens first — a caveat
+    /// buried in section 9 of the report itself is read too late, if at all.
+    /// What: empty for every unit whose remotes were reached, which is every
+    /// unit of a producer that runs no fetch. A re-render and a package carry
+    /// none: neither fetches, and neither re-reads the sweep's manifests.
+    pub stale: Vec<String>,
     /// Whether an earlier run did this work and this one carried it over.
     pub carried_over: bool,
     /// Wall clock around this unit, or `None` when this run did not measure it.
     pub duration: Option<Duration>,
+    /// Whether the search-derived evidence tier survived for this unit (#6783).
+    ///
+    /// `false` means trusty-search never indexed this repository, so its
+    /// findings, complexity distribution and health factors are unassessed and
+    /// no trusty-analyze pass ran for it. Each producer reads it off that unit's
+    /// gaps with [`crate::grounding::search_tier_degraded`], which is the same
+    /// line the report itself leads with — one fact with one source, rather than
+    /// a flag that can disagree with the prose beside it.
+    pub search_evidence: bool,
 }
 
 /// Everything the index states, before it is rendered against a directory.
@@ -232,6 +251,29 @@ pub struct IndexReport {
     pub entries: Vec<IndexEntry>,
     /// Wall clock around the whole run.
     pub total: Option<Duration>,
+    /// The findings every unit declared, counted once (#6781).
+    ///
+    /// Why: the index's "Technical debt by tier" table and the `report.json`
+    /// [`debt_rollup::write`](crate::debt_rollup::write) leaves beside it are
+    /// two views of ONE count. Carrying the computed value here rather than
+    /// letting each renderer walk the manifests is what makes it impossible for
+    /// them to disagree.
+    /// What: empty — which renders no table and an empty block — for a producer
+    /// that read no manifests, or a run whose repositories declared nothing.
+    pub debt: crate::debt_rollup::DebtRollup,
+    /// What the OSV lookup found across this run's repositories (#6780).
+    ///
+    /// All three producers pass `Some`: each reads the `osv.json` files that
+    /// hold the scans it is describing — the repository output directories for
+    /// the sweep and the package, and the SOURCE package's manifest directories
+    /// for a re-render, which writes into a fresh directory the collector never
+    /// touched. So the section states what the bundle CARRIES. An EMPTY roll-up
+    /// is what renders the "not run (opt-in)" line — the state that used to be
+    /// indistinguishable from a run that scanned and matched nothing.
+    ///
+    /// `None` is reserved for a caller with no directories to read at all, and
+    /// omits the section rather than claiming either way.
+    pub osv: Option<crate::grounding::osv_rollup::Rollup>,
 }
 
 /// The current local time with its UTC offset, e.g. `2026-08-19 22:40:11 -04:00`.
@@ -290,7 +332,8 @@ fn strip_binary_name(binary: &Path, line: &str) -> String {
 ///
 /// # Postconditions
 /// On `Ok`, `dir/index.md` describes this run: the versions, the timestamp, the
-/// timings, and one link per report file that EXISTS at the moment of writing.
+/// timings, and one link per report file that EXISTS at the moment of writing,
+/// and `dir/report.json` carries the same run's `debt_rollup` block (#6781).
 /// Nothing outside `dir` is written — which is what keeps
 /// `crate::rerender`'s "the source package is only read" postcondition true when
 /// the re-render writes an index of its own.
@@ -304,7 +347,10 @@ fn strip_binary_name(binary: &Path, line: &str) -> String {
 pub fn write(report: &IndexReport, dir: &Path) -> Result<(), AuditError> {
     let path = dir.join(INDEX_FILE);
     std::fs::write(&path, render(report, dir))
-        .map_err(|source| AuditError::WorkDir { path, source })
+        .map_err(|source| AuditError::WorkDir { path, source })?;
+    // #6781: the machine-readable twin of the table `render` just wrote, from
+    // the same value, so a consumer never has to re-derive a total.
+    crate::debt_rollup::write(&report.debt, &report.generated_at, dir)
 }
 
 /// The index's Markdown, with every link relative to `dir`.
@@ -324,10 +370,18 @@ pub fn render(report: &IndexReport, dir: &Path) -> String {
          long each piece took, what every file here is, and where each report is.\n\n",
     );
     summary(report, &mut out);
+    // #6781: every cell comes out of `report.debt`, including the grand total,
+    // so this table and `report.json` state one number rather than two.
+    out.push_str(&report.debt.table());
     versions(report, &mut out);
     inference(report, &mut out);
     timings(report, &mut out);
     reports(report, dir, &mut out);
+    // #6780: before the contents table, because it is a finding about the run
+    // rather than a description of the directory.
+    out.push_str(&crate::grounding::osv_rollup::index_section(
+        report.osv.as_ref(),
+    ));
     contents(report.producer, &mut out);
     out
 }
@@ -345,12 +399,33 @@ fn summary(report: &IndexReport, out: &mut String) {
         "- Produced by: trusty-audit {}\n",
         env!("CARGO_PKG_VERSION")
     ));
+    // #6783: a repository with no search index still produces a report, so the
+    // count above says nothing about whether that report was assessed. When any
+    // unit lost the tier the coverage line is qualified rather than left to read
+    // as complete, and the next line names the number.
+    let unassessed = report.entries.iter().filter(|e| !e.search_evidence).count();
+    let coverage = if unassessed == 0 {
+        String::new()
+    } else {
+        " — not fully assessed, see the next line".to_owned()
+    };
     out.push_str(&format!(
-        "- Reports: {} of {} {}\n",
+        "- Reports: {} of {} {}{}\n",
         produced,
         report.entries.len(),
-        unit
+        unit,
+        coverage
     ));
+    if unassessed > 0 {
+        out.push_str(&format!(
+            "- Search evidence: {} of {} {} audited WITHOUT search evidence — trusty-search never \
+             indexed them, so their findings, complexity distribution and health factors are not \
+             assessed and no trusty-analyze pass ran for them. Each report states its own reason.\n",
+            unassessed,
+            report.entries.len(),
+            unit
+        ));
+    }
     match report.total {
         Some(total) => out.push_str(&format!("- Total wall clock: {}\n\n", human(total))),
         None => out.push_str("- Total wall clock: not recorded\n\n"),
@@ -432,6 +507,11 @@ fn reports(report: &IndexReport, dir: &Path, out: &mut String) {
         if let Some(reason) = &entry.failure {
             out.push_str(&format!("No report — {reason}\n\n"));
         }
+        // #6782: before the links, because the point is to be read before the
+        // report is opened.
+        for line in &entry.stale {
+            out.push_str(&format!("> {line}\n\n"));
+        }
         if entry.files.is_empty() && entry.failure.is_none() {
             out.push_str(&format!(
                 "No files at `{}` — the run recorded this one as finished, so the \
@@ -508,6 +588,10 @@ impl Producer {
             Producer::Sweep => vec![
                 ("index.md", "this file"),
                 (
+                    "report.json",
+                    "the same run's technical-debt roll-up in machine-readable form — counts by tier, by dimension, by repository, and by tier x dimension, so a consumer never re-derives a total from the raw findings (#6781)",
+                ),
+                (
                     "<NN>-<repo>/",
                     "one directory per selected repository, numbered by its place in the selection",
                 ),
@@ -531,6 +615,10 @@ impl Producer {
             Producer::Render => vec![
                 ("index.md", "this file"),
                 (
+                    "report.json",
+                    "the re-rendered manifests' technical-debt roll-up in machine-readable form — counts by tier, by dimension, by repository, and by tier x dimension (#6781)",
+                ),
+                (
                     "<name>/",
                     "one directory per manifest re-rendered, named after the directory the manifest came from",
                 ),
@@ -547,6 +635,10 @@ impl Producer {
             // table and the links above it read in one frame.
             Producer::Package => vec![
                 ("index.md", "this file"),
+                (
+                    "report.json",
+                    "the packaged repositories' technical-debt roll-up in machine-readable form — counts by tier, by dimension, by repository, and by tier x dimension (#6781)",
+                ),
                 (
                     "<NN>-<repo>/manifest.toml",
                     "what `tga audit` collected for that repository — the interface `trusty-audit render` re-renders the report from",
@@ -747,10 +839,29 @@ pub fn write_sweep(
                 crate::run::RepoResult::Failed { reason } => Some(reason.clone()),
                 crate::run::RepoResult::Succeeded => None,
             },
+            // #6782: promoted out of the manifest's gap list so the index
+            // states it beside the repository's own links.
+            stale: run
+                .gaps
+                .iter()
+                .filter(|gap| gap.contains(crate::run::STALE_FETCH_MARKER))
+                .cloned()
+                .collect(),
             carried_over: run.resumed,
             duration: run.duration_ms.map(Duration::from_millis),
+            // #6783: read off the gaps this repository actually stated, which a
+            // resumed entry carries forward with the rest of its record.
+            search_evidence: !crate::grounding::search_tier_degraded(&run.gaps),
         })
         .collect();
+    // #6781: one read of each repository's manifest, feeding both the index's
+    // table and the `report.json` `write` leaves beside it.
+    let debt = crate::debt_rollup::from_manifests(report.repos.iter().map(|run| {
+        (
+            run.repo.name.clone(),
+            run.output.join(crate::manifest::AuditManifest::FILE_NAME),
+        )
+    }));
     let index = IndexReport {
         producer: Producer::Sweep,
         generated_at: local_now(),
@@ -759,6 +870,17 @@ pub fn write_sweep(
         inference: inference.map(InferenceRecord::of),
         entries,
         total: Some(total),
+        debt,
+        // #6780: read back from the `osv.json` each repository's leg wrote, so
+        // the roll-up states what is on disk rather than what this process
+        // believes it did. An empty one renders the "not run (opt-in)" line.
+        osv: Some(crate::grounding::osv_rollup::rollup(
+            &report
+                .repos
+                .iter()
+                .map(|run| run.output.clone())
+                .collect::<Vec<_>>(),
+        )),
     };
     write(&index, &work.path(crate::workdir::Area::Output))
 }
@@ -808,10 +930,23 @@ pub fn write_render(
                 crate::rerender::RenderResult::Failed { reason } => Some(reason.clone()),
                 crate::rerender::RenderResult::Succeeded => None,
             },
+            // A re-render fetches nothing and reads no manifest gaps, so it has
+            // no stale-history fact of its own to state (#6782).
+            stale: Vec::new(),
             carried_over: false,
             duration: rendered.duration_ms.map(Duration::from_millis),
+            // #6783: a re-render indexes any checkout present on this machine,
+            // so it loses the tier the same way a sweep does and says so here.
+            search_evidence: !crate::grounding::search_tier_degraded(&rendered.gaps),
         })
         .collect();
+    // #6781: read from the manifest each report was rendered FROM — the
+    // re-render writes none of its own, and the source package is only read.
+    let debt = crate::debt_rollup::from_manifests(
+        reports
+            .iter()
+            .map(|rendered| (rendered.name.clone(), rendered.manifest.clone())),
+    );
     let index = IndexReport {
         producer: Producer::Render,
         generated_at: local_now(),
@@ -822,6 +957,18 @@ pub fn write_render(
         inference,
         entries,
         total: Some(total),
+        debt,
+        // #6780: a re-render runs no collector, but the package it renders FROM
+        // carries whatever `osv.json` the sweep wrote — beside each source
+        // manifest, not in the fresh `--out` directory this render is filling.
+        // Omitting it made one bundle state "not run (opt-in)" in the re-render's
+        // index and report its advisories in the sweep's.
+        osv: Some(crate::grounding::osv_rollup::rollup(
+            &reports
+                .iter()
+                .filter_map(|rendered| rendered.manifest.parent().map(Path::to_path_buf))
+                .collect::<Vec<_>>(),
+        )),
     };
     write(&index, out_dir)
 }
@@ -839,9 +986,44 @@ mod index_tests {
             dir,
             log: None,
             failure: None,
+            stale: Vec::new(),
             carried_over: false,
             duration: Some(Duration::from_millis(1_500)),
+            search_evidence: true,
         }
+    }
+
+    /// Why (#6782): a repository fetched from nothing renders a full report,
+    /// so the index is where a reader has to see that its history is stale —
+    /// #5321's mid-list Gaps bullet is read after the figures, if at all.
+    /// What: an entry carrying a stale gap line renders it in that
+    /// repository's own section, and a clean entry adds nothing.
+    /// Test: this is the test.
+    #[test]
+    fn a_stale_repository_is_named_in_its_index_section() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("01-acme");
+        std::fs::create_dir_all(&dir).expect("create dir");
+
+        let mut stale = entry("acme/api", dir.clone());
+        stale.stale = vec![format!(
+            "**{} (unsupported URL protocol; class=Net (12))** — repository `acme/api` \
+             could not be fetched from remote `origin`.",
+            crate::run::STALE_FETCH_MARKER
+        )];
+        let clean = entry("acme/web", dir);
+
+        let text = render(&report(Producer::Sweep, vec![stale, clean]), tmp.path());
+
+        assert!(
+            text.contains("> **git history is stale: fetch failed"),
+            "the index does not headline the stale repository:\n{text}"
+        );
+        assert_eq!(
+            text.matches("git history is stale").count(),
+            1,
+            "the clean repository picked up a stale line:\n{text}"
+        );
     }
 
     fn report(producer: Producer, entries: Vec<IndexEntry>) -> IndexReport {
@@ -856,7 +1038,70 @@ mod index_tests {
             inference: None,
             entries,
             total: Some(Duration::from_secs(3_723)),
+            // #6781: no findings, so the fixture's index renders no debt table
+            // and every earlier assertion over it still reads the same page.
+            debt: crate::debt_rollup::DebtRollup::default(),
+            osv: None,
         }
+    }
+
+    /// The index renders the roll-up it is handed rather than counting the
+    /// findings again — mutate the block and the rendered totals follow.
+    ///
+    /// Against `origin/main` at aec14c919 this does not compile: neither
+    /// `IndexReport.debt` nor `crate::debt_rollup` exists.
+    #[test]
+    fn the_index_states_the_debt_rollup_it_is_handed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut index = report(Producer::Sweep, vec![]);
+        assert!(
+            !render(&index, tmp.path()).contains("Technical debt by tier"),
+            "an empty roll-up renders no table"
+        );
+
+        index.debt.tally("acme-api", "RED", "dependencies");
+        index.debt.tally("acme-api", "AMBER", "secrets");
+        index.debt.tally("acme-web", "RED", "license");
+        let rendered = render(&index, tmp.path());
+        assert!(
+            rendered.contains("| **all repositories** | **2** | **1** | **3** |"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("| acme-web | 1 | 0 | 1 |"), "{rendered}");
+
+        index.debt.tally("acme-web", "RED", "churn");
+        let after = render(&index, tmp.path());
+        assert!(
+            after.contains("| **all repositories** | **3** | **1** | **4** |"),
+            "the table follows the roll-up: {after}"
+        );
+    }
+
+    /// `write` leaves the machine-readable twin beside the index, carrying the
+    /// same counts the table states (#6781).
+    #[test]
+    fn the_index_write_leaves_a_report_json_beside_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut index = report(Producer::Sweep, vec![]);
+        index.debt.tally("acme-api", "RED", "dependencies");
+        write(&index, tmp.path()).expect("written");
+
+        let json = std::fs::read_to_string(tmp.path().join(crate::debt_rollup::REPORT_FILE))
+            .expect("report.json");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["debt_rollup"]["total"], 1);
+        assert_eq!(parsed["debt_rollup"]["by_tier"]["RED"], 1);
+        assert_eq!(parsed["generated_at"], "2026-08-19 22:40:11 -04:00");
+
+        let markdown = std::fs::read_to_string(tmp.path().join(INDEX_FILE)).expect("index.md");
+        assert!(
+            markdown.contains("| **all repositories** | **1** | **1** |"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("| `report.json` |"),
+            "the contents table names the new file: {markdown}"
+        );
     }
 
     /// 🔴 #6080's requirement in one assertion: a run over ONE repository still
@@ -884,6 +1129,53 @@ mod index_tests {
             text.contains("[00-acme-api/00-acme-api.md](00-acme-api/00-acme-api.md)"),
             "the one report must be linked relatively: {text}"
         );
+    }
+
+    /// #6783: a repository whose search index never registered still produces a
+    /// report, so the coverage line said "59 of 59" over 59 hollow reports. When
+    /// any unit lost the tier the line is qualified and the count is named.
+    #[test]
+    fn a_run_that_lost_the_search_tier_qualifies_its_coverage_line() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("out");
+        let one = dir.join("00-acme-api");
+        let two = dir.join("01-acme-web");
+        std::fs::create_dir_all(&one).expect("mkdir");
+        std::fs::create_dir_all(&two).expect("mkdir");
+
+        let mut degraded = entry("acme/api", one);
+        degraded.search_evidence = false;
+        let text = render(
+            &report(Producer::Sweep, vec![degraded, entry("acme/web", two)]),
+            &dir,
+        );
+
+        assert!(
+            text.contains("Reports: 2 of 2 repositories — not fully assessed"),
+            "the coverage line must not read as complete: {text}"
+        );
+        assert!(
+            text.contains("Search evidence: 1 of 2 repositories audited WITHOUT search evidence"),
+            "{text}"
+        );
+    }
+
+    /// The other side of it: a run that kept the tier says nothing extra, so the
+    /// qualifier stays a signal rather than boilerplate.
+    #[test]
+    fn a_run_that_kept_the_search_tier_says_nothing_about_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("out");
+        let unit = dir.join("00-acme-api");
+        std::fs::create_dir_all(&unit).expect("mkdir");
+
+        let text = render(
+            &report(Producer::Sweep, vec![entry("acme/api", unit)]),
+            &dir,
+        );
+
+        assert!(text.contains("- Reports: 1 of 1 repository\n"), "{text}");
+        assert!(!text.contains("WITHOUT search evidence"), "{text}");
     }
 
     /// Why: #6135, owner ruling 2026-08-21 — "The report should include which

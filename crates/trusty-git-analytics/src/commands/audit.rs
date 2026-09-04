@@ -686,6 +686,25 @@ fn write_stage_report(
     }
     writeln!(out, "\n{}", stats.summary())?;
 
+    // #6782: one named line per stale repository, ahead of the stage failures.
+    // `stage_mark` renders `ok (N stale)` in the table, which says how many but
+    // never which, and an operator watching a 59-repository sweep cannot act on
+    // a count.
+    if !stats.stale_fetches.is_empty() {
+        writeln!(
+            err,
+            "\n{} — these repositories were collected from stale local refs:",
+            tga::audit::STALE_FETCH_HEADLINE
+        )?;
+        for fetch in &stats.stale_fetches {
+            writeln!(
+                err,
+                "  {}: remote `{}` ({})",
+                fetch.repo, fetch.remote, fetch.error
+            )?;
+        }
+    }
+
     if stats.any_failed() {
         writeln!(
             err,
@@ -902,6 +921,44 @@ mod tests {
         assert!(
             stale_row.contains("ok (2 stale)"),
             "the row must count the repositories that fell back: {stale_row}"
+        );
+    }
+
+    /// Why (#6782): `ok (2 stale)` says how many repositories fell back and
+    /// never which, so an operator watching a 59-repository sweep cannot act on
+    /// it — and the report that would name them is written hours later.
+    /// What: the stale repositories are named on stderr under the same headline
+    /// the report leads its Gaps section with; a clean run writes nothing.
+    /// Test: this is the test.
+    #[test]
+    fn stale_repositories_are_named_on_stderr() {
+        let render_err = |stats: &AuditSweepStats| {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            write_stage_report(stats, &mut out, &mut err).expect("write to an in-memory buffer");
+            String::from_utf8(err).expect("stderr is UTF-8")
+        };
+
+        let mut clean = AuditSweepStats::default();
+        clean.record(SweepStage::Collect, Instant::now(), Ok(()));
+        assert_eq!(render_err(&clean), "", "a clean run writes no stderr");
+
+        let mut stale = AuditSweepStats::default();
+        stale.record(SweepStage::Collect, Instant::now(), Ok(()));
+        stale.record_stale_fetch(StaleFetch {
+            repo: "acme-service".to_string(),
+            remote: "origin".to_string(),
+            error: "unsupported URL protocol; class=Net (12)".to_string(),
+        });
+
+        let text = render_err(&stale);
+        assert!(
+            text.contains(tga::audit::STALE_FETCH_HEADLINE),
+            "the block must carry the report's own headline: {text}"
+        );
+        assert!(
+            text.contains("acme-service") && text.contains("unsupported URL protocol"),
+            "the block must name the repository and the fetch error: {text}"
         );
     }
 

@@ -334,6 +334,12 @@ impl<'a> ConfigValidator<'a> {
     ///
     /// A wholly absent `bitbucket:` block is fine — the integration is just
     /// off.
+    ///
+    /// #5220: `workspaces` is the second way to name a repository set, so
+    /// neither field check is unconditional any more. A config that lists
+    /// workspaces to discover satisfies the workspace check without a singular
+    /// `workspace`, and owes no `repo_slug` at all — the repository set comes
+    /// from `GET /2.0/repositories/{workspace}` instead of from the file.
     fn check_bitbucket_config(&self, errors: &mut Vec<ConfigError>) {
         let Some(bb) = self.config.bitbucket.as_ref() else {
             return;
@@ -342,22 +348,15 @@ impl<'a> ConfigValidator<'a> {
             return;
         }
 
-        if bb
-            .workspace
-            .as_deref()
-            .map(|s| s.trim().is_empty())
-            .unwrap_or(true)
-        {
+        let discovers = !crate::collect::bitbucket::effective_workspaces(&bb.workspaces).is_empty();
+        let named = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+
+        if !discovers && !named(&bb.workspace) {
             errors.push(ConfigError::IncompleteBitbucketConfig {
                 field: "workspace".into(),
             });
         }
-        if bb
-            .repo_slug
-            .as_deref()
-            .map(|s| s.trim().is_empty())
-            .unwrap_or(true)
-        {
+        if !discovers && !named(&bb.repo_slug) {
             errors.push(ConfigError::IncompleteBitbucketConfig {
                 field: "repo_slug".into(),
             });

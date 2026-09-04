@@ -21,6 +21,26 @@ pub struct BbPaged<T> {
     pub next: Option<String>,
 }
 
+/// A single repository record as returned by
+/// `GET /2.0/repositories/{workspace}` (#5220).
+///
+/// Why: workspace discovery needs the `(workspace, repo_slug)` pair and
+/// nothing else, and Bitbucket hands both back in one field. `slug` is kept as
+/// the fallback because a repository missing `full_name` would otherwise be
+/// dropped silently, and a dropped repository is invisible in the output.
+/// What: `full_name` is `"<workspace>/<repo_slug>"`; `slug` is the second half
+/// on its own. Every other field of the (large) repository payload is ignored.
+/// Test: `workspace_page_deserializes_full_name_and_slug`.
+#[derive(Debug, Deserialize)]
+pub struct BbRepository {
+    /// `"<workspace>/<repo_slug>"`.
+    #[serde(default)]
+    pub full_name: Option<String>,
+    /// Repository slug on its own, used when `full_name` is absent.
+    #[serde(default)]
+    pub slug: Option<String>,
+}
+
 /// A single pull-request record as returned by
 /// `GET /2.0/repositories/{workspace}/{repo_slug}/pullrequests`.
 #[derive(Debug, Deserialize)]

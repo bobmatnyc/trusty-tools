@@ -15,6 +15,8 @@ use super::flags::{
     is_revert,
 };
 use super::misc::{backfill_complexity, backfill_quality, backfill_top_level};
+use super::pm_effort::backfill_pm_effort_at;
+use super::pm_work::backfill_pm_work;
 use super::types::{ComplexityBackfillArgs, EffortBackfillArgs, EffortRow};
 
 fn seed(db: &Database, sha: &str, message: &str) {
@@ -1183,4 +1185,913 @@ fn backfill_effort_tshirt_tiny_corpus_fallback() {
         stored.is_none(),
         "no thresholds should be stored for tiny corpus"
     );
+}
+
+// --- #3916: PM work meaningfulness tier ------------------------------------
+
+/// Seed one `work_items` row with a JIRA-shaped `raw_json` payload.
+fn seed_work_item(db: &Database, id: &str, title: &str, reporter: &str, description: Option<&str>) {
+    seed_work_item_in_source(db, id, "jira", title, reporter, description);
+}
+
+/// Seed one `work_items` row under an explicit `source`.
+///
+/// Separate from [`seed_work_item`] so a test can put the SAME ticket key in
+/// two PM sources — `work_items` is keyed `(id, source)` precisely because
+/// ticket ids are unique per source, not globally.
+fn seed_work_item_in_source(
+    db: &Database,
+    id: &str,
+    source: &str,
+    title: &str,
+    reporter: &str,
+    description: Option<&str>,
+) {
+    let raw = serde_json::json!({
+        "fields": {
+            "reporter": { "displayName": reporter },
+            "description": description,
+            "created": "2026-01-15T09:30:00.000+0000",
+        }
+    })
+    .to_string();
+    db.connection()
+        .execute(
+            "INSERT OR REPLACE INTO work_items \
+             (id, source, title, status, item_type, raw_json) \
+             VALUES (?1, ?2, ?3, 'Done', 'Task', ?4)",
+            params![id, source, title, raw],
+        )
+        .expect("insert work item");
+}
+
+/// Seed one `fact_ticket_transitions` row so the BOT_FILED split has input.
+fn seed_transition(db: &Database, ticket: &str, author: &str) {
+    db.connection()
+        .execute(
+            "INSERT OR REPLACE INTO fact_ticket_transitions \
+             (ticket_key, project_key, from_status, to_status, transitioned_at, author, synced_at) \
+             VALUES (?1, 'PM', 'To Do', 'In Progress', '2026-01-16T10:00:00Z', ?2, 1)",
+            params![ticket, author],
+        )
+        .expect("insert transition");
+}
+
+/// Read back `(is_meaningful, exclusion_reason, formula_version)` for a ticket.
+fn read_verdict(db: &Database, id: &str) -> (i64, String, String) {
+    read_verdict_in_source(db, id, "jira")
+}
+
+/// Read back one verdict, scoped to an explicit `source`.
+fn read_verdict_in_source(db: &Database, id: &str, source: &str) -> (i64, String, String) {
+    db.connection()
+        .query_row(
+            "SELECT is_meaningful, exclusion_reason, formula_version FROM fact_pm_work \
+             WHERE work_item_id = ?1 AND work_item_source = ?2",
+            params![id, source],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap_or_else(|e| panic!("read verdict for {source}/{id}: {e}"))
+}
+
+/// Seed one ticket per exclusion reason plus one meaningful ticket, so a
+/// single backfill run proves every branch of the classifier reaches the
+/// table with the reason the rule names.
+fn seed_pm_work_corpus(db: &Database) {
+    // TERSE_TITLE — the Fabiana sub-task case from issue #3916.
+    seed_work_item(db, "PM-10215", "Final", "Fabiana Calabrese", None);
+    // AUTO_GENERATED — bot reporter, nobody ever moved it.
+    seed_work_item(
+        db,
+        "PM-20001",
+        "Bump serde from 1.0.203 to 1.0.204 across the workspace",
+        "dependabot[bot]",
+        Some("Automated dependency update."),
+    );
+    // BOT_FILED — bot reporter, a human transitioned it afterwards.
+    seed_work_item(
+        db,
+        "PM-20002",
+        "Nightly integration suite failed on the pricing service",
+        "Jenkins Automation",
+        Some("Six assertions failed in the rate-shop regression pack."),
+    );
+    seed_transition(db, "PM-20002", "Fabiana Calabrese");
+    // NONE — a substantive story.
+    seed_work_item(
+        db,
+        "PM-30001",
+        "Blend the occupancy forecast across four comparable weeks",
+        "Fabiana Calabrese",
+        Some(
+            "As a revenue manager I want the occupancy forecast to blend the last four \
+             comparable weeks so that one anomalous weekend stops dominating next month's \
+             rate recommendations.",
+        ),
+    );
+}
+
+#[test]
+fn backfill_pm_work_classifies_each_exclusion_reason() {
+    let mut db = Database::open_in_memory().expect("db");
+    seed_pm_work_corpus(&db);
+
+    backfill_pm_work(&mut db, false).expect("backfill");
+
+    for (id, meaningful, reason) in [
+        ("PM-10215", 0, "TERSE_TITLE"),
+        ("PM-20001", 0, "AUTO_GENERATED"),
+        ("PM-20002", 0, "BOT_FILED"),
+        ("PM-30001", 1, "NONE"),
+    ] {
+        let (is_meaningful, stored_reason, version) = read_verdict(&db, id);
+        assert_eq!(is_meaningful, meaningful, "{id} is_meaningful");
+        assert_eq!(stored_reason, reason, "{id} exclusion_reason");
+        assert_eq!(version, "pm-work-1", "{id} formula_version");
+    }
+}
+
+/// The BOT_FILED / AUTO_GENERATED split reads `fact_ticket_transitions`, so
+/// the same bot-filed ticket must flip reason once a human moves it — and
+/// must NOT flip when the mover is another bot.
+#[test]
+fn pm_work_backfill_marks_a_bot_filed_ticket_when_a_human_moved_it() {
+    let mut db = Database::open_in_memory().expect("db");
+    seed_work_item(
+        &db,
+        "PM-40001",
+        "Dependency scan flagged three advisories in the pricing service",
+        "dependabot[bot]",
+        Some("Three advisories, one of them high severity."),
+    );
+
+    backfill_pm_work(&mut db, false).expect("first backfill");
+    assert_eq!(read_verdict(&db, "PM-40001").1, "AUTO_GENERATED");
+
+    // A second bot moving it is not human contact.
+    seed_transition(&db, "PM-40001", "github-actions");
+    backfill_pm_work(&mut db, false).expect("second backfill");
+    assert_eq!(
+        read_verdict(&db, "PM-40001").1,
+        "AUTO_GENERATED",
+        "a bot transition must not count as human triage"
+    );
+
+    seed_transition(&db, "PM-40001", "Charles Abbott");
+    backfill_pm_work(&mut db, false).expect("third backfill");
+    assert_eq!(read_verdict(&db, "PM-40001").1, "BOT_FILED");
+}
+
+/// Re-running the classifier over an unchanged corpus must rewrite the same
+/// rows and create none: the upsert is keyed on
+/// `(work_item_id, work_item_source)`.
+#[test]
+fn backfill_pm_work_is_idempotent() {
+    let mut db = Database::open_in_memory().expect("db");
+    seed_pm_work_corpus(&db);
+
+    backfill_pm_work(&mut db, false).expect("first run");
+    let first: Vec<(String, i64, String)> = read_all_verdicts(&db);
+    assert_eq!(first.len(), 4, "one row per work item");
+
+    backfill_pm_work(&mut db, false).expect("second run");
+    let second = read_all_verdicts(&db);
+    assert_eq!(
+        first, second,
+        "a second run must produce identical rows, not duplicates"
+    );
+}
+
+/// Every `(work_item_id, is_meaningful, exclusion_reason)` in id order.
+fn read_all_verdicts(db: &Database) -> Vec<(String, i64, String)> {
+    let conn = db.connection();
+    let mut stmt = conn
+        .prepare(
+            "SELECT work_item_id, is_meaningful, exclusion_reason FROM fact_pm_work \
+             ORDER BY work_item_id",
+        )
+        .expect("prepare");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .expect("query");
+    rows.map(|r| r.expect("row")).collect()
+}
+
+#[test]
+fn backfill_pm_work_dry_run_writes_nothing() {
+    let mut db = Database::open_in_memory().expect("db");
+    seed_pm_work_corpus(&db);
+
+    backfill_pm_work(&mut db, true).expect("dry run");
+
+    let count: i64 = db
+        .connection()
+        .query_row("SELECT COUNT(*) FROM fact_pm_work", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(count, 0, "--dry-run must not write any row");
+}
+
+/// A ticket whose payload carries no reporter, description, or created date
+/// must still get a row — the classifier treats an absent reporter as human,
+/// so only the title decides.
+#[test]
+fn backfill_pm_work_handles_a_payload_with_no_extractable_fields() {
+    let mut db = Database::open_in_memory().expect("db");
+    db.connection()
+        .execute(
+            "INSERT INTO work_items (id, source, title, status, item_type) \
+             VALUES ('PM-50001', 'jira', 'Historical Occupancy', 'Done', 'Sub-task')",
+            [],
+        )
+        .expect("insert");
+
+    backfill_pm_work(&mut db, false).expect("backfill");
+
+    let (meaningful, reason, _) = read_verdict(&db, "PM-50001");
+    assert_eq!(meaningful, 0);
+    assert_eq!(reason, "TERSE_TITLE");
+
+    let (pm_name, week_key): (Option<String>, Option<String>) = db
+        .connection()
+        .query_row(
+            "SELECT pm_name, week_key FROM fact_pm_work WHERE work_item_id = 'PM-50001'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("read");
+    assert_eq!(pm_name, None, "no reporter in the payload");
+    assert_eq!(week_key, None, "no creation date in the payload");
+}
+
+/// A ticket key is unique per PM source, not globally (`work_items` is keyed
+/// `(id, source)`), but `fact_ticket_transitions` carries no source column —
+/// every row in it comes from the JIRA sync (#3966). Looking a candidate up
+/// by bare ticket key therefore let a JIRA ticket's human transition leak
+/// onto a same-keyed ticket from another source, flipping that one from
+/// AUTO_GENERATED to BOT_FILED.
+#[test]
+fn a_human_transition_does_not_leak_across_pm_sources() {
+    let mut db = Database::open_in_memory().expect("db");
+    let title = "Retry budget exhausted on the rate-shop worker";
+    let body = Some("The worker gave up after 40 attempts.");
+    // Same key, two sources, both filed by a bot.
+    seed_work_item_in_source(&db, "ENG-42", "jira", title, "dependabot[bot]", body);
+    seed_work_item_in_source(&db, "ENG-42", "linear", title, "dependabot[bot]", body);
+    // Only the JIRA ticket was ever moved by a person.
+    seed_transition(&db, "ENG-42", "Charles Abbott");
+
+    backfill_pm_work(&mut db, false).expect("backfill");
+
+    assert_eq!(
+        read_verdict_in_source(&db, "ENG-42", "jira").1,
+        "BOT_FILED",
+        "the JIRA ticket really was transitioned by a human"
+    );
+    assert_eq!(
+        read_verdict_in_source(&db, "ENG-42", "linear").1,
+        "AUTO_GENERATED",
+        "the Linear ticket has no transitions of its own; JIRA's must not leak onto it"
+    );
+}
+
+// --- `tga backfill pm-effort` (#3915) ---------------------------------------
+
+/// One seeded ticket for the effort-tier tests.
+struct EffortItemSpec<'a> {
+    id: &'a str,
+    source: &'a str,
+    title: &'a str,
+    item_type: &'a str,
+    reporter: &'a str,
+    description: &'a str,
+    created: &'a str,
+    parent: Option<&'a str>,
+    story_points: Option<f64>,
+}
+
+impl<'a> EffortItemSpec<'a> {
+    /// A substantive JIRA story authored well before the recency floor.
+    fn new(id: &'a str, title: &'a str) -> Self {
+        Self {
+            id,
+            source: "jira",
+            title,
+            item_type: "Story",
+            reporter: "Fabiana Calabrese",
+            description: "",
+            created: "2026-01-15T09:30:00.000+0000",
+            parent: None,
+            story_points: None,
+        }
+    }
+}
+
+/// Seed one `work_items` row with the effort-tier fields: item type, parent
+/// key, story points, description and creation date.
+///
+/// Separate from [`seed_work_item`], which seeds only what the WORK tier
+/// reads. Both write the same `raw_json` shape, so a ticket seeded here is
+/// also classifiable by `backfill_pm_work` — which is how these tests get
+/// the `fact_pm_work` rows the effort tier gates on.
+fn seed_effort_item(spec: &EffortItemSpec<'_>, db: &Database) {
+    let mut fields = serde_json::json!({
+        "reporter": { "displayName": spec.reporter },
+        "description": spec.description,
+        "created": spec.created,
+    });
+    if let Some(parent) = spec.parent {
+        fields["parent"] = serde_json::json!({ "key": parent });
+    }
+    if let Some(points) = spec.story_points {
+        fields["customfield_10004"] = serde_json::json!(points);
+    }
+    let raw = serde_json::json!({ "fields": fields }).to_string();
+    db.connection()
+        .execute(
+            "INSERT OR REPLACE INTO work_items \
+             (id, source, title, status, item_type, raw_json) \
+             VALUES (?1, ?2, ?3, 'In Progress', ?4, ?5)",
+            params![spec.id, spec.source, spec.title, spec.item_type, raw],
+        )
+        .expect("insert effort work item");
+}
+
+/// A description body of exactly `words` words, so a test can state the
+/// description term it expects instead of counting prose by hand.
+fn body_of(words: usize) -> String {
+    vec!["forecast"; words].join(" ")
+}
+
+/// Seed one `fact_jira_comment_detail` row.
+fn seed_comment(db: &Database, ticket: &str, comment_id: &str) {
+    db.connection()
+        .execute(
+            "INSERT OR REPLACE INTO fact_jira_comment_detail \
+             (ticket_key, comment_id, project_key, author, created_at, body_len, synced_at) \
+             VALUES (?1, ?2, 'PM', 'Fabiana Calabrese', '2026-01-16T10:00:00Z', 120, 1)",
+            params![ticket, comment_id],
+        )
+        .expect("insert comment");
+}
+
+/// Seed one `fact_ticket_transitions` row at a distinct timestamp, so
+/// repeat transitions on one ticket do not collide on the primary key.
+fn seed_transition_at(db: &Database, ticket: &str, at: &str) {
+    db.connection()
+        .execute(
+            "INSERT OR REPLACE INTO fact_ticket_transitions \
+             (ticket_key, project_key, from_status, to_status, transitioned_at, author, synced_at) \
+             VALUES (?1, 'PM', 'To Do', 'In Progress', ?2, 'Fabiana Calabrese', 1)",
+            params![ticket, at],
+        )
+        .expect("insert transition");
+}
+
+/// The fixed instant every effort test scores at, so ticket age is a stated
+/// number of days rather than whatever `Utc::now()` happens to be.
+fn scoring_instant() -> chrono::DateTime<chrono::Utc> {
+    "2026-03-01T00:00:00Z".parse().expect("parse instant")
+}
+
+/// An RFC3339 creation date `days` before [`scoring_instant`].
+fn created_days_before(days: i64) -> String {
+    (scoring_instant() - chrono::Duration::days(days)).to_rfc3339()
+}
+
+/// `(effort_score, effort_bucket, score_status, inputs_present, age_days)`.
+type EffortRowValues = (Option<f64>, Option<String>, String, String, Option<i64>);
+
+/// Read back the score row a test asserts on.
+fn read_effort(db: &Database, id: &str) -> EffortRowValues {
+    read_effort_in_source(db, id, "jira")
+}
+
+/// Read back one score row, scoped to an explicit `source`.
+fn read_effort_in_source(db: &Database, id: &str, source: &str) -> EffortRowValues {
+    db.connection()
+        .query_row(
+            "SELECT effort_score, effort_bucket, score_status, inputs_present, \
+             age_days_at_score FROM fact_pm_effort \
+             WHERE work_item_id = ?1 AND work_item_source = ?2",
+            params![id, source],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap_or_else(|e| panic!("read effort row for {source}/{id}: {e}"))
+}
+
+/// Whether `fact_pm_effort` holds a row for this ticket at all.
+fn has_effort_row(db: &Database, id: &str) -> bool {
+    let count: i64 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM fact_pm_effort WHERE work_item_id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .expect("count effort rows");
+    count > 0
+}
+
+/// Read one integer column of one `fact_pm_effort` row.
+fn read_effort_int(db: &Database, id: &str, source: &str, column: &str) -> i64 {
+    let sql = format!(
+        "SELECT {column} FROM fact_pm_effort \
+         WHERE work_item_id = ?1 AND work_item_source = ?2"
+    );
+    db.connection()
+        .query_row(&sql, params![id, source], |r| r.get(0))
+        .unwrap_or_else(|e| panic!("read {column} for {source}/{id}: {e}"))
+}
+
+/// Run the WORK tier, then the EFFORT tier at [`scoring_instant`]. The
+/// effort tier reads `fact_pm_work`, so a test that skipped the first call
+/// would be asserting against an empty candidate set.
+fn run_both_tiers(db: &mut Database) {
+    backfill_pm_work(db, false).expect("pm-work backfill");
+    backfill_pm_effort_at(db, false, scoring_instant()).expect("pm-effort backfill");
+}
+
+/// Three tickets whose inputs put them in the three different buckets, so a
+/// single run proves the bucket boundaries reach the table.
+#[test]
+fn backfill_pm_effort_scores_each_bucket() {
+    let mut db = Database::open_in_memory().expect("db");
+
+    // LOW: a real story with a short body and nothing else. 1.0 + 40/40 = 2.0.
+    let low_body = body_of(40);
+    let mut low = EffortItemSpec::new("PM-60001", "Cap the rate-shop retry budget");
+    low.description = &low_body;
+    seed_effort_item(&low, &db);
+
+    // MEDIUM: 1.0 + 320/40 + 6*0.8 + 4*0.5 = 15.8.
+    let medium_body = body_of(320);
+    let mut medium = EffortItemSpec::new("PM-60002", "Blend the occupancy forecast");
+    medium.description = &medium_body;
+    seed_effort_item(&medium, &db);
+    for n in 1..=6 {
+        seed_comment(&db, "PM-60002", &format!("c{n}"));
+    }
+    for n in 1..=4 {
+        seed_transition_at(&db, "PM-60002", &format!("2026-01-2{n}T10:00:00Z"));
+    }
+
+    // HIGH: an epic with nine children. 1.0 + 18.0 + 10.0 + 4*0.8 + 3.0 = 35.2.
+    let high_body = body_of(400);
+    let mut high = EffortItemSpec::new("PM-60003", "ML Plat - Observability and Monitoring");
+    high.item_type = "Epic";
+    high.description = &high_body;
+    high.story_points = Some(8.0);
+    seed_effort_item(&high, &db);
+    for n in 1..=9 {
+        let child_id = format!("PM-6100{n}");
+        let mut child = EffortItemSpec::new(&child_id, "Wire the metric exporter into the mesh");
+        child.parent = Some("PM-60003");
+        seed_effort_item(&child, &db);
+    }
+    for n in 1..=4 {
+        seed_comment(&db, "PM-60003", &format!("h{n}"));
+    }
+
+    run_both_tiers(&mut db);
+
+    assert_eq!(
+        read_effort(&db, "PM-60001"),
+        (
+            Some(2.0),
+            Some("LOW".to_string()),
+            "SCORED".to_string(),
+            "DESCRIPTION".to_string(),
+            Some(44)
+        )
+    );
+    assert_eq!(
+        read_effort(&db, "PM-60002"),
+        (
+            Some(15.8),
+            Some("MEDIUM".to_string()),
+            "SCORED".to_string(),
+            "DESCRIPTION,COMMENTS,TRANSITIONS".to_string(),
+            Some(44)
+        )
+    );
+    assert_eq!(
+        read_effort(&db, "PM-60003"),
+        (
+            Some(35.2),
+            Some("HIGH".to_string()),
+            "SCORED".to_string(),
+            "CHILDREN,DESCRIPTION,COMMENTS,STORY_POINTS".to_string(),
+            Some(44)
+        )
+    );
+
+    let version: String = db
+        .connection()
+        .query_row(
+            "SELECT DISTINCT formula_version FROM fact_pm_effort",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read formula_version");
+    assert_eq!(version, "pm-effort-1");
+}
+
+/// Issue #3915's motivating case: three epics authored the same day showed
+/// zero children at scoring time. Scoring them would have read "not yet
+/// decomposed" as "simple"; the row must say the score was deferred.
+#[test]
+fn a_recent_epic_is_recorded_as_deferred_not_scored_zero() {
+    let mut db = Database::open_in_memory().expect("db");
+    let body = body_of(60);
+
+    for (id, age) in [("ML-2314", 0), ("ML-2315", 3), ("ML-2316", 6)] {
+        let created = created_days_before(age);
+        let mut epic = EffortItemSpec::new(id, "ML Plat - Orchestration Layer");
+        epic.item_type = "Epic";
+        epic.reporter = "Rohit Puntambekar";
+        epic.description = &body;
+        epic.created = &created;
+        seed_effort_item(&epic, &db);
+    }
+    // The same epic exactly at the floor IS scored.
+    let created = created_days_before(7);
+    let mut old_epic = EffortItemSpec::new("ML-2200", "ML Plat - Feature Store");
+    old_epic.item_type = "Epic";
+    old_epic.reporter = "Rohit Puntambekar";
+    old_epic.description = &body;
+    old_epic.created = &created;
+    seed_effort_item(&old_epic, &db);
+
+    run_both_tiers(&mut db);
+
+    for (id, age) in [("ML-2314", 0), ("ML-2315", 3), ("ML-2316", 6)] {
+        let (score, bucket, status, inputs, age_days) = read_effort(&db, id);
+        assert_eq!(score, None, "{id} must not carry a score");
+        assert_eq!(bucket, None, "{id} must not carry a bucket");
+        assert_eq!(status, "DEFERRED_RECENT", "{id} status");
+        assert_eq!(inputs, "NONE", "{id} contributed no terms");
+        assert_eq!(age_days, Some(age), "{id} age is still recorded");
+    }
+
+    let (score, bucket, status, _, age_days) = read_effort(&db, "ML-2200");
+    assert_eq!(score, Some(2.5), "1.0 + 60/40 = 2.5");
+    assert_eq!(bucket.as_deref(), Some("LOW"));
+    assert_eq!(status, "SCORED");
+    assert_eq!(age_days, Some(7));
+}
+
+/// The recency floor guards types whose child count accrues after creation.
+/// A bug filed yesterday has no such input, so deferring it would withhold a
+/// score for nothing.
+#[test]
+fn a_recent_bug_is_scored_rather_than_deferred() {
+    let mut db = Database::open_in_memory().expect("db");
+    let body = body_of(80);
+    let created = created_days_before(1);
+    let mut bug = EffortItemSpec::new("PM-70001", "Rate-shop worker drops the retry budget");
+    bug.item_type = "Bug";
+    bug.description = &body;
+    bug.created = &created;
+    seed_effort_item(&bug, &db);
+
+    run_both_tiers(&mut db);
+
+    let (score, bucket, status, _, age_days) = read_effort(&db, "PM-70001");
+    assert_eq!(score, Some(3.0), "1.0 + 80/40 = 3.0");
+    assert_eq!(bucket.as_deref(), Some("LOW"));
+    assert_eq!(status, "SCORED");
+    assert_eq!(age_days, Some(1));
+}
+
+/// A ticket whose payload carries no parseable creation date cannot be
+/// aged, so the floor cannot fire; it is scored on its other inputs and the
+/// row records the unknown age as NULL.
+#[test]
+fn a_ticket_with_no_creation_date_is_scored_not_deferred() {
+    let mut db = Database::open_in_memory().expect("db");
+    db.connection()
+        .execute(
+            "INSERT INTO work_items (id, source, title, status, item_type, raw_json) \
+             VALUES ('PM-70002', 'jira', 'ML Plat - Serving Layer', 'To Do', 'Epic', \
+                     '{\"fields\":{\"description\":\"one two three four\"}}')",
+            [],
+        )
+        .expect("insert");
+
+    run_both_tiers(&mut db);
+
+    let (score, bucket, status, inputs, age_days) = read_effort(&db, "PM-70002");
+    assert_eq!(score, Some(1.1), "1.0 + 4/40 = 1.1");
+    assert_eq!(bucket.as_deref(), Some("LOW"));
+    assert_eq!(status, "SCORED");
+    assert_eq!(inputs, "DESCRIPTION");
+    assert_eq!(age_days, None, "an unparseable created date stores NULL");
+}
+
+/// Issue #3915: story_points is 76% NULL across four per-project
+/// custom-field IDs. Two otherwise identical tickets must differ only by the
+/// story-point term, and the one without must still carry a real score.
+#[test]
+fn missing_story_points_degrade_the_score_and_are_named_on_the_row() {
+    let mut db = Database::open_in_memory().expect("db");
+    let body = body_of(200);
+
+    let mut with_points = EffortItemSpec::new("PM-80001", "Blend the occupancy forecast");
+    with_points.description = &body;
+    with_points.story_points = Some(5.0);
+    seed_effort_item(&with_points, &db);
+
+    let mut without = EffortItemSpec::new("PM-80002", "Blend the compression forecast");
+    without.description = &body;
+    seed_effort_item(&without, &db);
+
+    // A value parked in the story-point field that is not an estimate must
+    // be treated as absent rather than crashing or skewing the score.
+    let mut nonsense = EffortItemSpec::new("PM-80003", "Blend the pickup forecast");
+    nonsense.description = &body;
+    nonsense.story_points = Some(86_400_000.0);
+    seed_effort_item(&nonsense, &db);
+
+    run_both_tiers(&mut db);
+
+    let (score, _, _, inputs, _) = read_effort(&db, "PM-80001");
+    assert_eq!(score, Some(8.0), "1.0 + 200/40 + 5*0.4 = 8.0");
+    assert_eq!(inputs, "DESCRIPTION,STORY_POINTS");
+
+    for id in ["PM-80002", "PM-80003"] {
+        let (score, bucket, status, inputs, _) = read_effort(&db, id);
+        assert_eq!(score, Some(6.0), "{id}: the description term still scores");
+        assert_eq!(bucket.as_deref(), Some("LOW"), "{id} bucket");
+        assert_eq!(status, "SCORED", "{id} status");
+        assert_eq!(
+            inputs, "DESCRIPTION",
+            "{id}: the row must say the story-point term did not fire"
+        );
+    }
+
+    let stored: Option<f64> = db
+        .connection()
+        .query_row(
+            "SELECT story_points FROM fact_pm_effort WHERE work_item_id = 'PM-80003'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read story_points");
+    assert_eq!(stored, None, "an implausible value is stored as NULL");
+}
+
+/// The effort tier scores the WORK tier's output. A ticket `fact_pm_work`
+/// excluded must get no row at all — scoring it would re-admit through the
+/// effort tier exactly the boilerplate the work tier removed.
+#[test]
+fn an_excluded_ticket_gets_no_effort_row() {
+    let mut db = Database::open_in_memory().expect("db");
+    seed_pm_work_corpus(&db);
+
+    run_both_tiers(&mut db);
+
+    for excluded in ["PM-10215", "PM-20001", "PM-20002"] {
+        assert!(
+            !has_effort_row(&db, excluded),
+            "{excluded} was excluded by fact_pm_work and must not be scored"
+        );
+    }
+    assert!(
+        has_effort_row(&db, "PM-30001"),
+        "the meaningful story must be scored"
+    );
+
+    let count: i64 = db
+        .connection()
+        .query_row("SELECT COUNT(*) FROM fact_pm_effort", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(count, 1, "exactly one of the four tickets is meaningful");
+}
+
+/// The meaningfulness gate is only durable if it is re-applied: a ticket
+/// that `pm-work` reclassifies as boilerplate must lose the effort row an
+/// earlier run wrote, or it goes on feeding every dashboard reading it.
+#[test]
+fn a_ticket_that_becomes_non_meaningful_loses_its_effort_row() {
+    let mut db = Database::open_in_memory().expect("db");
+    let body = body_of(120);
+    let mut story = EffortItemSpec::new("PM-90001", "Blend the occupancy forecast");
+    story.description = &body;
+    seed_effort_item(&story, &db);
+
+    run_both_tiers(&mut db);
+    assert!(has_effort_row(&db, "PM-90001"));
+
+    // The ticket is re-collected as a terse stub with no body, so the work
+    // tier now excludes it.
+    db.connection()
+        .execute(
+            "UPDATE work_items SET title = 'Final', raw_json = '{}' WHERE id = 'PM-90001'",
+            [],
+        )
+        .expect("update");
+
+    run_both_tiers(&mut db);
+    assert!(
+        !has_effort_row(&db, "PM-90001"),
+        "the stale effort row must be pruned once the ticket stops being meaningful"
+    );
+}
+
+/// Children are counted per source from the parent keys their own payloads
+/// carry, and a child's own meaningfulness verdict is irrelevant — a terse
+/// sub-task is still evidence the parent was decomposed.
+#[test]
+fn epic_children_are_counted_from_parent_keys() {
+    let mut db = Database::open_in_memory().expect("db");
+    let mut epic = EffortItemSpec::new("PM-91000", "ML Plat - Deployment and Serving Layer");
+    epic.item_type = "Epic";
+    seed_effort_item(&epic, &db);
+
+    // Two substantive children and one terse stub the work tier excludes.
+    for id in ["PM-91001", "PM-91002"] {
+        let mut child = EffortItemSpec::new(id, "Wire the exporter into the service mesh");
+        child.parent = Some("PM-91000");
+        seed_effort_item(&child, &db);
+    }
+    let mut stub = EffortItemSpec::new("PM-91003", "Final");
+    stub.parent = Some("PM-91000");
+    seed_effort_item(&stub, &db);
+    // A same-keyed epic in another source must not inherit the JIRA children.
+    let mut linear_epic = EffortItemSpec::new("PM-91000", "ML Plat - Deployment and Serving Layer");
+    linear_epic.source = "linear";
+    linear_epic.item_type = "Epic";
+    seed_effort_item(&linear_epic, &db);
+
+    run_both_tiers(&mut db);
+
+    assert_eq!(
+        read_effort_int(&db, "PM-91000", "jira", "epic_children_count"),
+        3,
+        "the terse stub still counts as decomposition"
+    );
+    assert_eq!(
+        read_effort(&db, "PM-91000").0,
+        Some(7.0),
+        "1.0 + 3 * 2.0 = 7.0"
+    );
+    assert_eq!(
+        read_effort_int(&db, "PM-91000", "linear", "epic_children_count"),
+        0,
+        "JIRA's children must not leak onto a same-keyed Linear epic"
+    );
+}
+
+/// `fact_jira_comment_detail` and `fact_ticket_transitions` carry no source
+/// column — every row in both comes from the JIRA sync (#3966). Looking a
+/// candidate up by bare ticket key would let a JIRA ticket's discussion
+/// inflate the score of a same-keyed ticket from another source.
+#[test]
+fn jira_comments_and_transitions_do_not_leak_across_pm_sources() {
+    let mut db = Database::open_in_memory().expect("db");
+    let body = body_of(40);
+    for source in ["jira", "linear"] {
+        let mut item = EffortItemSpec::new("ENG-42", "Retry budget exhausted on the worker");
+        item.source = source;
+        item.description = &body;
+        seed_effort_item(&item, &db);
+    }
+    for n in 1..=5 {
+        seed_comment(&db, "ENG-42", &format!("c{n}"));
+        seed_transition_at(&db, "ENG-42", &format!("2026-01-2{n}T10:00:00Z"));
+    }
+
+    run_both_tiers(&mut db);
+
+    assert_eq!(
+        read_effort_in_source(&db, "ENG-42", "jira"),
+        (
+            Some(8.5), // 1.0 + 1.0 + 5*0.8 + 5*0.5
+            Some("LOW".to_string()),
+            "SCORED".to_string(),
+            "DESCRIPTION,COMMENTS,TRANSITIONS".to_string(),
+            Some(44)
+        )
+    );
+    assert_eq!(
+        read_effort_in_source(&db, "ENG-42", "linear"),
+        (
+            Some(2.0), // 1.0 + 1.0, and nothing else
+            Some("LOW".to_string()),
+            "SCORED".to_string(),
+            "DESCRIPTION".to_string(),
+            Some(44)
+        ),
+        "the Linear ticket has no discussion of its own; JIRA's must not leak onto it"
+    );
+}
+
+/// Every stored column except `computed_at` — which is by design the
+/// wall-clock instant of the write — rendered as one comparable string per
+/// row, so the idempotency check compares whole rows rather than a subset.
+fn read_all_effort_rows(db: &Database) -> Vec<String> {
+    let conn = db.connection();
+    let mut stmt = conn
+        .prepare(
+            "SELECT work_item_id, work_item_source, pm_name, week_key, effort_score, \
+             effort_bucket, score_status, epic_children_count, description_word_count, \
+             comment_count, transition_count, story_points, inputs_present, \
+             age_days_at_score, formula_version FROM fact_pm_effort \
+             ORDER BY work_item_source, work_item_id",
+        )
+        .expect("prepare");
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(format!(
+                "{}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}|{}|{}|{}|{:?}|{}|{:?}|{}",
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<f64>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, i64>(8)?,
+                r.get::<_, i64>(9)?,
+                r.get::<_, i64>(10)?,
+                r.get::<_, Option<f64>>(11)?,
+                r.get::<_, String>(12)?,
+                r.get::<_, Option<i64>>(13)?,
+                r.get::<_, String>(14)?,
+            ))
+        })
+        .expect("query");
+    rows.map(|r| r.expect("row")).collect()
+}
+
+#[test]
+fn backfill_pm_effort_is_idempotent() {
+    let mut db = Database::open_in_memory().expect("db");
+    let body = body_of(200);
+
+    let mut epic = EffortItemSpec::new("PM-92000", "ML Plat - Orchestration Layer");
+    epic.item_type = "Epic";
+    epic.description = &body;
+    epic.story_points = Some(8.0);
+    seed_effort_item(&epic, &db);
+    for n in 1..=3 {
+        let child_id = format!("PM-9200{n}");
+        let mut child = EffortItemSpec::new(&child_id, "Wire the scheduler into the mesh");
+        child.parent = Some("PM-92000");
+        child.description = &body;
+        seed_effort_item(&child, &db);
+    }
+    // A deferred epic, so the idempotency check covers the NULL-score shape.
+    let created = created_days_before(2);
+    let mut recent = EffortItemSpec::new("PM-92100", "ML Plat - Observability");
+    recent.item_type = "Epic";
+    recent.description = &body;
+    recent.created = &created;
+    seed_effort_item(&recent, &db);
+    seed_comment(&db, "PM-92000", "c1");
+    seed_transition_at(&db, "PM-92000", "2026-01-21T10:00:00Z");
+
+    run_both_tiers(&mut db);
+    let first = read_all_effort_rows(&db);
+    assert_eq!(first.len(), 5, "one row per meaningful ticket");
+
+    backfill_pm_effort_at(&mut db, false, scoring_instant()).expect("second run");
+    let second = read_all_effort_rows(&db);
+    assert_eq!(
+        first, second,
+        "a second run at the same instant must produce identical rows, not duplicates"
+    );
+}
+
+#[test]
+fn backfill_pm_effort_dry_run_writes_nothing() {
+    let mut db = Database::open_in_memory().expect("db");
+    seed_pm_work_corpus(&db);
+    backfill_pm_work(&mut db, false).expect("pm-work backfill");
+
+    backfill_pm_effort_at(&mut db, true, scoring_instant()).expect("dry run");
+
+    let count: i64 = db
+        .connection()
+        .query_row("SELECT COUNT(*) FROM fact_pm_effort", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(count, 0, "--dry-run must not write any row");
+}
+
+/// `fact_pm_work` is the gate. With no work-tier rows there are no
+/// candidates, and the run must succeed with an empty table rather than
+/// scoring every ticket ungated.
+#[test]
+fn backfill_pm_effort_scores_nothing_when_the_work_tier_has_not_run() {
+    let mut db = Database::open_in_memory().expect("db");
+    seed_pm_work_corpus(&db);
+
+    backfill_pm_effort_at(&mut db, false, scoring_instant()).expect("backfill");
+
+    let count: i64 = db
+        .connection()
+        .query_row("SELECT COUNT(*) FROM fact_pm_effort", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(count, 0, "no fact_pm_work rows means no effort candidates");
 }

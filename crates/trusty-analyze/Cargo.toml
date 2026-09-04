@@ -11,7 +11,12 @@ name        = "trusty-analyze"
 # `report`/`tr_report` verb and MCP tool over a code-only CAST template — new
 # public items, purely additive. `cargo-semver-checks` reports no breaking
 # changes against the 0.12.3 baseline, so PATCH is correct.
-version     = "0.12.5"
+#
+# 0.12.6 (#6316): PATCH — 0.12.5 is live on crates.io and this PR edits
+# `src/**`: `mcp::rpc_client` dials the daemon through the shared
+# `trusty_mcp::DaemonBridgeJsonRpc` instead of its own framed client. Nothing
+# public changed shape — `call` is `pub(super)`.
+version     = "0.12.6"
 edition     = "2021"
 license.workspace    = true
 authors.workspace    = true
@@ -99,7 +104,7 @@ mime_guess         = { workspace = true }
 # receive half — the durable inbox, the listener, and the hardened UDS bind
 # this crate mounts in `webhook_listener`. Implies `uds` and `webhook-hmac`.
 trusty-common      = { workspace = true, features = ["symgraph", "cli-help", "update-check", "bedrock", "console-metrics", "config-cli", "webhook-relay", "uds-supervisor", "redb-open"] }  # `redb-open` (#5063): the workspace's single redb corruption classifier, which `core::redb_open` delegates to; `uds-supervisor` (#6350): the shared on-demand entry point every analyze client starts this server through
-trusty-mcp         = { workspace = true }  # daemon-bridge startup guard (ADR-0040, #5803)
+trusty-mcp         = { workspace = true, features = ["daemon-bridge-json-rpc"] }  # daemon-bridge startup guard (ADR-0040, #5803); #6316: `daemon-bridge-json-rpc` is the shared stdio<->UDS forwarder `mcp::rpc_client` dials the daemon through
 tree-sitter            = { workspace = true }
 tree-sitter-rust       = { workspace = true }
 tree-sitter-typescript = { workspace = true }

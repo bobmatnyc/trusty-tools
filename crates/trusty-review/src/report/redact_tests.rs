@@ -262,6 +262,7 @@ fn leaky_investigation(slug: &str) -> Investigation {
             status: InvestigationStatus::Unavailable(format!("provider rejected {FAKE_TOKEN}")),
             findings: vec![VerifiedFinding {
                 trace_verdict: String::new(),
+                cwe_id: Vec::new(),
                 title: format!("hardcoded {FAKE_TOKEN}"),
                 severity: Severity::Red,
                 dimension: format!("authentication & secrets {FAKE_TOKEN}"),
@@ -380,6 +381,7 @@ fn investigation_credentials_never_reach_the_rendered_report() {
 fn scrub_prose_covers_evidence_and_every_narrative_field() {
     let mut prose = crate::report::synthesize::FindingProse {
         trace_verdict: String::new(),
+        cwe_id: Vec::new(),
         app_slug: "northwind".to_string(),
         title: format!("t {FAKE_TOKEN}"),
         severity: "RED".to_string(),

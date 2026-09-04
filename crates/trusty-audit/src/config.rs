@@ -414,6 +414,65 @@ impl ReportSettings {
     }
 }
 
+/// Which optional collectors this engagement runs (#6780).
+///
+/// Why: a collector that talks to a third party about the recipient's code is a
+/// disclosure the engagement consents to rather than inherits. Every key here
+/// defaults to false, so a config written before this table existed runs
+/// exactly as it did.
+/// What: one boolean per opt-in leg. Unknown keys are tolerated for the reason
+/// [`EngagementConfig`] tolerates them — a config from a newer generator still
+/// loads.
+///
+/// ```toml
+/// [collectors]
+/// osv = true
+/// ```
+///
+/// Test: `super::grounding::osv::osv_tests::an_engagement_can_turn_the_collector_on`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[non_exhaustive]
+pub struct Collectors {
+    /// Query OSV.dev over the scanned dependency inventory (#6780).
+    #[serde(default)]
+    pub osv: bool,
+}
+
+/// What the OSV lookup does once `[collectors] osv` turns it on (#6780).
+///
+/// Why: the two knobs that matter are about the RUN rather than about
+/// vulnerabilities — an air-gapped machine needs `offline`, and a sweep over
+/// many repositories needs a per-repository clock budget so a slow endpoint
+/// costs one repository's coverage and not the whole run.
+/// What: every key optional; absent or zero means the compiled default in
+/// [`crate::grounding::osv_query`]. `endpoint` exists so a test can point the
+/// leg at a local mock server, and is not something an engagement sets.
+///
+/// ```toml
+/// [osv]
+/// offline = true
+/// cache_ttl_hours = 168
+/// time_cap_secs = 120
+/// ```
+///
+/// Test: `super::grounding::osv::osv_tests::an_engagement_can_turn_the_collector_on`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[non_exhaustive]
+pub struct OsvSettings {
+    /// Answer from the cache alone and open no socket.
+    #[serde(default)]
+    pub offline: bool,
+    /// How long a cached answer is trusted, in hours.
+    #[serde(default)]
+    pub cache_ttl_hours: Option<u64>,
+    /// Wall clock one repository may spend on OSV, in seconds.
+    #[serde(default)]
+    pub time_cap_secs: Option<u64>,
+    /// The batch endpoint, for a test's local mock server.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+}
+
 /// The engagement config that travels inside the handoff package.
 ///
 /// Why: the recipient can read this file before running anything — that
@@ -447,6 +506,13 @@ pub struct EngagementConfig {
     /// defaults — see [`crate::grounding::priority::Budget::for_engagement`].
     #[serde(default)]
     pub report: ReportSettings,
+    /// Which optional collectors this engagement runs (#6780). Absent means
+    /// none of them, so an existing config runs exactly as it did.
+    #[serde(default)]
+    pub collectors: Collectors,
+    /// How the OSV lookup runs once `[collectors] osv` turns it on (#6780).
+    #[serde(default)]
+    pub osv: OsvSettings,
     /// What this engagement audits (#5979).
     ///
     /// Absent and empty are DIFFERENT states, which is why this is an `Option`

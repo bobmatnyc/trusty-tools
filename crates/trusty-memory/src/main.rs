@@ -868,15 +868,15 @@ async fn run_monitor(target: MonitorTarget) -> Result<()> {
 /// collided with the HTTP daemon's exclusive write lock.  Reads fell back to
 /// a stale snapshot; writes failed with "palace is read-only".  The fix is to
 /// make the stdio process a pure proxy: it never touches redb.  Every JSON-RPC
-/// request is forwarded to `POST /rpc` on the running HTTP daemon; if the
-/// daemon is not running it is auto-started (detached, survives CLI exit).
-/// Stdout hygiene: no update-check banner, no HTTP bind announcement, no
+/// request is forwarded over the daemon's Unix socket; if the daemon is not
+/// running it is auto-started (detached, survives CLI exit).
+/// Stdout hygiene: no update-check banner, no socket-bind announcement, no
 /// eprintln! — stdout is the JSON-RPC channel and must carry only protocol
 /// bytes.
 /// What: delegates to `commands::serve_stdio_bridge::run_stdio_bridge` which
-/// (1) ensures the daemon is running (auto-start + 30 s health-poll), (2)
-/// builds a shared reqwest client, and (3) enters `run_stdio_loop` forwarding
-/// each request to `POST /rpc`.
+/// (1) ensures the daemon is running (auto-start + readiness poll), (2)
+/// resolves this process' own caller identity, and (3) runs the shared
+/// `trusty_mcp::DaemonBridgeJsonRpc` stdio loop against that socket (#6316).
 /// Test: `tests/serve_stdio_e2e.rs` spawns a real child, asserts bounded
 /// responses.  The bridge-specific unit tests live in
 /// `commands/serve_stdio_bridge.rs`.

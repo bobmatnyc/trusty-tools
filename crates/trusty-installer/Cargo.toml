@@ -2,7 +2,7 @@
 name = "trusty-installer"
 # 0.13.4 (#6618, #6619): patch — 0.13.3 is published and this PR edits
 # `src/**` (launchd restart-race fix). No public API changes.
-version = "0.13.4"
+version = "0.13.5"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"

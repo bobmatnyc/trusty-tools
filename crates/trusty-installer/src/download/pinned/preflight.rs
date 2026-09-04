@@ -208,6 +208,13 @@ async fn resolve_published_tag(
                         version: version.to_owned(),
                         source,
                     },
+                    // #6771: two disagreeing tags mean the published release is
+                    // ambiguous, so nothing can be installed — report which.
+                    release::ResolveError::TagSplit(detail) => PinnedError::ReleaseLookupFailed {
+                        crate_name: name.to_owned(),
+                        version: version.to_owned(),
+                        source: anyhow::anyhow!(detail),
+                    },
                 });
             }
         }

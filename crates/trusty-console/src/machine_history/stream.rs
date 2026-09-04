@@ -144,8 +144,16 @@ mod tests {
             3,
             "the connecting subscriber gets the three samples it missed"
         );
-        assert_eq!(data["sample_capacity"], 120);
-        assert_eq!(data["sample_interval_secs"], 5);
+        // #6642: read from the constants rather than restating 600 × 1, so the
+        // next cadence change fails in ONE place — history.rs's own window test.
+        assert_eq!(
+            data["sample_capacity"],
+            trusty_common::host_metrics::history::HOST_HISTORY_CAPACITY
+        );
+        assert_eq!(
+            data["sample_interval_secs"],
+            trusty_common::host_metrics::history::HOST_SAMPLE_INTERVAL_SECS
+        );
 
         let second = stream
             .next()

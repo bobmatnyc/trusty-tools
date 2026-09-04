@@ -408,6 +408,58 @@ both report exit 3 separately from exit 1. Both still stop the publish: a
 non-verdict is not a pass. What changes is that neither one tells you to bump a
 version on evidence that does not exist.
 
+### A dependency that does not compile ([#6740](https://github.com/bobmatnyc/trusty-tools/issues/6740))
+
+`cargo-semver-checks` builds through a generated placeholder project under
+`target/semver-checks/`, and it **regenerates that project's `Cargo.lock` on
+every run**. The resolution therefore ignores this workspace's pins and takes the
+newest semver-compatible release of every transitive dependency. Seeding the
+scratch lockfile does not help: the tool rewrites it before it builds. Measured
+on 2026-09-03 — a scratch lockfile seeded from this workspace's `Cargo.lock`
+resolved `tinyvec` 1.11.0 and built clean under a direct `cargo doc`, and the
+tool's next run had moved it back to 1.13.0 twenty-three seconds in.
+
+That is how a broken upstream release reaches the gate while every ordinary
+build in this repo stays green. `tinyvec` 1.13.0 calls `vec![]` while importing
+only the `alloc::vec` **module**, so it fails to compile for every consumer of
+its `alloc` feature; this workspace pins 1.11.0, so `cargo build` and `cargo
+test` never saw it, and only `trusty-common` and `trusty-memory` — the two crates
+whose graphs reach it, through `memory-core` → `unicode-normalization` — lost
+their verdict.
+
+The gate now names the package before the generic help block gets a chance to
+send the reader after a toolchain:
+
+```
+NO VERDICT trusty-common: cargo semver-checks exited 101 and never completed a check run.
+           No public API comparison against baseline 0.47.1 was performed.
+SCRATCH RESOLUTION trusty-common: the scratch project cargo-semver-checks builds in
+           ignores this workspace's Cargo.lock and regenerates its own on every
+           run, so it takes the NEWEST semver-compatible release of each
+           transitive dependency. These failed to compile there:
+             tinyvec — scratch 1.13.0, this workspace pins 1.11.0
+```
+
+**The classification does not move.** This is still exit 3, still `NO VERDICT`,
+and still not a pass — nothing was compared. What a release may do about it, in
+order:
+
+1. **Wait for a fixed or yanked release.** A crate that fails for every consumer
+   of a default-ish feature is corrected upstream in hours, and the gate then
+   passes with no change here.
+2. **Disclose it at release time** with `PREFLIGHT_SEMVER_UNVERIFIED="<reason>"`
+   (see [The override, and what it is not for](#the-override-and-what-it-is-not-for)).
+   A broken upstream release is transient, which is exactly what that lever is
+   for, and what it is not for is a standing gap.
+
+A feature-exclusion row is **not** the answer here, even though it is the lever
+for a standing gap. The only feature that reaches `tinyvec` is `memory-core`, and
+excluding it would leave the whole memory API — the surface `trusty-memory`
+publishes against — permanently uncompared to buy back a verdict on a transient
+upstream break. A crate-exclusion row is not available either: the gate re-checks
+that premise on every run and would refuse the skip, `trusty-common` having 17
+in-repo dependents.
+
 ## Which toolchain the gate runs under (#5289)
 
 `cargo-semver-checks` resolves dependencies in a scratch project that **ignores

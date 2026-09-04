@@ -30,6 +30,12 @@ spec_refs:
 **Cross-ref:** [#4346](https://github.com/bobmatnyc/trusty-tools/issues/4346) (this spec), [#4348](https://github.com/bobmatnyc/trusty-tools/issues/4348) (tcode style parameter), [#4349](https://github.com/bobmatnyc/trusty-tools/issues/4349) (`HandoffContext` style field + policy preamble), [#4350](https://github.com/bobmatnyc/trusty-tools/issues/4350) (addressable tcode PM target), [#4353](https://github.com/bobmatnyc/trusty-tools/issues/4353) (GUI selector), [#2596](https://github.com/bobmatnyc/trusty-tools/issues/2596) (VIBE execution tier), [#4126](https://github.com/bobmatnyc/trusty-tools/issues/4126) (prompt-injection floor)
 **DOC-N claim:** `DOC-62`, scan-before-claim per DOC-38 §4.1. The scan covered every tracked file under `docs/specs/**` and `docs/trusty-installer/research/02-design/**` on `origin/main` **and on every remote branch** (`git for-each-ref refs/remotes/origin`) — the highest claimed DOC number anywhere in the repository, on any branch, is `DOC-61`. `DOC-62` is also what the catalog's (advisory) "next free" note advertises, so hint and scan agree. Four pre-existing collisions are grandfathered in `.doc-number-allowlist.tsv` (`DUP-DOC 28/32/33`, `DUP-ADR 21`); this document deliberately adds no fifth.
 
+> **Implementation status (2026-09-03):** The behavior decision is Accepted,
+> but Trusty Code has no style-mode type or dispatch branch. The `~draft`
+> section IDs also need lifecycle cleanup before code may claim conformance.
+> Track implementation through #4348 and #4349; this document's acceptance is
+> not evidence that the feature ships.
+
 ---
 
 ## 1. Executive Summary {#SPEC-STYLE-01~draft}

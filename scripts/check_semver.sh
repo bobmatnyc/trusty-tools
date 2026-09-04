@@ -854,11 +854,19 @@ PY
 # shapes: `no-summary`, `zero-checks:<the line>`, `unparsable-count:<the line>`.
 VERDICT_REASON=""
 
+# strip_ansi_to <src> <dst> — write <src> to <dst> with every ECMA-48 CSI
+# sequence removed. Two readers need the same plain-text copy (verdict_computed
+# and scratch_resolution_report, #6740), and a second spelling of this regex is
+# a second thing to get wrong: #5500 was one escape sequence in the wrong place.
+strip_ansi_to() {
+  LC_ALL=C sed -E $'s/\033\\[[0-9:;<=>?]*[ -/]*[@-~]//g' "$1" > "$2"
+}
+
 verdict_computed() {
   # #5500: CARGO_TERM_COLOR=always splits `Checked` from its trailing space (PR #5458).
   local plain="${1}.plain" summary executed
   VERDICT_REASON="no-summary"
-  LC_ALL=C sed -E $'s/\033\\[[0-9:;<=>?]*[ -/]*[@-~]//g' "$1" > "$plain" || return 1
+  strip_ansi_to "$1" "$plain" || return 1
 
   # `tail -1` and not `grep -q`: the header explains why a short-circuiting
   # reader is wrong here, and the LAST summary is the conservative one to judge.
@@ -922,6 +930,89 @@ no_verdict_because() {
       printf '%s\n' "never completed a check run"
       ;;
   esac
+}
+
+# ---------------------------------------------------------------------------
+# lockfile_versions <package> — every version this workspace's Cargo.lock pins
+# for <package>, comma-separated, or nothing when the lockfile does not name it.
+# ---------------------------------------------------------------------------
+lockfile_versions() {
+  python3 - "${REPO_ROOT}/Cargo.lock" "$1" 2> /dev/null <<'PY' || true
+import sys
+want = sys.argv[2]
+found, name = [], None
+try:
+    fh = open(sys.argv[1])
+except OSError:
+    raise SystemExit(0)
+with fh:
+    for line in fh:
+        line = line.strip()
+        if line.startswith('name = "') and line.endswith('"'):
+            name = line[8:-1]
+        elif line.startswith('version = "') and line.endswith('"') and name == want:
+            found.append(line[11:-1])
+            name = None
+print(", ".join(sorted(set(found))))
+PY
+}
+
+# ---------------------------------------------------------------------------
+# scratch_resolution_report <crate> <run-log> — name the dependency that failed
+# to compile, beside the version this workspace pins for it (#6740).
+#
+# Why: cargo-semver-checks builds in a scratch project whose Cargo.lock it
+#   REGENERATES on every run, so the resolution ignores this workspace's pins and
+#   takes the newest semver-compatible release of every transitive dependency.
+#   When one of those releases does not compile, rustdoc dies before a single
+#   lint runs and the gate reports NO VERDICT — with several hundred lines of
+#   build log between the operator and the one package name that matters. #6740
+#   is that case: tinyvec 1.13.0 calls `vec![]` while importing only the
+#   `alloc::vec` MODULE, so it fails for every consumer of its `alloc` feature.
+#   This workspace pins 1.11.0 and builds clean, which is why the failure read as
+#   unreproducible and sent the reporter after toolchains instead.
+#
+# What: prints the packages cargo reported as failing to compile, each with the
+#   scratch version from the tool's own output and this workspace's pin. Prints
+#   NOTHING when no package failed to compile, so the other NO VERDICT causes are
+#   not handed a resolution story they do not have. Diagnosis only — it never
+#   touches the verdict, the counters or the exit status.
+#
+# Test: `scripts/check_semver_selftest.sh` case 29.
+# ---------------------------------------------------------------------------
+scratch_resolution_report() {
+  local crate="$1" log="$2" plain="${2}.plain" failed pkg scratch locked
+
+  # verdict_computed writes the ANSI-stripped copy; regenerate it when that call
+  # bailed before it could, because a coloured log hides these markers too.
+  [[ -f "$plain" ]] || strip_ansi_to "$log" "$plain" || return 0
+
+  failed="$(grep -oE 'could not compile `[^`]+`' "$plain" 2> /dev/null |
+    sed -E 's/^could not compile `([^`]+)`$/\1/' | LC_ALL=C sort -u || true)"
+  [[ -z "$failed" ]] && return 0
+
+  {
+    echo "SCRATCH RESOLUTION ${crate}: the scratch project cargo-semver-checks builds in"
+    echo "           ignores this workspace's Cargo.lock and regenerates its own on every"
+    echo "           run, so it takes the NEWEST semver-compatible release of each"
+    echo "           transitive dependency. These failed to compile there:"
+  } >&2
+  while IFS= read -r pkg; do
+    [[ -z "$pkg" ]] && continue
+    scratch="$(grep -oE "(Checking|Compiling) ${pkg} v[0-9][^ ]*" "$plain" 2> /dev/null |
+      tail -1 | sed -E 's/.* v//' || true)"
+    locked="$(lockfile_versions "$pkg")"
+    printf '             %s — scratch %s, this workspace pins %s\n' \
+      "$pkg" "${scratch:-unknown}" "${locked:-nothing (not in Cargo.lock)}" >&2
+  done <<<"$failed"
+  {
+    echo "           A dependency that is NEWER in the scratch than in Cargo.lock and does"
+    echo "           not build is broken UPSTREAM, not here — this workspace compiles on its"
+    echo "           pin. A newer toolchain does not fix that, and seeding the scratch"
+    echo "           lockfile does not stick: the tool rewrites it before it builds."
+    echo "           docs/reference/semver-gate.md names what a release may do about it."
+    echo "           Nothing was compared either way, so this stays NO VERDICT."
+  } >&2
 }
 
 # ---------------------------------------------------------------------------
@@ -1216,6 +1307,8 @@ while IFS= read -r crate; do
       echo "NO INVENTORY ${crate}: cargo semver-checks exited ${rc} and $(no_verdict_because)." >&2
       echo "             The release is still permitted (${baseline} -> ${current} already carries the break)," >&2
       echo "             but WHAT it breaks is unknown. Fix the run above to get the list." >&2
+      # #6740: the inventory arm hits the same broken-dependency wall.
+      scratch_resolution_report "$crate" "$RUN_LOG"
       inventory_blind=$((inventory_blind + 1))
     elif [[ "$rc" -ne 0 ]]; then
       echo "INVENTORY ${crate}: breaking change(s) listed above — permitted by the ${rtype} bump. Confirm every one was intended (#5297)."
@@ -1246,6 +1339,9 @@ while IFS= read -r crate; do
   if ! verdict_computed "$RUN_LOG"; then
     echo "NO VERDICT ${crate}: cargo semver-checks exited ${rc} and $(no_verdict_because)." >&2
     echo "           No public API comparison against baseline ${baseline} was performed." >&2
+    # #6740: name the dependency that would not build before the generic help
+    # block sends the reader after a toolchain that is not the problem.
+    scratch_resolution_report "$crate" "$RUN_LOG"
     noverdict=$((noverdict + 1))
     continue
   fi
@@ -1310,6 +1406,12 @@ The tool's own output is above. The usual causes:
     the gate. The `toolchain:` line above says which rustc that was. Install a
     newer one (`rustup toolchain install stable`), or point the gate at one:
         SEMVER_GATE_TOOLCHAIN_BIN=<dir> bash scripts/check_semver.sh --crate <c>
+    A NEWER TOOLCHAIN IS THE WRONG MOVE WHEN THE RELEASE SIMPLY DOES NOT COMPILE
+    (#6740). The scratch resolution takes the newest semver-compatible release of
+    every transitive dependency, so a broken upstream release reaches the gate
+    while this workspace keeps building on its Cargo.lock pin. The SCRATCH
+    RESOLUTION block above names the package and both versions when that is what
+    happened; there is no toolchain that fixes it.
   * A NATIVE LIBRARY THE FEATURE SET NEEDS IS ABSENT (issue #5440). The gate
     builds with --only-explicit-features, so every non-excluded feature is on
     and its build scripts run. On Linux, trusty-common's `keyring-store` pulls

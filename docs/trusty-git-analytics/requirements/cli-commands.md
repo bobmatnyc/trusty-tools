@@ -168,12 +168,50 @@ Manage manual classification overrides (Tier 0).
 
 ### `tga install`
 
-Interactive setup wizard. Creates `config.yaml`, prompts for tokens, validates connectivity.
+Setup wizard. Creates `config.yaml`. On a terminal with no flags it prompts;
+given `--host` / `--pm`, or with stdin not a terminal, it runs from flags and
+environment variables and never prompts ([#5216](https://github.com/bobmatnyc/trusty-tools/issues/5216)).
+With `--host github --org <ORG>` it pages the GitHub API for the org's
+repositories and writes them into the generated config.
 
 | Flag | Description |
 |------|-------------|
 | `--output <PATH>` | Output config path (default `./config.yaml`) |
 | `--force` | Overwrite existing config |
+| `--non-interactive` | Never prompt; implied when stdin is not a terminal |
+| `--host <local\|github\|bitbucket>` | Where repositories come from (required non-interactively) |
+| `--org <ORG>` | GitHub org to discover repositories from |
+| `--workspace <WORKSPACE>` | Bitbucket Cloud workspace |
+| `--repo <OWNER/NAME>` | Explicit remote repository; repeatable |
+| `--repo-path <PATH>` | Already-cloned repository; repeatable |
+| `--repo-cache <DIR>` | Where remote repositories are expected on disk (default `./repos`) |
+| `--host-token <TOKEN>` | Host API token; falls back to `$GITHUB_TOKEN` / `$BITBUCKET_TOKEN` |
+| `--pm <none\|github\|jira\|linear>` | PM system supplying work items (required non-interactively) |
+| `--jira-url`, `--jira-user`, `--jira-token` | JIRA credentials; fall back to `$JIRA_URL`, `$JIRA_EMAIL`, `$JIRA_API_TOKEN` |
+| `--linear-api-key <KEY>` | Linear API key; falls back to `$LINEAR_API_KEY` |
+| `--linear-team <TEAM>` | Linear team key to scope issue fetches to; repeatable |
+| `--output-dir <DIR>` | Report output directory (default `./tga-output`) |
+| `--llm-provider <PROVIDER>` | `none`, `openai` or `openrouter` (default `none`) |
+| `--llm-api-key <KEY>` | LLM API key; falls back to the provider's conventional env var |
+
+**Precedence:** a flag value wins over its environment variable. A credential
+taken from the environment is written to the config as a `${VAR}` reference,
+not as the secret itself.
+
+Run non-interactively with a required flag missing, install names every missing
+flag at once rather than blocking on a prompt:
+
+```bash
+$ tga install --host github --pm none < /dev/null
+Error: `tga install` has no terminal to prompt on and these required flags are missing:
+  --org <ORG> (or --repo <OWNER/NAME>, repeatable)
+  --host-token <TOKEN> (or set $GITHUB_TOKEN)
+```
+
+Bitbucket Cloud workspace-to-repo discovery is not implemented yet
+([#5220](https://github.com/bobmatnyc/trusty-tools/issues/5220)), so
+`--host bitbucket` requires an explicit `--repo <workspace/slug>` list and
+records that limitation as a comment in the generated config.
 
 ### `tga help`
 

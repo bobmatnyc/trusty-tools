@@ -17,6 +17,10 @@
 //! 4. Git credential helper (falls through to the platform keychain, e.g.
 //!    `osxkeychain`, `store`, or `manager-core`)
 //!
+//! Each is offered at most once per fetch, in that order: libgit2 re-enters
+//! the credential callback after every rejection, so a callback that answered
+//! from the top each time would re-offer source 1 forever (#6782).
+//!
 //! **No interactive prompts** — SSH BatchMode-equivalent. We never ask
 //! for a password or passphrase, because the binary is typically run
 //! in CI / background tasks where stdin is unavailable.
@@ -72,9 +76,21 @@ pub fn fetch_remote_with_outcome(repo: &Repository, remote_name: &str) -> Result
 
     info!("Fetching from remote '{}'", remote_name);
 
+    // #6782: libgit2 calls this callback again after every credential the
+    // remote rejects, so one that answers with the same source each time never
+    // reaches the next one. That is not hypothetical: `Cred::ssh_key_from_agent`
+    // succeeds against an `ssh-agent` holding no identities, so a host whose
+    // key lives in a file — the ordinary macOS 1Password/keychain setup — spent
+    // two minutes re-offering an empty agent to github.com and then reported
+    // `Auth (-16)`, never trying `~/.ssh/id_ed25519` at all. The cursor is what
+    // advances the chain.
+    let cursor = std::cell::Cell::new(0usize);
     let mut callbacks = RemoteCallbacks::new();
-    callbacks.credentials(|url, username_from_url, allowed_types| {
-        non_interactive_credentials(url, username_from_url, allowed_types)
+    callbacks.credentials(move |_url, username_from_url, allowed_types| {
+        let (next, cred) =
+            non_interactive_credentials(cursor.get(), username_from_url, allowed_types)?;
+        cursor.set(next);
+        Ok(cred)
     });
 
     let mut fetch_options = FetchOptions::new();
@@ -136,70 +152,86 @@ pub fn fetch_and_record(repo: &Repository, repo_name: &str, remote_name: &str) -
     }
 }
 
-/// Build a credential without prompting the user.
+/// One non-interactive place a credential can come from.
 ///
-/// Tries, in order:
-/// 1. SSH agent (if `allowed_types` permits)
-/// 2. `~/.ssh/id_ed25519` then `~/.ssh/id_rsa`
-/// 3. `GITHUB_TOKEN` / `GH_TOKEN` env var as an HTTPS PAT
-///    (username `x-access-token`, password = token value)
-/// 4. Default credential helper (falls through to platform keychain:
-///    `osxkeychain`, `store`, `manager-core`, etc.)
+/// Why (#6782): the chain used to be `if` arms inside one function, which is
+/// only expressible as "the first source that yields anything". libgit2 asks
+/// again after each rejection, so what it actually needs is an ordered list it
+/// can be walked through — the same order, addressable by position.
+#[derive(Clone, Copy)]
+enum CredSource {
+    /// A key held by a running `ssh-agent`.
+    Agent,
+    /// A private key file under `~/.ssh/`, by basename.
+    KeyFile(&'static str),
+    /// `GITHUB_TOKEN` / `GH_TOKEN` as an HTTPS password.
+    GithubToken,
+    /// The platform credential helper (`osxkeychain`, `store`, …).
+    Helper,
+}
+
+/// The sources tried, in order, most specific first.
+const CRED_CHAIN: [CredSource; 5] = [
+    CredSource::Agent,
+    CredSource::KeyFile("id_ed25519"),
+    CredSource::KeyFile("id_rsa"),
+    CredSource::GithubToken,
+    CredSource::Helper,
+];
+
+/// The next usable credential at or after `from` in [`CRED_CHAIN`], and the
+/// position the caller should resume from.
 ///
-/// Returns a git2 error if none of these succeed — the caller records it
-/// as a `FetchOutcome::Failed` and (by default since 2.6.0) exits
-/// non-zero so stale data is never silently served.
+/// Why: `RemoteCallbacks::credentials` is re-entered after every credential the
+/// remote rejects. Answering from a cursor rather than from the top is what
+/// turns the chain into a real fallback sequence — before #6782 it was a loop,
+/// because `Cred::ssh_key_from_agent` succeeds against an agent holding no
+/// identities and so was re-offered until libgit2 gave up.
+/// What: scans forward for the first source whose `allowed_types` the remote
+/// permits and that can actually build a `Cred`, and returns it with the index
+/// after it. Sources that cannot apply are skipped without consuming a turn.
+/// Never prompts: a key file is passed with no passphrase, so an encrypted one
+/// fails here rather than blocking on stdin.
+/// Test: `tests::the_credential_chain_advances_rather_than_repeating`.
 fn non_interactive_credentials(
-    _url: &str,
+    from: usize,
     username_from_url: Option<&str>,
     allowed_types: CredentialType,
-) -> std::result::Result<Cred, git2::Error> {
+) -> std::result::Result<(usize, Cred), git2::Error> {
     let username = username_from_url.unwrap_or("git");
 
-    if allowed_types.contains(CredentialType::SSH_KEY) {
-        // 1. SSH agent first.
-        if let Ok(cred) = Cred::ssh_key_from_agent(username) {
-            return Ok(cred);
-        }
-
-        // 2. Explicit key files (ed25519 preferred, rsa fallback).
-        if let Some(home) = home_dir() {
-            for key_name in &["id_ed25519", "id_rsa"] {
-                let private_key = home.join(".ssh").join(key_name);
-                if private_key.exists() {
-                    // git2 needs a passphrase parameter even for unencrypted
-                    // keys; we pass None to force non-interactive behavior.
-                    if let Ok(cred) = Cred::ssh_key(username, None, private_key.as_path(), None) {
-                        return Ok(cred);
-                    }
-                }
+    for (index, source) in CRED_CHAIN.iter().enumerate().skip(from) {
+        let cred = match source {
+            CredSource::Agent if allowed_types.contains(CredentialType::SSH_KEY) => {
+                Cred::ssh_key_from_agent(username).ok()
             }
-        }
-    }
-
-    // 3. HTTPS token from GITHUB_TOKEN / GH_TOKEN env var.
-    //    These are the standard names used by GitHub Actions, gh CLI,
-    //    and most CI systems.  The token is used as the password with
-    //    the canonical `x-access-token` username that GitHub expects for
-    //    PAT / GitHub App token authentication over HTTPS.
-    if allowed_types.contains(CredentialType::USER_PASS_PLAINTEXT) {
-        let token = std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN)
-            .or_else(|_| std::env::var("GH_TOKEN"))
-            .ok();
-        if let Some(tok) = token {
-            if let Ok(cred) = Cred::userpass_plaintext("x-access-token", &tok) {
-                return Ok(cred);
+            CredSource::KeyFile(name) if allowed_types.contains(CredentialType::SSH_KEY) => {
+                home_dir()
+                    .map(|home| home.join(".ssh").join(name))
+                    .filter(|key| key.exists())
+                    .and_then(|key| {
+                        // git2 needs a passphrase parameter even for unencrypted
+                        // keys; None forces non-interactive behaviour.
+                        Cred::ssh_key(username, None, key.as_path(), None).ok()
+                    })
             }
-        }
-    }
-
-    // 4. Default credential helper (platform keychain, credential store,
-    //    etc.).  This covers the common macOS / Windows / Linux cases where
-    //    the user has already authenticated via `gh auth login` or
-    //    `git credential approve`.
-    if allowed_types.contains(CredentialType::DEFAULT) {
-        if let Ok(cred) = Cred::default() {
-            return Ok(cred);
+            // The canonical `x-access-token` username GitHub expects for PAT /
+            // GitHub App token authentication over HTTPS.
+            CredSource::GithubToken
+                if allowed_types.contains(CredentialType::USER_PASS_PLAINTEXT) =>
+            {
+                std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN)
+                    .or_else(|_| std::env::var("GH_TOKEN"))
+                    .ok()
+                    .and_then(|token| Cred::userpass_plaintext("x-access-token", &token).ok())
+            }
+            CredSource::Helper if allowed_types.contains(CredentialType::DEFAULT) => {
+                Cred::default().ok()
+            }
+            _ => None,
+        };
+        if let Some(cred) = cred {
+            return Ok((index + 1, cred));
         }
     }
 
@@ -313,6 +345,109 @@ mod tests {
             matches!(prf.outcome, FetchOutcome::Failed { .. }),
             "expected Failed in PerRepoFetch, got {:?}",
             prf.outcome
+        );
+    }
+
+    /// The error libgit2 returns when it has no transport for a URL's scheme.
+    ///
+    /// #6782: this is the string 59 client repositories hit, and the one thing
+    /// an SSH remote must never produce — it means libssh2 was never linked in,
+    /// so no credential this module offers was ever consulted.
+    const NO_TRANSPORT: &str = "unsupported URL protocol";
+
+    /// A loopback port with nothing listening, so a connect attempt is refused
+    /// immediately rather than waiting out a TCP timeout.
+    fn closed_loopback_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        port
+    }
+
+    /// Run a tracked fetch against `url` and return the recorded failure text.
+    fn fetch_error_for(url: &str) -> String {
+        let td = tempfile::tempdir().expect("tempdir");
+        let repo = git2::Repository::init(td.path()).expect("init");
+        repo.remote("origin", url).expect("add remote origin");
+        match fetch_remote_with_outcome(&repo, "origin").expect("soft-fail returns Ok") {
+            FetchOutcome::Failed { error, .. } => error,
+            other => panic!("expected Failed for unreachable {url}, got {other:?}"),
+        }
+    }
+
+    /// Why (#6782): with the SSH transport linked, the credential chain ran for
+    /// the first time and looped. `Cred::ssh_key_from_agent` succeeds against an
+    /// `ssh-agent` holding no identities, and the callback answered from the top
+    /// of the chain every time libgit2 re-entered it, so `~/.ssh/id_ed25519` was
+    /// never reached — a real fetch spent 120 s re-offering an empty agent to
+    /// github.com and then reported `class=Ssh (23); code=Auth (-16)`.
+    /// What: walks the chain from every position and asserts each answer
+    /// advances the cursor, so the sequence is finite whatever this machine
+    /// happens to hold. Environment-independent by construction: it asserts the
+    /// advance, never which source answered.
+    /// Test: this is the test.
+    #[test]
+    fn the_credential_chain_advances_rather_than_repeating() {
+        let allowed =
+            CredentialType::SSH_KEY | CredentialType::USER_PASS_PLAINTEXT | CredentialType::DEFAULT;
+
+        let mut cursor = 0usize;
+        let mut answers = 0usize;
+        while let Ok((next, _cred)) = non_interactive_credentials(cursor, Some("git"), allowed) {
+            assert!(
+                next > cursor,
+                "the callback answered without advancing: cursor {cursor} -> {next}"
+            );
+            cursor = next;
+            answers += 1;
+            assert!(
+                answers <= CRED_CHAIN.len(),
+                "the chain answered more times than it has sources"
+            );
+        }
+        assert!(
+            cursor <= CRED_CHAIN.len(),
+            "the cursor ran past the chain: {cursor}"
+        );
+    }
+
+    /// Why (#6782): tga's `git2` was built without the `ssh` feature, so
+    /// libgit2 rejected every `ssh://` remote before the credential callback
+    /// above ran. The audit then walked whatever the clone-time refs held and
+    /// reported success.
+    /// What: points `origin` at an `ssh://` URL on a closed loopback port and
+    /// asserts the recorded failure is a connect/auth failure, not libgit2
+    /// declining the scheme. Pre-fix this asserts against `unsupported URL
+    /// protocol; class=Net (12)`.
+    /// Test: this is the test.
+    #[test]
+    fn an_ssh_url_reaches_the_ssh_transport() {
+        let url = format!(
+            "ssh://git@127.0.0.1:{}/org/repo.git",
+            closed_loopback_port()
+        );
+        let error = fetch_error_for(&url);
+        assert!(
+            !error.contains(NO_TRANSPORT),
+            "ssh:// remote was rejected for want of a transport, not for want of a \
+             reachable host: {error}"
+        );
+    }
+
+    /// Why (#6782): the scp-style spelling `git@host:org/repo.git` is what
+    /// `git clone` writes for a GitHub SSH remote, so it is the form the client
+    /// audit actually carried. libgit2 parses it into the same SSH transport,
+    /// which means it fails the same way when that transport is absent.
+    /// What: points `origin` at a scp-style URL on loopback and asserts the
+    /// failure is not the missing-transport error.
+    /// Test: this is the test.
+    #[test]
+    fn an_scp_style_remote_reaches_the_ssh_transport() {
+        let error = fetch_error_for("git@127.0.0.1:org/repo.git");
+        assert!(
+            !error.contains(NO_TRANSPORT),
+            "scp-style remote was rejected for want of a transport, not for want of a \
+             reachable host: {error}"
         );
     }
 }

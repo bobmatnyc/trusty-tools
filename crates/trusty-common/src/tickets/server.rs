@@ -17,7 +17,9 @@ use crate::tickets::api::backends::{
     UpdateIssueParams,
 };
 use crate::tickets::api::client::BackendClient;
-use trusty_mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
+// #6316: trusty-common must not depend on trusty-mcp (cycle) — the loop is
+// this crate's own now. See `crate::tickets::stdio`.
+use crate::tickets::stdio::{Request, Response, error_codes, initialize_response, run_stdio_loop};
 
 /// Shared state passed to every dispatcher invocation.
 ///
@@ -331,7 +333,7 @@ async fn dispatch(state: &AppState, name: &str, args: Value) -> Result<Value> {
 pub async fn handle_message(state: AppState, req: Value) -> Value {
     let method = req["method"].as_str().unwrap_or("");
     match method {
-        "initialize" => initialize_response("tickets-mcp", env!("CARGO_PKG_VERSION"), None),
+        "initialize" => initialize_response("tickets-mcp", env!("CARGO_PKG_VERSION")),
         "notifications/initialized" | "notifications/cancelled" => Value::Null,
         "ping" => json!({}),
         "tools/list" => crate::tickets::tools::tool_list_response(),

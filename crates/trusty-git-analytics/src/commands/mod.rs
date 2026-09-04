@@ -15,7 +15,13 @@ pub mod date_range;
 pub mod deployments;
 pub mod dora;
 pub mod incidents;
+// #5218: read-only database inspection and the data-handling attestation.
+pub mod inspect;
 pub mod install;
+// #5216: the non-interactive install path and the config emission both front
+// ends share, split out to keep `install.rs` under the SLOC cap.
+pub(crate) mod install_flags;
+pub mod install_plan;
 pub mod jira;
 pub mod override_cmd;
 pub mod pr_metrics;

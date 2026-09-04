@@ -131,7 +131,11 @@ pub async fn root_matches(socket: &Path, index_id: &str, checkout: &Path) -> Res
 /// Falls back to a separator-normalised string compare when either path cannot
 /// be canonicalised, which is the case in tests and for a root the daemon holds
 /// but this machine cannot stat.
-fn same_tree(served: &Path, checkout: &Path) -> bool {
+///
+/// Shared with [`super::conflict`] (#6783), which asks the same question of the
+/// same registry rows: a second answer to "is this the tree we audited" is how
+/// the root backstop and the conflict resolver would drift apart.
+pub(super) fn same_tree(served: &Path, checkout: &Path) -> bool {
     match (served.canonicalize(), checkout.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => {
@@ -202,6 +206,57 @@ pub fn ensure_indexed(
     }
 }
 
+/// [`ensure_indexed`], resolving a registration conflict rather than reporting it.
+///
+/// Why: `POST /indexes` answers `409` when a stale row from an earlier run on
+/// this machine holds either the id or the tree, and until #6783 that refusal
+/// went straight to a gap — 59 repositories in one client sweep lost their
+/// findings, complexity and health factors to rows the daemon would have given
+/// up on request. A stale row is recoverable; see [`super::conflict`] for the
+/// policy and why re-creating under the derived id beats adopting another.
+/// What: runs [`ensure_indexed`]; on a `409` asks [`super::conflict::resolve`]
+/// to clear the collision and runs it again, ONCE. Every other failure is
+/// returned untouched, and a resolution that itself fails is reported beside the
+/// refusal that prompted it rather than replacing it.
+///
+/// A [`super::conflict::Resolution::Reuse`] does not re-run the create: the
+/// daemon is already serving this checkout under this id, and `trusty-search
+/// index` reindexes as part of its own retry, so the only case that needs a
+/// second spawn is the one that follows a drop.
+///
+/// # Errors
+///
+/// One line, safe to show the recipient. The caller turns it into the gap
+/// headline; nothing here fails a run.
+///
+/// Test: `super::grounding_tests::{a_409_registration_conflict_clears_the_stale_row_and_retries,
+/// an_unresolvable_409_degrades_the_evidence_tier_out_loud,
+/// a_non_conflict_index_failure_is_not_retried}`.
+pub async fn ensure_indexed_resolved(
+    search: &Path,
+    socket: &Path,
+    checkout: &Path,
+    index_id: &str,
+) -> Result<IndexStatus, String> {
+    let refusal = match ensure_indexed(search, checkout, index_id) {
+        Ok(status) => return Ok(status),
+        Err(reason) => reason,
+    };
+    // #6783: only a registration collision is worth a second attempt.
+    if !super::conflict::is_registration_conflict(&refusal) {
+        return Err(refusal);
+    }
+    match super::conflict::resolve(socket, index_id, checkout).await {
+        Ok(super::conflict::Resolution::Reuse) => Ok(IndexStatus::AlreadyServed),
+        Ok(super::conflict::Resolution::Dropped { id }) => {
+            ensure_indexed(search, checkout, index_id).map_err(|retry| {
+                format!("{refusal}; the stale registration '{id}' was cleared and {retry}")
+            })
+        }
+        Err(cause) => Err(format!("{refusal}; {cause}")),
+    }
+}
+
 /// Run the binary, turning an unspawnable one into a reason rather than a panic.
 fn run(search: &Path, args: &[OsString]) -> Result<Output, String> {
     Command::new(search).args(args).output().map_err(|e| {
@@ -217,16 +272,26 @@ fn run(search: &Path, args: &[OsString]) -> Result<Output, String> {
 }
 
 /// A non-zero index exit rendered as one line naming what the report loses.
+///
+/// Why: the caller turns this into a report gap and nothing else records why
+/// the index failed, so a wrong line here is the whole diagnosis. Until #6720
+/// the line was the first non-empty one on stderr, which on a machine one
+/// release behind is `trusty-search`'s update-availability notice rather than
+/// the failure.
+/// What: quotes [`crate::search_stderr::reason`] — the first stderr line that
+/// is neither blank nor an update notice, or an explicit statement that there
+/// was none. Always one line.
+/// Test: `index_tests::{an_index_failure_names_the_checkout_and_quotes_what_search_said,
+/// a_silent_index_failure_still_produces_a_reason,
+/// an_update_notice_never_masks_the_real_index_failure,
+/// an_index_failure_reporting_only_a_notice_says_so}`.
 fn refusal(checkout: &Path, index_id: &str, output: &Output) -> Option<String> {
     if output.status.success() {
         return None;
     }
-    let said = String::from_utf8_lossy(&output.stderr);
-    let detail = said
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("no reason given");
+    // #6720: the update-availability notice trusty-search prints ahead of every
+    // human-facing subcommand is not the failure.
+    let detail = crate::search_stderr::reason(&output.stderr);
     Some(format!(
         "`trusty-search index {} --name {index_id}` failed ({}): {detail}",
         checkout.display(),
@@ -324,6 +389,73 @@ mod index_tests {
         let reason = refusal(Path::new("/w/repos/xsv"), "xsv", &output(2, ""))
             .expect("a non-zero exit is a refusal");
         assert!(reason.contains("no reason given"), "{reason}");
+    }
+
+    /// The stderr of the delivered client run of 2026-08-25, verbatim in shape:
+    /// `trusty-search` one release behind printed its update notice first and
+    /// #6720 reported THAT as the reason, for 60 of 61 repositories.
+    const REAL_NOTICE: &str = "Update available: trusty-search 0.49.1 (you have 0.47.0) — run: cargo install \
+         trusty-search --locked";
+
+    /// #6720: the regression. The notice is informational; the line after it is
+    /// the failure, and the failure is what the report gap must carry.
+    #[test]
+    fn an_update_notice_never_masks_the_real_index_failure() {
+        let said = format!("{REAL_NOTICE}\nindexing refused: root is not allowlisted\n");
+        let reason = refusal(Path::new("/w/repos/xsv"), "xsv", &output(1, &said))
+            .expect("a non-zero exit is a refusal");
+        assert!(
+            reason.contains("indexing refused: root is not allowlisted"),
+            "{reason}"
+        );
+        assert!(!reason.contains("Update available"), "{reason}");
+        assert_eq!(reason.lines().count(), 1, "must stay one line: {reason}");
+    }
+
+    /// The edge: the notice was the only thing on stderr. The gap says so
+    /// explicitly rather than quoting an upgrade instruction as a cause.
+    #[test]
+    fn an_index_failure_reporting_only_a_notice_says_so() {
+        let said = format!("{REAL_NOTICE}\n");
+        let reason = refusal(Path::new("/w/repos/xsv"), "xsv", &output(1, &said))
+            .expect("a non-zero exit is a refusal");
+        assert!(reason.contains("no reason given"), "{reason}");
+        assert!(!reason.contains("cargo install"), "{reason}");
+        assert_eq!(reason.lines().count(), 1, "must stay one line: {reason}");
+    }
+
+    /// The whole spawn path, against a stub that behaves like the real binary
+    /// on a machine one release behind: the notice goes to stderr ahead of
+    /// EVERY subcommand, and the index then fails for its own reason. What
+    /// reaches the caller must be that reason (#6720).
+    #[cfg(unix)]
+    #[test]
+    fn an_update_notice_from_the_real_spawn_path_does_not_become_the_reason() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let stub = tmp.path().join("trusty-search");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\n\
+                 echo '{REAL_NOTICE}' >&2\n\
+                 [ \"$1 $2\" = \"index add\" ] && exit 0\n\
+                 [ \"$1\" = index-status ] && exit 1\n\
+                 echo 'indexing refused: root is not allowlisted' >&2\n\
+                 exit 1\n"
+            ),
+        )
+        .expect("write stub");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let reason = ensure_indexed(&stub, Path::new("/w/repos/xsv"), "xsv")
+            .expect_err("a refused index must not report a status");
+        assert!(
+            reason.contains("indexing refused: root is not allowlisted"),
+            "{reason}"
+        );
+        assert!(!reason.contains("Update available"), "{reason}");
     }
 
     /// A binary that cannot be run is this repository's gap, never a panic.

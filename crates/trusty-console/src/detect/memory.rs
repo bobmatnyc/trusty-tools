@@ -263,6 +263,8 @@ impl MemoryConnector {
                 hint,
                 // #6416: trusty-memory is a resident daemon; `Available` means stopped.
                 lifecycle: ServiceLifecycle::Daemon,
+                cpu_pct: None,
+                rss_bytes: None,
             };
 
         if !binary_on_path("trusty-memory") {

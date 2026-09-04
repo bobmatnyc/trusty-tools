@@ -8,6 +8,12 @@
 > (cross-provider tool-calling), [#1028](https://github.com/bobmatnyc/trusty-tools/issues/1028)
 > (multi-turn agent loop).
 
+> **Scope correction (2026-09-03):** This contract applies only when the user
+> explicitly selects a cross-model parity run. It is not the product roadmap.
+> The per-agent source is canonical Markdown/YAML behavior rendered through host
+> adapters under ADR-0059, not `<project>/.claude/agents/<name>.toml`. See the
+> [reconciliation catalog](./spec-adr-reconciliation.md).
+
 This is a **decision document**. It defines the *parity floor*: the fixed
 system-instruction surface that trusty-code assembles into **every** agent
 prompt, identically across model slugs and providers, so that a cross-model
@@ -124,7 +130,7 @@ runs of the same task. Those either belong to other sections or are excluded
 
 Injected verbatim from the agent's `AgentConfig`
 (`crates/trusty-code/src/agents/config.rs`): the `[system_prompt].content`
-field of `<project>/.claude/agents/<name>.toml`. This is what differentiates
+field of the resolved canonical agent definition. This is what differentiates
 `engineer` from `python-engineer` from `qa`. Because it comes from on-disk
 config, it is identical across models for a given agent — satisfying parity.
 

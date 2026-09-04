@@ -310,6 +310,37 @@ impl BaseClient {
         Self::json_or_error(resp).await
     }
 
+    /// PATCH a raw byte body with an explicit `Content-Type`.
+    ///
+    /// Why: Drive's media-upload endpoint replaces an existing file's content
+    /// with a `PATCH` carrying the new bytes, not JSON — `patch` below would
+    /// send `application/json` and Drive would store the JSON envelope as the
+    /// file body (#6685).
+    /// What: Sends `bytes` verbatim under `content_type` through the shared
+    /// 401-refresh path, then parses the JSON response envelope.
+    /// Test: `update_patches_media_to_the_existing_file_id` in
+    /// `api::services::drive::files`.
+    pub async fn patch_raw(
+        &self,
+        url: &str,
+        content_type: &str,
+        bytes: Vec<u8>,
+        account: Option<&str>,
+    ) -> Result<Value> {
+        let resp = self
+            .send_with_retry(
+                reqwest::Method::PATCH,
+                url,
+                ReqBody::Raw {
+                    content_type,
+                    bytes: &bytes,
+                },
+                account,
+            )
+            .await?;
+        Self::json_or_error(resp).await
+    }
+
     pub async fn patch(&self, url: &str, body: Value, account: Option<&str>) -> Result<Value> {
         let resp = self
             .send_with_retry(reqwest::Method::PATCH, url, ReqBody::Json(&body), account)

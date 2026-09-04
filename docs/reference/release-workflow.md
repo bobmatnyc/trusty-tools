@@ -3,14 +3,17 @@
 Each crate is tagged independently using the pattern `<crate-name>-v<version>`,
 e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 
-> **`tga` tag aliases (issue #1128):** `trusty-git-analytics` publishes under the
-> short package name `tga`. The binary-release workflow accepts **both**
-> `tga-v<version>` and `trusty-git-analytics-v<version>` tags — they resolve to
-> the same build config and Homebrew formula. The parse step canonicalizes the
-> `tga` prefix to `trusty-git-analytics` for config/path lookups while keeping
-> changelog `--tag-pattern` matched to the literal pushed tag. Either form works;
-> you no longer need to push a second `trusty-git-analytics-v<version>` tag after
-> a `tga-v<version>` push.
+> **`tga` tag aliases (issue #1128) — push ONLY the canonical tag:** push
+> `trusty-git-analytics-v<version>` only. Never push a `tga-v*` alias tag.
+> Since #6771 landed in trusty-installer 0.13.5 (PR #6799), the installer
+> resolves either spelling correctly, and two tags mean two independent
+> non-reproducible builds whose digests differ — the installer refuses this as
+> TAG-SPLIT (#1128, #6771). If an alias was pushed by mistake, delete its
+> GitHub Release object with `gh release delete tga-v<version> --yes` (no
+> --cleanup-tag; the tag is immutable and harmless without a Release). Then
+> verify `bobmatnyc/homebrew-trusty` Formula/trusty-git-analytics.rb points at
+> the canonical release's URLs and digests, because whichever CI run finished
+> last wrote the formula. Release tags are immutable (#6178).
 
 ## Release Steps
 
@@ -72,6 +75,11 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
    trusty-common 0.46.1 and 0.46.3 in one week. Full rationale and the
    `--check-only`/full-mode split:
    [`.claude/skills/cargo-publish/SKILL.md`, "Step 2b"](../../.claude/skills/cargo-publish/SKILL.md#step-2b-pre-tag-gate-mandatory-issue-6508).
+4c. Releasing `trusty-audit`? Run `scripts/refresh-engagement-pins.sh` first and
+   commit the result, so `crates/trusty-audit/templates/engagement.template.toml`
+   pins the sibling versions this train ships rather than the previous ones —
+   `preflight-publish.sh` CHECK 10 fails the release when a pin lags a sibling
+   whose workspace version is not yet published (#6772).
 5. Create the tag: `git tag <crate-name>-v<version>`.
 6. Push the tag: `git push origin <crate-name>-v<version>`.
 7. Run `scripts/check-publish-ready.sh <crate-name>` (or
@@ -116,8 +124,8 @@ refs/heads/main` (never trusting a possibly-stale local
 1. **GUARD 1 (merged-main)** — current HEAD must be `origin/main` itself or an
    ancestor of it (`git merge-base --is-ancestor`).
 2. **GUARD 2 (version tag on main)** — the release tag `<crate>-v<version>`
-   (or `tga-v<version>` for `trusty-git-analytics`) must be pushed to origin
-   and its commit must be an ancestor of origin/main.
+   must be pushed to origin and its commit must be an ancestor of origin/main.
+   For `trusty-git-analytics`, this is `trusty-git-analytics-v<version>` only.
 
 Either guard failing aborts with an actionable message and a non-zero exit
 code; both passing prints an "OK — safe to publish" line and exits 0.

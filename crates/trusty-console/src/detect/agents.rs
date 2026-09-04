@@ -97,6 +97,8 @@ impl ServiceConnector for AgentsConnector {
             // #6416: trusty-agents is a resident daemon — `Available` here means
             // installed but stopped, which is what the card should say.
             lifecycle: ServiceLifecycle::Daemon,
+            cpu_pct: None,
+            rss_bytes: None,
         }
     }
 }

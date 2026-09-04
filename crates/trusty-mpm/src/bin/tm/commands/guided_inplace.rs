@@ -493,8 +493,8 @@ pub(crate) enum InPlaceOutcome {
 /// daemon call, so a dead workspace can never be masked by a durably-committed
 /// `Active` record nor exec'd into; (3) builds the resume argv via
 /// [`trusty_mpm::runtime::build_inplace_resume_command`] (the SAME
-/// `--resume`-existence-check → `--continue`/fresh-spawn fallback logic the
-/// tmux-pane resume path uses, #2013) — this is PURE/local (resolving the
+/// `--resume`-existence-check → fresh-spawn fallback logic the
+/// tmux-pane resume path uses, #2013, #6765) — this is PURE/local (resolving the
 /// `claude` binary can fail with `BinaryNotFound`) and runs BEFORE any daemon
 /// mutation, so a missing binary never flips the record to a false `Active`;
 /// (4) reactivates the record on the daemon (step 3 of #2023 C — see

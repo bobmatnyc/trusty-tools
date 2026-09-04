@@ -1572,10 +1572,13 @@ pub async fn resume_managed(
     }
 
     let tmux_arc = mgr.tmux_driver();
+    // #6766: the post-send launch check below needs the driver after the
+    // adapter has taken ownership of its Arc.
+    let tmux_driver = tmux_arc.clone();
     let adapter = build_adapter(record.runtime, tmux_arc);
     // #1744: prefer --resume <id> when a claude_session_id was captured at
-    // SessionStart; fall back to --continue (most-recent conversation in the
-    // workspace) when the id is absent. ClaudeCodeAdapter overrides spawn_resume
+    // SessionStart; launch fresh when the id is absent or stale (#6765 — no
+    // --continue fallback). ClaudeCodeAdapter overrides spawn_resume
     // to implement this; TcodeAdapter's default delegates to plain spawn.
     // Sibling-window hijack fix (follow-up to #2456): pass the record's OWN
     // `record.pane_id` through so the adapter targets that SPECIFIC pane
@@ -1602,12 +1605,16 @@ pub async fn resume_managed(
             .mark_errored(&record.id, &format!("resume spawn failed: {e}"))
             .await;
     } else {
-        info!(
-            id = %record.id,
-            name = %record.tmux_name,
-            workspace = %workspace.display(),
-            "managed session resumed and runtime respawned"
-        );
+        // #6766: `spawn_resume` returning Ok means tmux accepted the keystrokes,
+        // not that `claude` started. A launch-time refusal leaves the pane at a
+        // bare shell, and this arm used to log a resume that never happened.
+        super::launch_verify::record_resume_outcome(
+            &mgr,
+            tmux_driver.as_ref(),
+            &record,
+            &workspace,
+        )
+        .await;
     }
 
     Ok(mgr.get(id).await.unwrap_or(record))

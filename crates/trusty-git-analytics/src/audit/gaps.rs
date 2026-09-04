@@ -62,8 +62,21 @@ pull-request, and ticket metadata; it stores no file content, diffs, patches, hu
 Free-text fields it does store — commit messages, pull-request and ticket titles — are retained \
 verbatim and carry whatever their authors wrote into them.";
 
-/// One Gaps & Caveats line per stage that did not complete, then one per
-/// repository collected from stale local refs.
+/// The words a stale-refs gap line opens with (#6782).
+///
+/// Why: #5321 put the fallback on the page, but as one mid-list sentence in a
+/// section a reader skims, so a due-diligence reader taking commit and PR
+/// figures at face value had nothing to stop them. Leading with the verdict is
+/// what makes it visible; exporting the phrase is what lets a downstream
+/// consumer — `trusty-audit`'s run index — recognise the line instead of
+/// re-deriving the wording.
+/// What: the literal prefix every stale-refs line starts with, before the
+/// parenthesised reason.
+/// Test: `super::tests::a_stale_fetch_line_leads_with_the_headline`.
+pub const STALE_FETCH_HEADLINE: &str = "git history is stale: fetch failed";
+
+/// One Gaps & Caveats line per repository collected from stale local refs, then
+/// one per stage that did not complete.
 ///
 /// Why: a stage that failed took a whole class of data with it — no `dora` run
 /// means no delivery-health figures, no `jira sync` means no ticket
@@ -73,10 +86,11 @@ verbatim and carry whatever their authors wrote into them.";
 /// here. A stale-refs fallback (#5321) is the same obligation one step
 /// further in: the stage SUCCEEDED, so nothing about the data's age is visible
 /// anywhere on the page unless it is stated here.
-/// What: for each failure in execution order, a line naming the stage, a
-/// redacted excerpt of the reason, and the fact that the affected area is
-/// unassessed; then, for each unreachable remote, a line naming the repository,
-/// the remote, and that its figures may be behind the true remote state; then,
+/// What: for each unreachable remote FIRST (#6782), a line opening with
+/// [`STALE_FETCH_HEADLINE`] and naming the repository, the remote, and that its
+/// figures may be behind the true remote state; then, for each failure in
+/// execution order, a line naming the stage, a redacted excerpt of the reason,
+/// and the fact that the affected area is unassessed; then,
 /// for each leg the config declared absent (#6130), a line naming the leg and
 /// why it was never attempted. Returns an empty vec when every stage succeeded,
 /// every remote was reached, and every leg ran — a clean run adds no line.
@@ -90,7 +104,8 @@ verbatim and carry whatever their authors wrote into them.";
 /// credential was embedded in it.
 /// Test: `super::tests::{sweep_gap_lines_name_each_failed_stage,
 /// sweep_gap_lines_are_empty_for_a_clean_run,
-/// a_repo_that_fell_back_to_stale_local_refs_is_named_in_the_gap_lines}`, and
+/// a_repo_that_fell_back_to_stale_local_refs_is_named_in_the_gap_lines,
+/// a_stale_fetch_line_leads_with_the_headline}`, and
 /// `crate::report::dd_manifest_tests::a_token_straddling_the_excerpt_boundary_leaves_no_fragment`.
 pub fn sweep_gap_lines<S: AsRef<str>>(stats: &AuditSweepStats, secrets: &[S]) -> Vec<String> {
     let failed_stages = stats.failures().map(|outcome| {
@@ -108,12 +123,16 @@ pub fn sweep_gap_lines<S: AsRef<str>>(stats: &AuditSweepStats, secrets: &[S]) ->
 
     // #5321: worded from the collector's own log line, because an operator who
     // has the run log needs to match the two up without translating.
+    // #6782: the verdict leads, and the line is emitted ahead of the stage
+    // failures below — a reader who stops after the first bullet has still read
+    // the one fact that invalidates the commit and PR figures.
     let stale = stats.stale_fetches.iter().map(|fetch| {
         let reason = redacted_excerpt(&fetch.error, secrets);
         format!(
-            "Repository `{}` could not be fetched from remote `{}` ({reason}) — collection \
-             continued on stale local refs, so its data may be behind the true remote state. \
-             Read its figures as a snapshot of the local clone, not of the remote.",
+            "**{STALE_FETCH_HEADLINE} ({reason})** — repository `{}` could not be fetched \
+             from remote `{}`, so collection continued on stale local refs and its data may \
+             be behind the true remote state. Read its figures as a snapshot of the local \
+             clone, not of the remote.",
             fetch.repo, fetch.remote
         )
     });
@@ -132,7 +151,10 @@ pub fn sweep_gap_lines<S: AsRef<str>>(stats: &AuditSweepStats, secrets: &[S]) ->
         )
     });
 
-    failed_stages.chain(stale).chain(declared).collect()
+    // #6782: stale-refs lines first. A failed stage leaves an EMPTY section,
+    // which a reader notices; a stale fetch leaves a full one that is quietly
+    // wrong, which they do not.
+    stale.chain(failed_stages).chain(declared).collect()
 }
 
 /// One Gaps & Caveats line per distinct reason a repository could not be

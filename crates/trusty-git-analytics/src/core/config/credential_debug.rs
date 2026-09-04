@@ -128,6 +128,7 @@ impl fmt::Debug for BitbucketConfig {
             app_password,
             token,
             workspace,
+            workspaces,
             repo_slug,
             fetch_prs,
             api_base_url,
@@ -137,6 +138,7 @@ impl fmt::Debug for BitbucketConfig {
             .field("app_password", &mask(app_password.as_ref()))
             .field("token", &mask(token.as_ref()))
             .field("workspace", workspace)
+            .field("workspaces", workspaces)
             .field("repo_slug", repo_slug)
             .field("fetch_prs", fetch_prs)
             .field("api_base_url", api_base_url)

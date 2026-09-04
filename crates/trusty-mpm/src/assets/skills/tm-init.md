@@ -118,13 +118,9 @@ project — instant, no LLM analysis. After running it, reconcile against
 
 `/tm-init` only ever writes **project documentation** — never trusty config:
 
-- ✅ `CLAUDE.md` — project instructions (created or smart-merged). A scaffolded
-  or merged `CLAUDE.md` MUST include a **Commit & PR Attribution** section
-  stating that every commit and PR body ends with
-  `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`
-  (point the link at the project's own repo when known), and that this overrides
-  any harness default — never `🤖 Generated with Claude Code` or a
-  `Co-Authored-By: Claude …` trailer. Preserve the section on smart-merge.
+- ✅ `CLAUDE.md` — project instructions (created or smart-merged). The commit
+  and PR footer comes from the `attribution` key tm writes into the provisioned
+  Claude Code settings; never restate it in prose.
 - ✅ **Build Performance pointer (Rust projects only)** — when `Cargo.toml`
   exists at the project root, a scaffolded or refreshed `CLAUDE.md` MUST
   include a short **Build Performance** section, added at setup time instead

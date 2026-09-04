@@ -70,35 +70,19 @@ fn session_id_export_prefix(session_id: &str) -> String {
     )
 }
 
-/// The one-line hint printed to the pane AFTER `claude` exits (#2023 component D).
-///
-/// Why: component A leaves the pane alive as a bare shell when the runtime
-/// exits, and component C lets a bare `tm` run from inside that pane relaunch
-/// the same session in place — but neither is discoverable unless the pane
-/// itself says so. Backticks are used around the literal command name; they
-/// have no special meaning inside the single-quoted `echo` argument this is
-/// embedded in (see [`on_exit_hint_suffix`]), so no escaping is needed.
-/// What: a short, single-line, non-panicking string.
-/// Test: `spawn_command_prints_relaunch_hint_after_claude_exits`,
-/// `resume_command_prints_relaunch_hint_after_claude_exits`.
-const RELAUNCH_HINT: &str = "tm: run `tm` to relaunch this session";
+// #6766: the on-exit report used to be an unconditional `; echo '<hint>'`, so
+// a `claude` that refused the launch and quit printed the same "run `tm` to
+// relaunch" line as a session the operator worked in and exited. The hint, the
+// two failure lines, and the status/elapsed branch that chooses between them
+// now live in `claude_code_exit_hint` — a sibling submodule for the same reason
+// `claude_code_gh_env` is one (this file carries a frozen SLOC budget, #2398).
+use claude_code_exit_hint::{exit_dispatch_suffix, launch_clock_prefix};
 
-/// Build the `; echo '<hint>'` suffix appended AFTER every managed
-/// launch/resume command (#2023 component D).
-///
-/// Why: `;` sequences the `echo` to run only once the preceding `claude`
-/// invocation exits (successfully or not) and control returns to the pane's
-/// shell — exactly the moment component A leaves the pane idle at, and
-/// exactly what the in-place relaunch (component C) needs advertised.
-/// What: `; echo '<RELAUNCH_HINT>'`, single-quoted via [`shell_single_quote`]
-/// for the same reason [`env_bin_prefix`] quotes `CLAUDE_CONFIG_DIR` — a
-/// literal constant with no shell metacharacters, but quoting defensively
-/// costs nothing and matches this file's established convention.
-/// Test: `spawn_command_prints_relaunch_hint_after_claude_exits`,
-/// `resume_command_prints_relaunch_hint_after_claude_exits`.
-fn on_exit_hint_suffix() -> String {
-    format!("; echo {}", shell_single_quote(RELAUNCH_HINT))
-}
+/// Status-branched on-exit reporting for the pane (#6766) — see its module doc
+/// for why the refusal is detected by elapsed time rather than by matching
+/// Claude Code's own wording.
+#[path = "claude_code_exit_hint.rs"]
+mod claude_code_exit_hint;
 
 /// Wrap a managed launch/resume command so it is rooted at `cwd` regardless
 /// of the tmux pane shell's actual starting directory (#2250).
@@ -298,10 +282,11 @@ fn prompt_file_flag(prompt_file: Option<&Path>) -> String {
 /// same mechanism the CLI `tm launch` / client `/connect` paths already use —
 /// so this, previously the one driver missing it, can no longer silently spawn
 /// vanilla Claude Code.
-/// What: [`session_id_export_prefix`] followed by [`env_bin_prefix`], the
-/// optional [`prompt_file_flag`], the two shared flag constants, followed by
-/// [`on_exit_hint_suffix`] (#2023 component D — `; echo '<hint>'`, which only
-/// runs once `claude` exits and control returns to the pane); piped to
+/// What: [`launch_clock_prefix`] (#6766) and [`session_id_export_prefix`]
+/// followed by [`env_bin_prefix`], the optional [`prompt_file_flag`], the two
+/// shared flag constants, followed by [`exit_dispatch_suffix`] (#2023 component
+/// D, status-branched by #6766 — it runs once `claude` exits and control
+/// returns to the pane, and reports WHICH way it exited); piped to
 /// `tmux send-keys … Enter`. `claude_bin` is the resolved binary — an absolute
 /// path under launchd so the pane (which inherits the daemon's minimal `PATH`)
 /// does not need `claude` on its own `PATH` (#1298). `session_id` is the
@@ -315,7 +300,7 @@ fn prompt_file_flag(prompt_file: Option<&Path>) -> String {
 /// `spawn_command_uses_resolved_binary`,
 /// `spawn_command_sets_claude_config_dir`,
 /// `spawn_command_exports_managed_session_id`,
-/// `spawn_command_prints_relaunch_hint_after_claude_exits`,
+/// `spawn_command_dispatches_on_the_claude_exit_status`,
 /// `spawn_command_with_prompt_file_contains_flag`,
 /// `spawn_command_without_prompt_file_omits_flag`,
 /// `spawn_command_prefixes_cd_to_workdir`,
@@ -334,8 +319,13 @@ fn spawn_command(
     mcp_env: &[(String, String)],
 ) -> String {
     let body = format!(
-        "{}{}{}{} {} {}{}",
+        "{}{}{}{}{} {} {}{}",
         session_id_export_prefix(session_id),
+        // #6766: stamp the launch second here, between the two prefixes whose
+        // positions are already pinned — the `export` stays the group's first
+        // statement (#2023 B), and the gh-env source-and-delete stays
+        // immediately before `env` (#3025).
+        launch_clock_prefix(),
         claude_code_gh_env::gh_env_source_prefix(gh_env_file),
         env_bin_prefix(claude_bin, config_dir, oauth_token, mcp_env),
         prompt_file_flag(prompt_file),
@@ -343,7 +333,7 @@ fn spawn_command(
         // `CLAUDE_CONFIG_DIR/agents` (the bundled roster) lives.
         crate::core::model_inject::setting_sources_flag(config_dir),
         crate::core::model_inject::PERMISSION_MODE_FLAG,
-        on_exit_hint_suffix(),
+        exit_dispatch_suffix(),
     );
     cd_and_group(cwd, &body)
 }
@@ -442,32 +432,35 @@ fn build_prompt_file(project_dir: &Path, session_id: Option<&str>) -> Option<std
     file
 }
 
-/// Build a resume-aware Claude Code command (#1744, #1840).
+/// Build a resume-aware Claude Code command (#1744, #1840, #6765).
 ///
 /// Why: `resume_managed` must restore the prior conversation when one is known.
 /// `--resume <id>` restores the exact Claude Code conversation identified by
-/// `claude_session_id`; `--continue` resumes the most-recent conversation in
-/// the workspace when the id is absent AND prior conversation history exists;
-/// neither flag is passed when there is no prior conversation, preventing the
-/// "No conversation found to continue" error that would otherwise drop the
-/// session to a bare shell (#1840).
-/// What: `Some(id)` → `--resume <id>`. `None, has_prior_conv=true` → `--continue`.
-/// `None, has_prior_conv=false` → plain spawn (no resume flag), so the session
-/// starts a fresh conversation instead of erroring. All three share the same
-/// env prefix (scrub + `CLAUDE_CONFIG_DIR`) and isolation flags as
-/// [`spawn_command`], and all three get [`on_exit_hint_suffix`] appended
-/// (#2023 component D) so the pane always prints the relaunch hint once
-/// `claude` exits, whichever branch fired. `prompt_file` (#2230) carries the
+/// `claude_session_id`. There is no `--continue` fallback (#6765): the command
+/// exports the MANAGED `CLAUDE_CONFIG_DIR`, so a bare `--continue` resolves
+/// "most recent conversation" against `<config_dir>/projects` — a store this
+/// process cannot reason about, and which may hold a still-live conversation
+/// Claude Code refuses to double-attach to (it prints "Your most recent
+/// conversation is running in the background" and exits 0, dropping the pane to
+/// a bare shell). Resolving the target EXPLICITLY, or launching fresh, keeps
+/// the decision independent of Claude Code's undocumented background-job layout.
+/// What: `Some(id)` → `--resume <id>`; `None` → plain spawn (no resume flag), so
+/// the session starts a fresh conversation. Both share the same env prefix
+/// (scrub + `CLAUDE_CONFIG_DIR`) and isolation flags as [`spawn_command`], and
+/// both get [`launch_clock_prefix`] prepended and [`exit_dispatch_suffix`]
+/// appended (#2023 component D, status-branched by #6766) so the pane reports
+/// how `claude` exited — the relaunch hint for a session that ran, a named
+/// failure for a launch that was refused — whichever branch fired. `prompt_file` (#2230) carries the
 /// PM system prompt via `--append-system-prompt-file` the same way
 /// [`spawn_command`] does, so resumed/guided-resume/crash-recovery sessions
 /// get the identical carrier a fresh spawn gets instead of falling back to a
 /// vanilla `claude` invocation.
 /// Test: `resume_command_with_id_uses_resume_flag`,
-/// `resume_command_without_id_with_prior_conv_uses_continue`,
+/// `resume_command_without_id_never_uses_continue`,
 /// `resume_command_without_id_no_prior_conv_uses_plain_spawn`,
 /// `resume_command_sets_claude_config_dir`,
 /// `resume_command_exports_managed_session_id`,
-/// `resume_command_prints_relaunch_hint_after_claude_exits`,
+/// `resume_command_dispatches_on_the_claude_exit_status`,
 /// `resume_command_with_prompt_file_contains_flag`,
 /// `resume_command_prefixes_cd_to_workdir`,
 /// `resume_command_sets_oauth_token_when_available`,
@@ -490,7 +483,6 @@ fn resume_command(
     claude_bin: &str,
     config_dir: Option<&Path>,
     claude_session_id: Option<&str>,
-    has_prior_conv: bool,
     session_id: &str,
     prompt_file: Option<&Path>,
     oauth_token: Option<&str>,
@@ -498,8 +490,11 @@ fn resume_command(
     mcp_env: &[(String, String)],
 ) -> String {
     let base = format!(
-        "{}{}{}{} {} {}",
+        "{}{}{}{}{} {} {}",
         session_id_export_prefix(session_id),
+        // #6766: same launch stamp, same position as `spawn_command` — the
+        // resume path is the one the refused relaunch was observed on.
+        launch_clock_prefix(),
         claude_code_gh_env::gh_env_source_prefix(gh_env_file),
         env_bin_prefix(claude_bin, config_dir, oauth_token, mcp_env),
         prompt_file_flag(prompt_file),
@@ -509,74 +504,122 @@ fn resume_command(
     );
     let cmd = match claude_session_id {
         Some(id) => format!("{base} --resume {id}"),
-        None if has_prior_conv => format!("{base} --continue"),
-        None => base, // No prior conversation: start fresh to avoid "no conversation found".
+        // #6765: never a bare `--continue` — it would resolve against the
+        // managed store this process did not choose. No usable id → start fresh.
+        None => base,
     };
-    let body = format!("{cmd}{}", on_exit_hint_suffix());
+    let body = format!("{cmd}{}", exit_dispatch_suffix());
     cd_and_group(cwd, &body)
 }
 
+/// Length at which Claude Code truncates a project key and appends a path hash
+/// (its `MAX_SANITIZED_LENGTH`). Verified live: a 370-character cwd produced a
+/// 207-character directory name — 200 kept characters, `-`, then the hash.
+const MAX_PROJECT_KEY_LEN: usize = 200;
+
 /// Encode a workspace path the same way Claude Code names its project dir.
 ///
-/// Why: both the `--continue`-eligibility check ([`has_prior_conversation_in`])
-/// and the `--resume <id>`-existence check ([`session_id_exists_in`]) must
-/// derive the SAME on-disk project directory name for a given `cwd` — if the
-/// two ever computed the encoding differently (e.g. one gets tweaked and the
-/// other doesn't), `--continue` detection and `--resume` existence detection
-/// would silently disagree about which conversations exist. Sharing one
-/// helper makes that impossible.
-/// What: replaces every `/` in the path with `-` (Claude Code's project-dir
-/// naming scheme). A leading `/` becomes `-`, so `/private/tmp/foo` →
-/// `-private-tmp-foo`.
+/// Why: every on-disk lookup against a Claude Code session store — today only
+/// the `--resume <id>`-existence check ([`session_id_exists_in`]) — must derive
+/// the SAME project directory name for a given `cwd`. Sharing one helper makes
+/// two callers computing the encoding differently impossible.
+///
+/// What: folds every character outside `[A-Za-z0-9]` to `-`, counting UTF-16
+/// code units rather than Rust `char`s, then truncates to
+/// [`MAX_PROJECT_KEY_LEN`] plus `-<base36 hash>` when the result is longer.
+/// Uppercase is preserved; `/`, `.`, `_`, space, `@`, `+`, `~`, quotes,
+/// brackets and every non-ASCII character all become `-`. So
+/// `/private/tmp/foo` → `-private-tmp-foo`, and
+/// `/repo/.worktrees/w1` → `-repo--worktrees-w1`.
+///
+/// // #6777: this used to fold `/` alone, so every path segment starting with
+/// a dot encoded one character short of the real directory name. Rule
+/// re-derived from Claude Code 2.1.260's `sanitizePath`
+/// (`s.replace(/[^a-zA-Z0-9]/g, "-")`, then `slice(0,200) + "-" + base36`) and
+/// confirmed against live probe runs — see the doc on [`js_path_hash`] for the
+/// hash half.
+///
 /// Test: `encode_project_dir_replaces_slashes`,
-/// `has_prior_conversation_returns_true_when_jsonl_exists`,
-/// `session_id_exists_true_for_real_jsonl_file`,
-/// `session_id_exists_finds_hardcoded_dir_name_for_known_cwd` (non-circular
-/// regression guard against encoding-scheme drift).
-fn encode_project_dir(cwd: &Path) -> String {
-    cwd.to_string_lossy().replace('/', "-")
-}
-
-/// Detect whether Claude Code has prior conversation history for `cwd` (#1840).
+/// `encode_project_dir_folds_dot_in_worktrees_path`,
+/// `encode_project_dir_folds_every_non_alphanumeric`,
+/// `encode_project_dir_folds_astral_char_to_two_dashes`,
+/// `encode_project_dir_truncates_and_hashes_a_long_path`,
+/// `session_id_exists_finds_hardcoded_dir_name_for_dotted_cwd`,
+/// `spawn_resume_uses_resume_flag_for_a_worktree_cwd` (non-circular regression
+/// guards against encoding-scheme drift).
 ///
-/// Why: `claude --continue` exits with "No conversation found to continue" when
-/// no prior conversation exists for the workspace. This guard prevents that error.
-/// What: delegates to [`has_prior_conversation_in`] with the standard
-/// `~/.claude/projects/` directory derived from `dirs::home_dir()`.
-/// Test: `has_prior_conversation_returns_false_for_fresh_workspace` exercises
-/// the inner function directly via `has_prior_conversation_in`.
-fn has_prior_conversation(cwd: &Path) -> bool {
-    let Some(home) = dirs::home_dir() else {
-        return false;
-    };
-    has_prior_conversation_in(cwd, &home.join(".claude").join("projects"))
-}
-
-/// Inner implementation of conversation-history detection, testable with injected dir.
-///
-/// Why: allows unit tests to pass a temp directory as `projects_dir` without
-/// mutating the `HOME` environment variable (which is thread-unsafe under parallel
-/// test execution). Separating the I/O root from the detection logic keeps the
-/// detection pure and mockable.
-/// What: returns `true` when `<projects_dir>/<encoded-cwd>/` exists and contains
-/// at least one `.jsonl` file. The encoded path comes from
-/// [`encode_project_dir`] (every `/` replaced with `-`); a leading `/` becomes
-/// `-`, so `/private/tmp/foo` → `-private-tmp-foo`.
-/// Test: `has_prior_conversation_returns_false_for_fresh_workspace`,
-/// `has_prior_conversation_returns_true_when_jsonl_exists`.
-fn has_prior_conversation_in(cwd: &Path, projects_dir: &Path) -> bool {
-    if !projects_dir.is_dir() {
-        return false;
+/// `pub(crate)` (#6777): the daemon's `SessionStart` correlation tests seed
+/// transcripts under this same directory name, and a second hand-rolled fold
+/// there would drift — it did, and it silently omitted the truncation branch.
+pub(crate) fn encode_project_dir(cwd: &Path) -> String {
+    let path = cwd.to_string_lossy();
+    let mut key = String::with_capacity(path.len());
+    for c in path.chars() {
+        if c.is_ascii_alphanumeric() {
+            key.push(c);
+        } else {
+            // JavaScript's `String.prototype.replace` walks UTF-16 code units,
+            // so one astral `char` (a surrogate pair) yields TWO dashes.
+            for _ in 0..c.len_utf16() {
+                key.push('-');
+            }
+        }
     }
-    let project_dir = projects_dir.join(encode_project_dir(cwd));
-    project_dir.is_dir()
-        && std::fs::read_dir(&project_dir)
-            .map(|d| {
-                d.flatten()
-                    .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
-            })
-            .unwrap_or(false)
+    if key.len() <= MAX_PROJECT_KEY_LEN {
+        return key;
+    }
+    // `key` is pure ASCII here, so a byte truncation is a character truncation.
+    key.truncate(MAX_PROJECT_KEY_LEN);
+    key.push('-');
+    key.push_str(&to_base36(js_path_hash(&path).unsigned_abs()));
+    key
 }
+
+/// Claude Code's 32-bit path hash, used only for the over-length key suffix.
+///
+/// Why: an over-length project key ends in `-<base36 of abs(hash)>`, so
+/// reproducing the directory name for a deep worktree requires the exact same
+/// hash. tm's own managed worktree paths already reach 188 characters, so this
+/// branch is reachable, not theoretical.
+/// What: ports `h = (h << 5) - h + unit | 0` over the path's UTF-16 code units.
+/// Every JS step truncates to int32, which is wrapping `i32` arithmetic here.
+/// Test: `encode_project_dir_truncates_and_hashes_a_long_path`.
+fn js_path_hash(path: &str) -> i32 {
+    let mut hash: i32 = 0;
+    for unit in path.encode_utf16() {
+        hash = hash
+            .wrapping_shl(5)
+            .wrapping_sub(hash)
+            .wrapping_add(i32::from(unit));
+    }
+    hash
+}
+
+/// Render `n` in lowercase base 36, matching JavaScript's `Number#toString(36)`.
+///
+/// Test: `encode_project_dir_truncates_and_hashes_a_long_path`.
+fn to_base36(mut n: u32) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if n == 0 {
+        return "0".to_string();
+    }
+    let mut out = Vec::new();
+    while n > 0 {
+        out.push(DIGITS[(n % 36) as usize]);
+        n /= 36;
+    }
+    out.reverse();
+    out.into_iter().map(char::from).collect()
+}
+
+// #6765: `has_prior_conversation` / `has_prior_conversation_in` used to live
+// here as the `--continue`-eligibility check. They hardcoded
+// `~/.claude/projects` — the OPERATOR's store — while every managed relaunch
+// exports a managed `CLAUDE_CONFIG_DIR`, so the check answered for one store
+// and the flag acted on another. Both relaunch paths now resolve the target
+// explicitly (`--resume <id>` verified against the session's OWN store, else a
+// fresh launch), leaving neither function a caller. Deleted rather than
+// repointed: with no `--continue` branch there is nothing to gate.
 
 /// Resolve the Claude Code `projects` directory used for session storage.
 ///
@@ -590,8 +633,9 @@ fn has_prior_conversation_in(cwd: &Path, projects_dir: &Path) -> bool {
 /// `~/.claude/projects` — otherwise every id would appear "missing" for managed
 /// sessions and resume would never use `--resume`.
 /// What: `<config_dir>/projects` when a managed config dir is resolved; falls
-/// back to `~/.claude/projects` when `config_dir` is `None` (home-unresolved
-/// legacy path, matching [`has_prior_conversation`]'s fallback).
+/// back to `~/.claude/projects` when `config_dir` is `None` — the unmanaged
+/// default store, which is where an unrelocated `claude` really does keep its
+/// conversations.
 /// Test: `session_id_exists_prefers_config_dir_projects_when_present`,
 /// `session_id_exists_falls_back_to_home_claude_when_no_config_dir`.
 fn projects_dir_for(config_dir: Option<&Path>) -> Option<std::path::PathBuf> {
@@ -608,13 +652,15 @@ fn projects_dir_for(config_dir: Option<&Path>) -> Option<std::path::PathBuf> {
 /// session file was pruned, moved, or never made it to disk after a crash).
 /// `claude --resume <missing-id>` fails hard with no graceful recovery, which
 /// turns `tm` resume into a dead end. Checking first lets the caller fall back
-/// to `--continue` or a plain spawn instead of a hard failure.
+/// to a plain spawn instead of a hard failure.
 /// What: best-effort filesystem check — `true` only when
 /// `<projects_dir>/<encoded-cwd>/<id>.jsonl` exists as a regular file, where
 /// `projects_dir` is resolved via [`projects_dir_for`] and the cwd is encoded
-/// via the shared [`encode_project_dir`] helper (every `/` becomes `-`) — the
-/// same encoding [`has_prior_conversation_in`] uses, so the two checks can
-/// never silently disagree.
+/// via the shared [`encode_project_dir`] helper (every character outside
+/// `[A-Za-z0-9]` becomes `-`).
+/// #6765: this is now the ONLY conversation-store lookup either relaunch path
+/// makes — it is the check that consults the store the spawned process will
+/// actually use, which is exactly what the deleted `--continue` gate did not.
 /// Never panics: an unresolvable projects dir, a missing file, or any I/O
 /// error all conservatively resolve to `false` (safest outcome — it only ever
 /// causes an extra fallback, never a hard failure or a wrong `--resume`).
@@ -635,15 +681,18 @@ pub(crate) fn session_id_exists(cwd: &Path, config_dir: Option<&Path>, id: &str)
 }
 
 /// Inner implementation of the session-id existence check, testable with an
-/// injected `projects_dir` (mirrors [`has_prior_conversation_in`]'s pattern).
+/// injected `projects_dir` (the injected-I/O-root pattern used throughout this
+/// module).
 ///
 /// Why: unit tests need to point at a temp directory rather than mutating
 /// `HOME`/`CLAUDE_CONFIG_DIR` process-globals.
-/// What: encodes `cwd` via [`encode_project_dir`] (every `/` → `-`) and checks
-/// `<projects_dir>/<encoded-cwd>/<id>.jsonl` is a regular file.
+/// What: encodes `cwd` via [`encode_project_dir`] (every character outside
+/// `[A-Za-z0-9]` → `-`) and checks `<projects_dir>/<encoded-cwd>/<id>.jsonl` is
+/// a regular file.
 /// Test: `session_id_exists_true_for_real_jsonl_file`,
 /// `session_id_exists_false_for_missing_id`,
-/// `session_id_exists_finds_hardcoded_dir_name_for_known_cwd`.
+/// `session_id_exists_finds_hardcoded_dir_name_for_known_cwd`,
+/// `session_id_exists_finds_hardcoded_dir_name_for_dotted_cwd`.
 fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
     projects_dir
         .join(encode_project_dir(cwd))
@@ -755,7 +804,7 @@ fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::Path
 /// exactly what the caller (the `tm` CLI binary) needs to construct that
 /// [`std::process::Command`] itself.
 /// What: `claude_bin` (resolved absolute path), `args` (the isolation flags
-/// plus `--resume <id>`/`--continue`/neither, mirroring [`resume_command`]'s
+/// plus `--resume <id>` or neither, mirroring [`resume_command`]'s
 /// selection — see [`compose_inplace_args`]), `config_dir` (the tm-owned
 /// `CLAUDE_CONFIG_DIR`, when resolved), and `oauth_token` (issue #2246 — the
 /// resolved [`crate::core::oauth_token::resolve_oauth_token`] value, when
@@ -768,7 +817,7 @@ fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::Path
 pub struct InPlaceResumeCommand {
     /// Resolved `claude` binary (absolute path).
     pub claude_bin: String,
-    /// Full argv (isolation flags + resume/continue selection), EXCLUDING the
+    /// Full argv (isolation flags + resume-or-fresh selection), EXCLUDING the
     /// binary itself.
     pub args: Vec<String>,
     /// The tm-owned `CLAUDE_CONFIG_DIR`, when resolved (`None` when home is
@@ -787,7 +836,7 @@ pub struct InPlaceResumeCommand {
 
 /// Pure argv composition shared by [`build_inplace_resume_command`] (#2023 C).
 ///
-/// Why: separating the resume/continue/fresh SELECTION from claude-binary
+/// Why: separating the resume/fresh SELECTION from claude-binary
 /// resolution (which needs a real `claude` install to exercise end-to-end)
 /// keeps the decision itself testable in every CI environment — mirroring how
 /// [`resume_command`]'s selection tests pass a fake `claude_bin` string rather
@@ -798,9 +847,10 @@ pub struct InPlaceResumeCommand {
 /// [`crate::core::model_inject::PERMISSION_MODE_FLAG`], whitespace-split
 /// into argv tokens since both constants are simple space-separated flags with
 /// no embedded quoting) followed by `--resume <id>` (id exists under
-/// `config_dir`, per [`session_id_exists`]), `--continue` (no usable id but
-/// [`has_prior_conversation`] is true), or neither (fresh start) — the exact
-/// same three-way selection [`resume_command`] makes.
+/// `config_dir`, per [`session_id_exists`]) or neither flag (fresh start) — the
+/// exact same two-way selection [`resume_command`] makes. #6765: there is no
+/// `--continue` fallback on either path; see [`resume_command`]'s doc for why a
+/// bare `--continue` under a managed `CLAUDE_CONFIG_DIR` is unsafe.
 ///
 /// `prompt_file` (#4336): this path previously omitted the PM system prompt BY
 /// DESIGN, so an in-place relaunch silently restored the operator into vanilla
@@ -814,7 +864,7 @@ pub struct InPlaceResumeCommand {
 /// filename claude then fails to open.
 /// Test: `compose_inplace_args_uses_resume_for_existing_id`,
 /// `compose_inplace_args_falls_back_for_missing_id`,
-/// `compose_inplace_args_uses_continue_when_no_id_but_prior_conv`,
+/// `compose_inplace_args_never_continues_from_home_store`,
 /// `compose_inplace_args_carries_prompt_file_unquoted`,
 /// `compose_inplace_args_omits_prompt_flag_when_absent`.
 fn compose_inplace_args(
@@ -838,13 +888,11 @@ fn compose_inplace_args(
             .map(str::to_owned),
     );
 
-    match effective_id {
-        Some(id) => {
-            args.push("--resume".to_owned());
-            args.push(id.to_owned());
-        }
-        None if has_prior_conversation(cwd) => args.push("--continue".to_owned()),
-        None => {}
+    // #6765: an id verified against the session's OWN store, or a fresh launch.
+    // Never a bare `--continue` — see `resume_command`'s doc.
+    if let Some(id) = effective_id {
+        args.push("--resume".to_owned());
+        args.push(id.to_owned());
     }
     args
 }
@@ -853,11 +901,10 @@ fn compose_inplace_args(
 /// (#2023 component C).
 ///
 /// Why: the in-place relaunch must use the SAME `--resume <id>`
-/// existence-check → `--continue`/fresh-spawn fallback semantics as the
-/// tmux-pane resume path (#2013) — reusing [`session_id_exists`] /
-/// [`has_prior_conversation`] / [`prepare_managed_config`] directly (via
-/// [`compose_inplace_args`]), rather than re-deriving them, means the two
-/// paths can never silently drift.
+/// existence-check → fresh-spawn fallback semantics as the tmux-pane resume
+/// path (#2013, #6765) — reusing [`session_id_exists`] /
+/// [`prepare_managed_config`] directly (via [`compose_inplace_args`]), rather
+/// than re-deriving them, means the two paths can never silently drift.
 /// What: resolves the `claude` binary (`Err(RuntimeError::BinaryNotFound)` if
 /// missing), provisions/trust-seeds the managed `CLAUDE_CONFIG_DIR` via
 /// [`prepare_managed_config`] (logged under the synthetic session name
@@ -1089,7 +1136,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         Ok(())
     }
 
-    /// Resume Claude Code with conversation continuity (#1744, #1840, #2013).
+    /// Resume Claude Code with conversation continuity (#1744, #2013, #6765).
     ///
     /// Why: `resume_managed` must restore the prior conversation rather than
     /// starting fresh. If the stored `claude_session_id` is available AND
@@ -1097,15 +1144,14 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// [`session_id_exists`], #2013), `--resume <id>` restores the exact
     /// conversation. A stale id (the session was pruned, moved, or never
     /// reached disk) is NOT passed to `--resume` — `claude --resume <missing>`
-    /// fails hard with no recovery — instead it is treated like "no id" and
-    /// falls back to the existing #1840 semantics: `--continue` when prior
-    /// conversation history is detected (via [`has_prior_conversation`]), else
-    /// a plain spawn, avoiding the "No conversation found to continue" error
-    /// that would otherwise drop the session to a bare shell.
+    /// fails hard with no recovery — instead the pane launches FRESH. #6765:
+    /// there is no `--continue` fallback; the target is resolved explicitly or
+    /// not at all, so the decision never depends on which conversation the
+    /// managed store happens to consider "most recent".
     /// What: resolves the claude binary, provisions + trust-seeds the tm-owned
     /// `CLAUDE_CONFIG_DIR` via [`prepare_managed_config`], existence-checks
-    /// `claude_session_id` against the resolved config dir, falls back when it
-    /// is missing, checks for prior conversation when no usable id remains,
+    /// `claude_session_id` against the resolved config dir, falls back to a
+    /// fresh launch when it is missing,
     /// builds the PM system-prompt file via [`build_prompt_file`] (#2230 —
     /// same carrier `spawn` uses, previously missing from every resume path),
     /// resolves an optional `CLAUDE_CODE_OAUTH_TOKEN` via
@@ -1120,6 +1166,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// send, preserving prior behavior for that case.
     /// Test: `spawn_resume_with_id_uses_resume_flag`,
     /// `spawn_resume_without_id_no_prior_conv_sends_plain_spawn`,
+    /// `spawn_resume_never_sends_bare_continue`,
     /// `spawn_resume_sends_prompt_file_when_binary_available`,
     /// `spawn_resume_sends_oauth_token_when_available`,
     /// `spawn_resume_targets_stored_pane_id_when_known`,
@@ -1186,14 +1233,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
                  Stopped within ~60 s (#1744)"
             );
         }
-        // #1840: only use --continue when prior conversation history exists for cwd.
-        // Without this guard, --continue fails with "No conversation found" for
-        // sessions that were stopped before claude ever ran (e.g. provisioning error,
-        // or a fresh worktree that was never used).
-        // Compute file_history separately so the debug log reflects the actual
-        // filesystem check result rather than the combined (id || file) value.
-        let file_history = effective_id.is_none() && has_prior_conversation(cwd);
-        let prior = effective_id.is_some() || file_history;
+        // #6765: no `--continue` fallback — a usable id resumes by id, anything
+        // else launches fresh.
         debug!(
             session = %tmux_name,
             pane_id = pane_id.unwrap_or("<none>"),
@@ -1201,7 +1242,6 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             task = %task,
             claude = %claude_bin,
             resume = effective_id.is_some(),
-            has_prior_conv = file_history, // reflects actual .jsonl file check, not the combined value
             "resuming claude-code in tmux pane"
         );
         let cmd = resume_command(
@@ -1213,7 +1253,6 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             &crate::core::spawn_disclaim::disclaim_pane_command(&claude_bin),
             config_dir.as_deref(),
             effective_id,
-            prior,
             session_id,
             prompt_file.as_deref(),
             oauth_token.as_deref(),

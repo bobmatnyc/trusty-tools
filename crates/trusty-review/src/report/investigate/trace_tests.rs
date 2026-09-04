@@ -28,6 +28,7 @@ pub(super) const SHRINK_GUARD_RATIO_DIVISOR: usize = 2;\n";
 fn finding(title: &str, severity: Severity, line: Option<u64>) -> VerifiedFinding {
     VerifiedFinding {
         trace_verdict: String::new(),
+        cwe_id: Vec::new(),
         title: title.to_string(),
         severity,
         dimension: "scalability".to_string(),

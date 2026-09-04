@@ -22,6 +22,12 @@ spec_refs:
 **Builds on:** [ADR-0025](../adr/0025-collapse-agent-and-skill-tier-hierarchies.md) and its 2026-08-03 addendum ("Manifest-Based Project Configuration and the Four-Category Agent Model", §B1–B6) — the deployment/sourcing/precedence model this document maps its catalog onto, cited not restated. [DOC-61](./DOC-61-canonical-agent-standard.md) — the compose-chain source format (`extends:` inheritance, frontmatter merge, per-product builders) every agent cataloged here is built from, cited not restated. `crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md` — the hand-authored routing prose this document formalizes into a governed spec artifact without duplicating its table.
 **Related issues:** **#4755** (this spec), **#4760** (the framework manifest this document was updated for), **#5202** (workflow/ticketing/version-control ownership) — scheduled in the 1.3.5 release line
 
+> **Source-ownership amendment (2026-09-03):** The MPM asset paths below are
+> current provenance, not permanent canonical ownership. ADR-0059 requires one
+> host-neutral authored source and generated per-product adapters. Trusty Code
+> and Trusty Agents implementation is #5425; MPM adoption is a separate
+> cross-product handoff.
+
 ---
 
 ## 1. Summary

@@ -40,6 +40,11 @@ equally-specified first-class sections per owner instruction; documents
 assistant↔assistant as the replacement for the delegation lane closed by
 PR #4240/ADR-0024)
 
+> **Trusty Code disposition (2026-09-03):** This shared bus stays Draft and is
+> not implemented by Trusty Code. Its `SessionEventEnvelope` remains the local
+> ordered replay and live stream; it must not be presented as the durable
+> cross-agent channel. Adoption is tracked by #5429 and governed by ADR-0058.
+
 ## 1. Summary
 
 This spec unifies **three** communication paths onto **one** addressed,

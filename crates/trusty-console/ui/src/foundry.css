@@ -107,7 +107,7 @@
  * Every rule below is scoped under `.foundry`.
  *
  * The class names .badge, .stat-grid, .stat-value and .stat-label are ALREADY
- * in use by SearchTab, MemoryTab, AnalyzeTab, ReviewTab and ServiceCard, each
+ * in use by SearchTab, MemoryTab, AnalyzeTab, ReviewTab and ServicesList, each
  * with its own scoped styling. A global port would leak the Foundry mono
  * stamping into those five components — Svelte's scoped rules override the
  * properties they set, but not font-family or letter-spacing, so the existing

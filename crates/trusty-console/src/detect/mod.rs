@@ -182,6 +182,8 @@ mod tests {
             url: None,
             hint: None,
             lifecycle: ServiceLifecycle::Daemon,
+            cpu_pct: None,
+            rss_bytes: None,
         }
     }
 

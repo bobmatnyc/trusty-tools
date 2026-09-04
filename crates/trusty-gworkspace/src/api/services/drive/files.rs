@@ -184,12 +184,28 @@ pub async fn list_shared_drives(client: &BaseClient, args: Value) -> Result<Valu
     client.get(&url, account).await
 }
 
-/// Why: File-level mutations (create folder, rename, trash, upload) share one
-/// Drive API surface.
-/// What: Dispatches `create_folder|rename|trash|delete|copy|move|upload` to the
-/// Drive `/files` (and `/upload/.../files`) endpoints.
+/// Google-native MIME types whose content `update` can replace in place.
+///
+/// Why: Drive converts an uploaded body into a native Doc/Sheet/Slides file
+/// only for these three; PATCHing bytes at anything else (a PDF, an image, a
+/// folder) either corrupts it or fails opaquely, so the action refuses up
+/// front rather than guessing (#6685).
+/// What: The three `application/vnd.google-apps.*` editor types.
+/// Test: `update_refuses_non_google_native_target`.
+const IN_PLACE_UPDATABLE_MIMES: [&str; 3] = [
+    "application/vnd.google-apps.document",
+    "application/vnd.google-apps.spreadsheet",
+    "application/vnd.google-apps.presentation",
+];
+
+/// Why: File-level mutations (create folder, rename, trash, upload, in-place
+/// content replace) share one Drive API surface.
+/// What: Dispatches `create_folder|rename|trash|delete|copy|move|upload|update`
+/// to the Drive `/files` (and `/upload/.../files`) endpoints.
 /// Test: `upload` multipart-body shape is unit-tested via
-/// `build_multipart_related`; live 200 validation is deferred.
+/// `build_multipart_related`; `update` is covered end-to-end against a
+/// `wiremock` server by `update_refuses_non_google_native_target` and
+/// `update_patches_media_to_the_existing_file_id`.
 pub async fn manage_drive_file(client: &BaseClient, args: Value) -> Result<Value> {
     let action = require_str(&args, "action")?;
     let account = account_of(&args);
@@ -243,24 +259,7 @@ pub async fn manage_drive_file(client: &BaseClient, args: Value) -> Result<Value
         "upload" => {
             let name = require_str(&args, "name")?;
             let parent = opt_str(&args, "parent_id");
-            let mime_arg = opt_str(&args, "mime_type");
-
-            // Source bytes come from either a local file or inline content.
-            let (bytes, resolved_mime) = if let Some(path) = opt_str(&args, "local_path") {
-                let data =
-                    std::fs::read(path).with_context(|| format!("read upload source {path}"))?;
-                let mime = mime_arg
-                    .map(str::to_string)
-                    .unwrap_or_else(|| guess_mime_from_path(path));
-                (data, mime)
-            } else if let Some(content) = opt_str(&args, "content") {
-                let mime = mime_arg.unwrap_or("text/plain").to_string();
-                (content.as_bytes().to_vec(), mime)
-            } else {
-                return Err(anyhow!(
-                    "upload requires either 'local_path' or inline 'content'"
-                ));
-            };
+            let (bytes, resolved_mime) = read_source_bytes(&args, "upload")?;
 
             let mut metadata = json!({ "name": name, "mimeType": resolved_mime });
             if let Some(p) = parent {
@@ -275,8 +274,123 @@ pub async fn manage_drive_file(client: &BaseClient, args: Value) -> Result<Value
             );
             client.post_raw(&url, &content_type, body, account).await
         }
+        // #6685: in-place replace keeps file id and revision history.
+        "update" => {
+            update_drive_file(client, &args, account, DRIVE_API_BASE, DRIVE_UPLOAD_BASE).await
+        }
         other => Err(anyhow!("unknown action for manage_drive_file: {other}")),
     }
+}
+
+/// Resolve an action's payload bytes and their MIME type from the arguments.
+///
+/// Why: `upload` and `update` accept the same two-of-one source — a local file
+/// or inline text — and the same optional `mime_type` override. One reader
+/// keeps the extension guess and the `text/plain` inline default identical
+/// across both.
+/// What: Reads `local_path` (MIME guessed from its extension) or `content`
+/// (MIME defaults to `text/plain`), with `mime_type` overriding either. Errors
+/// naming `action` when neither source is present.
+/// Test: `source_bytes_prefers_local_path_and_guesses_mime`.
+fn read_source_bytes(args: &Value, action: &str) -> Result<(Vec<u8>, String)> {
+    let mime_arg = opt_str(args, "mime_type");
+    if let Some(path) = opt_str(args, "local_path") {
+        let data = std::fs::read(path).with_context(|| format!("read {action} source {path}"))?;
+        let mime = mime_arg
+            .map(str::to_string)
+            .unwrap_or_else(|| guess_mime_from_path(path));
+        return Ok((data, mime));
+    }
+    if let Some(content) = opt_str(args, "content") {
+        return Ok((
+            content.as_bytes().to_vec(),
+            mime_arg.unwrap_or("text/plain").to_string(),
+        ));
+    }
+    Err(anyhow!(
+        "{action} requires either 'local_path' or inline 'content'"
+    ))
+}
+
+/// Replace an existing Google editor file's content in place.
+///
+/// Why: Publishing into an EXISTING Google Doc must keep the file id, its
+/// share link, its permissions, and its revision history. `upload` POSTs a
+/// NEW file, so every workflow that re-publishes into a known doc id had to
+/// drop out to a raw `curl` (#6685).
+/// What: Reads the target's `mimeType` first and refuses anything that is not
+/// a Google Doc/Sheet/Slides file — no fallback to creating a new file — then
+/// PATCHes the source bytes to `/upload/drive/v3/files/{id}` with
+/// `uploadType=media`, or `uploadType=multipart` when a `name` is also given
+/// so the rename rides along in the same request. Drive converts the body
+/// into the file's existing native type, which is why the request never
+/// re-states `mimeType` in its metadata part.
+/// `api_base`/`upload_base` are parameters, not constants, so the tests can
+/// point both at a mock server.
+/// Test: `update_refuses_non_google_native_target`,
+/// `update_patches_media_to_the_existing_file_id`.
+async fn update_drive_file(
+    client: &BaseClient,
+    args: &Value,
+    account: Option<&str>,
+    api_base: &str,
+    upload_base: &str,
+) -> Result<Value> {
+    let id = require_str(args, "file_id")?;
+    let meta_url = format!("{api_base}/files/{id}?fields=id,name,mimeType&supportsAllDrives=true");
+    let meta = client.get(&meta_url, account).await?;
+    if let Some(err) = meta.get("error") {
+        return Ok(json!({ "error": err, "fileId": id }));
+    }
+    let mime = meta.get("mimeType").and_then(|v| v.as_str()).unwrap_or("");
+    if !IN_PLACE_UPDATABLE_MIMES.contains(&mime) {
+        let name = meta.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        return Ok(refuse_non_native_target(id, name, mime));
+    }
+
+    let (bytes, source_mime) = read_source_bytes(args, "update")?;
+    let fields = "fields=id,name,mimeType,modifiedTime,version";
+    // A rename rides along as a multipart metadata part; content-only updates
+    // take the cheaper media path.
+    if let Some(new_name) = opt_str(args, "name") {
+        let boundary = format!("gworkspace-{}", uuid::Uuid::new_v4().simple());
+        let body = build_multipart_related(
+            &json!({ "name": new_name }),
+            &source_mime,
+            &bytes,
+            &boundary,
+        )?;
+        let content_type = format!("multipart/related; boundary={boundary}");
+        let url =
+            format!("{upload_base}/{id}?uploadType=multipart&supportsAllDrives=true&{fields}");
+        return client.patch_raw(&url, &content_type, body, account).await;
+    }
+    let url = format!("{upload_base}/{id}?uploadType=media&supportsAllDrives=true&{fields}");
+    client
+        .patch_raw(&url, &sanitize_header_value(&source_mime), bytes, account)
+        .await
+}
+
+/// The structured refusal returned for a target `update` must not touch.
+///
+/// Why: The caller needs the ACTUAL mimeType to diagnose a wrong file id, and
+/// a machine-readable payload beats a prose error an agent has to parse. A
+/// silent fallback to `upload` would strand the share link the caller was
+/// trying to preserve (#6685).
+/// What: An `error` envelope (this crate's operational-failure shape) carrying
+/// the file id, its name, its real `mimeType`, and the supported set.
+/// Test: `update_refuses_non_google_native_target`.
+fn refuse_non_native_target(file_id: &str, name: &str, mime: &str) -> Value {
+    json!({
+        "error": format!(
+            "manage_drive_file action=update replaces the content of an existing Google Doc, \
+             Sheet, or Slides file; file {file_id} has mimeType '{mime}'"
+        ),
+        "fileId": file_id,
+        "name": name,
+        "mimeType": mime,
+        "supportedMimeTypes": IN_PLACE_UPDATABLE_MIMES,
+    })
 }
 
 /// Why: Drive's multipart upload endpoint expects a `multipart/related` body
@@ -325,6 +439,155 @@ pub(crate) fn encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::auth::TokenStorage;
+    use crate::api::auth::models::{OAuthToken, StoredToken, TokenMetadata};
+    use chrono::{Duration as ChronoDuration, Utc};
+    use std::collections::HashMap;
+    use wiremock::matchers::{header, method, path as wm_path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const GOOGLE_DOC: &str = "application/vnd.google-apps.document";
+
+    /// A client whose only profile ("a") holds a token an hour from expiry, so
+    /// `get_access_token` never reaches the OAuth refresh path.
+    fn client_with_token() -> BaseClient {
+        let dir = std::env::temp_dir().join(format!("gw-drive-update-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp token dir");
+        let client = BaseClient::for_test(TokenStorage::with_path(dir.join("tokens.json")));
+        let mut map = HashMap::new();
+        map.insert(
+            "a".to_string(),
+            StoredToken {
+                version: 1,
+                metadata: TokenMetadata {
+                    service_name: "a".into(),
+                    provider: "google".into(),
+                    created_at: Utc::now(),
+                    last_refreshed: None,
+                    email: Some("a@example.com".into()),
+                    is_default: true,
+                },
+                token: OAuthToken {
+                    access_token: "test-access-token".into(),
+                    refresh_token: Some("r".into()),
+                    expires_at: Utc::now() + ChronoDuration::seconds(3600),
+                    scopes: vec![],
+                    token_type: "Bearer".into(),
+                },
+            },
+        );
+        client.storage().save(&map).expect("seed token storage");
+        client
+    }
+
+    /// Mount the metadata GET the update action reads before doing anything.
+    async fn mount_metadata(server: &MockServer, id: &str, name: &str, mime: &str) {
+        Mock::given(method("GET"))
+            .and(wm_path(format!("/files/{id}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "id": id, "name": name, "mimeType": mime })),
+            )
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn update_refuses_non_google_native_target() {
+        let server = MockServer::start().await;
+        mount_metadata(&server, "pdf1", "report.pdf", "application/pdf").await;
+        // Any PATCH at all would mean the refusal leaked into a write.
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = client_with_token();
+        let upload_base = format!("{}/upload/files", server.uri());
+        let out = update_drive_file(
+            &client,
+            &json!({ "file_id": "pdf1", "content": "hello" }),
+            Some("a"),
+            &server.uri(),
+            &upload_base,
+        )
+        .await
+        .expect("refusal is a structured payload, not a transport failure");
+
+        assert_eq!(out["fileId"], "pdf1");
+        assert_eq!(out["name"], "report.pdf");
+        // The ACTUAL mimeType must be named, both as a field and in the prose.
+        assert_eq!(out["mimeType"], "application/pdf");
+        let msg = out["error"].as_str().expect("error string");
+        assert!(
+            msg.contains("application/pdf"),
+            "error names the mime: {msg}"
+        );
+        assert!(msg.contains("pdf1"), "error names the file id: {msg}");
+        assert_eq!(out["supportedMimeTypes"][0], GOOGLE_DOC);
+    }
+
+    #[tokio::test]
+    async fn update_patches_media_to_the_existing_file_id() {
+        let server = MockServer::start().await;
+        mount_metadata(&server, "doc1", "Weekly Report", GOOGLE_DOC).await;
+        Mock::given(method("PATCH"))
+            // Same file id as the target — never a new file.
+            .and(wm_path("/upload/files/doc1"))
+            .and(query_param("uploadType", "media"))
+            .and(header("content-type", "text/html"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "doc1",
+                "name": "Weekly Report",
+                "mimeType": GOOGLE_DOC,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client_with_token();
+        let upload_base = format!("{}/upload/files", server.uri());
+        let out = update_drive_file(
+            &client,
+            &json!({
+                "file_id": "doc1",
+                "content": "<h1>heading</h1>",
+                "mime_type": "text/html",
+            }),
+            Some("a"),
+            &server.uri(),
+            &upload_base,
+        )
+        .await
+        .expect("media PATCH succeeds");
+
+        assert_eq!(out["id"], "doc1");
+        assert_eq!(out["mimeType"], GOOGLE_DOC);
+    }
+
+    #[test]
+    fn source_bytes_prefers_local_path_and_guesses_mime() {
+        let path = std::env::temp_dir().join(format!("gw-src-{}.html", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"<p>hi</p>").expect("write source file");
+        let args = json!({
+            "local_path": path.to_string_lossy(),
+            "content": "ignored when local_path is present",
+        });
+        let (bytes, mime) = read_source_bytes(&args, "update").expect("read source");
+        assert_eq!(bytes, b"<p>hi</p>");
+        assert_eq!(mime, "text/html");
+        let _ = std::fs::remove_file(&path);
+
+        // Inline content defaults to text/plain, and an explicit override wins.
+        let (bytes, mime) = read_source_bytes(&json!({ "content": "raw" }), "update").unwrap();
+        assert_eq!(bytes, b"raw");
+        assert_eq!(mime, "text/plain");
+
+        // Neither source is an error naming the action.
+        let err = read_source_bytes(&json!({}), "update").unwrap_err();
+        assert!(err.to_string().contains("update"));
+    }
 
     #[test]
     fn textual_mime_classification() {

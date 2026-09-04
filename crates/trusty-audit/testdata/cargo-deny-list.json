@@ -1,0 +1,26 @@
+{
+  "adler2 2.0.1 registry+https://github.com/rust-lang/crates.io-index": {
+    "licenses": ["0BSD", "MIT", "Apache-2.0"]
+  },
+  "aho-corasick 1.1.4 registry+https://github.com/rust-lang/crates.io-index": {
+    "licenses": ["Unlicense", "MIT"]
+  },
+  "acme-core 0.4.2 (path+file:///src/acme-core)": {
+    "licenses": []
+  },
+  "colored 2.2.0 registry+https://github.com/rust-lang/crates.io-index": {
+    "licenses": ["MPL-2.0"]
+  },
+  "libfoo-sys 0.9.1 registry+https://github.com/rust-lang/crates.io-index": {
+    "licenses": ["AGPL-3.0-or-later"]
+  },
+  "objc-sys 0.3.5 registry+https://github.com/rust-lang/crates.io-index": {
+    "licenses": ["Apache-2.0 WITH LLVM-exception"]
+  },
+  "readerwriterqueue 1.0.6 registry+https://github.com/rust-lang/crates.io-index": {
+    "licenses": ["GPL-2.0-only", "MIT"]
+  },
+  "vendor-blob 3.1.0 registry+https://github.com/rust-lang/crates.io-index": {
+    "licenses": ["LicenseRef-Acme-Commercial"]
+  }
+}

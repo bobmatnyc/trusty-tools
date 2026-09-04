@@ -15,6 +15,12 @@ spec_refs:
 **Linked issues:** [#3539](https://github.com/bobmatnyc/trusty-tools/issues/3539) (Phase 1 scope decision); [#3542](https://github.com/bobmatnyc/trusty-tools/issues/3542) (base-agent listing filter, consumed unchanged); [#3465](https://github.com/bobmatnyc/trusty-tools/pull/3465) (skills whole-catalog-replacement threshold, consumed unchanged); [PR #3547 code-critic review](https://github.com/bobmatnyc/trusty-tools/pull/3547) (hostile-plugin-input hardening + dispatch wiring, §2.5)
 **Cross-ref:** `crates/trusty-code/src/plugins/{mod,agents,skills}.rs` (this spec's implementation, incl. `is_valid_namespaced_name`/`safe_plugin_subdir`); `crates/trusty-code/src/agents/{mod,md_loader,protocol}.rs` (agent discovery/loading/catalog, reused not forked); `crates/trusty-code/src/skills/{mod,protocol}.rs` (skill discovery/catalog, reused not forked); `crates/trusty-code/src/tools/{delegate,skill}.rs`, `crates/trusty-code/src/runner/in_process.rs`, `crates/trusty-code/src/main.rs` (namespaced-dispatch validation gates, §2.5)
 
+> **Reconciled status (2026-09-03):** Phase 1 local-directory discovery and
+> namespaced dispatch are implemented and tested. The spec stays Draft because
+> later plugin phases are unresolved. `.claude/plugins/` is a compatibility
+> input; ADR-0058 makes `.trusty-code/` the native product root. See the
+> [Trusty Code reconciliation catalog](../trusty-code/spec-adr-reconciliation.md).
+
 > **Scope note.** This is a **behavior contract** for Phase 1 of Claude Code
 > plugin support: ingesting a plugin's `agents/` and `skills/` from a **local
 > directory** only. It explicitly does **not** cover marketplace/git-fetched

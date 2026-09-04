@@ -1,6 +1,6 @@
 # 0015. Unified Agent Composition: Shared `.md`+YAML+`extends` Format Across Three Products
 
-- **Status:** Proposed
+- **Status:** Superseded by [0059](0059-canonical-agent-behavior-has-generated-host-adapters.md)
 - **Date:** 2026-07-18
 - **Scope:** Workspace-wide (trusty-agents, trusty-mpm, trusty-code)
 - **Reversibility Cost:** High — the source format, inheritance semantics, and
@@ -8,7 +8,10 @@
 - **Decision Drivers:** Eliminate parser duplication, preserve product-specific
   composition semantics, share deterministic `extends` resolution, keep
   cross-product delegation behind explicit proxies
-- **Supersedes / Superseded by:** — (complements DOC-37, issues #2791/#2792)
+- **Supersedes / Superseded by:** Superseded by ADR-0059, which retains the
+  compatible format and composition semantics but requires one canonical
+  behavioral source plus generated host adapters (complements DOC-37, issues
+  #2791/#2792)
 
 ## Context
 
@@ -124,3 +127,23 @@ This agent forwards orchestration and session-management tasks to trusty-mpm's P
 - **#2897** — trusty-code `.md` unification onto the shared format.
 - **#2894** — Hierarchical delegation depth/cycle guards for trusty-agents' runtime orchestration.
 - **#2892** — Composition and reuse epic.
+
+## Related Decisions
+
+Vetted against the ADR corpus on 2026-09-03, at supersession:
+
+- **ADR-0004 (Three event-driven harnesses):** Consistent — shared authored
+  behavior does not collapse the three product runtimes.
+- **ADR-0024 (In-process leaf sub-agents):** Consistent — runtime topology is
+  independent of source identity and adapter generation.
+- **ADR-0025 (Collapse deployment hierarchies, Proposed):** Consistent — both
+  records resolve precedence at deployment time.
+- **ADR-0042 (Static persistent MCP configuration):** Consistent — MCP
+  declarations stay persistent and outside generated behavioral sources.
+- **ADR-0058 (Independent Trusty Code harness):** Consistent — host adapters
+  deploy into the product-owned boundary.
+- **ADR-0059 (Canonical agent behavior):** Supersedes — preserves this record's
+  Markdown/YAML format and deterministic composition, and replaces separate
+  behavioral catalogs with one canonical source plus generated host adapters.
+
+No Accepted decision depends on this record remaining Proposed.

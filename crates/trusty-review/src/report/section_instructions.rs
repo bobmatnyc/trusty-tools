@@ -123,14 +123,21 @@ pub fn default_instruction(id: &str) -> Option<&'static str> {
             // They are an LLM's readings of source files with every quote
             // mechanically verified — which the disclaimer directly above this
             // paragraph says correctly, so the paragraph contradicted it.
+            // #6075: the disclaimer used to deny a CVE scan outright. The audit
+            // runs one now and its rows render under Assurance Scans, so the
+            // denial is narrowed to what is still uncovered rather than dropped.
             "Write ONE paragraph characterising the security posture strictly from the \
              RED/AMBER findings provided — an LLM's readings of the source files that \
              were inspected, each with its evidence quote verified against the file it \
-             cites. This is code-hygiene signal, NOT a SAST/CVE/secrets/pen-test result \
+             cites. This is code-hygiene signal, NOT a SAST result, NOT a license \
+             review, NOT a secrets scan of the whole tree, and NOT a penetration test \
              — never write as though it were, and never call it lint output; state that \
-             limitation if it changes how a risk should be read. Take the acquirer's \
-             skeptical side while still crediting a genuinely clean signal where the data \
-             supports it.",
+             limitation if it changes how a risk should be read. Dependency CVE exposure \
+             is NOT this section's subject either: where the run scanned for it, its \
+             findings are reported under Assurance Scans, and where it did not, Gaps & \
+             Caveats says so — do not restate or contradict either here. Take the \
+             acquirer's skeptical side while still crediting a genuinely clean signal \
+             where the data supports it.",
         ),
         AUTHORSHIP_SUMMARY => Some(
             "Write ONE high-level paragraph on the codebase's health from an authorship \

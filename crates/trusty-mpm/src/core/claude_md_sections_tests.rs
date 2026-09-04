@@ -663,7 +663,10 @@ fn claude_md_workflow_override_reaches_the_delivered_prompt() {
     // Every other section is untouched.
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
     assert!(prompt.contains("# Agent Delegation Routing"));
-    assert!(prompt.contains("Generated with trusty-mpm"));
+    // #6807: the attribution footer left the prose for Claude Code's
+    // `attribution` setting, so the surviving guaranteed convention is checked
+    // instead.
+    assert!(prompt.contains("Proportional documentation"));
 }
 
 #[test]

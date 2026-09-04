@@ -415,7 +415,7 @@ tga dora --since 2026-04-01
 | `tga author` | Per-engineer drill-down (commits, effort, PRs, categories) | `<email>`, `--format`, `--since`, `--until` |
 | `tga pr-metrics` | Pull-request metrics per engineer | `--weeks`, `--csv`, `--output` |
 | `tga profile` | Longitudinal per-contributor quality profile ([#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468)) | `<contributor>`, `--since`, `--until`, `--window`, `--dry-run`, `--model`, `--github-issue` |
-| `tga install` | Interactive first-time config wizard | `--output`, `--force` |
+| `tga install` | First-time config wizard, interactive or flag-driven ([#5216](https://github.com/bobmatnyc/trusty-tools/issues/5216)) | `--output`, `--force`, `--non-interactive`, `--host`, `--org`, `--workspace`, `--repo`, `--repo-path`, `--repo-cache`, `--host-token`, `--pm`, `--jira-*`, `--linear-*`, `--output-dir`, `--llm-provider`, `--llm-api-key` |
 | `tga aliases` | Manage developer identity aliases | `list`, `merge <src> <dst>`, `add-login <email> <provider> <login>` |
 | `tga backfill` | Retroactive maintenance on existing rows | `--repos`, `--weeks`, `--since`, `--until`, `--dry-run` |
 | `tga override` | Pin classification verdicts (Tier 0) | `add`, `list`, `remove` |

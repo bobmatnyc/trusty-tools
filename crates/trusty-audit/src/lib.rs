@@ -78,12 +78,20 @@ pub mod chain;
 pub mod cli;
 pub mod clone;
 pub mod config;
+// #6781: the bundle-level technical-debt roll-up — counts by tier, dimension,
+// repository, and tier x dimension, computed once per run and read by BOTH the
+// index's table and `report.json`, so the two cannot disagree.
+pub mod debt_rollup;
 pub mod discover;
 // #5825: the INBOUND package, built on the auditor's machine. `package` is the
 // outbound one built on the recipient's. Two modules, opposite directions,
 // opposite rules about the credential — never one with a flag.
 pub mod distribute;
 pub mod error;
+// #6079: the one hardened `git` child this crate spawns — the ambient-repository
+// environment cleared and terminal prompting off, in one place rather than a
+// copy per caller (CLAUDE.md's common-entry-point rule).
+pub mod git;
 // #6081: indexing each audited repository in trusty-search, measuring it with
 // trusty-analyze, and writing the resulting ranking into the manifest — the
 // interface trusty-review's investigation pass reads (#6078).
@@ -109,6 +117,10 @@ mod relay;
 // turning an `Outcome` into text; the verb the recipient types is `render`.
 pub mod rerender;
 pub mod run;
+// #6720: the one line a failed `trusty-search` invocation's stderr is worth
+// quoting. Shared by both refusal messages in this crate because both spawn
+// the same binary and both were masked by the same update-availability notice.
+pub(crate) mod search_stderr;
 pub mod session;
 pub mod tools;
 pub mod validate;

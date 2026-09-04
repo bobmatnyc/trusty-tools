@@ -253,13 +253,10 @@ async fn a_checkout_with_no_basename_never_reaches_a_daemon() {
     .await;
     assert!(out.index_id.is_none());
     assert!(out.priorities.is_empty());
-    assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("acme-api"), "{:?}", out.gaps);
-    assert!(
-        out.gaps[0].contains("no final path component"),
-        "{:?}",
-        out.gaps
-    );
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps);
+    assert!(gaps[0].contains("acme-api"), "{:?}", gaps);
+    assert!(gaps[0].contains("no final path component"), "{:?}", gaps);
 }
 
 /// #6081's headline case: the search daemon is the first link, and losing it
@@ -282,10 +279,11 @@ async fn a_search_daemon_that_will_not_start_is_a_named_gap() {
     )
     .await;
     assert!(out.priorities.is_empty());
-    assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("acme-api"), "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("trusty-search"), "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("not assessed"), "{:?}", out.gaps);
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps);
+    assert!(gaps[0].contains("acme-api"), "{:?}", gaps);
+    assert!(gaps[0].contains("trusty-search"), "{:?}", gaps);
+    assert!(gaps[0].contains("not assessed"), "{:?}", gaps);
 }
 
 /// A daemon that is already answering is not restarted, so a resumed sweep and
@@ -338,9 +336,10 @@ async fn an_unindexable_checkout_is_a_named_gap() {
         out.index_id,
         index::index_id_for(Path::new("/w/repos/acme-api"))
     );
-    assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("acme-api"), "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("not allowlisted"), "{:?}", out.gaps);
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps);
+    assert!(gaps[0].contains("acme-api"), "{:?}", gaps);
+    assert!(gaps[0].contains("not allowlisted"), "{:?}", gaps);
 }
 
 /// The second daemon. It is reached only once the index exists, and its loss is
@@ -366,9 +365,10 @@ async fn an_analyze_daemon_that_will_not_start_is_a_named_gap() {
         priority::Budget::from_env(),
     )
     .await;
-    assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("acme-api"), "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("trusty-analyze"), "{:?}", out.gaps);
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps);
+    assert!(gaps[0].contains("acme-api"), "{:?}", gaps);
+    assert!(gaps[0].contains("trusty-analyze"), "{:?}", gaps);
     assert!(
         !out.priorities.is_empty(),
         "search-derived evidence must survive a dead trusty-analyze"
@@ -402,19 +402,16 @@ async fn an_unreachable_hotspots_endpoint_is_a_named_gap() {
         priority::Budget::from_env(),
     )
     .await;
-    assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps);
     // #6287: the reachable-but-broken daemon answers a JSON-RPC error frame
     // where it used to answer HTTP 500. The gap must carry the daemon's own
     // reason either way — that is what separates it from an unreachable one.
+    assert!(gaps[0].contains("index is not loaded"), "{:?}", gaps);
     assert!(
-        out.gaps[0].contains("index is not loaded"),
+        gaps[0].contains("search-derived evidence only"),
         "{:?}",
-        out.gaps
-    );
-    assert!(
-        out.gaps[0].contains("search-derived evidence only"),
-        "{:?}",
-        out.gaps
+        gaps
     );
 }
 
@@ -439,12 +436,9 @@ async fn an_empty_hotspot_list_is_a_named_gap() {
         priority::Budget::from_env(),
     )
     .await;
-    assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
-    assert!(
-        out.gaps[0].contains("no complexity hotspot"),
-        "{:?}",
-        out.gaps
-    );
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps);
+    assert!(gaps[0].contains("no complexity hotspot"), "{:?}", gaps);
 }
 
 /// #6082: the index answers, and matches nothing. That is not the same as a
@@ -536,12 +530,9 @@ async fn a_daemon_that_binds_but_never_answers_is_a_named_gap() {
     )
     .await;
     assert!(out.priorities.is_empty());
-    assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
-    assert!(
-        out.gaps[0].contains("did not report healthy"),
-        "{:?}",
-        out.gaps
-    );
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps);
+    assert!(gaps[0].contains("did not report healthy"), "{:?}", gaps);
 }
 
 // ─── The happy path, end to end ──────────────────────────────────────────────
@@ -576,7 +567,7 @@ async fn hotspots_and_search_hits_become_ranked_inspect_priority_in_the_manifest
         priority::Budget::from_env(),
     )
     .await;
-    assert!(gaps.is_empty(), "{gaps:?}");
+    assert!(without_churn_leg(without_secrets_leg(gaps)).is_empty());
 
     let written = std::fs::read_to_string(&manifest).expect("read back");
     let parsed: toml::Value = toml::from_str(&written).expect("still valid TOML");
@@ -802,6 +793,50 @@ fn the_brief_a_manifest_declares_is_read() {
     );
 }
 
+/// The gaps left once the secrets leg's own line is removed, having checked it
+/// spoke exactly once.
+///
+/// // #6077: unlike the CVE and license legs, the secrets scan reads no
+/// dependency manifest, so it applies to EVERY checkout these fixtures build and
+/// contributes one gap to each — "`gitleaks` is not installed" on a machine
+/// without the binary, its clean-scan scope statement on one with it. WHICH of
+/// the two depends on the machine; that there is exactly one does not, so these
+/// tests assert the count and leave the wording to `secrets_tests`.
+/// The gaps left once the churn leg's own line is removed, having checked it
+/// spoke exactly once.
+///
+/// // #6079: the churn leg has no not-applicable arm — `local_repo` gives every
+/// real checkout its history by `git clone`, so a fixture directory holding no
+/// repository is an anomaly it names rather than a state it passes over in
+/// silence. It therefore contributes exactly one line to every fixture here:
+/// "holds no git repository" for a bare directory, an empty-window or
+/// quiet-repository line for a real one. WHICH line depends on the fixture;
+/// that there is exactly one does not, so these tests assert the count and
+/// leave the wording to `churn::churn_tests`.
+fn without_churn_leg(gaps: Vec<String>) -> Vec<String> {
+    let marker = format!("{}:", churn::COLLECTOR);
+    let (spoken, rest): (Vec<String>, Vec<String>) =
+        gaps.into_iter().partition(|gap| gap.contains(&marker));
+    assert_eq!(
+        spoken.len(),
+        1,
+        "the churn leg speaks exactly once per repository: {spoken:?}"
+    );
+    rest
+}
+
+fn without_secrets_leg(gaps: Vec<String>) -> Vec<String> {
+    let (spoken, rest): (Vec<String>, Vec<String>) = gaps
+        .into_iter()
+        .partition(|gap| gap.contains("secrets-scan:"));
+    assert_eq!(
+        spoken.len(),
+        1,
+        "the secrets leg speaks exactly once per repository: {spoken:?}"
+    );
+    rest
+}
+
 /// A gap produced by an earlier leg reaches the manifest too, so the RENDERED
 /// report states it — not only the console output of the run that produced it.
 #[cfg(unix)]
@@ -826,17 +861,36 @@ async fn a_gap_is_recorded_in_the_manifest_the_renderer_reads() {
         priority::Budget::from_env(),
     )
     .await;
+    let gaps = without_churn_leg(without_secrets_leg(gaps));
     assert_eq!(gaps.len(), 1, "{gaps:?}");
 
     let written = std::fs::read_to_string(&manifest).expect("read back");
     let parsed: toml::Value = toml::from_str(&written).expect("still valid TOML");
-    let stated = parsed["report"]["gaps"].as_array().expect("gaps");
-    assert_eq!(stated.len(), 1, "{written}");
+    let stated: Vec<&str> = parsed["report"]["gaps"]
+        .as_array()
+        .expect("gaps")
+        .iter()
+        .map(|gap| gap.as_str().expect("string"))
+        .collect();
+    // The secrets leg's line is written through the SECOND `priority::write_into`
+    // call, so both legs' gaps reach the key the renderer reads (#6077), and
+    // #6079's churn line rides the same key.
+    assert_eq!(stated.len(), 3, "{written}");
     assert!(
-        stated[0]
-            .as_str()
-            .expect("string")
-            .contains("trusty-search"),
+        stated.iter().any(|gap| gap.contains("trusty-search")),
+        "{written}"
+    );
+    assert!(
+        stated.iter().any(|gap| gap.contains("secrets-scan:")),
+        "{written}"
+    );
+    // #6079: a checkout holding no repository reaches the RENDERER as a gap.
+    // Stated anywhere short of this key, the report's Change Hotspots section is
+    // empty with nothing saying why.
+    assert!(
+        stated
+            .iter()
+            .any(|gap| gap.contains(churn::COLLECTOR) && gap.contains("holds no")),
         "{written}"
     );
 }
@@ -872,9 +926,19 @@ async fn a_manifest_that_cannot_be_written_is_a_named_gap() {
         priority::Budget::from_env(),
     )
     .await;
-    assert_eq!(gaps.len(), 1, "{gaps:?}");
-    assert!(gaps[0].contains("acme-api"), "{gaps:?}");
-    assert!(gaps[0].contains("does not state"), "{gaps:?}");
+    let gaps = without_churn_leg(without_secrets_leg(gaps));
+    // Two writes are attempted — the ranking, then the manifest legs' gaps — and
+    // a directory in place of the manifest fails both (#6077).
+    assert_eq!(gaps.len(), 2, "{gaps:?}");
+    assert!(gaps.iter().all(|gap| gap.contains("acme-api")), "{gaps:?}");
+    assert!(
+        gaps.iter().all(|gap| gap.contains("does not state")),
+        "{gaps:?}"
+    );
+    assert!(
+        gaps[1].contains("secrets scan, and change hotspots are missing"),
+        "the second names every leg whose reason went unwritten: {gaps:?}"
+    );
 }
 
 // ─── Resolution ──────────────────────────────────────────────────────────────
@@ -903,4 +967,247 @@ fn the_installed_copies_are_preferred_over_the_path() {
     // the bare name. Which of those applies depends on the ambient environment,
     // so what is asserted is only that it did NOT resolve to the tools/ copy.
     assert_ne!(t.analyze, RequiredTool::TrustyAnalyze.path_in(&work));
+}
+
+// ─── #6783: a 409 from the create route is resolved, never skipped ───────────
+
+/// A socket that records what it was asked and answers the conflict-resolution
+/// pair (#6783).
+///
+/// `registry` is the `search.indexes.list` result; `search.index.delete` always
+/// succeeds and `search.index.status` reports `root`, so the root backstop
+/// passes once the collision has been cleared.
+fn recording_search_socket(
+    dir: &Path,
+    registry: serde_json::Value,
+    root: &Path,
+) -> (PathBuf, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&seen);
+    let root = root.display().to_string();
+    let socket = answering_socket(dir, "recording-search", move |request| {
+        sink.lock()
+            .expect("the stub log is not poisoned")
+            .push(request.to_owned());
+        if request.contains("search.health") {
+            r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"0.0.0","indexes":1}}"#
+                .to_owned()
+        } else if request.contains("search.indexes.list") {
+            format!(r#"{{"jsonrpc":"2.0","id":1,"result":{registry}}}"#)
+        } else if request.contains("search.index.delete") {
+            r#"{"jsonrpc":"2.0","id":1,"result":{"deleted":true}}"#.to_owned()
+        } else if request.contains("search.index.status") {
+            format!(r#"{{"jsonrpc":"2.0","id":1,"result":{{"root_path":"{root}"}}}}"#)
+        } else {
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"no such index"}}"#
+                .to_owned()
+        }
+    });
+    (socket, seen)
+}
+
+/// A `trusty-search` whose `index` verb 409s once and then succeeds.
+///
+/// `index add` always approves and `index-status` always reports the index as
+/// unserved, so every call reaches the create. The marker file is what makes the
+/// second create succeed — the shape of a stale registration having been cleared
+/// between the two attempts.
+#[cfg(unix)]
+fn search_that_conflicts_once(at: &Path, marker: &Path) -> PathBuf {
+    stub_binary(
+        at,
+        "trusty-search",
+        &format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = 'index-status' ]; then exit 1; fi\n\
+             if [ \"$2\" = 'add' ]; then exit 0; fi\n\
+             if [ -f '{marker}' ]; then exit 0; fi\n\
+             : > '{marker}'\n\
+             echo 'daemon returned 409 Conflict for POST /indexes' >&2\n\
+             exit 1\n",
+            marker = marker.display()
+        ),
+    )
+}
+
+/// A `trusty-search` whose `index` verb always fails, with `reason` on stderr.
+#[cfg(unix)]
+fn search_that_always_fails(at: &Path, reason: &str) -> PathBuf {
+    stub_binary(
+        at,
+        "trusty-search",
+        &format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = 'index-status' ]; then exit 1; fi\n\
+             if [ \"$2\" = 'add' ]; then exit 0; fi\n\
+             echo '{reason}' >&2\n\
+             exit 1\n"
+        ),
+    )
+}
+
+/// Tools pointing at one stub binary and one recording socket.
+#[cfg(unix)]
+fn conflict_tools(search: PathBuf, socket: PathBuf, tmp: &Path) -> Tools {
+    tools(
+        search,
+        socket,
+        PathBuf::from("/nonexistent/trusty-analyze"),
+        dead_socket(tmp),
+    )
+}
+
+/// #6783's headline case, and the one a client run hit 59 times: #6149 changed
+/// the id derivation, so an earlier run's row owns this tree under its old
+/// basename id. The row is dropped and the create retried — the tier survives.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_409_registration_conflict_clears_the_stale_row_and_retries() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("repos").join("acme-api");
+    std::fs::create_dir_all(&checkout).expect("create the checkout");
+    let search = search_that_conflicts_once(tmp.path(), &tmp.path().join("conflicted"));
+    // The stale row: the SAME tree, registered under the pre-#6149 basename id.
+    let registry = serde_json::json!({
+        "indexes": [{ "id": "acme-api", "root_path": checkout.display().to_string() }]
+    });
+    let (socket, seen) = recording_search_socket(tmp.path(), registry, &checkout);
+    let t = conflict_tools(search, socket, tmp.path());
+
+    let out = ground(
+        &t,
+        &checkout,
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
+
+    assert!(
+        !search_tier_degraded(&out.gaps),
+        "the collision was resolvable, so nothing may report the tier as lost: {:?}",
+        out.gaps
+    );
+    let asked = seen.lock().expect("the stub log is not poisoned").clone();
+    assert!(
+        asked.iter().any(|r| r.contains("search.indexes.list")),
+        "the registry must be read before anything is deleted: {asked:?}"
+    );
+    let deleted: Vec<&String> = asked
+        .iter()
+        .filter(|r| r.contains("search.index.delete"))
+        .collect();
+    assert_eq!(deleted.len(), 1, "exactly one stale row goes: {asked:?}");
+    assert!(deleted[0].contains("\"acme-api\""), "{:?}", deleted[0]);
+    assert!(
+        deleted[0].contains("expected_root_path"),
+        "the delete is guarded by the root it was decided on: {:?}",
+        deleted[0]
+    );
+    assert!(
+        !deleted[0].contains("delete_data"),
+        "deregistration never destroys the corpus: {:?}",
+        deleted[0]
+    );
+}
+
+/// The other half of the fail-open contract: when the registry does not explain
+/// the refusal there is nothing to clear, and the run says so in the headline
+/// rather than shipping a report whose evidence tier is quietly empty.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unresolvable_409_degrades_the_evidence_tier_out_loud() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("repos").join("acme-api");
+    std::fs::create_dir_all(&checkout).expect("create the checkout");
+    let search =
+        search_that_always_fails(tmp.path(), "daemon returned 409 Conflict for POST /indexes");
+    let (socket, seen) =
+        recording_search_socket(tmp.path(), serde_json::json!({ "indexes": [] }), &checkout);
+    let t = conflict_tools(search, socket, tmp.path());
+
+    let out = ground(
+        &t,
+        &checkout,
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
+
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(gaps[0].contains(SEARCH_TIER_HEADLINE), "{:?}", gaps[0]);
+    assert!(gaps[0].contains("acme-api"), "{:?}", gaps[0]);
+    assert!(gaps[0].contains("409"), "{:?}", gaps[0]);
+    assert!(
+        gaps[0].contains("no trusty-analyze pass ran"),
+        "{:?}",
+        gaps[0]
+    );
+    assert_eq!(
+        gaps[0].lines().count(),
+        1,
+        "must stay one line: {:?}",
+        gaps[0]
+    );
+    let asked = seen.lock().expect("the stub log is not poisoned").clone();
+    assert!(
+        asked.iter().any(|r| r.contains("search.indexes.list")),
+        "the resolution must have been attempted: {asked:?}"
+    );
+    assert!(
+        !asked.iter().any(|r| r.contains("search.index.delete")),
+        "a registry that explains nothing licenses no delete: {asked:?}"
+    );
+}
+
+/// A refusal that is not a collision — an unapproved root, a dead embedder — is
+/// not a stale row, so nothing is read and nothing is deleted on its account.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_non_conflict_index_failure_is_not_retried() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("repos").join("acme-api");
+    std::fs::create_dir_all(&checkout).expect("create the checkout");
+    let search = search_that_always_fails(tmp.path(), "indexing refused: root is not allowlisted");
+    let registry = serde_json::json!({
+        "indexes": [{ "id": "acme-api", "root_path": checkout.display().to_string() }]
+    });
+    let (socket, seen) = recording_search_socket(tmp.path(), registry, &checkout);
+    let t = conflict_tools(search, socket, tmp.path());
+
+    let out = ground(
+        &t,
+        &checkout,
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
+
+    let gaps = without_churn_leg(out.gaps);
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(gaps[0].contains("root is not allowlisted"), "{:?}", gaps[0]);
+    let asked = seen.lock().expect("the stub log is not poisoned").clone();
+    assert!(
+        !asked.iter().any(|r| r.contains("search.indexes.list")),
+        "only a collision is worth a registry read: {asked:?}"
+    );
+}
+
+/// Every arm that loses the index leads with one phrase, because
+/// `crate::index_report` counts on it and the report's gap section leads with
+/// it. Four sentences that merely meant the same thing is what #6783 replaced.
+#[test]
+fn every_search_tier_gap_leads_with_the_headline() {
+    let line = search_tier_gap("acme-api", "daemon returned 409 Conflict for POST /indexes");
+    assert!(line.starts_with("acme-api: "), "{line}");
+    assert!(line.contains(SEARCH_TIER_HEADLINE), "{line}");
+    assert_eq!(line.lines().count(), 1, "must stay one line: {line}");
+    assert!(search_tier_degraded(&[line]));
+    assert!(!search_tier_degraded(&[
+        "acme-api: trusty-analyze is unreachable".to_owned()
+    ]));
+    assert!(!search_tier_degraded(&[]));
 }

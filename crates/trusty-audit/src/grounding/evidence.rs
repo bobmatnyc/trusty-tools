@@ -602,12 +602,38 @@ pub fn blend(
     dimensions: &[DimensionEvidence],
     cap: usize,
 ) -> Vec<Priority> {
+    blend_with(hotspots, dimensions, &[], cap)
+}
+
+/// [`blend`], plus #6079's optional git-churn lane.
+///
+/// Why: churn is a third selection signal — the files a team rewrites weekly are
+/// where the defects and the key-person risk are, and neither complexity nor a
+/// text query sees that. #6079's closure condition is that it be OPTIONAL and
+/// that its absence reproduce the previous ranking exactly, which is why the
+/// lane is a slice and [`blend`] passes an empty one.
+/// What: the round-robin [`blend`] already runs, with one churn path appended at
+/// the END of each round — after the complexity hotspot and after every
+/// dimension. That is the smallest non-zero weight this structure can express:
+/// churn never displaces a measured hotspot or a dimension's evidence at the
+/// same rank, and a churn path another signal already ranked costs nothing at
+/// all, because [`push`] keeps one entry per path.
+/// Test: `super::evidence_tests::{an_absent_churn_lane_reproduces_the_previous_ranking,
+/// churn_enters_each_round_behind_every_other_signal}`.
+#[must_use]
+pub fn blend_with(
+    hotspots: &[RankedFile],
+    dimensions: &[DimensionEvidence],
+    churn: &[Priority],
+    cap: usize,
+) -> Vec<Priority> {
     let mut out: Vec<Priority> = Vec::new();
     let attributed = attributions(dimensions);
     let depth = dimensions
         .iter()
         .map(|d| d.files.len())
         .chain(std::iter::once(hotspots.len()))
+        .chain(std::iter::once(churn.len()))
         .max()
         .unwrap_or(0);
 
@@ -629,12 +655,35 @@ pub fn blend(
                 },
             );
         }
+        // #6079: last in the round, so churn is the signal that yields.
+        if let Some(changed) = churn.get(round) {
+            push(&mut out, churn_entry(changed, &attributed));
+        }
         if out.len() >= cap {
             break;
         }
     }
     out.truncate(cap);
     out
+}
+
+/// One churn lane entry, carrying the search attribution when it has one.
+///
+/// The same rule [`hotspot`] follows and for the same reason: a path the search
+/// leg attributed to a dimension must reach the manifest WITH that dimension,
+/// whichever signal ranked it first, or the report counts the dimension as
+/// uninvestigated despite having read a file that addresses it.
+fn churn_entry(changed: &Priority, attributed: &[(String, String, String)]) -> Priority {
+    let measured = changed.reason.clone().unwrap_or_default();
+    match attributed.iter().find(|(p, _, _)| p == &changed.path) {
+        Some((_, dimension, found)) => Priority {
+            path: changed.path.clone(),
+            dimension: Some(dimension.clone()),
+            reason: Some(format!("{measured}; {found}")),
+            hotspot: None,
+        },
+        None => changed.clone(),
+    }
 }
 
 /// Append a priority unless its path is already ranked.

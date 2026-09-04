@@ -6596,7 +6596,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 2.0.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10439,7 +10439,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "6.0.0"
+version = "7.1.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -11368,7 +11368,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11416,7 +11416,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-analyze"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11481,7 +11481,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-audit"
-version = "0.13.2"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11503,6 +11503,7 @@ dependencies = [
  "trusty-installer",
  "trusty-progress",
  "walkdir",
+ "wiremock",
  "zip 2.4.2",
 ]
 
@@ -11604,7 +11605,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.47.1"
+version = "0.47.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11684,7 +11685,6 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
- "trusty-mcp",
  "unicode-normalization",
  "url",
  "uuid",
@@ -11694,7 +11694,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -11772,7 +11772,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-gworkspace"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -11798,7 +11798,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.13.4"
+version = "0.13.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11846,7 +11846,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mcp"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -11856,6 +11856,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "trusty-common",
 ]
 
 [[package]]
@@ -11998,7 +11999,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "anyhow",
  "async-trait",

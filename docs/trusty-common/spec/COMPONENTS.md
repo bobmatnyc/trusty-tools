@@ -283,8 +283,11 @@ from `trusty-tickets`).
 
 **Key types/modules.** `api::config`, `api::models`, `api::client`, the
 `Backend` trait + `backends::{github,jira,linear}`; `server` (MCP dispatch +
-`run_stdio`); `tools` (tool-list schema). Driven by the `tickets-mcp` binary shim
-(`src/bin/tickets_mcp.rs`). Requires `mcp`.
+`run_stdio`); `tools` (tool-list schema); the private `stdio` (JSON-RPC
+envelopes + the newline-framed stdin/stdout loop `run_stdio` drives). Driven by
+the `tickets-mcp` binary shim (`src/bin/tickets_mcp.rs`). Depends on no other
+trusty crate — #6316 removed the `trusty-mcp` edge, which closed a cycle, and
+`src/tickets/stdio.rs` is this crate's own loop as a result.
 
 **Current state.** ✅ Module unit tests cover dispatch, tool-list counts, config
 parsing, and serde round-trips.

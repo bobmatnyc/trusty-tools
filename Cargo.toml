@@ -146,7 +146,9 @@ trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.11", defau
 # manifest edge (#5236, DOC-67 §6). One in-tree Cargo edge exists again: #6294
 # made `tga` a dev-dependency of trusty-analyze, which is why tga no longer has
 # a row in scripts/semver-checks-crate-exclusions.tsv (#6300).
-tga = { path = "crates/trusty-git-analytics", version = "4.0.2" }
+# #6776: same drift as trusty-console, surfaced by the new gate — `^6.0.1`
+# cannot accept the crate's own 7.1.0.
+tga = { path = "crates/trusty-git-analytics", version = "7.1" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
 # daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
 # because it owns Tauri's build.rs and tauri.conf.json.
@@ -161,13 +163,17 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 #      this line existed. Both consumers name what they need: trusty-analyze's
 #      `review` feature pulls `trusty-review/mcp`; trusty-mpm's dev-dependency
 #      only touches `integrations`, which is unconditional.
-trusty-review = { path = "crates/trusty-review", version = "0.33", default-features = false }
+trusty-review = { path = "crates/trusty-review", version = "0.34", default-features = false }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
 # published library crate; the path entry remains so any local lib consumers
 # resolve in-tree.
-trusty-console = { path = "crates/trusty-console", version = "0.9.0" }
+# #6776: the requirement tracks the crate's current MINOR, not a pinned patch.
+# `^0.9.0` excluded the crate's own 0.11.0 — in-tree the path override hid it, so
+# only a crates.io consumer (or `cargo publish`) resolved wrong. Guarded now by
+# scripts/check_workspace_dep_versions.sh.
+trusty-console = { path = "crates/trusty-console", version = "0.11" }
 # trusty-progress: shared rustup/cargo-style progress + status display (#1315).
 # Consumed by trusty-installer for install/upgrade component rows; published library crate.
 trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }

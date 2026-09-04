@@ -66,6 +66,9 @@ pub(crate) mod worktree_reclaim;
 pub(crate) mod worktree_reclaim_gh;
 // #6507: the verdict vocabulary, including which GATE refused a candidate.
 pub(crate) mod worktree_reclaim_verdict;
+// #6806: gate 2's claim resolution — WHICH session claims a candidate, and
+// whether that session is the one that invoked the sweep.
+pub(crate) mod worktree_reclaim_claim;
 // #4732: the tri-state "does git still hold state here?" classifier that gates
 // every raw directory removal on the worktree teardown path.
 mod worktree_protection;

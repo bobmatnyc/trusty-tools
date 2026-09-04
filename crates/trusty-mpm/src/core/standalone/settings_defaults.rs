@@ -1,5 +1,5 @@
-//! Seed `outputStyle`/`statusLine` defaults into the tm-owned `CLAUDE_CONFIG_DIR`
-//! `settings.json` (defense-in-depth, issue #2214).
+//! Seed `outputStyle`/`statusLine`/`attribution` defaults into the tm-owned
+//! `CLAUDE_CONFIG_DIR` `settings.json` (defense-in-depth, issue #2214).
 //!
 //! Why: managed sessions currently rely on the PROJECT-tier `settings.json`
 //! (written by `crate::core::session_launch::settings::write_output_style` /
@@ -22,18 +22,24 @@
 //! writer computes: [`crate::core::session_launch::OUTPUT_STYLE`]
 //! (the default output-style id) and
 //! [`crate::core::session_launch::resolve_statusline_command`] (the resolved
-//! absolute `<tm-binary> statusline` command).
+//! absolute `<tm-binary> statusline` command). It also seeds `attribution`
+//! (#6807) with [`crate::core::attribution::ATTRIBUTION_FOOTER`] as both
+//! `commit` and `pr`, so Claude Code appends the trusty-mpm footer itself and no
+//! instruction prose has to restate it.
 //! Test: `ensure_settings_defaults_seeds_fresh_file`,
 //! `ensure_settings_defaults_preserves_existing_keys`,
 //! `ensure_settings_defaults_does_not_overwrite_customized_values`,
+//! `ensure_settings_defaults_seeds_attribution`,
+//! `ensure_settings_defaults_preserves_operator_attribution`,
 //! `ensure_settings_defaults_is_idempotent`.
 
 use std::path::Path;
 
 use trusty_common::claude_config::write_json_atomic;
 
-/// Seed `outputStyle` and `statusLine` into `<claude_config_dir>/settings.json`
-/// when either key is absent, preserving every other key untouched.
+/// Seed `outputStyle`, `statusLine`, and `attribution` into
+/// `<claude_config_dir>/settings.json` when a key is absent, preserving every
+/// other key untouched.
 ///
 /// Why: see the module-level doc comment — this is the defense-in-depth seed
 /// called from [`super::global_config::ensure_global_config_dir`] on every
@@ -50,15 +56,20 @@ use trusty_common::claude_config::write_json_atomic;
 /// [`crate::core::session_launch::is_stale_statusline_command`]. A genuinely
 /// user-customized `statusLine` pointing at an existing, non-ephemeral binary is
 /// left untouched. Managed hook commands self-heal separately via
-/// [`super::hooks::write_project_hooks`]'s replace-by-identity merge. Writes
-/// back via [`trusty_common::claude_config::write_json_atomic`] only when the
-/// merged value actually differs from what was on disk (idempotent — no spurious
+/// [`super::hooks::write_project_hooks`]'s replace-by-identity merge. It then
+/// inserts `attribution` = `{ "commit": <footer>, "pr": <footer> }` from
+/// [`crate::core::attribution::ATTRIBUTION_FOOTER`] only if the key is absent,
+/// so an operator who set their own attribution keeps it (#6807). Writes back
+/// via [`trusty_common::claude_config::write_json_atomic`] only when the merged
+/// value actually differs from what was on disk (idempotent — no spurious
 /// rewrite / mtime bump on repeat calls).
 /// Test: `ensure_settings_defaults_seeds_fresh_file`,
 /// `ensure_settings_defaults_preserves_existing_keys`,
 /// `ensure_settings_defaults_does_not_overwrite_customized_values`,
 /// `ensure_settings_defaults_heals_stale_ephemeral_statusline`,
 /// `ensure_settings_defaults_preserves_existing_valid_binary_statusline`,
+/// `ensure_settings_defaults_seeds_attribution`,
+/// `ensure_settings_defaults_preserves_operator_attribution`,
 /// `ensure_settings_defaults_is_idempotent`.
 pub(crate) fn ensure_settings_defaults(claude_config_dir: &Path) -> anyhow::Result<()> {
     let settings_path = claude_config_dir.join("settings.json");
@@ -98,6 +109,16 @@ pub(crate) fn ensure_settings_defaults(claude_config_dir: &Path) -> anyhow::Resu
             }),
         );
     }
+
+    // #6807: the commit trailer and PR footer come from Claude Code's own
+    // `attribution` setting, not from instruction prose. Seed only when absent
+    // so an operator-set value survives.
+    obj.entry("attribution").or_insert_with(|| {
+        serde_json::json!({
+            "commit": crate::core::attribution::ATTRIBUTION_FOOTER,
+            "pr": crate::core::attribution::ATTRIBUTION_FOOTER,
+        })
+    });
 
     // Structural comparison (not byte-wise) so formatting differences left by
     // editors or prior writes never trigger a spurious rewrite, matching the
@@ -290,6 +311,57 @@ mod tests {
         assert_eq!(
             bytes_first, bytes_second,
             "a second call must not rewrite the file when nothing changed"
+        );
+    }
+
+    /// #6807: a fresh settings.json gets `attribution.commit` and
+    /// `attribution.pr`, both equal to the one shared footer constant.
+    #[test]
+    fn ensure_settings_defaults_seeds_attribution() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().to_path_buf();
+
+        ensure_settings_defaults(&cfg).unwrap();
+
+        let text = std::fs::read_to_string(cfg.join("settings.json")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            val["attribution"]["commit"].as_str(),
+            Some(crate::core::attribution::ATTRIBUTION_FOOTER),
+            "attribution.commit must be the shared trusty-mpm footer"
+        );
+        assert_eq!(
+            val["attribution"]["pr"].as_str(),
+            Some(crate::core::attribution::ATTRIBUTION_FOOTER),
+            "attribution.pr must be the shared trusty-mpm footer"
+        );
+    }
+
+    /// #6807: seeding is absent-only, so an operator who set their own
+    /// `attribution` is never overwritten.
+    #[test]
+    fn ensure_settings_defaults_preserves_operator_attribution() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().to_path_buf();
+        std::fs::write(
+            cfg.join("settings.json"),
+            r#"{"attribution":{"commit":"operator text","pr":""}}"#,
+        )
+        .unwrap();
+
+        ensure_settings_defaults(&cfg).unwrap();
+
+        let text = std::fs::read_to_string(cfg.join("settings.json")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            val["attribution"]["commit"].as_str(),
+            Some("operator text"),
+            "an operator-set attribution.commit must survive the seed"
+        );
+        assert_eq!(
+            val["attribution"]["pr"].as_str(),
+            Some(""),
+            "an operator-set attribution.pr must survive the seed"
         );
     }
 }

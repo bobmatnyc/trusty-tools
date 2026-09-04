@@ -233,6 +233,16 @@
 		The bootstrap installer verifies every downloaded tarball against its published SHA-256
 		checksum. The install script itself is unsigned — read it first if you need higher assurance.
 	</p>
+	<!-- #5110: these three cards are the generic paths. The walkthrough is the
+	     per-product one, and is the only place that says which macOS permission
+	     a given product asks for. -->
+	<p class="mt-6 max-w-3xl text-sm text-foundry-secondary">
+		Installing one specific product? The
+		<a href="/install" class="text-foundry-primary underline underline-offset-2"
+			>install walkthrough</a
+		> has the exact sequence for each of the nine, what it needs first, and the macOS permission it asks
+		for.
+	</p>
 </section>
 
 <!-- NEXT -->

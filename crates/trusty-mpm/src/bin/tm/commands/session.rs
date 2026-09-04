@@ -416,12 +416,16 @@ pub(crate) async fn session(
             // destroying uncommitted/unpushed work (#4091).
             // `--merged-prs` is a THIRD, independent opt-in (#2919) enabling the
             // merged-pull-request reclaim pass. It never implies the other two.
+            // #6806: the daemon occupies no pane and cannot discover the
+            // caller, so the caller names itself; absent outside a managed
+            // session, which leaves every claim foreign.
             crate::commands::managed_merged_prs::session_prune_worktrees(
                 client,
                 url,
                 !force,
                 discard_dirty,
                 merged_prs,
+                std::env::var("TM_MANAGED_SESSION_ID").ok(),
             )
             .await?
         }
