@@ -2519,9 +2519,12 @@ fn cli_pr_merge_help_states_the_refusals() {
         "do-not-merge",
         "CHANGES_REQUESTED",
         "CONFLICTING",
+        "DIRTY",
         "gh pr update-branch",
         "BEHIND is NOT a refusal",
+        "left to `gh pr merge` to accept or reject",
         "auto-merge fires",
+        "merge queue",
     ] {
         assert!(
             help.contains(needle),

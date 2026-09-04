@@ -11,7 +11,8 @@
 //! hold signals, so one command replaces a read-then-judge-then-merge sequence.
 //!
 //! What: [`run`] reads the PR once
-//! (`gh pr view <n> --json number,title,body,isDraft,labels,reviewDecision,mergeStateStatus,headRefName`),
+//! (`gh pr view <n> --json
+//! number,title,body,isDraft,labels,reviewDecision,mergeStateStatus,mergeable,headRefName`),
 //! re-validates the body with [`body::validate`] — the same check `tm pr open`
 //! runs — and either refuses with one line and no `gh pr merge` call, or merges
 //! with `--squash --delete-branch --subject "<title> (#<n>)" --body-file <tmp>`
@@ -69,9 +70,17 @@ pub(crate) struct MergeView {
     /// `APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, or absent.
     #[serde(default, rename = "reviewDecision")]
     pub(crate) review_decision: Option<String>,
-    /// `CLEAN`, `BEHIND`, `BLOCKED`, `CONFLICTING`, … or absent.
+    /// `MergeStateStatus`: `DIRTY`, `UNKNOWN`, `BLOCKED`, `BEHIND`,
+    /// `UNSTABLE`, `HAS_HOOKS`, `CLEAN`, or absent. `DIRTY` is the conflict.
     #[serde(default, rename = "mergeStateStatus")]
     pub(crate) merge_state_status: Option<String>,
+    /// `MergeableState`: `MERGEABLE`, `CONFLICTING`, `UNKNOWN`, or absent.
+    ///
+    /// Why (#6808): `CONFLICTING` lives HERE, never in `mergeStateStatus` —
+    /// the two enums are disjoint, and reading a conflict off the wrong one
+    /// let every conflicted PR through to the raw `gh` error.
+    #[serde(default)]
+    pub(crate) mergeable: Option<String>,
     /// The head branch, named in the merge output.
     #[serde(default, rename = "headRefName")]
     pub(crate) head_ref_name: String,
@@ -95,16 +104,26 @@ pub(crate) enum Decision {
 ///
 /// What: refuses, in this order, on a failed body validation, a draft, a
 /// `do-not-merge` label in any case, a `CHANGES_REQUESTED` review decision, and
-/// a `CONFLICTING` merge state — the last naming `gh pr update-branch`, which
-/// is the fix for a genuine conflict. `BEHIND` is deliberately NOT a refusal:
-/// this repo's rule is that a behind branch merges fine, and updating it for
-/// BEHIND alone restarts CI and can fail to converge (root `CLAUDE.md`, "What
-/// CI actually gates").
+/// a conflict — the last naming `gh pr update-branch`, which is the fix.
+///
+/// A conflict is `mergeable == CONFLICTING` or `mergeStateStatus == DIRTY`;
+/// the two are separate GraphQL enums and `CONFLICTING` never appears in
+/// `mergeStateStatus`, so reading only the latter let every conflicted PR
+/// through (#6808). `BEHIND` is deliberately NOT a refusal: this repo's rule is
+/// that a behind branch merges fine, and updating it for BEHIND alone restarts
+/// CI and can fail to converge (root `CLAUDE.md`, "What CI actually gates").
+/// Every OTHER `mergeStateStatus` — `BLOCKED`, `UNSTABLE`, `HAS_HOOKS`,
+/// `UNKNOWN` — and every `reviewDecision` other than `CHANGES_REQUESTED`
+/// (`REVIEW_REQUIRED` and absent included) are left to `gh pr merge` to accept
+/// or reject, which is what makes `--auto` on a still-checking PR the intended
+/// path rather than a refusal.
 ///
 /// Test: `merge_valid_body_merges`, `merge_refuses_missing_footer`,
 /// `merge_refuses_draft`, `merge_refuses_do_not_merge_label_any_case`,
 /// `merge_refuses_changes_requested`, `merge_behind_is_not_a_refusal`,
-/// `merge_refuses_conflicting_with_update_branch_hint`.
+/// `merge_refuses_conflicting_with_update_branch_hint`,
+/// `merge_refuses_dirty_merge_state_with_update_branch_hint`,
+/// `merge_other_merge_states_fall_through_to_gh`.
 pub(crate) fn decide(view: &MergeView, body_failures: &[String]) -> Decision {
     if !body_failures.is_empty() {
         return Decision::Refuse(format!(
@@ -129,18 +148,40 @@ pub(crate) fn decide(view: &MergeView, body_failures: &[String]) -> Decision {
     {
         return Decision::Refuse("the review decision is CHANGES_REQUESTED".to_string());
     }
-    // #6808: BEHIND merges fine here, so only CONFLICTING stops the merge.
-    if view
-        .merge_state_status
-        .as_deref()
-        .is_some_and(|s| s.eq_ignore_ascii_case("CONFLICTING"))
-    {
+    // #6808: BEHIND merges fine here; only a real conflict stops the merge.
+    if let Some(field) = conflict_field(view) {
         return Decision::Refuse(format!(
-            "mergeStateStatus is CONFLICTING — resolve it with `gh pr update-branch {}`",
+            "the PR has merge conflicts ({field}) — resolve them with `gh pr update-branch {}`",
             view.number
         ));
     }
     Decision::Merge
+}
+
+/// Which field reports this PR as conflicted, if either does.
+///
+/// Why (#6808): GitHub splits the answer across two disjoint enums —
+/// `MergeableState` carries `CONFLICTING`, `MergeStateStatus` carries `DIRTY`.
+/// Reading both means neither spelling of the same conflict slips through.
+/// What: the human-readable field name, or `None` when neither reports one.
+/// Test: `merge_refuses_conflicting_with_update_branch_hint`,
+/// `merge_refuses_dirty_merge_state_with_update_branch_hint`.
+fn conflict_field(view: &MergeView) -> Option<&'static str> {
+    if view
+        .mergeable
+        .as_deref()
+        .is_some_and(|m| m.eq_ignore_ascii_case("CONFLICTING"))
+    {
+        return Some("mergeable CONFLICTING");
+    }
+    if view
+        .merge_state_status
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("DIRTY"))
+    {
+        return Some("mergeStateStatus DIRTY");
+    }
+    None
 }
 
 /// The `gh pr merge` argv for an approved merge.
@@ -190,7 +231,8 @@ fn pr_view<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<MergeView>
     push_repo(&mut a, args);
     a.push("--json".to_string());
     a.push(
-        "number,title,body,isDraft,labels,reviewDecision,mergeStateStatus,headRefName".to_string(),
+        "number,title,body,isDraft,labels,reviewDecision,mergeStateStatus,mergeable,headRefName"
+            .to_string(),
     );
     let stdout = gh.run(&a)?.stdout_ok(&a)?;
     serde_json::from_str(&stdout)

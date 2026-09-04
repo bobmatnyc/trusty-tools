@@ -707,6 +707,7 @@ fn merge_view(body: &str, patch: serde_json::Value) -> merge::MergeView {
         "labels": [],
         "reviewDecision": "APPROVED",
         "mergeStateStatus": "CLEAN",
+        "mergeable": "MERGEABLE",
         "headRefName": "feat/6808-x",
     });
     let obj = v.as_object_mut().expect("object");
@@ -791,15 +792,53 @@ fn merge_behind_is_not_a_refusal() {
     assert_eq!(merge_decision(&view), merge::Decision::Merge);
 }
 
+/// `CONFLICTING` is a `MergeableState` value, never a `MergeStateStatus` one
+/// (#6808) — reading it off `mergeStateStatus` let every conflicted PR through.
 #[test]
 fn merge_refuses_conflicting_with_update_branch_hint() {
     let view = merge_view(
         &full_body(),
-        serde_json::json!({"mergeStateStatus": "CONFLICTING"}),
+        serde_json::json!({"mergeable": "CONFLICTING"}),
     );
     let reason = merge_refusal(&view).expect("refused");
-    assert!(reason.contains("CONFLICTING"), "{reason}");
+    assert!(reason.contains("mergeable CONFLICTING"), "{reason}");
     assert!(reason.contains("gh pr update-branch 42"), "{reason}");
+}
+
+/// `DIRTY` is how the same conflict spells itself in `mergeStateStatus`.
+#[test]
+fn merge_refuses_dirty_merge_state_with_update_branch_hint() {
+    let view = merge_view(
+        &full_body(),
+        serde_json::json!({"mergeStateStatus": "DIRTY", "mergeable": "UNKNOWN"}),
+    );
+    let reason = merge_refusal(&view).expect("refused");
+    assert!(reason.contains("mergeStateStatus DIRTY"), "{reason}");
+    assert!(reason.contains("gh pr update-branch 42"), "{reason}");
+}
+
+/// Every other merge state and review decision is `gh pr merge`'s to judge —
+/// which is what makes `--auto` on a still-checking PR the intended path.
+#[test]
+fn merge_other_merge_states_fall_through_to_gh() {
+    for state in ["BLOCKED", "UNSTABLE", "HAS_HOOKS", "UNKNOWN"] {
+        let view = merge_view(&full_body(), serde_json::json!({"mergeStateStatus": state}));
+        assert_eq!(
+            merge_decision(&view),
+            merge::Decision::Merge,
+            "mergeStateStatus {state} must not refuse"
+        );
+    }
+    for decision in [
+        serde_json::json!(null),
+        serde_json::json!("REVIEW_REQUIRED"),
+    ] {
+        let view = merge_view(
+            &full_body(),
+            serde_json::json!({"reviewDecision": decision}),
+        );
+        assert_eq!(merge_decision(&view), merge::Decision::Merge);
+    }
 }
 
 /// A `gh pr view` stdout payload for PR 42.
@@ -812,6 +851,7 @@ fn merge_view_json(body: &str, patch: serde_json::Value) -> String {
         "labels": [],
         "reviewDecision": "APPROVED",
         "mergeStateStatus": "CLEAN",
+        "mergeable": "MERGEABLE",
         "headRefName": "feat/6808-x",
     });
     let obj = v.as_object_mut().expect("object");
@@ -905,4 +945,32 @@ fn merge_refuses_without_calling_gh_merge() {
         "gh pr merge must not be called on a refusal: {:?}",
         gh.calls()
     );
+}
+
+/// A failed `gh pr view` is an error, not a silent merge (#6808).
+#[test]
+fn merge_errors_when_gh_view_fails() {
+    let gh = FakeGh::new().on_fail("pr view", "could not resolve to a PullRequest");
+    let err = merge::run(&gh, &merge_args()).expect_err("must not swallow the failure");
+    assert!(format!("{err:#}").contains("could not resolve"), "{err:#}");
+    assert!(
+        gh.calls()
+            .iter()
+            .all(|a| a.get(1).map(String::as_str) != Some("merge")),
+        "gh pr merge must not run after a failed view: {:?}",
+        gh.calls()
+    );
+}
+
+/// A failed `gh pr merge` is an error, never a reported success (#6808).
+#[test]
+fn merge_errors_when_gh_merge_fails() {
+    let gh = FakeGh::new()
+        .on(
+            "pr view",
+            &merge_view_json(&full_body(), serde_json::json!({})),
+        )
+        .on_fail("pr merge", "Pull request is not mergeable");
+    let err = merge::run(&gh, &merge_args()).expect_err("must not swallow the failure");
+    assert!(format!("{err:#}").contains("not mergeable"), "{err:#}");
 }

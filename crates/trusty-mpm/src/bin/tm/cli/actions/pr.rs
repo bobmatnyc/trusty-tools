@@ -58,12 +58,17 @@ Refuses with a one-line reason, exits non-zero, and calls no merge when:
   - the PR is a draft
   - the PR carries a `do-not-merge` label (any case)
   - the review decision is CHANGES_REQUESTED
-  - mergeStateStatus is CONFLICTING (resolve it with `gh pr update-branch <n>`)
+  - the PR has merge conflicts — `mergeable` CONFLICTING or `mergeStateStatus`
+    DIRTY (resolve them with `gh pr update-branch <n>`)
 
-A mergeStateStatus of BEHIND is NOT a refusal — a behind branch merges fine here.
+A mergeStateStatus of BEHIND is NOT a refusal — a behind branch merges fine here. \
+Every other mergeStateStatus — BLOCKED, UNSTABLE, HAS_HOOKS, UNKNOWN — and every \
+reviewDecision other than CHANGES_REQUESTED are left to `gh pr merge` to accept or \
+reject.
 
 With --auto the merge is queued instead of performed, and GitHub applies the \
-supplied subject and body when auto-merge fires.";
+supplied subject and body when auto-merge fires. Under a merge queue GitHub \
+ignores the supplied subject and body entirely; this repo has no merge queue.";
 
 /// Flags for `tm pr open`.
 ///
