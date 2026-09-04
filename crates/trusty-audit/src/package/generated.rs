@@ -161,6 +161,15 @@ pub(super) fn render_index(
                     crate::run::RepoResult::Failed { reason } => Some(reason.clone()),
                     crate::run::RepoResult::Succeeded => None,
                 },
+                // #6782: the recipient's copy of the same headline. This index
+                // is the one they open, so leaving it to the sweep's `out/`
+                // index would state it only to the operator.
+                stale: run
+                    .gaps
+                    .iter()
+                    .filter(|gap| gap.contains(crate::run::STALE_FETCH_MARKER))
+                    .cloned()
+                    .collect(),
                 carried_over: run.resumed,
                 duration: run.duration_ms.map(std::time::Duration::from_millis),
                 // #6783: the recipient's copy of the coverage count, read off

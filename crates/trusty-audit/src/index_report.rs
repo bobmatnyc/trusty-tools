@@ -206,6 +206,16 @@ pub struct IndexEntry {
     pub log: Option<PathBuf>,
     /// Why this unit produced no report, or `None` when it produced one.
     pub failure: Option<String>,
+    /// Gap lines saying this unit's git history is stale (#6782), verbatim.
+    ///
+    /// Why: a repository whose fetch failed produces a report that looks
+    /// complete and is quietly describing a clone of unknown age. It reaches
+    /// the index because the index is what a reader opens first — a caveat
+    /// buried in section 9 of the report itself is read too late, if at all.
+    /// What: empty for every unit whose remotes were reached, which is every
+    /// unit of a producer that runs no fetch. A re-render and a package carry
+    /// none: neither fetches, and neither re-reads the sweep's manifests.
+    pub stale: Vec<String>,
     /// Whether an earlier run did this work and this one carried it over.
     pub carried_over: bool,
     /// Wall clock around this unit, or `None` when this run did not measure it.
@@ -477,6 +487,11 @@ fn reports(report: &IndexReport, dir: &Path, out: &mut String) {
         out.push_str(&format!("### {}\n\n", entry.name));
         if let Some(reason) = &entry.failure {
             out.push_str(&format!("No report — {reason}\n\n"));
+        }
+        // #6782: before the links, because the point is to be read before the
+        // report is opened.
+        for line in &entry.stale {
+            out.push_str(&format!("> {line}\n\n"));
         }
         if entry.files.is_empty() && entry.failure.is_none() {
             out.push_str(&format!(
@@ -805,6 +820,14 @@ pub fn write_sweep(
                 crate::run::RepoResult::Failed { reason } => Some(reason.clone()),
                 crate::run::RepoResult::Succeeded => None,
             },
+            // #6782: promoted out of the manifest's gap list so the index
+            // states it beside the repository's own links.
+            stale: run
+                .gaps
+                .iter()
+                .filter(|gap| gap.contains(crate::run::STALE_FETCH_MARKER))
+                .cloned()
+                .collect(),
             carried_over: run.resumed,
             duration: run.duration_ms.map(Duration::from_millis),
             // #6783: read off the gaps this repository actually stated, which a
@@ -878,6 +901,9 @@ pub fn write_render(
                 crate::rerender::RenderResult::Failed { reason } => Some(reason.clone()),
                 crate::rerender::RenderResult::Succeeded => None,
             },
+            // A re-render fetches nothing and reads no manifest gaps, so it has
+            // no stale-history fact of its own to state (#6782).
+            stale: Vec::new(),
             carried_over: false,
             duration: rendered.duration_ms.map(Duration::from_millis),
             // #6783: a re-render indexes any checkout present on this machine,
@@ -920,10 +946,44 @@ mod index_tests {
             dir,
             log: None,
             failure: None,
+            stale: Vec::new(),
             carried_over: false,
             duration: Some(Duration::from_millis(1_500)),
             search_evidence: true,
         }
+    }
+
+    /// Why (#6782): a repository fetched from nothing renders a full report,
+    /// so the index is where a reader has to see that its history is stale —
+    /// #5321's mid-list Gaps bullet is read after the figures, if at all.
+    /// What: an entry carrying a stale gap line renders it in that
+    /// repository's own section, and a clean entry adds nothing.
+    /// Test: this is the test.
+    #[test]
+    fn a_stale_repository_is_named_in_its_index_section() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("01-acme");
+        std::fs::create_dir_all(&dir).expect("create dir");
+
+        let mut stale = entry("acme/api", dir.clone());
+        stale.stale = vec![format!(
+            "**{} (unsupported URL protocol; class=Net (12))** — repository `acme/api` \
+             could not be fetched from remote `origin`.",
+            crate::run::STALE_FETCH_MARKER
+        )];
+        let clean = entry("acme/web", dir);
+
+        let text = render(&report(Producer::Sweep, vec![stale, clean]), tmp.path());
+
+        assert!(
+            text.contains("> **git history is stale: fetch failed"),
+            "the index does not headline the stale repository:\n{text}"
+        );
+        assert_eq!(
+            text.matches("git history is stale").count(),
+            1,
+            "the clean repository picked up a stale line:\n{text}"
+        );
     }
 
     fn report(producer: Producer, entries: Vec<IndexEntry>) -> IndexReport {

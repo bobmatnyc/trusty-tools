@@ -315,4 +315,71 @@ mod tests {
             prf.outcome
         );
     }
+
+    /// The error libgit2 returns when it has no transport for a URL's scheme.
+    ///
+    /// #6782: this is the string 59 client repositories hit, and the one thing
+    /// an SSH remote must never produce — it means libssh2 was never linked in,
+    /// so no credential this module offers was ever consulted.
+    const NO_TRANSPORT: &str = "unsupported URL protocol";
+
+    /// A loopback port with nothing listening, so a connect attempt is refused
+    /// immediately rather than waiting out a TCP timeout.
+    fn closed_loopback_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        port
+    }
+
+    /// Run a tracked fetch against `url` and return the recorded failure text.
+    fn fetch_error_for(url: &str) -> String {
+        let td = tempfile::tempdir().expect("tempdir");
+        let repo = git2::Repository::init(td.path()).expect("init");
+        repo.remote("origin", url).expect("add remote origin");
+        match fetch_remote_with_outcome(&repo, "origin").expect("soft-fail returns Ok") {
+            FetchOutcome::Failed { error, .. } => error,
+            other => panic!("expected Failed for unreachable {url}, got {other:?}"),
+        }
+    }
+
+    /// Why (#6782): tga's `git2` was built without the `ssh` feature, so
+    /// libgit2 rejected every `ssh://` remote before the credential callback
+    /// above ran. The audit then walked whatever the clone-time refs held and
+    /// reported success.
+    /// What: points `origin` at an `ssh://` URL on a closed loopback port and
+    /// asserts the recorded failure is a connect/auth failure, not libgit2
+    /// declining the scheme. Pre-fix this asserts against `unsupported URL
+    /// protocol; class=Net (12)`.
+    /// Test: this is the test.
+    #[test]
+    fn an_ssh_url_reaches_the_ssh_transport() {
+        let url = format!(
+            "ssh://git@127.0.0.1:{}/org/repo.git",
+            closed_loopback_port()
+        );
+        let error = fetch_error_for(&url);
+        assert!(
+            !error.contains(NO_TRANSPORT),
+            "ssh:// remote was rejected for want of a transport, not for want of a \
+             reachable host: {error}"
+        );
+    }
+
+    /// Why (#6782): the scp-style spelling `git@host:org/repo.git` is what
+    /// `git clone` writes for a GitHub SSH remote, so it is the form the client
+    /// audit actually carried. libgit2 parses it into the same SSH transport,
+    /// which means it fails the same way when that transport is absent.
+    /// What: points `origin` at a scp-style URL on loopback and asserts the
+    /// failure is not the missing-transport error.
+    /// Test: this is the test.
+    #[test]
+    fn an_scp_style_remote_reaches_the_ssh_transport() {
+        let error = fetch_error_for("git@127.0.0.1:org/repo.git");
+        assert!(
+            !error.contains(NO_TRANSPORT),
+            "scp-style remote was rejected for want of a transport, not for want of a \
+             reachable host: {error}"
+        );
+    }
 }

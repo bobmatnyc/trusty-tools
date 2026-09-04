@@ -142,16 +142,21 @@ toml_edit = { workspace = true }
 # is the documented way to extend a shared dep without cloning the version.
 rusqlite = { workspace = true, features = ["chrono"] }
 # Git
-# Local pin retained: the workspace `git2` entry turns on default ssh+https
-# features and `vendored-openssl`; tga explicitly disables defaults to drop
-# the libssh2 system dependency. The `https` and `vendored-openssl` features
-# are added here (#337) so `tga collect` can fetch from https:// remotes
-# without an external system git:
+# Local pin retained: the workspace `git2` entry turns on git2's defaults; tga
+# disables them and names exactly the transports it needs, so the feature set
+# is stated here rather than inherited.
+# The `https` and `vendored-openssl` features are here (#337) so `tga collect`
+# can fetch from https:// remotes without an external system git:
 #   - macOS: uses the native Security framework (no openssl runtime dep)
 #   - Linux: vendors openssl statically (portable binaries, no system libssl)
 #   - Windows: uses Schannel (no openssl runtime dep)
-# SSH transport remains disabled (out of scope for this fix).
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "https", "vendored-openssl"] }
+# #6782: `ssh` links libssh2, without which libgit2 rejects every
+# `git@host:org/repo.git` / `ssh://` origin with `unsupported URL protocol;
+# class=Net (12)` — 59 of 59 repositories in a client audit — and the sweep
+# then walks clone-time refs. libssh2-sys vendors libssh2 from its own bundled
+# source, and `vendored-openssl` already propagates to it, so this adds no
+# system library and no new runtime dependency.
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "https", "ssh", "vendored-openssl"] }
 # HTTP client — workspace entry already declares
 # `default-features = false, features = ["json", "stream", "rustls-tls"]`
 # which is a superset of what tga needs. The `stream` extra is harmless

@@ -140,6 +140,9 @@ use approve::approve_for_indexing;
 use child::spawn_tga;
 use pins::{PinnedBinaries, pinned_binaries};
 use verify::{mark_complete, verify_output};
+// #6782: the index states a stale-history repository, and verify.rs owns the
+// marker it recognises.
+pub(crate) use verify::STALE_FETCH_MARKER;
 
 // Re-exported at its historical path: `crate::rerender`, `crate::distribute`,
 // `crate::session` and both `cli` submodules name it as `crate::run::…`.
