@@ -7,13 +7,28 @@
 //! (`attribution.commit` / `attribution.pr`, which deprecated
 //! `includeCoAuthoredBy` in v2.0.62), so tm writes the setting instead and the
 //! prose says nothing (#6807).
-//! What: [`ATTRIBUTION_FOOTER`] is the single definition. The lib seeds it into
-//! the tm-owned `settings.json` via
-//! [`crate::core::standalone::settings_defaults::ensure_settings_defaults`], and
-//! `tm pr open`'s body validator checks the same constant so a hand-written body
-//! is held to the text the setting produces.
+//! What: [`ATTRIBUTION_FOOTER`] is the single definition, seeded into two
+//! settings tiers because they reach different launches:
+//! [`crate::core::standalone::settings_defaults::ensure_settings_defaults`]
+//! writes the tm-owned `CLAUDE_CONFIG_DIR` copy, which only the `claude` child
+//! tm spawns can see (`CLAUDE_CONFIG_DIR` is set per-command and never
+//! exported), and
+//! [`crate::core::session_launch::settings::write_output_style`] writes the
+//! project-tier `.claude/settings.json`, which any `claude` launched in the
+//! project reads. Both seed absent-only. `tm pr open`'s body validator checks
+//! the same constant so a hand-written body matches what the setting produces.
+//!
+//! Per-key fallback is what makes seeding both keys safe. Claude Code's
+//! settings reference, under `attribution`: "Once you set `commit` or `pr`,
+//! Claude Code ignores the deprecated `includeCoAuthoredBy` setting and uses
+//! its default text for whichever of the two you left unset." Setting both
+//! leaves no key on a default. Verified against the docs at
+//! <https://code.claude.com/docs/en/settings>; `attribution` deprecated
+//! `includeCoAuthoredBy` in Claude Code v2.0.62, and 2.1.260 is the version
+//! this was developed against.
 //! Test: `attribution_footer_is_the_expected_literal`,
-//! `ensure_settings_defaults_seeds_attribution`.
+//! `ensure_settings_defaults_seeds_attribution`,
+//! `write_output_style_seeds_attribution`.
 
 /// The attribution footer that ends every trusty-mpm commit message and PR body.
 ///
