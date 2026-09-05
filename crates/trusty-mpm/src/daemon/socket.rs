@@ -66,7 +66,7 @@ pub fn socket_path() -> Result<PathBuf> {
 /// `rpc_router_registers_every_documented_method`,
 /// `every_scoped_route_has_a_method`.
 fn build_router(state: &Arc<DaemonState>) -> RpcRouter {
-    // #6288 slice 2: the core request/response families. Slice 6 appends here.
+    // #6288 slice 2: the core request/response families.
     let router = rpc::core::register(RpcRouter::new(), state);
     // #6288 slice 3: the legacy session registry, hooks, and the polled feeds.
     let router = rpc::sessions_legacy::register(router, state);
@@ -74,7 +74,11 @@ fn build_router(state: &Arc<DaemonState>) -> RpcRouter {
     let router = rpc::managed::register(router, state);
     // #6288 slice 5: projects, deliverables/milestones, manager, bus, pairing,
     // delegation.
-    rpc::registry::register(router, state)
+    let router = rpc::registry::register(router, state);
+    // #6288 slice 6: the two hook-event SSE routes, as streaming methods. These
+    // land in the router's SEPARATE stream table, so they answer a request that
+    // sets `"stream": true` and refuse a unary one with `CODE_STREAM_REQUIRED`.
+    rpc::stream::register(router, state)
 }
 
 /// Per-connection budgets for this listener.
@@ -156,6 +160,9 @@ pub async fn serve_until_shutdown(
     tracing::info!(
         socket = %path.display(),
         methods = router.method_names().count(),
+        // #6288 slice 6: streaming names live in a separate table, so a count
+        // of unary methods alone would under-report what this listener serves.
+        streams = router.stream_names().count(),
         "trusty-mpm serving rpc"
     );
 
