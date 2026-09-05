@@ -307,6 +307,9 @@ pub async fn handle_start(
     }
 
     policy.log_summary();
+    // #6821: the resident-index cap now defaults to a tier-scaled number, so
+    // say which number is in force and where it came from.
+    crate::service::lazy_loader::log_resident_index_cap(policy.tier);
     let _ = foreground;
 
     // Fast-path: bail before loading the 86 MB embedding model when

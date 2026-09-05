@@ -60,6 +60,8 @@ impl SearchAppState {
         let (shutdown_tx, _) = watch::channel(false);
         Self {
             registry,
+            // #6821: one RAM read per state, not one per `/health` poll.
+            machine_tier: trusty_common::machine_tier::MachineBudget::detect().tier,
             // #6285 slice 3: one limiter and one deadline per DAEMON, not per
             // router — the socket and the axum router both gate the query
             // surface on these.

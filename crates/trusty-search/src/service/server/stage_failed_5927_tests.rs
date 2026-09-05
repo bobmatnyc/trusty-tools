@@ -357,7 +357,11 @@ async fn health_omits_the_failing_index_ids_when_nothing_is_failing() {
 /// previously-absent optional keys are still absent, and that the response
 /// carries no key this pin does not name.
 /// Test: this IS the test.
+// #6821: serial because `resident_index_cap`'s JSON type depends on
+// `TRUSTY_MAX_RESIDENT_INDEXES`, which the residency tests mutate — a parallel
+// `off` would flip this pin's `number` to `null`.
 #[tokio::test]
+#[serial_test::serial]
 async fn health_counter_wire_shape_is_unchanged_by_the_id_field() {
     let (registry, _handle) = registry_with_one_index("wire-shape-6688");
 
@@ -379,6 +383,11 @@ async fn health_counter_wire_shape_is_unchanged_by_the_id_field() {
         ("embedder_recent_timeout_count", "number"),
         ("rss_mb", "number"),
         ("rss_limit_mb", "number"),
+        // #6821: the resolved resident-index cap and its provenance. A number
+        // here because the cap now defaults on; `null` only under
+        // TRUSTY_MAX_RESIDENT_INDEXES=off.
+        ("resident_index_cap", "number"),
+        ("resident_index_cap_source", "string"),
         ("disk_bytes", "number"),
         ("cpu_pct", "number"),
         ("background_reindex_queue_depth", "number"),

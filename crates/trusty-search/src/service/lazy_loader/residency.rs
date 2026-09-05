@@ -11,50 +11,230 @@
 //! beyond the top `TRUSTY_MAX_RESIDENT_INDEXES`, reusing the existing
 //! cold-store + `get_or_load_index` machinery for the reload.
 //!
-//! What: `max_resident_indexes()` / `residency_sweep_secs()` (env readers),
-//! `ids_to_park()` (pure selection — reuses [`select_warmboot_entries`]'s
-//! comparator so boot-time and runtime ranking can never diverge), and
-//! `cold_park_index()` (the non-destructive detach-and-park primitive). The
-//! periodic sweep itself lives in `service::server::tickers` because it needs
-//! `SearchAppState` (registry, cold store, reindex-progress guard, watcher
-//! manager); this module stays free of that dependency so it is unit-testable
-//! in isolation.
+//! What: `resolve_max_resident_indexes_for()` / `residency_sweep_secs()` (the
+//! cap and cadence readers), `ids_to_park()` (pure selection — reuses
+//! [`select_warmboot_entries`]'s comparator so boot-time and runtime ranking
+//! can never diverge), and `cold_park_index()` (the non-destructive
+//! detach-and-park primitive). The periodic sweep itself lives in
+//! `service::server::tickers` because it needs `SearchAppState` (registry, cold
+//! store, reindex-progress guard, watcher manager); this module stays free of
+//! that dependency so it is unit-testable in isolation.
 //!
-//! Test: `max_resident_indexes_*`, `residency_sweep_secs_*`, `ids_to_park_*`,
+//! What changed in #6821: an unset `TRUSTY_MAX_RESIDENT_INDEXES` used to
+//! disable the cap outright, so every index that was ever queried stayed
+//! resident for the daemon's lifetime (56 indexes / 15 GB on the reporting
+//! host). It now resolves to a machine-tier default. `off` is the new spelling
+//! that disables the cap; every numeric value, `0` included, means exactly what
+//! it meant before.
+//!
+//! Test: `default_max_resident_indexes_*`, `resolve_max_resident_indexes_*`,
+//! `warmboot_cap_*`, `residency_sweep_secs_*`, `ids_to_park_*`,
 //! `cold_park_index_*` below; end-to-end round-trip coverage lives in
 //! `tests/residency_cold_park.rs`.
 
 use std::sync::Arc;
 
+use crate::core::memory_policy::{detect_total_ram_mb, MemoryTier};
 use crate::core::registry::{IndexId, IndexRegistry};
 use crate::service::persistence::PersistedIndex;
 
 use super::store::{select_warmboot_entries, ColdIndexStore};
 
-/// Read the usage-based resident-index cap from `TRUSTY_MAX_RESIDENT_INDEXES`.
+/// The one env value that turns the resident-index cap off entirely (#6821).
+const RESIDENT_CAP_OFF: &str = "off";
+
+/// Where the resolved resident-index cap came from (#6821).
 ///
-/// Why: operators with a long tail of rarely-used registered indexes want a
-/// hard ceiling on how many stay loaded in memory at once, independent of how
-/// many were eagerly warm-booted. Unset preserves the pre-#2161 behaviour —
-/// no runtime eviction — so upgrading the daemon never surprises an operator
-/// who never opted in.
-/// What: parses the env var as a `usize`. Unset → `None` (disabled, back-compat
-/// default). `0` → `Some(0)` (park every resident index on the next sweep,
-/// mirroring `TRUSTY_WARMBOOT_MAX_INDEXES=0` semantics). A parse failure is
-/// logged and treated as `None`.
-/// Test: `max_resident_indexes_unset_returns_none`,
-/// `max_resident_indexes_parses_env`, `max_resident_indexes_invalid_falls_back`.
-pub fn max_resident_indexes() -> Option<usize> {
-    let raw = std::env::var("TRUSTY_MAX_RESIDENT_INDEXES").ok()?;
-    match raw.trim().parse::<usize>() {
-        Ok(n) => Some(n),
-        Err(e) => {
-            tracing::warn!(
-                "TRUSTY_MAX_RESIDENT_INDEXES={raw:?} is not a valid usize ({e}); \
-                 residency sweep stays disabled"
-            );
-            None
+/// Why: with a tier-scaled default in play, the number alone no longer says
+/// whether an operator chose it. `/health` and the startup log report both, so
+/// "why is this host parking indexes" is answerable without reading the
+/// daemon's environment.
+/// What: three states — an env-supplied number, the env `off` spelling, or the
+/// machine-tier default. An unparseable env value resolves to the tier default
+/// and reports itself as such, because the daemon did not honour what was
+/// written.
+/// Test: `resolve_max_resident_indexes_reports_env_source`,
+/// `resolve_max_resident_indexes_off_disables_the_cap`,
+/// `resolve_max_resident_indexes_invalid_falls_back_to_the_tier_default`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentCapSource {
+    /// `TRUSTY_MAX_RESIDENT_INDEXES` named a number.
+    Env,
+    /// `TRUSTY_MAX_RESIDENT_INDEXES=off` — no index is ever cold-parked.
+    EnvOff,
+    /// Unset, empty, or unparseable — the machine tier chose the number.
+    TierDefault,
+}
+
+impl ResidentCapSource {
+    /// Stable wire spelling for `/health` and the startup log.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResidentCapSource::Env => "env",
+            ResidentCapSource::EnvOff => "env (off)",
+            ResidentCapSource::TierDefault => "tier default",
         }
+    }
+}
+
+/// The resolved resident-index cap plus the evidence behind it (#6821).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidentIndexCap {
+    /// How many indexes may stay resident. `None` means the cap is off and
+    /// nothing is ever cold-parked at runtime.
+    pub cap: Option<usize>,
+    /// Which of the three inputs produced [`Self::cap`].
+    pub source: ResidentCapSource,
+    /// The machine tier the default was (or would have been) read from.
+    pub tier: MemoryTier,
+}
+
+/// How many indexes a host of this tier keeps resident by default (#6821).
+///
+/// Why: the residency mechanism shipped in #2161 and then sat disabled, so a
+/// 128 GB host held 56 indexes and 15 GB of heap with 35 of them never queried.
+/// A cap has to default to a number for the mechanism to do anything, and that
+/// number has to track the machine — 12 resident indexes is fine on 128 GB and
+/// ruinous on 12 GB.
+/// What: the tier bands are `trusty_common::machine_tier`'s (#6820). The counts
+/// scale roughly with the tier's other caps: each resident index costs a redb
+/// handle, an HNSW view, and whatever chunk/BM25 cache has not been idle-evicted
+/// yet, so the budget doubles as the band does. A parked index is not lost — the
+/// next query reloads it through the same cold path a never-warm-booted index
+/// uses.
+/// Test: `default_max_resident_indexes_scales_with_tier`.
+pub fn default_max_resident_indexes(tier: MemoryTier) -> usize {
+    match tier {
+        MemoryTier::Degraded => 2,
+        MemoryTier::Medium => 4,
+        MemoryTier::Large => 8,
+        MemoryTier::XLarge => 12,
+    }
+}
+
+/// Resolve the resident-index cap against a known machine tier (#6821).
+///
+/// Why: the tier is a hardware fact that costs a `sysctl` spawn to read, so
+/// every caller that resolves the cap more than once — the residency sweep on
+/// every tick, `/health` on every poll — passes the tier it already holds
+/// (`SearchAppState::machine_tier`) instead of re-detecting it. The env read
+/// stays per-call so `TRUSTY_MAX_RESIDENT_INDEXES` is still toggleable through
+/// `daemon.env` without a restart, exactly as #2161 documented.
+/// What: precedence is env number > env `off` > tier default. An unset or empty
+/// value takes the tier default. `off` (any case) disables the cap. A numeric
+/// value is honoured verbatim, `0` included — `0` still means "park every
+/// resident index on the next sweep", the #2161 meaning, which is why `off` had
+/// to be a separate spelling. An unparseable value is warned about and takes the
+/// tier default rather than silently disabling the cap.
+/// Test: `resolve_max_resident_indexes_unset_takes_the_tier_default`,
+/// `resolve_max_resident_indexes_reports_env_source`,
+/// `resolve_max_resident_indexes_zero_still_parks_everything`,
+/// `resolve_max_resident_indexes_off_disables_the_cap`,
+/// `resolve_max_resident_indexes_invalid_falls_back_to_the_tier_default`.
+pub fn resolve_max_resident_indexes_for(tier: MemoryTier) -> ResidentIndexCap {
+    let fallback = default_max_resident_indexes(tier);
+    let tier_default = ResidentIndexCap {
+        cap: Some(fallback),
+        source: ResidentCapSource::TierDefault,
+        tier,
+    };
+    let Ok(raw) = std::env::var("TRUSTY_MAX_RESIDENT_INDEXES") else {
+        return tier_default;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return tier_default;
+    }
+    if trimmed.eq_ignore_ascii_case(RESIDENT_CAP_OFF) {
+        return ResidentIndexCap {
+            cap: None,
+            source: ResidentCapSource::EnvOff,
+            tier,
+        };
+    }
+    match trimmed.parse::<usize>() {
+        Ok(n) => ResidentIndexCap {
+            cap: Some(n),
+            source: ResidentCapSource::Env,
+            tier,
+        },
+        Err(e) => {
+            // #6821: falling back to the tier default rather than to "disabled"
+            // — a typo must not silently restore the unbounded pre-#6821 growth.
+            tracing::warn!(
+                "TRUSTY_MAX_RESIDENT_INDEXES={raw:?} is neither a usize nor \
+                 \"{RESIDENT_CAP_OFF}\" ({e}); using the {tier} tier default \
+                 ({fallback})"
+            );
+            tier_default
+        }
+    }
+}
+
+/// Resolve the resident-index cap, detecting the machine tier first (#6821).
+///
+/// Why: for the handful of callers that have no `SearchAppState` to read the
+/// tier from — the startup log, and `max_resident_indexes()` below.
+/// What: [`resolve_max_resident_indexes_for`] against
+/// `MemoryTier::from_total_ram_mb(detect_total_ram_mb())`, degrading to
+/// `Degraded` when RAM cannot be read (the same posture `MachineBudget::detect`
+/// takes). Spawns `sysctl` on macOS — never call it on a hot path.
+/// Test: `resolve_max_resident_indexes_unset_takes_the_tier_default`.
+pub fn resolve_max_resident_indexes() -> ResidentIndexCap {
+    let tier = detect_total_ram_mb().map_or(MemoryTier::Degraded, MemoryTier::from_total_ram_mb);
+    resolve_max_resident_indexes_for(tier)
+}
+
+/// The resolved resident-index cap as a bare `Option` (#2161, #6821).
+///
+/// `None` means the cap is off. Detects the tier — see
+/// [`resolve_max_resident_indexes`] for the cost note.
+/// Test: `resolve_max_resident_indexes_unset_takes_the_tier_default`.
+pub fn max_resident_indexes() -> Option<usize> {
+    resolve_max_resident_indexes().cap
+}
+
+/// How many indexes warm-boot may load eagerly (#993, capped by #6821).
+///
+/// Why: warm-boot and the residency sweep bounded different things and only one
+/// of them had a default, so a daemon eagerly loaded every registered index at
+/// boot and then relied on the sweep to park them back down 120 s later — the
+/// peak the epic's measurement pass flagged as the real risk. Inheriting the
+/// resident cap means the boot never reaches that peak in the first place.
+/// What: `TRUSTY_WARMBOOT_MAX_INDEXES` when set (`0` included), otherwise the
+/// resolved resident cap for `tier`. `None` — reachable only via
+/// `TRUSTY_MAX_RESIDENT_INDEXES=off` with no warm-boot cap set — keeps the
+/// pre-#993 warm-boot-everything behaviour. The ordering is
+/// [`select_warmboot_entries`]'s, so the kept slice is the most-recently-used
+/// N and a never-queried, never-indexed entry (sort key `0`) is always in the
+/// deferred remainder.
+/// Test: `warmboot_cap_prefers_the_explicit_env_var`,
+/// `warmboot_cap_falls_back_to_the_resident_cap`,
+/// `warmboot_cap_keeps_the_mru_slice_and_defers_never_used_entries`.
+pub fn warmboot_cap_for(tier: MemoryTier) -> Option<usize> {
+    super::env::warmboot_max_indexes().or_else(|| resolve_max_resident_indexes_for(tier).cap)
+}
+
+/// Log the resolved resident-index cap once, at daemon startup (#6821).
+///
+/// Test: `resolve_max_resident_indexes_reports_env_source` covers the values
+/// this renders; the log line itself has no assertable behaviour.
+pub fn log_resident_index_cap(tier: MemoryTier) {
+    let resolved = resolve_max_resident_indexes_for(tier);
+    match resolved.cap {
+        Some(n) => tracing::info!(
+            "resident-index cap: {n} (source={}, tier={}) — the residency sweep \
+             cold-parks everything beyond this; set TRUSTY_MAX_RESIDENT_INDEXES=off \
+             to disable",
+            resolved.source.as_str(),
+            resolved.tier
+        ),
+        None => tracing::info!(
+            "resident-index cap: off (source={}, tier={}) — no index is ever \
+             cold-parked at runtime",
+            resolved.source.as_str(),
+            resolved.tier
+        ),
     }
 }
 
@@ -377,29 +557,217 @@ mod tests {
         IndexHandle::bare(index_id, indexer, root_path)
     }
 
-    // ── max_resident_indexes ─────────────────────────────────────────────
+    /// Every tier, so a table test cannot silently skip the variant a new
+    /// `MemoryTier` band would add — the enum is deliberately not
+    /// `#[non_exhaustive]` for exactly this reason (#6820).
+    const ALL_TIERS: [MemoryTier; 4] = [
+        MemoryTier::Degraded,
+        MemoryTier::Medium,
+        MemoryTier::Large,
+        MemoryTier::XLarge,
+    ];
 
-    #[test]
-    #[serial_test::serial]
-    fn max_resident_indexes_unset_returns_none() {
+    fn clear_cap_env() {
         unsafe { std::env::remove_var("TRUSTY_MAX_RESIDENT_INDEXES") };
-        assert!(max_resident_indexes().is_none());
+        unsafe { std::env::remove_var("TRUSTY_WARMBOOT_MAX_INDEXES") };
     }
 
+    // ── the tier-scaled default (#6821) ──────────────────────────────────
+
+    /// The proposed table, pinned. A change here is a change to how much RAM a
+    /// host of that size will hold, so it must be a deliberate edit.
+    #[test]
+    fn default_max_resident_indexes_scales_with_tier() {
+        assert_eq!(default_max_resident_indexes(MemoryTier::Degraded), 2);
+        assert_eq!(default_max_resident_indexes(MemoryTier::Medium), 4);
+        assert_eq!(default_max_resident_indexes(MemoryTier::Large), 8);
+        assert_eq!(default_max_resident_indexes(MemoryTier::XLarge), 12);
+
+        // Monotonic: a bigger machine never holds fewer indexes.
+        for pair in ALL_TIERS.windows(2) {
+            assert!(
+                default_max_resident_indexes(pair[0]) < default_max_resident_indexes(pair[1]),
+                "{:?} must allow fewer resident indexes than {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    // ── resolve_max_resident_indexes_for (#6821) ─────────────────────────
+
+    /// The #6821 behaviour change: unset used to disable the cap outright.
     #[test]
     #[serial_test::serial]
-    fn max_resident_indexes_parses_env() {
+    fn resolve_max_resident_indexes_unset_takes_the_tier_default() {
+        clear_cap_env();
+        for tier in ALL_TIERS {
+            let resolved = resolve_max_resident_indexes_for(tier);
+            assert_eq!(
+                resolved.cap,
+                Some(default_max_resident_indexes(tier)),
+                "an unset TRUSTY_MAX_RESIDENT_INDEXES must resolve to the {tier} default"
+            );
+            assert_eq!(resolved.source, ResidentCapSource::TierDefault);
+            assert_eq!(resolved.tier, tier);
+        }
+        // The tier-detecting wrapper agrees with whatever tier this host is.
+        assert!(
+            max_resident_indexes().is_some(),
+            "the cap must be on by default — that is the whole of #6821"
+        );
+    }
+
+    /// An explicit number wins over the tier default on every tier.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_max_resident_indexes_reports_env_source() {
+        clear_cap_env();
         unsafe { std::env::set_var("TRUSTY_MAX_RESIDENT_INDEXES", "5") };
-        assert_eq!(max_resident_indexes(), Some(5));
-        unsafe { std::env::remove_var("TRUSTY_MAX_RESIDENT_INDEXES") };
+        for tier in ALL_TIERS {
+            let resolved = resolve_max_resident_indexes_for(tier);
+            assert_eq!(
+                resolved.cap,
+                Some(5),
+                "an explicit cap must win over the {tier} default"
+            );
+            assert_eq!(resolved.source, ResidentCapSource::Env);
+            assert_eq!(resolved.source.as_str(), "env");
+        }
+        clear_cap_env();
+    }
+
+    /// `0` keeps its #2161 meaning — park everything — because the issue's
+    /// contract is that a numeric value still "overrides exactly as today".
+    #[test]
+    #[serial_test::serial]
+    fn resolve_max_resident_indexes_zero_still_parks_everything() {
+        clear_cap_env();
+        unsafe { std::env::set_var("TRUSTY_MAX_RESIDENT_INDEXES", "0") };
+        let resolved = resolve_max_resident_indexes_for(MemoryTier::XLarge);
+        assert_eq!(
+            resolved.cap,
+            Some(0),
+            "0 must stay `Some(0)` — the sweep parks every resident index"
+        );
+        assert_eq!(resolved.source, ResidentCapSource::Env);
+        clear_cap_env();
+    }
+
+    /// `off` is the one spelling that turns the cap off.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_max_resident_indexes_off_disables_the_cap() {
+        clear_cap_env();
+        for spelling in ["off", "OFF", " Off "] {
+            unsafe { std::env::set_var("TRUSTY_MAX_RESIDENT_INDEXES", spelling) };
+            let resolved = resolve_max_resident_indexes_for(MemoryTier::Medium);
+            assert_eq!(
+                resolved.cap, None,
+                "{spelling:?} must disable the cap entirely"
+            );
+            assert_eq!(resolved.source, ResidentCapSource::EnvOff);
+            assert_eq!(resolved.source.as_str(), "env (off)");
+        }
+        clear_cap_env();
+    }
+
+    /// A typo must not silently restore the unbounded pre-#6821 growth.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_max_resident_indexes_invalid_falls_back_to_the_tier_default() {
+        clear_cap_env();
+        for raw in ["not-a-number", "-1", "12.5"] {
+            unsafe { std::env::set_var("TRUSTY_MAX_RESIDENT_INDEXES", raw) };
+            let resolved = resolve_max_resident_indexes_for(MemoryTier::Large);
+            assert_eq!(
+                resolved.cap,
+                Some(default_max_resident_indexes(MemoryTier::Large)),
+                "{raw:?} must fall back to the tier default, not to disabled"
+            );
+            assert_eq!(resolved.source, ResidentCapSource::TierDefault);
+        }
+        // An empty value is "unset", not "off".
+        unsafe { std::env::set_var("TRUSTY_MAX_RESIDENT_INDEXES", "") };
+        assert_eq!(
+            resolve_max_resident_indexes_for(MemoryTier::Large).source,
+            ResidentCapSource::TierDefault
+        );
+        clear_cap_env();
+    }
+
+    // ── warm-boot inherits the cap (#6821) ───────────────────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn warmboot_cap_prefers_the_explicit_env_var() {
+        clear_cap_env();
+        unsafe { std::env::set_var("TRUSTY_WARMBOOT_MAX_INDEXES", "3") };
+        unsafe { std::env::set_var("TRUSTY_MAX_RESIDENT_INDEXES", "9") };
+        assert_eq!(warmboot_cap_for(MemoryTier::XLarge), Some(3));
+
+        // `0` is a choice, not an absence.
+        unsafe { std::env::set_var("TRUSTY_WARMBOOT_MAX_INDEXES", "0") };
+        assert_eq!(warmboot_cap_for(MemoryTier::XLarge), Some(0));
+        clear_cap_env();
     }
 
     #[test]
     #[serial_test::serial]
-    fn max_resident_indexes_invalid_falls_back() {
-        unsafe { std::env::set_var("TRUSTY_MAX_RESIDENT_INDEXES", "not-a-number") };
-        assert!(max_resident_indexes().is_none());
-        unsafe { std::env::remove_var("TRUSTY_MAX_RESIDENT_INDEXES") };
+    fn warmboot_cap_falls_back_to_the_resident_cap() {
+        clear_cap_env();
+        for tier in ALL_TIERS {
+            assert_eq!(
+                warmboot_cap_for(tier),
+                Some(default_max_resident_indexes(tier)),
+                "an unset warm-boot cap must inherit the {tier} resident default"
+            );
+        }
+        // `off` on the resident cap restores warm-boot-everything.
+        unsafe { std::env::set_var("TRUSTY_MAX_RESIDENT_INDEXES", "off") };
+        assert_eq!(
+            warmboot_cap_for(MemoryTier::Medium),
+            None,
+            "TRUSTY_MAX_RESIDENT_INDEXES=off must restore the pre-#6821 warm-boot"
+        );
+        clear_cap_env();
+    }
+
+    /// Acceptance (d): with M > N registered indexes and no env vars set, the
+    /// warm-boot split keeps exactly N, most-recently-used first, and both
+    /// never-used entries land in the deferred remainder.
+    #[test]
+    #[serial_test::serial]
+    fn warmboot_cap_keeps_the_mru_slice_and_defers_never_used_entries() {
+        clear_cap_env();
+        // Degraded caps at 2; five entries, two of which were never touched.
+        let entries = vec![
+            mk_entry("never-a", None),
+            mk_entry("cold", Some(100)),
+            mk_entry("hottest", Some(300)),
+            mk_entry("never-b", None),
+            mk_entry("warm", Some(200)),
+        ];
+        let cap = warmboot_cap_for(MemoryTier::Degraded);
+        assert_eq!(cap, Some(2));
+
+        let (eager, deferred) = select_warmboot_entries(entries, cap);
+        let eager_ids: Vec<&str> = eager.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            eager_ids,
+            vec!["hottest", "warm"],
+            "exactly the top-2 by recency, most-recently-used first"
+        );
+        let deferred_ids: Vec<&str> = deferred.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(deferred_ids.len(), 3);
+        for never in ["never-a", "never-b"] {
+            assert!(
+                deferred_ids.contains(&never),
+                "a never-queried, never-indexed index must never be warm-booted \
+                 ahead of a used one — deferred={deferred_ids:?}"
+            );
+        }
+        clear_cap_env();
     }
 
     // ── residency_sweep_secs ─────────────────────────────────────────────

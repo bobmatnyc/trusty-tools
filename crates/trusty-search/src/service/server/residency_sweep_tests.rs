@@ -56,12 +56,21 @@ fn clear_env() {
     }
 }
 
-/// Back-compat: with `TRUSTY_MAX_RESIDENT_INDEXES` unset, a sweep tick must
-/// never park a resident index, no matter how many are registered.
+/// Build a state pinned to `tier`, so the tier-scaled default under test does
+/// not depend on how much RAM the machine running the suite happens to have.
+fn state_on_tier(tier: trusty_common::machine_tier::MemoryTier) -> SearchAppState {
+    let mut state = SearchAppState::new(IndexRegistry::new());
+    state.machine_tier = tier;
+    state
+}
+
+/// `TRUSTY_MAX_RESIDENT_INDEXES=off` is what disables the sweep since #6821 —
+/// with it set, no resident index is ever parked, however many are registered.
 #[tokio::test]
 #[serial_test::serial]
-async fn sweep_disabled_when_cap_unset_parks_nothing() {
+async fn sweep_disabled_when_cap_is_off_parks_nothing() {
     clear_env();
+    unsafe { std::env::set_var("TRUSTY_MAX_RESIDENT_INDEXES", "off") };
     let entries = vec![
         entry("a", Some(1)),
         entry("b", Some(2)),
@@ -69,7 +78,8 @@ async fn sweep_disabled_when_cap_unset_parks_nothing() {
     ];
     let _tmp = isolate_and_seed_toml(&entries);
 
-    let state = SearchAppState::new(IndexRegistry::new());
+    // Degraded caps at 2, so without the `off` this would park one index.
+    let state = state_on_tier(trusty_common::machine_tier::MemoryTier::Degraded);
     for e in &entries {
         state.registry.register(bare_handle(&e.id));
     }
@@ -79,13 +89,61 @@ async fn sweep_disabled_when_cap_unset_parks_nothing() {
     for e in &entries {
         assert!(
             state.registry.get(&IndexId::new(e.id.clone())).is_some(),
-            "'{}' must remain resident when the cap is unset",
+            "'{}' must remain resident when the cap is off",
             e.id
         );
     }
     assert!(
         state.cold_store.is_empty(),
-        "nothing should ever be parked when TRUSTY_MAX_RESIDENT_INDEXES is unset"
+        "nothing should ever be parked when TRUSTY_MAX_RESIDENT_INDEXES=off"
+    );
+    clear_env();
+}
+
+/// The #6821 behaviour change, end to end through the tick: with
+/// `TRUSTY_MAX_RESIDENT_INDEXES` unset the sweep now parks down to the machine
+/// tier's default. Before #6821 this tick was a no-op and all three stayed
+/// resident forever.
+#[tokio::test]
+#[serial_test::serial]
+async fn sweep_parks_down_to_the_tier_default_when_the_env_var_is_unset() {
+    clear_env();
+    let entries = vec![
+        entry("coldest", Some(100)),
+        entry("warm", Some(200)),
+        entry("hottest", Some(300)),
+    ];
+    let _tmp = isolate_and_seed_toml(&entries);
+
+    // Degraded's default is 2, so exactly the coldest of the three is parked.
+    let state = state_on_tier(trusty_common::machine_tier::MemoryTier::Degraded);
+    for e in &entries {
+        state.registry.register(bare_handle(&e.id));
+    }
+
+    run_residency_sweep_tick(&Arc::new(state.clone())).await;
+
+    for keep in ["hottest", "warm"] {
+        assert!(
+            state
+                .registry
+                .get(&IndexId::new(keep.to_string()))
+                .is_some(),
+            "'{keep}' is inside the Degraded tier default of 2 and must stay resident"
+        );
+    }
+    assert!(
+        state
+            .registry
+            .get(&IndexId::new("coldest".to_string()))
+            .is_none(),
+        "with no env var set, the tier default must now park the coldest index (#6821)"
+    );
+    assert!(
+        state
+            .cold_store
+            .contains(&IndexId::new("coldest".to_string())),
+        "the parked index must be discoverable in the cold store"
     );
     clear_env();
 }

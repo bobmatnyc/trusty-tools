@@ -13,14 +13,15 @@
 //!   - `store` — `ColdIndexStore` + `select_warmboot_entries()`.
 //!   - `loader` — `get_or_load_index()` + `LazyLoadError`.
 //!   - `residency` — issue #2161's usage-based resident-index cap:
-//!     `max_resident_indexes()`, `residency_sweep_secs()`, `ids_to_park()`,
-//!     and `cold_park_index()`, the non-destructive runtime counterpart to
-//!     boot-time selective warm-boot.
+//!     `resolve_max_resident_indexes_for()`, `warmboot_cap_for()`,
+//!     `residency_sweep_secs()`, `ids_to_park()`, and `cold_park_index()`, the
+//!     non-destructive runtime counterpart to boot-time selective warm-boot.
 //!
-//! Back-compat: when `TRUSTY_WARMBOOT_MAX_INDEXES` is unset, `select_warmboot_entries`
-//! returns all entries as eager and the cold store is empty — exact same behaviour
-//! as the pre-#993 daemon. Likewise, when `TRUSTY_MAX_RESIDENT_INDEXES` is unset,
-//! the residency sweep never cold-parks a resident index (issue #2161).
+//! Default (#6821): an unset `TRUSTY_MAX_RESIDENT_INDEXES` resolves to a
+//! machine-tier cap rather than disabling residency, and an unset
+//! `TRUSTY_WARMBOOT_MAX_INDEXES` inherits that same cap — so a boot never loads
+//! more than the sweep would keep. `TRUSTY_MAX_RESIDENT_INDEXES=off` restores
+//! the pre-#6821 posture on both: warm-boot everything, park nothing.
 //!
 //! Test: `select_warmboot_entries_*`, `cold_reload_timeout_parses_env`,
 //!       `warmboot_max_indexes_parses_env`, `get_or_load_index_*`,
@@ -35,7 +36,11 @@ mod store;
 // `crate::service::lazy_loader::*` need no changes.
 pub use env::{cold_reload_timeout, warmboot_max_indexes, LAST_QUERIED_WRITE_INTERVAL_SECS};
 pub use loader::{get_or_load_index, LazyLoadError};
-pub use residency::{cold_park_index, ids_to_park, max_resident_indexes, residency_sweep_secs};
+pub use residency::{
+    cold_park_index, default_max_resident_indexes, ids_to_park, log_resident_index_cap,
+    max_resident_indexes, residency_sweep_secs, resolve_max_resident_indexes,
+    resolve_max_resident_indexes_for, warmboot_cap_for, ResidentCapSource, ResidentIndexCap,
+};
 pub use store::{select_warmboot_entries, ColdIndexStore};
 
 #[cfg(test)]
