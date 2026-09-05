@@ -1,4 +1,6 @@
 pub mod bm25;
+// #6581: the one owner of the chunk-id grammar (build / validate / parse).
+pub mod chunk_id;
 pub mod chunker;
 pub mod classifier;
 #[cfg(feature = "clustering")]

@@ -18,6 +18,29 @@ use crate::core::chunker::RawChunk;
 use crate::core::entity::RawEntity;
 
 impl CorpusStore {
+    /// Empty the `chunks` and `entities` tables in one transaction (#6581).
+    ///
+    /// Why: M005 rebuilds an index's primary keys, so it has to start from an
+    /// empty corpus — re-ingesting new keys on top of the old rows would leave
+    /// both, and `commit_parsed_batch`'s cap pre-filter would count the corpus
+    /// twice. `delete_chunks` cannot serve this: it needs the id list, and the
+    /// in-memory chunk map an indexer holds is not guaranteed to be populated,
+    /// so a caller deriving ids from it can silently delete nothing.
+    /// What: `retain(false)` over both tables in a single write transaction, so
+    /// a reader never observes a half-emptied corpus. Idempotent.
+    /// Test: `core::migration::m005::tests::m005_rechunks_the_whole_corpus`.
+    pub fn clear_chunks_and_entities(&self) -> Result<()> {
+        let txn = self.db().begin_write().context("begin corpus clear txn")?;
+        {
+            let mut chunks = txn.open_table(CHUNKS_TABLE)?;
+            chunks.retain(|_, _| false).context("clear chunks")?;
+            let mut entities = txn.open_table(ENTITIES_TABLE)?;
+            entities.retain(|_, _| false).context("clear entities")?;
+        }
+        txn.commit().context("commit corpus clear txn")?;
+        Ok(())
+    }
+
     /// Upsert a batch of chunks in a single redb write transaction.
     ///
     /// Why: a batch commit (`commit_parsed_batch`) lands up to a few hundred

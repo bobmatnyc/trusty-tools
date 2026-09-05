@@ -524,7 +524,13 @@ impl CodeIndexer {
         }
         let normalized_prefix = path_filter::normalized_path_prefix(query, &self.root_path);
         let hits = store
-            .search_filtered(embedding, want, normalized_prefix.as_deref(), &query.repos)
+            .search_filtered(
+                embedding,
+                want,
+                normalized_prefix.as_deref(),
+                &query.repos,
+                self.chunk_id_shapes(),
+            )
             .await?;
         Ok(hits.into_iter().map(|h| (h.chunk_id, h.score)).collect())
     }

@@ -239,8 +239,14 @@ impl CodeIndexer {
         // `matches_id` (accepts the chunk-id suffix grammar), never
         // `matches_file` (see `path_filter` module docs for why the two are
         // not interchangeable).
-        let path_pred =
-            |id: &str| path_filter::matches_id(id, normalized_prefix.as_deref(), &query.repos);
+        let path_pred = |id: &str| {
+            path_filter::matches_id(
+                id,
+                normalized_prefix.as_deref(),
+                &query.repos,
+                self.chunk_id_shapes(),
+            )
+        };
         let filter: Option<&(dyn Fn(&str) -> bool + Send + Sync)> = if path_filter::is_active(query)
         {
             Some(&path_pred)

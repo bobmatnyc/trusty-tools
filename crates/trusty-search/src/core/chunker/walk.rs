@@ -52,6 +52,15 @@ pub(super) fn build_line_offsets(src: &[u8]) -> Vec<usize> {
 }
 
 /// Stable, content-aware chunk ID. Falls back to position when no name is available.
+///
+/// Why (#6581): this used to build the string itself and omit `end_line` from
+/// the named shape, so two declarations sharing a name and a start line — every
+/// `function e(…)` in a minified bundle — produced one id and the #6571 dedupe
+/// dropped all but the first.
+/// What: delegates to [`crate::core::chunk_id::make`], the single owner of the
+/// grammar, so the builder and the parsers cannot drift apart.
+/// Test: `named_chunks_sharing_a_start_line_get_distinct_ids` in
+/// `chunker::tests`, plus `core::chunk_id::tests`.
 pub(super) fn make_chunk_id(
     file: &str,
     chunk_type: &ChunkType,
@@ -59,11 +68,7 @@ pub(super) fn make_chunk_id(
     start_line: usize,
     end_line: usize,
 ) -> String {
-    if name.is_empty() {
-        format!("{file}:{start_line}:{end_line}")
-    } else {
-        format!("{file}::{}::{name}::{start_line}", chunk_type.as_str())
-    }
+    crate::core::chunk_id::make(file, chunk_type.as_str(), name, start_line, end_line)
 }
 
 /// Collect call expressions reachable inside `node` without descending into
@@ -450,7 +455,9 @@ pub(super) fn split_oversized(chunks: Vec<RawChunk>) -> Vec<RawChunk> {
         while start < lines.len() {
             let end = (start + SUB_CHUNK_WINDOW).min(lines.len());
             let text = lines[start..end].join("\n");
-            let sub_id = format!("{parent_id}::sub::{sub_idx}");
+            // #6581: the sub tail is part of the id grammar, so it is built
+            // where the rest of the grammar lives.
+            let sub_id = crate::core::chunk_id::make_sub(&parent_id, sub_idx);
             child_ids.push(sub_id.clone());
             out.push(RawChunk {
                 id: sub_id,

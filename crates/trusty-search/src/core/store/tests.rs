@@ -12,6 +12,11 @@ use std::sync::Arc;
 use super::types::{StagedSwapOutcome, VectorStore};
 use super::usearch_store::{staging_path, UsearchStore, POPULATED_SNAPSHOT_THRESHOLD_BYTES};
 
+/// The permissive chunk-id policy these pre-#6581 assertions were written
+/// against (#6581) — the per-index narrowing has its own tests.
+const ALL_SHAPES: crate::core::chunk_id::ChunkIdShapes =
+    crate::core::chunk_id::ChunkIdShapes::NewAndLegacy;
+
 /// Why (#4395's second defect): both writers used the same deterministic
 /// `hnsw.usearch.tmp`, and `hnsw.usearch` has no cross-process lock. Colocated
 /// indexes keep their snapshot in the project root, outside every data
@@ -1220,7 +1225,7 @@ async fn test_filtered_search_finds_match_ranked_below_top_k() {
     // global rank.
     let repos = vec!["repoB".to_string()];
     let filtered = store
-        .search_filtered(&query, 3, None, &repos)
+        .search_filtered(&query, 3, None, &repos, ALL_SHAPES)
         .await
         .expect("filtered search");
     assert_eq!(
@@ -1253,7 +1258,7 @@ async fn test_filtered_search_excludes_non_matching_keys() {
 
     let repos = vec!["repoA".to_string()];
     let hits = store
-        .search_filtered(&query, 10, None, &repos)
+        .search_filtered(&query, 10, None, &repos, ALL_SHAPES)
         .await
         .expect("filtered search");
     assert_eq!(hits.len(), 5, "only repoA's 5 vectors must be returned");
@@ -1574,5 +1579,46 @@ async fn test_promote_rebuilds_from_view_when_snapshot_vanished() {
         hits.first().map(|h| h.chunk_id.as_str()),
         Some("a"),
         "the rebuilt graph must still answer the seeded vectors"
+    );
+}
+
+/// `rewrite_keys` applies whatever mapping the caller supplies, and skips what
+/// the mapping does not cover (#6581).
+///
+/// Why: M003 relativizes ids and M005 re-points them at the ids its re-chunk
+/// produced. Both go through this one lock/swap, so the mapping — not the
+/// method — is what differs. A `None` return must leave an entry alone, which is
+/// what makes a second pass a no-op for either caller.
+/// What: renames one of two keys, asserts the count, asserts search returns the
+/// new id for the renamed one and the old id for the untouched one, then asserts
+/// a second pass with the same mapping rewrites nothing.
+/// Test: this test.
+#[tokio::test]
+async fn test_rewrite_keys_applies_an_arbitrary_mapping() {
+    let store = UsearchStore::new(4).expect("store init");
+    store
+        .upsert("a.js::Function::e::1", vec![1.0, 0.0, 0.0, 0.0])
+        .await
+        .unwrap();
+    store
+        .upsert("b.rs:1:9", vec![0.0, 1.0, 0.0, 0.0])
+        .await
+        .unwrap();
+
+    let remap = |id: &str| -> Option<String> {
+        (id == "a.js::Function::e::1").then(|| "a.js::Function::e::1::1".to_string())
+    };
+    let count = store.rewrite_keys(&remap).await.unwrap();
+    assert_eq!(count, 1, "only the mapped id is rewritten");
+
+    let hit = store.search(&[1.0, 0.0, 0.0, 0.0], 1).await.unwrap();
+    assert_eq!(hit[0].chunk_id, "a.js::Function::e::1::1");
+    let other = store.search(&[0.0, 1.0, 0.0, 0.0], 1).await.unwrap();
+    assert_eq!(other[0].chunk_id, "b.rs:1:9", "an unmapped id is untouched");
+
+    assert_eq!(
+        store.rewrite_keys(&remap).await.unwrap(),
+        0,
+        "a second pass over already-rewritten keys is a no-op"
     );
 }

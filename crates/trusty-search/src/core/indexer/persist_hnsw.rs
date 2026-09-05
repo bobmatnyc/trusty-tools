@@ -35,6 +35,27 @@ impl CodeIndexer {
     /// shrink its graph durably.
     /// Test: `quarantined_index_refuses_hnsw_snapshot_write` in
     /// `tests/quarantine_durable_writes_4226.rs`.
+    /// Drop `ids` from the vector store, best effort (#6581).
+    ///
+    /// Why: after M005's re-chunk, an old chunk id that no new chunk inherited
+    /// names a vector for text the corpus no longer holds. Left in the sidecar
+    /// it ranks into results and then resolves to no corpus row — the
+    /// `unresolved_corpus` drop `meta.dropped` reports as a fault.
+    /// What: a per-id `remove` on the wired store; no-op without one. Store
+    /// errors are logged, never propagated — a vector this index has already
+    /// stopped referencing is not worth failing a migration over.
+    /// Test: `core::migration::m005::tests::m005_reuses_the_existing_vectors`.
+    pub(crate) async fn remove_vectors(&self, ids: &[String]) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        for id in ids {
+            if let Err(e) = store.remove(id).await {
+                tracing::warn!(chunk_id = %id, "could not drop an orphaned vector ({e})");
+            }
+        }
+    }
+
     pub async fn save_vector_store(&self, path: &std::path::Path) -> Result<bool> {
         // #4226: a quarantined index performs no durable write of any kind.
         if self.refuse_durable_write("save_vector_store", &path.display().to_string()) {
@@ -94,10 +115,36 @@ impl CodeIndexer {
         hnsw_path: &std::path::Path,
         root_path: &std::path::Path,
     ) -> Result<usize> {
+        self.remap_vector_store_keys(hnsw_path, &|id| {
+            crate::core::store::relative_key(id, root_path)
+        })
+        .await
+    }
+
+    /// Apply an arbitrary id mapping to the HNSW key map and flush the sidecar.
+    ///
+    /// Why (#6581): M003 relativizes ids and M005 re-points them at the ids its
+    /// re-chunk produced. Both are the same two steps — rewrite the in-memory
+    /// maps, then flush the JSON sidecar — so there is one implementation and
+    /// the caller supplies the mapping. The `.usearch` binary needs no rewrite
+    /// in either case: it is keyed by `u64` labels that never encode a chunk id,
+    /// which is exactly why M005 can hand a stored vector to a re-chunked chunk
+    /// without embedding anything.
+    /// What: delegates the lock/swap to
+    /// [`crate::core::store::VectorStore::rewrite_keys`], then
+    /// `save_to(hnsw_path)` when anything changed. Returns 0 when no store is
+    /// wired (BM25-only) or the mapping covered nothing, which makes a second
+    /// pass a no-op.
+    /// Test: `core::migration::m005::tests::m005_reuses_the_existing_vectors`.
+    pub async fn remap_vector_store_keys(
+        &self,
+        hnsw_path: &std::path::Path,
+        remap: &(dyn for<'a> Fn(&'a str) -> Option<String> + Sync),
+    ) -> Result<usize> {
         let Some(store) = &self.store else {
             return Ok(0);
         };
-        let count = store.rewrite_keys_to_relative(root_path).await?;
+        let count = store.rewrite_keys(remap).await?;
         if count > 0 {
             // Flush the updated sidecar. The `.usearch` binary is unchanged
             // (vectors are keyed by u64 labels that don't encode file paths);

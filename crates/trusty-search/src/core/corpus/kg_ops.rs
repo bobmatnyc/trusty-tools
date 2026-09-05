@@ -279,3 +279,45 @@ impl CorpusStore {
             .map(|v| v.value()))
     }
 }
+
+impl CorpusStore {
+    /// Empty the three `kg_*` tables and drop the format stamp, in one
+    /// transaction, so the next load has to rebuild from the chunk corpus.
+    ///
+    /// Why (#6581): `tables::KG_GRAPH_FORMAT_VERSION`'s doc names the trap this
+    /// exists to avoid — a migration that rewrites DATA rather than format
+    /// leaves the stamp valid over keys that no longer match. A persisted node
+    /// carries a `chunk_id`, so M005's re-chunk desynchronizes the graph from
+    /// the corpus while `kg_graph_format_version` still compares equal: the gate
+    /// passes and the stale keys load. Bumping the constant is the wrong lever —
+    /// it would rebuild every index everywhere, not only the migrated ones.
+    /// What: clears `kg_nodes`, `kg_edges` and `kg_edges_rev` and REMOVES
+    /// `_meta[kg_graph_format_version]`. Removing the stamp matters:
+    /// `save_kg_graph(&[], &[], &[])` also empties the tables but re-stamps them
+    /// as current, which is the failure this method exists to prevent. Absent,
+    /// short, or unreadable all read as "rebuild", so an empty-and-unstamped
+    /// corpus is the fail-closed state. Idempotent — clearing already-empty
+    /// tables is a no-op.
+    /// Test: `clear_kg_graph_drops_the_format_stamp` in `corpus::tests`.
+    pub fn clear_kg_graph(&self) -> Result<()> {
+        let txn = self.db().begin_write().context("begin kg clear txn")?;
+        {
+            let mut nodes_tbl = txn.open_table(KG_NODES_TABLE)?;
+            nodes_tbl.retain(|_, _| false).context("clear kg_nodes")?;
+            let mut fwd_tbl = txn.open_table(KG_EDGES_TABLE)?;
+            fwd_tbl.retain(|_, _| false).context("clear kg_edges")?;
+            let mut rev_tbl = txn.open_table(KG_EDGES_REV_TABLE)?;
+            rev_tbl.retain(|_, _| false).context("clear kg_edges_rev")?;
+        }
+        {
+            let mut meta_tbl = txn
+                .open_table(crate::core::migration::META_TABLE)
+                .context("open _meta table to drop the kg format stamp")?;
+            meta_tbl
+                .remove(META_KEY_KG_GRAPH_FORMAT_VERSION)
+                .context("remove kg_graph_format_version")?;
+        }
+        txn.commit().context("commit kg clear txn")?;
+        Ok(())
+    }
+}

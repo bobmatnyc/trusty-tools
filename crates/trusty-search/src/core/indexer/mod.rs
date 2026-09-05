@@ -299,6 +299,38 @@ pub struct CodeIndexer {
     /// in `indexer::rehydrate_tests`.
     pub(super) lane_degraded: Arc<AtomicBool>,
 
+    /// `true` while this index may still hold pre-#6581 named chunk ids —
+    /// i.e. until its own M005 marker is set (#6581).
+    ///
+    /// Why: the owner ruling of 2026-09-05 makes legacy chunk-id acceptance
+    /// per-index and temporary. An index that has not run M005 still holds ids
+    /// of the form `{file}::{type}::{name}::{start}`, and the path filter must
+    /// match them or every named chunk in it silently leaves the candidate pool.
+    /// One that HAS run M005 holds none, so accepting the wider grammar there
+    /// only widens the #3401 lookalike-path surface for no recall.
+    /// What: starts `true` (fail-open on recall) and is set `false` by
+    /// [`crate::core::migration::run_migrations`] once the index's stored
+    /// `schema_version` reaches the M005 target. Read through
+    /// [`Self::chunk_id_shapes`]; `Arc` because the migration runner holds the
+    /// handle, not `&mut self`.
+    /// Test: `core::migration::m005::tests::the_suffix_policy_narrows_per_index`.
+    pub(super) legacy_chunk_ids_possible: Arc<AtomicBool>,
+
+    /// `true` while a commit must NOT evict a stored vector for a chunk it
+    /// commits without an embedding (#6581).
+    ///
+    /// Why: `ingest::commit::commit_vectors_batch` evicts such a vector because
+    /// a positional chunk id is not content-addressed, so a stored vector for an
+    /// id being recommitted may describe pre-edit text. M005 recommits every
+    /// chunk from UNCHANGED text with no embedding, on purpose — the ruling's
+    /// re-embed budget is zero — so that eviction would destroy exactly the
+    /// vectors the migration exists to reuse, for every positional chunk (whose
+    /// id this fix does not change at all).
+    /// What: set only by `migration::m005` for the span of its re-chunk, and
+    /// cleared on both the success and the failure path. Nothing else sets it.
+    /// Test: `core::migration::m005::tests::m005_reuses_the_existing_vectors`.
+    pub(super) suppress_vector_eviction: Arc<AtomicBool>,
+
     /// The last durable-corpus READ failure for this index, or `None` when the
     /// corpus last read cleanly (#5917).
     ///
@@ -593,6 +625,8 @@ impl CodeIndexer {
             rehydrate_inflight: Arc::new(std::sync::Mutex::new(None)),
             rehydrate_generation: Arc::new(Mutex::new(0)),
             lane_degraded: Arc::new(AtomicBool::new(false)),
+            legacy_chunk_ids_possible: Arc::new(AtomicBool::new(true)),
+            suppress_vector_eviction: Arc::new(AtomicBool::new(false)),
             corpus_read_fault: Arc::new(corpus_fault::CorpusReadFault::default()),
             last_rehydrate_cost_ms: Arc::new(AtomicU64::new(0)),
             corpus_open_failed: false,
@@ -669,6 +703,36 @@ impl CodeIndexer {
     /// finding 3, issue #3683). See [`Self::lane_degraded`]'s doc comment.
     /// Test: `lane_degraded_flag_sets_on_exhausted_retries_and_clears_on_rehydrate`
     /// in `indexer::rehydrate_tests`.
+    /// Which chunk-id shapes the path filter accepts for THIS index (#6581).
+    ///
+    /// Why: see [`Self::legacy_chunk_ids_possible`]. Every path-filter call site
+    /// reads the policy from here rather than assuming one globally.
+    /// What: `NewAndLegacy` until M005 has run on this index, `NewOnly` after.
+    /// Test: `core::migration::m005::tests::the_suffix_policy_narrows_per_index`.
+    pub fn chunk_id_shapes(&self) -> crate::core::chunk_id::ChunkIdShapes {
+        if self.legacy_chunk_ids_possible.load(Ordering::Relaxed) {
+            crate::core::chunk_id::ChunkIdShapes::NewAndLegacy
+        } else {
+            crate::core::chunk_id::ChunkIdShapes::NewOnly
+        }
+    }
+
+    /// Suppress (or restore) the commit-time eviction of a stored vector for a
+    /// chunk committed without an embedding (#6581).
+    ///
+    /// Why/What/Test: see [`Self::suppress_vector_eviction`]. M005 is the only
+    /// caller.
+    pub(crate) fn set_suppress_vector_eviction(&self, on: bool) {
+        self.suppress_vector_eviction.store(on, Ordering::Relaxed);
+    }
+
+    /// Record that this index's M005 marker is set, so the path filter stops
+    /// accepting the pre-#6581 named shape (#6581).
+    pub fn set_chunk_ids_migrated(&self) {
+        self.legacy_chunk_ids_possible
+            .store(false, Ordering::Relaxed);
+    }
+
     pub fn lane_degraded(&self) -> bool {
         self.lane_degraded.load(Ordering::Relaxed)
     }

@@ -636,22 +636,20 @@ fn render_caller_block(out: &mut String, symbol: &str, chunk: &RawChunk) {
     }
 }
 
-/// Parse a `RawChunk.id` of the form `"{file}:{start}:{end}"` back into a
-/// human-readable `"file:line"` location string.
+/// Render a `RawChunk::id` as a human-readable `"file:line"` location.
 ///
-/// Why: the graph hands us `chunk_id` for each neighbour but the report
-/// reads better with `file:line` than the synthetic id.
-/// What: takes the last two `:`-separated components as `start:end`, keeps
-/// just `start`, and prefixes with the file portion. Falls back to the id
-/// itself on parse failure.
+/// Why (#6581): the graph hands us `chunk_id` for each neighbour but the report
+/// reads better with `file:line` than the synthetic id. The previous
+/// `rsplitn(3, ':')` only understood the positional shape, so a named id came
+/// out as `assets/index.js::Function::e:` — a mis-parse, not a fallback — and
+/// the end line this issue adds does not fix that on its own.
+/// What: delegates the parse to [`crate::core::chunk_id`], the single owner of
+/// the grammar, and falls back to the id itself when it does not parse.
+/// Test: `location_from_chunk_id_renders_every_shape` in `tests`.
 fn location_from_chunk_id(chunk_id: &str) -> String {
-    // Split from the right twice to recover start_line.
-    let parts: Vec<&str> = chunk_id.rsplitn(3, ':').collect();
-    if parts.len() == 3 {
-        // parts = [end, start, file]
-        format!("{}:{}", parts[2], parts[1])
-    } else {
-        chunk_id.to_string()
+    match crate::core::chunk_id::parse(chunk_id) {
+        Some(p) => format!("{}:{}", p.file, p.start_line()),
+        None => chunk_id.to_string(),
     }
 }
 

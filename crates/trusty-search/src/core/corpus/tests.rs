@@ -588,3 +588,42 @@ fn reindex_checkpoint_roundtrip() {
     store.clear_reindex_checkpoint_sync().unwrap();
     assert!(store.read_reindex_checkpoint_sync().unwrap().is_none());
 }
+
+/// `clear_kg_graph` empties the KG tables AND removes the format stamp (#6581).
+///
+/// Why: `save_kg_graph(&[], &[], &[])` also empties the tables, but re-stamps
+/// them as the current format — a corpus whose keys no longer match anything
+/// would then pass the load gate and serve stale nodes. Removing the stamp is
+/// what makes the emptied state fail closed into a rebuild.
+/// What: saves a one-node graph, asserts the stamp is present, clears, then
+/// asserts both the node count and the stamp are gone. Runs twice to pin
+/// idempotency.
+/// Test: this test.
+#[test]
+fn clear_kg_graph_drops_the_format_stamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = CorpusStore::open(&dir.path().join("index.redb")).unwrap();
+    let node = PersistedKgNode {
+        chunk_id: "src/lib.rs::Function::alpha::1::3".to_string(),
+        file: "src/lib.rs".to_string(),
+    };
+    store
+        .save_kg_graph(&[("alpha".to_string(), node)], &[], &[])
+        .unwrap();
+    assert_eq!(store.kg_node_count().unwrap(), 1);
+    assert!(store.kg_graph_format_version().unwrap().is_some());
+
+    store.clear_kg_graph().unwrap();
+    assert_eq!(store.kg_node_count().unwrap(), 0, "nodes must be gone");
+    assert!(
+        store.kg_graph_format_version().unwrap().is_none(),
+        "the stamp must be gone too, or the emptied graph reads as current"
+    );
+
+    store.clear_kg_graph().unwrap();
+    assert_eq!(
+        store.kg_node_count().unwrap(),
+        0,
+        "clearing twice is a no-op"
+    );
+}

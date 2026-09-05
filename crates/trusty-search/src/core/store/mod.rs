@@ -26,5 +26,5 @@ mod usearch_recover;
 mod usearch_requant;
 mod usearch_store;
 
-pub use self::types::{RequantizeReport, StagedSwapOutcome, VectorHit, VectorStore};
+pub use self::types::{relative_key, RequantizeReport, StagedSwapOutcome, VectorHit, VectorStore};
 pub use self::usearch_store::UsearchStore;
