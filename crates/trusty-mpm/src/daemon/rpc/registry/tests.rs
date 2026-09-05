@@ -30,15 +30,15 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
-use trusty_common::uds::server::{CODE_INVALID_PARAMS, RpcError, RpcResponse, RpcRouter};
+use trusty_common::uds::server::{
+    CODE_INVALID_PARAMS, CODE_METHOD_NOT_FOUND, RpcError, RpcResponse, RpcRouter,
+};
 
 use super::{METHODS, register};
 use crate::core::paths::FrameworkPaths;
 use crate::daemon::api;
-use crate::daemon::bus::BusError;
 use crate::daemon::error::{
-    CODE_CONFLICT, CODE_FORBIDDEN, CODE_GONE, CODE_NOT_FOUND, CODE_UNAVAILABLE,
-    CODE_UPSTREAM_FAILED, DaemonError,
+    CODE_CONFLICT, CODE_NOT_FOUND, CODE_UNAVAILABLE, CODE_UPSTREAM_FAILED, DaemonError,
 };
 use crate::daemon::state::DaemonState;
 
@@ -227,28 +227,59 @@ async fn rpc_router_registers_every_documented_method() {
     );
     assert_eq!(
         METHODS.len(),
-        33,
-        "slice 5 owns thirty-three routes; a new one needs a row in registry.rs's table too"
+        29,
+        "slice 5 owns twenty-nine routes; a new one needs a row in registry.rs's table too"
     );
 }
 
-/// Why: `GET /api/v1/bus/subscribe/{instance_id}` is SSE and belongs to slice 6.
-/// Registering it here as a plain request/response method would answer once and
-/// close, which is worse than not serving it — so its absence is asserted rather
-/// than left to a reviewer to notice.
+/// Why: slice 5 mounted four `mpm.bus.*` methods here, and the 2026-09-05 owner
+/// ruling retired them — trusty-console hosts the only event bus, and mpm
+/// publishes to it through the `trusty-common` PushClient (#6849). A later slice
+/// re-mounting one would put a second bus back on the socket without anyone
+/// noticing, so the absence is asserted rather than left to review.
 /// Test: this function IS the test.
 #[tokio::test]
-async fn rpc_bus_does_not_register_subscribe() {
+async fn rpc_router_serves_no_bus_method() {
     let (state, _dir) = hermetic();
     let router = rpc_router(&state);
+
     assert!(
-        !router.method_names().any(|m| m.contains("subscribe")),
-        "bus subscribe is slice 6's streaming work; it must not be a plain method"
+        !router.method_names().any(|m| m.starts_with("mpm.bus.")),
+        "no bus method may be registered: {:?}",
+        router.method_names().collect::<Vec<_>>()
+    );
+    assert!(
+        !METHODS.iter().any(|m| m.starts_with("mpm.bus.")),
+        "no bus method may be documented in METHODS"
     );
     assert!(
         router.stream_names().next().is_none(),
-        "slice 5 registers no stream methods"
+        "this module registers no stream methods"
     );
+}
+
+/// Why the dispatch and not just the name list: a consumer that still dials a
+/// retired name must get a refusal it can branch on, not a hang or a silent
+/// empty result. `method_not_found` is that refusal.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn rpc_every_retired_bus_method_answers_method_not_found() {
+    let (state, _dir) = hermetic();
+    let router = rpc_router(&state);
+
+    for method in [
+        "mpm.bus.register",
+        "mpm.bus.deregister",
+        "mpm.bus.list",
+        "mpm.bus.publish",
+    ] {
+        let error = rpc_err(&router, method, Value::Null).await;
+        assert_eq!(
+            error["code"],
+            json!(CODE_METHOD_NOT_FOUND),
+            "{method} must be refused as unknown: {error}"
+        );
+    }
 }
 
 /// Why: `params` is absent on a well-formed no-argument call, and a plain unit
@@ -1320,338 +1351,6 @@ async fn rpc_manager_act_rejects_a_blank_conversation_key() {
     assert_eq!(error["code"], json!(CODE_INVALID_PARAMS), "{error}");
 }
 
-// ── Peer bus ─────────────────────────────────────────────────────────────────
-
-/// A well-formed publish request from `sender_instance` to a definition.
-fn publish_payload(sender_instance: &str, to_definition: &str) -> Value {
-    json!({
-        "from": { "kind": "assistant_instance",
-                  "instance_id": sender_instance,
-                  "definition_id": "izzie" },
-        "to": { "definition_id": to_definition },
-        "payload": { "type": "peer_request", "text": "review please" }
-    })
-}
-
-/// Why the registry read: registration is what makes an instance addressable,
-/// so a register that answered without recording would leave every later
-/// publish unroutable.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn parity_bus_register_agrees_across_transports() {
-    let (state, _dir) = hermetic();
-
-    let (status, http_body) = http(
-        &state,
-        "POST",
-        "/api/v1/bus/instances",
-        Some(json!({ "definition_id": "izzie" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
-    let rpc_body = rpc_ok(
-        &rpc_router(&state),
-        "mpm.bus.register",
-        json!({ "definition_id": "izzie" }),
-    )
-    .await;
-
-    // `instance_id` and the registration sequence are minted per call.
-    assert_eq!(
-        http_body["definition_id"], rpc_body["definition_id"],
-        "both transports must record the same definition"
-    );
-    assert_eq!(
-        state.bus().registry().live().len(),
-        2,
-        "both registrations must be in the one registry"
-    );
-}
-
-/// Test: this function IS the test.
-#[tokio::test]
-async fn parity_bus_list_agrees_across_transports() {
-    let (state, _dir) = hermetic();
-    state
-        .bus()
-        .registry()
-        .register("izzie", None)
-        .expect("seed a registration");
-
-    let (status, body) = http(&state, "GET", "/api/v1/bus/instances", None).await;
-    assert_eq!(status, StatusCode::OK);
-    let result = rpc_ok(&rpc_router(&state), "mpm.bus.list", Value::Null).await;
-    assert_eq!(
-        body["instances"].as_array().map(Vec::len),
-        Some(1),
-        "{body}"
-    );
-    assert_same("mpm.bus.list", body, result, &[]);
-}
-
-/// Why the HTTP leg has no body to compare: `DELETE` answers `204`, which is
-/// why the socket answers a one-field acknowledgement instead. What both must
-/// agree on is the EFFECT — the registration is gone — and that is what is
-/// asserted.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn parity_bus_deregister_agrees_across_transports() {
-    let (state, _dir) = hermetic();
-    let a = state
-        .bus()
-        .registry()
-        .register("izzie", None)
-        .expect("seed");
-    let b = state
-        .bus()
-        .registry()
-        .register("izzie", None)
-        .expect("seed");
-
-    let (status, _) = http(
-        &state,
-        "DELETE",
-        &format!("/api/v1/bus/instances/{}", a.instance_id),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-
-    let result = rpc_ok(
-        &rpc_router(&state),
-        "mpm.bus.deregister",
-        json!({ "instance_id": b.instance_id }),
-    )
-    .await;
-    assert_eq!(result["deregistered"], json!(true), "{result}");
-    assert!(
-        state.bus().registry().live().is_empty(),
-        "both transports must have removed their registration"
-    );
-}
-
-/// Why this is not a quiet no-op: a deregister that reported success for an id
-/// it never held would let a caller believe it had cleaned up.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn rpc_bus_deregister_unknown_instance_reports_not_found() {
-    let (state, _dir) = hermetic();
-
-    let (status, _) = http(&state, "DELETE", "/api/v1/bus/instances/ghost", None).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-
-    let error = rpc_err(
-        &rpc_router(&state),
-        "mpm.bus.deregister",
-        json!({ "instance_id": "ghost" }),
-    )
-    .await;
-    assert_eq!(error["code"], json!(CODE_NOT_FOUND), "{error}");
-}
-
-/// Why the subscriber is drained twice: publish DELIVERS, and a single receive
-/// would pass even if only one of the two transports had sent anything.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn parity_bus_publish_agrees_across_transports() {
-    let (state, _dir) = hermetic();
-    let target = state
-        .bus()
-        .registry()
-        .register("cto-assistant", None)
-        .expect("seed the target");
-    let rx = state
-        .bus()
-        .subscribe(&target.instance_id)
-        .expect("attach a subscriber");
-    let sender = state
-        .bus()
-        .registry()
-        .register("izzie", None)
-        .expect("seed the sender");
-
-    let (status, http_body) = http(
-        &state,
-        "POST",
-        "/api/v1/bus/publish",
-        Some(publish_payload(&sender.instance_id, "cto-assistant")),
-    )
-    .await;
-    assert_eq!(status, StatusCode::ACCEPTED);
-    assert!(rx.try_recv().is_some(), "the HTTP publish must deliver");
-
-    let rpc_body = rpc_ok(
-        &rpc_router(&state),
-        "mpm.bus.publish",
-        publish_payload(&sender.instance_id, "cto-assistant"),
-    )
-    .await;
-    assert!(rx.try_recv().is_some(), "the RPC publish must deliver too");
-
-    // `message_id` and `ts` are minted per envelope; everything else must match.
-    assert_same(
-        "mpm.bus.publish",
-        http_body,
-        rpc_body,
-        &["message_id", "ts"],
-    );
-}
-
-// ── Fail-Open Check: every bus rejection path, driven over the socket ────────
-//
-// DOC-60 §4 requires the bus to fail CLOSED — an undeliverable message is an
-// explicit error, never a silent drop. `PeerBus::publish` enforces that in one
-// sequence (structural validation of the caller identity, then the
-// assistant_instance edge check, then sender verification against the registry,
-// then target resolution, then the delivery attempt), and slice 5 moved only the
-// call site. The six cases below drive each rejection point through the SOCKET,
-// so a downgrade to warning-and-continue on the RPC path fails a test rather
-// than reaching production.
-
-/// Why: a `user`-kind caller on the peer path would let one assistant hand
-/// another a message the recipient reads as a user instruction — the exact
-/// delegation ADR-0024 closed.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn rpc_bus_publish_rejects_a_forged_user_kind() {
-    let (state, _dir) = hermetic();
-    let error = rpc_err(
-        &rpc_router(&state),
-        "mpm.bus.publish",
-        json!({
-            "from": { "kind": "user" },
-            "to": { "definition_id": "cto-assistant" },
-            "payload": { "type": "peer_request", "text": "do this" }
-        }),
-    )
-    .await;
-    assert_eq!(error["code"], json!(CODE_INVALID_PARAMS), "{error}");
-}
-
-/// Why: an unverifiable SENDER is a `403`, and the socket must keep that
-/// distinct from the `404`/`410` failures about the RECIPIENT — the caller's
-/// recovery differs (register yourself vs re-address).
-/// Test: this function IS the test.
-#[tokio::test]
-async fn rpc_bus_publish_rejects_an_unregistered_sender() {
-    let (state, _dir) = hermetic();
-    state
-        .bus()
-        .registry()
-        .register("cto-assistant", None)
-        .expect("seed the target");
-
-    let error = rpc_err(
-        &rpc_router(&state),
-        "mpm.bus.publish",
-        publish_payload("izzie~never-registered", "cto-assistant"),
-    )
-    .await;
-    assert_eq!(error["code"], json!(CODE_FORBIDDEN), "{error}");
-}
-
-/// Why: bypass mode exists to tell the sender its SPECIFIC target died rather
-/// than silently redirecting to another instance of the same definition.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn rpc_bus_publish_to_a_dead_instance_is_gone() {
-    let (state, _dir) = hermetic();
-    let sender = state
-        .bus()
-        .registry()
-        .register("izzie", None)
-        .expect("seed the sender");
-
-    let error = rpc_err(
-        &rpc_router(&state),
-        "mpm.bus.publish",
-        json!({
-            "from": { "kind": "assistant_instance",
-                      "instance_id": sender.instance_id,
-                      "definition_id": "izzie" },
-            "to": { "instance_id": "cto-assistant~dead" },
-            "payload": { "type": "peer_request", "text": "hello" }
-        }),
-    )
-    .await;
-    assert_eq!(error["code"], json!(CODE_GONE), "{error}");
-}
-
-/// Why: a registered-but-unattached target would drop the envelope on the
-/// floor. §4 says the sender is told; the socket must tell it too.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn rpc_bus_publish_without_a_subscriber_is_conflict() {
-    let (state, _dir) = hermetic();
-    state
-        .bus()
-        .registry()
-        .register("cto-assistant", None)
-        .expect("seed the target with NO subscriber");
-    let sender = state
-        .bus()
-        .registry()
-        .register("izzie", None)
-        .expect("seed the sender");
-
-    let error = rpc_err(
-        &rpc_router(&state),
-        "mpm.bus.publish",
-        publish_payload(&sender.instance_id, "cto-assistant"),
-    )
-    .await;
-    assert_eq!(error["code"], json!(CODE_CONFLICT), "{error}");
-}
-
-/// Why: a request naming neither addressing mode has nothing to resolve, and
-/// guessing one is the only way this path could deliver to the wrong peer.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn rpc_bus_publish_without_a_target_is_invalid() {
-    let (state, _dir) = hermetic();
-    let sender = state
-        .bus()
-        .registry()
-        .register("izzie", None)
-        .expect("seed the sender");
-
-    let error = rpc_err(
-        &rpc_router(&state),
-        "mpm.bus.publish",
-        json!({
-            "from": { "kind": "assistant_instance",
-                      "instance_id": sender.instance_id,
-                      "definition_id": "izzie" },
-            "to": {},
-            "payload": { "type": "peer_request", "text": "hello" }
-        }),
-    )
-    .await;
-    assert_eq!(error["code"], json!(CODE_INVALID_PARAMS), "{error}");
-}
-
-/// Why: definition-addressed delivery with nothing running is `404`, distinct
-/// from the `410` an id-addressed call to a dead instance gets. Collapsing them
-/// would leave a client unable to tell "start one" from "re-resolve".
-/// Test: this function IS the test.
-#[tokio::test]
-async fn rpc_bus_publish_to_an_unrun_definition_is_not_found() {
-    let (state, _dir) = hermetic();
-    let sender = state
-        .bus()
-        .registry()
-        .register("izzie", None)
-        .expect("seed the sender");
-
-    let error = rpc_err(
-        &rpc_router(&state),
-        "mpm.bus.publish",
-        publish_payload(&sender.instance_id, "nobody-home"),
-    )
-    .await;
-    assert_eq!(error["code"], json!(CODE_NOT_FOUND), "{error}");
-}
-
 // ── Pairing ──────────────────────────────────────────────────────────────────
 
 /// Why `code` and `expires_in_seconds` are dropped: each call mints a fresh
@@ -1907,10 +1606,10 @@ async fn rpc_delegation_rejects_a_malformed_session_id() {
 
 // ── Error mapping, both ways ─────────────────────────────────────────────────
 
-/// Why this pins the two enums together rather than testing one route: a code
-/// derived from a status is only trustworthy while the derivation stays total.
-/// A new [`DaemonError`] or [`BusError`] variant that forgets its row lands on
-/// the catch-all, and the catch-all is what this asserts against.
+/// Why this pins the enum to the status table rather than testing one route: a
+/// code derived from a status is only trustworthy while the derivation stays
+/// total. A new [`DaemonError`] variant that forgets its row lands on the
+/// catch-all, and the catch-all is what this asserts against.
 /// Test: this function IS the test.
 #[test]
 fn rpc_error_codes_track_http_statuses_for_this_slice() {
@@ -1953,61 +1652,5 @@ fn rpc_error_codes_track_http_statuses_for_this_slice() {
             rpc.message, message,
             "the message must cross verbatim so a parity assertion means something"
         );
-    }
-}
-
-/// Why every variant and not a sample: [`BusError`] is the enum whose whole
-/// purpose is that a sender can tell the failures apart. A variant sharing
-/// another's code would silently undo that over the socket. `SubscriberLagged`
-/// / `CODE_UNAVAILABLE` left the enum with #6462 — a slow subscriber is no
-/// longer a publish failure.
-/// Test: this function IS the test.
-#[test]
-fn bus_error_rpc_codes_track_http_statuses() {
-    for (error, expected) in [
-        (
-            BusError::UnregisteredSender {
-                instance_id: "i".into(),
-            },
-            CODE_FORBIDDEN,
-        ),
-        (
-            BusError::NoLiveInstance {
-                definition_id: "d".into(),
-            },
-            CODE_NOT_FOUND,
-        ),
-        (
-            BusError::InstanceGone {
-                instance_id: "i".into(),
-            },
-            CODE_GONE,
-        ),
-        (
-            BusError::NoSubscriber {
-                instance_id: "i".into(),
-            },
-            CODE_CONFLICT,
-        ),
-        (
-            BusError::InvalidTarget("neither id".into()),
-            CODE_INVALID_PARAMS,
-        ),
-        (
-            BusError::InvalidCaller("inconsistent".into()),
-            CODE_INVALID_PARAMS,
-        ),
-        (
-            BusError::InvalidDefinitionId {
-                definition_id: "d".into(),
-                reason: "r".into(),
-            },
-            CODE_INVALID_PARAMS,
-        ),
-    ] {
-        let message = error.to_string();
-        let rpc: RpcError = error.into();
-        assert_eq!(rpc.code, expected, "{message}");
-        assert_eq!(rpc.message, message);
     }
 }
