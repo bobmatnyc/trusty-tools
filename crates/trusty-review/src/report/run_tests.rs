@@ -13,6 +13,8 @@
 use super::*;
 
 use crate::report::manifest::parse_manifest;
+// #6811: the analyze lane's half lives in `run_analyze` since the SLOC split.
+use crate::report::run_analyze::{analyze_eligible_repositories, resolve_analyze_budget};
 
 /// Parse a manifest from an in-memory string.
 fn manifest_from(toml: &str) -> Manifest {

@@ -58,7 +58,7 @@ impl AnalyzeLaneCoverage {
     /// spellings of "nothing was assessed" is how one of them ends up not
     /// failing the run.
     /// What: `succeeded` is zero by construction.
-    /// Test: `run_tests::a_client_that_will_not_build_is_a_total_lane_failure`.
+    /// Test: `run_tests::a_client_that_will_not_build_counts_every_eligible_repository`.
     #[must_use]
     pub fn never_ran(attempted: usize) -> Self {
         Self {

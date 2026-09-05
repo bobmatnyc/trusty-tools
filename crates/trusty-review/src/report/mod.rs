@@ -64,6 +64,9 @@ pub mod reporter_performance;
 // #6669: the library entry point `trusty-review report` and trusty-analyze's
 // `report` verb both drive — one pipeline, two front doors.
 pub mod run;
+// #6811: the `--analyze` lane's half, split off when `run.rs` passed the SLOC
+// cap. `run.rs` is the only caller.
+mod run_analyze;
 pub mod scan;
 // #5747: the schema-tag parse both artifact loaders decide compatibility from.
 pub(crate) mod schema;
