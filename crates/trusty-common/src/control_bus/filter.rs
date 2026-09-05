@@ -1,19 +1,21 @@
-//! Subscriber-side event filter for the unified harness bus (ADR-0005).
+//! Subscriber-side event filter over `HarnessEvent`.
 //!
-//! Why: The global bus broadcasts *everything* to *every* subscriber. A given
-//!      consumer (a task-scoped SSE stream, a single-harness relay, a
-//!      hook-only aggregator) usually wants a slice of that firehose. Rather
-//!      than running N filtered channels, subscribers filter in their own recv
-//!      loop with a small predicate. Phase 0 deliberately avoids adding a
-//!      Stream dependency: `Filter::matches` is the lightweight primitive
-//!      consumers will call inside `recv_with_lag` loops in later phases.
+//! Why: The bus delivers everything to every subscriber. A given consumer (a
+//!      task-scoped SSE stream, a single-harness relay, a hook-only
+//!      aggregator) usually wants a slice of that firehose. Rather than running
+//!      N filtered channels, subscribers filter in their own receive loop with
+//!      a small predicate. Keeping the predicate beside the envelope it matches
+//!      on means the producer and the consumer agree on what a filter means.
 //! What: A `Filter` of optional constraints (source, session, domains) plus a
-//!       `matches` predicate that ANDs the present constraints. An empty /
+//!       `matches` predicate that ANDs the present constraints. An empty or
 //!       default filter matches everything.
-//! Test: `super::tests::filter_*` cover each axis, combinations, and the
-//!       default-matches-all case.
+//! Test: `super::tests::filter_default_matches_all`,
+//!       `super::tests::filter_by_source`, `super::tests::filter_by_session`,
+//!       `super::tests::filter_by_domain`, `super::tests::filter_combination`.
 
-use super::bus::HarnessEvent;
+// #6846: moved verbatim from `trusty_agents_common::events::filter`.
+
+use super::envelope::HarnessEvent;
 use super::lifecycle::HarnessSource;
 
 /// A conjunctive (AND) filter over `HarnessEvent`s.
@@ -50,8 +52,11 @@ impl Filter {
     ///       requires the event to carry that exact session (events with
     ///       `session = None` do not match a session constraint). A `domains`
     ///       constraint matches if the event's domain is in the list.
-    /// Test: `super::tests::filter_by_source`, `filter_by_session`,
-    ///       `filter_by_domain`, `filter_combination`, `filter_default_matches_all`.
+    /// Test: `super::tests::filter_by_source`,
+    ///       `super::tests::filter_by_session`,
+    ///       `super::tests::filter_by_domain`,
+    ///       `super::tests::filter_combination`,
+    ///       `super::tests::filter_default_matches_all`.
     pub fn matches(&self, ev: &HarnessEvent) -> bool {
         if let Some(source) = self.source
             && source != ev.source

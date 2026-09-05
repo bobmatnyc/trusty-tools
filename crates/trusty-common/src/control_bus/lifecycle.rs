@@ -1,27 +1,30 @@
-//! Lifecycle event taxonomy + harness source enum for the shared event bus.
+//! Lifecycle event taxonomy and harness source enum for the control bus.
 //!
-//! Why: Wave 3 unifies the three harnesses (trusty-agents, trusty-mpm,
-//!      trusty-code) onto a single event envelope (see ADR-0005). The richest
-//!      existing event taxonomy is `trusty-agents::events::Event` — the full PM
-//!      lifecycle. To avoid a flag-day rewrite, Phase 0 *copies* that taxonomy
-//!      here as `LifecycleEvent` (minus `Ping`, which becomes a transport-level
-//!      `HarnessPayload::Ping` arm). The de-duplication / migration of the
-//!      original `trusty-agents` enum happens in later phases (P1/P2); for now
-//!      this is purely additive and wires up no consumers.
+//! Why: trusty-console hosts the only event bus (owner ruling 2026-09-05,
+//!      superseding DOC-73 §4.1 Option C). Every producer — trusty-agents,
+//!      trusty-mpm, trusty-code — pushes to it, so the taxonomy those producers
+//!      and that consumer agree on cannot live inside any one of them. Hoisting
+//!      it here gives all four crates one definition to compile against instead
+//!      of a producer depending on a sibling producer.
 //! What: Defines `HarnessSource` (which harness produced an event) and
 //!       `LifecycleEvent` (the per-domain lifecycle taxonomy), both
 //!       serde-round-trippable with stable snake_case wire tags.
-//! Test: `super::tests` round-trips representative variants and asserts the
-//!       `{"type": ...}` tag shape; `session_id` is covered there too.
+//! Test: `super::tests::harness_source_round_trips`,
+//!       `super::tests::lifecycle_event_serializes_with_type_tag`,
+//!       `super::tests::lifecycle_session_id_returns_correct_field`,
+//!       `super::tests::lifecycle_recap_round_trips`.
+
+// #6846: moved verbatim from `trusty_agents_common::events::lifecycle`. The
+// serde tags are read by separate processes — renaming one breaks the wire.
 
 use serde::{Deserialize, Serialize};
 
 /// Which harness emitted an event.
 ///
-/// Why: Once all three harnesses share one bus, a subscriber (UI, relay,
-///      aggregator) must be able to tell trusty-agents events from trusty-mpm
-///      or trusty-code events without inspecting the payload. Encoding the
-///      origin in the envelope keeps that routing decision O(1) and explicit.
+/// Why: With all three harnesses pushing to one bus, a subscriber (UI, relay,
+///      aggregator) must tell trusty-agents events from trusty-mpm or
+///      trusty-code events without inspecting the payload. Encoding the origin
+///      in the envelope keeps that routing decision O(1) and explicit.
 /// What: A copy-able enum with three variants serialising as snake_case
 ///       (`"agents"`, `"mpm"`, `"code"`).
 /// Test: `super::tests::harness_source_round_trips`.
@@ -42,16 +45,16 @@ pub enum HarnessSource {
 ///      `serde(tag = "type")` produces `{"type":"agent_message", ...}` so the
 ///      UI can pattern-match on type and the back-end can grow new variants
 ///      without breaking older clients (unknown variants degrade to "ignored
-///      event"). This is a verbatim copy of `trusty-agents::events::Event`
-///      *minus* the `Ping` keepalive, which is promoted to a transport-level
-///      `HarnessPayload::Ping` arm (keepalives are not a lifecycle concern).
+///      event"). Keepalives are not a lifecycle concern, so they sit on the
+///      envelope as `HarnessPayload::Ping` rather than as a variant here.
 /// What: Variants cover the full PM lifecycle — session, PM activity, agent
 ///       activity, tool calls, AST analysis, workflow phases, persona
 ///       detection, LLM call lifecycle, and report/recap generation.
 ///       `session_id` correlates events to a specific task; the UI filters by
 ///       session when scoped to a task view.
 /// Test: `super::tests::lifecycle_event_serializes_with_type_tag` asserts the
-///       wire shape; `super::tests::lifecycle_session_id_*` cover the helper.
+///       wire shape; `super::tests::lifecycle_recap_round_trips` covers a
+///       structured variant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LifecycleEvent {
@@ -206,8 +209,8 @@ pub enum LifecycleEvent {
 impl LifecycleEvent {
     /// Return the event's `session_id` if it has one.
     ///
-    /// Why: Filtering the broadcast stream to a single task subscription needs
-    ///      a uniform accessor across the ~21 variants without each call site
+    /// Why: Filtering the event stream to a single task subscription needs a
+    ///      uniform accessor across the ~21 variants without each call site
     ///      re-matching. Every current variant carries a session, but the
     ///      `Option` keeps the contract stable if a session-less lifecycle
     ///      variant is ever added.

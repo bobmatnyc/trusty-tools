@@ -8,24 +8,31 @@
 //!      Phase 0 lands the *foundation only* — the types, the bus, the
 //!      subscription API, and a lightweight filter — with no consumers wired
 //!      yet. The migration of existing emit sites happens in P1–P4.
-//! What: A thin facade that re-exports the public surface from three focused
-//!       submodules (respecting the 500-line cap): `lifecycle` (the
-//!       `HarnessSource` + `LifecycleEvent` taxonomy), `bus` (the
-//!       `HarnessEvent`/`HarnessPayload` envelope, the global bus, and the
-//!       lagged-receiver helper), and `filter` (the subscriber-side `Filter`).
+//! What: A thin facade over two sources. `bus` (local) owns the process-global
+//!       broadcast channel, the stderr relay prefix, and the lagged-receiver
+//!       helper. The types those move — the `HarnessEvent`/`HarnessPayload`
+//!       envelope, the `HarnessSource` + `LifecycleEvent` taxonomy, and the
+//!       subscriber-side `Filter` — now live in `trusty_common::control_bus`
+//!       and are re-exported here, so this module's public surface is
+//!       unchanged for existing consumers.
 //! Test: `tests` (below) is the comprehensive suite for this foundation type;
 //!       submodules document which test exercises each item.
 
 mod bus;
-mod filter;
-mod lifecycle;
 
 pub use bus::{
-    BusClosed, CHANNEL_CAPACITY, EVENT_LINE_PREFIX, HarnessEvent, HarnessPayload, Lag, bus, emit,
-    format_event_line, publish, recv_with_lag, subscribe,
+    BusClosed, CHANNEL_CAPACITY, EVENT_LINE_PREFIX, Lag, bus, emit, format_event_line, publish,
+    recv_with_lag, subscribe,
 };
-pub use filter::Filter;
-pub use lifecycle::{HarnessSource, LifecycleEvent};
+
+// #6846: the types are defined in `trusty_common::control_bus` so trusty-console
+// (the one event bus) can consume them without depending on this producer. They
+// are re-exported rather than moved out of this path, which keeps every existing
+// `trusty_agents_common::events::*` import — and this module's own tests —
+// compiling unchanged.
+pub use trusty_common::control_bus::{
+    Filter, HarnessEvent, HarnessPayload, HarnessSource, LifecycleEvent,
+};
 
 #[cfg(test)]
 mod tests {

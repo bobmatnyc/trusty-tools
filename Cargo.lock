@@ -11397,6 +11397,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "trusty-common",
  "uuid",
 ]
 
