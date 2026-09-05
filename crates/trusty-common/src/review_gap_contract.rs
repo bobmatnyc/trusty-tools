@@ -10,8 +10,8 @@
 //! led with "trusty-analyze data unavailable" while the reader matched
 //! "trusty-analyze lane DID NOT RUN". A client-build collapse therefore rendered
 //! as a lane that RAN, and undercounted the index's dead-lane tally.
-//! What: [`ANALYZE_LANE_DEAD_HEADLINE`], which every writer leads its line with,
-//! and [`analyze_lane_is_dead`], the one predicate every reader applies to a
+//! What: `ANALYZE_LANE_DEAD_HEADLINE`, which every writer leads its line with,
+//! and `analyze_lane_is_dead`, the one predicate every reader applies to a
 //! report's `gaps` list. Zero dependencies — a `&str` and a `bool`.
 //!
 //! This is the [`crate::env_vars`] pattern applied to report prose rather than
