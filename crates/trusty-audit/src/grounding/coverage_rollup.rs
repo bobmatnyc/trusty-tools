@@ -105,8 +105,17 @@ impl Rollup {
 /// Why: the same one-phrase-to-key-on contract
 /// [`super::SEARCH_TIER_HEADLINE`] establishes. `trusty-review` writes it at the
 /// head of the report's Gaps & Caveats and this module matches it; two spellings
-/// would mean a bundle whose index disagrees with the reports it indexes.
-pub const ANALYZE_LANE_DEAD_HEADLINE: &str = "trusty-analyze lane DID NOT RUN";
+/// would mean a bundle whose index disagrees with the reports it indexes — which
+/// is exactly what #6784 found, with `trusty-review`'s client-build-collapse path
+/// leading with a different phrase and rolling up here as a lane that ran.
+///
+/// #6784: the value now comes from `trusty-common`, the one crate both this
+/// crate and `trusty-review` already depend on. That is deliberately NOT a
+/// dependency on `trusty-review`: DOC-67 §5 keeps this seam at a file, and it
+/// stays there. What the shared definition removes is two spellings inside one
+/// build.
+pub const ANALYZE_LANE_DEAD_HEADLINE: &str =
+    trusty_common::review_gap_contract::ANALYZE_LANE_DEAD_HEADLINE;
 
 /// Roll up the investigation coverage of every report under `dirs`, in the run's
 /// own order.
@@ -172,19 +181,22 @@ fn report_jsons(dir: &Path) -> Vec<PathBuf> {
 /// report-level fact, so every row of one report carries the same value.
 /// Anything that is not JSON, or is JSON without that shape, yields no rows.
 /// Test: `super::coverage_rollup_tests::{the_rollup_reads_every_report,
-/// a_json_that_is_not_a_report_contributes_nothing}`.
+/// a_json_that_is_not_a_report_contributes_nothing,
+/// a_gap_leading_with_the_shared_headline_is_a_dead_lane}`.
 #[must_use]
 pub fn read_coverage(report_json: &str) -> Vec<RepoCoverage> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(report_json) else {
         return Vec::new();
     };
+    // #6784: the predicate is the shared one, so a writer that leads with the
+    // headline can never be read here as a lane that ran.
     let analyze_lane_dead = value
         .get("gaps")
         .and_then(|g| g.as_array())
         .is_some_and(|gaps| {
-            gaps.iter()
-                .filter_map(|g| g.as_str())
-                .any(|g| g.contains(ANALYZE_LANE_DEAD_HEADLINE))
+            trusty_common::review_gap_contract::analyze_lane_is_dead(
+                gaps.iter().filter_map(|g| g.as_str()),
+            )
         });
     let Some(repos) = value
         .get("investigation")

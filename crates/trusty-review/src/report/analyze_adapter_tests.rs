@@ -1341,9 +1341,12 @@ async fn a_lane_that_failed_every_repository_is_recorded() {
 
     let gaps = enrich_with_analyze_gaps(&mut model, &source).await;
 
+    // #6784: matched with the shared predicate, not a literal — the walk's
+    // record and the client-build-failure gap have to be recognised by the same
+    // rule `trusty-audit`'s bundle index applies.
     let record = gaps
         .iter()
-        .find(|g| g.contains("trusty-analyze lane DID NOT RUN"))
+        .find(|g| trusty_common::review_gap_contract::analyze_lane_is_dead([g.as_str()]))
         .unwrap_or_else(|| {
             panic!("a lane that assessed nothing must record that as a fact: {gaps:?}")
         });

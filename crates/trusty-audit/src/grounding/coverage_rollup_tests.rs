@@ -139,3 +139,36 @@ fn a_bundle_with_no_coverage_records_says_so() {
         "a producer with no reports to read must claim nothing either way"
     );
 }
+
+/// #6784 regression, cross-crate. Both of `trusty-review`'s total-collapse paths
+/// lead their gap line with
+/// [`trusty_common::review_gap_contract::ANALYZE_LANE_DEAD_HEADLINE`] and append
+/// their own detail; the reader must recognise either. The client-build path
+/// used to lead with "trusty-analyze data unavailable" and rolled up here as a
+/// lane that RAN.
+///
+/// The producing half is `trusty-review`'s
+/// `run_tests::a_dead_analyze_client_reads_as_a_dead_lane_downstream`, which
+/// runs the real code path; the two halves are bound by the shared constant
+/// because the crates deliberately do not depend on each other (DOC-67 §5).
+#[test]
+fn a_gap_leading_with_the_shared_headline_is_a_dead_lane() {
+    let client_build = format!(
+        "{ANALYZE_LANE_DEAD_HEADLINE} — the analysis client could not be built, so no \
+         application in this report was assessed against trusty-analyze."
+    );
+    let walk = format!("{ANALYZE_LANE_DEAD_HEADLINE} — 0 of 59 application(s) assessed.");
+
+    for gap in [&client_build, &walk] {
+        let rows = read_coverage(&report_json("A", 10, 100, &[gap]));
+        assert_eq!(rows.len(), 1, "{gap}");
+        assert!(rows[0].analyze_lane_dead, "must roll up as dead: {gap}");
+    }
+
+    let partial = "trusty-analyze lane partially degraded — 58 of 59 application(s) assessed.";
+    let rows = read_coverage(&report_json("A", 10, 100, &[partial]));
+    assert!(
+        !rows[0].analyze_lane_dead,
+        "a partly degraded lane DID run: {partial}"
+    );
+}

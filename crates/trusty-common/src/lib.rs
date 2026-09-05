@@ -140,6 +140,20 @@ pub mod codex_config;
 /// env_var_names_are_stable`.
 pub mod env_vars;
 
+/// The Gaps & Caveats phrases a `trusty-review` report states and its readers
+/// key on (#6784).
+///
+/// Why: `trusty-review` writes the phrase and `trusty-audit` matches it, across
+/// a seam DOC-67 §5 keeps free of a Cargo edge — so a literal on each side
+/// drifted, and a total analyze collapse rolled up as a lane that RAN. This is
+/// the [`env_vars`] pattern applied to report prose.
+/// What: exposes
+/// [`ANALYZE_LANE_DEAD_HEADLINE`](review_gap_contract::ANALYZE_LANE_DEAD_HEADLINE)
+/// and [`analyze_lane_is_dead`](review_gap_contract::analyze_lane_is_dead).
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// review_gap_contract`.
+pub mod review_gap_contract;
+
 pub mod project_discovery;
 
 /// Shared graceful-shutdown signal helper for trusty-* daemons (issue #534).

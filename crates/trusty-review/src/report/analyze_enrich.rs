@@ -121,11 +121,14 @@ impl AnalyzeLaneCoverage {
             return None;
         }
         if self.succeeded == 0 {
+            // #6784: the headline is the shared constant, not a literal — the
+            // bundle index's dead-lane tally matches on it.
             return Some(format!(
-                "trusty-analyze lane DID NOT RUN — 0 of {attempted} application(s) assessed, \
+                "{headline} — 0 of {attempted} application(s) assessed, \
                  {failed} failed. No static-analysis pass contributed to this report, so every \
                  finding count, complexity figure, and health factor in it is UNASSESSED, not \
                  clean. Treat the report as covering the repository scan only (issue #6811).",
+                headline = trusty_common::review_gap_contract::ANALYZE_LANE_DEAD_HEADLINE,
                 attempted = self.attempted,
                 failed = failed,
             ));
