@@ -1,0 +1,313 @@
+//! Tests for the #6863 live-background-session probe and the `attach` relaunch
+//! shape: `claude_code_agents::{attach_id_in_registry, attach_command,
+//! relaunch_command}`.
+//!
+//! Why: the defect is a WRONG COMMAND, not a wrong exit code — `tm session
+//! resume` typed `claude --resume <uuid>` at a session Claude Code was already
+//! running in the background, which refuses and exits 0. So every test here
+//! asserts on the built pane command, and none of them runs a real `claude`:
+//! the registry read is injected as a `Result<&str, &str>` (#4255 — a unit test
+//! must never touch the operator's real session state).
+//! What: the registry sample is a verbatim capture of `claude agents --json`
+//! from Claude Code 2.1.261, trimmed to the entry shapes that differ —
+//! background-live, background-finished, and interactive.
+//! Test: itself.
+
+use std::path::Path;
+
+use super::{RelaunchInputs, attach_command, attach_id_in_registry, relaunch_command};
+
+/// The live background session every "attaches" test targets.
+const LIVE_UUID: &str = "74ede5c9-c66d-471e-8dbe-9370d29f6f2e";
+/// Its short id — what `claude attach` takes.
+const LIVE_SHORT: &str = "74ede5c9";
+/// A session that is on disk but absent from the registry.
+const STALE_UUID: &str = "11111111-2222-3333-4444-555555555555";
+
+const TEST_CWD: &str = "/tmp/ws";
+const TEST_SESSION_ID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+/// Verbatim `claude agents --json` output (Claude Code 2.1.261), reduced to one
+/// entry of each shape the parser must survive: an interactive entry with
+/// neither `id` nor `state`, a finished background entry, and the live
+/// background entry with `pid`/`status` fields the parser ignores.
+const REGISTRY_SAMPLE: &str = r#"[
+  {
+    "id": "8ec01a01",
+    "cwd": "/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools",
+    "kind": "background",
+    "startedAt": 1788315744511,
+    "sessionId": "8ec01a01-3a77-4d7c-b588-456fac3100dd",
+    "name": "Dog",
+    "state": "done"
+  },
+  {
+    "id": "a816af2c",
+    "cwd": "/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools",
+    "kind": "background",
+    "startedAt": 1784481833593,
+    "sessionId": "a816af2c-818a-4dfa-a2c8-463bdd4eb694",
+    "name": "resume paused session",
+    "state": "failed"
+  },
+  {
+    "id": "1905c26f",
+    "cwd": "/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools",
+    "kind": "background",
+    "startedAt": 1783783191567,
+    "sessionId": "1905c26f-c66e-4081-8c93-b612090ca104",
+    "name": "Research web-installer implementation",
+    "state": "blocked"
+  },
+  {
+    "pid": 6930,
+    "id": "74ede5c9",
+    "cwd": "/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools",
+    "kind": "background",
+    "startedAt": 1788618816891,
+    "sessionId": "74ede5c9-c66d-471e-8dbe-9370d29f6f2e",
+    "name": "Mpm dashboard",
+    "status": "busy",
+    "state": "working"
+  },
+  {
+    "pid": 9672,
+    "cwd": "/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools",
+    "kind": "interactive",
+    "startedAt": 1788618881733,
+    "sessionId": "e5e08169-b616-4b97-870d-08535eb2f4bc",
+    "name": "trusty-tools-38",
+    "status": "busy"
+  }
+]"#;
+
+/// The command inputs every builder test shares.
+fn inputs(cwd: &Path) -> RelaunchInputs<'_> {
+    RelaunchInputs {
+        cwd,
+        claude_bin: "/usr/local/bin/claude",
+        config_dir: None,
+        session_id: TEST_SESSION_ID,
+        prompt_file: None,
+        oauth_token: None,
+        gh_env_file: None,
+        mcp_env: &[],
+    }
+}
+
+/// Why (#6863): this is the whole defect. A `claude_session_id` Claude Code is
+/// still running as a background job must produce `attach <short-id>` — the
+/// only re-entry it offers — and must NOT produce `--resume`, which it refuses
+/// with a status-0 exit that leaves the pane a bare shell.
+#[test]
+fn relaunch_attaches_to_a_live_background_session() {
+    let cwd = Path::new(TEST_CWD);
+    let cmd = relaunch_command(
+        &inputs(cwd),
+        Some(LIVE_UUID),
+        Some(LIVE_UUID),
+        Ok(REGISTRY_SAMPLE),
+    );
+    assert!(
+        cmd.contains(&format!("attach {LIVE_SHORT}")),
+        "a live background session must be attached: {cmd}"
+    );
+    assert!(
+        !cmd.contains("--resume"),
+        "a live background session must never be sent --resume: {cmd}"
+    );
+}
+
+/// Why (#6863): the probe must not change the answer for the ordinary case. An
+/// id that is on disk but absent from the live registry is a FINISHED
+/// conversation, and `--resume <uuid>` is exactly right for it.
+#[test]
+fn relaunch_resumes_a_session_absent_from_the_registry() {
+    let cwd = Path::new(TEST_CWD);
+    let cmd = relaunch_command(
+        &inputs(cwd),
+        Some(STALE_UUID),
+        Some(STALE_UUID),
+        Ok(REGISTRY_SAMPLE),
+    );
+    assert!(
+        cmd.contains(&format!("--resume {STALE_UUID}")),
+        "an unlisted id must resume by id: {cmd}"
+    );
+    assert!(
+        !cmd.contains("attach"),
+        "an unlisted id must not be attached: {cmd}"
+    );
+}
+
+/// Why (#6863): the probe fails OPEN. A missing `claude`, a non-zero exit, or a
+/// timeout must leave the pre-#6863 behavior exactly as it was — the probe can
+/// only ever fix a refused relaunch, never break a working one.
+#[test]
+fn relaunch_resumes_when_the_registry_call_fails() {
+    let cwd = Path::new(TEST_CWD);
+    let cmd = relaunch_command(
+        &inputs(cwd),
+        Some(LIVE_UUID),
+        Some(LIVE_UUID),
+        Err("`claude agents --json` did not answer within 3s"),
+    );
+    assert!(
+        cmd.contains(&format!("--resume {LIVE_UUID}")),
+        "an unreadable registry must fall back to --resume: {cmd}"
+    );
+    assert!(
+        !cmd.contains("attach"),
+        "an unreadable registry must not attach: {cmd}"
+    );
+}
+
+/// Why (#6765, #6863): no stored id still means a FRESH launch — the probe adds
+/// no third way to guess at a conversation.
+#[test]
+fn relaunch_starts_fresh_without_a_usable_id() {
+    let cwd = Path::new(TEST_CWD);
+    let cmd = relaunch_command(&inputs(cwd), None, None, Ok(REGISTRY_SAMPLE));
+    assert!(
+        !cmd.contains("--resume"),
+        "fresh launch, no --resume: {cmd}"
+    );
+    assert!(!cmd.contains("attach"), "fresh launch, no attach: {cmd}");
+    assert!(
+        !cmd.contains("--continue"),
+        "never a bare --continue: {cmd}"
+    );
+}
+
+/// Why (#6863): `claude attach` takes the SHORT id, not the UUID a tm record
+/// stores, so the registry is the translation as well as the liveness answer.
+#[test]
+fn attach_id_found_for_a_live_background_entry() {
+    assert_eq!(
+        attach_id_in_registry(REGISTRY_SAMPLE, LIVE_UUID).as_deref(),
+        Some(LIVE_SHORT)
+    );
+}
+
+/// Why: an id nobody is running is a resume, not an attach.
+#[test]
+fn attach_id_absent_for_an_unlisted_session() {
+    assert_eq!(attach_id_in_registry(REGISTRY_SAMPLE, STALE_UUID), None);
+}
+
+/// Why: `--all` is never passed, but a terminal entry can still appear in the
+/// active listing, and attaching to a finished session is not what the operator
+/// asked for.
+#[test]
+fn attach_id_absent_for_a_finished_background_entry() {
+    for finished in [
+        "8ec01a01-3a77-4d7c-b588-456fac3100dd",
+        "a816af2c-818a-4dfa-a2c8-463bdd4eb694",
+    ] {
+        assert_eq!(
+            attach_id_in_registry(REGISTRY_SAMPLE, finished),
+            None,
+            "a done/failed entry must not be attached: {finished}"
+        );
+    }
+}
+
+/// Why: an `interactive` entry is a live TTY Claude Code. `attach` cannot take
+/// one over, and the entry carries no short id to attach to in any case.
+#[test]
+fn attach_id_absent_for_an_interactive_entry() {
+    assert_eq!(
+        attach_id_in_registry(REGISTRY_SAMPLE, "e5e08169-b616-4b97-870d-08535eb2f4bc"),
+        None
+    );
+}
+
+/// Why: a `claude` release that changes the `--json` shape, or an empty read,
+/// must degrade to `--resume` rather than panic on a hot path.
+#[test]
+fn attach_id_absent_for_unparsable_json() {
+    for junk in ["", "not json", "{}", "[{\"sessionId\": 7}]"] {
+        assert_eq!(
+            attach_id_in_registry(junk, LIVE_UUID),
+            None,
+            "unparsable registry must yield no attach id: {junk:?}"
+        );
+    }
+}
+
+/// Why (#6863): the sample is a real capture, so parsing it end to end is what
+/// proves the `Option` fields match the live shape — an entry missing `id` and
+/// `state` (interactive) must not poison the whole array, and the `pid` /
+/// `status` / `cwd` / `name` / `startedAt` fields the decision ignores must not
+/// be required either.
+#[test]
+fn registry_sample_parses_every_entry_shape() {
+    // Every UUID in the sample resolves to a decision without a parse failure;
+    // exactly one of them is the live background entry.
+    let uuids = [
+        "8ec01a01-3a77-4d7c-b588-456fac3100dd",
+        "a816af2c-818a-4dfa-a2c8-463bdd4eb694",
+        "1905c26f-c66e-4081-8c93-b612090ca104",
+        LIVE_UUID,
+        "e5e08169-b616-4b97-870d-08535eb2f4bc",
+    ];
+    let attachable: Vec<String> = uuids
+        .iter()
+        .filter_map(|u| attach_id_in_registry(REGISTRY_SAMPLE, u))
+        .collect();
+    assert_eq!(
+        attachable,
+        vec![
+            "1905c26f".to_owned(),
+            LIVE_SHORT.to_owned(),
+            // `blocked` is a live state — a background session waiting on input
+            // still refuses `--resume`.
+        ],
+        "only the non-terminal background entries are attachable"
+    );
+}
+
+/// Why (#6766, #3025, #2023, #2250): attaching must keep every wrapper the
+/// resume path carries, or the attached pane loses the `cd`, the managed
+/// session id, the launch clock, or the on-exit report.
+#[test]
+fn attach_command_carries_the_resume_prefixes() {
+    let cwd = Path::new(TEST_CWD);
+    let cmd = attach_command(&inputs(cwd), LIVE_SHORT);
+    assert!(cmd.starts_with("cd '/tmp/ws' && {"), "rooted at cwd: {cmd}");
+    assert!(
+        cmd.contains(&format!("export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'")),
+        "exports the managed session id: {cmd}"
+    );
+    assert!(
+        cmd.contains("env -u ANTHROPIC_API_KEY"),
+        "keeps the env scrub: {cmd}"
+    );
+    assert!(
+        cmd.contains("__tm_t0"),
+        "keeps the #6766 launch clock: {cmd}"
+    );
+    assert!(
+        cmd.contains(&format!("/usr/local/bin/claude attach {LIVE_SHORT}")),
+        "attaches by short id: {cmd}"
+    );
+}
+
+/// Why (#6863): `claude attach <id>` accepts no options at all — passing the
+/// resume path's flags would make it reject the invocation outright.
+#[test]
+fn attach_command_omits_flags_attach_cannot_take() {
+    let cwd = Path::new(TEST_CWD);
+    let prompt = Path::new("/tmp/prompt.md");
+    let mut with_prompt = inputs(cwd);
+    with_prompt.prompt_file = Some(prompt);
+    let cmd = attach_command(&with_prompt, LIVE_SHORT);
+    for flag in [
+        "--append-system-prompt-file",
+        "--setting-sources",
+        "--permission-mode",
+        "--resume",
+    ] {
+        assert!(!cmd.contains(flag), "attach must not carry {flag}: {cmd}");
+    }
+}
