@@ -173,3 +173,23 @@ Vetted against prior ADRs on 2026-07-19:
 
 No conflicts with any other Accepted ADR. Summary: consistent with, and a
 direct refinement of, ADR-0011; no silent contradictions.
+
+## Amendment 2026-09-05: host-level `tailscale serve` onto console's loopback port (#6857)
+
+**Amended, not superseded.** This ADR's own Decision is unchanged even though
+its Status is `Superseded by 0032`: console remains the sole off-loopback
+HTTP surface, and ADR-0032 carries that invariant forward.
+
+**Why:** `tailscaled` can terminate tailnet HTTPS itself and reverse-proxy to
+a loopback port, without going through console's own `--tailscale` bind flag.
+That path needs a ruling: an accepted equivalent, or a bypass of this
+doctrine.
+
+**What:** A host-level `tailscale serve` reverse proxy onto console's
+existing `127.0.0.1` bind (e.g. `tailscale serve --bg http://127.0.0.1:7788`)
+is an **accepted equivalent** to console's `--tailscale` flag — it satisfies
+the same invariants this ADR and ADR-0032 both require: console is still the
+only off-loopback trusty-\* surface, no sibling daemon is touched, console
+never binds `0.0.0.0`, and Funnel stays forbidden. Access control is tailnet
+membership, plus tailnet ACLs where configured. Operational detail and the
+rollback command live in `docs/reference/threat-model.md`'s console entry.

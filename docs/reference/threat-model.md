@@ -120,6 +120,22 @@ resolves `/api/agents/*` to it. The `--bind` escape hatch remains for the case
 console cannot cover, which is why it is token-gated at startup rather than
 merely discouraged.
 
+**A host-level `tailscale serve` reverse proxy is a second, accepted path
+onto console's loopback port** (#6857), alongside console's own `--tailscale`
+bind flag — see
+[ADR-0018's 2026-09-05 amendment](../adr/0018-loopback-only-doctrine.md#amendment-2026-09-05-host-level-tailscale-serve-onto-consoles-loopback-port-6857).
+Mechanism: `tailscaled`, running on the host, terminates tailnet HTTPS at the
+host's tailnet DNS name and reverse-proxies to console's existing
+`127.0.0.1:7788` listener (`tailscale serve --bg http://127.0.0.1:7788`);
+console itself is unmodified — it still binds `127.0.0.1` only, never
+`0.0.0.0`, and no sibling daemon is touched. What's exposed: everything
+console serves — the dashboard SPA and every proxied `/api/{service}/*path`
+route — the same surface console's own `--tailscale` bind would expose.
+Access control: tailnet membership, plus tailnet ACLs where configured; no
+additional auth layer beyond what console's other bind modes already provide.
+**Funnel is forbidden** on this path exactly as it is on console's built-in
+bind modes. Rollback: `tailscale serve --https=443 off`.
+
 ## Why the guard fails open on a missing `Origin` header
 
 The shared guard (`trusty_common::server::guard_write_origin`,
