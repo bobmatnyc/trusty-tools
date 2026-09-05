@@ -291,6 +291,17 @@ async fn run_idle_eviction_tick(state: &Arc<SearchAppState>, base_secs: u64) -> 
         total_evicted += indexer.evict_chunks_if_idle(threshold).await;
         total_evicted += indexer.evict_bm25_entities_if_idle(threshold).await;
         indexer.demote_vector_store_if_idle(threshold).await;
+        // #6826: the demote above only fires on a store whose graph already
+        // matches disk. This one covers the written store, on its own
+        // write-idle cooldown rather than this index's query-idle window.
+        // `None` is the operator's "off"; the indexer treats zero as disabled,
+        // and also honours `TRUSTY_HNSW_REVIEW_IDLE`, which disables BOTH
+        // demote paths.
+        let write_cooldown =
+            crate::core::store_config::hnsw_demote_cooldown().unwrap_or(Duration::ZERO);
+        indexer
+            .persist_and_demote_vector_store_after_write_cooldown(write_cooldown)
+            .await;
     }
     total_evicted
 }

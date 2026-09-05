@@ -10,10 +10,33 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+
+/// What one successful write-cooldown demotion reclaimed (issue #6826).
+///
+/// Why: the caller that logs the demotion is the idle ticker, which knows the
+/// index id but not the snapshot; the store knows the snapshot but not the id.
+/// Handing these three readings back lets the ticker write one line naming
+/// both.
+/// What: `snapshot_bytes` is the on-disk snapshot's size — the serialized form
+/// of exactly the heap arena that was released, and the only derivable proxy
+/// for it, since usearch exposes no heap-usage reading. `elapsed_ms` covers
+/// the save AND the re-view.
+/// Test: `store::tests::test_demote_after_write_cooldown_persists_and_views`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DemoteStats {
+    /// Vectors in the graph at the moment it was re-viewed.
+    pub vectors: usize,
+    /// Size of the on-disk snapshot the store was re-viewed from.
+    pub snapshot_bytes: u64,
+    /// Wall-clock cost of the save plus the re-view.
+    pub elapsed_ms: u64,
+}
 
 /// Sidecar JSON written alongside the usearch binary snapshot, capturing the
 /// `chunk_id → u64 key` mapping (and the `next_key` counter) so a restored
@@ -228,6 +251,25 @@ pub trait VectorStore: Send + Sync {
     /// in `store::tests`.
     async fn demote_to_view(&self) -> Result<bool> {
         Ok(false)
+    }
+
+    /// Persist a store that HAS been written and has since been write-idle for
+    /// `cooldown`, then demote it back to an mmap view (issue #6826).
+    ///
+    /// Why: [`Self::demote_to_view`] refuses on any store with unpersisted
+    /// writes, so it never fires for an index that was actually edited — which
+    /// on a developer machine is nearly all of them. This is the path that
+    /// saves first and demotes second.
+    /// What: default = no-op (mock / BM25-only stores hold no heap graph).
+    /// `UsearchStore` overrides; see
+    /// `UsearchStore::try_demote_after_write_cooldown` for the locking
+    /// argument. Returns `Ok(Some(stats))` only when the store became a view.
+    /// Test: `store::tests::test_demote_after_write_cooldown_*`.
+    async fn persist_and_demote_after_write_cooldown(
+        &self,
+        _cooldown: Duration,
+    ) -> Result<Option<DemoteStats>> {
+        Ok(None)
     }
 
     /// Re-point a store that recorded `staged` as its snapshot source at

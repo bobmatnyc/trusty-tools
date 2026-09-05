@@ -141,11 +141,18 @@ impl UsearchStore {
         {
             let mut index = self.index.write().await;
             *index = rebuilt;
+            // #6826: publish the swap and the flags that DESCRIBE it under the
+            // same write lock. These two stores used to sit after the block, so
+            // the handle was a fresh heap index for a window in which `is_view`
+            // and `dirty` still described the old one — long enough on a
+            // multi-thread runtime for a demote already queued on this lock to
+            // wake and `Index::view` the stale on-disk file over the rebuilt
+            // arena, or for `ensure_mutable` to `Index::load` it away. Either
+            // one silently republishes the OLD precision while this function
+            // reports `applied: true`.
+            self.is_view.store(false, Ordering::Release);
+            self.mark_dirty();
         }
-        // The replacement is a heap-resident mutable index, and nothing on disk
-        // matches it until the save below.
-        self.is_view.store(false, Ordering::Release);
-        self.dirty.store(true, Ordering::Release);
 
         // #6822: the durable write keeps `save`'s own guards — a conversion
         // that lost most of the arena is refused there rather than published.

@@ -230,11 +230,26 @@ impl UsearchStore {
             }
         };
         if !adopted {
+            // #6826: hold the HNSW write lock across BOTH the path store and
+            // the dirty mark. Both demote paths do their authoritative
+            // `is_view`/`dirty` re-check under this same lock, so publishing
+            // outside it left a window where a demote could pass that check —
+            // with `dirty` still false and `hnsw_path` still the staging file —
+            // and `Index::view` a snapshot that does not match memory, rolling
+            // the graph back. That is exactly what the comment below says this
+            // mark prevents.
+            //
+            // Lock order: this is the one site that holds `index` while taking
+            // `hnsw_path`. It cannot deadlock, because no site does the
+            // reverse — `save`, `promote_view_to_mutable`, and both demotes all
+            // clone out of `hnsw_path` and DROP that guard before acquiring
+            // `index`.
+            let _index = self.index.write().await;
             *self.hnsw_path.write().await = Some(live.to_path_buf());
             // Nothing on disk matches the in-memory graph: the idle sweep must
             // not re-view `live` (it would silently roll the graph back), and a
             // future save has somewhere truthful to write.
-            self.dirty.store(true, Ordering::Release);
+            self.mark_dirty();
             tracing::warn!(
                 "usearch: aborted reindex deleted the staging snapshot {} and no live snapshot \
                  at {} could be adopted — keeping the in-memory graph, marked dirty \

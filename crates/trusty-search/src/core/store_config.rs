@@ -14,6 +14,8 @@
 //! Test: see `tests` below — every accepted/rejected env spelling and the
 //! `ScalarKind` mapping are covered without touching the filesystem or usearch.
 
+use std::time::Duration;
+
 use usearch::ScalarKind;
 
 /// Environment variable selecting whether warm-booted HNSW snapshots are served
@@ -37,8 +39,38 @@ pub const VECTOR_QUANT_ENV: &str = "TRUSTY_VECTOR_QUANT";
 /// store back to `Index::view` (mmap), reclaiming its heap-resident copy.
 /// `false` disables demotion while leaving chunk/BM25/entity eviction
 /// untouched — an escape hatch in case the view↔load↔view cycle proves
-/// riskier than the memory it reclaims on some deployment.
+/// riskier than the memory it reclaims on some deployment. #6826: it gates
+/// BOTH demote paths, the write-cooldown one included — this is the kill
+/// switch for the mechanism, not for one trigger.
 pub const HNSW_REVIEW_IDLE_ENV: &str = "TRUSTY_HNSW_REVIEW_IDLE";
+
+/// Environment variable setting the WRITE-idle cooldown, in seconds, after
+/// which a promoted-and-written HNSW store is persisted and demoted back to
+/// `Index::view` (issue #6826).
+///
+/// Covers a different TRIGGER from [`HNSW_REVIEW_IDLE_ENV`]: that knob's
+/// #2164 sweep demotes a store whose on-disk snapshot is ALREADY
+/// byte-identical to the graph, which a written store never is until
+/// something saves it. This knob covers the written store — the case behind
+/// the measured 76 MB mmap-resident against 9 GB of heap on the 128 GB
+/// reference host.
+///
+/// It is NOT an independent switch. [`HNSW_REVIEW_IDLE_ENV`] disables
+/// heap→view demotion as a mechanism, this path included; turning it off
+/// disables both. This knob is the fine-grained switch that turns off only the
+/// write-cooldown path.
+pub const HNSW_DEMOTE_COOLDOWN_SECS_ENV: &str = "TRUSTY_HNSW_DEMOTE_COOLDOWN_SECS";
+
+/// Default write-idle cooldown before a written HNSW store is persisted and
+/// demoted back to a view: 5 minutes.
+///
+/// Why 300 s: the demote costs one `save()` (an FFI serialize of the whole
+/// graph) plus an `Index::view`, and the next write pays a re-promote
+/// (`Index::load`). Five minutes is long enough that an editor session's
+/// edit-commit-edit rhythm never crosses it — the file watcher commits far
+/// more often than that while a project is being worked on — and short enough
+/// that a project left alone stops holding its heap copy.
+pub const HNSW_DEMOTE_COOLDOWN_SECS_DEFAULT: u64 = 300;
 
 /// How a warm-booted (on-disk) HNSW snapshot is served on the read/search path.
 ///
@@ -278,6 +310,51 @@ pub fn hnsw_review_idle_enabled() -> bool {
     }
 }
 
+/// Write-idle cooldown before a written, promoted HNSW store is persisted and
+/// demoted back to mmap-view mode; resolved from
+/// [`HNSW_DEMOTE_COOLDOWN_SECS_ENV`] (issue #6826).
+///
+/// Why: the #2164 demote only fires on a store whose graph already matches
+/// disk, so a store that has taken even one write stays heap-resident until
+/// the daemon exits. Demoting a WRITTEN store means saving it first, which is
+/// expensive enough that it must not fire while the project is being edited —
+/// hence a cooldown measured from the last WRITE rather than the last query.
+/// What: unset → [`HNSW_DEMOTE_COOLDOWN_SECS_DEFAULT`]. `0`, `off`, `false`,
+/// `no`, `disabled`, or `none` → `None` (feature disabled). Any other
+/// unparseable value falls back to the default with a `tracing::warn!` so a
+/// typo never silently disables the reclamation.
+/// Test: `tests::hnsw_demote_cooldown_parse_accepts_seconds`,
+/// `tests::hnsw_demote_cooldown_parse_disables_on_zero_and_off`,
+/// `tests::hnsw_demote_cooldown_parse_falls_back_on_garbage`.
+pub fn hnsw_demote_cooldown() -> Option<Duration> {
+    match std::env::var(HNSW_DEMOTE_COOLDOWN_SECS_ENV) {
+        Ok(raw) => parse_demote_cooldown(&raw),
+        Err(_) => Some(Duration::from_secs(HNSW_DEMOTE_COOLDOWN_SECS_DEFAULT)),
+    }
+}
+
+/// Pure parser split out of [`hnsw_demote_cooldown`] so every accepted and
+/// rejected spelling is testable without touching the process environment.
+fn parse_demote_cooldown(raw: &str) -> Option<Duration> {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    match trimmed.as_str() {
+        "" => return Some(Duration::from_secs(HNSW_DEMOTE_COOLDOWN_SECS_DEFAULT)),
+        "0" | "off" | "false" | "no" | "disabled" | "none" => return Option::None,
+        _ => {}
+    }
+    match trimmed.parse::<u64>() {
+        Ok(0) => Option::None,
+        Ok(secs) => Some(Duration::from_secs(secs)),
+        Err(_) => {
+            tracing::warn!(
+                "{HNSW_DEMOTE_COOLDOWN_SECS_ENV}={raw:?} is not a whole number of seconds; \
+                 defaulting to {HNSW_DEMOTE_COOLDOWN_SECS_DEFAULT}s"
+            );
+            Some(Duration::from_secs(HNSW_DEMOTE_COOLDOWN_SECS_DEFAULT))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +468,32 @@ mod tests {
         assert_eq!(VectorQuant::None.label(), "f32 (none)");
         assert_eq!(VectorQuant::F16.label(), "f16");
         assert_eq!(VectorQuant::I8.label(), "i8");
+    }
+
+    // #6826: the cooldown parser is pure, so it is tested directly rather than
+    // through the process environment — no env mutation, no cross-test race.
+    #[test]
+    fn hnsw_demote_cooldown_parse_accepts_seconds() {
+        assert_eq!(parse_demote_cooldown("45"), Some(Duration::from_secs(45)));
+        assert_eq!(
+            parse_demote_cooldown("  600 "),
+            Some(Duration::from_secs(600))
+        );
+    }
+
+    #[test]
+    fn hnsw_demote_cooldown_parse_disables_on_zero_and_off() {
+        for raw in ["0", "off", "OFF", "false", "no", "disabled", "none"] {
+            assert_eq!(parse_demote_cooldown(raw), None, "{raw} should disable");
+        }
+    }
+
+    #[test]
+    fn hnsw_demote_cooldown_parse_falls_back_on_garbage() {
+        let default = Some(Duration::from_secs(HNSW_DEMOTE_COOLDOWN_SECS_DEFAULT));
+        assert_eq!(parse_demote_cooldown(""), default);
+        assert_eq!(parse_demote_cooldown("five minutes"), default);
+        assert_eq!(parse_demote_cooldown("-1"), default);
     }
 
     // #3769: `hnsw_review_idle_enabled_default_and_env_override` lived here and

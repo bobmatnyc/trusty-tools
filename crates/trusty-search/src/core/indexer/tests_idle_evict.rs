@@ -26,7 +26,7 @@ use crate::core::entity::{EdgeKind, EntityType, RawEntity};
 use crate::core::store::{UsearchStore, VectorStore};
 
 /// Minimal in-memory `RawChunk` builder (mirrors `tests::raw`).
-fn raw(id: &str, file: &str, content: &str) -> RawChunk {
+pub(super) fn raw(id: &str, file: &str, content: &str) -> RawChunk {
     RawChunk {
         id: id.to_string(),
         file: file.to_string(),

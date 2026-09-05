@@ -913,6 +913,82 @@ impl CodeIndexer {
         }
     }
 
+    /// Persist and demote this index's HNSW vector store when it has been
+    /// WRITE-idle longer than the configured cooldown (issue #6826).
+    ///
+    /// Why: [`Self::demote_vector_store_if_idle`] (issue #2164) can only
+    /// demote a store whose graph already matches disk, and a store that has
+    /// taken one write never does until something saves it — so on the 128 GB
+    /// reference host, 56 actively-edited indexes held 9 GB of heap against
+    /// 76 MB of mmap. This is the same reclamation for the written case.
+    /// What: a no-op when `cooldown` is zero — the caller
+    /// (`server::tickers::run_idle_eviction_tick`) resolves it from
+    /// [`crate::core::store_config::hnsw_demote_cooldown`] and passes
+    /// `Duration::ZERO` for the operator's "off", exactly as
+    /// [`Self::demote_vector_store_if_idle`] takes its window from the same
+    /// caller. Also a no-op when `TRUSTY_HNSW_REVIEW_IDLE` is off (PM ruling,
+    /// #6826): that knob is the kill switch for heap→view demotion as a
+    /// MECHANISM, not for the #2164 trigger alone, so an operator who turned it
+    /// off must not get demotion through this path either.
+    /// `TRUSTY_HNSW_DEMOTE_COOLDOWN_SECS` stays the fine-grained switch for
+    /// this path only. Otherwise delegates to
+    /// [`crate::core::store::VectorStore::persist_and_demote_after_write_cooldown`],
+    /// which owns every safety gate (see
+    /// `UsearchStore::try_demote_after_write_cooldown`'s concurrency
+    /// argument). Deliberately independent of the cost-scaled idle window the
+    /// #2164 demote rides: this cooldown measures writes, not queries, so a
+    /// store being queried steadily but not written still gets reclaimed.
+    /// Logs an `info` naming the index, the vectors, the bytes released, and
+    /// the duration; a `warn` on failure (never fatal). Returns `true` when a
+    /// demotion happened.
+    /// Test: `hnsw_write_cooldown_demotion_persists_and_reviews_dirty_store`
+    /// and `hnsw_write_cooldown_demotion_skips_when_cooldown_disabled` in
+    /// `indexer::tests_write_cooldown`;
+    /// `hnsw_write_cooldown_demotion_skips_when_review_idle_disabled_via_env`
+    /// in `tests/hnsw_review_idle_env.rs` covers the `TRUSTY_HNSW_REVIEW_IDLE`
+    /// gate (its own test BINARY — see #3769).
+    pub async fn persist_and_demote_vector_store_after_write_cooldown(
+        &self,
+        cooldown: Duration,
+    ) -> bool {
+        if cooldown.is_zero() {
+            return false;
+        }
+        // #6826: TRUSTY_HNSW_REVIEW_IDLE off disables demotion as a mechanism,
+        // this path included — not only the #2164 trigger.
+        if !crate::core::store_config::hnsw_review_idle_enabled() {
+            return false;
+        }
+        let Some(store) = &self.store else {
+            return false;
+        };
+        match store
+            .persist_and_demote_after_write_cooldown(cooldown)
+            .await
+        {
+            Ok(Some(stats)) => {
+                tracing::info!(
+                    "index '{}': persisted and demoted its written HNSW store to mmap-view \
+                     after {}s write-idle ({} vectors, ~{} bytes released, {} ms)",
+                    self.index_id,
+                    cooldown.as_secs(),
+                    stats.vectors,
+                    stats.snapshot_bytes,
+                    stats.elapsed_ms,
+                );
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(
+                    "index '{}': HNSW write-cooldown demote failed ({e}); leaving heap-resident",
+                    self.index_id
+                );
+                false
+            }
+        }
+    }
+
     /// Estimate this index's rehydrate cost in milliseconds (issue #3683
     /// slice 2), used to scale the idle-eviction window — see
     /// [`Self::cost_scaled_idle_threshold`].
