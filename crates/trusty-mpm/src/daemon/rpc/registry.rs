@@ -1,14 +1,13 @@
-//! The registry, deliverable, manager, bus, pairing and delegation RPC methods
+//! The registry, deliverable, manager, pairing and delegation RPC methods
 //! (#6288 slice 5).
 //!
-//! Why one module for six families: they are the daemon's RECORD-KEEPING
-//! surface — projects and their deliverables, the L3 rollup over both, the peer
-//! roster, the bot binding, and the delegation ledger. They share one property
-//! that matters here: every one of them is a plain request/response route over
-//! daemon-owned state, so all of them move onto the socket by the same
-//! mechanism and none of them needs the streaming seam. Splitting them across
-//! six top-level modules would put six `register` lines in `socket.rs` for one
-//! slice.
+//! Why one module for five families: they are the daemon's RECORD-KEEPING
+//! surface — projects and their deliverables, the L3 rollup over both, the bot
+//! binding, and the delegation ledger. They share one property that matters
+//! here: every one of them is a plain request/response route over daemon-owned
+//! state, so all of them move onto the socket by the same mechanism and none of
+//! them needs the streaming seam. Splitting them across five top-level modules
+//! would put five `register` lines in `socket.rs` for one slice.
 //!
 //! What: [`register`] mounts all of them, and [`METHODS`] pins the names. The
 //! per-family registrations live in the submodules, and the transport-neutral
@@ -16,10 +15,10 @@
 //! on a frozen SLOC budget, which is why the legacy `/projects*` and `/pair/*`
 //! bodies live in [`projects`] and [`pairing`] instead of in `api.rs`.
 //!
-//! Nothing in this module or its submodules names an HTTP type. The two error
-//! enums that cross both transports — [`DaemonError`] and [`BusError`] — each
-//! own their own `From<…> for RpcError`, derived from the same status table the
-//! HTTP transport reads, so a code and a status cannot drift apart.
+//! Nothing in this module or its submodules names an HTTP type. The one error
+//! enum that crosses both transports — [`DaemonError`] — owns its own
+//! `From<…> for RpcError`, derived from the same status table the HTTP
+//! transport reads, so a code and a status cannot drift apart.
 //!
 //! ## Method → route
 //!
@@ -48,10 +47,6 @@
 //! | `mpm.manager.chat` | `POST /api/v1/manager/chat` |
 //! | `mpm.manager.route_task` | `POST /api/v1/manager/route-task` |
 //! | `mpm.manager.act` | `POST /api/v1/manager/act` |
-//! | `mpm.bus.register` | `POST /api/v1/bus/instances` |
-//! | `mpm.bus.deregister` | `DELETE /api/v1/bus/instances/{instance_id}` |
-//! | `mpm.bus.list` | `GET /api/v1/bus/instances` |
-//! | `mpm.bus.publish` | `POST /api/v1/bus/publish` |
 //! | `mpm.pair.request` | `POST /pair/request` |
 //! | `mpm.pair.confirm` | `POST /pair/confirm` |
 //! | `mpm.pair.status` | `GET /pair/status` |
@@ -70,14 +65,20 @@
 //! refusals — malformed scope, unknown project, store read failed — ARE error
 //! frames. See [`manager`]'s module doc for why the degrade legs cannot be.
 //!
-//! **Pending slice 6:** `GET /api/v1/bus/subscribe/{instance_id}` is SSE and has
-//! no RPC method here. It needs the `RpcStreamMethod` seam slice 6 owns; its
-//! HTTP handler is untouched by this slice.
+//! **No peer-bus method is served here (#6288 slice A).** Slice 5 mounted
+//! `mpm.bus.register`, `mpm.bus.deregister`, `mpm.bus.list` and
+//! `mpm.bus.publish` on this router. The 2026-09-05 owner ruling makes
+//! trusty-console the host of the only event bus, so mpm publishes to console
+//! through the `trusty-common` PushClient (#6849) instead of serving a bus of
+//! its own over the socket. The four names are gone from [`METHODS`] and a call
+//! to any of them answers `method_not_found`. `PeerBus` itself — the registry,
+//! the envelope, the fail-closed publish sequencing — is untouched and still
+//! reachable over HTTP; only the RPC mounting went away.
 //!
 //! ## Path and query parameters become named fields
 //!
-//! A JSON-RPC call has no path and no query string, so `{name}`, `{id}`,
-//! `{instance_id}` and `?status=` / `?scope=` / `?path=` all arrive as named
+//! A JSON-RPC call has no path and no query string, so `{name}`, `{id}` and
+//! `?status=` / `?scope=` / `?path=` all arrive as named
 //! parameter fields. Where a route takes a path segment AND a body, the params
 //! struct `#[serde(flatten)]`s the body around the segment field, so the wire is
 //! the HTTP body plus one key rather than a nested object.
@@ -85,7 +86,6 @@
 //! Test: `registry/tests.rs` — one parity case per route.
 //!
 //! [`DaemonError`]: crate::daemon::error::DaemonError
-//! [`BusError`]: crate::daemon::bus::BusError
 //!
 //! [`register`]: crate::daemon::rpc::registry::register
 //! [`METHODS`]: crate::daemon::rpc::registry::METHODS
@@ -100,7 +100,6 @@ use trusty_common::uds::server::RpcRouter;
 
 use crate::daemon::state::DaemonState;
 
-pub mod bus;
 pub mod delegation;
 pub mod deliverables;
 pub mod manager;
@@ -118,10 +117,8 @@ mod tests;
 /// reports `method_not_found`.
 /// Test: `rpc_router_registers_every_documented_method`.
 pub const METHODS: &[&str] = &[
-    "mpm.bus.deregister",
-    "mpm.bus.list",
-    "mpm.bus.publish",
-    "mpm.bus.register",
+    // #6288: bus RPC retired — console hosts the only event bus (owner ruling
+    // 2026-09-05).
     "mpm.delegation.granted_worktree",
     "mpm.delegation.shared_tree_dispatch",
     "mpm.deliverables.create",
@@ -181,7 +178,8 @@ pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
     let r = projects::register(router, state);
     let r = deliverables::register(r, state);
     let r = manager::register(r, state);
-    let r = bus::register(r, state);
+    // #6288: bus RPC retired — console hosts the only event bus (owner ruling
+    // 2026-09-05).
     let r = pairing::register(r, state);
     delegation::register(r, state)
 }

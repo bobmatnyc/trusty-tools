@@ -164,13 +164,14 @@ pub async fn register_instance(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<RegisterInstanceRequest>,
 ) -> Result<(StatusCode, Json<InstanceMeta>), BusError> {
-    // #6288: the body is shared with `mpm.bus.register` over the Unix socket.
+    // #6288: bus RPC retired — console hosts the only event bus (owner ruling
+    // 2026-09-05). HTTP is the only caller of `register_op`.
     Ok((StatusCode::CREATED, Json(register_op(&state, req)?)))
 }
 
 /// [`register_instance`]'s body, with no transport in it (#6288 slice 5).
 ///
-/// Test: `parity_bus_register_agrees_across_transports`.
+/// Test: `route_register_returns_instance_id`.
 pub fn register_op(
     state: &Arc<DaemonState>,
     req: RegisterInstanceRequest,
@@ -191,27 +192,13 @@ pub async fn deregister_instance(
     State(state): State<Arc<DaemonState>>,
     Path(instance_id): Path<String>,
 ) -> StatusCode {
-    // #6288: the body is shared with `mpm.bus.deregister` over the Unix socket.
-    // The status pair is preserved exactly — this route has never had a body.
+    // #6288: bus RPC retired — console hosts the only event bus (owner ruling
+    // 2026-09-05). The status pair is preserved exactly — this route has never
+    // had a body.
     match deregister_op(&state, &instance_id) {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::NOT_FOUND,
     }
-}
-
-/// The acknowledgement `mpm.bus.deregister` answers with.
-///
-/// Why: the HTTP route says "removed" with a bodyless `204`, which a JSON-RPC
-/// result cannot express — a result is a JSON value or it is an error. Rather
-/// than inventing a null result, the socket answers a one-field record, and
-/// the miss stays an ERROR on both transports (`404` / `CODE_NOT_FOUND`) so a
-/// caller still cannot mistake "there was nothing to remove" for a removal.
-/// Test: `parity_bus_deregister_agrees_across_transports`,
-/// `rpc_bus_deregister_unknown_instance_reports_not_found`.
-#[derive(Debug, Serialize)]
-pub struct DeregisterAck {
-    /// Always `true` — a failure is an error frame, never `false` here.
-    pub deregistered: bool,
 }
 
 /// [`deregister_instance`]'s body, with no transport in it (#6288 slice 5).
@@ -227,13 +214,10 @@ pub struct DeregisterAck {
 ///
 /// [`DaemonError::NotFound`] when `instance_id` was not a live registration.
 ///
-/// Test: `parity_bus_deregister_agrees_across_transports`.
-pub fn deregister_op(
-    state: &Arc<DaemonState>,
-    instance_id: &str,
-) -> Result<DeregisterAck, DaemonError> {
+/// Test: `route_deregister_removes_instance`.
+pub fn deregister_op(state: &Arc<DaemonState>, instance_id: &str) -> Result<(), DaemonError> {
     if state.bus().registry().deregister(instance_id) {
-        Ok(DeregisterAck { deregistered: true })
+        Ok(())
     } else {
         Err(DaemonError::NotFound(format!(
             "bus instance '{instance_id}' is not registered"
@@ -248,13 +232,14 @@ pub fn deregister_op(
 /// What: every live [`InstanceMeta`], ordered by registration sequence.
 /// Test: `route_list_instances`.
 pub async fn list_instances(State(state): State<Arc<DaemonState>>) -> Json<ListInstancesResponse> {
-    // #6288: the body is shared with `mpm.bus.list` over the Unix socket.
+    // #6288: bus RPC retired — console hosts the only event bus (owner ruling
+    // 2026-09-05). HTTP is the only caller of `list_op`.
     Json(list_op(&state))
 }
 
 /// [`list_instances`]'s body, with no transport in it (#6288 slice 5).
 ///
-/// Test: `parity_bus_list_agrees_across_transports`.
+/// Test: `route_list_instances`.
 pub fn list_op(state: &Arc<DaemonState>) -> ListInstancesResponse {
     ListInstancesResponse {
         instances: state.bus().registry().live(),
@@ -293,7 +278,8 @@ pub async fn publish_message(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<PublishRequest>,
 ) -> Result<(StatusCode, Json<BusEnvelope>), BusError> {
-    // #6288: the body is shared with `mpm.bus.publish` over the Unix socket.
+    // #6288: bus RPC retired — console hosts the only event bus (owner ruling
+    // 2026-09-05). HTTP is the only caller of `publish_op`.
     Ok((StatusCode::ACCEPTED, Json(publish_op(&state, req)?)))
 }
 
@@ -317,12 +303,11 @@ pub async fn publish_message(
 /// A recipient whose subscriber has stopped reading is NOT among them since
 /// #6462 — see [`publish_message`]'s doc.
 ///
-/// Test: `parity_bus_publish_agrees_across_transports`,
-/// `rpc_bus_publish_rejects_a_forged_user_kind`,
-/// `rpc_bus_publish_rejects_an_unregistered_sender`,
-/// `rpc_bus_publish_to_a_dead_instance_is_gone`,
-/// `rpc_bus_publish_without_a_subscriber_is_conflict`,
-/// `rpc_bus_publish_without_a_target_is_invalid`,
+/// Test: `route_publish_delivers_and_returns_envelope`,
+/// `route_publish_forged_user_kind_is_400`,
+/// `route_publish_unregistered_sender_is_403`,
+/// `route_publish_to_dead_instance_is_410`,
+/// `route_publish_to_unknown_definition_is_404`,
 /// `route_publish_past_a_stalled_subscriber_is_accepted`.
 pub fn publish_op(state: &Arc<DaemonState>, req: PublishRequest) -> Result<BusEnvelope, BusError> {
     let target = req.to.to_peer_target()?;
