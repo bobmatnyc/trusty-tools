@@ -8,9 +8,10 @@
 //! on the same principle.
 //!
 //! What: [`enrich_with_analyze`] and [`enrich_with_analyze_gaps`], moved
-//! verbatim. Both are re-exported from
-//! [`crate::report::analyze_adapter`], so every existing path to them still
-//! resolves.
+//! verbatim, plus [`enrich_with_analyze_outcome`], which returns the same lines
+//! WITH the lane's own attempted/succeeded counts (#6811). All three are
+//! re-exported from [`crate::report::analyze_adapter`], so every existing path
+//! to them still resolves.
 //!
 //! Test: `analyze_adapter_tests.rs::{enrich_names_unreachable_repositories,
 //! enrich_reports_no_gaps_when_every_repo_is_populated,
@@ -38,15 +39,72 @@ use super::index_registry::resolve_report_index;
 /// Test: `analyze_adapter_tests::{a_lane_that_failed_every_repository_is_recorded,
 /// a_partly_degraded_lane_states_the_denominator,
 /// a_fully_successful_lane_records_nothing}`.
-#[derive(Debug, Default)]
-struct LaneCoverage {
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AnalyzeLaneCoverage {
     /// Repositories eligible for the fetch, counted before it runs.
-    attempted: usize,
+    pub attempted: usize,
     /// Repositories whose metrics were accepted onto the model.
-    succeeded: usize,
+    pub succeeded: usize,
 }
 
-impl LaneCoverage {
+impl AnalyzeLaneCoverage {
+    /// A lane that never got as far as a fetch, over `attempted` eligible
+    /// repositories (#6811).
+    ///
+    /// Why: the client-construction failure in
+    /// [`crate::report::run`] is a total collapse with no walk behind it, and it
+    /// has to reach the same decision point the walk's own record does — two
+    /// spellings of "nothing was assessed" is how one of them ends up not
+    /// failing the run.
+    /// What: `succeeded` is zero by construction.
+    /// Test: `run_tests::a_client_that_will_not_build_counts_every_eligible_repository`.
+    #[must_use]
+    pub fn never_ran(attempted: usize) -> Self {
+        Self {
+            attempted,
+            succeeded: 0,
+        }
+    }
+
+    /// Repositories the lane attempted and did not populate.
+    #[must_use]
+    pub fn failed(&self) -> usize {
+        self.attempted.saturating_sub(self.succeeded)
+    }
+
+    /// True when the lane was attempted at least once and populated nothing
+    /// (#6811).
+    ///
+    /// Why: this is the exact condition the issue's second closure condition
+    /// names, and it is a predicate rather than an inline comparison so the
+    /// `--allow-degraded` decision and the report line cannot drift apart. A
+    /// lane attempted ZERO times is not a collapse — a manifest of remote-only
+    /// repositories has no analyze lane to lose.
+    /// What: `attempted > 0 && succeeded == 0`.
+    /// Test: `analyze_adapter_tests::a_lane_that_failed_every_repository_is_recorded`,
+    /// `run_tests::a_total_analyze_collapse_fails_the_run`.
+    #[must_use]
+    pub fn is_total_failure(&self) -> bool {
+        self.attempted > 0 && self.succeeded == 0
+    }
+
+    /// True when the lane populated some but not all of what it attempted
+    /// (#6811).
+    ///
+    /// Why: partial degradation stays a WARNING by default — the report renders,
+    /// the coverage line states the denominator, and the run exits 0. That
+    /// threshold is deliberate: a 58-of-59 run still carries 58 assessed
+    /// applications, and failing it would throw away work over one unreachable
+    /// index.
+    /// What: `succeeded > 0 && succeeded < attempted`.
+    /// Test: `analyze_adapter_tests::a_partly_degraded_lane_states_the_denominator`,
+    /// `run_tests::a_partial_analyze_degradation_is_a_warning_not_a_failure`.
+    #[must_use]
+    pub fn is_partial_failure(&self) -> bool {
+        self.succeeded > 0 && self.succeeded < self.attempted
+    }
+
     /// The one Gaps & Caveats line this lane's outcome earns, if any.
     ///
     /// Why: a total collapse and a partial one need different words. "No
@@ -56,9 +114,9 @@ impl LaneCoverage {
     /// separates unassessed from clean.
     /// What: `None` when nothing was attempted (nothing to say) or when every
     /// attempt succeeded; otherwise one sentence carrying all three counts.
-    /// Test: see [`LaneCoverage`].
+    /// Test: see [`AnalyzeLaneCoverage`].
     fn record(&self) -> Option<String> {
-        let failed = self.attempted.saturating_sub(self.succeeded);
+        let failed = self.failed();
         if self.attempted == 0 || failed == 0 {
             return None;
         }
@@ -127,6 +185,45 @@ pub async fn enrich_with_analyze_gaps(
     model: &mut super::model::ReportModel,
     source: &dyn AnalyzeMetricsSource,
 ) -> Vec<String> {
+    enrich_with_analyze_outcome(model, source).await.lines
+}
+
+/// What one analyze enrichment produced: the report lines, and the lane's own
+/// attempted/succeeded counts (#6811).
+///
+/// Why: `enrich_with_analyze_gaps` returns prose, and a caller deciding whether
+/// to FAIL the run cannot make that decision by matching on a sentence. The
+/// counts the walk already keeps are what the decision needs, so they leave the
+/// function as data rather than being re-derived from the line's wording.
+/// What: `lines` is byte-identical to what `enrich_with_analyze_gaps` returns;
+/// `coverage` is the same record that produced its first line.
+/// Test: `analyze_adapter_tests::the_outcome_carries_the_lane_counts`.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct AnalyzeLaneOutcome {
+    /// One Gaps & Caveats line per degraded condition, coverage line first.
+    pub lines: Vec<String>,
+    /// How many repositories the lane attempted, and how many it populated.
+    pub coverage: AnalyzeLaneCoverage,
+}
+
+/// [`enrich_with_analyze_gaps`], returning the lane's counts alongside its lines
+/// (#6811).
+///
+/// Why: the report pipeline must fail a run whose analyze lane assessed NOTHING
+/// unless the operator passed `--allow-degraded`, and the only party that knows
+/// the denominator is this walk. Handing the counts back is what lets the
+/// decision live at the pipeline's one exit point instead of being inferred from
+/// the text.
+/// What: identical work and identical lines; the counts are the walk's own,
+/// counted before each fetch and incremented on each accepted result.
+/// Test: `analyze_adapter_tests::{a_lane_that_failed_every_repository_is_recorded,
+/// a_partly_degraded_lane_states_the_denominator,
+/// the_outcome_carries_the_lane_counts}`.
+pub async fn enrich_with_analyze_outcome(
+    model: &mut super::model::ReportModel,
+    source: &dyn AnalyzeMetricsSource,
+) -> AnalyzeLaneOutcome {
     // BTreeMap, not HashMap: the rendered line order must not depend on hash
     // iteration order (DOC-67 §9's determinism requirement).
     let mut missing: std::collections::BTreeMap<AnalyzeGap, Vec<String>> = Default::default();
@@ -136,7 +233,7 @@ pub async fn enrich_with_analyze_gaps(
     // #6811: the lane's own outcome, counted while the walk runs. The per-reason
     // lines below name repositories but state no denominator, so a run where the
     // lane never worked at all read exactly like one where it mostly did.
-    let mut coverage = LaneCoverage::default();
+    let mut coverage = AnalyzeLaneCoverage::default();
 
     // #5323: daemon-authored text lands in an acquirer-facing artifact, so it
     // crosses the redaction boundary before it reaches the model. Resolved once
@@ -222,5 +319,5 @@ pub async fn enrich_with_analyze_gaps(
             .map(|(caveat, repos)| format!("{caveat} — affects: {}.", repos.join(", "))),
     );
     lines.extend(stale);
-    lines
+    AnalyzeLaneOutcome { lines, coverage }
 }

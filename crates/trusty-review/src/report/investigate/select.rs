@@ -39,9 +39,41 @@ const MAX_FILE_BYTES: usize = 24 * 1024;
 pub const TRUNCATION_MARKER: &str = "\n… [content truncated for investigation budget]\n";
 
 /// The default maximum number of files selected for one investigation run.
+///
+/// This is a FLOOR, not the whole rule: on a repository large enough that it
+/// would collapse coverage, [`Budget::for_repository`] scales up from here
+/// (#6784).
 pub const DEFAULT_MAX_FILES: usize = 40;
 /// The default maximum total content bytes sent in one investigation run.
+///
+/// A floor, on the same terms as [`DEFAULT_MAX_FILES`].
 pub const DEFAULT_MAX_BYTES: usize = 400 * 1024;
+
+/// The share of a repository's tracked files a size-scaled budget aims to read
+/// (#6784).
+///
+/// Why: `10` — one file in ten — is what the flat default already delivered on
+/// the ~400-file repository it was sized for, so scaling to hold it constant
+/// changes nothing for a small repository and everything for a large one. The
+/// field report that produced #6784 measured 18-36% coverage on the five largest
+/// repositories of a 59-repository run, against a flat per-repository budget;
+/// the flat cap is what turns "the biggest codebase" into "the least read".
+/// What: the divisor applied to the tracked file count, rounded up.
+pub const TARGET_COVERAGE_DIVISOR: usize = 10;
+
+/// Ceiling on the file count a size-scaled budget may reach (#6784).
+///
+/// Why: scaling without a ceiling is a blank cheque on token spend and latency —
+/// a 100k-file monorepo would ask for 10,000 files. 400 is ten times the flat
+/// default, which is where the run-time cost of one repository stops being
+/// bounded by anything a reader would wait for.
+pub const MAX_SCALED_FILES: usize = 400;
+
+/// Ceiling on the content bytes a size-scaled budget may reach (#6784).
+///
+/// Why: [`MAX_SCALED_FILES`] at the default byte-per-file ratio, which is what
+/// keeps the two ceilings from contradicting each other.
+pub const MAX_SCALED_BYTES: usize = 4 * 1024 * 1024;
 
 /// Hard caps on how much of a repository one investigation run may read.
 ///
@@ -49,14 +81,30 @@ pub const DEFAULT_MAX_BYTES: usize = 400 * 1024;
 /// when a repo exceeds the cap the report says so rather than pretending the
 /// whole codebase was inspected.
 /// What: `max_files` caps the count; `max_bytes` caps the summed content sent.
-/// Both are configurable (manifest keys / CLI overrides) with sane defaults.
-/// Test: `select_tests::budget_caps_file_count`, `budget_caps_total_bytes`.
+/// Both are configurable (manifest keys / CLI overrides) with sane defaults, and
+/// a cap left at its default scales with the repository through
+/// [`Budget::for_repository`] (#6784).
+/// Test: `select_tests::budget_caps_file_count`, `budget_caps_total_bytes`,
+/// `a_large_repository_scales_its_budget_up`.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Budget {
     /// Maximum number of files to select.
     pub max_files: usize,
     /// Maximum total content bytes across all selected files.
     pub max_bytes: usize,
+    /// True when an operator named `max_files`, which forbids scaling it (#6784).
+    ///
+    /// Why: `--investigate-max-files 40` means forty, on a repository of any
+    /// size. Size-scaling is the DEFAULT's behaviour, not an override of an
+    /// operator's. The two dimensions carry their own flag because a run that
+    /// pins only the byte cap should still get a file count that fits the
+    /// repository.
+    /// Test: `select_tests::an_operator_pinned_budget_is_not_scaled`.
+    #[serde(default)]
+    pub files_pinned: bool,
+    /// True when an operator named `max_bytes`; see [`Self::files_pinned`].
+    #[serde(default)]
+    pub bytes_pinned: bool,
 }
 
 impl Default for Budget {
@@ -64,6 +112,58 @@ impl Default for Budget {
         Budget {
             max_files: DEFAULT_MAX_FILES,
             max_bytes: DEFAULT_MAX_BYTES,
+            files_pinned: false,
+            bytes_pinned: false,
+        }
+    }
+}
+
+impl Budget {
+    /// This budget as it applies to a repository of `total_files` tracked files
+    /// (#6784).
+    ///
+    /// Why: a flat per-repository budget means investigation coverage is
+    /// `cap / repository size`, so it collapses on exactly the repositories a
+    /// due-diligence reader needs most — the field run behind #6784 read 18-36%
+    /// of the five largest repositories in a 59-repository engagement, and one
+    /// file in forty of anything larger. Scaling the cap with the tracked file
+    /// count holds coverage at [`TARGET_COVERAGE_DIVISOR`] until the ceilings
+    /// bind, and decays far more slowly than a flat cap after that.
+    /// What: a pure function of the two inputs, so two runs over the same
+    /// repository resolve the same budget. It only ever raises a cap, never
+    /// lowers one: the resolved value is the floor, `total_files /
+    /// TARGET_COVERAGE_DIVISOR` (rounded up) is the target, and
+    /// [`MAX_SCALED_FILES`] / [`MAX_SCALED_BYTES`] are the ceilings. A pinned
+    /// dimension is returned untouched, and so is a `max_files` of zero — which
+    /// is an operator asking for no investigation, not an invitation to compute
+    /// a byte-per-file ratio from a zero denominator.
+    /// Test: `select_tests::{a_large_repository_scales_its_budget_up,
+    /// a_small_repository_keeps_the_flat_budget,
+    /// an_operator_pinned_budget_is_not_scaled,
+    /// the_scaled_budget_stops_at_its_ceiling}`.
+    #[must_use]
+    pub fn for_repository(self, total_files: usize) -> Self {
+        if self.max_files == 0 {
+            return self;
+        }
+        let bytes_per_file = self.max_bytes / self.max_files;
+        let target = total_files.div_ceil(TARGET_COVERAGE_DIVISOR);
+        let max_files = if self.files_pinned {
+            self.max_files
+        } else {
+            target.clamp(self.max_files, MAX_SCALED_FILES.max(self.max_files))
+        };
+        let max_bytes = if self.bytes_pinned {
+            self.max_bytes
+        } else {
+            max_files
+                .saturating_mul(bytes_per_file)
+                .clamp(self.max_bytes, MAX_SCALED_BYTES.max(self.max_bytes))
+        };
+        Budget {
+            max_files,
+            max_bytes,
+            ..self
         }
     }
 }

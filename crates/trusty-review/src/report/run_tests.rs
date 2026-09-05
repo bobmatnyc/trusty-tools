@@ -13,6 +13,8 @@
 use super::*;
 
 use crate::report::manifest::parse_manifest;
+// #6811: the analyze lane's half lives in `run_analyze` since the SLOC split.
+use crate::report::run_analyze::{analyze_eligible_repositories, resolve_analyze_budget};
 
 /// Parse a manifest from an in-memory string.
 fn manifest_from(toml: &str) -> Manifest {
@@ -326,6 +328,144 @@ fn the_environment_budget_is_read_below_the_manifest() {
         none.max_files,
         Budget::default().max_files,
         "no manifest key and no variable is still the default"
+    );
+}
+
+// ── #6811: a total analyze-lane collapse fails the run ───────────────────────
+
+/// The lane's coverage over `attempted` repositories, `succeeded` of them
+/// populated.
+fn lane(attempted: usize, succeeded: usize) -> crate::report::AnalyzeLaneCoverage {
+    let mut coverage = crate::report::AnalyzeLaneCoverage::never_ran(attempted);
+    coverage.succeeded = succeeded;
+    coverage
+}
+
+/// #6811 regression. A run whose analyze lane populated NOTHING ships a report
+/// where every finding count, complexity figure and health factor is
+/// unassessed — and #6783 shipped exactly that across 59 repositories, where
+/// downstream readers took it for "static analysis ran and found nothing". The
+/// coverage line #6827 added states the fact; it does not stop the artifact.
+/// This is the stop.
+///
+/// Against `origin/main` at 11b1ba9f9 this does not compile: neither
+/// `analyze_lane_verdict` nor `AnalyzeLaneCoverage` exists.
+#[test]
+fn a_total_analyze_collapse_fails_the_run() {
+    let err = analyze_lane_verdict(lane(59, 0), false)
+        .expect_err("a lane that assessed nothing must not ship a report");
+    let message = format!("{err}");
+    assert!(
+        message.contains("DID NOT RUN") && message.contains("0 of 59"),
+        "the failure must name the lane and both counts:\n{message}"
+    );
+    assert!(
+        message.contains("--allow-degraded"),
+        "and the flag that overrides it:\n{message}"
+    );
+}
+
+/// #6811. The override is the operator's explicit acknowledgement, so it must
+/// let the same collapse through — the report still carries the `0 of N` line.
+#[test]
+fn allow_degraded_lets_a_total_collapse_ship() {
+    assert!(
+        analyze_lane_verdict(lane(59, 0), true).is_ok(),
+        "--allow-degraded must let a total collapse write its report"
+    );
+}
+
+/// #6811 threshold. Partial degradation stays a warning at EVERY setting: a
+/// 58-of-59 run carries 58 assessed applications, and failing it would throw
+/// that away over one unreachable index.
+#[test]
+fn a_partial_analyze_degradation_is_a_warning_not_a_failure() {
+    assert!(
+        analyze_lane_verdict(lane(59, 58), false).is_ok(),
+        "58 of 59 assessed is a warning, not a failure"
+    );
+    assert!(
+        analyze_lane_verdict(lane(59, 1), false).is_ok(),
+        "so is 1 of 59 — the threshold is zero, not a share"
+    );
+}
+
+/// #6811. A manifest of remote-only repositories has no analyze lane to lose,
+/// so an unattempted lane is not a collapse — it is nothing to report.
+#[test]
+fn an_unattempted_analyze_lane_is_not_a_failure() {
+    assert!(analyze_lane_verdict(lane(0, 0), false).is_ok());
+}
+
+/// #6811. The client-construction failure arm never reaches the walk, so it has
+/// no denominator of its own — and without one, a total collapse cannot be told
+/// from a manifest that had nothing to assess. It counts the repositories the
+/// walk WOULD have attempted: local checkouts with no declared metrics file.
+#[test]
+fn a_client_that_will_not_build_counts_every_eligible_repository() {
+    // `ReportModel::build` records `local_path` only for a checkout that exists,
+    // so the two local entries have to be real directories.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+    std::fs::create_dir_all(&a).expect("mkdir");
+    std::fs::create_dir_all(&b).expect("mkdir");
+    let manifest = manifest_from(&format!(
+        "[report]\ntitle = \"T\"\n\n\
+         [[repositories]]\nname = \"A\"\npath = \"{a}\"\n\n\
+         [[repositories]]\nname = \"B\"\npath = \"{b}\"\n\n\
+         [[repositories]]\nname = \"C\"\nremote = \"acme/c\"\n",
+        a = a.display(),
+        b = b.display(),
+    ));
+    let model = ReportModel::build(&manifest, Path::new("m.toml"), "t", None).expect("model");
+
+    assert_eq!(
+        analyze_eligible_repositories(&model),
+        2,
+        "the two local checkouts are eligible; the remote entry is not"
+    );
+    assert!(
+        crate::report::AnalyzeLaneCoverage::never_ran(analyze_eligible_repositories(&model))
+            .is_total_failure(),
+        "a dead client over eligible repositories is the same total collapse"
+    );
+}
+
+// ── #6784: the investigation budget scales with the repository ───────────────
+
+/// #6784. A cap no tier named is the DEFAULT, and the default is what
+/// `Budget::for_repository` is allowed to scale. Pinning is a property of the
+/// resolution, not of the number.
+#[test]
+fn a_defaulted_budget_is_not_pinned() {
+    let req = ReportRequest::new("m.toml");
+    let bare = manifest_with("");
+
+    let defaulted = resolve_budget_from(&req, &bare, None, None);
+    assert!(
+        !defaulted.files_pinned && !defaulted.bytes_pinned,
+        "nothing named either cap, so neither is pinned"
+    );
+
+    let declared = resolve_budget_from(
+        &req,
+        &manifest_with("investigate_max_files = 3"),
+        None,
+        None,
+    );
+    assert!(
+        declared.files_pinned,
+        "a manifest key pins the dimension it names"
+    );
+    assert!(
+        !declared.bytes_pinned,
+        "and leaves the one it does not name free to scale"
+    );
+
+    let from_env = resolve_budget_from(&req, &bare, Some(240), Some(2_457_600));
+    assert!(
+        from_env.files_pinned && from_env.bytes_pinned,
+        "the environment tier is an operator too"
     );
 }
 

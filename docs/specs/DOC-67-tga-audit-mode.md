@@ -640,6 +640,46 @@ from that repo's scorecard, named explicitly in Gaps & Caveats, and the run
 continues — never silently under-represented in the repo count without
 comment, and never a reason to halt the other 199 repos.
 
+**The whole-lane collapse — the one case per-repository fail-open never
+covered (#6811, delivered).** Everything above is per repository, and it stayed
+correct: a repository the analyze lane could not reach is named and the run
+continues. What no rule covered is the lane failing for EVERY repository, which
+shipped: an estate-wide refusal (#6783) left all 59 repositories reading "not
+stated in source data" for every CAST health factor, and downstream readers
+concluded static analysis had run and found nothing. The report was a repository
+scan wearing a due-diligence report's clothes.
+
+`trusty-review report --analyze` now records the lane's own outcome as a fact and
+acts on it:
+
+- **Total collapse (`0 of N` assessed, `N > 0`) fails the run** — non-zero exit,
+  no report written, a message naming the lane and both counts. `--allow-degraded`
+  is the operator's explicit acknowledgement and writes the report anyway, with
+  the `0 of N` coverage line still at the head of Gaps & Caveats.
+- **Partial degradation (`M of N`, `M > 0`) stays a warning at every setting.**
+  A 58-of-59 run carries 58 assessed applications, and failing it would throw
+  that away over one unreachable index. The threshold is zero assessed, not a
+  share.
+- **A lane attempted zero times is not a failure.** A manifest of remote-only
+  repositories has no analyze lane to lose.
+- **`analyze_adapter.rs`'s per-repository fail-open contract is unchanged**, as
+  the issue's third closure condition requires.
+
+**`tga audit` passes `--allow-degraded`, and does not inherit the refusal.** The
+audit renders ONE report over the whole engagement, so a total collapse would
+delete the deliverable: the sweep's collected data survives on disk, but no
+bundle is written, and the degradation a reader needed to see becomes an ABSENT
+report rather than a stated caveat — the same invisibility #6811 exists to end,
+one level up. The audit therefore asks for the degraded report and lets the
+artifact carry the fact: trusty-review states `trusty-analyze lane DID NOT RUN —
+0 of N application(s) assessed` at the head of Gaps & Caveats, tga echoes the
+renderer's stderr verbatim (§6 step 4), and `trusty-audit`'s run index states it
+per repository beside the investigation-coverage roll-up (#6784). An operator who
+wants the refusal instead runs `trusty-review report` by hand without the flag —
+the recovery command tga already prints on a failed render. The flag is offered
+only to a renderer at 0.35.0 or newer: tga resolves `trusty-review` from PATH
+(§5), and an older copy rejects an unknown flag with a usage error.
+
 ## {#SPEC-TGAUDIT-10~draft} 10. Data-Handling Posture
 
 An acquirer's counterparty will ask, before granting access, what the tool

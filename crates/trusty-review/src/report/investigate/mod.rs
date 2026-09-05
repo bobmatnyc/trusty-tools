@@ -304,6 +304,11 @@ impl Investigation {
 /// Test: `tests/report_investigate.rs` (mock provider, verifiable + unverifiable
 /// + multi-batch partial failure).
 ///
+/// #6784: `budget` is the run-level resolution; each repository's effective
+/// budget is [`Budget::for_repository`] over its tracked file count, so a large
+/// repository is not read at the same absolute cap as a small one. A cap an
+/// operator pinned is used verbatim.
+///
 /// #6166 leg 2: `verifier` is the verifier-role client the verdict pass calls
 /// after tracing. `None` records every traced candidate UNVERIFIABLE rather than
 /// skipping the pass, so a run without a verifier states the gap instead of
@@ -328,6 +333,12 @@ pub async fn run_investigation(
         let deps = deps::build_inventory(path);
 
         let files = crate::report::scan::list_tracked_files(path);
+        // #6784: a flat per-repository cap makes coverage `cap / repository
+        // size`, which collapses on the largest repositories. The effective
+        // budget is resolved per repository from its tracked file count, and it
+        // is the one every downstream figure is built from, so the coverage
+        // section states the budget that actually applied.
+        let budget = budget.for_repository(files.len());
         // #6078: the manifest's declared ranking and the trusty-analyze findings
         // already on this repo steer which files get read; absent both, the
         // selection is byte-identical to the pre-#6078 one.

@@ -64,6 +64,9 @@ pub mod reporter_performance;
 // #6669: the library entry point `trusty-review report` and trusty-analyze's
 // `report` verb both drive — one pipeline, two front doors.
 pub mod run;
+// #6811: the `--analyze` lane's half, split off when `run.rs` passed the SLOC
+// cap. `run.rs` is the only caller.
+mod run_analyze;
 pub mod scan;
 // #5747: the schema-tag parse both artifact loaders decide compatibility from.
 pub(crate) mod schema;
@@ -96,8 +99,9 @@ pub mod topology;
 // ── Re-exports for convenience ─────────────────────────────────────────────
 
 pub use analyze_adapter::{
-    AnalyzeAdapterError, AnalyzeCaveat, AnalyzeFetch, AnalyzeGap, AnalyzeMetricsSource,
-    HttpAnalyzeMetricsSource, enrich_with_analyze, enrich_with_analyze_gaps,
+    AnalyzeAdapterError, AnalyzeCaveat, AnalyzeFetch, AnalyzeGap, AnalyzeLaneCoverage,
+    AnalyzeLaneOutcome, AnalyzeMetricsSource, HttpAnalyzeMetricsSource, enrich_with_analyze,
+    enrich_with_analyze_gaps, enrich_with_analyze_outcome,
 };
 // #6677: `derive_index_id` moved here from `analyze_adapter`; the public path
 // `trusty_review::report::derive_index_id` is unchanged.

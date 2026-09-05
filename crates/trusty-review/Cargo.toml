@@ -98,7 +98,7 @@ name        = "trusty-review"
 # neither of which is `#[non_exhaustive]` — an out-of-tree struct literal for
 # either stops compiling. `cargo-semver-checks` reports this as
 # `struct_missing_field`-class breakage against the 0.33.1 baseline.
-version     = "0.34.1"
+version     = "0.35.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

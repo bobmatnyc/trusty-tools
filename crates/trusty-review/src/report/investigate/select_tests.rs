@@ -140,6 +140,7 @@ fn budget_caps_file_count() {
         Budget {
             max_files: 2,
             max_bytes: DEFAULT_MAX_BYTES,
+            ..Budget::default()
         },
         RiskSignals::default(),
     );
@@ -162,6 +163,7 @@ fn budget_caps_total_bytes() {
         Budget {
             max_files: 40,
             max_bytes: 30,
+            ..Budget::default()
         },
         RiskSignals::default(),
     );
@@ -475,6 +477,7 @@ fn priorities_beyond_the_budget_truncate_in_rank_order() {
         Budget {
             max_files: 2,
             max_bytes: DEFAULT_MAX_BYTES,
+            ..Budget::default()
         },
         RiskSignals {
             priorities: &prio,
@@ -775,6 +778,7 @@ fn the_test_coverage_row_is_enumerated_not_sampled() {
         Budget {
             max_files: 1,
             max_bytes: 64,
+            ..Budget::default()
         },
         RiskSignals::default(),
     );
@@ -803,4 +807,111 @@ fn the_test_coverage_row_is_enumerated_not_sampled() {
             .is_some_and(|e| e.contains("not sampled")),
         "the row must state its own basis"
     );
+}
+
+// ── #6784: the budget scales with the repository ─────────────────────────────
+
+/// #6784 regression. A flat per-repository cap makes investigation coverage
+/// `cap / repository size`, so it collapses on exactly the repositories a
+/// due-diligence reader needs most — the field run behind the issue read 18-36%
+/// of the five largest repositories in a 59-repository engagement and reported
+/// `batches: 16 total, 13 succeeded, 3 truncated/failed` beside it. Pins the
+/// property the fix is FOR: on a large repository the effective budget rises so
+/// coverage does not collapse.
+///
+/// Against `origin/main` at 11b1ba9f9 this does not compile: `for_repository`
+/// does not exist. With the caps left flat it fails on the share assertion —
+/// 40 of 3000 tracked files is 1.3%.
+#[test]
+fn a_large_repository_scales_its_budget_up() {
+    let large = 3_000;
+    let flat = Budget::default();
+    assert!(
+        (flat.max_files as f64 / large as f64) < 0.02,
+        "the flat cap reads under 2% of a 3000-file repository — the collapse this fixes"
+    );
+
+    let scaled = flat.for_repository(large);
+    assert_eq!(
+        scaled.max_files, 300,
+        "one file in ten, which is what the flat default delivered on the repository it was \
+         sized for"
+    );
+    assert_eq!(
+        scaled.max_bytes,
+        300 * (DEFAULT_MAX_BYTES / DEFAULT_MAX_FILES),
+        "the byte cap follows at the same per-file ratio, so the two caps cannot contradict"
+    );
+    assert!(
+        (scaled.max_files as f64 / large as f64) >= 0.09,
+        "coverage no longer collapses on the largest repositories"
+    );
+}
+
+/// #6784. Scaling only ever RAISES a cap: a repository small enough that the
+/// flat default already covers it must resolve byte-identically to what it did
+/// before, so no existing run's selection moves.
+#[test]
+fn a_small_repository_keeps_the_flat_budget() {
+    let flat = Budget::default();
+    for total in [0usize, 1, 37, 200, 400] {
+        let scaled = flat.for_repository(total);
+        assert_eq!(scaled.max_files, flat.max_files, "at {total} tracked files");
+        assert_eq!(scaled.max_bytes, flat.max_bytes, "at {total} tracked files");
+    }
+}
+
+/// #6784. `--investigate-max-files 40` means forty, on a repository of any size.
+/// Size-scaling is the default's behaviour, never an override of an operator's.
+#[test]
+fn an_operator_pinned_budget_is_not_scaled() {
+    let pinned = Budget {
+        max_files: 40,
+        max_bytes: DEFAULT_MAX_BYTES,
+        files_pinned: true,
+        bytes_pinned: true,
+    };
+    let scaled = pinned.for_repository(50_000);
+    assert_eq!(scaled.max_files, 40, "the operator named this number");
+    assert_eq!(scaled.max_bytes, DEFAULT_MAX_BYTES);
+
+    // Each dimension carries its own flag: pinning the bytes must not freeze
+    // the file count.
+    let half = Budget {
+        bytes_pinned: true,
+        ..Budget::default()
+    };
+    let scaled = half.for_repository(3_000);
+    assert_eq!(scaled.max_files, 300, "the unpinned dimension still scales");
+    assert_eq!(
+        scaled.max_bytes, DEFAULT_MAX_BYTES,
+        "the pinned one does not"
+    );
+}
+
+/// #6784. Scaling without a ceiling is a blank cheque on token spend, so a
+/// 100k-file monorepo asks for the ceiling rather than for 10,000 files.
+#[test]
+fn the_scaled_budget_stops_at_its_ceiling() {
+    let scaled = Budget::default().for_repository(100_000);
+    assert_eq!(scaled.max_files, MAX_SCALED_FILES);
+    assert!(
+        scaled.max_bytes <= MAX_SCALED_BYTES,
+        "{} exceeds the byte ceiling",
+        scaled.max_bytes
+    );
+}
+
+/// #6784. `max_files = 0` is an operator asking for no investigation, not an
+/// invitation to compute a byte-per-file ratio from a zero denominator.
+#[test]
+fn a_zero_file_budget_is_left_alone() {
+    let none = Budget {
+        max_files: 0,
+        max_bytes: 0,
+        ..Budget::default()
+    };
+    let scaled = none.for_repository(3_000);
+    assert_eq!(scaled.max_files, 0);
+    assert_eq!(scaled.max_bytes, 0);
 }

@@ -200,8 +200,11 @@ pub(super) async fn run_review_report_with(
 /// actionable error, and parses stdout.
 /// Test: exercised through [`run_review_report`].
 fn invoke(binary: &str, manifest: &Path, out_dir: &Path) -> Result<ReviewRun, ReviewRunError> {
+    // #6811: the flag vector depends on what this copy of the renderer accepts,
+    // and tga resolves it from PATH rather than from a Cargo edge (DOC-67 §5).
+    let version = installed_review_version(binary);
     let output = Command::new(binary)
-        .args(report_args(manifest, out_dir))
+        .args(report_args_for(manifest, out_dir, version))
         .output()
         .map_err(|source| {
             if source.kind() == std::io::ErrorKind::NotFound {
@@ -228,16 +231,52 @@ fn invoke(binary: &str, manifest: &Path, out_dir: &Path) -> Result<ReviewRun, Re
     })
 }
 
-/// The exact argument vector [`invoke`] hands `trusty-review`.
+/// The oldest `trusty-review` that accepts `--allow-degraded` (#6811).
 ///
-/// Why: this list IS the tga→trusty-review contract, and the website documents it
-/// verbatim as the by-hand recovery command. Building it in a pure function is
-/// what lets a test assert its contents without spawning anything — the same
-/// reason [`binary_from_override`] takes its input as a parameter.
-/// What: `report --manifest <m> --analyze --synthesize --out <dir>`.
-/// Test: `super::tests::invocation_requests_inference`.
-pub(super) fn report_args(manifest: &Path, out_dir: &Path) -> Vec<std::ffi::OsString> {
-    vec![
+/// Why: 0.35.0 is the release that added the flag. An older renderer rejects an
+/// unknown flag with a clap usage error and exit 2 — so passing it
+/// unconditionally would turn every pairing with an older renderer into a failed
+/// render, which is the opposite of what this flag is for. tga installs and
+/// upgrades separately from the renderer (DOC-67 §5), so that pairing is
+/// ordinary rather than exotic.
+pub const MIN_REVIEW_VERSION_ALLOW_DEGRADED: (u64, u64, u64) = (0, 35, 0);
+
+/// The exact argument vector [`invoke`] hands `trusty-review` (#6811).
+///
+/// Why (the vector): this list IS the tga→trusty-review contract, and the
+/// website documents it verbatim as the by-hand recovery command. Building it in
+/// a pure function is what lets a test assert its contents without spawning
+/// anything — the same reason [`binary_from_override`] takes its input as a
+/// parameter.
+///
+/// Why: `tga audit` renders ONE report over the whole engagement, and
+/// trusty-review 0.35 fails a run whose analyze lane assessed nothing unless
+/// `--allow-degraded` is passed. Letting that failure through would delete the
+/// deliverable: the sweep's own collected data is intact, but no bundle is
+/// written, so the degradation a reader needed to see becomes an ABSENT report
+/// rather than a stated caveat — the same invisibility #6811 exists to end, one
+/// level up. So tga always asks for the degraded report and lets the artifact
+/// carry the fact: trusty-review writes `trusty-analyze lane DID NOT RUN — 0 of
+/// N application(s) assessed` at the head of its Gaps & Caveats, tga echoes the
+/// renderer's stderr verbatim (DOC-67 §6 step 4), and the bundle index states
+/// the coverage roll-up. An operator who wants the run to stop instead runs
+/// `trusty-review report` by hand without the flag — the recovery command tga
+/// already prints.
+///
+/// What: the fixed four arguments, plus `--allow-degraded` when `version` is
+/// known to be at or above [`MIN_REVIEW_VERSION_ALLOW_DEGRADED`]. An UNKNOWN
+/// version omits the flag: a renderer that would not answer `--version` is more
+/// likely to be an old one than a new one, and omitting it costs a degraded
+/// render, while passing it to a copy that rejects it costs every render.
+/// Test: `super::tests::{invocation_requests_inference,
+/// an_old_renderer_is_not_offered_allow_degraded,
+/// an_unreadable_renderer_version_omits_allow_degraded}`.
+pub(super) fn report_args_for(
+    manifest: &Path,
+    out_dir: &Path,
+    version: Option<(u64, u64, u64)>,
+) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec![
         "report".into(),
         "--manifest".into(),
         manifest.as_os_str().to_owned(),
@@ -246,7 +285,31 @@ pub(super) fn report_args(manifest: &Path, out_dir: &Path) -> Vec<std::ffi::OsSt
         "--synthesize".into(),
         "--out".into(),
         out_dir.as_os_str().to_owned(),
-    ]
+    ];
+    if version.is_some_and(|v| v >= MIN_REVIEW_VERSION_ALLOW_DEGRADED) {
+        args.push("--allow-degraded".into());
+    }
+    args
+}
+
+/// The version `<binary> --version` reports, or `None` when it will not say.
+///
+/// Why: [`report_args_for`] needs it, and the check that runs before the sweep
+/// ([`require_review_supports_required_inference`]) does not hand its answer
+/// down — the two are minutes apart and the operator could have swapped the
+/// binary between them. One short-lived child per render, which is the same
+/// trade `trusty_audit::index_report::tool_version` makes.
+/// What: spawns the binary once and parses its first line with
+/// [`parse_review_version`]. Anything that fails is `None`, which omits the
+/// flag rather than guessing.
+/// Test: exercised through [`run_review_report`]; the parse and the decision are
+/// covered directly by `super::tests::an_old_renderer_is_not_offered_allow_degraded`.
+fn installed_review_version(binary: &str) -> Option<(u64, u64, u64)> {
+    let output = Command::new(binary).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_review_version(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// Environment variable carrying the credential the renderer's inference needs.

@@ -134,6 +134,18 @@ pub struct ReportArgs {
     /// Precedence: this flag > manifest `[report].analyze_timeout_secs` > 180.
     #[arg(long, value_name = "SECS")]
     pub analyze_timeout_secs: Option<u64>,
+
+    /// Write the report even when the `--analyze` lane assessed NOTHING (#6811).
+    ///
+    /// Without it, a run where every repository's analyze fetch failed exits
+    /// non-zero and writes no report: its finding counts, complexity figures and
+    /// health factors would all be unassessed, and a reader cannot tell that
+    /// from clean. The threshold is a TOTAL collapse only — a partly degraded
+    /// lane (some repositories assessed, some not) is a warning at every
+    /// setting and never fails the run. Either way the report states the
+    /// coverage as `M of N application(s) assessed`.
+    #[arg(long)]
+    pub allow_degraded: bool,
 }
 
 impl ReportArgs {
@@ -159,6 +171,7 @@ impl ReportArgs {
         req.no_mermaid = self.no_mermaid;
         req.analyze = self.analyze;
         req.analyze_timeout_secs = self.analyze_timeout_secs;
+        req.allow_degraded = self.allow_degraded;
         req
     }
 }

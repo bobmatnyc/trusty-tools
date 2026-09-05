@@ -60,6 +60,7 @@ use crate::workdir::WorkDir;
 
 pub mod churn;
 pub mod conflict;
+pub mod coverage_rollup;
 pub mod cve;
 pub mod daemons;
 pub mod ecosystem;
@@ -80,6 +81,8 @@ pub mod search_rpc;
 pub mod secrets;
 pub mod topology;
 
+#[cfg(test)]
+mod coverage_rollup_tests;
 #[cfg(test)]
 mod grounding_tests;
 
