@@ -18,6 +18,7 @@
 //! a_partial_analyze_degradation_is_a_warning_not_a_failure,
 //! an_unattempted_analyze_lane_is_not_a_failure,
 //! a_client_that_will_not_build_counts_every_eligible_repository,
+//! a_dead_analyze_client_reads_as_a_dead_lane_downstream,
 //! the_request_analyze_timeout_beats_the_manifest}`.
 
 use anyhow::Result;
@@ -89,12 +90,9 @@ pub(super) async fn enrich_from_analyze(
             );
             // #5239: the client never existed, so no repo was assessed — that is
             // a whole-report gap, not a per-repo one.
-            model.gaps.push(
-                "trusty-analyze data unavailable — the analysis client could not be built, so no \
-                 application in this report was assessed against trusty-analyze. Findings, \
-                 complexity, and health factors are not assessed, not clean."
-                    .to_string(),
-            );
+            // #6784: it leads with the shared headline, so the bundle index
+            // counts it as the dead lane it is.
+            model.gaps.push(client_build_failure_gap());
             // #6811: no client means no repository was assessed, which is the
             // same total collapse the walk reports — counted over the
             // repositories the walk WOULD have attempted, so the verdict below
@@ -102,6 +100,29 @@ pub(super) async fn enrich_from_analyze(
             crate::report::AnalyzeLaneCoverage::never_ran(analyze_eligible_repositories(model))
         }
     }
+}
+
+/// The Gaps & Caveats line a client that would not build earns (#6784).
+///
+/// Why: this is the second of `trusty-review`'s two total-collapse paths, and
+/// it used to lead with "trusty-analyze data unavailable" while the other led
+/// with the phrase `trusty-audit`'s bundle index matches on. Under
+/// `--allow-degraded` a client-build collapse therefore shipped a report the
+/// index counted as a lane that RAN. Both paths now lead with the same shared
+/// headline, and the detail that distinguishes them follows it.
+/// It is a named function rather than an inline `format!` so the regression test
+/// can assert on the string this path actually produces rather than on a copy of
+/// it.
+/// What: [`trusty_common::review_gap_contract::ANALYZE_LANE_DEAD_HEADLINE`],
+/// then what this particular collapse was.
+/// Test: `run_tests::a_dead_analyze_client_reads_as_a_dead_lane_downstream`.
+pub(super) fn client_build_failure_gap() -> String {
+    format!(
+        "{headline} — the analysis client could not be built, so no application in this report \
+         was assessed against trusty-analyze. Findings, complexity, and health factors are not \
+         assessed, not clean (issue #6784).",
+        headline = trusty_common::review_gap_contract::ANALYZE_LANE_DEAD_HEADLINE,
+    )
 }
 
 /// Repositories the analyze walk would attempt, counted without walking (#6811).

@@ -431,6 +431,49 @@ fn a_client_that_will_not_build_counts_every_eligible_repository() {
     );
 }
 
+/// #6784 regression, cross-crate. `trusty-audit`'s bundle index decides whether
+/// a report's analyze lane ran by matching one phrase against the report JSON's
+/// `gaps` list. `trusty-review` has TWO total-collapse paths, and this one — the
+/// client that would not build — used to lead with "trusty-analyze data
+/// unavailable", so under `--allow-degraded` the index counted it as a lane that
+/// RAN and undercounted `Rollup::analyze_lanes_dead()`.
+///
+/// The gap string here is produced by the real code path, and it is serialized
+/// through the same `ReportModel.gaps` field the reader reads before the shared
+/// predicate — `trusty_common::review_gap_contract::analyze_lane_is_dead`, the
+/// one `trusty_audit::grounding::coverage_rollup::read_coverage` calls — is
+/// applied to it. The two crates cannot import each other (DOC-67 §5 keeps the
+/// seam at a file), so the shared predicate is what binds this half to the
+/// `trusty-audit` half, `coverage_rollup_tests::a_gap_leading_with_the_shared_
+/// headline_is_a_dead_lane`.
+///
+/// Against `origin/main` at 0239a5388 the equivalent assertion fails: feeding
+/// that revision's client-build gap string to `read_coverage` yields
+/// `analyze_lane_dead: false`.
+#[test]
+fn a_dead_analyze_client_reads_as_a_dead_lane_downstream() {
+    let gap = crate::report::run_analyze::client_build_failure_gap();
+
+    // The reader sees this string only after it has been through the report's
+    // JSON twin, so the round trip is part of what is asserted.
+    let json = serde_json::json!({ "gaps": [gap] });
+    let gaps: Vec<&str> = json["gaps"]
+        .as_array()
+        .expect("gaps array")
+        .iter()
+        .filter_map(|g| g.as_str())
+        .collect();
+
+    assert!(
+        trusty_common::review_gap_contract::analyze_lane_is_dead(gaps),
+        "a client-build collapse must read downstream as a dead lane: {gap}"
+    );
+    assert!(
+        gap.contains("the analysis client could not be built"),
+        "the headline does not displace the detail that names WHICH collapse: {gap}"
+    );
+}
+
 // ── #6784: the investigation budget scales with the repository ───────────────
 
 /// #6784. A cap no tier named is the DEFAULT, and the default is what
