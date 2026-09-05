@@ -257,6 +257,21 @@ pub fn resolve_palace_registry_dir(data_dir: PathBuf) -> PathBuf {
 #[derive(Clone)]
 pub struct AppState {
     pub version: String,
+    /// What machine this daemon is on, and the memory budget that follows
+    /// (#6820).
+    ///
+    /// Why: trusty-memory had NO tier detection at all — `max_open_palaces`
+    /// stayed at the fixed `DEFAULT_MAX_OPEN_PALACES` (64) whether the host had
+    /// 12 GB or 128 GB, so a sub-minimum machine held the same 64 resident
+    /// palaces as a workstation. #6820 detects and exposes the tier; #6823 is
+    /// what reads this field to size that cap. Deliberately NOT retuning any cap
+    /// here — the issue is scoped to detect + expose + document.
+    /// What: `trusty_common::machine_tier::MachineBudget` — the cgroup-clamped
+    /// RAM reading, the tier band, and the two proportional soft limits, from
+    /// the same shared module trusty-search resolves its own caps through.
+    /// Resolved once per `AppState`, in [`AppState::new`].
+    /// Test: `machine_budget_is_detected_and_self_consistent` in `lib_tests`.
+    pub machine: trusty_common::machine_tier::MachineBudget,
     pub registry: Arc<PalaceRegistry>,
     pub data_root: PathBuf,
     /// Optional default palace applied to MCP tool calls when the caller
@@ -665,6 +680,9 @@ impl AppState {
         tools::spawn_bm25_index_worker(bm25_index_rx, None, Arc::clone(&bm25_dirty));
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
+            // #6820: one RAM read per AppState, through the shared module, so
+            // this daemon and trusty-search cannot disagree about the host.
+            machine: trusty_common::machine_tier::MachineBudget::detect(),
             // Idle-to-disk: honour TRUSTY_MEMORY_MAX_OPEN_PALACES (default 64)
             // so operators can bound resident-palace RAM without a rebuild.
             registry: Arc::new(PalaceRegistry::from_env()),

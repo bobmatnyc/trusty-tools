@@ -21,9 +21,25 @@ as consolidations land. Reference: common-entry-point principle above.
 | Daemon PID discovery | FRAGMENTED | 3 copy-pasted find_daemon_pids() | backlog |
 | tmux (trusty-mpm) | SCATTERED→fixing | 19 sites | in flight: #2398/PR #2399 |
 | LLM inference | FRAGMENTED→fixing | 6 bespoke clients | epic #2400 |
+| Total-RAM detection for sizing | CONSOLIDATED | `trusty_common::machine_tier` (feature `machine-tier`); one production reader of `hw.memsize` / `/proc/meminfo` / the cgroup files, consumed by trusty-search and trusty-memory | done (#6820) — see below |
 
 First enforcement instances: inference-adapter epic #2400, tmux common entry
 point #2398/PR #2399.
+
+## Total-RAM detection — what "consolidated" covers (#6820)
+
+`git grep -n 'sysctl\|total_memory\|hw.memsize\|MemTotal'` over `crates/**/*.rs`
+returns exactly three production readers of memory, and they answer three
+different questions. Only the first is machine-tier sizing:
+
+| Site | Question | Verdict |
+|---|---|---|
+| `trusty_common::machine_tier::detect` | How much RAM may this process size itself for, at startup? | The single implementation. Reads `hw.memsize` / `/proc/meminfo` and clamps to the enclosing cgroup ceiling (#3657). trusty-search and trusty-memory both route through it; `trusty-search`'s `core::memory_policy` re-exports it so its own call sites are unchanged. |
+| `trusty_common::host_metrics` (`sysinfo::total_memory`) | What is the host doing RIGHT NOW? | Not a duplicate. Live telemetry for the Foundry dashboard — total/used/available/swap with a pressure signal, sampled repeatedly. `sysinfo` applies NO cgroup clamp, so inside a capped container it reports the host's RAM; using it for sizing would reintroduce the #3657 bug. Keep separate. |
+| `trusty-mpm`'s `doctor_pty_headroom` (`sysctl kern.tty.ptmx_max`) | How many PTYs may this machine allocate? | Not memory at all — matches the grep only on the word `sysctl`. |
+
+No follow-up is owed. A fourth reader that needs a sizing number takes the
+`machine-tier` feature rather than adding a fourth spelling.
 
 ## gh CLI — what "consolidated" covers (#5475, 2026-08-13)
 

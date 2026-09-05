@@ -64,7 +64,12 @@ name = "trusty-common"
 # 0.47.3 (#6773): patch — additive only. `ProcessCpuSampler` gained
 # `rss_bytes`, `sys_metrics` gained `physical_footprint_bytes`, and the sampler
 # now refreshes process memory alongside CPU. No existing signature changed.
-version = "0.47.3"
+# 0.48.0 (#6820): minor — the new public `machine_tier` module (behind the new
+# `machine-tier` feature) is additive, and under Cargo's 0.x rule a MINOR bump is
+# what a published crate owes a new public module. Same reasoning as 0.44.0's
+# `uds::server`. Nothing existing was removed or changed; the module's contents
+# are moved verbatim out of trusty-search, which never published them.
+version = "0.48.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -123,6 +128,10 @@ lanes = [
         # collector's `scrub_secrets` path is exercised by the lane that already
         # owns the crate's filesystem-facing modules.
         "log-drain",
+        # #6820: machine-tier joins the core lane, beside host-metrics. Both read
+        # the machine; keeping them in one lane is what makes the "sizing budget
+        # vs. live telemetry" split visible to whoever edits either.
+        "machine-tier",
         "update-check",
         "bug-capture",
         "session-naming",
@@ -832,6 +841,11 @@ console-metrics = ["stdio-mcp-client"]
 # consumer's build. Adds no new crate to the lockfile — only two extra sysinfo
 # features, and only for a consumer that opts in.
 host-metrics = ["sysinfo/disk", "sysinfo/network"]
+# #6820: machine-tier detection + proportional memory budget, hoisted out of
+# trusty-search so trusty-memory reads the same numbers. Zero new dependencies —
+# the RAM read is `sysctl`/`/proc` + the cgroup files, deliberately NOT sysinfo
+# (which applies no cgroup clamp; see the module doc).
+machine-tier = []
 
 # Enables the `log_drain` module (#6533, epic phase 1+2): the `LogDestination`
 # trait, its `s3://` and `file://` adapters, the `DestinationUri` parser, the

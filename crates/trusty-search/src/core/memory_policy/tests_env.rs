@@ -9,14 +9,15 @@
 //! detection.
 //! Test: run with `cargo test -p trusty-search`.
 
-use super::compute::{
+use super::coreml::{
     resolve_coreml_batch_size, resolve_coreml_tripwire_mb, COREML_BATCH_SIZE_MAX,
     DEFAULT_COREML_BATCH_SIZE, DEFAULT_COREML_TRIPWIRE_MB,
 };
-use super::detect::detect_total_ram_mb;
 use super::policy::MemoryPolicy;
-use super::tier::MemoryTier;
 use std::sync::Mutex;
+// #6820: re-exported from trusty-common through `super`, so these tests exercise
+// the same path every production call site takes.
+use super::{detect_total_ram_mb, MemoryTier};
 
 /// Serialize env-mutating tests within this module. Cargo runs tests on
 /// multiple threads by default and `std::env::set_var` is process-global,

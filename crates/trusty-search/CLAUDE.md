@@ -939,17 +939,24 @@ Silicon hosts are completely unaffected (unchanged ort default).
 
 ## Memory Tuning (Environment Variables)
 
-> **System requirement: 16 GB RAM minimum.** `trusty-search start` performs
-> a hard RAM check at startup (`src/commands/start.rs`) and exits with an
-> error on hosts with less than 16 GB. Indexing large codebases on
-> under-spec machines is not supported. The legacy `Tiny` (<8 GB) and
-> `Small` (8–15 GB) memory tiers have been removed — `Medium` (16–31 GB)
-> is now the baseline.
+> **Supported hardware: 24 GB target, 16 GB minimum, documented degrade
+> below (#6820, epic #6802).** 24 GB is the size the suite is tuned for; it
+> sits inside the `Medium` band and needs no boundary of its own. 16 GB is
+> the minimum supported configuration. **Below 16 GB the daemon no longer
+> exits** — it warns once at startup and serves on the reduced `Degraded`
+> caps (see the tier table below). It used to `bail!` here, so a 12 GB
+> laptop got no search at all rather than a smaller one. Indexing large
+> codebases on a `Degraded` host is slower and evicts resident state more
+> aggressively; it is not a supported configuration, only a working one.
+> `TRUSTY_SKIP_RAM_CHECK=1` silences the advisory.
 
 The daemon caps several in-memory structures to keep RAM bounded on
-long-running deployments (issue #75). **As of the memory-tier autosizing
-change, defaults are computed from detected system RAM at daemon startup**
-(`src/core/memory_policy.rs`). Env vars always override the auto-tuned
+long-running deployments (issue #75). **Defaults are computed from detected
+system RAM at daemon startup.** Since #6820 the RAM read, the tier bands, and
+the proportional formulas live in `trusty_common::machine_tier` — shared with
+trusty-memory so the two daemons cannot disagree about the host — and
+`src/core/memory_policy/` layers this daemon's own caps and env overrides on
+top of the resulting `MachineBudget`. Env vars always override the auto-tuned
 values; precedence is **shell env > `daemon.env` > tier default**.
 
 ### Auto-tuned defaults (per tier)
@@ -959,7 +966,7 @@ values; precedence is **shell env > `daemon.env` > tier default**.
 > values per tier. Set `TRUSTY_MEMORY_LIMIT_MB` to override.
 
 `MemoryPolicy::detect()` reads `hw.memsize` (macOS) or `/proc/meminfo`
-(Linux) at daemon startup and selects one of five tiers. **Issue #3657:** on
+(Linux) at daemon startup and selects one of four tiers. **Issue #3657:** on
 Linux, if this process is confined to a smaller ceiling by a cgroup
 (systemd `MemoryMax=`/`MemoryHigh=`, Docker `--memory`, Kubernetes resource
 limits) — `/proc/meminfo` reports the HOST's total RAM, not the cgroup's —
@@ -975,17 +982,40 @@ more physical RAM than the cgroup allows this one service could auto-tune
 defeating the issue #2846 enforcement ticker (its high-water check would
 never cross before the kernel's cgroup OOM-killer fires).
 
-| Tier | Total RAM | `MEMORY_LIMIT_MB` | `MAX_CHUNKS` | `EMBEDDING_CACHE` | `MAX_BATCH_SIZE` | `BM25_CORPUS_CAP` | `MAX_KG_NODES` |
-|------|-----------|-------------------|--------------|-------------------|------------------|-------------------|----------------|
-| Tiny | < 8 GB | ~2 048 (25% of RAM, min 1 024) | 50 000 | 500 | 64 | 20 000 | 30 000 |
-| Small | 8–15 GB | ~2 048–3 840 (25% of RAM) | 100 000 | 1 000 | 128 | 50 000 | 75 000 |
-| Medium | 16–31 GB | ~4 096–8 192 (25% of RAM) | 200 000 | 5 000 | 256 | 100 000 | 150 000 |
-| Large | 32–63 GB | ~8 192–16 384 (25% of RAM) | 400 000 | 10 000 | 512 | 200 000 | 300 000 |
-| XLarge | ≥ 64 GB | 65 536 (capped at 64 GiB) | 800 000 | 20 000 | 512 | 400 000 | 500 000 |
+Four tiers. Only `EMBEDDING_CACHE`, `BM25_CORPUS_CAP`, and `MAX_KG_NODES` are
+keyed off the tier itself; `MEMORY_LIMIT_MB`, `MAX_CHUNKS`, and
+`MAX_BATCH_SIZE` scale continuously with actual RAM, so the representative
+host in each row is one point on a line, not a bucket.
+
+| Tier | Total RAM | `EMBEDDING_CACHE` | `BM25_CORPUS_CAP` | `MAX_KG_NODES` | batch-size hard cap |
+|------|-----------|-------------------|-------------------|----------------|---------------------|
+| **Degraded** (#6820) | < 16 GB | 500 | 50 000 | 75 000 | 64 |
+| Medium | 16–31 GB | 1 000 | 100 000 | 150 000 | 128 |
+| Large | 32–63 GB | 10 000 | 200 000 | 300 000 | 256 |
+| XLarge | ≥ 64 GB | 20 000 | 400 000 | 500 000 | 512 |
+
+The continuous caps, at representative host sizes. `MEMORY_LIMIT_MB` is
+`clamp(RAM × 25%, 1 GiB, 64 GiB)`; `INDEX_MEMORY_LIMIT_MB` is
+`clamp(RAM × 75%, 2 GiB, 96 GiB)`; `MAX_CHUNKS` is
+`clamp(MEMORY_LIMIT_MB × 50, 50 000, 800 000)`; `MAX_BATCH_SIZE` is
+`clamp(INDEX_MEMORY_LIMIT_MB × 0.75 / 32, 32, 512)`.
+
+| Host RAM | Tier | `MEMORY_LIMIT_MB` | `INDEX_MEMORY_LIMIT_MB` | `MAX_CHUNKS` | `MAX_BATCH_SIZE` |
+|----------|------|-------------------|-------------------------|--------------|------------------|
+| 12 GB | Degraded | 3 072 | 9 216 | 153 600 | 216 |
+| 16 GB (minimum) | Medium | 4 096 | 12 288 | 204 800 | 288 |
+| **24 GB (supported target)** | Medium | **6 144** | **18 432** | 307 200 | 432 |
+| 32 GB | Large | 8 192 | 24 576 | 409 600 | 512 (ceiling) |
+| 64 GB | XLarge | 16 384 | 49 152 | 800 000 (ceiling) | 512 (ceiling) |
+| 128 GB | XLarge | 32 768 | 98 304 (ceiling) | 800 000 (ceiling) | 512 (ceiling) |
+
+The batch-size hard cap only constrains an explicit `TRUSTY_MAX_BATCH_SIZE`
+override — the auto-derived defaults above sit below it, and
+`TRUSTY_MAX_BATCH_SIZE_EXPLICIT=1` bypasses it.
 
 The resolved policy is logged at daemon startup so operators can confirm
 which tier was selected. If RAM detection fails on an unsupported OS, the
-daemon falls back to the Tiny tier (8 GB assumption) with a `tracing::warn!`.
+daemon assumes 8 GB — the `Degraded` tier — with a `tracing::warn!`.
 
 ### Per-variable reference
 

@@ -9,13 +9,15 @@
 //! `test_batch_size_env_override_clamped_by_hard_cap`,
 //! `test_batch_size_explicit_flag_bypasses_clamp`.
 
-use super::compute::{
-    compute_index_memory_limit_mb, compute_max_batch_size, compute_max_chunks,
-    compute_memory_limit_mb, resolve_coreml_batch_size,
+use super::coreml::resolve_coreml_batch_size;
+use super::tier::tier_defaults;
+// #6820: the RAM read, the tier bands, and the proportional formulas moved to
+// trusty-common so trusty-memory reads the same numbers.
+use trusty_common::machine_tier::{
+    compute_max_batch_size, compute_max_chunks, MachineBudget, MemoryTier,
+    INDEX_MEMORY_LIMIT_CEIL_MB, INDEX_MEMORY_LIMIT_FLOOR_MB, MEMORY_LIMIT_CEIL_MB,
+    MEMORY_LIMIT_FLOOR_MB,
 };
-use super::constants::*;
-use super::detect::detect_total_ram_mb;
-use super::tier::MemoryTier;
 
 /// Resolved memory caps for this daemon process. Constructed by
 /// [`MemoryPolicy::detect`].
@@ -25,7 +27,7 @@ pub struct MemoryPolicy {
     pub tier: MemoryTier,
     pub memory_limit_mb: usize,
     /// Separate soft cap applied *only* while the indexing pipeline is running
-    /// (see [`compute_index_memory_limit_mb`] and `core::memguard`).
+    /// (see `trusty_common::machine_tier::compute_index_memory_limit_mb` and `core::memguard`).
     /// Always at least as large as `memory_limit_mb`. Lets the reindex
     /// orchestrator absorb CoreML unified-memory spikes without OOM-aborting
     /// under the global daemon ceiling.
@@ -56,27 +58,40 @@ impl MemoryPolicy {
     /// Test: see `test_tier_selection`, `test_env_override`, and
     /// `test_ram_detection_returns_nonzero`.
     pub fn detect() -> Self {
-        let total_ram_mb = detect_total_ram_mb().unwrap_or_else(|| {
-            tracing::warn!(
-                "memory_policy: could not detect total system RAM — \
-                 falling back to {FALLBACK_RAM_MB} MB (Medium tier defaults)"
-            );
-            FALLBACK_RAM_MB
-        });
-        Self::from_total_ram_mb(total_ram_mb)
+        // #6820: MachineBudget::detect owns the RAM read AND the
+        // detection-failure fallback, so both daemons degrade identically.
+        Self::from_budget(MachineBudget::detect())
     }
 
     /// Like [`Self::detect`] but with a caller-supplied RAM value. Useful for
     /// tests and for callers that have already measured RAM.
     pub fn from_total_ram_mb(total_ram_mb: u64) -> Self {
-        let tier = MemoryTier::from_total_ram_mb(total_ram_mb);
-        // Compute the proportional memory limit (25% of system RAM, clamped)
-        // BEFORE selecting tier-keyed defaults so max_chunks / max_batch_size
-        // scale with the actual host RAM rather than a fixed tier bucket.
+        Self::from_budget(MachineBudget::from_total_ram_mb(total_ram_mb))
+    }
+
+    /// Resolve the policy from an already-computed shared machine budget.
+    ///
+    /// Why (#6820): the tier and the two proportional limits are now
+    /// `trusty_common::machine_tier`'s answer, shared with trusty-memory. This
+    /// constructor takes that answer whole rather than re-deriving it, so the
+    /// two daemons cannot disagree about the host they share.
+    /// What: layers trusty-search's own caps and every `TRUSTY_*` env override
+    /// on top of `budget`, then stamps the result back into the process env.
+    /// Test: `super::tests_basic::test_tier_defaults_table`,
+    /// `super::tests_env::test_env_override`.
+    pub fn from_budget(budget: MachineBudget) -> Self {
+        let MachineBudget {
+            total_ram_mb,
+            tier,
+            memory_limit_mb: proportional_limit_mb,
+            index_memory_limit_mb: proportional_index_limit_mb,
+            ..
+        } = budget;
+        // The proportional limits are computed from actual host RAM (25% / 75%,
+        // clamped) BEFORE the tier-keyed defaults, so max_chunks and
+        // max_batch_size scale with the host rather than a fixed tier bucket.
         // See issue #120 (104 GB reindex on a 128 GB host).
-        let proportional_limit_mb = compute_memory_limit_mb(total_ram_mb);
-        let proportional_index_limit_mb = compute_index_memory_limit_mb(total_ram_mb);
-        let d = tier.defaults(proportional_limit_mb, proportional_index_limit_mb);
+        let d = tier_defaults(tier, proportional_limit_mb, proportional_index_limit_mb);
 
         // Resolve memory limit first so the derived max_batch_size default
         // tracks any TRUSTY_MEMORY_LIMIT_MB override. TRUSTY_MAX_BATCH_SIZE
@@ -210,8 +225,9 @@ impl MemoryPolicy {
     /// `tracing::info!` at daemon startup.
     pub fn log_summary(&self) {
         let gb = self.total_ram_mb / 1024;
-        let proportional = compute_memory_limit_mb(self.total_ram_mb);
-        let proportional_index = compute_index_memory_limit_mb(self.total_ram_mb);
+        let proportional = trusty_common::machine_tier::compute_memory_limit_mb(self.total_ram_mb);
+        let proportional_index =
+            trusty_common::machine_tier::compute_index_memory_limit_mb(self.total_ram_mb);
         tracing::info!(
             "trusty-search: detected {} GB RAM → tier={} \
              (daemon memory_limit_mb={}, 25% of RAM clamped to [{}, {}]; \
@@ -258,8 +274,3 @@ pub(super) fn env_override_usize(name: &str, default: usize) -> usize {
         Err(_) => default,
     }
 }
-
-// Suppress unused-import lint when DEFAULT_COREML_TRIPWIRE_MB is referenced
-// only in doc comments from this module.
-#[allow(unused_imports)]
-use super::compute::DEFAULT_COREML_TRIPWIRE_MB as _;
