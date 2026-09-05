@@ -330,6 +330,22 @@ pub mod supervision;
 /// Test: `cargo test -p trusty-common --features unconditional-only spawn_retry`.
 pub mod spawn_retry;
 
+/// Shared event types for the control bus (issue #6846, DOC-73).
+///
+/// Why: trusty-console hosts the one event bus (owner ruling 2026-09-05), and
+/// trusty-agents, trusty-mpm and trusty-code are all producers pushing to it.
+/// Reaching the envelope used to mean depending on `trusty-agents-common` — a
+/// sibling producer, not a shared library. These types live here so all four
+/// crates compile against one definition.
+/// What: [`control_bus::HarnessEvent`] and [`control_bus::HarnessPayload`] (the
+/// envelope), [`control_bus::LifecycleEvent`] and [`control_bus::HarnessSource`]
+/// (the taxonomy), and [`control_bus::Filter`]. Types only — no channel and no
+/// global state, which `control_bus::tests::control_bus_declares_no_transport`
+/// enforces against the module's own sources. Ungated: `serde`, `serde_json`
+/// and `chrono` are already unconditional here, so it adds no dependency.
+/// Test: `cargo test -p trusty-common --features unconditional-only control_bus`.
+pub mod control_bus;
+
 #[cfg(feature = "axum-server")]
 pub mod server;
 

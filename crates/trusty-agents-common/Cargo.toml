@@ -11,7 +11,18 @@ name = "trusty-agents-common"
 # PR #6764: patch bump. 0.6.3 is live on crates.io and this PR edits
 # src/assets/agents/*.md (prose only — no item signature changed), which
 # scripts/check-pr-version-bump.sh requires be bumped in the same PR (#4421).
-version = "0.6.4"
+#
+# 0.7.0 (#6846): minor — the breaking position for a 0.y.z crate. This PR moves
+# the `events` envelope and lifecycle/filter TYPES into
+# `trusty_common::control_bus` and re-exports them from the same `events` path.
+# Source-level that is compatible — `use trusty_agents_common::events::
+# HarnessEvent` still resolves, to the same type — but `cargo-semver-checks`
+# reports `enum_missing` / `struct_missing` for all five, because a cross-crate
+# re-export leaves no item definition in this crate's rustdoc. The crate also
+# gains a required `trusty-common ^0.49` dependency, which does change what a
+# published consumer resolves. The gate is never advisory (#5050), so the bump
+# goes to the position the gate names rather than being argued down.
+version = "0.7.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -36,6 +47,12 @@ serde_yaml = { workspace = true }
 # Wave 1 (issue #862): session_registry.rs needs anyhow + chrono.
 anyhow = { workspace = true }
 chrono = { workspace = true }
+# #6846: the `events` envelope and lifecycle/filter TYPES moved to
+# `trusty_common::control_bus`, so trusty-console (the one event bus, owner
+# ruling 2026-09-05) can consume them without depending on this producer.
+# `events` re-exports them; the in-process channel and stderr relay stay here
+# until slice 9 (#6854).
+trusty-common = { workspace = true }
 # adapters/patterns.rs uses regex for pattern compilation.
 regex = { workspace = true }
 # Wave 3 P0 (issue #875): events::bus uses tokio::sync::broadcast for the

@@ -1,34 +1,32 @@
-//! Process-global event bus, the `HarnessEvent` envelope, and the
-//! lagged-receiver helper for the unified harness event stream (ADR-0005).
+//! Process-global event bus and the lagged-receiver helper for the unified
+//! harness event stream (ADR-0005).
 //!
 //! Why: Threading a `broadcast::Sender<HarnessEvent>` through every code path
 //!      that might emit telemetry (workflow engine, agent runners, hooks,
 //!      ctrl) would touch hundreds of function signatures. A `OnceLock` mirrors
 //!      how `tracing` solves the same problem — emit-from-anywhere with zero
-//!      overhead when no one is listening. The envelope wraps the per-domain
-//!      payload with cross-cutting metadata (source, session, monotonic seq,
-//!      timestamp) so any subscriber can order, correlate, and route events
-//!      without inspecting the payload.
-//! What: Defines `HarnessPayload` (the domain-tagged inner union),
-//!       `HarnessEvent` (the envelope), the process-global `EVENT_BUS`, a
-//!       monotonic `SEQ` counter, `bus`/`subscribe`/`publish`/`emit` helpers,
-//!       the `__OMPM_EVENT__` stderr relay prefix, and a `Lag` notice with
-//!       `recv_with_lag` so a lagged subscriber is told how many events it
-//!       skipped and can resume instead of tearing down its stream. A closed
-//!       channel ends that stream with the terminal `BusClosed` error.
-//! Test: `super::tests` covers serde round-trips of each payload arm, seq
-//!       monotonicity, lagged handling against a constructible test bus, and
-//!       the emit-line formatting helper.
+//!      overhead when no one is listening.
+//! What: Defines the process-global `EVENT_BUS`, a monotonic `SEQ` counter,
+//!       `bus`/`subscribe`/`publish`/`emit` helpers, the `__OMPM_EVENT__`
+//!       stderr relay prefix, and a `Lag` notice with `recv_with_lag` so a
+//!       lagged subscriber is told how many events it skipped and can resume
+//!       instead of tearing down its stream. A closed channel ends that stream
+//!       with the terminal `BusClosed` error. The envelope this transports —
+//!       `HarnessEvent`, `HarnessPayload`, and the lifecycle taxonomy — lives
+//!       in `trusty_common::control_bus`.
+//! Test: `super::tests` covers seq monotonicity, lagged handling against a
+//!       constructible test bus, and the emit-line formatting helper.
+
+// #6846: the envelope and lifecycle/filter TYPES moved to
+// `trusty_common::control_bus`; this file keeps the transport that moves them.
+// The in-process channel itself is removed in slice 9 (#6854).
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use chrono::Utc;
 use tokio::sync::broadcast;
-
-use super::lifecycle::{HarnessSource, LifecycleEvent};
+use trusty_common::control_bus::{HarnessEvent, HarnessPayload, HarnessSource};
 
 /// Stderr line prefix used to relay events from a child process to its parent.
 ///
@@ -62,75 +60,6 @@ pub const EVENT_LINE_PREFIX: &str = "__OMPM_EVENT__ ";
 /// What: Used both for the process-global bus and as the default for the
 ///       test-only constructible bus.
 pub const CHANNEL_CAPACITY: usize = 1024;
-
-/// Domain-tagged inner union carried inside a `HarnessEvent`.
-///
-/// Why: The "adapt, don't fold" decision (ADR-0005): rather than flattening
-///      lifecycle, hook, and keepalive events into one giant enum, we tag by
-///      *domain* so each harness can grow its own payload taxonomy
-///      independently. Hooks in particular are open-ended (arbitrary
-///      tool/event names + JSON data), so they get an untyped `Value` arm
-///      instead of being modelled variant-by-variant.
-/// What: `serde(tag = "domain", content = "event")` produces
-///       `{"domain":"lifecycle","event":{...}}`, `{"domain":"hook","event":
-///       {"kind":...,"data":...}}`, or `{"domain":"ping"}`. `Ping` is the
-///       transport keepalive (promoted out of the lifecycle enum).
-/// Test: `super::tests::payload_*_round_trips` assert the tag shape for each
-///       arm.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "domain", content = "event", rename_all = "snake_case")]
-pub enum HarnessPayload {
-    /// A structured PM-lifecycle event (session/agent/tool/phase/LLM/...).
-    Lifecycle(LifecycleEvent),
-    /// An open-ended hook event: `kind` names the hook, `data` is its payload.
-    Hook { kind: String, data: Value },
-    /// Transport keepalive so long-lived SSE connections don't time out.
-    Ping,
-}
-
-impl HarnessPayload {
-    /// The domain string for this payload (`"lifecycle"`, `"hook"`, `"ping"`).
-    ///
-    /// Why: `Filter` matches on the domain without serialising the whole
-    ///      payload; keeping the mapping here is the single source of truth.
-    /// What: Returns the same string serde uses for the `domain` tag.
-    /// Test: `super::tests::payload_domain_matches_serde_tag`.
-    pub fn domain(&self) -> &'static str {
-        match self {
-            HarnessPayload::Lifecycle(_) => "lifecycle",
-            HarnessPayload::Hook { .. } => "hook",
-            HarnessPayload::Ping => "ping",
-        }
-    }
-}
-
-/// Cross-harness event envelope: metadata + domain-tagged payload.
-///
-/// Why: Subscribers need to order (`seq`), time-stamp (`at`), attribute
-///      (`source`), and correlate (`session`) events uniformly, regardless of
-///      which harness produced them or which domain the payload belongs to.
-///      Carrying that metadata in the envelope keeps the payload taxonomies
-///      free of repeated bookkeeping fields.
-/// What: `source` is the originating harness; `session` is the optional task
-///       correlation key (omitted from JSON when `None`); `seq` is a
-///       process-monotonic counter; `at` is the emit-time UTC timestamp;
-///       `payload` is the domain-tagged union. All fields derive serde.
-/// Test: `super::tests::harness_event_round_trips` and the per-arm payload
-///       tests build full envelopes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HarnessEvent {
-    /// Which harness produced this event.
-    pub source: HarnessSource,
-    /// Optional task/session correlation key. Omitted from JSON when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<String>,
-    /// Process-monotonic sequence number assigned at publish time.
-    pub seq: u64,
-    /// Emit-time UTC timestamp.
-    pub at: DateTime<Utc>,
-    /// Domain-tagged payload.
-    pub payload: HarnessPayload,
-}
 
 /// Notice that a subscriber fell behind and skipped `skipped` events.
 ///
