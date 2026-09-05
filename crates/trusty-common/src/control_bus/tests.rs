@@ -248,6 +248,38 @@ const FORBIDDEN_SUBSTRINGS: &[&str] = &[
     concat!("once_", "cell"),
 ];
 
+/// Strips a leading visibility qualifier (`pub`, `pub(crate)`, `pub(super)`,
+/// `pub(in ...)`) and the whitespace after it, so a static-declaration check
+/// can anchor on `static` regardless of which visibility form precedes it.
+///
+/// Why: The transport scan below needs `static` at the true start of an item
+///      declaration; without stripping visibility first, `pub(crate) static`
+///      and `pub(in crate::foo) static` slipped past a scan that only knew
+///      about bare `static ` and `pub static ` (#6846 review note).
+/// What: Removes one `pub` token, and — when followed by a parenthesized
+///       qualifier — the balanced `(...)` after it, then trims the remaining
+///       leading whitespace. A line with no `pub` prefix passes through
+///       unchanged.
+/// Test: `static_scan_catches_every_visibility_form`.
+fn strip_leading_pub(trimmed: &str) -> &str {
+    let Some(rest) = trimmed.strip_prefix("pub") else {
+        return trimmed;
+    };
+    if let Some(after_paren) = rest.strip_prefix('(') {
+        // `pub(crate)`, `pub(super)`, `pub(in path::to::mod)` — the
+        // qualifier never itself contains `)`, so the first one closes it.
+        match after_paren.find(')') {
+            Some(close) => after_paren[close + 1..].trim_start(),
+            None => rest, // malformed `pub(` with no close — leave as-is
+        }
+    } else if rest.starts_with(char::is_whitespace) || rest.is_empty() {
+        rest.trim_start()
+    } else {
+        // e.g. "public" — not actually the `pub` keyword.
+        trimmed
+    }
+}
+
 /// The `control_bus` module carries types and nothing that moves them.
 ///
 /// Why: The owner ruling for #6846 puts the one event bus in trusty-console and
@@ -256,12 +288,15 @@ const FORBIDDEN_SUBSTRINGS: &[&str] = &[
 ///      boundary fail the build the moment a channel, a process-global sender,
 ///      or a mutable global is added back.
 /// What: Scans every source file of this module for a channel or global-state
-///       spelling, and for any item-position `static` declaration. The
-///       substring needles are `concat!`-assembled so scanning this file does
-///       not match the needle list itself; `&'static str` in a type position is
-///       not an item declaration, so the `static` check is line-anchored rather
-///       than a substring search.
-/// Test: this test itself.
+///       spelling, and for any item-position `static` declaration (`static`
+///       and `static mut`, under any visibility — `pub`, `pub(crate)`,
+///       `pub(super)`, `pub(in ...)`, or none). The substring needles are
+///       `concat!`-assembled so scanning this file does not match the needle
+///       list itself; `&'static str` in a type position is not an item
+///       declaration, so the `static` check is line-anchored (after stripping
+///       a leading visibility qualifier) rather than a substring search.
+/// Test: this test itself, plus the visibility-form negative control in
+///       `static_scan_catches_every_visibility_form`.
 #[test]
 fn control_bus_declares_no_transport() {
     for (name, src) in MODULE_SOURCES {
@@ -274,9 +309,9 @@ fn control_bus_declares_no_transport() {
         }
 
         for (idx, line) in src.lines().enumerate() {
-            let trimmed = line.trim_start();
+            let candidate = strip_leading_pub(line.trim_start());
             assert!(
-                !(trimmed.starts_with("static ") || trimmed.starts_with("pub static ")),
+                !(candidate.starts_with("static ") || candidate.starts_with("static mut ")),
                 "{}:{} declares a global `static`: control_bus holds event TYPES \
                  only — no global state (#6846)\n  {line}",
                 name,
@@ -284,6 +319,43 @@ fn control_bus_declares_no_transport() {
             );
         }
     }
+}
+
+/// Negative control for the visibility stripping in
+/// `control_bus_declares_no_transport`.
+///
+/// Why: The scan above is only as good as its line-anchoring. A prior version
+///      caught bare `static ` and `pub static ` but missed `pub(crate) static`
+///      and `static mut` — this test proves the fix against tiny inline
+///      fixtures rather than trusting the real module sources to happen to
+///      cover every visibility form.
+/// What: Runs the same detection the scan above uses — strip a leading `pub`
+///       qualifier, then check for a `static ` or `static mut ` prefix —
+///       against three one-line fixtures: a `pub(crate) static` declaration
+///       (must be caught), a `static mut` declaration with no visibility
+///       (must be caught), and a `&'static` reference in a `let` binding
+///       (must NOT be caught).
+/// Test: this test itself.
+#[test]
+fn static_scan_catches_every_visibility_form() {
+    let is_static_declaration =
+        |line: &str| -> bool {
+            let candidate = strip_leading_pub(line.trim_start());
+            candidate.starts_with("static ") || candidate.starts_with("static mut ")
+        };
+
+    assert!(
+        is_static_declaration("pub(crate) static X: u8 = 0;"),
+        "`pub(crate) static` must be detected as a static declaration"
+    );
+    assert!(
+        is_static_declaration("static mut Y: u8 = 0;"),
+        "`static mut` with no visibility qualifier must be detected"
+    );
+    assert!(
+        !is_static_declaration("let s: &'static str = \"\";"),
+        "`&'static` in a type position must not be flagged as a static declaration"
+    );
 }
 
 /// The scan above covers every file the module actually ships.
