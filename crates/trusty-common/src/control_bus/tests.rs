@@ -338,11 +338,10 @@ fn control_bus_declares_no_transport() {
 /// Test: this test itself.
 #[test]
 fn static_scan_catches_every_visibility_form() {
-    let is_static_declaration =
-        |line: &str| -> bool {
-            let candidate = strip_leading_pub(line.trim_start());
-            candidate.starts_with("static ") || candidate.starts_with("static mut ")
-        };
+    let is_static_declaration = |line: &str| -> bool {
+        let candidate = strip_leading_pub(line.trim_start());
+        candidate.starts_with("static ") || candidate.starts_with("static mut ")
+    };
 
     assert!(
         is_static_declaration("pub(crate) static X: u8 = 0;"),
