@@ -9,14 +9,17 @@ spec_refs:
 
 **Status:** Draft. Design record only — no code in this PR.
 **Spec ID:** `SPEC-UNIDASH-01~draft` … `SPEC-UNIDASH-11~draft`
-**Subsystem:** `trusty-console` — the dashboard routes, the bus reader, and the
-SSE fan-out (`src/routes/`, `src/metrics_poller.rs`, `ui/src/`);
-`trusty-agents-common` — the `HarnessEvent` envelope the taxonomy extends
-(`src/events/`); `trusty-common` — the prospective `control_bus` home (#3157);
-`trusty-mpm`, `trusty-code`, `trusty-agents` — the three event sources and their
-adapters.
+**Subsystem:** `trusty-console` — the event bus itself (the UDS ingest socket,
+`seq` assignment, the ring, the durable log), the dashboard routes, and the SSE
+fan-out (`src/routes/`, `src/metrics_poller.rs`, `ui/src/`); `trusty-common` —
+the `HarnessEvent` envelope, the `ActionEvent` taxonomy, and the shared
+`PushClient` (§4.1, owner ruling 2026-09-05, superseding the prospective
+`control_bus` home in #3157); `trusty-agents-common` — the taxonomy's prior
+home, retired once its producers push to console (§3.4, §4.1); `trusty-mpm`,
+`trusty-code`, `trusty-agents`, `trusty-analyze` — the four event sources and
+their adapters.
 **Owner:** Bob Matsuoka
-**Last-updated:** 2026-09-02
+**Last-updated:** 2026-09-05
 **DOC-N claim:** `DOC-73`, scan-before-claim per DOC-38 §4.1.
 `docs/specs/README.md`'s catalog note names `DOC-72` as the next free number;
 `DOC-72` is claimed by open pull request
@@ -37,7 +40,8 @@ UDS); [DOC-39](./trusty-code-harness-ui.md) §8 (the Foundry design system).
 **Cross-ref:** issues
 [#6611](https://github.com/bobmatnyc/trusty-tools/issues/6611) (this spec),
 [#3157](https://github.com/bobmatnyc/trusty-tools/issues/3157) (the control-bus
-epic whose consumer side this dashboard settles),
+epic this spec no longer routes through — closed not-planned 2026-09-02; the
+2026-09-05 owner ruling in §4.1 decides bus placement directly),
 [#6155](https://github.com/bobmatnyc/trusty-tools/issues/6155) (embedded tool UIs
 migrate into console — the precedent that puts this dashboard in console rather
 than in each crate),
@@ -405,107 +409,194 @@ agent wrote it. Every `File` variant is a new emission at the tool boundary.
 
 Three placements were considered.
 
-| Option | What it means | Why not |
+| Option | What it means | Status |
 |---|---|---|
-| **A. Console-hosted** | Console owns the bus; the harnesses relay to it | Console becomes a dependency of every harness's telemetry. A harness running with console stopped loses its events entirely, and `tm` must run without console |
-| **B. A new crate** | `trusty-eventbus`, a fourth daemon | ADR-0032 says no new service binds HTTP, and a UDS-only fourth daemon adds a supervision target, an install step, and a failure mode for no capability the existing crates lack. #3157 explicitly wants *fewer* bus implementations |
-| **C. `trusty-common::control_bus`** | The bus promoted into the common layer, as epic #3157 already scoped | — |
+| **A. Console-hosted** | Console owns the bus; the harnesses push to it | **Decided.** Owner ruling, 2026-09-05 — see below |
+| **B. A new crate** | `trusty-eventbus`, a fourth daemon | Rejected. ADR-0032 says no new service binds HTTP, and a UDS-only fourth daemon adds a supervision target, an install step, and a failure mode for no capability the existing crates lack. #3157 explicitly wanted *fewer* bus implementations |
+| **C. `trusty-common::control_bus`** | The bus promoted into the common layer, as epic #3157 had scoped it | Superseded 2026-09-05. #3157 closed not-planned on 2026-09-02; the owner ruling below decides placement directly rather than through that epic |
 
-**Recommendation: C.** The name is `control_bus`, in `trusty-common`, exactly as
-#3157 specifies. Three reasons.
+**Decided: Option A, console-hosted (owner ruling, 2026-09-05).**
 
-1. **The decision is already made.** #3157's consolidated scope opens with
-   "promote the existing events implementation into
-   `trusty-common::control_bus`". This spec does not get to re-decide it; it
-   supplies the consumer that makes the promotion worth doing.
-2. **`trusty-common` is the one crate all three harnesses already depend on.** A
-   bus there needs no new Cargo edge in any direction. `trusty-agents-common` is
-   the wrong home for the same reason DOC-72 §4 avoids it: `trusty-analyze` takes
-   no edge on `trusty-agents-common` and mirrors the envelope by field name to
-   stay uncoupled. The common layer is where a shared type stops needing that
-   workaround.
-3. **A library, not a daemon.** The bus is an in-process broadcast plus a
-   durable log plus a UDS relay. It runs inside whichever process emits, exactly
-   as ADR-0005's bus does today. Nothing new gets supervised.
+> "The only event bus actually."
+> — Bob, 2026-09-05
 
-`trusty-agents-common::events` stays where it is and re-exports from
-`control_bus`, so no consumer of the current API breaks. #3157's "harnesses do
-not retain competing event-bus implementations" acceptance criterion is met by
-migration, not by deletion in this spec's phases.
+`trusty-console` hosts the event bus, and it is the ONLY event bus in the
+workspace. Producers — `trusty-mpm`, `trusty-code`, `trusty-agents`, and
+`trusty-analyze`'s LSP events — push `HarnessEvent` frames to console over its
+UDS ingest socket, through a shared bounded `PushClient` in `trusty-common`
+(buffer default 4096, replay on reconnect, a `dropped` count on overflow; full
+contract in §4.2). Console is the one process that assigns the single `seq`,
+appends every accepted frame to a day-rotated NDJSON log, keeps an in-memory
+ring (configurable, default 8192), and fans the stream out over SSE (§4.3,
+§4.4).
 
-### 4.2 Ingestion
+`trusty-common` carries only what two or more processes need to agree on: the
+envelope (`HarnessEvent` with `id`/`parent_id`, §3.1), the `ActionEvent`
+taxonomy (§3.2), and `PushClient` itself. It holds no broadcast channel and no
+process-global bus — that state lives in exactly one place, console, which is
+the point of the ruling: ADR-0005 and epic #3157 both aimed the promotion at a
+library every process loads and hosts a copy of; this ruling makes console the
+single owner and everyone else a client of it.
 
-Three paths, one envelope.
+`trusty-agents-common`'s in-process bus (`crates/trusty-agents-common/src/events/bus.rs`)
+is retired once its producers push to console instead of publishing locally —
+not before, so no consumer of the current API breaks mid-migration.
 
-- **In-process publish.** Code inside a harness calls
-  `control_bus::publish(event)`, which stamps `id`, `seq`, and `at` and
-  broadcasts. This is the existing `publish` (`bus.rs:248`), extended with `id`
-  and `parent_id`.
-- **Child-to-parent stderr relay.** A subprocess writes one NDJSON line prefixed
-  `__OMPM_EVENT__ ` and the parent re-publishes it. This already works
-  (`EVENT_LINE_PREFIX`, `bus.rs:53`) and is how a `--workflow` child reaches its
-  API server today. It stays the transport for anything the harness spawns.
-- **UDS relay to console.** Each harness exposes a cursor method on the UDS
-  socket it already serves, and console drains it. This is DOC-72 §4's console
-  relay generalized from one daemon to three:
+This supersedes Option C above and the 2026-07-18 "single hub on the tm
+daemon" decision, which placed the hub role on `trusty-mpm` rather than
+console. It is consistent with ADR-0032 (console is the single external
+surface — this extends the same reasoning from HTTP to the event bus) and the
+2026-08-30 push-to-console rulings that established the same producer-pushes
+shape for other subsystems.
+
+Option A's original objection — a harness running with console stopped loses
+its events — is bounded, not eliminated, by `PushClient`'s local buffer: a
+producer whose console connection is down keeps working and keeps buffering
+(default 4096 frames), replaying on reconnect. Only a producer that stays
+disconnected longer than its buffer holds loses events, and it reports how
+many via the `dropped` count.
+
+**Ownership boundary (owner ruling, 2026-09-05).**
+
+> "The console crate should also hold dashboard code. It can call APIs in
+> other crates."
+> — Bob, 2026-09-05
+
+`crates/trusty-console` owns all dashboard code — the UI views (§5), the
+HTTP/SSE routes (§4.4), and the event-bus core this section decides (the
+ingest socket, `seq` assignment, the ring, and the log, §4.2–§4.3). No other
+crate gains dashboard code of its own. Console reaches every other crate only
+through that crate's UDS or library API — the object viewer (§6) dials the
+owning harness for a session record rather than reading its internals
+directly, exactly as `service_metrics.rs` already dials `trusty-memory`,
+`trusty-search`, and `trusty-analyze` today. Symmetrically, a producer crate
+— `trusty-mpm`, `trusty-code`, `trusty-agents`, `trusty-analyze` — carries
+only three things for this spec: the shared `trusty-common` event types
+(§3.1–§3.2), the shared `PushClient` (§4.2), and its own publish call sites
+(§3.4).
+
+**Non-blocking invariant (owner ruling, 2026-09-05).**
+
+> "[The bus] is a critical service though it shouldn't block functionality,
+> just messages and observability."
+> — Bob, 2026-09-05
+
+The bus is worth building correctly, and its failure must never reach a
+daemon's actual work. Bus unavailability — console down, the ingest socket
+unreachable, a full `PushClient` buffer — degrades message delivery and
+observability only: events queue, then drop with a counted gap (§4.2), and
+the dashboard shows a disconnected state (§8.5). It never delays a tool call,
+blocks a dispatch, or fails a session. §4.3's backpressure rule already
+states the mechanism; this is the invariant the mechanism exists to serve.
+
+### 4.2 Ingestion — the push contract
+
+Producers push; console is the only ingester. There is no per-daemon cursor
+method for console to drain — §4.1's ruling retires the pull-based
+`bus_events { since_seq, max }` shape this section specified before
+2026-09-05.
+
+- **In-process, inside each harness.** A harness's adapter (§3.4) builds a
+  `HarnessEvent` exactly as before and hands it to `PushClient` instead of
+  broadcasting locally. `PushClient` stamps nothing — `id` is minted by the
+  emitting process (§3.1); `seq` is stamped once, by console, on arrival
+  (§4.3).
+- **Child-to-parent stderr relay.** Unchanged. A subprocess writes one NDJSON
+  line prefixed `__OMPM_EVENT__ ` and the parent re-publishes it. This already
+  works (`EVENT_LINE_PREFIX`, `bus.rs:53`) and is how a `--workflow` child
+  reaches its API server today. The parent's own adapter then pushes the
+  re-published event to console exactly as it would one of its own.
+- **`PushClient`, over console's UDS ingest socket.** One shared client in
+  `trusty-common`, used by every producer:
 
   ```
-  <service>.bus_events  { since_seq, max }
-    -> { events: [ … ], next_seq, dropped }
+  PushClient::send(event)
+    -> enqueue in a local bounded buffer, flush to console's ingest socket
   ```
 
-  The method name differs per service, the shape does not. ADR-0032 holds: no
-  harness binds HTTP, console is the only HTTP surface, and console reaches each
-  service over UDS as ADR-0035 directs.
+  - **Frame shape.** One `HarnessEvent` per frame, newline-delimited JSON — the
+    push contract changes the transport, not the envelope.
+  - **The ingest socket.** Console binds one UDS socket for this, using the
+    same per-daemon convention every other socket in the workspace already
+    uses (`trusty_common::daemon_socket_path`,
+    [port-assignments.md](../architecture/port-assignments.md)):
+    `daemon_socket_path("trusty-console")` resolves to
+    `<data dir>/trusty-console/trusty-console.sock`. Every producer, regardless
+    of source, dials this one socket.
+  - **Buffering.** `PushClient` holds a local bounded buffer, default capacity
+    4096 frames, so a producer never blocks on a slow or absent console —
+    `send` is best-effort from the producer's point of view, the same rule
+    §4.3 states for backpressure.
+  - **Reconnect and replay.** On a dropped connection, `PushClient` reconnects
+    with the same backoff shape used elsewhere in the workspace (§8.1) and
+    replays whatever is still buffered, oldest first, before resuming live
+    sends — a console restart or a brief network hiccup loses nothing that
+    still fits in the buffer.
+  - **Overflow: the `dropped` count.** When the buffer fills before a
+    reconnect succeeds, `PushClient` drops the oldest frames and keeps a
+    running `dropped` count, surfaced the same way `Lag { skipped }` already
+    is (§4.3) — a gap is always visible to the viewer, never silent.
 
-### 4.3 Ordering, retention, and backpressure
+  ADR-0032 holds throughout: no harness binds HTTP, console is the only HTTP
+  surface, and this UDS socket is console's ingest side of the same aggregation
+  ADR-0035 already directs for reads.
 
-**Ordering.** `seq` is monotonic *within one process*, and nothing makes it
-monotonic across processes. The bus therefore defines two orderings and the views
-use them for different things.
+### 4.3 Ordering, retention, and backpressure — all console-side
 
-- **Causal order** comes from `parent_id`. It is total within a subtree and is
-  the only ordering the tree view uses.
-- **Display order** is `(at, source, seq)`, applied by the reader, not the
-  producer. The list view uses it. Two events from different harnesses with equal
-  `at` order by `source` then `seq`, deterministically, so two viewers of the
-  same stream show the same sequence.
+**Ordering.** `seq` is now minted once, by console, for every frame it accepts
+— not per-process. §4.1's ruling removes the cross-process ordering problem
+this section used to solve: with exactly one process assigning `seq`, `seq`
+alone is already a total, deterministic order, and the list view uses it
+directly. `parent_id` still carries the causal edge the tree view needs (§5.2)
+— `seq` order and causal order answer different questions, and the tree keeps
+using the second one.
 
-Clock skew between processes on one machine is bounded by the OS clock, so `at`
-is sufficient here. A cross-machine bus would need a different answer, and this
-spec does not have one (§10 Q3).
+Clock skew no longer affects ordering (`at` is still recorded and still used
+for display and duration arithmetic). A cross-machine bus is still out of
+scope, and this spec still has no answer for one (§10 Q3).
 
-**Retention.** Two tiers.
+**Retention.** Two tiers, both held by console.
 
-- **The ring.** An in-memory `broadcast` channel, capacity 1024 today
-  (`CHANNEL_CAPACITY`, `bus.rs:64`). Live subscribers read this. Overflow is
-  reported, never silent — ADR-0005's `Lag { skipped }` (`bus.rs:146`) already
-  translates `RecvError::Lagged(n)` into a typed notice and resumes the stream.
-  The dashboard renders a lag notice as a visible gap marker in both views.
-- **The log.** A durable NDJSON file per day, rotated and retained per #3157's
-  "durable JSONL logging, rotation, retention, and replay". A viewer that opens
-  mid-session reads the log to build the tree it missed, then switches to the
-  live ring at the log's last `seq`. Without this, the tree view is empty until
-  the next spawn and a wall display shows nothing after a console restart.
+- **The ring.** An in-memory ring, capacity configurable, defaulting to 8192,
+  held by console rather than by each harness. Live subscribers — the SSE
+  route (§4.4) — read this. Overflow is reported, never silent: a ring overrun
+  produces the same `Lag { skipped }`-shaped notice §3.1's envelope already
+  carries, and the dashboard renders it as a visible gap marker in both views.
+- **The log.** A durable NDJSON file per day, written by console as each frame
+  is accepted, rotated and retained per #3157's original "durable JSONL
+  logging, rotation, retention, and replay" requirement — the requirement
+  survives the epic's closure even though its bus placement did not. A viewer
+  that opens mid-session reads the log to build the tree it missed, then
+  switches to the live ring at the log's last `seq`. Without this, the tree
+  view is empty until the next spawn and a wall display shows nothing after a
+  console restart.
 
-**Backpressure.** The bus never blocks a producer. `publish` is best-effort
-already, ignoring `SendError` when no subscriber exists. A slow reader lags and
-gets a `Lag` notice; it does not slow the harness down. The rule is explicit
+**Backpressure.** The push contract (§4.2) is what keeps a producer from ever
+blocking on the bus, not a best-effort broadcast inside a shared library. A
+producer whose `PushClient` cannot reach console keeps working and buffers
+locally (default 4096 frames) rather than stalling; a slow SSE subscriber gets
+a `Lag` notice from console's own ring and never slows a producer down,
+because producers push and never wait on a reader. The rule is explicit
 because the alternative — a full channel stalling an agent's tool call — would
 make telemetry able to break the work it observes.
 
 **Overflow, three defenses.**
 
-1. Capacity rises from 1024 to a configurable value, defaulting to 8192 for a
-   bus carrying three harnesses' actions rather than one harness's lifecycle.
-2. The console reader drains on a cursor, so a browser that stops reading does
-   not lag the bus — only console's own SSE buffer.
-3. The log is written from the producer side, so a lagged reader loses nothing
-   permanently. It re-reads.
+1. The console ring's capacity is configurable, defaulting to 8192 — sized for
+   three (soon four) harnesses' actions rather than one harness's lifecycle.
+2. Producers push independently of any reader, so a browser that stops reading
+   lags only console's own SSE buffer (§8.2) — never the ring, and never a
+   producer.
+3. The log is written by console as frames arrive, so a lagged SSE reader
+   loses nothing permanently — it re-reads from the log via `since_seq`.
 
 ### 4.4 Fan-out to viewers
 
-Console is the only HTTP surface, so every viewer reads console.
+Console is the only HTTP surface and, per §4.1, the only event bus — the
+frames every producer pushed to console's ingest socket (§4.2) and the ring
+and log console built from them (§4.3) are what these routes read. Every
+viewer reads console; nothing upstream of console is a fan-out point of its
+own.
 
 | Route | Shape | Consumer |
 |---|---|---|
@@ -525,12 +616,15 @@ Filters apply server-side on the query string — `source`, `session`, `kind`,
 extended with the `kind` and `actor` axes. Server-side filtering is what lets a
 wall display subscribe to one session without shipping every event to it.
 
-**DOC-72's analyze events ride this bus unchanged.** DOC-72 §4 already publishes
-LSP results as `HarnessEvent`-shaped payloads into a per-`(workspace, language)`
-ring, drained by `analyze.lsp_events { since_seq, max } -> {events, next_seq,
-dropped}` from `metrics_poller.rs` and republished at
-`/api/console/events/analyze/lsp`. That is this section's ingestion path and
-fan-out path, one service early. Two reconciliations:
+**DOC-72's analyze events move onto the push contract, not around it.** DOC-72
+§4 already publishes LSP results as `HarnessEvent`-shaped payloads into a
+per-`(workspace, language)` ring, today drained by `analyze.lsp_events {
+since_seq, max } -> {events, next_seq, dropped}` from `metrics_poller.rs` and
+republished at `/api/console/events/analyze/lsp`. Under the 2026-09-05 ruling
+that per-daemon cursor is retired the same way §4.2 retires every other
+service's: `trusty-analyze` becomes a `PushClient` producer alongside
+`trusty-mpm`, `trusty-code`, and `trusty-agents`, pushing over console's one
+ingest socket instead of being polled. Two reconciliations:
 
 - The analyze payloads become `ActionEvent::Tool` with `tool: "lsp.<method>"`,
   so they appear as leaves in the tree beside every other tool call rather than
@@ -950,11 +1044,14 @@ Rotation, and the measurements that only a long run can produce.
 
 Eight. Each names what changes depending on the answer.
 
-**Q1 — Does the bus go in `trusty-common::control_bus`, as §4.1 recommends?**
-#3157 already says so, but that epic has not moved and this spec would be its
-first consumer. Confirming it makes phase 1 a promotion; rejecting it means
-choosing between a console-hosted bus and a fourth daemon, and phase 1 changes
-shape entirely.
+**Q1 — Where does the bus live?** **Answered, 2026-09-05.** Owner ruling: "The
+only event bus actually." `trusty-console` hosts the event bus and is the ONLY
+event bus; producers push over UDS through a shared `trusty-common::PushClient`
+(§4.1). `trusty-common` carries only the envelope, the `ActionEvent` taxonomy,
+and `PushClient` — no broadcast channel, no `control_bus` module, no
+process-global. This also settles the choice between a console-hosted bus and
+a fourth daemon that §4.1's original recommendation left open on rejection: it
+is console, not a new daemon.
 
 **Q2 — Is the durable log in scope for phase 1, or deferred?**
 Without it, a viewer that opens mid-session sees an empty tree until the next
@@ -997,75 +1094,43 @@ browser ceilings are initial values rather than derived ones.
 
 ## {#SPEC-UNIDASH-11~draft} 11. Implementation issues to cut
 
-To be filed by `ticketing` once the owner accepts this spec. One line each; each
-references #6611.
+Milestone 72 cut these as ten slices, re-scoped to the 2026-09-05
+push-to-console ruling (§4.1). Each references #6611.
 
-1. **Owner decisions on §10 Q1–Q8.** Blocks phase 1's shape. First issue to cut.
-2. `trusty-common`: create `control_bus` — move the `trusty-agents-common::events`
-   implementation, keep the old path as a re-export (§4.1, #3157).
-3. `trusty-common`: add `id` (UUIDv7) and `parent_id` to `HarnessEvent`, stamped
-   by `publish` (§3.1).
-4. `trusty-common`: the `ActionEvent` enum, its six kinds, `Actor`, `ObjectRef`,
-   and `schema_version` with the unknown-kind fallback (§3.2, §3.3).
-5. `trusty-common`: the durable NDJSON log — write, rotate daily, retain, replay
-   into an identical sequence (§4.3).
-6. `trusty-common`: raise `CHANNEL_CAPACITY` to a configurable value defaulting
-   to 8192 (§4.3).
-7. `trusty-mpm`: thread causal context through the dispatch path and stamp
-   `parent_id` on every emission (§3.4). The largest single piece of work here.
-8. `trusty-mpm`: publish `ActionEvent` for session, agent, tool, and workflow
-   transitions, alongside the existing `SessionEvent` (§3.4).
-9. `trusty-mpm`: project the typed Claude Code hooks — `PreToolUse`/`PostToolUse`
-   to `Tool`, `SessionStart`/`SessionEnd` to `Session`, `FileChanged` to `File`,
-   `WorktreeCreate`/`WorktreeRemove` to `Workflow` — leaving the untyped `Hook`
-   arm in place (§3.4).
-10. `trusty-mpm`: the `bus_events { since_seq, max }` cursor method on its UDS
-    socket (§4.2).
-11. `trusty-console`: drain each service's `bus_events` cursor on a 250 ms
-    interval, beside the existing `console_metrics` poll in `metrics_poller.rs`
-    (§4.2, §8.1).
-12. `trusty-console`: `GET /api/console/events/stream` — the cursor JSON route,
-    with server-side `source`/`session`/`kind`/`actor` filters (§4.4).
-13. `trusty-console`: `GET /api/console/events/stream/sse` — SSE fan-out with
-    `Last-Event-ID` resume. Console's first SSE route (§4.4).
-14. `trusty-console` ui: `/ui/stream/list` — virtualized list on
-    `@tanstack/svelte-virtual`, URL filters, follow-tail, bounded window, gap
-    markers (§5.1).
-15. `trusty-console` ui: `/ui/stream/tree` — `d3-hierarchy` layout plus a canvas
-    renderer, node lifecycle, active state, stall marker, timed collapse, forest
-    layout (§5.2, §7.3).
-16. `trusty-console` ui: the canvas renderer reads Foundry tokens from computed
-    style at draw time and re-reads on theme change (§8.4).
-17. `trusty-console` ui: `prefers-reduced-motion` disables both tree animations
-    (§8.3).
-18. `trusty-console` ui: the tree canvas text alternative — live node count,
-    deepest active path, oldest active node's age (§8.3).
-19. `trusty-console` ui: the zero-event and disconnected states for both views,
-    rendered distinctly (§8.5).
-20. `trusty-code`: publish `ActionEvent` additively, leaving
-    `SessionEventEnvelope` and the `session.attach` wire shape untouched (§3.4).
-21. `trusty-code`: thread causal context and stamp `parent_id`, keyed on
-    `agent_id` for concurrent same-name delegations (§3.4).
-22. `trusty-code`: the `bus_events` cursor method on its UDS socket (§4.2).
-23. `trusty-agents`: publish `ActionEvent` from the existing `Event` emission
-    sites, and add task and workstream lifecycle events, which do not exist today
-    (§3.4).
-24. `trusty-agents`: thread causal context and stamp `parent_id` (§3.4).
-25. `trusty-agents`: the `bus_events` cursor method on its UDS socket (§4.2).
-26. all three harnesses: emit typed `File` events at the tool boundary — read,
-    write, create, delete, move. No harness emits these today (§3.4).
-27. `trusty-console` ui: the object viewer routes for `session`, `agent`, `task`,
-    `workstream`, `file`, `tool_call`, `inference`, `issue`, `pr` — read-only,
-    new-tab, stated-absence handling (§6).
-28. `trusty-console` ui: screensaver rotation includes list and tree; links
-    suppressed in screensaver mode (§5.3).
-29. `trusty-analyze`: map the DOC-72 LSP events onto `ActionEvent::Tool` with
-    `tool: "lsp.<method>"` so they appear as tree leaves; keep
-    `/api/console/events/analyze/lsp` as the service-specific route (§4.4).
-30. **Phase 3 acceptance run: 2000 nodes, 300 ms reflow.** Confirms §7.3's canvas
-    recommendation or triggers the sigma fallback; record the result in §7.3.
-31. **Phase 5 acceptance run: 24 hours unattended.** Memory trend and node count
-    over a full day, on the `.saver` bundle (§8.2, #6516 phase 4).
+1. [#6846](https://github.com/bobmatnyc/trusty-tools/issues/6846) — Types-only
+   move: relocate the `HarnessEvent` envelope and lifecycle/filter types from
+   `trusty-agents-common` into `trusty-common`, no behavior change, so every
+   later slice lands on stable types.
+2. [#6847](https://github.com/bobmatnyc/trusty-tools/issues/6847) — Envelope
+   fields (`id`, `parent_id`) plus the `ActionEvent` payload arm plus
+   `PushClient`, in `trusty-common` (§3.1, §3.2, §4.2).
+3. [#6848](https://github.com/bobmatnyc/trusty-tools/issues/6848) — The
+   console event-bus core: the UDS ingest socket, single-`seq` assignment, and
+   the durable day-rotated NDJSON log (§4.1, §4.3).
+4. [#6849](https://github.com/bobmatnyc/trusty-tools/issues/6849) —
+   `trusty-mpm` emits `ActionEvent` with `parent_id` threading and the named-hook
+   projection, pushed via `PushClient` (§3.4, §4.2).
+5. [#6850](https://github.com/bobmatnyc/trusty-tools/issues/6850) — Console's
+   list route over the ring: `GET /api/console/events/stream` with
+   `since_seq`/`source`/`session`/`kind`/`actor` filters (§4.4).
+6. [#6851](https://github.com/bobmatnyc/trusty-tools/issues/6851) — SSE
+   fan-out: `GET /api/console/events/stream/sse` with `Last-Event-ID` resume
+   (§4.4, §8.1).
+7. [#6852](https://github.com/bobmatnyc/trusty-tools/issues/6852) — The list
+   UI: `/ui/stream/list`, virtualized, URL filters, follow-tail, bounded
+   window, gap markers (§5.1).
+8. [#6853](https://github.com/bobmatnyc/trusty-tools/issues/6853) — The tree
+   UI: `/ui/stream/tree`, `d3-hierarchy` layout, node lifecycle, stall marker,
+   timed collapse, forest layout, with the 2000-node/300ms measurement (§5.2,
+   §7.3).
+9. [#6854](https://github.com/bobmatnyc/trusty-tools/issues/6854) —
+   `trusty-code` and `trusty-agents` publish `ActionEvent` via `PushClient`;
+   `trusty-agents-common`'s in-process bus is retired now that its producers
+   push to console instead (§3.4, §4.1).
+10. [#6855](https://github.com/bobmatnyc/trusty-tools/issues/6855) — The
+    object viewer: `/ui/object/<type>/<id>` for every type in §6, read-only,
+    new-tab, stated-absence handling, plus list/tree in the screensaver
+    rotation (§5.3, §6).
 
 
 
