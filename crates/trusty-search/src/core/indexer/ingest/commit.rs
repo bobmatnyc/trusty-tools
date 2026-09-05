@@ -247,6 +247,15 @@ impl CodeIndexer {
             items.push((chunk.id.clone(), v.clone()));
         }
 
+        // #6581: M005 recommits unchanged text with no embedding on purpose;
+        // evicting there would destroy the vectors it is reusing.
+        if self
+            .suppress_vector_eviction
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            unembedded_ids.clear();
+        }
+
         if !unembedded_ids.is_empty() {
             let already_present = store.contains_many(&unembedded_ids).await;
             for (id, present) in unembedded_ids.iter().zip(already_present) {

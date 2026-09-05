@@ -134,6 +134,7 @@ impl VectorStore for UsearchStore {
         top_k: usize,
         path_prefix: Option<&str>,
         repos: &[String],
+        shapes: crate::core::chunk_id::ChunkIdShapes,
     ) -> Result<Vec<VectorHit>> {
         if query.len() != self.dim {
             return Err(anyhow!(
@@ -154,7 +155,7 @@ impl VectorStore for UsearchStore {
         // check).
         let filter = |key: usearch::Key| {
             key_to_id.get(&key).is_some_and(|id| {
-                super::path_match::matches_chunk_id(id.as_str(), path_prefix, repos)
+                super::path_match::matches_chunk_id(id.as_str(), path_prefix, repos, shapes)
             })
         };
         let matches = index
@@ -235,16 +236,18 @@ impl VectorStore for UsearchStore {
         self.save(path).await
     }
 
-    /// Rewrite in-memory `id_to_key` / `key_to_id` maps from absolute to
-    /// root-relative chunk IDs. Returns the count of entries rewritten.
+    /// Rewrite the in-memory `id_to_key` / `key_to_id` maps under one write-lock
+    /// pair, applying `remap` to every stored id. Returns the count rewritten.
     ///
-    /// Why: M003 needs to fix the HNSW key maps after M002 relativized redb.
-    /// See [`VectorStore::rewrite_keys_to_relative`] for the full rationale.
+    /// Why (#6581): M003 relativizes ids and M005 re-points them at the ids a
+    /// re-chunk produced. Both are the same lock/swap over the same two maps, so
+    /// there is one implementation and the caller supplies the mapping. The
+    /// `.usearch` binary needs no rewrite either way — it is keyed by `u64` and
+    /// never encodes a chunk id.
     /// What: under a single write-lock pair on `id_to_key` and `key_to_id`,
-    /// iterates every entry whose string key is absolute and shares `root_path`
-    /// as a prefix, strips the prefix (mirrors M002's `strip_prefix` logic),
-    /// replaces the entry in both maps. Idempotent: already-relative IDs are
-    /// skipped. Outside-root absolute IDs are left unchanged and logged at warn.
+    /// collects `(old, new, key)` for every id `remap` renames, then replaces
+    /// the entry in both maps. Idempotent by construction: `remap` returning
+    /// `None` (or an unchanged id) rewrites nothing.
     /// Issue #2179: when any rewrite happened, promotes the store view →
     /// mutable via [`Self::ensure_mutable`] (rather than flipping the
     /// `is_view` flag directly) so the flag never claims "mutable" while the
@@ -252,46 +255,25 @@ impl VectorStore for UsearchStore {
     /// [`Self::ensure_mutable`]'s doc comment for why that mismatch is unsafe
     /// (a subsequent write path would skip promotion and mutate the view).
     /// Test: `tests::test_rewrite_keys_to_relative`,
-    /// `tests::test_rewrite_keys_to_relative_promotes_view_to_mutable`.
-    async fn rewrite_keys_to_relative(&self, root_path: &Path) -> Result<usize> {
+    /// `tests::test_rewrite_keys_to_relative_promotes_view_to_mutable`,
+    /// `tests::test_rewrite_keys_applies_an_arbitrary_mapping`.
+    async fn rewrite_keys(
+        &self,
+        remap: &(dyn for<'a> Fn(&'a str) -> Option<String> + Sync),
+    ) -> Result<usize> {
         let mut id_map = self.id_to_key.write().await;
         let mut key_map = self.key_to_id.write().await;
 
         // Collect rewrites first to avoid mutating the map while iterating.
-        // Each entry: (old_absolute_id, new_relative_id, u64_key).
+        // Each entry: (old_id, new_id, u64_key).
         let mut rewrites: Vec<(String, String, u64)> = Vec::new();
-        // Compute root prefix string once, outside the loop.
-        let root_prefix = root_path.to_string_lossy();
-
         for (id, &key) in id_map.iter() {
-            if !std::path::Path::new(id).is_absolute() {
-                // Already relative — idempotency: leave unchanged.
-                continue;
-            }
-            // Try to strip root_path from the absolute chunk ID. Chunk IDs
-            // have the format "{file_path}:{start}:{end}". On POSIX, ':'
-            // is a valid path character so `Path::strip_prefix` treats the
-            // entire ID string as a single path and strips the prefix
-            // correctly. We then do a raw string prefix-swap (instead of
-            // trusting the Path result's `to_string_lossy`) to preserve the
-            // exact ":{start}:{end}" suffix bytes without re-encoding.
-            match std::path::Path::new(id.as_str()).strip_prefix(root_path) {
-                Ok(_) => {
-                    // ID is under root_path. Compute the relative ID by
-                    // stripping the root prefix as a raw string and trimming
-                    // the leading separator.
-                    let new_id = id
-                        .strip_prefix(root_prefix.as_ref())
-                        .map(|s| s.trim_start_matches('/').to_string())
-                        .unwrap_or_else(|| id.clone());
+            // `None` means "leave it alone" — an already-migrated id, or one
+            // the mapping does not cover. That is what makes a second pass a
+            // no-op for every caller.
+            if let Some(new_id) = remap(id.as_str()) {
+                if new_id != *id {
                     rewrites.push((id.clone(), new_id, key));
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        id = %id,
-                        root = %root_path.display(),
-                        "M003: HNSW key is absolute but not under root_path; skipping"
-                    );
                 }
             }
         }

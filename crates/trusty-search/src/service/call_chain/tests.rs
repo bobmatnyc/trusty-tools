@@ -328,3 +328,38 @@ fn location_from_chunk_id_parses_standard_form() {
     );
     assert_eq!(location_from_chunk_id("opaque"), "opaque");
 }
+
+/// Every shape `core::chunk_id::make` can emit renders as `file:line` (#6581).
+///
+/// Why: the previous `rsplitn(3, ':')` only understood the positional shape, so
+/// a named id came out as `assets/index.js::Function::e:` — a mis-parse the
+/// report showed the reader verbatim. The end line this issue adds does not fix
+/// that on its own; delegating the parse does.
+/// What: one assertion per shape, plus the unchanged fallback for a string that
+/// is not a chunk id at all.
+/// Test: this test.
+#[test]
+fn location_from_chunk_id_renders_every_shape() {
+    assert_eq!(
+        location_from_chunk_id("src/auth.rs::Function::authenticate::42::78"),
+        "src/auth.rs:42"
+    );
+    assert_eq!(
+        location_from_chunk_id("assets/index.js::Function::e::1::1::dup::2"),
+        "assets/index.js:1"
+    );
+    assert_eq!(
+        location_from_chunk_id("src/big.rs::Function::wide::10::900::sub::3"),
+        "src/big.rs:10"
+    );
+    // The pre-#6581 named shape still renders, for an index yet to run M005.
+    assert_eq!(
+        location_from_chunk_id("assets/index.js::Function::e::1"),
+        "assets/index.js:1"
+    );
+    assert_eq!(
+        location_from_chunk_id("src/auth.rs:10:25"),
+        "src/auth.rs:10"
+    );
+    assert_eq!(location_from_chunk_id("opaque"), "opaque");
+}

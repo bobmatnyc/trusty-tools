@@ -163,18 +163,29 @@ pub trait VectorStore: Send + Sync {
     /// via `usearch::Index::filtered_search`, which is the only
     /// implementation this crate actually relies on for correctness.
     /// Test: `UsearchStore` — `test_filtered_search_finds_match_ranked_below_top_k`.
+    ///
+    /// `shapes` (#6581) is the caller index's chunk-id policy — see
+    /// [`crate::core::chunk_id::ChunkIdShapes`]. It reaches the predicate so a
+    /// pre-M005 index still matches its own legacy named ids and a migrated one
+    /// does not.
     async fn search_filtered(
         &self,
         query: &[f32],
         top_k: usize,
         path_prefix: Option<&str>,
         repos: &[String],
+        shapes: crate::core::chunk_id::ChunkIdShapes,
     ) -> Result<Vec<VectorHit>> {
         let overfetch = top_k.saturating_mul(50).max(top_k).min(100_000);
         let hits = self.search(query, overfetch).await?;
         let mut out = Vec::with_capacity(top_k.min(hits.len()));
         for hit in hits {
-            if super::path_match::matches_chunk_id(hit.chunk_id.as_str(), path_prefix, repos) {
+            if super::path_match::matches_chunk_id(
+                hit.chunk_id.as_str(),
+                path_prefix,
+                repos,
+                shapes,
+            ) {
                 out.push(hit);
                 if out.len() >= top_k {
                     break;
@@ -229,7 +240,34 @@ pub trait VectorStore: Send + Sync {
     /// (idempotency). IDs that are absolute but outside `root_path` are left
     /// unchanged and logged at warn.
     /// Test: `test_rewrite_keys_to_relative` in `store::tests`.
-    async fn rewrite_keys_to_relative(&self, _root_path: &Path) -> Result<usize> {
+    ///
+    /// Why this is a thin wrapper (#6581): M005 rewrites the same two maps with
+    /// a different mapping, and a second lock/swap implementation is exactly the
+    /// kind of duplication that lets two of them drift. Both routes go through
+    /// [`Self::rewrite_keys`]; only the mapping differs.
+    async fn rewrite_keys_to_relative(&self, root_path: &Path) -> Result<usize> {
+        self.rewrite_keys(&|id| relative_key(id, root_path)).await
+    }
+
+    /// Rewrite the in-memory chunk-ID to u64 key maps under one lock pair,
+    /// returning the number of entries rewritten.
+    ///
+    /// Why (#6581): the `.usearch` binary is keyed by `u64` and never encodes a
+    /// chunk id, so any id change — M002/M003's relativization, M005's
+    /// re-chunk — is a rewrite of the JSON sidecar alone. One implementation of
+    /// that lock/swap serves every such migration, and it is what lets M005 hand
+    /// an existing vector to a re-chunked chunk whose text is unchanged instead
+    /// of paying to embed it again.
+    /// What: `remap` is called once per stored id; `Some(new_id)` replaces the
+    /// entry in both maps, `None` leaves it alone (so a mapping that covers
+    /// nothing is a no-op and a second pass over already-rewritten keys returns
+    /// `0`). Callers persist the result with [`Self::save_to`]. Default = no-op
+    /// for mock / BM25-only stores.
+    /// Test: `test_rewrite_keys_applies_an_arbitrary_mapping` in `store::tests`.
+    async fn rewrite_keys(
+        &self,
+        _remap: &(dyn for<'a> Fn(&'a str) -> Option<String> + Sync),
+    ) -> Result<usize> {
         Ok(0)
     }
 
@@ -365,4 +403,35 @@ pub trait VectorStore: Send + Sync {
     ) -> Result<Option<RequantizeReport>> {
         Ok(None)
     }
+}
+
+/// Map one absolute chunk id onto its root-relative form, or `None` to leave it.
+///
+/// Why (#6581): this was inlined in `UsearchStore::rewrite_keys_to_relative`
+/// alongside the lock/swap it now shares with M005. Lifting it out leaves one
+/// lock/swap ([`VectorStore::rewrite_keys`]) and one mapping per migration.
+/// What: an already-relative id returns `None` (idempotency); an absolute id
+/// under `root_path` loses that prefix as a raw string swap, preserving the
+/// exact suffix bytes; an absolute id outside `root_path` returns `None` and is
+/// logged at warn.
+/// Test: `test_rewrite_keys_to_relative` and
+/// `test_m003_skips_out_of_root_absolute_ids`.
+pub fn relative_key(id: &str, root_path: &Path) -> Option<String> {
+    if !Path::new(id).is_absolute() {
+        return None;
+    }
+    // Chunk IDs are `{file_path}{suffix}`. On POSIX `:` is a valid path
+    // character, so `Path::strip_prefix` treats the whole id as one path and
+    // strips the root correctly; the raw string swap below then preserves the
+    // suffix bytes without re-encoding them through `to_string_lossy`.
+    if Path::new(id).strip_prefix(root_path).is_err() {
+        tracing::warn!(
+            %id,
+            root = %root_path.display(),
+            "HNSW key is absolute but not under root_path; skipping"
+        );
+        return None;
+    }
+    let stripped = id.strip_prefix(root_path.to_string_lossy().as_ref())?;
+    Some(stripped.trim_start_matches('/').to_string())
 }

@@ -572,6 +572,73 @@ impl CodeIndexer {
         self.delete_chunks_from_redb(ids).await;
     }
 
+    /// Empty every chunk-keyed structure so the caller can rebuild the corpus
+    /// from source, WITHOUT touching the vector store (#6581).
+    ///
+    /// Why: M005 is a corpus clear plus a full re-chunk (owner ruling
+    /// 2026-09-05), and the re-chunk changes every named chunk's primary key.
+    /// Clearing first is also what makes `TRUSTY_MAX_CHUNKS` behave exactly as
+    /// it does on a fresh index — `commit_parsed_batch`'s cap pre-filter decides
+    /// by `corpus.contains_key(&chunk.id)`, so re-ingesting new keys on top of a
+    /// still-populated corpus would count the whole corpus twice and drop the
+    /// tail. It deliberately does NOT go through `remove_chunks_from_stores`,
+    /// which removes the HNSW entry too: those vectors are what the migration
+    /// hands back to the re-chunked chunks instead of embedding them again.
+    /// What: clears the in-memory chunk map, the embedding LRU, the BM25 index
+    /// and the per-file entity map, then deletes every chunk row, every entity
+    /// row and the whole persisted KG from redb. The KG must go with them —
+    /// a persisted node carries a `chunk_id`, and the format stamp would still
+    /// compare current over keys that no longer exist. Returns the number of
+    /// chunk rows dropped.
+    /// Test: `core::migration::m005::tests::m005_rechunks_the_whole_corpus`.
+    pub(crate) async fn clear_corpus_for_rechunk(&self) -> Result<usize> {
+        self.ensure_chunks_loaded().await;
+        self.ensure_bm25_entities_loaded().await;
+        // The DURABLE corpus is the authority on what exists. The in-memory map
+        // can legitimately be empty on an index that has never served a query,
+        // so deriving the id list from it would delete nothing and leave the old
+        // rows beside the new ones.
+        let mut ids: Vec<String> = {
+            let chunks = self.chunks.read().await;
+            chunks.keys().cloned().collect()
+        };
+        if let Some(corpus) = self.corpus.clone() {
+            let durable = tokio::task::spawn_blocking(move || corpus.load_all_chunks())
+                .await
+                .map_err(|e| anyhow::anyhow!("corpus scan task panicked: {e}"))??;
+            ids.extend(durable.into_iter().map(|c| c.id));
+            ids.sort();
+            ids.dedup();
+        }
+        {
+            let mut chunks = self.chunks.write().await;
+            chunks.clear();
+        }
+        {
+            let mut emb = self.chunk_embeddings.write().await;
+            emb.clear();
+        }
+        {
+            let mut bm25 = self.bm25.write().await;
+            for id in &ids {
+                bm25.remove_document(id);
+            }
+        }
+        self.entities.write().await.clear();
+        if let Some(corpus) = self.corpus.clone() {
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                corpus.clear_chunks_and_entities()?;
+                corpus.clear_kg_graph()?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("corpus clear task panicked: {e}"))??;
+        }
+        *self.symbol_graph.write().await =
+            std::sync::Arc::new(crate::core::symbol_graph::SymbolGraph::default());
+        Ok(ids.len())
+    }
+
     /// Remove a chunk from the corpus and its vector from the HNSW store.
     pub async fn remove_chunk(&self, chunk_id: &str) -> Result<()> {
         if let Some(store) = &self.store {
