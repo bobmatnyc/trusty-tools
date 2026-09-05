@@ -7,17 +7,21 @@
 //! explicit that this surface should mirror the existing patterns rather than
 //! invent a new one.
 //! What: five handlers — register/deregister/list an instance, publish a peer
-//! message, and subscribe to one instance's inbound stream. Since #6288 slice
-//! 5 the four request/response verbs are ALSO JSON-RPC methods on the daemon's
-//! Unix socket: each handler is now a delegator over a transport-neutral
-//! `*_op` body ([`register_op`], [`deregister_op`], [`list_op`], [`publish_op`])
-//! that both transports call, so one route keeps one implementation.
-//! [`subscribe_instance`] is deliberately NOT among them — it is SSE, and it
-//! needs the `RpcStreamMethod` seam slice 6 owns. No RPC method is registered
-//! for it, and its handler is untouched here.
+//! message, and subscribe to one instance's inbound stream. #6288 slice 5 had
+//! briefly mounted the four request/response verbs as JSON-RPC methods on the
+//! daemon's Unix socket too; slice A retires those registrations — the
+//! 2026-09-05 owner ruling makes trusty-console the host of the only event
+//! bus, so mpm no longer serves one of its own, and this HTTP surface is now
+//! the sole caller of the transport-neutral `*_op` bodies ([`register_op`],
+//! [`deregister_op`], [`list_op`], [`publish_op`]) each handler delegates to.
+//! [`subscribe_instance`] was never among them — it is SSE and was always
+//! HTTP-only. This HTTP surface itself retires in #6288 slice 8, once the
+//! daemon finishes its move onto the UDS transport.
 //! Test: `bus::tests` — `route_register_returns_instance_id`,
 //! `route_publish_to_dead_instance_is_410`, `route_list_instances`; the
-//! transport-parity cases live in `daemon::rpc::registry::tests`.
+//! retirement is proven in `daemon::rpc::registry::tests` —
+//! `rpc_router_serves_no_bus_method`,
+//! `rpc_every_retired_bus_method_answers_method_not_found`.
 
 use std::convert::Infallible;
 use std::sync::Arc;
