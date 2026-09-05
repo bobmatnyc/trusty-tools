@@ -21,6 +21,13 @@
 //! derive the same id, and pinning on the id alone would silently serve one
 //! project's results to the other.
 //!
+//! #6864: that refusal was too broad. Two checkouts of one repository collide on
+//! the derived id by construction, and the daemon holds the second under a
+//! distinct id — `trusty-tools-checkout` beside `trusty-tools`. So before
+//! refusing, the already-fetched entries are scanned for one whose `root_path`
+//! IS this working directory, and that index is pinned instead. No extra request
+//! is made; only the entries the confirmation already read are re-examined.
+//!
 //! The pin is computed once, at startup. `serve` is a long-lived stdio process
 //! whose working directory cannot change after exec, so re-resolving per call
 //! would re-read an input that never varies.
@@ -45,6 +52,11 @@ pub(crate) enum PinSource {
     /// #5264: derived from the working directory and confirmed against the
     /// daemon's index list.
     WorkingDir,
+    /// #6864: the working directory's DERIVED id names another tree (or nothing),
+    /// but the daemon serves this exact tree under a different id. Reported
+    /// apart from [`PinSource::WorkingDir`] so the startup line says the id was
+    /// substituted rather than derived.
+    WorkingDirRootMatch,
 }
 
 impl PinSource {
@@ -54,6 +66,7 @@ impl PinSource {
             PinSource::Flag => "--index / TRUSTY_INDEX",
             PinSource::Project => "--project",
             PinSource::WorkingDir => "working directory",
+            PinSource::WorkingDirRootMatch => "working directory root_path match",
         }
     }
 }
@@ -163,7 +176,11 @@ pub(crate) struct DaemonIndex {
 pub(crate) enum Confirmation {
     /// The daemon serves this id from this exact root — safe to pin.
     Confirmed,
-    /// The daemon serves the id, but from a different project root.
+    /// #6864: the derived id does not name this tree, but another registered
+    /// index is rooted at it. That index is what the session pins.
+    ServedByAnotherId { index_id: String },
+    /// The daemon serves the id from a different project root, and no other
+    /// registered index is rooted at this one.
     RootMismatch { serving_root: PathBuf },
     /// The daemon does not serve the id at all.
     NotServed,
@@ -203,22 +220,58 @@ fn same_root(a: &Path, b: &Path) -> bool {
 /// What: finds the entry with a matching id, then requires its root to be the
 /// same directory. Every other outcome is a distinct refusal reason so the
 /// report can say which one happened.
+///
+/// #6864: refusing is right only when NOTHING serves this tree. The id
+/// collision it guards against is the ordinary consequence of two checkouts of
+/// one repository, and the second one is routinely registered under a distinct
+/// id — `trusty-tools-checkout` beside `trusty-tools` on 2026-09-05 — so the
+/// entries already in hand are scanned for a `root_path` that IS this tree
+/// before the candidate is refused. That scan costs no request: `entries` is the
+/// single `GET /indexes?details=true` the caller already made. The same scan
+/// runs when the derived id is served from another root and when it is not
+/// served at all, because the remedy is identical in both.
 /// Test: `confirm_accepts_matching_root`, `confirm_rejects_colliding_basename`,
-/// `confirm_rejects_unknown_index`, `confirm_rejects_null_root`.
+/// `confirm_rejects_unknown_index`, `confirm_rejects_null_root`,
+/// `confirm_substitutes_the_index_rooted_at_the_cwd`,
+/// `confirm_substitutes_when_the_derived_id_is_unserved`.
 pub(crate) fn confirm_candidate(candidate: &CwdCandidate, entries: &[DaemonIndex]) -> Confirmation {
     let Some(entry) = entries.iter().find(|e| e.id == candidate.index_id) else {
-        return Confirmation::NotServed;
+        return match index_serving_root(entries, &candidate.project_root) {
+            Some(index_id) => Confirmation::ServedByAnotherId { index_id },
+            None => Confirmation::NotServed,
+        };
     };
     let Some(root) = entry.root_path.as_ref() else {
         return Confirmation::RootUnknown;
     };
     if same_root(root, &candidate.project_root) {
-        Confirmation::Confirmed
-    } else {
-        Confirmation::RootMismatch {
-            serving_root: root.clone(),
-        }
+        return Confirmation::Confirmed;
     }
+    match index_serving_root(entries, &candidate.project_root) {
+        Some(index_id) => Confirmation::ServedByAnotherId { index_id },
+        None => Confirmation::RootMismatch {
+            serving_root: root.clone(),
+        },
+    }
+}
+
+/// The id of the registered index whose root IS `root` (#6864).
+///
+/// Why: an index identifies a directory tree, so the tree — not the id derived
+/// from its basename — is what decides which index answers about it. This is the
+/// trusty-search half of the rule `trusty_common::search_index`'s
+/// `index_id_serving_root` applies at registration time.
+/// What: the first entry whose reported `root_path` is the same directory under
+/// [`same_root`], which already tolerates symlinks and macOS's `/private`
+/// aliasing. Entries with no reported root are skipped — an unconfirmable entry
+/// is not a match.
+/// Test: `confirm_substitutes_the_index_rooted_at_the_cwd`,
+/// `confirm_substitutes_when_the_derived_id_is_unserved`.
+fn index_serving_root(entries: &[DaemonIndex], root: &Path) -> Option<String> {
+    entries
+        .iter()
+        .find(|e| e.root_path.as_deref().is_some_and(|r| same_root(r, root)))
+        .map(|e| e.id.clone())
 }
 
 /// The outcome of the working-directory tier: either a pin, or a refusal that
@@ -254,11 +307,14 @@ impl AutoPin {
 /// explicit `index_id` calls. Staying unpinned is exactly the behavior a bare
 /// `serve` had before this tier existed, so a refusal costs nothing that
 /// previously worked — it only declines to guess.
-/// What: `Confirmed` pins with [`PinSource::WorkingDir`]; every other verdict
-/// leaves the session unpinned and names the reason, the derived id, and the
-/// remedy.
+/// What: `Confirmed` pins with [`PinSource::WorkingDir`] and — since #6864 —
+/// `ServedByAnotherId` pins the substituted id with
+/// [`PinSource::WorkingDirRootMatch`], so the startup line names the index that
+/// was actually pinned and says it came from a root match rather than the
+/// basename. Every other verdict leaves the session unpinned and names the
+/// reason, the derived id, and the remedy.
 /// Test: `decide_pins_on_confirmation`, `decide_refuses_on_root_mismatch`,
-/// `decide_refuses_when_not_served`.
+/// `decide_refuses_when_not_served`, `decide_pins_the_substituted_index`.
 pub(crate) fn decide_auto_pin(candidate: &CwdCandidate, verdict: Confirmation) -> AutoPin {
     let root = candidate.project_root.display();
     let id = &candidate.index_id;
@@ -267,6 +323,18 @@ pub(crate) fn decide_auto_pin(candidate: &CwdCandidate, verdict: Confirmation) -
             index_id: candidate.index_id.clone(),
             source: PinSource::WorkingDir,
         }),
+        // #6864: pin the index registered at this tree, not the derived name.
+        Confirmation::ServedByAnotherId { index_id } => {
+            tracing::info!(
+                "working directory {root} derives index {id}, which does not name this \
+                 tree; the daemon serves it as {index_id} and that is what this session \
+                 pins (#6864)"
+            );
+            AutoPin::Pinned(PinChoice {
+                index_id,
+                source: PinSource::WorkingDirRootMatch,
+            })
+        }
         Confirmation::RootMismatch { serving_root } => AutoPin::Unpinned {
             reason: format!(
                 "MCP session UNPINNED — working directory {root} derives index {id}, \

@@ -76,6 +76,12 @@
 
 use std::path::Path;
 
+// #6864: basename-collision recovery lives in a sibling file so this one stays
+// under the 500-SLOC production cap. Same child-module rule as `tests` below.
+#[path = "search_index_reconcile.rs"]
+mod reconcile;
+use reconcile::CreateOutcome;
+
 /// Find-or-create the trusty-search index for `project_root`, best-effort
 /// trigger a reindex so it is actually populated, and return its id (issues
 /// #1373, #1908).
@@ -344,7 +350,7 @@ pub fn ensure_project_indexed_reporting(
             registration: IndexRegistration::RefusedUnindexableRoot(refusal),
         };
     }
-    let index_id = crate::derive_index_id(&root);
+    let mut index_id = crate::derive_index_id(&root);
     if index_id.trim().is_empty() {
         tracing::warn!(
             "skipping trusty-search index registration: empty index id for {}",
@@ -372,7 +378,11 @@ pub fn ensure_project_indexed_reporting(
     // why `DaemonUnreachable` is not a pinnable outcome.
     let registration = match crate::resolve_daemon_base_url("trusty-search") {
         Some(base) => {
-            let outcome = best_effort_create_index(&base, &index_id, &root, opts);
+            // #6864: a derived id the daemon holds for ANOTHER tree resolves to
+            // the index already registered at this root instead of failing.
+            let (resolved, outcome) =
+                reconcile::create_and_reconcile(&base, &index_id, &root, opts);
+            index_id = resolved;
             best_effort_trigger_reindex(&base, &index_id);
             outcome
         }
@@ -1031,10 +1041,11 @@ fn registered_root_from_response(body: &str) -> Option<String> {
 /// so the joined thread returns quickly: this call sits on a hot path and
 /// must NOT stall when the daemon is slow or unreachable.
 ///
-/// Returns [`IndexRegistration::Confirmed`] ONLY for a 2xx response (#5065
-/// review): a non-2xx, a transport error, and a panicked worker thread are all
-/// `NotConfirmed`. They are still logged and swallowed — the return value gives
-/// the caller something honest to report, it does not make the call fallible.
+/// Returns [`CreateOutcome::Confirmed`] ONLY for a 2xx response (#5065
+/// review): a non-2xx other than `409`, a transport error, and a panicked worker
+/// thread are all `NotConfirmed`. They are still logged and swallowed — the
+/// return value gives the caller something honest to report, it does not make
+/// the call fallible.
 ///
 /// A 2xx is no longer sufficient on its own. The daemon answers a find-or-create
 /// for an id it already holds with `200 {created: false}`, and reading only the
@@ -1042,16 +1053,25 @@ fn registered_root_from_response(body: &str) -> Option<String> {
 /// tree differed from the registered one was told the registration succeeded and
 /// then had every query answered from the OTHER tree, with no error and no
 /// warning. The response now carries the registered `root_path` and a mismatch
-/// downgrades the verdict to `NotConfirmed`.
+/// downgrades the verdict to [`CreateOutcome::Conflict`].
+///
+/// #6864: a `409` is that same conflict said out loud — the daemon refuses to
+/// re-register an id over a second tree (`root_path_mismatch_response`), and
+/// refuses a second id over one tree (`root_path_collision_response`, which
+/// names the owning `existing_id`). Both are reported as `Conflict` rather than
+/// `NotConfirmed` because an index for the requested tree may well exist under
+/// another id; [`reconcile::create_and_reconcile`] is what goes and finds it.
 /// Test: `ensure_project_indexed_withholds_id_when_nothing_was_registered`
 /// (daemon-down path), `registered_root_from_response_*` (the body contract),
-/// `create_index_response_for_a_different_tree_is_not_confirmed` (the error arm).
+/// `create_index_response_for_a_different_tree_reports_a_conflict` (the 2xx
+/// conflict arm), `registration_matches_an_existing_index_by_root_path` (the
+/// `409` arm, end to end).
 fn best_effort_create_index(
     base: &str,
     index_id: &str,
     root: &Path,
     opts: IndexOptions,
-) -> IndexRegistration {
+) -> CreateOutcome {
     let url = format!("{base}/indexes");
     let body = create_index_request_body(index_id, root, opts);
     let index_id = index_id.to_string();
@@ -1076,40 +1096,18 @@ fn best_effort_create_index(
     .join();
 
     match result {
-        Ok(Ok((status, body))) if status.is_success() => {
-            // The daemon answers a find-or-create for an id it already holds
-            // with `200 {created: false}`. Reading only `status` made that
-            // byte-identical to a real create, so a session whose tree differs
-            // from the registered one was told it had been registered and then
-            // had every query answered from the OTHER tree. Compare the tree the
-            // daemon reports against the one that was asked for.
-            match registered_root_from_response(&body) {
-                Some(registered) if !crate::identifies_same_path(Path::new(&registered), root) => {
-                    tracing::warn!(
-                        "trusty-search index '{index_id}' is registered at {registered}, not at \
-                         the requested {root_display}; withholding confirmation so the caller \
-                         cannot pin an index that searches a different tree"
-                    );
-                    return IndexRegistration::NotConfirmed;
-                }
-                _ => {}
-            }
-            tracing::debug!("registered trusty-search index '{index_id}' (root={root_display})");
-            IndexRegistration::Confirmed
-        }
-        Ok(Ok((status, _))) => {
-            tracing::warn!(
-                "trusty-search index registration for '{index_id}' returned HTTP {status}"
-            );
-            IndexRegistration::NotConfirmed
+        // #6864: every status→outcome rule lives in `reconcile` beside the
+        // recovery it feeds, so the conflict semantics cannot drift apart.
+        Ok(Ok((status, body))) => {
+            reconcile::classify_create_response(status, &body, &index_id, root, &root_display)
         }
         Ok(Err(e)) => {
             tracing::warn!("trusty-search index registration for '{index_id}' failed: {e}");
-            IndexRegistration::NotConfirmed
+            CreateOutcome::NotConfirmed
         }
         Err(_) => {
             tracing::warn!("trusty-search index registration thread for '{index_id}' panicked");
-            IndexRegistration::NotConfirmed
+            CreateOutcome::NotConfirmed
         }
     }
 }
