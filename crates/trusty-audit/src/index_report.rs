@@ -274,6 +274,18 @@ pub struct IndexReport {
     /// `None` is reserved for a caller with no directories to read at all, and
     /// omits the section rather than claiming either way.
     pub osv: Option<crate::grounding::osv_rollup::Rollup>,
+    /// How much of each repository the investigation pass read (#6784).
+    ///
+    /// Why: the figure was per report and the question is per bundle — "how much
+    /// of this estate was actually read" was answerable only by opening all 59
+    /// reports. It is read back off the reports each producer is describing, so
+    /// the index states what the bundle CARRIES, on the same terms as
+    /// [`Self::osv`].
+    /// What: `None` omits the section, for a producer with no report directories
+    /// to read. An EMPTY roll-up renders the "not recorded" line — the state a
+    /// bundle rendered by a renderer too old to record coverage lands in, which
+    /// used to be indistinguishable from full coverage.
+    pub coverage: Option<crate::grounding::coverage_rollup::Rollup>,
 }
 
 /// The current local time with its UTC offset, e.g. `2026-08-19 22:40:11 -04:00`.
@@ -381,6 +393,11 @@ pub fn render(report: &IndexReport, dir: &Path) -> String {
     // rather than a description of the directory.
     out.push_str(&crate::grounding::osv_rollup::index_section(
         report.osv.as_ref(),
+    ));
+    // #6784: beside the OSV roll-up and for the same reason — a finding about
+    // the run, before the description of the directory.
+    out.push_str(&crate::grounding::coverage_rollup::index_section(
+        report.coverage.as_ref(),
     ));
     contents(report.producer, &mut out);
     out
@@ -881,6 +898,15 @@ pub fn write_sweep(
                 .map(|run| run.output.clone())
                 .collect::<Vec<_>>(),
         )),
+        // #6784: read back from the report JSON each repository's render wrote,
+        // beside its markdown twin — the same directories the OSV roll-up reads.
+        coverage: Some(crate::grounding::coverage_rollup::rollup(
+            &report
+                .repos
+                .iter()
+                .map(|run| run.output.clone())
+                .collect::<Vec<_>>(),
+        )),
     };
     write(&index, &work.path(crate::workdir::Area::Output))
 }
@@ -969,6 +995,15 @@ pub fn write_render(
                 .filter_map(|rendered| rendered.manifest.parent().map(Path::to_path_buf))
                 .collect::<Vec<_>>(),
         )),
+        // #6784: the reports THIS render just wrote, not the ones it rendered
+        // from — a re-render's coverage is a property of its own output, and a
+        // renderer upgraded between the two runs will state a different figure.
+        coverage: Some(crate::grounding::coverage_rollup::rollup(
+            &reports
+                .iter()
+                .map(|rendered| rendered.output.clone())
+                .collect::<Vec<_>>(),
+        )),
     };
     write(&index, out_dir)
 }
@@ -1042,6 +1077,10 @@ mod index_tests {
             // and every earlier assertion over it still reads the same page.
             debt: crate::debt_rollup::DebtRollup::default(),
             osv: None,
+            // #6784: the fixture states no coverage, so the section is omitted
+            // and every earlier assertion over the rendered page still reads the
+            // same way.
+            coverage: None,
         }
     }
 

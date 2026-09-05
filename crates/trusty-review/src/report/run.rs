@@ -75,6 +75,17 @@ pub struct ReportRequest {
     /// Seconds one corpus-scanning analyze request may take; `None` defers to
     /// the manifest key then the default (#6712).
     pub analyze_timeout_secs: Option<u64>,
+    /// Ship a report whose `--analyze` lane assessed NOTHING (#6811).
+    ///
+    /// Why: a run where every repository's analyze fetch failed produces a
+    /// report whose finding counts, complexity figures and health factors are
+    /// all unassessed, and #6783 showed that reading as "clean" to a downstream
+    /// reader. The default is now to fail rather than ship it. This flag is the
+    /// operator's explicit acknowledgement that they want it anyway — the
+    /// coverage line stating `0 of N` stays in the report either way.
+    /// What: only the TOTAL collapse is gated. Partial degradation (`M of N`,
+    /// `M > 0`) is a warning at every setting and never fails the run.
+    pub allow_degraded: bool,
 }
 
 impl ReportRequest {
@@ -95,6 +106,7 @@ impl ReportRequest {
             no_mermaid: false,
             analyze: false,
             analyze_timeout_secs: None,
+            allow_degraded: false,
         }
     }
 }
@@ -212,7 +224,11 @@ pub async fn run_report(config_path: Option<&Path>, req: &ReportRequest) -> Resu
     // the live metrics).  Fully fail-open — populates only local-path repos that
     // declared no metrics, and only when their index is served.
     if req.analyze {
-        enrich_from_analyze(&mut model, req, &manifest, &config).await;
+        let coverage = enrich_from_analyze(&mut model, req, &manifest, &config).await;
+        // #6811: the lane's own outcome decides whether this run may ship. It is
+        // checked BEFORE synthesis, which costs minutes and whose prose would
+        // describe nothing that was measured.
+        analyze_lane_verdict(coverage, req.allow_degraded)?;
     }
 
     // LLM synthesis plus the repo-evidence investigation. #5454: required, so a
@@ -432,7 +448,7 @@ async fn enrich_from_analyze(
     req: &ReportRequest,
     manifest: &Manifest,
     config: &ReviewConfig,
-) {
+) -> crate::report::AnalyzeLaneCoverage {
     let analyze_socket = manifest
         .report
         .analyze_socket
@@ -449,11 +465,12 @@ async fn enrich_from_analyze(
             // #5239: every repo the fetch could not populate is named in the
             // report, not only warned about on stderr — a dimension missing
             // because the daemon was down must not read as a clean pass.
-            let gaps = crate::report::enrich_with_analyze_gaps(model, &source).await;
-            for gap in &gaps {
+            let outcome = crate::report::enrich_with_analyze_outcome(model, &source).await;
+            for gap in &outcome.lines {
                 eprintln!("[trusty-review report] --analyze gap: {gap}");
             }
-            model.gaps.extend(gaps);
+            model.gaps.extend(outcome.lines);
+            outcome.coverage
         }
         Err(e) => {
             eprintln!(
@@ -468,8 +485,93 @@ async fn enrich_from_analyze(
                  complexity, and health factors are not assessed, not clean."
                     .to_string(),
             );
+            // #6811: no client means no repository was assessed, which is the
+            // same total collapse the walk reports — counted over the
+            // repositories the walk WOULD have attempted, so the verdict below
+            // sees one condition rather than two.
+            crate::report::AnalyzeLaneCoverage::never_ran(analyze_eligible_repositories(model))
         }
     }
+}
+
+/// Repositories the analyze walk would attempt, counted without walking (#6811).
+///
+/// Why: the client-construction failure arm never reaches
+/// `enrich_with_analyze_outcome`, so it has no denominator of its own — and a
+/// total collapse with no denominator cannot be told from a manifest that had
+/// nothing to assess. This applies the walk's own eligibility rule minus the
+/// index-registry lookup a dead client cannot perform, so it can only
+/// over-count (a checkout whose path derives to no index id), never under-count.
+/// What: local checkouts that declared no metrics file.
+/// Test: `run_tests::a_client_that_will_not_build_counts_every_eligible_repository`.
+fn analyze_eligible_repositories(model: &ReportModel) -> usize {
+    model
+        .repositories
+        .iter()
+        .filter(|repo| repo.metrics.is_none() && repo.local_path.is_some())
+        .count()
+}
+
+/// Whether an analyze lane's outcome may ship (#6811).
+///
+/// Why: DOC-67 §9's fail-open contract is per repository and stays that way.
+/// What it never covered is the lane failing for EVERY repository, which #6783
+/// shipped: 59 repositories all reading "not stated in source data", which a
+/// downstream reader took for "static analysis ran and found nothing". A report
+/// nothing was measured for is not a degraded report, so the run fails unless
+/// the operator says otherwise.
+///
+/// The threshold: only a TOTAL collapse (`0 of N` assessed, `N > 0`) fails.
+/// Partial degradation (`M of N`, `M > 0`) stays a warning at every setting — a
+/// 58-of-59 run carries 58 assessed applications, and throwing that away over
+/// one unreachable index costs more than it protects. A lane attempted zero
+/// times is not a failure either: a manifest of remote-only repositories has no
+/// analyze lane to lose.
+///
+/// # Errors
+///
+/// When the lane assessed nothing and `allow_degraded` is false. The message
+/// names the lane, both counts, and the flag that overrides it.
+///
+/// Test: `run_tests::{a_total_analyze_collapse_fails_the_run,
+/// allow_degraded_lets_a_total_collapse_ship,
+/// a_partial_analyze_degradation_is_a_warning_not_a_failure,
+/// an_unattempted_analyze_lane_is_not_a_failure}`.
+fn analyze_lane_verdict(
+    coverage: crate::report::AnalyzeLaneCoverage,
+    allow_degraded: bool,
+) -> Result<()> {
+    if !coverage.is_total_failure() {
+        if coverage.is_partial_failure() {
+            eprintln!(
+                "[trusty-review report] --analyze: lane partially degraded — {} of {} \
+                 application(s) assessed, {} failed; the report states the coverage and the run \
+                 continues (issue #6811)",
+                coverage.succeeded,
+                coverage.attempted,
+                coverage.failed(),
+            );
+        }
+        return Ok(());
+    }
+    if allow_degraded {
+        eprintln!(
+            "[trusty-review report] --analyze: lane DID NOT RUN — 0 of {} application(s) \
+             assessed; --allow-degraded was passed, so the report is written with that stated \
+             (issue #6811)",
+            coverage.attempted,
+        );
+        return Ok(());
+    }
+    anyhow::bail!(
+        "the trusty-analyze lane DID NOT RUN — 0 of {attempted} application(s) assessed, \
+         {failed} failed. Every finding count, complexity figure and health factor this report \
+         would carry is UNASSESSED, not clean, so it is not written. Fix the analyze lane (is \
+         `trusty-analyze` running, and is each checkout indexed?) and re-run, or pass \
+         --allow-degraded to ship the report with that fact stated in it.",
+        attempted = coverage.attempted,
+        failed = coverage.failed(),
+    )
 }
 
 /// Resolve the benchmark corpus directory or fail with a clear message.
@@ -561,8 +663,11 @@ fn target_snapshots(model: &ReportModel) -> Vec<CorpusSnapshot> {
 /// boundaries the manifest cannot — see
 /// `trusty_common::env_vars::ENV_AUDIT_INVESTIGATE_MAX_FILES`.
 /// What: request field > manifest `[report].investigate_max_*` >
-/// `TRUSTY_AUDIT_INVESTIGATE_MAX_*` > [`Budget::default`].
-/// Test: `run_tests::the_environment_budget_is_read_below_the_manifest`.
+/// `TRUSTY_AUDIT_INVESTIGATE_MAX_*` > [`Budget::default`]. #6784: a value from
+/// any of the first three tiers is recorded as PINNED, which stops
+/// [`Budget::for_repository`] from scaling that dimension with repository size.
+/// Test: `run_tests::the_environment_budget_is_read_below_the_manifest`,
+/// `run_tests::a_defaulted_budget_is_not_pinned`.
 fn resolve_budget(req: &ReportRequest, manifest: &Manifest) -> Budget {
     resolve_budget_from(
         req,
@@ -585,17 +690,21 @@ fn resolve_budget_from(
     env_bytes: Option<usize>,
 ) -> Budget {
     let default = Budget::default();
+    // #6784: which tier answered is now part of the resolution, not only the
+    // number — a cap an operator named must not be size-scaled underneath them.
+    let files = req
+        .investigate_max_files
+        .or(manifest.report.investigate_max_files)
+        .or(env_files);
+    let bytes = req
+        .investigate_max_bytes
+        .or(manifest.report.investigate_max_bytes)
+        .or(env_bytes);
     Budget {
-        max_files: req
-            .investigate_max_files
-            .or(manifest.report.investigate_max_files)
-            .or(env_files)
-            .unwrap_or(default.max_files),
-        max_bytes: req
-            .investigate_max_bytes
-            .or(manifest.report.investigate_max_bytes)
-            .or(env_bytes)
-            .unwrap_or(default.max_bytes),
+        max_files: files.unwrap_or(default.max_files),
+        max_bytes: bytes.unwrap_or(default.max_bytes),
+        files_pinned: files.is_some(),
+        bytes_pinned: bytes.is_some(),
     }
 }
 

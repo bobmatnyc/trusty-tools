@@ -1406,6 +1406,44 @@ async fn a_fully_successful_lane_records_nothing() {
     assert!(model.repositories.iter().all(|r| r.metrics.is_some()));
 }
 
+/// #6811 regression. The lane record is prose, and the caller deciding whether
+/// to FAIL the run cannot make that decision by matching on a sentence. The
+/// counts leave the walk as data, and they agree with the line the same walk
+/// wrote.
+///
+/// Against `origin/main` at 11b1ba9f9 this does not compile:
+/// `enrich_with_analyze_outcome` does not exist.
+#[tokio::test]
+async fn the_outcome_carries_the_lane_counts() {
+    let mut model = model_with_local_repos(&["A", "B", "C", "D"]);
+    let source = AlternatingSource::new(vec![1, 3]);
+
+    let outcome = crate::report::enrich_with_analyze_outcome(&mut model, &source).await;
+
+    assert_eq!(outcome.coverage.attempted, 4);
+    assert_eq!(outcome.coverage.succeeded, 2);
+    assert_eq!(outcome.coverage.failed(), 2);
+    assert!(
+        outcome.coverage.is_partial_failure() && !outcome.coverage.is_total_failure(),
+        "two of four assessed is partial, not total: {:?}",
+        outcome.coverage
+    );
+    assert!(
+        outcome.lines.first().is_some_and(|l| l.contains("2 of 4")),
+        "the counts and the line state the same thing: {:?}",
+        outcome.lines
+    );
+
+    let mut model = model_with_local_repos(&["A", "B"]);
+    let dead = StubSource(|| AnalyzeFetch::Missing(AnalyzeGap::Unreachable));
+    let outcome = crate::report::enrich_with_analyze_outcome(&mut model, &dead).await;
+    assert!(
+        outcome.coverage.is_total_failure(),
+        "a lane that populated nothing is the total collapse: {:?}",
+        outcome.coverage
+    );
+}
+
 // ── #6177: the Python class-body region ─────────────────────────────────────
 
 /// A Python class body the daemon named as one.

@@ -210,6 +210,16 @@ pub(super) fn render_index(
                 .map(|run| run.output.clone())
                 .collect::<Vec<_>>(),
         )),
+        // #6784: the recipient's copy of the coverage figure, read off the same
+        // report JSONs this package is about to carry. Leaving it to the sweep's
+        // `out/` index would state it only to the operator.
+        coverage: Some(crate::grounding::coverage_rollup::rollup(
+            &report
+                .repos
+                .iter()
+                .map(|run| run.output.clone())
+                .collect::<Vec<_>>(),
+        )),
     };
     (
         crate::index_report::render(&index, Path::new(REPORTS_PREFIX)),

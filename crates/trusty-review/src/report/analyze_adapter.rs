@@ -56,7 +56,10 @@ pub use super::analyze_endpoints::{
 };
 // #6712: the model-enrichment half moved to `analyze_enrich` when this file
 // passed the SLOC cap; the paths callers already use resolve through here.
-pub use super::analyze_enrich::{enrich_with_analyze, enrich_with_analyze_gaps};
+pub use super::analyze_enrich::{
+    AnalyzeLaneCoverage, AnalyzeLaneOutcome, enrich_with_analyze, enrich_with_analyze_gaps,
+    enrich_with_analyze_outcome,
+};
 
 // ─── Tunables ──────────────────────────────────────────────────────────────
 

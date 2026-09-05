@@ -96,8 +96,9 @@ pub mod topology;
 // ── Re-exports for convenience ─────────────────────────────────────────────
 
 pub use analyze_adapter::{
-    AnalyzeAdapterError, AnalyzeCaveat, AnalyzeFetch, AnalyzeGap, AnalyzeMetricsSource,
-    HttpAnalyzeMetricsSource, enrich_with_analyze, enrich_with_analyze_gaps,
+    AnalyzeAdapterError, AnalyzeCaveat, AnalyzeFetch, AnalyzeGap, AnalyzeLaneCoverage,
+    AnalyzeLaneOutcome, AnalyzeMetricsSource, HttpAnalyzeMetricsSource, enrich_with_analyze,
+    enrich_with_analyze_gaps, enrich_with_analyze_outcome,
 };
 // #6677: `derive_index_id` moved here from `analyze_adapter`; the public path
 // `trusty_review::report::derive_index_id` is unchanged.

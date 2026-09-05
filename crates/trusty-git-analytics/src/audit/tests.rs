@@ -895,7 +895,11 @@ fn binary_resolution_prefers_the_env_override() {
 fn invocation_requests_inference() {
     use std::path::Path;
 
-    let args = super::review::report_args(Path::new("/o/manifest.toml"), Path::new("/o"));
+    let args = super::review::report_args_for(
+        Path::new("/o/manifest.toml"),
+        Path::new("/o"),
+        Some(super::review::MIN_REVIEW_VERSION_ALLOW_DEGRADED),
+    );
     let rendered: Vec<String> = args
         .iter()
         .map(|a| a.to_string_lossy().into_owned())
@@ -911,8 +915,71 @@ fn invocation_requests_inference() {
             "--synthesize",
             "--out",
             "/o",
+            // #6811: see `an_old_renderer_is_not_offered_allow_degraded`.
+            "--allow-degraded",
         ],
         "the audit's renderer invocation must request inference"
+    );
+}
+
+// ── #6811: the audit asks for the degraded report rather than losing it ──────
+
+/// #6811. `tga audit` renders ONE report over the whole engagement, and
+/// trusty-review 0.35 fails a run whose analyze lane assessed nothing. Letting
+/// that failure through would delete the deliverable: the sweep's collected data
+/// survives, but no bundle is written, so the degradation a reader needed to see
+/// becomes an ABSENT report rather than a stated caveat — the same invisibility
+/// #6811 exists to end, one level up. So the audit always asks for it, and the
+/// artifact carries the fact.
+///
+/// Against `origin/main` at 11b1ba9f9 this does not compile: `report_args_for`
+/// does not exist.
+#[test]
+fn a_current_renderer_is_asked_for_the_degraded_report() {
+    use std::path::Path;
+
+    let args = super::review::report_args_for(
+        Path::new("/o/manifest.toml"),
+        Path::new("/o"),
+        Some(super::review::MIN_REVIEW_VERSION_ALLOW_DEGRADED),
+    );
+    assert!(
+        args.iter().any(|a| a == "--allow-degraded"),
+        "a renderer at the floor accepts the flag: {args:?}"
+    );
+}
+
+/// #6811. tga resolves `trusty-review` from PATH rather than from a Cargo edge
+/// (DOC-67 §5), so a pairing with an older renderer is ordinary. An older copy
+/// rejects an unknown flag with a clap usage error and exit 2 — passing it
+/// unconditionally would turn EVERY render against that copy into a failure,
+/// which is the opposite of what the flag is for.
+#[test]
+fn an_old_renderer_is_not_offered_allow_degraded() {
+    use std::path::Path;
+
+    let args = super::review::report_args_for(
+        Path::new("/o/manifest.toml"),
+        Path::new("/o"),
+        Some((0, 34, 1)),
+    );
+    assert!(
+        !args.iter().any(|a| a == "--allow-degraded"),
+        "a pre-0.35 renderer must not be handed a flag it will reject: {args:?}"
+    );
+}
+
+/// #6811. A renderer that would not answer `--version` is more likely to be an
+/// old one than a new one, and omitting the flag costs one degraded render while
+/// passing it to a copy that rejects it costs every render.
+#[test]
+fn an_unreadable_renderer_version_omits_allow_degraded() {
+    use std::path::Path;
+
+    let args = super::review::report_args_for(Path::new("/o/manifest.toml"), Path::new("/o"), None);
+    assert!(
+        !args.iter().any(|a| a == "--allow-degraded"),
+        "an unknown version omits the flag rather than guessing: {args:?}"
     );
 }
 
