@@ -20,7 +20,7 @@ pub mod core;
 pub mod core_ops;
 
 /// Registration for the legacy session registry, hook ingestion, and the polled
-/// event feeds (#6288 slice 3). The SSE stream legs stay on HTTP until slice 6.
+/// event feeds (#6288 slice 3). The SSE stream legs are `stream`'s (slice 6).
 pub mod sessions_legacy;
 
 /// The transport-neutral bodies `sessions_legacy`'s methods and `daemon::api`'s
@@ -35,3 +35,8 @@ pub mod managed;
 /// deliverables/milestones, the L3 manager, the peer bus, pairing, and the
 /// delegation query (#6288 slice 5).
 pub mod registry;
+
+/// Registration for the two hook-event SSE routes as streaming methods
+/// (#6288 slice 6). Also owns the per-session filter predicate `daemon::api`'s
+/// SSE handler shares, so the two transports cannot drift.
+pub mod stream;

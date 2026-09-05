@@ -38,6 +38,9 @@ use super::rpc::core_ops;
 // #6288 slice 3: the shared bodies for the legacy session, hook, and polled
 // event routes. Every handler below is a thin adapter over one of them.
 use super::rpc::sessions_legacy_ops as sessions_ops;
+// #6288 slice 6: the per-session filter predicate `mpm.sessions.events_stream`
+// and the SSE handler below share. One rule, one implementation.
+use super::rpc::stream as stream_rpc;
 use super::state::DaemonState;
 
 /// The SESSCTL control-plane routes (`/api/v1/control/sessions/*`, WI-2 #1593).
@@ -510,7 +513,8 @@ pub async fn recent_events(State(state): State<Arc<DaemonState>>) -> Json<Events
 /// as one SSE `data:` line (JSON-encoded). A `KeepAlive` comment ping every
 /// 15 seconds prevents idle proxies from closing the connection.
 /// Test: `events_sse_streams_one_frame` posts a hook and reads one SSE frame
-/// from this handler.
+/// from this handler; `stream_matches_the_sse_sequence` compares it against
+/// `mpm.events.stream` frame for frame (#6288 slice 6).
 pub async fn stream_events(
     State(state): State<Arc<DaemonState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -829,7 +833,9 @@ pub async fn session_events(
 /// `"session": "<uuid>"` field every [`HookEventRecord`](crate::core::hook::HookEventRecord) carries). A 15-second
 /// `KeepAlive` ping keeps idle proxies from closing the connection.
 /// Test: `session_events_sse_filters_by_session` posts a hook for one
-/// session and confirms only that session's stream sees it.
+/// session and confirms only that session's stream sees it;
+/// `session_stream_matches_the_sse_sequence` compares this handler's output
+/// against `mpm.sessions.events_stream`'s frame for frame.
 pub async fn stream_session_events(
     Path(id): Path<String>,
     State(state): State<Arc<DaemonState>>,
@@ -837,11 +843,11 @@ pub async fn stream_session_events(
     let rx = state.event_subscribe();
     let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
         Ok(val) => {
-            // Include the event only if it mentions this session id. The
-            // record serializes its `SessionId` as the UUID string, so a
-            // simple substring match is sufficient and avoids a typed parse
-            // per frame.
-            if val.to_string().contains(&id) {
+            // #6288 slice 6: the filter rule is shared with
+            // `mpm.sessions.events_stream`, so the two transports cannot drift
+            // into selecting different events. The predicate is unchanged —
+            // this handler's output is byte-identical to what it was.
+            if stream_rpc::event_mentions_session(&val, &id) {
                 Some(Ok(Event::default().data(val.to_string())))
             } else {
                 None
