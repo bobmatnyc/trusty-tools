@@ -13,30 +13,19 @@
 //! `gh_set_assignee`) that drive `gh` through the injected [`CommandRunner`].
 //! Test: the `gh_*` unit tests in this file drive a `FakeRunner` (no live `gh`).
 
-use serde::Deserialize;
-
 use super::runner::CommandRunner;
 
 /// A repository label as it exists (or should exist) on GitHub.
 ///
 /// Why: seeding (`tm issue seed-labels`) is create-missing against the repo's
-/// label set, so both the "what the YAML wants" and "what the repo has" sides
-/// need the same name/color/description shape for a diff.
-/// What: the label `name`, its 6-hex `color` (no leading `#`), and an optional
-/// `description`.
+/// label set, so both the "what the model wants" and "what the repo has" sides
+/// need the same name/color/description shape for a diff. #6914 made that shape
+/// the library's [`trusty_mpm::core::policy_labels::PolicyLabel`] rather than a
+/// second, identical struct here — session launch and `tm issue` now diff and
+/// create the same type.
 /// Test: round-tripped through `gh_list_repo_labels` parsing in
 /// `gh_list_repo_labels_parses`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct RepoLabel {
-    /// Label name (e.g. `unicorn:queued`).
-    pub(crate) name: String,
-    /// 6-hex color, no `#` (e.g. `BFD4F2`). `gh label list` returns it without `#`.
-    #[serde(default)]
-    pub(crate) color: String,
-    /// Optional human description shown in the GitHub label UI.
-    #[serde(default)]
-    pub(crate) description: String,
-}
+pub(crate) use trusty_mpm::core::policy_labels::PolicyLabel as RepoLabel;
 
 /// The effective assignee mutation a transition should apply.
 ///
@@ -79,23 +68,20 @@ pub(crate) fn gh_list_repo_labels<R: CommandRunner>(runner: &R) -> anyhow::Resul
 ///
 /// Why: the create-missing half of seeding; the caller decides *whether* to
 /// create (post-diff), this just performs one creation.
-/// What: invokes `gh label create` with the label's color/description (omitting
-/// the `--description` flag when empty); maps failure to an `anyhow` error.
+/// What: builds the command line with
+/// [`trusty_mpm::core::policy_labels::create_label_argv`] — the crate's single
+/// `gh label create` spelling since #6914 — and runs it through `runner`.
+/// Never forces: seeding must leave a label the repo already carries untouched,
+/// colour and description included.
 /// Test: `gh_create_label_invokes_create`,
 /// `gh_create_label_omits_empty_description`.
 pub(crate) fn gh_create_label<R: CommandRunner>(
     runner: &R,
     label: &RepoLabel,
 ) -> anyhow::Result<()> {
-    let mut args: Vec<&str> = vec!["label", "create", &label.name];
-    if !label.color.is_empty() {
-        args.push("--color");
-        args.push(&label.color);
-    }
-    if !label.description.is_empty() {
-        args.push("--description");
-        args.push(&label.description);
-    }
+    // #6914: one argv builder for both the launch path and `tm issue`.
+    let argv = trusty_mpm::core::policy_labels::create_label_argv(label, None, false);
+    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     runner.run("gh", &args)?.ok_or_stderr("gh label create")?;
     Ok(())
 }
@@ -305,11 +291,7 @@ mod tests {
     #[test]
     fn gh_create_label_invokes_create() {
         let r = FakeRunner::new(vec![ok_out("")]);
-        let label = RepoLabel {
-            name: "unicorn:done".to_string(),
-            color: "0075CA".to_string(),
-            description: "Done".to_string(),
-        };
+        let label = RepoLabel::new("unicorn:done", "0075CA", "Done");
         gh_create_label(&r, &label).expect("create");
         assert_eq!(
             r.calls()[0].1,
@@ -328,11 +310,7 @@ mod tests {
     #[test]
     fn gh_create_label_omits_empty_description() {
         let r = FakeRunner::new(vec![ok_out("")]);
-        let label = RepoLabel {
-            name: "T4".to_string(),
-            color: "0075CA".to_string(),
-            description: String::new(),
-        };
+        let label = RepoLabel::new("T4", "0075CA", "");
         gh_create_label(&r, &label).expect("create");
         let args = &r.calls()[0].1;
         assert!(!args.iter().any(|a| a == "--description"));

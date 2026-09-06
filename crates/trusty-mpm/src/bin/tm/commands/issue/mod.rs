@@ -62,7 +62,10 @@ fn dispatch<S: TicketSystem>(backend: &S, cmd: IssueCmd) -> anyhow::Result<()> {
     match cmd {
         IssueCmd::SeedLabels { config, dry_run } => {
             let model = load_model(config.as_deref())?;
-            let report = ops::seed_labels(backend, &model, dry_run)?;
+            // #6914: the `ws/<session>` policy label needs the same session
+            // name session launch labels with — the tmux session name.
+            let session = crate::commands::tmux_attach::current_tmux_session_name();
+            let report = ops::seed_labels(backend, &model, session.as_deref(), dry_run)?;
             print_seed_report(&report);
         }
         IssueCmd::Transition {
@@ -115,6 +118,10 @@ fn print_seed_report(report: &ops::SeedReport) {
         println!("  + {name}");
     }
     println!("already present: {} label(s)", report.already_present.len());
+    // #6914: an omitted ws/ label is stated, never silent.
+    if report.workstream_skipped {
+        println!("skipped ws/<session>: no tmux session name to derive it from");
+    }
 }
 
 /// Print the configured states and transitions.

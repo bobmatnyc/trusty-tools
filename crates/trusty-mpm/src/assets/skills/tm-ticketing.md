@@ -200,6 +200,13 @@ because the session that filed the issue happened to run under tm. When no
 component label fits, apply none — that decision is final, not a trigger to
 reach for `trusty-mpm`.
 
+🔴 **Seed the harness's own labels on first use in a repository.** `tm issue
+seed-labels` creates the four `status:*` lifecycle labels, `trusty-mpm`, and
+`ws/<session>`. It is idempotent and never rewrites a label that already
+exists, so run it rather than checking first. Re-run it whenever a `gh issue
+edit --add-label` or `gh issue create --label` fails on an unknown label, then
+retry the original command once.
+
 🔴 **Never invent a label the repository does not carry.** Check `gh label list`
 before using one; create a genuinely missing label rather than dropping the
 family or substituting an approximation.

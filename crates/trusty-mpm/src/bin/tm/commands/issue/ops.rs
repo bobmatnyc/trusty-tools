@@ -30,6 +30,10 @@ pub(crate) struct SeedReport {
     pub(crate) already_present: Vec<String>,
     /// Whether this was a dry-run (no `create_label` calls made).
     pub(crate) dry_run: bool,
+    /// `true` when no session name was known, so the `ws/<session>` policy
+    /// label was left out of the seed (#6914). The caller says so in its
+    /// output rather than letting the omission pass silently.
+    pub(crate) workstream_skipped: bool,
 }
 
 /// Outcome of a `transition` (for printing + assertion).
@@ -49,44 +53,66 @@ pub(crate) struct TransitionReport {
     pub(crate) assignee_changed: bool,
 }
 
-/// Collect every label the model declares (state labels + extra labels).
+/// Every label the harness applies by policy, in seed order.
 ///
-/// Why: seeding ensures both families exist; gathering them once keeps the diff
-/// simple.
-/// What: maps state labels and extra labels into [`RepoLabel`]s.
-/// Test: exercised via `ops_seed_creates_only_missing`.
-fn declared_labels(model: &StateModel) -> Vec<RepoLabel> {
+/// Why: #6914 — `gh issue edit --add-label` and `gh issue create --label` fail
+/// on a label the repo has never seen, so `seed-labels` has to cover EVERY
+/// label the harness applies, not just the model's. Two families make that up:
+/// the project-configured lifecycle labels from `issue-state.yaml`, and the
+/// framework's own set from `trusty_mpm::core::policy_labels` (`trusty-mpm`,
+/// plus `ws/<session>` when a session name is known). One list, so a family cannot
+/// be seeded by one caller and forgotten by another.
+/// What: the model's state labels and extra labels first (a label-less state
+/// like `open`/`closed` has nothing to seed), then the policy set. A name
+/// already contributed by the model is not repeated.
+/// Test: `ops_seed_creates_only_missing`,
+/// `ops_seed_includes_policy_labels`,
+/// `ops_seed_without_session_skips_workstream_label`.
+fn desired_labels(model: &StateModel, session_name: Option<&str>) -> Vec<RepoLabel> {
     let mut out: Vec<RepoLabel> = model
         .states
         .iter()
         // A label-less state (`open`, `closed`) has nothing to seed.
         .filter_map(|s| s.label.as_ref())
-        .map(|l| RepoLabel {
-            name: l.name.clone(),
-            color: l.color.clone(),
-            description: l.description.clone(),
-        })
+        .map(|l| RepoLabel::new(l.name.clone(), l.color.clone(), l.description.clone()))
         .collect();
-    out.extend(model.extra_labels.iter().map(|l| RepoLabel {
-        name: l.name.clone(),
-        color: l.color.clone(),
-        description: l.description.clone(),
-    }));
+    out.extend(
+        model
+            .extra_labels
+            .iter()
+            .map(|l| RepoLabel::new(l.name.clone(), l.color.clone(), l.description.clone())),
+    );
+    // #6914: the framework's own labels come from the shared policy table that
+    // session launch also uses — never a second list spelled out here.
+    for label in trusty_mpm::core::policy_labels::policy_labels(session_name) {
+        if !out.iter().any(|existing| existing.name == label.name) {
+            out.push(label);
+        }
+    }
     out
 }
 
-/// `tm issue seed-labels` — idempotent create-missing of all model labels.
+/// `tm issue seed-labels` — idempotent create-missing of every label the
+/// harness applies.
 ///
-/// Why: a repo must have the state + family labels before transitions can apply
-/// them; create-missing is non-destructive so re-runs are safe.
-/// What: lists existing repo labels, then for each declared label not present
-/// creates it (unless `dry_run`); leaves existing labels (incl. drifted
-/// color/description) untouched (RFC §5.1). Returns a [`SeedReport`].
+/// Why: a repo must carry the state, family, and policy labels before any
+/// transition or `gh issue create --label` can apply them; create-missing is
+/// non-destructive so re-runs are safe, and re-running is the documented
+/// recovery when a `--add-label` fails on an unknown label.
+/// What: lists existing repo labels, then for each label in
+/// [`desired_labels`] not already present, creates it (unless `dry_run`).
+/// Existing labels are left untouched, drifted colour/description included
+/// (RFC §5.1) — seeding never rewrites what a project already styled. Records
+/// `workstream_skipped` when `session_name` is `None`, so the caller can say
+/// the `ws/<session>` label was left out. Returns a [`SeedReport`].
 /// Test: `ops_seed_creates_only_missing`, `ops_seed_dry_run_creates_nothing`,
-/// `ops_seed_idempotent_when_all_present`.
+/// `ops_seed_idempotent_when_all_present`, `ops_seed_includes_policy_labels`,
+/// `ops_seed_without_session_skips_workstream_label`,
+/// `ops_seed_leaves_present_policy_labels_untouched`.
 pub(crate) fn seed_labels<S: TicketSystem>(
     sys: &S,
     model: &StateModel,
+    session_name: Option<&str>,
     dry_run: bool,
 ) -> anyhow::Result<SeedReport> {
     let existing = sys.list_repo_labels()?;
@@ -95,9 +121,10 @@ pub(crate) fn seed_labels<S: TicketSystem>(
 
     let mut report = SeedReport {
         dry_run,
+        workstream_skipped: session_name.is_none_or(|n| n.trim().is_empty()),
         ..Default::default()
     };
-    for label in declared_labels(model) {
+    for label in desired_labels(model, session_name) {
         if existing_names.contains(label.name.as_str()) {
             report.already_present.push(label.name.clone());
             continue;

@@ -115,24 +115,30 @@ fn issue_with_labels(number: u64, labels: &[&str]) -> Issue {
 
 // ---- seed-labels ----------------------------------------------------------
 
+/// The tmux session name the `ws/` policy label is derived from in these tests.
+const SESSION: &str = "tm-tcode-01";
+
+/// Every `create_label` name the fake recorded, in call order.
+fn create_names(sys: &FakeSystem) -> Vec<String> {
+    sys.calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            Call::CreateLabel(n) => Some(n),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn ops_seed_creates_only_missing() {
     let m = model();
     // Repo already has the base `unicorn` label and `unicorn:queued`.
     let existing = vec![
-        RepoLabel {
-            name: "unicorn".to_string(),
-            color: "7B68EE".to_string(),
-            description: String::new(),
-        },
-        RepoLabel {
-            name: "unicorn:queued".to_string(),
-            color: "BFD4F2".to_string(),
-            description: String::new(),
-        },
+        RepoLabel::new("unicorn", "7B68EE", ""),
+        RepoLabel::new("unicorn:queued", "BFD4F2", ""),
     ];
     let sys = FakeSystem::new(issue_with_labels(1, &[])).with_repo_labels(existing);
-    let report = seed_labels(&sys, &m, false).expect("seed");
+    let report = seed_labels(&sys, &m, Some(SESSION), false).expect("seed");
 
     // Present ones not re-created.
     assert!(report.already_present.contains(&"unicorn".to_string()));
@@ -146,23 +152,89 @@ fn ops_seed_creates_only_missing() {
     assert!(report.created.contains(&"blast:high".to_string()));
     assert!(report.created.contains(&"approval:level-1".to_string()));
     // No create call for the already-present labels.
-    let create_names: Vec<String> = sys
-        .calls()
-        .into_iter()
-        .filter_map(|c| match c {
-            Call::CreateLabel(n) => Some(n),
-            _ => None,
-        })
-        .collect();
-    assert!(!create_names.contains(&"unicorn".to_string()));
-    assert!(!create_names.contains(&"unicorn:queued".to_string()));
+    let created = create_names(&sys);
+    assert!(!created.contains(&"unicorn".to_string()));
+    assert!(!created.contains(&"unicorn:queued".to_string()));
+}
+
+/// #6914: seeding covers the FRAMEWORK's own labels, not just the model's.
+///
+/// Before the fix, `trusty-mpm` and `ws/<session>` were absent from
+/// `seed-labels` entirely — the first `gh issue create --label trusty-mpm` in a
+/// fresh repo failed on an unknown label.
+#[test]
+fn ops_seed_includes_policy_labels() {
+    let m = model();
+    // Zero existing labels: everything the harness applies must be created.
+    let sys = FakeSystem::new(issue_with_labels(1, &[]));
+    let report = seed_labels(&sys, &m, Some(SESSION), false).expect("seed");
+
+    let created = create_names(&sys);
+    assert!(
+        created.contains(&"trusty-mpm".to_string()),
+        "the convention label must be seeded; got {created:?}"
+    );
+    assert!(
+        created.contains(&"ws/tm-tcode-01".to_string()),
+        "the workstream label must be seeded; got {created:?}"
+    );
+    assert_eq!(created, report.created, "report must match the calls made");
+    assert!(!report.workstream_skipped);
+
+    // The retired pair session launch used to seed must never come back.
+    assert!(
+        !created.iter().any(|n| n == "in-progress" || n == "blocked"),
+        "the retired lifecycle pair must not be seeded; got {created:?}"
+    );
+}
+
+/// #6914: with no session name there is no `ws/` label — and the report says so.
+#[test]
+fn ops_seed_without_session_skips_workstream_label() {
+    let m = model();
+    let sys = FakeSystem::new(issue_with_labels(1, &[]));
+    let report = seed_labels(&sys, &m, None, false).expect("seed");
+
+    let created = create_names(&sys);
+    assert!(created.contains(&"trusty-mpm".to_string()));
+    assert!(
+        !created.iter().any(|n| n.starts_with("ws/")),
+        "no session name means no ws/ label; got {created:?}"
+    );
+    assert!(
+        report.workstream_skipped,
+        "the omission must be reported, not silent"
+    );
+}
+
+/// #6914: a policy label the repo already carries is left untouched — no
+/// re-create, and therefore no colour or description rewrite.
+#[test]
+fn ops_seed_leaves_present_policy_labels_untouched() {
+    let m = model();
+    let existing = vec![
+        RepoLabel::new("trusty-mpm", "111111", "a project's own wording"),
+        RepoLabel::new("ws/tm-tcode-01", "222222", "already styled"),
+    ];
+    let sys = FakeSystem::new(issue_with_labels(1, &[])).with_repo_labels(existing);
+    let report = seed_labels(&sys, &m, Some(SESSION), false).expect("seed");
+
+    let created = create_names(&sys);
+    assert!(!created.contains(&"trusty-mpm".to_string()));
+    assert!(!created.contains(&"ws/tm-tcode-01".to_string()));
+    assert!(report.already_present.contains(&"trusty-mpm".to_string()));
+    assert!(
+        report
+            .already_present
+            .contains(&"ws/tm-tcode-01".to_string())
+    );
 }
 
 #[test]
 fn ops_seed_dry_run_creates_nothing() {
     let m = model();
     let sys = FakeSystem::new(issue_with_labels(1, &[]));
-    let report = seed_labels(&sys, &m, true).expect("seed dry");
+    let report = seed_labels(&sys, &m, Some(SESSION), true).expect("seed dry");
     assert!(report.dry_run);
     // Everything reported as created (would-be), but ZERO create calls.
     assert!(!report.created.is_empty());
@@ -182,22 +254,26 @@ fn ops_seed_idempotent_when_all_present() {
             .states
             .iter()
             .filter_map(|s| s.label.as_ref())
-            .map(|l| RepoLabel {
-                name: l.name.clone(),
-                color: l.color.clone(),
-                description: l.description.clone(),
-            })
+            .map(|l| RepoLabel::new(l.name.clone(), l.color.clone(), l.description.clone()))
             .collect();
-        v.extend(m.extra_labels.iter().map(|l| RepoLabel {
-            name: l.name.clone(),
-            color: l.color.clone(),
-            description: l.description.clone(),
-        }));
+        v.extend(
+            m.extra_labels
+                .iter()
+                .map(|l| RepoLabel::new(l.name.clone(), l.color.clone(), l.description.clone())),
+        );
+        // #6914: the policy set is part of what a second run must find present.
+        v.extend(trusty_mpm::core::policy_labels::policy_labels(Some(
+            SESSION,
+        )));
         v
     };
     let sys = FakeSystem::new(issue_with_labels(1, &[])).with_repo_labels(all);
-    let report = seed_labels(&sys, &m, false).expect("seed");
-    assert!(report.created.is_empty(), "second run creates nothing");
+    let report = seed_labels(&sys, &m, Some(SESSION), false).expect("seed");
+    assert!(
+        report.created.is_empty(),
+        "second run creates nothing; got {:?}",
+        report.created
+    );
 }
 
 // ---- transition -----------------------------------------------------------
