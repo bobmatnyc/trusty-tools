@@ -22,7 +22,7 @@
 //! Module layout (see #366 split):
 //! - `mod.rs` — `PerfCollector` lifecycle + explicit re-exports of the
 //!   portable types from `trusty-agents-common::perf`
-//! - `pricing.rs` — `cost_usd` + the model pricing table + formatters
+//! - `pricing.rs` — `cost_usd` over `trusty_common::pricing` (#6875) + formatters
 //! - `tests.rs` — unit tests
 
 mod pricing;

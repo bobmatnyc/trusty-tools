@@ -1282,3 +1282,29 @@ pub use tracing_init::{init_tracing, init_tracing_with_buffer, maybe_disable_col
 // OpenRouter legacy (deprecated but must remain reachable)
 #[allow(deprecated)]
 pub use openrouter_legacy::{ChatMessage, openrouter_chat, openrouter_chat_stream};
+
+/// Directory under `$HOME` holding every trusty-* crate's operator configuration.
+///
+/// Why: three surfaces name this tree — `crate_config`'s
+/// `~/.trusty-tools/<crate>/config.yaml` convention, `palace_resolve`'s
+/// project-root marker, and (#6875) the `pricing` module's operator override.
+/// Two of them declared their own copy of the literal; the third is
+/// unconditional and could not reach either. One definition at the crate root
+/// removes the drift risk and the feature coupling at once.
+/// What: `".trusty-tools"`. Re-exported unchanged as
+/// `crate_config::TRUSTY_TOOLS_DIR`, `palace_resolve::TRUSTY_TOOLS_DIR` and
+/// `pricing::TRUSTY_TOOLS_DIR`.
+/// Test: `crate_config::tests::crate_config_path_layout`,
+/// `pricing_tests::default_override_path_layout`.
+pub const TRUSTY_TOOLS_DIR: &str = ".trusty-tools";
+
+/// The one model-pricing table for the workspace (#6875).
+///
+/// Why: `trusty-agents`, `trusty-mpm` and #6872's cost ledger each priced the
+/// same Anthropic models from their own table, and two of them had gone stale.
+/// What: [`pricing::Pricing`] over a bundled `pricing.toml` with `effective_from`
+/// dates, alias resolution, and an operator override; [`pricing::shared`] is the
+/// instance every consumer reads. Unconditional — cost is not an optional
+/// concern of a crate three consumers price through.
+/// Test: `pricing_tests.rs`.
+pub mod pricing;

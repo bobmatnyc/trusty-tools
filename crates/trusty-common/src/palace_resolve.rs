@@ -51,7 +51,10 @@ use crate::palace_id::{
 use crate::slug::slugify_string;
 
 /// The `.trusty-tools/` directory name, used as a project-root marker.
-pub const TRUSTY_TOOLS_DIR: &str = ".trusty-tools";
+///
+/// #6875: re-export of [`crate::TRUSTY_TOOLS_DIR`]; this module used to declare
+/// a second copy of the same literal.
+pub use crate::TRUSTY_TOOLS_DIR;
 
 /// Relative path of the palace pin file within a project root.
 pub const PIN_FILE_REL: &str = ".trusty-tools/trusty-memory.yaml";

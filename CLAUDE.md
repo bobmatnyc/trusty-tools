@@ -517,6 +517,7 @@ already deployed in `trusty-console/ui-search`, `trusty-analyze/ui`,
 
 Most references are linked from the rule they serve, above. Not linked elsewhere:
 
+- [model-pricing.md](docs/reference/model-pricing.md) — the ONE model pricing table (`crates/trusty-common/pricing.toml`, #6875): row schema, `effective_from` dates, how a Bedrock/OpenRouter id resolves, the `~/.trusty-tools/pricing.toml` operator override, and how to update a rate. Never add a second table
 - [ci-scripts.md](docs/reference/ci-scripts.md) — the eight `scripts/` checks that run only in a workflow: where each runs, what it gates, and which have a self-test
 - [documentation-layout.md](docs/reference/documentation-layout.md) — docs layout conventions
 - [DOC-38](docs/specs/spec-linked-documentation.md) — SLD policy, enforced by `scripts/check_sld.sh`

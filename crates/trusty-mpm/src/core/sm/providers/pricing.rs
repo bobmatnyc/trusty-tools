@@ -1,58 +1,45 @@
-//! Single source of truth for SM per-call USD cost estimation (DOC-14 §5.5).
+//! SM per-call USD cost estimation over the shared table (DOC-14 §5.5).
 //!
 //! Why: the three SM providers (Anthropic, Bedrock, OpenRouter) all bill the
-//! same Anthropic model FAMILIES (Sonnet / Haiku / Opus) at the same public
-//! per-million-token rates, plus a couple of common OpenAI ids routed through
-//! OpenRouter. SM-2 review flagged that copy-pasting that pricing table into
-//! every provider file means the numbers silently drift out of sync the moment
-//! one vendor changes a price. Centralising the table in one dated module gives
-//! a single place to audit and update, and keeps every provider's cost
-//! telemetry consistent.
-//! What: exposes [`cost_per_million`] (family-substring → `(input, output)` USD
-//! per million tokens) and [`estimate_cost_usd`] (token counts → USD). Both use
-//! the same substring matching the per-provider copies used before, so behaviour
-//! is identical for every previously-priced model.
-//! Test: `pricing_tests.rs` (substring matching, known/unknown estimates, the
-//! OpenRouter-routed OpenAI ids); per-provider tests still assert that their
+//! same Anthropic models, so copy-pasting a pricing table into every provider
+//! file meant the numbers drifted the moment one vendor changed a price. SM-2
+//! review centralised them here.
+//!
+//! **#6875: the table itself moved again, out of this crate.** Centralising per
+//! crate still left three tables in the workspace — this one, a differently
+//! stale one in `trusty-agents`, and the one #6872's cost ledger would have
+//! added. The rows now live in `trusty_common::pricing`, whose `pricing.toml`
+//! carries `effective_from` dates, alias resolution and an operator override.
+//! Two rates changed as a result: Opus is $5/$25 rather than the $15/$75 this
+//! file recorded, and Haiku 4.5 is $1/$5 rather than $0.80/$4.
+//!
+//! What: [`cost_per_million`] (model id → `(input, output)` USD per million
+//! tokens) and [`estimate_cost_usd`] (token counts → USD), both thin adapters
+//! over the shared table so every existing provider call site is unchanged.
+//! Test: `pricing_tests.rs`; per-provider tests still assert that their
 //! `complete` round-trips compute the expected cost via this module.
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// Pricing as of 2026-06 — update when Anthropic/AWS/OpenRouter publish changes.
-//   - Anthropic:  https://www.anthropic.com/pricing
-//   - AWS Bedrock: https://aws.amazon.com/bedrock/pricing/
-//   - OpenRouter: https://openrouter.ai/models
-// All rates are USD per 1,000,000 tokens, expressed as (input, output).
-// ─────────────────────────────────────────────────────────────────────────────
 
-/// Approximate `(input, output)` USD cost per million tokens for the model
-/// families the SM routes through any of its three providers.
+use trusty_common::pricing::{Usage, shared, warn_unknown_model_once};
+
+/// `(input, output)` USD cost per million tokens for a model the SM routes
+/// through any of its three providers.
 ///
 /// Why: the SM logs a per-call cost estimate in `LlmResponse` (§5.5); all three
-/// providers need the SAME table so their telemetry agrees and updates land in
-/// one place. Unknown ids fall back to `(0.0, 0.0)` — a missing estimate, not
-/// an error.
-/// What: matches on the model-family substring (so version suffixes such as
-/// `-4-6` still price) for the Anthropic Sonnet/Haiku/Opus tiers, accepting both
-/// the bare `sonnet`/`haiku`/`opus` ids (direct Anthropic + Bedrock) and the
-/// `claude-sonnet`/… ids OpenRouter uses; plus a couple of common OpenAI ids
-/// routed through OpenRouter.
+/// providers need the SAME numbers so their telemetry agrees.
+/// What: (#6875) resolves today's row from `trusty_common::pricing`, which
+/// normalises the routing spellings the providers actually pass — bare ids,
+/// `us.anthropic.…` Bedrock ids, and OpenRouter's `anthropic/claude-…`. An id no
+/// row claims returns `(0.0, 0.0)` after [`warn_unknown_model_once`]: a missing
+/// estimate, reported, rather than an error or a fabricated rate.
 /// Test: `pricing::tests::cost_per_million_*`.
 pub fn cost_per_million(model: &str) -> (f64, f64) {
-    // NOTE: the family arms below are SUBSTRING matches and are ORDER-SENSITIVE
-    // — the first `contains(...)` that hits wins. We check `sonnet` before
-    // `haiku`/`opus`, which is safe only because we assume Anthropic model ids
-    // name exactly one family (no id contains two of "sonnet"/"haiku"/"opus").
-    // If a future id ever combined family words, the earliest arm here would
-    // mis-price it; reorder/disambiguate before adding such an id.
-    match model {
-        // Anthropic families (direct, Bedrock, and OpenRouter `claude-*` ids).
-        m if m.contains("sonnet") => (3.00, 15.00),
-        m if m.contains("haiku") => (0.80, 4.00),
-        m if m.contains("opus") => (15.00, 75.00),
-        // Common OpenAI ids routed through OpenRouter.
-        "openai/gpt-5.4-mini-20260317" => (0.75, 4.50),
-        "openai/gpt-5.4-nano-20260317" => (0.20, 1.25),
-        _ => (0.0, 0.0),
+    // #6875: one table for the workspace — see trusty_common::pricing.
+    match shared().rate_today(model) {
+        Some(rates) => (rates.input, rates.output),
+        None => {
+            warn_unknown_model_once(model);
+            (0.0, 0.0)
+        }
     }
 }
 
@@ -60,12 +47,19 @@ pub fn cost_per_million(model: &str) -> (f64, f64) {
 ///
 /// Why: lets the SM total session cost and rank tiers by cost (§5.5) using one
 /// shared formula across every provider.
-/// What: applies [`cost_per_million`]; returns `0.0` for unknown models.
+/// What: prices the input and output buckets from the shared table. The SM's
+/// `LlmResponse` carries no cache-token counts, so those buckets stay zero here;
+/// `trusty-agents` prices all four through the same table.
 /// Test: `pricing::tests::estimate_cost_usd_*`.
 pub fn estimate_cost_usd(model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
-    let (in_price, out_price) = cost_per_million(model);
-    (input_tokens as f64 / 1_000_000.0) * in_price
-        + (output_tokens as f64 / 1_000_000.0) * out_price
+    let usage = Usage::new(u64::from(input_tokens), u64::from(output_tokens), 0, 0);
+    match shared().rate_today(model) {
+        Some(rates) => rates.cost_usd(&usage),
+        None => {
+            warn_unknown_model_once(model);
+            0.0
+        }
+    }
 }
 
 #[cfg(test)]

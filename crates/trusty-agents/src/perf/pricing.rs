@@ -1,41 +1,48 @@
-//! Cost computation, model pricing table, and small formatting helpers.
+//! Cost computation over the shared pricing table, plus small formatters.
 //!
-//! Why: The pricing table + cost math is mechanically independent of the
-//! collector's lifecycle; isolating it keeps `mod.rs` focused on recording
-//! and persisting performance records.
+//! Why: The cost math is mechanically independent of the collector's lifecycle;
+//! isolating it keeps `mod.rs` focused on recording and persisting performance
+//! records.
 //!
-//! **#4098 (COST-05, formerly #4103): this is the SINGLE pricing entry point.**
-//! A second, Haiku-only rate table used to live in `usage::daily`, which meant
-//! the REPL statusline and the persisted daily total priced every Sonnet turn
-//! at Haiku rates — every cost the operator saw was ~12x too low. That table
-//! is gone; `usage::daily::cost_from_tokens`, `usage::aggregate` and
-//! `perf::PerfCollector` all route through [`cost_usd`] here. Do not add a
-//! second table: a rate that disagrees with this one is a defect, not a
-//! variant.
+//! **#6875: the rate table itself no longer lives here.** This file used to own
+//! a per-family table that priced Sonnet at 4.x-generation rates ($3/$15 per
+//! MTok) and defaulted every unrecognised id to those same rates — so a Sonnet 5
+//! turn was billed 50% high and an unknown model was billed as if it were
+//! Sonnet. `trusty-mpm` carried a second, differently-stale copy. Both now read
+//! `trusty_common::pricing`, the one table for the workspace; see that module's
+//! doc for the schema, the `effective_from` dates, and the operator override.
+//! [`cost_usd`] stays the single cost entry point for THIS crate (#4098,
+//! COST-05): `usage::daily::cost_from_tokens`, `usage::aggregate` and
+//! `perf::PerfCollector` all route through it.
 //!
-//! What: `cost_usd` (public), the `pricing_for`/`per_million` rate helpers, and
-//! the `filename_stamp` / `truncate_preview` formatters used by the collector.
+//! What: `cost_usd` (public) plus the `filename_stamp` / `truncate_preview`
+//! formatters used by the collector.
 //! Test: `cost_usd_*` / `filename_stamp_format` / `truncate_preview_*` in
 //! `perf::tests`.
 
+use trusty_common::pricing::{Usage, shared, warn_unknown_model_once};
+
 /// Compute USD cost for a single LLM call given the model name and token
-/// counts. Unknown models fall back to Sonnet-class pricing.
+/// counts. An unpriced model costs `0.00` and is reported once.
 ///
-/// Why: (#47) We hard-code the pricing table rather than hit a live endpoint
-/// so offline/CI runs still produce comparable cost figures. Pricing is
-/// per-million-tokens as published by Anthropic and OpenRouter. (#4098) This
-/// is the one entry point every cost surface must call — see the module doc
-/// for the duplicate table it replaced.
-/// What: Substring-matches the model string (e.g. "anthropic/claude-sonnet-4-5"
-/// or "claude-haiku-4") and multiplies each token bucket by its rate.
+/// Why: (#47) The rates are shipped rather than fetched, so offline/CI runs
+/// still produce comparable cost figures. (#4098) This is the one entry point
+/// every cost surface in this crate must call. (#6875) The rates themselves come
+/// from `trusty_common::pricing`, shared with trusty-mpm and the #6872 ledger.
+/// What: resolves today's [`trusty_common::pricing::Rates`] for `model` and
+/// prices each token bucket at its own rate. An id no row claims returns `0.0`
+/// after [`warn_unknown_model_once`] — the stale Sonnet-class default it
+/// replaced turned an unknown model into a confident wrong number.
 ///
 /// Counts are `u64` rather than `u32` (#4098) because the aggregate surfaces
-/// that now share this entry point — a whole day of dispatches in
+/// that share this entry point — a whole day of dispatches in
 /// `usage::aggregate`, a whole REPL session in `usage::daily` — sum well past
-/// `u32::MAX`, and a saturating cast at each of those call sites would
-/// silently under-report exactly the totals the Costs tab exists to show.
+/// `u32::MAX`, and a saturating cast at each of those call sites would silently
+/// under-report exactly the totals the Costs tab exists to show.
 /// Test: `cost_usd_known_sonnet`, `cost_usd_known_haiku`,
-/// `cost_usd_unknown_defaults_to_sonnet`, `cost_usd_accepts_counts_beyond_u32`.
+/// `cost_usd_unknown_model_is_zero_not_a_stale_default`,
+/// `cost_usd_sonnet_5_is_no_longer_priced_at_4x_rates`,
+/// `cost_usd_accepts_counts_beyond_u32`.
 pub fn cost_usd(
     model: &str,
     prompt_tokens: u64,
@@ -43,57 +50,15 @@ pub fn cost_usd(
     cache_read: u64,
     cache_creation: u64,
 ) -> f64 {
-    // Rates in USD per token (not per million).
-    let (rate_in, rate_out, rate_cache_r, rate_cache_w) = pricing_for(model);
-    let to_usd = |tokens: u64, rate: f64| tokens as f64 * rate;
-    to_usd(prompt_tokens, rate_in)
-        + to_usd(completion_tokens, rate_out)
-        + to_usd(cache_read, rate_cache_r)
-        + to_usd(cache_creation, rate_cache_w)
-}
-
-/// Returns (input, output, cache_read, cache_creation) rates per token.
-fn pricing_for(model: &str) -> (f64, f64, f64, f64) {
-    let m = model.to_ascii_lowercase();
-    // Claude Sonnet 4.x — $3 in, $15 out, $0.30 cache read, $3.75 cache write
-    if m.contains("sonnet-4") || m.contains("claude-sonnet-4") {
-        return (
-            per_million(3.0),
-            per_million(15.0),
-            per_million(0.30),
-            per_million(3.75),
-        );
+    // #6875: one table for the workspace — see trusty_common::pricing.
+    let usage = Usage::new(prompt_tokens, completion_tokens, cache_creation, cache_read);
+    match shared().rate_today(model) {
+        Some(rates) => rates.cost_usd(&usage),
+        None => {
+            warn_unknown_model_once(model);
+            0.0
+        }
     }
-    // Claude Haiku 3/4 — $0.80 in, $4 out, $0.08 cache read, $1 cache write
-    if m.contains("haiku-3") || m.contains("haiku-4") || m.contains("claude-haiku") {
-        return (
-            per_million(0.80),
-            per_million(4.0),
-            per_million(0.08),
-            per_million(1.0),
-        );
-    }
-    // Claude Opus 4 — $15 in, $75 out (cache rates not published here, use
-    // conservative 10% / 125% of input, matching Anthropic convention).
-    if m.contains("opus-4") || m.contains("claude-opus") {
-        return (
-            per_million(15.0),
-            per_million(75.0),
-            per_million(1.50),
-            per_million(18.75),
-        );
-    }
-    // Default: Sonnet-class rates.
-    (
-        per_million(3.0),
-        per_million(15.0),
-        per_million(0.30),
-        per_million(3.75),
-    )
-}
-
-fn per_million(usd: f64) -> f64 {
-    usd / 1_000_000.0
 }
 
 /// Build the canonical filename stamp from an ISO8601 timestamp + build #.

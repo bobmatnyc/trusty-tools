@@ -85,10 +85,42 @@ fn cost_usd_sonnet_mixed_cache_hit_scenario() {
     assert!((c - expected).abs() < 1e-9, "expected {expected}, got {c}");
 }
 
+/// Why (#6875): this crate's table answered EVERY unrecognised id with
+/// Sonnet-class rates, so an unpriced model produced a confident wrong number
+/// instead of a visible gap. The shared table returns no row and the adapter
+/// reports zero, warning once.
+/// What: an id no row claims costs $0.00.
+/// Test: this test.
 #[test]
-fn cost_usd_unknown_defaults_to_sonnet() {
+fn cost_usd_unknown_model_is_zero_not_a_stale_default() {
     let u = cost_usd("some/unknown-model", 1_000_000, 0, 0, 0);
-    assert!((u - 3.0).abs() < 1e-9);
+    assert!(u.abs() < 1e-9, "unpriced model must cost $0.00, got {u}");
+}
+
+/// Why (#6875): the table this replaced had no Sonnet 5 row, so a Sonnet 5 turn
+/// fell through to the Sonnet-class default and was billed at 4.x-generation
+/// rates — $3/$15 per MTok against a published $2/$10, a 50% overcharge. This
+/// test fails on `origin/main`.
+/// What: a fixed usage (1M input + 1M output) on Sonnet 5. Old table: $18.00.
+/// Shared table: $2.00 + $10.00 = $12.00.
+/// Test: this test.
+#[test]
+fn cost_usd_sonnet_5_is_no_longer_priced_at_4x_rates() {
+    let c = cost_usd("claude-sonnet-5", 1_000_000, 1_000_000, 0, 0);
+    assert!(
+        (c - 12.0).abs() < 1e-9,
+        "expected $12.00 at Sonnet 5 rates, got {c} (the stale table said $18.00)"
+    );
+}
+
+/// Why (#6875): Opus was priced at $15/$75 by both replaced tables; the
+/// published Opus 5 rate is $5/$25.
+/// What: 1M input + 1M output on Opus 5 costs $30.00, not $90.00.
+/// Test: this test.
+#[test]
+fn cost_usd_opus_5_uses_the_published_rate() {
+    let c = cost_usd("claude-opus-5", 1_000_000, 1_000_000, 0, 0);
+    assert!((c - 30.0).abs() < 1e-9, "expected $30.00, got {c}");
 }
 
 /// Why (#4098): the counts widened to `u64` precisely so the shared aggregate

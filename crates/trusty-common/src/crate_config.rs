@@ -38,9 +38,11 @@ use serde::de::DeserializeOwned;
 ///
 /// Why: a single named constant keeps every crate agreeing on the root so the
 /// convention cannot drift to `.trusty_tools` / `.trustytools` variants.
-/// What: `".trusty-tools"`.
+/// What: re-export of [`crate::TRUSTY_TOOLS_DIR`]. The definition moved to the
+/// crate root in #6875 so the unconditional `pricing` module can reach it
+/// without turning on this feature-gated one; the path and value are unchanged.
 /// Test: `crate_config_path_layout`.
-pub const TRUSTY_TOOLS_DIR: &str = ".trusty-tools";
+pub use crate::TRUSTY_TOOLS_DIR;
 
 /// Canonical config filename within a crate's directory.
 ///

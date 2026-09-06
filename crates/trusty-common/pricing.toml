@@ -1,0 +1,221 @@
+# The one model-pricing table for the trusty-* workspace (#6875).
+#
+# Every rate is USD per 1,000,000 tokens. `crates/trusty-common/src/pricing.rs`
+# embeds this file with `include_str!`, so the crate has no runtime file
+# dependency; an operator overrides a row by dropping the same schema at
+# `~/.trusty-tools/pricing.toml`.
+#
+# Row schema:
+#   id             required — the canonical model id
+#   input/output   required — USD per MTok
+#   cache_write    optional — 5-minute-TTL cache-write rate, default 0.00
+#   cache_read     optional — cache-read rate, default 0.00
+#   effective_from required — ISO date; `rate_for` picks the LATEST row whose
+#                  date is <= the day being priced
+#   provider       optional — anthropic | bedrock | openrouter
+#   aliases        optional — additional ids that resolve to this row
+#   source         optional — provenance; `legacy-table` marks a rate carried
+#                  over verbatim from a table this file replaced, because no
+#                  currently published rate exists for that id
+#
+# `effective_from = "2020-01-01"` is a SENTINEL meaning "the earliest usage this
+# table prices". None of these rows records a historical rate change, so a
+# single early date is the honest encoding: inventing launch dates would put
+# fiction in a file whose whole job is to be the audited number. When a vendor
+# changes a price, add a SECOND row for that id carrying the real change date —
+# `rate_for` then prices old usage at the old rate and new usage at the new one.
+#
+# A `cache_write`/`cache_read` of 0.00 means NO published cache rate was carried
+# over for that id (the tables this file replaces priced no cache buckets for
+# it). It is a recorded absence, not a discount.
+#
+# Anthropic rates below are the currently published per-model rates
+# (`claude-api` skill, `shared/models.md` + its Current Models table, read
+# 2026-09-05). Cache write is 1.25x input and cache read 0.1x input on every
+# Anthropic model EXCEPT Claude Fable 5.1, which publishes cache reads at
+# $0.25/MTok (0.025x).
+
+# ── Anthropic, currently published ───────────────────────────────────────────
+
+[[model]]
+id = "claude-fable-5-1"
+provider = "anthropic"
+input = 10.00
+output = 50.00
+cache_write = 12.50
+cache_read = 0.25
+effective_from = "2020-01-01"
+aliases = ["anthropic/claude-fable-5-1", "us.anthropic.claude-fable-5-1"]
+
+[[model]]
+id = "claude-fable-5"
+provider = "anthropic"
+input = 10.00
+output = 50.00
+cache_write = 12.50
+cache_read = 1.00
+effective_from = "2020-01-01"
+aliases = ["anthropic/claude-fable-5", "us.anthropic.claude-fable-5"]
+
+[[model]]
+id = "claude-opus-5"
+provider = "anthropic"
+input = 5.00
+output = 25.00
+cache_write = 6.25
+cache_read = 0.50
+effective_from = "2020-01-01"
+aliases = ["anthropic/claude-opus-5", "us.anthropic.claude-opus-5"]
+
+[[model]]
+id = "claude-opus-4-8"
+provider = "anthropic"
+input = 5.00
+output = 25.00
+cache_write = 6.25
+cache_read = 0.50
+effective_from = "2020-01-01"
+aliases = [
+  "anthropic/claude-opus-4-8",
+  "us.anthropic.claude-opus-4-8",
+  "claude-opus-4.8",
+]
+
+[[model]]
+id = "claude-opus-4-7"
+provider = "anthropic"
+input = 5.00
+output = 25.00
+cache_write = 6.25
+cache_read = 0.50
+effective_from = "2020-01-01"
+aliases = ["anthropic/claude-opus-4-7", "us.anthropic.claude-opus-4-7"]
+
+[[model]]
+id = "claude-opus-4-6"
+provider = "anthropic"
+input = 5.00
+output = 25.00
+cache_write = 6.25
+cache_read = 0.50
+effective_from = "2020-01-01"
+aliases = ["anthropic/claude-opus-4-6", "us.anthropic.claude-opus-4-6"]
+
+[[model]]
+id = "claude-sonnet-5"
+provider = "anthropic"
+input = 2.00
+output = 10.00
+cache_write = 2.50
+cache_read = 0.20
+effective_from = "2020-01-01"
+aliases = ["anthropic/claude-sonnet-5", "us.anthropic.claude-sonnet-5"]
+
+[[model]]
+id = "claude-sonnet-4-6"
+provider = "anthropic"
+input = 3.00
+output = 15.00
+cache_write = 3.75
+cache_read = 0.30
+effective_from = "2020-01-01"
+aliases = ["anthropic/claude-sonnet-4-6", "us.anthropic.claude-sonnet-4-6"]
+
+[[model]]
+id = "claude-haiku-4-5"
+provider = "anthropic"
+input = 1.00
+output = 5.00
+cache_write = 1.25
+cache_read = 0.10
+effective_from = "2020-01-01"
+aliases = ["anthropic/claude-haiku-4-5", "us.anthropic.claude-haiku-4-5"]
+
+# ── Carried over verbatim from the tables this file replaced ─────────────────
+#
+# `crates/trusty-agents/src/perf/pricing.rs` and
+# `crates/trusty-mpm/src/core/sm/providers/pricing.rs` priced these families by
+# substring. No currently published rate covers them, so their numbers are
+# reproduced exactly rather than re-derived.
+
+[[model]]
+id = "claude-sonnet-4-5"
+provider = "anthropic"
+input = 3.00
+output = 15.00
+cache_write = 3.75
+cache_read = 0.30
+effective_from = "2020-01-01"
+source = "legacy-table"
+aliases = ["anthropic/claude-sonnet-4-5", "us.anthropic.claude-sonnet-4-5"]
+
+[[model]]
+id = "claude-sonnet-4"
+provider = "anthropic"
+input = 3.00
+output = 15.00
+cache_write = 3.75
+cache_read = 0.30
+effective_from = "2020-01-01"
+source = "legacy-table"
+
+[[model]]
+id = "claude-opus-4-1"
+provider = "anthropic"
+input = 15.00
+output = 75.00
+cache_write = 18.75
+cache_read = 1.50
+effective_from = "2020-01-01"
+source = "legacy-table"
+aliases = ["anthropic/claude-opus-4-1", "us.anthropic.claude-opus-4-1"]
+
+[[model]]
+id = "claude-opus-4"
+provider = "anthropic"
+input = 15.00
+output = 75.00
+cache_write = 18.75
+cache_read = 1.50
+effective_from = "2020-01-01"
+source = "legacy-table"
+
+[[model]]
+id = "claude-haiku-4"
+provider = "anthropic"
+input = 0.80
+output = 4.00
+cache_write = 1.00
+cache_read = 0.08
+effective_from = "2020-01-01"
+source = "legacy-table"
+aliases = ["anthropic/claude-haiku-4", "us.anthropic.claude-haiku-4"]
+
+[[model]]
+id = "claude-haiku-3"
+provider = "anthropic"
+input = 0.80
+output = 4.00
+cache_write = 1.00
+cache_read = 0.08
+effective_from = "2020-01-01"
+source = "legacy-table"
+
+# OpenAI ids routed through OpenRouter. The table they came from priced input
+# and output only, so both cache rates record the absence rather than a guess.
+
+[[model]]
+id = "openai/gpt-5.4-mini-20260317"
+provider = "openrouter"
+input = 0.75
+output = 4.50
+effective_from = "2020-01-01"
+source = "legacy-table"
+
+[[model]]
+id = "openai/gpt-5.4-nano-20260317"
+provider = "openrouter"
+input = 0.20
+output = 1.25
+effective_from = "2020-01-01"
+source = "legacy-table"
