@@ -25,8 +25,9 @@
 //!
 //! **Three independent releases, whichever fires first.** A `SubagentStop` or
 //! the staleness sweep moves the record out of
-//! [`DelegationStatus::is_live`]; the dispatching session's PID being confirmed
-//! dead releases it without waiting for any signal from the agent; and
+//! [`DelegationStatus::is_live`](crate::core::agent::DelegationStatus::is_live);
+//! the dispatching session's PID being confirmed dead releases it without
+//! waiting for any signal from the agent; and
 //! [`BUILDER_LEASE_TTL_SECS`] releases it regardless of both. All three exist
 //! because each covers a hole the others leave — see each variant of
 //! [`BuilderLease`].
@@ -303,8 +304,9 @@ impl DaemonState {
     /// cap is asked, and a `PreToolUse` deny means nothing downstream will ever
     /// close it.
     /// What: marks the delegation carrying `tool_use_id`
-    /// [`DelegationStatus::Cancelled`] and stamps `ended_at`, under the
-    /// dispatch-record lock so it cannot race the tracker's own writer.
+    /// [`DelegationStatus::Cancelled`](crate::core::agent::DelegationStatus::Cancelled)
+    /// and stamps `ended_at`, under the dispatch-record lock so it cannot race
+    /// the tracker's own writer.
     ///
     /// It RETAINS the record rather than removing it, deliberately. The
     /// tracker's `matcher: "*"` hook fires on the same dispatch and may land

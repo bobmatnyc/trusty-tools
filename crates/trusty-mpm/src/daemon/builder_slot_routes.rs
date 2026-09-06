@@ -13,7 +13,8 @@
 //! the answer and the record are one operation — see
 //! [`DaemonState::claim_builder_slot`].
 //!
-//! **The daemon resolves the cap, never the caller.** [`resolve_max_concurrent`]
+//! **The daemon resolves the cap, never the caller.**
+//! [`resolve_max_concurrent`](crate::core::builders::resolve_max_concurrent)
 //! reads `~/.trusty-mpm/config.toml` here, in the process that does the
 //! counting. A `tm` older or newer than the daemon would otherwise argue for a
 //! number the live leases were not admitted under, and the guard's whole value
@@ -22,12 +23,13 @@
 //! **Eligibility is re-derived here too, never taken on trust.** The caller says
 //! which agent it is dispatching; whether that agent claims a builder slot is
 //! this daemon's policy call, shared with the guard through the one
-//! [`agent_is_builder`] classifier. A non-builder payload therefore claims
-//! nothing even if a caller posts it to this route.
+//! [`agent_is_builder`](crate::core::dispatch_isolation::agent_is_builder)
+//! classifier. A non-builder payload therefore claims nothing even if a caller
+//! posts it to this route.
 //!
 //! It lives in its own module, merged as a sub-router, for the same reason
-//! [`super::delegation_routes`] does: `api.rs` is grandfathered at a frozen
-//! line-cap budget.
+//! [`delegation_routes`](crate::daemon::delegation_routes) does: `api.rs` is
+//! grandfathered at a frozen line-cap budget.
 //! Test: the `#[cfg(test)]` suite below.
 
 use std::sync::Arc;
