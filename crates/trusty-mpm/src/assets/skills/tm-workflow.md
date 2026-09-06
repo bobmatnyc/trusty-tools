@@ -46,8 +46,9 @@ two agents was the defect this replaced.
    statement, and the closure conditions.
 2. **PM → `version-control`**: the work summary, files changed, test evidence,
    the review verdict, and the issue context ticketing returned. Version control
-   writes the PR body and inserts the correct `Closes owner/repo#N` (or a
-   non-closing relationship link when the PR does not finish the issue).
+   writes the PR body and inserts the correct issue link — `Refs owner/repo#N`
+   by default, and a closing keyword only on a project whose `CLAUDE.md`
+   permits a merge to auto-close the issue.
 3. **After merge, PM → `ticketing`**: the merged PR number and squash SHA, for
    the completion comment and the `status:` advance. `version-control` confirms
    the merge and FLAGS the advance it owes — "#4409 owes `status:coded` ->
@@ -490,7 +491,7 @@ existing style.
 
 The `version-control` agent writes this; the PM supplies the material.
 
-1. Primary outcome and linked issue(s), with the `Closes owner/repo#N` link.
+1. Primary outcome and linked issue(s), with the `Refs owner/repo#N` link.
 2. What changed, and what is intentionally out of scope.
 3. Risk / blast radius.
 4. Test evidence at the applicable levels.
@@ -498,6 +499,20 @@ The `version-control` agent writes this; the PM supplies the material.
 6. Documentation/changelog status.
 7. Review-finding disposition: fixed here, kept on the parent, or separately
    ticketed.
+
+🔴 **Field 1 models `Refs`, not a closing keyword (#6895).** `Closes`, `Fixes`
+and `Resolves` go in only when the project's `CLAUDE.md` permits a merge to
+auto-close the issue. On a Refs-only project — one whose `CLAUDE.md` says fix
+PRs use `Refs #N` and never `Closes #N` — every issue reference in the body is
+`Refs`, because an issue there closes from `status:tested` after live
+verification, not from the merge.
+
+GitHub scans the WHOLE body for a closing keyword, not just field 1, and
+honours one inside a negation ("does not close #N" still closed it, #5389). So
+a single `Fixes #N` in any field auto-closes the issue on squash-merge before
+anyone verified the fix — that is exactly what PR #6894 did to #6888. Grep the
+finished body for a keyword before opening the PR and after every body edit;
+`version-control` carries the command.
 
 **PR body freshness**: when scope or claims change mid-flight, delegate the
 update to `version-control` immediately rather than leaving stale assertions.

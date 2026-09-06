@@ -276,7 +276,51 @@ fn issue_link_rejects_unrequested_closes() {
     let body = full_body().replace("## Outcome\n", "## Outcome\n\nCloses #3\n");
     let err = body::apply_issue_link(&body, Some(3), IssueLink::Refs)
         .expect_err("an unrequested Closes must be refused");
-    assert!(err.contains("Closes"), "{err}");
+    assert!(err.contains("closes #3"), "{err}");
+}
+
+/// #6895: PR #6894's field 1 read `Fixes #6888`, which the old
+/// `starts_with("closes ")` guard let through; squash-merge then closed #6888
+/// while it still sat unverified at `status:merged`.
+#[test]
+fn issue_link_rejects_every_closing_keyword() {
+    for keyword in [
+        "Close", "Closes", "Closed", "Fix", "Fixes", "Fixed", "Resolve", "Resolves", "Resolved",
+    ] {
+        let body = full_body().replace("## Outcome\n", &format!("## Outcome\n\n{keyword} #6888\n"));
+        let Err(err) = body::apply_issue_link(&body, Some(6888), IssueLink::Refs) else {
+            panic!("`{keyword} #6888` must be refused");
+        };
+        assert!(err.contains(&keyword.to_ascii_lowercase()), "{err}");
+    }
+}
+
+/// GitHub scans the whole body, so a keyword in a later field closes too.
+#[test]
+fn issue_link_rejects_a_closing_keyword_outside_field_one() {
+    let body = full_body().replace("## Review\n", "## Review\n\nfixes #6888 as reviewed.\n");
+    let err = body::apply_issue_link(&body, Some(6888), IssueLink::Refs)
+        .expect_err("a keyword outside field 1 must be refused");
+    assert!(err.contains("fixes #6888"), "{err}");
+}
+
+/// #5389: "Does NOT close #5357" still closed #5357 — GitHub ignores negation.
+#[test]
+fn issue_link_rejects_a_negated_closing_keyword() {
+    let body = full_body().replace("## Risk\n", "## Risk\n\nDoes NOT close #5357.\n");
+    let err = body::apply_issue_link(&body, Some(1), IssueLink::Refs)
+        .expect_err("a negated keyword must be refused");
+    assert!(err.contains("close #5357"), "{err}");
+}
+
+#[test]
+fn issue_link_allows_prose_that_only_looks_like_a_keyword() {
+    let body = full_body().replace(
+        "## Changes\n",
+        "## Changes\n\nprefix #12 stays; the fix for #13 stays; Refs #14 stays.\n",
+    );
+    body::apply_issue_link(&body, Some(14), IssueLink::Refs)
+        .expect("prose without a keyword+reference pair must pass");
 }
 
 #[test]
