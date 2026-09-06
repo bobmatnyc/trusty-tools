@@ -14,6 +14,11 @@
   is available to a screen reader too. A clickable row's `aria-label` replaces
   the name its cells would compute, so `rowAriaLabel` restates every column in
   it rather than announcing the service and the action alone.
+  #6923: a third row shape — an `<a>` — for a service whose dashboard its own
+  daemon serves rather than the console. `trusty-agents` is the one such service
+  today: it had no in-console tab and so no way to reach its dashboard at all.
+  The href is the URL the roster reported from that daemon's `http_addr` file,
+  never a port written down here.
   #6773: each row now carries TWO graphs side by side, CPU first and memory
   second, drawn from the one per-service ring so the bar at any x is the same
   second in both. Each has its own scale — a percentage and a byte count share
@@ -78,10 +83,58 @@
         </span>
       </div>
 
-      {#each rows as row (row.id)}
+      <!-- #6923: the three row shapes below carry identical cells, so the cells
+           are one snippet rather than three copies that can drift. -->
+      {#snippet cells(row, inertHint)}
         {@const cpuGraph = rowCpuGraphSpec(row)}
         {@const memGraph = rowMemoryGraphSpec(row)}
-        {#if row.hasDashboard}
+        <span class="name">
+          {row.displayName}
+          {#if inertHint}<span class="sr-only">— {inertHint}</span>{/if}
+        </span>
+        <span class="mono">{row.version}</span>
+        <span class="badge-cell">
+          <span class="badge" style="--_s: {row.statusVar};">
+            <span class="dot"></span>{row.statusLabel}
+          </span>
+        </span>
+        <span class="mono num">{row.cpuLabel}</span>
+        <span class="mono num">{row.memoryLabel}</span>
+        <!-- #6773: CPU first, memory second, in one container so the pair
+             stays side by side and equal-width at every viewport. -->
+        <span class="graphs">
+          <BarGraph
+            values={cpuGraph.values}
+            max={cpuGraph.max}
+            height="1.6rem"
+            label={cpuGraph.label}
+          />
+          <BarGraph
+            values={memGraph.values}
+            max={memGraph.max}
+            height="1.6rem"
+            label={memGraph.label}
+          />
+        </span>
+      {/snippet}
+
+      {#each rows as row (row.id)}
+        {#if row.dashboardUrl}
+          <!-- #6923: this service's dashboard is served by its own daemon, not
+               by the console, so the row is a real link to the URL the roster
+               reported — no port is written down here. Same row affordance as
+               every other clickable row; a new tab because leaving the console
+               to open it would lose whatever the operator was watching. -->
+          <a
+            class="row link"
+            href={row.dashboardUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={row.ariaLabel}
+          >
+            {@render cells(row, null)}
+          </a>
+        {:else if row.hasDashboard}
           <!-- #6642: the whole row opens the dashboard, so the row IS the
                button — same one-action-means-whole-card rule the card grid
                used before it was replaced. -->
@@ -91,64 +144,13 @@
             aria-label={row.ariaLabel}
             onclick={() => onOpen?.(row.id)}
           >
-            <span class="name">{row.displayName}</span>
-            <span class="mono">{row.version}</span>
-            <span class="badge-cell">
-              <span class="badge" style="--_s: {row.statusVar};">
-                <span class="dot"></span>{row.statusLabel}
-              </span>
-            </span>
-            <span class="mono num">{row.cpuLabel}</span>
-            <span class="mono num">{row.memoryLabel}</span>
-            <!-- #6773: CPU first, memory second, in one container so the pair
-                 stays side by side and equal-width at every viewport. -->
-            <span class="graphs">
-              <BarGraph
-                values={cpuGraph.values}
-                max={cpuGraph.max}
-                height="1.6rem"
-                label={cpuGraph.label}
-              />
-              <BarGraph
-                values={memGraph.values}
-                max={memGraph.max}
-                height="1.6rem"
-                label={memGraph.label}
-              />
-            </span>
+            {@render cells(row, null)}
           </button>
         {:else}
           <!-- #6642: no dashboard exists for this service, so the row is inert:
                no pointer, not focusable, and it says why. -->
           <div class="row inert" title={NO_DASHBOARD_HINT}>
-            <span class="name">
-              {row.displayName}
-              <span class="sr-only">— {NO_DASHBOARD_HINT}</span>
-            </span>
-            <span class="mono">{row.version}</span>
-            <span class="badge-cell">
-              <span class="badge" style="--_s: {row.statusVar};">
-                <span class="dot"></span>{row.statusLabel}
-              </span>
-            </span>
-            <span class="mono num">{row.cpuLabel}</span>
-            <span class="mono num">{row.memoryLabel}</span>
-            <!-- #6773: CPU first, memory second, in one container so the pair
-                 stays side by side and equal-width at every viewport. -->
-            <span class="graphs">
-              <BarGraph
-                values={cpuGraph.values}
-                max={cpuGraph.max}
-                height="1.6rem"
-                label={cpuGraph.label}
-              />
-              <BarGraph
-                values={memGraph.values}
-                max={memGraph.max}
-                height="1.6rem"
-                label={memGraph.label}
-              />
-            </span>
+            {@render cells(row, NO_DASHBOARD_HINT)}
           </div>
         {/if}
       {/each}
@@ -212,12 +214,17 @@
     background: transparent;
   }
 
+  /* #6923: `.row.link` now dresses an `<a>` as well as a `<button>`, so it
+     cancels the anchor's underline and lets `.row`'s own colour win. */
   .row.link {
     background: none;
     border-left: none;
     border-right: none;
     border-top: none;
     font-family: inherit;
+    font-size: var(--trusty-fs-sm);
+    color: var(--trusty-text-secondary);
+    text-decoration: none;
     cursor: pointer;
   }
   .row.link:hover { background: var(--trusty-surface-hover); }

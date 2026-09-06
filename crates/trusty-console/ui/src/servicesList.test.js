@@ -11,6 +11,7 @@ import {
   DASH,
   ROW_GRAPH_FLOOR_PCT,
   ROW_MEMORY_FLOOR_BYTES,
+  SELF_HOSTED_DASHBOARDS,
   SERVICES_URL,
   cpuSeries,
   fetchServices,
@@ -21,6 +22,7 @@ import {
   rowAriaLabel,
   rowCpuGraphSpec,
   rowMemoryGraphSpec,
+  selfHostedDashboardUrl,
   serviceRows,
   sortByDisplayName,
   statusCounts,
@@ -154,7 +156,41 @@ test('only a service with a dashboard is marked clickable', () => {
   const rows = serviceRows(ROSTER, {}, new Set(['trusty-search', 'trusty-memory']));
   const clickable = rows.filter((r) => r.hasDashboard).map((r) => r.id);
   assert.deepEqual(clickable.sort(), ['trusty-memory', 'trusty-search']);
+  // #6923: agents is in `SELF_HOSTED_DASHBOARDS`, but this roster reports no
+  // `url` for it — a stopped daemon has no dashboard to open.
   assert.equal(rows.find((r) => r.id === 'trusty-agents').hasDashboard, false);
+  assert.equal(rows.find((r) => r.id === 'trusty-agents').dashboardUrl, null);
+});
+
+// ── #6923: the daemon-served dashboard row ──────────────────────────────────
+
+test('a self-hosted dashboard row links to the daemon URL the roster reports', () => {
+  const roster = ROSTER.map((s) =>
+    s.id === 'trusty-agents' ? { ...s, url: 'http://127.0.0.1:51843' } : s,
+  );
+  const rows = serviceRows(roster, {}, new Set(['trusty-search']));
+  const agents = rows.find((r) => r.id === 'trusty-agents');
+  // The URL is whatever detection found; nothing in the UI knows a port.
+  assert.equal(agents.dashboardUrl, 'http://127.0.0.1:51843');
+  assert.equal(agents.hasDashboard, true, 'a URL alone makes the row clickable');
+  assert.match(agents.ariaLabel, /open dashboard in a new tab$/);
+});
+
+test('a console-hosted tab never becomes a daemon link', () => {
+  // A `url` on a service the console hosts a tab for must not turn its row into
+  // an outbound link — every trusty-* daemon reports one.
+  const roster = [{ id: 'trusty-search', display_name: 'Trusty Search', status: 'running', url: 'http://127.0.0.1:7878' }];
+  const [row] = serviceRows(roster, {}, new Set(['trusty-search']));
+  assert.equal(row.dashboardUrl, null);
+  assert.equal(row.hasDashboard, true);
+  assert.equal(selfHostedDashboardUrl(roster[0]), null);
+});
+
+test('a self-hosted service with an empty or absent URL stays inert', () => {
+  assert.equal(selfHostedDashboardUrl({ id: 'trusty-agents' }), null);
+  assert.equal(selfHostedDashboardUrl({ id: 'trusty-agents', url: '' }), null);
+  assert.equal(selfHostedDashboardUrl(undefined), null);
+  assert.ok(SELF_HOSTED_DASHBOARDS.has('trusty-agents'));
 });
 
 // ── #6642: the clickable row's accessible name ─────────────────────────────

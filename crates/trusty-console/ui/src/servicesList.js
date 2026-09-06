@@ -44,6 +44,39 @@ export const DASH = '—';
 /** What a row without a dashboard says when hovered or read aloud. */
 export const NO_DASHBOARD_HINT = 'No dashboard for this service';
 
+/**
+ * Services whose dashboard is served by their own daemon, not by the console
+ * (#6923).
+ *
+ * Why a set rather than a rule over every service with a URL: a `url` in the
+ * roster means the console found a reachable daemon, which is not the same
+ * claim as "that daemon serves a dashboard at its root". `trusty-agents` does —
+ * its axum router serves the SPA at `/` and `/{*path}`
+ * (`crates/trusty-agents/src/api/server/routes.rs:322-323`) — and it is the one
+ * service in the roster with no in-console tab, which is why DOC-73 §14's
+ * Services row had no target for it.
+ *
+ * The URL itself is never built here: it is whatever the connector discovered
+ * from that daemon's `http_addr` file, so no port is written down anywhere in
+ * this UI.
+ */
+export const SELF_HOSTED_DASHBOARDS = new Set(['trusty-agents']);
+
+/**
+ * The daemon-served dashboard URL for a service, or `null`.
+ *
+ * `null` for a service the console hosts a tab for, for one whose daemon is not
+ * running (no `url` in the roster), and for anything not in
+ * [`SELF_HOSTED_DASHBOARDS`].
+ * Test: `a self-hosted dashboard row links to the daemon URL the roster
+ * reports`, `a self-hosted service with no live daemon stays inert`.
+ */
+export function selfHostedDashboardUrl(service) {
+  if (!SELF_HOSTED_DASHBOARDS.has(service?.id)) return null;
+  const url = service?.url;
+  return typeof url === 'string' && url.length > 0 ? url : null;
+}
+
 /** True only for a real, finite number — `null`, `undefined` and NaN are not. */
 function isNum(value) {
   return typeof value === 'number' && Number.isFinite(value);
@@ -189,7 +222,10 @@ export function rowAriaLabel(row) {
   // column is in it — an aria-label replaces the cells, so a column left out is
   // a column a listener never hears.
   const memory = row.memoryLabel === DASH ? 'memory not measured' : `${row.memoryLabel} memory`;
-  return `${row.displayName}, ${version}, ${row.statusLabel}, ${cpu}, ${memory} — open dashboard`;
+  // #6923: a daemon-served dashboard leaves the console, so the label says so —
+  // the row opens a new tab, which a listener should hear before activating it.
+  const action = row.dashboardUrl ? 'open dashboard in a new tab' : 'open dashboard';
+  return `${row.displayName}, ${version}, ${row.statusLabel}, ${cpu}, ${memory} — ${action}`;
 }
 
 /**
@@ -197,7 +233,9 @@ export function rowAriaLabel(row) {
  *
  * @param {object[]} services the `/api/console/services` roster
  * @param {object} serviceSamples the stream's per-service rings, keyed by id
- * @param {Set<string>} dashboards ids that have a dashboard to open
+ * @param {Set<string>} dashboards ids the CONSOLE hosts a tab for. A service
+ *        whose own daemon serves its dashboard is clickable without being in
+ *        this set — see [`selfHostedDashboardUrl`].
  */
 export function serviceRows(services, serviceSamples = {}, dashboards = new Set()) {
   return sortByDisplayName(services).map((service) => {
@@ -212,8 +250,13 @@ export function serviceRows(services, serviceSamples = {}, dashboards = new Set(
     const cpu = live ? live.cpu_pct : service.cpu_pct;
     const memory = live ? live.rss_bytes : service.rss_bytes;
 
+    // #6923: `null` for every console-hosted tab; a URL only where the service's
+    // own daemon serves the dashboard.
+    const dashboardUrl = selfHostedDashboardUrl(service);
+
     const row = {
       id: service.id,
+      dashboardUrl,
       displayName: service.display_name || service.id,
       version: service.version || DASH,
       status: merged.status,
@@ -223,7 +266,7 @@ export function serviceRows(services, serviceSamples = {}, dashboards = new Set(
       memoryLabel: formatMemory(memory),
       series: cpuSeries(serviceSamples, service.id),
       memorySeries: memorySeries(serviceSamples, service.id),
-      hasDashboard: dashboards.has(service.id),
+      hasDashboard: dashboards.has(service.id) || dashboardUrl !== null,
     };
     // #6642: only a clickable row overrides its accessible name. An inert row
     // is a plain <div>, whose visible cells a screen reader reads as written.

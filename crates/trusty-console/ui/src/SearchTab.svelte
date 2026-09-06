@@ -1,13 +1,14 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import RefreshHeader from './RefreshHeader.svelte';
-  // #6360: the index roster grew a delete action; the control itself is shared
-  // with the Memory tab so both confirm and report failures identically.
-  import DeleteAction from './DeleteAction.svelte';
-  // #6371: the index table can only show registrations the daemon actually
-  // registered. A registration the warm-boot allowlist excluded is in neither,
-  // so the cleanup panel below is the only place it is visible.
-  import StaleIndexCleanup from './StaleIndexCleanup.svelte';
+  // #6923: this tab displays; the search dashboard manages (DOC-73 §13). The
+  // inline delete (#6360) and the stale-registration cleanup panel (#6371) are
+  // gone, and a row now opens the index's management view instead (§14).
+  import {
+    NO_INDEX_ID_HINT,
+    indexDashboardHref,
+    indexRowAriaLabel,
+  } from './searchIndexNav.js';
   // #6424: the Last Used column and its sort. Shared with the Memory tab so
   // both rosters agree on what a missing timestamp means.
   import {
@@ -65,26 +66,6 @@
     } finally {
       loading = false;
       refreshing = false;
-    }
-  }
-
-  /**
-   * Re-read the index roster from the daemon after a confirmed delete (#6360).
-   *
-   * Why not `fetchMetrics(true)`: that call drops itself when a background tick
-   * is already in flight, and a dropped refresh right after a delete leaves the
-   * deleted index on screen until the next tick — which reads as a delete that
-   * did not happen. This one always issues the request. The row is never
-   * removed locally: what the daemon reports is what the table shows.
-   */
-  async function reloadRoster() {
-    try {
-      const resp = await fetch('/api/console/metrics/search');
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      report = await resp.json();
-      error = null;
-    } catch (e) {
-      error = e.message;
     }
   }
 
@@ -148,62 +129,85 @@
         <span class="stat-value">{report.metrics?.index_count ?? 0}</span>
         <span class="stat-label">Indexes</span>
       </div>
-      <div class="stat-card" class:degraded={report.metrics?.warm_boot_degraded}>
+      <!-- #6923: the card used to be labelled "Warm Boot Degraded", which named
+           the field rather than what it measures. The flag it reads
+           (`warmboot_summary.warm_boot_degraded`, recomputed in trusty-search's
+           `health.rs:1040`) is true when ANY index is not fully serving: a
+           failed embed stage, a TCC or allowlist skip at boot, a load timeout,
+           or a registry that came back smaller than it was. The title says
+           which, since the card itself is one word. -->
+      <div
+        class="stat-card"
+        class:degraded={report.metrics?.warm_boot_degraded}
+        title="Some index is not fully serving: a failed embed stage, a boot-time TCC or allowlist skip, a load timeout, or a registry smaller than it was."
+      >
         <span class="stat-value">
           {report.metrics?.warm_boot_degraded ? 'Yes' : 'No'}
         </span>
-        <span class="stat-label">Warm Boot Degraded</span>
+        <span class="stat-label">Indexes Degraded</span>
       </div>
     </div>
 
-    <!-- Per-index table -->
+    <!-- #6923: the roster is a grid list, not a `<table>`, for the reason
+         `ServicesList.svelte` gives: a row that navigates must BE the link, and
+         a link cannot wrap a `<tr>`. The Actions column is gone with the inline
+         delete — the row itself is now the one control it carries. -->
     {#if report.metrics?.indexes?.length > 0}
       <h3 class="sub-title">Indexes</h3>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Root Path</th>
-              <th>Size</th>
-              <!-- #6424: click to cycle newest-first, oldest-first, daemon order. -->
-              <th class="num sortable">
-                <button
-                  type="button"
-                  class="sort-btn"
-                  aria-label="Sort by last used"
-                  onclick={() => (lastUsedSort = nextSortDirection(lastUsedSort))}
-                >
-                  Last Used <span class="sort-arrow">{sortIndicator(lastUsedSort)}</span>
-                </button>
-              </th>
-              <th class="actions-head">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each indexRows as idx (idx.id)}
-              <tr>
-                <td><code>{idx.id ?? '—'}</code></td>
-                <td class="path">{idx.root_path ?? '—'}</td>
-                <td class="num">
-                  {idx.size_bytes != null ? formatBytes(idx.size_bytes) : '—'}
-                </td>
-                <td class="num" title={lastUsedTitle(idx)}>{formatLastUsed(idx)}</td>
-                <td class="actions">
-                  {#if idx.id}
-                    <DeleteAction kind="index" id={idx.id} onDeleted={reloadRoster} />
-                  {/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+      <div class="list">
+        <div class="row head">
+          <span aria-hidden="true">ID</span>
+          <span aria-hidden="true">Root Path</span>
+          <span class="num" aria-hidden="true">Size</span>
+          <!-- #6424: click to cycle newest-first, oldest-first, daemon order. -->
+          <span class="num sortable">
+            <button
+              type="button"
+              class="sort-btn"
+              aria-label="Sort by last used"
+              onclick={() => (lastUsedSort = nextSortDirection(lastUsedSort))}
+            >
+              Last Used <span class="sort-arrow">{sortIndicator(lastUsedSort)}</span>
+            </button>
+          </span>
+        </div>
+
+        {#snippet indexCells(idx)}
+          <span class="mono">{idx.id ?? '—'}</span>
+          <span class="path">{idx.root_path ?? '—'}</span>
+          <span class="num">
+            {idx.size_bytes != null ? formatBytes(idx.size_bytes) : '—'}
+          </span>
+          <span class="num" title={lastUsedTitle(idx)}>{formatLastUsed(idx)}</span>
+        {/snippet}
+
+        {#each indexRows as idx (idx.id)}
+          {#if idx.id}
+            <a
+              class="row link"
+              href={indexDashboardHref(idx.id)}
+              aria-label={indexRowAriaLabel({
+                id: idx.id,
+                rootPath: idx.root_path ?? 'no root path',
+                size: idx.size_bytes != null ? formatBytes(idx.size_bytes) : 'size unknown',
+                lastUsed: formatLastUsed(idx),
+              })}
+            >
+              {@render indexCells(idx)}
+            </a>
+          {:else}
+            <!-- A registration with no id has no management view to open, so
+                 the row is inert and says why — the same rule an undashboarded
+                 service row follows in `ServicesList.svelte`. -->
+            <div class="row inert" title={NO_INDEX_ID_HINT}>
+              {@render indexCells(idx)}
+            </div>
+          {/if}
+        {/each}
       </div>
     {:else}
       <p class="empty-hint">No indexes registered.</p>
     {/if}
-
-    <StaleIndexCleanup onPruned={reloadRoster} />
   {/if}
 </div>
 
@@ -241,8 +245,18 @@
     background: var(--trusty-card-bg); border: 1px solid var(--trusty-border); border-radius: 0.5rem;
     padding: 1rem; display: flex; flex-direction: column; align-items: center; gap: 0.25rem;
   }
-  .stat-value { font-size: 1.6rem; font-weight: 700; color: var(--trusty-text-primary); }
-  .stat-label { font-size: 0.75rem; color: var(--trusty-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
+  /* #6923: the card centres its own text. `align-items: center` above centres
+     each line as a flex ITEM, which is not the same thing once a label wraps to
+     two lines — the second line was left-aligned under the first. */
+  .stat-value {
+    font-size: 1.6rem; font-weight: 700; color: var(--trusty-text-primary);
+    text-align: center;
+  }
+  .stat-label {
+    font-size: 0.75rem; color: var(--trusty-text-secondary);
+    text-transform: uppercase; letter-spacing: 0.05em;
+    text-align: center;
+  }
   /* .degraded modifier: warm-boot-degraded card gets amber border/value tint,
      consistent with the --_s badge pattern (single scoped var, no inline one-offs). */
   .stat-card.degraded {
@@ -253,37 +267,61 @@
   .stat-card.degraded .stat-value { color: var(--trusty-warning); }
 
   .sub-title { font-size: 1rem; font-weight: 600; color: var(--trusty-text-secondary); margin: 0 0 0.75rem; }
-  .table-wrap { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  th {
-    text-align: left; padding: 0.5rem 0.75rem;
-    background: var(--trusty-card-bg); color: var(--trusty-text-secondary); font-weight: 600;
+
+  /* #6923: the roster list, built the way `ServicesList.svelte` builds its own
+     — one grid row per index, the row itself the link. Same tokens, same
+     borders, same hover and focus treatment; nothing new is invented here. */
+  .list {
+    background: var(--trusty-card-bg);
+    border: 1.5px solid var(--trusty-border);
+    border-radius: var(--trusty-radius);
+    overflow: hidden;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: minmax(6rem, 0.8fr) minmax(10rem, 2fr) 6rem 7rem;
+    align-items: center;
+    gap: var(--trusty-space-4);
+    width: 100%;
+    padding: 0.5rem var(--trusty-space-5);
+    border-bottom: 1px solid var(--trusty-surface-raised);
+    font-size: var(--trusty-fs-sm);
+    text-align: left;
+    color: var(--trusty-text-primary);
+    text-decoration: none;
+  }
+  .row:last-child { border-bottom: none; }
+  .row.head {
+    font: 600 10px var(--trusty-mono);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--trusty-text-muted);
     border-bottom: 1px solid var(--trusty-border);
   }
-  td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--trusty-card-bg); color: var(--trusty-text-primary); }
-  tr:last-child td { border-bottom: none; }
-  tr:hover td { background: var(--trusty-card-bg); }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  td.path { font-size: 0.8rem; color: var(--trusty-text-secondary); max-width: 400px; overflow: hidden; text-overflow: ellipsis; }
-  /* #6360: the delete column. Right-aligned and vertically top-anchored so the
-     expanded confirm panel grows downward without shifting the row's numbers. */
+  .row.link:hover { background: var(--trusty-surface-hover); }
+  .row.link:focus-visible {
+    outline: 2px solid var(--trusty-accent);
+    outline-offset: -2px;
+  }
+  /* No management view for this row → no affordance. */
+  .row.inert { cursor: default; color: var(--trusty-text-muted); }
+
+  .mono { font-family: var(--trusty-mono); font-size: var(--trusty-fs-xs); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .path {
+    font-size: 0.8rem; color: var(--trusty-text-secondary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   /* #6424: the sortable header is a real button so it is keyboard-reachable;
      it inherits the header's type so only the arrow marks it as interactive. */
-  th.sortable { padding: 0; }
+  .row.head .sortable { padding: 0; }
   .sort-btn {
     width: 100%; background: none; border: none; cursor: pointer;
-    font: inherit; color: inherit; text-align: right;
-    padding: 0.5rem 0.75rem;
+    font: inherit; color: inherit; text-align: right; padding: 0;
   }
   .sort-btn:hover { color: var(--trusty-text-primary); }
   .sort-arrow { opacity: 0.6; margin-left: 0.2rem; }
 
-  th.actions-head, td.actions { text-align: right; }
-  td.actions { vertical-align: top; }
-  code {
-    font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;
-    background: var(--trusty-surface-raised); padding: 0.1rem 0.35rem; border-radius: 0.25rem;
-  }
   .empty-hint { color: var(--trusty-text-secondary); font-size: 0.85rem; }
   .dashboard-link { margin: 0 0 1rem; font-size: 0.85rem; }
   .dashboard-link a { color: var(--trusty-accent); text-decoration: none; }
