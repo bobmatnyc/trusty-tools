@@ -15,6 +15,18 @@
 
 use std::net::SocketAddr;
 
+/// What the startup guard prints when a daemon is already answering.
+///
+/// Why (#6869): both guard arms printed `… already running at
+/// http://127.0.0.1:7880`, which put the daemon's port in front of the
+/// operator on a path where it changes nothing they can act on. The URL is a
+/// discovery detail — whatever `resolve_daemon_url` happened to return, or
+/// whatever `--addr` asked for — and the move to a Unix socket (#6288) will
+/// make printing one wrong. It is demoted to `tracing::debug!` at each site.
+/// What: one fixed line, shared by both arms so they cannot drift apart.
+/// Test: `already_running_notice_names_no_address`.
+const ALREADY_RUNNING_NOTICE: &str = "the trusty-mpm daemon is already running";
+
 /// `daemon` subcommand — run the HTTP daemon (or MCP server) with auto port
 /// selection and lock-file service discovery.
 ///
@@ -111,7 +123,9 @@ pub(crate) async fn run_daemon(
     if recorded_url != trusty_mpm::core::DEFAULT_DAEMON_URL
         && trusty_common::probe_health(&recorded_url, "/health").await
     {
-        eprintln!("trusty-mpm daemon is already running at {recorded_url}");
+        // #6869: the operator gets the fact; the URL goes to the log.
+        tracing::debug!("daemon already running at recorded url {recorded_url}");
+        eprintln!("{ALREADY_RUNNING_NOTICE}");
         return Ok(());
     }
 
@@ -123,7 +137,9 @@ pub(crate) async fn run_daemon(
     // default, so `--addr` still starts a second daemon on a free port.
     let intended_url = format!("http://{addr}");
     if trusty_common::probe_health(&intended_url, "/health").await {
-        eprintln!("trusty-mpm daemon is already running at {intended_url}");
+        // #6869: same demotion as the recorded-url arm above.
+        tracing::debug!("daemon already running at intended url {intended_url}");
+        eprintln!("{ALREADY_RUNNING_NOTICE}");
         return Ok(());
     }
 
@@ -434,6 +450,26 @@ fn tailscale_deprecated_error() -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (#6869): the guard's line is the one place `tm daemon` still spoke a
+    /// port to the operator. Pinning the constant is what keeps a later edit
+    /// from quietly interpolating a URL back into it.
+    /// What: asserts the notice carries no port, no loopback host, no scheme,
+    /// and still names the daemon.
+    /// Test: this is the test.
+    #[test]
+    fn already_running_notice_names_no_address() {
+        for needle in ["7880", "127.0.0.1", "http://", ":"] {
+            assert!(
+                !ALREADY_RUNNING_NOTICE.contains(needle),
+                "the startup guard must not print {needle:?}: {ALREADY_RUNNING_NOTICE}"
+            );
+        }
+        assert!(
+            ALREADY_RUNNING_NOTICE.contains("trusty-mpm daemon is already running"),
+            "the operator must still be told what happened: {ALREADY_RUNNING_NOTICE}"
+        );
+    }
 
     /// The regression test for the stale lock #6288 slice 1 would otherwise
     /// have introduced.

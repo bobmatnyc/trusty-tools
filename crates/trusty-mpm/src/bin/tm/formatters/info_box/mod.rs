@@ -447,7 +447,11 @@ mod tests {
             &online(7880),
         );
         assert!(out.contains('\u{25cf}'), "expected ● online marker");
-        assert!(out.contains(":7880"), "expected port in daemon row");
+        // #6869: the row reports liveness; the port is not shown.
+        assert!(
+            out.contains("daemon  running"),
+            "expected running label in daemon row"
+        );
         assert!(out.contains("my-project"), "expected project name");
         assert!(!out.contains("reconnecting"), "must not show reconnecting");
     }
