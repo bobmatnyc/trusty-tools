@@ -16,11 +16,9 @@
 //! refuses.
 //!   - [`tune_listener_buffers`] is for a socket that has no peer and never
 //!     will: any failure is a failure. [`crate::uds::bind_hardened`] calls it.
-//!     Both platforms copy a listener's buffer sizes onto every socket `accept`
-//!     returns, so this is the whole server side — including a service such as
-//!     `trusty-embedderd` that binds through here and drives its own accept loop.
 //!   - [`tune_connected_buffers`] is for a socket that has a peer, which may
-//!     have gone away. [`crate::uds::connect_hardened`] calls it.
+//!     have gone away. [`crate::uds::connect_hardened`] calls it for the
+//!     dialling end and [`crate::uds::accept_sized`] for the accepted end.
 //!
 //! 🔴 **Why the split is not a stylistic one (#6896 review).** The benign
 //! classification rests on `getpeername` failing, and `getpeername` ALWAYS
@@ -31,14 +29,19 @@
 //! default. The strict form has no benign outcome to reach, in the type as well
 //! as in the code.
 //!
-//! 🔴 **The listener is sized, not each accepted socket.** macOS refuses
-//! `setsockopt(SO_SNDBUF)` with `EINVAL` once a socket's peer has hung up —
-//! `getpeername` on the same fd fails the same way, which is what identifies
-//! the condition. An accepted socket can already be in that state before the
-//! server touches it: a liveness probe connects and closes, which is exactly
-//! what [`crate::uds::probe::socket_is_serving`] does. Sizing per accepted
-//! socket therefore turned every probe into a connection failure. Inheriting
-//! from the listener happens inside `accept`, before any peer can go away.
+//! 🔴 **Both the listener AND each accepted socket are sized, because only
+//! macOS inherits (#6896 follow-up).** macOS builds the server-side socket in
+//! `sonewconn`, which copies the listener's `sb_hiwat` onto it, so sizing the
+//! listener there covers everything `accept` returns. Linux does not: AF_UNIX
+//! builds the server-side socket from scratch in `unix_stream_connect`, so it
+//! comes back at `net.core.wmem_default` / `rmem_default` however the listener
+//! was sized. Sizing only the listener therefore left every server-side socket
+//! on Linux at the platform default. [`crate::uds::accept_sized`] closes that,
+//! through the forgiving entry point: an accepted socket can have lost its peer
+//! before the server touches it — a liveness probe connects and closes, which
+//! is exactly what [`crate::uds::probe::socket_is_serving`] does — and that
+//! peer-hangup is what [`SocketBufferOutcome::PeerHungUp`] absorbs rather than
+//! turning every probe into a connection failure.
 //!
 //! **A failure is propagated, never defaulted — with one named exception.** A
 //! socket left at the platform default still works, at the cost this module
@@ -54,11 +57,20 @@
 //! this raises the buffer where the host allows it and changes nothing where it
 //! does not.
 //!
+//! 🟡 **Nothing here compares a read-back against what was requested.** Linux
+//! stores twice the accepted value and `getsockopt` returns that doubled
+//! figure, so a request of 1 MiB reads back as 2 MiB — or as 425984 on a host
+//! whose `wmem_max` is 212992, the clamp applied first and the doubling after.
+//! The read-back is logged and returned for observation, never asserted
+//! against [`SOCKET_BUFFER_BYTES`]. A caller comparing two sockets on the same
+//! host is comparing like with like; a caller comparing either against the
+//! request is not.
+//!
 //! Test: `tune_connected_buffers_raises_both_buffers_on_a_socketpair`,
 //! `tune_connected_buffers_reports_a_peer_that_already_hung_up`,
 //! `a_listener_can_never_classify_a_failure_as_a_hung_up_peer`,
 //! `tune_listener_buffers_refuses_where_the_connected_form_tolerates`,
-//! `an_accepted_socket_inherits_the_listeners_sizing`,
+//! `accept_sized_raises_the_accepted_socket_to_the_listeners_sizing`,
 //! `hardened_sockets_hold_far_more_in_flight_than_the_platform_default`.
 
 use std::io;
@@ -230,15 +242,16 @@ fn read_buffer(fd: i32, option: i32, name: &'static str) -> Result<usize, UdsSec
 
 /// Read a socket's effective buffer sizes without changing them.
 ///
-/// Why: the only way to observe what a socket carries — an accepted socket's
-/// sizing comes from the listener, so asking it is the one check that proves
-/// the inheritance this module relies on (#6896).
+/// Why: the only way to observe what a socket carries. What the kernel granted
+/// is not what was asked for — Linux doubles it and clamps it first — so a
+/// caller checking that a socket really is sized has to read it back rather
+/// than assume (#6896).
 ///
 /// # Errors
 ///
 /// [`UdsSecurityError::SocketBufferRead`] when either option cannot be read.
 ///
-/// Test: `an_accepted_socket_inherits_the_listeners_sizing`.
+/// Test: `accept_sized_raises_the_accepted_socket_to_the_listeners_sizing`.
 pub fn socket_buffer_sizes<S: AsRawFd + ?Sized>(
     socket: &S,
 ) -> Result<SocketBufferSizes, UdsSecurityError> {
@@ -279,13 +292,15 @@ fn tune(fd: i32, connected: bool) -> Result<Option<SocketBufferSizes>, UdsSecuri
 
 /// Size the buffers of a socket that has no peer, failing on any error.
 ///
-/// Why: a listener is where the whole server side is sized, and it is the one
-/// socket for which the hung-up-peer classification cannot be evaluated — see
-/// the module docs. There is no benign outcome in the return type, so a caller
-/// cannot proceed on an unsized listener without seeing an error (#6896 review).
+/// Why: a listener is the one socket for which the hung-up-peer classification
+/// cannot be evaluated — see the module docs. There is no benign outcome in the
+/// return type, so a caller cannot proceed on an unsized listener without
+/// seeing an error (#6896 review).
 ///
 /// What: `setsockopt` for both options, then `getsockopt` for both, at debug
-/// level. Every accepted socket inherits what this sets.
+/// level. macOS copies what this sets onto every socket `accept` returns; Linux
+/// does not, which is why [`crate::uds::accept_sized`] sizes the accepted end
+/// as well.
 ///
 /// # Errors
 ///
@@ -294,7 +309,7 @@ fn tune(fd: i32, connected: bool) -> Result<Option<SocketBufferSizes>, UdsSecuri
 ///
 /// Test: `a_listener_can_never_classify_a_failure_as_a_hung_up_peer`,
 /// `tune_listener_buffers_refuses_where_the_connected_form_tolerates`,
-/// `an_accepted_socket_inherits_the_listeners_sizing`.
+/// `accept_sized_raises_the_accepted_socket_to_the_listeners_sizing`.
 pub fn tune_listener_buffers<S: AsRawFd + ?Sized>(
     socket: &S,
 ) -> Result<SocketBufferSizes, UdsSecurityError> {

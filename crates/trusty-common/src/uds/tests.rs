@@ -836,28 +836,36 @@ impl std::os::fd::AsRawFd for BorrowedFdForTest {
     }
 }
 
-/// The server side is sized by inheritance, which is why nothing sizes an
-/// accepted socket directly.
+/// The server side is sized on the accepted socket, not inherited from the
+/// listener: Linux hands back a default-sized socket from `accept` however the
+/// listener was sized (#6896).
 #[tokio::test]
-async fn an_accepted_socket_inherits_the_listeners_sizing() {
+async fn accept_sized_raises_the_accepted_socket_to_the_listeners_sizing() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let sock = tmp.path().join("sockets").join("inherit.sock");
     let listener = bind_hardened(&sock).expect("bind hardened");
     let _client = connect_hardened(&sock).await.expect("connect hardened");
-    let (server, _) = listener.accept().await.expect("accept");
+    let (server, _) = accept_sized(&listener).await.expect("accept sized");
 
-    // Read back without setting anything: whatever the accepted socket carries
-    // it got from the listener at `accept` time.
     let on_listener = socket_buffer_sizes(&listener).expect("read the listener");
-    let inherited = socket_buffer_sizes(&server).expect("read the accepted socket");
+    let accepted = socket_buffer_sizes(&server).expect("read the accepted socket");
 
+    // Two granted figures compared against each other, never against
+    // `SOCKET_BUFFER_BYTES`: both sockets asked the same host for the same
+    // bytes, so the same `wmem_max` clamp and the same Linux doubling landed on
+    // both, whatever those two produce here. Comparing either against the
+    // request is what fails on Linux — it answers 2 MiB to a 1 MiB request, and
+    // 425984 where `wmem_max` is 212992.
     assert_eq!(
-        inherited, on_listener,
-        "an accepted socket must carry the listener's sizing without being set itself"
+        accepted, on_listener,
+        "an accepted socket must carry the same granted sizing as its listener"
     );
+    // The regression this guards: drop the sizing from `accept_sized` and the
+    // accepted socket falls back to `net.core.wmem_default` on Linux, which is
+    // half the listener's granted figure or less.
     assert!(
-        inherited.send >= FILL_CHUNK * 2 && inherited.recv >= FILL_CHUNK * 2,
-        "the inherited sizing must be the raised one, not the platform default: {inherited:?}"
+        accepted.send >= FILL_CHUNK * 2 && accepted.recv >= FILL_CHUNK * 2,
+        "the accepted socket must carry the raised sizing, not the platform default: {accepted:?}"
     );
 }
 
