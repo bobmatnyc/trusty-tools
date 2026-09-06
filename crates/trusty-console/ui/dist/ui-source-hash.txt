@@ -1,4 +1,4 @@
 # Digest of the UI source this bundle was built from (#3606).
 # Written by scripts/stamp-ui-bundle.sh — regenerate by rebuilding, never by hand.
 # Verified by scripts/check-ui-bundle-freshness.sh (preflight-publish.sh CHECK 7).
-9bd9e561155d7a90615eb0d097a267beae7690b5 59
+4314b1f08470e8cec54b5b6ca485e2e6e7da4886 61
