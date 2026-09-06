@@ -6,8 +6,8 @@
 //! resume` typed `claude --resume <uuid>` at a session Claude Code was already
 //! running in the background, which refuses and exits 0. So every test here
 //! asserts on the built pane command, and none of them runs a real `claude`:
-//! the registry read is injected as a `Result<&str, &str>` (#4255 — a unit test
-//! must never touch the operator's real session state).
+//! the registry read is injected as a closure returning `Result<String, String>`
+//! (#4255 — a unit test must never touch the operator's real session state).
 //! The one test that does spawn — `query_registry_kills_and_reaps_a_wedged_probe`
 //! — runs a stand-in shell script, never the operator's `claude`.
 //! What: the registry sample is a verbatim capture of `claude agents --json`
@@ -104,12 +104,9 @@ fn inputs(cwd: &Path) -> RelaunchInputs<'_> {
 #[test]
 fn relaunch_attaches_to_a_live_background_session() {
     let cwd = Path::new(TEST_CWD);
-    let cmd = relaunch_command(
-        &inputs(cwd),
-        Some(LIVE_UUID),
-        Some(LIVE_UUID),
-        Ok(REGISTRY_SAMPLE),
-    );
+    let cmd = relaunch_command(&inputs(cwd), Some(LIVE_UUID), Some(LIVE_UUID), || {
+        Ok(REGISTRY_SAMPLE.to_owned())
+    });
     assert!(
         cmd.contains(&format!("attach {LIVE_SHORT}")),
         "a live background session must be attached: {cmd}"
@@ -126,12 +123,9 @@ fn relaunch_attaches_to_a_live_background_session() {
 #[test]
 fn relaunch_resumes_a_session_absent_from_the_registry() {
     let cwd = Path::new(TEST_CWD);
-    let cmd = relaunch_command(
-        &inputs(cwd),
-        Some(STALE_UUID),
-        Some(STALE_UUID),
-        Ok(REGISTRY_SAMPLE),
-    );
+    let cmd = relaunch_command(&inputs(cwd), Some(STALE_UUID), Some(STALE_UUID), || {
+        Ok(REGISTRY_SAMPLE.to_owned())
+    });
     assert!(
         cmd.contains(&format!("--resume {STALE_UUID}")),
         "an unlisted id must resume by id: {cmd}"
@@ -148,12 +142,9 @@ fn relaunch_resumes_a_session_absent_from_the_registry() {
 #[test]
 fn relaunch_resumes_when_the_registry_call_fails() {
     let cwd = Path::new(TEST_CWD);
-    let cmd = relaunch_command(
-        &inputs(cwd),
-        Some(LIVE_UUID),
-        Some(LIVE_UUID),
-        Err("`claude agents --json` did not answer within 3s"),
-    );
+    let cmd = relaunch_command(&inputs(cwd), Some(LIVE_UUID), Some(LIVE_UUID), || {
+        Err("`claude agents --json` did not answer within 3s".to_owned())
+    });
     assert!(
         cmd.contains(&format!("--resume {LIVE_UUID}")),
         "an unreadable registry must fall back to --resume: {cmd}"
@@ -169,7 +160,7 @@ fn relaunch_resumes_when_the_registry_call_fails() {
 #[test]
 fn relaunch_starts_fresh_without_a_usable_id() {
     let cwd = Path::new(TEST_CWD);
-    let cmd = relaunch_command(&inputs(cwd), None, None, Ok(REGISTRY_SAMPLE));
+    let cmd = relaunch_command(&inputs(cwd), None, None, || Ok(REGISTRY_SAMPLE.to_owned()));
     assert!(
         !cmd.contains("--resume"),
         "fresh launch, no --resume: {cmd}"
@@ -178,6 +169,24 @@ fn relaunch_starts_fresh_without_a_usable_id() {
     assert!(
         !cmd.contains("--continue"),
         "never a bare --continue: {cmd}"
+    );
+}
+
+/// Why (#6863): with no stored id there is nothing to look up, and the probe
+/// spawns the operator's real `claude` — which this module's docs forbid a test
+/// to do (#4255) and which cost ~20 s on every fresh-launch test. The closure
+/// must stay uncalled, not merely ignored.
+#[test]
+fn relaunch_never_probes_the_registry_without_a_session_id() {
+    let cwd = Path::new(TEST_CWD);
+    let probed = std::cell::Cell::new(false);
+    let cmd = relaunch_command(&inputs(cwd), None, None, || {
+        probed.set(true);
+        Ok(REGISTRY_SAMPLE.to_owned())
+    });
+    assert!(
+        !probed.get(),
+        "the registry must not be read without a claude_session_id: {cmd}"
     );
 }
 

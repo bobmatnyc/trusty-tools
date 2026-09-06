@@ -1271,13 +1271,12 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // refuses `--resume` and exits 0, leaving the pane a bare shell; ask its
         // own registry first and `attach` instead. Any failure to read the
         // registry falls back to the pre-#6863 `--resume`/fresh-launch choice.
-        let registry = claude_code_agents::query_registry(&claude_bin, config_dir.as_deref());
-        let cmd = claude_code_agents::relaunch_command(
-            &inputs,
-            claude_session_id,
-            effective_id,
-            registry.as_deref().map_err(String::as_str),
-        );
+        // The probe is passed unevaluated: a launch with no stored id has
+        // nothing to look up and must not spawn `claude` at all.
+        let cmd =
+            claude_code_agents::relaunch_command(&inputs, claude_session_id, effective_id, || {
+                claude_code_agents::query_registry(&claude_bin, config_dir.as_deref())
+            });
         // Sibling-window hijack fix (follow-up to #2456): when the caller
         // supplies the record's own `pane_id`, target it directly — tmux's
         // session-scoped `send_line` resolves to whichever pane/window is

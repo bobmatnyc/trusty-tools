@@ -252,29 +252,37 @@ pub(super) fn attach_command(inputs: &RelaunchInputs<'_>, attach_id: &str) -> St
 /// yields [`attach_command`]; otherwise the pre-#6863 path runs unchanged —
 /// [`super::resume_command`] with `effective_id` (the caller's
 /// `session_id_exists`-filtered id), which is `--resume <uuid>` when that id
-/// survived and a fresh launch when it did not. `registry` is `Err` whenever
+/// survived and a fresh launch when it did not. `probe` returns `Err` whenever
 /// [`query_registry`] could not answer; the reason is logged at debug and the
 /// fallback is taken.
+///
+/// `probe` is a closure, not an already-read string, so the registry read
+/// happens only on the one path that can use it. There is nothing to look up
+/// without a `claude_session_id`, and running it anyway shelled out to the
+/// operator's real `claude` from every fresh-launch test (#4255, and ~20 s per
+/// test — the reason this is lazy).
 /// Test: `relaunch_attaches_to_a_live_background_session`,
 /// `relaunch_resumes_a_session_absent_from_the_registry`,
 /// `relaunch_resumes_when_the_registry_call_fails`,
-/// `relaunch_starts_fresh_without_a_usable_id`.
+/// `relaunch_starts_fresh_without_a_usable_id`,
+/// `relaunch_never_probes_the_registry_without_a_session_id`.
 pub(super) fn relaunch_command(
     inputs: &RelaunchInputs<'_>,
     claude_session_id: Option<&str>,
     effective_id: Option<&str>,
-    registry: Result<&str, &str>,
+    probe: impl FnOnce() -> Result<String, String>,
 ) -> String {
-    let attach_id = match (claude_session_id, registry) {
-        (Some(id), Ok(json)) => attach_id_in_registry(json, id),
-        (Some(_), Err(reason)) => {
+    // #6863: no stored id means no registry lookup — the probe must not run.
+    let attach_id = match claude_session_id.map(|id| (id, probe())) {
+        Some((id, Ok(json))) => attach_id_in_registry(&json, id),
+        Some((_, Err(reason))) => {
             debug!(
                 reason = %reason,
                 "claude agents --json unavailable; falling back to --resume (#6863)"
             );
             None
         }
-        (None, _) => None,
+        None => None,
     };
     match attach_id {
         Some(short_id) => {
