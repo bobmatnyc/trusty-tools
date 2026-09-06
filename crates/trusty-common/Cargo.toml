@@ -75,7 +75,18 @@ name = "trusty-common"
 # Nothing existing was removed or changed, and the module adds no dependency:
 # `serde`, `serde_json` and `chrono` are already unconditional here, so it is
 # ungated rather than sitting behind a feature.
-version = "0.49.0"
+# 0.49.1 (#6896): patch — 0.49.0 is already live on crates.io and this branch
+# changes `src/uds/**`, so the "PR version bump vs crates.io" gate (#4421)
+# requires a bump. Everything against published 0.49.0 is additive: a new
+# `uds::sockbuf` module with its two entry points, three re-exported types, and
+# two new variants on the already-`#[non_exhaustive]` `UdsSecurityError`. No
+# public item was removed or changed shape.
+# PATCH rather than the MINOR-for-a-new-module precedent 0.44.0 set, for the
+# same reason 0.45.1 took: `^0.49` in the workspace table and in every consuming
+# manifest is what a MINOR bump would force churn through, and it would record
+# no compatibility fact this comment does not. `sockbuf` also sits behind the
+# existing `uds` feature rather than adding one.
+version = "0.49.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
