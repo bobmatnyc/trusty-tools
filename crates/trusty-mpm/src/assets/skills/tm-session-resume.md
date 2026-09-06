@@ -90,7 +90,8 @@ place and returns typed JSON instead of scraped text:
 ```
 mcp__trusty-mpm__session_context_catchup(
   project_dir: <absolute path to the current project root>,
-  session_id: <the current session id — the first thing resolved_snapshot is tried against>,
+  # session_id: OMIT IT — the tool derives the same id your pause was filed
+  #             under (#6888). Pass one only to read a specific KNOWN session.
   tmux_window: <your own `tmux display-message -p '#{session_name}:#{window_index}:#{window_id}'`>,
   all_projects: false,   # true also scans machine-wide registered projects
   full: false,            # true ignores the watermark, returns full history
@@ -171,9 +172,15 @@ knowledge of the repo state if anything looks stale.
 > and move on. To read one on purpose, pass ITS `session_id` — the explicit
 > opt-in — and it becomes owned for that call.
 
-> **`resolved_snapshot` belongs to the `session_id` you passed, or to your
-> tmux window — nothing else.** Several sessions share one
-> `.trusty-mpm/sessions/` store, so there is still no "latest overall"
+> **Never invent a `session_id` here either.** Omit it and the tool derives the
+> same id `session_context_pause` derived when it wrote the snapshot — your
+> managed session id, or your tmux window id — so the exact-id route finds your
+> own pause without you retyping a string (#6888). An id you make up matches
+> nothing and is the reason resumes used to report "no snapshot resolved".
+
+> **`resolved_snapshot` belongs to the `session_id` you passed or that was
+> derived for you, or to your tmux window — nothing else.** Several sessions
+> share one `.trusty-mpm/sessions/` store, so there is still no "latest overall"
 > fallback (#5272). The tool tries your `session_id` first; only when that
 > owns nothing does it try `tmux_window`, matching the `@id` component against
 > snapshots this project paused. Pass neither, or a `session_id` that never

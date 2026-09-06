@@ -20,6 +20,8 @@ pub mod palace;
 pub mod pause;
 pub mod resolve;
 pub mod session_finder;
+// #6888: writer-and-reader-agree derivation of a pause's `session_id`.
+pub mod session_id;
 pub mod session_log;
 pub mod state;
 

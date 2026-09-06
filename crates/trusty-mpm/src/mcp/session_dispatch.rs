@@ -183,20 +183,25 @@ async fn session_context_catchup<B: OrchestratorBackend>(
 
 /// Parse `session_context_pause` arguments and call the backend.
 ///
-/// Why: `project_dir`/`session_id`/`summary` are required; the three
-/// bullet-list sections default to empty (omitted from the written snapshot),
-/// `tmux_window` defaults to absent, and `prune_worktrees` defaults to `true`
-/// (pause wrap-up prunes by default, matching the bash skill it replaces).
+/// Why: `project_dir`/`summary` are required; the three bullet-list sections
+/// default to empty (omitted from the written snapshot), `tmux_window` defaults
+/// to absent, and `prune_worktrees` defaults to `true` (pause wrap-up prunes by
+/// default, matching the bash skill it replaces).
+///
+/// #6888: `session_id` is OPTIONAL here. It was required, and the PM invented a
+/// different string almost every pause, so the exact-match resume lookup missed
+/// its own snapshots. Omitted, the daemon derives it from the caller's identity.
 /// What: parses the required fields, reads optional string arrays via
 /// [`string_array`], and calls [`OrchestratorBackend::session_context_pause`].
 /// Test: `super::tests::dispatch_session_context_pause_tool`,
-/// `super::tests::dispatch_session_context_pause_requires_summary`.
+/// `super::tests::dispatch_session_context_pause_requires_summary`,
+/// `super::tests::dispatch_session_context_pause_allows_a_missing_session_id`.
 async fn session_context_pause<B: OrchestratorBackend>(
     backend: &B,
     args: &Value,
 ) -> Result<Value, String> {
     let project_dir = required_str(args, "project_dir")?;
-    let session_id = required_str(args, "session_id")?;
+    let session_id = args.get("session_id").and_then(Value::as_str);
     let summary = required_str(args, "summary")?;
     let completed = string_array(args, "completed");
     let in_progress = string_array(args, "in_progress");
@@ -209,7 +214,7 @@ async fn session_context_pause<B: OrchestratorBackend>(
     backend
         .session_context_pause(
             &project_dir,
-            &session_id,
+            session_id,
             &summary,
             completed,
             in_progress,

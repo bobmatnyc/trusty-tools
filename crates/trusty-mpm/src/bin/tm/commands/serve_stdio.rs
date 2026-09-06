@@ -20,9 +20,15 @@
 //! STDOUT hygiene: NEVER write to stdout — it is the JSON-RPC channel. All
 //! diagnostics go to stderr (via `eprintln!` inside the shared helper).
 //!
-//! Test: `is_notification_*`, `value_to_mcp_response_*`, and
-//! `forward_rpc_errors_on_refused` unit tests below; the daemon-side `POST /rpc`
-//! dispatch is covered by `daemon::api_tests::rpc_*`.
+//! #6888: the bridge also STAMPS the caller's own managed session id onto the
+//! two caller-session tools when the caller omitted it — see
+//! [`stamp_caller_session_id`]. It is the only process in the chain that can:
+//! Claude Code spawned it inside the managed pane, while the daemon it forwards
+//! to is long-lived and shared.
+//!
+//! Test: `is_notification_*`, `value_to_mcp_response_*`,
+//! `forward_rpc_errors_on_refused`, and `stamp_*` unit tests below; the
+//! daemon-side `POST /rpc` dispatch is covered by `daemon::api_tests::rpc_*`.
 
 use std::time::Duration;
 
@@ -163,6 +169,58 @@ fn req_to_value(req: &Request) -> serde_json::Value {
     serde_json::to_value(req).unwrap_or_else(|_| serde_json::json!({}))
 }
 
+/// Tools whose `session_id` argument names the CALLING session.
+///
+/// Why: only these two operate on the caller's own snapshot state, so only they
+/// may have the bridge's managed session id stamped in. Every other tool's
+/// `session_id` names a managed SUB-session the caller is acting on, and
+/// stamping the caller's own id there would retarget the call (#6888).
+const CALLER_SESSION_TOOLS: [&str; 2] = ["session_context_catchup", "session_context_pause"];
+
+/// Fill in the caller's managed session id on a `tools/call` that omitted it.
+///
+/// Why: #6888 — the pause writer and the catch-up reader have to key the same
+/// string, and only THIS process can supply the managed one. The daemon behind
+/// the bridge is long-lived and shared, so its own environment names whatever
+/// session happened to start it, not the caller; the bridge is the process
+/// Claude Code spawned inside the managed pane, so its
+/// `TM_MANAGED_SESSION_ID` is the caller's by construction. Without this the
+/// daemon can only fall back to the tmux window, and a managed session that
+/// moves windows loses its own history.
+/// What: mutates `req` in place, and ONLY when every condition holds — the
+/// method is `tools/call`, the tool is one of [`CALLER_SESSION_TOOLS`], the
+/// arguments object carries no `session_id`, and this process really does export
+/// a non-empty [`MANAGED_SESSION_ID_ENV`](trusty_common::catchup::session_id::MANAGED_SESSION_ID_ENV).
+/// An explicit `session_id` is never overwritten.
+/// Test: `stamp_fills_a_missing_session_id`,
+/// `stamp_leaves_an_explicit_session_id_alone`,
+/// `stamp_ignores_unrelated_tools`.
+fn stamp_caller_session_id(req: &mut serde_json::Value, managed: Option<&str>) {
+    let Some(managed) = managed.filter(|m| !m.is_empty()) else {
+        return;
+    };
+    if req.get("method").and_then(serde_json::Value::as_str) != Some("tools/call") {
+        return;
+    }
+    let Some(params) = req.get_mut("params") else {
+        return;
+    };
+    let name = params.get("name").and_then(serde_json::Value::as_str);
+    if !name.is_some_and(|n| CALLER_SESSION_TOOLS.contains(&n)) {
+        return;
+    }
+    let Some(args) = params.get_mut("arguments").and_then(|a| a.as_object_mut()) else {
+        return;
+    };
+    if args.contains_key("session_id") {
+        return;
+    }
+    args.insert(
+        "session_id".to_string(),
+        serde_json::Value::String(managed.to_string()),
+    );
+}
+
 /// Convert the daemon's JSON-RPC response value into an `mcp::Response`.
 ///
 /// Why: `run_stdio_loop` expects `mcp::Response`; the daemon returns a raw value
@@ -252,16 +310,24 @@ pub(crate) async fn run_stdio_bridge() -> Result<()> {
     // Step 2: shared HTTP client.
     let client = build_rpc_client()?;
 
+    // #6888: this process, not the daemon, is the one Claude Code spawned inside
+    // the managed pane, so it is the only place the caller's own managed session
+    // id can be read. Snapshot it once — the pane's environment cannot change
+    // under a running bridge.
+    let managed_session_id = trusty_common::catchup::session_id::managed_session_id_from_env();
+
     // Step 3: forward loop. Re-resolve the base URL per request so a restarted
     // daemon (possibly on a new ephemeral port) is followed automatically.
     mcp::run_stdio_loop(move |req| {
         let client = client.clone();
+        let managed_session_id = managed_session_id.clone();
         async move {
             if is_notification(&req) {
                 return Response::suppressed();
             }
             let base_url = trusty_mpm::core::resolve_daemon_url(None);
-            let req_value = req_to_value(&req);
+            let mut req_value = req_to_value(&req);
+            stamp_caller_session_id(&mut req_value, managed_session_id.as_deref());
             match forward_rpc(&client, &base_url, req_value).await {
                 Ok(resp_value) => value_to_mcp_response(resp_value),
                 Err(e) => {
@@ -399,5 +465,71 @@ mod tests {
         let client = build_rpc_client().expect("client");
         let result = forward_rpc(&client, "http://127.0.0.1:65534", json!({"method":"ping"})).await;
         assert!(result.is_err(), "must error when no daemon is listening");
+    }
+
+    fn call(tool: &str, args: serde_json::Value) -> serde_json::Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": args },
+        })
+    }
+
+    /// Why: #6888 — the daemon cannot read the caller's `TM_MANAGED_SESSION_ID`;
+    /// this process can, and stamping it is what lets a managed session's pause
+    /// and its next catch-up key the same string.
+    /// What: both caller-session tools get the id filled in when they omit it.
+    /// Test: itself.
+    #[test]
+    fn stamp_fills_a_missing_session_id() {
+        for tool in CALLER_SESSION_TOOLS {
+            let mut req = call(tool, json!({ "project_dir": "/tmp/p" }));
+            stamp_caller_session_id(&mut req, Some("mgr-1"));
+            assert_eq!(
+                req["params"]["arguments"]["session_id"], "mgr-1",
+                "{tool} must carry the caller's managed id"
+            );
+        }
+    }
+
+    /// Why: #6888 keeps the explicit override working — naming another
+    /// session's id is the deliberate opt-in #5272 defined, and the bridge must
+    /// never silently retarget it.
+    /// What: an argument object that already has `session_id` is untouched, and
+    /// an empty environment stamps nothing.
+    /// Test: itself.
+    #[test]
+    fn stamp_leaves_an_explicit_session_id_alone() {
+        let mut req = call(
+            "session_context_pause",
+            json!({ "project_dir": "/tmp/p", "session_id": "explicit" }),
+        );
+        stamp_caller_session_id(&mut req, Some("mgr-1"));
+        assert_eq!(req["params"]["arguments"]["session_id"], "explicit");
+
+        let mut unmanaged = call("session_context_pause", json!({ "project_dir": "/tmp/p" }));
+        stamp_caller_session_id(&mut unmanaged, None);
+        assert!(unmanaged["params"]["arguments"]["session_id"].is_null());
+        stamp_caller_session_id(&mut unmanaged, Some(""));
+        assert!(unmanaged["params"]["arguments"]["session_id"].is_null());
+    }
+
+    /// Why: every OTHER tool's `session_id` names a managed SUB-session, so
+    /// stamping the caller's own id there would retarget the call — a stop on a
+    /// sibling session becomes a stop on yourself.
+    /// What: an unrelated tool, and a non-`tools/call` method, are both left
+    /// exactly as they arrived.
+    /// Test: itself.
+    #[test]
+    fn stamp_ignores_unrelated_tools() {
+        let mut req = call("session_stop", json!({}));
+        stamp_caller_session_id(&mut req, Some("mgr-1"));
+        assert!(req["params"]["arguments"]["session_id"].is_null());
+
+        let mut ping = json!({"jsonrpc": "2.0", "id": 2, "method": "ping"});
+        let before = ping.clone();
+        stamp_caller_session_id(&mut ping, Some("mgr-1"));
+        assert_eq!(ping, before);
     }
 }
