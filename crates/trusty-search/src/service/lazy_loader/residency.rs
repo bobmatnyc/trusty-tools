@@ -94,21 +94,24 @@ pub struct ResidentIndexCap {
 /// Why: the residency mechanism shipped in #2161 and then sat disabled, so a
 /// 128 GB host held 56 indexes and 15 GB of heap with 35 of them never queried.
 /// A cap has to default to a number for the mechanism to do anything, and that
-/// number has to track the machine — 12 resident indexes is fine on 128 GB and
+/// number has to track the machine — 16 resident indexes is fine on 128 GB and
 /// ruinous on 12 GB.
-/// What: the tier bands are `trusty_common::machine_tier`'s (#6820). The counts
-/// scale roughly with the tier's other caps: each resident index costs a redb
-/// handle, an HNSW view, and whatever chunk/BM25 cache has not been idle-evicted
-/// yet, so the budget doubles as the band does. A parked index is not lost — the
-/// next query reloads it through the same cold path a never-warm-booted index
-/// uses.
+/// What: the tier bands are `trusty_common::machine_tier`'s (#6820). Each
+/// resident index costs a redb handle, an HNSW view, and whatever chunk/BM25
+/// cache has not been idle-evicted yet. `Degraded` stays at 2 because that host
+/// cannot absorb a second working set; the bands above it step by 4 rather than
+/// doubling, because a 24 GB host holding 8 indexes is the working posture the
+/// owner ruled for and doubling from there overshoots what the larger bands buy.
+/// A parked index is not lost — the next query reloads it through the same cold
+/// path a never-warm-booted index uses.
 /// Test: `default_max_resident_indexes_scales_with_tier`.
 pub fn default_max_resident_indexes(tier: MemoryTier) -> usize {
+    // #6821: owner ruling 2026-09-06, Medium 8-12
     match tier {
         MemoryTier::Degraded => 2,
-        MemoryTier::Medium => 4,
-        MemoryTier::Large => 8,
-        MemoryTier::XLarge => 12,
+        MemoryTier::Medium => 8,
+        MemoryTier::Large => 12,
+        MemoryTier::XLarge => 16,
     }
 }
 
@@ -664,10 +667,11 @@ mod tests {
     /// host of that size will hold, so it must be a deliberate edit.
     #[test]
     fn default_max_resident_indexes_scales_with_tier() {
+        // #6821: owner ruling 2026-09-06, Medium 8-12
         assert_eq!(default_max_resident_indexes(MemoryTier::Degraded), 2);
-        assert_eq!(default_max_resident_indexes(MemoryTier::Medium), 4);
-        assert_eq!(default_max_resident_indexes(MemoryTier::Large), 8);
-        assert_eq!(default_max_resident_indexes(MemoryTier::XLarge), 12);
+        assert_eq!(default_max_resident_indexes(MemoryTier::Medium), 8);
+        assert_eq!(default_max_resident_indexes(MemoryTier::Large), 12);
+        assert_eq!(default_max_resident_indexes(MemoryTier::XLarge), 16);
 
         // Monotonic: a bigger machine never holds fewer indexes.
         for pair in ALL_TIERS.windows(2) {

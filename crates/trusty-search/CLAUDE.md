@@ -990,9 +990,9 @@ representative host in each row is one point on a line, not a bucket.
 | Tier | Total RAM | `EMBEDDING_CACHE` | `BM25_CORPUS_CAP` | `MAX_KG_NODES` | `MAX_RESIDENT_INDEXES` | batch-size hard cap |
 |------|-----------|-------------------|-------------------|----------------|------------------------|---------------------|
 | **Degraded** (#6820) | < 16 GB | 500 | 50 000 | 75 000 | 2 | 64 |
-| Medium | 16–31 GB | 1 000 | 100 000 | 150 000 | 4 | 128 |
-| Large | 32–63 GB | 10 000 | 200 000 | 300 000 | 8 | 256 |
-| XLarge | ≥ 64 GB | 20 000 | 400 000 | 500 000 | 12 | 512 |
+| Medium | 16–31 GB | 1 000 | 100 000 | 150 000 | 8 | 128 |
+| Large | 32–63 GB | 10 000 | 200 000 | 300 000 | 12 | 256 |
+| XLarge | ≥ 64 GB | 20 000 | 400 000 | 500 000 | 16 | 512 |
 
 🔴 **The `MAX_RESIDENT_INDEXES` column is new in #6821 and it is the one cap
 that changes an existing host's behaviour on upgrade.** Before it, an unset
