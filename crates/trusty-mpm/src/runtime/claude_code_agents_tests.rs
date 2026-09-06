@@ -25,6 +25,8 @@ const LIVE_UUID: &str = "74ede5c9-c66d-471e-8dbe-9370d29f6f2e";
 const LIVE_SHORT: &str = "74ede5c9";
 /// A session that is on disk but absent from the registry.
 const STALE_UUID: &str = "11111111-2222-3333-4444-555555555555";
+/// A background session the operator ended with `claude stop`.
+const STOPPED_UUID: &str = "5c30bb17-9d41-4a2e-9f0c-7ab2c1d5e604";
 
 const TEST_CWD: &str = "/tmp/ws";
 const TEST_SESSION_ID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -32,7 +34,10 @@ const TEST_SESSION_ID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 /// Verbatim `claude agents --json` output (Claude Code 2.1.261), reduced to one
 /// entry of each shape the parser must survive: an interactive entry with
 /// neither `id` nor `state`, a finished background entry, and the live
-/// background entry with `pid`/`status` fields the parser ignores.
+/// background entry with `pid`/`status` fields the parser ignores. The
+/// `stopped` entry is the one addition to the capture — the shape `claude stop
+/// <short-id>` leaves behind, which the machine that produced this capture had
+/// none of (#6863).
 const REGISTRY_SAMPLE: &str = r#"[
   {
     "id": "8ec01a01",
@@ -60,6 +65,15 @@ const REGISTRY_SAMPLE: &str = r#"[
     "sessionId": "1905c26f-c66e-4081-8c93-b612090ca104",
     "name": "Research web-installer implementation",
     "state": "blocked"
+  },
+  {
+    "id": "5c30bb17",
+    "cwd": "/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools",
+    "kind": "background",
+    "startedAt": 1788500000000,
+    "sessionId": "5c30bb17-9d41-4a2e-9f0c-7ab2c1d5e604",
+    "name": "stopped by the operator",
+    "state": "stopped"
   },
   {
     "pid": 6930,
@@ -223,6 +237,37 @@ fn attach_id_absent_for_a_finished_background_entry() {
     }
 }
 
+/// Why (#6863): `claude stop <short-id>` ends the background job, so there is no
+/// process left for `attach` to enter — but the transcript is still on disk, so
+/// `--resume <uuid>` works. Before this the predicate treated every state but
+/// `done`/`failed` as live and would have attached to it.
+#[test]
+fn attach_id_absent_for_a_stopped_background_entry() {
+    assert_eq!(
+        attach_id_in_registry(REGISTRY_SAMPLE, STOPPED_UUID),
+        None,
+        "a stopped entry must resume, never attach"
+    );
+}
+
+/// Why (#6863): the same rule read from the seam the resume path actually
+/// calls — a stopped id must reach the pane as `--resume <uuid>`.
+#[test]
+fn relaunch_resumes_a_stopped_background_session() {
+    let cwd = Path::new(TEST_CWD);
+    let cmd = relaunch_command(&inputs(cwd), Some(STOPPED_UUID), Some(STOPPED_UUID), || {
+        Ok(REGISTRY_SAMPLE.to_owned())
+    });
+    assert!(
+        cmd.contains(&format!("--resume {STOPPED_UUID}")),
+        "a stopped session must resume by id: {cmd}"
+    );
+    assert!(
+        !cmd.contains("attach"),
+        "a stopped session must not be attached: {cmd}"
+    );
+}
+
 /// Why: an `interactive` entry is a live TTY Claude Code. `attach` cannot take
 /// one over, and the entry carries no short id to attach to in any case.
 #[test]
@@ -259,6 +304,7 @@ fn registry_sample_parses_every_entry_shape() {
         "8ec01a01-3a77-4d7c-b588-456fac3100dd",
         "a816af2c-818a-4dfa-a2c8-463bdd4eb694",
         "1905c26f-c66e-4081-8c93-b612090ca104",
+        STOPPED_UUID,
         LIVE_UUID,
         "e5e08169-b616-4b97-870d-08535eb2f4bc",
     ];

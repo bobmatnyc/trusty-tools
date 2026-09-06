@@ -67,10 +67,15 @@ const REGISTRY_TIMEOUT: Duration = Duration::from_secs(3);
 /// TTY Claude Code, which `attach` cannot take over and which carries no `id`.
 const BACKGROUND_KIND: &str = "background";
 
-/// `state` values that mean the background session has FINISHED. Anything else
-/// (`working`, `blocked`, or a state a future release adds) is live, so an
-/// unrecognised state attaches rather than colliding with a refusal.
-const TERMINAL_STATES: [&str; 2] = ["done", "failed"];
+/// `state` values that mean the background session is NO LONGER RUNNING.
+/// Anything else (`working`, `blocked`, or a state a future release adds) is
+/// live, so an unrecognised state attaches rather than colliding with a refusal.
+///
+/// `stopped` is the state `claude stop <short-id>` leaves behind — the command
+/// this module's header quotes from Claude Code's own refusal text. There is no
+/// process left to attach to, and the transcript is on disk, so a stopped entry
+/// belongs on the `--resume` path with the finished ones (#6863).
+const TERMINAL_STATES: [&str; 3] = ["done", "failed", "stopped"];
 
 /// One entry of the `claude agents --json` array.
 ///
@@ -189,6 +194,7 @@ pub(super) fn query_registry(
 /// Test: `attach_id_found_for_a_live_background_entry`,
 /// `attach_id_absent_for_an_unlisted_session`,
 /// `attach_id_absent_for_a_finished_background_entry`,
+/// `attach_id_absent_for_a_stopped_background_entry`,
 /// `attach_id_absent_for_an_interactive_entry`,
 /// `attach_id_absent_for_unparsable_json`.
 pub(super) fn attach_id_in_registry(
@@ -265,7 +271,8 @@ pub(super) fn attach_command(inputs: &RelaunchInputs<'_>, attach_id: &str) -> St
 /// `relaunch_resumes_a_session_absent_from_the_registry`,
 /// `relaunch_resumes_when_the_registry_call_fails`,
 /// `relaunch_starts_fresh_without_a_usable_id`,
-/// `relaunch_never_probes_the_registry_without_a_session_id`.
+/// `relaunch_never_probes_the_registry_without_a_session_id`,
+/// `relaunch_resumes_a_stopped_background_session`.
 pub(super) fn relaunch_command(
     inputs: &RelaunchInputs<'_>,
     claude_session_id: Option<&str>,
