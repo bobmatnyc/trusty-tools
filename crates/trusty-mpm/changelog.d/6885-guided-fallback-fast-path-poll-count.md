@@ -1,3 +1,0 @@
-Fixed
-
-- `guided_fallback_non_git_dir_no_managed_env_is_fast` no longer measures wall-clock time. It aimed a 150ms budget at a refused connection and reported 162ms to 434ms under a loaded concurrent suite run, on branches that had not touched the guided-fallback path. It now points a real listener at `fallback_protected` and asserts the daemon is never connected to — zero round trips is what the no-managed-signal fast path actually promises, and it holds at any load. Same substitution [#6240](https://github.com/bobmatnyc/trusty-tools/pull/6240) made for the sibling test ([#6885](https://github.com/bobmatnyc/trusty-tools/issues/6885)).

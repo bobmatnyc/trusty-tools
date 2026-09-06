@@ -6,6 +6,172 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.17] — 2026-09-06
+
+### Added
+
+- `tm pr merge <n> [--auto] [--no-delete-branch]` squash-merges a PR with its
+  own validated body as the landing commit message. It reads the PR once
+  (`gh pr view <n> --json number,title,body,isDraft,labels,reviewDecision,mergeStateStatus,mergeable,headRefName`),
+  re-runs the seven-field-and-footer body check `tm pr open` runs, then calls
+  `gh pr merge <n> --squash --delete-branch --subject "<title> (#<n>)"
+  --body-file <tmp>`. `gh pr merge --squash` on its own lets GitHub assemble the
+  squash commit from the branch's raw commit messages, so the validated body
+  never reached `main` — the squash for PR #6607 landed as a concatenation of
+  five raw messages, harness trailers included
+  ([#6808](https://github.com/bobmatnyc/trusty-tools/issues/6808)).
+- The command refuses with one line, a non-zero exit, and no merge call when the
+  body fails validation, the PR is a draft, it carries a `do-not-merge` label in
+  any case, its review decision is `CHANGES_REQUESTED`, or it has merge
+  conflicts — `mergeable` reporting `CONFLICTING` or `mergeStateStatus`
+  reporting `DIRTY`, the two disjoint enums GitHub splits that answer across.
+  The conflict refusal names `gh pr update-branch`.
+- What it deliberately does not refuse: `BEHIND` (a behind branch merges fine on
+  this repo), and every other `mergeStateStatus` — `BLOCKED`, `UNSTABLE`,
+  `HAS_HOOKS`, `UNKNOWN` — plus every `reviewDecision` other than
+  `CHANGES_REQUESTED`, all of which are left to `gh pr merge` to accept or
+  reject. With `--auto` the merge is queued and GitHub applies the supplied
+  subject and body when auto-merge fires; under a merge queue GitHub ignores
+  them, and this repo has no merge queue.
+
+### Fixed
+
+- `tm session prune-worktrees --merged-prs` reclaims a worktree whose branch squash-merged from two or more commits. The previous fix compared patch ids one commit at a time, and a squash carries the union of the branch's patches, so it matched none of them and the unsaved-work gate reported the landed work as unsaved (#6507).
+- The merged-PR pass names why every non-reclaimable candidate was refused, each candidate exactly once: a tree a dispatched agent holds keeps its agent-skip line, and every other refusal reads `<path>: blocked at <gate>: <reason>`. A failed per-branch `gh pr list` logs at WARN with the branch, the repository, and the resolved `gh` identity. Only the agent-ownership gate's refusals were visible before (#6507).
+- A per-project `github.config_dir` binding now wins over the shell's own
+  `GH_TOKEN`. `gh` reads an environment token ahead of `GH_CONFIG_DIR`, so a
+  `tm` run from a shell exporting another account's token authenticated as that
+  account and `tm session prune-worktrees --merged-prs` reported "Could not
+  resolve to a Repository" for every repo that token could not see. A resolved
+  binding now removes `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
+  `GITHUB_ENTERPRISE_TOKEN`, `GH_USER` and — under a `token_env` binding —
+  `GH_CONFIG_DIR` from the child, keeping only what the binding itself sets.
+  The removal applies ONLY when a binding resolves an identity: an unbound
+  call, and a binding that sets only `host` or the informational `GH_USER`,
+  still inherit the ambient environment unchanged (#6668).
+- The env file every managed Claude Code / tmux session sources now carries
+  `unset` lines ahead of its exports, so a daemon started from a shell that
+  exports another account's `GH_TOKEN` no longer hands that token to the
+  spawned session for its whole lifetime. Which vars are cleared comes from
+  the same resolver the `gh` subprocess path uses (#6668).
+- `pm_guard` classifies the command inside a `sh -c` / `bash -c` / `zsh -c` /
+  `env -S` / `xargs` wrapper instead of the wrapper itself. The worktree-remove
+  deny, the main-checkout HEAD-move rule and the destructive-delete rule all
+  read their segments from one splitter, which now also emits the wrapped
+  command; nested wrappers and quoting are followed up to eight layers.
+  `pm_guard` refuses outright, ahead of every Bash rule and ahead of the
+  subagent exemption, when it cannot establish what a command would run: a
+  wrapper whose inner command will not lex, `$'…'`/`$"…"` quoting the lexer
+  cannot decode (`sh -c $'git worktree remove x'` used to read as `$git` and
+  match no rule), or nesting past the descent budget. Each of the three was a
+  live bypass of the #5791 worktree-remove deny from a real subagent dispatch
+  (#6660).
+- Test-only: five integration targets (`manager_routes`, `project_registry_routes`, `manager_cli_client`, `manager_inference`, `mcp_spawn_gate`) now redirect `$HOME` to a per-process scratch directory, so the project registry no longer seeds itself from the developer's real `~/.trusty-tools/trusty-mpm/config.yaml` (#6671).
+- Test-only: three load-sensitive tests no longer assume a fixed timing budget — the orphan-GC canary owns its own `$HOME` instead of racing sibling `$HOME` overrides, and the statusline remote-slug and transcript-tail guards poll for their condition (#6663).
+- `tm session pause` and the `session_context_pause` MCP tool no longer lose a
+  `sessions-log.jsonl` line when two sessions pause at the same moment. The
+  append these tools route through emitted the JSON line and its newline as two
+  separate writes, which concurrent pauses could interleave into one unparseable
+  line plus one blank line — the surviving record then read as a destructive
+  rewrite of the log rather than an append
+  ([#6732](https://github.com/bobmatnyc/trusty-tools/issues/6732)). The fix is
+  in `trusty-common`; no trusty-mpm API changed.
+- `spawn_claude_without_tmux_is_unprocessable_when_tmux_missing` pins `$HOME` at
+  a tempdir and runs `#[serial]`, so it no longer depends on when a sibling test
+  moves `$HOME` process-wide. `spawn_claude` reads the #5784 host-state gate
+  twice and the test's own tmux probe read it a third time; a sibling landing
+  between those reads made the call refuse against a scratch home while the
+  probe answered against the real one, and the test saw `Internal` where it
+  expected `Unprocessable`
+  ([#6736](https://github.com/bobmatnyc/trusty-tools/issues/6736)). Test-only —
+  no behavior changed.
+- The bare-`tm` picker's FIRST menu is ordered like every later one: attached, then active, then the rest, each group most-recently-active first. It used to print the daemon's ascending-slot order, so the attached session — usually the highest slot — came last, bare Enter targeted the OLDEST session (usually stopped, so it fired the restart confirmation) while the hint read "resume most recent", and the whole list reordered under the operator after the first action. `sort_sessions` ran only at the bottom of `run_tty_picker`'s loop, and `tm ls`'s connector sorted before its first render while the bare-`tm` path did not (#6753).
+- The order is no longer a call-site responsibility. `run_tty_picker` derives every render — the list order, the launch-new number, the stale-slot fallback and the bare-Enter target — from one `prepare_menu` seam at the top of its loop, so a first render that disagrees with later ones is not reachable rather than merely fixed. A caller that already sorted is unaffected: filtering and sorting are both idempotent (#6753).
+- A managed relaunch no longer emits a bare `claude --continue`. Both relaunch
+  paths — the tmux-pane resume and the in-place `tm` exec — now resolve the
+  target explicitly: `--resume <id>` when the session record carries a
+  `claude_session_id` that exists in that session's OWN store, otherwise a fresh
+  launch. The eligibility check behind the old `--continue` branch read
+  `~/.claude/projects`, the operator's store, while the command it built exported
+  the managed `CLAUDE_CONFIG_DIR`; the check therefore answered `true` on any
+  machine with transcripts and `--continue` resolved "most recent conversation"
+  against the managed store instead. When that store's newest conversation was a
+  still-live `claude agents` background job, Claude Code refused to double-attach,
+  printed "Your most recent conversation is running in the background", and exited
+  0 — leaving the pane at a bare shell
+  ([#6765](https://github.com/bobmatnyc/trusty-tools/issues/6765)).
+- `has_prior_conversation` / `has_prior_conversation_in` are deleted: with no
+  `--continue` branch they had no caller. `session_id_exists`, which already
+  resolves the store through `projects_dir_for(config_dir)`, is now the only
+  conversation-store lookup either relaunch path makes.
+- A managed pane reports how `claude` actually exited instead of always printing `tm: run \`tm\` to relaunch this session`. The on-exit line was `;`-sequenced, so a launch Claude Code refused — it prints a notice and exits 0 — was byte-identical to a session the operator had worked in and exited. A non-zero exit now names its status, and a status-0 exit inside the launch floor is reported as a refused launch pointing at Claude Code's own message above it. The refusal is detected by elapsed time, never by matching Claude Code's wording, so a reworded release cannot silently take the detection with it (#6766).
+- `tm session resume` stops reporting a relaunch that never happened. `tmux send-keys` returning success only proves tmux accepted the keystrokes, so a refused relaunch left the record `Active` with nothing behind it until the periodic runtime-exit reaper noticed roughly a minute later. The resume path now polls the pane's runtime-ready signal after the send and, when the tmux session is observably alive but no runtime came up, marks the session errored with a message naming the pane — the same transition an outright adapter failure already takes. A driver that cannot observe the session at all (tmux absent) returns no verdict and costs no delay (#6766).
+- A managed relaunch now finds the session's stored conversation.
+  `encode_project_dir` folded only `/` to `-`, but Claude Code folds every
+  character outside `[A-Za-z0-9]`, so a workspace under `.worktrees/` encoded to
+  `…-.worktrees-<id>` while the directory Claude Code really creates is
+  `…--worktrees-<id>`. Because every tm-provisioned workspace sits under
+  `.worktrees/` or `.claude/worktrees/`, `session_id_exists` returned false for
+  every managed session: `spawn_resume` dropped `--resume <id>` and started a
+  fresh conversation each time, and the SessionStart correlation
+  ([#4337](https://github.com/bobmatnyc/trusty-tools/issues/4337)) judged the
+  stored id stale and overwrote it on every launch. This also made the
+  [#6765](https://github.com/bobmatnyc/trusty-tools/issues/6765) relaunch fix
+  unreachable in practice — that change resolves the target explicitly via
+  `--resume <id>`, and the id never resolved
+  ([#6777](https://github.com/bobmatnyc/trusty-tools/issues/6777)).
+- The encoder now reproduces Claude Code's `sanitizePath` in full: it folds the
+  whole `[^A-Za-z0-9]` class, counts UTF-16 code units (one astral character
+  yields two dashes), and truncates past 200 characters to `<200 chars>-<base36
+  of the int32 path hash>`. tm's own managed worktree paths already reach 188
+  characters, so the truncation branch is reachable, not theoretical.
+- `tm hook --pm-guard` no longer refuses a session's own delegated commit as a foreign live writer. The ADR-0048 decision 10 writer query was widened across sessions deliberately, but its hazard is ANOTHER session's uncommitted work — reading it as "every session, the caller's included" made a session's own subagent block the ADR-0049 documents-only commit it had been dispatched to make, naming an agent of the very session that was committing. A HEAD-write query (a documents-only commit, `git merge`, `git rebase`) now carries the asking session and excludes that session's own delegations. Any OTHER session's record still denies, unconditionally and with no liveness guess of its own, and a caller that names no session is told about every record as before (#6797).
+- The admission answer is unchanged. Whether two unisolated file-mutating agents may share one main checkout is still decided from the full occupant set, which never sees a caller — ADR-0048 decision 3's grant and #4480's claim keep that pair out of the checkout before a commit is ever reached. The caller's identity rides on the `HeadWrite` question itself rather than beside it, so the dispatch question structurally cannot read it (#6797).
+- A `SessionEnd` hook now stales the ended harness session's live delegation records. Its subagents cannot outlive it, and while their records read as live they denied every merge, rebase, and documents-only commit in that checkout for the six hours of `RUNNING_STALE_AFTER_SECS`. #6497 already did this for a session the tmux reaper buries, but that reaper walks the daemon's MANAGED sessions and skips non-tmux origins, while a delegation's owning session is the HARNESS id — so a plain `claude` run's agents were never reached. Ungated by the managed-record match and by the #2454 pane-liveness deferral, since the first is exactly the case the reaper misses and the second is about the tmux pane rather than the Claude conversation. The disposition is `Stale`, never `Completed`: tracking gave up, and the record stays resolvable by a late `SubagentStop` (#6797).
+- Both HEAD-write denials now state that the named writer belongs to a different session, rather than "possibly dispatched by a different session" — after this change the caller's own agents are excluded, so the attribution is established rather than hedged (#6797).
+- `tm session prune-worktrees --merged-prs` reclaims the worktrees the CALLING session created inside its own workspace. Gate 2 answered one bit — "does any session claim this path?" — and a session's own `workspace_path` covers the `.worktrees/<name>` trees it provisions under it, so a run from inside a session blocked every one of them: 31 clean, pushed, merged worktrees refused as `gate 2 (liveness)` in one observed run, leaving `git worktree remove --force` — which bypasses every other gate — as the only way out. The claim set now carries the claiming session's id and the CLI sends `$TM_MANAGED_SESSION_ID` as `invoking_session`, so a claim held only by the caller no longer blocks. Another live session's claim still refuses, and `--force` does not override it — `--force` selects the destructive mode and overrides no gate. The caller's own workspace directory is still refused: a session may prune worktrees inside its workspace, never the workspace it is sitting in. A malformed `invoking_session` is a 400 rather than a silent drop, which would reinstate the defect (#6806).
+- Every liveness refusal names the session holding the claim and says whether that session is the caller, replacing the fixed string "a session still claims this workspace". A caller that named no session of its own is told that, rather than told the claim is not its own. The pre-delete re-check applies the same resolution as the survey's gate 2, so the two can no longer disagree about one worktree (#6806).
+- `session_worktree_path_uses_dot_prefix` now holds `env_test_lock()`. It reads
+  `TRUSTY_MPM_WORKTREES_DIRNAME` without taking the lock a sibling test holds to
+  set it, so under `cargo test`'s shared process it intermittently observed
+  `.sessions` and failed. See #4162.
+- `tm session resume` re-enters a session Claude Code is still running as a background job instead of leaving the pane at a bare shell. The resume path chose `--resume <uuid>` from a filesystem check alone, and that transcript file exists both for a finished conversation and for a live background one; sent `--resume`, Claude Code prints "Session … is running as a background session" and exits 0, so the pane died and the reap loop marked the record Stopped about a minute later. Before issuing `--resume`, the pane command now asks Claude Code's own `claude agents --json` registry whether the stored id is a live background session and sends `claude attach <short-id>` when it is, with the same `cd`, managed-session-id export, env scrub, `CLAUDE_CONFIG_DIR`, `gh` identity file, launch clock, on-exit report, disclaim-exec wrapper and pane targeting the resume path already used. The decision is made against the `--json` surface rather than by matching the refusal text, so a reworded release cannot silently take it with it (#6766's objection). A missing `claude`, a non-zero exit, a three-second timeout, or unparsable JSON all fall back to the previous `--resume`/fresh-launch choice, and `claude stop` is never issued (#6863).
+- The registry probe runs under the bounded-wait spawn the `claude --version` probe already uses (#5969): a `claude` that never answers is SIGKILLed and reaped on the three-second deadline instead of being left running (#6863).
+- A resume with no stored `claude_session_id` no longer spawns `claude` at all — there is nothing for the registry probe to look up, so it is skipped (#6863).
+- A background session the operator ended with `claude stop` reports `state: "stopped"`; it now resumes by id like the `done` and `failed` states instead of being treated as live and attached to (#6863).
+- A `gh` poll that outlives its 10-second budget now has its whole PROCESS GROUP killed, not just the `gh` pid. `gh` reads its token by running `/usr/bin/security find-generic-password`, and with `securityd` wedged that grandchild survived its parent, was reparented to launchd, and never exited — roughly 200 orphan `security`/`gh` pairs accumulated on one host in a couple of hours. Every `gh` child the reclaim survey and the worktree-removal probe spawn is now placed in its own process group and signalled as a group (#6867).
+- Overlapping `gh` polls of the same query spawn one child. A second caller asking the same registry root the same question — the bulk pull-request index, or one named branch — waits for the outstanding call and takes its answer instead of starting another `gh` (#6867).
+- After three consecutive `gh` TIMEOUTS for one registry root, further polls of that root are skipped for a doubling interval (60 s, capped at 30 minutes), and `tm doctor`'s `worktree_disk` check reports `gh polling suspended: N consecutive timeouts, next retry at <time>`. Any answer — including a fast non-zero exit — clears the count, so an auth failure is never hidden behind a suspension (#6867).
+- The daemon warns once when no `github:` binding resolves, naming `token_env` and `config_dir` as the two ways to stop every poll from consulting the macOS keychain (#6867).
+- `guided_fallback_non_git_dir_no_managed_env_is_fast` no longer measures wall-clock time. It aimed a 150ms budget at a refused connection and reported 162ms to 434ms under a loaded concurrent suite run, on branches that had not touched the guided-fallback path. It now points a real listener at `fallback_protected` and asserts the daemon is never connected to — zero round trips is what the no-managed-signal fast path actually promises, and it holds at any load. Same substitution [#6240](https://github.com/bobmatnyc/trusty-tools/pull/6240) made for the sibling test ([#6885](https://github.com/bobmatnyc/trusty-tools/issues/6885)).
+- `session_context_pause` derives `session_id` server-side instead of taking a free-text string the PM invents, so `session_context_catchup` finds the pause on the next resume. The pause skill used to say to pass `$TM_SESSION_ID`, the tmux `session:window`, "or any other stable value"; nothing exports `$TM_SESSION_ID`, and the resume lookup is exact string equality, so the second guess never matched the first — one checkout's `sessions-log.jsonl` carries over forty distinct ids in five shapes for one continuous stream of work, and the owner was told no snapshot resolved for its session. `session_id` is now optional on the tool schema and, when omitted, comes from the caller's identity: the managed session id stamped in by the `serve --stdio` bridge (the only process that runs inside the calling pane), else the caller's tmux window id. `session_context_catchup` derives the same id the same way, so writer and reader agree without the PM typing anything. An explicit `session_id` is honored unchanged, and the response now reports the id the snapshot was filed under. A caller that is neither managed nor inside tmux is refused with a message naming what to pass, rather than filing a snapshot under a string nothing will look up. #5272 is not weakened: a derived id keys exactly one caller, never "latest overall" (#6888).
+
+### Changed
+
+- The commit trailer and PR footer now come from Claude Code's own `attribution`
+  setting instead of instruction prose. tm seeds `attribution.commit` and
+  `attribution.pr` into two tiers, because they reach different launches:
+  `ensure_settings_defaults` writes the tm-owned `CLAUDE_CONFIG_DIR` copy, which
+  only the `claude` child tm spawns can see, and `write_output_style` writes the
+  project-tier `.claude/settings.json`, which any `claude` launched in the
+  project reads. Both seed absent-only, so an operator-set `attribution`
+  survives. Setting both keys leaves neither on a default: per the settings
+  reference, Claude Code "uses its default text for whichever of the two you
+  left unset". `attribution` deprecated `includeCoAuthoredBy` in Claude Code
+  v2.0.62; developed against 2.1.260.
+- The footer text is removed from the PM instruction package, the seeded
+  `CLAUDE.md` stub, and the bundled skills, so no session pays for it on every
+  turn. `tm pr open`'s body validator reads the same constant (#6807).
+- No `tm` command prints the daemon's address to the operator any more. The bare-`tm` welcome banner's daemon row reports liveness — `● daemon  running  (2)` where it used to render `● daemon  :7880  (2)`. `tm daemon`'s already-running guard and `tm start` both print "the trusty-mpm daemon is already running" from one shared constant, and `tm start` no longer prints `(listening on <url>)` after a successful spawn. Every one of those sites sends its URL to `tracing::debug!` instead. `tm health` still reports the resolved URL — that is what the command is for. The port is still bound and `docs/architecture/port-assignments.md` is unchanged; only the display goes, matching what `tm doctor` ([#6336](https://github.com/bobmatnyc/trusty-tools/issues/6336)) and `tm statusline` ([#6304](https://github.com/bobmatnyc/trusty-tools/issues/6304)) already do, and keeping the wording correct once the daemon moves to a Unix socket ([#6288](https://github.com/bobmatnyc/trusty-tools/issues/6288), [#6869](https://github.com/bobmatnyc/trusty-tools/issues/6869)).
+
+### Removed
+
+- The four peer-bus JSON-RPC methods — `mpm.bus.register`, `mpm.bus.deregister`, `mpm.bus.list` and `mpm.bus.publish` — are no longer served over the daemon's Unix socket, and a call to any of them answers `method_not_found`. trusty-console hosts the only event bus (owner ruling 2026-09-05), and mpm publishes to it through the `trusty-common` PushClient instead. `PeerBus` itself is unchanged and still reachable over HTTP (#6288).
+
+### Documentation
+
+- `tm-ticketing` gained a "Relationships (native, never prose)" section: use GitHub's sub-issue and blocked-by dependency APIs for parent/child and sequencing links between issues, never a task list or a repurposed `Closes #N`.
+
 ## [1.5.16] — 2026-09-02
 
 ### Added
