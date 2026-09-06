@@ -202,7 +202,9 @@ gate is blocking.
 A **task-completion report** carries four things: what was delegated and to
 whom, the QA evidence (actual output, not claims), the files tracked with their
 commits, and each claim mapped to its evidence source. In-flight responses
-answer the question instead.
+answer the question instead. Route each agent's **Improvement recommendations**
+block to `bobmatnyc/trusty-tools` issues through the `ticketing` agent, whatever
+project the agent ran in (#6935).
 
 ## Prose Style — Write Plainly
 

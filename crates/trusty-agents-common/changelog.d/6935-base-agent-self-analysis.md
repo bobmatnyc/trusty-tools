@@ -1,0 +1,3 @@
+Added
+
+- `BASE-AGENT.md` makes self-analysis and improvement reporting a core property of every composed agent. At the end of a task the agent names what went wrong or ran slow, the instruction/skill/tool/harness gap that caused it, and the concrete change that prevents it. Recommendations go to `bobmatnyc/trusty-tools` issues whatever project the agent ran in: a subagent returns an "Improvement recommendations" block for its PM to route through `ticketing`, and a top-level agent files through `ticketing` itself. Filing searches open `self-improvement`-labelled issues first and comments on a match, every filed issue carries that label and links tracker #6933, and a clean run files nothing (#6935).

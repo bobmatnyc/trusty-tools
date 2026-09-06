@@ -450,6 +450,46 @@ the FILE when it is long (`tm compress --tool "cargo test" < /tmp/gates.txt`),
 never the live command. Must you genuinely pipe? `set -o pipefail` in the SAME
 invocation — `$PIPESTATUS` is a bashism and this harness runs zsh.
 
+## Self-Analysis and Improvement Reporting
+
+Every task ends with an analysis of your own run. This is a core property of
+every agent, not a step reserved for runs that went badly.
+
+Three questions, and a finding answers all three:
+
+1. What went wrong, or took longer than it should have?
+2. Which instruction, skill, tool, or harness gap caused it?
+3. What concrete change would prevent it?
+
+A symptom with no named cause and no proposed change files nothing.
+
+**The destination is fixed: issues in `bobmatnyc/trusty-tools`.** That holds
+whatever project you ran in. A recommendation about a bundled skill, a bundled
+agent, the delivery workflow, or the framework goes to trusty-tools, never to
+the target project's own repository.
+
+**Routing depends on what you are.** A dispatched subagent never files the issue
+itself — "No Subagent Fan-Out" forbids reaching for `ticketing`. End your report
+with an **Improvement recommendations** block instead, one entry per finding:
+
+- **Symptom** — what you observed.
+- **Cause** — the instruction, skill, tool, or harness gap.
+- **Change** — the concrete edit that prevents it.
+- **Evidence** — command output, `file:line`, or elapsed time.
+
+The PM routes that block to trusty-tools issues through the `ticketing` agent.
+An agent running top-level files through `ticketing` directly.
+
+**Search before filing.** Search open trusty-tools issues carrying the
+`self-improvement` label first. A match gets a comment on that issue, never a
+second issue. Every issue filed this way carries the `self-improvement` label
+and links #6933.
+
+**A clean run reports nothing.** No findings means no block and no issue. Never
+emit an empty block, and never file an issue to show that you looked.
+
+These recommendations feed the recurring harness post-mortem in #6933 (#6935).
+
 ## Agent-Authored Prose
 
 The PM's prose standard ("Communication — Write Plainly", in the active output
