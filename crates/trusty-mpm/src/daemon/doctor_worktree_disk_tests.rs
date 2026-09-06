@@ -130,6 +130,40 @@ fn worktree_disk_check_is_unknown_when_no_pr_state_resolved() {
     assert!(check.message.contains("gh"), "{}", check.message);
 }
 
+/// 🔴 #6867: a SUSPENDED poll reaches the operator through the same clause a
+/// broken one does, naming the strike count and when polling resumes.
+///
+/// Why: the closure condition asks for the backoff to be "surfaced in
+/// `tm doctor`". It is surfaced by riding the `lookup_failure` channel #6561
+/// already built rather than by adding a second one — this test is what pins
+/// that the reason survives the trip verbatim instead of being summarised
+/// away.
+#[test]
+fn worktree_disk_check_reports_a_suspended_gh_poll() {
+    let suspended =
+        "gh polling suspended: 3 consecutive timeouts, next retry at 14:32:10 EDT".to_string();
+    let mut s = survey_of(vec![candidate(
+        Some(4096),
+        BranchPrState::LookupFailed {
+            reason: suspended.clone(),
+        },
+        ReclaimVerdict::Blocked {
+            gate: ReclaimGate::PrState,
+            reason: suspended.clone(),
+        },
+    )]);
+    s.lookup_failed = 1;
+    s.lookup_failure = Some(suspended.clone());
+
+    let check = build_worktree_disk_check(&s);
+    assert!(check.message.contains(&suspended), "{}", check.message);
+    assert_ne!(
+        check.status,
+        CheckStatus::Ok,
+        "a survey that could not poll at all must not read healthy"
+    );
+}
+
 #[test]
 fn worktree_disk_check_is_ok_when_nothing_is_reclaimable() {
     // Some PR state DID resolve, and nothing is reclaimable: healthy, but the

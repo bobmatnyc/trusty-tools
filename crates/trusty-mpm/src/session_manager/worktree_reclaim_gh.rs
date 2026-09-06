@@ -23,10 +23,20 @@
 //! that bare environment and exit 4 ("gh auth login"). [`resolve_daemon_gh_env`]
 //! resolves the same per-project/global `github:` binding an interactive `tm`
 //! invocation would (via `core::gh_identity`), and [`gh_command`] applies it.
+//!
+//! #6867: killing the `gh` PID alone leaked the process TREE. `gh` reads its
+//! token by running `/usr/bin/security find-generic-password`, and a wedged
+//! `securityd` makes that grandchild block forever: the timeout killed `gh`,
+//! the grandchild was reparented to launchd, and roughly 200 orphan pairs
+//! accumulated on one host in a couple of hours. Every child this runner
+//! spawns is now put in its OWN process group and the whole GROUP is signalled
+//! on expiry. Deciding whether to spawn at all — the single-flight guard and
+//! the consecutive-timeout backoff — belongs to
+//! [`super::worktree_reclaim_gh_gate`].
 
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::core::gh_identity::{self, GhEnv};
@@ -160,6 +170,53 @@ pub(crate) fn gh_command(dir: &Path, gh_env: &GhEnv) -> Command {
 /// Test: exercised through the production `gh_command` call sites
 /// (`PrIndex::from_gh`, `pr_state_for_branch`); the pure selection is unit-
 /// tested via `select_config_for_origin_*` in `core::gh_identity`.
+/// Will `gh` have to look its token up itself, rather than read one this
+/// binding handed it (#6867)?
+///
+/// Why: that lookup is `/usr/bin/security find-generic-password` on macOS, and
+/// it is the call that hangs when `securityd` is wedged — the root cause of
+/// this issue's orphan pairs. Whether a poll is exposed to it is decided
+/// entirely by whether the resolved binding SETS an identity, so the check is
+/// a pure function of the [`GhEnv`] and gets tested as one.
+/// What: true when neither `GH_TOKEN` nor `GH_CONFIG_DIR` is set — the ambient
+/// fallback [`resolve_daemon_gh_env`] takes when no `github:` binding applies.
+/// Test: `ambient_gh_env_is_reported_as_keychain_bound`,
+/// `a_config_dir_binding_avoids_the_keychain`.
+pub(crate) fn consults_the_keychain(env: &GhEnv) -> bool {
+    !env.vars()
+        .iter()
+        .any(|(k, _)| k == "GH_TOKEN" || k == "GH_CONFIG_DIR")
+}
+
+/// The one-time warning an unbound daemon `gh` earns (#6867).
+///
+/// Why: separated from the emission so the wording — which is the whole value
+/// of the warning, since it has to tell the operator what to configure — is
+/// assertable without capturing a `tracing` subscriber. Naming a token store
+/// of our own is deliberately NOT offered: `gh_identity` already resolves a
+/// token through `github.token_env`, and a second secret store would be a new
+/// place for a credential to leak.
+/// Test: `the_keychain_warning_names_both_bindings`.
+pub(crate) fn keychain_warning() -> String {
+    "worktree-reclaim: no `github:` binding resolved, so every `gh` poll will look its \
+     own credentials up — on macOS via `/usr/bin/security find-generic-password`, which \
+     never returns while `securityd` is wedged and used to leak one orphan process pair \
+     per poll (#6867). Bind an identity in trusty-tools config under `github:` — \
+     `token_env: <NAME OF AN ENV VAR THE DAEMON CARRIES>`, or `config_dir: <a gh config \
+     home>` — so the daemon's polls never touch the keychain."
+        .to_string()
+}
+
+/// Emit [`keychain_warning`] at most once for the life of the process.
+///
+/// Why: the reclaim survey resolves an identity per registry root and runs on
+/// every `tm doctor` and every prune, so a per-call warning would be the
+/// noisiest line in the log for a condition that is one configuration fix.
+fn warn_once_about_the_keychain() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| tracing::warn!("{}", keychain_warning()));
+}
+
 pub(crate) fn resolve_daemon_gh_env(dir: &Path) -> GhEnv {
     let origin_url = crate::daemon::managed_routes::inproject::get_origin_url(dir)
         .inspect_err(|e| {
@@ -173,7 +230,7 @@ pub(crate) fn resolve_daemon_gh_env(dir: &Path) -> GhEnv {
         .flatten();
     let config = TrustyToolsConfig::load();
     let selected = gh_identity::select_config_for_origin(&config, origin_url.as_deref());
-    match gh_identity::resolve_gh_env(selected) {
+    let env = match gh_identity::resolve_gh_env(selected) {
         Ok(env) => env,
         Err(e) => {
             tracing::warn!(
@@ -182,7 +239,12 @@ pub(crate) fn resolve_daemon_gh_env(dir: &Path) -> GhEnv {
             );
             GhEnv::default()
         }
+    };
+    // #6867: an unbound gh is the one that consults the keychain on every poll.
+    if consults_the_keychain(&env) {
+        warn_once_about_the_keychain();
     }
+    env
 }
 
 /// Read `pipe` to EOF on its own thread, handing the text back over a channel.
@@ -200,6 +262,77 @@ fn drain_pipe(mut pipe: impl Read + Send + 'static) -> std::sync::mpsc::Receiver
         let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
     });
     rx
+}
+
+/// Why one `gh` call failed, and whether it failed by HANGING (#6561, #6867).
+///
+/// Why: `Result<String, String>` said what to print but not what to do next.
+/// The backoff in [`super::worktree_reclaim_gh_gate`] must count timeouts and
+/// only timeouts — an exit-4 auth failure returns instantly and no amount of
+/// waiting fixes it, whereas a wedged keychain is exactly the thing that must
+/// stop being retried every few seconds. String-matching the reason text to
+/// tell them apart would make a wording change silently disable the backoff.
+/// What: the operator-readable one-liner, the resolved `gh` identity when one
+/// was resolved before the failure, and `timed_out`, set ONLY where the
+/// wall-clock budget expired. [`std::fmt::Display`] renders the line the CLI
+/// summary and the doctor message carry.
+/// Test: `run_with_timeout_reports_the_exit_code_and_stderr`,
+/// `run_with_timeout_marks_a_timeout_as_timed_out`,
+/// `gh_failure_displays_the_resolved_identity`.
+#[derive(Debug, Clone)]
+pub(crate) struct GhFailure {
+    reason: String,
+    identity: Option<String>,
+    timed_out: bool,
+}
+
+impl GhFailure {
+    /// A failure that is NOT a hang — a spawn error, a non-zero exit, a wait
+    /// error, or the gate's own refusal to spawn.
+    pub(crate) fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            identity: None,
+            timed_out: false,
+        }
+    }
+
+    /// A failure caused by the wall-clock budget expiring — the only kind the
+    /// backoff counts (#6867).
+    pub(crate) fn timeout(reason: impl Into<String>) -> Self {
+        Self {
+            timed_out: true,
+            ..Self::new(reason)
+        }
+    }
+
+    /// Attach the `gh` identity the caller resolved before spawning (#6623).
+    #[must_use]
+    pub(crate) fn with_identity(mut self, identity: impl Into<String>) -> Self {
+        self.identity = Some(identity.into());
+        self
+    }
+
+    /// Did the child outlive its budget rather than answer?
+    pub(crate) fn timed_out(&self) -> bool {
+        self.timed_out
+    }
+
+    /// The resolved identity, or a note that the call never got that far.
+    pub(crate) fn identity(&self) -> &str {
+        self.identity
+            .as_deref()
+            .unwrap_or("no gh identity was resolved — the call never spawned")
+    }
+}
+
+impl std::fmt::Display for GhFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.identity {
+            Some(id) => write!(f, "{} (resolved gh identity: {id})", self.reason),
+            None => f.write_str(&self.reason),
+        }
+    }
 }
 
 /// One operator-readable line naming why a `gh` call failed (#6561).
@@ -223,32 +356,98 @@ fn failure_reason(code: Option<i32>, stderr: &str) -> String {
     }
 }
 
-/// Run `cmd`, killing it if it outlives `budget` (#2919, #6561).
+/// Put the child in its own process group, so a kill can reach its whole tree
+/// (#6867).
 ///
-/// Why: see [`GH_TIMEOUT`]. `Command::output()` waits indefinitely.
-/// What: spawns the child with both pipes drained on their own threads (see
-/// [`drain_pipe`]), polls `try_wait` until the budget expires, then kills and
-/// reaps. `Ok` carries stdout; `Err` carries a one-line reason — a spawn
-/// failure, a non-zero exit with `gh`'s own first stderr line, a timeout, or a
-/// wait error. Every `Err` blocks reclamation; #6561 is that the caller can now
-/// tell the operator which one it was.
+/// Why: `gh` shells out to `/usr/bin/security find-generic-password` for its
+/// token. Signalling the `gh` pid alone leaves that grandchild running,
+/// reparented to launchd, and a wedged `securityd` means it never exits — the
+/// leak this issue reports. A child that leads its own group can be signalled
+/// as a group, which reaches every descendant that has not itself called
+/// `setsid`.
+/// What: `process_group(0)`, which makes the child's pid its own process-GROUP
+/// id. A no-op off unix, where there is no such concept and the tree is
+/// bounded differently.
+///
+/// The cost is that a terminal signal no longer reaches `gh` through the
+/// foreground group — acceptable, because the only caller is a runner that
+/// promises to reap the child itself within [`GH_TIMEOUT`]. That is also why
+/// this is not pushed down into `trusty_common::gh::GhCommand`: an interactive
+/// `gh` spawned through that shared entry point SHOULD still die with its
+/// terminal, and `GhCommand` owns no kill-on-timeout runner to pair with it.
+#[cfg(unix)]
+fn isolate_process_group(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn isolate_process_group(_cmd: &mut Command) {}
+
+/// SIGKILL the timed-out child's whole process group, then reap it (#6867).
+///
+/// Why: see [`isolate_process_group`] — `child.kill()` alone is what leaked
+/// the `security` grandchildren.
+/// What: `killpg` on the child's pid, which [`isolate_process_group`] made the
+/// group id, followed by the direct kill and the `wait` that reaps the zombie.
+/// The group is signalled BEFORE the reap: once `wait` returns, the pid may be
+/// recycled and the group id would name someone else's processes.
+/// Test: `run_with_timeout_kills_the_whole_process_group`.
+#[cfg(unix)]
+fn kill_child_group(child: &mut Child) {
+    if let Ok(pgid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: `child` has not been waited on yet, so its pid is still
+        // reserved and — because the child was spawned with `process_group(0)`
+        // — names its own process group. A group with no members left returns
+        // ESRCH, which is ignored.
+        unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn kill_child_group(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Run `cmd`, killing its whole process group if it outlives `budget`
+/// (#2919, #6561, #6867).
+///
+/// Why: see [`GH_TIMEOUT`]. `Command::output()` waits indefinitely, and — as
+/// #6867 found — killing only the `gh` pid leaves its keychain grandchild
+/// behind.
+/// What: spawns the child in its own process group (see
+/// [`isolate_process_group`]) with both pipes drained on their own threads (see
+/// [`drain_pipe`]), polls `try_wait` until the budget expires, then kills the
+/// GROUP and reaps. `Ok` carries stdout; `Err` is a [`GhFailure`] carrying a
+/// one-line reason — a spawn failure, a non-zero exit with `gh`'s own first
+/// stderr line, a timeout, or a wait error — and, for the timeout alone, the
+/// `timed_out` flag the backoff counts. Every `Err` blocks reclamation.
 /// Test: `run_with_timeout_captures_output`, `run_with_timeout_kills_a_hung_child`,
+/// `run_with_timeout_kills_the_whole_process_group`,
+/// `run_with_timeout_marks_a_timeout_as_timed_out`,
 /// `run_with_timeout_reports_the_exit_code_and_stderr`.
-pub(crate) fn run_with_timeout(mut cmd: Command, budget: Duration) -> Result<String, String> {
+pub(crate) fn run_with_timeout(mut cmd: Command, budget: Duration) -> Result<String, GhFailure> {
+    // #6867: BEFORE the spawn — a group cannot be joined retroactively.
+    isolate_process_group(&mut cmd);
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("`gh` could not be run: {e}"))?;
+        .map_err(|e| GhFailure::new(format!("`gh` could not be run: {e}")))?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "`gh` exposed no stdout pipe".to_string())
+        .ok_or_else(|| GhFailure::new("`gh` exposed no stdout pipe"))
         .map(drain_pipe)?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| "`gh` exposed no stderr pipe".to_string())
+        .ok_or_else(|| GhFailure::new("`gh` exposed no stderr pipe"))
         .map(drain_pipe)?;
     let deadline = Instant::now() + budget;
     loop {
@@ -259,18 +458,18 @@ pub(crate) fn run_with_timeout(mut cmd: Command, budget: Duration) -> Result<Str
                     return Ok(out);
                 }
                 let err = stderr.recv_timeout(PIPE_DRAIN_WAIT).unwrap_or_default();
-                return Err(failure_reason(status.code(), &err));
+                return Err(GhFailure::new(failure_reason(status.code(), &err)));
             }
             Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "`gh` did not answer within {}s and was killed",
+                // #6867: the GROUP, not just the pid.
+                kill_child_group(&mut child);
+                return Err(GhFailure::timeout(format!(
+                    "`gh` did not answer within {}s and its process group was killed",
                     budget.as_secs()
-                ));
+                )));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(e) => return Err(format!("`gh` could not be waited on: {e}")),
+            Err(e) => return Err(GhFailure::new(format!("`gh` could not be waited on: {e}"))),
         }
     }
 }
