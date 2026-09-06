@@ -697,10 +697,10 @@ fn expect_sized(outcome: SocketBufferOutcome) -> SocketBufferSizes {
 }
 
 #[tokio::test]
-async fn tune_socket_buffers_raises_both_buffers_on_a_socketpair() {
+async fn tune_connected_buffers_raises_both_buffers_on_a_socketpair() {
     let (a, _b) = tokio::net::UnixStream::pair().expect("socketpair");
 
-    let sized = expect_sized(tune_socket_buffers(&a).expect("size the buffers"));
+    let sized = expect_sized(tune_connected_buffers(&a).expect("size the buffers"));
 
     // The kernel clamps, so the granted size is asserted as a floor against the
     // platform default rather than an equality against the request.
@@ -717,11 +717,11 @@ async fn tune_socket_buffers_raises_both_buffers_on_a_socketpair() {
 /// connects and closes. Treating it as a failure turned every probe into a
 /// connection error, which is the regression this test pins.
 #[tokio::test]
-async fn tune_socket_buffers_reports_a_peer_that_already_hung_up() {
+async fn tune_connected_buffers_reports_a_peer_that_already_hung_up() {
     let (a, b) = tokio::net::UnixStream::pair().expect("socketpair");
     drop(b);
 
-    let outcome = tune_socket_buffers(&a).expect("a dead peer is not a sizing failure");
+    let outcome = tune_connected_buffers(&a).expect("a dead peer is not a sizing failure");
 
     // Linux sets the buffer regardless of connection state, so both outcomes
     // are correct there; what must never happen is an error.
@@ -734,6 +734,106 @@ async fn tune_socket_buffers_reports_a_peer_that_already_hung_up() {
     );
     #[cfg(target_os = "macos")]
     assert_eq!(outcome, SocketBufferOutcome::PeerHungUp);
+}
+
+/// The fail-open the #6896 review found: `getpeername` cannot answer for a
+/// LISTENING socket, so the errno was the only surviving signal there.
+///
+/// Why this is the regression rather than an end-to-end test: the hazard is a
+/// classification, and forcing a real `EINVAL` out of `setsockopt` on a healthy
+/// listener is not something a test can arrange. Feeding the classifier a real
+/// listener fd and a synthesized `EINVAL` reaches the same decision the bind
+/// path would, on every platform — `getpeername` fails on a listener
+/// unconditionally, so the `connected = true` arm below is the fail-open, and
+/// the `connected = false` arm is the fix.
+#[tokio::test]
+async fn a_listener_can_never_classify_a_failure_as_a_hung_up_peer() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("classify.sock");
+    let listener = bind_hardened(&sock).expect("bind hardened");
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&listener);
+
+    let einval = UdsSecurityError::SocketBuffer {
+        option: "SO_SNDBUF",
+        requested: SOCKET_BUFFER_BYTES,
+        source: std::io::Error::from_raw_os_error(libc::EINVAL),
+    };
+
+    assert!(
+        sockbuf::hangup_is_benign(true, &einval, fd),
+        "a listener has no peer, so the connected form would wave this through — \
+         which is exactly why the bind path must not use it"
+    );
+    assert!(
+        !sockbuf::hangup_is_benign(false, &einval, fd),
+        "the listener form must report the failure, whatever the errno says"
+    );
+}
+
+/// The strict form refuses precisely where the forgiving one tolerates.
+///
+/// A hung-up peer is the one condition the two treat differently, so a socket
+/// in that state is what separates them. On Linux `setsockopt` ignores the
+/// connection state and both simply succeed, which is why the divergence is
+/// asserted only on macOS; the type-level guarantee — `tune_listener_buffers`
+/// has no benign variant to return — holds on both.
+#[tokio::test]
+async fn tune_listener_buffers_refuses_where_the_connected_form_tolerates() {
+    let (strict_side, peer) = tokio::net::UnixStream::pair().expect("socketpair");
+    drop(peer);
+    let (lenient_side, peer) = tokio::net::UnixStream::pair().expect("socketpair");
+    drop(peer);
+
+    let strict = tune_listener_buffers(&strict_side);
+    let lenient = tune_connected_buffers(&lenient_side).expect("the forgiving form tolerates it");
+
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(lenient, SocketBufferOutcome::PeerHungUp);
+        let err = strict.expect_err("the listener form must not absorb a sizing failure");
+        assert!(
+            matches!(err, UdsSecurityError::SocketBuffer { .. }),
+            "expected SocketBuffer, got {err:?}"
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert!(strict.is_ok(), "linux sizes a hung-up socket: {strict:?}");
+        assert!(matches!(lenient, SocketBufferOutcome::Sized(_)));
+    }
+}
+
+/// A read-back failure names the read, not a set that never happened.
+#[test]
+fn a_read_back_failure_names_its_own_operation() {
+    // A closed fd is the one way to make `getsockopt` fail on demand.
+    let bad = std::os::unix::net::UnixStream::pair()
+        .expect("socketpair")
+        .0;
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&bad);
+    drop(bad);
+
+    let err = socket_buffer_sizes(&BorrowedFdForTest(fd))
+        .expect_err("a closed fd cannot answer getsockopt");
+
+    assert!(
+        matches!(err, UdsSecurityError::SocketBufferRead { .. }),
+        "expected SocketBufferRead, got {err:?}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.starts_with("read SO_SNDBUF back"),
+        "a read failure must not be reported as a set: {text}"
+    );
+}
+
+/// A bare fd, so a read-back can be aimed at one that is already closed.
+struct BorrowedFdForTest(i32);
+
+impl std::os::fd::AsRawFd for BorrowedFdForTest {
+    fn as_raw_fd(&self) -> i32 {
+        self.0
+    }
 }
 
 /// The server side is sized by inheritance, which is why nothing sizes an

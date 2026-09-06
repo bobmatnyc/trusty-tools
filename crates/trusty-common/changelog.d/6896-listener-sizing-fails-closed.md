@@ -1,0 +1,4 @@
+Fixed
+
+- `uds::sockbuf` splits into `tune_listener_buffers` (strict) and `tune_connected_buffers` (forgiving), and `bind_hardened` calls the strict one. The hung-up-peer classification rests on `getpeername` failing, and `getpeername` always fails on a listening socket — so the single forgiving entry point degraded on the listener to trusting the errno alone, and any `EINVAL` from `setsockopt` would have left `bind_hardened` returning a listener silently sized at the platform default. The strict form has no benign outcome in its return type ([#6896](https://github.com/bobmatnyc/trusty-tools/issues/6896))
+- a `getsockopt` read-back failure reports `UdsSecurityError::SocketBufferRead` ("read SO_SNDBUF back: …") instead of borrowing the set-failure message, which named a write the branch never attempted ([#6896](https://github.com/bobmatnyc/trusty-tools/issues/6896))

@@ -22,8 +22,8 @@
 //!     not this process's own, which is what turns the permission bits into an
 //!     enforced boundary rather than a documented intention.
 //!
-//! [`sockbuf::tune_socket_buffers`] runs inside [`bind_hardened`] and
-//! [`connect_hardened`], so both ends of every socket here are sized to
+//! [`sockbuf`] runs inside [`bind_hardened`] and [`connect_hardened`], so both
+//! ends of every socket here are sized to
 //! [`sockbuf::SOCKET_BUFFER_BYTES`] rather than the 8 KiB macOS default
 //! (#6896). The listener's sizing is what every accepted socket inherits, so a
 //! service driving its own accept loop is covered too. No consumer calls it.
@@ -115,7 +115,7 @@ pub use rpc::{
 pub use singleton::bind_singleton_hardened;
 pub use sockbuf::{
     SOCKET_BUFFER_BYTES, SocketBufferOutcome, SocketBufferSizes, socket_buffer_sizes,
-    tune_socket_buffers,
+    tune_connected_buffers, tune_listener_buffers,
 };
 pub use stream_client::{
     FramedStream, send_framed_stream_request, send_framed_stream_request_capped,
@@ -318,6 +318,20 @@ pub enum UdsSecurityError {
         source: std::io::Error,
     },
 
+    /// A socket buffer could not be READ back (#6896 review).
+    ///
+    /// Distinct from [`UdsSecurityError::SocketBuffer`]: reporting a
+    /// `getsockopt` failure through that variant printed "size SO_SNDBUF to
+    /// 1048576 bytes", naming a write this branch never attempted.
+    #[error("read {option} back: {source}")]
+    SocketBufferRead {
+        /// Which option could not be read — `SO_SNDBUF` or `SO_RCVBUF`.
+        option: &'static str,
+        /// Underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// Reading the connected peer's credentials failed.
     #[error("read peer credentials: {source}")]
     PeerCred {
@@ -345,11 +359,11 @@ impl UdsSecurityError {
     ///
     /// Why: macOS answers `EINVAL` to `setsockopt(SO_SNDBUF)` once a socket's
     /// peer has hung up. That is one of the two signals
-    /// [`sockbuf::tune_socket_buffers`] requires before it treats an unsized
+    /// [`sockbuf::hangup_is_benign`] requires before it treats an unsized
     /// socket as harmless rather than as a failure — see that module's docs for
     /// why one signal is not enough.
     ///
-    /// Test: `tune_socket_buffers_reports_a_peer_that_already_hung_up`.
+    /// Test: `tune_connected_buffers_reports_a_peer_that_already_hung_up`.
     pub(crate) fn is_disconnected_socket(&self) -> bool {
         matches!(
             self,
@@ -469,7 +483,7 @@ fn socket_parent(path: &Path) -> Result<&Path, UdsSecurityError> {
 /// # Errors
 ///
 /// Any [`UdsSecurityError`] the directory hardening, the bind, the chmod or
-/// [`sockbuf::tune_socket_buffers`] produces.
+/// [`sockbuf::tune_listener_buffers`] produces.
 ///
 /// Test: `bind_hardened_sets_socket_0600_and_dir_0700`,
 /// `bind_hardened_socket_is_connectable_after_hardening`,
@@ -494,8 +508,9 @@ pub fn bind_hardened(path: &Path) -> Result<UnixListener, UdsSecurityError> {
 
     // #6896: sized on the LISTENER, which both Linux and macOS copy onto every
     // socket `accept` returns — so a service driving its own accept loop gets
-    // the sizing without calling anything.
-    sockbuf::tune_socket_buffers(&listener)?;
+    // the sizing without calling anything. The strict form: a listener has no
+    // peer, so it must never reach the hung-up-peer outcome (#6896 review).
+    sockbuf::tune_listener_buffers(&listener)?;
 
     Ok(listener)
 }
@@ -521,7 +536,7 @@ pub fn bind_hardened(path: &Path) -> Result<UnixListener, UdsSecurityError> {
 /// # Errors
 ///
 /// Any [`UdsSecurityError`] the verification, the connect or
-/// [`sockbuf::tune_socket_buffers`] produces.
+/// [`sockbuf::tune_connected_buffers`] produces.
 ///
 /// Test: `connect_hardened_accepts_a_properly_hardened_socket`,
 /// `connect_hardened_refuses_a_world_readable_socket`,
@@ -539,9 +554,10 @@ pub async fn connect_hardened(path: &Path) -> Result<UnixStream, UdsSecurityErro
             source,
         })?;
 
-    // #6896: the dialling end of the pair. The accepting end is sized by
-    // `bind_hardened`'s listener and again in `server::handle_connection`.
-    sockbuf::tune_socket_buffers(&stream)?;
+    // #6896: the dialling end of the pair; the accepting end inherits the
+    // listener's sizing. The forgiving form — the server may have dropped this
+    // connection already, which is not a failure to report.
+    sockbuf::tune_connected_buffers(&stream)?;
 
     Ok(stream)
 }
