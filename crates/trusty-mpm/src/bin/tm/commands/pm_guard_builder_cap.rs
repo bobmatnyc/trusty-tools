@@ -29,9 +29,20 @@
 //! daemon outage cannot deny it. "The daemon is down" degrades builder dispatch
 //! only, never every dispatch on the machine.
 //!
+//! **A DENY undoes the record the guard's previous call just wrote (#6892
+//! critic round).** This check is asked LAST, after the shared-tree and
+//! worktree-grant rules, and both of those claim BY recording a `Running`
+//! delegation on an empty answer. A `PreToolUse` deny means the tool never runs,
+//! so nothing downstream would ever close that record: it would hold the
+//! checkout and a builder slot for the six hours of `RUNNING_STALE_AFTER_SECS`,
+//! and the re-issue this guard's own deny message recommends would then be
+//! refused by #4480 with a message that never mentions the cap. The daemon
+//! releases it inside the same critical section as the refusal — see
+//! `DaemonState::claim_builder_slot`.
+//!
 //! Test: the `#[cfg(test)]` suite below covers the pure classification and every
-//! failure arm; the daemon-side counting and atomicity are covered by
-//! `daemon::state::builder_slots` and `daemon::builder_slot_routes`.
+//! failure arm; the daemon-side counting, atomicity, and the deny's release are
+//! covered by `daemon::state::builder_slots` and `daemon::builder_slot_routes`.
 
 use serde_json::Value;
 use std::path::Path;
@@ -205,6 +216,10 @@ pub(crate) enum BuilderSlotClaim {
     Admitted,
     /// The machine is at its cap. Carries the cap and its current holders.
     Full(u32, Vec<HolderLine>),
+    /// The daemon answered, reported the machine's state, and declined to count
+    /// this dispatch at all — it classified the agent as a non-builder where
+    /// this binary classified it as one.
+    NotCounted,
     /// No usable answer, so the count is unknown. Carries the failure detail.
     Unverifiable(String),
 }
@@ -247,6 +262,13 @@ pub(crate) async fn claim_builder_slot(
             if claimed {
                 return BuilderSlotClaim::Admitted;
             }
+            // #6892 critic round: `claimed: false` had two meanings and this is
+            // the second — the daemon answered with the machine's real state and
+            // declined to count this dispatch. Reading it as a full machine
+            // denied on an idle host, naming zero holders.
+            if body.get("ineligible").and_then(Value::as_bool) == Some(true) {
+                return BuilderSlotClaim::NotCounted;
+            }
             let cap = body
                 .get("cap")
                 .and_then(Value::as_u64)
@@ -263,28 +285,56 @@ pub(crate) async fn claim_builder_slot(
     }
 }
 
-/// Warn that a payload carrying no session id cannot claim a slot.
+/// The field this payload is missing that makes the claim impossible, if any.
 ///
-/// Why: this is the ONE input failure that allows rather than denies, and the
-/// asymmetry needs stating. Every other failure this guard meets is the daemon
-/// declining to answer, which is correlated with load and therefore with a busy
-/// machine — exactly when a false allow costs the most. A payload with no
-/// session id is a different thing: the claim route is addressed per session, so
-/// there is nothing to POST to, and the failure is in the caller's own input
-/// rather than in the machine's state. Claude Code stamps `session_id` on every
-/// `PreToolUse`, so reaching this line means the payload did not come from it —
-/// and a caller that can edit the payload can already set
-/// `TRUSTY_MPM_DISABLE_HOOKS`, so denying buys nothing while breaking every
-/// harness whose payload shape this binary does not control.
+/// Why: two keys are load-bearing for a claim and NEITHER is this guard's to
+/// supply. `session_id` addresses the route; `tool_use_id` is what lets the
+/// daemon exclude this dispatch's own record from its own count, and without it
+/// a claim would be refused by the record the guard itself just wrote. Checking
+/// both HERE — locally, before the POST — is what makes them one class of
+/// outcome rather than two: the round trip is skipped, and the answer cannot be
+/// confused with a full machine (#6892 critic round). The daemon re-derives the
+/// same rule and reports `ineligible` for a caller that skips this check.
+/// What: `Some("session id")` or `Some("tool_use_id")` — the first missing key,
+/// for the warning — else `None`.
+/// Test: `a_payload_with_no_session_id_allows_and_warns`,
+/// `a_payload_with_no_tool_use_id_allows_and_warns`.
+fn unclaimable_field(payload: &Value, session_id: &str) -> Option<&'static str> {
+    if session_id.is_empty() {
+        return Some("session id");
+    }
+    let has_tool_use_id = payload
+        .get("tool_use_id")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    (!has_tool_use_id).then_some("tool_use_id")
+}
+
+/// Warn that a payload missing `field` cannot claim a slot.
+///
+/// Why: this is the ONE class of input failure that allows rather than denies,
+/// and the asymmetry needs stating. Every other failure this guard meets is the
+/// daemon declining to answer, which is correlated with load and therefore with
+/// a busy machine — exactly when a false allow costs the most. A payload missing
+/// one of the two keys a claim needs is a different thing: there is nothing to
+/// POST to, or nothing to key the claim by, and the failure is in the caller's
+/// own input rather than in the machine's state. Claude Code stamps both
+/// `session_id` and `tool_use_id` on every `PreToolUse`, so reaching this line
+/// means the payload did not come from it — and a caller that can edit the
+/// payload can already set `TRUSTY_MPM_DISABLE_HOOKS`, so denying buys nothing
+/// while breaking every harness whose payload shape this binary does not
+/// control.
 /// What: one stderr line, the same channel and reasoning as
 /// `pm_guard_dispatch::warn_guard_unavailable`.
-/// Test: `a_payload_with_no_session_id_allows_and_warns`.
-fn warn_unaddressable() {
+/// Test: `a_payload_with_no_session_id_allows_and_warns`,
+/// `a_payload_with_no_tool_use_id_allows_and_warns`.
+fn warn_unaddressable(field: &str) {
     eprintln!(
-        "tm hook --pm-guard: this dispatch's payload carries no session id, so the machine-wide \
+        "tm hook --pm-guard: this dispatch's payload carries no {field}, so the machine-wide \
          builder cap (#6892) could not be claimed for it. The cap is NOT being enforced for this \
          dispatch — an uncounted builder may now be running. Every payload Claude Code emits \
-         carries `session_id`; a payload without one did not come from it. Allowing the dispatch."
+         carries both `session_id` and `tool_use_id`; a payload without one did not come from it. \
+         Allowing the dispatch."
     );
 }
 
@@ -312,16 +362,46 @@ pub(crate) async fn evaluate(
     if !dispatch_claims_a_builder_slot(tool_name, tool_input) {
         return None;
     }
-    if session_id.is_empty() {
-        warn_unaddressable();
+    if let Some(missing) = unclaimable_field(payload, session_id) {
+        warn_unaddressable(missing);
         return None;
     }
     let agent = dispatch_agent(tool_input).unwrap_or("this");
     match claim_builder_slot(url, session_id, cwd, payload).await {
         BuilderSlotClaim::Admitted => None,
         BuilderSlotClaim::Full(cap, holders) => Some(deny_reason(agent, cap, &holders)),
+        // ALLOW, and say so on stderr. The daemon ANSWERED here — the machine's
+        // count is known, this dispatch simply was not added to it — so unlike
+        // the arm below there is no open question to fail closed on. The usual
+        // cause is a daemon older than this `tm`, and denying on version skew
+        // would halt every build until a restart, which is the same trade #5324
+        // already settled the same way for the shared-tree guard.
+        BuilderSlotClaim::NotCounted => {
+            warn_not_counted(agent);
+            None
+        }
         BuilderSlotClaim::Unverifiable(detail) => Some(unverifiable_deny_reason(agent, &detail)),
     }
+}
+
+/// Warn that the daemon declined to count a dispatch this binary calls a builder.
+///
+/// Why: the divergence is always a disagreement, never a normal outcome — the
+/// guard does not reach the daemon at all unless it has already classified the
+/// dispatch as a builder. Discarding the signal would leave the cap silently
+/// under-counting, which is exactly the invisible degradation #5324's own
+/// warning exists to prevent for the shared-tree guard.
+/// What: one stderr line, naming the likely cause and the repair.
+/// Test: `an_ineligible_answer_allows_rather_than_denying`.
+fn warn_not_counted(agent: &str) {
+    eprintln!(
+        "tm hook --pm-guard: the daemon does not classify {agent} as a builder, so this dispatch \
+         was NOT counted against the machine-wide cap (#6892) — the machine may now be running \
+         one more builder than it is sized for. The usual cause is a running daemon older than \
+         the `tm` on PATH, built before this agent joined its bundled table; `tm restart` clears \
+         it. Allowing the dispatch: the daemon answered, so the count is known and this is a \
+         classification disagreement rather than an unverifiable cap."
+    );
 }
 
 #[cfg(test)]
@@ -541,6 +621,64 @@ mod tests {
         )
         .await;
         assert!(verdict.is_none(), "{verdict:?}");
+    }
+
+    /// The #6892 critic round, MEDIUM. A payload with no `tool_use_id` cannot be
+    /// claimed OR excluded from its own count, so the daemon answers it
+    /// `claimed: false` — and reading that as "the machine is full" produced a
+    /// deny naming zero holders on an idle machine. It is the same class of
+    /// input failure as a missing session id, and it is answered the same way:
+    /// decided locally, before the POST, allow and warn.
+    ///
+    /// Fails before this round: the guard POSTs, reads `claimed: false` as
+    /// `Full`, and denies.
+    #[tokio::test]
+    async fn a_payload_with_no_tool_use_id_allows_and_warns() {
+        let url = spawn_mock_answering("200 OK", r#"{"claimed":false,"cap":4,"holders":[]}"#);
+        let verdict = evaluate(
+            &url,
+            &serde_json::json!({"cwd": "/repo"}),
+            "Agent",
+            Some(&input("rust-engineer", None)),
+            "11111111-1111-1111-1111-111111111111",
+            Path::new("/repo"),
+        )
+        .await;
+        assert!(
+            verdict.is_none(),
+            "an unclaimable payload must not read as a full machine: {verdict:?}"
+        );
+    }
+
+    /// A daemon that answered and declined to COUNT this dispatch reported the
+    /// machine's real state, so there is no open question to fail closed on.
+    /// Denying would halt every build on version skew.
+    #[tokio::test]
+    async fn an_ineligible_answer_allows_rather_than_denying() {
+        let url = spawn_mock_answering(
+            "200 OK",
+            r#"{"claimed":false,"ineligible":true,"cap":4,"holders":[]}"#,
+        );
+        let verdict = evaluate_builder_against(&url).await;
+        assert!(verdict.is_none(), "{verdict:?}");
+    }
+
+    /// The counterpart, so the allow above cannot widen into "any `claimed:
+    /// false` allows". With a `tool_use_id` present, `claimed: false` IS a full
+    /// machine and denies.
+    #[tokio::test]
+    async fn a_payload_with_a_tool_use_id_still_denies_when_full() {
+        let url = spawn_mock_answering(
+            "200 OK",
+            r#"{"claimed":false,"cap":1,"holders":[{"agent":"local-ops","session":"s","elapsed_secs":30}]}"#,
+        );
+        let reason = evaluate_builder_against(&url)
+            .await
+            .expect("a full machine denies");
+        assert!(
+            reason.contains("Machine-wide builder cap reached"),
+            "{reason}"
+        );
     }
 
     #[tokio::test]

@@ -15,6 +15,14 @@
 //! — a builder holds a slot for exactly as long as its delegation is live, and
 //! [`builder_lease`] is the predicate that decides when that stops being true.
 //!
+//! **A DENIED dispatch releases too, and that release is this module's own
+//! (#6892 critic round).** The three signals below all describe an agent that
+//! ran. A dispatch the cap refuses never runs at all, and yet the guard's
+//! preceding shared-tree or worktree-grant claim has already recorded it as
+//! `Running` — those claim BY recording. Nothing downstream would ever close
+//! that record, so [`DaemonState::release_denied_builder_dispatch`] closes it
+//! inside the same critical section as the refusal.
+//!
 //! **Three independent releases, whichever fires first.** A `SubagentStop` or
 //! the staleness sweep moves the record out of
 //! [`DelegationStatus::is_live`]; the dispatching session's PID being confirmed
@@ -241,30 +249,90 @@ impl DaemonState {
     /// IS the record that tracker would have written milliseconds later, with
     /// the same lifecycle and the same staleness sweep.
     ///
-    /// `record` must not take THIS lock again — it is not reentrant — and must
-    /// not await. It MAY take
-    /// [`dispatch_record_guard`](DaemonState::dispatch_record_guard), and the
-    /// closure passed today does: that is the documented lock order, matching
-    /// the shared-tree claim's. This mutex is never taken inside that one, so
-    /// the two orders cannot cross.
+    /// **A refused claim runs `release` instead, and that is not symmetry for
+    /// its own sake (#6892 critic round).** By the time this is asked, the
+    /// guard's preceding shared-tree or worktree-grant call has ALREADY recorded
+    /// a `Running` delegation for this dispatch — both of those claim by
+    /// recording on an empty answer. Denying here means the tool never runs, so
+    /// no `SubagentStop` will ever close that record and no process will die: it
+    /// stays live for the six hours of
+    /// [`RUNNING_STALE_AFTER_SECS`](super::sessions::RUNNING_STALE_AFTER_SECS),
+    /// occupying both the checkout (so #4480 refuses the re-issue this cap's own
+    /// deny message recommends) and a builder slot (so the machine is one
+    /// permanently short). Releasing it inside this same critical section is
+    /// what makes the deny leave no trace.
+    ///
+    /// Neither closure may take THIS lock again — it is not reentrant — and
+    /// neither may await. Both MAY take
+    /// [`dispatch_record_guard`](DaemonState::dispatch_record_guard), and both
+    /// passed today do: that is the documented lock order, matching the
+    /// shared-tree claim's. This mutex is never taken inside that one, so the
+    /// two orders cannot cross.
     /// Test: `builder_cap_admits_up_to_the_cap_and_denies_the_rest`,
     /// `builder_cap_admits_exactly_one_of_two_simultaneous_claims`,
     /// `a_refused_builder_claim_records_nothing`,
-    /// `a_non_builder_dispatch_claims_no_slot`.
-    pub fn claim_builder_slot<F: FnOnce(&Self)>(
+    /// `a_non_builder_dispatch_claims_no_slot`,
+    /// `a_denied_builder_releases_the_record_the_dispatch_just_claimed`.
+    pub fn claim_builder_slot<C: FnOnce(&Self), R: FnOnce(&Self)>(
         &self,
         cap: u32,
         exclude_tool_use_id: Option<&str>,
         eligible: bool,
-        record: F,
+        record: C,
+        release: R,
     ) -> (Vec<BuilderHolder>, bool) {
         let _claim = self.builder_claim_guard();
         let holders = self.builder_slot_holders(exclude_tool_use_id);
         let claimed = eligible && u32::try_from(holders.len()).unwrap_or(u32::MAX) < cap;
         if claimed {
             record(self);
+        } else if eligible {
+            // #6892: only an ELIGIBLE refusal is a deny. An ineligible payload
+            // was never going to be denied by this guard, so nothing it may have
+            // recorded is this rule's to undo.
+            release(self);
         }
         (holders, claimed)
+    }
+
+    /// Close out the delegation record a denied builder dispatch just created
+    /// (#6892 critic round).
+    ///
+    /// Why: see [`Self::claim_builder_slot`]. The record is written by the
+    /// shared-tree claim or the worktree grant that runs immediately before the
+    /// cap is asked, and a `PreToolUse` deny means nothing downstream will ever
+    /// close it.
+    /// What: marks the delegation carrying `tool_use_id`
+    /// [`DelegationStatus::Cancelled`] and stamps `ended_at`, under the
+    /// dispatch-record lock so it cannot race the tracker's own writer.
+    ///
+    /// It RETAINS the record rather than removing it, deliberately. The
+    /// tracker's `matcher: "*"` hook fires on the same dispatch and may land
+    /// after this, and `delegation_tracker::on_dispatch_locked` returns early on
+    /// a `tool_use_id` it already knows — whatever its status. Keeping a
+    /// cancelled record is therefore what stops that hook from re-creating a
+    /// live one; deleting it would leave the hole open. `Cancelled`, not
+    /// `Completed`: nothing ran.
+    /// Returns `false` when there is no such record — the ordinary case when the
+    /// guard's own preceding claim declined to record.
+    /// Test: `a_denied_builder_releases_the_record_the_dispatch_just_claimed`,
+    /// `a_denied_builder_releases_only_its_own_record`,
+    /// `releasing_an_unknown_dispatch_is_a_no_op`.
+    pub fn release_denied_builder_dispatch(
+        &self,
+        session: SessionId,
+        tool_use_id: Option<&str>,
+    ) -> bool {
+        let Some(tool_use_id) = tool_use_id else {
+            return false;
+        };
+        let _record = self.dispatch_record_guard();
+        let Some(id) =
+            self.find_delegation(session, |d| d.tool_use_id.as_deref() == Some(tool_use_id))
+        else {
+            return false;
+        };
+        self.terminate_delegation(id, crate::core::agent::DelegationStatus::Cancelled)
     }
 
     /// The one scan every builder-slot query runs.
@@ -512,9 +580,13 @@ mod tests {
             (a, "react-engineer"),
             (b, "local-ops"),
         ] {
-            let (holders, claimed) = state.claim_builder_slot(2, None, true, |s| {
-                s.upsert_delegation(running(session, agent, 1));
-            });
+            let (holders, claimed) = state.claim_builder_slot(
+                2,
+                None,
+                true,
+                |s| s.upsert_delegation(running(session, agent, 1)),
+                |_| {},
+            );
             last_holders = holders;
             if claimed {
                 admitted += 1;
@@ -552,9 +624,13 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    let (_, claimed) = state.claim_builder_slot(1, None, true, |s| {
-                        s.upsert_delegation(running(session, agent, 0));
-                    });
+                    let (_, claimed) = state.claim_builder_slot(
+                        1,
+                        None,
+                        true,
+                        |s| s.upsert_delegation(running(session, agent, 0)),
+                        |_| {},
+                    );
                     if claimed {
                         admitted.fetch_add(1, Ordering::Relaxed);
                     }
@@ -579,13 +655,17 @@ mod tests {
         state.upsert_delegation(running(session, "rust-engineer", 10));
 
         let mut recorded = false;
-        let (holders, claimed) = state.claim_builder_slot(1, None, true, |_| recorded = true);
+        let mut released = false;
+        let (holders, claimed) =
+            state.claim_builder_slot(1, None, true, |_| recorded = true, |_| released = true);
         assert_eq!(holders.len(), 1, "the deny must name the holder");
         assert!(!claimed);
         assert!(
             !recorded,
             "nothing may be written when the claim is refused"
         );
+        // #6892 critic round: and the record the preceding claim wrote is undone.
+        assert!(released, "a refused eligible claim must release");
     }
 
     /// Criterion 7 at the claim layer. `eligible = false` is the daemon's own
@@ -595,10 +675,15 @@ mod tests {
     fn a_non_builder_dispatch_claims_no_slot() {
         let state = DaemonState::new();
         let mut recorded = false;
-        let (holders, claimed) = state.claim_builder_slot(4, None, false, |_| recorded = true);
+        let mut released = false;
+        let (holders, claimed) =
+            state.claim_builder_slot(4, None, false, |_| recorded = true, |_| released = true);
         assert!(holders.is_empty());
         assert!(!claimed);
         assert!(!recorded);
+        // An INELIGIBLE dispatch was never going to be denied by this guard, so
+        // nothing it may have recorded is this rule's to undo.
+        assert!(!released, "an ineligible payload must not be released");
     }
 
     #[test]
@@ -611,10 +696,29 @@ mod tests {
         mine.tool_use_id = Some("toolu_MINE".to_string());
         state.upsert_delegation(mine);
 
-        let (holders, claimed) = state.claim_builder_slot(1, Some("toolu_MINE"), true, |_| {});
+        let (holders, claimed) =
+            state.claim_builder_slot(1, Some("toolu_MINE"), true, |_| {}, |_| {});
         assert!(
             holders.is_empty() && claimed,
             "a dispatch must never be denied by its own record: {holders:?}"
+        );
+    }
+
+    /// The release is keyed by `tool_use_id`, so a payload without one — or a
+    /// dispatch whose preceding claim recorded nothing — is a no-op rather than
+    /// a scan that guesses at which record to close.
+    #[test]
+    fn releasing_an_unknown_dispatch_is_a_no_op() {
+        let state = DaemonState::new();
+        let session = session_with_pid(&state, Some(std::process::id()));
+        state.upsert_delegation(running(session, "rust-engineer", 10));
+
+        assert!(!state.release_denied_builder_dispatch(session, None));
+        assert!(!state.release_denied_builder_dispatch(session, Some("toolu_NOT_HERE")));
+        assert_eq!(
+            state.builder_slot_holders(None).len(),
+            1,
+            "a no-op release must not touch the live holder"
         );
     }
 

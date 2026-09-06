@@ -65,11 +65,15 @@ pub struct BuilderSlotRequest {
 /// Why: the guard needs a verdict to act on and names to explain it — a deny
 /// that cannot say which builders are running reads as arbitrary and gets
 /// retried identically.
-/// What: `holders` is one entry per live builder lease, newest-running last;
+/// What: `holders` is one entry per live builder lease, longest-running first;
 /// `cap` is the machine's effective `builders.max_concurrent`; `claimed` says
-/// whether THIS call took a slot. `claimed = false` with an under-cap
-/// `holders` list means the daemon classified the dispatch as a non-builder —
-/// see [`builder_slot_op`].
+/// whether THIS call took a slot.
+///
+/// **`ineligible` exists because `claimed: false` had two meanings (#6892 critic
+/// round).** It meant both "the machine is full" and "this payload could never
+/// have claimed anything", and the hook read the second as the first — denying
+/// an idle machine with a message naming zero holders. The two are now separate
+/// fields, so a caller cannot conflate them by reading only one.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct BuilderSlotResponse {
     /// Builders already holding a slot, excluding this dispatch's own record.
@@ -79,6 +83,11 @@ pub struct BuilderSlotResponse {
     /// Whether this call claimed a slot.
     #[serde(default)]
     pub claimed: bool,
+    /// Whether the daemon judged this payload unable to claim at all — a
+    /// non-builder agent, a non-dispatch tool, or no `tool_use_id`. Never a
+    /// statement about the machine, and never `true` alongside `claimed`.
+    #[serde(default)]
+    pub ineligible: bool,
 }
 
 /// The builder-slot sub-router (#6892).
@@ -140,11 +149,18 @@ pub async fn builder_slot_route(
 /// atomic claim. A payload with no `tool_use_id` is still ANSWERED but claims
 /// nothing: without that key the record could not be excluded from its own
 /// count, and a dispatch that denied itself would be worse than one that went
-/// uncounted.
+/// uncounted. That answer reports `ineligible: true` rather than leaving the
+/// caller to read `claimed: false` as a full machine (#6892 critic round).
+///
+/// A refusal that IS eligible releases the record the guard's preceding
+/// shared-tree or worktree-grant claim wrote for this same dispatch — see
+/// [`DaemonState::claim_builder_slot`].
 /// Test: `builder_slot_route_claims_a_free_slot`,
 /// `builder_slot_route_denies_over_the_cap_and_names_the_holders`,
 /// `builder_slot_route_claims_nothing_for_a_non_builder`,
-/// `builder_slot_route_claims_nothing_without_a_tool_use_id`.
+/// `builder_slot_route_claims_nothing_without_a_tool_use_id`,
+/// `a_denied_builder_releases_the_record_the_dispatch_just_claimed`,
+/// `a_payload_with_no_tool_use_id_is_ineligible_not_full`.
 pub fn builder_slot_op(
     state: &Arc<DaemonState>,
     id: &str,
@@ -162,18 +178,31 @@ pub fn builder_slot_op(
         && str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool)
         && dispatch_agent(input).is_some_and(agent_is_builder);
 
-    let (holders, claimed) = state.claim_builder_slot(cap, exclude, eligible, |s| {
-        crate::daemon::services::delegation_tracker::observe(
-            s,
-            session,
-            HookEvent::PreToolUse,
-            payload,
-        );
-    });
+    let (holders, claimed) = state.claim_builder_slot(
+        cap,
+        exclude,
+        eligible,
+        |s| {
+            crate::daemon::services::delegation_tracker::observe(
+                s,
+                session,
+                HookEvent::PreToolUse,
+                payload,
+            );
+        },
+        // #6892 critic round: a refusal is a DENY, and the guard's preceding
+        // shared-tree or worktree-grant claim already recorded this dispatch as
+        // Running. Nothing downstream will ever close that record, because a
+        // `PreToolUse` deny means the tool never runs.
+        |s| {
+            s.release_denied_builder_dispatch(session, exclude);
+        },
+    );
     Ok(BuilderSlotResponse {
         holders,
         cap,
         claimed,
+        ineligible: !eligible,
     })
 }
 
@@ -319,6 +348,190 @@ mod tests {
         )
         .expect_err("a malformed id is a 400");
         assert!(matches!(err, DaemonError::InvalidRequest(_)));
+    }
+
+    /// What the shared-tree claim or the worktree grant wrote for THIS dispatch
+    /// before the cap was asked.
+    ///
+    /// Why both shapes: the cap is asked at three ALLOW exits and each is
+    /// preceded by a different recorder — the grant's `record_granted_isolation`
+    /// upsert on the `Rewrite` arm, and `observe` on the `InPlace` arm and the
+    /// fall-through. Both key the record by `tool_use_id`, so the release is
+    /// exit-independent, and driving both is what proves that rather than
+    /// assuming it.
+    fn record_the_preceding_claim_wrote(
+        state: &DaemonState,
+        session: SessionId,
+        payload: &Value,
+        granted: bool,
+    ) {
+        if granted {
+            let mut isolated = payload.clone();
+            isolated["input"]["isolation"] = Value::String("worktree".to_string());
+            crate::daemon::services::delegation_tracker::record_granted_isolation(
+                state, session, &isolated,
+            );
+        } else {
+            crate::daemon::services::delegation_tracker::observe(
+                state,
+                session,
+                HookEvent::PreToolUse,
+                payload,
+            );
+        }
+    }
+
+    /// The #6892 critic round, HIGH. The call that runs BEFORE the cap at every
+    /// one of the guard's three ALLOW exits records a `Running` delegation for
+    /// this dispatch on its empty answer — that is how both the #4480 claim and
+    /// the ADR-0048 grant work. The cap then denies, and nothing sends the
+    /// `SubagentStop` that would close the record, because a `PreToolUse` deny
+    /// means the tool never runs. Without a compensating release the record is
+    /// live for the six hours of `RUNNING_STALE_AFTER_SECS`, so the "queue and
+    /// re-issue" the deny message offers is itself refused — by #4480, with a
+    /// message that never mentions the cap.
+    ///
+    /// Fails before this round: the record stays `Running`, `shared_tree_occupants`
+    /// names it, and the retry's claim is refused.
+    #[test]
+    fn a_denied_builder_releases_the_record_the_dispatch_just_claimed() {
+        for granted in [false, true] {
+            let (state, _dir, session) = hermetic();
+            // The machine's two slots, held by agents with no cwd of their own —
+            // so the only thing that can occupy `/repo` is the denied dispatch.
+            insert_builder(&state, session, "rust-engineer");
+            insert_builder(&state, session, "local-ops");
+
+            let req = dispatch("python-engineer", Some("toolu_DENIED"));
+            record_the_preceding_claim_wrote(&state, session, &req.payload, granted);
+            let recorded = state.find_delegation(session, |d| {
+                d.tool_use_id.as_deref() == Some("toolu_DENIED")
+            });
+            assert!(
+                recorded.is_some(),
+                "premise (granted={granted}): the preceding claim records this dispatch"
+            );
+
+            let body =
+                builder_slot_op(&state, &session.0.to_string(), req, 2).expect("route succeeds");
+            assert!(!body.claimed, "granted={granted}: the machine is full");
+
+            // The record must be terminal, not deleted: keeping it is what makes
+            // the tracker's own `matcher: "*"` hook a no-op if it lands after the
+            // deny (`on_dispatch_locked` returns early on a known `tool_use_id`).
+            let id = state
+                .find_delegation(session, |d| {
+                    d.tool_use_id.as_deref() == Some("toolu_DENIED")
+                })
+                .expect("the record is retained, not removed");
+            let released = state
+                .all_delegations()
+                .into_iter()
+                .find(|d| d.id == id)
+                .expect("delegation");
+            assert!(
+                !released.status.is_live(),
+                "granted={granted}: a denied dispatch must not keep a live record: {:?}",
+                released.status
+            );
+            assert!(released.ended_at.is_some(), "granted={granted}");
+
+            // And the remedy the deny offers must actually work: nothing occupies
+            // the checkout, so the retry is ADMITTED.
+            assert!(
+                state
+                    .shared_tree_occupants(std::path::Path::new("/repo"), Some("toolu_RETRY"))
+                    .is_empty(),
+                "granted={granted}: the denied dispatch still occupies the checkout"
+            );
+            let (occupants, claimed) = state.claim_shared_tree_dispatch(
+                std::path::Path::new("/repo"),
+                Some("toolu_RETRY"),
+                true,
+                crate::daemon::state::sessions::SharedTreeQuestion::Dispatch,
+                |_| {},
+            );
+            assert!(
+                claimed,
+                "granted={granted}: the re-issued dispatch must be admitted, \
+                 but #4480 named {occupants:?}"
+            );
+        }
+    }
+
+    /// The release is keyed to the DENIED dispatch and nothing else. A sibling
+    /// builder already holding a slot must survive another dispatch's refusal.
+    #[test]
+    fn a_denied_builder_releases_only_its_own_record() {
+        let (state, _dir, session) = hermetic();
+        insert_builder(&state, session, "rust-engineer");
+        insert_builder(&state, session, "local-ops");
+
+        let req = dispatch("python-engineer", Some("toolu_DENIED"));
+        record_the_preceding_claim_wrote(&state, session, &req.payload, false);
+        let body = builder_slot_op(&state, &session.0.to_string(), req, 2).expect("route succeeds");
+        assert!(!body.claimed);
+
+        assert_eq!(
+            state.builder_slot_holders(None).len(),
+            2,
+            "the two holders keep their slots"
+        );
+    }
+
+    /// An ADMITTED claim releases nothing — the record it just wrote IS the
+    /// lease.
+    #[test]
+    fn an_admitted_builder_keeps_its_record() {
+        let (state, _dir, session) = hermetic();
+        let body = builder_slot_op(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_OK")),
+            2,
+        )
+        .expect("route succeeds");
+        assert!(body.claimed);
+        assert_eq!(state.builder_slot_holders(None).len(), 1);
+    }
+
+    /// The #6892 critic round, MEDIUM. A payload with no `tool_use_id` cannot be
+    /// claimed OR excluded from its own count, and answering it `claimed: false`
+    /// made the hook read an idle machine as full and deny naming zero holders.
+    /// The route now says so in its own field rather than overloading `claimed`.
+    #[test]
+    fn a_payload_with_no_tool_use_id_is_ineligible_not_full() {
+        let (state, _dir, session) = hermetic();
+        let body = builder_slot_op(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", None),
+            4,
+        )
+        .expect("route succeeds");
+        assert!(!body.claimed);
+        assert!(
+            body.ineligible,
+            "an unclaimable payload must not read as a full machine"
+        );
+        assert!(state.builder_slot_holders(None).is_empty());
+    }
+
+    /// The counterpart: a real refusal is NOT ineligible, or the hook would read
+    /// a full machine as a payload defect and allow the build.
+    #[test]
+    fn a_full_machine_is_not_reported_ineligible() {
+        let (state, _dir, session) = hermetic();
+        insert_builder(&state, session, "rust-engineer");
+        let body = builder_slot_op(
+            &state,
+            &session.0.to_string(),
+            dispatch("python-engineer", Some("toolu_C")),
+            1,
+        )
+        .expect("route succeeds");
+        assert!(!body.claimed);
+        assert!(!body.ineligible);
     }
 
     #[tokio::test]
