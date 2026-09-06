@@ -6,6 +6,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.7.0] — 2026-09-06
+
+### Changed
+
+- BASE-AGENT and the `ticketing` agent no longer restate the commit and PR
+  attribution footer. It comes from the `attribution` key tm writes into the
+  provisioned Claude Code settings (#6807). The issue-body footer, which that
+  setting does not cover, is unchanged.
+- The `version-control` agent now names `tm pr merge <n> --auto` as the merge
+  path, so the PR body it wrote becomes the squash commit message instead of a
+  concatenation of the branch's raw commit messages.
+  `gh pr merge --squash --delete-branch --auto` remains the fallback on a host
+  without `tm` ([#6808](https://github.com/bobmatnyc/trusty-tools/issues/6808)).
+- `events` now re-exports `HarnessEvent`, `HarnessPayload`, `LifecycleEvent`,
+  `HarnessSource` and `Filter` from the new `trusty_common::control_bus` instead
+  of declaring them. Every name resolves at the same `events::*` path with the
+  same shape, so no source change is needed in a consumer. The process-global
+  broadcast channel, the `__OMPM_EVENT__` stderr relay, `Lag`, `BusClosed` and
+  `CHANNEL_CAPACITY` stay here — the transport is not the type. Shipped as
+  `0.7.0`: `cargo-semver-checks` reports the five as removed, because a
+  cross-crate re-export leaves no item definition in this crate's rustdoc, and
+  the crate now requires `trusty-common ^0.49`. (#6846)
+
+### Documentation
+
+- Added a File-Size Precheck rule to `BASE-AGENT.md`: before the first edit
+  to a production source file, every agent now measures its current size
+  with the project's cap tool and plans a split up front when the planned
+  addition would push it over the cap.
+- The `ticketing` agent's GitHub ticket-type section now points to `tm-ticketing`'s "Relationships (native, never prose)" rule instead of describing parent/child as task lists and `Closes #N` references.
+- `BASE-AGENT.md` gains an "Effort Matches Blast Radius" section: verification
+  effort is proportional to what the change can break, consolidation ships
+  inside the next change that touches that code rather than as a standalone
+  cleanup, and a defect in code you are already editing is fixed now.
+- `rust-engineer.md` carries the two Rust traps already in `CLAUDE.md` —
+  `--no-fail-fast` on every `cargo test` (cargo stops issuing targets on the
+  first target failure, so the counts overstate coverage; #5324, PR #5904), and
+  `trusty-common` needing `--features` on every test run because its default
+  feature set is empty.
+
 ## [0.6.3] — 2026-09-02
 
 ### Added

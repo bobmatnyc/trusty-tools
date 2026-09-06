@@ -6,6 +6,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.49.0] — 2026-09-06
+
+### Added
+
+- `ProcessCpuSampler` now refreshes process memory alongside CPU and exposes
+  `rss_bytes(pid)`, so one refresh per tick serves both figures for a set of
+  tracked pids. `physical_footprint_bytes` is the byte-granular form of
+  `physical_footprint_mb` on macOS, which now divides it down rather than
+  reading `proc_pid_rusage` a second time (#6773).
+- `review_gap_contract`: the one definition of the "trusty-analyze lane DID NOT
+  RUN" headline a `trusty-review` report leads a dead analyze lane with, plus the
+  `analyze_lane_is_dead` predicate its readers apply. `trusty-review` and
+  `trusty-audit` deliberately do not depend on each other (DOC-67 §5), so each
+  spelled the phrase as its own literal and they drifted (#6784).
+- **`machine_tier` — one place that answers "how much RAM is really here" and "how many MB may I hold".** New module behind the new `machine-tier` feature (no new dependencies). It carries the cgroup-aware RAM read (`detect_total_ram_mb`), the tier bands (`MemoryTier`), the four proportional formulas (`compute_memory_limit_mb`, `compute_index_memory_limit_mb`, `compute_max_chunks`, `compute_max_batch_size`), and `MachineBudget`, which ties them together. Every value moved verbatim out of trusty-search's private `core::memory_policy`, where trusty-search could read it and trusty-memory could not — so trusty-memory sized its palace cap off a fixed 64 whether the host had 12 GB or 128 GB ([#6820](https://github.com/bobmatnyc/trusty-tools/issues/6820))
+  - `MINIMUM_SUPPORTED_RAM_MB` (16 GB) and `SUPPORTED_TARGET_RAM_MB` (24 GB) name the suite's hardware bar so it can be tested rather than only described. 24 GB needs no boundary of its own: it sits inside `MemoryTier::Medium` (16–31 GB) and resolves to 6144 MB / 18432 MB, the same pair the pre-move formula produced
+  - `MemoryTier::Degraded` is new — the sub-16 GB band. `MachineBudget::minimum_advisory` returns the operator-facing message for it as a `String`, not an `Err`, which is what makes "below the minimum does not abort startup" visible in the signature
+  - Distinct from `host_metrics`, which samples LIVE CPU/memory pressure through `sysinfo` and applies no cgroup clamp. `sysinfo::total_memory()` reports the host's RAM inside a capped container; this module reports what the cgroup allows
+- New public `control_bus` module carrying the shared event types every harness
+  and trusty-console agree on: the `HarnessEvent` envelope, its `HarnessPayload`
+  domain union, the `LifecycleEvent` / `HarnessSource` taxonomy, and the
+  subscriber-side `Filter`. Moved verbatim from `trusty_agents_common::events`
+  so consuming the envelope no longer means depending on a producer crate.
+  Types only — no channel and no global state, enforced against the module's own
+  sources by `control_bus::tests::control_bus_declares_no_transport`. Ungated:
+  `serde`, `serde_json` and `chrono` were already unconditional, so the module
+  adds no dependency. (#6846)
+- `catchup::session_id::derive_session_id` computes the `session_id` a pause is filed under from the caller's own identity — the managed session id when the caller runs in a `tm`-managed pane, else the stable tmux window id rendered as `tmux-window-<N>`, and `None` when the caller is neither. The pause writer and the catch-up reader run the same function over the same identity, so the two key the same string by construction instead of by the PM retyping a free-text id it invented at pause time. `catchup::session_id::managed_session_id_from_env` reads `TM_MANAGED_SESSION_ID` for the one process that legitimately can — the `trusty-mpm serve --stdio` bridge, which Claude Code spawns inside the pane. #5272's rule is unchanged: a derived id keys exactly one caller, never "latest overall", and an unidentifiable caller derives nothing (#6888).
+
+### Fixed
+
+- `ensure_project_indexed_reporting` no longer fails a session when the derived
+  index id already identifies another tree. On a `409` — or a
+  `200 {created:false}` naming a different root — it reads
+  `GET /indexes?details=true` and pins the index whose `root_path` IS the
+  requested project, and registers under `derive_checkout_index_id` when nothing
+  serves it. Two checkouts of one repository used to leave the second unpinned,
+  so every MCP `search` in that session answered `missing required string field:
+  index_id` (#6864).
+
 ## [0.47.2] — 2026-09-03
 
 ### Added
