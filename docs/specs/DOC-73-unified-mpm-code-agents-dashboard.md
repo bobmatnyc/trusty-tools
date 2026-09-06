@@ -1272,19 +1272,25 @@ navigates. It never mutates anything. A dashboard is where a person changes
 something — creates, deletes, configures, compacts, or executes an action.
 Every control that writes moves to the dashboard for the element it acts on.
 
-**Migration backlog.** Five places in console carry a MANAGE control today,
-verified against `crates/trusty-console/ui/src/*.svelte`:
+**Migration backlog.** Five places in console carried a MANAGE control when this
+section was written, verified against `crates/trusty-console/ui/src/*.svelte`.
+The first two are DONE
+([#6923](https://github.com/bobmatnyc/trusty-tools/issues/6923)); the line
+numbers below are the ones they carried then.
 
-1. **`SearchTab.svelte`** deletes an index inline, through
-   `DeleteAction.svelte:74,96,113` (`SearchTab.svelte:194`, a `DELETE` fetch).
-2. **The `StaleIndexCleanup` panel nested inside `SearchTab.svelte`** scans and
+1. ~~**`SearchTab.svelte`** deletes an index inline, through
+   `DeleteAction.svelte:74,96,113` (`SearchTab.svelte:194`, a `DELETE` fetch).~~
+   Removed; the row links to `/tools/search/#/indexes/<id>/config` instead (§14).
+2. ~~**The `StaleIndexCleanup` panel nested inside `SearchTab.svelte`** scans and
    prunes stale index registrations
    (`StaleIndexCleanup.svelte:151,203,240,288,289,296,299`,
    `POST /api/console/search/prune-indexes`, invoked from
    `SearchTab.svelte:206`), and, nested a level further inside it, deregisters
    unjudged registrations (`UnjudgedReview.svelte:73,109,110,116,117`,
    `POST /api/console/search/deregister-unjudged`, embedded at
-   `StaleIndexCleanup.svelte:313`).
+   `StaleIndexCleanup.svelte:313`).~~ Both components are deleted. Their routes
+   still serve; no console screen calls them until the search dashboard carries
+   the panel, which is not yet cut as an issue.
 3. **`MemoryTab.svelte`** compacts a palace inline, through
    `CompactAction.svelte:48,70,83` (`MemoryTab.svelte:212`, `POST`), and
    deletes one, through `DeleteAction.svelte:74,96,113`
@@ -1348,11 +1354,11 @@ today, what it should open once §13 lands, and whether that target exists yet.
 
 | List | Rendered in | Row click today | Target management view | Exists today? |
 |---|---|---|---|---|
-| Services | `ServicesList.svelte`, Overview tab | `onOpen` switches `activeTab` to that service's in-console tab (`App.svelte:50-59,121-125`) — never leaves the console shell | The service's own dashboard: search → `/tools/search`; memory/analyze/mpm → none yet | Only search has a real target |
-| Indexes | `SearchTab.svelte` table | No navigation — the only interactive element per row is the inline `DeleteAction` (§13, item 1) | `crates/trusty-console/ui-search`'s `Indexes.svelte` (`/indexes`, `/indexes/{id}/config`) — already built | Yes, already built and richer (create, bulk reindex/delete, per-row config) than the console tab's inline delete |
+| Services | `ServicesList.svelte`, Overview tab | `onOpen` switches `activeTab` to that service's in-console tab (`App.svelte:50-59,121-125`) — never leaves the console shell; since #6923 a service whose OWN daemon serves the dashboard is an `<a>` to the URL detection read from its `http_addr` file | The service's own dashboard: search → `/tools/search`; agents → its daemon's SPA root (#6923); memory/analyze/mpm → none yet | Search and agents have real targets |
+| Indexes | `SearchTab.svelte` grid list | DONE (#6923) — the row IS the link, to `/tools/search/#/indexes/<id>/config`. The dashboard is hash-routed, so there is no `/tools/search/indexes/<id>` path to link to | `crates/trusty-console/ui-search`'s `IndexConfig.svelte`, reached from `Indexes.svelte` (`#/indexes`, `#/indexes/{id}/config`) | Yes, already built and richer (create, bulk reindex/delete, per-row config) than the console tab's inline delete was |
 | Palaces | `MemoryTab.svelte` table | No navigation — inline `CompactAction`/`DeleteAction` (§13, item 3) | No console-hosted memory dashboard exists yet. `crates/trusty-memory/ui`'s `Palaces.svelte` is read-only today (counts, a graph link) | Partial — the standalone view exists but has no create/delete/compact controls |
 | Sessions | `SessionsTab.svelte` cards | No row-click navigation — every row carries inline Resume/Stop/Decommission (§13, item 5) plus an Activity toggle | A new console-hosted `/tools/mpm` page, ported from `trusty-mpm-gui`'s `Dashboard.svelte`/`SessionDetail.svelte` (owner ruling, 2026-09-06 — "Port it into the console"; §13, item 5) | Not yet — the port is [#6924](https://github.com/bobmatnyc/trusty-tools/issues/6924), sequenced after #6460 |
-| Agents | none | n/a | n/a | No agents element list exists in console yet. `crates/trusty-console/src/detect/agents.rs` detects `trusty-agents` for the Overview row only; the per-agent list lives only in the standalone `tagent` desktop app |
+| Agents | none | n/a | n/a (the SERVICE row links to the daemon's own dashboard since #6923; a per-agent list is still unbuilt) | No agents element list exists in console yet. `crates/trusty-console/src/detect/agents.rs` detects `trusty-agents` for the Overview row only; the per-agent list lives only in the standalone `tagent` desktop app |
 | Reviews | none (aggregate only) | n/a | n/a | `ReviewTab.svelte` shows one aggregate report; there is no per-PR row to click |
 
 Agents and Reviews carry no element list today, so the row-click contract has
@@ -1416,8 +1422,9 @@ A pulse attaches to an element already on screen, never a new widget:
 - `SessionsTab.svelte`'s session-card header
   (`.session-name`/`.session-state`).
 - `MemoryTab.svelte`'s palace rows, beside the existing count badges.
-- `SearchTab.svelte`'s index table rows, beside the `idx.id`/`Last Used`
-  cells.
+- `SearchTab.svelte`'s index rows, beside the id/`Last Used` cells. Since
+  #6923 the roster is a grid list whose row is a link, so the pulse attaches to
+  a cell inside that link, not to a `<td>`.
 
 ### 15.4 Foundry addition
 
@@ -1577,10 +1584,15 @@ reuses that same component.
 ### 16.4 Management actions, and the guards on clearing
 
 **The pattern to follow already exists.** `crates/trusty-console/src/routes/cleanup.rs`
-and `crates/trusty-console/ui/src/StaleIndexCleanup.svelte` already implement
-this exact shape for stale search-index registrations: a census, an operator
-review, an explicit confirm, then a batch action reporting a per-item
-outcome, never a single boolean "cleaned." The Disk dashboard follows it:
+implements this exact shape for stale search-index registrations: a census, an
+operator review, an explicit confirm, then a batch action reporting a per-item
+outcome, never a single boolean "cleaned." Its UI half,
+`crates/trusty-console/ui/src/StaleIndexCleanup.svelte`, was removed from the
+console by §13's display-only ruling
+([#6923](https://github.com/bobmatnyc/trusty-tools/issues/6923)) and now lives
+only in history — read it with `git show
+6ee2b182b:crates/trusty-console/ui/src/StaleIndexCleanup.svelte`. The Disk
+dashboard follows it:
 
 - **Clear one worktree.** The confirm dialog names the exact path, branch,
   PR, and bytes to be reclaimed, from the `ReclaimCandidate` already rendered

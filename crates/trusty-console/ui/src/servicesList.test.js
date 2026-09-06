@@ -11,16 +11,19 @@ import {
   DASH,
   ROW_GRAPH_FLOOR_PCT,
   ROW_MEMORY_FLOOR_BYTES,
+  SELF_HOSTED_DASHBOARDS,
   SERVICES_URL,
   cpuSeries,
   fetchServices,
   formatCpu,
   formatMemory,
+  isLoopbackUrl,
   latestSample,
   memorySeries,
   rowAriaLabel,
   rowCpuGraphSpec,
   rowMemoryGraphSpec,
+  selfHostedDashboardUrl,
   serviceRows,
   sortByDisplayName,
   statusCounts,
@@ -154,7 +157,84 @@ test('only a service with a dashboard is marked clickable', () => {
   const rows = serviceRows(ROSTER, {}, new Set(['trusty-search', 'trusty-memory']));
   const clickable = rows.filter((r) => r.hasDashboard).map((r) => r.id);
   assert.deepEqual(clickable.sort(), ['trusty-memory', 'trusty-search']);
+  // #6923: agents is in `SELF_HOSTED_DASHBOARDS`, but this roster reports no
+  // `url` for it — a stopped daemon has no dashboard to open.
   assert.equal(rows.find((r) => r.id === 'trusty-agents').hasDashboard, false);
+  assert.equal(rows.find((r) => r.id === 'trusty-agents').dashboardUrl, null);
+});
+
+// ── #6923: the daemon-served dashboard row ──────────────────────────────────
+
+test('a self-hosted dashboard row links to the daemon URL the roster reports', () => {
+  const roster = ROSTER.map((s) =>
+    s.id === 'trusty-agents' ? { ...s, url: 'http://127.0.0.1:51843' } : s,
+  );
+  const rows = serviceRows(roster, {}, new Set(['trusty-search']));
+  const agents = rows.find((r) => r.id === 'trusty-agents');
+  // The URL is whatever detection found; nothing in the UI knows a port.
+  assert.equal(agents.dashboardUrl, 'http://127.0.0.1:51843');
+  assert.equal(agents.hasDashboard, true, 'a URL alone makes the row clickable');
+  assert.match(agents.ariaLabel, /open dashboard in a new tab$/);
+});
+
+test('a console-hosted tab never becomes a daemon link', () => {
+  // A `url` on a service the console hosts a tab for must not turn its row into
+  // an outbound link — every trusty-* daemon reports one.
+  const roster = [{ id: 'trusty-search', display_name: 'Trusty Search', status: 'running', url: 'http://127.0.0.1:7878' }];
+  const [row] = serviceRows(roster, {}, new Set(['trusty-search']));
+  assert.equal(row.dashboardUrl, null);
+  assert.equal(row.hasDashboard, true);
+  assert.equal(selfHostedDashboardUrl(roster[0]), null);
+});
+
+test('a self-hosted service with an empty or absent URL stays inert', () => {
+  assert.equal(selfHostedDashboardUrl({ id: 'trusty-agents' }), null);
+  assert.equal(selfHostedDashboardUrl({ id: 'trusty-agents', url: '' }), null);
+  assert.equal(selfHostedDashboardUrl(undefined), null);
+  assert.ok(SELF_HOSTED_DASHBOARDS.has('trusty-agents'));
+});
+
+test('a self-hosted service reporting a non-loopback URL renders no link', () => {
+  // The row must fall back to the non-link shape: an `<a href>` at a LAN or
+  // public address is the console navigating a browser somewhere it has no
+  // business going, which is what `proxy::routes::is_local_upstream` refuses
+  // for every other consumer of a detected URL.
+  const roster = [
+    { id: 'trusty-agents', display_name: 'Trusty Agents', status: 'running', url: 'http://10.0.0.5:8765' },
+  ];
+  const [row] = serviceRows(roster, {}, new Set());
+  assert.equal(row.dashboardUrl, null, 'a LAN address must not become an href');
+  assert.equal(row.hasDashboard, false, 'and the row must not be clickable');
+  assert.equal(row.ariaLabel, null, 'an inert row overrides no accessible name');
+});
+
+test('a non-loopback daemon URL is not a loopback URL', () => {
+  for (const url of [
+    'http://10.0.0.5:8765',
+    'http://192.168.1.9:8765',
+    'http://evil.example.com:8765',
+    // The prefix test `is_local_upstream` uses accepts this one; a hostname
+    // test does not, and a browser is where the difference is resolved.
+    'http://127.0.0.1.evil.com:8765',
+    // Loopback host, wrong scheme — every trusty-* daemon binds loopback HTTP.
+    'https://127.0.0.1:8765',
+    'file:///etc/passwd',
+    'not a url',
+    '',
+  ]) {
+    assert.equal(isLoopbackUrl(url), false, `${url} must not pass the guard`);
+  }
+});
+
+test('every loopback spelling the roster can report is accepted', () => {
+  for (const url of [
+    'http://127.0.0.1:8765',
+    'http://127.1.2.3:9000',
+    'http://[::1]:8765',
+    'http://localhost:8765',
+  ]) {
+    assert.equal(isLoopbackUrl(url), true, `${url} must pass the guard`);
+  }
 });
 
 // ── #6642: the clickable row's accessible name ─────────────────────────────
