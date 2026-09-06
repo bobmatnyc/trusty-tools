@@ -8,7 +8,7 @@ spec_refs:
 # DOC-73 — The Unified mpm/code/agents Dashboard: One Event Stream, List and Tree
 
 **Status:** Draft. Design record only — no code in this PR.
-**Spec ID:** `SPEC-UNIDASH-01~draft` … `SPEC-UNIDASH-11~draft`
+**Spec ID:** `SPEC-UNIDASH-01~draft` … `SPEC-UNIDASH-17~draft`
 **Subsystem:** `trusty-console` — the event bus itself (the UDS ingest socket,
 `seq` assignment, the ring, the durable log), the dashboard routes, and the SSE
 fan-out (`src/routes/`, `src/metrics_poller.rs`, `ui/src/`); `trusty-common` —
@@ -51,7 +51,20 @@ machine-status dashboard epic these views sit beside),
 `/ui/screensaver` route this spec's screensaver extends),
 [#6606](https://github.com/bobmatnyc/trusty-tools/issues/6606) and
 [DOC-72](https://github.com/bobmatnyc/trusty-tools/pull/6607) §4 (the analyze-side
-console relay — the first feeder into the bus this spec generalizes).
+console relay — the first feeder into the bus this spec generalizes), and, for
+§§12–17's amendment (owner rulings of 2026-09-06 on console/dashboard
+unification), epic [#6922](https://github.com/bobmatnyc/trusty-tools/issues/6922)
+and its children
+[#6923](https://github.com/bobmatnyc/trusty-tools/issues/6923),
+[#6924](https://github.com/bobmatnyc/trusty-tools/issues/6924),
+[#6925](https://github.com/bobmatnyc/trusty-tools/issues/6925),
+[#6926](https://github.com/bobmatnyc/trusty-tools/issues/6926),
+[#6927](https://github.com/bobmatnyc/trusty-tools/issues/6927),
+[#6928](https://github.com/bobmatnyc/trusty-tools/issues/6928),
+[#6929](https://github.com/bobmatnyc/trusty-tools/issues/6929),
+[#6930](https://github.com/bobmatnyc/trusty-tools/issues/6930), and
+[#6931](https://github.com/bobmatnyc/trusty-tools/issues/6931) (§17 orders all
+ten).
 
 ---
 
@@ -1206,9 +1219,519 @@ slices build first — see §5.4.
     object viewer: `/ui/object/<type>/<id>` for every type in §6, read-only,
     new-tab, stated-absence handling, plus list/tree in the screensaver
     rotation (§5.3, §6).
+---
 
+## {#SPEC-UNIDASH-12~draft} 12. Design unification
 
+> "unify the console/dashboard designs, based on the new DS and console. All
+> dashboards should link up to console, and only show detailed information."
+> — Bob, 2026-09-06
 
+Three rules follow, and they generalize §1's placement rule beyond the
+mpm/code/agents dashboard this document originally scoped, to every trusty-*
+dashboard.
 
+1. **One design language.** Every trusty-* dashboard uses Foundry
+   (`docs/design/UI/design-system/`). Console's own copy
+   (`crates/trusty-console/ui/src/foundry.css`, `theme.css`) is a separate
+   file tree, not a symlink to the canonical one, so the two can drift; console
+   stays the reference deployment regardless. A dashboard that carries no
+   Foundry tokens, or one not yet verified against them, is not unified. Four
+   surfaces are unverified today: `trusty-mpm-gui`
+   (`crates/trusty-mpm-gui/ui/src/`), the `tagent` desktop UI
+   (`crates/trusty-agents/ui/src/`), `trusty-code-gui`
+   (`crates/trusty-code-gui/ui/src/`), and `trusty-audit`'s UI
+   (`crates/trusty-audit/ui/src/App.svelte`) — none of them was found to carry
+   a `tokens.css`.
+2. **Every dashboard is reachable from console.** Console is the entry point
+   for every trusty-* dashboard, following #6155's precedent: `trusty-search`'s
+   dashboard already migrated in and is served by the console binary at
+   `/tools/search` (`crates/trusty-console/ui-search/`,
+   `crates/trusty-search/build.rs:9` records that the crate itself carries no
+   `ui/` tree any more). Four dashboards are not reachable from console yet,
+   each living behind its own process, daemon, or window instead: `trusty-memory`'s
+   admin UI (its own HTTP daemon binary), `trusty-analyze`'s UI (its own
+   on-demand process, invoked and read over stdio MCP, never proxied),
+   `trusty-mpm-gui` and the `tagent` UI (separate Tauri desktop windows), and
+   `trusty-code-gui` (its own process). §13 states what each shows once
+   reachable, and §17's Sequence orders the migrations.
+3. **A dashboard shows detail only.** Console's own tabs display state; a
+   dashboard is where the detail behind a console row lives (§14), and where
+   any control lives (§13). A dashboard never re-summarizes what console
+   already shows — it is reached FROM a summary, and it goes deeper, not
+   sideways.
 
+## {#SPEC-UNIDASH-13~draft} 13. Console displays, dashboard manages
 
+> "console displays, dashboard manages. All interactive/management/
+> configuration elements move to the dashboard view."
+> — Bob, 2026-09-06
+
+**The division.** A console screen shows state: it reads, it renders, it
+navigates. It never mutates anything. A dashboard is where a person changes
+something — creates, deletes, configures, compacts, or executes an action.
+Every control that writes moves to the dashboard for the element it acts on.
+
+**Migration backlog.** Five places in console carry a MANAGE control today,
+verified against `crates/trusty-console/ui/src/*.svelte`:
+
+1. **`SearchTab.svelte`** deletes an index inline, through
+   `DeleteAction.svelte:74,96,113` (`SearchTab.svelte:194`, a `DELETE` fetch).
+2. **The `StaleIndexCleanup` panel nested inside `SearchTab.svelte`** scans and
+   prunes stale index registrations
+   (`StaleIndexCleanup.svelte:151,203,240,288,289,296,299`,
+   `POST /api/console/search/prune-indexes`, invoked from
+   `SearchTab.svelte:206`), and, nested a level further inside it, deregisters
+   unjudged registrations (`UnjudgedReview.svelte:73,109,110,116,117`,
+   `POST /api/console/search/deregister-unjudged`, embedded at
+   `StaleIndexCleanup.svelte:313`).
+3. **`MemoryTab.svelte`** compacts a palace inline, through
+   `CompactAction.svelte:48,70,83` (`MemoryTab.svelte:212`, `POST`), and
+   deletes one, through `DeleteAction.svelte:74,96,113`
+   (`MemoryTab.svelte:213`, `DELETE`).
+4. **`ConfigTab.svelte`** saves the mpm config
+   (`ConfigTab.svelte:106,140`, fetch at `:73`,
+   `POST /api/console/config/mpm`) and toggles auto-resume
+   (`ConfigTab.svelte:124`) as part of the same submit.
+5. **`SessionsTab.svelte`** spawns a session
+   (`SessionsTab.svelte:295,302-305`, `POST`), toggles the supervisor's
+   auto-resume (`SessionsTab.svelte:335,337`,
+   `POST /api/console/sessions/supervisor/auto-resume`), bulk-deletes session
+   records (`SessionsTab.svelte:371-402`,
+   `POST /api/console/sessions/bulk-delete`), and resumes, stops, or
+   decommissions a session per row (`SessionsTab.svelte:437,440,443`). Its
+   target dashboard is settled (owner ruling, 2026-09-06 — "Port it into the
+   console"): `trusty-mpm-gui`'s `Dashboard.svelte` and `SessionDetail.svelte`
+   are ported into a console-hosted `/tools/mpm` page, the same shape as
+   `/tools/search` and the #6155 migrations. The Tauri app is not launched
+   from console — it is replaced by the ported page, not wrapped by it. Once
+   the port lands, `SessionsTab.svelte` becomes DISPLAY-only and each row
+   links to `/tools/mpm/sessions/<id>` (§14).
+
+**The session row also gains an agent roll-up (owner ruling, 2026-09-06).**
+Each session row — in console's Sessions view and in the ported `/tools/mpm`
+page — expands to its live subagents, showing a state glyph, agent type,
+current one-line activity, elapsed time, and tokens consumed, matching the
+Claude Code status line: `◯ rust-engineer  Appending probe test to
+ops_tests.rs  1h 7m 15s · ↓ 281.5k tokens`. A distinct waiting-for-user-input
+signal — a Foundry status colour plus icon, not the same treatment as a
+routine idle state — marks any session or agent stopped on a question or a
+permission prompt. That signal is sourced from the activity monitor's
+existing classification: `ActivityState::BlockedOnPermission`
+(`crates/trusty-mpm/src/activity/cache.rs:25`) is the state already computed
+for exactly this condition, and `ActivityVerdict.summary` on the same struct
+is the one-line activity text the roll-up renders. The roll-up is
+DISPLAY-only in console; answering a prompt or resuming a session is a
+dashboard action, on the ported `/tools/mpm` page. Data reaches the row over
+#6460's push transport, the same path §15's pulses use.
+
+**Already DISPLAY-only, no change needed.** `AnalyzeTab.svelte`'s one
+interactive element is a `<select>` at `:287` that drives a GET-only fetch
+(`fetchIndexes`/`loadViz`, `:98-155`); `ReviewTab.svelte` issues one GET
+(`:32`) and has no buttons; `ServicesList.svelte`'s row click (`:88-92`)
+switches console's own `activeTab` state and makes no write call;
+`MachineStatusPanel.svelte` has no interactive elements at all.
+
+Moving each of the five controls above to its target dashboard is a separate
+step, ordered in §17's Sequence — this section states the rule and the
+backlog, not the implementation.
+
+## {#SPEC-UNIDASH-14~draft} 14. Row-click contract
+
+> "Where the console has an element list (sessions, palaces, indexes),
+> clicking goes to the management view for that element."
+> — Bob, 2026-09-06
+
+Every row in a console element list links to that element's management view.
+The table states, per list: where it renders today, what a row click does
+today, what it should open once §13 lands, and whether that target exists yet.
+
+| List | Rendered in | Row click today | Target management view | Exists today? |
+|---|---|---|---|---|
+| Services | `ServicesList.svelte`, Overview tab | `onOpen` switches `activeTab` to that service's in-console tab (`App.svelte:50-59,121-125`) — never leaves the console shell | The service's own dashboard: search → `/tools/search`; memory/analyze/mpm → none yet | Only search has a real target |
+| Indexes | `SearchTab.svelte` table | No navigation — the only interactive element per row is the inline `DeleteAction` (§13, item 1) | `crates/trusty-console/ui-search`'s `Indexes.svelte` (`/indexes`, `/indexes/{id}/config`) — already built | Yes, already built and richer (create, bulk reindex/delete, per-row config) than the console tab's inline delete |
+| Palaces | `MemoryTab.svelte` table | No navigation — inline `CompactAction`/`DeleteAction` (§13, item 3) | No console-hosted memory dashboard exists yet. `crates/trusty-memory/ui`'s `Palaces.svelte` is read-only today (counts, a graph link) | Partial — the standalone view exists but has no create/delete/compact controls |
+| Sessions | `SessionsTab.svelte` cards | No row-click navigation — every row carries inline Resume/Stop/Decommission (§13, item 5) plus an Activity toggle | A new console-hosted `/tools/mpm` page, ported from `trusty-mpm-gui`'s `Dashboard.svelte`/`SessionDetail.svelte` (owner ruling, 2026-09-06 — "Port it into the console"; §13, item 5) | Not yet — the port is [#6924](https://github.com/bobmatnyc/trusty-tools/issues/6924), sequenced after #6460 |
+| Agents | none | n/a | n/a | No agents element list exists in console yet. `crates/trusty-console/src/detect/agents.rs` detects `trusty-agents` for the Overview row only; the per-agent list lives only in the standalone `tagent` desktop app |
+| Reviews | none (aggregate only) | n/a | n/a | `ReviewTab.svelte` shows one aggregate report; there is no per-PR row to click |
+
+Agents and Reviews carry no element list today, so the row-click contract has
+nothing to bind yet for either. An eventual Agents list is this document's own
+phased delivery (§9) to design, not a new item cut here.
+
+## {#SPEC-UNIDASH-15~draft} 15. Activity pulses
+
+> "use color pulses in console to indicate actions: read/write/index"
+> — Bob, 2026-09-06
+
+### 15.1 Extending the taxonomy
+
+§3.2's `ActionEvent` has no kind for an index operation, and `File`'s existing
+phases (`Read`, `Written`, `Created`, `Deleted`, `Moved`) do not cover one
+either — §3.4 already states plainly that "nothing about `File` fits today."
+This ruling adds a sixth kind, alongside `Workflow`, `Agent`, `File`, `Tool`,
+`Session`, and `Inference`:
+
+```rust
+Index { phase: CallPhase, actor: Actor, target: ObjectRef, .. }
+```
+
+using the same `CallPhase` (`Started`, `Finished`, `Errored`) that `Tool` and
+`Inference` already use. Per §3.3, this is an additive new `kind` and does not
+bump `schema_version`.
+
+The three colours the ruling asks for map onto three kinds, one of them new:
+
+- **Read** — a `File::Read`, or a read-phase `Workflow`/`Tool` event.
+- **Write** — a `File::Written`/`Created`/`Deleted`/`Moved`, or
+  `Workflow::Write`.
+- **Index** — the new `Index` kind above.
+
+### 15.2 Producers
+
+Three producers push these events over console's ingest socket (§4.2),
+through the shared `PushClient`:
+
+- `trusty-mpm` — already a producer (§3.4); its session and file events
+  already carry `Read`/`Write`.
+- `trusty-search` — a new producer, not in §4.1's producer list today. Its
+  `index_file` and `reindex` calls become `Index` events.
+- `trusty-memory` — a new producer, not in §4.1's producer list today. It
+  exposes only a per-palace `last_used_unix` timestamp over `console_metrics`
+  today (`crates/trusty-memory/src/console_metrics/mod.rs:1-60`), a
+  poll-driven gauge with no read-versus-write distinction and no per-event
+  granularity; becoming a `PushClient` producer is new work, not a reuse of
+  that field.
+
+All three depend on #6460 landing — the services-push-metrics-to-console
+transport epic (epic #6284). #6460 is in progress, not merged, as of this
+amendment; a pulse producer has nothing to push over until it does.
+
+### 15.3 Render points
+
+A pulse attaches to an element already on screen, never a new widget:
+
+- Services rows, beside the existing status `Badge`
+  (`ServicesList.svelte`, `.badge-cell`).
+- `SessionsTab.svelte`'s session-card header
+  (`.session-name`/`.session-state`).
+- `MemoryTab.svelte`'s palace rows, beside the existing count badges.
+- `SearchTab.svelte`'s index table rows, beside the `idx.id`/`Last Used`
+  cells.
+
+### 15.4 Foundry addition
+
+No pulse motion token exists today. `foundry.css:240-288` defines the robot
+mark's `robot-idle`/`robot-working`/`robot-receiving` blink/tilt/ping states,
+but those animate one mascot icon and carry no colour-by-kind meaning — all
+three states use the same body colour, only motion differs. Foundry gains:
+
+- **A new `@keyframes` pulse** — a short scale/opacity flash, distinct from
+  the robot mark's blink/tilt/ping, applicable to an arbitrary row or badge.
+- **A colour per action class.** `--trusty-info` for read and
+  `--trusty-accent` for write reuse Foundry's existing roles (`tokens.css:32-44`
+  light, `:105-107` dark). Index needs one new token — `--trusty-warning`
+  already means "degraded" (§8.4's role mapping), so reusing it for "index" would
+  read as a fault when none exists.
+
+## {#SPEC-UNIDASH-16~draft} 16. The Disk dashboard
+
+> "Design the Disk dashboard too, that should show projects and worktrees,
+> segmented radial style like daisy disk, with indications for stale
+> worktrees and an ability to clear them."
+> — Bob, 2026-09-06
+
+This section amends DOC-73 with a new console surface: **projects and
+worktrees, rendered as a segmented radial (sunburst) view, with staleness
+shown by colour and clearing gated behind an explicit confirm.** It follows
+this document's own placement rule (§1, §13): the Disk *view* is a console
+display; the Disk *dashboard* — the clear action — is where trusty-mpm is
+managed, reached from that view.
+
+### 16.1 Data sources
+
+- **Project registry.** `crates/trusty-mpm/src/project/registry.rs:34-90` —
+  `ProjectRegistry` wraps a `ProjectStore` (`<data_dir>/projects.json`),
+  exposed over MCP as `project_list`/`project_get`. `Project` carries no size
+  field today.
+- **Worktree discovery.** `crates/trusty-mpm/src/session_manager/worktree_registry.rs:1-45`
+  derives worktrees from `git worktree list --porcelain` and
+  `git rev-parse --git-common-dir` (#4207), not from path-shape guessing. A
+  managed project can have two git checkouts, each owning its own worktree
+  registry — the project checkout itself, and the `.base` bare clone
+  trusty-mpm provisions alongside it (`worktree_registry.rs:58-60`). Both must
+  be walked to see every worktree for a project.
+- **Path shapes.** `.worktrees/<name>` (project-owned session worktrees) and
+  `.claude/worktrees/<name>` (the Claude Code harness's own agent-lifetime
+  store, `worktree_ownership.rs:261-267`). One predicate,
+  `decommission::removal_permitted`, now admits both shapes plus a
+  `.trusty-mpm-worktree` sentinel (post-#6561), shared by the classifier and
+  the remover.
+- **Byte measurement.** Two existing primitives, neither cached:
+  `measure_bytes_until` (`worktree_reclaim.rs:1019-1044`, `walkdir`-based,
+  deadline-bounded, used only inside the merged-PR survey) and
+  `dir_size_bytes` (`crates/trusty-common/src/sys_metrics.rs:517-525`,
+  iterative, depth- and time-capped, returns a partial total on truncation,
+  runs today on a 60-second ticker for `/health`'s `disk_bytes`). Neither is
+  an index: both re-stat every file on every call. A sunburst spanning many
+  projects and worktrees at DaisyDisk's scale (hundreds of GB to TiB) cannot
+  walk cold on every load — §16.6's issue list adds a cached size index as a
+  prerequisite.
+- **Live-session and git state.** `session_list`/`session_status` over MCP
+  give live-session detection; `classify`'s own gates 5 and 6
+  (`worktree_reclaim.rs:670-745`) already compute the merged/open/unmerged/
+  no-PR state and the dirty/clean state the sunburst needs to display — the
+  display reuses the survey's output, adding no new git probe.
+
+### 16.2 Staleness — three tiers mapped to `classify()`'s verdicts
+
+The tier a worktree shows is a projection of the same `ReclaimVerdict`
+`tm session prune-worktrees` already computes, not a second predicate the
+display and the clear action could disagree about.
+
+| Tier | Predicate | Computed by | Cost |
+|---|---|---|---|
+| **SAFE-TO-CLEAR** | Gates 1-4 pass (admitted, not live-claimed, tm-provisioned, no live agent) AND gate 5 is `Merged{pr}` AND gate 6 is clean AND the path is not on the owner keep-list | `classify()` returning `Reclaimable`, plus a keep-list check the classifier does not have today | One `classify()` call per worktree: a few git subprocess calls, one `gh pr view`, one dirty-tree probe |
+| **REVIEW** | Clean tree, but PR state is `Open`, `ClosedUnmerged`, `NoPr`, `Unknown`, or `LookupFailed` | The same call, returning a non-`Reclaimable`, non-agent, non-liveness `Blocked{gate: PrState}` with clean dirt | Same as above |
+| **KEEP** | Dirty tree, unpushed commits, a live session claim, a live dispatched agent, or a keep-list entry | `Blocked{gate: Liveness}` / `BlockedByAgent` / `Blocked{gate: UnsavedWork}`, or a keep-list membership check | Same as above; the keep-list check is an O(1) path lookup |
+
+A branchless worktree resolves to `NoPr` at gate 5 — REVIEW, not
+automatically SAFE, absent a keep-list override. Every tier is
+first-gate-wins, in `classify`'s own gate order: a dirty, unmerged worktree
+reports KEEP, because dirt outranks PR state for display purposes exactly as
+it does for the CLI's own verdict.
+
+**The keep-list gate is new.** Nothing in `worktree_reclaim.rs` today accepts
+an owner-authored allowlist. It is added as a seventh gate (or a new
+`Admission` variant), so a keep-listed worktree renders `Blocked`, never
+silently invisible.
+
+### 16.3 Visual design
+
+**Hand-rolled SVG, not a charting library.** `trusty-console/ui`'s own
+`BarGraph.svelte` (`crates/trusty-console/ui/src/BarGraph.svelte:1-24`) is
+deliberately inline-SVG-only, with no charting library and no canvas, so
+console's existing charts cannot drift against each other. `d3` is a
+dependency of `trusty-analyze/ui` only (`crates/trusty-analyze/ui/package.json:14`),
+a separate Svelte bundle — pulling it into `trusty-console/ui` for one
+sunburst breaks that convention for a single view. The sunburst follows
+`BarGraph.svelte`'s pattern: path-string generation in a co-located `.js`
+module (`diskSunburst.js`), tested independently of the component
+(`diskSunburst.test.js`).
+
+**Rings.** Centre is the workspace-root total; ring 1 is one arc per
+registered project (angle proportional to bytes); ring 2 is one arc per
+worktree within that project, across both path shapes and the `.base` bare
+clone; an optional ring 3 is the top-N subtrees inside a worktree (`target/`,
+`node_modules/`, `.git/`), with a synthetic "other" wedge for the remainder so
+ring 3 never needs full enumeration.
+
+**Colour, mapped to the three tiers using existing tokens — no new colour
+roles:**
+
+- SAFE-TO-CLEAR → `--trusty-success` / `--trusty-success-soft`
+  (`tokens.css:37-38` light, `:110-112` dark).
+- REVIEW → `--trusty-warning` / `--trusty-warning-soft`
+  (`tokens.css:39-40`, `:112-113`).
+- KEEP → `--trusty-danger` / `--trusty-danger-soft`
+  (`tokens.css:41-42`, `:113-115`).
+- Ring 1 (projects) and ring 3 (subtrees) carry no staleness colour — a
+  neutral surface/border tone, so colour means one thing only.
+
+**Interaction.** Hovering or clicking a ring-2 arc opens a detail panel:
+path, bytes, branch, tier plus the `ReclaimGate` label and reason string
+verbatim, last commit date, PR number and state, and the owning session or
+agent if any — a direct render of the `ReclaimCandidate`/`ReclaimVerdict`
+struct (`worktree_reclaim.rs:780+`), not a new computation. A legend (Safe to
+clear / Review / Keep / Project) stays visible at all times, never
+hover-only. Any ring-2 or ring-3 arc under a 2° minimum angle collapses into a
+grey "other (N items, X GB)" wedge, expandable to a flat list.
+
+**Narrow-width fallback.** A sunburst degrades badly under roughly 600px —
+labels become unreadable and touch targets too small. Below that width, the
+view falls back to a flat, sortable list — project, then worktree rows,
+tier shown as a `Badge.svelte` — sorted by bytes descending. The clear
+confirmation flow (§16.4) needs a list regardless of width, so the fallback
+reuses that same component.
+
+**ASCII layout sketch, desktop width:**
+
+```
++-----------------------------------------------------------------+
+| Disk                              [Legend: o Safe o Review o Keep]|
+|                                                                   |
+|                    .-----------.                                 |
+|                 .--|  ring 2   |--.      +- Detail panel -------+ |
+|              .--|  | worktrees |  |--.   | path: .../pr-6907     | |
+|           .--|  .--|  ring 1   |--.  |--.| branch: fix/uds-buf   | |
+|          +-+ |     |  projects |     | +-+ tier: SAFE-TO-CLEAR   | |
+|          | | |     '-----+-----'     | | | reason: merged #6907  | |
+|          +-+ '--.  (center: total) .--' +-+ bytes: 1.2 GB        | |
+|           '--.  '--------+--------'  .--'   last commit: 2d ago | |
+|              '-----------+-----------'      PR: #6907 merged    | |
+|                                              session: none       | |
+|                                              [Open in dashboard] | |
++-----------------------------------------------------------------+
+```
+
+### 16.4 Management actions, and the guards on clearing
+
+**The pattern to follow already exists.** `crates/trusty-console/src/routes/cleanup.rs`
+and `crates/trusty-console/ui/src/StaleIndexCleanup.svelte` already implement
+this exact shape for stale search-index registrations: a census, an operator
+review, an explicit confirm, then a batch action reporting a per-item
+outcome, never a single boolean "cleaned." The Disk dashboard follows it:
+
+- **Clear one worktree.** The confirm dialog names the exact path, branch,
+  PR, and bytes to be reclaimed, from the `ReclaimCandidate` already rendered
+  in the detail panel — no re-fetch needed.
+- **Clear all SAFE-TO-CLEAR.** The confirm dialog lists every candidate
+  (path plus bytes) and a running total ("12 worktrees, 34.2 GB").
+- **Dry-run preview.** `tm session prune-worktrees` already defaults to
+  dry-run, and the HTTP route already takes a `dry_run` field
+  (`crates/trusty-mpm/src/daemon/managed_routes/prune.rs:128-155`). The
+  dashboard's review stage *is* this existing dry-run call — no new concept,
+  just surfacing it.
+
+**The MCP tool gap.** Console reaches trusty-mpm only through its MCP tool
+interface (`crates/trusty-console/src/routes/config.rs:1-13` states the
+discipline: HTTP lives only in console, driven natively through trusty-mpm's
+MCP tools, never by proxying to the daemon's own HTTP port). trusty-mpm's
+`prune-worktrees` has three call sites today
+(`crates/trusty-mpm/src/daemon/managed_routes/prune.rs:63-70`): the orphan-GC
+loop, an MCP tool that is orphan-only (no merged-PR argument), and the HTTP
+route (which does take `merged_prs`, but console cannot call a sibling
+daemon's HTTP port). **No existing MCP tool exposes the merged-PR survey or a
+reclaim-by-id call.** One is new work, mirroring `session_prune`'s shape
+(`crates/trusty-mpm/src/mcp/mod.rs:339`, dispatched in
+`crates/trusty-mpm/src/mcp/session_dispatch.rs:102`).
+
+**Guards on the clear action.**
+
+- **Removal executes only from the dashboard's explicit confirm, with a
+  dry-run preview shown first.** There is no automatic or scheduled clearing
+  from this surface.
+- **The server re-checks every gate immediately before deleting**, mirroring
+  `recheck_before_delete` (`worktree_reclaim.rs:303-345`), which already
+  re-probes right before removal to close the survey-to-delete race. The
+  dashboard never trusts an earlier snapshot for the delete itself.
+- **Never a live session's worktree** (gate 2, `ClaimState`) **and never a
+  live dispatched agent's worktree** (gate 4) — the clear action must not
+  touch a KEEP-tier item, full stop.
+- **Never the main checkout.** Gate 1's `Admission::Admitted` already
+  excludes it structurally; this dashboard keeps that exclusion rather than
+  re-deriving it.
+- **The owner keep-list overrides every other gate to KEEP.**
+- **This dashboard's confirm click is the human action BASE-AGENT's
+  worktree-removal rule requires (#5791).** That rule bars a subagent from
+  running `git worktree remove` on its own judgment; a person clicking
+  confirm in a console the owner is running is that owner's own hand, not an
+  autonomous agent decision, and satisfies the rule rather than working
+  around it.
+- **Audit logging is new work.** Today's only record is
+  `tracing::info!`/`warn!` (e.g. `prune.rs:1169`,
+  "prune-worktrees: removing orphaned worktree"). A dashboard-triggered clear
+  logs the same way, plus records which console session or operator
+  confirmed it — that attribution does not exist today.
+
+### 16.5 API shape
+
+```
+GET  /api/console/disk/tree
+  -> { generated_at, root: { path, bytes, projects: [
+        { name, path, bytes, worktrees: [
+            { id, path, branch, tier: "safe"|"review"|"keep",
+              gate: "admission"|"liveness"|"removability"|"agent_ownership"
+                    |"pr_state"|"unsaved_work"|null,
+              reason, bytes, pr: {number, state} | null,
+              last_commit_at, session: {id, state} | null,
+              agent: {id} | null }
+        ] }
+      ] } }
+
+GET  /api/console/disk/worktrees/{id}
+  -> single ReclaimCandidate-shaped detail, for the detail panel
+
+POST /api/console/disk/worktrees/clear
+  body: { ids: [...], dry_run: bool }
+  -> { ok, dry_run, removed: [{id, path, bytes_reclaimed}],
+       failed: [{id, path, reason}], skipped: [{id, reason}] }
+```
+
+Each route proxies to trusty-mpm through the new MCP tool §16.4 names:
+`disk/tree` reads the merged-PR survey in report mode plus a byte walk per
+worktree; `worktrees/clear` with `dry_run: true` re-renders that same survey
+as a confirmation list with no deletion; `worktrees/clear` with
+`dry_run: false` runs the one and only delete path, which re-checks each
+candidate via `recheck_before_delete` immediately before removing it.
+
+### 16.6 Issue breakdown
+
+Sized S/M/L, in the dependency order §17's Sequence carries as placeholders:
+
+1. **Size index / cached byte walk** (M-L) — a background or on-demand cache
+   mapping worktree path to bytes-with-timestamp, refreshed incrementally
+   rather than walking cold on every load. Prerequisite for everything below.
+2. **MCP tool for the merged-PR survey, plus the keep-list gate** (M) — a
+   `disk_survey`/`worktree_survey`-shaped MCP tool on trusty-mpm returning
+   per-worktree `ReclaimVerdict` and reason, and the owner keep-list as a new
+   gate in `classify()`. Depends on 1 for bytes in the response.
+3. **The console Disk view, display only** (M) — the sunburst component, the
+   narrow-width list fallback, and the two `GET` routes in §16.5. No delete
+   action in this step, per §13's rule.
+4. **The Disk dashboard, the clear action** (M) — the `POST` route
+   (dry-run and real, re-check-before-delete), the confirm-flow UI, and the
+   audit-log attribution field §16.4 found missing. Depends on 3 for the list
+   UI it reuses and 2 for the delete-capable tool call.
+
+## {#SPEC-UNIDASH-17~draft} 17. Sequence
+
+Ordered by dependency, not by priority alone. This amendment itself is
+tracked on the epic, item 1.
+
+1. **Epic [#6922](https://github.com/bobmatnyc/trusty-tools/issues/6922) —
+   console/dashboard unification.** Tracks this DOC-73 amendment and every
+   item below.
+2. **[#6923](https://github.com/bobmatnyc/trusty-tools/issues/6923) —
+   `trusty-search` tab cleanup.** Strips the inline MANAGE controls from
+   `SearchTab.svelte` (§13, items 1-2), wires its row click into the existing
+   `/tools/search` indexes view (§14).
+3. **[#6155](https://github.com/bobmatnyc/trusty-tools/issues/6155) —
+   `trusty-memory` and `trusty-analyze` UI migration into console** (existing
+   issue, reused). Migrates `crates/trusty-memory/ui` into console and adds
+   the palace management actions it does not have today (§12, §14), and
+   migrates `crates/trusty-analyze/ui` into console (§12), including wiring
+   `AnalyzeTab.svelte`'s row click — no control removal needed there, since
+   that tab is already DISPLAY-only (§13).
+4. **[#6928](https://github.com/bobmatnyc/trusty-tools/issues/6928) —
+   `trusty-memory` tab cleanup** (after #6155). Strips `MemoryTab.svelte`'s
+   inline `CompactAction`/`DeleteAction` (§13, item 3) once the migrated
+   dashboard carries them, wires the row click (§14).
+5. **[#6924](https://github.com/bobmatnyc/trusty-tools/issues/6924) — mpm
+   dashboard, ported into console** (after #6460). Ports `trusty-mpm-gui`'s
+   `Dashboard.svelte` and `SessionDetail.svelte` into a console-hosted
+   `/tools/mpm` page (owner ruling, 2026-09-06 — "Port it into the console";
+   §13, item 5) — the same shape as `/tools/search` and the #6155
+   migrations, and not a Tauri app launched from console. Once it lands,
+   strips `SessionsTab.svelte`'s inline Spawn/Resume/Stop/Decommission/
+   bulk-delete controls and wires each row to `/tools/mpm/sessions/<id>`
+   (§14). Sequenced after #6460 so the ported dashboard uses live push
+   rather than another poller.
+6. **[#6931](https://github.com/bobmatnyc/trusty-tools/issues/6931) — agent
+   roll-up in the Sessions view** (blocked by #6924). Adds the per-session
+   subagent roll-up — state glyph, agent type, one-line activity, elapsed
+   time, tokens consumed — and the waiting-for-user-input signal, to
+   console's Sessions view and the ported `/tools/mpm` page (§13, item 5).
+7. **[#6925](https://github.com/bobmatnyc/trusty-tools/issues/6925) —
+   activity pulses, read/write/index** (after #6460). Wires `trusty-search`
+   and `trusty-memory` as `PushClient` producers, adds the `Index` kind, and
+   lands the render points and the Foundry pulse token (§15).
+8. **[#6926](https://github.com/bobmatnyc/trusty-tools/issues/6926) —
+   incremental directory-size index** (§16.6, item 1).
+9. **[#6927](https://github.com/bobmatnyc/trusty-tools/issues/6927) — MCP
+   tool exposing the worktree survey/`classify` plus the keep-list gate**
+   (§16.6, item 2). Depends on #6926.
+10. **[#6929](https://github.com/bobmatnyc/trusty-tools/issues/6929) —
+    console Disk view, sunburst** (§16.6, item 3). Depends on #6926 and #6927.
+11. **[#6930](https://github.com/bobmatnyc/trusty-tools/issues/6930) — Disk
+    dashboard, clear with dry-run** (§16.6, item 4). Depends on #6929.
