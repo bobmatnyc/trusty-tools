@@ -32,6 +32,7 @@ export const VIEW_LABELS = {
   analyze: 'Analyze',
   review: 'Review',
   sessions: 'MPM Sessions', // #6370: UI label only — the id stays 'sessions'
+  console: 'Console', // #6908: the console's own details pane
   [CONFIG]: 'Config',
 };
 

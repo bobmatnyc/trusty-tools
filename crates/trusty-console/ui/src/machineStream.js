@@ -45,8 +45,13 @@ export const STREAM_URL = '/api/console/machine-status/stream';
  * A mismatch is logged once and then ignored: the payload is additive, so an
  * older or newer daemon still carries the fields the graphs read, and blanking
  * the page over a version integer would be worse than rendering what parsed.
+ *
+ * `4` (#6908) added `sse_client_count`. This constant tracks
+ * `MACHINE_HISTORY_SCHEMA_VERSION` in
+ * `crates/trusty-console/src/machine_history/mod.rs`; the two moving apart is
+ * what the warning above reports.
  */
-export const EXPECTED_SCHEMA_VERSION = 3;
+export const EXPECTED_SCHEMA_VERSION = 4;
 
 /** Ring size assumed before the first snapshot states the server's. */
 export const DEFAULT_CAPACITY = 600;
@@ -61,6 +66,11 @@ export const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
  * a service id to its own oldest-first `{ id, status, cpu_pct, rss_bytes }` list.
  * `connected` drives nothing but a diagnostic today — it exists so a future
  * "stream offline" notice does not need a second source of truth.
+ *
+ * `sseClientCount` (#6908) is how many browsers hold this endpoint open, as of
+ * the last snapshot. It is `null` before the first snapshot and on a daemon
+ * that predates schema 4 — `null` is "not reported", which the console's
+ * details pane renders as a dash rather than as zero watchers.
  */
 export function initialState() {
   return {
@@ -69,6 +79,7 @@ export function initialState() {
     capacity: DEFAULT_CAPACITY,
     serviceCapacity: DEFAULT_CAPACITY,
     sampleIntervalSecs: 1,
+    sseClientCount: null,
     connected: false,
     seeded: false,
   };
@@ -114,6 +125,13 @@ export function applyHistory(state, snapshot) {
     sampleIntervalSecs: Number.isFinite(snapshot.sample_interval_secs)
       ? snapshot.sample_interval_secs
       : state.sampleIntervalSecs,
+    // #6908: only a real, non-negative integer counts. A daemon older than
+    // schema 4 omits the field, and carrying the previous snapshot's number
+    // forward would report watchers nobody measured.
+    sseClientCount:
+      Number.isFinite(snapshot.sse_client_count) && snapshot.sse_client_count >= 0
+        ? Math.floor(snapshot.sse_client_count)
+        : null,
     seeded: true,
   };
 }

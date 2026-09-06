@@ -53,6 +53,49 @@ export function describeConsole(version) {
 }
 
 /**
+ * Read the console's uptime in whole seconds out of a `/health` payload
+ * (#6908).
+ *
+ * Why `null` rather than `0` for anything unreadable: the console's details
+ * pane renders a dash for an unknown uptime and a duration for a known one, and
+ * a daemon that predates the field would otherwise claim it just started. A
+ * negative number is rejected for the same reason — it is not a duration.
+ * Test: `uptimeFrom reads whole seconds`, `uptimeFrom rejects a non-duration`.
+ */
+export function uptimeFrom(payload) {
+  const value = payload?.uptime_secs;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
+  return Math.floor(value);
+}
+
+/**
+ * Ask the server what it is running and how long it has been running,
+ * resolving to nulls on any failure.
+ *
+ * Why one probe for both: the console's details pane wants the version and the
+ * uptime together, and `/health` answers both in one body. Splitting them would
+ * be two reads of the same route whose answers could name different builds
+ * across a restart. `fetchConsoleVersion` below is the version-only caller —
+ * `BrandLockup` mounts under the screensaver too, where no page owner has a
+ * health read to hand it.
+ * What: `{ version, uptimeSecs }`, either half `null` when the field is absent
+ * or unreadable. Never rejects — a transport error, a non-2xx status and an
+ * unparseable body are all the same answer as a missing field.
+ * Test: `fetchConsoleHealth reads both fields`, `fetchConsoleHealth reports
+ * nulls on a failed probe`.
+ */
+export async function fetchConsoleHealth(fetchImpl = fetch) {
+  try {
+    const resp = await fetchImpl('/health');
+    if (!resp.ok) return { version: null, uptimeSecs: null };
+    const payload = await resp.json();
+    return { version: versionFrom(payload), uptimeSecs: uptimeFrom(payload) };
+  } catch {
+    return { version: null, uptimeSecs: null };
+  }
+}
+
+/**
  * Ask the server which version it is running, resolving to `null` on any
  * failure.
  *
@@ -62,11 +105,5 @@ export function describeConsole(version) {
  * without a network.
  */
 export async function fetchConsoleVersion(fetchImpl = fetch) {
-  try {
-    const resp = await fetchImpl('/health');
-    if (!resp.ok) return null;
-    return versionFrom(await resp.json());
-  } catch {
-    return null;
-  }
+  return (await fetchConsoleHealth(fetchImpl)).version;
 }

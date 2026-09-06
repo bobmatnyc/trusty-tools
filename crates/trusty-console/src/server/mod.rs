@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     Router,
@@ -141,6 +141,19 @@ pub struct AppState {
     /// What: `None` in production, which resolves the real path.
     /// Test: `tests/search_uds_bridge.rs` sets it on every case.
     pub(crate) search_socket: Option<Arc<PathBuf>>,
+    /// When this server's state was built, which is when the console started
+    /// serving (#6908).
+    ///
+    /// Why an `Instant` on the state rather than a process-global: the console's
+    /// own Services row now opens a details pane that reports how long the
+    /// console has been up, and `/health` is the route that already answers
+    /// "which console is this". A `OnceLock` would be the global state this
+    /// workspace does not keep, and reading the process start time back out of
+    /// the OS would be a second answer to a question construction already
+    /// settled.
+    /// What: set once in [`AppState::new`]; read only by [`health_handler`].
+    /// Test: `test_health_route`, `health_uptime_is_monotonic`.
+    started_at: Instant,
 }
 
 impl AppState {
@@ -240,6 +253,7 @@ impl AppState {
             analyze_handle,
             mcp_handles: Arc::new(handles),
             search_socket: None,
+            started_at: Instant::now(),
         }
     }
 
@@ -712,13 +726,18 @@ fn build_router_inner(
 ///
 /// Why: Required by process monitors and the `trusty-console status` CLI
 /// subcommand. Returns a minimal JSON body so callers can confirm the server
-/// is up and which version is running.
-/// What: Returns `{"status":"ok","version":"<CARGO_PKG_VERSION>"}`.
-/// Test: Tested by `test_health_route` below.
-async fn health_handler() -> impl IntoResponse {
+/// is up and which version is running. #6908 added `uptime_secs` because the
+/// console's own details pane reports how long the console has been up, and
+/// this is the route the SPA already reads for the version beside it.
+/// What: Returns `{"status":"ok","version":"<v>","uptime_secs":<n>}`, where the
+/// uptime is whole seconds since [`AppState::new`] built this state. Additive:
+/// a caller that only reads `status` and `version` is unaffected.
+/// Test: Tested by `test_health_route` and `health_uptime_is_monotonic` below.
+async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
     axum::Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        "uptime_secs": state.started_at.elapsed().as_secs(),
     }))
 }
 
