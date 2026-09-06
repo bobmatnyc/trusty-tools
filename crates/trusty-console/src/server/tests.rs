@@ -109,6 +109,53 @@ async fn test_services_route_returns_json() {
     assert_eq!(body[2]["status"], "absent");
 }
 
+/// REGRESSION (#6908): `GET /api/console/services` must carry the console's own
+/// row, through the same generic path every other member uses.
+///
+/// Why it goes through the ROUTE with the REAL roster rather than asserting on
+/// `all_connectors()`: the roster test next door proves registration, and would
+/// still pass if the handler filtered the row back out or the sort dropped it.
+/// What the operator sees is the response body, so that is what this reads.
+/// Against `origin/main` there is no `trusty-console` entry at all and the
+/// `find` below returns `None`.
+///
+/// Why nothing here is asserted about CPU, RSS or the other six rows: this
+/// state has no sampler running, and the six real connectors probe a machine
+/// whose daemons this test does not control. The console row is the one whose
+/// every asserted field is decided by this process.
+/// What: builds the router over `detect::all_connectors()`, issues the request,
+/// and asserts the `trusty-console` entry exists with the status, lifecycle and
+/// version the connector promises.
+/// Test: this test itself.
+#[tokio::test]
+async fn services_route_lists_the_console_itself() {
+    let router = build_router(AppState::new(crate::detect::all_connectors()));
+
+    let req = Request::builder()
+        .uri("/api/console/services")
+        .body(Body::empty())
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = get_bytes(resp).await;
+    let body: Vec<serde_json::Value> = serde_json::from_slice(&bytes).expect("parse json");
+
+    let console = body
+        .iter()
+        .find(|s| s["id"] == "trusty-console")
+        .unwrap_or_else(|| {
+            panic!("the services response must carry the console's own row; got: {body:?}")
+        });
+    assert_eq!(console["display_name"], "Trusty Console");
+    assert_eq!(
+        console["status"], "running",
+        "the console can only answer this request while it is running"
+    );
+    assert_eq!(console["lifecycle"], "daemon");
+    assert_eq!(console["version"], env!("CARGO_PKG_VERSION"));
+}
+
 /// Why: #6370 — the Overview grid renders the array in response order, so the
 /// route must lead with the services that are live rather than with whichever
 /// connector `all_connectors()` happens to register first. This test fails on

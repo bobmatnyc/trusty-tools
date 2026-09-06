@@ -28,6 +28,7 @@
 //! | `trusty-mpm` | the `pid = N` line in its `daemon.lock` |
 //! | `trusty-search` | `LOCAL_PEERPID` / `SO_PEERCRED` on its Unix socket |
 //! | `trusty-memory` | the same, on its own Unix socket |
+//! | `trusty-console` | `std::process::id()` — the console IS this process (#6908) |
 //! | `trusty-agents` | none — it serves TCP loopback, and a TCP peer carries no pid |
 //! | `trusty-analyze`, `trusty-review` | none — on-demand members with no resident process |
 //!
@@ -70,7 +71,8 @@ const LOOKUP_BACKOFF: Duration = Duration::from_secs(15);
 /// actually publishes — see the table in the module docs. An id with no known
 /// source returns `None` immediately, doing no I/O at all.
 /// Test: `resolve_pid_is_none_for_a_service_with_no_source`,
-/// `mpm_pid_is_read_from_the_lock_file`.
+/// `mpm_pid_is_read_from_the_lock_file`,
+/// `console_pid_is_this_process`.
 #[must_use]
 pub fn resolve_pid(service_id: &str) -> Option<u32> {
     match service_id {
@@ -79,6 +81,10 @@ pub fn resolve_pid(service_id: &str) -> Option<u32> {
         "trusty-memory" => {
             socket_peer_pid(trusty_common::daemon_socket_path("trusty-memory").ok()?)
         }
+        // #6908: the console's pid needs no discovery artifact — the process
+        // resolving it IS the console. This is the one arm that cannot fail and
+        // the one that reads neither a file nor a socket.
+        "trusty-console" => Some(std::process::id()),
         _ => None,
     }
 }
@@ -368,6 +374,90 @@ mod tests {
                 sample.id
             );
         }
+    }
+
+    /// REGRESSION (#6908): the console's own row must carry real CPU and RSS
+    /// from the sampler's FIRST tick, like every other resident daemon.
+    ///
+    /// Why it runs the whole tick rather than asserting `resolve_pid` alone:
+    /// three things have to hold together for the row to render a number — the
+    /// id must be pending a lookup, the lookup must yield a pid, and the sample
+    /// taken against that pid must produce both figures. A test of `resolve_pid`
+    /// on its own would still pass with the sampler wiring broken.
+    ///
+    /// Why the assertions can be exact rather than probabilistic: the pid is
+    /// this test process, which is running by definition, so `track` primes it
+    /// and the refresh resolves it. There is no flake window and no load
+    /// generated. Delete the `trusty-console` arm from [`resolve_pid`] and both
+    /// figures go `None`, which is what this fails on.
+    /// What: drives one tick end to end — `pending_lookups` → `resolve_pid` →
+    /// `record_lookups` → `sample` → `record_service_samples` — then asserts the
+    /// history's `trusty-console` ring is non-empty and its newest sample
+    /// carries both measurements.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn console_row_gets_cpu_and_rss_on_the_first_tick() {
+        let services = vec![info("trusty-console", ServiceStatus::Running)];
+        let mut sampler = ServiceMetricsSampler::new();
+
+        let pending = sampler.pending_lookups(&services, Instant::now());
+        assert_eq!(
+            pending,
+            vec!["trusty-console".to_string()],
+            "the console row must be offered for a pid lookup on the first tick"
+        );
+
+        // The same two lines `machine_history::sampler::sample_services` runs.
+        let found: Vec<(String, Option<u32>)> = pending
+            .into_iter()
+            .map(|id| {
+                let pid = resolve_pid(&id);
+                (id, pid)
+            })
+            .collect();
+        assert_eq!(
+            found[0].1,
+            Some(std::process::id()),
+            "resolve_pid must answer the console with this very process"
+        );
+        sampler.record_lookups(found, Instant::now());
+
+        let history = crate::machine_history::MachineHistory::new();
+        history
+            .record_service_samples(sampler.sample(&services, 1))
+            .await;
+
+        let snap = history.snapshot().await;
+        let ring = snap
+            .service_samples
+            .get("trusty-console")
+            .expect("the console must have a per-service ring after one tick");
+        assert!(
+            !ring.is_empty(),
+            "the ring must hold the first tick's sample"
+        );
+
+        let newest = ring.last().expect("a non-empty ring has a last entry");
+        assert!(
+            newest.cpu_pct.is_some(),
+            "the console row must carry a CPU measurement, not null: {newest:?}"
+        );
+        assert!(
+            newest.rss_bytes.is_some_and(|b| b > 0),
+            "the console row must carry a non-zero RSS measurement: {newest:?}"
+        );
+    }
+
+    /// Why: the pid arm added in #6908 must name THIS process — a lookup that
+    /// answered some other pid would graph a stranger's cost under the
+    /// console's name.
+    /// What: asserts the console arm equals `std::process::id()` and that an
+    /// unrelated id still resolves to nothing.
+    /// Test: this test itself.
+    #[test]
+    fn console_pid_is_this_process() {
+        assert_eq!(resolve_pid("trusty-console"), Some(std::process::id()));
+        assert_eq!(resolve_pid("trusty-consoleX"), None);
     }
 
     /// Why: dialling a socket for a service that is not running is I/O that
