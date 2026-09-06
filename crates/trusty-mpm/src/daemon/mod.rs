@@ -12,13 +12,15 @@
 pub mod api;
 pub mod audit;
 pub mod bug_report;
+/// Delegation query routes merged into the main router (#4480).
+// #6892: the machine-wide builder-slot claim route and its read-only census.
+pub mod builder_slot_routes;
 /// The peer message bus (DOC-60 §5.3) — envelope, pub/sub, instance registry.
 pub mod bus;
 /// Response-size bound for the `session_context_catchup` digest (#5557).
 pub mod catchup_bounds;
 pub mod claude_config;
 pub mod coordinator;
-/// Delegation query routes merged into the main router (#4480).
 pub mod delegation_routes;
 pub mod discovery;
 pub mod doctor;

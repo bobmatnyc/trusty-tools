@@ -238,6 +238,12 @@ trusty-common = { workspace = true, features = [
     # compiles into every daemon build; the drain itself stays OFF unless
     # `log_drain.enabled` is set in config.
     "log-drain",
+    # #6892: `trusty_common::machine_tier::MemoryTier` sizes the default
+    # machine-wide builder cap (`core::builders`). Pure code with no extra
+    # transitive deps — the feature is `machine-tier = []` — and it is the same
+    # sizing input trusty-search and trusty-memory already read, so the three
+    # daemons agree about the machine they share.
+    "machine-tier",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # `console-metrics` enables `trusty_common::console_metrics` (used unconditionally by

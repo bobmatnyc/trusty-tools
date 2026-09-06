@@ -271,6 +271,9 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         // frozen budget, so a new route may not simply be appended here.
         .merge(super::pairing_routes::router())
         .merge(super::delegation_routes::router())
+        // #6892: the machine-wide builder-slot claim, a sibling sub-router for
+        // the same line-cap reason.
+        .merge(super::builder_slot_routes::router())
         .route("/api/v1/doctor", get(doctor))
         .route("/api/v1/errors", get(list_errors))
         .route("/api/v1/report-bug", post(report_bug_http))

@@ -70,6 +70,10 @@ pub mod claude_json_guard;
 pub mod claude_mpm_registry;
 pub mod claude_mpm_session;
 
+// #6892: the machine-wide builder-slot cap — the `[builders]` config section,
+// the memory-tier default table, and the one host-root resolution site.
+pub mod builders;
+
 pub mod compress;
 pub mod config;
 /// Unrecognised-key reporting for the host-level config files (#5207).
