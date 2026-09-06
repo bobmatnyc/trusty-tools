@@ -10,6 +10,17 @@ edit this file by hand (see
 
 ---
 
+## [0.14.2] — 2026-09-06
+
+### Fixed
+
+- Declared `trusty-common`'s `uds` feature, which the `grounding` daemons,
+  hotspots, and search_rpc modules need for their UDS framed-request client.
+  Workspace feature unification hid the missing declaration from every gate
+  except `cargo publish`'s isolated verification build, which failed with
+  11 x E0433 `could not find 'uds' in 'trusty_common'` and burned the
+  trusty-audit-v0.14.1 tag before it could ship.
+
 ## [0.14.1] — 2026-09-06
 
 ### Added
