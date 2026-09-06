@@ -367,6 +367,44 @@ mod tests {
         );
     }
 
+    /// Self-analysis is a core property, and the shipped prompt must carry
+    /// every part of it.
+    ///
+    /// Why (#6935, owner ruling 2026-09-06): a recommendation is worthless if
+    /// it lands in the wrong repository, and a subagent that reaches for
+    /// `ticketing` itself breaks "No Subagent Fan-Out". The facts below decide
+    /// where a finding goes and whether one is filed at all, so a reword that
+    /// drops one turns the section back into advice.
+    #[test]
+    fn self_analysis_reporting_ships_in_the_base_agent() {
+        let flat = BASE_AGENT.replace('\n', " ");
+        for (fact, needle) in [
+            (
+                "the section exists",
+                "## Self-Analysis and Improvement Reporting",
+            ),
+            (
+                "trusty-tools is the fixed destination",
+                "bobmatnyc/trusty-tools",
+            ),
+            (
+                "a subagent returns a block instead of filing",
+                "Improvement recommendations",
+            ),
+            (
+                "dedup runs against the label",
+                "`self-improvement` label first",
+            ),
+            ("a clean run files nothing", "A clean run reports nothing"),
+            ("the post-mortem tracker is named", "#6933"),
+        ] {
+            assert!(
+                flat.contains(needle),
+                "`BASE-AGENT.md` must state that {fact} (#6935)"
+            );
+        }
+    }
+
     /// The `BASE-*` templates are what every other asset's `extends:` chain
     /// roots at. Shipping the roster without them would make composition
     /// impossible for every consumer, which is precisely why all 42 moved
