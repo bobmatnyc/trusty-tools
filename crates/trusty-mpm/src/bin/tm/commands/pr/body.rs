@@ -5,7 +5,7 @@
 //! noticing a thin body after the PR is already open. Its seven numbered
 //! fields are, verbatim from that section:
 //!
-//!   1. Primary outcome and linked issue(s), with the `Closes owner/repo#N` link.
+//!   1. Primary outcome and linked issue(s), with the `Refs owner/repo#N` link.
 //!   2. What changed, and what is intentionally out of scope.
 //!   3. Risk / blast radius.
 //!   4. Test evidence at the applicable levels.
@@ -270,25 +270,31 @@ impl IssueLink {
 /// Why: the link is field 1's obligation and the `Refs`/`Closes` choice is a
 /// hard project rule, so `tm pr open` owns both rather than trusting the body
 /// file to have got them right.
-/// What: with no `--issue`, a body carrying an unrequested `Closes #N` is
+/// What: with no `--issue`, a body carrying an unrequested closing keyword is
 /// rejected. With `--issue N`, a body already carrying the correct
 /// `<keyword> #N` line is left alone; otherwise the line is inserted
-/// immediately above the attribution footer. A `Closes #N` present when
+/// immediately above the attribution footer. Any closing keyword present when
 /// `--closes` was NOT passed is always an error, whatever `--issue` says.
 /// Test: `issue_link_defaults_to_refs`, `issue_link_is_idempotent`,
 /// `issue_link_rejects_unrequested_closes`,
+/// `issue_link_rejects_every_closing_keyword`,
+/// `issue_link_rejects_a_closing_keyword_outside_field_one`,
+/// `issue_link_rejects_a_negated_closing_keyword`,
+/// `issue_link_allows_prose_that_only_looks_like_a_keyword`,
 /// `issue_link_without_issue_leaves_body_alone`.
 pub(crate) fn apply_issue_link(
     body: &str,
     issue: Option<u64>,
     link: IssueLink,
 ) -> Result<String, String> {
-    if link == IssueLink::Refs && contains_closes(body) {
-        return Err(
-            "body contains a `Closes #N` line but `--closes` was not passed; this repo's \
-             fix PRs use `Refs #N` so a merge does not auto-close the issue"
-                .to_string(),
-        );
+    if link == IssueLink::Refs
+        && let Some(found) = closing_reference(body)
+    {
+        return Err(format!(
+            "body contains the closing keyword `{found}` but `--closes` was not passed; this \
+             repo's fix PRs use `Refs #N` so a merge does not auto-close the issue before live \
+             verification"
+        ));
     }
     let Some(n) = issue else {
         return Ok(body.to_string());
@@ -314,10 +320,46 @@ pub(crate) fn apply_issue_link(
     Ok(out)
 }
 
-/// Does the body carry a `Closes #N` / `Closes owner/repo#N` line?
-fn contains_closes(body: &str) -> bool {
-    body.lines().any(|l| {
-        let t = l.trim().to_ascii_lowercase();
-        t.starts_with("closes ") && t.contains('#')
-    })
+/// GitHub's closing keywords, lowercased.
+const CLOSING_KEYWORDS: [&str; 9] = [
+    "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
+];
+
+/// The first closing keyword + issue reference in `body`, if any.
+///
+/// Why: GitHub scans the whole body, not just field 1, and honours a keyword
+/// inside a negation, so `Fixes #N` anywhere auto-closes the issue on
+/// squash-merge before live verification. Matching only a line that STARTS
+/// with `closes ` let PR #6894 close #6888 off a `Fixes #6888` in field 1 —
+/// see #6895, and #5389 for the negation case.
+/// What: scans each line token by token for a keyword whose next token is an
+/// issue reference (`#12` or `owner/repo#12`), mirroring GitHub's grammar, and
+/// returns the matched pair so the error can quote it.
+/// Test: `issue_link_rejects_unrequested_closes`,
+/// `issue_link_rejects_every_closing_keyword`,
+/// `issue_link_rejects_a_closing_keyword_outside_field_one`,
+/// `issue_link_rejects_a_negated_closing_keyword`,
+/// `issue_link_allows_prose_that_only_looks_like_a_keyword`.
+fn closing_reference(body: &str) -> Option<String> {
+    for line in body.lines() {
+        let lowered = line.to_ascii_lowercase();
+        let words: Vec<&str> = lowered.split_whitespace().collect();
+        for pair in words.windows(2) {
+            let keyword = pair[0].trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            if CLOSING_KEYWORDS.contains(&keyword) && is_issue_reference(pair[1]) {
+                return Some(format!("{keyword} {}", pair[1]));
+            }
+        }
+    }
+    None
+}
+
+/// Is `token` a `#12` / `owner/repo#12` issue reference, trailing punctuation
+/// and all?
+fn is_issue_reference(token: &str) -> bool {
+    let Some((_, number)) = token.split_once('#') else {
+        return false;
+    };
+    let digits = number.trim_end_matches(|c: char| !c.is_ascii_digit());
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
 }

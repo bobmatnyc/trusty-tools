@@ -1,0 +1,4 @@
+Fixed
+
+- The `tm-workflow` skill's "Minimal PR Body" template modelled field 1's example on a closing keyword, so an agent following the example put one in the body of a project whose `CLAUDE.md` forbids it. PR #6894's field 1 read `Fixes #6888` and squash-merge closed #6888 while it still sat unverified at `status:merged`. Field 1 now models `Refs owner/repo#N`, and says `Closes`/`Fixes`/`Resolves` go in only when the project's `CLAUDE.md` permits a merge to auto-close (#6895).
+- `tm pr open` now refuses a body carrying ANY GitHub closing keyword — `close`/`closes`/`closed`, `fix`/`fixes`/`fixed`, `resolve`/`resolves`/`resolved` — before an issue reference, anywhere in the body, unless `--closes` was passed. The old guard matched only a line starting with `closes `, so it missed the `Fixes #6888` that closed #6888, and missed a keyword in a later field or inside a negation, which GitHub honours regardless (#6895, #5389).

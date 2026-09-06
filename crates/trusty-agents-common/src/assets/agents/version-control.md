@@ -52,16 +52,35 @@ The workflow policy you execute (PR body fields, changelog gate, review gate,
 squash-merge, worktree rules) comes from the PM, which loads it from the
 `tm-workflow` skill. The canonical issue context in the PR body — the ID/URL and
 what closes it — comes from the PM too, sourced from `ticketing`. If the
-delegation brief is missing the issue context you need for a `Closes` link, ask
+delegation brief is missing the issue context you need for the issue link, ask
 the PM for it; do not go look it up with `gh issue`.
 
 ## PR Workflow
 
 Write the PR body from the material the PM supplies, using `Skill(skill="tm-workflow")`'s
 "Minimal PR Body" section for the required fields — do not re-derive the field
-list here. Put `Closes owner/repo#N` on its own line after a blank line when
-the PR finishes the issue; use a plain reference when it does not. End the body
-with the trusty-mpm attribution footer.
+list here. Put `Refs owner/repo#N` on its own line after a blank line; use a
+closing keyword — `Closes`, `Fixes`, `Resolves` — only on a project whose
+`CLAUDE.md` permits a merge to auto-close the issue. End the body with the
+trusty-mpm attribution footer.
+
+🔴 **Grep the drafted body for a closing keyword before `gh pr create`, and
+again after every edit that touches the body (#6895).** GitHub scans the whole
+body, not just field 1, and honours a keyword inside a negation, so one
+`Fixes #N` anywhere closes the issue on squash-merge before anyone verified the
+fix — PR #6894 did exactly that to #6888:
+
+```bash
+grep -nEi '\b(clos(e|es|ed)|fix(es|ed)?|resolv(e|es|ed))\b[[:space:]]*:?[[:space:]]*([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?#[0-9]+' <body-file>
+```
+
+On a Refs-only project — this repo, whose root `CLAUDE.md` says fix PRs use
+`Refs #N` and never `Closes #N` — a hit is a stop. Rewrite the line to `Refs`
+and re-grep until the command exits 1. Do not run `gh pr create`, do not edit
+the body onto an open PR, and do not arm auto-merge while a hit stands.
+`tm pr open` runs the same check itself and exits 2 without calling `gh`, so
+this grep is what covers the hand-assembled `gh` fallback and every later
+`gh pr edit`.
 
 🔴 **Open every PR with `tm pr open --title <title> --body-file <path> [--issue N]
 [--rung 1-6] [--base main] [--docs-only]`.** It validates the seven-field body
