@@ -461,8 +461,11 @@ pub(super) fn spawn_orphan_reaper_ticker(state: Arc<SearchAppState>) {
 /// key used at boot (`lazy_loader::ids_to_park`, sharing
 /// `select_warmboot_entries`'s comparator) and cold-parks everything beyond
 /// `TRUSTY_MAX_RESIDENT_INDEXES` via `lazy_loader::cold_park_index` — a
-/// non-destructive detach that leaves `indexes.toml`, `roots.toml`, and every
-/// on-disk artifact untouched. A subsequent query reloads the index lazily
+/// non-destructive detach that leaves `indexes.toml`, `roots.toml`, and the
+/// redb corpus untouched. #6870 added one durable write on the way out: the
+/// index's own HNSW snapshot is saved before the detach, because dropping a
+/// heap-resident store with unpersisted writes loses them. A subsequent query
+/// reloads the index lazily
 /// through the existing cold-store path, exactly like a never-yet-queried
 /// boot-time cold index.
 /// What: spawns a detached task (mirrors every other `spawn_*_ticker`) that

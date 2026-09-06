@@ -355,16 +355,18 @@ pub fn ids_to_park(resident_entries: Vec<PersistedIndex>, cap: usize) -> Vec<Per
 /// What: (0) bail out with `false` if `id` is already in `cold_store`
 /// (in-flight load guard, see above); (0.5) snapshot the handle currently
 /// registered under `id` as `expected` — see "Concurrent-write guard" below;
-/// (1) `cold_store.register_cold_entries([entry])`; (2)
+/// (0.75) [`persist_before_park`] saves the vector store (#6870); (1)
+/// `cold_store.register_cold_entries([entry])`; (2)
 /// `registry.remove_and_get(id)`, compared by `Arc::ptr_eq` against
 /// `expected`. Returns `true` when an index was actually resident and got
-/// parked. Returns `false` in two distinct cases, both of which roll back the
-/// cold-store registration: (a) the id had already been removed by a
-/// concurrent delete / orphan-reap (benign race: nothing to park); (b) a
-/// concurrent create/relocate/reindex-override swapped in a DIFFERENT handle
-/// under this id — see below. Either way we must not leave a stray,
-/// unloadable cold entry for an id whose live registration is either gone or
-/// no longer what we thought it was.
+/// parked. Returns `false` in three distinct cases. The first mutates nothing:
+/// (0) the save failed, so the park is abandoned before it starts and the next
+/// sweep retries. The other two roll back the cold-store registration: (a) the
+/// id had already been removed by a concurrent delete / orphan-reap (benign
+/// race: nothing to park); (b) a concurrent create/relocate/reindex-override
+/// swapped in a DIFFERENT handle under this id — see below. In both of those we
+/// must not leave a stray, unloadable cold entry for an id whose live
+/// registration is either gone or no longer what we thought it was.
 ///
 /// **Concurrent-write guard (issue #3995 round 4, HIGH; identity-guarded
 /// reap added round 5, CRITICAL):** `create_index_handler`,
@@ -467,6 +469,85 @@ pub async fn cold_park_index(
 /// force the precise interleaving deterministically instead of relying on
 /// real OS-thread scheduling to hit a multi-microsecond window — the same
 /// need documented on [`cold_park_index`]'s "Concurrent-write guard" section.
+/// Snapshot the index's vector store to disk before the park detaches it
+/// (#6870).
+///
+/// Why: parking drops the last `Arc` to the `IndexHandle`, and with it a
+/// heap-resident HNSW store holding writes that were never saved. The next
+/// `get_or_load_index` rebuilds from the on-disk snapshot, so those writes are
+/// gone — silently, with the index looking healthy. #2161 shipped the park with
+/// the cap off by default, which made this rare; #6821 turns the cap on for
+/// every host and makes it the ordinary path.
+/// What: calls [`CodeIndexer::save_vector_store`] — the same path the shutdown
+/// flush takes — against the entry's snapshot path, under the indexer read
+/// lock. Returns `true` when the caller may proceed to detach: the save
+/// succeeded, no store is wired (BM25-only), or the entry has no resolvable
+/// snapshot path. Returns `false` on a save error so the caller parks nothing
+/// and the next sweep retries; losing 120 s of residency headroom is cheaper
+/// than losing the writes. A store already serving from its mmap view has
+/// nothing unpersisted and `UsearchStore::save` short-circuits it.
+///
+/// This is a durable write to the index's OWN snapshot path, which the
+/// non-destructive contract in [`cold_park_index`] already permits — it is what
+/// the shutdown flush and the incremental persister write. `indexes.toml`,
+/// `roots.toml`, and the redb corpus are still untouched.
+/// Test: `cold_park_persists_a_dirty_vector_store_before_detaching` in
+/// `tests/residency_cold_park.rs`.
+async fn persist_before_park(
+    id: &IndexId,
+    handle: &Arc<crate::core::registry::IndexHandle>,
+    entry: &PersistedIndex,
+) -> bool {
+    let hnsw_path = match crate::service::persistence::hnsw_path_for_entry(entry) {
+        Ok(path) => path,
+        Err(e) => {
+            // No resolvable snapshot path — there is nowhere to save to, and
+            // that is not a reason to keep the index resident forever.
+            tracing::debug!(
+                "residency-park: '{}' has no resolvable HNSW snapshot path ({e}) \
+                 — parking (#6870)",
+                id.0
+            );
+            return true;
+        }
+    };
+    let started = std::time::Instant::now();
+    let saved = handle
+        .indexer
+        .read()
+        .await
+        .save_vector_store(&hnsw_path)
+        .await;
+    match saved {
+        Ok(true) => {
+            let bytes = std::fs::metadata(&hnsw_path).map(|m| m.len()).unwrap_or(0);
+            tracing::info!(
+                "residency-park: saved '{}' HNSW snapshot before detaching \
+                 ({bytes} bytes, {:?}) (#6870)",
+                id.0,
+                started.elapsed()
+            );
+            true
+        }
+        Ok(false) => {
+            tracing::debug!(
+                "residency-park: '{}' has no vector store to save — parking (#6870)",
+                id.0
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                "residency-park: refusing to park '{}' — its vector store could \
+                 not be saved ({e}); parking now would drop unpersisted writes. \
+                 The next sweep retries (#6870)",
+                id.0
+            );
+            false
+        }
+    }
+}
+
 async fn cold_park_index_inner(
     id: &IndexId,
     registry: &IndexRegistry,
@@ -489,6 +570,11 @@ async fn cold_park_index_inner(
     let Some(expected) = registry.get(id) else {
         return false;
     };
+    // 0.75. #6870: persist before detaching. Nothing has been mutated yet, so a
+    //    failed save is a clean no-op and the next sweep retries.
+    if !persist_before_park(id, &expected, &entry).await {
+        return false;
+    }
     // 1. Make the index discoverable as "cold" FIRST — closes the gap where a
     //    concurrent query would otherwise see it in neither store. Capture
     //    the identity token this specific insertion is stamped with (issue

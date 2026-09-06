@@ -262,3 +262,90 @@ async fn park_reload_park_cycle_is_lossless() {
         "second reload after a park→reload→park cycle must still be lossless"
     );
 }
+
+/// #6870: a park must not drop a vector store's unpersisted writes.
+///
+/// Why: `cold_park_index` detached the handle and dropped the last `Arc` to it
+/// without ever calling `save()`. A heap-resident HNSW store holding writes the
+/// incremental persister had not yet checkpointed lost them, and the reload
+/// rebuilt from the stale on-disk snapshot — silently, with the index reporting
+/// healthy. #2161 shipped this with the residency cap off by default; #6821
+/// turns the cap on for every host, so the park is now the ordinary path.
+/// What: indexes a file, writes a SECOND one straight after so the in-memory
+/// store is ahead of any checkpoint, parks, and reloads. The reloaded store
+/// must hold every vector the live one did.
+///
+/// On `origin/main` this fails at the vector-count assertion: the reload sees
+/// only what the on-disk snapshot happened to contain.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn cold_park_persists_a_dirty_vector_store_before_detaching() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let id_str = "residency-dirty-store";
+    let entry = colocated_entry(id_str, root.clone());
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(8));
+
+    let handle = build_and_index(
+        &entry,
+        &embedder,
+        "lib.rs",
+        "fn alpha_function() {}\nfn beta_function() {}\n",
+    )
+    .await;
+    handle
+        .indexer
+        .read()
+        .await
+        .index_file(
+            "more.rs",
+            "fn gamma_function() {}\nfn delta_function() {}\n",
+        )
+        .await
+        .expect("second index_file");
+
+    let vectors_before = handle
+        .indexer
+        .read()
+        .await
+        .vector_count()
+        .await
+        .expect("this fixture must wire a vector store — otherwise it proves nothing");
+    assert!(
+        vectors_before > 0,
+        "the seed content must have produced vectors to lose"
+    );
+
+    let registry = IndexRegistry::default();
+    let cold = ColdIndexStore::new();
+    let id = IndexId::new(id_str.to_string());
+    registry.register(handle);
+
+    let parked = cold_park_index(&id, &registry, &cold, entry.clone()).await;
+    assert!(parked, "a resident index with a saveable store must park");
+
+    // The registry files and the corpus stay untouched — only the index's own
+    // HNSW snapshot is written, which is what the shutdown flush writes too.
+    let redb_path = corpus_redb_path_for_entry(&entry).unwrap();
+    assert!(
+        redb_path.exists(),
+        "the park must not touch the redb corpus"
+    );
+
+    let reloaded =
+        reload_via_cold_path(&id, &registry, &cold, entry.clone(), Arc::clone(&embedder)).await;
+    let vectors_after = reloaded
+        .indexer
+        .read()
+        .await
+        .vector_count()
+        .await
+        .expect("the reloaded index must wire a vector store");
+
+    assert_eq!(
+        vectors_after, vectors_before,
+        "every vector the live store held must survive the park — a park that \
+         detaches without saving loses the writes made since the last checkpoint \
+         (#6870)"
+    );
+}
