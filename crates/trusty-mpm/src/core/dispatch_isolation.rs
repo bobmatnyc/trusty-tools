@@ -77,7 +77,7 @@
 //! machine's builder slots — whether it runs a compiler or a test suite — which
 //! is neither "does it write files" nor "does it need its own tree". It is here
 //! because it reads the same bundled frontmatter through the same scan
-//! ([`bundled_agent_metadata`]), and it must NOT be folded into
+//! (`bundled_agent_metadata`), and it must NOT be folded into
 //! [`agent_mutates_files`]: `documentation` and `version-control` both write and
 //! neither builds, so counting them against a RAM cap would deny builds to buy
 //! nothing.
@@ -92,7 +92,6 @@
 //! [`permitted_in_shared_checkout`]: crate::core::dispatch_isolation::permitted_in_shared_checkout
 //! [`blocked_by_shared_tree`]: crate::core::dispatch_isolation::blocked_by_shared_tree
 //! [`agent_is_builder`]: crate::core::dispatch_isolation::agent_is_builder
-//! [`bundled_agent_metadata`]: crate::core::dispatch_isolation::bundled_agent_metadata
 
 use serde_json::Value;
 use trusty_agents_common::agents::metadata::agent_metadata_from_str;

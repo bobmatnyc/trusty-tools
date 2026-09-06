@@ -227,9 +227,9 @@ pub(crate) enum BuilderSlotClaim {
 /// Claim a builder slot for this dispatch, and learn who already holds one.
 ///
 /// Why: the count and the claim must be indivisible or two dispatches in one PM
-/// turn both see a free slot — see [`crate::daemon`]'s builder-slot route. The
-/// hook cannot make them so; the daemon can, and this is the call that asks it
-/// to.
+/// turn both see a free slot — see [`trusty_mpm::daemon`]'s builder-slot route.
+/// The hook cannot make them so; the daemon can, and this is the call that asks
+/// it to.
 /// What: POSTs through the shared delegation-guard wire contract
 /// ([`post_shared_tree`], which takes the route) so the endpoint, the payload
 /// projection and the 500 ms / 2 s bounds are the same ones every other
