@@ -17,7 +17,7 @@ name = "trusty-audit"
 # `search_evidence` here, which `cargo-semver-checks` reports as
 # `struct_missing_field` against 0.13.3; for a 0.y.z crate the breaking bump is
 # the MINOR position.
-version = "0.14.1"
+version = "0.14.2"
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"
@@ -108,7 +108,13 @@ trusty-installer = { workspace = true }
 # point, used where a board provider's own error text reaches an operator.
 # #5915: `crate-config` for `crate_config_dir_at` — the workspace's one owner of
 # the `~/.trusty-tools/<crate>` layout, which `workdir.rs` now defaults into.
-trusty-common = { workspace = true, features = ["gh-cli", "credentials", "crate-config"] }
+# #6906: `uds` for the UDS framed-request client the `grounding` daemons/
+# hotspots/search_rpc modules use to talk to trusty-analyze/trusty-search over
+# their Unix sockets. Workspace feature unification hid the missing
+# declaration from every gate except `cargo publish`'s isolated verification
+# build, which burned the trusty-audit-v0.14.1 tag (E0433 `could not find
+# 'uds' in 'trusty_common'`).
+trusty-common = { workspace = true, features = ["gh-cli", "credentials", "crate-config", "uds"] }
 # #5822: board validation issues HTTP requests, so it needs `reqwest`'s types —
 # the RequestBuilder, and the error it classifies without quoting the URL. The
 # CLIENT still comes from `trusty_installer::download::http_client`, which stays
