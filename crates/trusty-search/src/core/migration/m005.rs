@@ -19,9 +19,9 @@
 //! text is unchanged, so a re-chunked chunk's vector already exists — under the
 //! OLD id. usearch keys its vectors by `u64` labels that never encode a chunk
 //! id, so handing a stored vector to its new id is a rewrite of the JSON sidecar
-//! alone ([`CodeIndexer::remap_vector_store_keys`]). Nothing is embedded; only
-//! text this corpus has never held would need to be, and that is left to the
-//! ordinary embed catch-up rather than paid for here.
+//! alone ([`crate::core::indexer::CodeIndexer::remap_vector_store_keys`]).
+//! Nothing is embedded; only text this corpus has never held would need to be,
+//! and that is left to the ordinary embed catch-up rather than paid for here.
 //!
 //! Why it is crash-recoverable: the clear destroys the very evidence a
 //! contents-based guard would read, so an interrupted pass used to look
