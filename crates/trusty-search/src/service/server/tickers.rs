@@ -472,17 +472,21 @@ pub(super) fn spawn_orphan_reaper_ticker(state: Arc<SearchAppState>) {
 /// key used at boot (`lazy_loader::ids_to_park`, sharing
 /// `select_warmboot_entries`'s comparator) and cold-parks everything beyond
 /// `TRUSTY_MAX_RESIDENT_INDEXES` via `lazy_loader::cold_park_index` — a
-/// non-destructive detach that leaves `indexes.toml`, `roots.toml`, and every
-/// on-disk artifact untouched. A subsequent query reloads the index lazily
+/// non-destructive detach that leaves `indexes.toml`, `roots.toml`, and the
+/// redb corpus untouched. #6870 added one durable write on the way out: the
+/// index's own HNSW snapshot is saved before the detach, because dropping a
+/// heap-resident store with unpersisted writes loses them. A subsequent query
+/// reloads the index lazily
 /// through the existing cold-store path, exactly like a never-yet-queried
 /// boot-time cold index.
 /// What: spawns a detached task (mirrors every other `spawn_*_ticker`) that
 /// ticks at a FIXED interval resolved once at spawn time
 /// (`residency_sweep_secs()`; `0` disables the ticker entirely, never
-/// spawning). Inside the loop, `max_resident_indexes()` is re-read on every
-/// tick so `TRUSTY_MAX_RESIDENT_INDEXES` can be toggled via `daemon.env`
-/// without a restart — when it is unset the tick is a cheap no-op (back-compat
-/// default: nothing is ever parked).
+/// spawning). Inside the loop, `TRUSTY_MAX_RESIDENT_INDEXES` is re-read on
+/// every tick so it can be toggled via `daemon.env` without a restart; the
+/// machine tier it falls back to is read once, off `state.machine_tier`. #6821
+/// made that fallback a real number, so an unset var no longer makes the tick a
+/// no-op — `TRUSTY_MAX_RESIDENT_INDEXES=off` is what does that now.
 /// Test: the pure selection logic is covered by `lazy_loader::residency::tests`;
 /// this function is a thin scheduling wrapper — `run_residency_sweep_tick` (the
 /// per-tick logic) is covered directly by `residency_sweep_tests`; the full
@@ -1123,8 +1127,12 @@ async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
 /// catch up on anything that changed while unwatched, so nothing is lost —
 /// this is the identical, already-tested mechanism idle-suspend relies on.
 async fn run_residency_sweep_tick(state: &Arc<SearchAppState>) {
-    let Some(cap) = crate::service::lazy_loader::max_resident_indexes() else {
-        return; // Feature disabled — back-compat default (issue #2161).
+    // #6821: an unset TRUSTY_MAX_RESIDENT_INDEXES now resolves to the machine
+    // tier's default instead of disabling the sweep; `off` is what disables it.
+    let resolved =
+        crate::service::lazy_loader::resolve_max_resident_indexes_for(state.machine_tier);
+    let Some(cap) = resolved.cap else {
+        return; // TRUSTY_MAX_RESIDENT_INDEXES=off — nothing is ever parked.
     };
 
     let resident_ids: HashSet<String> = state.registry.list().into_iter().map(|id| id.0).collect();

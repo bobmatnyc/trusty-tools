@@ -49,6 +49,20 @@ pub(super) struct HealthResponse {
     /// successfully-sampled value; `0` only before the very first sample.
     pub(super) rss_mb: u64,
     pub(super) rss_limit_mb: u64,
+    /// How many indexes may stay resident at once (#6821).
+    ///
+    /// Why: the residency sweep parks indexes beyond this number, and since
+    /// #6821 the number has a tier-scaled default rather than being off. An
+    /// operator seeing `index_not_resident`, or a shrinking `indexes` count,
+    /// needs the acting cap without reading the daemon's environment.
+    /// What: the resolved cap. `null` means the cap is off
+    /// (`TRUSTY_MAX_RESIDENT_INDEXES=off`) and nothing is ever parked. Always
+    /// present — `null` is the disabled signal, not an absent key.
+    /// Test: `health_reports_the_resident_index_cap_and_its_source`.
+    pub(super) resident_index_cap: Option<usize>,
+    /// Which input produced [`Self::resident_index_cap`] (#6821): `"env"`,
+    /// `"env (off)"`, or `"tier default"`.
+    pub(super) resident_index_cap_source: &'static str,
     pub(super) disk_bytes: u64,
     /// CPU usage percent. Same staleness semantics as `rss_mb`: returns the
     /// last good sample on contention, `0.0` only before the first sample.
@@ -475,6 +489,11 @@ pub(super) async fn health_handler(
     // `rss_limit_mb` mirrors the resolved TRUSTY_MEMORY_LIMIT_MB soft cap.
     // `memory_limit_mb()` returns `None` when no limit is configured.
     let rss_limit_mb = crate::core::memguard::memory_limit_mb().unwrap_or(0);
+    // #6821: the acting resident-index cap and where it came from. The tier is
+    // read off the state (one RAM read per daemon, not one per poll); only the
+    // env var is re-read here.
+    let resident_cap =
+        crate::service::lazy_loader::resolve_max_resident_indexes_for(state.machine_tier);
     let disk_bytes = state.disk_bytes.load(std::sync::atomic::Ordering::Relaxed);
     // Issue #38 / epic #3524 slice 6 (PR 2/5, closes #3530 / #3493 P1):
     // surface model detail (dimension, provider, quantized, model, backend)
@@ -928,6 +947,8 @@ pub(super) async fn health_handler(
         embedder_recent_timeout_count,
         rss_mb,
         rss_limit_mb,
+        resident_index_cap: resident_cap.cap,
+        resident_index_cap_source: resident_cap.source.as_str(),
         disk_bytes,
         cpu_pct,
         embedder_info,

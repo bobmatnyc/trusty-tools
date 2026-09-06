@@ -75,6 +75,20 @@ pub enum DaemonEvent {
 #[non_exhaustive]
 pub struct SearchAppState {
     pub registry: IndexRegistry,
+    /// The machine-size band this daemon is running on (#6820, read here by
+    /// #6821).
+    ///
+    /// Why: total RAM costs a `sysctl` spawn on macOS, and two per-request /
+    /// per-tick callers now need the tier — `/health` and the residency sweep,
+    /// both of which resolve `TRUSTY_MAX_RESIDENT_INDEXES`'s tier-scaled
+    /// default. Resolving it once per state is the same idiom
+    /// [`Self::query_limiter`] uses; re-detecting it per poll would spawn a
+    /// process on a hot endpoint.
+    /// What: `MachineBudget::detect().tier`, resolved in
+    /// [`SearchAppState::new`]. A hardware fact, so it is fixed for the
+    /// process; the env vars layered on top of it are still read per call.
+    /// Test: `health_reports_the_resident_index_cap_and_its_source`.
+    pub machine_tier: trusty_common::machine_tier::MemoryTier,
     /// The ONE admission limiter gating the interactive query surface
     /// (#6285 slice 3).
     ///

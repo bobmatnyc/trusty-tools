@@ -21,7 +21,9 @@ use crate::commands::start_restore::{
 };
 use crate::service::SearchAppState;
 
-use crate::service::lazy_loader::{select_warmboot_entries, warmboot_max_indexes};
+use crate::service::lazy_loader::{
+    select_warmboot_entries, warmboot_cap_for, warmboot_max_indexes,
+};
 use crate::service::persistence::PersistedIndex;
 use crate::service::warm_boot::{
     collect_colocated_entries, collect_legacy_entries, is_on_inaccessible_volume,
@@ -189,11 +191,20 @@ pub(super) async fn restore_indexes(
     no_auto_discover: bool,
 ) {
     // Issue #993: read TRUSTY_WARMBOOT_MAX_INDEXES once before collecting.
-    let max_warmboot = warmboot_max_indexes();
+    // #6821: when it is unset the eager cap falls back to the resident-index
+    // cap, so a boot never loads more than the residency sweep would keep 120 s
+    // later. The ranking is unchanged — most-recently-used first, and an entry
+    // that was never queried and never indexed sorts last.
+    let max_warmboot = warmboot_cap_for(state.machine_tier);
     if let Some(n) = max_warmboot {
+        let source = if warmboot_max_indexes().is_some() {
+            "TRUSTY_WARMBOOT_MAX_INDEXES"
+        } else {
+            "resident-index cap"
+        };
         tracing::info!(
-            "warm-boot: TRUSTY_WARMBOOT_MAX_INDEXES={n} — will eager-load top-{n} \
-             by recency, defer the rest to cold store (issue #993)"
+            "warm-boot: eager cap {n} (from {source}) — will eager-load top-{n} \
+             by recency, defer the rest to cold store (issues #993, #6821)"
         );
     }
 

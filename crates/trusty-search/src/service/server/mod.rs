@@ -128,6 +128,9 @@ mod tests_health_degraded;
 // #5927: corpus-open failure vs. any-lane failure counter semantics.
 #[cfg(test)]
 mod stage_failed_5927_tests;
+// #6821: /health's resident-index cap and its provenance.
+#[cfg(test)]
+mod resident_index_cap_6821_tests;
 #[cfg(test)]
 mod tests_health_switchable;
 #[cfg(test)]
