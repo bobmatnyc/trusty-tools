@@ -53,6 +53,8 @@
 //! [`connect_hardened`]: crate::uds::connect_hardened
 //! [`ensure_peer_is_self`]: crate::uds::ensure_peer_is_self
 //! [`dir::prepare_socket_dir`]: crate::uds::dir::prepare_socket_dir
+//! [`sockbuf`]: crate::uds::sockbuf
+//! [`sockbuf::SOCKET_BUFFER_BYTES`]: crate::uds::sockbuf::SOCKET_BUFFER_BYTES
 
 #[cfg(test)]
 #[path = "tests.rs"]
