@@ -1,0 +1,5 @@
+Fixed
+
+- `tm issue seed-labels` now seeds every label the harness applies, not just the ones `issue-state.yaml` declares: the lifecycle labels, `trusty-mpm`, and `ws/<session>` when a tmux session name is available. Before this, a fresh repo's first `gh issue create --label trusty-mpm` failed on an unknown label with nothing in the tooling that would have created it. Labels the repo already carries stay untouched, colour and description included; with no session name the `ws/` label is skipped and the output says so (#6914).
+- Session launch no longer creates the retired `in-progress` / `blocked` label pair. That pair predates the `status:*` lifecycle and was seeded into every repo a managed session ever launched against. Launch now ensures the same policy set `seed-labels` does, from one shared table in `core::policy_labels` (#6914).
+- The crate builds its `gh label create` command line in exactly one place. Session launch and `tm issue` each kept their own argv builder and their own label table, which is how launch went on creating retired labels unnoticed (#6914).

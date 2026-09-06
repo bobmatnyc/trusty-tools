@@ -347,7 +347,7 @@ fn project_seed_labels_skips_the_labelless_states() {
     let m = project_model();
     let gh = FakeGh::new(vec![ok_out("[]")]);
     let sys = GhTicketSystem::new(gh);
-    let report = ops::seed_labels(&sys, &m, true).expect("seed dry-run");
+    let report = ops::seed_labels(&sys, &m, None, true).expect("seed dry-run");
     assert_eq!(
         report.created,
         vec![
@@ -355,7 +355,36 @@ fn project_seed_labels_skips_the_labelless_states() {
             "status:coded".to_string(),
             "status:merged".to_string(),
             "status:tested".to_string(),
+            // #6914: the framework's own labels seed alongside the model's.
+            "trusty-mpm".to_string(),
         ],
-        "only the four labelled states are seeded"
+        "only the four labelled states, plus the policy set, are seeded"
     );
+    assert!(
+        report.workstream_skipped,
+        "no session name was supplied, so the ws/ label is skipped and said so"
+    );
+}
+
+/// #6914: against THIS repo's real `issue-state.yaml`, one `seed-labels` run
+/// creates every label the harness applies — the four lifecycle labels, the
+/// `trusty-mpm` convention label, and `ws/<session>`.
+#[test]
+fn project_seed_labels_covers_the_whole_harness_label_set() {
+    let m = project_model();
+    let gh = FakeGh::new(vec![ok_out("[]")]);
+    let sys = GhTicketSystem::new(gh);
+    let report = ops::seed_labels(&sys, &m, Some("tm-tcode-01"), true).expect("seed dry-run");
+    assert_eq!(
+        report.created,
+        vec![
+            "status:in-progress".to_string(),
+            "status:coded".to_string(),
+            "status:merged".to_string(),
+            "status:tested".to_string(),
+            "trusty-mpm".to_string(),
+            "ws/tm-tcode-01".to_string(),
+        ]
+    );
+    assert!(!report.workstream_skipped);
 }

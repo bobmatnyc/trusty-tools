@@ -139,9 +139,23 @@ gh issue create --title "…" --body "…" \
   --label bug --label trusty-memory --label P1
 ```
 
-Check `gh label list` before inventing a variant of a label the repo already
-carries; create a genuinely missing one (`gh label create <name>`) rather than
-dropping the family.
+### Seed the labels before the first filing
+
+🔴 **Run `tm issue seed-labels` on first use in a repository.** It creates the
+four `status:*` lifecycle labels, `trusty-mpm`, and `ws/<session>`. It is
+idempotent and leaves every label that already exists untouched — colour and
+description included — so running it unconditionally costs less than checking
+whether it is needed.
+
+🔴 **When `gh issue edit --add-label` or `gh issue create --label` fails on an
+unknown label, run `tm issue seed-labels`, then retry the original command
+once.** Both commands fail outright on a label the repo has never seen, and the
+seed is what makes the retry succeed.
+
+If the retry still fails, the label is not one the harness owns. Check `gh label
+list` before inventing a variant of a label the repo already carries; create a
+genuinely missing one (`gh label create <name>`) rather than dropping the
+family.
 
 ## Milestones Are Release Slots, Not a Field to Fill
 

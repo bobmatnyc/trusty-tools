@@ -137,6 +137,11 @@ pub mod overseer_config;
 pub mod own_binary_names;
 pub mod paths;
 pub mod pid_registry;
+// The labels trusty-mpm applies by policy, shared by session launch and
+// `tm issue seed-labels` (#6914). Doc lives in the module's own `//!` header —
+// an outer `///` here would resolve its intra-doc links in THIS scope and break
+// them (`check_rustdoc_links.sh`).
+pub mod policy_labels;
 pub mod process;
 pub mod project;
 pub mod project_aliases;
