@@ -1,0 +1,3 @@
+Fixed
+
+- `uds` now sizes `SO_SNDBUF` and `SO_RCVBUF` to 1 MiB — an eighth of the 8 MiB frame budget — on both ends of every socket it owns: the listener in `bind_hardened`, each accepted stream in `server::handle_connection`, and the dialled stream in `connect_hardened`. macOS ships those buffers at 8 KiB, so an 8 MiB frame cost roughly 1,100 write-then-drain round trips, each a task park and unpark; on this host the measured in-flight window rises from 8 KiB to 1 MiB, taking that frame from 1024 round trips to 8. The new `uds::sockbuf::tune_socket_buffers` is the single entry point, and a `setsockopt` failure is reported as `UdsSecurityError::SocketBuffer` rather than absorbed into the platform default ([#6896](https://github.com/bobmatnyc/trusty-tools/issues/6896))

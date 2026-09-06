@@ -650,3 +650,180 @@ async fn bind_singleton_refuses_a_socket_someone_is_serving() {
     );
     assert!(sock.exists(), "the live owner's socket must survive");
 }
+
+// ---------------------------------------------------------------------------
+// #6896 — socket buffer sizing.
+// ---------------------------------------------------------------------------
+
+/// One write into a socket under measurement, in bytes. 8 KiB is the macOS
+/// default buffer, so an unsized socket absorbs one or two of these.
+const FILL_CHUNK: usize = 8 * 1024;
+
+/// Bytes a writer can hand the kernel before the socket stops accepting them,
+/// with nothing draining the other end.
+///
+/// This is the figure the round-trip count derives from: a frame of `F` bytes
+/// costs `ceil(F / in_flight)` write-then-drain round trips, and each one parks
+/// and unparks the writing task.
+fn bytes_in_flight(stream: &tokio::net::UnixStream) -> usize {
+    let chunk = vec![0u8; FILL_CHUNK];
+    let mut written = 0usize;
+    loop {
+        match stream.try_write(&chunk) {
+            Ok(0) => return written,
+            Ok(n) => written += n,
+            // Every other error is also "no more fits" for this measurement;
+            // returning what was accepted keeps the test from spinning.
+            Err(_) => return written,
+        }
+    }
+}
+
+/// Round trips an 8 MiB frame costs at a given in-flight window.
+fn round_trips(in_flight: usize) -> usize {
+    let frame = MAX_FRAME_BYTES as usize;
+    if in_flight == 0 {
+        return frame;
+    }
+    frame.div_ceil(in_flight)
+}
+
+/// The granted sizes, or a panic naming what came back instead.
+fn expect_sized(outcome: SocketBufferOutcome) -> SocketBufferSizes {
+    match outcome {
+        SocketBufferOutcome::Sized(sizes) => sizes,
+        other => panic!("expected a sized socket, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn tune_socket_buffers_raises_both_buffers_on_a_socketpair() {
+    let (a, _b) = tokio::net::UnixStream::pair().expect("socketpair");
+
+    let sized = expect_sized(tune_socket_buffers(&a).expect("size the buffers"));
+
+    // The kernel clamps, so the granted size is asserted as a floor against the
+    // platform default rather than an equality against the request.
+    assert!(
+        sized.send >= FILL_CHUNK * 2 && sized.recv >= FILL_CHUNK * 2,
+        "expected both buffers well above the 8 KiB macOS default, got {sized:?}"
+    );
+}
+
+/// A socket whose peer has gone is reported, not failed.
+///
+/// Why: macOS answers EINVAL to `setsockopt(SO_SNDBUF)` once the peer has hung
+/// up, and an accepted socket is routinely in that state — a liveness probe
+/// connects and closes. Treating it as a failure turned every probe into a
+/// connection error, which is the regression this test pins.
+#[tokio::test]
+async fn tune_socket_buffers_reports_a_peer_that_already_hung_up() {
+    let (a, b) = tokio::net::UnixStream::pair().expect("socketpair");
+    drop(b);
+
+    let outcome = tune_socket_buffers(&a).expect("a dead peer is not a sizing failure");
+
+    // Linux sets the buffer regardless of connection state, so both outcomes
+    // are correct there; what must never happen is an error.
+    assert!(
+        matches!(
+            outcome,
+            SocketBufferOutcome::PeerHungUp | SocketBufferOutcome::Sized(_)
+        ),
+        "unexpected outcome {outcome:?}"
+    );
+    #[cfg(target_os = "macos")]
+    assert_eq!(outcome, SocketBufferOutcome::PeerHungUp);
+}
+
+/// The server side is sized by inheritance, which is why nothing sizes an
+/// accepted socket directly.
+#[tokio::test]
+async fn an_accepted_socket_inherits_the_listeners_sizing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("inherit.sock");
+    let listener = bind_hardened(&sock).expect("bind hardened");
+    let _client = connect_hardened(&sock).await.expect("connect hardened");
+    let (server, _) = listener.accept().await.expect("accept");
+
+    // Read back without setting anything: whatever the accepted socket carries
+    // it got from the listener at `accept` time.
+    let on_listener = socket_buffer_sizes(&listener).expect("read the listener");
+    let inherited = socket_buffer_sizes(&server).expect("read the accepted socket");
+
+    assert_eq!(
+        inherited, on_listener,
+        "an accepted socket must carry the listener's sizing without being set itself"
+    );
+    assert!(
+        inherited.send >= FILL_CHUNK * 2 && inherited.recv >= FILL_CHUNK * 2,
+        "the inherited sizing must be the raised one, not the platform default: {inherited:?}"
+    );
+}
+
+#[test]
+fn socket_buffer_request_stays_within_the_frame_budget() {
+    // macOS refuses a reservation past `kern.ipc.maxsockbuf` scaled by the mbuf
+    // overhead, and `sockbuf` propagates that refusal rather than defaulting.
+    // Staying an eighth of the frame budget is what keeps the request reachable.
+    assert_eq!(SOCKET_BUFFER_BYTES, 1024 * 1024);
+    assert!((SOCKET_BUFFER_BYTES as u64) < MAX_FRAME_BYTES);
+}
+
+/// The #6896 measurement: a hardened pair holds far more in flight than a pair
+/// left at the platform default, so a frame-budget exchange costs far fewer
+/// round trips.
+///
+/// Why a ratio rather than a wall-clock figure: the cost the issue names is the
+/// COUNT of write-then-drain round trips, each a task park and unpark, and that
+/// count is a deterministic function of the socket buffer sizes. Timing it
+/// instead would measure the scheduler under whatever else the host is doing.
+///
+/// The 8x floor is asserted only on macOS. Linux ships `net.core.wmem_default`
+/// at 212992 — 26x the macOS figure — so there the contract the issue states is
+/// "unchanged or improved", which is the unconditional assertion below.
+#[tokio::test]
+async fn hardened_sockets_hold_far_more_in_flight_than_the_platform_default() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    // Baseline: a bare bind and connect — what this module did before #6896.
+    let plain_path = tmp.path().join("plain.sock");
+    let plain_listener = tokio::net::UnixListener::bind(&plain_path).expect("bind plain");
+    let plain_client = tokio::net::UnixStream::connect(&plain_path)
+        .await
+        .expect("connect plain");
+    let (_plain_server, _) = plain_listener.accept().await.expect("accept plain");
+    let plain = bytes_in_flight(&plain_client);
+
+    // The production paths: `bind_hardened` sizes the listener (and so every
+    // socket `accept` returns), `connect_hardened` sizes the dialling end.
+    let sized_path = tmp.path().join("sockets").join("sized.sock");
+    let sized_listener = bind_hardened(&sized_path).expect("bind hardened");
+    let sized_client = connect_hardened(&sized_path)
+        .await
+        .expect("connect hardened");
+    let (_sized_server, _) = sized_listener.accept().await.expect("accept hardened");
+    let sized = bytes_in_flight(&sized_client);
+
+    eprintln!(
+        "#6896 in-flight bytes: default={plain} ({} round trips for an 8 MiB frame), \
+         sized={sized} ({} round trips)",
+        round_trips(plain),
+        round_trips(sized)
+    );
+
+    assert!(
+        sized >= plain,
+        "sizing must never reduce what a socket holds in flight: \
+         default={plain}, sized={sized}"
+    );
+
+    #[cfg(target_os = "macos")]
+    assert!(
+        sized >= plain * 8 && round_trips(sized) * 8 <= round_trips(plain),
+        "expected at least an 8x drop in round trips on macOS: \
+         default={plain} ({} round trips), sized={sized} ({} round trips)",
+        round_trips(plain),
+        round_trips(sized)
+    );
+}

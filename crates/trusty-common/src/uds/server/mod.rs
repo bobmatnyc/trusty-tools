@@ -348,6 +348,9 @@ pub async fn handle_connection(
     router: Arc<RpcRouter>,
     options: RpcServeOptions,
 ) -> Result<Served, RpcServerError> {
+    // #6896: this connection's buffers were sized by `bind_hardened` on the
+    // LISTENER and copied here by `accept`. Sizing them again would fail on a
+    // liveness probe, whose peer has already closed — see `uds::sockbuf`.
     ensure_peer_is_self(&stream).map_err(|source| RpcServerError::Peer { source })?;
 
     let mut frame: Vec<u8> = Vec::new();

@@ -451,8 +451,8 @@ mod tests {
     /// request and answers nothing at all.
     ///
     /// The stall is what makes the OPEN slow rather than instant: the request
-    /// frame is larger than any plausible UNIX-socket send buffer, so the
-    /// client's `write_all` cannot finish until this end starts reading.
+    /// frame is larger than the socket's send and receive buffers combined, so
+    /// the client's `write_all` cannot finish until this end starts reading.
     fn stalls_then_drains(socket: PathBuf, drain_after: std::time::Duration) -> PathBuf {
         let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
         tokio::spawn(async move {
@@ -467,9 +467,15 @@ mod tests {
         socket
     }
 
-    /// A request frame past any plausible socket send buffer.
+    /// A request frame past what one socket can hold in flight.
+    ///
+    /// #6896: derived from `SOCKET_BUFFER_BYTES` rather than a 512 KiB literal.
+    /// `uds` now sizes both buffers to that constant, so a fixed figure below it
+    /// leaves the whole frame sitting in the kernel and the write returns
+    /// immediately — which makes the open fast and this test vacuous. Four times
+    /// the constant clears the sending and receiving buffers together.
     fn bulky_params() -> Value {
-        json!({ "blob": "x".repeat(512 * 1024) })
+        json!({ "blob": "x".repeat(4 * trusty_common::uds::SOCKET_BUFFER_BYTES) })
     }
 
     /// Why: the open has two waiting steps — the dial-and-write inside
