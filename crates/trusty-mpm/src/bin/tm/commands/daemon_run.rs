@@ -15,17 +15,20 @@
 
 use std::net::SocketAddr;
 
-/// What the startup guard prints when a daemon is already answering.
+/// What an already-running daemon is reported as, wherever that is reported.
 ///
-/// Why (#6869): both guard arms printed `… already running at
-/// http://127.0.0.1:7880`, which put the daemon's port in front of the
-/// operator on a path where it changes nothing they can act on. The URL is a
-/// discovery detail — whatever `resolve_daemon_url` happened to return, or
-/// whatever `--addr` asked for — and the move to a Unix socket (#6288) will
-/// make printing one wrong. It is demoted to `tracing::debug!` at each site.
-/// What: one fixed line, shared by both arms so they cannot drift apart.
-/// Test: `already_running_notice_names_no_address`.
-const ALREADY_RUNNING_NOTICE: &str = "the trusty-mpm daemon is already running";
+/// Why (#6869): `tm daemon`'s two guard arms printed `… already running at
+/// http://127.0.0.1:7880` and `tm start` printed `Daemon already running on
+/// <url>`, which put the daemon's port in front of the operator on paths where
+/// it changes nothing they can act on. The URL is a discovery detail —
+/// whatever `resolve_daemon_url` happened to return, or whatever `--addr`
+/// asked for — and the move to a Unix socket (#6288) will make printing one
+/// wrong. It is demoted to `tracing::debug!` at each site.
+/// What: one fixed line. `pub(super)` so `daemon::start` renders the SAME
+/// string rather than keeping a second copy that could drift.
+/// Test: `already_running_notice_names_no_address`,
+/// `start_already_running_line_names_no_address`.
+pub(super) const ALREADY_RUNNING_NOTICE: &str = "the trusty-mpm daemon is already running";
 
 /// `daemon` subcommand — run the HTTP daemon (or MCP server) with auto port
 /// selection and lock-file service discovery.
