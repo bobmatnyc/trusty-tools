@@ -25,27 +25,22 @@
   import { createMachineStream, initialState } from './machineStream.js';
   // #6643: the roster read the screensaver shares.
   import { fetchServices } from './servicesList.js';
+  // #6909: the labels the tab bar used to carry, now the breadcrumb's.
+  import { viewLabel } from './consoleNav.js';
 
   // ── state ────────────────────────────────────────────────────────────────
 
   let services = $state([]);
   let loading = $state(true);
   let error = $state(null);
-  let activeTab = $state('overview');
+  // #6909: which view the panel renders. The tab bar that used to set this is
+  // gone — the Services list sets it for a service, the header's Config action
+  // sets it for Config, and the breadcrumb sets it back to 'overview'.
+  let view = $state('overview');
   // #6642: the 1 s machine-status window every graph on this page draws from,
   // and the single stream that fills it. Not `$state` — nothing renders it.
   let history = $state(initialState());
   let stream;
-
-  const TABS = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'search',   label: 'Search' },
-    { id: 'memory',   label: 'Memory' },
-    { id: 'analyze',  label: 'Analyze' },
-    { id: 'review',   label: 'Review' },
-    { id: 'sessions', label: 'MPM Sessions' }, // #6370: UI label only — the id stays 'sessions'
-    { id: 'config',   label: 'Config' },
-  ];
 
   // Single source of truth: maps service.id → console tab key. A service absent
   // from this map has no dashboard, so `ServicesList` renders its row inert —
@@ -118,43 +113,61 @@
 
   // ── navigation callback for the Services list ────────────────────────────
 
-  /** Switch to the tab for the given service id (if one exists). */
+  /** Open the view for the given service id (if one exists). */
   function handleViewDetails(serviceId) {
     const tabKey = SERVICE_TAB_MAP[serviceId];
-    if (tabKey) activeTab = tabKey;
+    if (tabKey) view = tabKey;
   }
 </script>
 
 <main>
+  <!-- #6909: the Foundry app shell puts a breadcrumb on the left of the topbar
+       and its actions on the right (docs/design/UI/design-system-svelte
+       lib/Topbar.svelte). This header is that topbar: brand and breadcrumb
+       left, Config action and theme control right. No tab strip. -->
   <header>
     <div class="header-left">
       <h1><BrandLockup /></h1>
+      {#if view !== 'overview'}
+        <nav class="crumbs" aria-label="Breadcrumb">
+          <span class="crumb-prefix" aria-hidden="true">//</span>
+          <ol>
+            <li>
+              <button type="button" class="crumb-link" onclick={() => (view = 'overview')}>
+                Overview
+              </button>
+            </li>
+            <li aria-current="page">
+              <span class="crumb-sep" aria-hidden="true">/</span>{viewLabel(view)}
+            </li>
+          </ol>
+        </nav>
+      {/if}
     </div>
-    <ThemeSelector />
+    <div class="header-right">
+      <!-- #6909: Config is the one former tab with no Services row, so it keeps
+           a single header action rather than a re-created tab strip. -->
+      <button
+        type="button"
+        class="header-action"
+        class:active={view === 'config'}
+        aria-current={view === 'config' ? 'page' : undefined}
+        onclick={() => (view = 'config')}
+      >
+        Config
+      </button>
+      <ThemeSelector />
+    </div>
   </header>
 
-  <!-- Tab bar -->
-  <div class="tabs" role="tablist">
-    {#each TABS as tab (tab.id)}
-      <button
-        role="tab"
-        class="tab-btn"
-        class:active={activeTab === tab.id}
-        aria-selected={activeTab === tab.id}
-        onclick={() => activeTab = tab.id}
-      >
-        {tab.label}
-      </button>
-    {/each}
-  </div>
-
-  <!-- Tab panels -->
+  <!-- View panel -->
   <div class="panel">
-    {#if activeTab === 'overview'}
+    {#if view === 'overview'}
       <!-- The dashboard reads its own endpoint, so it renders whether or not
            the service probe below has answered. -->
       <MachineStatusPanel samples={history.samples} />
-      <!-- #6642: the one services section on the page. -->
+      <!-- #6642: the one services section on the page, and since #6909 the
+           only navigation to a service view. -->
       <ServicesList
         {services}
         serviceSamples={history.serviceSamples}
@@ -163,17 +176,17 @@
         {loading}
         {error}
       />
-    {:else if activeTab === 'search'}
+    {:else if view === 'search'}
       <SearchTab />
-    {:else if activeTab === 'memory'}
+    {:else if view === 'memory'}
       <MemoryTab />
-    {:else if activeTab === 'analyze'}
+    {:else if view === 'analyze'}
       <AnalyzeTab />
-    {:else if activeTab === 'review'}
+    {:else if view === 'review'}
       <ReviewTab />
-    {:else if activeTab === 'sessions'}
+    {:else if view === 'sessions'}
       <SessionsTab />
-    {:else if activeTab === 'config'}
+    {:else if view === 'config'}
       <ConfigTab />
     {/if}
   </div>
@@ -213,32 +226,81 @@
   .header-left {
     min-width: 0;
   }
-
-  /* Tab bar */
-  div.tabs {
+  .header-right {
     display: flex;
-    gap: 0.25rem;
-    border-bottom: 1px solid var(--trusty-border);
-    margin-bottom: 1.5rem;
+    align-items: center;
+    gap: 0.5rem;
   }
-  .tab-btn {
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    padding: 0.6rem 1.2rem;
+
+  /* Breadcrumb (#6909) — the Foundry topbar's `// crumb`, mono and stamped. */
+  .crumbs {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    margin-top: 0.4rem;
+  }
+  .crumbs ol {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .crumb-prefix,
+  .crumbs li {
+    font-family: var(--trusty-mono);
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
     color: var(--trusty-text-secondary);
-    font-size: 0.9rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: color 0.15s, border-color 0.15s;
-    margin-bottom: -1px;
   }
-  .tab-btn:hover {
+  .crumbs li[aria-current='page'] {
     color: var(--trusty-text-primary);
   }
-  .tab-btn.active {
+  .crumb-sep {
+    margin-right: 0.35rem;
+    color: var(--trusty-text-secondary);
+  }
+  .crumb-link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    color: inherit;
+    cursor: pointer;
+    border-bottom: 1px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .crumb-link:hover,
+  .crumb-link:focus-visible {
     color: var(--trusty-accent);
     border-bottom-color: var(--trusty-accent);
+  }
+
+  /* Config entry point (#6909) — a header action, sized to the theme control
+     beside it so the two read as one row rather than a leftover tab. */
+  .header-action {
+    background: none;
+    border: 1px solid var(--trusty-border);
+    border-radius: 0.4rem;
+    color: var(--trusty-text-secondary);
+    cursor: pointer;
+    font-size: 0.72rem;
+    font-weight: 500;
+    line-height: 1.4;
+    padding: 0.25rem 0.6rem;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .header-action:hover {
+    color: var(--trusty-text-primary);
+  }
+  .header-action.active {
+    border-color: var(--trusty-accent);
+    color: var(--trusty-accent);
   }
 
   /* Panel */
