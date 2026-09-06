@@ -84,6 +84,11 @@ use claude_code_exit_hint::{exit_dispatch_suffix, launch_clock_prefix};
 #[path = "claude_code_exit_hint.rs"]
 mod claude_code_exit_hint;
 
+/// Live-background-session probe and the `attach` relaunch shape (#6863) — a
+/// sibling submodule for the same reason `claude_code_exit_hint` is one.
+#[path = "claude_code_agents.rs"]
+mod claude_code_agents;
+
 /// Wrap a managed launch/resume command so it is rooted at `cwd` regardless
 /// of the tmux pane shell's actual starting directory (#2250).
 ///
@@ -1147,7 +1152,11 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// fails hard with no recovery — instead the pane launches FRESH. #6765:
     /// there is no `--continue` fallback; the target is resolved explicitly or
     /// not at all, so the decision never depends on which conversation the
-    /// managed store happens to consider "most recent".
+    /// managed store happens to consider "most recent". #6863: the disk check
+    /// alone cannot tell a FINISHED conversation from one Claude Code is still
+    /// running as a background job — the `.jsonl` exists either way, and the
+    /// live one refuses `--resume` — so the choice now runs through
+    /// [`claude_code_agents::relaunch_command`], which attaches instead.
     /// What: resolves the claude binary, provisions + trust-seeds the tm-owned
     /// `CLAUDE_CONFIG_DIR` via [`prepare_managed_config`], existence-checks
     /// `claude_session_id` against the resolved config dir, falls back to a
@@ -1244,21 +1253,30 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             resume = effective_id.is_some(),
             "resuming claude-code in tmux pane"
         );
-        let cmd = resume_command(
+        // #2997: same disclaim-exec wrapper as `spawn` — every resumed /
+        // guided-resume / crash-recovery pane must disclaim `claude` off the
+        // shared tmux server too, else exactly those sessions keep re-prompting.
+        let disclaimed_bin = crate::core::spawn_disclaim::disclaim_pane_command(&claude_bin);
+        let inputs = claude_code_agents::RelaunchInputs {
             cwd,
-            // #2997: same disclaim-exec wrapper as `spawn` — every resumed /
-            // guided-resume / crash-recovery pane must disclaim `claude` off the
-            // shared tmux server too, else exactly those sessions keep
-            // re-prompting.
-            &crate::core::spawn_disclaim::disclaim_pane_command(&claude_bin),
-            config_dir.as_deref(),
-            effective_id,
+            claude_bin: &disclaimed_bin,
+            config_dir: config_dir.as_deref(),
             session_id,
-            prompt_file.as_deref(),
-            oauth_token.as_deref(),
-            gh_env_file.as_deref(),
-            &mcp_env,
-        );
+            prompt_file: prompt_file.as_deref(),
+            oauth_token: oauth_token.as_deref(),
+            gh_env_file: gh_env_file.as_deref(),
+            mcp_env: &mcp_env,
+        };
+        // #6863: a session Claude Code is still running in the background
+        // refuses `--resume` and exits 0, leaving the pane a bare shell; ask its
+        // own registry first and `attach` instead. Any failure to read the
+        // registry falls back to the pre-#6863 `--resume`/fresh-launch choice.
+        // The probe is passed unevaluated: a launch with no stored id has
+        // nothing to look up and must not spawn `claude` at all.
+        let cmd =
+            claude_code_agents::relaunch_command(&inputs, claude_session_id, effective_id, || {
+                claude_code_agents::query_registry(&claude_bin, config_dir.as_deref())
+            });
         // Sibling-window hijack fix (follow-up to #2456): when the caller
         // supplies the record's own `pane_id`, target it directly — tmux's
         // session-scoped `send_line` resolves to whichever pane/window is
