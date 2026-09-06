@@ -456,7 +456,7 @@ impl OrchestratorBackend for StateBackend {
     async fn session_context_pause(
         &self,
         project_dir: &str,
-        session_id: &str,
+        session_id: Option<&str>,
         summary: &str,
         completed: Vec<String>,
         in_progress: Vec<String>,

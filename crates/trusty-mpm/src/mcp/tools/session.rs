@@ -49,8 +49,9 @@ use super::tool;
 /// `session_decommission_ephemeral` takes no args; `session_prune` takes a
 /// `state` filter plus `dry_run`/`include_active`; `session_context_catchup`
 /// takes a required `project_dir` plus optional `session_id`/`all_projects`/
-/// `full`; `session_context_pause` takes required `project_dir`/`session_id`/
-/// `summary` plus optional bullet-list sections, `tmux_window`, and
+/// `full`; `session_context_pause` takes required `project_dir`/`summary` plus
+/// an optional `session_id` (#6888 — derived from the caller when omitted),
+/// optional bullet-list sections, `tmux_window`, and
 /// `prune_worktrees`. Every schema sets `additionalProperties: false` so the
 /// driver gets a clear error on a typo.
 /// Test: `super::tests::session_tools_present`,
@@ -359,7 +360,7 @@ pub(super) fn session_tools() -> Vec<Value> {
                     },
                     "session_id": {
                         "type": "string",
-                        "description": "Session id that `resolved_snapshot` is resolved FOR. Omit it and only the `tmux_window` route can resolve anything: an unidentified caller owns nothing in a shared store. Naming another session's id is the explicit opt-in that reads that session's state (#5272)."
+                        "description": "Session id that `resolved_snapshot` is resolved FOR. Omit it and the daemon derives the same id `session_context_pause` derived for you, so a pause written with no `session_id` resolves back here exactly (#6888); with neither an id nor a `tmux_window` an unidentified caller still owns nothing in a shared store. Naming another session's id is the explicit opt-in that reads that session's state (#5272)."
                     },
                     "tmux_window": {
                         "type": "string",
@@ -392,7 +393,11 @@ pub(super) fn session_tools() -> Vec<Value> {
              `## In Progress` / `## Next Steps` / `## Git Context` / \
              `## Tmux Window`), plus an appended `pause` line in the \
              append-only `sessions-log.jsonl` naming it. Only that session can \
-             resume from it (#5272). Also prunes orphaned managed-session \
+             resume from it (#5272). Leave `session_id` out — the daemon derives \
+             it from your own identity, which is what the next \
+             `session_context_catchup` matches on, and an invented one silently \
+             files the snapshot where nothing will look for it (#6888). Also \
+             prunes orphaned managed-session \
              git worktrees in-process (same engine as `tm session prune-worktrees`) \
              unless `prune_worktrees` is set to `false`. That prune NEVER removes a \
              worktree holding uncommitted or unpushed work (#4091) — any such \
@@ -408,7 +413,7 @@ pub(super) fn session_tools() -> Vec<Value> {
                     },
                     "session_id": {
                         "type": "string",
-                        "description": "Stable id for the originating session; keys the append-only pause-log entry."
+                        "description": "OPTIONAL — omit it and the daemon derives the id from your own identity, which is what the next `session_context_catchup` looks the snapshot back up by (#6888). Do NOT invent a stable-looking string: the resume lookup is exact string equality, so a second guess never matches the first. Pass it only to attribute the pause to a specific KNOWN id. The id actually used comes back in the response's `session_id`."
                     },
                     "summary": {
                         "type": "string",
@@ -438,7 +443,8 @@ pub(super) fn session_tools() -> Vec<Value> {
                         "description": "Also prune orphaned managed-session git worktree directories as part of pause wrap-up. Defaults to true."
                     }
                 },
-                "required": ["project_dir", "session_id", "summary"],
+                // #6888: `session_id` is derived when omitted, so it is not required.
+                "required": ["project_dir", "summary"],
                 "additionalProperties": false
             }),
         ),

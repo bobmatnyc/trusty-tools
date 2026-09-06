@@ -33,6 +33,29 @@ use crate::core::catchup::{CatchupOptions, generate_catchup_json};
 use crate::daemon::catchup_bounds::{CATCHUP_BUDGET_BYTES, bound_catchup};
 use crate::daemon::state::DaemonState;
 
+/// The session id to use for a caller that named none.
+///
+/// Why: #6888 — a PM-invented `session_id` never matched itself twice, so the
+/// pause and the next catch-up keyed different strings and the owner was told
+/// no snapshot resolved. Both tools call this, so writer and reader agree by
+/// construction. The DERIVATION itself lives in
+/// [`trusty_common::catchup::session_id`]; this wrapper exists only to pin what
+/// the daemon may feed it.
+/// What: passes `None` for the managed session id and derives from the caller's
+/// tmux window alone. The daemon is a long-lived process behind the
+/// `trusty-mpm serve --stdio` bridge, so its OWN `TM_MANAGED_SESSION_ID` — if a
+/// managed pane happened to auto-start it — names some unrelated session and
+/// would misattribute every caller's pause to it. The bridge, which really does
+/// run inside the calling pane, stamps that id into the arguments instead
+/// (`commands::serve_stdio`), so a managed caller arrives here with an explicit
+/// `session_id` already set.
+/// Test: `catchup_derives_a_missing_session_id_from_the_callers_window`,
+/// `pause_derives_a_missing_session_id_from_the_callers_window`,
+/// `pause_without_an_identifiable_caller_errors`.
+fn derive_caller_session_id(tmux_window: Option<&str>) -> Option<String> {
+    trusty_common::catchup::session_id::derive_session_id(None, tmux_window)
+}
+
 /// Shape the merged digest into the `session_context_catchup` response body.
 ///
 /// Why: `undatable_sessions_dropped` is a receipt — an empty `sessions` array
@@ -143,7 +166,8 @@ fn catchup_payload(
 /// `session_context_catchup_never_resolves_another_sessions_snapshot`,
 /// `session_context_catchup_resolves_by_tmux_window_after_a_relaunch`,
 /// `session_context_catchup_withholds_a_non_owners_handles`,
-/// `session_context_catchup_digest_agrees_with_the_window_fallback`.
+/// `session_context_catchup_digest_agrees_with_the_window_fallback`,
+/// `catchup_derives_a_missing_session_id_from_the_callers_window`.
 pub async fn session_context_catchup(
     project_dir: &str,
     session_id: Option<&str>,
@@ -158,6 +182,11 @@ pub async fn session_context_catchup(
             "project_dir does not exist or is not a directory: {project_dir}"
         ));
     }
+
+    // #6888: the reader derives the same id the pause writer derived, so the
+    // exact-id route survives a restart that mints a new harness session id.
+    let derived = derive_caller_session_id(tmux_window);
+    let session_id = session_id.or(derived.as_deref());
 
     let mut project_dirs = vec![primary.clone()];
     if all_projects {
@@ -240,14 +269,25 @@ pub async fn session_context_catchup(
 /// operator instead of it being a log line nobody reads. There is
 /// deliberately no argument through which the MCP tool could request the
 /// force-discard policy.
+/// #6888: `session_id` is OPTIONAL. It used to be a required free-text string
+/// the PM invented per pause, and because the resume lookup is exact string
+/// equality, the next guess never matched the last one. Omitting it now derives
+/// the id from the caller's own identity via [`derive_caller_session_id`], which
+/// is the same derivation `session_context_catchup` runs — so the two agree
+/// without the PM having to retype anything. An explicitly passed id is honored
+/// unchanged. A caller that is neither managed nor inside tmux derives nothing
+/// and gets an error naming what to pass, rather than a snapshot filed under an
+/// id nothing will ever look up again.
 /// Test: `session_context_pause_missing_project_dir_errors`,
 /// `session_context_pause_requires_summary`,
-/// `session_context_pause_writes_snapshot_without_pruning`.
+/// `session_context_pause_writes_snapshot_without_pruning`,
+/// `pause_derives_a_missing_session_id_from_the_callers_window`,
+/// `pause_without_an_identifiable_caller_errors`.
 #[allow(clippy::too_many_arguments)]
 pub async fn session_context_pause(
     state: &Arc<DaemonState>,
     project_dir: &str,
-    session_id: &str,
+    session_id: Option<&str>,
     summary: &str,
     completed: Vec<String>,
     in_progress: Vec<String>,
@@ -264,6 +304,20 @@ pub async fn session_context_pause(
     if summary.trim().is_empty() {
         return Err("`summary` must not be empty".to_string());
     }
+
+    // #6888: derive rather than let the caller invent an id the reader can't match.
+    let derived = derive_caller_session_id(tmux_window);
+    let Some(session_id) = session_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(derived.as_deref())
+    else {
+        return Err(
+            "`session_id` was omitted and could not be derived: this caller is neither a \
+             tm-managed session nor running inside tmux. Pass `session_id` explicitly."
+                .to_string(),
+        );
+    };
 
     let input = trusty_common::catchup::pause::PauseSnapshotInput {
         session_id,
@@ -317,6 +371,8 @@ pub async fn session_context_pause(
     };
 
     Ok(json!({
+        // #6888: report the id the snapshot was filed under, derived or not.
+        "session_id": session_id,
         "snapshot_path": outcome.snapshot_path.display().to_string(),
         "timestamp": outcome.timestamp.to_rfc3339(),
         "pruned_worktrees": pruned_worktrees,
@@ -420,7 +476,7 @@ mod tests {
         let paused = session_context_pause(
             &state,
             dir,
-            session_a,
+            Some(session_a),
             "Session A's work.",
             vec![],
             vec![],
@@ -474,7 +530,7 @@ mod tests {
         let paused = session_context_pause(
             &state,
             dir,
-            "e262f4c5-d309-4203-ad3b-e0c29084d87e",
+            Some("e262f4c5-d309-4203-ad3b-e0c29084d87e"),
             "Work from the previous incarnation.",
             vec![],
             vec![],
@@ -747,7 +803,7 @@ mod tests {
         let paused = session_context_pause(
             &state,
             dir,
-            session_a,
+            Some(session_a),
             "Session A's work.",
             vec![],
             vec!["halfway through X".to_string()],
@@ -814,7 +870,7 @@ mod tests {
         let paused = session_context_pause(
             &state,
             dir,
-            "e262f4c5-d309-4203-ad3b-e0c29084d87e",
+            Some("e262f4c5-d309-4203-ad3b-e0c29084d87e"),
             "Work from the previous incarnation.",
             vec![],
             vec![],
@@ -852,7 +908,7 @@ mod tests {
         let err = session_context_pause(
             &state,
             "/nonexistent/does/not/exist",
-            "s1",
+            Some("s1"),
             "summary",
             vec![],
             vec![],
@@ -872,7 +928,7 @@ mod tests {
         let err = session_context_pause(
             &state,
             tmp.path().to_str().unwrap(),
-            "s1",
+            Some("s1"),
             "   ",
             vec![],
             vec![],
@@ -892,7 +948,7 @@ mod tests {
         let result = session_context_pause(
             &state,
             tmp.path().to_str().unwrap(),
-            "s1",
+            Some("s1"),
             "Did the thing.",
             vec![],
             vec![],
@@ -908,5 +964,125 @@ mod tests {
         let sessions =
             crate::core::catchup::session_finder::find_paused_sessions(tmp.path()).unwrap();
         assert_eq!(sessions.len(), 1, "the written snapshot should round-trip");
+    }
+
+    /// Why: #6888 — this is the whole fix, end to end at the daemon boundary. A
+    /// caller pauses without naming an id and, after a restart that renames the
+    /// tmux session and renumbers the window, resumes and gets its own snapshot
+    /// back. Before this change the PM invented an id at each end and the second
+    /// one never matched the first.
+    /// What: pause with `session_id: None`, then catch up with `session_id: None`
+    /// from the same window; `resolved_via` is `session_id`, so the derived id —
+    /// not the pre-existing window fallback — is what answered.
+    /// Test: itself.
+    #[tokio::test]
+    async fn pause_derives_a_missing_session_id_from_the_callers_window() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = DaemonState::shared();
+        let paused = session_context_pause(
+            &state,
+            tmp.path().to_str().unwrap(),
+            None,
+            "Did the thing.",
+            vec![],
+            vec![],
+            vec![],
+            Some("tm-dogfood:0:@230"),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            paused["session_id"], "tmux-window-230",
+            "the response must name the id the snapshot was filed under: {paused}"
+        );
+
+        let resumed = session_context_catchup(
+            tmp.path().to_str().unwrap(),
+            None,
+            Some("renamed:7:@230"),
+            false,
+            true,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resumed["resolved_snapshot"], paused["snapshot_path"],
+            "the resume must find the pause this caller wrote: {resumed}"
+        );
+        assert_eq!(
+            resumed["resolved_via"], "session_id",
+            "the DERIVED id must be what matched, not the window fallback: {resumed}"
+        );
+    }
+
+    /// Why: #6888 must not invent an id for a caller it cannot identify — a
+    /// snapshot filed under a made-up string is exactly the defect. #5272's rule
+    /// stands: unidentified means nothing is attributed.
+    /// What: no `session_id` and no tmux window is an error naming what to pass,
+    /// and nothing is written.
+    /// Test: itself.
+    #[tokio::test]
+    async fn pause_without_an_identifiable_caller_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = DaemonState::shared();
+        let err = session_context_pause(
+            &state,
+            tmp.path().to_str().unwrap(),
+            None,
+            "Did the thing.",
+            vec![],
+            vec![],
+            vec![],
+            None,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("session_id"), "{err}");
+        assert!(
+            crate::core::catchup::session_finder::find_paused_sessions(tmp.path())
+                .unwrap()
+                .is_empty(),
+            "a refused pause must write nothing"
+        );
+    }
+
+    /// Why: #6888 — the reader has to derive the same id the writer derived, or
+    /// the two agree only by the PM retyping a string. This pins the reader half.
+    /// What: an explicitly-attributed pause under the derived id resolves for a
+    /// catch-up caller that passes only its window, through the `session_id`
+    /// route.
+    /// Test: itself.
+    #[tokio::test]
+    async fn catchup_derives_a_missing_session_id_from_the_callers_window() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = DaemonState::shared();
+        session_context_pause(
+            &state,
+            tmp.path().to_str().unwrap(),
+            Some("tmux-window-77"),
+            "Did the thing.",
+            vec![],
+            vec![],
+            vec![],
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let resumed = session_context_catchup(
+            tmp.path().to_str().unwrap(),
+            None,
+            Some("proj:3:@77"),
+            false,
+            true,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed["resolved_via"], "session_id", "{resumed}");
     }
 }

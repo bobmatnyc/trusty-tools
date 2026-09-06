@@ -143,8 +143,7 @@ prune worktrees, all in one step:
 ```
 mcp__trusty-mpm__session_context_pause(
   project_dir: <absolute path to the current project root>,
-  session_id: <a stable id for this session — $TM_SESSION_ID, or the tmux
-               session:window, or any other stable value>,
+  # session_id: OMIT IT. The tool derives it — see below.
   summary: <human-readable current-state prose>,
   completed: [<completed todos/tasks this session>, ...],   # optional
   in_progress: [<in-progress todos with detailed state>, ...],  # optional
@@ -154,8 +153,19 @@ mcp__trusty-mpm__session_context_pause(
 )
 ```
 
+**Do not pass `session_id`, and never invent one.** The resume lookup is exact
+string equality, so an id you make up here has to be retyped identically after a
+restart or the next `/tm-session-resume` finds nothing — which is what used to
+happen on nearly every resume (#6888). Omit the argument and the tool derives the
+id from what you actually are: your managed session id when you run in a `tm`
+pane, else your tmux window id. `session_context_catchup` derives the same id the
+same way, so the two agree without you doing anything. Pass `session_id`
+explicitly ONLY to attribute the pause to a specific id you already know — never
+to supply a "stable-looking" string of your own.
+
 The tool returns
-`{ snapshot_path, timestamp, pruned_worktrees, skipped_dirty_worktrees }`. It writes
+`{ session_id, snapshot_path, timestamp, pruned_worktrees, skipped_dirty_worktrees }`,
+where `session_id` is the id it filed the snapshot under. It writes
 `.trusty-mpm/sessions/<session-id>/session-YYYYMMDD-HHMMSS.md` in the same section format
 `/tm-session-resume` already parses (`## Summary` / `## Completed` /
 `## In Progress` / `## Next Steps` / `## Git Context` / `## Tmux Window`,

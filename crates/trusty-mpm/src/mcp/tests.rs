@@ -163,7 +163,7 @@ impl OrchestratorBackend for MockBackend {
     async fn session_context_pause(
         &self,
         project_dir: &str,
-        session_id: &str,
+        session_id: Option<&str>,
         summary: &str,
         completed: Vec<String>,
         in_progress: Vec<String>,
@@ -976,9 +976,9 @@ async fn dispatch_session_context_catchup_requires_project_dir() {
     );
 }
 
-/// Why: `session_context_pause` requires `project_dir`/`session_id`/`summary`;
-/// the optional bullet-list sections and `prune_worktrees` must round-trip
-/// through dispatch to the backend.
+/// Why: `session_context_pause` requires `project_dir`/`summary`; the optional
+/// bullet-list sections, an explicit `session_id`, and `prune_worktrees` must
+/// round-trip through dispatch to the backend.
 /// Test: this test.
 #[tokio::test]
 async fn dispatch_session_context_pause_tool() {
@@ -1002,6 +1002,35 @@ async fn dispatch_session_context_pause_tool() {
     assert!(text.contains("snapshot_path"));
     assert!(text.contains("ship it"));
     assert!(text.contains("\"prune_worktrees\":false"));
+}
+
+/// Why: #6888 — `session_id` used to be required, so the PM invented one per
+/// pause and the exact-match resume lookup never found its own snapshots. A call
+/// that omits it must reach the backend, which derives the id, rather than
+/// being refused at the dispatch layer.
+/// What: a pause with no `session_id` succeeds and the backend sees `null`.
+/// Test: itself.
+#[tokio::test]
+async fn dispatch_session_context_pause_allows_a_missing_session_id() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_context_pause",
+            json!({
+                "project_dir": "/tmp/proj",
+                "summary": "Did the thing.",
+                "tmux_window": "tm-dogfood:0:@230",
+            }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false, "{result}");
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("\"session_id\":null"),
+        "the backend must be handed None, not an invented string: {text}"
+    );
 }
 
 #[tokio::test]

@@ -292,12 +292,19 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       uses, called directly rather than looped back over HTTP). Returns
     ///       `{ snapshot_path, timestamp, pruned_worktrees }`. Never touches
     ///       tmux — window realignment on resume stays a PM-side bash step.
-    /// Test: `dispatch_session_context_pause_tool` (mock).
+    ///
+    /// #6888: `session_id` is optional. Omitted, the daemon derives it from the
+    ///        caller's own identity — the same derivation
+    ///        `session_context_catchup` runs — so the pause and the next resume
+    ///        key the same string instead of two PM guesses. An explicit id is
+    ///        honored unchanged.
+    /// Test: `dispatch_session_context_pause_tool` (mock),
+    ///       `dispatch_session_context_pause_allows_a_missing_session_id`.
     #[allow(clippy::too_many_arguments)]
     async fn session_context_pause(
         &self,
         project_dir: &str,
-        session_id: &str,
+        session_id: Option<&str>,
         summary: &str,
         completed: Vec<String>,
         in_progress: Vec<String>,
