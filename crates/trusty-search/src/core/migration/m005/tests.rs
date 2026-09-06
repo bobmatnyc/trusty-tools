@@ -441,3 +441,254 @@ async fn ids_are_stable_across_a_reindex_of_unchanged_files() {
         "an unchanged file must re-chunk to the same ids the migration produced"
     );
 }
+
+// ─── Crash recovery (#6581, code-critic BLOCK) ───────────────────────────────
+//
+// The guard used to answer "is a pass outstanding" by looking for a pre-#6581
+// id in the corpus. Step 3 clears that corpus, so after any interruption the
+// answer was `false`, `apply` returned `Ok`, and `run_migrations` stamped
+// schema_version = 5 over a partial or empty index. These tests pin the
+// durable-marker guard that replaced it.
+
+/// Put the index in the exact on-disk state a crash between the corpus clear
+/// and the first batch commit leaves behind: the plan durable, the corpus empty.
+async fn simulate_crash_after_clear(fx: &Fixture) -> plan::M005Plan {
+    let corpus = {
+        let indexer = fx.handle.indexer.read().await;
+        indexer.corpus_store().expect("fixture wires a corpus")
+    };
+    let old_chunks = corpus.load_all_chunks().expect("load");
+    let mut vector_by_text: HashMap<[u8; 32], String> = HashMap::new();
+    let mut files: BTreeSet<String> = BTreeSet::new();
+    for chunk in &old_chunks {
+        files.insert(chunk.file.clone());
+        vector_by_text
+            .entry(text_hash(&chunk.content))
+            .or_insert_with(|| chunk.id.clone());
+    }
+    let plan = plan::M005Plan {
+        files,
+        vector_by_text: vector_by_text.into_iter().collect(),
+        old_ids: old_chunks.iter().map(|c| c.id.clone()).collect(),
+        old_count: old_chunks.len(),
+    };
+    // Order matters: the real pass persists the plan BEFORE it clears, which is
+    // what makes every crashable state carry the marker.
+    plan.store(&corpus).await.expect("store plan");
+    {
+        let indexer = fx.handle.indexer.read().await;
+        indexer.clear_corpus_for_rechunk().await.expect("clear");
+    }
+    assert_eq!(
+        corpus.load_all_chunks().expect("reload").len(),
+        0,
+        "the simulated crash must leave the corpus empty"
+    );
+    plan
+}
+
+/// The plan survives a round trip through the corpus `_meta` table.
+///
+/// Why: the marker is the whole guard. If it did not persist, or came back
+/// different, the crash window this fix closes would silently reopen.
+/// What: stores a plan, reads it back, compares, then clears it.
+/// Test: this test.
+#[tokio::test]
+async fn m005_plan_roundtrips_through_the_corpus_meta_table() {
+    let fx = fixture().await;
+    let stored = simulate_crash_after_clear(&fx).await;
+    let corpus = {
+        let indexer = fx.handle.indexer.read().await;
+        indexer.corpus_store().unwrap()
+    };
+    let loaded = plan::M005Plan::load(&corpus)
+        .await
+        .expect("load")
+        .expect("a plan was stored");
+    assert_eq!(loaded, stored, "the plan must survive the round trip");
+    plan::M005Plan::clear(&corpus).await.expect("clear");
+    assert!(
+        plan::M005Plan::load(&corpus).await.expect("load").is_none(),
+        "clearing must retire the marker"
+    );
+}
+
+/// A crash after the clear and before the first batch is RECOVERED, not
+/// mistaken for a finished migration.
+///
+/// Why: this is the CRITICAL fail-open the code critic blocked on. With the old
+/// contents-based guard, `apply` over this state found no legacy id, returned
+/// `Ok`, and let `run_migrations` mark the index migrated with zero chunks —
+/// total, silent, permanent loss reported as success.
+/// What: simulates the crash, re-runs `apply`, and asserts the corpus comes back
+/// fully re-chunked in the new id shape with the marker retired.
+/// Test: this test.
+#[tokio::test]
+async fn m005_resumes_after_a_crash_before_the_first_batch() {
+    let fx = fixture().await;
+    simulate_crash_after_clear(&fx).await;
+
+    M005ChunkIdEndLine
+        .apply(&fx.handle)
+        .await
+        .expect("the resumed pass must succeed");
+
+    let corpus = {
+        let indexer = fx.handle.indexer.read().await;
+        indexer.corpus_store().unwrap()
+    };
+    let after = corpus.load_all_chunks().expect("reload");
+    assert_eq!(
+        after.len(),
+        fresh_chunk_count(&fx.root),
+        "recovery must restore every chunk a fresh index would hold, not leave the corpus empty"
+    );
+    assert!(
+        after
+            .iter()
+            .all(|c| !crate::core::chunk_id::parse(&c.id).is_some_and(|p| p.is_legacy_named())),
+        "every recovered id must carry the new shape"
+    );
+    assert!(
+        plan::M005Plan::load(&corpus).await.expect("load").is_none(),
+        "a completed pass must retire its marker"
+    );
+    assert_eq!(
+        fx.embed_calls.load(Ordering::SeqCst),
+        0,
+        "recovery must not re-embed — the ruling's budget is zero on the resume path too"
+    );
+}
+
+/// A crash between the sidecar remap (Step 4) and the flush (Step 5) recovers,
+/// still without re-embedding.
+///
+/// Why: the remap rewrites the HNSW sidecar from old ids to new. A resume from
+/// that state re-applies a mapping whose left-hand side is already gone, which
+/// must be a no-op rather than a corruption or a re-embed.
+/// What: runs a full pass, then re-arms the marker to put the index back in the
+/// "pass did not finish" state with the corpus and sidecar already on new ids,
+/// and re-runs `apply`.
+/// Test: this test.
+#[tokio::test]
+async fn m005_resumes_after_a_crash_between_the_remap_and_the_flush() {
+    let fx = fixture().await;
+    M005ChunkIdEndLine
+        .apply(&fx.handle)
+        .await
+        .expect("first pass");
+
+    let corpus = {
+        let indexer = fx.handle.indexer.read().await;
+        indexer.corpus_store().unwrap()
+    };
+    let post_remap = corpus.load_all_chunks().expect("reload");
+    let expected = post_remap.len();
+
+    // Re-arm the marker: the on-disk shape of "Step 4 committed, Step 7 never ran".
+    let plan = plan::M005Plan {
+        files: post_remap.iter().map(|c| c.file.clone()).collect(),
+        vector_by_text: post_remap
+            .iter()
+            .map(|c| (text_hash(&c.content), c.id.clone()))
+            .collect(),
+        old_ids: post_remap.iter().map(|c| c.id.clone()).collect(),
+        old_count: post_remap.len(),
+    };
+    plan.store(&corpus).await.expect("re-arm");
+
+    M005ChunkIdEndLine
+        .apply(&fx.handle)
+        .await
+        .expect("the resumed pass must succeed");
+
+    assert_eq!(
+        corpus.load_all_chunks().expect("reload").len(),
+        expected,
+        "a resume over already-migrated state must converge on the same corpus"
+    );
+    assert!(
+        plan::M005Plan::load(&corpus).await.expect("load").is_none(),
+        "the resumed pass must retire its marker"
+    );
+    assert_eq!(
+        fx.embed_calls.load(Ordering::SeqCst),
+        0,
+        "no text was re-embedded on either pass"
+    );
+}
+
+/// `run_migrations` never stamps schema_version 5 over a corpus the interrupted
+/// pass emptied.
+///
+/// Why: the version write is the permanent part. The old guard's `Ok` over an
+/// empty corpus is what let the loss become unrecoverable, because a v5 index
+/// never runs M005 again.
+/// What: simulates the crash, runs the real migration runner, and asserts the
+/// index only reaches 5 WITH its chunks restored.
+/// Test: this test.
+#[tokio::test]
+async fn m005_never_advances_the_schema_over_missing_chunks() {
+    let fx = fixture().await;
+    simulate_crash_after_clear(&fx).await;
+
+    let registry = crate::core::migration::MigrationRegistry::new();
+    crate::core::migration::run_migrations(&fx.handle, &registry)
+        .await
+        .expect("the runner must recover rather than fail");
+
+    let corpus = {
+        let indexer = fx.handle.indexer.read().await;
+        indexer.corpus_store().unwrap()
+    };
+    let chunks = corpus.load_all_chunks().expect("reload").len();
+    let version = fx.handle.read_schema_version().await.expect("read version");
+    assert_eq!(version, super::super::M005_TARGET_VERSION);
+    assert_eq!(
+        chunks,
+        fresh_chunk_count(&fx.root),
+        "reaching v{version} with {chunks} chunks would be the #6581 fail-open"
+    );
+}
+
+/// A query landing inside the migration window is REFUSED, not answered with an
+/// empty result set.
+///
+/// Why: the pass empties the corpus for the length of its re-chunk while every
+/// read still succeeds, so a concurrent search returned `results: []` at HTTP
+/// 200 — indistinguishable from a genuine miss.
+/// What: raises the window by hand, searches, and asserts the typed refusal;
+/// then asserts the guard's drop reopens the index.
+/// Test: this test.
+#[tokio::test]
+async fn a_search_during_the_migration_window_is_refused_not_empty() {
+    let fx = fixture().await;
+    let flag = {
+        let indexer = fx.handle.indexer.read().await;
+        indexer.migration_flag()
+    };
+    let query = crate::core::indexer::SearchQuery {
+        text: "alpha".to_string(),
+        ..Default::default()
+    };
+    {
+        let _window = crate::core::indexer::MigrationWindow::open(flag);
+        let indexer = fx.handle.indexer.read().await;
+        assert!(indexer.is_migrating(), "the window must be open");
+        let err = indexer
+            .search(&query)
+            .await
+            .expect_err("a search inside the window must refuse");
+        assert!(
+            err.downcast_ref::<crate::core::indexer::IndexMigrationInProgress>()
+                .is_some(),
+            "the refusal must be typed so the HTTP layer can render it as 503: {err:#}"
+        );
+    }
+    // The guard drops with the window, so the index serves again.
+    let indexer = fx.handle.indexer.read().await;
+    assert!(
+        !indexer.is_migrating(),
+        "a failed or finished migration must not leave the index refusing forever"
+    );
+}

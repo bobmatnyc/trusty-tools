@@ -170,6 +170,17 @@ impl CodeIndexer {
         query: &SearchQuery,
     ) -> Result<(Vec<CodeChunk>, SearchDrops)> {
         self.touch_activity();
+        // #6581: M005 clears the corpus and re-chunks it in batches, so a query
+        // landing in that window would read a cleanly-readable but empty corpus
+        // and answer `results: []` — the same "outage rendered as nothing
+        // matched" failure #5917 fixed for the unreadable case. Refuse instead.
+        if self.is_migrating() {
+            return Err(anyhow::Error::new(
+                crate::core::indexer::IndexMigrationInProgress {
+                    index_id: self.index_id.clone(),
+                },
+            ));
+        }
         let intent = QueryClassifier::classify_with_domain(&query.text, &self.domain_terms);
         let (alpha, beta, use_kg_first) = intent.weights();
 

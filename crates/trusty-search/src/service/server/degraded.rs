@@ -161,6 +161,33 @@ pub(super) fn corpus_read_failure_from(
     ))
 }
 
+/// Render `err` as a 503 when it is the migration-in-progress refusal (#6581).
+///
+/// Why: M005 empties the corpus for the length of its re-chunk, so a query
+/// landing there must be told "not yet" rather than handed an empty result set
+/// it cannot distinguish from a genuine miss. Same shape as
+/// [`corpus_read_failure_from`], which solves the same reporting problem for a
+/// corpus that cannot be read at all.
+/// What: `Some((503, body))` for an `IndexMigrationInProgress`, `None`
+/// otherwise. `retryable` is always `true` — the window always closes.
+/// Test: `a_search_during_the_migration_window_is_refused_not_empty`.
+pub(super) fn migration_in_progress_from(
+    err: &anyhow::Error,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let migrating = err.downcast_ref::<crate::core::indexer::IndexMigrationInProgress>()?;
+    Some((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": "index_migration_in_progress",
+            "index_id": migrating.index_id,
+            "failure_kind": "migrating",
+            "transient": true,
+            "retryable": true,
+            "message": err.to_string(),
+        })),
+    ))
+}
+
 pub(super) fn corpus_read_failure_response(
     index_id: &str,
     detail: &str,

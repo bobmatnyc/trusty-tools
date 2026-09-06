@@ -23,8 +23,17 @@
 //! text this corpus has never held would need to be, and that is left to the
 //! ordinary embed catch-up rather than paid for here.
 //!
-//! What: `apply` loads the corpus, returns early unless it still holds a
-//! pre-#6581 named id, records `text hash → current id`, clears every
+//! Why it is crash-recoverable: the clear destroys the very evidence a
+//! contents-based guard would read, so an interrupted pass used to look
+//! identical to a finished one and `run_migrations` stamped `schema_version = 5`
+//! over a partial or empty corpus. A durable [`plan::M005Plan`] written BEFORE
+//! the clear and removed only after Step 7 is the evidence instead: present
+//! means "a pass started and did not finish", whatever the corpus now holds.
+//! Any failure leaves the marker, returns `Err`, and pins the version at 4.
+//!
+//! What: `apply` loads the corpus, resumes an outstanding plan or (absent one)
+//! returns early unless the corpus still holds a pre-#6581 named id, records
+//! `text hash → current id` durably, clears every
 //! chunk-keyed structure (leaving the vector store alone), re-chunks every file
 //! it knew about through the ordinary commit path — so `TRUSTY_MAX_CHUNKS`
 //! applies exactly as it does on a fresh index — then re-points the sidecar from
@@ -45,6 +54,8 @@ use crate::core::indexer::ParsedBatch;
 use crate::core::registry::IndexHandle;
 
 use super::Migration;
+
+mod plan;
 
 #[cfg(test)]
 mod tests;
@@ -81,11 +92,15 @@ impl Migration for M005ChunkIdEndLine {
     /// Apply M005 to `index`.
     ///
     /// Why: see module-level doc.
-    /// What: the six steps below. Idempotent: step 2's guard makes a second run
-    /// a no-op, and the sidecar remap in step 5 rewrites nothing when every id
-    /// already maps to itself.
+    /// What: the seven steps below. Idempotent AND crash-recoverable: step 2
+    /// reads the durable plan rather than the corpus, so an interrupted pass is
+    /// resumed instead of mistaken for a finished one, and the sidecar remap in
+    /// step 4 rewrites nothing when every id already maps to itself. Step 7
+    /// retires the marker and is the only thing that records the pass as done.
     /// Test: `m005_is_a_no_op_on_an_already_migrated_corpus`,
-    /// `m005_rechunks_the_whole_corpus`, `m005_reuses_the_existing_vectors`.
+    /// `m005_rechunks_the_whole_corpus`, `m005_reuses_the_existing_vectors`,
+    /// `m005_resumes_after_a_crash_before_the_first_batch`,
+    /// `m005_never_advances_the_schema_over_missing_chunks`.
     async fn apply(&self, index: &IndexHandle) -> Result<(), anyhow::Error> {
         let (corpus, root_path) = {
             let indexer = index.indexer.read().await;
@@ -105,45 +120,89 @@ impl Migration for M005ChunkIdEndLine {
         .context("M005: load_all_chunks task panicked")?
         .context("M005: failed to load chunks from corpus")?;
 
-        // ── Step 2: idempotency guard ─────────────────────────────────────
-        // A corpus with no pre-#6581 named id has nothing this migration can
-        // improve, so a second run — and a fresh index — does no work.
-        let holds_legacy = old_chunks
-            .iter()
-            .any(|c| chunk_id::parse(&c.id).is_some_and(|p| p.is_legacy_named()));
-        if !holds_legacy {
-            tracing::info!(
-                index_id = %index.id,
-                chunks = old_chunks.len(),
-                "M005: no pre-#6581 named chunk ids present, nothing to re-chunk"
-            );
-            return Ok(());
-        }
+        // ── Step 2: is a pass outstanding? ────────────────────────────────
+        // #6581: the corpus cannot answer this. Step 3 clears it, so after any
+        // interruption no pre-#6581 id remains to find, and a contents-based
+        // guard reports "already migrated" for an index whose chunks are
+        // missing — `run_migrations` would then stamp schema_version = 5 over
+        // the loss. The durable plan is the evidence instead, and it is written
+        // before the clear so every crashable state already carries it.
+        let plan = match plan::M005Plan::load(&corpus)
+            .await?
+            .filter(|p| !p.is_empty())
+        {
+            Some(plan) => {
+                tracing::warn!(
+                    index_id = %index.id,
+                    files = plan.files.len(),
+                    chunks_before = plan.old_count,
+                    chunks_now = old_chunks.len(),
+                    "M005: a previous pass did not finish — resuming from the durable plan \
+                     rather than from the corpus, which that pass had already cleared"
+                );
+                drop(old_chunks);
+                plan
+            }
+            None => {
+                // No pass outstanding, so a corpus with no pre-#6581 named id
+                // has nothing this migration can improve: a second run — and a
+                // fresh index — does no work.
+                let holds_legacy = old_chunks
+                    .iter()
+                    .any(|c| chunk_id::parse(&c.id).is_some_and(|p| p.is_legacy_named()));
+                if !holds_legacy {
+                    tracing::info!(
+                        index_id = %index.id,
+                        chunks = old_chunks.len(),
+                        "M005: no pre-#6581 named chunk ids present, nothing to re-chunk"
+                    );
+                    return Ok(());
+                }
+                // `text hash → the id that text is stored under today`. First
+                // wins: two chunks with identical text can share one vector, and
+                // which of them keeps it is arbitrary because the vector is
+                // identical either way.
+                let mut vector_by_text: HashMap<[u8; 32], String> = HashMap::new();
+                let mut files: BTreeSet<String> = BTreeSet::new();
+                for chunk in &old_chunks {
+                    files.insert(chunk.file.clone());
+                    vector_by_text
+                        .entry(text_hash(&chunk.content))
+                        .or_insert_with(|| chunk.id.clone());
+                }
+                let plan = plan::M005Plan {
+                    files,
+                    vector_by_text: vector_by_text.into_iter().collect(),
+                    old_ids: old_chunks.iter().map(|c| c.id.clone()).collect(),
+                    old_count: old_chunks.len(),
+                };
+                drop(old_chunks);
+                plan.store(&corpus).await?;
+                plan
+            }
+        };
 
-        // `text hash → the id that text is stored under today`. First wins: two
-        // chunks with identical text can share one vector, and which of them
-        // keeps it is arbitrary because the vector is identical either way.
-        let mut vector_by_text: HashMap<[u8; 32], String> = HashMap::new();
-        let mut files: BTreeSet<String> = BTreeSet::new();
-        for chunk in &old_chunks {
-            files.insert(chunk.file.clone());
-            vector_by_text
-                .entry(text_hash(&chunk.content))
-                .or_insert_with(|| chunk.id.clone());
-        }
-        let old_ids: Vec<String> = old_chunks.iter().map(|c| c.id.clone()).collect();
-        let old_count = old_chunks.len();
-        drop(old_chunks);
+        let vector_by_text = plan.vector_by_text_map();
+        let old_count = plan.old_count;
 
         tracing::info!(
             index_id = %index.id,
             chunks = old_count,
-            files = files.len(),
+            files = plan.files.len(),
             "M005: clearing the corpus and re-chunking (#6581)"
         );
 
         // ── Step 3: clear, then re-chunk through the ordinary commit path ──
         let indexer_arc = std::sync::Arc::clone(&index.indexer);
+        // #6581: from here until this guard drops, the corpus is empty or
+        // partial. A query landing in that window must be told so rather than
+        // served an empty result set that reads as "nothing matched". The guard
+        // is RAII because Steps 4 and 5 propagate with `?` — a manual clear
+        // would leave a failed migration refusing every later query.
+        let _window = crate::core::indexer::MigrationWindow::open({
+            let indexer = indexer_arc.read().await;
+            indexer.migration_flag()
+        });
         {
             let indexer = indexer_arc.read().await;
             indexer.set_suppress_vector_eviction(true);
@@ -152,7 +211,7 @@ impl Migration for M005ChunkIdEndLine {
             index,
             &indexer_arc,
             &root_path,
-            &files,
+            &plan.files,
             &vector_by_text,
             old_count,
         )
@@ -182,9 +241,11 @@ impl Migration for M005ChunkIdEndLine {
         // An old id no new chunk inherited names a vector for text this corpus
         // no longer holds. Left in place it would rank into results and then
         // resolve to no corpus row — the `unresolved_corpus` drop.
-        let orphans: Vec<String> = old_ids
-            .into_iter()
-            .filter(|id| !remap.contains_key(id))
+        let orphans: Vec<String> = plan
+            .old_ids
+            .iter()
+            .filter(|id| !remap.contains_key(*id))
+            .cloned()
             .collect();
         if !orphans.is_empty() {
             let indexer = indexer_arc.read().await;
@@ -201,6 +262,13 @@ impl Migration for M005ChunkIdEndLine {
             let _ = indexer.rebuild_symbol_graph_now().await;
         }
         index.indexer.read().await.set_chunk_ids_migrated();
+
+        // ── Step 7: the pass finished — retire the marker ─────────────────
+        // #6581: this is the ONLY thing that lets a later boot treat M005 as
+        // done. It runs after every other step has succeeded, so any earlier
+        // failure leaves the marker in place, `apply` returns Err, and
+        // `run_migrations` never advances schema_version past 4.
+        plan::M005Plan::clear(&corpus).await?;
 
         if dropped_by_cap > 0 {
             // Reported, not fatal — returning `Err` leaves schema_version at 4

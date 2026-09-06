@@ -106,6 +106,22 @@ pub(crate) const META_KEY_INDEXED_ROOT: &str = "indexed_root";
 /// Test: `service::reindex::checkpoint::tests` and `resume_tests`.
 pub(crate) const META_KEY_REINDEX_CHECKPOINT: &str = "reindex_checkpoint";
 
+/// The outstanding-M005-pass marker (#6581).
+///
+/// Why: M005 clears the corpus and rebuilds it from source, so the corpus
+/// cannot answer "did that pass finish" — the clear destroys the pre-#6581 ids
+/// whose presence would otherwise be the evidence. Without a marker, a crash
+/// between the clear and the final flush left an empty or partial corpus that
+/// the guard read as "already migrated", and `run_migrations` then stamped
+/// `schema_version = 5` over the loss. This key is the durable evidence
+/// instead: present means a pass started and did not finish.
+/// What: a UTF-8 JSON blob (`core::migration::m005::plan::M005Plan`) written
+/// BEFORE the corpus clear and removed only after the whole pass succeeds. It
+/// survives the clear because `clear_corpus_for_rechunk` empties the chunk,
+/// entity and KG tables, never `_meta`.
+/// Test: `core::migration::m005::tests::m005_resumes_after_a_crash_before_the_first_batch`.
+pub(crate) const META_KEY_M005_PLAN: &str = "m005_plan";
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 /// Structured errors from the migration subsystem.

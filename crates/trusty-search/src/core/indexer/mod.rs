@@ -37,10 +37,12 @@ use crate::core::symbol_graph::SymbolGraph;
 pub(crate) mod archive;
 pub(crate) mod corpus_fault;
 pub(crate) mod docs_penalty;
+// #6581: the migration-in-progress window and the error a query lands on there.
 mod files;
 pub(crate) mod helpers;
 mod idle_evict;
 mod ingest;
+pub(crate) mod migration_state;
 pub(crate) mod migrations;
 mod persist;
 mod persist_hnsw;
@@ -89,6 +91,7 @@ pub(crate) use helpers::{
 
 // Re-export types so callers outside this module see the same paths.
 pub use corpus_fault::CorpusReadUnavailable;
+pub use migration_state::{IndexMigrationInProgress, MigrationWindow};
 pub use search::drops::SearchDrops;
 pub use typeahead::{TypeaheadHit, TypeaheadMode, TypeaheadResponse};
 pub(crate) use types::ChunkSnapshot;
@@ -313,12 +316,30 @@ pub struct CodeIndexer {
     /// One that HAS run M005 holds none, so accepting the wider grammar there
     /// only widens the #3401 lookalike-path surface for no recall.
     /// What: starts `true` (fail-open on recall) and is set `false` by
-    /// [`crate::core::migration::run_migrations`] once the index's stored
-    /// `schema_version` reaches the M005 target. Read through
+    /// [`Self::set_chunk_ids_migrated`]. `M005ChunkIdEndLine::apply` is the
+    /// first caller, at the end of a successful pass;
+    /// `crate::core::migration::run_migrations` calls it again through
+    /// `narrow_chunk_id_shapes` for an index already at or above the M005
+    /// target at boot, which is idempotent. Read through
     /// [`Self::chunk_id_shapes`]; `Arc` because the migration runner holds the
     /// handle, not `&mut self`.
     /// Test: `core::migration::m005::tests::the_suffix_policy_narrows_per_index`.
     pub(super) legacy_chunk_ids_possible: Arc<AtomicBool>,
+
+    /// `true` while a schema migration is rebuilding this index's corpus
+    /// (#6581).
+    ///
+    /// Why: M005 clears the corpus and re-chunks it in batches, so for the
+    /// length of that pass the corpus is empty or partial while still reading
+    /// cleanly. A concurrent query would answer `results: []` at HTTP 200 —
+    /// indistinguishable from a genuine miss — because the migration runs under
+    /// the SHARED teardown lock, which blocks a delete and not a search. This
+    /// flag is what lets the search path refuse instead.
+    /// What: raised and lowered by [`MigrationWindow`], read through
+    /// [`Self::is_migrating`]. `Arc` because the migration is a detached task
+    /// holding clones of the index's state.
+    /// Test: `a_search_during_the_migration_window_is_refused_not_empty`.
+    pub(super) migration_in_progress: Arc<AtomicBool>,
 
     /// `true` while a commit must NOT evict a stored vector for a chunk it
     /// commits without an embedding (#6581).
@@ -630,6 +651,7 @@ impl CodeIndexer {
             rehydrate_generation: Arc::new(Mutex::new(0)),
             lane_degraded: Arc::new(AtomicBool::new(false)),
             legacy_chunk_ids_possible: Arc::new(AtomicBool::new(true)),
+            migration_in_progress: Arc::new(AtomicBool::new(false)),
             suppress_vector_eviction: Arc::new(AtomicBool::new(false)),
             corpus_read_fault: Arc::new(corpus_fault::CorpusReadFault::default()),
             last_rehydrate_cost_ms: Arc::new(AtomicU64::new(0)),
@@ -738,10 +760,32 @@ impl CodeIndexer {
     /// accepting the pre-#6581 named shape (#6581).
     ///
     /// Why/What/Test: see [`Self::legacy_chunk_ids_possible`].
-    /// `core::migration::run_migrations` is the only caller.
+    /// Two callers, both idempotent: `M005ChunkIdEndLine::apply` calls it first
+    /// at the end of a successful pass, and
+    /// `core::migration::run_migrations`'s `narrow_chunk_id_shapes` calls it at
+    /// boot for an index whose stored `schema_version` already reaches the M005
+    /// target.
     pub fn set_chunk_ids_migrated(&self) {
         self.legacy_chunk_ids_possible
             .store(false, Ordering::Relaxed);
+    }
+
+    /// The shared migration-in-progress flag for this index (#6581).
+    ///
+    /// Why: M005 runs in a detached boot task that holds `Arc` clones of the
+    /// index's state, not `&mut self`, so the flag it raises must be reachable
+    /// as an `Arc` rather than through a method on a borrowed indexer.
+    /// What: hands out a clone for [`MigrationWindow::open`] to hold.
+    /// Test: `a_search_during_the_migration_window_is_refused_not_empty`.
+    pub fn migration_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.migration_in_progress)
+    }
+
+    /// `true` while a schema migration is rebuilding this index's corpus.
+    ///
+    /// Why/What/Test: see [`Self::migration_in_progress`].
+    pub fn is_migrating(&self) -> bool {
+        self.migration_in_progress.load(Ordering::Relaxed)
     }
 
     /// Drop the in-memory `chunks` map when the index has been idle longer

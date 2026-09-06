@@ -313,6 +313,70 @@ impl CorpusStore {
         Ok(())
     }
 
+    /// Read the outstanding-M005-pass marker, if one is present (#6581).
+    ///
+    /// Why: M005's own first step clears the corpus, so corpus contents cannot
+    /// say whether a pass finished. This marker can, and it is the only thing
+    /// that stands between an interrupted re-chunk and a `schema_version = 5`
+    /// stamped over missing chunks.
+    /// What: opens a read transaction on `_meta` and returns the bytes under
+    /// `META_KEY_M005_PLAN`. `None` when the table or key is absent — the normal
+    /// case for a corpus with no pass outstanding. Parsing is the caller's job.
+    /// Test: `m005_plan_roundtrips_through_the_corpus_meta_table`.
+    pub(crate) fn read_m005_plan_sync(&self) -> Result<Option<Vec<u8>>> {
+        use crate::core::migration::{META_KEY_M005_PLAN, META_TABLE};
+        let txn = self.db.begin_read().context("begin _meta read txn")?;
+        let table = match txn.open_table(META_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(anyhow::anyhow!("open _meta table: {e}")),
+        };
+        match table.get(META_KEY_M005_PLAN).context("read m005_plan")? {
+            Some(v) => Ok(Some(v.value().to_vec())),
+            None => Ok(None),
+        }
+    }
+
+    /// Write the M005 recovery plan into `_meta` (#6581).
+    ///
+    /// Why: written BEFORE `clear_corpus_for_rechunk` runs, so every state the
+    /// pass can crash in has the marker already durable. redb commits it
+    /// atomically, so there is no window in which a half-written plan is
+    /// readable.
+    /// Test: `m005_plan_roundtrips_through_the_corpus_meta_table`.
+    pub(crate) fn write_m005_plan_sync(&self, bytes: &[u8]) -> Result<()> {
+        use crate::core::migration::{META_KEY_M005_PLAN, META_TABLE};
+        let txn = self.db.begin_write().context("begin _meta write txn")?;
+        {
+            let mut table = txn.open_table(META_TABLE).context("open _meta table")?;
+            table
+                .insert(META_KEY_M005_PLAN, bytes)
+                .context("insert m005_plan")?;
+        }
+        txn.commit().context("commit _meta write txn")?;
+        Ok(())
+    }
+
+    /// Remove the M005 recovery plan — the pass completed (#6581).
+    ///
+    /// Why: this removal is what makes a later boot treat M005 as done, so it
+    /// is the last action of a fully successful pass and never runs earlier.
+    /// What: one redb write transaction removing the key. Removing an absent key
+    /// is a no-op, so this is safe to call unconditionally.
+    /// Test: `m005_is_a_no_op_on_an_already_migrated_corpus`.
+    pub(crate) fn clear_m005_plan_sync(&self) -> Result<()> {
+        use crate::core::migration::{META_KEY_M005_PLAN, META_TABLE};
+        let txn = self.db.begin_write().context("begin _meta write txn")?;
+        {
+            let mut table = txn.open_table(META_TABLE).context("open _meta table")?;
+            table
+                .remove(META_KEY_M005_PLAN)
+                .context("remove m005_plan")?;
+        }
+        txn.commit().context("commit _meta write txn")?;
+        Ok(())
+    }
+
     /// Bulk-copy all durable rows from `source` into `self` (issue #839).
     ///
     /// Why: the incremental reindex staging path opens a FRESH empty
