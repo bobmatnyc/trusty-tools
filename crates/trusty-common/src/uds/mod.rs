@@ -557,7 +557,16 @@ pub async fn accept_sized(
     // #6896: Linux hands back a default-sized socket here whatever the listener
     // carries, so both platforms need this to end up at the intended sizing.
     if let Err(e) = sockbuf::tune_connected_buffers(&accepted.0) {
+        // #6896: name the listener, matching `drain_shutdown`'s precedent
+        // (#6601 review) — under a persistent failure this warn repeats per
+        // connection, and an unnamed socket leaves no way to tell which one.
+        let socket = listener
+            .local_addr()
+            .ok()
+            .and_then(|addr| addr.as_pathname().map(|p| p.display().to_string()))
+            .unwrap_or_else(|| "<unknown>".to_string());
         tracing::warn!(
+            %socket,
             error = %e,
             "accepted connection left at the platform socket buffer size"
         );

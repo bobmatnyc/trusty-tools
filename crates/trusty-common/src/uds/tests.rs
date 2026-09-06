@@ -836,8 +836,8 @@ impl std::os::fd::AsRawFd for BorrowedFdForTest {
     }
 }
 
-/// The server side is sized on the accepted socket, not inherited from the
-/// listener: Linux hands back a default-sized socket from `accept` however the
+/// On Linux, the server side is sized on the accepted socket, not inherited
+/// from the listener: `accept` hands back a default-sized socket however the
 /// listener was sized (#6896).
 #[tokio::test]
 async fn accept_sized_raises_the_accepted_socket_to_the_listeners_sizing() {

@@ -352,7 +352,7 @@ pub async fn handle_connection(
 ) -> Result<Served, RpcServerError> {
     // #6896: this connection's buffers were sized by `accept_sized`, which the
     // serving accept sites in this module call in place of `listener.accept()`.
-    // Sizing them again here would repeat two syscalls per connection — see
+    // Sizing them again here would repeat four syscalls per connection — see
     // `uds::sockbuf` for why the listener's sizing is not enough on Linux.
     ensure_peer_is_self(&stream).map_err(|source| RpcServerError::Peer { source })?;
 
@@ -640,6 +640,7 @@ async fn drain_shutdown(listener: &UnixListener, open: &Arc<IdleTracker>, budget
 
     let refuse = async {
         loop {
+            // #6896: not sized — this stream is dropped without carrying a frame.
             match listener.accept().await {
                 Ok((stream, _)) => {
                     tracing::debug!("refusing a connection dialled during the shutdown drain");
