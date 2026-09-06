@@ -175,6 +175,60 @@ fn confirm_rejects_null_root() {
     );
 }
 
+/// Regression for #6864: the derived id names another tree, but a second
+/// registered index is rooted at THIS one — pin that one instead of refusing.
+///
+/// Why: this is the reported session. `trusty-tools` was registered for
+/// `/Users/masa/Projects/trusty-tools` while the working checkout was served as
+/// `trusty-tools-checkout`; the mismatch alone left the session UNPINNED and
+/// every `search` call in it failed. The entries needed to resolve it were
+/// already in hand — `confirm_candidate` simply never looked past the id.
+#[test]
+fn confirm_substitutes_the_index_rooted_at_the_cwd() {
+    let c = CwdCandidate {
+        index_id: "trusty-tools".into(),
+        project_root: PathBuf::from("/work/checkout/trusty-tools"),
+    };
+    let verdict = confirm_candidate(
+        &c,
+        &[
+            entry("trusty-tools", "/work/projects/trusty-tools"),
+            entry("trusty-tools-checkout", "/work/checkout/trusty-tools"),
+        ],
+    );
+    assert_eq!(
+        verdict,
+        Confirmation::ServedByAnotherId {
+            index_id: "trusty-tools-checkout".into()
+        },
+        "an index registered at this exact root answers about this tree, whatever \
+         its id (#6864)"
+    );
+}
+
+/// Why (#6864): the same substitution when the derived id is served by NOBODY.
+/// The remedy is identical — an index is registered at this tree — so refusing
+/// here would leave the session unpinned for the same non-reason.
+#[test]
+fn confirm_substitutes_when_the_derived_id_is_unserved() {
+    let c = CwdCandidate {
+        index_id: "trusty-tools".into(),
+        project_root: PathBuf::from("/work/checkout/trusty-tools"),
+    };
+    assert_eq!(
+        confirm_candidate(
+            &c,
+            &[entry(
+                "trusty-tools-checkout",
+                "/work/checkout/trusty-tools"
+            )],
+        ),
+        Confirmation::ServedByAnotherId {
+            index_id: "trusty-tools-checkout".into()
+        }
+    );
+}
+
 /// Why: a git worktree is routinely reached through a symlink, and on macOS the
 /// same directory is reachable as both `/tmp/x` and `/private/tmp/x`. A byte
 /// comparison would refuse a pin that is in fact correct, so the check
@@ -231,6 +285,32 @@ fn decide_pins_on_confirmation() {
     assert!(
         report.contains("api") && report.contains("working directory"),
         "the report must name both the index and its source; got {report:?}"
+    );
+}
+
+/// Regression for #6864: the substituted index is pinned, and the startup line
+/// names it.
+///
+/// Why: resolving the right index is only half the fix — an operator reading
+/// the startup line has to see WHICH index the session is on and that it was
+/// not the derived one, or the substitution is invisible until results look
+/// wrong.
+#[test]
+fn decide_pins_the_substituted_index() {
+    let pin = decide_auto_pin(
+        &candidate(),
+        Confirmation::ServedByAnotherId {
+            index_id: "api-checkout".into(),
+        },
+    );
+    let choice = pin.choice().expect("a root-path match pins");
+    assert_eq!(choice.index_id, "api-checkout");
+    assert_eq!(choice.source, PinSource::WorkingDirRootMatch);
+    let report = pin.report();
+    assert!(
+        report.contains("api-checkout") && report.contains("root_path match"),
+        "the report must name the substituted index and say it came from a root \
+         match; got {report:?}"
     );
 }
 
@@ -429,6 +509,33 @@ async fn auto_pin_refuses_a_colliding_index_end_to_end() {
     assert!(
         pin.report().contains("/somewhere/else/entirely"),
         "the refusal must name the conflicting root; got {:?}",
+        pin.report()
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Regression for #6864, end to end: the daemon serves the derived id from
+/// another tree AND serves this one under a different id. The session must pin
+/// the second, from the ONE index listing it already fetched.
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_pin_substitutes_the_index_rooted_at_the_cwd_end_to_end() {
+    let root = scratch("e2e-substitute");
+    git_init(&root);
+    let derived = root.file_name().unwrap().to_string_lossy().into_owned();
+    let base = fixture_daemon(json!({"indexes": [
+        {"id": derived, "root_path": "/somewhere/else/entirely"},
+        {"id": "the-checkout-index", "root_path": root.to_string_lossy()}
+    ]}))
+    .await;
+
+    let pin = auto_pin_from_cwd(&base, &root).await.expect("a candidate");
+    let choice = pin
+        .choice()
+        .expect("an index registered at this root must pin the session (#6864)");
+    assert_eq!(choice.index_id, "the-checkout-index");
+    assert!(
+        pin.report().contains("the-checkout-index"),
+        "the startup line must name the substituted index; got {:?}",
         pin.report()
     );
     let _ = fs::remove_dir_all(&root);

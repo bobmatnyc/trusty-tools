@@ -1368,10 +1368,13 @@ fn registered_root_from_response_tolerates_a_daemon_that_omits_it() {
 /// must not read as confirmation.
 /// What: stands up a fake daemon answering `200` with a `root_path` that is a
 /// real, existing directory OTHER than the one requested, so the comparison runs
-/// on `(dev, ino)` rather than falling back to string equality.
+/// on `(dev, ino)` rather than falling back to string equality. #6864 renamed
+/// the verdict from `NotConfirmed` to `CreateOutcome::Conflict` — the answer is
+/// still not a registration, and is now marked as the recoverable kind so the
+/// caller looks for the index that does serve this tree.
 /// Test: itself.
 #[test]
-fn create_index_response_for_a_different_tree_is_not_confirmed() {
+fn create_index_response_for_a_different_tree_reports_a_conflict() {
     let requested = scratch_dir("mismatch-requested");
     let registered = scratch_dir("mismatch-registered");
     fs::create_dir_all(&requested).unwrap();
@@ -1395,7 +1398,7 @@ fn create_index_response_for_a_different_tree_is_not_confirmed() {
 
     assert_eq!(
         outcome,
-        IndexRegistration::NotConfirmed,
+        CreateOutcome::Conflict { existing_id: None },
         "a 200 naming a different tree must not confirm the registration"
     );
 
@@ -1428,7 +1431,230 @@ fn create_index_response_for_the_same_tree_is_confirmed() {
     );
     let _ = server.join();
 
-    assert_eq!(outcome, IndexRegistration::Confirmed);
+    assert_eq!(outcome, CreateOutcome::Confirmed);
 
     let _ = fs::remove_dir_all(&root);
+}
+
+// ── #6864: a colliding basename resolves to the index serving this root ───────
+
+/// Stand up a fake trusty-search daemon answering a SCRIPTED SEQUENCE.
+///
+/// Why: the #6864 recovery is a conversation, not one call — the create is
+/// refused, the registry is read, and (when nothing serves the tree) a second
+/// create is issued. `one_shot_daemon` answers exactly one request, so it can
+/// only ever reach the first step. Dropping the listener once the script is
+/// exhausted keeps the follow-up reindex probes failing fast with
+/// connection-refused instead of idling out their own timeouts, which is the
+/// same trick the one-shot form uses.
+/// What: binds `127.0.0.1:0` and accepts `responses.len()` connections in order,
+/// replying with each `(status_line, body)` pair in turn. Every request in this
+/// module's flows is `connection: close` on a freshly built client, so
+/// connection order IS request order.
+/// Test: used by `registration_matches_an_existing_index_by_root_path` and
+/// `registration_falls_back_to_a_collision_resistant_id`.
+fn scripted_daemon(
+    responses: Vec<(&'static str, String)>,
+) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake daemon");
+    let addr = listener.local_addr().expect("fake daemon local_addr");
+    let handle = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for (status_line, body) in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(
+                format!(
+                    "{status_line}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+            let _ = stream.flush();
+        }
+        drop(listener);
+    });
+    (addr, handle)
+}
+
+/// The `409` trusty-search returns when an id already identifies another tree.
+///
+/// Mirrors `root_path_mismatch_response` — note it names no `existing_id`,
+/// because no index serves the tree that was asked about.
+fn root_mismatch_409(index_id: &str, registered: &Path, requested: &Path) -> String {
+    format!(
+        r#"{{"error":"index '{index_id}' is registered elsewhere","index_id":"{index_id}",
+           "registered_root_path":"{}","requested_root_path":"{}"}}"#,
+        registered.display(),
+        requested.display()
+    )
+}
+
+/// Run `body` against a scripted fake daemon, with a git-rooted project named
+/// `project_name` (#6864).
+///
+/// Why: the two #6864 regressions need the same arrangement as
+/// [`with_refusing_daemon`] — `ENV_LOCK`, an isolated data dir, the #4255
+/// opt-out, a published daemon address — but they also need the project's PATH
+/// before the responses can be written, because the registry body embeds it.
+/// What: creates `<scratch>/<project_name>/.git`, calls `script(&project)` to
+/// build the response sequence, serves it, runs `body(&project)`, then restores
+/// the environment and removes both scratch trees.
+/// Test: used by the two tests below.
+fn with_scripted_daemon<T>(
+    tag: &str,
+    project_name: &str,
+    script: impl FnOnce(&Path) -> Vec<(&'static str, String)>,
+    body: impl FnOnce(&Path) -> T,
+) -> T {
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let data_dir = scratch_dir(&format!("6864-data-{tag}"));
+    fs::create_dir_all(&data_dir).unwrap();
+    // SAFETY: guarded by ENV_LOCK; both vars are removed below before returning.
+    unsafe {
+        std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &data_dir);
+        std::env::set_var(crate::test_harness::ALLOW_PRODUCTION_ENV, "1");
+    }
+
+    let workspace = scratch_dir(&format!("6864-ws-{tag}"));
+    let project = workspace.join(project_name);
+    fs::create_dir_all(project.join(".git")).unwrap();
+
+    let (addr, server) = scripted_daemon(script(&project));
+    publish_daemon_addr(&data_dir, addr);
+
+    let out = body(&project);
+
+    let _ = server.join();
+    unsafe {
+        std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+        std::env::remove_var(crate::test_harness::ALLOW_PRODUCTION_ENV);
+    }
+    let _ = fs::remove_dir_all(&workspace);
+    let _ = fs::remove_dir_all(&data_dir);
+    out
+}
+
+/// Regression for #6864: a basename already taken by another tree resolves to
+/// the index registered at THIS tree.
+///
+/// Why: this is the reported failure exactly. The daemon held `trusty-tools` for
+/// `/Users/masa/Projects/trusty-tools` and answered the checkout's registration
+/// `409`; nothing then looked for the index that DID serve the checkout, so the
+/// session got `NotConfirmed`, no pin, and every MCP `search` call in it failed
+/// with `missing required string field: index_id` — while
+/// `trusty-tools-checkout` sat in the same daemon serving the very tree the
+/// session was working in.
+/// What: two checkouts named `trusty-tools`; the daemon refuses the create with
+/// the same-id-different-tree `409` and then reports both indexes on
+/// `GET /indexes?details=true`. The report must come back `Confirmed` carrying
+/// `trusty-tools-checkout`, the id whose `root_path` IS this project.
+/// Test: this test.
+#[test]
+fn registration_matches_an_existing_index_by_root_path() {
+    let other = scratch_dir("6864-other-checkout");
+    fs::create_dir_all(&other).unwrap();
+
+    let report = with_scripted_daemon(
+        "match",
+        "trusty-tools",
+        |project| {
+            vec![
+                (
+                    "HTTP/1.1 409 Conflict",
+                    root_mismatch_409("trusty-tools", &other, project),
+                ),
+                (
+                    "HTTP/1.1 200 OK",
+                    format!(
+                        r#"{{"indexes":[{{"id":"trusty-tools","root_path":"{}"}},
+                           {{"id":"trusty-tools-checkout","root_path":"{}"}}]}}"#,
+                        other.display(),
+                        project.display()
+                    ),
+                ),
+            ]
+        },
+        |project| ensure_project_indexed_reporting(project, IndexOptions::default()),
+    );
+
+    assert_eq!(
+        report.registration,
+        IndexRegistration::Confirmed,
+        "an index registered at this root IS a confirmed registration (#6864)"
+    );
+    assert_eq!(
+        report.index_id,
+        Some("trusty-tools-checkout".to_string()),
+        "the report must carry the id that serves this tree, not the colliding \
+         basename the daemon refused (#6864)"
+    );
+
+    let _ = fs::remove_dir_all(&other);
+}
+
+/// Regression for #6864: when nothing serves this tree, the create is retried
+/// once under a collision-resistant id.
+///
+/// Why: the root-path scan answers "which index already serves me"; it cannot
+/// answer "register me". A checkout whose basename is taken and which has no
+/// index of its own would otherwise stay unregistered forever, because the only
+/// id the client ever tried is the one the daemon refuses. Retrying under
+/// `derive_checkout_index_id` — the path-digest form #6149 defined for two
+/// checkouts of one repository — is what gets it indexed at all.
+/// What: same `409`, but the registry names only the OTHER checkout. The client
+/// must POST a second create under the digest id and confirm THAT.
+/// Test: this test.
+#[test]
+fn registration_falls_back_to_a_collision_resistant_id() {
+    let other = scratch_dir("6864-fallback-other");
+    fs::create_dir_all(&other).unwrap();
+
+    let (report, expected) = with_scripted_daemon(
+        "fallback",
+        "trusty-tools",
+        |project| {
+            vec![
+                (
+                    "HTTP/1.1 409 Conflict",
+                    root_mismatch_409("trusty-tools", &other, project),
+                ),
+                (
+                    "HTTP/1.1 200 OK",
+                    format!(
+                        r#"{{"indexes":[{{"id":"trusty-tools","root_path":"{}"}}]}}"#,
+                        other.display()
+                    ),
+                ),
+                (
+                    "HTTP/1.1 200 OK",
+                    r#"{"id":"trusty-tools-abcdef12","created":true}"#.to_string(),
+                ),
+            ]
+        },
+        |project| {
+            (
+                ensure_project_indexed_reporting(project, IndexOptions::default()),
+                crate::derive_checkout_index_id(project),
+            )
+        },
+    );
+
+    assert_eq!(
+        report.registration,
+        IndexRegistration::Confirmed,
+        "the fallback create landed, so the registration is confirmed (#6864)"
+    );
+    assert_eq!(
+        report.index_id, expected,
+        "the id must be the shared checkout derivation, not a scheme invented here \
+         (#6149 / #6864)"
+    );
+
+    let _ = fs::remove_dir_all(&other);
 }
