@@ -157,6 +157,22 @@ pub(crate) async fn daemon_healthy(client: &reqwest::Client, url: &str) -> bool 
     }
 }
 
+/// The line `tm start` prints when the daemon is already up.
+///
+/// Why (#6869): this printed `Daemon already running on <resolved url>`, the
+/// third site still putting the daemon's address in front of the operator.
+/// Rendering it through a function that TAKES the URL and puts none of it in
+/// the result is what makes "no address survives into the line" assertable for
+/// any address the discovery chain can produce — a later `format!("… on
+/// {check_url}")` fails the test rather than shipping.
+/// What: returns [`daemon_run::ALREADY_RUNNING_NOTICE`] verbatim, so `tm start`
+/// and `tm daemon` say the same thing from one constant. The caller logs the
+/// URL at debug level.
+/// Test: `start_already_running_line_names_no_address`.
+fn already_running_line(_check_url: &str) -> String {
+    daemon_run::ALREADY_RUNNING_NOTICE.to_string()
+}
+
 /// `start` subcommand — ensure the daemon is running, then show status.
 ///
 /// Why: operators want one command that is safe to run repeatedly — it brings
@@ -165,10 +181,12 @@ pub(crate) async fn daemon_healthy(client: &reqwest::Client, url: &str) -> bool 
 /// launchd does NOT own the daemon. Where launchd DOES own it, `tm start` is the
 /// wrong verb and now says so rather than racing launchd (#4230), so it is no
 /// longer appropriate in a shell profile on such a host — use `launchctl` there.
-/// What: probes `/health`; if healthy, prints "Daemon already running" plus the
+/// What: probes `/health`; if healthy, prints [`already_running_line`] plus the
 /// same listing as `tm status`. If not, opens `~/.trusty-mpm/daemon.log`, spawns
 /// `tm daemon` detached with stdout/stderr appended to that log, polls `/health`
 /// for up to 5 seconds, then prints "Starting daemon... done" and the status.
+/// Neither branch names an address any more (#6869); both log the resolved URL
+/// at debug level instead.
 ///
 /// #4230: refuses to spawn at all when a trusty-mpm launchd unit is registered.
 /// This was the ONE client-side daemon-spawn path with no launchd awareness —
@@ -192,7 +210,9 @@ pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result
         url.to_string()
     };
     if daemon_healthy(client, &check_url).await {
-        println!("Daemon already running on {check_url}");
+        // #6869: the resolved URL goes to the log, not to the operator.
+        tracing::debug!("daemon already running at {check_url}");
+        println!("{}", already_running_line(&check_url));
         return print_status(client, &check_url).await;
     }
 
@@ -256,9 +276,9 @@ pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result
     }
     if healthy {
         println!("done");
-        if actual_url != url {
-            println!("(listening on {actual_url})");
-        }
+        // #6869: the bound address is a discovery detail — clients read it
+        // from the lock file, so it goes to the log rather than to stdout.
+        tracing::debug!("daemon listening on {actual_url}");
     } else {
         println!("failed");
         println!(
@@ -522,6 +542,39 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (#6869): `tm start` was the third site still printing the daemon's
+    /// address, after the welcome banner and the `tm daemon` startup guard.
+    /// What: renders the already-running line for the default port and for a
+    /// non-default one — a test pinning only 7880 would still pass against a
+    /// hardcoded default — and asserts neither address reaches the operator,
+    /// that the line still names the daemon, and that `tm start` and
+    /// `tm daemon` render the one shared constant rather than two copies.
+    /// Test: this is the test.
+    #[test]
+    fn start_already_running_line_names_no_address() {
+        for url in [
+            trusty_mpm::core::DEFAULT_DAEMON_URL,
+            "http://127.0.0.1:9911",
+        ] {
+            let line = already_running_line(url);
+            for needle in ["7880", "9911", "127.0.0.1", "http://", ":"] {
+                assert!(
+                    !line.contains(needle),
+                    "`tm start` must not print {needle:?} for {url}: {line}"
+                );
+            }
+            assert!(
+                line.contains("trusty-mpm daemon is already running"),
+                "the operator must still be told what happened: {line}"
+            );
+            assert_eq!(
+                line,
+                daemon_run::ALREADY_RUNNING_NOTICE,
+                "`tm start` and `tm daemon` must render the one shared constant"
+            );
+        }
+    }
 
     fn make_session(workdir: &str) -> SessionRow {
         SessionRow {

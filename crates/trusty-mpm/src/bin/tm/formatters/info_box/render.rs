@@ -124,21 +124,22 @@ pub(crate) fn build_rows(data: &WelcomeData) -> Vec<String> {
 /// Format the daemon status row.
 ///
 /// Why: the daemon row has two forms (online/offline) with an optional session
-/// count; a helper keeps `build_rows` readable.
-/// What: `"  \u{25cf} daemon  :7880  (2)"` when online; `"  \u{25cb} daemon  offline"` when not.
-/// Test: indirectly by `welcome_panel_renders_online/offline`.
+/// count; a helper keeps `build_rows` readable. It names no port and no
+/// transport (#6869): the port it used to print was whatever the discovery
+/// chain happened to resolve, and it will be wrong outright once the daemon
+/// moves to a Unix socket (#6288). `tm doctor` (#6336) and `tm statusline`
+/// (#6304) already say only whether the daemon answers; this row now matches.
+/// What: `"  \u{25cf} daemon  running  (2)"` when online; `"  \u{25cb} daemon  offline"` when not.
+/// Test: `welcome_panel_renders_online`, `welcome_panel_renders_offline`,
+/// `welcome_panel_never_contains_the_daemon_port`.
 fn format_daemon_row(daemon: &DaemonInfo) -> String {
     if daemon.online {
-        let port_str = daemon
-            .addr
-            .rfind(':')
-            .map(|i| &daemon.addr[i..])
-            .unwrap_or(daemon.addr.as_str());
+        // #6869: the operator gets liveness and session count, never the port.
         let count_str = match daemon.session_count {
             Some(n) => format!("  ({n})"),
             None => String::new(),
         };
-        format!("  \u{25cf} daemon  {port_str}{count_str}")
+        format!("  \u{25cf} daemon  running{count_str}")
     } else {
         "  \u{25cb} daemon  offline".to_string()
     }
@@ -266,10 +267,54 @@ mod tests {
         };
         let out = render_welcome_panel(&data);
         assert!(out.contains('\u{25cf}'), "expected ● online marker");
-        assert!(out.contains(":7880"), "expected port");
+        // #6869: liveness, not an address.
+        assert!(out.contains("daemon  running"), "expected running label");
         assert!(out.contains("(2)"), "expected session count");
         assert!(out.contains("owner/repo"), "expected project");
         assert!(out.contains("alice"), "expected user name");
+    }
+
+    /// Why (#6869): the welcome banner rendered `● daemon  :7880`, so bare `tm`
+    /// put the daemon's port in front of every operator on every launch. The
+    /// port is an implementation detail of a transport that is moving to a Unix
+    /// socket (#6288), and `tm doctor` (#6336) and `tm statusline` (#6304)
+    /// already hide it. Mirrors `render_statusline_never_contains_the_daemon_port`.
+    /// What: renders the online row through both the standalone panel and the
+    /// production two-panel row builder, with a non-default port so the
+    /// assertion cannot pass by coincidence against a hardcoded 7880, and
+    /// checks that neither the port nor the loopback host survives.
+    /// Test: this is the test.
+    #[test]
+    fn welcome_panel_never_contains_the_daemon_port() {
+        for port in [7880u16, 9911] {
+            let data = WelcomeData {
+                daemon: online_daemon(port).with_count(2),
+                ..base_data()
+            };
+            let panel = render_welcome_panel(&data);
+            let rows = crate::formatters::info_box::render_info_box_rows(&data).join("\n");
+            for (label, out) in [("panel", &panel), ("two-panel rows", &rows)] {
+                assert!(
+                    !out.contains(&port.to_string()),
+                    "{label}: the daemon port must not reach the operator: {out}"
+                );
+                assert!(
+                    !out.contains("127.0.0.1"),
+                    "{label}: the daemon host must not reach the operator: {out}"
+                );
+                assert!(
+                    out.contains("daemon  running"),
+                    "{label}: liveness must still be reported: {out}"
+                );
+                assert!(out.contains("(2)"), "{label}: session count kept: {out}");
+            }
+        }
+        // The offline form has nothing to leak, and must stay that way.
+        let offline = render_welcome_panel(&base_data());
+        assert!(
+            !offline.contains("127.0.0.1") && !offline.contains("7880"),
+            "offline row must name no address: {offline}"
+        );
     }
 
     #[test]
