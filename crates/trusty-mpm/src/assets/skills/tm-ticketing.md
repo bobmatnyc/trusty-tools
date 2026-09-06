@@ -211,6 +211,18 @@ retry the original command once.
 before using one; create a genuinely missing label rather than dropping the
 family or substituting an approximation.
 
+🟡 **The standard is configurable — read it, do not assume it.** `tm issue
+standard` prints the ticketing standard in effect: the component labels, the
+lifecycle labels, the default assignee, and whether a claim comment and a
+closing note are expected. Those values come from the `agents.ticketing` block
+in `~/.trusty-tools/trusty-mpm/config.yaml`, so a project can add a component
+label, restyle one, name a different assignee, or point at its own
+`issue-state.yaml` (#6918). Two things the block cannot change, and the command
+prints both: the PR issue-link keyword stays `Refs #N` (a one-off `Closes` is
+the deliberate `tm pr open --closes` flag), and `trusty-mpm` stays a component
+label, never a lifecycle one. A block that tries either is refused at load with
+the field named.
+
 ## Milestones
 
 🔴 **Leave the milestone UNSET by default.** A milestone is a delivery slot in a

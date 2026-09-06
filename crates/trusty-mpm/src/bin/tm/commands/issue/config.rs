@@ -3,8 +3,9 @@
 //! Why: the issue state machine (label set, allowed transitions, assignee model)
 //! is *configuration*, not harness code. This module defines the serde shape of
 //! that YAML contract, embeds the Unicorn Factory default via `include_str!`, and
-//! resolves which model to load (flag > CWD file > user config > embedded
-//! default, RFC §6). Validation lives in the sibling `validate` module to keep
+//! resolves which model to load (flag > CWD file > `agents.ticketing.
+//! lifecycle_model` (#6918) > user config > embedded default, RFC §6).
+//! Validation lives in the sibling `validate` module to keep
 //! both files under the 500-SLOC production cap.
 //! What: the [`StateModel`] root and its nested types ([`LabelConfig`],
 //! [`StateDef`], [`StateLabel`], [`ExtraLabel`], [`Transition`], [`Trigger`],
@@ -260,15 +261,21 @@ pub(crate) fn user_config_path() -> Option<PathBuf> {
 /// Resolve which config path to load, by precedence (RFC §6).
 ///
 /// Why: a single, testable precedence resolver keeps the discovery rule in one
-/// place: `--config` flag > `./issue-state.yaml` > user config > (None ⇒
-/// embedded default).
+/// place: `--config` flag > `./issue-state.yaml` > `agents.ticketing.
+/// lifecycle_model` > user config > (None ⇒ embedded default).
 /// What: returns `Some(path)` for the first location that exists, or `None` to
 /// signal "use the embedded default". An explicit `--config` path is returned
 /// even if missing, so the loader can surface a clear not-found error.
-/// Test: `resolve_prefers_flag`, `resolve_prefers_cwd`, `resolve_none_means_default`.
+///
+/// #6918 slotted `configured` in BELOW the repo's own `./issue-state.yaml`: it
+/// is a host-level default for repos that ship no model, not an override of a
+/// model a project committed and reviewed.
+/// Test: `resolve_prefers_flag`, `resolve_prefers_cwd`, `resolve_none_means_default`,
+/// `resolve_prefers_cwd_over_configured`, `resolve_uses_configured_before_user`.
 pub(crate) fn resolve_config_path(
     flag: Option<&Path>,
     cwd_exists: bool,
+    configured: Option<&Path>,
     user_path: Option<&Path>,
 ) -> Option<PathBuf> {
     if let Some(f) = flag {
@@ -276,6 +283,12 @@ pub(crate) fn resolve_config_path(
     }
     if cwd_exists {
         return Some(PathBuf::from(CONFIG_BASENAME));
+    }
+    // #6918: an explicitly configured path is returned even when missing, so
+    // the loader reports it by name rather than silently using the embedded
+    // default — the same reasoning as the `--config` flag above.
+    if let Some(c) = configured {
+        return Some(c.to_path_buf());
     }
     if let Some(u) = user_path
         && u.exists()
@@ -289,14 +302,21 @@ pub(crate) fn resolve_config_path(
 ///
 /// Why: the one entry point every `tm issue` verb calls to obtain a validated
 /// model; folding discovery + parse + validate here keeps the verbs thin.
-/// What: resolves the path (flag > CWD > user > embedded), reads + parses the
-/// YAML (or the embedded default when no file is found), then runs
-/// [`super::validate::validate_model`]; returns the validated [`StateModel`].
+/// What: resolves the path (flag > CWD > `configured` > user > embedded), reads
+/// and parses the YAML (or the embedded default when no file is found), then
+/// runs [`super::validate::validate_model`], returning the validated model.
+///
+/// #6918: `configured` is `agents.ticketing.lifecycle_model` from
+/// `~/.trusty-tools/trusty-mpm/config.yaml`. The lifecycle is REFERENCED from
+/// that block, never embedded in it.
 /// Test: `load_embedded_default_ok`, `load_explicit_missing_errors`.
-pub(crate) fn load_model(flag: Option<&Path>) -> anyhow::Result<StateModel> {
+pub(crate) fn load_model(
+    flag: Option<&Path>,
+    configured: Option<&Path>,
+) -> anyhow::Result<StateModel> {
     let user = user_config_path();
     let cwd_path = PathBuf::from(CONFIG_BASENAME);
-    let chosen = resolve_config_path(flag, cwd_path.exists(), user.as_deref());
+    let chosen = resolve_config_path(flag, cwd_path.exists(), configured, user.as_deref());
 
     let yaml = match &chosen {
         Some(path) => std::fs::read_to_string(path).map_err(|e| {
@@ -390,29 +410,49 @@ mod tests {
     #[test]
     fn load_explicit_missing_errors() {
         let missing = Path::new("/nonexistent/issue-state-does-not-exist.yaml");
-        let err = load_model(Some(missing)).unwrap_err().to_string();
+        let err = load_model(Some(missing), None).unwrap_err().to_string();
         assert!(err.contains("failed to read"), "got: {err}");
     }
 
     #[test]
     fn resolve_prefers_flag() {
         let flag = PathBuf::from("/tmp/custom.yaml");
-        let got = resolve_config_path(Some(&flag), true, None);
+        let got = resolve_config_path(Some(&flag), true, None, None);
         assert_eq!(got, Some(flag));
     }
 
     #[test]
     fn resolve_prefers_cwd() {
         // No flag, CWD file exists → the CWD basename wins over user/default.
-        let got = resolve_config_path(None, true, None);
+        let got = resolve_config_path(None, true, None, None);
         assert_eq!(got, Some(PathBuf::from(CONFIG_BASENAME)));
     }
 
     #[test]
     fn resolve_none_means_default() {
         // No flag, no CWD file, no user file → None (use embedded default).
-        let got = resolve_config_path(None, false, None);
+        let got = resolve_config_path(None, false, None, None);
         assert_eq!(got, None);
+    }
+
+    #[test]
+    fn resolve_prefers_cwd_over_configured() {
+        // #6918: a model the project committed beats the host-level config
+        // block — the block is a default for repos that ship none.
+        let configured = PathBuf::from("/tmp/host-issue-state.yaml");
+        let got = resolve_config_path(None, true, Some(&configured), None);
+        assert_eq!(got, Some(PathBuf::from(CONFIG_BASENAME)));
+    }
+
+    #[test]
+    fn resolve_uses_configured_before_user() {
+        // #6918: with no flag and no repo model, the configured path wins over
+        // the user config — and is returned even when missing, so the loader
+        // names it rather than silently falling back to the embedded default.
+        let configured = PathBuf::from("/tmp/host-issue-state.yaml");
+        let user = PathBuf::from("/tmp/user-issue-state.yaml");
+        let got = resolve_config_path(None, false, Some(&configured), Some(&user));
+        assert_eq!(got, Some(configured));
     }
 
     #[test]

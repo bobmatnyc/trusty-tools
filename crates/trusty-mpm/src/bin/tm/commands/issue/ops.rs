@@ -9,6 +9,8 @@
 //! [`SeedReport`]/[`TransitionReport`] result types the dispatcher prints.
 //! Test: the `ops_*` tests in `ops_tests.rs` drive a `FakeSystem`.
 
+use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
+
 use crate::commands::ticket::labels::{AssigneeTarget, RepoLabel};
 use crate::commands::ticket::system::TicketSystem;
 
@@ -65,10 +67,22 @@ pub(crate) struct TransitionReport {
 /// What: the model's state labels and extra labels first (a label-less state
 /// like `open`/`closed` has nothing to seed), then the policy set. A name
 /// already contributed by the model is not repeated.
+///
+/// #6918: the policy half now comes from
+/// [`trusty_mpm::core::policy_labels::policy_labels_configured`], so a label an
+/// operator declared in `agents.ticketing.extra_labels` is seeded by the same
+/// call the built-in ones are. A default `ticketing` — what an absent block
+/// resolves to — yields the identical set #6914 seeded.
 /// Test: `ops_seed_creates_only_missing`,
 /// `ops_seed_includes_policy_labels`,
-/// `ops_seed_without_session_skips_workstream_label`.
-fn desired_labels(model: &StateModel, session_name: Option<&str>) -> Vec<RepoLabel> {
+/// `ops_seed_without_session_skips_workstream_label`,
+/// `ops_seed_includes_configured_extra_labels`,
+/// `ops_seed_absent_block_matches_builtin_output`.
+fn desired_labels(
+    model: &StateModel,
+    ticketing: &ResolvedTicketing,
+    session_name: Option<&str>,
+) -> Vec<RepoLabel> {
     let mut out: Vec<RepoLabel> = model
         .states
         .iter()
@@ -84,7 +98,9 @@ fn desired_labels(model: &StateModel, session_name: Option<&str>) -> Vec<RepoLab
     );
     // #6914: the framework's own labels come from the shared policy table that
     // session launch also uses — never a second list spelled out here.
-    for label in trusty_mpm::core::policy_labels::policy_labels(session_name) {
+    // #6918: read through the config-aware call so `agents.ticketing` applies.
+    for label in trusty_mpm::core::policy_labels::policy_labels_configured(ticketing, session_name)
+    {
         if !out.iter().any(|existing| existing.name == label.name) {
             out.push(label);
         }
@@ -108,10 +124,15 @@ fn desired_labels(model: &StateModel, session_name: Option<&str>) -> Vec<RepoLab
 /// Test: `ops_seed_creates_only_missing`, `ops_seed_dry_run_creates_nothing`,
 /// `ops_seed_idempotent_when_all_present`, `ops_seed_includes_policy_labels`,
 /// `ops_seed_without_session_skips_workstream_label`,
-/// `ops_seed_leaves_present_policy_labels_untouched`.
+/// `ops_seed_leaves_present_policy_labels_untouched`,
+/// `ops_seed_includes_configured_extra_labels`,
+/// `ops_seed_absent_block_matches_builtin_output`.
 pub(crate) fn seed_labels<S: TicketSystem>(
     sys: &S,
     model: &StateModel,
+    // #6918: the resolved `agents.ticketing` standard. A default value is the
+    // built-in policy table, so an absent block seeds exactly what #6914 did.
+    ticketing: &ResolvedTicketing,
     session_name: Option<&str>,
     dry_run: bool,
 ) -> anyhow::Result<SeedReport> {
@@ -124,7 +145,7 @@ pub(crate) fn seed_labels<S: TicketSystem>(
         workstream_skipped: session_name.is_none_or(|n| n.trim().is_empty()),
         ..Default::default()
     };
-    for label in desired_labels(model, session_name) {
+    for label in desired_labels(model, ticketing, session_name) {
         if existing_names.contains(label.name.as_str()) {
             report.already_present.push(label.name.clone());
             continue;

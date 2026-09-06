@@ -40,7 +40,15 @@
 //! `workstream_label_runs_even_when_convention_label_fails`,
 //! `launch_labels_survive_total_gh_failure`,
 //! `launch_labels_skip_cleanly_on_non_github_remote`,
-//! `launch_labels_ensure_convention_label_when_session_name_is_blank`.
+//! `launch_labels_ensure_convention_label_when_session_name_is_blank`,
+//! `launch_labels_match_builtin_when_the_block_is_absent`,
+//! `launch_labels_include_configured_extra_labels`,
+//! `launch_labels_skip_entirely_when_ensure_labels_is_false`.
+//!
+//! #6918 made the set CONFIGURABLE without adding a second table: launch reads
+//! [`crate::core::policy_labels::policy_labels_configured`] with the resolved
+//! `agents.ticketing` block, and `agents.ticketing.ensure_labels: false` turns
+//! the launch-time ensure off entirely.
 
 use std::path::Path;
 use std::time::Duration;
@@ -49,6 +57,7 @@ use trusty_common::github_path::GithubPath;
 
 use crate::core::gh_account::run_bounded;
 use crate::core::policy_labels::{self, PolicyLabel};
+use crate::core::trusty_tools_config::{ResolvedTicketing, TrustyToolsConfig, resolve_ticketing};
 
 /// Bound for the `gh label create` call this module makes at session launch.
 ///
@@ -178,10 +187,17 @@ fn create_policy_label<R: GhLabelRunner>(runner: &R, repo: &str, label: &PolicyL
 /// `launch_labels_survive_total_gh_failure`.
 fn ensure_launch_labels_with<R: GhLabelRunner>(
     runner: &R,
+    ticketing: &ResolvedTicketing,
     repo_url: Option<&str>,
     workspace_dir: &Path,
     session_name: &str,
 ) {
+    // #6918: an operator who set `agents.ticketing.ensure_labels: false` turned
+    // OFF the launch-time ensure. `tm issue seed-labels` still seeds on demand.
+    if !ticketing.ensure_labels {
+        tracing::debug!("launch labels: agents.ticketing.ensure_labels is false — skipping");
+        return;
+    }
     let _ = ensure_workstream_label_with(runner, repo_url, workspace_dir, session_name);
     let Ok(gh_path) = resolve_github_repo(repo_url, workspace_dir) else {
         return;
@@ -189,7 +205,8 @@ fn ensure_launch_labels_with<R: GhLabelRunner>(
     let repo = gh_path.rel_path();
     // #6914: the ws/ label above is already ensured; everything else in the
     // shared policy set follows, each independently best-effort.
-    for label in policy_labels::policy_labels(Some(session_name)) {
+    // #6918: read through the config-aware call so `agents.ticketing` applies.
+    for label in policy_labels::policy_labels_configured(ticketing, Some(session_name)) {
         if policy_labels::is_owned_namespace(&label.name) {
             continue;
         }
@@ -254,8 +271,15 @@ pub fn spawn_workstream_label_ensure(
 ) {
     tokio::task::spawn(async move {
         if let Err(e) = tokio::task::spawn_blocking(move || {
+            // #6918: a malformed `agents.ticketing` block must never fail a
+            // launch — log it and ensure the built-in policy set instead.
+            let ticketing = resolve_ticketing(&TrustyToolsConfig::load()).unwrap_or_else(|e| {
+                tracing::warn!("agents.ticketing is invalid ({e}); using the built-in standard");
+                ResolvedTicketing::default()
+            });
             ensure_launch_labels_with(
                 &RealGhRunner,
+                &ticketing,
                 repo_url.as_deref(),
                 &workspace_dir,
                 &session_name,
@@ -551,6 +575,7 @@ mod tests {
         let runner = FakeGhRunner::new(true);
         ensure_launch_labels_with(
             &runner,
+            &ResolvedTicketing::default(),
             Some(REPO_URL),
             Path::new("/nonexistent"),
             "tm-tcode-01",
@@ -565,6 +590,7 @@ mod tests {
         let runner = FakeGhRunner::new(true);
         ensure_launch_labels_with(
             &runner,
+            &ResolvedTicketing::default(),
             Some(REPO_URL),
             Path::new("/nonexistent"),
             "tm-tcode-01",
@@ -581,6 +607,7 @@ mod tests {
         let runner = FakeGhRunner::new(true);
         ensure_launch_labels_with(
             &runner,
+            &ResolvedTicketing::default(),
             Some(REPO_URL),
             Path::new("/nonexistent"),
             "tm-tcode-01",
@@ -612,6 +639,7 @@ mod tests {
         let runner = FakeGhRunner::failing_for(&["ws/tm-tcode-01"]);
         ensure_launch_labels_with(
             &runner,
+            &ResolvedTicketing::default(),
             Some(REPO_URL),
             Path::new("/nonexistent"),
             "tm-tcode-01",
@@ -624,6 +652,7 @@ mod tests {
         let runner = FakeGhRunner::failing_for(&["trusty-mpm"]);
         ensure_launch_labels_with(
             &runner,
+            &ResolvedTicketing::default(),
             Some(REPO_URL),
             Path::new("/nonexistent"),
             "tm-tcode-01",
@@ -643,6 +672,7 @@ mod tests {
         let runner = FakeGhRunner::new(false);
         ensure_launch_labels_with(
             &runner,
+            &ResolvedTicketing::default(),
             Some(REPO_URL),
             Path::new("/nonexistent"),
             "tm-tcode-01",
@@ -655,6 +685,7 @@ mod tests {
         let runner = FakeGhRunner::new(true);
         ensure_launch_labels_with(
             &runner,
+            &ResolvedTicketing::default(),
             Some("git@gitlab.com:acme/widget.git"),
             Path::new("/nonexistent"),
             "tm-tcode-01",
@@ -670,7 +701,69 @@ mod tests {
         // A blank session name skips the ws/ label only — the rest of the
         // policy set does not depend on it.
         let runner = FakeGhRunner::new(true);
-        ensure_launch_labels_with(&runner, Some(REPO_URL), Path::new("/nonexistent"), "  ");
+        ensure_launch_labels_with(
+            &runner,
+            &ResolvedTicketing::default(),
+            Some(REPO_URL),
+            Path::new("/nonexistent"),
+            "  ",
+        );
         assert_eq!(runner.label_names(), ["trusty-mpm"]);
+    }
+
+    // ── the config block at launch (#6918) ──────────────────────────────
+
+    #[test]
+    fn launch_labels_match_builtin_when_the_block_is_absent() {
+        // #6918: a default `ResolvedTicketing` is what an absent
+        // `agents.ticketing` resolves to, and it must seed exactly the #6914
+        // set — same names, same order.
+        let runner = FakeGhRunner::new(true);
+        ensure_launch_labels_with(
+            &runner,
+            &ResolvedTicketing::default(),
+            Some(REPO_URL),
+            Path::new("/nonexistent"),
+            "tm-tcode-01",
+        );
+        assert_eq!(runner.label_names(), ["ws/tm-tcode-01", "trusty-mpm"]);
+    }
+
+    #[test]
+    fn launch_labels_include_configured_extra_labels() {
+        let ticketing = ResolvedTicketing::default().with_extra_labels(vec![PolicyLabel::new(
+            "area/cli",
+            "0E8A16",
+            "CLI surface",
+        )]);
+        let runner = FakeGhRunner::new(true);
+        ensure_launch_labels_with(
+            &runner,
+            &ticketing,
+            Some(REPO_URL),
+            Path::new("/nonexistent"),
+            "tm-tcode-01",
+        );
+        assert_eq!(
+            runner.label_names(),
+            ["ws/tm-tcode-01", "trusty-mpm", "area/cli"]
+        );
+    }
+
+    #[test]
+    fn launch_labels_skip_entirely_when_ensure_labels_is_false() {
+        let ticketing = ResolvedTicketing::default().with_ensure_labels(false);
+        let runner = FakeGhRunner::new(true);
+        ensure_launch_labels_with(
+            &runner,
+            &ticketing,
+            Some(REPO_URL),
+            Path::new("/nonexistent"),
+            "tm-tcode-01",
+        );
+        assert!(
+            runner.calls.borrow().is_empty(),
+            "ensure_labels: false turns the launch-time ensure off"
+        );
     }
 }

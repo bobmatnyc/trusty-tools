@@ -186,6 +186,7 @@ commands:
       - cmd: trusty-mpm issue transition 1232 approved --note "approved by reviewer"
       - cmd: trusty-mpm issue current 1232
       - cmd: trusty-mpm issue states
+      - cmd: trusty-mpm issue standard
       - cmd: trusty-mpm issue seed-config --force
       - cmd: trusty-mpm issue repair 1232
     flags:
@@ -215,6 +216,11 @@ commands:
             description: Explicit path to an issue-state YAML (overrides discovery)
       states:
         description: List the configured states and transitions (reads YAML only)
+        flags:
+          - name: config
+            description: Explicit path to an issue-state YAML (overrides discovery)
+      standard:
+        description: Print the ticketing standard in effect (agents.ticketing plus the lifecycle model; no gh)
         flags:
           - name: config
             description: Explicit path to an issue-state YAML (overrides discovery)

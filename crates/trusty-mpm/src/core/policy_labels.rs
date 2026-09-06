@@ -26,9 +26,18 @@
 //! `label_name_long_is_truncated_with_hash_suffix`,
 //! `label_name_distinct_long_names_get_distinct_labels`,
 //! `create_label_argv_full`, `create_label_argv_omits_empty_fields`,
-//! `create_label_argv_repo_and_force`.
+//! `create_label_argv_repo_and_force`,
+//! `configured_labels_match_builtin_when_block_absent`,
+//! `configured_labels_append_extra_labels`,
+//! `configured_labels_restyle_a_builtin_by_name`.
+//!
+//! #6918 made the table CONFIGURABLE without adding a second one:
+//! [`policy_labels_configured`] folds the operator's `agents.ticketing` block
+//! over [`policy_labels`], and every consumer calls that one function.
 
 use serde::Deserialize;
+
+use crate::core::trusty_tools_config::ResolvedTicketing;
 
 /// GitHub's hard cap on a label name's length (the full `ws/<name>` string).
 pub const GITHUB_LABEL_MAX_LEN: usize = 50;
@@ -133,6 +142,36 @@ pub fn workstream_label(session_name: &str) -> Option<PolicyLabel> {
 pub fn policy_labels(session_name: Option<&str>) -> Vec<PolicyLabel> {
     let mut out = vec![convention_label()];
     out.extend(session_name.and_then(workstream_label));
+    out
+}
+
+/// [`policy_labels`] with the operator's `agents.ticketing` block applied —
+/// the ONE call every consumer of the label policy makes (#6918).
+///
+/// Why: #6914 made the built-in table the single source; #6918 makes it
+/// configurable without reintroducing a second table. Consumers call this and
+/// nothing else, so a project's extra label reaches `tm issue seed-labels` and
+/// session launch by the same route the built-in ones do.
+/// What: starts from [`policy_labels`], then folds in
+/// [`ResolvedTicketing::extra_labels`]: an entry whose name matches a built-in
+/// REPLACES it (that is how a project restyles `trusty-mpm`), any other entry
+/// is appended in declaration order. A default [`ResolvedTicketing`] — which is
+/// what an absent block resolves to — returns exactly [`policy_labels`]'s
+/// output, so an absent block changes nothing.
+/// Test: `configured_labels_match_builtin_when_block_absent`,
+/// `configured_labels_append_extra_labels`,
+/// `configured_labels_restyle_a_builtin_by_name`.
+pub fn policy_labels_configured(
+    ticketing: &ResolvedTicketing,
+    session_name: Option<&str>,
+) -> Vec<PolicyLabel> {
+    let mut out = policy_labels(session_name);
+    for label in &ticketing.extra_labels {
+        match out.iter_mut().find(|existing| existing.name == label.name) {
+            Some(existing) => *existing = label.clone(),
+            None => out.push(label.clone()),
+        }
+    }
     out
 }
 
@@ -313,6 +352,48 @@ mod tests {
             .map(|l| l.name)
             .collect();
         assert_eq!(names, ["trusty-mpm"]);
+    }
+
+    // ── the config-aware successor (#6918) ──────────────────────────────
+
+    #[test]
+    fn configured_labels_match_builtin_when_block_absent() {
+        // #6918: the whole point of the default — an absent `agents.ticketing`
+        // block must leave the seeded set byte-identical to #6914's.
+        let default = ResolvedTicketing::default();
+        for session in [None, Some("tm-tcode-01")] {
+            assert_eq!(
+                policy_labels_configured(&default, session),
+                policy_labels(session),
+                "session={session:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn configured_labels_append_extra_labels() {
+        let cfg = ResolvedTicketing::default().with_extra_labels(vec![PolicyLabel::new(
+            "area/cli",
+            "0E8A16",
+            "CLI surface",
+        )]);
+        let names: Vec<String> = policy_labels_configured(&cfg, Some("tm-tcode-01"))
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(names, ["trusty-mpm", "ws/tm-tcode-01", "area/cli"]);
+    }
+
+    #[test]
+    fn configured_labels_restyle_a_builtin_by_name() {
+        let cfg = ResolvedTicketing::default().with_extra_labels(vec![PolicyLabel::new(
+            CONVENTION_LABEL,
+            "FF0000",
+            "ours",
+        )]);
+        let labels = policy_labels_configured(&cfg, None);
+        assert_eq!(labels.len(), 1, "restyle must not duplicate: {labels:?}");
+        assert_eq!(labels[0].color, "FF0000");
     }
 
     #[test]

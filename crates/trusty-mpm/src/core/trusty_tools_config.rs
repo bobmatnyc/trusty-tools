@@ -37,6 +37,15 @@ pub use untracked_sync::{
     resolve_untracked_sync,
 };
 
+/// The `agents:` group and its first occupant `agents.ticketing` (#6918),
+/// split out for the same SLOC reason as `untracked_sync`. See that module's
+/// doc for why two of its fields exist only to be refused.
+pub mod agents;
+pub use agents::{
+    AgentsConfig, ConfiguredLabel, DEFAULT_ASSIGNEE, LabelRole, REQUIRED_PR_LINK_KEYWORD,
+    ResolvedTicketing, TicketingConfig, TicketingConfigError, resolve_ticketing,
+};
+
 /// Cloud log-drain config shape + resolution (#6535), split out for the same
 /// SLOC reason as `untracked_sync`. See that module's doc for why a malformed
 /// section is an error rather than a silent fall-back to defaults.
@@ -193,6 +202,15 @@ pub struct TrustyToolsConfig {
     /// [`resolve_log_drain`] for why a malformed section is a hard error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_drain: Option<LogDrainConfig>,
+
+    /// Per-agent settings (the `agents:` YAML section, #6918).
+    ///
+    /// `None` → every bundled agent runs on its built-in defaults, which for
+    /// `agents.ticketing` is byte-for-byte the #6914 behaviour. See
+    /// [`resolve_ticketing`] for the resolution and the two rules a block
+    /// cannot relax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<AgentsConfig>,
 }
 
 /// The `daemon:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#1836).

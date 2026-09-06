@@ -1,0 +1,4 @@
+Added
+
+- `~/.trusty-tools/trusty-mpm/config.yaml` takes an `agents:` group, whose first occupant `agents.ticketing` declares the ticketing standard: extra component labels (name, colour, description), the default PR assignee, whether session launch ensures the labels, whether a claim comment and a closing note are expected, and the path to the `issue-state.yaml` that defines the lifecycle. The lifecycle itself is referenced, never embedded. An absent block resolves to the built-in standard, which is byte-for-byte what shipped in #6914 (#6918).
+- `tm issue standard` prints the ticketing standard in effect — component labels, lifecycle labels, the resolved settings, and the two rules configuration cannot relax. It reads config and `issue-state.yaml` only; it calls no `gh` and mutates nothing. The ticketing agent and the `tm-ticketing` skill now run it instead of assuming what their prompt says (#6918).

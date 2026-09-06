@@ -9,6 +9,7 @@ use super::open::{self, ChangelogVerdict, Preflight};
 use super::queue_check;
 use super::{GhRun, GhRunner, repo_slug};
 use crate::cli::{PrMergeArgs, PrOpenArgs, PrQueueCheckArgs};
+use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
 
 // ── fakes ────────────────────────────────────────────────────────────────
 
@@ -340,6 +341,7 @@ fn open_argv_carries_shipped_defaults() {
         &full_body(),
         Some("tm-test-01"),
         ChangelogVerdict::Pass,
+        &ResolvedTicketing::default(),
     )
     .expect("a complete body plans");
     let joined = plan.argv.join(" ");
@@ -353,11 +355,72 @@ fn open_argv_carries_shipped_defaults() {
 }
 
 #[test]
+fn open_labels_come_from_the_policy_table() {
+    // #6918: `tm pr open` used to spell `trusty-mpm` and `ws/<session>`
+    // itself. Its own `format!("ws/{}")` skipped the 50-char truncation
+    // `policy_labels::workstream_label` applies, so a session name long enough
+    // to overflow GitHub's cap produced a PR label that did not match the one
+    // `tm issue seed-labels` and session launch had actually created.
+    let long = "a".repeat(80);
+    let args = open_args("/dev/null");
+    let plan = open::plan(
+        &args,
+        &full_body(),
+        Some(&long),
+        ChangelogVerdict::Pass,
+        &ResolvedTicketing::default(),
+    )
+    .expect("a complete body plans");
+    let expected = trusty_mpm::core::policy_labels::workstream_label(&long)
+        .expect("a non-blank name derives a label");
+    assert_eq!(plan.workstream_label, expected.name);
+    assert!(
+        plan.workstream_label.len() <= trusty_mpm::core::policy_labels::GITHUB_LABEL_MAX_LEN,
+        "{}",
+        plan.workstream_label
+    );
+    assert!(
+        plan.argv
+            .iter()
+            .any(|a| a == trusty_mpm::core::policy_labels::CONVENTION_LABEL),
+        "{:?}",
+        plan.argv
+    );
+}
+
+#[test]
+fn open_assignee_comes_from_the_ticketing_block() {
+    // #6918: `--assignee @me` was hardcoded; it is now the resolved
+    // `agents.ticketing.default_assignee`.
+    let ticketing = ResolvedTicketing::default().with_default_assignee("bobmatnyc");
+    let args = open_args("/dev/null");
+    let plan = open::plan(
+        &args,
+        &full_body(),
+        Some("tm-test-01"),
+        ChangelogVerdict::Pass,
+        &ticketing,
+    )
+    .expect("a complete body plans");
+    assert!(
+        plan.argv.join(" ").contains("--assignee bobmatnyc"),
+        "{:?}",
+        plan.argv
+    );
+}
+
+#[test]
 fn open_reports_each_missing_field() {
     for f in FIELDS {
         let args = open_args("/dev/null");
-        let failures = open::plan(&args, &body_without(f), Some("s"), ChangelogVerdict::Pass)
-            .expect_err("a missing field must fail the plan");
+        let failures = open::plan(
+            &args,
+            &body_without(f),
+            Some("s"),
+            ChangelogVerdict::Pass,
+            &ResolvedTicketing::default(),
+        )
+        .expect_err("a missing field must fail the plan");
         assert_eq!(failures.len(), 1, "{f:?}: {failures:?}");
         assert!(failures[0].contains(f.heading()), "{failures:?}");
     }
@@ -367,8 +430,14 @@ fn open_reports_each_missing_field() {
 fn open_rejects_bad_footer() {
     let args = open_args("/dev/null");
     let body = format!("{}\nafterword\n", full_body());
-    let failures = open::plan(&args, &body, Some("s"), ChangelogVerdict::Pass)
-        .expect_err("a footer that is not last must fail");
+    let failures = open::plan(
+        &args,
+        &body,
+        Some("s"),
+        ChangelogVerdict::Pass,
+        &ResolvedTicketing::default(),
+    )
+    .expect_err("a footer that is not last must fail");
     assert!(
         failures.iter().any(|f| f.contains("attribution footer")),
         "{failures:?}"
@@ -378,8 +447,14 @@ fn open_rejects_bad_footer() {
 #[test]
 fn open_requires_a_session_name() {
     let args = open_args("/dev/null");
-    let failures = open::plan(&args, &full_body(), None, ChangelogVerdict::Pass)
-        .expect_err("no session name must fail");
+    let failures = open::plan(
+        &args,
+        &full_body(),
+        None,
+        ChangelogVerdict::Pass,
+        &ResolvedTicketing::default(),
+    )
+    .expect_err("no session name must fail");
     assert!(
         failures.iter().any(|f| f.contains("ws/<session>")),
         "{failures:?}"
@@ -390,8 +465,14 @@ fn open_requires_a_session_name() {
 fn open_reports_changelog_failure() {
     let args = open_args("/dev/null");
     let verdict = ChangelogVerdict::Fail("FAIL: crates/x has no fragment".to_string());
-    let failures = open::plan(&args, &full_body(), Some("s"), verdict)
-        .expect_err("a failing changelog gate must fail the plan");
+    let failures = open::plan(
+        &args,
+        &full_body(),
+        Some("s"),
+        verdict,
+        &ResolvedTicketing::default(),
+    )
+    .expect_err("a failing changelog gate must fail the plan");
     assert!(
         failures
             .iter()
@@ -404,8 +485,14 @@ fn open_reports_changelog_failure() {
 fn open_docs_only_skips_the_changelog_gate() {
     let mut args = open_args("/dev/null");
     args.docs_only = true;
-    let plan = open::plan(&args, &full_body(), Some("s"), ChangelogVerdict::Skipped)
-        .expect("docs-only plans without the gate");
+    let plan = open::plan(
+        &args,
+        &full_body(),
+        Some("s"),
+        ChangelogVerdict::Skipped,
+        &ResolvedTicketing::default(),
+    )
+    .expect("docs-only plans without the gate");
     assert!(plan.argv.join(" ").contains("pr create"));
 }
 
@@ -413,8 +500,14 @@ fn open_docs_only_skips_the_changelog_gate() {
 fn open_plan_reports_every_failure_at_once() {
     let args = open_args("/dev/null");
     let body = body_without(Field::Risk).replace("## Tests\n\nsomething real.\n", "## Tests\n\n");
-    let failures = open::plan(&args, &body, None, ChangelogVerdict::Pass)
-        .expect_err("three problems must all be reported");
+    let failures = open::plan(
+        &args,
+        &body,
+        None,
+        ChangelogVerdict::Pass,
+        &ResolvedTicketing::default(),
+    )
+    .expect_err("three problems must all be reported");
     assert_eq!(failures.len(), 3, "{failures:?}");
 }
 

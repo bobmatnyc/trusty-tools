@@ -16,12 +16,18 @@ use std::path::Path;
 
 use anyhow::Context as _;
 
+use trusty_mpm::core::policy_labels;
+use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
+
 use super::body::{self, IssueLink};
 use super::{EXIT_CHECK_FAILED, EXIT_OK, GhRunner, argv};
 use crate::cli::PrOpenArgs;
 
-/// The label every trusty-mpm-owned PR carries (`tm-workflow.md`).
-const FRAMEWORK_LABEL: &str = "trusty-mpm";
+// #6918: both label names come from `core::policy_labels`, the crate's one
+// policy table. This module used to spell them itself — a `FRAMEWORK_LABEL`
+// constant and a `format!("ws/{}")` that skipped the 50-char truncation
+// `policy_labels::workstream_label` applies, so a long session name produced a
+// PR label that did not match the one `seed-labels` and launch had created.
 
 /// The two pre-flight facts `tm pr open` cannot compute from its own inputs.
 ///
@@ -139,15 +145,21 @@ pub(crate) struct OpenPlan {
 /// What: in order — the body contract and footer ([`body::validate`]), the
 /// `Refs`/`Closes` rule ([`body::apply_issue_link`]), the workstream label,
 /// and the changelog gate. Returns every failure found, not just the first,
-/// so one run fixes them all.
+/// so one run fixes them all. Both labels and the assignee come from
+/// `core::policy_labels` and the resolved `agents.ticketing` block (#6918),
+/// never from constants spelled here.
 /// Test: `open_reports_each_missing_field`, `open_rejects_bad_footer`,
 /// `open_requires_a_session_name`, `open_reports_changelog_failure`,
-/// `open_docs_only_skips_the_changelog_gate`.
+/// `open_docs_only_skips_the_changelog_gate`,
+/// `open_labels_come_from_the_policy_table`,
+/// `open_assignee_comes_from_the_ticketing_block`.
 pub(crate) fn plan(
     args: &PrOpenArgs,
     body_text: &str,
     session: Option<&str>,
     changelog: ChangelogVerdict,
+    // #6918: the resolved `agents.ticketing` standard supplies the assignee.
+    ticketing: &ResolvedTicketing,
 ) -> Result<OpenPlan, Vec<String>> {
     let mut failures: Vec<String> = Vec::new();
 
@@ -189,8 +201,15 @@ pub(crate) fn plan(
         return Err(failures);
     }
 
-    // `session` is Some here — an unresolved name is a failure above.
-    let label = format!("ws/{}", session.unwrap_or_default());
+    // #6918: `session` is Some here — an unresolved name is a failure above —
+    // and the shared derivation refuses a blank name the same way, so the
+    // `None` arm is unreachable rather than a second blankness rule.
+    let Some(workstream) = session.and_then(policy_labels::workstream_label) else {
+        return Err(vec![
+            "cannot derive the `ws/<session>` label from the resolved session name".to_string(),
+        ]);
+    };
+    let label = workstream.name;
     let mut gh_argv = argv(&["pr", "create"]);
     if let Some(repo) = args.repo.as_deref().filter(|r| !r.trim().is_empty()) {
         gh_argv.push("--repo".to_string());
@@ -203,9 +222,9 @@ pub(crate) fn plan(
     gh_argv.push("--body".to_string());
     gh_argv.push(linked.clone());
     gh_argv.push("--assignee".to_string());
-    gh_argv.push("@me".to_string());
+    gh_argv.push(ticketing.default_assignee.clone());
     gh_argv.push("--label".to_string());
-    gh_argv.push(FRAMEWORK_LABEL.to_string());
+    gh_argv.push(policy_labels::CONVENTION_LABEL.to_string());
     gh_argv.push("--label".to_string());
     gh_argv.push(label.clone());
 
@@ -246,7 +265,13 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
         pre.changelog_gate(&args.base)?
     };
 
-    let plan = match plan(args, &body_text, session.as_deref(), changelog) {
+    // #6918: a malformed `agents.ticketing` block is an error here, not a
+    // silent revert to the built-in standard.
+    let ticketing = trusty_mpm::core::trusty_tools_config::resolve_ticketing(
+        &trusty_mpm::core::trusty_tools_config::TrustyToolsConfig::load(),
+    )?;
+
+    let plan = match plan(args, &body_text, session.as_deref(), changelog, &ticketing) {
         Ok(p) => p,
         Err(failures) => {
             eprintln!(
@@ -278,7 +303,11 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
         .trim();
     let number = url.rsplit('/').next().unwrap_or("?");
     println!("opened PR #{number} — {url}");
-    println!("  labels: {FRAMEWORK_LABEL}, {}", plan.workstream_label);
+    println!(
+        "  labels: {}, {}",
+        policy_labels::CONVENTION_LABEL,
+        plan.workstream_label
+    );
     if let Some(rung) = args.rung {
         println!("  test-ladder rung claimed: {rung}");
     }
