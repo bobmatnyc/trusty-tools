@@ -12,6 +12,8 @@
 pub mod api;
 pub mod audit;
 pub mod bug_report;
+/// The machine-wide builder-slot claim route and its read-only census (#6892).
+pub mod builder_slot_routes;
 /// The peer message bus (DOC-60 §5.3) — envelope, pub/sub, instance registry.
 pub mod bus;
 /// Response-size bound for the `session_context_catchup` digest (#5557).

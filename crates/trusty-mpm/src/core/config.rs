@@ -404,6 +404,16 @@ pub struct MpmConfig {
     /// warning too. The section type lives in [`crate::core::agent_cost`]
     /// alongside the pure policy it configures.
     pub agent_cost: crate::core::agent_cost::AgentCostConfig,
+
+    /// `[builders]` — machine-wide concurrent-builder cap (#6892).
+    ///
+    /// Absent section → the cap derived from this host's `MemoryTier`
+    /// (Degraded 1, Medium 2, Large 3, XLarge 4). Set `max_concurrent` to
+    /// override it. The section type and the ONE host-root resolution site live
+    /// in [`crate::core::builders`]; this is deliberately reachable only through
+    /// [`Self::load_default`] — see that module's doc for why no project layer
+    /// may raise a cap that protects the machine every project shares.
+    pub builders: crate::core::builders::BuildersConfig,
 }
 
 // ──────────────────────────────────────────────

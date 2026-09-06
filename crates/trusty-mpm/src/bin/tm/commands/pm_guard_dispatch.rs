@@ -778,7 +778,7 @@ const GRANTED_WORKTREE_ROUTE: &str = "granted-worktree";
 /// `claim_is_unknown_when_the_daemon_answers_500`,
 /// `claim_is_unknown_when_the_body_does_not_parse`,
 /// `claim_shared_tree_is_empty_when_the_daemon_is_unreachable`.
-enum SharedTreeReply {
+pub(crate) enum SharedTreeReply {
     /// The daemon answered and its body parsed.
     Answered(Value),
     /// No daemon, or no such route, can answer this call — the guard cannot
@@ -817,6 +817,15 @@ impl SharedTreeReply {
 /// Why: split from [`claim_shared_tree`] so the claiming and the read-only
 /// callers share one wire contract — the endpoint, the payload projection, and
 /// the timeout bounds are the parts a second copy would drift on.
+///
+/// #6892: the builder-slot guard POSTs through this too, on its own `route`.
+/// The endpoint SHAPE is `/api/v1/sessions/{id}/delegations/{route}` for every
+/// delegation-time guard, and the projection and timeout bounds are the parts a
+/// second copy would drift on — so it takes the route rather than owning one.
+/// What it does NOT decide is what a failure MEANS: `commands::pm_guard_builder_cap`
+/// denies on both [`SharedTreeReply::Unavailable`] and
+/// [`SharedTreeReply::Unanswered`], where this module's claim path allows on the
+/// first. That policy stays with each caller.
 /// What: an answered body, or which KIND of failure stopped it (see
 /// [`SharedTreeReply`]). Sent under the same tight connect/total bounds
 /// `pm_guard`'s audit POSTs use (500 ms / 2 s), because this call sits inside a
@@ -829,7 +838,7 @@ impl SharedTreeReply {
 /// `claim_is_unknown_when_the_daemon_answers_500`,
 /// `claim_is_unknown_when_the_body_does_not_parse`,
 /// `claim_is_empty_when_the_daemon_has_no_such_route`.
-async fn post_shared_tree(
+pub(crate) async fn post_shared_tree(
     url: &str,
     session_id: &str,
     cwd: &Path,

@@ -28,6 +28,9 @@ pub(crate) mod daemon;
 pub(crate) mod delete;
 // #4230: the client-side orphan-daemon check — the daemon's own `run_doctor`
 // cannot detect that the process answering it is the unsupervised one.
+// #6892: the machine-wide builder-slot row — holders, the cap, and a Warn
+// for a lease only the TTL could have ended.
+pub(crate) mod doctor_builder_cap;
 // #6336: the standalone `tm doctor` — the battery runs in-process and the
 // daemon is one appended reachability row, never a precondition.
 pub(crate) mod doctor_daemon_row;
@@ -84,6 +87,9 @@ pub(crate) mod picker_launch_new;
 pub(crate) mod pm_guard;
 pub(crate) mod pm_guard_bash;
 pub(crate) mod pm_guard_budget;
+// #6892: the machine-wide concurrent-builder denial. Fails CLOSED, unlike its
+// #4480 sibling — see its module doc.
+pub(crate) mod pm_guard_builder_cap;
 pub(crate) mod pm_guard_cost;
 pub(crate) mod pm_guard_deny_by_default;
 pub(crate) mod pm_guard_dispatch;

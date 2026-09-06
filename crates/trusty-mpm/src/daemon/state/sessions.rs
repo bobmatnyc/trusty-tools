@@ -677,6 +677,18 @@ impl DaemonState {
         self.dispatch_record.lock()
     }
 
+    /// Hold the machine-wide builder-slot lock for one scan-and-claim (#6892).
+    ///
+    /// Why: see the `builder_claim` field's own doc. Exposed as a guard rather
+    /// than inlined so [`super::builder_slots`] — a sibling module of this one —
+    /// can take it without the field being `pub`.
+    /// What: blocks until the lock is free. `pub(crate)`: an internal invariant
+    /// between two modules of this crate, never a consumer API.
+    /// Test: `builder_cap_admits_exactly_one_of_two_simultaneous_claims`.
+    pub(crate) fn builder_claim_guard(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.builder_claim.lock()
+    }
+
     /// Stops still waiting for the `agent_id` that names them (#4142).
     ///
     /// Why: `crate::daemon::services::delegation_tracker` is the ledger's only

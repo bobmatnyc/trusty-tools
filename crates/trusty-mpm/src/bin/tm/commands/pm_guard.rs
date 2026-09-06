@@ -216,6 +216,7 @@ use crate::commands::pm_guard_bash::{
     unclassifiable_command,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
+use crate::commands::pm_guard_builder_cap;
 use crate::commands::pm_guard_cost;
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
 use crate::commands::pm_guard_dispatch;
@@ -654,10 +655,23 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                         audit_denied_tool(url, session_id, tool_name, &reason).await;
                         println!("{}", build_pretooluse_deny_response(&reason));
                     }
-                    None => println!(
-                        "{}",
-                        pm_guard_worktree_grant::build_worktree_grant_response(&updated_input)
-                    ),
+                    // #6892: a granted worktree answers WHERE this agent writes,
+                    // not whether the machine has room for another build. The
+                    // cap is asked here, at the grant's ALLOW exit, because the
+                    // grant prints and returns — a check after this block would
+                    // never see a granted dispatch at all.
+                    None => {
+                        emit_builder_cap_or(
+                            url,
+                            &payload,
+                            tool_name,
+                            tool_input,
+                            session_id,
+                            &hook_cwd,
+                            &pm_guard_worktree_grant::build_worktree_grant_response(&updated_input),
+                        )
+                        .await;
+                    }
                 }
             }
             pm_guard_worktree_grant::WorktreeGrant::Deny(reason) => {
@@ -680,10 +694,21 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                         audit_denied_tool(url, session_id, tool_name, &reason).await;
                         println!("{}", build_pretooluse_deny_response(&reason));
                     }
-                    None => println!(
-                        "{}",
-                        pm_guard_worktree_grant::build_worktree_grant_response(&updated_input)
-                    ),
+                    // #6892: as the Rewrite arm above — the machine cap is a
+                    // separate question from where the agent writes, and this is
+                    // the only place a rewritten dispatch can still be stopped.
+                    None => {
+                        emit_builder_cap_or(
+                            url,
+                            &payload,
+                            tool_name,
+                            tool_input,
+                            session_id,
+                            &hook_cwd,
+                            &pm_guard_worktree_grant::build_worktree_grant_response(&updated_input),
+                        )
+                        .await;
+                    }
                 }
             }
         }
@@ -705,6 +730,33 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     if !caller_is_subagent
         && let Some(reason) =
             pm_guard_dispatch::evaluate(url, &payload, tool_name, tool_input, session_id).await
+    {
+        audit_denied_tool(url, session_id, tool_name, &reason).await;
+        println!("{}", build_pretooluse_deny_response(&reason));
+        return Ok(());
+    }
+
+    // #6892: the machine-wide builder cap, the third of the three exits it is
+    // asked at — this one for a dispatch that reached neither the grant nor a
+    // #4480 deny. It runs AFTER the tree rules above, not before, because its
+    // claim WRITES the delegation record: asking it first put both of two
+    // simultaneous dispatches' records in the map before either shared-tree
+    // claim ran, so each saw the other and #5324's "exactly one admitted"
+    // became "both denied".
+    //
+    // It fails CLOSED, deliberately unlike every daemon call around it: an
+    // unreachable or silent daemon DENIES a builder dispatch rather than
+    // allowing it, because a false allow overcommits the host and a machine that
+    // goes down takes every session with it. The blast radius of that inversion
+    // is bounded by ordering inside the guard — `pm_guard_builder_cap`
+    // classifies locally and returns before any network call for a non-builder
+    // dispatch, so a daemon outage costs builder dispatches only. See its module
+    // doc.
+    if !caller_is_subagent
+        && let Some(reason) = pm_guard_builder_cap::evaluate(
+            url, &payload, tool_name, tool_input, session_id, &hook_cwd,
+        )
+        .await
     {
         audit_denied_tool(url, session_id, tool_name, &reason).await;
         println!("{}", build_pretooluse_deny_response(&reason));
@@ -1164,6 +1216,42 @@ async fn audit_agent_cost_warning(
         return;
     };
     let _ = client.post(format!("{url}/hooks")).json(&body).send().await;
+}
+
+/// Print the builder-cap deny, or `allowed` when the machine has room (#6892).
+///
+/// Why: the worktree grant has two ALLOW exits and both print a rewrite and
+/// return, so the machine cap has to be asked at each of them or a granted
+/// dispatch escapes it entirely. Folded into one helper rather than written
+/// twice because the two arms differ only in which rewrite they emit, and a
+/// `PreToolUse` hook's stdout may carry exactly one object — duplicating the
+/// print/deny pair is how a second one gets emitted.
+/// What: runs [`pm_guard_builder_cap::evaluate`]; on a deny it audits and prints
+/// the deny, on an allow it prints `allowed` verbatim. Exactly one line reaches
+/// stdout either way.
+/// Test: `pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout` and
+/// `pm_guard_denies_the_second_of_two_simultaneous_dispatches` in
+/// `tests/tm_hook_pm_guard.rs` cover the allow exits; the cap's own verdicts are
+/// covered in `commands::pm_guard_builder_cap`.
+#[allow(clippy::too_many_arguments)]
+async fn emit_builder_cap_or(
+    url: &str,
+    payload: &serde_json::Value,
+    tool_name: &str,
+    tool_input: Option<&serde_json::Value>,
+    session_id: &str,
+    hook_cwd: &std::path::Path,
+    allowed: &str,
+) {
+    match pm_guard_builder_cap::evaluate(url, payload, tool_name, tool_input, session_id, hook_cwd)
+        .await
+    {
+        Some(reason) => {
+            audit_denied_tool(url, session_id, tool_name, &reason).await;
+            println!("{}", build_pretooluse_deny_response(&reason));
+        }
+        None => println!("{allowed}"),
+    }
 }
 
 async fn audit_denied_tool(url: &str, session_id: &str, tool_name: &str, reason: &str) {

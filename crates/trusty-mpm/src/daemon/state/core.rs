@@ -426,6 +426,25 @@ pub struct DaemonState {
     /// so the two can never deadlock. In-memory work only: no I/O, no await.
     /// Test: `a_grant_and_the_tracker_converge_in_either_order`.
     pub(super) dispatch_record: parking_lot::Mutex<()>,
+    /// Serializes the machine-wide builder-slot claim (#6892).
+    ///
+    /// Why: the same reason [`Self::shared_tree_claim`] exists, one scope wider.
+    /// A guard that asked how many builders were running and acted on the answer
+    /// would leave the window two dispatches issued in one PM turn slip through
+    /// — both seeing a free slot, both taking it, which is the overcommit the
+    /// cap exists to prevent. `delegations` is a `DashMap`: it makes each entry
+    /// atomic, never a scan-then-insert pair.
+    /// What: guards nothing itself — it is held across the scan-and-record in
+    /// [`DaemonState::claim_builder_slot`], which is its only taker. Held for an
+    /// in-memory scan of the delegation map and at most one insert; no I/O and
+    /// no await.
+    ///
+    /// It is a SEPARATE lock from [`Self::shared_tree_claim`], never nested
+    /// inside it and never around it: the two claims answer different questions
+    /// on different routes and one call takes exactly one of them. Both may take
+    /// [`Self::dispatch_record`] inside, which is the documented inner lock.
+    /// Test: `builder_cap_admits_exactly_one_of_two_simultaneous_claims`.
+    pub(super) builder_claim: parking_lot::Mutex<()>,
     /// `SubagentStop`s that arrived before the `agent_id` naming them (#4142).
     ///
     /// Why: `PostToolUse` is async and `SubagentStop` synchronous, so the stop
@@ -532,6 +551,7 @@ impl DaemonState {
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
             shared_tree_claim: parking_lot::Mutex::new(()),
             dispatch_record: parking_lot::Mutex::new(()),
+            builder_claim: parking_lot::Mutex::new(()),
             pending_stops: super::pending_stops::PendingStops::default(),
         }
     }
@@ -610,6 +630,7 @@ impl DaemonState {
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
             shared_tree_claim: parking_lot::Mutex::new(()),
             dispatch_record: parking_lot::Mutex::new(()),
+            builder_claim: parking_lot::Mutex::new(()),
             pending_stops: super::pending_stops::PendingStops::default(),
         }
     }

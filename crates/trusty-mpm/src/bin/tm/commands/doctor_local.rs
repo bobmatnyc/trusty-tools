@@ -134,6 +134,11 @@ async fn daemon_rows(url: &str) -> Vec<DoctorCheck> {
             &restart_hint,
         ));
         rows.push(super::doctor_orphan::orphan_daemon_check(Some(snapshot)));
+        // #6892: the machine-wide builder-slot census. A separate GET rather
+        // than a field of `/health` — it is a list, and folding it into the
+        // health payload would put a per-dispatch-relevant scan on the hot path
+        // every readiness probe already takes.
+        rows.push(super::doctor_builder_cap::builder_cap_row(url).await);
     }
     rows
 }
