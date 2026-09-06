@@ -36,6 +36,59 @@ const BUNDLE_JS: &str =
 
 const LIB_RS: &str = "pub fn alpha() -> u32 {\n    1\n}\n\npub fn beta() -> u32 {\n    2\n}\n";
 
+/// Paragraphs the office fixture's real `.docx` carries.
+///
+/// Why (#6910): proving M005 went through the extractor takes text that exists
+/// ONLY inside the zip container — a raw UTF-8 read of a `.docx` cannot
+/// produce it.
+const DOCX_PARAGRAPHS: &[&str] = &[
+    "Quarterly revenue by region",
+    "EMEA closed the quarter ahead of plan.",
+    "APAC held flat against a strong prior year.",
+];
+
+/// The text a previous, successful extraction of `broken.docx` had stored.
+///
+/// Why (#6910): the corrupt-document case needs chunks and vectors already in
+/// the index — the file was extractable when it was indexed and is not now.
+const BROKEN_DOCX_TEXT: &str =
+    "Board pack, draft three\nHeadcount plan attached\nSigned off by finance\n";
+
+/// The text a previous extraction of `scanned.docx` had stored, before the
+/// document was replaced by a version whose text layer is gone (#6910).
+const SCANNED_DOCX_TEXT: &str =
+    "Signed lease agreement\nExhibit A follows\nCounterparty countersigned\n";
+
+/// Write a minimal but real `.docx` at `path`: a zip whose `word/document.xml`
+/// holds one `<w:p>` per entry in `paragraphs`.
+///
+/// Why (#6910): the regression is about a format the extractor understands and
+/// `read_to_string` does not, so the fixture has to be a genuine container
+/// `core::extract::docx` parses — a stub file would behave the same under the
+/// broken and the fixed read path.
+/// What: the container `core::extract::tests` builds, with prose instead of one
+/// oversized run.
+fn write_docx(path: &std::path::Path, paragraphs: &[&str]) {
+    use std::io::Write;
+    let body: String = paragraphs
+        .iter()
+        .map(|p| format!("<w:p><w:r><w:t>{p}</w:t></w:r></w:p>"))
+        .collect();
+    let document_xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#
+    );
+    let mut buf = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut buf);
+        let mut zip = zip::ZipWriter::new(cursor);
+        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        zip.start_file("word/document.xml", opts).unwrap();
+        zip.write_all(document_xml.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+    std::fs::write(path, buf).unwrap();
+}
+
 /// An embedder that refuses to embed and counts every attempt.
 ///
 /// Why: the owner ruling's re-embed budget is zero. "Zero" is only provable by
@@ -114,7 +167,7 @@ async fn fixture() -> Fixture {
 /// mutates that shared state takes its own id (#6581).
 /// Test: `m005_stops_before_the_clear_when_a_delete_signals_cancel`.
 async fn fixture_named(id: &str) -> Fixture {
-    fixture_inner(id, None).await
+    fixture_inner(id, None, false).await
 }
 
 /// As [`fixture`], but with an explicit per-index chunk cap.
@@ -123,10 +176,24 @@ async fn fixture_named(id: &str) -> Fixture {
 /// `with_chunk_cap` rather than by writing `TRUSTY_MAX_CHUNKS` — an env write
 /// leaks into every other test sharing the process.
 async fn fixture_with_cap(cap: Option<usize>) -> Fixture {
-    fixture_inner("m005-test", cap).await
+    fixture_inner("m005-test", cap, false).await
 }
 
-async fn fixture_inner(index_id: &str, cap: Option<usize>) -> Fixture {
+/// As [`fixture`], but the tree also carries a real `notes.docx` and a
+/// `broken.docx` that is not a valid zip (#6910).
+///
+/// Why: M005 re-read every file as raw UTF-8, so an office document produced no
+/// chunks and its whole vector set was swept as orphans. Both halves of the fix
+/// need a corpus that holds office-document chunks: one file the extractor can
+/// still read, and one it cannot.
+/// Test: `m005_rechunks_office_documents_through_the_extractor`,
+/// `m005_keeps_the_vectors_of_a_file_it_cannot_extract`,
+/// `m005_drops_the_vectors_of_a_file_deleted_from_disk`.
+async fn fixture_with_office(index_id: &str) -> Fixture {
+    fixture_inner(index_id, None, true).await
+}
+
+async fn fixture_inner(index_id: &str, cap: Option<usize>, office: bool) -> Fixture {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -134,13 +201,40 @@ async fn fixture_inner(index_id: &str, cap: Option<usize>) -> Fixture {
     std::fs::write(root.join("src/lib.rs"), LIB_RS).unwrap();
     std::fs::write(root.join("bundle.js"), BUNDLE_JS).unwrap();
 
+    // `(root-relative path, the text a working ingest would have chunked)`.
+    let mut sources: Vec<(String, String)> = vec![
+        ("src/lib.rs".to_string(), LIB_RS.to_string()),
+        ("bundle.js".to_string(), BUNDLE_JS.to_string()),
+    ];
+    if office {
+        write_docx(&root.join("notes.docx"), DOCX_PARAGRAPHS);
+        // Indexed while it was readable; corrupt on disk by the time M005 runs.
+        std::fs::write(root.join("broken.docx"), b"this is not a zip container").unwrap();
+        // #6910 code-critic finding 1: extraction that SUCCEEDS with no usable
+        // text. A container with no `<w:t>` run is the docx analogue of the
+        // scanned PDF `core::extract::pdf` returns `Ok(text: "")` for.
+        write_docx(&root.join("scanned.docx"), &[]);
+        let notes = crate::core::extract::read_content(&root.join("notes.docx"))
+            .await
+            .expect("the fixture docx must extract");
+        let scanned = crate::core::extract::read_content(&root.join("scanned.docx"))
+            .await
+            .expect("an empty docx must still extract cleanly");
+        assert!(
+            scanned.trim().is_empty(),
+            "the scanned-document stand-in must extract to no text, got {scanned:?}"
+        );
+        sources.push(("notes.docx".to_string(), notes));
+        sources.push(("broken.docx".to_string(), BROKEN_DOCX_TEXT.to_string()));
+        sources.push(("scanned.docx".to_string(), SCANNED_DOCX_TEXT.to_string()));
+    }
+
     // Chunk as today, then rewrite to the pre-#6581 shape and collapse the
     // collisions exactly as #6571's dedupe did — that IS the legacy corpus.
     let mut legacy_chunks: Vec<RawChunk> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for file in ["src/lib.rs", "bundle.js"] {
-        let content = std::fs::read_to_string(root.join(file)).unwrap();
-        let (chunks, _) = chunk_ast(file, &content);
+    for (file, content) in &sources {
+        let (chunks, _) = chunk_ast(file, content);
         for mut c in chunks {
             // The dup tail is a post-#6581 invention; the legacy corpus never
             // held one, so strip it before rewriting to the legacy shape.
@@ -962,4 +1056,201 @@ async fn rechunk_all_stops_at_a_batch_boundary_when_a_delete_signals_cancel() {
         "the clear ran, so the abort came from the batch boundary and not from \
          `apply`'s earlier check"
     );
+}
+
+// ─── Office-document re-reads (#6910) ────────────────────────────────────────
+//
+// M005 re-read every file with `read_to_string`, which fails on the zip and
+// binary containers `core::extract` exists to handle. The empty re-chunk then
+// left every chunk those files had looking like an orphan and the sweep dropped
+// their vectors: matsuoka-com fell from 64,517 chunks to 3,526 on its first
+// query after the 0.54.0 upgrade.
+
+/// Ids the corpus currently holds for `file`.
+fn ids_for_file(chunks: &[RawChunk], file: &str) -> Vec<String> {
+    chunks
+        .iter()
+        .filter(|c| c.file == file)
+        .map(|c| c.id.clone())
+        .collect()
+}
+
+/// Every chunk in the corpus right now.
+async fn corpus_chunks(fx: &Fixture) -> Vec<RawChunk> {
+    let idx = fx.handle.indexer.read().await;
+    idx.corpus_store().unwrap().load_all_chunks().unwrap()
+}
+
+/// The regression #6910 is about: a `.docx` comes back out of the migration
+/// with its text, because M005 reads through the same extractor the ingest and
+/// watch paths read through.
+///
+/// On the pre-fix code the re-read is `read_to_string` over a zip container, so
+/// the file contributes no chunks, the corpus loses every one it had, and the
+/// sweep drops their vectors as orphans.
+#[tokio::test]
+async fn m005_rechunks_office_documents_through_the_extractor() {
+    let f = fixture_with_office("m005-office-extract").await;
+    let before = ids_for_file(&corpus_chunks(&f).await, "notes.docx");
+    assert!(
+        !before.is_empty(),
+        "the fixture must seed chunks for the docx"
+    );
+
+    M005ChunkIdEndLine.apply(&f.handle).await.expect("apply");
+
+    let after = corpus_chunks(&f).await;
+    let docx: Vec<&RawChunk> = after.iter().filter(|c| c.file == "notes.docx").collect();
+    assert!(
+        !docx.is_empty(),
+        "the docx must survive the re-chunk — M005 read it as raw UTF-8 and \
+         dropped every chunk it had (#6910)"
+    );
+    assert!(
+        docx.iter()
+            .any(|c| c.content.contains("Quarterly revenue by region")),
+        "the surviving text must be what the extractor produced, not raw zip bytes"
+    );
+    for c in &docx {
+        assert!(
+            f.store.contains(&c.id).await,
+            "a re-chunked docx chunk must keep its vector: {}",
+            c.id
+        );
+    }
+}
+
+/// A file that is on disk but cannot be extracted is not an orphan.
+///
+/// Why: dropping its vectors is the one step of the pass that cannot be undone
+/// without re-embedding, and the file's text has not gone anywhere — only this
+/// pass's reading of it failed. The chosen behaviour is to keep the vectors and
+/// warn; the operator recovers the corpus rows with a reindex.
+/// Test: this test — the error-arm regression the Fail-Open Check asks for.
+#[tokio::test]
+async fn m005_keeps_the_vectors_of_a_file_it_cannot_extract() {
+    let f = fixture_with_office("m005-office-unreadable").await;
+    let broken = ids_for_file(&corpus_chunks(&f).await, "broken.docx");
+    assert!(
+        !broken.is_empty(),
+        "the fixture must seed chunks for the corrupt docx"
+    );
+
+    M005ChunkIdEndLine.apply(&f.handle).await.expect("apply");
+
+    for id in &broken {
+        assert!(
+            f.store.contains(id).await,
+            "a file that failed extraction but is still on disk must keep its \
+             vectors (#6910): {id}"
+        );
+    }
+}
+
+/// The other half of the same decision: removal stays correct for a file that
+/// genuinely no longer exists, so the fix does not turn the orphan sweep off.
+#[tokio::test]
+async fn m005_drops_the_vectors_of_a_file_deleted_from_disk() {
+    let f = fixture_with_office("m005-office-deleted").await;
+    let deleted = ids_for_file(&corpus_chunks(&f).await, "notes.docx");
+    assert!(!deleted.is_empty(), "the fixture must seed the docx");
+    std::fs::remove_file(f.root.join("notes.docx")).unwrap();
+
+    M005ChunkIdEndLine.apply(&f.handle).await.expect("apply");
+
+    for id in &deleted {
+        assert!(
+            !f.store.contains(id).await,
+            "a file gone from disk must still have its vectors swept: {id}"
+        );
+    }
+}
+
+/// #6910 code-critic finding 1: extraction that returns `Ok` with no usable
+/// text reaches the orphan sweep by a different route than an `Err` and used to
+/// drop the same vectors.
+///
+/// Why: `core::extract::pdf::extract` returns `Ok(Extracted { text: "", warning:
+/// Some(..) })` for a scanned/image-only PDF rather than an error, and
+/// `chunk_text` emits no chunk for empty content — so the file landed in neither
+/// `remap` nor `unreadable`, and every id it had was classified an orphan. The
+/// docx here stands in for that PDF: same `Ok`-with-no-text shape, same M005
+/// branch, and a fixture the migration tests can build without a PDF writer.
+#[tokio::test]
+async fn m005_keeps_the_vectors_of_a_file_that_extracts_to_nothing() {
+    let f = fixture_with_office("m005-office-empty-extract").await;
+    let scanned = ids_for_file(&corpus_chunks(&f).await, "scanned.docx");
+    assert!(
+        !scanned.is_empty(),
+        "the fixture must seed chunks for the document whose text layer is gone"
+    );
+
+    M005ChunkIdEndLine.apply(&f.handle).await.expect("apply");
+
+    for id in &scanned {
+        assert!(
+            f.store.contains(id).await,
+            "a file that extracts cleanly to NO text is still on disk and must keep \
+             its vectors (#6910): {id}"
+        );
+    }
+}
+
+/// #6910 code-critic finding 3: the `Err` arm of the existence probe.
+///
+/// Why: [`super::file_is_gone`] is what makes the orphan sweep's one
+/// irreversible step conditional, and its contract is that only an affirmative
+/// `Ok(false)` permits removal. A probe that cannot answer must read as "still
+/// there". Uses a path whose parent is a regular file, so the underlying `stat`
+/// fails `ENOTDIR` — deterministic, and independent of the uid the suite runs
+/// as, unlike a chmod-based fixture.
+#[tokio::test]
+async fn file_is_gone_answers_no_when_the_probe_cannot_tell() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let a_file = tmp.path().join("not-a-directory");
+    std::fs::write(&a_file, b"x").unwrap();
+
+    assert!(
+        !super::file_is_gone(&a_file.join("child")).await,
+        "a probe that errors must read as 'still there', never as 'gone'"
+    );
+    assert!(
+        super::file_is_gone(&tmp.path().join("absent")).await,
+        "an affirmative absence is the only thing that permits removal"
+    );
+    assert!(
+        !super::file_is_gone(&a_file).await,
+        "a file that exists is not gone"
+    );
+}
+
+/// The retention rule itself: only ids whose file is in the unreadable set are
+/// held back, and a claimed id is never an orphan either way.
+#[test]
+fn orphan_partition_retains_only_unreadable_files() {
+    let old: Vec<String> = vec![
+        "notes.docx:1:3".to_string(),
+        "gone.pdf:1:9".to_string(),
+        "src/lib.rs::Function::alpha::1".to_string(),
+    ];
+    let mut remap = HashMap::new();
+    remap.insert(
+        "src/lib.rs::Function::alpha::1".to_string(),
+        "src/lib.rs::Function::alpha::1::3".to_string(),
+    );
+    let unreadable: BTreeSet<String> = ["notes.docx".to_string()].into_iter().collect();
+
+    let (orphans, retained) = super::partition_orphans(&old, &remap, &unreadable);
+
+    assert_eq!(retained, 1, "only the unreadable file's id is held back");
+    assert_eq!(
+        orphans,
+        vec!["gone.pdf:1:9".to_string()],
+        "a claimed id is not an orphan and an unreadable file's id is not either"
+    );
+
+    // With nothing unreadable the sweep behaves exactly as it did before #6910.
+    let (all, none_held) = super::partition_orphans(&old, &remap, &BTreeSet::new());
+    assert_eq!(none_held, 0);
+    assert_eq!(all.len(), 2);
 }

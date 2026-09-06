@@ -40,6 +40,13 @@
 //! old ids to the new ids that carry the same text and drops the entries nothing
 //! claimed.
 //!
+//! Re-reading goes through [`crate::core::extract::read_content`], the seam the
+//! ordinary ingest and watch paths read through (#6910). Reading raw UTF-8 here
+//! instead failed on every `.docx`, `.pdf` and spreadsheet in the corpus, and
+//! the resulting empty re-chunk made all of their chunks look like orphans:
+//! matsuoka-com fell from 64,517 chunks to 3,526 on its first query after the
+//! 0.54.0 upgrade. A file that still cannot be extracted keeps its vectors.
+//!
 //! Test: `m005::tests`.
 
 use std::collections::{BTreeSet, HashMap};
@@ -100,7 +107,10 @@ impl Migration for M005ChunkIdEndLine {
     /// Test: `m005_is_a_no_op_on_an_already_migrated_corpus`,
     /// `m005_rechunks_the_whole_corpus`, `m005_reuses_the_existing_vectors`,
     /// `m005_resumes_after_a_crash_before_the_first_batch`,
-    /// `m005_never_advances_the_schema_over_missing_chunks`.
+    /// `m005_never_advances_the_schema_over_missing_chunks`,
+    /// `m005_rechunks_office_documents_through_the_extractor`,
+    /// `m005_keeps_the_vectors_of_a_file_it_cannot_extract`,
+    /// `m005_drops_the_vectors_of_a_file_deleted_from_disk`.
     async fn apply(&self, index: &IndexHandle) -> Result<(), anyhow::Error> {
         let (corpus, root_path) = {
             let indexer = index.indexer.read().await;
@@ -231,6 +241,7 @@ impl Migration for M005ChunkIdEndLine {
         }
         let Rechunked {
             remap,
+            unreadable,
             committed,
             dropped_by_cap,
             unembedded,
@@ -250,12 +261,23 @@ impl Migration for M005ChunkIdEndLine {
         // An old id no new chunk inherited names a vector for text this corpus
         // no longer holds. Left in place it would rank into results and then
         // resolve to no corpus row — the `unresolved_corpus` drop.
-        let orphans: Vec<String> = plan
-            .old_ids
-            .iter()
-            .filter(|id| !remap.contains_key(*id))
-            .cloned()
-            .collect();
+        //
+        // #6910: an id from a file `rechunk_all` could not extract is NOT such
+        // an id. That file is still on disk with its text intact, so its
+        // vectors are still the right vectors for it; dropping them is the one
+        // step of this pass that cannot be undone without re-embedding.
+        let (orphans, retained) = partition_orphans(&plan.old_ids, &remap, &unreadable);
+        if retained > 0 {
+            tracing::warn!(
+                index_id = %index.id,
+                files = unreadable.len(),
+                vectors = retained,
+                "M005: {} file(s) are on disk but could not be extracted — keeping their \
+                 {retained} vector(s) rather than dropping them as orphans (#6910). Reindex \
+                 this index to rebuild their corpus rows.",
+                unreadable.len()
+            );
+        }
         if !orphans.is_empty() {
             let indexer = indexer_arc.read().await;
             indexer.remove_vectors(&orphans).await;
@@ -352,11 +374,15 @@ fn cancel_stop(index: &IndexHandle, committed: usize) -> anyhow::Error {
 /// between setting and clearing the eviction guard, so they travel as one value
 /// rather than four out-parameters.
 /// What: `remap` is `old id → new id` for every chunk whose text is unchanged;
-/// the counts are for the operator log.
-/// Test: covered through `apply` by `m005_rechunks_the_whole_corpus`.
+/// `unreadable` is the root-relative path of every file that is still on disk
+/// but yielded no chunks (#6910); the counts are for the operator log.
+/// Test: covered through `apply` by `m005_rechunks_the_whole_corpus`,
+/// `m005_keeps_the_vectors_of_a_file_it_cannot_extract` and
+/// `m005_keeps_the_vectors_of_a_file_that_extracts_to_nothing`.
 #[derive(Debug)]
 struct Rechunked {
     remap: HashMap<String, String>,
+    unreadable: BTreeSet<String>,
     committed: usize,
     dropped_by_cap: usize,
     unembedded: usize,
@@ -368,9 +394,20 @@ struct Rechunked {
 /// call, and so the file-size cap is not spent on a single 200-line method.
 /// What: clears every chunk-keyed structure (leaving the vector store alone),
 /// then for each batch reads the files, chunks them, and commits with NO
-/// embeddings — the ruling's zero re-embed budget. A file that cannot be read is
-/// skipped with a warn: it was deleted since the last index, and its chunks are
-/// correctly gone.
+/// embeddings — the ruling's zero re-embed budget.
+///
+/// Reads each batch concurrently through [`crate::core::extract::read_content`]
+/// — the same seam, and the same `join_all` shape, as
+/// `service::reindex::batch::prepare_batch_payload` — so `.docx`, `.pdf` and the
+/// spreadsheet formats are extracted here exactly as they were when they were
+/// first indexed, and a batch's wall time is its slowest file rather than the
+/// sum of 64 `EXTRACT_TIMEOUT`s (#6910).
+///
+/// A file that yields no chunks is reported two ways. Gone from disk means its
+/// chunks are correctly gone and its `old_ids` fall through to the orphan sweep.
+/// Still on disk — whether extraction returned `Err`, or returned `Ok` with text
+/// that chunks to nothing, as a scanned PDF does — means its path is returned in
+/// [`Rechunked::unreadable`] so `apply` keeps its vectors instead.
 ///
 /// Polls the #3049 cancel flag at every batch boundary and returns
 /// [`M005Cancelled`] when it is set — see that type for why a pass with no
@@ -378,7 +415,9 @@ struct Rechunked {
 /// `apply` takes the same check once more before it calls in, where stopping
 /// still costs the corpus nothing.
 /// Test: `m005_rechunks_the_whole_corpus`, `m005_honours_the_chunk_cap`,
-/// `rechunk_all_stops_at_a_batch_boundary_when_a_delete_signals_cancel`.
+/// `rechunk_all_stops_at_a_batch_boundary_when_a_delete_signals_cancel`,
+/// `m005_rechunks_office_documents_through_the_extractor`,
+/// `m005_keeps_the_vectors_of_a_file_it_cannot_extract`.
 async fn rechunk_all(
     index: &IndexHandle,
     indexer_arc: &std::sync::Arc<tokio::sync::RwLock<crate::core::indexer::CodeIndexer>>,
@@ -402,6 +441,7 @@ async fn rechunk_all(
 
     let ordered: Vec<&String> = files.iter().collect();
     let mut remap: HashMap<String, String> = HashMap::new();
+    let mut unreadable: BTreeSet<String> = BTreeSet::new();
     let mut committed = 0usize;
     let mut dropped_by_cap = 0usize;
     let mut unembedded = 0usize;
@@ -413,22 +453,63 @@ async fn rechunk_all(
         if cancel.load(std::sync::atomic::Ordering::Acquire) {
             return Err(cancel_stop(index, committed));
         }
+        // #6910: read the batch concurrently, as
+        // `service::reindex::batch::prepare_batch_payload` does. Sequentially a
+        // batch costs the SUM of its files, so 64 files each hitting
+        // `EXTRACT_TIMEOUT` hold the pass for ~32 minutes before the next cancel
+        // checkpoint — and a delete's `DELETE_QUIESCE_TIMEOUT` is 30 seconds.
+        // Concurrently the batch costs its slowest file.
+        let reads = futures::future::join_all(batch.iter().map(|file| {
+            let abs = root_path.join(file.as_str());
+            async move {
+                let content = crate::core::extract::read_content(&abs).await;
+                (abs, content)
+            }
+        }))
+        .await;
+
         let mut chunks = Vec::new();
         let mut entities_by_file = Vec::new();
-        for file in batch {
-            let abs = root_path.join(file.as_str());
-            let content = match tokio::fs::read_to_string(&abs).await {
+        for (file, (abs, content)) in batch.iter().zip(reads) {
+            // #6910: route M005 re-reads through the extractor; raw UTF-8
+            // dropped office docs
+            let content = match content {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::warn!(
-                        index_id = %index.id,
-                        path = %abs.display(),
-                        "M005: cannot read file, its chunks stay dropped ({e})"
-                    );
+                    if file_is_gone(&abs).await {
+                        tracing::warn!(
+                            index_id = %index.id,
+                            path = %abs.display(),
+                            "M005: file is gone from disk, its chunks stay dropped ({e})"
+                        );
+                    } else {
+                        unreadable.insert((*file).clone());
+                        tracing::warn!(
+                            index_id = %index.id,
+                            path = %abs.display(),
+                            "M005: file is on disk but could not be extracted ({e}) — keeping \
+                             its existing vectors rather than dropping them (#6910)"
+                        );
+                    }
                     continue;
                 }
             };
             let (file_chunks, entities) = chunk_ast(file.as_str(), &content);
+            // #6910: extraction can succeed and still yield nothing usable — a
+            // scanned PDF is `Ok(Extracted { text: "", .. })` from
+            // `extract::pdf`, and `chunk_text` emits no chunk for empty content.
+            // That reaches the orphan sweep by a different route than an `Err`
+            // and drops the same vectors, so it is held back the same way.
+            if file_chunks.is_empty() && !file_is_gone(&abs).await {
+                unreadable.insert((*file).clone());
+                tracing::warn!(
+                    index_id = %index.id,
+                    path = %abs.display(),
+                    "M005: file is on disk but yielded no chunks (empty extraction?) — \
+                     keeping its existing vectors rather than dropping them (#6910)"
+                );
+                continue;
+            }
             entities_by_file.push((file.to_string(), entities));
             chunks.extend(file_chunks);
         }
@@ -468,10 +549,60 @@ async fn rechunk_all(
 
     Ok(Rechunked {
         remap,
+        unreadable,
         committed,
         dropped_by_cap,
         unembedded,
     })
+}
+
+/// `true` only when `abs` is affirmatively absent from disk.
+///
+/// Why (#6910): the orphan sweep is the pass's one irreversible step, so it may
+/// only run on evidence that the file itself is gone. An `Err` from the
+/// existence probe is not that evidence — a permission or I/O fault on the
+/// parent directory answers "cannot tell", and `false` here keeps the vectors.
+/// What: `tokio::fs::try_exists`, with `Err` folded into "still there".
+/// Test: `file_is_gone_answers_no_when_the_probe_cannot_tell` covers the `Err`
+/// arm directly; `m005_keeps_the_vectors_of_a_file_it_cannot_extract` and
+/// `m005_drops_the_vectors_of_a_file_deleted_from_disk` cover it through `apply`.
+async fn file_is_gone(abs: &std::path::Path) -> bool {
+    matches!(tokio::fs::try_exists(abs).await, Ok(false))
+}
+
+/// Split the pre-pass ids into the ones whose vectors may be dropped and a
+/// count of the ones held back.
+///
+/// Why (#6910): before this split every id no new chunk claimed was dropped,
+/// which made "M005 could not read this file" indistinguishable from "this file
+/// no longer exists" — and every `.docx`/`.pdf`/`.xlsx` in the corpus took the
+/// first branch, because M005 read them as raw UTF-8. matsuoka-com fell from
+/// 64,517 chunks to 3,526 on its first post-upgrade query.
+/// What: an id is retained when [`chunk_id::parse`] resolves its file to one of
+/// `unreadable`. An id that will not parse is treated as claimable — the sweep's
+/// pre-#6910 behaviour, and no `unreadable` file can own it.
+/// Test: `m005_keeps_the_vectors_of_a_file_it_cannot_extract`,
+/// `orphan_partition_retains_only_unreadable_files`.
+fn partition_orphans(
+    old_ids: &[String],
+    remap: &HashMap<String, String>,
+    unreadable: &BTreeSet<String>,
+) -> (Vec<String>, usize) {
+    let mut orphans = Vec::new();
+    let mut retained = 0usize;
+    for id in old_ids {
+        if remap.contains_key(id) {
+            continue;
+        }
+        let held = !unreadable.is_empty()
+            && chunk_id::parse(id).is_some_and(|p| unreadable.contains(&p.file));
+        if held {
+            retained += 1;
+        } else {
+            orphans.push(id.clone());
+        }
+    }
+    (orphans, retained)
 }
 
 /// SHA-256 of a chunk's text — the identity M005 reuses a vector by.
