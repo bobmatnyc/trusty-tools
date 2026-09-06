@@ -1320,6 +1320,14 @@ async fn guided_fallback_non_git_dir_no_managed_env_is_fast() {
     // all — must take the ordinary, unaffected fast path: no extra daemon
     // round trip, no added latency (#4061 must not slow down bare `tm` for a
     // genuinely non-managed pane).
+    //
+    // #6885: "fast" is proven structurally, not by the clock. The old bound
+    // (`elapsed < 150ms` against a refused connection) measured how busy the
+    // machine was rather than what the code did, and reported 162ms to 434ms
+    // on branches that had not touched this path. This aims a REAL listener at
+    // `fallback_protected` and asserts it is never connected to. Zero daemon
+    // round trips is the property the Why above actually claims, and it holds
+    // at any load. Same substitution #6240 made for the sibling test.
     let managed_key = "TM_MANAGED_SESSION_ID";
     let prev = std::env::var(managed_key).ok();
     // SAFETY: serialised by `#[serial_test::serial]`.
@@ -1332,11 +1340,20 @@ async fn guided_fallback_non_git_dir_no_managed_env_is_fast() {
     let project = dir.path();
     assert!(!project.join(".git").exists(), "test precondition");
 
+    // The mock is scripted "stopped" on purpose: were the code to poll, it
+    // would get the single most favourable answer and still be caught by the
+    // connection count below.
+    const UNUSED_ID: &str = "66666666-7777-8888-9999-aaaaaaaaaaaa";
+    let (url, hits) = spawn_4061_state_mock(UNUSED_ID, vec!["stopped"]).await;
+
     let client = reqwest::Client::new();
-    let start = std::time::Instant::now();
-    let result =
-        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", project).await;
-    let elapsed = start.elapsed();
+    // The 5s timeout is an anti-hang guard only — #6070 saw this same path
+    // hang outright. Promptness itself is the connection count, never a clock.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::commands::guided::fallback_protected(&client, &url, project),
+    )
+    .await;
 
     // Restore before any assertion can panic.
     unsafe {
@@ -1350,13 +1367,17 @@ async fn guided_fallback_non_git_dir_no_managed_env_is_fast() {
         }
     }
 
+    let result = result.expect("#6885: the no-managed-env fallback must never hang");
     assert!(
         result.is_ok(),
         "non-git dir must exit cleanly; got {result:?}"
     );
-    assert!(
-        elapsed < std::time::Duration::from_millis(150),
-        "no managed-session signal must never pay the #4061 retry budget; took {elapsed:?}"
+    // #6885: the deterministic stand-in for the old wall-clock budget.
+    let polls = hits.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        polls, 0,
+        "no managed-session signal must never pay the #4061 retry budget: \
+         expected 0 daemon round trips, got {polls}"
     );
 }
 
