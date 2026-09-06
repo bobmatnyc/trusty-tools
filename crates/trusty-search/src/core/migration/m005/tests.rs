@@ -54,6 +54,11 @@ const DOCX_PARAGRAPHS: &[&str] = &[
 const BROKEN_DOCX_TEXT: &str =
     "Board pack, draft three\nHeadcount plan attached\nSigned off by finance\n";
 
+/// The text a previous extraction of `scanned.docx` had stored, before the
+/// document was replaced by a version whose text layer is gone (#6910).
+const SCANNED_DOCX_TEXT: &str =
+    "Signed lease agreement\nExhibit A follows\nCounterparty countersigned\n";
+
 /// Write a minimal but real `.docx` at `path`: a zip whose `word/document.xml`
 /// holds one `<w:p>` per entry in `paragraphs`.
 ///
@@ -205,11 +210,23 @@ async fn fixture_inner(index_id: &str, cap: Option<usize>, office: bool) -> Fixt
         write_docx(&root.join("notes.docx"), DOCX_PARAGRAPHS);
         // Indexed while it was readable; corrupt on disk by the time M005 runs.
         std::fs::write(root.join("broken.docx"), b"this is not a zip container").unwrap();
+        // #6910 code-critic finding 1: extraction that SUCCEEDS with no usable
+        // text. A container with no `<w:t>` run is the docx analogue of the
+        // scanned PDF `core::extract::pdf` returns `Ok(text: "")` for.
+        write_docx(&root.join("scanned.docx"), &[]);
         let notes = crate::core::extract::read_content(&root.join("notes.docx"))
             .await
             .expect("the fixture docx must extract");
+        let scanned = crate::core::extract::read_content(&root.join("scanned.docx"))
+            .await
+            .expect("an empty docx must still extract cleanly");
+        assert!(
+            scanned.trim().is_empty(),
+            "the scanned-document stand-in must extract to no text, got {scanned:?}"
+        );
         sources.push(("notes.docx".to_string(), notes));
         sources.push(("broken.docx".to_string(), BROKEN_DOCX_TEXT.to_string()));
+        sources.push(("scanned.docx".to_string(), SCANNED_DOCX_TEXT.to_string()));
     }
 
     // Chunk as today, then rewrite to the pre-#6581 shape and collapse the
@@ -1147,6 +1164,64 @@ async fn m005_drops_the_vectors_of_a_file_deleted_from_disk() {
             "a file gone from disk must still have its vectors swept: {id}"
         );
     }
+}
+
+/// #6910 code-critic finding 1: extraction that returns `Ok` with no usable
+/// text reaches the orphan sweep by a different route than an `Err` and used to
+/// drop the same vectors.
+///
+/// Why: `core::extract::pdf::extract` returns `Ok(Extracted { text: "", warning:
+/// Some(..) })` for a scanned/image-only PDF rather than an error, and
+/// `chunk_text` emits no chunk for empty content — so the file landed in neither
+/// `remap` nor `unreadable`, and every id it had was classified an orphan. The
+/// docx here stands in for that PDF: same `Ok`-with-no-text shape, same M005
+/// branch, and a fixture the migration tests can build without a PDF writer.
+#[tokio::test]
+async fn m005_keeps_the_vectors_of_a_file_that_extracts_to_nothing() {
+    let f = fixture_with_office("m005-office-empty-extract").await;
+    let scanned = ids_for_file(&corpus_chunks(&f).await, "scanned.docx");
+    assert!(
+        !scanned.is_empty(),
+        "the fixture must seed chunks for the document whose text layer is gone"
+    );
+
+    M005ChunkIdEndLine.apply(&f.handle).await.expect("apply");
+
+    for id in &scanned {
+        assert!(
+            f.store.contains(id).await,
+            "a file that extracts cleanly to NO text is still on disk and must keep \
+             its vectors (#6910): {id}"
+        );
+    }
+}
+
+/// #6910 code-critic finding 3: the `Err` arm of the existence probe.
+///
+/// Why: [`super::file_is_gone`] is what makes the orphan sweep's one
+/// irreversible step conditional, and its contract is that only an affirmative
+/// `Ok(false)` permits removal. A probe that cannot answer must read as "still
+/// there". Uses a path whose parent is a regular file, so the underlying `stat`
+/// fails `ENOTDIR` — deterministic, and independent of the uid the suite runs
+/// as, unlike a chmod-based fixture.
+#[tokio::test]
+async fn file_is_gone_answers_no_when_the_probe_cannot_tell() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let a_file = tmp.path().join("not-a-directory");
+    std::fs::write(&a_file, b"x").unwrap();
+
+    assert!(
+        !super::file_is_gone(&a_file.join("child")).await,
+        "a probe that errors must read as 'still there', never as 'gone'"
+    );
+    assert!(
+        super::file_is_gone(&tmp.path().join("absent")).await,
+        "an affirmative absence is the only thing that permits removal"
+    );
+    assert!(
+        !super::file_is_gone(&a_file).await,
+        "a file that exists is not gone"
+    );
 }
 
 /// The retention rule itself: only ids whose file is in the unreadable set are

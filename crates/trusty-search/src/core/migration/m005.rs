@@ -375,9 +375,10 @@ fn cancel_stop(index: &IndexHandle, committed: usize) -> anyhow::Error {
 /// rather than four out-parameters.
 /// What: `remap` is `old id → new id` for every chunk whose text is unchanged;
 /// `unreadable` is the root-relative path of every file that is still on disk
-/// but yielded no text (#6910); the counts are for the operator log.
-/// Test: covered through `apply` by `m005_rechunks_the_whole_corpus` and
-/// `m005_keeps_the_vectors_of_a_file_it_cannot_extract`.
+/// but yielded no chunks (#6910); the counts are for the operator log.
+/// Test: covered through `apply` by `m005_rechunks_the_whole_corpus`,
+/// `m005_keeps_the_vectors_of_a_file_it_cannot_extract` and
+/// `m005_keeps_the_vectors_of_a_file_that_extracts_to_nothing`.
 #[derive(Debug)]
 struct Rechunked {
     remap: HashMap<String, String>,
@@ -395,14 +396,18 @@ struct Rechunked {
 /// then for each batch reads the files, chunks them, and commits with NO
 /// embeddings — the ruling's zero re-embed budget.
 ///
-/// Reads through [`crate::core::extract::read_content`] — the same seam
-/// `service::reindex::batch` and `service::watch_loop` use — so `.docx`, `.pdf`
-/// and the spreadsheet formats are extracted here exactly as they were when
-/// they were first indexed (#6910). A file that yields no text is reported two
-/// ways: gone from disk means its chunks are correctly gone, and its `old_ids`
-/// fall through to the orphan sweep; still on disk means extraction failed, and
-/// its path is returned in [`Rechunked::unreadable`] so `apply` keeps its
-/// vectors instead.
+/// Reads each batch concurrently through [`crate::core::extract::read_content`]
+/// — the same seam, and the same `join_all` shape, as
+/// `service::reindex::batch::prepare_batch_payload` — so `.docx`, `.pdf` and the
+/// spreadsheet formats are extracted here exactly as they were when they were
+/// first indexed, and a batch's wall time is its slowest file rather than the
+/// sum of 64 `EXTRACT_TIMEOUT`s (#6910).
+///
+/// A file that yields no chunks is reported two ways. Gone from disk means its
+/// chunks are correctly gone and its `old_ids` fall through to the orphan sweep.
+/// Still on disk — whether extraction returned `Err`, or returned `Ok` with text
+/// that chunks to nothing, as a scanned PDF does — means its path is returned in
+/// [`Rechunked::unreadable`] so `apply` keeps its vectors instead.
 ///
 /// Polls the #3049 cancel flag at every batch boundary and returns
 /// [`M005Cancelled`] when it is set — see that type for why a pass with no
@@ -448,13 +453,27 @@ async fn rechunk_all(
         if cancel.load(std::sync::atomic::Ordering::Acquire) {
             return Err(cancel_stop(index, committed));
         }
+        // #6910: read the batch concurrently, as
+        // `service::reindex::batch::prepare_batch_payload` does. Sequentially a
+        // batch costs the SUM of its files, so 64 files each hitting
+        // `EXTRACT_TIMEOUT` hold the pass for ~32 minutes before the next cancel
+        // checkpoint — and a delete's `DELETE_QUIESCE_TIMEOUT` is 30 seconds.
+        // Concurrently the batch costs its slowest file.
+        let reads = futures::future::join_all(batch.iter().map(|file| {
+            let abs = root_path.join(file.as_str());
+            async move {
+                let content = crate::core::extract::read_content(&abs).await;
+                (abs, content)
+            }
+        }))
+        .await;
+
         let mut chunks = Vec::new();
         let mut entities_by_file = Vec::new();
-        for file in batch {
-            let abs = root_path.join(file.as_str());
+        for (file, (abs, content)) in batch.iter().zip(reads) {
             // #6910: route M005 re-reads through the extractor; raw UTF-8
             // dropped office docs
-            let content = match crate::core::extract::read_content(&abs).await {
+            let content = match content {
                 Ok(c) => c,
                 Err(e) => {
                     if file_is_gone(&abs).await {
@@ -468,14 +487,29 @@ async fn rechunk_all(
                         tracing::warn!(
                             index_id = %index.id,
                             path = %abs.display(),
-                            "M005: file is on disk but yielded no text ({e}) — keeping its \
-                             existing vectors rather than dropping them (#6910)"
+                            "M005: file is on disk but could not be extracted ({e}) — keeping \
+                             its existing vectors rather than dropping them (#6910)"
                         );
                     }
                     continue;
                 }
             };
             let (file_chunks, entities) = chunk_ast(file.as_str(), &content);
+            // #6910: extraction can succeed and still yield nothing usable — a
+            // scanned PDF is `Ok(Extracted { text: "", .. })` from
+            // `extract::pdf`, and `chunk_text` emits no chunk for empty content.
+            // That reaches the orphan sweep by a different route than an `Err`
+            // and drops the same vectors, so it is held back the same way.
+            if file_chunks.is_empty() && !file_is_gone(&abs).await {
+                unreadable.insert((*file).clone());
+                tracing::warn!(
+                    index_id = %index.id,
+                    path = %abs.display(),
+                    "M005: file is on disk but yielded no chunks (empty extraction?) — \
+                     keeping its existing vectors rather than dropping them (#6910)"
+                );
+                continue;
+            }
             entities_by_file.push((file.to_string(), entities));
             chunks.extend(file_chunks);
         }
@@ -529,8 +563,9 @@ async fn rechunk_all(
 /// existence probe is not that evidence — a permission or I/O fault on the
 /// parent directory answers "cannot tell", and `false` here keeps the vectors.
 /// What: `tokio::fs::try_exists`, with `Err` folded into "still there".
-/// Test: `m005_keeps_the_vectors_of_a_file_it_cannot_extract`,
-/// `m005_drops_the_vectors_of_a_file_deleted_from_disk`.
+/// Test: `file_is_gone_answers_no_when_the_probe_cannot_tell` covers the `Err`
+/// arm directly; `m005_keeps_the_vectors_of_a_file_it_cannot_extract` and
+/// `m005_drops_the_vectors_of_a_file_deleted_from_disk` cover it through `apply`.
 async fn file_is_gone(abs: &std::path::Path) -> bool {
     matches!(tokio::fs::try_exists(abs).await, Ok(false))
 }
