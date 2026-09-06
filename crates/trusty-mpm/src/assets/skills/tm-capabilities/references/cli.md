@@ -46,6 +46,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `repair` — Resolve a mid-transition issue carrying multiple state labels
   - `seed-config` — Write the embedded default model to the user config path
   - `seed-labels` — Create any missing labels (states + extra families) in the repo
+  - `standard` — Print the ticketing standard in effect (#6918; reads config, no `gh`)
   - `states` — List the configured states and transitions (reads YAML only)
   - `transition` — Move an issue to `<to-state>`, validating the edge against the model
 - `launch` — Launch a session with full setup: deploys instructions, agents, and skills, then starts Claude
