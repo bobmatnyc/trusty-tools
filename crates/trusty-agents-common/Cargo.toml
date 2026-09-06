@@ -22,7 +22,12 @@ name = "trusty-agents-common"
 # gains a required `trusty-common ^0.49` dependency, which does change what a
 # published consumer resolves. The gate is never advisory (#5050), so the bump
 # goes to the position the gate names rather than being argued down.
-version = "0.7.0"
+#
+# 0.7.1 (#6895): patch bump. 0.7.0 is live on crates.io and this PR edits
+# src/assets/agents/version-control.md (prose only — no item signature changed),
+# which scripts/check-pr-version-bump.sh requires be bumped in the same PR
+# (#4421).
+version = "0.7.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
