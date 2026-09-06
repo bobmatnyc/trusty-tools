@@ -219,6 +219,41 @@ async fn test_health_route() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
     assert_eq!(body["status"], "ok");
     assert!(body["version"].is_string());
+    // #6908: the console's own details pane reads its uptime from here.
+    assert!(
+        body["uptime_secs"].is_u64(),
+        "health must report uptime_secs: {body}"
+    );
+}
+
+/// Why: the details pane renders "how long has the console been up", so a
+/// constant or a value that resets per request would be a lie the operator
+/// cannot detect. The field must count forward from when the state was built.
+/// What: builds one state, reads `/health` twice around a short sleep, and
+/// asserts the second reading is not behind the first — whole seconds, so the
+/// two may legitimately be equal.
+/// Test: this test itself.
+#[tokio::test]
+async fn health_uptime_is_monotonic() {
+    async fn read(router: axum::Router) -> u64 {
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        let bytes = get_bytes(resp).await;
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
+        body["uptime_secs"].as_u64().expect("uptime_secs")
+    }
+
+    let router = build_router(make_test_state());
+    let first = read(router.clone()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let second = read(router).await;
+    assert!(
+        second >= first,
+        "uptime went backwards: {first} -> {second}"
+    );
 }
 
 /// Why: the services route must serialise `Degraded` status and the

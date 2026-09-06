@@ -12,6 +12,8 @@
   import ReviewTab from './ReviewTab.svelte';
   import SessionsTab from './SessionsTab.svelte';
   import ConfigTab from './ConfigTab.svelte';
+  // #6908: the console's own row opens a details pane for the console itself.
+  import ConsoleTab from './ConsoleTab.svelte';
   import ThemeSelector from './ThemeSelector.svelte';
   import BrandLockup from './BrandLockup.svelte';
   // #6519: opt-in idle entry to the screensaver route.
@@ -27,6 +29,8 @@
   import { fetchServices } from './servicesList.js';
   // #6909: the labels the tab bar used to carry, now the breadcrumb's.
   import { viewLabel } from './consoleNav.js';
+  // #6908: the console's version and uptime, read from the one `/health` probe.
+  import { fetchConsoleHealth } from './consoleVersion.js';
 
   // ── state ────────────────────────────────────────────────────────────────
 
@@ -41,6 +45,16 @@
   // and the single stream that fills it. Not `$state` — nothing renders it.
   let history = $state(initialState());
   let stream;
+  // #6908: the console's own build and uptime, from `/health`. The server is
+  // the only thing that knows when the process started, so the figure is
+  // re-read rather than counted up in the browser — a page left open through a
+  // console restart would otherwise keep counting the uptime of a process that
+  // is gone. Ten seconds is finer than the resolution the pane prints below an
+  // hour, and `/health` is a two-field constant-time handler.
+  let consoleVersion = $state(null);
+  let consoleUptimeSecs = $state(null);
+  const HEALTH_POLL_MS = 10_000;
+  let healthTimer;
 
   // Single source of truth: maps service.id → console tab key. A service absent
   // from this map has no dashboard, so `ServicesList` renders its row inert —
@@ -51,6 +65,8 @@
     'trusty-analyze': 'analyze',
     'trusty-review':  'review',
     'trusty-mpm':     'sessions',
+    // #6908: the console now lists itself, so its row opens a pane too.
+    'trusty-console': 'console',
   };
 
   // Derived set `ServicesList` asks whether a row is clickable. Kept in sync
@@ -66,11 +82,20 @@
     armIdleWatch();
     stream = createMachineStream({ onState: (next) => (history = next) });
     stream.start();
+    await loadHealth();
+    healthTimer = setInterval(loadHealth, HEALTH_POLL_MS);
     const roster = await fetchServices();
     services = roster.services;
     error = roster.error;
     loading = false;
   });
+
+  /** Re-read `/health`, leaving the last known values in place on a failure. */
+  async function loadHealth() {
+    const health = await fetchConsoleHealth();
+    if (health.version !== null) consoleVersion = health.version;
+    if (health.uptimeSecs !== null) consoleUptimeSecs = health.uptimeSecs;
+  }
 
   // ── idle entry to the screensaver (#6519) ────────────────────────────────
 
@@ -106,6 +131,7 @@
   onDestroy(() => {
     stream?.stop();
     clearInterval(idleTimer);
+    clearInterval(healthTimer);
     for (const event of IDLE_EVENTS) {
       window.removeEventListener(event, noteInput);
     }
@@ -186,6 +212,16 @@
       <ReviewTab />
     {:else if view === 'sessions'}
       <SessionsTab />
+    {:else if view === 'console'}
+      <!-- #6908: the console's own details pane, fed from the same roster and
+           the same per-service rings the Services row it opened from draws. -->
+      <ConsoleTab
+        {services}
+        serviceSamples={history.serviceSamples}
+        sseClientCount={history.sseClientCount}
+        version={consoleVersion}
+        uptimeSecs={consoleUptimeSecs}
+      />
     {:else if view === 'config'}
       <ConfigTab />
     {/if}
