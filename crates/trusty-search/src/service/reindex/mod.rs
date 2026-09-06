@@ -202,12 +202,16 @@ pub(crate) use semaphore::{
 #[cfg(test)]
 pub(crate) use semaphore::index_teardown_lock;
 
-/// Re-export `index_cancel_flag` for the `tests_3049` eviction test, which needs
-/// to read the flag the delete signalled. Production readers reach it through
-/// `super::semaphore`, so this is `#[cfg(test)]`-gated to avoid a dead re-export
-/// — same pattern as `background_reindex_semaphore` above.
-/// Test: `service::server::tests_3049::index_cancel_flag_is_evicted_so_a_recreated_index_starts_uncancelled`.
-#[cfg(test)]
+/// Re-export `index_cancel_flag` for readers outside `service::reindex`.
+///
+/// Why: readers inside this module reach it through `super::semaphore`, so this
+/// used to be `#[cfg(test)]`-gated for the `tests_3049` eviction test alone.
+/// `core::migration::m005` is now a production reader: it polls the same flag at
+/// its re-chunk checkpoints, because it holds the teardown lock's shared side
+/// for its whole pass and a `delete_data=true` DELETE waiting on the exclusive
+/// side abandons otherwise (#6581).
+/// Test: `service::server::tests_3049::index_cancel_flag_is_evicted_so_a_recreated_index_starts_uncancelled`,
+/// `core::migration::m005::tests::m005_stops_before_the_clear_when_a_delete_signals_cancel`.
 pub(crate) use semaphore::index_cancel_flag;
 
 /// Re-export `run_embed_catch_up` (issue #2984 Phase 1) so

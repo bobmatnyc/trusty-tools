@@ -106,12 +106,27 @@ async fn fixture() -> Fixture {
     fixture_with_cap(None).await
 }
 
+/// As [`fixture`], but registered under `id` instead of `m005-test`.
+///
+/// Why: the per-index semaphore and the #3049 cancel flag are keyed by
+/// `IndexId` in process-global maps, so a test that SETS either one under the
+/// shared `m005-test` id perturbs every sibling running beside it. A test that
+/// mutates that shared state takes its own id (#6581).
+/// Test: `m005_stops_before_the_clear_when_a_delete_signals_cancel`.
+async fn fixture_named(id: &str) -> Fixture {
+    fixture_inner(id, None).await
+}
+
 /// As [`fixture`], but with an explicit per-index chunk cap.
 ///
 /// Why: the cap is a per-index value since #6369, so a test sets it with
 /// `with_chunk_cap` rather than by writing `TRUSTY_MAX_CHUNKS` — an env write
 /// leaks into every other test sharing the process.
 async fn fixture_with_cap(cap: Option<usize>) -> Fixture {
+    fixture_inner("m005-test", cap).await
+}
+
+async fn fixture_inner(index_id: &str, cap: Option<usize>) -> Fixture {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -160,14 +175,14 @@ async fn fixture_with_cap(cap: Option<usize>) -> Fixture {
     let embedder: Arc<dyn Embedder> = Arc::new(RefusingEmbedder {
         calls: Arc::clone(&embed_calls),
     });
-    let mut indexer = CodeIndexer::new("m005-test", root.to_string_lossy().as_ref())
+    let mut indexer = CodeIndexer::new(index_id, root.to_string_lossy().as_ref())
         .with_components(embedder, store.clone() as Arc<dyn VectorStore>);
     if let Some(cap) = cap {
         indexer = indexer.with_chunk_cap(cap);
     }
     indexer.set_corpus_store(Arc::new(corpus));
     let handle = IndexHandle::bare(
-        IndexId::new("m005-test"),
+        IndexId::new(index_id),
         Arc::new(RwLock::new(indexer)),
         root.clone(),
     );
@@ -807,5 +822,144 @@ async fn an_unreadable_plan_over_a_cleared_corpus_fails_closed() {
         fx.handle.read_schema_version().await.expect("version"),
         4,
         "a refused pass must never advance the schema version"
+    );
+}
+
+// ─── Delete cancellation (#6581, code-critic round 3) ────────────────────────
+
+/// Clear `id`'s cancel flag and evict it, so nothing leaks into a sibling test.
+///
+/// Why: the flag lives in a process-global `DashMap`, and a test that leaves one
+/// set aborts the next pass over that id. Each cancel test already takes its own
+/// index id; this is the belt to that suspenders.
+fn release_cancel(id: &crate::core::registry::IndexId) {
+    crate::service::reindex::clear_index_cancel(id);
+}
+
+/// A cancel already signalled when `apply` reaches Step 3 stops the pass with a
+/// distinct error, having destroyed nothing.
+///
+/// Why: `unregister_index` signals the cancel and then waits
+/// `DELETE_QUIESCE_TIMEOUT` on the teardown lock's EXCLUSIVE side, which
+/// `run_migrations_exclusive` holds the shared side of for the whole pass. With
+/// no checkpoint, M005 re-chunks the entire corpus first, the wait expires, and
+/// a `delete_data=true` DELETE takes the #3049 abandon branch — telling the
+/// operator to re-issue a delete that will abandon again for as long as the
+/// migration runs.
+/// What: signals the cancel, applies, and asserts the typed abort, the intact
+/// corpus, the surviving plan marker and the unchanged schema version — then
+/// clears the cancel and asserts the pass resumes to completion.
+/// Test: this test.
+#[tokio::test]
+async fn m005_stops_before_the_clear_when_a_delete_signals_cancel() {
+    let fx = fixture_named("m005-cancel-before-clear").await;
+    let corpus = {
+        let indexer = fx.handle.indexer.read().await;
+        indexer.corpus_store().unwrap()
+    };
+    let before = corpus.load_all_chunks().expect("load").len();
+    assert!(before > 0, "the fixture seeds a populated legacy corpus");
+
+    crate::service::reindex::signal_index_cancel(&fx.handle.id);
+
+    let err = M005ChunkIdEndLine
+        .apply(&fx.handle)
+        .await
+        .expect_err("a signalled cancel must stop the pass");
+    assert!(
+        err.downcast_ref::<M005Cancelled>().is_some(),
+        "the abort must be typed so a caller can tell it from a failure: {err:#}"
+    );
+    assert_eq!(
+        corpus.load_all_chunks().expect("reload").len(),
+        before,
+        "stopping before the clear must leave the corpus whole"
+    );
+    assert!(
+        plan::M005Plan::load(&corpus)
+            .await
+            .expect("load plan")
+            .is_some(),
+        "Step 7 never ran, so the marker that resumes the pass must survive"
+    );
+
+    // The runner applies `?` to `apply` before `write_schema_version`, so the
+    // abort pins the version at 4 — a v5 stamp here would record an unmigrated
+    // corpus as migrated, which is the #6581 fail-open.
+    let registry = crate::core::migration::MigrationRegistry::new();
+    crate::core::migration::run_migrations(&fx.handle, &registry)
+        .await
+        .expect_err("the runner must surface the abort");
+    assert_eq!(
+        fx.handle.read_schema_version().await.expect("version"),
+        4,
+        "an aborted pass must never advance the schema version"
+    );
+
+    // The delete was abandoned or refused and the index survived: the pass has
+    // to converge, not stay stuck behind its own marker.
+    release_cancel(&fx.handle.id);
+    crate::core::migration::run_migrations(&fx.handle, &registry)
+        .await
+        .expect("the pass resumes once the cancel clears");
+    assert_eq!(
+        corpus.load_all_chunks().expect("reload").len(),
+        fresh_chunk_count(&fx.root),
+        "the resumed pass loses nothing"
+    );
+    assert_eq!(
+        fx.handle.read_schema_version().await.expect("version"),
+        super::super::M005_TARGET_VERSION
+    );
+}
+
+/// `rechunk_all` polls the cancel flag at the batch boundary, not only once
+/// before it starts.
+///
+/// Why: the boundary check is the one that matters for a LARGE index — a delete
+/// signalled halfway through a multi-minute re-chunk is exactly the case where
+/// waiting for the pass to end blows the 30s quiesce budget. `apply`'s check
+/// runs before the clear and so can never observe that arrival.
+/// What: calls `rechunk_all` directly with the flag already set, which puts the
+/// clear behind the checkpoint: the corpus is emptied and the FIRST batch
+/// boundary then aborts. Asserts the typed abort and that nothing was committed.
+/// Test: this test.
+#[tokio::test]
+async fn rechunk_all_stops_at_a_batch_boundary_when_a_delete_signals_cancel() {
+    let fx = fixture_named("m005-cancel-at-batch").await;
+    let corpus = {
+        let indexer = fx.handle.indexer.read().await;
+        indexer.corpus_store().unwrap()
+    };
+    let files: std::collections::BTreeSet<String> = corpus
+        .load_all_chunks()
+        .expect("load")
+        .into_iter()
+        .map(|c| c.file)
+        .collect();
+    assert!(!files.is_empty(), "the fixture seeds files to re-chunk");
+
+    crate::service::reindex::signal_index_cancel(&fx.handle.id);
+    let indexer_arc = Arc::clone(&fx.handle.indexer);
+    let err = super::rechunk_all(
+        &fx.handle,
+        &indexer_arc,
+        &fx.root,
+        &files,
+        &std::collections::HashMap::new(),
+        0,
+    )
+    .await
+    .expect_err("the first batch boundary must abort");
+    release_cancel(&fx.handle.id);
+
+    assert!(
+        err.downcast_ref::<M005Cancelled>().is_some(),
+        "the abort must be typed: {err:#}"
+    );
+    assert!(
+        corpus.load_all_chunks().expect("reload").is_empty(),
+        "the clear ran, so the abort came from the batch boundary and not from \
+         `apply`'s earlier check"
     );
 }

@@ -13,6 +13,13 @@
 //! the way redb's "Previous I/O error occurred" state does, and asserts each
 //! handler's status and body. Asserts through the responses, not the Rust API,
 //! so the shape a caller branches on is what is pinned.
+//!
+//! The same fixture carries the #6581 half. There the corpus reads FINE and is
+//! merely emptied — M005 clears it and re-chunks it in batches — so each handler
+//! reaches the identical false answer by a second route, and owes the identical
+//! refusal under its own error code (`index_migration_in_progress`). Only
+//! `search` had that guard; the corpus- and graph-backed handlers beside it
+//! never call `search_with_drops` and so had none.
 //! Test: this module.
 
 use super::*;
@@ -385,5 +392,255 @@ async fn global_search_reports_the_index_it_dropped_for_a_running_migration() {
             .expect("results array")
             .is_empty(),
         "the migrating index contributes no lane; body={body:?}"
+    );
+}
+
+// ─── #6581: the corpus reads fine, but a migration has emptied it ────────────
+
+/// Open M005's migration window on `fx`'s index until the guard drops.
+///
+/// Why: every #6581 test below stages the same state — the flag M005 raises
+/// while its re-chunk holds the corpus empty. Raising it by hand rather than
+/// running M005 is what keeps these tests about the HANDLERS.
+/// Test: the six `*_during_a_migration_*` tests below.
+async fn open_migration_window(fx: &Fixture) -> crate::core::indexer::MigrationWindow {
+    let handle = fx
+        .state
+        .registry
+        .get(&fx.id)
+        .expect("the fixture registers its index");
+    let flag = handle.indexer.read().await.migration_flag();
+    crate::core::indexer::MigrationWindow::open(flag)
+}
+
+/// Assert the shared `503 index_migration_in_progress` contract on one body.
+///
+/// Why: routing every handler through one producer is worth nothing unless the
+/// bodies actually match, and #5917 is the precedent for how they drift — two
+/// producers under one error code, one sending `retryable` and the other
+/// `failure_kind` + `transient`. Six surfaces asserting one field set is what
+/// pins it.
+/// Test: the six `*_during_a_migration_*` tests below.
+fn assert_migration_in_progress(
+    status: StatusCode,
+    body: &serde_json::Value,
+    index_id: &str,
+    surface: &str,
+) {
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{surface}: body={body:?}"
+    );
+    assert_eq!(body["error"], "index_migration_in_progress", "{surface}");
+    assert_eq!(body["index_id"], index_id, "{surface}");
+    assert_eq!(body["failure_kind"], "migrating", "{surface}");
+    assert_eq!(body["transient"], serde_json::json!(true), "{surface}");
+    assert_eq!(body["retryable"], serde_json::json!(true), "{surface}");
+    let message = body["message"].as_str().expect("message is a string");
+    assert!(
+        message.contains(index_id) && message.contains("#6581"),
+        "{surface}: the message names the index and the ticket; message={message}"
+    );
+}
+
+fn chunks_params() -> super::files::ChunksParams {
+    serde_json::from_value(serde_json::json!({})).expect("default chunks params")
+}
+
+/// #6581: `GET /indexes/:id/chunks` during a migration is a refusal, not a page
+/// of a corpus that is mid-rebuild.
+///
+/// Why: M005 clears the corpus and refills it batch by batch, so `total` and the
+/// page beneath it describe however much has been re-committed so far — with no
+/// field saying so. An exporter walking the cursor to exhaustion records that
+/// partial corpus as the index's contents.
+/// What: proves the page answers outside the window, opens it, and re-runs.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn chunks_during_a_migration_is_503_not_a_partial_page() {
+    let fx = Fixture::build("chunks-migrating-6581").await;
+    let call = || {
+        super::files::get_index_chunks_handler(
+            axum::extract::State(Arc::clone(&fx.state)),
+            axum::extract::Path("chunks-migrating-6581".to_string()),
+            axum::extract::Query(chunks_params()),
+        )
+    };
+
+    let Json(warm) = call().await.expect("the page answers outside the window");
+    assert!(
+        warm["total"].as_u64().expect("total is a number") > 0,
+        "the fixture holds chunks before the window opens; body={warm:?}"
+    );
+
+    let _window = open_migration_window(&fx).await;
+    let (status, Json(body)) = call()
+        .await
+        .expect_err("a mid-rebuild corpus must not be paged as the whole one");
+    assert_migration_in_progress(status, &body, "chunks-migrating-6581", "chunks");
+}
+
+/// #6581: `GET /indexes/:id/call_chain` during a migration is a refusal, not a
+/// `404` saying the entry point does not exist.
+///
+/// Why: the identical disguise the #5917 sibling covers, reached by a different
+/// route — the snapshot reads cleanly here and is simply empty, and the symbol
+/// graph stays empty until M005's Step 6 rebuild even after the corpus refills.
+/// What: opens the window and asserts the status and body.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn call_chain_during_a_migration_is_503_not_404() {
+    let fx = Fixture::build("callchain-migrating-6581").await;
+    let _window = open_migration_window(&fx).await;
+
+    let params: super::files::CallChainParams =
+        serde_json::from_value(serde_json::json!({ "entry_point": "authenticate_user" }))
+            .expect("call chain params");
+    let (status, Json(body)) = super::files::call_chain_handler(
+        axum::extract::State(Arc::clone(&fx.state)),
+        axum::extract::Path("callchain-migrating-6581".to_string()),
+        axum::extract::Query(params),
+    )
+    .await
+    .expect_err("a migrating index must not render as 'entry point not found'");
+    assert_ne!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a real symbol must not be reported nonexistent; body={body:?}"
+    );
+    assert_migration_in_progress(status, &body, "callchain-migrating-6581", "call_chain");
+}
+
+/// #6581: `POST /indexes/:id/grep` during a migration is a refusal, not an empty
+/// match set.
+///
+/// Why: grep derives its file set from the chunk corpus, so a pass that has
+/// emptied it scans no files and answers `{matches: [], total: 0}` — "this
+/// literal is nowhere in your code" for a literal that is right there on disk.
+/// What: proves the pattern matches outside the window, opens it, and re-runs.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn grep_during_a_migration_is_503_not_zero_matches() {
+    let fx = Fixture::build("grep-migrating-6581").await;
+    let call = || {
+        super::files::grep_handler(
+            axum::extract::State(Arc::clone(&fx.state)),
+            axum::extract::Path("grep-migrating-6581".to_string()),
+            axum::extract::Json(grep_request("authenticate_user")),
+        )
+    };
+
+    let Json(warm) = call().await.expect("grep answers outside the window");
+    assert!(
+        !warm.matches.is_empty(),
+        "the pattern matches before the window opens"
+    );
+
+    let _window = open_migration_window(&fx).await;
+    let (status, Json(body)) = call()
+        .await
+        .expect_err("a migrating index must not be reported as zero matches");
+    assert_migration_in_progress(status, &body, "grep-migrating-6581", "grep");
+}
+
+/// #6581: `POST /grep` refuses when any index in the fan-out is migrating.
+///
+/// Why: the global response carries one flat match list and no per-index status,
+/// so returning the other indexes' matches presents an incomplete sweep as a
+/// complete one — the same argument the #5917 fan-out refusal makes.
+/// What: opens the window on the only index and asserts the fan-out refuses.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn global_grep_during_a_migration_is_503() {
+    let fx = Fixture::build("global-grep-migrating-6581").await;
+    let _window = open_migration_window(&fx).await;
+
+    let (status, Json(body)) = super::files::global_grep_handler(
+        axum::extract::State(Arc::clone(&fx.state)),
+        axum::extract::Json(grep_request("authenticate_user")),
+    )
+    .await
+    .expect_err("a fan-out across a migrating index must be refused");
+    assert_migration_in_progress(status, &body, "global-grep-migrating-6581", "global grep");
+}
+
+/// #6581: `GET /indexes/:id/graph/neighbors` during a migration is a refusal,
+/// not `count: 0`.
+///
+/// Why: M005's clear empties the symbol graph outright and nothing refills it
+/// until Step 6, so a BFS in that window answers "this node has no edges" for a
+/// graph that is merely mid-rebuild.
+/// What: opens the window and asserts the status and body. The request is
+/// deliberately well-formed: the guard sits AFTER the direction and edge-kind
+/// parsing, so a malformed one still earns its permanent 400 rather than a
+/// retryable 503 that would loop a caller with a typo.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn graph_neighbors_during_a_migration_is_503_not_count_zero() {
+    let fx = Fixture::build("neighbors-migrating-6581").await;
+    let _window = open_migration_window(&fx).await;
+
+    let (status, Json(body)) = super::contrib_graph::graph_neighbors_handler(
+        axum::extract::State(Arc::clone(&fx.state)),
+        axum::extract::Path("neighbors-migrating-6581".to_string()),
+        axum::extract::Query(super::contrib_graph::NeighborsParams {
+            node: "authenticate_user".to_string(),
+            direction: None,
+            edge_kinds: None,
+            max_hops: None,
+        }),
+    )
+    .await
+    .expect_err("a migrating index must not answer an empty neighbour list");
+    assert_migration_in_progress(status, &body, "neighbors-migrating-6581", "graph neighbors");
+}
+
+/// #6581: `POST /indexes/:id/graph` during a migration is refused before it
+/// writes anything.
+///
+/// Why: this is the WRITE on the surface. It calls `rebuild_symbol_graph_now`,
+/// which races M005's own Step 6 rebuild over that same graph, and it answers
+/// with post-merge totals read from a corpus M005 has emptied. Refusing before
+/// the persist is what keeps the caller from holding a durable contribution
+/// behind a 503 whose body says nothing about whether anything was stored.
+/// What: opens the window, ingests, and asserts both the refusal and that no
+/// contribution reached `kg_contrib`.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn graph_ingest_during_a_migration_is_503_and_stores_nothing() {
+    let fx = Fixture::build("ingest-migrating-6581").await;
+    let _window = open_migration_window(&fx).await;
+
+    let (status, Json(body)) = super::contrib_graph::ingest_graph_handler(
+        axum::extract::State(Arc::clone(&fx.state)),
+        axum::extract::Path("ingest-migrating-6581".to_string()),
+        axum::extract::Json(super::contrib_graph::IngestGraphRequest {
+            schema: Some("navigatsql/kggraph@1".into()),
+            producer: "navigatsql".into(),
+            producer_version: None,
+            git_sha: None,
+            nodes: vec![crate::core::corpus::contrib::ContribNode {
+                id: "dbo.orders".into(),
+                kind: "table".into(),
+            }],
+            edges: Vec::new(),
+        }),
+    )
+    .await
+    .expect_err("an ingest during a migration must be refused, not merged");
+    assert_migration_in_progress(status, &body, "ingest-migrating-6581", "graph ingest");
+    assert!(
+        fx.corpus
+            .load_contrib_graphs()
+            .expect("read kg_contrib")
+            .is_empty(),
+        "a refused ingest must not have persisted a contribution"
     );
 }

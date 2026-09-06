@@ -18,6 +18,7 @@
 //! | vector lane off by config (#5068) | `503 vector_unavailable` | no |
 //! | vector lane not built yet (#5068) | `503 vector_unavailable` | yes |
 //! | contribution stored, not merged (#5505) | `503 contrib_not_merged` | yes |
+//! | corpus mid-rebuild by a migration (#6581) | `503 index_migration_in_progress` | yes |
 //!
 //! Centralising them means `search`, `index_status`, `chunks`, and `grep` can
 //! never drift into reporting the same daemon state three different ways —
@@ -185,6 +186,47 @@ pub(super) fn migration_in_progress_from(
             "retryable": true,
             "message": err.to_string(),
         })),
+    ))
+}
+
+/// Refuse a request against an index whose corpus a migration is rebuilding
+/// (#6581).
+///
+/// Why: `CodeIndexer::search_with_drops` raises `IndexMigrationInProgress` from
+/// inside the index, but the corpus- and graph-backed HANDLERS never go through
+/// it — they read the corpus or the symbol graph directly. So during M005's
+/// window `call_chain` answered `404 entry point not found` for a symbol that
+/// exists, `/chunks` reported a mid-rebuild page as the whole corpus (`total`
+/// included), `grep` reported `{matches: [], total: 0}`, KG-neighbors answered
+/// `count: 0`, and graph ingest rebuilt the serving graph on top of M005's own
+/// Step 6 rebuild and returned totals read from an emptied corpus. Every one of
+/// those is an answer about the caller's code for a state that is about the
+/// daemon — the same defect this module exists to prevent, arriving by a route
+/// the search-path guard does not cover.
+/// What: `Some((503, body))` while the flag is up, built from the SAME typed
+/// error and the same producer [`migration_in_progress_from`] renders for
+/// search, so a caller branches on one shape whichever surface it hit. `None`
+/// otherwise — the caller proceeds.
+///
+/// This is a "do not START" guard, not mutual exclusion: the flag can be raised
+/// the instant after it reads `false`. Excluding a reader outright would need
+/// the teardown lock's EXCLUSIVE side, which M005 cannot take — it holds the
+/// shared side for its whole run (#3049). The window is seconds to minutes wide
+/// and this closes all of it but the last instruction, which is the same bargain
+/// `search_with_drops` already makes.
+/// Test: `service::server::tests_corpus_read_5917::chunks_during_a_migration_is_503_not_a_partial_page`
+/// and its four siblings there.
+pub(super) async fn migration_refusal(
+    index_id: &str,
+    handle: &IndexHandle,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    if !handle.indexer.read().await.is_migrating() {
+        return None;
+    }
+    migration_in_progress_from(&anyhow::Error::new(
+        crate::core::indexer::IndexMigrationInProgress {
+            index_id: index_id.to_string(),
+        },
     ))
 }
 

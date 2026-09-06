@@ -193,6 +193,15 @@ impl Migration for M005ChunkIdEndLine {
         );
 
         // ── Step 3: clear, then re-chunk through the ordinary commit path ──
+        // #6581: a delete signalled before this pass touches anything. Stopping
+        // HERE rather than at the first batch boundary is what keeps the corpus
+        // intact — the clear is the next thing that happens — so a delete that
+        // is later refused (#6380) or abandoned leaves a whole index behind.
+        if crate::service::reindex::index_cancel_flag(&index.id)
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(cancel_stop(index, 0));
+        }
         let indexer_arc = std::sync::Arc::clone(&index.indexer);
         // #6581: from here until this guard drops, the corpus is empty or
         // partial. A query landing in that window must be told so rather than
@@ -294,6 +303,49 @@ impl Migration for M005ChunkIdEndLine {
     }
 }
 
+/// M005 stopped at a checkpoint because this index is being deleted (#6581).
+///
+/// Why: `unregister_index` signals the #3049 cancel flag and then waits
+/// `DELETE_QUIESCE_TIMEOUT` for the teardown lock's EXCLUSIVE side —
+/// `run_migrations_exclusive` holds the SHARED side for the pass's whole run.
+/// With no checkpoint, M005 re-chunks the entire corpus before releasing, the
+/// wait expires, and a `delete_data=true` DELETE takes the #3049 abandon branch:
+/// the operator is told to re-issue a delete that will abandon again for as long
+/// as the migration lasts. `reindex::runner`'s consumer loop polls the same flag
+/// at its own batch boundaries for exactly this reason; this is that checkpoint.
+/// What: a distinct type, so a caller can tell an abort from a failure. Raised
+/// BEFORE Step 7, so the durable plan marker survives and the next boot resumes
+/// the pass; `run_migrations` applies `?` to `apply` before it calls
+/// `write_schema_version`, so the schema stays at 4 either way.
+/// Test: `m005_stops_before_the_clear_when_a_delete_signals_cancel`,
+/// `rechunk_all_stops_at_a_batch_boundary_when_a_delete_signals_cancel`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "index '{index_id}': M005 stopped at a checkpoint because this index is being deleted \
+     (#3049 cancel). Nothing was recorded as migrated: the durable plan marker is kept and \
+     the schema stays at 4, so the pass resumes from it if the index survives (#6581)."
+)]
+pub struct M005Cancelled {
+    /// The index whose delete signalled the cancel.
+    pub index_id: String,
+}
+
+/// Log the stop and build the [`M005Cancelled`] error for `index`.
+///
+/// Why/What/Test: see [`M005Cancelled`]. Factored out because `rechunk_all`
+/// checks the flag at two points and both owe the same operator log.
+fn cancel_stop(index: &IndexHandle, committed: usize) -> anyhow::Error {
+    tracing::warn!(
+        index_id = %index.id,
+        committed,
+        "M005: this index is being deleted — stopping at a checkpoint so the delete's \
+         quiesce wait succeeds instead of expiring (#6581)"
+    );
+    anyhow::Error::new(M005Cancelled {
+        index_id: index.id.to_string(),
+    })
+}
+
 /// What one re-chunk pass produced.
 ///
 /// Why: `apply` needs four numbers back from the pass and the pass has to run
@@ -302,6 +354,7 @@ impl Migration for M005ChunkIdEndLine {
 /// What: `remap` is `old id → new id` for every chunk whose text is unchanged;
 /// the counts are for the operator log.
 /// Test: covered through `apply` by `m005_rechunks_the_whole_corpus`.
+#[derive(Debug)]
 struct Rechunked {
     remap: HashMap<String, String>,
     committed: usize,
@@ -318,7 +371,14 @@ struct Rechunked {
 /// embeddings — the ruling's zero re-embed budget. A file that cannot be read is
 /// skipped with a warn: it was deleted since the last index, and its chunks are
 /// correctly gone.
-/// Test: `m005_rechunks_the_whole_corpus`, `m005_honours_the_chunk_cap`.
+///
+/// Polls the #3049 cancel flag at every batch boundary and returns
+/// [`M005Cancelled`] when it is set — see that type for why a pass with no
+/// checkpoint makes a `delete_data=true` DELETE unservable for its duration.
+/// `apply` takes the same check once more before it calls in, where stopping
+/// still costs the corpus nothing.
+/// Test: `m005_rechunks_the_whole_corpus`, `m005_honours_the_chunk_cap`,
+/// `rechunk_all_stops_at_a_batch_boundary_when_a_delete_signals_cancel`.
 async fn rechunk_all(
     index: &IndexHandle,
     indexer_arc: &std::sync::Arc<tokio::sync::RwLock<crate::core::indexer::CodeIndexer>>,
@@ -327,6 +387,10 @@ async fn rechunk_all(
     vector_by_text: &HashMap<[u8; 32], String>,
     old_count: usize,
 ) -> Result<Rechunked> {
+    // #6581: fetched once, and AFTER `run_migrations_exclusive` took the index
+    // permit — `index_cancel_flag`'s contract, so a flag left over from a delete
+    // that has already finished is gone by now and this one is correctly false.
+    let cancel = crate::service::reindex::index_cancel_flag(&index.id);
     {
         let indexer = indexer_arc.read().await;
         let cleared = indexer
@@ -343,6 +407,12 @@ async fn rechunk_all(
     let mut unembedded = 0usize;
 
     for batch in ordered.chunks(BATCH_SIZE) {
+        // #6581: the same checkpoint `reindex::runner`'s consumer loop takes.
+        // Without it a large corpus holds the teardown lock's shared side for the
+        // whole pass, and the delete waiting on the exclusive side abandons.
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(cancel_stop(index, committed));
+        }
         let mut chunks = Vec::new();
         let mut entities_by_file = Vec::new();
         for file in batch {
