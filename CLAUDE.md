@@ -53,6 +53,11 @@ count then proves: [test-ladder-baseline.md](docs/reference/test-ladder-baseline
 - 🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from
   the crate's `Cargo.toml`; exceptions are in Abbreviations & Aliases below. On
   "package not found", read the crate's `Cargo.toml`.
+- 🟡 **Editing `crates/trusty-mpm/src/assets/instructions/sections/*.md` needs a
+  golden refresh first (#6937).** Three snapshot tests fail before any real gate
+  runs otherwise. Run `UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`, then
+  read the diff of the three `crates/trusty-mpm/src/core/testdata/pm-prompt-*.md`
+  goldens and confirm it carries only your edit.
 
 🔴 **`trusty-common` takes `--features` on every test run (#4901)** — its
 `default` set is empty, so a bare `cargo test -p trusty-common` is a

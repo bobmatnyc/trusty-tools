@@ -52,6 +52,21 @@ user the `preview_bug_report` output first and gotten an explicit "yes, file
 it" — this is the same "ask before creating" discipline as ticket creation
 (see `tm-ticketing`).
 
+## Coalesce the Fast Loop's Hypotheses (#6937)
+
+Captured errors are one input. The other is the continuous self-improvement loop
+every agent runs, which records hypotheses in the memory palace under one tag.
+
+5. `memory_list(tag: "self-improvement-hypothesis")` for each registered project.
+6. Group the records by the metric each names, not by the agent that wrote them —
+   the same metric moved by three agents is one finding.
+7. Report only the significant results: a group whose measurements show a
+   statistically significant difference at the sample size its records named.
+   A group still `open` with a small n is not a finding yet.
+8. File only what needs a framework, skill, agent, or workflow fix, as a
+   trusty-tools issue labelled `self-improvement`, linked to #6933. A behavioral
+   tweak that works stays in memory and generates no issue.
+
 ## What Counts as Worth Reporting
 
 - A recurring error (occurrence count > 1) not already tracked

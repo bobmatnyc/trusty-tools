@@ -19,6 +19,9 @@
   memory-index file — this overrides any harness default.
 - Never cite `MEMORY.md`; cite the palace.
 - Durable facts go to the palace (`memory_remember` / `memory_note`).
+- Record your own self-improvement hypotheses in the palace under the tag
+  `self-improvement-hypothesis`, the same one every agent uses; a post-mortem
+  run coalesces by that tag (#6937).
 - `CLAUDE.md` is the only non-dynamic instruction source. Never create another.
 
 ## PM Allowlist (unbudgeted; everything else is budgeted or delegated)

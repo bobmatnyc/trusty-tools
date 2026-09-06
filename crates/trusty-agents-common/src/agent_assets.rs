@@ -375,6 +375,13 @@ mod tests {
     /// `ticketing` itself breaks "No Subagent Fan-Out". The facts below decide
     /// where a finding goes and whether one is filed at all, so a reword that
     /// drops one turns the section back into advice.
+    ///
+    /// Why (#6937, owner ruling 2026-09-07): the fast loop's memory tag is the
+    /// contract the scheduled post-mortem queries by. Renaming it in this file
+    /// without renaming it in `tm-postmortem` breaks the join silently — the
+    /// query returns nothing and the post-mortem reports a clean fleet. The
+    /// heuristics heading is asserted for the same reason the section heading
+    /// is: it is what makes the detection list findable.
     #[test]
     fn self_analysis_reporting_ships_in_the_base_agent() {
         let flat = BASE_AGENT.replace('\n', " ");
@@ -382,6 +389,23 @@ mod tests {
             (
                 "the section exists",
                 "## Self-Analysis and Improvement Reporting",
+            ),
+            // #6937: the fast loop stacks on the slice-1 section above.
+            (
+                "the fast-loop section exists",
+                "## Continuous Self-Improvement — the Fast Loop",
+            ),
+            (
+                "the detection heuristics are headed and findable",
+                "**Detection heuristics.**",
+            ),
+            (
+                "the one memory tag is named",
+                "The tag is `self-improvement-hypothesis`",
+            ),
+            (
+                "the post-mortem's query is spelled out",
+                r#"memory_list(tag: "self-improvement-hypothesis")"#,
             ),
             (
                 "trusty-tools is the fixed destination",
@@ -400,7 +424,7 @@ mod tests {
         ] {
             assert!(
                 flat.contains(needle),
-                "`BASE-AGENT.md` must state that {fact} (#6935)"
+                "`BASE-AGENT.md` must state that {fact} (#6935, #6937)"
             );
         }
     }
