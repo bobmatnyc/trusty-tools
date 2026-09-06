@@ -22,11 +22,12 @@
 //!     not this process's own, which is what turns the permission bits into an
 //!     enforced boundary rather than a documented intention.
 //!
-//! [`sockbuf`] runs inside [`bind_hardened`] and [`connect_hardened`], so both
-//! ends of every socket here are sized to
+//! [`sockbuf`] runs inside [`bind_hardened`], [`connect_hardened`] and
+//! [`accept_sized`], so both ends of every socket here are sized to
 //! [`sockbuf::SOCKET_BUFFER_BYTES`] rather than the 8 KiB macOS default
-//! (#6896). The listener's sizing is what every accepted socket inherits, so a
-//! service driving its own accept loop is covered too. No consumer calls it.
+//! (#6896). Only macOS copies a listener's sizing onto the sockets `accept`
+//! returns, so a service driving its own accept loop needs [`accept_sized`] in
+//! place of `listener.accept()` to be covered on Linux.
 //!
 //! **What this does and does not guarantee.** With the directory held at `0700`
 //! and owned by this uid, no other unprivileged user can traverse to the socket
@@ -49,6 +50,7 @@
 //! functions behind every refusal, and the `sun_path` budget pre-check.
 //!
 //! [`scratch_socket_dir`]: crate::uds::scratch_socket_dir
+//! [`accept_sized`]: crate::uds::accept_sized
 //! [`bind_hardened`]: crate::uds::bind_hardened
 //! [`connect_hardened`]: crate::uds::connect_hardened
 //! [`ensure_peer_is_self`]: crate::uds::ensure_peer_is_self
@@ -508,13 +510,68 @@ pub fn bind_hardened(path: &Path) -> Result<UnixListener, UdsSecurityError> {
         }
     })?;
 
-    // #6896: sized on the LISTENER, which both Linux and macOS copy onto every
-    // socket `accept` returns — so a service driving its own accept loop gets
-    // the sizing without calling anything. The strict form: a listener has no
-    // peer, so it must never reach the hung-up-peer outcome (#6896 review).
+    // #6896: sized on the LISTENER, which macOS copies onto every socket
+    // `accept` returns. Linux does not, so the accepted end is sized by
+    // `accept_sized`. The strict form: a listener has no peer, so it must never
+    // reach the hung-up-peer outcome (#6896 review).
     sockbuf::tune_listener_buffers(&listener)?;
 
     Ok(listener)
+}
+
+/// Accept one connection and size its buffers.
+///
+/// Why: an accepted socket does not carry the listener's `SO_SNDBUF` /
+/// `SO_RCVBUF` on Linux. AF_UNIX builds the server-side socket from scratch in
+/// `unix_stream_connect`, so it comes back at `net.core.wmem_default` /
+/// `rmem_default` however the listener was sized; only macOS copies the
+/// listener's sizing, in `sonewconn`. #6896 sized the listener alone and stated
+/// the copy as universal, which left every server-side socket on Linux at the
+/// platform default — paying, on one end of every connection, exactly the round
+/// trips that issue exists to remove.
+///
+/// What: `accept`, then [`sockbuf::tune_connected_buffers`] on what came back.
+/// The forgiving form, because an accepted socket can already have lost its
+/// peer: [`probe::socket_is_serving`] connects and closes without sending
+/// anything, and that probe has to stay a probe.
+///
+/// A sizing failure is logged and the connection returned anyway — the one
+/// place in this module a failure is not propagated. The connection is already
+/// accepted and cannot be un-accepted, so refusing it would turn a throughput
+/// knob into an availability failure. [`bind_hardened`] and
+/// [`connect_hardened`] propagate because their caller still has somewhere else
+/// to go.
+///
+/// This does NOT check the peer's uid; [`ensure_peer_is_self`] stays a separate
+/// call, made once per connection where the connection is served.
+///
+/// # Errors
+///
+/// Whatever `UnixListener::accept` returns. Sizing never fails the call.
+///
+/// Test: `accept_sized_raises_the_accepted_socket_to_the_listeners_sizing`.
+pub async fn accept_sized(
+    listener: &UnixListener,
+) -> std::io::Result<(UnixStream, tokio::net::unix::SocketAddr)> {
+    let accepted = listener.accept().await?;
+    // #6896: Linux hands back a default-sized socket here whatever the listener
+    // carries, so both platforms need this to end up at the intended sizing.
+    if let Err(e) = sockbuf::tune_connected_buffers(&accepted.0) {
+        // #6896: name the listener, matching `drain_shutdown`'s precedent
+        // (#6601 review) — under a persistent failure this warn repeats per
+        // connection, and an unnamed socket leaves no way to tell which one.
+        let socket = listener
+            .local_addr()
+            .ok()
+            .and_then(|addr| addr.as_pathname().map(|p| p.display().to_string()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        tracing::warn!(
+            %socket,
+            error = %e,
+            "accepted connection left at the platform socket buffer size"
+        );
+    }
+    Ok(accepted)
 }
 
 /// Verify a socket and its directory, then connect.

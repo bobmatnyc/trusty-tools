@@ -100,7 +100,9 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt as _, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::uds::{MAX_FRAME_BYTES, UdsSecurityError, bind_hardened, ensure_peer_is_self};
+use crate::uds::{
+    MAX_FRAME_BYTES, UdsSecurityError, accept_sized, bind_hardened, ensure_peer_is_self,
+};
 
 pub use idle::{IdleGuard, IdleTracker};
 pub use router::{RpcFallback, RpcMethod, RpcRouter, typed_method};
@@ -348,9 +350,10 @@ pub async fn handle_connection(
     router: Arc<RpcRouter>,
     options: RpcServeOptions,
 ) -> Result<Served, RpcServerError> {
-    // #6896: this connection's buffers were sized by `bind_hardened` on the
-    // LISTENER and copied here by `accept`. Sizing them again would fail on a
-    // liveness probe, whose peer has already closed — see `uds::sockbuf`.
+    // #6896: this connection's buffers were sized by `accept_sized`, which the
+    // serving accept sites in this module call in place of `listener.accept()`.
+    // Sizing them again here would repeat four syscalls per connection — see
+    // `uds::sockbuf` for why the listener's sizing is not enough on Linux.
     ensure_peer_is_self(&stream).map_err(|source| RpcServerError::Peer { source })?;
 
     let mut frame: Vec<u8> = Vec::new();
@@ -542,7 +545,7 @@ async fn drain_backlog(
     options: RpcServeOptions,
     idle: &Arc<IdleTracker>,
 ) -> Drained {
-    let Ok(accepted) = tokio::time::timeout(IDLE_EXIT_DRAIN, listener.accept()).await else {
+    let Ok(accepted) = tokio::time::timeout(IDLE_EXIT_DRAIN, accept_sized(listener)).await else {
         return Drained::Nothing;
     };
     let stream = match accepted {
@@ -637,6 +640,7 @@ async fn drain_shutdown(listener: &UnixListener, open: &Arc<IdleTracker>, budget
 
     let refuse = async {
         loop {
+            // #6896: not sized — this stream is dropped without carrying a frame.
             match listener.accept().await {
                 Ok((stream, _)) => {
                     tracing::debug!("refusing a connection dialled during the shutdown drain");
@@ -738,7 +742,7 @@ pub async fn serve_until_idle(
                 return ServeExit::Shutdown;
             }
             () = &mut idle_expired => Step::IdleElapsed,
-            accepted = listener.accept() => Step::Accepted(accepted),
+            accepted = accept_sized(listener) => Step::Accepted(accepted),
         };
         // #6350: the drain runs HERE, not inside the arm — the `select!`'s
         // borrow of `idle_expired` has ended, so the re-arm below can run. The
