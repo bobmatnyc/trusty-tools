@@ -6,6 +6,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.35.0] — 2026-09-06
+
+### Fixed
+
+- Both total analyze-lane collapses now lead their Gaps & Caveats line with the
+  same "trusty-analyze lane DID NOT RUN" headline. The client-build-failure path
+  led with "trusty-analyze data unavailable", which the audit bundle index does
+  not recognise, so under `--allow-degraded` a report whose static-analysis lane
+  never ran was indexed as one whose lane ran (#6784).
+- The investigation budget now scales with repository size instead of being a
+  flat per-repository cap, so coverage no longer collapses on the largest
+  repositories — the ones a due-diligence reader needs most. A 3,000-file
+  repository is read at 300 files rather than 40, and a repository small enough
+  that the flat default already covered it resolves exactly as before. A cap an
+  operator pinned through `--investigate-max-files`, the manifest, or the
+  environment is used verbatim and never scaled (#6784).
+- An investigation batch whose response could not be parsed is retried once
+  instead of failing closed on the first attempt, so the files it carried are
+  still read. 37 of 59 repositories in one engagement logged
+  `unparseable response` on at least one batch, and every such batch was dropped
+  with no second call — which is what collapsed investigation coverage on the
+  largest repositories (#6784).
+- `parse_findings` now decodes three response shapes it used to reject outright:
+  a conforming object behind a prose preamble, an untagged ``` fence, and an
+  object followed by trailing prose. Any one of them dropped a whole batch
+  (#6784).
+- A response the provider cut off mid-object without setting `finish_reason` is
+  classified as a truncation rather than an unparseable answer, so it reaches the
+  concise retry built for exactly that case instead of skipping it (#6784).
+- The analyze lane's own outcome is now a recorded fact in Gaps & Caveats, not
+  something a reader has to infer from the per-repository reason lines. A run
+  where every repository's fetch failed leads its gap list with
+  `trusty-analyze lane DID NOT RUN — 0 of N application(s) assessed, N failed`,
+  and a partly degraded run states `M of N application(s) assessed`. Before this,
+  a 59-repository bundle whose analyze lane never ran carried the same shape of
+  line as one where the lane worked for 58 of 59, so every CAST health factor
+  read as absent rather than unassessed and downstream readers concluded static
+  analysis had run and found nothing. Per-repository fail-open in
+  `analyze_adapter.rs` is unchanged: nothing aborts, and a lane that populated
+  everything it attempted still adds no line (#6811).
+
+### Changed
+
+- `trusty-review report --analyze` now FAILS, with a non-zero exit and a message
+  naming the lane and both counts, when the analyze lane assessed nothing at all
+  (`0 of N` applications). Such a report carries a finding count, a complexity
+  figure and a health factor for every application and not one of them was
+  measured, which #6783 shipped across 59 repositories and downstream readers
+  took for "static analysis ran and found nothing" (#6811).
+- The new `--allow-degraded` flag writes that report anyway, with the `0 of N`
+  coverage line still in it. Partial degradation (`M of N`, `M > 0`) stays a
+  warning at every setting and never fails the run: a 58-of-59 run carries 58
+  assessed applications (#6811).
+
 ## [0.34.0] — 2026-09-04
 
 ### Added
