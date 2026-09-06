@@ -17,6 +17,7 @@ use super::ops;
 use super::state::{CurrentState, StateMachine};
 use crate::commands::ticket::runner::{CommandOutput, CommandRunner};
 use crate::commands::ticket::system::GhTicketSystem;
+use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
 
 /// Load + validate the repo-root `issue-state.yaml` — the file `tm issue`'s
 /// CWD tier reads.
@@ -347,7 +348,8 @@ fn project_seed_labels_skips_the_labelless_states() {
     let m = project_model();
     let gh = FakeGh::new(vec![ok_out("[]")]);
     let sys = GhTicketSystem::new(gh);
-    let report = ops::seed_labels(&sys, &m, None, true).expect("seed dry-run");
+    let report = ops::seed_labels(&sys, &m, &ResolvedTicketing::default(), None, true)
+        .expect("seed dry-run");
     assert_eq!(
         report.created,
         vec![
@@ -374,7 +376,14 @@ fn project_seed_labels_covers_the_whole_harness_label_set() {
     let m = project_model();
     let gh = FakeGh::new(vec![ok_out("[]")]);
     let sys = GhTicketSystem::new(gh);
-    let report = ops::seed_labels(&sys, &m, Some("tm-tcode-01"), true).expect("seed dry-run");
+    let report = ops::seed_labels(
+        &sys,
+        &m,
+        &ResolvedTicketing::default(),
+        Some("tm-tcode-01"),
+        true,
+    )
+    .expect("seed dry-run");
     assert_eq!(
         report.created,
         vec![

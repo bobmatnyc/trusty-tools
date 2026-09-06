@@ -3,7 +3,7 @@
 //! Why: extracted from `cli.rs` (issue #2603) to keep the top-level file
 //! under the 500-SLOC production cap.
 //! What: [`IssueCmd`] — `seed-labels`/`transition`/`current`/`states`/
-//! `seed-config`/`repair`.
+//! `standard`/`seed-config`/`repair`.
 //! Test: `cli_parses_issue_*` in `tests.rs`.
 
 use clap::Subcommand;
@@ -15,7 +15,8 @@ use clap::Subcommand;
 /// individually parseable.
 /// What: `SeedLabels` (idempotent create-missing), `Transition` (validated
 /// atomic state change), `Current` (read state from labels), `States` (list the
-/// model), `SeedConfig` (write the default YAML to disk), `Repair` (resolve a
+/// model), `Standard` (print the effective ticketing standard, #6918),
+/// `SeedConfig` (write the default YAML to disk), `Repair` (resolve a
 /// multi-state issue).
 /// Test: `cli_parses_issue_*` in `tests.rs`.
 #[derive(Debug, Subcommand)]
@@ -52,6 +53,12 @@ pub(crate) enum IssueCmd {
     },
     /// List the configured states and transitions (reads YAML only).
     States {
+        /// Explicit path to an issue-state YAML (overrides discovery).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Print the ticketing standard in effect (#6918; reads config, no `gh`).
+    Standard {
         /// Explicit path to an issue-state YAML (overrides discovery).
         #[arg(long)]
         config: Option<std::path::PathBuf>,

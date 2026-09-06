@@ -14,6 +14,7 @@ use std::cell::RefCell;
 use super::*;
 use crate::commands::ticket::labels::{AssigneeTarget, RepoLabel};
 use crate::commands::ticket::system::{Issue, TicketSystem};
+use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
 
 /// A recorded backend call (for assertion).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +139,14 @@ fn ops_seed_creates_only_missing() {
         RepoLabel::new("unicorn:queued", "BFD4F2", ""),
     ];
     let sys = FakeSystem::new(issue_with_labels(1, &[])).with_repo_labels(existing);
-    let report = seed_labels(&sys, &m, Some(SESSION), false).expect("seed");
+    let report = seed_labels(
+        &sys,
+        &m,
+        &ResolvedTicketing::default(),
+        Some(SESSION),
+        false,
+    )
+    .expect("seed");
 
     // Present ones not re-created.
     assert!(report.already_present.contains(&"unicorn".to_string()));
@@ -167,7 +175,14 @@ fn ops_seed_includes_policy_labels() {
     let m = model();
     // Zero existing labels: everything the harness applies must be created.
     let sys = FakeSystem::new(issue_with_labels(1, &[]));
-    let report = seed_labels(&sys, &m, Some(SESSION), false).expect("seed");
+    let report = seed_labels(
+        &sys,
+        &m,
+        &ResolvedTicketing::default(),
+        Some(SESSION),
+        false,
+    )
+    .expect("seed");
 
     let created = create_names(&sys);
     assert!(
@@ -188,12 +203,67 @@ fn ops_seed_includes_policy_labels() {
     );
 }
 
+/// #6918: an `agents.ticketing.extra_labels` entry is seeded by the same call
+/// the built-in policy labels are, with no second table.
+#[test]
+fn ops_seed_includes_configured_extra_labels() {
+    let m = model();
+    let ticketing = ResolvedTicketing::default().with_extra_labels(vec![RepoLabel::new(
+        "area/cli",
+        "0E8A16",
+        "CLI surface",
+    )]);
+    let sys = FakeSystem::new(issue_with_labels(1, &[]));
+    let report = seed_labels(&sys, &m, &ticketing, Some(SESSION), false).expect("seed");
+
+    let created = create_names(&sys);
+    assert!(
+        created.contains(&"area/cli".to_string()),
+        "a configured label must be seeded; got {created:?}"
+    );
+    assert!(created.contains(&"trusty-mpm".to_string()));
+    assert_eq!(created, report.created);
+}
+
+/// #6918: THE regression this slice owes — an absent `agents.ticketing` block
+/// must seed byte-for-byte what 6ee2b182b (#6914) seeded.
+///
+/// A default [`ResolvedTicketing`] is exactly what an absent block resolves to,
+/// so comparing its seed output against the built-in policy table proves the
+/// config surface changed nothing observable for every project that has no
+/// block — which is all of them until someone writes one.
+#[test]
+fn ops_seed_absent_block_matches_builtin_output() {
+    let m = model();
+    for session in [None, Some(SESSION)] {
+        let sys = FakeSystem::new(issue_with_labels(1, &[]));
+        let report = seed_labels(&sys, &m, &ResolvedTicketing::default(), session, false)
+            .expect("seed with the default standard");
+
+        // The built-in expectation, assembled without touching the config path.
+        let mut expected: Vec<String> = m
+            .states
+            .iter()
+            .filter_map(|s| s.label.as_ref())
+            .map(|l| l.name.clone())
+            .collect();
+        expected.extend(m.extra_labels.iter().map(|l| l.name.clone()));
+        for label in trusty_mpm::core::policy_labels::policy_labels(session) {
+            if !expected.contains(&label.name) {
+                expected.push(label.name);
+            }
+        }
+        assert_eq!(report.created, expected, "session={session:?}");
+        assert_eq!(create_names(&sys), expected, "session={session:?}");
+    }
+}
+
 /// #6914: with no session name there is no `ws/` label — and the report says so.
 #[test]
 fn ops_seed_without_session_skips_workstream_label() {
     let m = model();
     let sys = FakeSystem::new(issue_with_labels(1, &[]));
-    let report = seed_labels(&sys, &m, None, false).expect("seed");
+    let report = seed_labels(&sys, &m, &ResolvedTicketing::default(), None, false).expect("seed");
 
     let created = create_names(&sys);
     assert!(created.contains(&"trusty-mpm".to_string()));
@@ -217,7 +287,14 @@ fn ops_seed_leaves_present_policy_labels_untouched() {
         RepoLabel::new("ws/tm-tcode-01", "222222", "already styled"),
     ];
     let sys = FakeSystem::new(issue_with_labels(1, &[])).with_repo_labels(existing);
-    let report = seed_labels(&sys, &m, Some(SESSION), false).expect("seed");
+    let report = seed_labels(
+        &sys,
+        &m,
+        &ResolvedTicketing::default(),
+        Some(SESSION),
+        false,
+    )
+    .expect("seed");
 
     let created = create_names(&sys);
     assert!(!created.contains(&"trusty-mpm".to_string()));
@@ -234,7 +311,8 @@ fn ops_seed_leaves_present_policy_labels_untouched() {
 fn ops_seed_dry_run_creates_nothing() {
     let m = model();
     let sys = FakeSystem::new(issue_with_labels(1, &[]));
-    let report = seed_labels(&sys, &m, Some(SESSION), true).expect("seed dry");
+    let report = seed_labels(&sys, &m, &ResolvedTicketing::default(), Some(SESSION), true)
+        .expect("seed dry");
     assert!(report.dry_run);
     // Everything reported as created (would-be), but ZERO create calls.
     assert!(!report.created.is_empty());
@@ -268,7 +346,14 @@ fn ops_seed_idempotent_when_all_present() {
         v
     };
     let sys = FakeSystem::new(issue_with_labels(1, &[])).with_repo_labels(all);
-    let report = seed_labels(&sys, &m, Some(SESSION), false).expect("seed");
+    let report = seed_labels(
+        &sys,
+        &m,
+        &ResolvedTicketing::default(),
+        Some(SESSION),
+        false,
+    )
+    .expect("seed");
     assert!(
         report.created.is_empty(),
         "second run creates nothing; got {:?}",

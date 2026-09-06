@@ -5,16 +5,19 @@
 //! trusty-mpm, surfaced as `tm issue` verbs the Python harness consumes by
 //! shelling out. Every operation maps to a concrete label/assignee/comment
 //! mutation, so issue state stays reconstructable from GitHub artifacts alone.
-//! What: the [`issue`] dispatcher that selects the `gh` backend, loads + validates
-//! the model (config discovery: flag > CWD > user > embedded default), and runs
-//! the requested verb (`seed-labels`, `transition`, `current`, `states`,
-//! `seed-config`, `repair`). Schema types live in `config.rs`, validation in
-//! `validate.rs`, the state machine in `state.rs`, the operations in `ops.rs`.
+//! What: the [`issue`] dispatcher that selects the `gh` backend, resolves the
+//! `agents.ticketing` standard (#6918), loads + validates the model (config
+//! discovery: flag > CWD > `agents.ticketing.lifecycle_model` > user > embedded
+//! default), and runs the requested verb (`seed-labels`, `transition`,
+//! `current`, `states`, `standard`, `seed-config`, `repair`). Schema types live
+//! in `config.rs`, validation in `validate.rs`, the state machine in `state.rs`,
+//! the operations in `ops.rs`, the `standard` printer in `standard.rs`.
 //! Test: pure logic is unit-tested in the submodules (`config`/`validate`/
 //! `state`/`ops`); CLI parsing in `tests.rs`.
 
 pub(crate) mod config;
 pub(crate) mod ops;
+pub(crate) mod standard;
 pub(crate) mod state;
 pub(crate) mod validate;
 
@@ -31,6 +34,7 @@ use crate::commands::ticket::system::{
 };
 
 use config::{StateModel, load_model};
+use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, resolve_ticketing};
 
 /// `tm issue <subcommand>` dispatcher.
 ///
@@ -59,14 +63,24 @@ pub(crate) fn issue(cmd: IssueCmd, system: TicketSystemKind) -> anyhow::Result<(
 /// prints a human summary.
 /// Test: per-verb ops are unit-tested; this is thin glue.
 fn dispatch<S: TicketSystem>(backend: &S, cmd: IssueCmd) -> anyhow::Result<()> {
+    // #6918: resolve the operator's ticketing standard ONCE. An absent
+    // `agents.ticketing` block yields the built-in defaults; a malformed one is
+    // an error here rather than a silent revert to them.
+    let ticketing = resolve_ticketing(&TrustyToolsConfig::load())?;
+    let lifecycle = ticketing.lifecycle_model.as_deref();
     match cmd {
         IssueCmd::SeedLabels { config, dry_run } => {
-            let model = load_model(config.as_deref())?;
+            let model = load_model(config.as_deref(), lifecycle)?;
             // #6914: the `ws/<session>` policy label needs the same session
             // name session launch labels with — the tmux session name.
             let session = crate::commands::tmux_attach::current_tmux_session_name();
-            let report = ops::seed_labels(backend, &model, session.as_deref(), dry_run)?;
+            let report =
+                ops::seed_labels(backend, &model, &ticketing, session.as_deref(), dry_run)?;
             print_seed_report(&report);
+        }
+        IssueCmd::Standard { config } => {
+            let model = load_model(config.as_deref(), lifecycle)?;
+            standard::print_standard(&ticketing, &model);
         }
         IssueCmd::Transition {
             issue,
@@ -74,7 +88,7 @@ fn dispatch<S: TicketSystem>(backend: &S, cmd: IssueCmd) -> anyhow::Result<()> {
             config,
             note,
         } => {
-            let model = load_model(config.as_deref())?;
+            let model = load_model(config.as_deref(), lifecycle)?;
             let report = ops::transition(backend, &model, issue, &to_state, note.as_deref())?;
             let from = report.from.as_deref().unwrap_or("(none)");
             println!("transitioned #{issue}: {from} → {}", report.to);
@@ -83,19 +97,19 @@ fn dispatch<S: TicketSystem>(backend: &S, cmd: IssueCmd) -> anyhow::Result<()> {
             }
         }
         IssueCmd::Current { issue, config } => {
-            let model = load_model(config.as_deref())?;
+            let model = load_model(config.as_deref(), lifecycle)?;
             let state = ops::current(backend, &model, issue)?;
             println!("{state}");
         }
         IssueCmd::States { config } => {
-            let model = load_model(config.as_deref())?;
+            let model = load_model(config.as_deref(), lifecycle)?;
             print_states(&model);
         }
         IssueCmd::SeedConfig { force } => {
             seed_config(force)?;
         }
         IssueCmd::Repair { issue, config } => {
-            let model = load_model(config.as_deref())?;
+            let model = load_model(config.as_deref(), lifecycle)?;
             let kept = ops::repair(backend, &model, issue)?;
             println!("repaired #{issue}: resolved to `{kept}`");
         }

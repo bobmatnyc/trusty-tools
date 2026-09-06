@@ -157,6 +157,18 @@ list` before inventing a variant of a label the repo already carries; create a
 genuinely missing one (`gh label create <name>`) rather than dropping the
 family.
 
+🟡 **Read the standard rather than assuming it.** `tm issue standard` prints
+what is in effect — the component labels, the lifecycle labels, the default
+assignee, and whether a claim comment and a closing note are expected. Those
+values come from the `agents.ticketing` block in
+`~/.trusty-tools/trusty-mpm/config.yaml`, so a project can add a component
+label, restyle one, name a different assignee, or point at its own
+`issue-state.yaml` (#6918). Two things the block cannot change, and the command
+prints both: the PR issue-link keyword stays `Refs #N` (a one-off `Closes` is
+the deliberate `tm pr open --closes` flag), and `trusty-mpm` stays a component
+label, never a lifecycle one. A block that tries either is refused at load with
+the field named.
+
 ## Milestones Are Release Slots, Not a Field to Fill
 
 🔴 **Leave the milestone UNSET by default.** A milestone is a slot in a named
