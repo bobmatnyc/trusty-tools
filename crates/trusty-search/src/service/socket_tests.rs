@@ -28,6 +28,23 @@ use crate::service::server::SearchAppState;
 /// machine, not a latency budget.
 const GENEROUS: Duration = Duration::from_secs(10);
 
+/// The same claim as [`GENEROUS`], for an exchange that moves MEGABYTES.
+///
+/// Why (#6876): macOS sizes a Unix-socket buffer at 8 KiB — `sysctl
+/// net.local.stream.sendspace` and `.recvspace` both read 8192 — so the ~8.8 MiB
+/// frames the two frame-budget tests drive cross the socket in roughly 1100
+/// blocked-write / drained-read round trips, each one a task park and unpark
+/// rather than a byte copy. Wall clock therefore tracks SCHEDULER latency, not
+/// work: one exchange measures ~0.2s on an idle machine and 9-11s under 30x CPU
+/// oversubscription. [`GENEROUS`] is a latency figure for frames that answer in
+/// microseconds, and applying it to a bulk transfer is what turned a green suite
+/// red on a machine also running several cargo jobs.
+///
+/// What: two minutes — ~500x the idle transfer and ~11x the worst measured
+/// loaded one, and still short enough that a genuinely stuck read fails the test
+/// instead of hanging the suite. It bounds a hang; it does not police speed.
+const BULK: Duration = Duration::from_secs(120);
+
 /// A state carrying `count` registered indexes and nothing else.
 ///
 /// Enough for the health method, which reports the registry's size. Nothing
@@ -113,8 +130,11 @@ struct RawExchange {
 /// answers "did a frame arrive". The assertion this slice owes is stronger —
 /// one frame arrives AND the server then closes, rather than hanging or hanging
 /// up mid-frame. Only a raw stream can tell those three apart.
-async fn dial_once(socket: &Path, request: &serde_json::Value) -> RawExchange {
-    let stream = tokio::time::timeout(GENEROUS, UnixStream::connect(socket))
+///
+/// `budget` is [`GENEROUS`] for a control-plane frame and [`BULK`] for one that
+/// moves megabytes — see [`BULK`] for why one figure cannot serve both (#6876).
+async fn dial_once(socket: &Path, request: &serde_json::Value, budget: Duration) -> RawExchange {
+    let stream = tokio::time::timeout(budget, UnixStream::connect(socket))
         .await
         .expect("connect must not hang")
         .expect("a live socket must accept a connection");
@@ -129,14 +149,14 @@ async fn dial_once(socket: &Path, request: &serde_json::Value) -> RawExchange {
         .expect("write the request frame");
 
     let mut line = String::new();
-    let read = tokio::time::timeout(GENEROUS, reader.read_line(&mut line))
+    let read = tokio::time::timeout(budget, reader.read_line(&mut line))
         .await
         .expect("the server must answer rather than hang")
         .expect("read the response frame");
     assert!(read > 0, "the server closed without writing a frame at all");
 
     let mut trailing = Vec::new();
-    tokio::time::timeout(GENEROUS, reader.read_to_end(&mut trailing))
+    tokio::time::timeout(budget, reader.read_to_end(&mut trailing))
         .await
         .expect("the server must close rather than hold the connection open")
         .expect("read to EOF");
@@ -248,6 +268,7 @@ async fn rpc_reports_method_not_found_for_an_unknown_method() {
         &serde_json::json!({
             "jsonrpc": "2.0", "id": 7, "method": "search.no.such.method", "params": {},
         }),
+        GENEROUS,
     )
     .await;
 
@@ -288,6 +309,7 @@ async fn rpc_health_answers_with_no_params() {
     let exchange = dial_once(
         &socket,
         &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": METHOD_HEALTH }),
+        GENEROUS,
     )
     .await;
 
@@ -325,6 +347,7 @@ async fn rpc_health_answers_with_a_stray_params_object() {
             "jsonrpc": "2.0", "id": 4, "method": METHOD_HEALTH,
             "params": { "unrecognised": true },
         }),
+        GENEROUS,
     )
     .await;
 
@@ -356,6 +379,7 @@ async fn health_over_the_socket_matches_the_http_body() {
     let exchange = dial_once(
         &socket,
         &serde_json::json!({ "jsonrpc": "2.0", "id": 9, "method": METHOD_HEALTH }),
+        GENEROUS,
     )
     .await;
 
@@ -577,7 +601,8 @@ async fn a_request_frame_over_the_shared_default_is_accepted_and_refused_at_the_
         "jsonrpc": "2.0", "id": 1, "method": METHOD_HEALTH, "params": { "filler": filler },
     });
 
-    let answered = dial_once(&raised, &request).await;
+    // #6876: a megabyte-scale frame is a bulk transfer, not a latency probe.
+    let answered = dial_once(&raised, &request, BULK).await;
     assert!(
         answered.frame.get("result").is_some(),
         "a frame under this listener's budget must be served: {}",
@@ -611,7 +636,7 @@ async fn a_request_frame_over_the_shared_default_is_accepted_and_refused_at_the_
     }
 
     let refused: Result<serde_json::Value, _> =
-        trusty_common::uds::send_framed_request(&defaulted, &request, GENEROUS).await;
+        trusty_common::uds::send_framed_request(&defaulted, &request, BULK).await;
     assert!(
         refused.is_err(),
         "the shared default must refuse the frame this surface accepts: {refused:?}"
@@ -652,14 +677,11 @@ async fn a_client_budget_below_this_listeners_refuses_a_response_it_serves() {
         "jsonrpc": "2.0", "id": 1, "method": "search.logs.tail", "params": { "n": 1000 },
     });
 
-    let served: serde_json::Value = trusty_common::uds::send_framed_request_capped(
-        &socket,
-        &request,
-        GENEROUS,
-        MAX_FRAME_BYTES,
-    )
-    .await
-    .expect("this surface's budget must carry the response");
+    // #6876: a megabyte-scale frame is a bulk transfer, not a latency probe.
+    let served: serde_json::Value =
+        trusty_common::uds::send_framed_request_capped(&socket, &request, BULK, MAX_FRAME_BYTES)
+            .await
+            .expect("this surface's budget must carry the response");
     assert_eq!(
         served["result"]["lines"].as_array().map(Vec::len),
         Some(trusty_common::log_buffer::DEFAULT_LOG_CAPACITY),
@@ -667,7 +689,7 @@ async fn a_client_budget_below_this_listeners_refuses_a_response_it_serves() {
     );
 
     let refused: Result<serde_json::Value, _> =
-        trusty_common::uds::send_framed_request(&socket, &request, GENEROUS).await;
+        trusty_common::uds::send_framed_request(&socket, &request, BULK).await;
     match refused {
         Err(trusty_common::uds::UdsRpcError::FrameTooLarge { limit, .. }) => assert_eq!(
             limit,
