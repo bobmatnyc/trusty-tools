@@ -44,6 +44,8 @@ use super::worktree_ownership::{
 use super::worktree_reclaim_gh::{
     GH_TIMEOUT, PR_JSON_FIELDS, gh_command, resolve_daemon_gh_env, run_with_timeout,
 };
+// #6867: the single-flight + backoff gate every `gh` poll passes through.
+use super::worktree_reclaim_gh_gate as gh_gate;
 use super::worktree_registry::{Admission, HarnessLockState, harness_lock_state};
 use super::worktree_safety::DirtyWorktree;
 // #6507: the verdict vocabulary lives next door so this file stays under the
@@ -295,16 +297,24 @@ impl PrIndex {
     /// `pr_index_from_gh_reads_this_repository` (a real successful call);
     /// `pr_index_malformed_json_is_unavailable` (failure-to-unavailable).
     pub(crate) fn from_gh(registry_root: &Path) -> Self {
-        // #6623: resolved once per registry root — the daemon's own gh
-        // identity, since launchd hands it neither `GH_TOKEN` nor
-        // `GH_CONFIG_DIR`.
-        let gh_env = resolve_daemon_gh_env(registry_root);
-        let identity = gh_env.describe();
-        let mut cmd = gh_command(registry_root, &gh_env);
-        cmd.args(["pr", "list", "--state", "all", "--limit"])
-            .arg(PR_INDEX_LIMIT.to_string())
-            .args(["--json", PR_JSON_FIELDS]);
-        match run_with_timeout(cmd, GH_TIMEOUT) {
+        // #6867: through the gate, so a survey that overlaps another spawns no
+        // second `gh`, and a root that has hung three times running is skipped
+        // rather than polled again. The identity resolution sits INSIDE the
+        // closure because it shells out to git — a suspended root must not pay
+        // for that either.
+        let outcome = gh_gate::shared().poll(registry_root, "index", || {
+            // #6623: resolved once per registry root — the daemon's own gh
+            // identity, since launchd hands it neither `GH_TOKEN` nor
+            // `GH_CONFIG_DIR`.
+            let gh_env = resolve_daemon_gh_env(registry_root);
+            let identity = gh_env.describe();
+            let mut cmd = gh_command(registry_root, &gh_env);
+            cmd.args(["pr", "list", "--state", "all", "--limit"])
+                .arg(PR_INDEX_LIMIT.to_string())
+                .args(["--json", PR_JSON_FIELDS]);
+            run_with_timeout(cmd, GH_TIMEOUT).map_err(|f| f.with_identity(identity))
+        });
+        match outcome {
             Ok(stdout) => {
                 let index = Self::from_json(&stdout, PR_INDEX_LIMIT);
                 // #2919: logged because "resolved 0 branches" is the signature
@@ -318,7 +328,7 @@ impl PrIndex {
                 );
                 index
             }
-            Err(reason) => {
+            Err(failure) => {
                 // #6561: WARN, not debug, and carrying the reason. A silent
                 // debug line is why an auth failure across all 261 worktrees
                 // surfaced only as "0 reclaimable". #6623: the resolved
@@ -326,12 +336,12 @@ impl PrIndex {
                 // differently from "used none at all".
                 tracing::warn!(
                     root = %registry_root.display(),
-                    reason = %reason,
-                    identity = %identity,
+                    reason = %failure,
+                    identity = %failure.identity(),
                     "worktree-reclaim: the pull-request lookup failed — every branch \
                      will block, and the survey reports this reason (#6561, #6623)"
                 );
-                Self::unavailable_because(format!("{reason} (resolved gh identity: {identity})"))
+                Self::unavailable_because(failure.to_string())
             }
         }
     }
@@ -417,18 +427,24 @@ impl PrIndex {
 /// `pr_index_resolves_a_squash_merged_pr_whose_head_branch_was_deleted`.
 pub(crate) fn pr_state_for_branch(registry_root: &Path, branch: &str) -> BranchPrState {
     const PER_BRANCH_LIMIT: usize = 50;
-    // #6623: same resolution as the bulk index — this call has its own
-    // working directory and must not rely on the daemon's bare launchd
-    // environment either.
-    let gh_env = resolve_daemon_gh_env(registry_root);
-    let identity = gh_env.describe();
-    let mut cmd = gh_command(registry_root, &gh_env);
-    cmd.args(["pr", "list", "--head", branch, "--state", "all", "--limit"])
-        .arg(PER_BRANCH_LIMIT.to_string())
-        .args(["--json", PR_JSON_FIELDS]);
-    match run_with_timeout(cmd, GH_TIMEOUT) {
+    // #6867: keyed by the BRANCH, not merely the root — two branches do not
+    // have the same answer, so sharing one call's stdout between them would
+    // be a correctness bug rather than a saving.
+    let outcome = gh_gate::shared().poll(registry_root, &format!("head:{branch}"), || {
+        // #6623: same resolution as the bulk index — this call has its own
+        // working directory and must not rely on the daemon's bare launchd
+        // environment either.
+        let gh_env = resolve_daemon_gh_env(registry_root);
+        let identity = gh_env.describe();
+        let mut cmd = gh_command(registry_root, &gh_env);
+        cmd.args(["pr", "list", "--head", branch, "--state", "all", "--limit"])
+            .arg(PER_BRANCH_LIMIT.to_string())
+            .args(["--json", PR_JSON_FIELDS]);
+        run_with_timeout(cmd, GH_TIMEOUT).map_err(|f| f.with_identity(identity))
+    });
+    match outcome {
         Ok(stdout) => PrIndex::from_json(&stdout, PER_BRANCH_LIMIT).state_for(Some(branch)),
-        Err(reason) => {
+        Err(failure) => {
             // #6507: WARN, matching `PrIndex::from_gh`. This arm used to be
             // silent at every level, so a per-branch failure — the path this
             // repository's 4526-PR history forces every older branch through —
@@ -437,13 +453,13 @@ pub(crate) fn pr_state_for_branch(registry_root: &Path, branch: &str) -> BranchP
             tracing::warn!(
                 root = %registry_root.display(),
                 branch = %branch,
-                reason = %reason,
-                identity = %identity,
+                reason = %failure,
+                identity = %failure.identity(),
                 "worktree-reclaim: the per-branch pull-request lookup failed — this \
                  branch will block, and the survey reports this reason (#6507)"
             );
             BranchPrState::LookupFailed {
-                reason: format!("{reason} (resolved gh identity: {identity})"),
+                reason: failure.to_string(),
             }
         }
     }

@@ -15,6 +15,12 @@
 use std::path::{Path, PathBuf};
 
 use super::*;
+// #6867: the runner's own vocabulary — the failure type, and the keychain
+// predicate whose answer decides whether a poll can hang in `securityd`.
+use crate::session_manager::worktree_reclaim_gh::{
+    GhFailure, consults_the_keychain, keychain_warning,
+};
+
 use crate::session_manager::worktree_git_fixture::{GitWorktreeFixture, deny_all};
 use crate::session_manager::worktree_safety::inspect_dirt;
 
@@ -1322,7 +1328,8 @@ fn run_with_timeout_reports_the_exit_code_and_stderr() {
     let mut cmd = std::process::Command::new("sh");
     cmd.args(["-c", "echo 'gh auth login' >&2; exit 4"]);
     let err = run_with_timeout(cmd, std::time::Duration::from_secs(5))
-        .expect_err("a non-zero exit must be an error");
+        .expect_err("a non-zero exit must be an error")
+        .to_string();
     assert!(err.contains("exited 4"), "{err}");
     assert!(err.contains("gh auth login"), "{err}");
 }
@@ -1333,7 +1340,11 @@ fn run_with_timeout_reports_a_spawn_failure() {
     let cmd = std::process::Command::new("definitely-not-a-real-binary-6561");
     let err = run_with_timeout(cmd, std::time::Duration::from_secs(5))
         .expect_err("an unspawnable command must be an error");
-    assert!(err.contains("could not be run"), "{err}");
+    assert!(err.to_string().contains("could not be run"), "{err}");
+    assert!(
+        !err.timed_out(),
+        "a spawn failure is not a hang and must not count toward the backoff (#6867)"
+    );
 }
 
 #[test]
@@ -1351,6 +1362,134 @@ fn run_with_timeout_kills_a_hung_child() {
         "the timeout must actually fire; took {:?}",
         started.elapsed()
     );
+}
+
+/// 🔴 #6867 REGRESSION: a timeout is FLAGGED as one, so the backoff can count
+/// it apart from an exit that answered instantly.
+///
+/// Why: the alternative — matching the reason string — makes a reworded
+/// message silently disable the backoff, which is the guard that stops the
+/// leak.
+#[test]
+fn run_with_timeout_marks_a_timeout_as_timed_out() {
+    let mut cmd = std::process::Command::new("sleep");
+    cmd.arg("30");
+    let err = run_with_timeout(cmd, std::time::Duration::from_millis(200))
+        .expect_err("a hung child must fail");
+    assert!(err.timed_out(), "{err}");
+    assert!(err.to_string().contains("process group"), "{err}");
+}
+
+/// 🔴 #6867 REGRESSION: killing the child must reap its GRANDCHILDREN too.
+///
+/// Why: this is the leak. `gh` runs `/usr/bin/security find-generic-password`
+/// for its token; with `securityd` wedged that grandchild never returns, and
+/// `child.kill()` — which signals one pid — left it running, reparented to
+/// launchd. Roughly 200 orphan pairs accumulated on the reporting host in a
+/// couple of hours.
+///
+/// The stand-in is a shell that backgrounds a long `sleep` and then blocks,
+/// which is the same shape: one process the runner knows about, one it does
+/// not. On `origin/main` the backgrounded `sleep` is still alive after the
+/// timeout and this assertion fails.
+#[test]
+fn run_with_timeout_kills_the_whole_process_group() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pidfile = tmp.path().join("grandchild.pid");
+    // The grandchild's fds are redirected so it does not hold the runner's
+    // stdout pipe open after its parent dies.
+    let script = format!(
+        "sleep 300 >/dev/null 2>&1 & echo $! > {}; sleep 300",
+        pidfile.display()
+    );
+    let mut cmd = std::process::Command::new("sh");
+    cmd.args(["-c", &script]);
+    let err = run_with_timeout(cmd, std::time::Duration::from_millis(500))
+        .expect_err("a hung child must time out");
+    assert!(err.timed_out(), "{err}");
+
+    let pid: i32 = std::fs::read_to_string(&pidfile)
+        .expect("the shell must have recorded its background child's pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+
+    // The grandchild is reparented to launchd/init on its parent's death, so a
+    // killed one is reaped promptly and `kill(pid, 0)` starts reporting ESRCH.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while alive(pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let still_there = alive(pid);
+    if still_there {
+        // Never leave a 300-second sleep behind, whatever the verdict.
+        // SAFETY: `pid` was read from a child this test itself started.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    assert!(
+        !still_there,
+        "the grandchild (pid {pid}) survived its parent's timeout — the process group \
+         was not killed (#6867)"
+    );
+}
+
+/// Is `pid` still a live process?
+///
+/// SAFETY: `kill(pid, 0)` sends no signal; it only probes for the process's
+/// existence and permission to signal it.
+#[cfg(unix)]
+fn alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// A `gh` failure renders the identity it resolved, so "used the wrong config
+/// dir" reads differently from "used none at all" (#6623, #6867).
+#[test]
+fn gh_failure_displays_the_resolved_identity() {
+    let bare = GhFailure::new("`gh` exited 4: auth");
+    assert_eq!(bare.to_string(), "`gh` exited 4: auth");
+    assert!(
+        bare.identity().contains("never spawned"),
+        "{}",
+        bare.identity()
+    );
+
+    let attributed = GhFailure::new("`gh` exited 4: auth").with_identity("GH_CONFIG_DIR=/cfg");
+    assert_eq!(
+        attributed.to_string(),
+        "`gh` exited 4: auth (resolved gh identity: GH_CONFIG_DIR=/cfg)"
+    );
+    assert_eq!(attributed.identity(), "GH_CONFIG_DIR=/cfg");
+}
+
+/// 🔴 #6867: an unbound daemon `gh` is the one that consults the keychain on
+/// every poll, and the operator has to be told which case they are in.
+#[test]
+fn ambient_gh_env_is_reported_as_keychain_bound() {
+    assert!(consults_the_keychain(
+        &crate::core::gh_identity::GhEnv::default()
+    ));
+}
+
+#[test]
+fn a_config_dir_binding_avoids_the_keychain() {
+    let env = crate::core::gh_identity::resolve_gh_env(Some(
+        &crate::core::trusty_tools_config::GithubConfig {
+            config_dir: Some(PathBuf::from("/cfg/daemon")),
+            ..Default::default()
+        },
+    ))
+    .expect("ok");
+    assert!(!consults_the_keychain(&env));
+}
+
+/// The warning has to name what to configure, or it is just a complaint.
+#[test]
+fn the_keychain_warning_names_both_bindings() {
+    let w = keychain_warning();
+    assert!(w.contains("token_env"), "{w}");
+    assert!(w.contains("config_dir"), "{w}");
+    assert!(w.contains("securityd"), "{w}");
 }
 
 /// 🔴 #6561 REGRESSION: a failed per-branch lookup reports the FAILURE, not a

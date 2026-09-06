@@ -128,11 +128,19 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         // resolves. The hook inherits the operator's shell environment in the
         // common case, but not when Claude Code is launched from a GUI, and a
         // lookup that fails auth must not read as "no merged PR".
-        let mut cmd = gh_command(dir, &resolve_daemon_gh_env(dir));
-        cmd.arg("pr").arg("list").arg("--head").arg(branch);
-        cmd.args(MERGED_PR_ARGS);
-        let stdout =
-            crate::session_manager::worktree_reclaim_gh::run_with_timeout(cmd, GH_TIMEOUT)?;
+        // #6867: through the same gate the reclaim survey uses — this call has
+        // the identical hang shape, and a `dir` whose `gh` has wedged must stop
+        // being polled here too. Its own key: the argv asks a DIFFERENT
+        // question (merged only) from `pr_state_for_branch`'s, so the two must
+        // never share a reply.
+        let stdout = crate::session_manager::worktree_reclaim_gh_gate::shared()
+            .poll(dir, &format!("merged-count:{branch}"), || {
+                let mut cmd = gh_command(dir, &resolve_daemon_gh_env(dir));
+                cmd.arg("pr").arg("list").arg("--head").arg(branch);
+                cmd.args(MERGED_PR_ARGS);
+                crate::session_manager::worktree_reclaim_gh::run_with_timeout(cmd, GH_TIMEOUT)
+            })
+            .map_err(|f| f.to_string())?;
         let rows: Vec<serde_json::Value> = serde_json::from_str(&stdout)
             .map_err(|e| format!("`gh pr list --head {branch}` JSON did not parse: {e}"))?;
         Ok(rows.len())
