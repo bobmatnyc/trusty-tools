@@ -692,3 +692,120 @@ async fn a_search_during_the_migration_window_is_refused_not_empty() {
         "a failed or finished migration must not leave the index refusing forever"
     );
 }
+
+// ─── Reindex exclusion and marker corruption (#6581, code-critic round 2) ────
+
+/// M005 waits for the per-index permit before it clears anything, so a reindex
+/// already holding it can never snapshot a cleared corpus.
+///
+/// Why: this is the CRITICAL the round-2 critic blocked on. A reindex holds this
+/// permit for its whole run — including `copy_all_from`, which snapshots the
+/// LIVE corpus to carry hash-skipped unchanged files across the staged-corpus
+/// swap (#839), and `commit_staged_corpus_swap`, which renames that staging file
+/// over the live one. With nothing serializing the two, a snapshot taken while
+/// M005 held the corpus emptied copied nothing, and the swap then discarded
+/// every unchanged file's chunks with no error. Because the permit is a single
+/// 1-permit semaphore, proving M005 blocks on it also proves the reverse
+/// direction: a reindex cannot start inside M005's window either.
+/// What: takes the permit (standing in for a running reindex), starts the
+/// migration, and asserts it has NOT touched the corpus while the permit is
+/// held; then releases and asserts the pass completes fully.
+/// Test: this test.
+#[tokio::test]
+async fn m005_waits_for_the_index_permit_before_clearing_the_corpus() {
+    let fx = fixture().await;
+    let corpus = {
+        let indexer = fx.handle.indexer.read().await;
+        indexer.corpus_store().unwrap()
+    };
+    let before = corpus.load_all_chunks().expect("load").len();
+    assert!(before > 0, "the fixture seeds a populated legacy corpus");
+
+    // The reindex holds this for its whole run (`reindex::runner`).
+    let reindex_permit = crate::service::reindex::index_semaphore(&fx.handle.id)
+        .acquire_owned()
+        .await
+        .expect("permit");
+
+    let registry = crate::core::migration::MigrationRegistry::new();
+    // Blocked on the permit, so it cannot finish. The cancelled future never
+    // acquired anything, so nothing partial is left behind.
+    let blocked = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        crate::core::migration::run_migrations_exclusive(&fx.handle, &registry),
+    )
+    .await;
+    assert!(
+        blocked.is_err(),
+        "M005 must block on the permit a reindex holds, not run beside it"
+    );
+    assert_eq!(
+        corpus.load_all_chunks().expect("reload").len(),
+        before,
+        "M005 must not have cleared the corpus a reindex could still snapshot"
+    );
+    assert_eq!(
+        fx.handle.read_schema_version().await.expect("version"),
+        4,
+        "nothing may advance while the migration is blocked"
+    );
+
+    drop(reindex_permit);
+    crate::core::migration::run_migrations_exclusive(&fx.handle, &registry)
+        .await
+        .expect("the migration then runs");
+
+    assert_eq!(
+        corpus.load_all_chunks().expect("reload").len(),
+        fresh_chunk_count(&fx.root),
+        "once the reindex releases, the pass completes and loses nothing"
+    );
+    assert_eq!(
+        fx.handle.read_schema_version().await.expect("version"),
+        super::super::M005_TARGET_VERSION
+    );
+}
+
+/// An unreadable plan blob over an already-cleared corpus fails CLOSED.
+///
+/// Why: the marker is only ever written before the clear, so an unreadable one
+/// means a pass started and its recovery inputs are gone. Degrading that to "no
+/// plan" fell through to the corpus-contents check, which reads `false` over the
+/// very corpus that pass emptied — reopening the round-1 fail-open through
+/// corruption of the fix's own marker.
+/// What: writes garbage under the plan key, clears the corpus, and asserts the
+/// migration REFUSES rather than recording success, leaving the version at 4.
+/// Test: this test.
+#[tokio::test]
+async fn an_unreadable_plan_over_a_cleared_corpus_fails_closed() {
+    let fx = fixture().await;
+    let corpus = {
+        let indexer = fx.handle.indexer.read().await;
+        indexer.corpus_store().unwrap()
+    };
+    corpus
+        .write_m005_plan_sync(b"{ not json at all")
+        .expect("store a corrupt marker");
+    {
+        let indexer = fx.handle.indexer.read().await;
+        indexer.clear_corpus_for_rechunk().await.expect("clear");
+    }
+
+    let err = M005ChunkIdEndLine
+        .apply(&fx.handle)
+        .await
+        .expect_err("an unreadable marker over a cleared corpus must refuse");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("unreadable"),
+        "the refusal must name the cause: {msg}"
+    );
+
+    let registry = crate::core::migration::MigrationRegistry::new();
+    let _ = crate::core::migration::run_migrations_exclusive(&fx.handle, &registry).await;
+    assert_eq!(
+        fx.handle.read_schema_version().await.expect("version"),
+        4,
+        "a refused pass must never advance the schema version"
+    );
+}

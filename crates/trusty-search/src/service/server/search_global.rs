@@ -206,6 +206,8 @@ pub(crate) async fn global_search_report(
             // every response so a caller never has to treat absent as zero.
             "corpus_failed_indexes_skipped": 0_usize,
             "corpus_read_failed_indexes_skipped": 0_usize,
+            // #6581: same contract — present on every response, never absent.
+            "migration_in_progress_indexes_skipped": 0_usize,
             "latency_ms": 0_u64,
             "intent": format!("{:?}", QueryClassifier::classify(&req.query)),
         }));
@@ -337,11 +339,17 @@ pub(crate) async fn global_search_report(
     // simply had no matches.
     let corpus_read_failed_indexes_skipped =
         std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // #6581: an index mid-schema-migration has an empty or partial corpus for
+    // the length of the rebuild. Counted separately so a caller can tell that
+    // from an index that genuinely matched nothing.
+    let migration_in_progress_indexes_skipped =
+        std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let futures = active_ids.into_iter().map(|id| {
         let registry = registry.clone();
         let query = per_index_query.clone();
         let failed_counter = std::sync::Arc::clone(&corpus_failed_indexes_skipped);
         let read_failed_counter = std::sync::Arc::clone(&corpus_read_failed_indexes_skipped);
+        let migrating_counter = std::sync::Arc::clone(&migration_in_progress_indexes_skipped);
         async move {
             let handle = registry.get(&id)?;
             if super::degraded::is_corpus_failed(&handle).await {
@@ -373,6 +381,23 @@ pub(crate) async fn global_search_report(
                         );
                         return None;
                     }
+                    // #6581: a schema migration is rebuilding this index's
+                    // corpus. Without its own counter it fell through to the
+                    // generic arm below and vanished from the payload entirely
+                    // — the "outage rendered as nothing matched" failure this
+                    // 503 exists to prevent, one call site over.
+                    if e.downcast_ref::<crate::core::indexer::IndexMigrationInProgress>()
+                        .is_some()
+                    {
+                        migrating_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::warn!(
+                            index_id = %id,
+                            "global search: index '{id}' contributed nothing — a schema \
+                             migration is rebuilding its corpus ({e:#}); reported as \
+                             migration_in_progress_indexes_skipped (issue #6581)"
+                        );
+                        return None;
+                    }
                     tracing::warn!("global search: index {} errored: {e}", id);
                     None
                 }
@@ -389,6 +414,8 @@ pub(crate) async fn global_search_report(
         corpus_failed_indexes_skipped.load(std::sync::atomic::Ordering::Relaxed);
     let corpus_read_failed_indexes_skipped =
         corpus_read_failed_indexes_skipped.load(std::sync::atomic::Ordering::Relaxed);
+    let migration_in_progress_indexes_skipped =
+        migration_in_progress_indexes_skipped.load(std::sync::atomic::Ordering::Relaxed);
     // `buffer_unordered` yields in completion order; sort by index id so the
     // fused output is deterministic regardless of which lanes finished first
     // (RRF is a per-lane rank sum, but stable lane ordering keeps score ties
@@ -483,6 +510,10 @@ pub(crate) async fn global_search_report(
         // read. Non-zero means those indexes contributed no lane at all, so
         // this result set is not the complete answer over the fan-out.
         "corpus_read_failed_indexes_skipped": corpus_read_failed_indexes_skipped,
+        // #6581: indexes whose corpus is mid-rebuild by a schema migration.
+        // Non-zero means this result set is not the complete answer over the
+        // fan-out and the missing lanes are transient — retry once they settle.
+        "migration_in_progress_indexes_skipped": migration_in_progress_indexes_skipped,
         "latency_ms": latency_ms,
         "intent": format!("{:?}", intent),
         "routing": routing_label,

@@ -3,14 +3,15 @@
 //!
 //! Why: M005 clears the corpus and re-chunks it from source in batches, so for
 //! the length of that pass — potentially many batches of file I/O and redb
-//! commits on a large index — the corpus is empty or partial. It is dispatched
-//! at boot under `acquire_index_teardown_read`, the SHARED side of the teardown
-//! lock, which blocks a concurrent DELETE and nothing else; every search call
-//! site takes its own independent read path with no knowledge of the migration.
-//! A query landing inside the window therefore saw a corpus that read cleanly
-//! and simply held nothing, and answered `results: []` at HTTP 200 — the same
-//! "total outage rendered as nothing matched" failure #5917 fixed for the
-//! unreadable-corpus case, arriving by a different route.
+//! commits on a large index — the corpus is empty or partial. `run_migrations_
+//! exclusive` holds the per-index permit and the teardown lock's shared side,
+//! which between them exclude a reindex and a DELETE — but not a READER. Every
+//! search call site takes its own independent read path with no knowledge of the
+//! migration, so a query landing inside the window saw a corpus that read
+//! cleanly and simply held nothing, and answered `results: []` at HTTP 200 — the
+//! same "total outage rendered as nothing matched" failure #5917 fixed for the
+//! unreadable-corpus case, arriving by a different route. This flag is the
+//! reader-facing half; the permit is the writer-facing half.
 //!
 //! What: [`MigrationWindow`], an RAII guard that raises an index's
 //! `migration_in_progress` flag on open and lowers it on drop (so a migration

@@ -67,11 +67,16 @@ impl M005Plan {
     /// pass started and did not reach its final step, whatever the corpus now
     /// looks like.
     /// What: `Ok(None)` when no pass is outstanding. A blob that fails to parse
-    /// is treated as an outstanding pass rather than an error — re-running a
-    /// deterministic re-chunk is always safe, and refusing to boot over an
-    /// unreadable marker would be worse than repeating work.
+    /// is an ERROR, not a missing plan (#6581): the marker is only ever written
+    /// before the clear, so an unreadable one means a pass is outstanding AND
+    /// its recovery inputs are gone. Degrading that to `None` fell through to
+    /// the corpus-contents check, which reads `false` over the very corpus that
+    /// pass had already emptied — reopening the round-1 fail-open through
+    /// corruption of the fix's own marker. Failing here pins `schema_version` at
+    /// 4 and reports loudly instead of recording success over missing chunks.
     /// Test: `m005_plan_roundtrips_through_the_corpus_meta_table`,
-    /// `m005_resumes_after_a_crash_before_the_first_batch`.
+    /// `m005_resumes_after_a_crash_before_the_first_batch`,
+    /// `an_unreadable_plan_over_a_cleared_corpus_fails_closed`.
     pub(super) async fn load(corpus: &Arc<CorpusStore>) -> Result<Option<Self>> {
         let corpus = Arc::clone(corpus);
         let read = tokio::task::spawn_blocking(move || corpus.read_m005_plan_sync())
@@ -80,27 +85,16 @@ impl M005Plan {
         let Some(bytes) = read.context("M005: could not read the recovery plan")? else {
             return Ok(None);
         };
-        match serde_json::from_slice::<Self>(&bytes) {
-            Ok(plan) => Ok(Some(plan)),
-            Err(e) => {
-                tracing::warn!(
-                    "M005: the recovery plan is unreadable ({e}) — re-running the pass from \
-                     the corpus as it stands rather than assuming it finished"
-                );
-                Ok(Some(Self::default_for_unreadable()))
-            }
-        }
-    }
-
-    /// The stand-in for a plan that will not parse: empty, so the caller
-    /// re-derives from whatever the corpus still holds.
-    fn default_for_unreadable() -> Self {
-        Self {
-            files: BTreeSet::new(),
-            vector_by_text: Vec::new(),
-            old_ids: Vec::new(),
-            old_count: 0,
-        }
+        serde_json::from_slice::<Self>(&bytes)
+            .map(Some)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                "M005: an outstanding recovery plan is unreadable ({e}). A marker exists, so a \
+                 pass started and did not finish, but its file list and vector map cannot be \
+                 recovered — this index's corpus may be empty or partial. Refusing to advance \
+                 its schema version; reindex it to rebuild from source."
+            )
+            })
     }
 
     /// `true` when this plan carries nothing to act on.

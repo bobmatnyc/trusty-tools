@@ -326,3 +326,64 @@ async fn global_search_reports_the_index_it_dropped_for_an_unreadable_corpus() {
         "the broken index contributed no lane; body={body:?}"
     );
 }
+
+/// #6581: the global search fan-out counts an index it dropped because a schema
+/// migration is rebuilding its corpus.
+///
+/// Why: the same reporting problem #5917 fixed for an unreadable corpus, one
+/// state over. M005 empties the corpus for the length of its re-chunk while
+/// every read still succeeds, so a fan-out during a boot-time migration dropped
+/// that index with no counter incremented at all — not even the generic
+/// corpus-failed one — and the caller saw a complete-looking sweep.
+/// What: opens the migration window on the only index, runs the fan-out, and
+/// asserts the count reaches the caller beside an empty result set.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn global_search_reports_the_index_it_dropped_for_a_running_migration() {
+    let fx = Fixture::build("global-search-6581").await;
+    let handle = fx
+        .state
+        .registry
+        .get(&fx.id)
+        .expect("the fixture registers its index");
+    let flag = handle.indexer.read().await.migration_flag();
+    let _window = crate::core::indexer::MigrationWindow::open(flag);
+
+    let Json(body) = super::search_global::global_search_handler(
+        axum::extract::State(Arc::clone(&fx.state)),
+        axum::extract::Json(super::search_global::GlobalSearchRequest {
+            query: "authenticate_user".to_string(),
+            top_k: 5,
+            full_content: false,
+            indexes: None,
+            routing: None,
+            routing_n: None,
+            routing_threshold: None,
+            max_fanout_concurrency: None,
+            serial: false,
+            path_prefix: None,
+            repos: Vec::new(),
+        }),
+    )
+    .await
+    .expect("the fan-out itself still answers");
+
+    assert_eq!(
+        body["migration_in_progress_indexes_skipped"],
+        serde_json::json!(1),
+        "a migrating index must be counted, not silently dropped; body={body:?}"
+    );
+    assert_eq!(
+        body["corpus_read_failed_indexes_skipped"],
+        serde_json::json!(0),
+        "a migration is not a read failure; body={body:?}"
+    );
+    assert!(
+        body["results"]
+            .as_array()
+            .expect("results array")
+            .is_empty(),
+        "the migrating index contributes no lane; body={body:?}"
+    );
+}

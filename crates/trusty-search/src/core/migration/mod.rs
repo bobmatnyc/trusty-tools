@@ -349,9 +349,7 @@ pub fn spawn_index_migrations(state: &crate::service::SearchAppState) {
         };
         let reg = std::sync::Arc::clone(&registry);
         tokio::spawn(async move {
-            let _teardown_guard =
-                crate::service::reindex::acquire_index_teardown_read(&handle.id).await;
-            if let Err(e) = run_migrations(&handle, &reg).await {
+            if let Err(e) = run_migrations_exclusive(&handle, &reg).await {
                 tracing::warn!(
                     index_id = %handle.id,
                     "schema migration failed (index kept at current schema): {e:#}"
@@ -359,6 +357,41 @@ pub fn spawn_index_migrations(state: &crate::service::SearchAppState) {
             }
         });
     }
+}
+
+/// Run `index`'s migration chain with every other writer of its corpus excluded
+/// (#6581).
+///
+/// Why: M005 empties the corpus and rebuilds it over many batches, and an
+/// incremental reindex racing that window destroys data with no error. The
+/// reindex's `copy_all_from` snapshots the LIVE corpus to carry hash-skipped,
+/// unchanged files across its staged-corpus swap (#839); a snapshot taken while
+/// M005 holds the corpus cleared copies nothing, the reindex then commits only
+/// the files it saw as changed, and `commit_staged_corpus_swap` renames that
+/// staging file over the live one — every unchanged file's chunks gone, in the
+/// shape #839 exists to prevent. M001-M004 were in-place rewrites and never
+/// opened this window.
+/// What: takes the SAME per-index mutual-exclusion permit
+/// `service::reindex::runner` holds for a reindex's whole run
+/// (`index_semaphore`), so the two can never overlap; whichever starts first
+/// runs to completion and the other waits. The teardown lock's shared side is
+/// still held underneath it for #3049. Lock ORDER is permit-then-teardown,
+/// matching `reindex::runner` and `reindex::defer_embed_queue` — the reverse
+/// order would deadlock against a pending DELETE, which is the teardown lock's
+/// only writer.
+/// Test: `m005_waits_for_the_index_permit_before_clearing_the_corpus`.
+pub(crate) async fn run_migrations_exclusive(
+    index: &IndexHandle,
+    registry: &MigrationRegistry,
+) -> Result<(), MigrationError> {
+    // #6581: the reindex holds this for its snapshot AND its swap, so taking it
+    // here is what makes the two mutually exclusive.
+    let _index_permit = crate::service::reindex::index_semaphore(&index.id)
+        .acquire_owned()
+        .await
+        .expect("per-index semaphore is never closed — a fresh Semaphore per IndexId");
+    let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index.id).await;
+    run_migrations(index, registry).await
 }
 
 pub async fn run_migrations(
