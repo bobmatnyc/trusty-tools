@@ -21,6 +21,7 @@ pub mod m001;
 pub mod m002;
 pub mod m003;
 pub mod m004;
+pub mod m005;
 
 use std::sync::Arc;
 
@@ -34,6 +35,7 @@ pub use m001::M001PerPubConstRust;
 pub use m002::M002AbsoluteToRelativePaths;
 pub use m003::M003HnswKeyRelativization;
 pub use m004::M004RepairAbsoluteFilePaths;
+pub use m005::M005ChunkIdEndLine;
 
 // ── Schema version ────────────────────────────────────────────────────────────
 
@@ -49,7 +51,11 @@ pub use m004::M004RepairAbsoluteFilePaths;
 /// Issue #402: bump to 2 for M002 (absolute → relative file paths in redb).
 /// Issue #402 phase 2: bump to 3 for M003 (absolute → relative HNSW key IDs).
 /// Issue #674: bump to 4 for M004 (repair any remaining absolute file paths).
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+/// Issue #6581: bump to 5 for M005 (clear + re-chunk so named chunk ids carry
+/// the end line). This value is also the per-index marker
+/// `run_migrations` reads to narrow that index's accepted chunk-id shapes —
+/// see [`crate::core::indexer::CodeIndexer::chunk_id_shapes`].
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 // ── redb table for _meta ──────────────────────────────────────────────────────
 
@@ -99,6 +105,22 @@ pub(crate) const META_KEY_INDEXED_ROOT: &str = "indexed_root";
 /// never leak from a live corpus into a fresh staging corpus.
 /// Test: `service::reindex::checkpoint::tests` and `resume_tests`.
 pub(crate) const META_KEY_REINDEX_CHECKPOINT: &str = "reindex_checkpoint";
+
+/// The outstanding-M005-pass marker (#6581).
+///
+/// Why: M005 clears the corpus and rebuilds it from source, so the corpus
+/// cannot answer "did that pass finish" — the clear destroys the pre-#6581 ids
+/// whose presence would otherwise be the evidence. Without a marker, a crash
+/// between the clear and the final flush left an empty or partial corpus that
+/// the guard read as "already migrated", and `run_migrations` then stamped
+/// `schema_version = 5` over the loss. This key is the durable evidence
+/// instead: present means a pass started and did not finish.
+/// What: a UTF-8 JSON blob (`core::migration::m005::plan::M005Plan`) written
+/// BEFORE the corpus clear and removed only after the whole pass succeeds. It
+/// survives the clear because `clear_corpus_for_rechunk` empties the chunk,
+/// entity and KG tables, never `_meta`.
+/// Test: `core::migration::m005::tests::m005_resumes_after_a_crash_before_the_first_batch`.
+pub(crate) const META_KEY_M005_PLAN: &str = "m005_plan";
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -226,6 +248,11 @@ impl MigrationRegistry {
             // CURRENT_SCHEMA_VERSION=4 so they skip this migration; only corpora
             // that were indexed by a binary at v3 or earlier will run M004.
             Arc::new(M004RepairAbsoluteFilePaths),
+            // Issue #6581: a named chunk id omitted its end line, so two
+            // declarations sharing a name and a start line shared a primary
+            // key and all but the first were dropped. Clears the corpus and
+            // re-chunks it; reuses the stored vectors rather than re-embedding.
+            Arc::new(M005ChunkIdEndLine),
         ];
         // Defensive sort: ensures chain_from returns migrations in ascending
         // version order even if a future contributor adds them out of order.
@@ -322,9 +349,7 @@ pub fn spawn_index_migrations(state: &crate::service::SearchAppState) {
         };
         let reg = std::sync::Arc::clone(&registry);
         tokio::spawn(async move {
-            let _teardown_guard =
-                crate::service::reindex::acquire_index_teardown_read(&handle.id).await;
-            if let Err(e) = run_migrations(&handle, &reg).await {
+            if let Err(e) = run_migrations_exclusive(&handle, &reg).await {
                 tracing::warn!(
                     index_id = %handle.id,
                     "schema migration failed (index kept at current schema): {e:#}"
@@ -332,6 +357,41 @@ pub fn spawn_index_migrations(state: &crate::service::SearchAppState) {
             }
         });
     }
+}
+
+/// Run `index`'s migration chain with every other writer of its corpus excluded
+/// (#6581).
+///
+/// Why: M005 empties the corpus and rebuilds it over many batches, and an
+/// incremental reindex racing that window destroys data with no error. The
+/// reindex's `copy_all_from` snapshots the LIVE corpus to carry hash-skipped,
+/// unchanged files across its staged-corpus swap (#839); a snapshot taken while
+/// M005 holds the corpus cleared copies nothing, the reindex then commits only
+/// the files it saw as changed, and `commit_staged_corpus_swap` renames that
+/// staging file over the live one — every unchanged file's chunks gone, in the
+/// shape #839 exists to prevent. M001-M004 were in-place rewrites and never
+/// opened this window.
+/// What: takes the SAME per-index mutual-exclusion permit
+/// `service::reindex::runner` holds for a reindex's whole run
+/// (`index_semaphore`), so the two can never overlap; whichever starts first
+/// runs to completion and the other waits. The teardown lock's shared side is
+/// still held underneath it for #3049. Lock ORDER is permit-then-teardown,
+/// matching `reindex::runner` and `reindex::defer_embed_queue` — the reverse
+/// order would deadlock against a pending DELETE, which is the teardown lock's
+/// only writer.
+/// Test: `m005_waits_for_the_index_permit_before_clearing_the_corpus`.
+pub(crate) async fn run_migrations_exclusive(
+    index: &IndexHandle,
+    registry: &MigrationRegistry,
+) -> Result<(), MigrationError> {
+    // #6581: the reindex holds this for its snapshot AND its swap, so taking it
+    // here is what makes the two mutually exclusive.
+    let _index_permit = crate::service::reindex::index_semaphore(&index.id)
+        .acquire_owned()
+        .await
+        .expect("per-index semaphore is never closed — a fresh Semaphore per IndexId");
+    let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index.id).await;
+    run_migrations(index, registry).await
 }
 
 pub async fn run_migrations(
@@ -356,6 +416,7 @@ pub async fn run_migrations(
             target,
             "no migrations needed"
         );
+        narrow_chunk_id_shapes(index, current).await;
         return Ok(());
     }
 
@@ -405,8 +466,36 @@ pub async fn run_migrations(
         );
     }
 
+    narrow_chunk_id_shapes(index, current).await;
     Ok(())
 }
+
+/// Tell the index to stop accepting the pre-#6581 named chunk-id shape once its
+/// own M005 marker is set (#6581).
+///
+/// Why: the owner ruling of 2026-09-05 makes legacy acceptance per-index — an
+/// index that has not run M005 still holds ids of that shape and must match
+/// them, one that has holds none. The migration runner is the single place that
+/// reads every index's stored `schema_version` at boot, so it is where the
+/// marker becomes a live policy rather than a number in redb.
+/// What: a no-op below `M005_TARGET_VERSION`; above it, flips this index's
+/// policy to [`crate::core::chunk_id::ChunkIdShapes::NewOnly`]. Called on both
+/// the no-op early return and the end of a completed chain, so an index that was
+/// already at 5 narrows on the boot after the one that migrated it.
+/// Test: `core::migration::m005::tests::the_suffix_policy_narrows_per_index`.
+async fn narrow_chunk_id_shapes(index: &IndexHandle, current: u32) {
+    if current >= M005_TARGET_VERSION {
+        index.indexer.read().await.set_chunk_ids_migrated();
+    }
+}
+
+/// The schema version that means "M005 has run on this index" (#6581).
+///
+/// Why: `narrow_chunk_id_shapes` and M005's own tests both need the marker, and
+/// spelling `5` at two sites is how the two drift apart.
+/// What: equals `M005ChunkIdEndLine::target_version()`.
+/// Test: `core::migration::m005::tests::m005_advances_exactly_one_version`.
+pub const M005_TARGET_VERSION: u32 = 5;
 
 // ── Read/write schema_version on IndexHandle ──────────────────────────────────
 

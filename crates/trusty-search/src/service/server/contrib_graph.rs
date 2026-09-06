@@ -132,6 +132,18 @@ pub(crate) async fn ingest_graph_report(
         .get(&index_id)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, format!("unknown index '{index_id}'")))?;
 
+    // #6581: this handler WRITES. It persists the contribution and then calls
+    // `rebuild_symbol_graph_now`, which races M005's own Step 6 rebuild over the
+    // same graph, and it reports post-merge totals read from a corpus M005 has
+    // emptied. Refusing HERE — before the persist, not just before the rebuild —
+    // is what keeps the caller from holding a durable contribution behind a 503
+    // whose body says nothing about whether anything was stored.
+    if let Some((status, body)) =
+        super::degraded::migration_refusal(&index_id.to_string(), &handle).await
+    {
+        return Err((status, body.0));
+    }
+
     let contrib = ContribGraph {
         producer: req.producer.clone(),
         producer_version: req.producer_version,
@@ -318,6 +330,18 @@ pub(crate) async fn graph_neighbors_report(
         }
     };
     let max_hops = params.max_hops.unwrap_or(2).clamp(1, 4);
+
+    // #6581: M005's clear empties the symbol graph and leaves it empty until its
+    // Step 6 rebuild, so a BFS landing in that window answers `count: 0` with an
+    // empty neighbour list — "this node has no edges" for a graph that is merely
+    // mid-rebuild. Checked AFTER the direction and edge-kind parsing above: a
+    // malformed request is permanently wrong, and answering it with a retryable
+    // 503 would send a caller with a typo into a loop instead of fixing it.
+    if let Some((status, body)) =
+        super::degraded::migration_refusal(&index_id.to_string(), &handle).await
+    {
+        return Err((status, body.0));
+    }
 
     let graph = {
         let indexer = handle.indexer.read().await;

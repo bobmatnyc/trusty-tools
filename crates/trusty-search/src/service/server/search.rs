@@ -792,6 +792,15 @@ pub(crate) async fn search_report(
         // The downcast matters here and not in the grep/call_chain wrapper:
         // `search_with_drops` also fails for reasons that have nothing to do
         // with the corpus (an embed call, the vector store), and those stay 500.
+        // #6581: a schema migration is rebuilding this index's corpus — refuse
+        // rather than answer from the empty corpus it is mid-way through writing.
+        if let Some((status, body)) = super::degraded::migration_in_progress_from(&e) {
+            tracing::warn!(
+                index_id = %index_id,
+                "search: refused while a schema migration rebuilds the corpus"
+            );
+            return (status, body.0);
+        }
         if let Some((status, body)) = super::degraded::corpus_read_failure_from(&e) {
             tracing::warn!(
                 index_id = %index_id,

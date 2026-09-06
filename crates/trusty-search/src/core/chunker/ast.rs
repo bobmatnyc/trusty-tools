@@ -112,9 +112,11 @@ pub fn chunk_ast(file: &str, content: &str) -> (Vec<RawChunk>, Vec<RawEntity>) {
         }
     }
 
-    // Split oversized chunks; produces sub-chunks with `parent_chunk_id`.
-    // #6571: then collapse id collisions before anything downstream keys on them.
-    let split = dedupe_chunk_ids(file, split_oversized(chunks));
+    // #6581: separate colliding ids FIRST, then split. Disambiguating before
+    // the split means a sub-chunk's `{parent}::sub::{i}` id inherits an
+    // already-unique parent, so neither the parent ids nor the derived sub ids
+    // can collide and `parent_chunk_id` needs no remapping.
+    let split = split_oversized(disambiguate_chunk_ids(file, chunks));
 
     // Entities (single pass over the same tree).
     let entities = extract_entities(&tree, src, file, lang);
@@ -122,46 +124,52 @@ pub fn chunk_ast(file: &str, content: &str) -> (Vec<RawChunk>, Vec<RawEntity>) {
     (split, entities)
 }
 
-/// Drop chunks whose id a preceding chunk in the same file already claimed.
+/// Give every chunk in a file an id no other chunk in that file holds.
 ///
-/// Why (#6571): a chunk's id is the primary key in every downstream layer — the
-/// redb corpus, the BM25 document map, the HNSW key map, and `IndexedFiles`.
-/// `walk::make_chunk_id` builds a named chunk's id from
-/// `{file}::{kind}::{name}::{start_line}` and omits the end line, so two
-/// declarations that share a name and a start line share an id. A minified
-/// JavaScript bundle is one long line of single-letter functions and hits this
-/// constantly: `app/hiring/static/assets/index.js` produced 225 distinct ids for
-/// its declarations and 209 surplus chunks per pass carrying an id already used.
+/// Why (#6581, superseding #6571's drop): a chunk's id is the primary key in
+/// every downstream layer — the redb corpus, the BM25 document map, the HNSW key
+/// map, and `IndexedFiles`. #6571 stopped the corpus corruption by keeping the
+/// FIRST chunk under a colliding id and dropping the rest, which left 2,070 of
+/// `app/hiring/static/assets/index.js`'s 2,299 declarations absent from search.
+/// Carrying `end_line` in the id (this issue) separates most collisions, but not
+/// the one that caused the incident: a minified bundle is a single physical
+/// line, so every declaration in it has `start == end == 1` and two
+/// `function e(…)` still land on one id.
 ///
-/// Every layer but one absorbed that quietly by overwriting. `UsearchStore` did
-/// not: it resolved one usearch key for all occurrences of an id, added the
-/// first, and then failed every later `add` with "Duplicate keys not allowed in
-/// high-level wrappers" — after which the failure rollback removed the id→key
-/// mapping the successful add had just installed. The vector stayed in the graph
-/// with nothing pointing at it and the file never became searchable.
+/// What: keeps every chunk and appends `::dup::{n}` to the second and later
+/// occurrence of any repeated id, `n` counting repeats after the first. Because
+/// the id now carries `{type}::{name}::{start}::{end}`, a repeat means an
+/// IDENTICAL SPAN — the scope the owner ruling of 2026-09-05 sets for the
+/// suffix. The first occurrence keeps its bare id, so a corpus with no
+/// collisions is byte-identical to one built without this pass. Runs BEFORE
+/// `split_oversized`, where `parent_chunk_id` and `child_chunk_ids` are still
+/// empty, so no reference has to be rewritten. Deterministic: the suffix follows
+/// the chunker's own emission order, so the same input yields the same ids.
 ///
-/// What: keeps the FIRST chunk for each id and drops the rest. First rather than
-/// last because a sub-chunk's `parent_chunk_id` names the parent that preceded
-/// it, so keeping the earlier occurrence keeps that reference resolvable. The
-/// dropped chunks are duplicates by id only, not by content — the underlying id
-/// scheme cannot tell them apart, and repairing that is a corpus-wide key change
-/// this does not attempt.
-///
-/// Test: `duplicate_chunk_ids_are_collapsed` in `core/chunker/tests.rs`.
-fn dedupe_chunk_ids(file: &str, chunks: Vec<RawChunk>) -> Vec<RawChunk> {
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let before = chunks.len();
+/// Test: `named_chunks_sharing_a_start_line_get_distinct_ids`,
+/// `identical_span_duplicates_get_a_deterministic_dup_suffix`, and
+/// `chunk_ast_never_emits_two_chunks_under_one_id` in `core/chunker/tests.rs`.
+fn disambiguate_chunk_ids(file: &str, chunks: Vec<RawChunk>) -> Vec<RawChunk> {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut renamed = 0usize;
     let out: Vec<RawChunk> = chunks
         .into_iter()
-        .filter(|c| seen.insert(c.id.clone()))
+        .map(|mut c| {
+            let count = seen.entry(c.id.clone()).or_insert(0);
+            *count += 1;
+            if *count > 1 {
+                c.id = crate::core::chunk_id::make_dup(&c.id, *count - 1);
+                renamed += 1;
+            }
+            c
+        })
         .collect();
-    let dropped = before - out.len();
-    if dropped > 0 {
+    if renamed > 0 {
         tracing::debug!(
             %file,
-            dropped,
+            renamed,
             kept = out.len(),
-            "chunker: dropped chunks whose id collided with an earlier chunk in the same file",
+            "chunker: disambiguated chunks whose id collided within the same file",
         );
     }
     out

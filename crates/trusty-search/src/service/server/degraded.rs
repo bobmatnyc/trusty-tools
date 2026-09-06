@@ -18,6 +18,7 @@
 //! | vector lane off by config (#5068) | `503 vector_unavailable` | no |
 //! | vector lane not built yet (#5068) | `503 vector_unavailable` | yes |
 //! | contribution stored, not merged (#5505) | `503 contrib_not_merged` | yes |
+//! | corpus mid-rebuild by a migration (#6581) | `503 index_migration_in_progress` | yes |
 //!
 //! Centralising them means `search`, `index_status`, `chunks`, and `grep` can
 //! never drift into reporting the same daemon state three different ways —
@@ -158,6 +159,74 @@ pub(super) fn corpus_read_failure_from(
     Some(corpus_read_failure_response(
         &unavailable.index_id,
         &err.to_string(),
+    ))
+}
+
+/// Render `err` as a 503 when it is the migration-in-progress refusal (#6581).
+///
+/// Why: M005 empties the corpus for the length of its re-chunk, so a query
+/// landing there must be told "not yet" rather than handed an empty result set
+/// it cannot distinguish from a genuine miss. Same shape as
+/// [`corpus_read_failure_from`], which solves the same reporting problem for a
+/// corpus that cannot be read at all.
+/// What: `Some((503, body))` for an `IndexMigrationInProgress`, `None`
+/// otherwise. `retryable` is always `true` — the window always closes.
+/// Test: `a_search_during_the_migration_window_is_refused_not_empty`.
+pub(super) fn migration_in_progress_from(
+    err: &anyhow::Error,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let migrating = err.downcast_ref::<crate::core::indexer::IndexMigrationInProgress>()?;
+    Some((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": "index_migration_in_progress",
+            "index_id": migrating.index_id,
+            "failure_kind": "migrating",
+            "transient": true,
+            "retryable": true,
+            "message": err.to_string(),
+        })),
+    ))
+}
+
+/// Refuse a request against an index whose corpus a migration is rebuilding
+/// (#6581).
+///
+/// Why: `CodeIndexer::search_with_drops` raises `IndexMigrationInProgress` from
+/// inside the index, but the corpus- and graph-backed HANDLERS never go through
+/// it — they read the corpus or the symbol graph directly. So during M005's
+/// window `call_chain` answered `404 entry point not found` for a symbol that
+/// exists, `/chunks` reported a mid-rebuild page as the whole corpus (`total`
+/// included), `grep` reported `{matches: [], total: 0}`, KG-neighbors answered
+/// `count: 0`, and graph ingest rebuilt the serving graph on top of M005's own
+/// Step 6 rebuild and returned totals read from an emptied corpus. Every one of
+/// those is an answer about the caller's code for a state that is about the
+/// daemon — the same defect this module exists to prevent, arriving by a route
+/// the search-path guard does not cover.
+/// What: `Some((503, body))` while the flag is up, built from the SAME typed
+/// error and the same producer [`migration_in_progress_from`] renders for
+/// search, so a caller branches on one shape whichever surface it hit. `None`
+/// otherwise — the caller proceeds.
+///
+/// This is a "do not START" guard, not mutual exclusion: the flag can be raised
+/// the instant after it reads `false`. Excluding a reader outright would need
+/// the teardown lock's EXCLUSIVE side, which M005 cannot take — it holds the
+/// shared side for its whole run (#3049). The window is seconds to minutes wide
+/// and this closes all of it but the last instruction, which is the same bargain
+/// `search_with_drops` already makes.
+/// Test: `service::server::tests_corpus_read_5917::chunks_during_a_migration_is_503_not_a_partial_page`
+/// and its four siblings there.
+pub(super) async fn migration_refusal(
+    index_id: &str,
+    handle: &IndexHandle,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    if !handle.indexer.read().await.is_migrating() {
+        return None;
+    }
+    migration_in_progress_from(&anyhow::Error::new(
+        crate::core::indexer::IndexMigrationInProgress {
+            index_id: index_id.to_string(),
+        },
     ))
 }
 

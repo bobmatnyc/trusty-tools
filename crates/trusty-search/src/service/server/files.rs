@@ -297,6 +297,12 @@ pub(crate) async fn index_chunks_report(
             return Err((status, body.0));
         }
     };
+    // #6581: M005 clears the corpus and re-chunks it in batches, so a page read
+    // mid-pass reports a partial corpus as the whole one — `total` included, and
+    // an exporter walking the cursor to exhaustion records the loss as fact.
+    if let Some((status, body)) = super::degraded::migration_refusal(&index_id.0, &handle).await {
+        return Err((status, body.0));
+    }
     let limit = params.limit.min(MAX_CHUNKS_LIMIT);
     let indexer = handle.indexer.read().await;
 
@@ -511,6 +517,14 @@ pub(crate) async fn grep_report(
         }
     };
 
+    // #6581: grep derives its file set from the chunk corpus, so a pass that has
+    // emptied it greps nothing and answers `{matches: [], total: 0}` — the same
+    // "your literal is nowhere in your code" disguise the #5917 refusal below
+    // covers for a corpus that cannot be read at all.
+    if let Some((status, body)) = super::degraded::migration_refusal(&index_id.0, &handle).await {
+        return Err((status, body.0));
+    }
+
     let started = std::time::Instant::now();
     let mut matches = Vec::new();
     // #5917: an unreadable corpus greps no files at all. Reporting that as
@@ -600,6 +614,11 @@ pub(crate) async fn global_grep_report(
             break;
         }
         if let Some(handle) = state.registry.get(&id) {
+            // #6581: same rule, one state over — a migrating index contributes
+            // no files, and this flat response has no per-index field to say so.
+            if let Some((status, body)) = super::degraded::migration_refusal(&id.0, &handle).await {
+                return Err((status, body.0));
+            }
             // #5917: one unreadable corpus makes the whole fan-out incomplete,
             // and a global grep has no per-index field to say so. Refuse rather
             // than return the other indexes' matches as the complete answer.
@@ -724,6 +743,14 @@ pub(crate) async fn call_chain_report(
                 "index": index_id.0,
             }),
         ));
+    }
+
+    // #6581: the entry point is resolved against a chunk snapshot and a symbol
+    // graph M005 has emptied, so a real symbol renders as `404 entry point not
+    // found` — the exact disguise #5917 fixed one state over, and the graph is
+    // empty until M005's Step 6 rebuild even after the corpus refills.
+    if let Some((status, body)) = super::degraded::migration_refusal(&index_id.0, &handle).await {
+        return Err((status, body.0));
     }
 
     let (graph, chunks) = {

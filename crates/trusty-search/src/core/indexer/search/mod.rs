@@ -170,6 +170,17 @@ impl CodeIndexer {
         query: &SearchQuery,
     ) -> Result<(Vec<CodeChunk>, SearchDrops)> {
         self.touch_activity();
+        // #6581: M005 clears the corpus and re-chunks it in batches, so a query
+        // landing in that window would read a cleanly-readable but empty corpus
+        // and answer `results: []` — the same "outage rendered as nothing
+        // matched" failure #5917 fixed for the unreadable case. Refuse instead.
+        if self.is_migrating() {
+            return Err(anyhow::Error::new(
+                crate::core::indexer::IndexMigrationInProgress {
+                    index_id: self.index_id.clone(),
+                },
+            ));
+        }
         let intent = QueryClassifier::classify_with_domain(&query.text, &self.domain_terms);
         let (alpha, beta, use_kg_first) = intent.weights();
 
@@ -239,8 +250,16 @@ impl CodeIndexer {
         // `matches_id` (accepts the chunk-id suffix grammar), never
         // `matches_file` (see `path_filter` module docs for why the two are
         // not interchangeable).
-        let path_pred =
-            |id: &str| path_filter::matches_id(id, normalized_prefix.as_deref(), &query.repos);
+        // #6581: the suffix grammar the filter accepts is per index, so the
+        // index's own policy travels with the call.
+        let path_pred = |id: &str| {
+            path_filter::matches_id(
+                id,
+                normalized_prefix.as_deref(),
+                &query.repos,
+                self.chunk_id_shapes(),
+            )
+        };
         let filter: Option<&(dyn Fn(&str) -> bool + Send + Sync)> = if path_filter::is_active(query)
         {
             Some(&path_pred)

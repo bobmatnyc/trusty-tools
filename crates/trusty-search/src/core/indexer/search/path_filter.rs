@@ -105,8 +105,17 @@ pub(crate) fn normalized_path_prefix(query: &SearchQuery, root_path: &Path) -> O
 /// unconditionally. Delegates to `core::store::path_match::matches_chunk_id`
 /// — the single source of truth shared with `VectorStore::search_filtered`'s
 /// predicate.
-pub(crate) fn matches_id(candidate: &str, path_prefix: Option<&str>, repos: &[String]) -> bool {
-    crate::core::store::path_match::matches_chunk_id(candidate, path_prefix, repos)
+///
+/// `shapes` (#6581) is the per-index chunk-id policy — see
+/// [`crate::core::chunk_id::ChunkIdShapes`] and
+/// [`crate::core::indexer::CodeIndexer::chunk_id_shapes`].
+pub(crate) fn matches_id(
+    candidate: &str,
+    path_prefix: Option<&str>,
+    repos: &[String],
+    shapes: crate::core::chunk_id::ChunkIdShapes,
+) -> bool {
+    crate::core::store::path_match::matches_chunk_id(candidate, path_prefix, repos, shapes)
 }
 
 /// Test whether `candidate` — a bare file path (`RawChunk::file` /
@@ -138,7 +147,8 @@ mod tests {
         assert!(matches_id(
             "/any/path/at/all.rs",
             q.path_prefix.as_deref(),
-            &q.repos
+            &q.repos,
+            crate::core::chunk_id::ChunkIdShapes::NewAndLegacy,
         ));
     }
 
@@ -149,12 +159,14 @@ mod tests {
         assert!(matches_id(
             "/repos/foo/src/lib.rs:1:5",
             q.path_prefix.as_deref(),
-            &q.repos
+            &q.repos,
+            crate::core::chunk_id::ChunkIdShapes::NewAndLegacy,
         ));
         assert!(!matches_id(
             "/repos/bar/src/lib.rs:1:5",
             q.path_prefix.as_deref(),
-            &q.repos
+            &q.repos,
+            crate::core::chunk_id::ChunkIdShapes::NewAndLegacy,
         ));
     }
 
@@ -164,17 +176,20 @@ mod tests {
         assert!(matches_id(
             "/home/user/repos/foo/src/lib.rs:1:5",
             q.path_prefix.as_deref(),
-            &q.repos
+            &q.repos,
+            crate::core::chunk_id::ChunkIdShapes::NewAndLegacy,
         ));
         assert!(matches_id(
             "foo/src/lib.rs:1:5",
             q.path_prefix.as_deref(),
-            &q.repos
+            &q.repos,
+            crate::core::chunk_id::ChunkIdShapes::NewAndLegacy,
         ));
         assert!(!matches_id(
             "/home/user/repos/foobar/src/lib.rs:1:5",
             q.path_prefix.as_deref(),
-            &q.repos
+            &q.repos,
+            crate::core::chunk_id::ChunkIdShapes::NewAndLegacy,
         ));
     }
 
@@ -184,13 +199,15 @@ mod tests {
         assert!(matches_id(
             "/repos/foo/src/lib.rs:1:5",
             q.path_prefix.as_deref(),
-            &q.repos
+            &q.repos,
+            crate::core::chunk_id::ChunkIdShapes::NewAndLegacy,
         ));
         // Matches `repos` but not `path_prefix`.
         assert!(!matches_id(
             "/repos/foo/tests/lib.rs:1:5",
             q.path_prefix.as_deref(),
-            &q.repos
+            &q.repos,
+            crate::core::chunk_id::ChunkIdShapes::NewAndLegacy,
         ));
     }
 
@@ -205,7 +222,8 @@ mod tests {
         assert!(matches_id(
             "vendor/acme/src/lib.rs:1:5",
             normalized.as_deref(),
-            &[]
+            &[],
+            crate::core::chunk_id::ChunkIdShapes::NewAndLegacy,
         ));
     }
 

@@ -1222,6 +1222,120 @@ fn test_deeply_nested_modules_does_not_crash() {
     );
 }
 
+/// Three `function e` declarations sharing a start line get three distinct ids
+/// and none is dropped (#6581).
+///
+/// Why: this is the minified-bundle case the issue is about. Two of the three
+/// share an IDENTICAL span (start 1, end 1) and the third ends on line 2. Before
+/// the fix all three built `assets/index.js::Function::e::1`, so the chunker
+/// kept one and dropped two — 2,070 of one real file's 2,299 declarations were
+/// absent from search. An implementation that adds the end line but keeps the
+/// #6571 drop fails the count assertion; one that drops the end line fails the
+/// distinctness assertion.
+/// What: asserts three `e` chunks survive, that their ids are distinct, and that
+/// the end line is what separates the third from the first two.
+/// Test: this test.
+#[test]
+fn named_chunks_sharing_a_start_line_get_distinct_ids() {
+    // Three `function e(...)` on line 1; the third's body closes on line 2.
+    let minified =
+        "function e(a){ return a }; function e(b){ return b }; function e(c){ return c\n}\n";
+    let (chunks, _entities) = chunk_ast("assets/index.js", minified);
+
+    let e_ids: Vec<&str> = chunks
+        .iter()
+        .filter(|c| c.function_name.as_deref() == Some("e"))
+        .map(|c| c.id.as_str())
+        .collect();
+    assert_eq!(
+        e_ids.len(),
+        3,
+        "all three declarations must survive; got {e_ids:?}"
+    );
+    let distinct: std::collections::HashSet<&&str> = e_ids.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        3,
+        "each declaration needs its own id; got {e_ids:?}"
+    );
+    // The end line is what separates the third from the first two.
+    assert!(
+        e_ids.iter().any(|id| id.contains("::e::1::2")),
+        "the id must carry the end line; got {e_ids:?}"
+    );
+    // No chunk in the file shares an id with any other.
+    let all: Vec<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
+    let all_distinct: std::collections::HashSet<&&str> = all.iter().collect();
+    assert_eq!(all_distinct.len(), all.len(), "ids must be unique: {all:?}");
+}
+
+/// An identical span gets the `::dup::{n}` suffix, and the same input yields the
+/// same ids on every run (#6581, owner ruling 2026-09-05).
+///
+/// Why: the end line cannot separate two declarations that begin AND end on one
+/// physical line, which is every declaration in a minified bundle. The ruling
+/// scopes the suffix to exactly that case, and a suffix that is not
+/// deterministic would rekey the corpus on every reindex.
+/// What: asserts the suffix appears only on the repeat, that the first
+/// occurrence keeps the bare id, and that two runs agree byte for byte.
+/// Test: this test.
+#[test]
+fn identical_span_duplicates_get_a_deterministic_dup_suffix() {
+    let minified = "function e(a){ return a }; function e(b){ return b }\n";
+    let first: Vec<String> = chunk_ast("assets/index.js", minified)
+        .0
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    let second: Vec<String> = chunk_ast("assets/index.js", minified)
+        .0
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(first, second, "the same input must yield the same ids");
+
+    let dup: Vec<&String> = first.iter().filter(|id| id.contains("::dup::")).collect();
+    assert_eq!(
+        dup.len(),
+        1,
+        "only the repeat of an identical span carries the suffix; got {first:?}"
+    );
+    assert!(
+        first.iter().any(|id| id.ends_with("::e::1::1")),
+        "the first occurrence keeps its bare id; got {first:?}"
+    );
+}
+
+/// An unnamed chunk's id is byte-identical to what it was before #6581.
+///
+/// Why: only the NAMED arm of the grammar changed. A positional id that shifted
+/// would rekey chunks the issue never touched, and #6581 has no migration budget
+/// for that.
+/// What: pins the exact string for a file with no recognisable declarations.
+/// Test: this test.
+#[test]
+fn unnamed_chunk_ids_are_unchanged() {
+    let (chunks, _entities) = chunk_ast("notes/plain.unknownext", "alpha\nbeta\ngamma\n");
+    assert!(!chunks.is_empty(), "fallback chunker must emit something");
+    for c in &chunks {
+        assert!(
+            c.id.starts_with("notes/plain.unknownext:"),
+            "unnamed ids stay positional: {}",
+            c.id
+        );
+        assert!(
+            !c.id.contains("::"),
+            "an unnamed id must carry no named-shape separator: {}",
+            c.id
+        );
+    }
+    assert_eq!(
+        crate::core::chunk_id::make("src/lib.rs", "Code", "", 10, 40),
+        "src/lib.rs:10:40",
+        "the positional shape is byte-identical to the pre-#6581 one"
+    );
+}
+
 /// Why (#6571): `walk::make_chunk_id` builds a named chunk's id from
 /// `{file}::{kind}::{name}::{start_line}` and omits the end line. A minified
 /// JavaScript bundle is one long line, so every declaration in it shares a start
@@ -1230,9 +1344,11 @@ fn test_deeply_nested_modules_does_not_crash() {
 /// `IndexedFiles`; two chunks under one id is a corpus defect, and in the vector
 /// store it orphaned a live vector and left the file unsearchable.
 ///
-/// Pre-fix `chunk_ast` returned both `e` chunks and this assertion failed.
+/// #6581 supersedes the #6571 mitigation: the ids are separated rather than
+/// collapsed, so both `e` chunks now survive. The property this test guards —
+/// `chunk_ast` never emits two chunks under one id — is unchanged.
 #[test]
-fn duplicate_chunk_ids_are_collapsed() {
+fn chunk_ast_never_emits_two_chunks_under_one_id() {
     // One line, two `function e(...)` declarations — the shape a bundler emits.
     let minified = "function e(a){return a+1}function e(b){return b+2}function q(c){return c}\n";
     let (chunks, _entities) = chunk_ast("assets/index.js", minified);

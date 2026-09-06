@@ -31,6 +31,8 @@
 //! `test_chunk_id_prefix_rejects_colon_in_real_path_segment`,
 //! `test_exact_file_prefix_matches_its_own_chunk_ids`, and others below.
 
+use crate::core::chunk_id::ChunkIdShapes;
+
 /// Test whether `candidate` — a bare file path (`RawChunk::file` /
 /// `CodeChunk::file`) — satisfies `path_prefix` (if set) AND every name in
 /// `repos` matching as a path segment (if non-empty). An empty filter
@@ -50,12 +52,20 @@ pub(crate) fn matches_file(candidate: &str, path_prefix: Option<&str>, repos: &[
 ///
 /// Use this at any site whose candidate is a chunk id (BM25/grep/HNSW
 /// admission predicates), never a bare file path.
+/// `shapes` (#6581) is the per-index chunk-id policy — see
+/// [`crate::core::chunk_id::ChunkIdShapes`]. An index that has not run M005
+/// still holds pre-#6581 named ids and passes [`ChunkIdShapes::NewAndLegacy`];
+/// one that has passes [`ChunkIdShapes::NewOnly`], which stops the wider legacy
+/// grammar from admitting a lookalike path for no recall.
 pub(crate) fn matches_chunk_id(
     candidate: &str,
     path_prefix: Option<&str>,
     repos: &[String],
+    shapes: ChunkIdShapes,
 ) -> bool {
-    matches_with(candidate, path_prefix, repos, chunk_id_prefix_boundary_ok)
+    matches_with(candidate, path_prefix, repos, |cand, prefix| {
+        chunk_id_prefix_boundary_ok(cand, prefix, shapes)
+    })
 }
 
 fn matches_with(
@@ -104,65 +114,92 @@ fn file_prefix_boundary_ok(candidate: &str, prefix: &str) -> bool {
 /// (validated against the shape `chunker::walk::make_chunk_id` actually
 /// emits — not "any `:`", which is what let a real `vendor/foo:evil/...`
 /// directory leak through in the prior version of this check).
-fn chunk_id_prefix_boundary_ok(candidate: &str, prefix: &str) -> bool {
+fn chunk_id_prefix_boundary_ok(candidate: &str, prefix: &str, shapes: ChunkIdShapes) -> bool {
     if file_prefix_boundary_ok(candidate, prefix) {
         return true;
     }
     if !candidate.starts_with(prefix) {
         return false;
     }
-    is_chunk_id_suffix(&candidate[prefix.len()..])
+    is_chunk_id_suffix(&candidate[prefix.len()..], shapes)
 }
 
 /// `true` when `suffix` (everything in a chunk id after a matched file-path
-/// prefix) is EXACTLY one of the two shapes `make_chunk_id` emits — the
-/// WHOLE remainder is validated, not just its first byte or two (code
-/// review finding, issue #3401: peeking only at the leading bytes let
-/// `src/foo::bar.rs:10:20` and `src/foo:9lives.rs:15:25` — neither of which
-/// is a real chunk-id suffix — pass as if they were, letting a
-/// coincidentally-named sibling file consume a slot in a lane's `want`
-/// candidate pool ahead of a genuine in-scope match — a recall bug, not a
-/// disclosure one, but the exact property #3401 exists to guarantee).
+/// prefix) is EXACTLY one of the shapes `make_chunk_id` emits — the WHOLE
+/// remainder is validated, not just its first byte or two (code review finding,
+/// issue #3401: peeking only at the leading bytes let `src/foo::bar.rs:10:20`
+/// and `src/foo:9lives.rs:15:25` — neither of which is a real chunk-id suffix —
+/// pass as if they were, letting a coincidentally-named sibling file consume a
+/// slot in a lane's `want` candidate pool ahead of a genuine in-scope match — a
+/// recall bug, not a disclosure one, but the exact property #3401 exists to
+/// guarantee).
 ///
-/// `make_chunk_id` emits exactly two shapes after `file`, and no others:
-///
-///   - `:{start_line}:{end_line}` — a single `:`, then a non-empty run of
-///     ASCII digits, then `:`, then a non-empty run of ASCII digits, with
-///     NOTHING else (line numbers are `usize`, so always plain `\d+`).
-///   - `::{chunk_type}::{name}::{start_line}` — `::`, then a non-empty
-///     colon-free run (`chunk_type`), then `::`, then a non-empty
-///     colon-free run (`name`), then `::`, then a non-empty run of ASCII
-///     digits (`start_line`), with NOTHING else.
-fn is_chunk_id_suffix(suffix: &str) -> bool {
-    fn all_digits(s: &str) -> bool {
-        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
-    }
-    fn colon_free(s: &str) -> bool {
-        !s.is_empty() && !s.contains(':')
-    }
-
-    if let Some(rest) = suffix.strip_prefix("::") {
-        // "::{chunk_type}::{name}::{start_line}" — must split into exactly
-        // three non-empty parts on "::", the last of which is all digits.
-        let parts: Vec<&str> = rest.split("::").collect();
-        return matches!(parts.as_slice(), [chunk_type, name, start]
-            if colon_free(chunk_type) && colon_free(name) && all_digits(start));
-    }
-    if let Some(rest) = suffix.strip_prefix(':') {
-        // "{start_line}:{end_line}" — must split into exactly two non-empty
-        // digit-only parts on the first remaining `:`.
-        let mut parts = rest.splitn(2, ':');
-        return match (parts.next(), parts.next()) {
-            (Some(start), Some(end)) => all_digits(start) && all_digits(end),
-            _ => false,
-        };
-    }
-    false
+/// Why it delegates (#6581): this re-implemented the grammar with a hard-coded
+/// three-segment named shape, so it went stale the moment the named shape grew
+/// an `end_line`, and it rejected every method chunk outright because it
+/// required `name` to be colon-free (a qualified method name is `Type::method`).
+/// What: [`crate::core::chunk_id::is_valid_suffix`] is the single owner of the
+/// grammar; `shapes` decides whether the pre-#6581 named shape still counts for
+/// THIS index.
+/// Test: `chunk_id_suffix_shape_is_gated_per_index` in this module's `tests`,
+/// and `core::chunk_id::tests::suffix_policy_gates_the_legacy_shape`.
+fn is_chunk_id_suffix(suffix: &str, shapes: ChunkIdShapes) -> bool {
+    crate::core::chunk_id::is_valid_suffix(suffix, shapes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Keeps every pre-#6581 assertion below at its original three-argument
+    /// shape while the production signature carries the per-index policy. The
+    /// permissive policy is what those assertions were written against.
+    fn matches_chunk_id(candidate: &str, path_prefix: Option<&str>, repos: &[String]) -> bool {
+        super::matches_chunk_id(candidate, path_prefix, repos, ChunkIdShapes::NewAndLegacy)
+    }
+
+    /// The owner ruling of 2026-09-05, per index: before an index's M005 marker
+    /// is set both named shapes match; after it, only the new one. An
+    /// implementation that ignores `shapes` fails the second assertion, and one
+    /// that forgets `end_line` fails the first.
+    #[test]
+    fn chunk_id_suffix_shape_is_gated_per_index() {
+        let new_id = "src/auth.rs::Function::login::10::40";
+        let legacy_id = "src/auth.rs::Function::login::10";
+
+        // Index A — has not run M005: both shapes are in scope.
+        for id in [new_id, legacy_id] {
+            assert!(
+                super::matches_chunk_id(id, Some("src/auth.rs"), &[], ChunkIdShapes::NewAndLegacy),
+                "pre-M005 index must match {id}"
+            );
+        }
+
+        // Index B — M005 has run: the legacy shape is no longer a chunk-id
+        // boundary, so the prefix lands mid-path and the candidate is rejected.
+        assert!(super::matches_chunk_id(
+            new_id,
+            Some("src/auth.rs"),
+            &[],
+            ChunkIdShapes::NewOnly
+        ));
+        assert!(!super::matches_chunk_id(
+            legacy_id,
+            Some("src/auth.rs"),
+            &[],
+            ChunkIdShapes::NewOnly
+        ));
+
+        // The positional shape is unaffected by the policy either way.
+        for shapes in [ChunkIdShapes::NewAndLegacy, ChunkIdShapes::NewOnly] {
+            assert!(super::matches_chunk_id(
+                "src/auth.rs:10:20",
+                Some("src/auth.rs"),
+                &[],
+                shapes
+            ));
+        }
+    }
 
     #[test]
     fn test_empty_filter_matches_everything() {

@@ -30,5 +30,7 @@ mod usearch_recover;
 mod usearch_requant;
 mod usearch_store;
 
-pub use self::types::{DemoteStats, RequantizeReport, StagedSwapOutcome, VectorHit, VectorStore};
+pub use self::types::{
+    relative_key, DemoteStats, RequantizeReport, StagedSwapOutcome, VectorHit, VectorStore,
+};
 pub use self::usearch_store::UsearchStore;
