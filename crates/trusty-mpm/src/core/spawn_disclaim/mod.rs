@@ -215,8 +215,10 @@ pub use stdout_piped::{StdoutPipedSpawn, disclaimed_stdout_piped_spawn};
 
 // #5969: every other spawn shape here waits unbounded, which hung `tm` on a
 // wedged `claude --version`; this one carries a deadline.
+// #6863: `runtime::claude_code_agents::query_registry` needs the same deadline
+// for a `Command` it builds itself (it exports `CLAUDE_CONFIG_DIR`).
 mod timeout;
-pub use timeout::disclaimed_stdout_with_timeout;
+pub use timeout::{disclaimed_stdout_command_with_timeout, disclaimed_stdout_with_timeout};
 
 /// Trait-object alias for a spawned child's writable stdin, uniform across
 /// the native (`tokio::process::ChildStdin`) and macOS-disclaimed

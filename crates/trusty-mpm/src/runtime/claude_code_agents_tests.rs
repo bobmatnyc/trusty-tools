@@ -8,6 +8,8 @@
 //! asserts on the built pane command, and none of them runs a real `claude`:
 //! the registry read is injected as a `Result<&str, &str>` (#4255 — a unit test
 //! must never touch the operator's real session state).
+//! The one test that does spawn — `query_registry_kills_and_reaps_a_wedged_probe`
+//! — runs a stand-in shell script, never the operator's `claude`.
 //! What: the registry sample is a verbatim capture of `claude agents --json`
 //! from Claude Code 2.1.261, trimmed to the entry shapes that differ —
 //! background-live, background-finished, and interactive.
@@ -264,6 +266,62 @@ fn registry_sample_parses_every_entry_shape() {
             // still refuses `--resume`.
         ],
         "only the non-terminal background entries are attachable"
+    );
+}
+
+/// Why (#6863): the probe is the module's only real spawn, and it runs on the
+/// interactive resume path. A `claude` that never answers must cost the deadline
+/// and nothing more — before this fix the reader thread owned the child and the
+/// deadline merely abandoned it, leaving a probe process alive indefinitely.
+/// A stand-in script wedges the way a hung `claude` would; the fake binary path
+/// keeps the test off the operator's real session state (#4255).
+#[test]
+#[cfg(unix)]
+fn query_registry_kills_and_reaps_a_wedged_probe() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pidfile = dir.path().join("pid");
+    let script = dir.path().join("wedged-claude");
+    // `exec` so the recorded pid IS the long sleep, not a shell wrapper.
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho $$ > {}\nexec sleep 300\n",
+            pidfile.display()
+        ),
+    )
+    .expect("write stand-in claude");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let started = std::time::Instant::now();
+    let err = super::query_registry(script.to_str().expect("utf-8 tempdir path"), None)
+        .expect_err("a wedged probe must report a timeout, not hang");
+    assert!(
+        err.contains("did not answer within"),
+        "the timeout must be the reported reason: {err}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the probe must return on its own deadline, took {:?}",
+        started.elapsed()
+    );
+
+    let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
+        .expect("the stand-in must have recorded its pid before wedging")
+        .trim()
+        .parse()
+        .expect("pid file must hold a pid");
+    // SAFETY: signal 0 performs the existence/permission check only.
+    let alive = unsafe { libc::kill(pid, 0) };
+    assert_eq!(
+        alive, -1,
+        "no probe child may outlive the deadline (pid {pid} still exists)"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH),
+        "the probe child must be gone, not merely unsignalable"
     );
 }
 

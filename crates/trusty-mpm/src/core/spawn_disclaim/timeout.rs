@@ -21,9 +21,14 @@
 //! [`super::disclaimed_output`] and suits the probe this exists for — a
 //! `--version` call that reads no input and is now killed on a deadline
 //! either way.
+//!
+//! [`disclaimed_stdout_command_with_timeout`] is the same wait for a caller
+//! that built its own `Command` — added for the `claude agents --json` registry
+//! probe, which must export `CLAUDE_CONFIG_DIR` to the child (#6863).
 //! Test: `tests::disclaimed_stdout_with_timeout_returns_output_for_fast_child`,
 //! `tests::disclaimed_stdout_with_timeout_kills_and_reaps_wedged_child`,
-//! `tests::disclaimed_stdout_with_timeout_reports_spawn_error_for_missing_binary`.
+//! `tests::disclaimed_stdout_with_timeout_reports_spawn_error_for_missing_binary`,
+//! `tests::disclaimed_stdout_command_with_timeout_carries_env_to_the_child`.
 
 use std::io::{self, Read as _};
 use std::process::{Command, ExitStatus, Output};
@@ -61,6 +66,30 @@ pub fn disclaimed_stdout_with_timeout(
 ) -> io::Result<Output> {
     let mut cmd = Command::new(program);
     cmd.args(args);
+    disclaimed_stdout_command_with_timeout(cmd, timeout)
+}
+
+/// The same bounded-wait capture spawn for an already-built `Command`.
+///
+/// Why: a caller that must set something on the child beyond program and args —
+/// `runtime::claude_code_agents::query_registry` exports `CLAUDE_CONFIG_DIR` so
+/// the registry is read against the config home the pane will use (#6863) —
+/// otherwise has to hand-roll the spawn and loses the deadline with it, leaving
+/// a wedged child alive.
+/// What: identical to [`disclaimed_stdout_with_timeout`], which is now a thin
+/// wrapper over this, except the caller owns the `Command` and so may set env,
+/// cwd, or stdin on it. The stdout and stderr settings are NOT the caller's:
+/// [`super::disclaimed_stdout_piped_spawn`] overwrites them with a pipe and
+/// `/dev/null`. `stdin` is honoured on the native path only — the macOS
+/// disclaimed path installs no stdin file action, so the child inherits it.
+/// Test: `tests::disclaimed_stdout_command_with_timeout_carries_env_to_the_child`,
+/// and the three [`disclaimed_stdout_with_timeout`] tests, which run through
+/// this function.
+pub fn disclaimed_stdout_command_with_timeout(
+    cmd: Command,
+    timeout: Duration,
+) -> io::Result<Output> {
+    let program = cmd.get_program().to_string_lossy().into_owned();
     let StdoutPipedSpawn {
         id,
         mut stdout,
@@ -224,6 +253,20 @@ mod tests {
             Some(libc::ESRCH),
             "the child must be gone, not merely unsignalable"
         );
+    }
+
+    /// #6863: the registry probe needs `CLAUDE_CONFIG_DIR` on the child, which
+    /// the `program`/`args` entry point cannot express — the whole reason the
+    /// `Command`-taking variant exists.
+    #[test]
+    #[serial_test::serial]
+    fn disclaimed_stdout_command_with_timeout_carries_env_to_the_child() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(args(&["-c", "printf %s \"$TM_TIMEOUT_ENV_PROBE\""]));
+        cmd.env("TM_TIMEOUT_ENV_PROBE", "carried");
+        let out = disclaimed_stdout_command_with_timeout(cmd, Duration::from_secs(10))
+            .expect("a fast child must not error");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "carried");
     }
 
     #[test]

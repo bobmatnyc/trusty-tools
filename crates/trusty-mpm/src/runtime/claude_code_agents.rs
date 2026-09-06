@@ -40,11 +40,12 @@
 //! Test: `relaunch_attaches_to_a_live_background_session`,
 //! `relaunch_resumes_a_session_absent_from_the_registry`,
 //! `relaunch_resumes_when_the_registry_call_fails`,
-//! `registry_sample_parses_every_entry_shape` — in the sibling `_tests.rs`.
+//! `registry_sample_parses_every_entry_shape`,
+//! `query_registry_kills_and_reaps_a_wedged_probe` — in the sibling `_tests.rs`.
 
+use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -116,13 +117,16 @@ pub(super) struct RelaunchInputs<'a> {
 /// every decision above it is a pure function of a `&str` and can be unit
 /// tested without a real `claude` on the machine (#4255 — a test must never
 /// touch the operator's real session state).
-/// What: spawns `<claude_bin> agents --json` with stdin and stderr null-ed and
-/// stdout piped, through [`trusty_common::spawn_retry::retry_on_etxtbsy`] (the
-/// workspace's one exec-retry policy), then waits on a thread-and-channel
-/// handoff capped at [`REGISTRY_TIMEOUT`]. The handoff, rather than a bare
-/// `wait_with_output`, is what makes the cap real: a reader thread keeps
-/// draining the pipe, so a child that outgrew the pipe buffer cannot deadlock
-/// the caller, and `recv_timeout` returns on the deadline regardless.
+/// What: spawns `<claude_bin> agents --json` through
+/// [`crate::core::spawn_disclaim::disclaimed_stdout_command_with_timeout`] —
+/// stdout piped, stderr to `/dev/null`, TCC-disclaimed on macOS — wrapped in
+/// [`trusty_common::spawn_retry::retry_on_etxtbsy`], the workspace's one
+/// exec-retry policy (only the exec step can raise `ETXTBSY`, so no retry ever
+/// re-runs a probe that started). That helper drains stdout off-thread, so a
+/// child that outgrew the pipe buffer cannot deadlock the caller, and it
+/// SIGKILLs and reaps a child that outlives [`REGISTRY_TIMEOUT`] — a probe
+/// process never survives the deadline (#6863; the same guarantee #5969 bought
+/// the `claude --version` probe).
 ///
 /// `CLAUDE_CONFIG_DIR` is exported to match the spawn the pane will make.
 /// Claude Code 2.1.261 keeps this registry machine-global — verified: the same
@@ -136,41 +140,41 @@ pub(super) struct RelaunchInputs<'a> {
 /// rendered as a one-line reason for the caller's debug log. Every one of them
 /// means the same thing to [`relaunch_command`]: fall back to `--resume`.
 ///
-/// Test: not unit tested — it is the seam tests inject AROUND. The live shape
-/// it returns is pinned by `registry_sample_parses_every_entry_shape`, which
-/// parses a capture of this command's real output.
+/// Test: `query_registry_kills_and_reaps_a_wedged_probe` proves the deadline
+/// leaves no child behind. The live shape it returns is pinned by
+/// `registry_sample_parses_every_entry_shape`, which parses a capture of this
+/// command's real output; the decision above it is the seam tests inject AROUND.
 pub(super) fn query_registry(
     claude_bin: &str,
     config_dir: Option<&Path>,
 ) -> Result<String, String> {
-    let mut cmd = Command::new(claude_bin);
-    cmd.arg("agents")
-        .arg("--json")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    if let Some(dir) = config_dir {
-        cmd.env("CLAUDE_CONFIG_DIR", dir);
-    }
-    let child = trusty_common::spawn_retry::retry_on_etxtbsy(|| cmd.spawn())
-        .map_err(|e| format!("could not spawn `{claude_bin} agents --json`: {e}"))?;
-
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-    match rx.recv_timeout(REGISTRY_TIMEOUT) {
-        Ok(Ok(out)) if out.status.success() => {
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    // #6863: rebuilt per attempt because the bounded-wait helper consumes the
+    // `Command`; an ETXTBSY retry never re-runs a probe that already started.
+    let build = || {
+        let mut cmd = Command::new(claude_bin);
+        cmd.arg("agents").arg("--json").stdin(Stdio::null());
+        if let Some(dir) = config_dir {
+            cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
-        Ok(Ok(out)) => Err(format!("`claude agents --json` exited {}", out.status)),
-        Ok(Err(e)) => Err(format!(
-            "`claude agents --json` could not be waited on: {e}"
-        )),
-        Err(_) => Err(format!(
-            "`claude agents --json` did not answer within {REGISTRY_TIMEOUT:?}"
-        )),
+        cmd
+    };
+    let out = trusty_common::spawn_retry::retry_on_etxtbsy(|| {
+        crate::core::spawn_disclaim::disclaimed_stdout_command_with_timeout(
+            build(),
+            REGISTRY_TIMEOUT,
+        )
+    })
+    .map_err(|e| {
+        if e.kind() == io::ErrorKind::TimedOut {
+            format!("`claude agents --json` did not answer within {REGISTRY_TIMEOUT:?}")
+        } else {
+            format!("could not run `{claude_bin} agents --json`: {e}")
+        }
+    })?;
+    if !out.status.success() {
+        return Err(format!("`claude agents --json` exited {}", out.status));
     }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Find the short id to `attach` for a stored `claude_session_id`, if that
