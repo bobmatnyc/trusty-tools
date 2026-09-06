@@ -170,11 +170,19 @@ described in §5.3, built on the `/ui/screensaver` route #6519 landed.
 **Acceptance test.** A dashboard design with no per-session route, or with no
 link from the session list, fails this ruling.
 
-Where a machine-wide view survives elsewhere in this spec — the unfiltered,
-cross-session list in §2.1's PM-operator story, and the unfiltered-by-default
-`/ui/stream/list` and `/ui/stream/tree` routes in §5.1 — it is reached through
-the Sessions console and composes per-session dashboards, rather than standing
-as its own top-level destination.
+**Start with per session (owner ruling, 2026-09-06).**
+
+> "Start with per session."
+> — Bob, 2026-09-06
+
+§2.1's PM-operator story and §5.1's list route (and, symmetrically, §5.2's tree
+route) are per session first: both routes require a `session=<id>`, reached
+from a session's row in the Sessions console, and there is no bare unfiltered
+route in this phase. The machine-wide aggregate view this spec's earlier draft
+described as the default — an unfiltered, cross-session list or tree — is kept,
+not deleted, and moved to "Deferred: machine-wide view" (§5.4): a later phase
+reached through the Sessions console, composing per-session dashboards rather
+than standing as its own top-level destination.
 
 **What this spec does not change.**
 
@@ -211,15 +219,16 @@ in the tree, and what they click through to.
 
 ### 2.1 The mpm PM operator
 
-*I am running five sessions across three projects, and I want to know which agent
-is doing what right now.*
+*I have dispatched several agents within one session, and I want to know which
+agent is doing what right now.*
 
-- **List.** One row per event across every live `tm` session, newest at the
-  bottom, filtered to `source=mpm`. A row reads: timestamp, session name, actor,
-  kind, and a one-line object summary — "14:03:12 · tm-trusty-tools-02 ·
-  rust-engineer · workflow.spawn · code-critic". A dispatch, a worktree creation,
-  a hook firing, and a session ending are all rows in the same column.
-- **Tree.** The PM session is the root. Each dispatched agent is a child node
+- **List.** One row per event in one `tm` session — `session=<id>`, opened from
+  that session's row in the Sessions console — newest at the bottom. A row
+  reads: timestamp, actor, kind, and a one-line object summary —
+  "14:03:12 · rust-engineer · workflow.spawn · code-critic". A dispatch, a
+  worktree creation, a hook firing, and a session ending are all rows in the
+  same column.
+- **Tree.** The session is the root. Each dispatched agent is a child node
   that appears when its `Workflow::Spawn` arrives and stays lit until its
   `Workflow::Stop`. Under an agent, its tool calls and file writes are leaves.
   The operator sees at a glance that four agents are live, one has been running
@@ -228,7 +237,12 @@ is doing what right now.*
   links to the diff viewer; a `Workflow::Spawn` node links to the delegation's
   prompt and the worktree path.
 
-*What this replaces:* reading five tmux panes, or `tm session list` on a loop.
+*What this replaces:* reading one tmux pane, or `tm session status` on a loop.
+
+*Running five sessions across three projects?* Each has its own dashboard,
+opened from its own row in the Sessions console — one tab per session. A
+single view showing every session's events unfiltered is not this phase's
+deliverable; see "Deferred: machine-wide view" (§5.4).
 
 ### 2.2 The trusty-code user
 
@@ -277,7 +291,9 @@ from indentation.
 sitting at it.*
 
 - It shows the same two views, unfiltered, rotating between them on a fixed
-  cadence.
+  cadence. Machine-wide, unfiltered rotation is the "Deferred: machine-wide
+  view" case (§5.4) — the wall display's own dashboard is a per-session one
+  until that phase lands.
 - It never prompts, never waits for input, and never shows an error dialog. A
   daemon that goes away is a degraded badge, not a modal.
 - It renders correctly with zero events — an empty stream is a legitimate state,
@@ -671,8 +687,15 @@ pure functions of its inputs, the `.svelte` file is a renderer over them.
 
 ### 5.1 List view — `/ui/stream/list`
 
-Sequential, newest last, scrolling.
+Sequential, newest last, scrolling, per session (owner ruling, 2026-09-06 —
+"Start with per session."; §1).
 
+- **`session=<id>` is required.** The route always scopes to one session and
+  never renders unfiltered by default. It is reached from that session's row in
+  the Sessions console (§1) — `/ui/stream/list?session=<id>` — not as a
+  standalone destination a user navigates to directly. A request with no
+  `session` is the "Deferred: machine-wide view" case (§5.4), not something
+  this phase serves.
 - **Virtualized.** Only the visible rows exist in the DOM. A day-long session
   produces tens of thousands of events and an unvirtualized list stops scrolling
   smoothly in the low thousands.
@@ -681,10 +704,9 @@ Sequential, newest last, scrolling.
   cursor route, not by scrolling forever.
 - **Follow-tail by default.** The view pins to the newest row. A wall display
   never needs to be scrolled to stay current.
-- **Filters live in the URL**, not in a widget:
-  `?source=mpm&session=<id>&kind=file&actor=rust-engineer`. Absent means
-  unfiltered. Combining axes ANDs them, matching `events::Filter`'s existing
-  semantics.
+- **Further filters live in the URL**, additive to the required `session`:
+  `?session=<id>&source=mpm&kind=file&actor=rust-engineer`. Combining axes ANDs
+  them, matching `events::Filter`'s existing semantics.
 - **A row is:** timestamp (mono), source badge, session, actor, kind badge, and
   the first `ObjectRef`'s label as a link. Foundry's typographic split applies —
   IBM Plex Mono for every identifier, path, count, and status, IBM Plex Sans for
@@ -694,7 +716,9 @@ Sequential, newest last, scrolling.
 
 ### 5.2 Tree view — `/ui/stream/tree`
 
-A call graph, keyed on `parent_id`.
+A call graph, keyed on `parent_id`. Like the list view, `session=<id>` is
+required (§5.1) — the tree route is also per session first, reached from the
+same Sessions-console row.
 
 **Node lifecycle.** A node appears when its opening event arrives and stays
 *active* until its closing event does.
@@ -770,6 +794,31 @@ test-covered without a browser.
   `http://127.0.0.1:7788/ui/screensaver` in a WKWebView. Both stream views must
   therefore be correct with no observer for hours, which is what §5.2's collapse
   rule and §8.2's memory ceiling exist to guarantee.
+
+### 5.4 Deferred: machine-wide view
+
+**Not built in this phase.** §5.1 and §5.2 require `session=<id>` on every
+list and tree route (owner ruling, 2026-09-06 — "Start with per session.";
+§1). A machine-wide view — every live session's events in one unfiltered list
+or tree, as the pre-2026-09-06 draft of this spec described as the default —
+is kept, not deleted. It is deferred to a later phase, reached through the
+Sessions console once that phase lands, and composes the per-session
+dashboards rather than replacing them.
+
+- **What it would add.** A route with no required `session` (or an explicit
+  `session=all`) showing every live session's events interleaved. §5.1's and
+  §5.2's per-session mechanics — virtualization, the bounded window,
+  follow-tail, node lifecycle, timed collapse — carry over unchanged; only the
+  query's scope widens.
+- **Who it serves, once built.** The PM operator running several sessions at
+  once (§2.1) and the wall display's unfiltered rotation (§2.4) both describe
+  this view. Until it lands, each gets a per-session dashboard per session
+  instead.
+- **Milestone 72 predates this ruling.** Its title,
+  "trusty-mpm dashboard — machine-wide event visualization (DOC-73)", names
+  what is now the deferred phase this subsection describes, not the
+  per-session phase §9 orders first. Re-titling or splitting milestone 72 is a
+  milestone-tracker follow-up, not a change this spec makes.
 
 ---
 
@@ -1119,7 +1168,9 @@ browser ceilings are initial values rather than derived ones.
 ## {#SPEC-UNIDASH-11~draft} 11. Implementation issues to cut
 
 Milestone 72 cut these as ten slices, re-scoped to the 2026-09-05
-push-to-console ruling (§4.1). Each references #6611.
+push-to-console ruling (§4.1). Each references #6611. Milestone 72's title
+now names the deferred machine-wide phase, not the per-session phase these
+slices build first — see §5.4.
 
 1. [#6846](https://github.com/bobmatnyc/trusty-tools/issues/6846) — Types-only
    move: relocate the `HarnessEvent` envelope and lifecycle/filter types from

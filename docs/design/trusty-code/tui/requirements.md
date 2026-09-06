@@ -163,19 +163,45 @@ session (`interaction-model.md` context). — **NEW**, optional.
 (`interaction-model.md` "Quick commands"). — **NEW**, optional, folds into
 R17.
 
-## Conflicts and flags (not resolved here)
+## Resolved by owner ruling, 2026-09-06 (now MUST)
 
-**R23 — CONFLICT with DOC-50 §3.1/§9 Q3.** DOC-50 mandates ratatui's
-alt-screen + raw mode unconditionally in the shared `trusty-code-tui` crate
-(§2.2/§3.1) and defers an SSH/narrow-terminal plain-line fallback to Phase 2
-(§9 Q3, "RESOLVED … Phase 2"). The real Claude Code TUI instead keeps
-**classic (non-alt-screen) rendering as the default in more situations than
-fullscreen**, and reserves fullscreen for terminals/situations it can
-positively detect as compatible (`rendering-and-layout.md` "Transcript
-structure"; fullscreen doc "Fullscreen by default" table). Flagging for Bob:
-should trusty-code-tui's Phase-2 SSH fallback follow DOC-50's original
-plain-line design, or invert to "classic is the default, alt-screen is the
-opt-in enhancement" the way the real product now does? Not resolved here.
+**R23 (owner ruling, 2026-09-06).** The TUI MUST render so the terminal's
+native scrollback survives. Alt-screen MUST NOT be the default rendering
+mode; classic/inline rendering — like Claude Code's own default
+(`rendering-and-layout.md` "Transcript structure") — is the default, and
+fullscreen is at most an opt-in mode. — **Resolves R23**, previously flagged
+as a conflict with DOC-50 §3.1/§9 Q3, which mandated ratatui's alt-screen +
+raw mode unconditionally in the shared `trusty-code-tui` crate and deferred
+an SSH/narrow-terminal plain-line fallback to Phase 2 (§9 Q3, "RESOLVED …
+Phase 2"). Asked what trusty-code-tui uses today (alt-screen + raw mode via
+ratatui/crossterm, DOC-50 `setup_terminal`), the owner ruled:
+
+> "I want rendering that allows scroll back."
+> — Bob, 2026-09-06
+
+DOC-50 is amended accordingly — see its 2026-09-06 Amendment near
+`setup_terminal`, the Phase 2 SSH fallback, and the "requires full-size
+terminal with alt-screen support" known limitation. The SSH/narrow-terminal
+plain-line fallback (#3405) is no longer a separate Phase 2 feature: classic
+rendering is the default everywhere, so the same rendering mode already
+covers SSH and narrow terminals. Cross-reference R16.
+
+**R25 (owner ruling, 2026-09-06).** The `/resume`-equivalent picker MUST read
+the shared trusty-mpm project registry (DOC-48 §8 Rev 9, DOC-39 §5.8.1, issue
+#3435) and MUST filter its roster to the project that owns the current
+working directory — registry and cwd are meant to agree. A cwd outside any
+registered project is a designed-for edge case, not an error: the picker MUST
+either offer to register the cwd as a new project, or show every registry
+project and let the user pick one, and when the user picks, the picker MUST
+mark that pick as the PM's assumption rather than a confirmed match. —
+**Resolves R25**, previously flagged as a conflict between cloning Claude
+Code's cwd-scoped `/resume` picker verbatim and the owner directive to source
+the roster from the shared trusty-mpm registry:
+
+> "Resume picker should use registry which should align to cwd."
+> — Bob, 2026-09-06
+
+## Conflicts and flags (not resolved here)
 
 **R24 — CONFLICT with DOC-50 §2.1 C-4 (thin-client axiom).** The real Claude
 Code TUI sources its PR/MR badge (R18) and spell-check (R17) from **local**
@@ -190,23 +216,12 @@ already states for any such case. Flagging for Bob: is a daemon-side
 descoped for trusty-code-tui because the daemon should never shell out to
 per-user local tooling on the client's behalf?
 
-**R25 — CONFLICT with owner directive (trusty-mpm project registry reuse).**
-The real Claude Code TUI's project/session picker (`/resume`,
-`screen-inventory.md` §16) is scoped to sessions in the current working
-directory tree only. The owner directive in force for trusty-code (DOC-48
-§8 Rev 9, DOC-39 §5.8.1, issue #3435) requires any project/workstream roster
-the TUI shows to come from the **shared trusty-mpm project registry**, which
-is cross-project by design. Any trusty-code-tui `/resume`-equivalent picker
-therefore needs a roster source model that has no direct analogue in the
-real product being cloned — flagging that "clone Claude Code's picker
-verbatim" and "source the roster from the shared trusty-mpm registry" are in
-tension, not identical asks. Not resolved here.
-
 ## Summary counts
 
-- MUST: R1–R12 (12)
+- MUST: R1–R12, R23, R25 (14)
 - SHOULD: R13–R19 (7)
 - MAY: R20–R22 (3)
-- Flagged conflicts: R23, R24, R25 (3) — counted separately, not folded into
-  the MUST/SHOULD/MAY totals above since each is a flag, not an accepted
-  requirement.
+- Flagged conflicts: R24 (1) — counted separately, not folded into the
+  MUST/SHOULD/MAY totals above since it is a flag, not an accepted
+  requirement. R23 and R25 were flagged conflicts too, until the 2026-09-06
+  owner rulings above resolved each into a MUST.
