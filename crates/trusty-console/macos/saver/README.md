@@ -17,7 +17,7 @@ or runs on Linux, and no CI job covers it (see "Not covered" below).
 | `Info.plist` | Bundle plist template. `__CONSOLE_VERSION__` is replaced at build time. |
 | `Resources/ConsolePreview.png` | Static render of the dashboard's services frame — the gallery tile and the offline fallback (#6839). Generated, committed, copied into `Contents/Resources/` at build time. |
 | `LoadHarness.swift` | Bundle-load smoke test — resolves the principal class and asserts the page loads. |
-| `PaintHarness.swift` | Paint regression harness — reads the rendered bitmap in the offline, slow-daemon and preview states (#6838). |
+| `PaintHarness.swift` | Paint regression harness — reads the rendered bitmap in the offline, slow-daemon and preview states (#6838), and tracks the web view across a late host resize (#6871). Runs at any frame size. |
 
 The bundle is assembled by `scripts/build-console-saver.sh` and copied into place
 by `scripts/install-console-saver.sh`, both at the repo root.
@@ -133,7 +133,7 @@ daemon**: each mode builds its own endpoint.
 swiftc -O -swift-version 5 -o target/console-saver/harness/paintharness \
   crates/trusty-console/macos/saver/PaintHarness.swift
 
-for mode in offline slow preview; do
+for mode in offline slow preview resize; do
   ./target/console-saver/harness/paintharness "$mode" \
     target/console-saver/TrustyConsole.saver || echo "FAILED: $mode"
 done
@@ -147,14 +147,45 @@ unoptimised build spends over a second in it.
 | `offline` | a closed port | ≥98% of pixels non-black and ≥2% carrying drawn content, both before `startAnimation()` and after |
 | `slow` | a listener that accepts and never answers | the same, plus ≥3 connection attempts in 34 s — i.e. the load timed out and retried instead of hanging on `URLRequest`'s 60 s default |
 | `preview` | none (`isPreview: true`) | the bundled asset draws, and no `WKWebView` is built for a tile |
+| `resize` | the real console (7788, or `SAVER_HARNESS_PORT`) | after a late growth: `webView.frame == view.bounds`, the page's own `innerWidth`×`innerHeight` equals those bounds, and none of five edge samples is black (#6871) |
 
-Measured ink ratios at 1280×800, unfixed bundle → fixed:
+### Frame size (#6871)
 
-| Mode | Unfixed | Fixed |
-|---|---|---|
-| `offline` | 0.0034 | 0.0417 |
-| `slow` | 0.0034 | 0.0417 |
-| `preview` | 0.0022 | 0.1152 |
+Every mode runs at the frame you give it, so the ultrawide geometry #6871 was
+reported on is reachable:
+
+```bash
+./target/console-saver/harness/paintharness offline \
+  target/console-saver/TrustyConsole.saver --frame 3440x1440
+SAVER_HARNESS_FRAME=3440x1440 ./target/console-saver/harness/paintharness offline \
+  target/console-saver/TrustyConsole.saver
+```
+
+The default is 1280×800, unchanged, so an invocation with no `--frame` still
+measures what the ink table below was measured at. An explicit `--frame` wins
+over `SAVER_HARNESS_FRAME`.
+
+`resize` takes a second size: `--start WxH` is the frame the view is
+CONSTRUCTED at before the host grows it to `--frame` (default 320×200, the rough
+size of a System Settings preview). `--start 0x0` exercises the fully degenerate
+case — a view built before the host knows which screen it is on. A 0×0 start has
+no bitmap to read, so that run skips the two pre-resize captures and reports it.
+
+`resize` is the one mode that wants a **live console**; the others build their
+own endpoint and need none. Without one it still asserts the frame geometry and
+prints `SKIP viewport check`.
+
+Measured ink ratios, unfixed bundle → fixed:
+
+| Mode | Unfixed @1280×800 | Fixed @1280×800 | Fixed @3440×1440 |
+|---|---|---|---|
+| `offline` | 0.0034 | 0.0417 | 0.0328 |
+| `slow` | 0.0034 | 0.0417 | 0.0328 |
+| `preview` | 0.0022 | 0.1152 | 0.0942 |
+
+The ultrawide column is lower because the fallback asset is 16:9 and is drawn to
+FIT: on a 21:9 frame it letterboxes, and about a quarter of the width is flat
+background. The 2% bar is not per-frame and is still cleared.
 
 Exit 0 passes; 9 is an assertion failure (every failed assertion is printed);
 2–6 and 8 are setup failures (bundle, principal class, endpoint, bitmap). Like
@@ -164,6 +195,21 @@ sandboxed host.
 The `slow` mode is the regression guard for #6838: against an unfixed bundle it
 reports **one** connection attempt in 34 s, because nothing bounded the load.
 The fixed bundle reports four.
+
+**`resize` is not a regression guard for #6871, and cannot be made into one.**
+Measured against a bundle built from the pre-fix `main` (37d6f11), it passes:
+AppKit's autoresizing already keeps the web view at `bounds` through a
+host-driven `setFrameSize`, from a 320×200 start and from 0×0 alike. What the
+mode does guard is the invariant the fix makes explicit — that the web view owns
+the whole view after a late resize — against a future change to the view
+hierarchy that autoresizing would not survive. The ultrawide symptom itself
+remains unreproduced outside the real host; see "Not covered".
+
+The 1 s first-paint budget is a **machine-load** measurement, not a geometry one.
+It fails on a busy host in every mode (2.7 s at 3440×1440 with a load average of
+24 on 16 cores) because the clock spans WebKit's XPC bring-up. Report it; do not
+raise it. `firstPaintDeadline` in `PaintHarness.swift` says why it is the
+harness's weakest assertion.
 
 ### Manual verification (still owed)
 
@@ -180,6 +226,22 @@ log stream --predicate 'subsystem == "com.trusty.console.saver"'
 Expect `init`, `loading`, then `didFinish`. An `offline` line instead means the
 sandboxed `legacyScreenSaver.appex` host could not reach 127.0.0.1 — the one
 thing the spike could not settle from outside the host.
+
+**Reading it after the fact (#6871).** `log stream` only shows what happens while
+you watch. The `init` and `startAnimation` lines are logged at `.default`, which
+`log show` persists, so a report can carry the geometry the host actually handed
+the view:
+
+```bash
+log show --last 30m --predicate 'subsystem == "com.trusty.console.saver"' --info
+```
+
+`init frame=…` is the frame the host passed to `init(frame:isPreview:)`;
+`startAnimation bounds=…` is what the view owned by the time it loaded the page.
+Those two numbers against the display's real resolution say whether a
+fits-the-screen complaint is the host handing over the wrong frame or the page
+laying out wrongly inside a correct one. Every other line stays at `.info` and is
+memory-only — `log stream` sees them, `log show` will not.
 
 ## Port and route override
 
@@ -222,6 +284,12 @@ configuration sheet this phase (`hasConfigureSheet` is `false`).
   its own data, so this is not a freshness mechanism.
 - **Multi-display** — the framework instantiates one view per screen, so each
   display gets its own web view and timers. No coordination is attempted.
+- **Tracks the frame** — the web view is sized from `bounds` in
+  `resizeSubviews(withOldSize:)` and again on the way into `startAnimation()`, so
+  a host that constructs the view at a preview size or 0×0 and supplies the real
+  screen afterwards cannot leave a mis-sized page on screen (#6871).
+  `autoresizingMask` stays as well; it is a hint about size CHANGES, not a
+  contract that the subview matches `bounds`.
 
 Colours are copied from `docs/design/UI/design-system/tokens.css`
 (`[data-theme='dark']`); the fallback is drawn natively and cannot pick up the
@@ -258,3 +326,18 @@ Reference host for the spike: macOS 26.5.2 arm64, `LSMinimumSystemVersion 13.0`.
   zipped bundle. Stapling is a distribution concern and nothing distributes this
   yet — see `docs/reference/release-workflow.md` for the workspace's Developer ID
   setup.
+- **The ultrawide mis-fit is not reproduced outside the real host (#6871).** The
+  `resize` mode grows the view the way a host that learns the screen late would,
+  and the pre-fix bundle passes it — so whatever the owner saw on a 3440×1440
+  display is not a plain `setFrameSize` the harness can drive. Two candidates the
+  harness cannot reach: the sandboxed `WallpaperLegacyExtension` host sizing the
+  view by a route that is not a subview resize at all, and the System Settings
+  preview pane, which draws the 16:9 fallback asset letterboxed on a 21:9 pane
+  and looks exactly like content that does not fit. The persisted `init frame=`
+  and `startAnimation bounds=` lines above are what the next report should carry
+  to tell those apart.
+- **`cacheDisplay` cannot read a live page.** It runs the view's own `draw(_:)`,
+  and a `WKWebView`'s remote layer is not part of that. The console's dark theme
+  uses the same `#201612` the view fills with, so an edge sample of a live frame
+  is background whether the page covers it or not. That is why `resize` asserts
+  the web view's frame and the page's own viewport rather than trusting pixels.

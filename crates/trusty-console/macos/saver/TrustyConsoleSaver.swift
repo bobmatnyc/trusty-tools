@@ -10,11 +10,15 @@
 //   at `http://127.0.0.1:<port><path>`, with a bundled static preview of the
 //   dashboard as its fallback, a bounded load timeout, a 5 s→30 s retry backoff
 //   while the console is down, and an hourly reload for long-run memory hygiene.
+//   The web view is sized from `bounds` on every host-driven resize and again on
+//   the way into `startAnimation()`, so a preview-sized or 0x0 init frame never
+//   survives to the first paint (#6871).
 // Test: `LoadHarness.swift` in this directory resolves the principal class,
 //   instantiates the view outside the screen-saver host and asserts `didFinish`
 //   fires; `PaintHarness.swift` reads the rendered bitmap in the offline,
-//   slow-daemon and preview states. The in-host run is manual — see README.md,
-//   "Manual verification".
+//   slow-daemon and preview states and tracks the web view's frame across a
+//   late host resize in the `resize` state. The in-host run is manual — see
+//   README.md, "Manual verification".
 //
 // Two constraints below are load-tested spike findings, not preference:
 //   * the class is `public` and carries NO `@objc(Name)` rename, so the runtime
@@ -154,9 +158,15 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         animationTimeInterval = 1.0
         autoresizingMask = [.width, .height]
 
-        os_log("init isPreview=%{public}@ url=%{public}@",
-               log: saverLog, type: .info,
-               String(describing: isPreview), config.url.absoluteString)
+        // #6871: `frame` here is the initializer's PARAMETER, which shadows the
+        // property — the frame the host actually handed this view, before any
+        // resize. That is the number a mis-sized-on-ultrawide report needs.
+        // `.default` rather than `.info` so `log show` persists it after the
+        // fact; `.info` entries are memory-only and gone by the time an operator
+        // files the bug.
+        os_log("init frame=%{public}@ isPreview=%{public}@ url=%{public}@",
+               log: saverLog, type: .default,
+               NSStringFromRect(frame), String(describing: isPreview), config.url.absoluteString)
 
         // The System Settings thumbnail is a few hundred pixels of a dashboard
         // nobody can read, and spinning up a WebContent XPC child for it is pure
@@ -191,6 +201,14 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
 
     public override func startAnimation() {
         super.startAnimation()
+        // #6871: the host may have constructed this view at a preview size or at
+        // 0x0 and supplied the screen's real bounds only afterwards. Size the web
+        // view from `bounds` before the load, so no init frame reaches the first
+        // paint.
+        webView?.frame = bounds
+        // #6871: `.default` so `log show` persists it — this line and the `init`
+        // one together say whether the host ever handed the view the real screen.
+        os_log("startAnimation bounds=%{public}@", log: saverLog, type: .default, NSStringFromRect(bounds))
         // #6838: ask for the fallback on the way in rather than waiting for the
         // first animation tick, so the very first frame the host composites is
         // already the preview and never an unpainted view.
@@ -198,6 +216,23 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         guard state != .preview else { return }
         loadConsole()
         scheduleReloadTimer()
+    }
+
+    /// Why: `autoresizingMask` is a hint that acts only on a superview-driven
+    ///   size change, not a contract that the subview matches `bounds`. The
+    ///   modern `WallpaperLegacyExtension` host can hand
+    ///   `init(frame:isPreview:)` a preview-sized or 0x0 frame and reach the real
+    ///   screen bounds by another route, and a web view left at the init frame
+    ///   draws the dashboard at the wrong size — reported on a 3440x1440
+    ///   ultrawide (#6871).
+    /// What: lets autoresizing run, then reasserts the web view's frame from
+    ///   `bounds`, which is the only authority on how much screen this view owns.
+    ///   A no-op in preview, which builds no web view.
+    /// Test: `PaintHarness.swift`'s `resize` mode instantiates the view small,
+    ///   grows it to the target frame, and asserts `webView.frame == bounds`.
+    public override func resizeSubviews(withOldSize oldSize: NSSize) {
+        super.resizeSubviews(withOldSize: oldSize)
+        webView?.frame = bounds
     }
 
     /// Why: `ScreenSaverView`'s contract is that the host drives repainting

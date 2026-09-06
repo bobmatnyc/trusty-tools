@@ -7,7 +7,7 @@
 //   "whatever the view paints when there is no live page", and all three were
 //   reported as a black screen. Nothing measured them, because measuring them
 //   means reading pixels, not navigation callbacks.
-// What: three modes, each instantiating the bundle's principal class offscreen
+// What: four modes, each instantiating the bundle's principal class offscreen
 //   and reading its rendered bitmap through
 //   `bitmapImageRepForCachingDisplay` / `cacheDisplay`:
 //     offline — points the view at a closed port; asserts the frame is not black
@@ -18,6 +18,12 @@
 //               retries instead of hanging.
 //     preview — instantiates with `isPreview: true`; asserts the bundled static
 //               asset is what draws, and that no web view is built for a tile.
+//     resize  — #6871: constructs the view SMALL, animates it, then grows it to
+//               the target frame the way a host that learns the screen late
+//               would; asserts the web view tracks `bounds`, that the page's own
+//               viewport matches, and that the frame is not black at its edges.
+//   Every mode takes the frame it runs at — `--frame WxH`, default 1280x800 —
+//   so the ultrawide geometry #6871 was reported on is reachable.
 // Test: it IS the test. README.md, "Paint harness", has the invocations;
 //   `scripts/build-console-saver.sh` builds the bundle it consumes.
 //
@@ -52,6 +58,12 @@ let minNonBlackRatio = 0.98
 /// worst fixed one. The offline number is the tight side because the asset is
 /// drawn at 35% there, which divides every source pixel's distance from the
 /// background back through that blend. Re-measure before moving it.
+///
+/// #6871: `--frame` moves the geometry those numbers came from. The fallback
+/// asset is drawn to FIT, so a frame wider than the asset's 16:9 letterboxes it
+/// and the ink ratio falls — offline 0.0417 → 0.0328 and preview 0.1152 →
+/// 0.0942 going from 1280x800 to 3440x1440.
+/// The bar is unchanged and still cleared; it is not per-frame.
 let minInkRatio = 0.02
 /// How long from the view being READY to its first non-black, non-empty frame.
 /// #6838's acceptance says one second, and measuring before `startAnimation()`
@@ -84,21 +96,79 @@ let minSlowModeAttempts = 3
 /// The Foundry dark background the view fills before drawing anything, from
 /// `docs/design/UI/design-system/tokens.css` (`--trusty-content-bg: #201612`).
 let backgroundRGB = (r: 0x20, g: 0x16, b: 0x12)
+/// Brightest channel value still counted as black. #6838's bar, named once so
+/// the whole-frame ratio and #6871's five edge samples cannot drift apart.
+let nearBlackLevel = 8
+/// How long `resize` mode waits for the console before growing the view. Only
+/// the page-viewport assertion needs a live page; the frame assertions do not,
+/// so a timeout here downgrades that one check rather than failing the run.
+let resizeLiveWait: TimeInterval = 15
 
 // MARK: - Arguments
-
-let args = CommandLine.arguments
-let mode = args.count > 1 ? args[1] : ""
-let bundlePath = args.count > 2
-    ? args[2]
-    : NSHomeDirectory() + "/Library/Screen Savers/TrustyConsole.saver"
 
 func note(_ message: String) {
     FileHandle.standardError.write("PAINT: \(message)\n".data(using: .utf8)!)
 }
 
-guard ["offline", "slow", "preview"].contains(mode) else {
-    note("usage: paintharness <offline|slow|preview> [bundlePath]")
+/// `WxH` → an `NSSize`. 0 is ACCEPTED: a 0x0 start frame is the degenerate case
+/// #6871 exists to exercise, not a typo to reject.
+func parseSize(_ text: String) -> NSSize? {
+    let parts = text.lowercased().split(separator: "x", maxSplits: 1)
+    guard parts.count == 2,
+          let width = Double(parts[0]), let height = Double(parts[1]),
+          width >= 0, height >= 0, width <= 32768, height <= 32768 else { return nil }
+    return NSSize(width: width, height: height)
+}
+
+/// Unchanged from the harness's first cut, so an invocation with no `--frame`
+/// still measures what the #6838/#6839 ink table was measured at.
+let defaultFrameSize = NSSize(width: 1280, height: 800)
+/// What `resize` starts at: the rough size of a System Settings preview, i.e. a
+/// plausible frame for a host that has not yet decided which screen this is.
+let defaultStartSize = NSSize(width: 320, height: 200)
+
+var positional: [String] = []
+var frameSize: NSSize?
+var startSize: NSSize?
+
+var pending = Array(CommandLine.arguments.dropFirst())
+while let arg = pending.first {
+    pending.removeFirst()
+    switch arg {
+    case "--frame", "--start":
+        guard let value = pending.first, let size = parseSize(value) else {
+            note("\(arg) needs a WxH value, e.g. \(arg) 3440x1440")
+            exit(64)
+        }
+        pending.removeFirst()
+        if arg == "--frame" { frameSize = size } else { startSize = size }
+    default:
+        positional.append(arg)
+    }
+}
+
+// Env is the fallback, not an override: an explicit flag wins.
+if frameSize == nil, let env = ProcessInfo.processInfo.environment["SAVER_HARNESS_FRAME"] {
+    guard let size = parseSize(env) else {
+        note("SAVER_HARNESS_FRAME=\(env) is not a WxH size")
+        exit(64)
+    }
+    frameSize = size
+}
+
+let targetFrame = frameSize ?? defaultFrameSize
+let resizeStart = startSize ?? defaultStartSize
+
+let mode = positional.count > 0 ? positional[0] : ""
+let bundlePath = positional.count > 1
+    ? positional[1]
+    : NSHomeDirectory() + "/Library/Screen Savers/TrustyConsole.saver"
+
+guard ["offline", "slow", "preview", "resize"].contains(mode) else {
+    note("usage: paintharness <offline|slow|preview|resize> [bundlePath]"
+        + " [--frame WxH] [--start WxH]")
+    note("  --frame  the frame to run at (default 1280x800; env SAVER_HARNESS_FRAME)")
+    note("  --start  resize mode only: the frame to construct at (default 320x200)")
     exit(64)
 }
 
@@ -107,6 +177,9 @@ guard ["offline", "slow", "preview"].contains(mode) else {
 let defaultsDomain = "com.trusty.console.saver"
 let portKey = "ConsolePort"
 let pathKey = "ConsolePath"
+/// The console's default port, mirrored from `SaverConfig.defaultPort` — the
+/// port `resize` mode looks for a live dashboard on.
+let SaverDefaultPort = 7788
 let saverDefaults = ScreenSaverDefaults(forModuleWithName: defaultsDomain)
 let priorPort = saverDefaults?.object(forKey: portKey)
 let priorPath = saverDefaults?.object(forKey: pathKey)
@@ -244,7 +317,10 @@ func capture(_ view: NSView) -> NSBitmapImageRep? {
     return rep
 }
 
-func stats(of rep: NSBitmapImageRep) -> PaintStats? {
+/// Decodes a captured rep into a tightly-packed sRGB RGBA buffer. Shared by the
+/// whole-frame ratios and #6871's five edge samples so both read the same
+/// pixels through the same colour space.
+func pixels(of rep: NSBitmapImageRep) -> (width: Int, height: Int, buffer: [UInt8])? {
     guard let cgImage = rep.cgImage else { return nil }
 
     let width = cgImage.width
@@ -268,6 +344,11 @@ func stats(of rep: NSBitmapImageRep) -> PaintStats? {
         return true
     }
     guard drew else { return nil }
+    return (width, height, buffer)
+}
+
+func stats(of rep: NSBitmapImageRep) -> PaintStats? {
+    guard let (width, height, buffer) = pixels(of: rep) else { return nil }
 
     var nonBlack = 0
     var ink = 0
@@ -278,7 +359,7 @@ func stats(of rep: NSBitmapImageRep) -> PaintStats? {
         let r = Int(buffer[offset])
         let g = Int(buffer[offset + 1])
         let b = Int(buffer[offset + 2])
-        if max(r, max(g, b)) > 8 { nonBlack += 1 }
+        if max(r, max(g, b)) > nearBlackLevel { nonBlack += 1 }
         let distance = abs(r - backgroundRGB.r) + abs(g - backgroundRGB.g) + abs(b - backgroundRGB.b)
         if distance > 24 { ink += 1 }
         index += 1
@@ -289,6 +370,31 @@ func stats(of rep: NSBitmapImageRep) -> PaintStats? {
         height: height,
         nonBlackRatio: Double(nonBlack) / Double(total),
         inkRatio: Double(ink) / Double(total))
+}
+
+/// #6871: one sample inside each corner plus the centre — the five points a web
+/// view that failed to grow would leave unpainted along an edge.
+///
+/// This is the "never black" bar (#6838) restated at the target frame, and that
+/// is ALL it is. `cacheDisplay` reads the view's own `draw(_:)`, and the live
+/// page's background is the same `#201612` the view fills with, so these samples
+/// cannot tell a correctly sized page from a letterboxed one. The frame equality
+/// and the page-viewport check are what prove the fit.
+func edgeSamples(of rep: NSBitmapImageRep) -> [(name: String, r: Int, g: Int, b: Int)]? {
+    guard let (width, height, buffer) = pixels(of: rep) else { return nil }
+    let inset = 8
+    guard width > inset * 2, height > inset * 2 else { return nil }
+    let points: [(String, Int, Int)] = [
+        ("top-left", inset, inset),
+        ("top-right", width - 1 - inset, inset),
+        ("bottom-left", inset, height - 1 - inset),
+        ("bottom-right", width - 1 - inset, height - 1 - inset),
+        ("centre", width / 2, height / 2),
+    ]
+    return points.map { name, x, y in
+        let offset = (y * width + x) * 4
+        return (name, Int(buffer[offset]), Int(buffer[offset + 1]), Int(buffer[offset + 2]))
+    }
 }
 
 // MARK: - Bundle load
@@ -317,6 +423,13 @@ case "slow":
     }
     silent = listener
     pointView(atPort: listener.port)
+case "resize":
+    // #6871 is a LIVE-page defect, so this mode points at the real console
+    // rather than a stand-in. It still runs without one — only the viewport
+    // assertion needs the page.
+    let port = ProcessInfo.processInfo.environment["SAVER_HARNESS_PORT"].flatMap(Int.init)
+        ?? SaverDefaultPort
+    pointView(atPort: port)
 default:
     break // preview never touches the network
 }
@@ -326,8 +439,14 @@ default:
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
-let frame = NSRect(x: 0, y: 0, width: 1280, height: 800)
+// #6871: `resize` deliberately constructs the view SMALL and grows it later, so
+// it is the one mode whose initial frame is not the frame under test.
+let initialSize = mode == "resize" ? resizeStart : targetFrame
+let frame = NSRect(origin: .zero, size: initialSize)
 let isPreview = mode == "preview"
+/// A 0x0 frame has no bitmap to read — `resize --start 0x0` asks for exactly
+/// that, and its assertions all land after the growth.
+let initialFrameIsMeasurable = initialSize.width > 0 && initialSize.height > 0
 
 var failures: [String] = []
 
@@ -342,29 +461,35 @@ window.contentView = view
 window.orderFrontRegardless()
 window.setFrameOrigin(NSPoint(x: -5000, y: -5000)) // offscreen: do not disturb the operator
 
+note("constructed at \(Int(initialSize.width))x\(Int(initialSize.height)); view.bounds=\(NSStringFromRect(view.bounds))")
+
 // No run loop first: `cacheDisplay` drives `draw(_:)` synchronously, so this is
 // the earliest frame the view can possibly produce.
-guard let firstRep = capture(view) else {
-    note("FAIL — could not read the view's bitmap")
-    silent?.stop()
-    finish(8)
-}
-let firstPaintElapsed = Date().timeIntervalSince(readyAt)
-guard let firstFrame = stats(of: firstRep) else {
-    note("FAIL — could not decode the captured bitmap")
-    silent?.stop()
-    finish(8)
-}
-note("first frame at \(String(format: "%.2f", firstPaintElapsed))s after init returned: \(firstFrame.summary)")
+if initialFrameIsMeasurable {
+    guard let firstRep = capture(view) else {
+        note("FAIL — could not read the view's bitmap")
+        silent?.stop()
+        finish(8)
+    }
+    let firstPaintElapsed = Date().timeIntervalSince(readyAt)
+    guard let firstFrame = stats(of: firstRep) else {
+        note("FAIL — could not decode the captured bitmap")
+        silent?.stop()
+        finish(8)
+    }
+    note("first frame at \(String(format: "%.2f", firstPaintElapsed))s after init returned: \(firstFrame.summary)")
 
-if firstPaintElapsed > firstPaintDeadline {
-    failures.append(String(format: "first frame took %.2fs, budget %.2fs", firstPaintElapsed, firstPaintDeadline))
-}
-if firstFrame.nonBlackRatio < minNonBlackRatio {
-    failures.append(String(format: "frame is black: nonBlack=%.4f < %.4f", firstFrame.nonBlackRatio, minNonBlackRatio))
-}
-if firstFrame.inkRatio < minInkRatio {
-    failures.append(String(format: "no static fallback drawn: ink=%.4f < %.4f", firstFrame.inkRatio, minInkRatio))
+    if firstPaintElapsed > firstPaintDeadline {
+        failures.append(String(format: "first frame took %.2fs, budget %.2fs", firstPaintElapsed, firstPaintDeadline))
+    }
+    if firstFrame.nonBlackRatio < minNonBlackRatio {
+        failures.append(String(format: "frame is black: nonBlack=%.4f < %.4f", firstFrame.nonBlackRatio, minNonBlackRatio))
+    }
+    if firstFrame.inkRatio < minInkRatio {
+        failures.append(String(format: "no static fallback drawn: ink=%.4f < %.4f", firstFrame.inkRatio, minInkRatio))
+    }
+} else {
+    note("start frame is 0x0 — no bitmap to read before the resize")
 }
 
 // Now start it, and confirm the frame survives the load attempt. No time budget
@@ -372,7 +497,9 @@ if firstFrame.inkRatio < minInkRatio {
 // latency to answer for.
 view.startAnimation()
 RunLoop.current.run(until: Date().addingTimeInterval(0.5))
-if let animRep = capture(view), let animFrame = stats(of: animRep) {
+if !initialFrameIsMeasurable {
+    note("skipping the post-startAnimation capture: the view is still 0x0")
+} else if let animRep = capture(view), let animFrame = stats(of: animRep) {
     note("frame after startAnimation: \(animFrame.summary)")
     if animFrame.nonBlackRatio < minNonBlackRatio {
         failures.append(String(format: "frame went black once animating: nonBlack=%.4f", animFrame.nonBlackRatio))
@@ -391,6 +518,74 @@ case "preview":
     // A tile must not cost a WebContent XPC child; the asset is the whole point.
     if view.subviews.contains(where: { $0 is WKWebView }) {
         failures.append("preview built a WKWebView")
+    }
+
+case "resize":
+    // #6871: give the page a chance to come up FIRST, so the growth models a
+    // host that hands over the real screen after the saver is already running —
+    // the order the owner's ultrawide report happened in.
+    let liveBy = Date().addingTimeInterval(resizeLiveWait)
+    var live = false
+    while Date() < liveBy && !live {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        live = view.subviews.compactMap { $0 as? WKWebView }.first.map { !$0.isHidden } ?? false
+    }
+    note("console live before the resize: \(live)")
+
+    note("resizing \(Int(initialSize.width))x\(Int(initialSize.height))"
+        + " → \(Int(targetFrame.width))x\(Int(targetFrame.height))")
+    window.setContentSize(targetFrame)
+    RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+
+    guard let web = view.subviews.compactMap({ $0 as? WKWebView }).first else {
+        failures.append("no web view to size — the view built none")
+        break
+    }
+    note("after the resize: view.bounds=\(NSStringFromRect(view.bounds))"
+        + " webView.frame=\(NSStringFromRect(web.frame))")
+    // The issue's own closure condition: the web view owns the whole view.
+    if web.frame != view.bounds {
+        failures.append("web view does not track the bounds:"
+            + " frame=\(NSStringFromRect(web.frame)) bounds=\(NSStringFromRect(view.bounds))")
+    }
+
+    // What the report was actually about — the PAGE's viewport, which the
+    // bitmap cannot see (`edgeSamples` says why). Only a live page can answer.
+    if web.isHidden {
+        note("SKIP viewport check — the console never went live on this run")
+    } else {
+        var viewport: String?
+        let answered = DispatchSemaphore(value: 0)
+        web.evaluateJavaScript("[window.innerWidth, window.innerHeight].join('x')") { value, error in
+            viewport = value as? String ?? "<error: \(error?.localizedDescription ?? "nil")>"
+            answered.signal()
+        }
+        // The completion lands on the main queue, so the run loop has to turn.
+        let answerBy = Date().addingTimeInterval(5)
+        while answered.wait(timeout: .now()) == .timedOut && Date() < answerBy {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        let expected = "\(Int(view.bounds.width))x\(Int(view.bounds.height))"
+        note("page viewport=\(viewport ?? "<timeout>") expected=\(expected)")
+        if viewport != expected {
+            failures.append("page viewport \(viewport ?? "<timeout>") != view bounds \(expected)")
+        }
+    }
+
+    if let grownRep = capture(view), let samples = edgeSamples(of: grownRep) {
+        note("edge samples: " + samples.map { "\($0.name)=(\($0.r),\($0.g),\($0.b))" }.joined(separator: " "))
+        for sample in samples where max(sample.r, max(sample.g, sample.b)) <= nearBlackLevel {
+            failures.append("frame is black at \(sample.name) after the resize:"
+                + " (\(sample.r),\(sample.g),\(sample.b))")
+        }
+        if let grown = stats(of: grownRep) {
+            note("frame after the resize: \(grown.summary)")
+            if grown.nonBlackRatio < minNonBlackRatio {
+                failures.append(String(format: "frame went black across the resize: nonBlack=%.4f", grown.nonBlackRatio))
+            }
+        }
+    } else {
+        failures.append("could not read the view's bitmap after the resize")
     }
 
 case "slow":
