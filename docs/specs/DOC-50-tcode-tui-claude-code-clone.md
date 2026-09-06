@@ -419,14 +419,14 @@ belongs to trusty-memory).
 - Tool-call cards: fancy rendering of tool invocations (blocks, colors, indentation).
 - Streaming diffs: code changes render incrementally (Phase 2B+).
 - Model/agent pickers: modal/inline UI (reuse from tagent's pickers).
-- SSH fallback (#3405): detect narrow terminals (< 80 cols?) and fall back to plain-line mode (no alt-screen, no ratatui).
+- SSH fallback (#3405): detect narrow terminals (< 80 cols?) and fall back to plain-line mode (no alt-screen, no ratatui). *(Superseded — see the 2026-09-06 Amendment near Q3: this is no longer a separate Phase 2 feature.)*
 - Workstream switcher UI: header showing active workstream name; Ctrl-w or `/ws activate` with inline picker.
 
 **Acceptance criteria:**
 - Permission prompts are surfaced and responses are relayed to the daemon.
 - Tool calls render with colors and indentation.
 - Users can pick models and agents via TUI modal (not just text commands).
-- SSH mode works (plain-line fallback, no alt-screen).
+- SSH mode works (plain-line fallback, no alt-screen). *(Superseded — see the 2026-09-06 Amendment near Q3.)*
 
 ### 4.3 Phase 3 (future) — Suggested next prompts, advanced workstream features
 
@@ -486,7 +486,7 @@ Each slice is independently shippable and critic-gateable.
 **What:** Implement the panic-safe terminal RAII guards, event channel, key reader thread, 100ms-tick loop, and validate ratatui 0.30 compatibility.
 
 **Deliverable:**
-- `setup_terminal()` → Terminal with alt-screen + raw mode + mouse capture.
+- `setup_terminal()` → Terminal with alt-screen + raw mode + mouse capture. *(Superseded — see the 2026-09-06 Amendment near Q3: alt-screen is no longer the default mode `setup_terminal` enters.)*
 - `restore_terminal()` RAII guard implemented as Drop trait (panic-safe: terminal is restored even if event loop panics).
 - Key reader thread spawned; KeyEvent routed to mpsc channel.
 - 100ms-tick interval with backpressure note (see §10 below).
@@ -672,7 +672,43 @@ Removes vulnerable `lru` transitive (#2886). Spike de-risks incompatibilities be
 
 **RESOLVED (Bob, 2026-07-20):** Phase 2 (not MVP).
 
-Known limitation: "tcode tui requires full-size terminal with alt-screen support; SSH/narrow terminals use `tcode run-task` CLI."
+Known limitation: "tcode tui requires full-size terminal with alt-screen support; SSH/narrow terminals use `tcode run-task` CLI." *(Superseded — see the 2026-09-06 Amendment immediately below.)*
+
+### 2026-09-06 Amendment: rendering mode
+
+**This amendment supersedes Q3's alt-screen mandate and the alt-screen +
+raw mode default stated at `setup_terminal()` (§3.1 Slice 2) and in §4.2's
+Phase 2 feature list. It does not rewrite this spec's body — the superseded
+text stays in place with a pointer to this section.**
+
+Asked what trusty-code-tui uses today for rendering (alt-screen + raw mode
+via ratatui/crossterm, `setup_terminal`), the owner ruled (resolves R23 in
+`docs/design/trusty-code/tui/requirements.md`):
+
+> "I want rendering that allows scroll back."
+> — Bob, 2026-09-06
+
+**What is superseded.** Q3's resolution treated alt-screen + raw mode as the
+unconditional default and treated a plain-line SSH/narrow-terminal fallback
+as a separate Phase 2 feature (#3405) layered on top of that default.
+
+**What replaces it.**
+
+- The TUI renders so the terminal's own native scrollback survives. Classic,
+  scrollback-append rendering — the same shape Claude Code's own CLI defaults
+  to — is the default rendering mode, not alt-screen.
+- Alt-screen is no longer the default `setup_terminal()` enters. A fullscreen,
+  alt-screen mode may still exist, but only as an explicit opt-in, never the
+  mode a plain `tcode tui` invocation starts in.
+- The SSH/narrow-terminal plain-line fallback (#3405) is no longer a separate
+  Phase 2 phase. Classic rendering is now the default in every terminal, so
+  the same rendering mode already covers SSH sessions and narrow terminals —
+  there is no second code path left to build in Phase 2 for that case.
+
+This is a MUST per `docs/design/trusty-code/tui/requirements.md` R23.
+Implementation (the `setup_terminal()` default, the Slice 2/Phase 2 acceptance
+criteria above, and any successor to Q3) is a follow-up engineering change to
+this spec's body, not made in this amendment.
 
 ### Q4 — Engine adapter flexibility (slash command routing)
 
