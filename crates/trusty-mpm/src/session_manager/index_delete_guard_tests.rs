@@ -64,6 +64,10 @@ fn refusing(code: i64, message: &str) -> impl Fn(&str, Value) -> MockFuture + Se
 /// Reverting the `running_under_test_harness` branch in `acquire` fails this on
 /// any machine with a running trusty-search daemon.
 /// Test: this function IS the test.
+// #6863: two siblings set `TRUSTY_ALLOW_PRODUCTION_STATE` process-globally, which
+// `acquire` reads first — only local `cargo test` shares a process, since main's
+// nextest shards give every test its own (CLAUDE.md, #4162).
+#[serial_test::serial]
 #[test]
 fn acquire_is_refused_under_a_test_harness() {
     assert!(
