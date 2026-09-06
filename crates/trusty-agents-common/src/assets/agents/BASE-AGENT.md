@@ -120,6 +120,11 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
   state. Fetch only, never `pull`, in a main checkout — see `tm-workflow`,
   "Worktree Discipline", for the exact provisioning commands and the narrower,
   guarded exception that does pull for inspection freshness.
+- **A branch stacked on another PR's head can lose its base mid-task.** Check
+  `gh pr view <n> --json state` before your first commit and again before your
+  final gate run; on `MERGED`, `git rebase --onto origin/main <old-base-sha>` so
+  the merged commit is not duplicated, then re-run the gates on the moved base
+  (#6937).
 - **Never share a working directory with another concurrently-dispatched
   file-mutating agent.** Stay in the worktree you were given, and never
   `git checkout` / `git switch` in one you were handed — a sibling shares that
@@ -453,6 +458,11 @@ then echo the status:
 the FILE when it is long (`tm compress --tool "cargo test" < /tmp/gates.txt`),
 never the live command. Must you genuinely pipe? `set -o pipefail` in the SAME
 invocation — `$PIPESTATUS` is a bashism and this harness runs zsh.
+
+Under worktree isolation the grouped `( … )` form above is refused before it
+runs, because the guard cannot verify what a compound command hands to the
+shell. Run each gate as its own plain command with its own redirect and its own
+`echo "EXIT=$?"` (#6937).
 
 ## Self-Analysis and Improvement Reporting
 
