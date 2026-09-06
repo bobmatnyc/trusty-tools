@@ -17,6 +17,10 @@ mod tests;
 #[cfg(test)]
 mod tests_2936;
 mod types;
+// #6826: the whole view↔heap demotion state machine (the #2164 clean-store
+// demote and the write-cooldown demote), in its own file so
+// `usearch_store.rs` stays under the 500-SLOC production cap.
+mod usearch_demote;
 mod usearch_impl;
 // Issue #4707: snapshot-adoption recovery for the #1711 guard. Kept in its own
 // file so `usearch_store.rs` stays under the 500-SLOC production cap.
@@ -26,5 +30,5 @@ mod usearch_recover;
 mod usearch_requant;
 mod usearch_store;
 
-pub use self::types::{RequantizeReport, StagedSwapOutcome, VectorHit, VectorStore};
+pub use self::types::{DemoteStats, RequantizeReport, StagedSwapOutcome, VectorHit, VectorStore};
 pub use self::usearch_store::UsearchStore;

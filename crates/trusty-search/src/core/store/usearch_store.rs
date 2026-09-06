@@ -346,16 +346,23 @@ pub struct UsearchStore {
     /// otherwise the demotion would silently roll back unsaved vectors the
     /// next time the index is queried or promoted again. This flag is the
     /// single source of truth for that guarantee: every graph-mutating path
-    /// (`upsert`, `remove`, `upsert_batch`) sets it `true` before releasing
-    /// the HNSW write lock; [`Self::save`] clears it back to `false` once the
-    /// snapshot is actually flushed; [`Self::promote_view_to_mutable`] clears
-    /// it because a fresh `Index::load` is by definition in sync with disk.
+    /// (`upsert`, `remove`, `upsert_batch`) sets it `true` via
+    /// [`Self::mark_dirty`] before releasing the HNSW write lock;
+    /// [`Self::save`] clears it back to `false` once the snapshot is actually
+    /// flushed AND no write raced that flush (#6826 — see `write_clock`);
+    /// [`Self::promote_view_to_mutable`] clears it because a fresh
+    /// `Index::load` is by definition in sync with disk.
     /// What: read by [`Self::try_demote_to_view`] (outside the lock as a fast
     /// pre-check, then again under the write lock as the authoritative
     /// check) to refuse demotion whenever there is unpersisted state.
     /// Test: `tests::test_demote_to_view_full_cycle`,
     /// `tests::test_demote_to_view_skips_when_dirty`.
     pub(super) dirty: Arc<AtomicBool>,
+    /// When this store's graph was last mutated, and how many mutations have
+    /// been recorded (issue #6826). See [`super::usearch_demote::WriteClock`]
+    /// for why both readings are needed and
+    /// [`Self::try_demote_after_write_cooldown`] for how they are used.
+    pub(super) write_clock: Arc<super::usearch_demote::WriteClock>,
     /// Serializes the entire `save()` operation (both the HNSW write+rename
     /// and the sidecar write+rename) for this store instance.
     ///
@@ -470,6 +477,7 @@ impl UsearchStore {
             is_view: Arc::new(AtomicBool::new(false)),
             hnsw_path: Arc::new(RwLock::new(None)),
             dirty: Arc::new(AtomicBool::new(false)),
+            write_clock: Arc::new(super::usearch_demote::WriteClock::new()),
             save_lock: Arc::new(tokio::sync::Mutex::new(())),
             removed_since_save: Arc::new(AtomicU64::new(0)),
         })
@@ -530,6 +538,15 @@ impl UsearchStore {
         // `save()` call on this store. See the `save_lock` field doc for why
         // this is required beyond the HNSW `RwLock` alone.
         let _save_guard = self.save_lock.clone().lock_owned().await;
+
+        // #6826: the mutation epoch as of the moment this save began. The
+        // HNSW write lock covers only the FFI serialize, not the renames that
+        // follow, so a writer can land between them; clearing `dirty`
+        // unconditionally at the end would then mark a graph clean whose newest
+        // vector is not in the file, and the demote would re-view over it.
+        // Comparing this reading against the epoch after the renames is what
+        // makes "clean" mean "clean as of the bytes actually written".
+        let epoch_at_start = self.write_clock.epoch();
 
         // Fast path: in view mode the in-memory state is a mmap of the
         // on-disk snapshot — there is nothing dirty to flush. Skipping the
@@ -748,7 +765,19 @@ impl UsearchStore {
         // store back to a view once it goes idle, and remember the path so a
         // store that was never `load_from`-ed (e.g. a brand-new index built
         // via `new()`) becomes demotion-eligible after its first save.
-        self.dirty.store(false, Ordering::Release);
+        //
+        // #6826: unless a write raced this save. `dirty` then stays set and the
+        // store simply is not demotion-eligible until the next save catches up
+        // — a missed reclamation cycle, never a lost vector.
+        if self.write_clock.epoch() == epoch_at_start {
+            self.dirty.store(false, Ordering::Release);
+        } else {
+            tracing::debug!(
+                "usearch: a write raced the save of {} — leaving the store marked dirty \
+                 so the demote sweep skips it (issue #6826)",
+                hnsw_path.display()
+            );
+        }
         {
             let mut path_guard = self.hnsw_path.write().await;
             if path_guard.as_deref() != Some(hnsw_path) {
@@ -1027,7 +1056,7 @@ impl UsearchStore {
             self.rebuild_mutable_from_view(&index, &path, &e.to_string())?;
             self.is_view.store(false, Ordering::Release);
             // Nothing on disk matches the rebuilt graph until the next save.
-            self.dirty.store(true, Ordering::Release);
+            self.mark_dirty();
             return Ok(());
         }
         let size = index.size();
@@ -1046,97 +1075,6 @@ impl UsearchStore {
             size
         );
         Ok(())
-    }
-
-    /// Demote a promoted, currently-idle store back to mmap-view mode,
-    /// releasing the heap-resident HNSW copy (issue #2164).
-    ///
-    /// Why: the #709 mmap-view optimization keeps a freshly warm-booted HNSW
-    /// index pageable (`load_from` calls `Index::view`), but ANY write —
-    /// `index_file`/`reindex`/file-watcher commit — promotes it to a full
-    /// heap copy via [`Self::promote_view_to_mutable`], and until this method
-    /// there was no path back. Live measurement on a 77-index production
-    /// daemon found mmap-resident was only ~80 KB total — i.e. nearly every
-    /// index had been promoted at least once and stayed heap-resident
-    /// forever afterward, even long after going idle. Re-viewing an idle,
-    /// disk-clean index lets it behave like a never-written warm-boot again.
-    /// What: a no-op (`Ok(false)`) unless the store is currently mutable
-    /// (`is_view == false`), has no unpersisted writes (`dirty == false`),
-    /// and has a known source path to re-open (`hnsw_path.is_some()`). Under
-    /// those conditions, takes the HNSW write lock — excluding concurrent
-    /// searches (which take a read lock) and concurrent writers/promoters
-    /// (which take the same write lock) — re-checks the same three
-    /// conditions (a racing writer may have promoted/mutated/demoted between
-    /// the fast pre-check and the lock acquisition), then calls `Index::view`
-    /// on the *same* `Index` handle, mirroring how
-    /// [`Self::promote_view_to_mutable`] calls `Index::load` in place on the
-    /// same handle for the reverse transition. `id_to_key` / `key_to_id` are
-    /// never touched — only the vector graph returns to mmap. Returns
-    /// `Ok(true)` when a demotion actually happened.
-    ///
-    /// CRITICAL correctness (never lose vectors): this only re-views from a
-    /// snapshot that is byte-for-byte the current in-memory graph — the
-    /// `dirty` gate refuses to demote whenever there is a mutation not yet
-    /// flushed by [`Self::save`]. Demotion is an optimization, not a
-    /// correctness requirement, so any doubt (unreadable path, non-UTF8
-    /// path, a racing writer, a `view()` failure) means "skip this cycle",
-    /// never "demote anyway".
-    /// Test: `tests::test_demote_to_view_full_cycle` exercises
-    /// view → promote (write) → demote → search → write (re-promote) →
-    /// search, asserting identical results and `in_view_mode()` at each step.
-    /// `tests::test_demote_to_view_skips_when_dirty` and
-    /// `tests::test_demote_to_view_skips_without_path` cover the guard.
-    pub(super) async fn try_demote_to_view(&self) -> Result<bool> {
-        // Fast pre-check without the write lock: skip the common case
-        // (already a view, dirty, or never associated with a source path)
-        // without contending for the lock that concurrent searches and
-        // writers also need.
-        if self.is_view.load(Ordering::Acquire) {
-            return Ok(false);
-        }
-        if self.dirty.load(Ordering::Acquire) {
-            return Ok(false);
-        }
-        let path = {
-            let guard = self.hnsw_path.read().await;
-            guard.clone()
-        };
-        let Some(path) = path else {
-            return Ok(false);
-        };
-        let Some(path_str) = path.to_str() else {
-            tracing::warn!(
-                "usearch: cannot demote {} to view — non-utf8 path",
-                path.display()
-            );
-            return Ok(false);
-        };
-        let path_str = path_str.to_string();
-
-        let index = self.index.write().await;
-        // Re-check under the write lock: `is_view` and `dirty` are only ever
-        // flipped by a caller holding this same write lock, so the values
-        // observed here are authoritative — a racing promote/mutate/demote
-        // between the fast pre-check and this point is caught here.
-        if self.is_view.load(Ordering::Acquire) || self.dirty.load(Ordering::Acquire) {
-            return Ok(false);
-        }
-
-        if let Err(e) = index.view(&path_str) {
-            tracing::warn!(
-                "usearch: failed to demote {} to view ({e}) — leaving index heap-resident",
-                path.display()
-            );
-            return Ok(false);
-        }
-        let size = index.size();
-        self.is_view.store(true, Ordering::Release);
-        tracing::info!(
-            "usearch: demoted mutable → view for {} ({} vectors, heap reclaimed)",
-            path.display(),
-            size
-        );
-        Ok(true)
     }
 
     /// Ensure the underlying HNSW has room for at least one more vector.

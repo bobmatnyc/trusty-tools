@@ -66,7 +66,7 @@ impl VectorStore for UsearchStore {
         // The in-memory graph now differs from the on-disk snapshot (issue
         // #2164) — the idle-demote sweep must skip this store until the next
         // `save()` flushes it.
-        self.dirty.store(true, Ordering::Release);
+        self.mark_dirty();
         Ok(())
     }
 
@@ -192,7 +192,7 @@ impl VectorStore for UsearchStore {
                 .remove(key)
                 .map_err(|e| anyhow!("usearch remove failed: {e}"))?;
             // Graph changed — see the `dirty` note in `upsert` (issue #2164).
-            self.dirty.store(true, Ordering::Release);
+            self.mark_dirty();
             // Issue #1717: credit this removal against the shrink guard in
             // `save()` ONLY when the HNSW graph actually lost a vector — not
             // merely when `id_to_key` lost an entry. `upsert()` inserts into
@@ -485,7 +485,7 @@ impl VectorStore for UsearchStore {
         // `save()` flush (issue #2164). Set while still holding the write
         // lock so a racing `try_demote_to_view` re-check under the same lock
         // always observes it.
-        self.dirty.store(true, Ordering::Release);
+        self.mark_dirty();
         // Drop the HNSW write lock before touching the id maps so we don't
         // hold two write locks at once.
         drop(index);
@@ -558,6 +558,15 @@ impl VectorStore for UsearchStore {
     /// [`UsearchStore::try_demote_to_view`] (issue #2164).
     async fn demote_to_view(&self) -> Result<bool> {
         self.try_demote_to_view().await
+    }
+
+    /// See [`VectorStore::persist_and_demote_after_write_cooldown`]; delegates
+    /// to [`UsearchStore::try_demote_after_write_cooldown`] (issue #6826).
+    async fn persist_and_demote_after_write_cooldown(
+        &self,
+        cooldown: std::time::Duration,
+    ) -> Result<Option<super::types::DemoteStats>> {
+        self.try_demote_after_write_cooldown(cooldown).await
     }
 
     /// Issue #6299: keep `hnsw_path` / `is_view` truthful across a reindex's

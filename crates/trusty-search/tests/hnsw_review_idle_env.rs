@@ -127,6 +127,72 @@ async fn hnsw_idle_demotion_skips_when_disabled_via_env() {
     assert!(usearch.in_view_mode());
 }
 
+/// `TRUSTY_HNSW_REVIEW_IDLE=0` also disables the #6826 WRITE-cooldown demote,
+/// not only the #2164 clean-store one (PM ruling on the #6826 critic round).
+///
+/// Why: that variable's contract is the kill switch for heap→view demotion as
+/// a MECHANISM. An operator who turned it off because the view↔load↔view cycle
+/// was risky on their deployment must not get demotion back through a new
+/// trigger. `TRUSTY_HNSW_DEMOTE_COOLDOWN_SECS` stays the fine-grained switch
+/// for the write-cooldown path alone.
+/// What: builds a store that is written, dirty, past its cooldown, and
+/// otherwise eligible, then asserts the cooldown demote is refused while the
+/// gate is off and proceeds once it is restored.
+/// Test: this IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn hnsw_write_cooldown_demotion_skips_when_review_idle_disabled_via_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+    let dim = 32;
+
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(dim));
+    let usearch = Arc::new(UsearchStore::new(dim).expect("usearch new"));
+    let store: Arc<dyn VectorStore> = usearch.clone();
+    let idx = CodeIndexer::new("hnsw-cooldown-gate-test", "/tmp/hnsw-cooldown-gate-test")
+        .with_components(embedder, store);
+
+    idx.add_chunk(raw("a", "src/a.rs", "fn a() {}"))
+        .await
+        .expect("add chunk a");
+    idx.save_vector_store(&path).await.expect("save hnsw");
+    // The write that leaves the store dirty — the case #6826 exists for.
+    idx.add_chunk(raw("b", "src/b.rs", "fn b() {}"))
+        .await
+        .expect("add chunk b");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let prior = std::env::var(HNSW_REVIEW_IDLE_ENV).ok();
+    // SAFETY (#3769): this binary contains only `#[serial]` tests that touch
+    // this var, so no concurrent reader or writer exists in this process.
+    unsafe { std::env::set_var(HNSW_REVIEW_IDLE_ENV, "0") };
+
+    assert!(
+        !idx.persist_and_demote_vector_store_after_write_cooldown(Duration::from_millis(1))
+            .await,
+        "TRUSTY_HNSW_REVIEW_IDLE=0 must disable the write-cooldown demote too"
+    );
+    assert!(
+        !usearch.in_view_mode(),
+        "store must remain heap-resident while the gate is disabled"
+    );
+
+    // SAFETY: see above.
+    unsafe {
+        match prior {
+            Some(v) => std::env::set_var(HNSW_REVIEW_IDLE_ENV, v),
+            None => std::env::remove_var(HNSW_REVIEW_IDLE_ENV),
+        }
+    }
+
+    assert!(
+        idx.persist_and_demote_vector_store_after_write_cooldown(Duration::from_millis(1))
+            .await,
+        "the same store must demote once the gate is re-enabled"
+    );
+    assert!(usearch.in_view_mode());
+}
+
 /// `hnsw_review_idle_enabled` honours unset (default on), explicit on/off
 /// spellings, and falls back to enabled on garbage (issue #2164).
 ///

@@ -9,6 +9,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use super::super::store_config::VectorQuant;
 use super::types::{StagedSwapOutcome, VectorStore};
 use super::usearch_store::{staging_path, UsearchStore, POPULATED_SNAPSHOT_THRESHOLD_BYTES};
 
@@ -1574,5 +1575,434 @@ async fn test_promote_rebuilds_from_view_when_snapshot_vanished() {
         hits.first().map(|h| h.chunk_id.as_str()),
         Some("a"),
         "the rebuilt graph must still answer the seeded vectors"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #6826 — demote a WRITTEN, then write-idle, store back to an mmap view.
+// ---------------------------------------------------------------------------
+
+/// Seed a two-vector store, snapshot it, and reopen it as a view — the state
+/// every warm-booted index starts in.
+async fn seeded_view_store(path: &std::path::Path) -> UsearchStore {
+    let seed = UsearchStore::new(4).unwrap();
+    seed.upsert("alpha", vec![1.0, 0.0, 0.0, 0.0])
+        .await
+        .unwrap();
+    seed.upsert("beta", vec![0.0, 1.0, 0.0, 0.0]).await.unwrap();
+    seed.save(path).await.expect("seed save");
+    drop(seed);
+
+    UsearchStore::load_from(path)
+        .await
+        .expect("load ok")
+        .expect("load returned Some")
+}
+
+/// The core #6826 acceptance criterion: a store that was written and then went
+/// write-idle past the cooldown is persisted, re-viewed, and answers the same
+/// top-k it did before.
+///
+/// Why: before this, `try_demote_to_view` refused every written store forever
+/// because `dirty` was never cleared without an explicit save, and nothing
+/// saved on the idle path — so every edited index stayed heap-resident for the
+/// daemon's whole life (76 MB mmap vs 9 GB heap on the reference host).
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_demote_after_write_cooldown_persists_and_views() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+    let store = seeded_view_store(&path).await;
+
+    // A write promotes the view to a heap copy and marks it dirty.
+    store
+        .upsert("gamma", vec![0.0, 0.0, 1.0, 0.0])
+        .await
+        .expect("upsert promotes");
+    assert!(!store.in_view_mode(), "write must promote to mutable");
+    assert!(store.dirty.load(Ordering::Acquire), "write must set dirty");
+
+    let query = [1.0, 0.0, 0.0, 0.0];
+    let before: Vec<String> = store
+        .search(&query, 3)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.chunk_id)
+        .collect();
+
+    // The #2164 demote alone still refuses — this is the gap #6826 closes.
+    assert!(
+        !store.try_demote_to_view().await.unwrap(),
+        "the clean-store demote must still refuse a dirty store"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let stats = store
+        .try_demote_after_write_cooldown(std::time::Duration::from_millis(1))
+        .await
+        .expect("cooldown demote must not error")
+        .expect("a written, write-idle store must be persisted and demoted");
+
+    assert!(
+        store.in_view_mode(),
+        "the store must be back on the mmap view"
+    );
+    assert!(
+        !store.dirty.load(Ordering::Acquire),
+        "the save that preceded the demote must have cleared dirty"
+    );
+    assert_eq!(stats.vectors, 3, "all three vectors survive the demotion");
+    assert!(
+        stats.snapshot_bytes > 0,
+        "the on-disk snapshot the store was re-viewed from must be measurable"
+    );
+
+    let after: Vec<String> = store
+        .search(&query, 3)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.chunk_id)
+        .collect();
+    assert_eq!(
+        before, after,
+        "the same query must return the identical top-k after the demotion"
+    );
+    assert_eq!(store.len().await.unwrap(), 3);
+}
+
+/// A write during the cooldown restarts the clock: the store is not demoted
+/// until it has been quiet for a full cooldown after the LAST write.
+#[tokio::test]
+async fn test_demote_after_write_cooldown_waits_for_cooldown() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+    let store = seeded_view_store(&path).await;
+    let cooldown = std::time::Duration::from_millis(60);
+
+    store
+        .upsert("gamma", vec![0.0, 0.0, 1.0, 0.0])
+        .await
+        .unwrap();
+    assert!(
+        store
+            .try_demote_after_write_cooldown(cooldown)
+            .await
+            .unwrap()
+            .is_none(),
+        "a store written a moment ago is still inside its cooldown"
+    );
+
+    // Wait out the cooldown, then write again — that write must reset it.
+    tokio::time::sleep(std::time::Duration::from_millis(90)).await;
+    store
+        .upsert("delta", vec![0.0, 0.0, 0.0, 1.0])
+        .await
+        .unwrap();
+    assert!(
+        store
+            .try_demote_after_write_cooldown(cooldown)
+            .await
+            .unwrap()
+            .is_none(),
+        "the second write must restart the cooldown, so no demote happens yet"
+    );
+    assert!(!store.in_view_mode(), "a skipped demote leaves it mutable");
+
+    // Quiet for a full cooldown after the LAST write — now it demotes.
+    tokio::time::sleep(std::time::Duration::from_millis(90)).await;
+    assert!(
+        store
+            .try_demote_after_write_cooldown(cooldown)
+            .await
+            .unwrap()
+            .is_some(),
+        "a full cooldown after the last write must demote"
+    );
+    assert!(store.in_view_mode());
+    assert_eq!(store.len().await.unwrap(), 4, "no vectors lost");
+}
+
+/// A zero cooldown is the operator's off switch
+/// (`TRUSTY_HNSW_DEMOTE_COOLDOWN_SECS=0` / `off`), not "demote immediately".
+#[tokio::test]
+async fn test_demote_after_write_cooldown_disabled_by_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+    let store = seeded_view_store(&path).await;
+
+    store
+        .upsert("gamma", vec![0.0, 0.0, 1.0, 0.0])
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    assert!(
+        store
+            .try_demote_after_write_cooldown(std::time::Duration::ZERO)
+            .await
+            .unwrap()
+            .is_none(),
+        "a zero cooldown disables the feature outright"
+    );
+    assert!(
+        !store.in_view_mode(),
+        "the disabled path must leave the store exactly as it found it"
+    );
+    assert!(
+        store.dirty.load(Ordering::Acquire),
+        "the disabled path must not save either"
+    );
+}
+
+/// A write that races a `save()` must never be dropped by a later demote.
+///
+/// Why (issue #6826): `save()` holds the HNSW write lock only for the FFI
+/// serialize, then releases it before the renames and before clearing `dirty`.
+/// A writer landing in that window used to have its mutation marked clean, so
+/// the next demote would `Index::view` a snapshot that did not contain it and
+/// the vector would vanish from the graph while still sitting in `id_to_key`.
+/// The mutation-epoch comparison across the whole save is what closes it.
+/// What: `join!` polls `save()` first, so it captures its start epoch before
+/// the racing `upsert` is ever polled; the upsert's `mark_dirty` therefore
+/// always bumps the epoch afterwards, and `dirty` must survive the save. That
+/// assertion fails on `origin/main`, where `save()` clears `dirty`
+/// unconditionally.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_demote_after_write_cooldown_never_loses_a_racing_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+    let store = seeded_view_store(&path).await;
+
+    store
+        .upsert("gamma", vec![0.0, 0.0, 1.0, 0.0])
+        .await
+        .unwrap();
+
+    let (saved, upserted) = tokio::join!(
+        store.save(&path),
+        store.upsert("racer", vec![0.0, 0.0, 0.0, 1.0])
+    );
+    saved.expect("save ok");
+    upserted.expect("racing upsert ok");
+
+    assert!(
+        store.dirty.load(Ordering::Acquire),
+        "a write racing a save must leave the store dirty — clearing it would let \
+         the next demote re-view a snapshot that may not contain 'racer'"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    store
+        .try_demote_after_write_cooldown(std::time::Duration::from_millis(1))
+        .await
+        .expect("cooldown demote must not error")
+        .expect("the store is write-idle and eligible once the race settled");
+    assert!(store.in_view_mode());
+
+    let hits = store.search(&[0.0, 0.0, 0.0, 1.0], 1).await.unwrap();
+    assert_eq!(
+        hits.first().map(|h| h.chunk_id.as_str()),
+        Some("racer"),
+        "the vector written during the save must survive the demotion"
+    );
+    assert_eq!(store.len().await.unwrap(), 4, "no vectors lost");
+}
+
+/// Bounded, sleep-free wait for `cond` to become true.
+///
+/// Why: `test_requantize_publishes_its_flags_under_the_hnsw_write_lock` needs
+/// to catch the instant a concurrent task holds a lock, which is an in-memory
+/// state change a yield can observe — no wall clock required. Exhausting the
+/// budget is a PASSING outcome there; the caller documents why.
+/// Test: used by `test_requantize_publishes_its_flags_under_the_hnsw_write_lock`.
+async fn yield_until(mut cond: impl FnMut() -> bool) -> bool {
+    for _ in 0..2_000 {
+        if cond() {
+            return true;
+        }
+        tokio::task::yield_now().await;
+    }
+    false
+}
+
+/// An aborted staged→live swap must publish `hnsw_path` and `dirty` while
+/// holding the HNSW write lock, so a demote can never slip between them.
+///
+/// Why (issue #6826, code-critic round): `resolve_staged_snapshot_inner`'s
+/// `!adopted` branch used to store the path and call `mark_dirty()` with no
+/// HNSW lock held. Both demote paths make their authoritative `is_view` /
+/// `dirty` check under that lock, so a demote could pass it in the gap — with
+/// `dirty` still false and `hnsw_path` still the staging file — and
+/// `Index::view` a snapshot that does not match memory, silently rolling the
+/// graph back. That is exactly the outcome the `mark_dirty()` call exists to
+/// prevent.
+/// What: the test holds the HNSW READ lock, which the fixed code must wait on
+/// before it can publish anything, and then gives the abort a bounded window
+/// to finish. The old code, needing no HNSW lock, completes inside it and sets
+/// `dirty`; the fixed code cannot, so the window always elapses. A bounded
+/// wait rather than a yield budget because the abort does real filesystem work
+/// — a yield budget expires in microseconds and observed nothing even with the
+/// fix reverted, which would have made this test prove nothing. Asymmetric by
+/// construction: the fixed code can never fail it, because a held read lock is
+/// a hard barrier, not a timing hope.
+/// Test: this IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_staged_swap_abort_publishes_dirty_under_the_hnsw_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let staged = dir.path().join("hnsw.staged.usearch");
+    let live = dir.path().join("hnsw.usearch");
+
+    let store = Arc::new(UsearchStore::new(4).unwrap());
+    store
+        .upsert("alpha", vec![1.0, 0.0, 0.0, 0.0])
+        .await
+        .unwrap();
+    store.save(&staged).await.expect("save to staging");
+    assert!(
+        !store.dirty.load(Ordering::Acquire),
+        "a store is clean immediately after a save"
+    );
+    assert!(
+        !live.exists(),
+        "no live snapshot — the abort branch must take the `!adopted` path"
+    );
+
+    // The barrier: the fixed code takes this lock for WRITE before it publishes.
+    let read_guard = store.index.read().await;
+
+    let handle = {
+        let store = Arc::clone(&store);
+        let staged = staged.clone();
+        let live = live.clone();
+        tokio::spawn(async move {
+            store
+                .resolve_staged_snapshot_inner(&staged, &live, StagedSwapOutcome::Aborted)
+                .await
+        })
+    };
+
+    let published_early = tokio::time::timeout(std::time::Duration::from_millis(250), async {
+        loop {
+            if store.dirty.load(Ordering::Acquire) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    assert!(
+        !published_early,
+        "the aborted swap published `dirty` without holding the HNSW write lock — a demote \
+         could pass its under-lock check in that gap and re-view a stale snapshot"
+    );
+
+    drop(read_guard);
+    handle.await.expect("task").expect("resolve ok");
+
+    assert!(
+        store.dirty.load(Ordering::Acquire),
+        "once the lock is free the abort must still mark the store dirty"
+    );
+    assert_eq!(
+        store.hnsw_path.read().await.as_deref(),
+        Some(live.as_path()),
+        "and re-point a future save at the live path"
+    );
+}
+
+/// `requantize` must publish `is_view` and `dirty` before it releases the HNSW
+/// write lock that swapped the rebuilt arena in.
+///
+/// Why (issue #6826, code-critic round): those two stores used to sit AFTER
+/// the write-lock block. A demote already queued on that lock wakes the
+/// instant the guard drops — before the stores land — reads the stale
+/// `is_view == false && dirty == false`, and `Index::view`s the old-precision
+/// file over the rebuilt arena. `requantize` then reports `applied: true`
+/// while the live index still holds the old precision.
+/// What: spawns the requantize, then polls `try_read()` — which fails only
+/// while a writer HOLDS the lock, since `rebuild_at`'s own read lock does not
+/// block it — to spawn the demote at the one moment it is guaranteed to queue
+/// BEHIND the swap. It then wakes into exactly the window the old ordering
+/// left open. Missing that window is a pass, not a flake: the poll also stops
+/// once the requantize has finished, at which point the store is dirty and the
+/// demote refuses for the ordinary reason. The target is f32 because #6822
+/// makes f16 the CREATION default, and a requantize to the precision an index
+/// already holds is a documented no-op.
+/// Test: this IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_requantize_publishes_its_flags_under_the_hnsw_write_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+
+    let store = Arc::new(UsearchStore::new(4).unwrap());
+    store
+        .upsert("alpha", vec![1.0, 0.0, 0.0, 0.0])
+        .await
+        .unwrap();
+    store
+        .upsert("beta", vec![0.0, 1.0, 0.0, 0.0])
+        .await
+        .unwrap();
+    store.save(&path).await.expect("save");
+    // Demote-eligible: mutable, clean, and pointed at an on-disk snapshot.
+    assert!(!store.in_view_mode());
+    assert!(!store.dirty.load(Ordering::Acquire));
+    let built_as = store.vector_quant_label().await;
+    assert_ne!(
+        built_as,
+        Some("f32 (none)"),
+        "the conversion below must be a real one, not the documented no-op"
+    );
+
+    let requant = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move { store.requantize(VectorQuant::None, false).await })
+    };
+    // Spawn the demote at the instant the requantize HOLDS the write lock, so
+    // it is guaranteed to queue behind the swap rather than race ahead of it.
+    // `rebuild_at`'s read lock does not fail `try_read`, so a failure here can
+    // only mean the write guard is held.
+    yield_until(|| store.index.try_read().is_err() || requant.is_finished()).await;
+
+    let demote = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move { store.try_demote_to_view().await })
+    };
+
+    let report = requant.await.expect("task").expect("requantize ok");
+    // Whether the demote ends up demoting is NOT the invariant: `requantize`
+    // finishes with a `save()`, after which a clean, mutable, path-backed store
+    // is legitimately demotable. What must hold either way is that it never
+    // viewed the PRE-conversion snapshot.
+    demote.await.expect("task").expect("demote ok");
+
+    assert!(report.applied, "the conversion must have been published");
+    assert_eq!(
+        store.vector_quant_label().await,
+        Some("f32 (none)"),
+        "the live index must hold the converted precision — a demote that re-viewed the \
+         stale snapshot would leave it at {built_as:?}"
+    );
+    assert_eq!(store.len().await.unwrap(), 2, "no vectors lost");
+}
+
+/// A store that has never been saved has no snapshot to re-view from, so the
+/// cooldown path must skip it rather than invent a destination.
+#[tokio::test]
+async fn test_demote_after_write_cooldown_skips_without_path() {
+    let store = UsearchStore::new(4).unwrap();
+    store.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(
+        store
+            .try_demote_after_write_cooldown(std::time::Duration::from_millis(1))
+            .await
+            .unwrap()
+            .is_none(),
+        "a store with no recorded hnsw_path must never demote"
     );
 }

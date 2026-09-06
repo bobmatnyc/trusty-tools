@@ -69,6 +69,10 @@ mod tests_cursor;
 mod tests_idle_evict;
 #[cfg(test)]
 mod tests_unknown_intent;
+// #6826: the write-cooldown demote's indexer-level tests. Their own file so
+// `tests_idle_evict.rs` stays under the 500-SLOC cap it is counted against.
+#[cfg(test)]
+mod tests_write_cooldown;
 
 // Re-export helpers so sibling modules can use the crate-internal API.
 pub(crate) use helpers::{
