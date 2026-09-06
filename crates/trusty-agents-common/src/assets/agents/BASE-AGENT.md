@@ -174,6 +174,10 @@ polish — the full gate is in `tm-workflow`.
 - Project uses fragments → write `<package>/changelog.d/<issue-or-pr>-<slug>.md`.
   First line is the category (`Added`/`Fixed`/`Changed`/…), the rest is the
   bullet. The per-PR filename is what keeps two concurrent PRs from conflicting.
+- **A fragment follows the crate whose `src/**` the diff touches, not the
+  commit's subject.** One PR that edits three crates' sources owes three
+  fragments. Check the paths in `git diff --name-only`, not what you meant the
+  change to be about (see #6937).
 - The file goes DIRECTLY in `changelog.d/`. A `README.md` there is the
   directory's placeholder, not a fragment.
 - No `changelog.d/` at all → add the bullet to `CHANGELOG.md` under
@@ -489,6 +493,99 @@ and links #6933.
 emit an empty block, and never file an issue to show that you looked.
 
 These recommendations feed the recurring harness post-mortem in #6933 (#6935).
+
+## Continuous Self-Improvement — the Fast Loop
+
+The section above reports upward on the post-mortem's schedule. This one runs on
+every task and changes your behavior now. See #6937.
+
+**Detection heuristics.** Check these at the end of every task. Each is
+observable from your own transcript or a tool result:
+
+- A retry on the same failure — you re-ran a command and it failed the same way.
+- A gate failing after a "done" claim — your `fmt`, test, `clippy`, or script
+  gate went red after you called the work finished.
+- A review round beyond the first — a critic or reviewer returned a second round.
+- A user or PM correction — a message redirected work you had already started.
+- A circuit-breaker trip — `mcp__trusty-mpm__circuit_breaker_status`, or a
+  breaker notice in your transcript.
+- Repeated tool errors — the same tool failed twice on the same argument shape.
+- An overrun of your own estimate — you named a duration, a file count, or an
+  action count, and exceeded it.
+
+A run that trips none of them records nothing. A run that trips one where you
+cannot name a different way to try records nothing either: a symptom with no
+alternative is a report, not an experiment.
+
+**The tag is `self-improvement-hypothesis`.** One tag, in the project's memory
+palace, and it is the contract the post-mortem queries by —
+`memory_list(tag: "self-improvement-hypothesis")`. Add descriptive tags beside
+it, never in place of it.
+
+**The record shape**, seven fields:
+
+- **Trigger heuristic** — which one fired, and what you observed.
+- **What was tried** — the approach that produced the trigger.
+- **Hypothesis** — what to do differently, and why it should help.
+- **Metric and baseline** — the one number the change moves, its value before
+  the change, and where that number came from. Cite a harness-emitted source
+  over your own estimate: the daemon's delegation records, `session_activity`,
+  `console_metrics`, the `agent_cost` context reading, or the session
+  transcript. Name the source in the record.
+- **Judgement rule** — the sample size, the test, and the thresholds that make
+  the outcome improved or regressed.
+- **Status** — `open`, `improved`, `regressed`, or `inconclusive`, with the n so
+  far.
+- **Evidence** — command output, `file:line`, or the tool result the numbers
+  came from.
+
+**Consult before you start; measure after you finish.**
+
+1. Before starting a task, recall the open hypotheses under the tag for your
+   area and apply the ones that fit. An open hypothesis is an approach to try,
+   not a note to read.
+2. After finishing, record the measurement against the SAME hypothesis — same
+   metric, same source.
+3. Promote to `improved`, or retire as `regressed`, only on a statistically
+   significant difference at the sample size the record named. Below that the
+   status stays `open` with the n so far, or `inconclusive` when the experiment
+   cannot run again.
+4. Retire a regressed hypothesis by re-recording it with the measurement and the
+   `regressed` status. Never delete it silently — the measurement that killed it
+   is what stops the next agent retrying it.
+
+**A behavioral tweak that works needs no issue.** It stays in memory and the
+record is the whole deliverable. Only a change that needs an edit to the
+framework, a bundled skill, a bundled agent, or the workflow goes to
+trusty-tools, through the Improvement recommendations block above.
+
+**The post-mortem coalesces; it does not replace this.** The scheduled
+post-mortem (#6933, #6934) reads every record under the tag across registered
+projects, groups them by metric, and files only the significant, fix-needing
+results as trusty-tools issues. Its cadence is unchanged. This loop runs every
+task.
+
+**Worked example — guard denials.** A PM dispatched a read-only agent from a
+main checkout without declaring `isolation: "worktree"` while `version-control`
+was working there. The ADR-0048 guard denied it and the PM re-dispatched, which
+is a retry on the same failure. The same lesson was already in memory from
+2026-08-28 and had not changed behavior. Hypothesis: declaring isolation on
+every dispatch from a main checkout except `version-control` (ADR-0056),
+read-only agents included, drives denials to zero. Metric: guard-denied
+dispatches per 30 dispatches, from the daemon's delegation records. Baseline: 1
+in 14 that session, and 3 in one session on 2026-08-28. Judge: 0 in the next 30
+is `improved`, 2 or more is `regressed`. Status: `open`, n=0.
+
+**Worked example — monitor parks.** An agent handed back twice with its goal
+unmet, saying a background monitor would wake it. The monitor watched
+`pgrep -f <pattern>`, and `pgrep -f` matched the monitor's own command line, so
+the exit condition could never become true. Hypothesis: waiting on your own
+conditions with `tm wait --for run|file`, or where `pgrep` is unavoidable the
+self-excluding `pgrep -f '[c]argo install'` form or a pid captured at spawn,
+drives parks to zero. Metric: hand-backs with the goal unmet that needed a PM
+`SendMessage`, per 20 dispatches, counted from the session transcript. Baseline:
+2 in 1 dispatch. Judge: 0 in the next 20 is `improved`, 2 or more is
+`regressed`. Status: `open`, n=0.
 
 ## Agent-Authored Prose
 
