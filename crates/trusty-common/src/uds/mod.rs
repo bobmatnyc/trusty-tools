@@ -22,6 +22,12 @@
 //!     not this process's own, which is what turns the permission bits into an
 //!     enforced boundary rather than a documented intention.
 //!
+//! [`sockbuf`] runs inside [`bind_hardened`] and [`connect_hardened`], so both
+//! ends of every socket here are sized to
+//! [`sockbuf::SOCKET_BUFFER_BYTES`] rather than the 8 KiB macOS default
+//! (#6896). The listener's sizing is what every accepted socket inherits, so a
+//! service driving its own accept loop is covered too. No consumer calls it.
+//!
 //! **What this does and does not guarantee.** With the directory held at `0700`
 //! and owned by this uid, no other unprivileged user can traverse to the socket
 //! — that is the load-bearing property, and it holds from the moment the
@@ -60,6 +66,9 @@ pub mod rpc;
 // ADR-0032 supplies a method table rather than a fourth hand-rolled accept loop.
 pub mod server;
 pub mod singleton;
+// #6896: one place that sizes SO_SNDBUF/SO_RCVBUF, so both ends of every socket
+// this module owns are sized identically and no consumer sets them itself.
+pub mod sockbuf;
 // #6286: the reading half of a multi-frame response, so a token stream has one
 // definition of what terminates it rather than one per consumer.
 pub mod stream_client;
@@ -104,6 +113,10 @@ pub use rpc::{
     send_framed_request_capped, write_frame,
 };
 pub use singleton::bind_singleton_hardened;
+pub use sockbuf::{
+    SOCKET_BUFFER_BYTES, SocketBufferOutcome, SocketBufferSizes, socket_buffer_sizes,
+    tune_connected_buffers, tune_listener_buffers,
+};
 pub use stream_client::{
     FramedStream, send_framed_stream_request, send_framed_stream_request_capped,
 };
@@ -288,6 +301,37 @@ pub enum UdsSecurityError {
         source: std::io::Error,
     },
 
+    /// A socket buffer could not be sized to
+    /// [`sockbuf::SOCKET_BUFFER_BYTES`] (#6896).
+    ///
+    /// Fatal by design: a socket left at the platform default still works, at
+    /// the round-trip cost `sockbuf` exists to remove and with nothing saying
+    /// so. See that module's docs.
+    #[error("size {option} to {requested} bytes: {source}")]
+    SocketBuffer {
+        /// Which option failed — `SO_SNDBUF` or `SO_RCVBUF`.
+        option: &'static str,
+        /// Bytes that were requested.
+        requested: usize,
+        /// Underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A socket buffer could not be READ back (#6896 review).
+    ///
+    /// Distinct from [`UdsSecurityError::SocketBuffer`]: reporting a
+    /// `getsockopt` failure through that variant printed "size SO_SNDBUF to
+    /// 1048576 bytes", naming a write this branch never attempted.
+    #[error("read {option} back: {source}")]
+    SocketBufferRead {
+        /// Which option could not be read — `SO_SNDBUF` or `SO_RCVBUF`.
+        option: &'static str,
+        /// Underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// Reading the connected peer's credentials failed.
     #[error("read peer credentials: {source}")]
     PeerCred {
@@ -308,6 +352,24 @@ pub enum UdsSecurityError {
     /// No peer-credential syscall is wired up for this target.
     #[error("peer-credential checks are not implemented for this platform")]
     UnsupportedPlatform,
+}
+
+impl UdsSecurityError {
+    /// Whether this is the errno a torn-down socket buffer produces (#6896).
+    ///
+    /// Why: macOS answers `EINVAL` to `setsockopt(SO_SNDBUF)` once a socket's
+    /// peer has hung up. That is one of the two signals
+    /// [`sockbuf::hangup_is_benign`] requires before it treats an unsized
+    /// socket as harmless rather than as a failure — see that module's docs for
+    /// why one signal is not enough.
+    ///
+    /// Test: `tune_connected_buffers_reports_a_peer_that_already_hung_up`.
+    pub(crate) fn is_disconnected_socket(&self) -> bool {
+        matches!(
+            self,
+            Self::SocketBuffer { source, .. } if source.raw_os_error() == Some(libc::EINVAL)
+        )
+    }
 }
 
 /// Bytes available in this platform's `sockaddr_un.sun_path`, NUL included.
@@ -418,9 +480,15 @@ fn socket_parent(path: &Path) -> Result<&Path, UdsSecurityError> {
 /// `chmod`. [`prepare_socket_dir`]'s docs carry the reasoning and the residual
 /// race it does not close.
 ///
+/// # Errors
+///
+/// Any [`UdsSecurityError`] the directory hardening, the bind, the chmod or
+/// [`sockbuf::tune_listener_buffers`] produces.
+///
 /// Test: `bind_hardened_sets_socket_0600_and_dir_0700`,
 /// `bind_hardened_socket_is_connectable_after_hardening`,
-/// `bind_hardened_rejects_an_over_long_path`.
+/// `bind_hardened_rejects_an_over_long_path`,
+/// `hardened_sockets_hold_far_more_in_flight_than_the_platform_default`.
 pub fn bind_hardened(path: &Path) -> Result<UnixListener, UdsSecurityError> {
     check_sun_path_budget(path)?;
     prepare_socket_dir(socket_parent(path)?)?;
@@ -437,6 +505,12 @@ pub fn bind_hardened(path: &Path) -> Result<UnixListener, UdsSecurityError> {
             source,
         }
     })?;
+
+    // #6896: sized on the LISTENER, which both Linux and macOS copy onto every
+    // socket `accept` returns — so a service driving its own accept loop gets
+    // the sizing without calling anything. The strict form: a listener has no
+    // peer, so it must never reach the hung-up-peer outcome (#6896 review).
+    sockbuf::tune_listener_buffers(&listener)?;
 
     Ok(listener)
 }
@@ -459,20 +533,33 @@ pub fn bind_hardened(path: &Path) -> Result<UnixListener, UdsSecurityError> {
 /// that race — it is closing the case that actually occurs, where a wrong-mode
 /// or wrong-owner socket persists and would otherwise be dialled silently.
 ///
+/// # Errors
+///
+/// Any [`UdsSecurityError`] the verification, the connect or
+/// [`sockbuf::tune_connected_buffers`] produces.
+///
 /// Test: `connect_hardened_accepts_a_properly_hardened_socket`,
 /// `connect_hardened_refuses_a_world_readable_socket`,
 /// `connect_hardened_refuses_a_socket_in_a_wide_directory`,
-/// `connect_hardened_refuses_a_regular_file`.
+/// `connect_hardened_refuses_a_regular_file`,
+/// `hardened_sockets_hold_far_more_in_flight_than_the_platform_default`.
 pub async fn connect_hardened(path: &Path) -> Result<UnixStream, UdsSecurityError> {
     check_sun_path_budget(path)?;
     verify_socket_for_connect(path)?;
 
-    UnixStream::connect(path)
+    let stream = UnixStream::connect(path)
         .await
         .map_err(|source| UdsSecurityError::Connect {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+
+    // #6896: the dialling end of the pair; the accepting end inherits the
+    // listener's sizing. The forgiving form — the server may have dropped this
+    // connection already, which is not a failure to report.
+    sockbuf::tune_connected_buffers(&stream)?;
+
+    Ok(stream)
 }
 
 /// The filesystem half of [`connect_hardened`], split out so it is testable
