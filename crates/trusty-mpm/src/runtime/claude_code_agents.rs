@@ -228,7 +228,8 @@ pub(super) fn attach_id_in_registry(
 /// system prompt it would carry is already part of the conversation being
 /// re-entered. Passing it would make `claude` reject the invocation.
 /// Test: `attach_command_carries_the_resume_prefixes`,
-/// `attach_command_omits_flags_attach_cannot_take`.
+/// `attach_command_omits_flags_attach_cannot_take`,
+/// `attach_and_resume_share_a_byte_identical_prefix`.
 pub(super) fn attach_command(inputs: &RelaunchInputs<'_>, attach_id: &str) -> String {
     let body = format!(
         "{}{}{}{} attach {attach_id}{}",

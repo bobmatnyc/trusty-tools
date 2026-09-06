@@ -406,6 +406,40 @@ fn attach_command_carries_the_resume_prefixes() {
     );
 }
 
+/// Why (#6863): `attach` and `--resume` are two endings on ONE preamble — the
+/// `cd`, the managed-session-id export, the launch clock, the `gh` identity
+/// source, the env scrub and `CLAUDE_CONFIG_DIR`. Asserting each piece
+/// individually lets the two drift apart one piece at a time; comparing the
+/// byte-identical prefix pins that they diverge only at the subcommand.
+#[test]
+fn attach_and_resume_share_a_byte_identical_prefix() {
+    let cwd = Path::new(TEST_CWD);
+    let shared = inputs(cwd);
+    let attach = attach_command(&shared, LIVE_SHORT);
+    let resume = super::super::resume_command(
+        shared.cwd,
+        shared.claude_bin,
+        shared.config_dir,
+        Some(LIVE_UUID),
+        shared.session_id,
+        shared.prompt_file,
+        shared.oauth_token,
+        shared.gh_env_file,
+        shared.mcp_env,
+    );
+    let prefix: String = attach
+        .chars()
+        .zip(resume.chars())
+        .take_while(|(a, r)| a == r)
+        .map(|(a, _)| a)
+        .collect();
+    assert!(
+        prefix.ends_with(&format!("{} ", shared.claude_bin)),
+        "the two commands must be identical up to the claude binary, then \
+         diverge at the subcommand; shared prefix was: {prefix}"
+    );
+}
+
 /// Why (#6863): `claude attach <id>` accepts no options at all — passing the
 /// resume path's flags would make it reject the invocation outright.
 #[test]
