@@ -19,7 +19,7 @@ home, retired once its producers push to console (§3.4, §4.1); `trusty-mpm`,
 `trusty-code`, `trusty-agents`, `trusty-analyze` — the four event sources and
 their adapters.
 **Owner:** Bob Matsuoka
-**Last-updated:** 2026-09-05
+**Last-updated:** 2026-09-06
 **DOC-N claim:** `DOC-73`, scan-before-claim per DOC-38 §4.1.
 `docs/specs/README.md`'s catalog note names `DOC-72` as the next free number;
 `DOC-72` is claimed by open pull request
@@ -151,6 +151,30 @@ commit.
 
 The screensaver is not a fourth route. It is a mode of the two view routes,
 described in §5.3, built on the `/ui/screensaver` route #6519 landed.
+
+**Navigation and scope (owner ruling, 2026-09-06).**
+
+> "the mpm dashboard should be accessed from the MPM Sessions console, and the
+> list/tree dashboard visualizer should link from the session list. Dashboards
+> should be per session."
+> — Bob, 2026-09-06
+
+1. **Entry point.** The mpm dashboard is reached from the MPM Sessions
+   console — the trusty-console Sessions screen (`SessionsTab.svelte`). It is
+   not a separate top-level destination.
+2. **Linking.** Each row in the session list links to that session's
+   list/tree dashboard visualizer.
+3. **Scope.** A dashboard is per session. One managed session has one
+   dashboard. There is no global dashboard across sessions.
+
+**Acceptance test.** A dashboard design with no per-session route, or with no
+link from the session list, fails this ruling.
+
+Where a machine-wide view survives elsewhere in this spec — the unfiltered,
+cross-session list in §2.1's PM-operator story, and the unfiltered-by-default
+`/ui/stream/list` and `/ui/stream/tree` routes in §5.1 — it is reached through
+the Sessions console and composes per-session dashboards, rather than standing
+as its own top-level destination.
 
 **What this spec does not change.**
 
