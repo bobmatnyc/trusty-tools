@@ -10,6 +10,25 @@ edit this file by hand (see
 
 ---
 
+## [0.14.1] — 2026-09-06
+
+### Added
+
+- The run index (`index.md`, and the copy inside the return package) states how
+  much of each repository the investigation pass actually read — files read,
+  tracked files, the share, and whether that repository's static-analysis lane
+  ran at all — plus the estate total, least-covered first. The figure was in
+  every report's JSON twin and nowhere a recipient would look, so answering "how
+  much of this estate was read" meant opening all 59 reports (#6784, #6811).
+
+### Fixed
+
+- The run index's dead-analyze-lane count now keys on the shared
+  `trusty_common::review_gap_contract` headline instead of a literal of its own,
+  so it recognises every gap line `trusty-review` writes for a total collapse.
+  It previously missed the client-build-failure path and undercounted
+  `Rollup::analyze_lanes_dead()` (#6784).
+
 ## [0.14.0] — 2026-09-04
 
 ### Added
