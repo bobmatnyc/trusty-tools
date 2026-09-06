@@ -1591,7 +1591,7 @@ outcome, never a single boolean "cleaned." Its UI half,
 console by §13's display-only ruling
 ([#6923](https://github.com/bobmatnyc/trusty-tools/issues/6923)) and now lives
 only in history — read it with `git show
-53e067931:crates/trusty-console/ui/src/StaleIndexCleanup.svelte`. The Disk
+6ee2b182b:crates/trusty-console/ui/src/StaleIndexCleanup.svelte`. The Disk
 dashboard follows it:
 
 - **Clear one worktree.** The confirm dialog names the exact path, branch,

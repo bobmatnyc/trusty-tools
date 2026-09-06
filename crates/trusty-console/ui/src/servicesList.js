@@ -63,18 +63,61 @@ export const NO_DASHBOARD_HINT = 'No dashboard for this service';
 export const SELF_HOSTED_DASHBOARDS = new Set(['trusty-agents']);
 
 /**
+ * Whether a roster URL points at this machine's loopback interface.
+ *
+ * Why: the console is a strictly local tool, and a non-loopback URL reaching
+ * the poller cache — through a bug, a hand-edited `http_addr` file, or a
+ * compromise — must never become something a browser navigates to. Every other
+ * consumer of a detected URL is already guarded: `proxy::routes::is_local_upstream`
+ * (`crates/trusty-console/src/proxy/routes.rs:117-121`) gates the reverse proxy
+ * and the delete routes. `read_addr_file` (`detect/helpers.rs:38-46`) checks
+ * only that the file is non-empty, so the guard belongs at each consumer, and
+ * an `<a href>` is a consumer.
+ *
+ * Why stricter than the Rust predicate rather than a literal port of it: that
+ * one tests the string prefix `http://127.`, which `http://127.0.0.1.evil.com`
+ * also satisfies. Parsing the URL and testing the HOSTNAME closes that, and a
+ * browser is the one place a hostname that merely LOOKS like an address is
+ * actually resolved. Same three loopback forms either way — `127.0.0.0/8`,
+ * `::1`, `localhost` — and `http:` only, since every trusty-* daemon binds
+ * loopback HTTP ([ADR-0018](docs/adr/0018-loopback-only-doctrine.md)).
+ *
+ * What: `true` only for an `http:` URL whose host is one of those three.
+ * Anything unparseable is `false`.
+ * Test: `a non-loopback daemon URL is not a loopback URL`, `every loopback
+ * spelling the roster can report is accepted`.
+ */
+export function isLoopbackUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:') return false;
+  const host = parsed.hostname;
+  // `URL` keeps IPv6 hosts in brackets and lowercases the literal.
+  if (host === 'localhost' || host === '[::1]') return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
+/**
  * The daemon-served dashboard URL for a service, or `null`.
  *
  * `null` for a service the console hosts a tab for, for one whose daemon is not
- * running (no `url` in the roster), and for anything not in
- * [`SELF_HOSTED_DASHBOARDS`].
+ * running (no `url` in the roster), for anything not in
+ * [`SELF_HOSTED_DASHBOARDS`], and — the guard, not a formality — for any URL
+ * that is not loopback. A `null` here is what makes the row fall back to the
+ * non-link shape.
  * Test: `a self-hosted dashboard row links to the daemon URL the roster
- * reports`, `a self-hosted service with no live daemon stays inert`.
+ * reports`, `a self-hosted service with an empty or absent URL stays inert`,
+ * `a self-hosted service reporting a non-loopback URL renders no link`.
  */
 export function selfHostedDashboardUrl(service) {
   if (!SELF_HOSTED_DASHBOARDS.has(service?.id)) return null;
   const url = service?.url;
-  return typeof url === 'string' && url.length > 0 ? url : null;
+  if (typeof url !== 'string' || url.length === 0) return null;
+  return isLoopbackUrl(url) ? url : null;
 }
 
 /** True only for a real, finite number — `null`, `undefined` and NaN are not. */

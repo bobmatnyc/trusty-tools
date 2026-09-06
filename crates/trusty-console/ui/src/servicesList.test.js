@@ -17,6 +17,7 @@ import {
   fetchServices,
   formatCpu,
   formatMemory,
+  isLoopbackUrl,
   latestSample,
   memorySeries,
   rowAriaLabel,
@@ -191,6 +192,49 @@ test('a self-hosted service with an empty or absent URL stays inert', () => {
   assert.equal(selfHostedDashboardUrl({ id: 'trusty-agents', url: '' }), null);
   assert.equal(selfHostedDashboardUrl(undefined), null);
   assert.ok(SELF_HOSTED_DASHBOARDS.has('trusty-agents'));
+});
+
+test('a self-hosted service reporting a non-loopback URL renders no link', () => {
+  // The row must fall back to the non-link shape: an `<a href>` at a LAN or
+  // public address is the console navigating a browser somewhere it has no
+  // business going, which is what `proxy::routes::is_local_upstream` refuses
+  // for every other consumer of a detected URL.
+  const roster = [
+    { id: 'trusty-agents', display_name: 'Trusty Agents', status: 'running', url: 'http://10.0.0.5:8765' },
+  ];
+  const [row] = serviceRows(roster, {}, new Set());
+  assert.equal(row.dashboardUrl, null, 'a LAN address must not become an href');
+  assert.equal(row.hasDashboard, false, 'and the row must not be clickable');
+  assert.equal(row.ariaLabel, null, 'an inert row overrides no accessible name');
+});
+
+test('a non-loopback daemon URL is not a loopback URL', () => {
+  for (const url of [
+    'http://10.0.0.5:8765',
+    'http://192.168.1.9:8765',
+    'http://evil.example.com:8765',
+    // The prefix test `is_local_upstream` uses accepts this one; a hostname
+    // test does not, and a browser is where the difference is resolved.
+    'http://127.0.0.1.evil.com:8765',
+    // Loopback host, wrong scheme — every trusty-* daemon binds loopback HTTP.
+    'https://127.0.0.1:8765',
+    'file:///etc/passwd',
+    'not a url',
+    '',
+  ]) {
+    assert.equal(isLoopbackUrl(url), false, `${url} must not pass the guard`);
+  }
+});
+
+test('every loopback spelling the roster can report is accepted', () => {
+  for (const url of [
+    'http://127.0.0.1:8765',
+    'http://127.1.2.3:9000',
+    'http://[::1]:8765',
+    'http://localhost:8765',
+  ]) {
+    assert.equal(isLoopbackUrl(url), true, `${url} must pass the guard`);
+  }
 });
 
 // ── #6642: the clickable row's accessible name ─────────────────────────────

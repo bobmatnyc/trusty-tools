@@ -5,9 +5,9 @@
   // inline delete (#6360) and the stale-registration cleanup panel (#6371) are
   // gone, and a row now opens the index's management view instead (§14).
   import {
-    NO_INDEX_ID_HINT,
     indexDashboardHref,
     indexRowAriaLabel,
+    indexRowHint,
   } from './searchIndexNav.js';
   // #6424: the Last Used column and its sort. Shared with the Memory tab so
   // both rosters agree on what a missing timestamp means.
@@ -172,8 +172,11 @@
           </span>
         </div>
 
-        {#snippet indexCells(idx)}
-          <span class="mono">{idx.id ?? '—'}</span>
+        {#snippet indexCells(idx, inertHint)}
+          <span class="mono">
+            {idx.id ?? '—'}
+            {#if inertHint}<span class="sr-only">— {inertHint}</span>{/if}
+          </span>
           <span class="path">{idx.root_path ?? '—'}</span>
           <span class="num">
             {idx.size_bytes != null ? formatBytes(idx.size_bytes) : '—'}
@@ -193,14 +196,16 @@
                 lastUsed: formatLastUsed(idx),
               })}
             >
-              {@render indexCells(idx)}
+              {@render indexCells(idx, null)}
             </a>
           {:else}
             <!-- A registration with no id has no management view to open, so
-                 the row is inert and says why — the same rule an undashboarded
-                 service row follows in `ServicesList.svelte`. -->
-            <div class="row inert" title={NO_INDEX_ID_HINT}>
-              {@render indexCells(idx)}
+                 the row is inert and says why — on `title` for a pointer AND in
+                 a visually hidden span for a screen reader, which is the whole
+                 shape an undashboarded service row uses in
+                 `ServicesList.svelte`, not just its `title` half. -->
+            <div class="row inert" title={indexRowHint(idx)}>
+              {@render indexCells(idx, indexRowHint(idx))}
             </div>
           {/if}
         {/each}
@@ -321,6 +326,20 @@
   }
   .sort-btn:hover { color: var(--trusty-text-primary); }
   .sort-arrow { opacity: 0.6; margin-left: 0.2rem; }
+
+  /* The same visually-hidden stamp `ServicesList.svelte` uses, so an inert row
+     reads its reason aloud rather than only on hover. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
 
   .empty-hint { color: var(--trusty-text-secondary); font-size: 0.85rem; }
   .dashboard-link { margin: 0 0 1rem; font-size: 0.85rem; }

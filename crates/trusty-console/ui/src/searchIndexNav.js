@@ -24,6 +24,20 @@ export const SEARCH_DASHBOARD_URL = '/tools/search/';
 export const NO_INDEX_ID_HINT = 'This registration reports no id, so it has no management view';
 
 /**
+ * The hint an index row carries when it cannot be opened, or `null`.
+ *
+ * Why a function rather than an inline `{#if}` in the component: the hint is
+ * rendered TWICE on an inert row — as `title` for a pointer and as a visually
+ * hidden span for a screen reader, the shape `ServicesList.svelte` uses for a
+ * service with no dashboard — and a decision rendered in two places is one a
+ * test should be able to make on its own.
+ * Test: `a row with no id carries the hint, in both places it is rendered`.
+ */
+export function indexRowHint(idx) {
+  return idx?.id ? null : NO_INDEX_ID_HINT;
+}
+
+/**
  * The management view for one index.
  *
  * The id is percent-encoded: an index id is a free-form string, and one

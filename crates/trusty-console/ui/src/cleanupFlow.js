@@ -35,6 +35,10 @@ export const PRUNE_URL = '/api/console/search/prune-indexes';
  * registration's corpus is the disk this whole panel exists to reclaim, so
  * unticking the box is the exception. Exported rather than written inline in
  * `StaleIndexCleanup.svelte` so the default is covered by `cleanupFlow.test.js`.
+ * That component was removed from the console by #6923; read it at
+ * `git show 6ee2b182b:crates/trusty-console/ui/src/StaleIndexCleanup.svelte`.
+ * The prune and deregister exports below have no caller until the search
+ * dashboard carries the panel — #6941 owns that.
  */
 export const PRUNE_DELETE_DATA_DEFAULT = true;
 
