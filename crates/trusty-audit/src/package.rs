@@ -2493,19 +2493,30 @@ api_key = "lin_api_do-not-package-me"
 
     /// A line longer than the per-line cap is cut, and the entry says so —
     /// a minified bundle must not turn "five lines" into two megabytes.
+    ///
+    /// 🔴 The cap counts CHARACTERS and cuts on a `char_indices` boundary, so
+    /// the multibyte rows are the ones that would panic on a byte slice. Both
+    /// scripts land at exactly the cap plus the marker.
     #[test]
     fn an_excerpt_line_longer_than_the_cap_is_cut() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
         install_record(&work);
-        let long = "x".repeat(5_000);
         let run = audited_citing(
             &work,
             "00-acme-api",
             "acme-api",
             "  { category = \"churn\", id = \"minified\", package = \"src/bundle.js\", \
-             file = \"src/bundle.js\", line = 1, severity = \"RED\", title = \"t\" },\n",
-            &[("src/bundle.js", &format!("{long}\n"))],
+             file = \"src/bundle.js\", line = 1, severity = \"RED\", title = \"t\" },\n\
+             \x20 { category = \"churn\", id = \"accented\", package = \"src/accents.rs\", \
+             file = \"src/accents.rs\", line = 1, severity = \"RED\", title = \"t\" },\n\
+             \x20 { category = \"churn\", id = \"cjk\", package = \"src/cjk.rs\", \
+             file = \"src/cjk.rs\", line = 1, severity = \"RED\", title = \"t\" },\n",
+            &[
+                ("src/bundle.js", &format!("{}\n", "x".repeat(5_000))),
+                ("src/accents.rs", &format!("{}\n", "é".repeat(5_000))),
+                ("src/cjk.rs", &format!("{}\n", "日本語".repeat(2_000))),
+            ],
         );
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
@@ -2521,10 +2532,161 @@ api_key = "lin_api_do-not-package-me"
         .expect("assembles");
 
         let rows = excerpt_entries(&destination);
-        assert!(rows[0]["truncated"].as_bool().unwrap_or(false), "{rows:?}");
-        let excerpt = rows[0]["excerpt"].as_str().expect("an excerpt");
-        assert!(excerpt.ends_with('…'), "{excerpt}");
-        assert!(excerpt.chars().count() < 500, "{}", excerpt.len());
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        for row in &rows {
+            assert!(row["truncated"].as_bool().unwrap_or(false), "{row}");
+            let excerpt = row["excerpt"].as_str().expect("an excerpt");
+            assert!(excerpt.ends_with('…'), "{excerpt}");
+            assert_eq!(
+                excerpt.chars().count(),
+                excerpts::MAX_LINE_CHARS + 1,
+                "the cap counts characters, not bytes: {} chars in {} bytes",
+                excerpt.chars().count(),
+                excerpt.len()
+            );
+        }
+        // The multibyte rows are wider in bytes than in chars, which is the
+        // whole reason the cut is made on a char boundary.
+        assert!(
+            rows[1]["excerpt"]
+                .as_str()
+                .is_some_and(|e| e.len() > e.chars().count()),
+            "{rows:?}"
+        );
+        assert!(
+            rows[2]["excerpt"]
+                .as_str()
+                .is_some_and(|e| e.starts_with('日')),
+            "{rows:?}"
+        );
+    }
+
+    /// A file that is not valid UTF-8 is a stated absence, not a panic and not
+    /// a lossy excerpt — the recipient is told the file could not be read.
+    #[test]
+    fn a_finding_citing_a_non_utf8_file_states_why() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited_citing(
+            &work,
+            "00-acme-api",
+            "acme-api",
+            "  { category = \"churn\", id = \"binary\", package = \"src/blob.rs\", \
+             file = \"src/blob.rs\", line = 1, severity = \"RED\", title = \"t\" },\n",
+            &[],
+        );
+        // Written as raw bytes: 0xFF is a byte no UTF-8 sequence can start.
+        std::fs::create_dir_all(work.root().join("repos/acme-api/src")).expect("mkdir src");
+        std::fs::write(
+            work.root().join("repos/acme-api/src/blob.rs"),
+            [0xFF_u8, 0xFE, 0xFD, b'\n'],
+        )
+        .expect("write non-utf8 file");
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        assemble(
+            &work,
+            &config_with_excerpts(),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("a non-UTF-8 file must not stop the package");
+
+        let rows = excerpt_entries(&destination);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].get("excerpt").is_none(), "{rows:?}");
+        assert!(
+            rows[0]["unavailable"]
+                .as_str()
+                .is_some_and(|r| r.contains("could not be read")),
+            "{rows:?}"
+        );
+        assert!(entries(&destination).contains(&"reports/00-acme-api/report.md".to_owned()));
+    }
+
+    /// A cited path that resolves to a DIRECTORY is refused before any read:
+    /// `canonicalize` succeeds for one, so the regular-file check is what
+    /// stops it rather than an IO error at open time.
+    #[test]
+    fn a_finding_citing_a_directory_states_why() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited_citing(
+            &work,
+            "00-acme-api",
+            "acme-api",
+            "  { category = \"churn\", id = \"dir\", package = \"src\", \
+             file = \"src\", line = 1, severity = \"RED\", title = \"t\" },\n",
+            &[("src/pay.rs", NUMBERED)],
+        );
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        assemble(
+            &work,
+            &config_with_excerpts(),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("a cited directory must not stop the package");
+
+        let rows = excerpt_entries(&destination);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].get("excerpt").is_none(), "{rows:?}");
+        assert!(
+            rows[0]["unavailable"]
+                .as_str()
+                .is_some_and(|r| r.contains("is not a regular file")),
+            "{rows:?}"
+        );
+        assert!(entries(&destination).contains(&"reports/00-acme-api/report.md".to_owned()));
+    }
+
+    /// A cited line the file does not reach yields no lines at all, and that
+    /// is stated rather than shipped as an excerpt with an empty string in it.
+    #[test]
+    fn a_finding_citing_a_line_past_the_end_states_why() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited_citing(
+            &work,
+            "00-acme-api",
+            "acme-api",
+            "  { category = \"churn\", id = \"past-eof\", package = \"src/pay.rs\", \
+             file = \"src/pay.rs\", line = 900, severity = \"RED\", title = \"t\" },\n",
+            &[("src/pay.rs", NUMBERED)],
+        );
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        assemble(
+            &work,
+            &config_with_excerpts(),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("a line past the end must not stop the package");
+
+        let rows = excerpt_entries(&destination);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].get("excerpt").is_none(), "{rows:?}");
+        assert!(
+            rows[0]["unavailable"]
+                .as_str()
+                .is_some_and(|r| r.contains("has no line 900")),
+            "{rows:?}"
+        );
+        assert!(entries(&destination).contains(&"reports/00-acme-api/report.md".to_owned()));
     }
 
     /// 🔴 `crate::grounding::secrets` redacts the matched value before it ever
@@ -2626,6 +2788,27 @@ api_key = "lin_api_do-not-package-me"
         assert!(
             !readme.contains("No source code as such"),
             "the claim is false once excerpts are on: {readme}"
+        );
+        // 🔴 The scrub covers `configured_secrets()` plus the gh token and
+        // nothing else, so the page states that scope rather than claiming
+        // the excerpt was checked for the client's own hardcoded keys.
+        assert!(
+            readme.contains(
+                "scrubbed of the credentials in your engagement config and of the GitHub \
+                 token this run read from `gh` — and of nothing else"
+            ),
+            "{readme}"
+        );
+        assert!(
+            readme.contains(
+                "A credential hardcoded in your own source is not one this client \
+                 can recognise"
+            ),
+            "{readme}"
+        );
+        assert!(
+            !readme.contains("scanned for your credentials on the way in"),
+            "that phrasing claims a scope the scrub does not have: {readme}"
         );
     }
 

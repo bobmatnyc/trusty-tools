@@ -77,7 +77,7 @@ use crate::workdir::WorkDir;
 /// line budget alone would let one finding carry megabytes into a package that
 /// is otherwise reports and counts. 400 is wide enough that ordinary source —
 /// including a long Rust signature or a deeply indented call — arrives whole.
-const MAX_LINE_CHARS: usize = 400;
+pub(super) const MAX_LINE_CHARS: usize = 400;
 
 /// Appended to a line [`MAX_LINE_CHARS`] cut short, so the cut is visible.
 const TRUNCATION_MARKER: &str = "…";
@@ -351,7 +351,8 @@ fn entry_for(row: &Row<'_>, context_lines: u64, needles: &[String]) -> ExcerptEn
 /// is inside `checkout`'s canonical form.
 ///
 /// Test: `super::package_tests::{an_excerpt_never_reaches_outside_the_checkout,
-/// a_finding_whose_file_cannot_be_read_states_why}`.
+/// a_finding_whose_file_cannot_be_read_states_why,
+/// a_finding_citing_a_directory_states_why}`.
 fn resolve_in_checkout(checkout: &Path, cited: &str) -> Result<PathBuf, String> {
     let relative = Path::new(cited);
     if relative.is_absolute() {
@@ -407,7 +408,9 @@ struct Window {
 /// read — which includes a file that is not valid UTF-8.
 ///
 /// Test: `super::package_tests::{a_red_finding_at_a_file_and_line_carries_an_excerpt,
-/// an_excerpt_line_longer_than_the_cap_is_cut}`.
+/// an_excerpt_line_longer_than_the_cap_is_cut,
+/// a_finding_citing_a_non_utf8_file_states_why,
+/// a_finding_citing_a_line_past_the_end_states_why}`.
 fn read_window(path: &Path, line: Option<u64>, context: u64) -> Result<Window, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("could not be read ({e})"))?;
     let (first, last) = match line {
@@ -456,6 +459,9 @@ fn read_window(path: &Path, line: Option<u64>, context: u64) -> Result<Window, S
 ///
 /// Counts CHARACTERS, not bytes, and cuts on a `char_indices` boundary, so a
 /// line of multi-byte text is bounded without ever slicing a code point in two.
+///
+/// Test: `super::package_tests::an_excerpt_line_longer_than_the_cap_is_cut`
+/// (ASCII, accented Latin and CJK, all three cut at the same char count).
 fn clamp_line(text: &str) -> (String, bool) {
     match text.char_indices().nth(MAX_LINE_CHARS) {
         Some((at, _)) => (format!("{}{TRUNCATION_MARKER}", &text[..at]), true),

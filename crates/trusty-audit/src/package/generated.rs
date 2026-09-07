@@ -429,7 +429,10 @@ pub(super) fn render_readme(
         out.push_str(&format!(
             "- **Source code, in one place only.** This engagement turned code excerpts on, so \
              `evidence/excerpts.json` carries up to {} lines either side of each RED finding's \
-             cited line, verbatim, scanned for your credentials on the way in. Everything else \
+             cited line, verbatim. Those lines are scrubbed of the credentials in your \
+             engagement config and of the GitHub token this run read from `gh` — and of \
+             nothing else. A credential hardcoded in your own source is not one this client \
+             can recognise, so read this member before you send the file. Everything else \
              holds no file content, diffs, patches, hunks, or blobs — the extract database does \
              hold free-text fields (commit messages, pull-request and work-item titles, \
              classification notes), so a snippet a person pasted into one of those is in it.\n",
