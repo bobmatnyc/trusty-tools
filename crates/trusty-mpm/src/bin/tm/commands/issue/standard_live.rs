@@ -134,14 +134,20 @@ fn fetch_milestones(runner: &dyn CommandRunner) -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
+/// Cap passed to `gh project list -L`. gh's own default is 30, which it applies
+/// silently, so a project past position 30 would never reach the agent.
+const PROJECT_LIST_LIMIT: &str = "200";
+
 /// Fetch the repository owner's OPEN projects as `(number, title)`.
 ///
 /// Why: `gh project list` is owner-scoped, not repo-scoped, so the owner has to
 /// be resolved first; asking gh for it keeps the answer tied to the same
 /// working directory the milestone call reads.
 /// What: `gh repo view --json owner`, then
-/// `gh project list --owner <login> --format json`, dropping closed projects.
-/// Test: `filing_targets_skip_closed_projects`.
+/// `gh project list --owner <login> -L 200 --format json`, dropping closed
+/// projects.
+/// Test: `filing_targets_skip_closed_projects`,
+/// `project_list_carries_an_explicit_limit`.
 fn fetch_projects(runner: &dyn CommandRunner) -> anyhow::Result<Vec<(u64, String)>> {
     let owner_out = runner.run(
         "gh",
@@ -152,9 +158,19 @@ fn fetch_projects(runner: &dyn CommandRunner) -> anyhow::Result<Vec<(u64, String
         anyhow::bail!("`gh repo view` named no owner — is this a GitHub repository?");
     }
 
+    // #7067: without -L, gh caps the list at 30 and signals no truncation.
     let list_out = runner.run(
         "gh",
-        &["project", "list", "--owner", &owner, "--format", "json"],
+        &[
+            "project",
+            "list",
+            "--owner",
+            &owner,
+            "-L",
+            PROJECT_LIST_LIMIT,
+            "--format",
+            "json",
+        ],
     )?;
     let text = list_out.ok_or_stderr("gh project list")?;
     let parsed: GhProjectList = serde_json::from_str(&text)
@@ -248,6 +264,29 @@ mod tests {
         let runner = FakeRunner::new(vec![ok_out(""), ok_out("bobmatnyc"), ok_out(PROJECTS_JSON)]);
         let text = render_filing_targets(&runner);
         assert!(!text.contains("Retired 2025"), "{text}");
+    }
+
+    #[test]
+    fn project_list_carries_an_explicit_limit() {
+        // #7067: gh caps `project list` at 30 with no truncation signal, so the
+        // flag and its value must both survive in argv.
+        let runner = FakeRunner::new(vec![ok_out(""), ok_out("bobmatnyc"), ok_out(PROJECTS_JSON)]);
+        let _ = render_filing_targets(&runner);
+        let calls = runner.calls.borrow();
+        let argv = &calls[2];
+        let flag = argv
+            .iter()
+            .position(|a| a == "-L")
+            .unwrap_or_else(|| panic!("`gh project list` carries -L: {argv:?}"));
+        assert_eq!(
+            argv.get(flag + 1).map(String::as_str),
+            Some(PROJECT_LIST_LIMIT),
+            "{argv:?}"
+        );
+        assert!(
+            PROJECT_LIST_LIMIT.parse::<u32>().is_ok_and(|n| n > 30),
+            "the limit must exceed gh's silent default of 30: {PROJECT_LIST_LIMIT}"
+        );
     }
 
     #[test]

@@ -269,7 +269,8 @@ names one when the project always applies; when it does not, pick from the live
 list rather than guessing a title.
 
 ```bash
-gh project list --owner <owner> --format json   # what `tm issue standard` reads
+# -L is required: gh silently caps the list at 30 without it (#7067)
+gh project list --owner <owner> -L 200 --format json  # what `tm issue standard` reads
 gh issue edit 7067 --add-project "trusty-mpm"
 ```
 
