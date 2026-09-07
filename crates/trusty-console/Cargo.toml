@@ -43,6 +43,8 @@ include = [
     "ui/dist/**/*",
     # #6155: the trusty-search SPA the console serves at /tools/search/.
     "ui-search-dist/**/*",
+    # #6155: the trusty-memory SPA the console serves at /tools/memory/.
+    "ui-memory-dist/**/*",
     "Cargo.toml",
     "README.md",
 ]

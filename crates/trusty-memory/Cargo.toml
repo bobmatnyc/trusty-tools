@@ -42,7 +42,10 @@ homepage = "https://github.com/bobmatnyc/trusty-tools"
 keywords = ["mcp", "memory", "vector-search", "knowledge-graph", "embeddings"]
 categories = ["command-line-utilities", "development-tools"]
 
-exclude = [".fastembed_cache/", "ui/node_modules/**"]
+# #6155: no `ui/` tree any more — its Svelte source moved to
+# crates/trusty-console/ui-memory, so there is nothing here to exclude but
+# the embedder cache.
+exclude = [".fastembed_cache/"]
 
 [lib]
 # Why: Explicit `rlib` keeps the crate linkable as a Rust library from
@@ -132,8 +135,6 @@ tracing = { workspace = true }
 clap = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
-rust-embed = { workspace = true }
-mime_guess = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
 tokio-stream = { workspace = true }

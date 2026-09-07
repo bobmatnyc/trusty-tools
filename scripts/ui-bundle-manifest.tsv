@@ -37,6 +37,15 @@
 # property this gate exists for. #6285 deletes trusty-search's HTTP listener
 # and this row with it.
 #
+# #6155: trusty-memory's row is GONE, not moved. That crate no longer ships a
+# bundle at all — its embed, its build.rs and its ui/ tree were deleted when the
+# dashboard's Svelte source moved to crates/trusty-console/ui-memory. The
+# `trusty-console-memory` row below is the console's third bundle, keyed the same
+# way as `trusty-console-search` and for the same reason: stamp-ui-bundle.sh
+# stamps by key, so three bundles need three keys or one build's stamp certifies
+# a bundle it never rebuilt. Its source_dir keeps the pre-move path as a second
+# entry so `--rev` can still audit a commit from before the move.
+#
 # crates/trusty-agents has a ui/ but its dist is gitignored (Tauri packages it
 # at build time, nothing is embedded from git), so it ships no committed bundle
 # and correctly has no row. Adding one would fail NO-BUNDLE.
@@ -61,7 +70,7 @@
 #
 # crate_dir	source_dir	bundle_dir
 trusty-search	crates/trusty-console/ui-search,crates/trusty-search/ui	crates/trusty-search/ui-dist
-trusty-memory	crates/trusty-memory/ui	crates/trusty-memory/ui/dist
 trusty-analyze	crates/trusty-analyze/ui	crates/trusty-analyze/ui/dist
 trusty-console	crates/trusty-console/ui	crates/trusty-console/ui/dist
 trusty-console-search	crates/trusty-console/ui-search,crates/trusty-search/ui	crates/trusty-console/ui-search-dist
+trusty-console-memory	crates/trusty-console/ui-memory,crates/trusty-memory/ui	crates/trusty-console/ui-memory-dist

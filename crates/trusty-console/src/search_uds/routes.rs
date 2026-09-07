@@ -13,23 +13,15 @@
 //! ## The SSE bridge, frame for frame
 //!
 //! `trusty_search::service::rpc::streams` states the contract this side has to
-//! honour: one stream ITEM is exactly the JSON document one SSE `data:` line
-//! carried, parsed rather than prefixed. So the bridge re-prefixes it and adds
-//! nothing — the `{"type":"connected"}` opener, every `DaemonEvent`, every
-//! reindex progress event and the `{"type":"lag","skipped":N}` frame reach the
-//! browser byte-identical to what the daemon's own SSE route wrote.
+//! honour, and [`crate::uds_sse`] is where honouring it lives — the `data:`
+//! encoding, the 20-second keep-alive comment, and the terminal error event that
+//! keeps a broken reindex from reading as a finished one
+//! (`crates/trusty-console/ui-search/src/lib/views/Indexes.svelte` treats a closed
+//! stream as a completed reindex). #6155 moved that plumbing there so the
+//! trusty-memory bridge shares it rather than carrying a second copy.
 //!
-//! Two things the daemon's SSE route emitted that its RPC stream deliberately
-//! does not, and what happens to them here:
-//!
-//! - the `: heartbeat\n\n` comment every 20 s. It exists so an idle TCP body is
-//!   not torn down, and the browser hop is still TCP — so this module emits it,
-//!   on the same interval, rather than changing what the browser receives.
-//! - the terminal `data:` framing of a failure. A mid-stream failure becomes one
-//!   `{"type":"error","message":…}` event before the body closes, because the
-//!   SPA reads a closed reindex stream as a COMPLETED reindex
-//!   (`crates/trusty-console/ui-search/src/lib/views/Indexes.svelte`) and a silent close
-//!   would report a broken reindex as a finished one.
+//! What stays here is what trusty-search owns: which methods stream, which
+//! JSON-RPC code becomes which HTTP status, and the peek below.
 //!
 //! A refusal that arrives BEFORE the first item — the reindex stream's "no
 //! progress record for this index" — becomes an HTTP status, not a `200`
@@ -42,16 +34,13 @@
 
 use std::path::{Path, PathBuf};
 
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Request, State};
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use futures_util::StreamExt as _;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use trusty_common::uds::UdsRpcError;
-use trusty_common::uds::stream_client::FramedStream;
 
 use super::map::{Call, map_request};
 use super::{
@@ -59,18 +48,7 @@ use super::{
     open_stream,
 };
 use crate::server::AppState;
-
-/// How often an open stream emits an SSE keep-alive comment.
-///
-/// The same 20 s `trusty_search::service::server::reindex_handlers` used, so an
-/// idle browser connection sees the byte sequence it saw before the migration.
-const SSE_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
-
-/// How many stream items may buffer between the socket reader and the browser.
-///
-/// Matches the daemon-side producer buffer (`streams::STREAM_BUFFER`), so
-/// neither side is the first to accumulate behind a slow reader.
-const SSE_BUFFER: usize = 64;
+use crate::uds_sse::sse_response;
 
 /// `ANY /api/search/{*path}` — reach trusty-search over its socket.
 ///
@@ -223,102 +201,7 @@ async fn stream_response(
         None => None,
     };
 
-    let head = futures_util::stream::iter(
-        first
-            .into_iter()
-            .map(|item| Ok::<Bytes, std::convert::Infallible>(sse_data(&item))),
-    );
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        // The same header the daemon's SSE routes set, so a reverse proxy in
-        // front of the console does not buffer the stream into uselessness.
-        .header("X-Accel-Buffering", "no")
-        .body(Body::from_stream(head.chain(sse_tail(stream, method))))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-}
-
-/// The rest of an open stream, as SSE frames plus keep-alive comments.
-///
-/// Why the reader runs in its own task rather than inside the `select!`:
-/// `FramedStream::next_frame` reads a line off a `BufReader`, and cancelling
-/// that mid-line — which a heartbeat tick would do — discards the bytes already
-/// read. Moving the read behind an `mpsc` makes both arms of the select
-/// cancel-safe, since `Receiver::recv` and `Interval::tick` both are.
-///
-/// The task also carries the disconnect signal: when the browser goes, axum
-/// drops this body and the receiver drops. The read itself selects on
-/// `Sender::closed()` so the task notices immediately rather than at the next
-/// frame — a status stream can be silent for minutes, and waiting for a frame
-/// that will never come would hold the socket, and the daemon's producer behind
-/// it, open for exactly that long. The same shape the daemon's own producer uses
-/// (`trusty_search::service::rpc::streams`). Either way the task returns,
-/// dropping the `FramedStream` and closing the socket, which is what ends the
-/// producer (`streams`'s "a dropped client stops the producer").
-///
-/// Test: `tests/search_uds_bridge.rs`'s `a_stream_reaches_the_browser_frame_for_frame`,
-/// `a_mid_stream_failure_becomes_an_error_event`, and
-/// `a_browser_disconnect_releases_the_daemon_socket` for the disconnect arm.
-fn sse_tail(
-    mut stream: FramedStream<Value>,
-    method: &'static str,
-) -> impl futures_util::Stream<Item = Result<Bytes, std::convert::Infallible>> {
-    let (tx, rx) = mpsc::channel::<Result<Value, UdsRpcError>>(SSE_BUFFER);
-    tokio::spawn(async move {
-        loop {
-            // Cancelling `next_frame` mid-line discards the bytes already read,
-            // which only matters to a reader that resumes. This arm never
-            // resumes: it returns, and the `FramedStream` is dropped with it.
-            let item = tokio::select! {
-                biased;
-                () = tx.closed() => return,
-                item = stream.next_frame() => item,
-            };
-            let Some(item) = item else { return };
-            let terminal = item.is_err();
-            if tx.send(item).await.is_err() || terminal {
-                return;
-            }
-        }
-    });
-
-    let heartbeat = tokio::time::interval_at(
-        tokio::time::Instant::now() + SSE_HEARTBEAT_INTERVAL,
-        SSE_HEARTBEAT_INTERVAL,
-    );
-
-    futures_util::stream::unfold(Some((rx, heartbeat)), move |state| async move {
-        let (mut rx, mut heartbeat) = state?;
-        tokio::select! {
-            biased;
-            item = rx.recv() => match item {
-                Some(Ok(value)) => Some((Ok(sse_data(&value)), Some((rx, heartbeat)))),
-                Some(Err(e)) => {
-                    // #6285: never a silent close. See the module docs.
-                    warn!("search_uds: {method} failed mid-stream: {e}");
-                    let event = json!({ "type": "error", "message": e.to_string() });
-                    Some((Ok(sse_data(&event)), None))
-                }
-                None => None,
-            },
-            _ = heartbeat.tick() => Some((
-                Ok(Bytes::from_static(b": heartbeat\n\n")),
-                Some((rx, heartbeat)),
-            )),
-        }
-    })
-}
-
-/// Encode one stream item as an SSE `data:` frame.
-///
-/// Why `to_string` on a `Value` rather than passing the raw line through: the
-/// stream carries parsed JSON, and re-serialising is what puts it back on one
-/// line — an embedded newline would split one event into two.
-/// Test: `sse_data_is_one_line_per_event`.
-fn sse_data(value: &Value) -> Bytes {
-    Bytes::from(format!("data: {value}\n\n"))
+    sse_response(first, stream, method)
 }
 
 /// Turn a stream failure into the console's verdict about it.
@@ -377,17 +260,6 @@ impl AppState {
 mod tests {
     use super::*;
     use trusty_common::uds::server::RpcError;
-
-    /// Why: an event carrying a newline inside a string would split into two SSE
-    /// events and the SPA would parse neither.
-    /// Test: this is the test.
-    #[test]
-    fn sse_data_is_one_line_per_event() {
-        let framed = sse_data(&json!({ "message": "a\nb" }));
-        let text = String::from_utf8(framed.to_vec()).expect("utf-8");
-        assert_eq!(text, "data: {\"message\":\"a\\nb\"}\n\n");
-        assert_eq!(text.matches("\n\n").count(), 1);
-    }
 
     /// Why: the daemon's terminal error frame is a refusal with a code, and it
     /// must reach the browser as the status that code stands for — not as a

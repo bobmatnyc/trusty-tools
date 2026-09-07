@@ -1,4 +1,6 @@
-// KEEP IN SYNC WITH crates/trusty-{analyze,memory}/ui/src/lib/base.js
+// KEEP IN SYNC WITH crates/trusty-analyze/ui/src/lib/base.js and
+// crates/trusty-console/ui-memory/src/lib/base.js (#6155 moved memory's SPA
+// source into this crate too).
 /*
  * Why: The daemon serves this SPA under the `/ui/` mount (routes `/ui/` and
  * `/ui/{*path}` in src/service/server/mod.rs) while the JSON API endpoints

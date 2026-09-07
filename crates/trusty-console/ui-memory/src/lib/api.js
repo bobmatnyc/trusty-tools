@@ -1,16 +1,16 @@
 /*
  * Why: All UI components hit the same trusty-memory daemon REST surface;
  * centralizing fetch logic gives us one place to handle errors and JSON
- * parsing. The daemon serves the SPA at `/` and the API under `/api/v1/*`
- * (plus `/health`), so requests are always same-origin in production. In
- * `vite dev`, vite.config.js proxies `/api` and `/health` to the daemon.
- * When served through the trusty-console reverse-proxy at /proxy/memory/,
- * apiUrl() rebases absolute paths to the proxy sub-path so every API call
- * reaches the daemon via the proxy instead of 404ing at the console host root.
+ * parsing. #6155: trusty-memory stopped binding a listener (#6286, ADR-0032),
+ * so these paths no longer reach a daemon directly. trusty-console serves this
+ * SPA at `/tools/memory/` and injects `window.__MEMORY_BASE__ =
+ * /api/memory/`, so every path below resolves against that prefix and
+ * `crate::memory_uds` translates it into one `memory.*` JSON-RPC call on the
+ * daemon's Unix socket. The path SHAPES are unchanged, because that mapping
+ * table is written against them.
  * What: Thin wrappers returning parsed JSON or throwing on non-2xx.
- * Test: Console-call api.health() and confirm the shape matches /health.
- *   Proxy mode: open the SPA at /proxy/memory/ and confirm api.health()
- *   fetches /proxy/memory/health not /health.
+ * Test: `crates/trusty-console/tests/memory_uds_bridge.rs` asserts each path
+ * below reaches the method it stands for.
  */
 
 import { apiUrl } from './base.js';
@@ -80,15 +80,6 @@ export const api = {
   stopDaemon: () => request('/api/v1/admin/stop', { method: 'POST' }),
 
   /**
-   * List distinct active subjects in a palace's knowledge graph.
-   * Why: KG Explorer left panel — caller doesn't know subjects up front.
-   */
-  kgListSubjects: (id, limit = 50) =>
-    request(
-      `/api/v1/palaces/${encodeURIComponent(id)}/kg/subjects?limit=${encodeURIComponent(limit)}`
-    ),
-
-  /**
    * List distinct active subjects paired with their active-triple count.
    * Why: KG Explorer renders a count badge next to each subject and
    * supports sort-by-count without N round-trips.
@@ -111,10 +102,15 @@ export const api = {
    * Query triples by subject within a single palace.
    * Why: KG Explorer right panel when a subject is selected.
    */
+  // #6155: the console bridges this path onto trusty-memory's `kg_query` tool,
+  // which answers `{subject, triples, kg_triple_count}` rather than the bare
+  // array the retired HTTP route returned. Callers still want the array, so
+  // unwrap it here rather than in the bridge — the bridge maps names, not
+  // payload shapes.
   kgQuery: (id, subject) =>
     request(
       `/api/v1/palaces/${encodeURIComponent(id)}/kg?subject=${encodeURIComponent(subject)}`
-    ),
+    ).then((r) => (Array.isArray(r) ? r : (r?.triples ?? []))),
 
   /** Count of currently-active triples for a palace. */
   kgCount: (id) => request(`/api/v1/palaces/${encodeURIComponent(id)}/kg/count`),

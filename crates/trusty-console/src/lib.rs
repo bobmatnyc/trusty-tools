@@ -62,6 +62,9 @@ pub mod poller;
 pub mod proxy;
 pub mod routes;
 // #6285: the console's client to trusty-search, which no longer serves HTTP.
+// #6155: the trusty-memory bridge, the sibling of `search_uds`. It maps the
+// memory dashboard's REST-shaped paths onto the daemon's `memory.*` methods.
+pub mod memory_uds;
 pub mod search_uds;
 pub mod server;
 pub mod service;
@@ -69,6 +72,8 @@ pub mod service;
 pub mod service_metrics;
 // #6155: the trusty-search SPA, mounted under /tools/search/.
 pub mod tools_ui;
+// #6155: the SSE plumbing both UDS bridges hand an opened stream to.
+pub(crate) mod uds_sse;
 pub mod webhook;
 
 /// How often the background sweep re-attempts pending webhook deliveries.

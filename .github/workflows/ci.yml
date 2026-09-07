@@ -1988,8 +1988,12 @@ jobs:
           - name: trusty-mpm-gui
             dir: crates/trusty-mpm-gui/ui
             command: pnpm run build:web
-          - name: trusty-memory
-            dir: crates/trusty-memory/ui
+          # #6155: the memory dashboard's source moved into trusty-console as
+          # its third UI project, alongside ui-search. The matrix name follows
+          # the directory so a failure names the tree to open. Not a required
+          # context, so renaming it wedges no open PR.
+          - name: trusty-console-memory
+            dir: crates/trusty-console/ui-memory
             command: pnpm run build
           - name: trusty-console
             dir: crates/trusty-console/ui

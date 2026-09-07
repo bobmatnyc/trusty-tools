@@ -11,10 +11,11 @@
 //!
 //! NOTE: The core UI-build logic (SKIP_UI_BUILD guard, pnpm detection,
 //! install+build pipeline, placeholder fallback, and the #5078 committed-bundle
-//! freshness guard) is intentionally kept identical across trusty-memory,
-//! trusty-analyze, trusty-console, and trusty-search (issue #987).
+//! freshness guard) is intentionally kept identical across trusty-analyze,
+//! trusty-console, and trusty-search (issue #987).
 //! `scripts/check_buildrs_sync.sh` asserts that the canonical implementation
-//! block does not drift between these four files.
+//! block does not drift between these three files. #6155 removed the fourth,
+//! trusty-memory: that crate ships no bundle any more, so it has no build.rs.
 //!
 //! Test: `SKIP_UI_BUILD=1 cargo check -p trusty-analyze` exits without invoking
 //! pnpm; a normal `cargo build` populates `ui/dist/index.html`.

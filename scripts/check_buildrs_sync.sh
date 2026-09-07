@@ -5,7 +5,9 @@
 # same build-time logic duplicate it by necessity. This script is the anti-drift
 # gate that fails CI whenever the copies diverge. Two independent families exist:
 #
-#   "daemon"  — trusty-memory, trusty-analyze, trusty-console, trusty-search
+#   "daemon"  — trusty-analyze, trusty-console, trusty-search. #6155 dropped
+#               trusty-memory: it ships no committed bundle any more, so it
+#               has no build.rs to keep in sync.
 #               (issue #987). Embeds an OPTIONAL web UI; degrades to a
 #               placeholder when the JS toolchain is missing.
 #   "tauri-ui" — trusty-code-gui, trusty-mpm-gui, trusty-agents-ui,
@@ -34,7 +36,6 @@ set -euo pipefail
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 DAEMON_FILES=(
-    "crates/trusty-memory/build.rs"
     "crates/trusty-analyze/build.rs"
     "crates/trusty-console/build.rs"
     "crates/trusty-search/build.rs"
