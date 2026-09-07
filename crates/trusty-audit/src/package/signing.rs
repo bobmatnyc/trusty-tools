@@ -523,39 +523,48 @@ pub fn verify(package: &Path, retained: &RetainedKey) -> Result<Verdict, Signing
 /// Why: `zip` 2.4.2 keys its entry table by name, so a second central-directory
 /// record under an existing name never reaches a caller — see
 /// [`super::zip_directory`]'s module docs for what that lets an archive do.
-/// What: walks the raw directory, refuses a repeated name, then refuses any
-/// other disagreement between that walk and `ZipArchive::file_names`. Callers
-/// downstream may then treat either view as the member set.
+/// What: walks the raw directory, refuses two records carrying the same name
+/// BYTES, then refuses any count that differs from what the parser exposes.
+///
+/// Comparing bytes and counts rather than decoded names is deliberate. `zip`
+/// picks UTF-8 or CP437 by general-purpose flag bit 11, so a decoded comparison
+/// would refuse a legitimate CP437-flagged member — and it would still have to
+/// answer the harder case, two records whose different bytes decode alike,
+/// which the parser also collapses. The count catches that one without this
+/// module owning an encoding rule at all: a collapse of any kind leaves the
+/// parser exposing fewer members than the directory holds records.
 ///
 /// # Postconditions
-/// On `Ok`, the returned names are exactly `ZipArchive`'s and exactly the raw
-/// directory's, with no repeat in either.
+/// On `Ok`, the returned names are the parser's, and the raw directory holds
+/// exactly as many records with no two carrying the same bytes.
 /// Test: `super::signing_tests::a_duplicate_central_directory_record_is_refused`,
-/// `super::signing_tests::the_raw_directory_matches_what_the_zip_parser_exposes`.
+/// `super::signing_tests::the_raw_directory_matches_what_the_zip_parser_exposes`,
+/// `super::signing_tests::a_cp437_flagged_name_is_not_refused`.
 fn agreed_members(archive: &mut Archive, package: &Path) -> Result<Vec<String>, SigningError> {
     let raw = super::zip_directory::member_names(package)?;
-    let mut unique = std::collections::BTreeSet::new();
+    let mut seen: std::collections::BTreeSet<&[u8]> = std::collections::BTreeSet::new();
     for name in &raw {
-        if !unique.insert(name.clone()) {
+        if !seen.insert(name.as_slice()) {
             return Err(SigningError::DuplicateMember {
                 path: package.to_path_buf(),
-                entry: name.clone(),
+                // Lossy for the MESSAGE only. Nothing decides anything on it.
+                entry: String::from_utf8_lossy(name).into_owned(),
             });
         }
     }
-    let exposed: std::collections::BTreeSet<String> =
-        archive.file_names().map(str::to_owned).collect();
-    if exposed != unique {
+    let exposed: Vec<String> = archive.file_names().map(str::to_owned).collect();
+    if exposed.len() != raw.len() {
         return Err(SigningError::DirectoryMismatch {
             path: package.to_path_buf(),
             reason: format!(
-                "the directory holds {} member(s) and the parser exposes {}",
-                unique.len(),
+                "the directory holds {} record(s) and the parser exposes {} member(s), so at \
+                 least one record was collapsed",
+                raw.len(),
                 exposed.len()
             ),
         });
     }
-    Ok(raw)
+    Ok(exposed)
 }
 
 /// The detached-signature half of [`verify`].
@@ -1228,7 +1237,7 @@ mod signing_tests {
             super::super::zip_directory::member_names(&forged_path)
                 .expect("the raw directory walks")
                 .iter()
-                .filter(|n| *n == "README.md")
+                .filter(|n| n.as_slice() == b"README.md")
                 .count(),
             2,
             "the raw directory must show what the parser hides"
@@ -1260,7 +1269,8 @@ mod signing_tests {
         let raw: std::collections::BTreeSet<String> =
             super::super::zip_directory::member_names(&path)
                 .expect("walks")
-                .into_iter()
+                .iter()
+                .map(|n| String::from_utf8_lossy(n).into_owned())
                 .collect();
         assert_eq!(raw, exposed);
         assert_eq!(raw.len(), 4, "two members plus the manifest and signature");
@@ -1315,6 +1325,254 @@ mod signing_tests {
                 Ok(Verdict::Signed { .. }) | Err(SigningError::Archive { .. })
             ),
             "expected a verdict rather than an abort, got {outcome:?}"
+        );
+    }
+
+    /// A minimal one-member archive, built byte by byte, with `flags` on both
+    /// headers and `comment` after the EOCD. The escape hatch the framing tests
+    /// need: a real `ZipWriter` cannot produce any of these shapes.
+    fn hand_built(name: &[u8], body: &[u8], flags: u16, comment: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&le32(0x0403_4b50));
+        out.extend_from_slice(&le16(20));
+        out.extend_from_slice(&le16(flags));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le32(crc32(body)));
+        out.extend_from_slice(&le32(body.len() as u32));
+        out.extend_from_slice(&le32(body.len() as u32));
+        out.extend_from_slice(&le16(name.len() as u16));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(name);
+        out.extend_from_slice(body);
+
+        let directory_at = out.len() as u32;
+        let mut record = Vec::new();
+        record.extend_from_slice(&le32(0x0201_4b50));
+        record.extend_from_slice(&le16(20));
+        record.extend_from_slice(&le16(20));
+        record.extend_from_slice(&le16(flags));
+        record.extend_from_slice(&le16(0));
+        record.extend_from_slice(&le16(0));
+        record.extend_from_slice(&le16(0));
+        record.extend_from_slice(&le32(crc32(body)));
+        record.extend_from_slice(&le32(body.len() as u32));
+        record.extend_from_slice(&le32(body.len() as u32));
+        record.extend_from_slice(&le16(name.len() as u16));
+        record.extend_from_slice(&le16(0));
+        record.extend_from_slice(&le16(0));
+        record.extend_from_slice(&le16(0));
+        record.extend_from_slice(&le16(0));
+        record.extend_from_slice(&le32(0));
+        record.extend_from_slice(&le32(0));
+        record.extend_from_slice(name);
+        let directory_size = record.len() as u32;
+        out.extend_from_slice(&record);
+
+        out.extend_from_slice(&le32(0x0605_4b50));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(1));
+        out.extend_from_slice(&le16(1));
+        out.extend_from_slice(&le32(directory_size));
+        out.extend_from_slice(&le32(directory_at));
+        out.extend_from_slice(&le16(comment.len() as u16));
+        out.extend_from_slice(comment);
+        out
+    }
+
+    fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).expect("write");
+        path
+    }
+
+    /// The EOCD sits behind the archive comment, so the scan has to reach past
+    /// one. An ordinary comment must leave the verdict alone.
+    #[test]
+    fn an_ordinary_archive_comment_does_not_change_the_verdict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = EngagementKey::generate();
+        let commented = write(
+            dir.path(),
+            "commented.zip",
+            &with_comment(
+                &std::fs::read(package(dir.path(), &[("README.md", "read me")], Some(&key)))
+                    .expect("read"),
+                b"delivered 2026-09-07",
+            ),
+        );
+
+        assert_eq!(
+            super::super::zip_directory::member_names(&commented)
+                .expect("the EOCD is found behind the comment")
+                .len(),
+            3,
+            "one member plus the manifest and its signature"
+        );
+        let outcome = verify(&commented, &retained(&key));
+        assert!(
+            matches!(outcome, Ok(Verdict::Signed { .. })),
+            "a comment must not change the verdict: {outcome:?}"
+        );
+    }
+
+    /// 🔴 The archive comment is arbitrary bytes whoever sent the package
+    /// wrote, so "the last EOCD signature in the file" is a rule they can
+    /// answer: a planted `PK\x05\x06` sits at a HIGHER offset than the real
+    /// record. The walk is not fooled — a candidate must frame itself, its
+    /// declared comment length reaching exactly the end of the file, and its
+    /// directory must end where the record describing it begins.
+    ///
+    /// `zip` 2.4.2's own scan IS fooled by this archive and reports it empty,
+    /// which is the case this whole check exists for: the two views disagree,
+    /// so verification refuses rather than reporting Signed over a member set
+    /// that is not what the file would extract.
+    #[test]
+    fn a_comment_carrying_a_fake_eocd_signature_is_refused_not_believed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = EngagementKey::generate();
+        let path = package(dir.path(), &[("README.md", "read me")], Some(&key));
+        // A whole fake EOCD inside the comment, with bytes after it.
+        let mut decoy = Vec::new();
+        decoy.extend_from_slice(&le32(0x0605_4b50));
+        decoy.extend_from_slice(&[0_u8; 18]);
+        decoy.extend_from_slice(b"trailing");
+        let doctored = write(
+            dir.path(),
+            "decoy.zip",
+            &with_comment(&std::fs::read(&path).expect("read"), &decoy),
+        );
+
+        assert_eq!(
+            super::super::zip_directory::member_names(&doctored)
+                .expect("the real EOCD is still found")
+                .len(),
+            3,
+            "the walk must not take the decoy"
+        );
+        let parser = open(&doctored).expect("opens");
+        assert_eq!(
+            parser.file_names().count(),
+            0,
+            "zip 2.4.2 is expected to take the decoy — that is why the two views are compared"
+        );
+        match verify(&doctored, &retained(&key)) {
+            Err(SigningError::DirectoryMismatch { reason, .. }) => {
+                assert!(reason.contains("collapsed"), "{reason}");
+            }
+            other => panic!("expected a refusal rather than a verdict, got {other:?}"),
+        }
+    }
+
+    /// `raw` with `comment` appended and the EOCD's comment length updated.
+    fn with_comment(raw: &[u8], comment: &[u8]) -> Vec<u8> {
+        let eocd = eocd_at(raw);
+        let mut out = raw[..eocd].to_vec();
+        let mut record = raw[eocd..].to_vec();
+        record[20..22].copy_from_slice(&le16(comment.len() as u16));
+        out.extend_from_slice(&record);
+        out.extend_from_slice(comment);
+        out
+    }
+
+    /// A directory that stops in the middle of a record is refused rather than
+    /// walked off the end of the buffer.
+    #[test]
+    fn a_directory_truncated_mid_record_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut raw = hand_built(b"README.md", b"read me", 0, b"");
+        let eocd = eocd_at(&raw);
+        // Claim the whole directory but leave twenty bytes of it: the record's
+        // fixed part no longer fits, let alone its name.
+        let size = read_u32(&raw, eocd + 12);
+        raw[eocd + 12..eocd + 16].copy_from_slice(&le32(size));
+        let directory_at = read_u32(&raw, eocd + 16) as usize;
+        let mut truncated = raw[..directory_at + 20].to_vec();
+        truncated.extend_from_slice(&raw[eocd..]);
+        let eocd = eocd_at(&truncated);
+        truncated[eocd + 16..eocd + 20].copy_from_slice(&le32(directory_at as u32));
+        let path = write(dir.path(), "truncated.zip", &truncated);
+
+        let outcome = super::super::zip_directory::member_names(&path);
+        assert!(
+            matches!(outcome, Err(SigningError::DirectoryMalformed { .. })),
+            "{outcome:?}"
+        );
+    }
+
+    /// A saturated entry count says zip64, and a zip64 archive with no locator
+    /// is refused rather than read as if the classic fields meant anything.
+    #[test]
+    fn a_saturated_eocd_with_no_zip64_locator_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut raw = hand_built(b"README.md", b"read me", 0, b"");
+        let eocd = eocd_at(&raw);
+        raw[eocd + 10..eocd + 12].copy_from_slice(&le16(u16::MAX));
+        let path = write(dir.path(), "saturated.zip", &raw);
+
+        let outcome = super::super::zip_directory::member_names(&path);
+        assert!(
+            matches!(outcome, Err(SigningError::DirectoryMalformed { .. })),
+            "{outcome:?}"
+        );
+    }
+
+    /// An entry count far past what the directory can hold is refused on the
+    /// record that does not frame, without indexing past the buffer.
+    #[test]
+    fn a_forged_entry_count_is_refused_without_a_panic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut raw = hand_built(b"README.md", b"read me", 0, b"");
+        let eocd = eocd_at(&raw);
+        // 0xFFFE rather than 0xFFFF: a huge count that is NOT the zip64
+        // sentinel, so the walk runs rather than diverting to the locator.
+        raw[eocd + 8..eocd + 10].copy_from_slice(&le16(0xFFFE));
+        raw[eocd + 10..eocd + 12].copy_from_slice(&le16(0xFFFE));
+        let path = write(dir.path(), "forged-count.zip", &raw);
+
+        let outcome = super::super::zip_directory::member_names(&path);
+        assert!(
+            matches!(outcome, Err(SigningError::DirectoryMalformed { .. })),
+            "{outcome:?}"
+        );
+    }
+
+    /// 🔴 `zip` decodes a member name as UTF-8 or CP437 by general-purpose flag
+    /// bit 11 (`read.rs:1313-1316`). A walk that decoded every name one fixed
+    /// way would disagree with the parser about a legitimate CP437-flagged
+    /// name — 0x81 is `ü` there and not valid UTF-8 on its own — and refuse an
+    /// ordinary archive. The comparison is bytes and counts, so it does not.
+    #[test]
+    fn a_cp437_flagged_name_is_not_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Flags 0: bit 11 clear, so the name is CP437 to every reader.
+        let raw = hand_built(b"gr\x81ss.md", b"hello", 0, b"");
+        let path = write(dir.path(), "cp437.zip", &raw);
+
+        let walked = super::super::zip_directory::member_names(&path).expect("walks");
+        assert_eq!(walked, vec![b"gr\x81ss.md".to_vec()], "raw, undecoded");
+
+        let archive = open(&path).expect("open");
+        let exposed: Vec<String> = archive.file_names().map(str::to_owned).collect();
+        assert_eq!(
+            exposed,
+            vec!["grüss.md".to_owned()],
+            "the parser decodes CP437"
+        );
+        assert_ne!(
+            String::from_utf8_lossy(&walked[0]),
+            exposed[0],
+            "a decoded comparison would have disagreed here — that is the finding"
+        );
+
+        // The archive carries no manifest, so this stops at the manifest rather
+        // than at the member set: the encoding did not refuse it.
+        let outcome = verify(&path, &retained(&EngagementKey::generate()));
+        assert!(
+            matches!(outcome, Err(SigningError::ManifestMissing { .. })),
+            "a CP437 name must not be refused as a directory disagreement: {outcome:?}"
         );
     }
 }

@@ -13,7 +13,11 @@ Added
   Before any of those it establishes the member set from the RAW central
   directory — the `zip` crate keys its entry table by name, so an archive
   repeating a name would present one member here and another to `zipfile` or
-  Info-ZIP — refusing a repeated name and any disagreement with the parser.
+  Info-ZIP — refusing a repeated name and any disagreement with the parser. That
+  walk identifies the end-of-central-directory record by its own framing rather
+  than by being last, so an archive comment carrying a planted `PK\x05\x06` does
+  not move it, and it compares raw name bytes rather than decoded names, so a
+  legitimate CP437-flagged member is not refused.
   Member bytes are streamed through a fixed buffer, never into an allocation
   sized from the archive's own declared size. An engagement with no key still
   packages —

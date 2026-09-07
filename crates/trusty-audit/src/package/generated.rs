@@ -462,7 +462,7 @@ pub(super) fn render_readme(
     }
     // #5481: the "no signature yet" bullet is gone — the Signature section
     // below states what this package actually carries, either way.
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(if signed {
         // #5481: the limit is stated in the same paragraph as the property, so
         // no reader takes a valid signature for more than it is.

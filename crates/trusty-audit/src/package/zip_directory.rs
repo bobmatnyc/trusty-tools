@@ -17,11 +17,19 @@
 //! repeats. Deciding what a repeat means is [`super::signing::verify`]'s job;
 //! this module only refuses to hide one.
 //!
+//! Names come back as RAW BYTES, undecoded. `zip` picks UTF-8 or CP437 by
+//! general-purpose flag bit 11 (`read.rs:1313-1316`), so decoding here with one
+//! fixed rule would make a legitimate CP437-flagged name disagree with the
+//! parser's and refuse an ordinary archive. The caller compares bytes and
+//! counts, which needs no encoding rule at all and catches a collision between
+//! two records that decode alike as readily as one between identical bytes.
+//!
 //! Scope: names and record framing. Nothing here reads a local header, a
 //! compressed byte, or a declared size — a size in this directory is
 //! attacker-controlled and is never used to size an allocation.
 //!
-//! Test: `super::signing::signing_tests::a_duplicate_central_directory_record_is_refused`.
+//! Test: `super::signing::signing_tests::a_duplicate_central_directory_record_is_refused`,
+//! `super::signing::signing_tests::a_cp437_flagged_name_is_not_refused`.
 
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::Path;
@@ -52,22 +60,40 @@ const EOCD64_LOCATOR_LEN: usize = 20;
 /// follow.
 const MAX_DIRECTORY_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Every member name in the raw central directory, repeats included.
+/// How many self-framing EOCD candidates are tried before the archive is
+/// refused. A real archive offers one; a comment can be stuffed with decoys.
+const MAX_EOCD_CANDIDATES: usize = 64;
+
+/// Every member name in the raw central directory, as bytes, repeats included.
 ///
 /// Why: see the module docs — a repeated name is invisible through `ZipArchive`,
 /// and it is exactly the shape that makes one archive verify here and extract
 /// differently elsewhere.
 /// What: locates the EOCD (scanning back over any archive comment), resolves the
-/// zip64 record when the classic count, size or offset is saturated, then walks
-/// the declared number of file headers, checking each signature and framing.
-/// The names come back in directory order.
+/// zip64 record when the classic count or offset is saturated, then walks the
+/// declared number of file headers, checking each signature and framing. The
+/// names come back undecoded, in directory order.
+///
+/// # Preconditions
+/// `package` is an archive this crate assembled: the zip begins at byte 0 with
+/// no prepended data. The EOCD's central-directory offset is therefore used as
+/// an absolute file offset, where `zip` corrects for a prefix with its own
+/// `archive_offset` (`read.rs:531`). An archive with prepended bytes — a
+/// self-extracting stub, a concatenated file — fails
+/// [`SigningError::DirectoryMalformed`] here rather than being misread, so the
+/// narrower assumption fails closed; it is stated because the failure would
+/// otherwise look like corruption.
 ///
 /// # Postconditions
 /// The returned vector has exactly the length the directory declares. A record
 /// whose signature or framing is wrong is [`SigningError::DirectoryMalformed`],
 /// never a short read that would under-report the member set.
 /// Test: `super::signing::signing_tests::a_duplicate_central_directory_record_is_refused`,
-/// `super::signing::signing_tests::the_raw_directory_matches_what_the_zip_parser_exposes`.
+/// `super::signing::signing_tests::the_raw_directory_matches_what_the_zip_parser_exposes`,
+/// `super::signing::signing_tests::a_comment_carrying_a_fake_eocd_signature_is_refused_not_believed`,
+/// `super::signing::signing_tests::a_directory_truncated_mid_record_is_refused`,
+/// `super::signing::signing_tests::a_saturated_eocd_with_no_zip64_locator_is_refused`,
+/// `super::signing::signing_tests::a_forged_entry_count_is_refused_without_a_panic`.
 ///
 /// # Errors
 ///
@@ -75,7 +101,7 @@ const MAX_DIRECTORY_BYTES: u64 = 64 * 1024 * 1024;
 /// is required and absent, the directory exceeds [`MAX_DIRECTORY_BYTES`], or a
 /// record's signature or lengths do not frame the directory; and
 /// [`SigningError::Archive`] for any read failure.
-pub(super) fn member_names(package: &Path) -> Result<Vec<String>, SigningError> {
+pub(super) fn member_names(package: &Path) -> Result<Vec<Vec<u8>>, SigningError> {
     let mut file = std::fs::File::open(package).map_err(|source| SigningError::Archive {
         path: package.to_path_buf(),
         source,
@@ -89,11 +115,35 @@ pub(super) fn member_names(package: &Path) -> Result<Vec<String>, SigningError> 
         .len();
 
     let tail_len = length.min((EOCD_LEN + usize::from(u16::MAX)) as u64);
-    let tail = read_at(&mut file, package, length - tail_len, tail_len)?;
-    let eocd =
-        find_eocd(&tail).ok_or_else(|| malformed(package, "no end-of-central-directory record"))?;
+    let tail_at = length - tail_len;
+    let tail = read_at(&mut file, package, tail_at, tail_len)?;
 
-    let (entries, size, offset) = locate(&mut file, package, &tail, eocd)?;
+    // A comment can carry a whole well-framed EOCD of its own — an empty one
+    // sitting at the end of the file satisfies every check a single candidate
+    // could make — so candidates are tried in turn and the first that describes
+    // a directory it can actually walk wins. An attacker can only satisfy that
+    // by supplying a real directory, which the caller's duplicate and count
+    // checks then judge.
+    let mut refusal = None;
+    for eocd in eocd_candidates(&tail, tail_at, length) {
+        match resolve(&mut file, package, &tail, eocd, tail_at, length) {
+            Ok(names) => return Ok(names),
+            Err(e) => refusal = Some(e),
+        }
+    }
+    Err(refusal.unwrap_or_else(|| malformed(package, "no end-of-central-directory record")))
+}
+
+/// One candidate EOCD, resolved through to a walked directory.
+fn resolve(
+    file: &mut std::fs::File,
+    package: &Path,
+    tail: &[u8],
+    eocd: usize,
+    tail_at: u64,
+    length: u64,
+) -> Result<Vec<Vec<u8>>, SigningError> {
+    let (entries, size, offset, directory_end) = locate(file, package, tail, eocd)?;
     if size > MAX_DIRECTORY_BYTES {
         return Err(malformed(
             package,
@@ -106,7 +156,19 @@ pub(super) fn member_names(package: &Path) -> Result<Vec<String>, SigningError> 
             "the central directory runs past the end of the file",
         ));
     }
-    let directory = read_at(&mut file, package, offset, size)?;
+    // The directory ends where the record that describes it begins. This is
+    // what tells a real EOCD from a well-framed decoy in a comment, and it is
+    // also the check that turns the no-prepended-bytes precondition from an
+    // assumption into a refusal: a prefixed archive's stored offsets are short
+    // by the prefix, so they do not meet their own record.
+    let directory_end = directory_end.unwrap_or(tail_at + eocd as u64);
+    if offset.saturating_add(size) != directory_end {
+        return Err(malformed(
+            package,
+            "the central directory does not end where the record describing it begins",
+        ));
+    }
+    let directory = read_at(file, package, offset, size)?;
     walk(package, &directory, entries)
 }
 
@@ -115,20 +177,27 @@ pub(super) fn member_names(package: &Path) -> Result<Vec<String>, SigningError> 
 ///
 /// A package member can exceed the 4 GiB classic ceiling (`super::start` writes
 /// a zip64 local header for one), so zip64 is handled rather than refused.
+///
+/// The fourth element is where the directory must end when zip64 answered —
+/// the zip64 record's own offset, since that record and its locator sit between
+/// the directory and the classic EOCD. `None` means the classic EOCD is the end.
 fn locate(
     file: &mut std::fs::File,
     package: &Path,
     tail: &[u8],
     eocd: usize,
-) -> Result<(u64, u64, u64), SigningError> {
+) -> Result<(u64, u64, u64, Option<u64>), SigningError> {
     let entries = u64::from(u16(tail, eocd + 10));
     let size = u64::from(u32(tail, eocd + 12));
     let offset = u64::from(u32(tail, eocd + 16));
-    let saturated = entries == u64::from(u16::MAX)
-        || size == u64::from(u32::MAX)
-        || offset == u64::from(u32::MAX);
+    // The parser's own rule, matched exactly: `spec.rs:369`'s `may_be_zip64`
+    // tests the entry count and the directory offset, and NOT the directory
+    // size. A directory that happens to be 0xFFFFFFFF bytes long is a classic
+    // archive to `zip`, and reading it as zip64 here would disagree with the
+    // parser on an archive neither of us should refuse.
+    let saturated = entries == u64::from(u16::MAX) || offset == u64::from(u32::MAX);
     if !saturated {
-        return Ok((entries, size, offset));
+        return Ok((entries, size, offset, None));
     }
 
     let locator = eocd
@@ -143,11 +212,16 @@ fn locate(
             "the zip64 locator does not point at a zip64 record",
         ));
     }
-    Ok((u64(&record, 32), u64(&record, 40), u64(&record, 48)))
+    Ok((
+        u64(&record, 32),
+        u64(&record, 40),
+        u64(&record, 48),
+        Some(record_at),
+    ))
 }
 
-/// One pass over the directory, returning a name per declared record.
-fn walk(package: &Path, directory: &[u8], entries: u64) -> Result<Vec<String>, SigningError> {
+/// One pass over the directory, returning a raw name per declared record.
+fn walk(package: &Path, directory: &[u8], entries: u64) -> Result<Vec<Vec<u8>>, SigningError> {
     let entries = usize::try_from(entries).map_err(|_| {
         malformed(
             package,
@@ -176,22 +250,37 @@ fn walk(package: &Path, directory: &[u8], entries: u64) -> Result<Vec<String>, S
                 &format!("central-directory record {index} runs past the directory"),
             ));
         }
-        // Lossy on purpose: a name this reader cannot decode still has to be
-        // COUNTED, because refusing to name it is how a duplicate hides.
-        names.push(String::from_utf8_lossy(&directory[name_at..name_at + name_len]).into_owned());
+        // Undecoded: `zip` chooses UTF-8 or CP437 by flag bit 11, so any single
+        // rule applied here would disagree with it on a legitimate archive.
+        names.push(directory[name_at..name_at + name_len].to_vec());
         at = end;
     }
     Ok(names)
 }
 
-/// The last EOCD signature in `tail` that leaves a whole record behind it.
+/// Candidate EOCD positions, latest first.
 ///
-/// Scanned backwards because the archive comment is arbitrary bytes and may
-/// itself contain the signature; the real record is the last viable one.
-fn find_eocd(tail: &[u8]) -> Option<usize> {
-    (0..=tail.len().checked_sub(EOCD_LEN)?)
+/// The archive comment is arbitrary bytes and may carry the EOCD signature, so
+/// "the last signature in the file" is a rule an attacker writes the answer to.
+/// A candidate must at least frame itself — its declared comment length has to
+/// end exactly at the end of the file, since the comment is the archive's last
+/// bytes by definition. That still admits a decoy, which is why the caller
+/// judges each one by whether its directory walks.
+///
+/// Capped, so a comment stuffed with signatures costs a bounded number of
+/// seeks rather than one per byte.
+fn eocd_candidates(tail: &[u8], tail_at: u64, length: u64) -> Vec<usize> {
+    let Some(last) = tail.len().checked_sub(EOCD_LEN) else {
+        return Vec::new();
+    };
+    (0..=last)
         .rev()
-        .find(|at| u32(tail, *at) == EOCD_SIGNATURE)
+        .filter(|at| {
+            u32(tail, *at) == EOCD_SIGNATURE
+                && tail_at + *at as u64 + EOCD_LEN as u64 + u64::from(u16(tail, at + 20)) == length
+        })
+        .take(MAX_EOCD_CANDIDATES)
+        .collect()
 }
 
 fn read_at(
