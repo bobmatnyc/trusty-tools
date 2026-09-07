@@ -108,7 +108,88 @@ workstream, and TUI flows. `run-workflow` remains the incomplete surface.
 | `tcode session …` | List, inspect, and create sessions |
 | `tcode attach`, `cancel`, `transcript` | Operate on an existing session |
 | `tcode workstream …` | Manage workstreams and their active state |
+| `tcode paths show\|import` | Report which config root wins; import a `.claude/` catalog |
 | `tcode run-workflow <name>` | Reserved workflow runner; not yet implemented |
+
+## Configuration layout (`.trusty-code`)
+
+Trusty Code owns two directories. It READS from three, and WRITES to only one
+of them.
+
+### Project configuration — `<project>/.trusty-code/`
+
+Agents, skills, plugins, `settings.json`, and `CLAUDE.md` are looked up in this
+order, highest precedence first:
+
+| # | Directory | Role |
+|---|---|---|
+| 1 | `<project>/.trusty-code/<entry>` | Trusty Code's own — read AND written |
+| 2 | `<project>/.claude/<entry>` | Claude Code compatibility input — read only |
+| 3 | `<project>/.open-mpm/<entry>` | Pre-Claude-Code legacy input — read only |
+
+The first candidate that exists **and can be opened** wins. When none exists,
+the resolved path is `<project>/.trusty-code/<entry>` anyway, so a clean project
+with no `.claude/` directory installs and runs normally.
+
+**Fallback is never silent.** A candidate that exists but cannot be read
+(permissions, a broken mount) is skipped rather than fatal — a harness that
+refuses to start over an unreadable optional config is worse than one that
+starts with less config — but it logs at `warn` to stderr naming the path tried,
+and `tcode paths show` lists it. A `settings.json` that resolves but then fails
+to read or parse falls through to the next harness-mode tier with the same
+warning.
+
+**Writes go to `.trusty-code/` only.** `.claude/` and `.open-mpm/` are inputs.
+A write aimed outside `<project>/.trusty-code/` — including one that reaches
+outside through a symlink — is refused, not redirected.
+
+Run `tcode paths show [--json]` to see which root won for each entry.
+
+### Private state — `~/.trusty-code/`
+
+Transcripts, logs, compression telemetry, daemon discovery files, and the
+workstream store are per-user runtime state, not project configuration. They
+live in `~/.trusty-code/`, which is created at mode `0700`; an existing
+directory with a permissive mode is tightened on the next run. `tcode paths
+show` reports whether the mode is currently owner-only.
+
+### Importing an existing `.claude/` catalog
+
+```bash
+tcode paths import --dry-run    # print the plan, write nothing
+tcode paths import              # apply exactly that plan
+```
+
+The import copies `.claude/agents/**`, `.claude/skills/**`, and
+`.claude/settings.json` to the same relative paths under `.trusty-code/`. It is
+deterministic (the plan is a function of the tree, sorted by target), so the dry
+run and the real run cannot disagree, and it is reversible — the report lists
+exactly the files it created and nothing else was touched.
+
+Four sources are refused rather than copied, each named in the output:
+
+- the target already exists — an import never overwrites a user-authored file;
+- the source is, or reaches through, a symlink out of `.claude/`;
+- the source carries the executable bit;
+- `settings.json` carries a secret-bearing key, or will not parse. Put
+  credentials in the environment or the secure store, never in a file the
+  project commits.
+
+Plugins are deliberately not copied: their provenance cannot be vouched for, so
+`.claude/plugins/` stays discoverable in place through the compatibility root.
+
+**What counts as a secret-bearing key.** The key is split into words on
+separators and camelCase boundaries, then matched word-exactly against `token`,
+`secret`, `password`, `passphrase`, `credential`, `authorization`, `apikey`,
+`accesskey` and `privatekey`. One entry covers every spelling: `api_key`,
+`API-KEY`, `x-api-key`, `xApiKey` and `APIKEY` all match. Matching on words
+rather than substrings is what keeps ordinary keys like `tokenizer` and
+`max_tokens` from being refused.
+
+**Limitation — keys, not values.** The scan reads key NAMES only. A credential
+stored under an unrelated key (`"endpoint": "https://user:pw@host"`) is not
+detected, and this check is not a substitute for a secret scanner on the
+repository itself.
 
 ## Build
 
@@ -120,8 +201,12 @@ cargo test -p trusty-code --no-fail-fast
 
 ## Design Constraints
 
-- **Claude-Code compatible** — reads `.claude/` config, agents, skills, MCP
-  descriptors, `CLAUDE.md`, and permission grants exactly as Claude Code does.
+- **Owns its own layout** — project configuration under
+  `<project>/.trusty-code/`, private mutable state under `~/.trusty-code/`
+  (mode `0700`). See [Configuration layout](#configuration-layout-trusty-code).
+- **Claude-Code compatible** — still reads `.claude/` config, agents, skills,
+  MCP descriptors, `CLAUDE.md`, and permission grants exactly as Claude Code
+  does, as a fallback behind its own directory. Never writes there.
 - **Per-agent model routing** — each agent may specify its own model
   (AWS Bedrock or OpenRouter).
 - **Single-instance per project** — one `tcode serve` process per `.claude/`

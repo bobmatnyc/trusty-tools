@@ -61,6 +61,53 @@ fn read_settings_json_cadence_missing_file_is_not_an_error() {
     assert_eq!(read_settings_json_cadence(project.path()), None);
 }
 
+/// A `.trusty-code`-only project's cadence override is honoured (#5426).
+///
+/// Why: code-critic HIGH on PR #6980 — this reader still joined
+/// `.claude/settings.json` while its sibling reader of the SAME file
+/// (`mode::read_settings_json_mode`) had moved to the resolver, so a project
+/// with no `.claude/` kept its mode override and silently lost its cadence
+/// override. On the reviewed head this returns `None` and the assertion below
+/// fails on the default `cadence_turns`.
+/// What: writes only `.trusty-code/settings.json` and asserts both keys apply,
+/// then adds a conflicting `.claude/settings.json` and asserts the native file
+/// still wins.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn trusty_code_settings_json_sets_cadence_without_a_claude_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let native = tmp.path().join(".trusty-code");
+    std::fs::create_dir_all(&native).expect("mkdir");
+    std::fs::write(
+        native.join("settings.json"),
+        r#"{"code_harness": {"cadence_turns": 3, "max_overhead_fraction_pct": 25}}"#,
+    )
+    .expect("write settings.json");
+    assert!(!tmp.path().join(".claude").exists());
+
+    with_cadence_env(None, None, || {
+        let cfg = resolve_cadence_config(tmp.path());
+        assert_eq!(cfg.cadence_turns, 3);
+        assert_eq!(cfg.max_overhead_fraction_pct, 25);
+    })
+    .await;
+
+    let compat = tmp.path().join(".claude");
+    std::fs::create_dir_all(&compat).expect("mkdir");
+    std::fs::write(
+        compat.join("settings.json"),
+        r#"{"code_harness": {"cadence_turns": 9, "max_overhead_fraction_pct": 90}}"#,
+    )
+    .expect("write settings.json");
+
+    with_cadence_env(None, None, || {
+        let cfg = resolve_cadence_config(tmp.path());
+        assert_eq!(cfg.cadence_turns, 3, ".trusty-code/settings.json must win");
+        assert_eq!(cfg.max_overhead_fraction_pct, 25);
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn resolve_cadence_config_settings_json_override() {
     let project = project_with_settings(Some(

@@ -30,18 +30,24 @@ const HASH_LEN: usize = 8;
 /// store regardless of which directory `tcode serve` happened to start in.
 const PROJECTLESS_FILENAME: &str = "workstreams-projectless.json";
 
-/// Resolve `~/.trusty-code`, the trusty-code data directory.
+/// Resolve `~/.trusty-code`, the trusty-code private state directory.
 ///
 /// Why: mirrors `trusty-mpm`'s `~/.trusty-mpm` precedent
 /// (`crates/trusty-mpm/src/core/paths.rs`) rather than inventing a new
-/// resolution convention.
-/// What: `dirs::home_dir()/.trusty-code`, falling back to a relative
-/// `.trusty-code` if the home directory cannot be resolved (never panics).
-/// Test: `path_tests::default_data_dir_is_dot_trusty_code`.
+/// resolution convention. #5426 moved the resolution itself into
+/// [`crate::paths::private_state`], which also owns the `0700` mode this
+/// directory must carry — a workstream store sitting beside transcripts and
+/// logs is private state, not an independent location.
+/// What: delegates to [`crate::paths::private_state::private_state_dir`]:
+/// `dirs::home_dir()/.trusty-code`, falling back to a relative `.trusty-code`
+/// (with a `warn`) if the home directory cannot be resolved. Never panics, and
+/// creates nothing — [`crate::paths::private_state::ensure_private_state_dir`]
+/// is the creating variant.
+/// Test: `path_tests::default_data_dir_is_dot_trusty_code`,
+/// `paths::private_state::private_state_tests::private_state_dir_matches_home_when_available`.
 pub fn default_data_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".trusty-code")
+    // #5426: one resolver for the private state root, shared with its mode guard.
+    crate::paths::private_state::private_state_dir()
 }
 
 /// Turn an arbitrary string into a filesystem-safe, lowercase, hyphenated

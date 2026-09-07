@@ -180,10 +180,28 @@ pub mod llm;
 /// Test: `assets::tests::*`.
 pub mod assets;
 
+/// Trusty Code's own configuration and state layout (#5426, epic #2892).
+///
+/// Why: every discovery site used to join the literal `.claude/` itself, which
+/// made another product's directory the source of truth for this one and left
+/// nothing stopping a write INTO it. #5426 makes `<project>/.trusty-code/` the
+/// read-preferred and write-only location, with `.claude/` (and `.open-mpm/`)
+/// demoted to compatibility inputs.
+/// What: `resolve_project_entry` (the one precedence rule: `.trusty-code` →
+/// `.claude` → `.open-mpm`, then a native default) plus the per-entry
+/// `agents_dir`/`skills_dir`/`plugins_dir`/`settings_file` wrappers;
+/// `native_config_dir`/`check_native_write_target` (the write boundary, symlink
+/// escapes included); `private_state` (`~/.trusty-code/`, mode `0700`); and
+/// `import` (the deterministic, non-overwriting `.claude/` import).
+/// Test: `paths::tests::*`, `paths::private_state::private_state_tests::*`,
+/// `paths::import::import_tests::*`.
+pub mod paths;
+
 /// Agent configuration loading.
 ///
 /// Why: Sub-agents are defined declaratively in Markdown+frontmatter files
-/// under `.claude/agents/` (#2897 Slice D — TOML retired) so model, prompt,
+/// under `.trusty-code/agents/` — or `.claude/agents/` on a project that has not
+/// imported yet (#5426; #2897 Slice D — TOML retired) so model, prompt,
 /// and parameters can evolve without code changes.
 /// What: `AgentConfig`, `AgentInfo`, `LlmParams`, `SystemPrompt`, `ToolsConfig`,
 /// `RunnerConfig`, `RunnerKind`, `discover_agents`, `load_all_agents`.

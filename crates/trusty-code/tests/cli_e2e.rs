@@ -823,3 +823,161 @@ fn tui_refuses_to_spawn_for_an_unreachable_explicit_daemon_url() {
         "must not have spawned a daemon: {stderr}"
     );
 }
+
+// -- #5426: trusty-code's own configuration layout --------------------------
+
+/// A project whose agents live ONLY under `.trusty-code/agents/`, with no
+/// `.claude/` directory at all.
+///
+/// Why: the #5426 acceptance criterion "a clean project can install and run
+/// without a `.claude/` directory" needs a fixture that genuinely has none —
+/// `support::project_with_agents` writes `.claude/agents/` and so cannot prove
+/// it.
+/// What: the same two agent configs, written under `.trusty-code/agents/`. The
+/// PM is named `native-pm`, a name the EMBEDDED roster does not carry, so the
+/// run can only succeed by reading the project's own directory — a `pm.md` here
+/// would be satisfied by the embedded fallback and prove nothing.
+/// Test: used by `run_task_works_on_a_project_with_no_claude_dir`.
+fn project_with_native_agents() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("project tempdir");
+    let agents = tmp.path().join(".trusty-code").join("agents");
+    std::fs::create_dir_all(&agents).expect("mkdir agents");
+    std::fs::write(
+        agents.join("native-pm.md"),
+        "---\nname: native-pm\nmodel: openai/gpt-4o-mini\n---\n\nYou are the PM. Delegate work to python-engineer.\n",
+    )
+    .expect("write native-pm.md");
+    std::fs::write(
+        agents.join("python-engineer.md"),
+        "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n\nYou are a Python engineer.\n",
+    )
+    .expect("write python-engineer.md");
+    tmp
+}
+
+/// The whole harness runs against a project that has no `.claude/` directory.
+///
+/// Why: this is #5426's headline acceptance criterion, and it is the one test
+/// that fails on `origin/main` for the WHOLE change rather than for one
+/// resolver — there, `locate_agents_dir` defaulted to `.claude/agents`, so a
+/// `.trusty-code`-only project never reached its own configuration and the run
+/// died with `unknown agent 'native-pm'`.
+/// What: drives the real `tcode` binary with `TCODE_MOCK_LLM=echo` against a
+/// project whose agents live only under `.trusty-code/agents/`, and asserts the
+/// run finishes.
+/// Test: this function IS the test.
+#[test]
+fn run_task_works_on_a_project_with_no_claude_dir() {
+    let project = project_with_native_agents();
+    assert!(!project.path().join(".claude").exists());
+
+    let output = support::tcode_command()
+        .args([
+            "run-task",
+            "native-pm",
+            "say hi",
+            "--project",
+            &project.path().display().to_string(),
+            "--json",
+        ])
+        .env("TCODE_MOCK_LLM", "echo")
+        .output()
+        .expect("spawn tcode run-task");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "a .trusty-code-only project must run: {:?}\nstdout: {stdout}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be valid JSON: {e}: {stdout}"));
+    assert_eq!(parsed["status"], "finished");
+}
+
+/// `tcode paths show --json` names the winning source for each entry.
+///
+/// Why: the diagnostic is the operator's only way to see which configuration
+/// root won without reading the source.
+/// What: stages `.trusty-code/agents` and `.claude/skills` and asserts the
+/// reported sources differ accordingly, and that the write root is always
+/// `.trusty-code`.
+/// Test: this function IS the test.
+#[test]
+fn paths_show_reports_the_winning_source() {
+    let project = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(project.path().join(".trusty-code").join("agents")).expect("mkdir");
+    std::fs::create_dir_all(project.path().join(".claude").join("skills")).expect("mkdir");
+
+    let output = support::tcode_command()
+        .args([
+            "paths",
+            "show",
+            "--project",
+            &project.path().display().to_string(),
+            "--json",
+        ])
+        .output()
+        .expect("spawn tcode paths show");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "tcode paths show must exit 0: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be valid JSON: {e}: {stdout}"));
+    assert_eq!(parsed["entries"]["agents"]["source"], "trusty-code");
+    assert_eq!(parsed["entries"]["skills"]["source"], "claude");
+    assert_eq!(parsed["entries"]["plugins"]["source"], "default");
+    assert!(
+        parsed["write_root"]
+            .as_str()
+            .expect("write_root")
+            .ends_with(".trusty-code"),
+        "the write root must always be .trusty-code: {parsed}"
+    );
+}
+
+/// `tcode paths import --dry-run` prints the plan and writes nothing.
+///
+/// Why: a dry run that touched the tree would defeat its own purpose, and the
+/// plan it prints has to match what the real run would do.
+/// What: stages `.claude/agents/pm.md`, runs the dry run, and asserts the plan
+/// names the target while no `.trusty-code/` directory appears.
+/// Test: this function IS the test.
+#[test]
+fn paths_import_dry_run_writes_nothing() {
+    let project = tempfile::tempdir().expect("tempdir");
+    let agents = project.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents).expect("mkdir");
+    std::fs::write(agents.join("pm.md"), "---\nname: pm\n---\n").expect("write");
+
+    let output = support::tcode_command()
+        .args([
+            "paths",
+            "import",
+            "--project",
+            &project.path().display().to_string(),
+            "--dry-run",
+        ])
+        .output()
+        .expect("spawn tcode paths import --dry-run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "must exit 0: {stdout}");
+    assert!(
+        stdout.contains("copy") && stdout.contains("agents/pm.md"),
+        "the plan must name the target: {stdout}"
+    );
+    assert!(
+        stdout.contains("--dry-run"),
+        "the run must say it wrote nothing: {stdout}"
+    );
+    assert!(
+        !project.path().join(".trusty-code").exists(),
+        "a dry run must not create .trusty-code/"
+    );
+}

@@ -264,6 +264,17 @@ enum Command {
     /// binary (epic #2400 Wave 1, #2405).
     Config(trusty_common::inference::config::ConfigCommand),
 
+    /// Inspect and migrate trusty-code's own configuration layout (#5426).
+    ///
+    /// Trusty Code reads `<project>/.trusty-code/` first and falls back to
+    /// `.claude/` then `.open-mpm/`; it WRITES only beneath `.trusty-code/`.
+    /// Private mutable state (transcripts, logs, telemetry) lives in
+    /// `~/.trusty-code/` at mode 0700.
+    Paths {
+        #[command(subcommand)]
+        action: PathsCommand,
+    },
+
     /// Manage workstreams — durable named groupings of sessions bound to the
     /// daemon's project (#3296, DOC-48 §5.4). `tcode ws` is a short alias
     /// for this whole family (DOC-48 AC-5.3).
@@ -313,6 +324,37 @@ enum Command {
         /// Emit the verdict as one JSON document instead of a human summary.
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// `tcode paths <action>` subcommands (#5426).
+///
+/// Both variants carry their own `--project` (defaulting to `.`), matching the
+/// per-leaf convention every other subcommand family here uses.
+#[derive(Subcommand)]
+enum PathsCommand {
+    /// Report which configuration root wins for each entry, plus the write
+    /// root and the private state directory's permissions.
+    Show {
+        /// Path to the project root.
+        #[arg(long, short, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+
+        /// Emit the report as JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Import `.claude/agents`, `.claude/skills`, and `.claude/settings.json`
+    /// into `.trusty-code/`, never overwriting an existing file.
+    Import {
+        /// Path to the project root.
+        #[arg(long, short, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+
+        /// Print the plan and exit without writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -540,6 +582,13 @@ async fn main() -> Result<()> {
         }
 
         Command::Config(cmd) => cmd.run().await,
+
+        // #5426: offline and daemon-free — it reads the project tree and, for
+        // `import`, writes only beneath `<project>/.trusty-code/`.
+        Command::Paths { action } => match action {
+            PathsCommand::Show { project, json } => cli::paths::show(&project, json),
+            PathsCommand::Import { project, dry_run } => cli::paths::import(&project, dry_run),
+        },
 
         Command::Workstream { action } => match action {
             WorkstreamCommand::List {

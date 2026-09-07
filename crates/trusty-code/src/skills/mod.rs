@@ -88,17 +88,22 @@ pub enum SkillError {
     },
 }
 
-/// Locate the Claude-Code-compatible skills directory for a project root.
+/// Locate the skills directory for a project root.
 ///
-/// Why: #2069 pins this to `.claude/skills/` exactly — the Claude-Code-native
-/// convention — and explicitly NOT the legacy `~/.trusty-mpm/skills/` path
-/// trusty-mpm uses, so a project's skill catalog resolves identically whether
-/// browsed by a human in Claude Code or discovered by `tcode`.
-/// What: Returns `<project_root>/.claude/skills` (may not exist yet — callers
-/// handle absence via `discover_skill_metadata`'s empty-Vec fallback).
-/// Test: `locate_skills_dir_is_dot_claude_skills`.
+/// Why: #2069 pinned this to `.claude/skills/` exactly. #5426 unpins it: Trusty
+/// Code owns `<project_root>/.trusty-code/skills/`, and `.claude/skills/` stays
+/// readable behind it so a project's existing catalog keeps resolving whether
+/// browsed by a human in Claude Code or discovered by `tcode`. It is still
+/// explicitly NOT the `~/.trusty-mpm/skills/` path trusty-mpm uses.
+/// What: delegates to [`crate::paths::skills_dir`] and keeps its path — the
+/// single precedence rule, shared with agents, plugins, and settings. May not
+/// exist yet; callers handle absence via `discover_skill_metadata`'s empty-Vec
+/// fallback.
+/// Test: `locate_skills_dir_is_dot_claude_skills`,
+/// `paths::tests::skills_dir_prefers_trusty_code`.
 pub fn locate_skills_dir(project_root: &Path) -> PathBuf {
-    project_root.join(".claude").join("skills")
+    // #5426: one resolver, not a second copy of the precedence chain.
+    crate::paths::skills_dir(project_root).path
 }
 
 /// Discover skill metadata from every `<dir>/<skill-name>/SKILL.md`.
@@ -382,15 +387,38 @@ mod tests {
         std::fs::write(dir.join("SKILL.md"), format!("{frontmatter}{body}")).expect("write");
     }
 
-    /// `locate_skills_dir` returns `<project_root>/.claude/skills` exactly.
+    /// `locate_skills_dir` defaults to `.trusty-code/skills` and still finds an
+    /// existing `.claude/skills` (#5426).
     ///
-    /// Why: Pins the Claude-Code-compatible path (#2069) so a future edit
-    /// cannot silently drift back to `~/.trusty-mpm/skills/`.
-    /// Test: this test.
+    /// Why: pins both halves — the native default (so a clean project needs no
+    /// `.claude/`) and the compatibility fallback (so an existing catalog keeps
+    /// resolving) — and keeps either from drifting to `~/.trusty-mpm/skills/`.
+    /// What: an empty project resolves native; adding `.claude/skills` makes it
+    /// win; adding `.trusty-code/skills` takes precedence back.
+    /// Test: this function IS the test.
     #[test]
     fn locate_skills_dir_is_dot_claude_skills() {
-        let root = Path::new("/fake/project");
-        assert_eq!(locate_skills_dir(root), root.join(".claude").join("skills"));
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        assert_eq!(
+            locate_skills_dir(root),
+            root.join(".trusty-code").join("skills"),
+            "a clean project must resolve skills under trusty-code's own directory"
+        );
+
+        std::fs::create_dir_all(root.join(".claude").join("skills")).expect("mkdir");
+        assert_eq!(
+            locate_skills_dir(root),
+            root.join(".claude").join("skills"),
+            "an existing .claude/skills must still resolve"
+        );
+
+        std::fs::create_dir_all(root.join(".trusty-code").join("skills")).expect("mkdir");
+        assert_eq!(
+            locate_skills_dir(root),
+            root.join(".trusty-code").join("skills"),
+            ".trusty-code/skills must win when both exist"
+        );
     }
 
     /// Discovery reads `name`/`description` from frontmatter for every
