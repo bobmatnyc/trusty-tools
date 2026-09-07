@@ -114,7 +114,14 @@ impl SelfOrigins {
 /// check accepts the attacker-controlled DNS name `127.0.0.1.evil.com` (and
 /// `127.attacker.com`) as "loopback", defeating the CSRF guard. `IpAddr::from_str`
 /// rejects any string that is not a bare IP literal.
-/// Test: `origin_is_loopback_*` below, incl. `_rejects_ip_prefixed_dns_names`.
+///
+/// Two shapes that reach a loopback-looking host through the BRACKET branch are
+/// rejected by the parser rather than here (#6945): an authority carrying
+/// userinfo (`http://[::1]:80@evil.com` dials evil.com) and a bracketed literal
+/// trailed by anything but a port (`http://[::1].evil.com`). See
+/// [`parse_origin_authority`].
+/// Test: `origin_is_loopback_*` below, incl. `_rejects_ip_prefixed_dns_names`,
+/// `_rejects_userinfo`, and `_rejects_bracketed_ipv6_lookalikes`.
 pub fn origin_is_loopback(origin: &str) -> bool {
     match parse_origin_authority(origin) {
         Some((host, _port)) => {
@@ -186,17 +193,36 @@ pub fn origin_matches_self(origin: &str, self_origins: &SelfOrigins) -> bool {
 /// parsing in exactly one place.
 /// What: strips the `scheme://` prefix, takes everything up to the first `/`
 /// as the authority, and splits it into host and optional port, unwrapping
-/// `[…]` IPv6 literals. Returns `None` for a value with no `://`.
+/// `[…]` IPv6 literals. Returns `None` for a value with no `://`, for an
+/// authority carrying userinfo (`user@host`), and for a bracketed literal
+/// followed by anything that is not a `:port`.
 /// Test: exercised indirectly via `origin_is_loopback_*` and
-/// `origin_matches_self_*`.
+/// `origin_matches_self_*`, plus `origin_is_loopback_rejects_userinfo` and
+/// `origin_is_loopback_rejects_bracketed_ipv6_lookalikes`.
 fn parse_origin_authority(origin: &str) -> Option<(&str, Option<&str>)> {
     let after_scheme = origin.split_once("://").map(|(_, rest)| rest)?;
     let authority = after_scheme.split('/').next().unwrap_or("");
 
+    // #6945: userinfo is refused outright rather than parsed. What a client
+    // dials in `user@host` is `host`, but the bracket branch below reads
+    // `[::1]@evil.com` as host `::1` — a loopback verdict for a URL that
+    // connects to evil.com. Neither a well-formed `Origin` nor a daemon's
+    // `http_addr` discovery file ever carries userinfo, so rejecting the whole
+    // shape loses nothing and closes every direction of the trick at once.
+    if authority.contains('@') {
+        return None;
+    }
+
     if let Some(rest) = authority.strip_prefix('[') {
         // Bracketed IPv6 literal: `[::1]:7070` → host `::1`, port `7070`.
         let (host, remainder) = rest.split_once(']')?;
-        let port = remainder.strip_prefix(':');
+        // #6945: what follows `]` is a `:port` or nothing. Dropping anything
+        // else read `[::1].evil.com` as host `::1` — a loopback verdict for a
+        // hostname that resolves wherever its owner points it.
+        let port = match remainder {
+            "" => None,
+            _ => Some(remainder.strip_prefix(':')?),
+        };
         Some((host, port))
     } else {
         // host[:port] — split at the FIRST `:` (`split_once`). For a
@@ -327,6 +353,43 @@ mod tests {
         assert!(!origin_is_loopback("http://localhost.evil.com"));
         // A bracketed IPv6 loopback still parses and is trusted.
         assert!(origin_is_loopback("http://[::1]"));
+    }
+
+    /// Why: #6945 — an authority carrying userinfo names one host to a reader
+    /// and dials another. `127.0.0.1:80@evil.com` and `[::1]:80@evil.com` were
+    /// the false accepts: both branches read the part before the `@` as the
+    /// host and returned loopback for a URL that connects to evil.com.
+    /// What: asserts every userinfo shape — loopback as the userinfo (with and
+    /// without a port), loopback as the host, bracketed and not — is rejected.
+    /// Test: this test.
+    #[test]
+    fn origin_is_loopback_rejects_userinfo() {
+        assert!(!origin_is_loopback("http://127.0.0.1:80@evil.com"));
+        assert!(!origin_is_loopback("http://[::1]:80@evil.com"));
+        assert!(!origin_is_loopback("http://[::1]@evil.com"));
+        assert!(!origin_is_loopback("http://127.0.0.1@evil.com"));
+        assert!(!origin_is_loopback("http://localhost@evil.com"));
+        assert!(!origin_is_loopback("http://localhost:80@evil.com"));
+        // The mirror direction — a real loopback host behind userinfo — is
+        // refused too: fail closed, and nothing legitimate emits this shape.
+        assert!(!origin_is_loopback("http://evil.com@127.0.0.1"));
+    }
+
+    /// Why: #6945 — the bracket branch split on `]` and dropped whatever
+    /// followed, so `[::1].evil.com` read as host `::1` and passed as loopback
+    /// while resolving wherever its owner pointed it.
+    /// What: asserts a bracketed literal trailed by anything that is not a
+    /// `:port` is rejected, and that the legitimate forms still pass.
+    /// Test: this test.
+    #[test]
+    fn origin_is_loopback_rejects_bracketed_ipv6_lookalikes() {
+        assert!(!origin_is_loopback("http://[::1].evil.com"));
+        assert!(!origin_is_loopback("http://[::1].evil.com:7070"));
+        assert!(!origin_is_loopback("http://[::1]x.evil.com"));
+        assert!(!origin_is_loopback("http://[::1]-evil.com"));
+        // The two well-formed shapes must still pass.
+        assert!(origin_is_loopback("http://[::1]"));
+        assert!(origin_is_loopback("http://[::1]:7070"));
     }
 
     /// Why: a value with no scheme is not a well-formed Origin; treat as
