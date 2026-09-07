@@ -326,6 +326,9 @@ pub fn router(state: Arc<DaemonState>) -> Router {
                 .patch(rename_managed_session),
         )
         .route("/api/v1/sessions/managed/{id}/send", post(send_to_session))
+        // #94: read-only per-session file-change view, derived from the hook
+        // event ring buffer. Merged as a sub-router like the two below.
+        .merge(super::managed_routes::files::router())
         // #2605: async-spawn progress poll route, merged as a sub-router.
         .merge(super::managed_routes::provision_status::router())
         // #2444: per-session + fleet-wide asset re-sync

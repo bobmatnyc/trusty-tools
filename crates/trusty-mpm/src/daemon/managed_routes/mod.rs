@@ -29,6 +29,8 @@ pub(crate) mod cores;
 pub mod delete;
 mod deliverable_link;
 mod deployment_check;
+// #94: the per-session file-change view over the hook-event ring buffer.
+pub mod files;
 pub mod fleet;
 mod foreign_harness;
 pub mod front_gate;
