@@ -255,11 +255,8 @@ struct SpawnedState {
     // behaviour (implicit oneshot cancellation), not for any explicit send.
     #[allow(dead_code)]
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
-    /// Kept alive to ensure the supervisor's `child_pid_slot` Arc remains
-    /// valid as long as the state is live. The forwarder task in `do_spawn`
-    /// clones the same Arc; this field prevents it from becoming a dangling
-    /// clone if the caller drops their reference.
-    #[allow(dead_code)]
+    /// Shared supervised PID slot. Its allocation identifies the current
+    /// spawn so a retired forwarder cannot publish into a successor's slot.
     pid_slot: Arc<AtomicU32>,
     /// Definitive "the supervisor for THIS spawn gave up permanently" signal
     /// (epic #3524 slice 6 PR-4 follow-up, code-critic BLOCK on PR #3584).
@@ -568,8 +565,8 @@ impl LazyEmbedderHandle {
         let Some(spawned) = guard.take() else {
             return;
         };
-        drop(guard);
         self.app_pid_slot.store(0, AtomicOrdering::Release);
+        drop(guard);
         if let Some(handle) = spawned.supervisor_handle {
             handle.shutdown().await;
         }
@@ -742,23 +739,44 @@ async fn do_spawn(
     let initial_pid = child_pid_slot.load(AtomicOrdering::Acquire);
     app_pid_slot.store(initial_pid, AtomicOrdering::Release);
 
-    // Issue #829: abort the previous forwarder before spawning a new one.
-    // On idle-shutdown cycles the old child_pid_slot never resets to 0, so
-    // the old forwarder loops forever without this cancellation.
+    // #6967: a zero PID is also a normal restart gap. Forward while this
+    // spawn owns the state, and publish under its lock so teardown or a new
+    // spawn cannot be overwritten by a stale task. A weak capture prevents
+    // forwarding alone from retaining the state. Test:
+    // `lazy_handle_pid_forwarder_survives_restart_gap`.
     {
         let src = Arc::clone(&child_pid_slot);
         let dst = Arc::clone(&app_pid_slot);
+        let state = Arc::downgrade(&state_cell);
         let join = tokio::spawn(async move {
             loop {
-                let pid = src.load(AtomicOrdering::Acquire);
-                dst.store(pid, AtomicOrdering::Release);
-                if pid == 0 {
-                    break;
+                {
+                    let Some(state) = state.upgrade() else {
+                        break;
+                    };
+                    let guard = state.lock().await;
+                    let Some(spawned) = guard.as_ref() else {
+                        break;
+                    };
+                    if !Arc::ptr_eq(&spawned.pid_slot, &src) {
+                        break;
+                    }
+                    // Read the release-published termination flag before
+                    // sampling PID so permanent give-up forwards its final
+                    // zero, never a PID sampled before the child exited.
+                    let terminated = spawned
+                        .terminated
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(AtomicOrdering::Acquire));
+                    dst.store(src.load(AtomicOrdering::Acquire), AtomicOrdering::Release);
+                    if terminated {
+                        break;
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         });
-        // Swap in the new handle, abort the old one.
+        // Preserve #829 cancellation when another lazy spawn replaces us.
         let mut handle_guard = pid_forwarder_handle.lock().await;
         if let Some(old) = handle_guard.take() {
             old.abort();
@@ -913,13 +931,8 @@ async fn idle_watchdog(
             // request arriving during the shutdown just triggers a new
             // `do_spawn` concurrently; it has no reason to wait on the
             // just-stopped process.
-            drop(guard);
-            // Note: a concurrent `do_spawn` racing in here could in principle
-            // overwrite this with a new PID before we finish; correctness
-            // relies on `do_spawn`'s own spawn + client-handshake latency
-            // making that reorder practically unreachable, not on any
-            // explicit ordering/lock between the two stores.
             app_pid_slot.store(0, AtomicOrdering::Release);
+            drop(guard);
 
             // Cooperative shutdown (issue #2979): flips the shared shutdown
             // flag the supervision loop selects on. The loop kills and reaps
