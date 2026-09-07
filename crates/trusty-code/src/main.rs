@@ -78,7 +78,10 @@ enum Command {
     /// be selected: `--stdio` XOR `--http` (they are independent modes, not
     /// simultaneous — see `trusty_code::serve` module docs).
     Serve {
-        /// Path to the project root (must contain a `.claude/` directory).
+        // #6999: same stale `.claude/`-only wording as `run-task` carried.
+        /// Path to the project root. Its configuration is read from
+        /// `.trusty-code/`, falling back to `.claude/` then `.open-mpm/`; none
+        /// of the three has to exist.
         ///
         /// OPTIONAL: omit it to serve PROJECTLESS — a first-class state for
         /// chat/planning before a project is chosen, and the state the shell's
@@ -154,14 +157,19 @@ enum Command {
     /// diff-report output, which the daemon-driven path does not (yet)
     /// compute.
     RunTask {
-        /// Agent name as declared in `.claude/agents/<name>.md` (e.g. `pm`).
+        // #6999: the pre-#5426 wording named `.claude/` as the only layout.
+        /// Agent name as declared in `.trusty-code/agents/<name>.md` (e.g.
+        /// `pm`), falling back to `.claude/agents/` then `.open-mpm/agents/`.
         agent: String,
 
         /// Free-form task description passed to the agent's system prompt.
         task: String,
 
-        /// Path to the project root (must contain a `.claude/` directory).
-        /// Defaults to the current working directory.
+        // #6999: a `.trusty-code`-only project runs; `.claude/` is a fallback.
+        /// Path to the project root. Its configuration is read from
+        /// `.trusty-code/`, falling back to `.claude/` then `.open-mpm/`; none
+        /// of the three has to exist. Defaults to the current working
+        /// directory.
         #[arg(long, short, value_name = "PATH", default_value = ".")]
         project: PathBuf,
 
@@ -347,6 +355,10 @@ enum PathsCommand {
 
     /// Import `.claude/agents`, `.claude/skills`, and `.claude/settings.json`
     /// into `.trusty-code/`, never overwriting an existing file.
+    ///
+    /// Exits 1 if any entry was refused — a symlink escape, an executable, a
+    /// secret-bearing `settings.json`, or a target that already exists (#6999).
+    /// `--dry-run` reports the same code the real run would.
     Import {
         /// Path to the project root.
         #[arg(long, short, value_name = "PATH", default_value = ".")]
@@ -587,7 +599,17 @@ async fn main() -> Result<()> {
         // `import`, writes only beneath `<project>/.trusty-code/`.
         Command::Paths { action } => match action {
             PathsCommand::Show { project, json } => cli::paths::show(&project, json),
-            PathsCommand::Import { project, dry_run } => cli::paths::import(&project, dry_run),
+            // #6999: a refused entry must reach the caller as an exit code, not
+            // only as a line of plan output.
+            PathsCommand::Import { project, dry_run } => {
+                match cli::paths::import(&project, dry_run) {
+                    Ok(code) => process::exit(code),
+                    Err(e) => {
+                        eprintln!("tcode paths import: {e:#}");
+                        process::exit(ExitCode::RunFailure.code());
+                    }
+                }
+            }
         },
 
         Command::Workstream { action } => match action {

@@ -80,9 +80,21 @@ pub(crate) static DATA_DIR_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex
 /// uses: [`DATA_DIR_ENV_VAR`] when set (test isolation), otherwise
 /// `crate::workstreams::default_data_dir()` (`~/.trusty-code`, production).
 pub fn default_data_dir() -> PathBuf {
-    std::env::var(DATA_DIR_ENV_VAR)
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| crate::workstreams::default_data_dir())
+    data_dir_override().unwrap_or_else(crate::workstreams::default_data_dir)
+}
+
+/// The directory [`DATA_DIR_ENV_VAR`] names, if it is set.
+///
+/// Why: #6999 gave `crate::workstreams::default_data_dir` a side effect — it
+/// creates and chmods `~/.trusty-code` — so a test that asserted on
+/// [`default_data_dir`] to check the UNSET branch did real I/O in whatever
+/// `$HOME` the run had. Reading the variable separately lets that branch be
+/// asserted without resolving, creating, or chmod'ing anything.
+/// What: the variable parsed as a `PathBuf`, or `None` when unset.
+/// Test: `agent_loop::telemetry_tests::default_data_dir_honors_env_override`,
+/// `agent_loop::telemetry_tests::default_data_dir_falls_back_to_workstreams_default_when_unset`.
+fn data_dir_override() -> Option<PathBuf> {
+    std::env::var(DATA_DIR_ENV_VAR).ok().map(PathBuf::from)
 }
 
 /// One JSONL line: a single compression/summarization event (issue #3867).

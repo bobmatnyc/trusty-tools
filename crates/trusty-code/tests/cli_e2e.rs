@@ -52,6 +52,14 @@
 //! home directory — the same sandboxing `support::home_with_user_level_agents`
 //! already uses for agent resolution.
 //!
+//! `a_non_import_command_tightens_a_permissive_private_state_dir`,
+//! `run_task_help_names_trusty_code_first_and_claude_as_fallback`, and
+//! `paths_import_exits_nonzero_when_an_entry_is_refused` (#6999) close the
+//! three gaps #5426's live verification found: the `0700` guarantee reached
+//! only `tcode paths import`, `run-task --help` still described the
+//! pre-#5426 `.claude`-only layout, and a refused import printed its refusal
+//! while exiting 0.
+//!
 //! Test: this file IS the test; see `support` for the shared
 //! `project_with_agents` fixture.
 
@@ -979,5 +987,202 @@ fn paths_import_dry_run_writes_nothing() {
     assert!(
         !project.path().join(".trusty-code").exists(),
         "a dry run must not create .trusty-code/"
+    );
+}
+
+/// A tcode command that is NOT `paths import` tightens a permissive
+/// `~/.trusty-code` (#6999).
+///
+/// Why: the README promised an existing permissive private-state directory is
+/// tightened "on the next run", but `ensure_private_state_dir` was reachable
+/// only from `tcode paths import`. A `workstream list` — which resolves the
+/// same root to find its store — left a pre-existing `0755` directory `0755`.
+/// What: stages `$HOME/.trusty-code` at `0755`, runs `tcode workstream list`
+/// with `HOME` pinned there, and asserts every group and other bit is clear
+/// afterwards. `workstream list` is chosen because it reaches the root through
+/// `workstreams::path::default_data_dir`, the resolver every private-state
+/// writer shares — proving the guarantee at the shared entry point rather than
+/// at one subcommand.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[test]
+fn a_non_import_command_tightens_a_permissive_private_state_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let state = home.path().join(".trusty-code");
+    std::fs::create_dir_all(&state).expect("mkdir private state");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755))
+        .expect("stage a permissive private state dir");
+
+    let output = support::tcode_command()
+        .args([
+            "workstream",
+            "list",
+            "--project",
+            &project.path().display().to_string(),
+        ])
+        .env("HOME", home.path())
+        .output()
+        .expect("spawn tcode workstream list");
+    assert!(
+        output.status.success(),
+        "workstream list must exit 0: {output:?}"
+    );
+
+    let mode = std::fs::metadata(&state)
+        .expect("stat private state")
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o077,
+        0,
+        "a non-import run must tighten ~/.trusty-code to owner-only, saw {:o}",
+        mode & 0o777
+    );
+}
+
+/// `tcode run-task --help` describes the `.trusty-code` layout, not the
+/// pre-#5426 `.claude`-only one (#6999).
+///
+/// Why: the help still told operators the project root "must contain a
+/// `.claude/` directory" and that agents live in `.claude/agents/<name>.md`,
+/// both false since #5426 — a `.trusty-code`-only project runs.
+/// What: asserts the help names `.trusty-code` for both the agent argument and
+/// the project argument, keeps `.claude` only as a fallback, and no longer
+/// carries the "must contain" sentence.
+/// Test: this function IS the test.
+#[test]
+fn run_task_help_names_trusty_code_first_and_claude_as_fallback() {
+    let output = support::tcode_command()
+        .args(["run-task", "--help"])
+        .output()
+        .expect("spawn tcode run-task --help");
+    assert!(output.status.success(), "--help must exit 0: {output:?}");
+    let help = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        help.contains(".trusty-code/agents/<name>.md"),
+        "the agent argument must name the native agents directory: {help}"
+    );
+    assert!(
+        help.contains(".trusty-code/"),
+        "the project argument must name the native config root: {help}"
+    );
+    assert!(
+        help.contains(".claude/"),
+        "the fallback root must still be documented: {help}"
+    );
+    assert!(
+        !help.contains("must contain a `.claude/` directory"),
+        "the pre-#5426 requirement must be gone: {help}"
+    );
+    assert!(
+        !help.contains("declared in `.claude/agents/"),
+        "the pre-#5426 agent location must be gone: {help}"
+    );
+}
+
+/// `tcode paths import` exits nonzero when the plan refuses an entry (#6999).
+///
+/// Why: a symlink escape was printed as `skip ...` and the process still exited
+/// 0, so a caller scripting the migration could not tell a clean import from
+/// one that silently left a credential-bearing symlink behind.
+/// What: stages `.claude/agents/leak.md` as a symlink to a file outside the
+/// project, runs the real import (not `--dry-run`) with `HOME` pinned, and
+/// asserts the refusal is both printed AND reported as exit code
+/// `cli::paths::IMPORT_REFUSED_EXIT_CODE`. Then asserts `--dry-run` on the same
+/// tree reports the same code, since the preview and the run must not disagree.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[test]
+fn paths_import_exits_nonzero_when_an_entry_is_refused() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let secret = outside.path().join("id_rsa");
+    std::fs::write(&secret, "not really a key\n").expect("write outside file");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let agents = project.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents).expect("mkdir agents");
+    std::os::unix::fs::symlink(&secret, agents.join("leak.md")).expect("symlink escape");
+
+    let project_arg = project.path().display().to_string();
+    let output = support::tcode_command()
+        .args(["paths", "import", "--project", &project_arg])
+        .env("HOME", home.path())
+        .output()
+        .expect("spawn tcode paths import");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("skip") && stdout.contains("leak.md"),
+        "the refusal must still be printed: {stdout}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a refused entry must exit 1: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let dry = support::tcode_command()
+        .args(["paths", "import", "--project", &project_arg, "--dry-run"])
+        .env("HOME", home.path())
+        .output()
+        .expect("spawn tcode paths import --dry-run");
+    assert_eq!(
+        dry.status.code(),
+        Some(1),
+        "the dry run must report the code the real run would: {}",
+        String::from_utf8_lossy(&dry.stdout)
+    );
+}
+
+/// A `~/.trusty-code` that cannot be a directory warns; it never panics (#6999).
+///
+/// Why: making every run create and chmod the private-state root added an error
+/// arm — the path is a regular file, the home directory is read-only, the disk
+/// is full. That arm must fail OPEN: the process gets the resolved path back and
+/// keeps going, with a `warn` naming what it tried. An `unwrap` there would kill
+/// a harness that is otherwise fine.
+/// What: pins `HOME` to a tempdir with `$HOME/.trusty-code` staged as a plain
+/// FILE, so `create_dir_all` cannot succeed, then runs `tcode workstream list` —
+/// which resolves the data dir through `workstreams::path::default_data_dir` —
+/// and asserts the process exits without a panic and emits the warning on
+/// stderr. The unit half is
+/// `workstreams::path_tests::ensure_or_report_falls_back_when_the_path_is_a_file`.
+/// Test: this function IS the test.
+#[test]
+fn an_unusable_private_state_path_warns_instead_of_panicking() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    std::fs::write(home.path().join(".trusty-code"), "not a directory\n")
+        .expect("stage a file where the private state root would be");
+
+    let output = support::tcode_command()
+        .args([
+            "workstream",
+            "list",
+            "--project",
+            &project.path().display().to_string(),
+        ])
+        .env("HOME", home.path())
+        .env("RUST_LOG", "warn")
+        .output()
+        .expect("spawn tcode workstream list");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("panicked at"),
+        "an unusable private state path must not panic the process: {stderr}"
+    );
+    assert!(
+        stderr.contains("could not create the trusty-code private state directory"),
+        "the fail-open arm must say what it tried: {stderr}"
+    );
+    assert!(
+        home.path().join(".trusty-code").is_file(),
+        "the staged file must be left alone"
     );
 }

@@ -95,22 +95,42 @@ pub fn private_state_dir() -> PathBuf {
 /// `paths::private_state_tests::ensure_tightens_a_permissive_existing_dir`.
 pub fn ensure_private_state_dir_at(home: &Path) -> io::Result<PathBuf> {
     let dir = private_state_dir_at(home);
-    std::fs::create_dir_all(&dir)?;
-    harden(&dir);
+    ensure_dir(&dir)?;
     Ok(dir)
+}
+
+/// Create `dir` and tighten it, on an already-resolved path.
+///
+/// Why: #6999 — the create-and-tighten body was written twice, once per
+/// `ensure_*` wrapper, and [`crate::workstreams::default_data_dir`] needs a
+/// third caller that already holds the resolved path (its home resolution is
+/// [`private_state_dir`]'s job, including the no-home fallback). One body, three
+/// callers, rather than a copy per entry point.
+/// What: `create_dir_all` then [`harden`]. Errors only on the create — a
+/// failure to chmod is logged by [`harden`] and does not fail the call.
+/// Test: `paths::private_state_tests::ensure_creates_restrictive_dir`,
+/// `workstreams::path_tests::ensure_or_report_falls_back_when_the_path_is_a_file`.
+pub(crate) fn ensure_dir(dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    harden(dir);
+    Ok(())
 }
 
 /// Create and tighten the production `~/.trusty-code`.
 ///
 /// Why: the production wrapper over [`ensure_private_state_dir_at`], so callers
-/// never resolve the home directory themselves.
+/// never resolve the home directory themselves. #6999: `tcode paths import` was
+/// its only caller, so the mode guarantee applied to exactly one subcommand;
+/// [`crate::workstreams::default_data_dir`] now calls it too, which is the
+/// resolver every private-state writer already routes through.
 /// What: [`private_state_dir`] then the same create-and-tighten sequence.
 /// Test: covered hermetically by `ensure_private_state_dir_at`'s tests; the
 /// wrapper adds only home resolution.
+/// `tests/cli_e2e.rs::a_non_import_command_tightens_a_permissive_private_state_dir`
+/// covers the call from `default_data_dir`.
 pub fn ensure_private_state_dir() -> io::Result<PathBuf> {
     let dir = private_state_dir();
-    std::fs::create_dir_all(&dir)?;
-    harden(&dir);
+    ensure_dir(&dir)?;
     Ok(dir)
 }
 
