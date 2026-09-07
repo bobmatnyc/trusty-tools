@@ -14,16 +14,16 @@ pnpm install
 pnpm dev        # http://localhost:5173
 ```
 
-| Command             | What it does                                                   |
-| ------------------- | -------------------------------------------------------------- |
-| `pnpm dev`          | Dev server with HMR                                            |
-| `pnpm build`        | Production build into `.vercel/output/`                        |
-| `pnpm preview`      | Serve the production build locally                             |
-| `pnpm check`        | `svelte-check` typecheck                                       |
-| `pnpm lint`         | `prettier --check` + `eslint`                                  |
-| `pnpm format`       | Rewrite with Prettier                                          |
-| `pnpm test`         | Vitest: docs reader, token parity, theme store, content, build |
-| `pnpm check:tokens` | Repo-wide Foundry drift gate (`scripts/check_token_drift.mjs`) |
+| Command             | What it does                                                            |
+| ------------------- | ----------------------------------------------------------------------- |
+| `pnpm dev`          | Dev server with HMR                                                     |
+| `pnpm build`        | Production build into `.vercel/output/`                                 |
+| `pnpm preview`      | Serve the production build locally                                      |
+| `pnpm check`        | `svelte-check` typecheck                                                |
+| `pnpm lint`         | `prettier --check` + `eslint`                                           |
+| `pnpm format`       | Rewrite with Prettier                                                   |
+| `pnpm test`         | Vitest: docs reader, flagship content, token parity, theme store, build |
+| `pnpm check:tokens` | Repo-wide Foundry drift gate (`scripts/check_token_drift.mjs`)          |
 
 pnpm `9.15.9`, pinned in `packageManager` to match the seven UI packages under
 `crates/*/ui/`.
@@ -62,7 +62,9 @@ documentation reader ([#5098](https://github.com/bobmatnyc/trusty-tools/issues/5
 reads `docs/public-manifest.tsv` and the Markdown it points at, both of which
 live above `website/`. With the setting off the build container has no
 `../docs`, and the reader fails with `FAIL NO-REPO-ROOT …` naming this exact
-setting — see `src/lib/docs/README.md`.
+setting — see `src/lib/docs/README.md`. The flagship pages
+([#6960](https://github.com/bobmatnyc/trusty-tools/issues/6960)) read from the
+same place through `include` directives, so the setting covers both.
 
 ### Ignored Build Step
 
@@ -176,6 +178,61 @@ These files are a byte-identical **second copy** of
 `crates/trusty-agents/ui/public/fonts/`. Consolidating the two is worth doing
 once a third consumer appears — [#3492](https://github.com/bobmatnyc/trusty-tools/issues/3492)
 tracks replacing copy-paste distribution of Foundry assets with a real package.
+
+## The flagship tool pages
+
+`/tools/<slug>` serves seven pages. Six render their prose from markdown; one
+is still Svelte.
+
+| To change                          | Edit                                         |
+| ---------------------------------- | -------------------------------------------- |
+| What a flagship page SAYS          | `src/content/tools/<slug>.md`                |
+| Its tagline, lede, or fact cards   | `src/lib/tools.ts`                           |
+| The hero, install block, or footer | `src/lib/components/ToolPage.svelte`         |
+| The `/tools/trusty-audit` page     | `src/routes/tools/trusty-audit/+page.svelte` |
+
+A crate README is not a source for any of them — nothing in the build reads one.
+
+One route serves all six: `src/routes/tools/[slug]/`, whose `entries` are the
+markdown files themselves, so adding `src/content/tools/<slug>.md` for a slug
+already in `TOOLS` is the whole of adding a page. `trusty-audit` keeps its own
+static route, which takes precedence over `[slug]`; its copy embeds live
+`CopyButton` components next to the commands an operator has to run, and
+markdown cannot express those.
+
+`src/lib/flagship/content.ts` does the rendering, through the **same**
+remark/rehype pipeline as the documentation reader below — so a table, a fenced
+block, and the `RAW-HTML` metavariable gate all behave identically on both
+surfaces, and a broken link fails the build on both. Two deliberate
+differences:
+
+- **Root-relative links are allowed**, checked against an allowlist built from
+  the routes this build knows about (nav links, every `/docs` route, every
+  `/tools/<slug>`). A `docs/` page still refuses them, because that source is
+  read on GitHub as often as on the site. An unknown path fails
+  `UNKNOWN-SITE-ROUTE`.
+- **Heading ids are unique across a page's sources**, not per file. The pieces
+  are concatenated into one document, where a second `id="cost-savings"` is
+  unreachable and its anchor silently lands on the first. A collision fails
+  `DUP-HEADING-ID`.
+
+### Including a `docs/` file
+
+A line that is nothing but
+
+```
+<!-- include: docs/trusty-mpm/statusline-savings.md -->
+```
+
+renders that file at that point. It is how one source publishes on two
+surfaces: `docs/trusty-mpm/statusline-savings.md` is a `/docs` page in its own
+right AND the Cost savings section of `/tools/trusty-mpm`. The included file's
+opening `<h1>` is dropped — that heading titles its `/docs` page, and the
+flagship page already has one in its hero.
+
+Includes are one level deep, and the path is repo-relative. A directive naming
+a file that does not exist, or one escaping the repository, fails
+`BAD-INCLUDE`.
 
 ## The documentation reader
 

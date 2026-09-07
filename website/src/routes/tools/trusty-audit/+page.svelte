@@ -10,6 +10,11 @@
 	 * first run, register targets, audit — then what comes back, then the
 	 * failure modes.
 	 *
+	 * The one flagship page still written in Svelte (#6960). The other six
+	 * render from `website/src/content/tools/<slug>.md`; this one's copy embeds
+	 * live `CopyButton` components beside the commands an operator has to run,
+	 * which markdown cannot express.
+	 *
 	 * Sourcing: verbs and flags from `src/cli.rs`; the pinned four-tool set from
 	 * `src/tools.rs` (`RequiredTool::ALL`) and `src/config.rs` (`ToolPins`); the
 	 * credential precedence and prompt from `src/cli/credential.rs` (#5872);
@@ -39,16 +44,9 @@
 	import { installCommand, TOOLS } from '$lib/tools';
 
 	const tool = TOOLS.find((t) => t.slug === 'trusty-audit')!;
-
-	const facts = [
-		{ label: 'Package', value: 'trusty-audit' },
-		{ label: 'Runs on', value: 'macOS, Apple Silicon' },
-		{ label: 'Needs', value: 'gh, authenticated' },
-		{ label: 'Returns', value: 'audit-return-package.zip' }
-	];
 </script>
 
-<ToolPage {tool} {facts}>
+<ToolPage {tool}>
 	<div>
 		<h2 class="font-display text-2xl font-bold sm:text-3xl">What it is</h2>
 		<p class="mt-4 max-w-3xl text-foundry-secondary">

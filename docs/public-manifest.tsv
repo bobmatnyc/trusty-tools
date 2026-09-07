@@ -102,6 +102,7 @@ PAGE	installation	docs/distribution/INSTALL-CONVENTION.md	/installation/conventi
 
 SECTION	tools	Tools
 PAGE	tools	docs/trusty-mpm/README.md	/tools/trusty-mpm	trusty-mpm
+PAGE	tools	docs/trusty-mpm/statusline-savings.md	/tools/trusty-mpm/statusline-savings	trusty-mpm Statusline Cost Savings
 PAGE	tools	docs/trusty-agents/README.md	/tools/trusty-agents	trusty-agents
 PAGE	tools	docs/trusty-search/README.md	/tools/trusty-search	trusty-search
 PAGE	tools	docs/trusty-memory/README.md	/tools/trusty-memory	trusty-memory

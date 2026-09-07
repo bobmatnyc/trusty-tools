@@ -102,13 +102,18 @@ describe('flagship tool records are grounded in the repository', () => {
 		}
 	});
 
-	it('has a route directory for every slug, and no duplicate slugs', () => {
+	/**
+	 * Since #6960 a flagship page is served one of two ways, and a record that
+	 * matches NEITHER is a `/tools/<slug>` link on the landing page that leads
+	 * to a 404: markdown under `src/content/tools/`, served by the `[slug]`
+	 * route, or a hand-authored `+page.svelte` of its own (trusty-audit).
+	 */
+	it('has a page source for every slug, and no duplicate slugs', () => {
 		expect(new Set(TOOLS.map((t) => t.slug)).size).toBe(TOOLS.length);
 		for (const tool of TOOLS) {
-			expect(
-				existsSync(path.join(HERE, '../routes/tools', tool.slug, '+page.svelte')),
-				tool.slug
-			).toBe(true);
+			const markdown = existsSync(path.join(HERE, '../content/tools', `${tool.slug}.md`));
+			const svelte = existsSync(path.join(HERE, '../routes/tools', tool.slug, '+page.svelte'));
+			expect(markdown || svelte, tool.slug).toBe(true);
 		}
 	});
 
@@ -145,11 +150,11 @@ describe('flagship tool records are grounded in the repository', () => {
 			const declared = readFileSync(path.join(REPO_ROOT, source), 'utf8').match(pattern);
 			expect(declared, source).not.toBeNull();
 
-			const page = readFileSync(path.join(HERE, '../routes/tools', slug, '+page.svelte'), 'utf8');
-			const card = page.match(/\{\s*label:\s*'MCP tools',\s*value:\s*'(\d+)'\s*\}/);
-			expect(card, `${slug} has an 'MCP tools' fact card`).not.toBeNull();
+			const tool = TOOLS.find((candidate) => candidate.slug === slug);
+			const card = tool?.facts.find((fact) => fact.label === 'MCP tools');
+			expect(card, `${slug} has an 'MCP tools' fact card`).toBeDefined();
 
-			expect(Number(card![1]), `${slug} fact card vs ${source}`).toBe(declared!.length);
+			expect(Number(card!.value), `${slug} fact card vs ${source}`).toBe(declared!.length);
 		}
 	);
 
