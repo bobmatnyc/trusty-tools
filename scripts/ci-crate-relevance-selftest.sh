@@ -27,6 +27,14 @@
 #   against an input that answers `false` when cargo works, so it proves the
 #   arm was reached rather than that the answer happened to be true.
 #
+#   One section builds real single-commit git repos and drives the script
+#   through its OWN `git diff` (#7063). Feeding paths on stdin cannot reach
+#   that defect: git C-quotes a path holding a non-ASCII byte, a double quote
+#   or a backslash, and the quoted string matches no crate directory, so a
+#   change INSIDE a crate answered `false` and that crate's required clippy job
+#   was skipped. Its last case is a non-ASCII path OUTSIDE the closure,
+#   asserting `false`, so the section cannot pass by answering `true` always.
+#
 # Usage: bash scripts/ci-crate-relevance-selftest.sh
 # Exit: 0 when every case matches; 1 otherwise, printing both sides of each
 #   mismatch.
@@ -122,6 +130,13 @@ new_crate crates/nested/ui/src-tauri nested-ui
   echo 'nested = { path = "../.." }'
 } >>"${FIXTURE}/crates/nested/ui/src-tauri/Cargo.toml"
 
+# A pristine copy, taken before any verdict runs so the Cargo.lock that
+# `cargo metadata` writes never reaches a git fixture and never shows up as a
+# changed path (Cargo.lock is a workspace-wide input, which would make every
+# git-fixture case answer `true` for the wrong reason).
+PRISTINE="${WORK}/pristine"
+cp -R "${FIXTURE}" "${PRISTINE}"
+
 # fixture_verdict <crate> <changed path>... — run the script inside the fixture.
 fixture_verdict() {
   local crate="$1"
@@ -134,6 +149,41 @@ live_verdict() {
   local crate="$1"
   shift
   (cd "${REPO_ROOT}" && printf '%s\n' "$@" | bash "${SCRIPT}" "${crate}" 2>/dev/null)
+}
+
+# gitfix_verdict <crate> <added path>... — build a throwaway git repo from the
+# pristine fixture, add the named files in a second commit, and let the script
+# resolve the change set with its OWN `git diff` (#7063). A fresh repo per case
+# keeps the cases independent and needs no history rewriting between them.
+gitfix_verdict() {
+  local crate="$1" repo path base
+  shift
+  repo="$(mktemp -d "${WORK}/gitcase.XXXXXX")" || return 1
+  cp -R "${PRISTINE}/." "${repo}/" || return 1
+  (
+    cd "${repo}" || exit 1
+    git init -q . >/dev/null 2>&1
+    git config user.email selftest@example.invalid >/dev/null 2>&1
+    git config user.name selftest >/dev/null 2>&1
+    git add -A >/dev/null 2>&1
+    git commit -qm base >/dev/null 2>&1
+    base="$(git rev-parse HEAD 2>/dev/null)"
+    # Without this, a git that could not build the fixture would leave
+    # CRATE_RELEVANCE_BASE empty, the script would read its empty stdin, and
+    # the fail-closed arm would answer `true` — passing five of the six cases
+    # below for a reason that has nothing to do with path quoting.
+    if [ -z "${base}" ]; then
+      echo "git-fixture-setup-failed"
+      exit 0
+    fi
+    for path in "$@"; do
+      mkdir -p "$(dirname "${path}")"
+      printf 'pub fn x() {}\n' >"${path}"
+    done
+    git add -A >/dev/null 2>&1
+    git commit -qm change >/dev/null 2>&1
+    CRATE_RELEVANCE_BASE="${base}" bash "${SCRIPT}" "${crate}" </dev/null 2>/dev/null
+  )
 }
 
 echo "fixture: the crate's own directory"
@@ -183,6 +233,28 @@ for path in Cargo.lock Cargo.toml clippy.toml rust-toolchain rust-toolchain.toml
   scripts/ci-crate-relevance-selftest.sh; do
   assert_eq "top <- ${path}" "true" "$(fixture_verdict top "${path}")"
 done
+
+echo "fixture: git-quoted paths reach the matcher (#7063)"
+# Each of these three characters makes git C-quote the path — wrapping it in
+# literal double quotes and escaping the byte — unless the diff is read with
+# `-z`. The quoted string is under no crate directory, so before the fix a
+# change inside the crate answered `false`.
+assert_eq "top <- crates/top/src/café.rs (non-ASCII, own dir)" \
+  "true" "$(gitfix_verdict top 'crates/top/src/café.rs')"
+assert_eq "top <- crates/mid/src/café.rs (non-ASCII, in the closure)" \
+  "true" "$(gitfix_verdict top 'crates/mid/src/café.rs')"
+assert_eq 'top <- crates/top/src/a"b.rs (double quote, own dir)' \
+  "true" "$(gitfix_verdict top 'crates/top/src/a"b.rs')"
+assert_eq 'top <- crates/top/src/back\slash.rs (backslash, own dir)' \
+  "true" "$(gitfix_verdict top 'crates/top/src/back\slash.rs')"
+# The control: a quoted path that is genuinely inert must still answer `false`,
+# so the four above cannot be passing because the fix answers `true` always.
+assert_eq "top <- crates/unrelated/src/café.rs (non-ASCII, outside)" \
+  "false" "$(gitfix_verdict top 'crates/unrelated/src/café.rs')"
+# An ordinary ASCII path through the same git-diff route, pinning that `-z`
+# did not break the common case.
+assert_eq "top <- crates/top/src/plain.rs (ASCII, own dir)" \
+  "true" "$(gitfix_verdict top 'crates/top/src/plain.rs')"
 
 echo "fixture: fail-closed arms"
 assert_eq "no crate name" \

@@ -375,8 +375,12 @@ jobs:
             exit 0
           fi
 
+          # #7063: `-z` — without it git C-quotes any path carrying a non-ASCII
+          # byte, a double quote or a backslash, and the quoted string matches
+          # no crate directory, so a change inside the crate answers `false`
+          # and that crate's required clippy job is skipped.
           changed="${RUNNER_TEMP}/ui-changed-paths.txt"
-          if ! git diff --name-only --no-renames "$merge_base" HEAD > "$changed"; then
+          if ! git diff -z --name-only --no-renames "$merge_base" HEAD > "$changed"; then
             fail_closed "git diff against ${merge_base} failed"
             exit 0
           fi

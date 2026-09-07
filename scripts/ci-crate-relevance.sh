@@ -36,6 +36,16 @@
 #   (trusty-audit-ui lives at crates/trusty-audit/ui/src-tauri) is matched by
 #   its own directory as well as its parent's.
 #
+#   Paths arrive NUL-delimited, from `git diff -z` (#7063). Without `-z` git
+#   C-quotes any path holding a non-ASCII byte, a double quote or a backslash —
+#   `crates/trusty-mpm/src/caf\303\251.rs`, wrapped in literal double quotes —
+#   and that string matches no directory prefix, so a change INSIDE a crate
+#   answered `false` and the crate's required clippy job was skipped.
+#   `core.quotePath=false` fixes only the non-ASCII third of that; `-z` emits
+#   every byte of every path verbatim. Newline-delimited stdin is still read as
+#   before when the input holds no NUL, which keeps the plain
+#   `git diff --name-only | …` form in Usage working.
+#
 #   FAIL CLOSED. Every error — no crate name, a crate cargo does not know, a
 #   `cargo metadata` failure, a missing python3, an unresolvable base ref, an
 #   empty change set — prints `true`, writes a note to stderr, and exits 0, so
@@ -43,7 +53,7 @@
 #   full build; it can never cost a silent skip.
 #
 # Usage:
-#   git diff --name-only --no-renames "$MERGE_BASE" HEAD |
+#   git diff -z --name-only --no-renames "$MERGE_BASE" HEAD |
 #     bash scripts/ci-crate-relevance.sh trusty-mpm-gui
 #   CRATE_RELEVANCE_BASE=origin/main bash scripts/ci-crate-relevance.sh trusty-code-gui
 #
@@ -95,7 +105,10 @@ if [ -n "${CRATE_RELEVANCE_BASE:-}" ]; then
   if ! merge_base="$(git merge-base "${CRATE_RELEVANCE_BASE}" HEAD 2>/dev/null)"; then
     fail_closed "cannot resolve merge-base against '${CRATE_RELEVANCE_BASE}'"
   fi
-  if ! git diff --name-only --no-renames "${merge_base}" HEAD >"${CHANGED_FILE}" 2>/dev/null; then
+  # #7063: `-z` — without it git C-quotes any path carrying a non-ASCII byte, a
+  # double quote or a backslash, and the quoted string matches no crate
+  # directory, so a change inside the crate answers `false`.
+  if ! git diff -z --name-only --no-renames "${merge_base}" HEAD >"${CHANGED_FILE}" 2>/dev/null; then
     fail_closed "git diff against ${merge_base} failed"
   fi
 else
@@ -129,8 +142,21 @@ crate = os.environ["CRATE_NAME"]
 
 with open(os.environ["METADATA_FILE"], encoding="utf-8") as fh:
     meta = json.load(fh)
-with open(os.environ["CHANGED_FILE"], encoding="utf-8") as fh:
-    changed = [line.strip() for line in fh if line.strip()]
+
+# #7063: `git diff -z` is NUL-delimited and emits every path byte verbatim.
+# A NUL can never occur inside a path, so its presence identifies the format
+# unambiguously; input without one is the newline-delimited form the Usage
+# block still documents, read exactly as before. `surrogateescape` keeps a
+# path that is not valid UTF-8 matchable instead of raising, which would
+# fail closed and cost a full build for a file that is plainly inert.
+with open(
+    os.environ["CHANGED_FILE"], encoding="utf-8", errors="surrogateescape", newline=""
+) as fh:
+    raw = fh.read()
+if "\0" in raw:
+    changed = [path for path in raw.split("\0") if path]
+else:
+    changed = [line.strip() for line in raw.splitlines() if line.strip()]
 
 root = meta.get("workspace_root")
 packages = meta.get("packages") or []
