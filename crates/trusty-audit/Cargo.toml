@@ -149,6 +149,14 @@ zip = { workspace = true }
 # prove it is scanning outbound files with the credential that produced them
 # rather than a freshly re-resolved one that never touched those files.
 sha2 = { workspace = true }
+# #5481: the detached ed25519 signature over the return package's content
+# manifest, and the check that reads it back. The workspace has no other
+# asymmetric-signing implementation to route through — `trusty-installer`'s
+# Developer-ID codesign answers a different question (who built the binary),
+# which #5481 and #5484 both warn against conflating. `rand_core` is only for
+# `OsRng` when a fresh engagement keypair is minted.
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
 # #5499: walking each audited repository's output directory. Not followed
 # through symlinks — `package::collect_dir` refuses one rather than reading a
 # file from outside the working directory into a package that leaves the

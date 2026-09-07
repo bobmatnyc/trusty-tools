@@ -101,6 +101,12 @@ pub(super) fn refuse_if_credential(
 }
 
 /// Copy one file into the archive, refusing it if it carries any credential.
+///
+/// #5481: `digest` is fed every byte that reaches the archive, so the content
+/// manifest's SHA-256 comes out of the SAME pass that scans and copies. Hashing
+/// the source file separately would hash bytes this function never wrote — a
+/// file rewritten mid-copy would then be recorded under a digest the package
+/// does not contain.
 pub(super) fn copy_member(
     zip: &mut Archive,
     entry: &str,
@@ -108,6 +114,7 @@ pub(super) fn copy_member(
     config: &EngagementConfig,
     temporary: &Path,
     github_token: Option<&str>,
+    digest: &mut sha2::Sha256,
 ) -> Result<u64, AuditError> {
     let mut input = std::fs::File::open(source).map_err(|e| AuditError::Package {
         path: source.to_path_buf(),
@@ -138,6 +145,7 @@ pub(super) fn copy_member(
                 path: temporary.to_path_buf(),
                 source,
             })?;
+        sha2::Digest::update(digest, &buffer[..read]);
         written += read as u64;
     }
     Ok(written)

@@ -71,19 +71,29 @@
 //! patches, hunks, or blobs, but it does carry whatever free text a human
 //! pasted into a commit message or work-item title.
 //!
-//! ## The boundary with signing (#5481)
+//! ## Signing (#5481)
 //!
-//! This module signs nothing and hashes nothing. #5481 owns the ed25519 manifest
-//! — filename plus SHA-256 per delivered file, signed with the per-engagement
-//! key — and writes it into `out/`. Everything under `out/` is packaged
-//! verbatim, so that manifest and its signature ride along with no change here.
-//! Until #5481 lands, the generated README says the package is unsigned rather
-//! than leaving the recipient to infer it.
+//! Every member's SHA-256 goes into one manifest, and that manifest carries a
+//! detached ed25519 signature made with the engagement's own key. Both are
+//! written by [`fill_archive`] as the LAST two members, which is the one thing
+//! that changed from the shape #5499 anticipated: the manifest was to be
+//! written into `out/` and packaged verbatim, but a manifest written there
+//! cannot cover the members this module generates, because they do not exist
+//! until the archive is being filled. So the hashes are taken from the bytes as
+//! they are written, in the same pass that scans them.
+//!
+//! An engagement with no key configured still packages — the manifest is
+//! written without a `[signature]` table, [`ReturnPackage::signature`] says so,
+//! and the generated README and the CLI both state it. See [`signing`] for the
+//! verification side, and for the tamper-evidence limit this must not be worded
+//! as more than.
 //!
 //! Test: `super::package_tests`.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+
+use sha2::Digest as _;
 
 use crate::config::EngagementConfig;
 use crate::error::AuditError;
@@ -114,6 +124,12 @@ mod error_digest;
 // file for the same reason the three above are — this file decides what goes
 // into the archive; that one decides what an excerpt may contain.
 mod excerpts;
+
+// #5481: the content manifest, its detached ed25519 signature, and the check
+// that reads both back out of a received package. `pub` because #5563's
+// `trusty-audit verify` CLI arm drives `signing::verify` — one implementation
+// behind the CLI, the Tauri shell, and this module's own write path.
+pub mod signing;
 
 use generated::{
     Generated, exclusions, render_failures, render_index, render_metadata, render_readme,
@@ -245,6 +261,30 @@ pub struct ReturnPackage {
     /// `unattempted` — a repository that never cloned reaches the sweep's
     /// records nowhere, so it can only arrive that way (#5824).
     pub excluded: Vec<String>,
+    /// Whether this package carries a signature, and under which key (#5481).
+    pub signature: SignatureOutcome,
+}
+
+/// What the signing step did while this package was written (#5481).
+///
+/// Why: "the package is unsigned" is a fact the operator sending it has to be
+/// able to see, and an absent `manifest.sha256.sig` is not something anyone
+/// reads a zip listing to discover. Modelling it as a field rather than a
+/// warning line means the CLI, the README and any front end state the same
+/// thing from the same value.
+/// Test: `super::package_tests::a_package_with_no_signing_key_is_unsigned_and_says_so`,
+/// `super::package_tests::a_configured_key_signs_the_package_and_it_verifies`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SignatureOutcome {
+    /// The manifest was signed with the engagement's key.
+    Signed {
+        /// The signing key's short fingerprint, as the manifest records it.
+        key_fingerprint: String,
+    },
+    /// No `[signing]` key is configured, so the manifest carries no signature.
+    /// The package was still built — this is a warning, not a refusal.
+    Unsigned,
 }
 
 /// Build the return package from what a completed sweep produced.
@@ -380,6 +420,12 @@ pub fn assemble(
         });
     }
 
+    // #5481: read the key BEFORE any member is written, so a malformed
+    // `[signing] private_key` refuses at the top rather than after a
+    // multi-gigabyte archive has been built. `None` is the unsigned engagement,
+    // which is not an error — see `SignatureOutcome`.
+    let signing_key = config.signing_key()?;
+
     let mut collected = Vec::new();
     for run in &audited {
         let stem = output_stem(run);
@@ -412,7 +458,9 @@ pub fn assemble(
     let (index, debt) = render_index(work, report, &collected);
     let generated = Generated {
         metadata: render_metadata(work, config, report, &audited, unattempted)?,
-        readme: render_readme(config, &audited, &excluded),
+        // #5481: the README states signed-or-not, and it is written before the
+        // manifest exists — so it is told from the key, which is already known.
+        readme: render_readme(config, &audited, &excluded, signing_key.is_some()),
         // #6080: built from `collected`, so the index links the members that are
         // actually going into this archive rather than the files the sweep left
         // on disk. Before `fill_archive`, because it is one of the members.
@@ -441,6 +489,7 @@ pub fn assemble(
         collected,
         excluded,
         github_token,
+        signing_key.as_ref(),
     )
 }
 
@@ -675,6 +724,7 @@ fn write_archive(
     collected: Vec<(String, PathBuf)>,
     excluded: Vec<String>,
     github_token: Option<&str>,
+    signing_key: Option<&signing::EngagementKey>,
 ) -> Result<ReturnPackage, AuditError> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|source| AuditError::Package {
@@ -683,7 +733,14 @@ fn write_archive(
         })?;
     }
     let temporary = destination.with_extension("zip.part");
-    let result = fill_archive(&temporary, config, generated, collected, github_token);
+    let result = fill_archive(
+        &temporary,
+        config,
+        generated,
+        collected,
+        github_token,
+        signing_key,
+    );
     let mut files = match result {
         Ok(files) => files,
         Err(e) => {
@@ -713,6 +770,12 @@ fn write_archive(
         total_bytes,
         packaged_bytes,
         excluded,
+        signature: match signing_key {
+            Some(key) => SignatureOutcome::Signed {
+                key_fingerprint: key.fingerprint(),
+            },
+            None => SignatureOutcome::Unsigned,
+        },
     })
 }
 
@@ -722,6 +785,7 @@ fn fill_archive(
     generated: Generated,
     collected: Vec<(String, PathBuf)>,
     github_token: Option<&str>,
+    signing_key: Option<&signing::EngagementKey>,
 ) -> Result<Vec<PackagedFile>, AuditError> {
     let file = std::fs::File::create(temporary).map_err(|source| AuditError::Package {
         path: temporary.to_path_buf(),
@@ -729,6 +793,8 @@ fn fill_archive(
     })?;
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
     let mut files = Vec::with_capacity(collected.len() + 3);
+    // #5481: one entry per member as it is written, in the order it is written.
+    let mut manifest = Vec::with_capacity(files.capacity());
 
     let members = [
         (README_ENTRY, Some(generated.readme)),
@@ -763,6 +829,11 @@ fn fill_archive(
                 path: temporary.to_path_buf(),
                 source,
             })?;
+        manifest.push(signing::ManifestFile {
+            entry: entry.to_owned(),
+            sha256: hex_digest(sha2::Sha256::digest(text.as_bytes())),
+            bytes: text.len() as u64,
+        });
         files.push(PackagedFile {
             entry: entry.to_owned(),
             source: None,
@@ -771,6 +842,9 @@ fn fill_archive(
     }
 
     for (entry, source) in collected {
+        // #5481: hashed in the same pass that scans and copies, so the digest
+        // is over the bytes that actually reached the archive.
+        let mut digest = sha2::Sha256::new();
         let bytes = credential_scan::copy_member(
             &mut zip,
             &entry,
@@ -778,11 +852,41 @@ fn fill_archive(
             config,
             temporary,
             github_token,
+            &mut digest,
         )?;
+        manifest.push(signing::ManifestFile {
+            entry: entry.clone(),
+            sha256: hex_digest(digest.finalize()),
+            bytes,
+        });
         files.push(PackagedFile {
             entry,
             source: Some(source),
             bytes,
+        });
+    }
+
+    // #5481: last, because the manifest covers every member before it and
+    // nothing can hash itself. `signing::verify` skips both when it re-checks
+    // the archive for members the manifest does not list.
+    let signed = signing::render(manifest, signing_key)?;
+    for (entry, text) in [
+        (signing::MANIFEST_ENTRY, Some(signed.manifest)),
+        (signing::SIGNATURE_ENTRY, signed.signature),
+    ]
+    .into_iter()
+    .filter_map(|(e, t)| t.map(|t| (e, t)))
+    {
+        start(&mut zip, entry, text.len() as u64, temporary)?;
+        zip.write_all(text.as_bytes())
+            .map_err(|source| AuditError::Package {
+                path: temporary.to_path_buf(),
+                source,
+            })?;
+        files.push(PackagedFile {
+            entry: entry.to_owned(),
+            source: None,
+            bytes: text.len() as u64,
         });
     }
 
@@ -791,6 +895,14 @@ fn fill_archive(
         source: std::io::Error::other(e),
     })?;
     Ok(files)
+}
+
+/// A SHA-256 digest as lower-case hex — the form the manifest records.
+///
+/// The `GithubAccess::fingerprint` spelling (#5980), so the crate writes hex
+/// one way rather than acquiring a `hex` dependency for four lines.
+fn hex_digest(digest: impl AsRef<[u8]>) -> String {
+    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 type Archive = zip::ZipWriter<std::io::BufWriter<std::fs::File>>;
@@ -992,6 +1104,171 @@ trusty-review = "0.15.1"
         let mut text = String::new();
         entry.read_to_string(&mut text).expect("read entry");
         text
+    }
+
+    /// A config that carries `key` as its `[signing]` private half.
+    fn signing_config(key: &signing::EngagementKey) -> EngagementConfig {
+        EngagementConfig::from_toml(
+            &format!(
+                "{CONFIG}\n[signing]\nprivate_key = \"{}\"\n",
+                key.private_hex()
+            ),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses")
+    }
+
+    /// 🔴 #5481 closure conditions 1 and 2, over the REAL assembler: the
+    /// manifest covers every member the package actually holds, the signature
+    /// over it verifies against the retained public half, and the two signing
+    /// members are the last two written.
+    #[test]
+    fn a_configured_key_signs_the_package_and_it_verifies() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let key = signing::EngagementKey::generate();
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+
+        let package = assemble(
+            &work,
+            &signing_config(&key),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("assembles");
+
+        assert_eq!(
+            package.signature,
+            SignatureOutcome::Signed {
+                key_fingerprint: key.fingerprint()
+            }
+        );
+        let names = entries(&destination);
+        assert_eq!(
+            names.iter().rev().take(2).collect::<Vec<_>>(),
+            vec![signing::SIGNATURE_ENTRY, signing::MANIFEST_ENTRY],
+            "the two signing members go last, so the manifest covers the rest: {names:?}"
+        );
+        let retained =
+            signing::RetainedKey::from_hex(&key.public_hex()).expect("the public half parses");
+        match signing::verify(&destination, &retained).expect("verifies") {
+            signing::Verdict::Signed {
+                key_fingerprint,
+                files,
+            } => {
+                assert_eq!(key_fingerprint, key.fingerprint());
+                // Every member except the two the manifest cannot cover.
+                assert_eq!(files, names.len() - 2, "{names:?}");
+            }
+            other => panic!("expected a signed verdict, got {other:?}"),
+        }
+        let readme = read_entry(&destination, README_ENTRY);
+        assert!(
+            readme.contains("tamper-evidence, not proof about you"),
+            "the limit must be stated, not softened: {readme}"
+        );
+    }
+
+    /// 🔴 #5481: a missing key must not stop the package being built. The
+    /// engagement still gets its deliverable, the manifest is still written, and
+    /// `verify` answers `Unsigned` rather than an error.
+    #[test]
+    fn a_package_with_no_signing_key_is_unsigned_and_says_so() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+
+        let package =
+            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+
+        assert_eq!(package.signature, SignatureOutcome::Unsigned);
+        let names = entries(&destination);
+        assert!(
+            names.contains(&signing::MANIFEST_ENTRY.to_owned()),
+            "{names:?}"
+        );
+        assert!(
+            !names.contains(&signing::SIGNATURE_ENTRY.to_owned()),
+            "an unsigned package carries no signature member: {names:?}"
+        );
+        let manifest = read_entry(&destination, signing::MANIFEST_ENTRY);
+        assert!(
+            !manifest.contains("[signature]"),
+            "the absent table is what tells `Unsigned` from a removed signature: {manifest}"
+        );
+        let retained =
+            signing::RetainedKey::from_hex(&signing::EngagementKey::generate().public_hex())
+                .expect("parses");
+        assert!(matches!(
+            signing::verify(&destination, &retained).expect("reads"),
+            signing::Verdict::Unsigned { .. }
+        ));
+    }
+
+    /// A manifest entry records the digest of the bytes IN the archive, so a
+    /// collected member (streamed through the credential scan) and a generated
+    /// one (written from memory) are both covered.
+    #[test]
+    fn the_manifest_digest_matches_a_collected_members_own_bytes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let key = signing::EngagementKey::generate();
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+        assemble(
+            &work,
+            &signing_config(&key),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("assembles");
+
+        let manifest: toml::Value = read_entry(&destination, signing::MANIFEST_ENTRY)
+            .parse()
+            .expect("the manifest is TOML");
+        let listed = manifest["file"].as_array().expect("an array of files");
+        let database = listed
+            .iter()
+            .find(|f| f["entry"].as_str() == Some("extract/00-acme-api.db"))
+            .expect("the extract database is listed");
+        assert_eq!(
+            database["sha256"].as_str(),
+            Some(hex_digest(sha2::Sha256::digest(b"SQLite format 3\0extract")).as_str()),
+            "{database:?}"
+        );
+    }
+
+    /// A `[signing]` key that is not a key refuses BEFORE the archive is
+    /// written, so a malformed field costs no packaging work and leaves no zip.
+    #[test]
+    fn a_malformed_signing_key_refuses_before_anything_is_written() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let broken = EngagementConfig::from_toml(
+            &format!("{CONFIG}\n[signing]\nprivate_key = \"not-a-key\"\n"),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses");
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+
+        let refused = assemble(&work, &broken, &report, &[], &destination, None);
+
+        assert!(
+            matches!(refused, Err(AuditError::Signing { .. })),
+            "{refused:?}"
+        );
+        assert!(!destination.exists(), "a refused assembly leaves no zip");
     }
 
     /// The whole path: a completed sweep becomes one openable file carrying the
@@ -1199,6 +1476,9 @@ trusty-review = "0.15.1"
             vec![
                 "README.md",
                 "extract/00-acme-api.db",
+                // #5481: the content manifest, on every package. Its signature
+                // is absent here because this config configures no key.
+                signing::MANIFEST_ENTRY,
                 "package.toml",
                 "reports/00-acme-api/manifest.toml",
                 "reports/00-acme-api/report.md",
@@ -1454,9 +1734,11 @@ trusty-review = "0.15.1"
             readme.contains("no file content, diffs, patches, hunks, or blobs"),
             "{readme}"
         );
+        // #5481: this config configures no signing key, and the README says so
+        // in those words rather than leaving the recipient to infer it.
         assert!(
-            readme.contains("#5481"),
-            "the unsigned state must be stated"
+            readme.contains("**This package is unsigned.**"),
+            "the unsigned state must be stated: {readme}"
         );
 
         let metadata = read_entry(&destination, METADATA_ENTRY);

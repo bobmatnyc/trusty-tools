@@ -393,10 +393,15 @@ pub(super) fn render_metadata(
 /// file, and it is the only place they are told which way it went.
 /// Test: `super::package_tests::{the_readme_states_the_excerpt_member_when_it_is_on,
 /// the_readme_states_excerpts_are_off_when_they_are}`.
+///
+/// #5481: `signed` is whether the engagement configured a signing key. It is
+/// passed rather than read back from the archive because this member is written
+/// before the manifest it would have to read.
 pub(super) fn render_readme(
     config: &EngagementConfig,
     audited: &[&RepoRun],
     excluded: &[String],
+    signed: bool,
 ) -> String {
     let mut out = String::from(
         "# Audit return package\n\n\
@@ -417,6 +422,12 @@ pub(super) fn render_readme(
              cited line, so the auditor can confirm it without a checkout |\n",
         );
     }
+    // #5481: last in the table because they are last in the archive — the
+    // manifest covers every member above it.
+    out.push_str(
+        "| `manifest.sha256.toml` | every file above, with its SHA-256 |\n\
+         | `manifest.sha256.sig` | the signature over that manifest, when this engagement signs |\n",
+    );
     out.push_str(
         "\n## What is not inside\n\n\
          - **No credential.** The OpenRouter key in your engagement config never \
@@ -449,10 +460,28 @@ pub(super) fn render_readme(
              findings.\n",
         );
     }
-    out.push_str(
-        "- **No signature yet.** Content signing is separate work (#5481); until it \
-         lands nothing here proves the package was not altered after it was written.\n\n",
-    );
+    // #5481: the "no signature yet" bullet is gone — the Signature section
+    // below states what this package actually carries, either way.
+    out.push_str("\n");
+    out.push_str(if signed {
+        // #5481: the limit is stated in the same paragraph as the property, so
+        // no reader takes a valid signature for more than it is.
+        "## Signature\n\n\
+         `manifest.sha256.toml` lists every file above with its SHA-256, and \
+         `manifest.sha256.sig` is a detached ed25519 signature over that manifest, made \
+         with this engagement's own key. Your auditor holds the matching public key and \
+         checks both on receipt.\n\n\
+         This is **tamper-evidence, not proof about you**. The signing key is on this \
+         machine, so it shows the package was not altered in transit or by a third party; \
+         it cannot show that whoever holds the key did not alter it before signing.\n\n"
+    } else {
+        "## Signature\n\n\
+         **This package is unsigned.** No `[signing]` key is configured in \
+         `engagement.toml`, so `manifest.sha256.toml` lists each file's SHA-256 with no \
+         signature over it, and nothing here shows the package was not altered after it \
+         was written. Ask your auditor for the engagement's signing key if they expected \
+         a signed deliverable.\n\n"
+    });
     if let Some(client) = &config.client {
         out.push_str(&format!("Engagement: {client}\n\n"));
     }

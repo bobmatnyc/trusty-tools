@@ -259,6 +259,16 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 # reqwest, so this adds no new tree.
 url = "2"
 sha2 = "0.10"
+# #5481: detached ed25519 signatures over the audit return package's content
+# manifest. The workspace carried no asymmetric signing at all — the
+# Developer-ID codesign in `trusty-installer` proves who BUILT a binary, a
+# different question — so this is the first and only answer to "sign this
+# content", and any second signing implementation is a defect under
+# CLAUDE.md's common-entry-point rule. `rand_core` supplies the `OsRng` its
+# key generation takes; both are already in `Cargo.lock` transitively, and
+# `signature 2.2.0` (the trait crate ed25519-dalek 2 builds on) is too.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 # NFC canonical composition for the memory content-hash contract (#5902): two
 # machines that typed the same sentence must produce one digest even when their
 # editors disagree about composition form. Already in `Cargo.lock` transitively,

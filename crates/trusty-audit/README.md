@@ -5,11 +5,12 @@ codebases, and returns a report. It installs the pinned tools it needs
 (`tga`, `trusty-analyze`, `trusty-review`) and drives the audit workflow —
 "really an installer runner".
 
-**Status (#5502, #5495, #5555, #5499).** The crate, its working-directory
-layout, the CLI surface, pinned tool installation, the audit run, and the return
-package exist. Content signing and the desktop shell do not — they are later
-milestones on #5473 / #5477. The run reads a selection file; its shape is
-documented under "Running the sweep".
+**Status (#5502, #5495, #5555, #5499, #5481).** The crate, its
+working-directory layout, the CLI surface, pinned tool installation, the audit
+run, the return package, and that package's signed content manifest exist. The
+`verify` CLI arm over the signature (#5563) and the desktop shell do not — they
+are later milestones on #5473 / #5477. The run reads a selection file; its shape
+is documented under "Running the sweep".
 
 ## Shape: a library with a CLI over it
 
@@ -524,12 +525,10 @@ that state takes a deliberate `ln`, `cp -l`, or a hardlink-based backup tool
 pointed into the working directory. If you hit it, copy the file instead of
 linking it.
 
-Two things it does not claim. The extract database holds no file content,
+One thing it does not claim. The extract database holds no file content,
 diffs, patches, hunks or blobs — but it does hold free-text fields (commit
 messages, PR and work-item titles, classification notes), so a snippet someone
-pasted into one of those is in it. And nothing here is signed yet: content
-signing is #5481, and until it lands nothing proves the package was not altered
-after it was written.
+pasted into one of those is in it.
 
 A sweep that audited nothing produces no package. A sweep that audited some
 repositories does, and it names the ones it does not cover — in the printed
@@ -537,6 +536,70 @@ output, in `package.toml`, and in a non-zero exit status.
 
 `--out` is the one path on which this client writes outside the working
 directory, and only when you name one.
+
+## Signing the return package (#5481)
+
+Every package carries `manifest.sha256.toml`: one row per delivered file, with
+its SHA-256 and its size. When the engagement has a signing key, it also carries
+`manifest.sha256.sig` — a detached ed25519 signature over that manifest's exact
+bytes. Signing one small manifest rather than each file is the whole reason the
+manifest exists.
+
+### Setting the key up
+
+The auditor mints one keypair per engagement, keeps the public half, and writes
+the private half into the engagement config that ships to the recipient:
+
+```toml
+[signing]
+private_key = "9d61b19d…"   # 32 bytes of hex
+```
+
+The private key travels IN the inbound package on purpose, so the recipient
+signs on their own machine with no call back to the auditor. The public half
+never appears in either package — a key that arrives with the thing it
+authenticates authenticates nothing — so the auditor retains it out of band, the
+same way the OpenRouter key reaches the recipient out of band.
+
+Nothing else needs configuring. `trusty-audit package` reads the key, hashes
+every member as it writes it, and signs. The printed output names the key's
+short fingerprint so the operator can confirm it is the engagement's own.
+
+### No key configured is not a failure
+
+An engagement with no `[signing]` table still packages. The manifest is still
+written, without a `[signature]` block; `trusty-audit package` prints an
+`UNSIGNED` line beside the file it wrote, and the package README says the same
+thing in the recipient's own words. The deliverable is never withheld for a
+property the engagement did not ask for.
+
+### Checking a received package
+
+Verification is a library call today —
+`trusty_audit::package::signing::verify(&path, &retained_key)` — and reports one
+of: a signed package that checks out, an unsigned package, or one of five
+distinguishable failures. A member altered after signing, a signature member
+removed, a signature made by a different key, a manifest-listed member that is
+gone, and a member the manifest never listed are five different errors, not one
+"verification failed". The `trusty-audit verify` CLI arm over the same call is
+[#5563](https://github.com/bobmatnyc/trusty-tools/issues/5563); this crate keeps
+one implementation behind it and any front end.
+
+### What the signature proves, and what it does not
+
+**Tamper-evidence, not proof about the recipient.** The signing key is on
+hardware the recipient fully controls, so a recipient who wanted to could alter
+the package and re-sign it. What the signature does show is that the package was
+not altered between that machine and the auditor — in transit, or by a third
+party who got hold of the file. The alternatives that would close the remaining
+gap — submitting to an endpoint the auditor controls, or the auditor re-running
+the audit — were offered and declined. This is the accepted trust model, not an
+interim step toward a stronger one.
+
+It is also a different thing from the Developer-ID signature on the client
+binary ([#5484](https://github.com/bobmatnyc/trusty-tools/issues/5484)), which
+authenticates who *built* the binary and says nothing about the report. Treating
+either as if it vouched for the other is the error both issues warn against.
 
 ## Re-rendering a delivered audit
 

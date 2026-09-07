@@ -480,6 +480,20 @@ fn render_package(package: &crate::package::ReturnPackage) -> String {
             file.entry
         ));
     }
+    // #5481: an unsigned package is a warning the operator has to see before
+    // they send it — an absent `manifest.sha256.sig` is not something anyone
+    // discovers by reading the member list above.
+    out.push_str(&match &package.signature {
+        crate::package::SignatureOutcome::Signed { key_fingerprint } => format!(
+            "  signed with engagement key {key_fingerprint} — tamper-evident in transit, \
+             not proof about the sender\n"
+        ),
+        crate::package::SignatureOutcome::Unsigned => {
+            "  UNSIGNED — no [signing] key in engagement.toml, so nothing here shows the \
+             package was not altered after it was written\n"
+                .to_owned()
+        }
+    });
     for line in &package.excluded {
         out.push_str(&format!("Not included: {line}\n"));
     }
