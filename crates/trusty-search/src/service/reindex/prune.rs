@@ -7,7 +7,12 @@
 //! set-difference between the walked files and the staged corpus, then removes
 //! every stale file's data from all stores.
 //!
-//! What: exports `prune_deleted_files_from_staging` and `to_corpus_relative_path`.
+//! #7004 adds the force path's counterpart, `reconcile_warm_state_to_promoted_corpus`:
+//! force needs no staging prune, but its promotion leaves the WARM state
+//! (chunk map, BM25, vectors) still holding the rebuild's obsolete chunks.
+//!
+//! What: exports `prune_deleted_files_from_staging`,
+//! `reconcile_warm_state_to_promoted_corpus`, and `to_corpus_relative_path`.
 //! The latter is the single canonical normalisation that BOTH the batch loop
 //! and the prune pass use, guaranteeing the strings are identical so the
 //! set-difference can never generate false "deleted" entries.
@@ -250,6 +255,154 @@ pub(super) async fn prune_deleted_files_from_staging(
         total_pruned_chunks,
         pruned_paths_for_hash.len(),
     );
+}
+
+/// Reconcile the warm in-memory state to the corpus a force reindex just
+/// promoted (issue #7004).
+///
+/// Why: the prune pass above is skipped on the force path, because force stages
+/// an EMPTY corpus and therefore carries no stale rows forward. That reasoning
+/// covers redb and nothing else. The warm chunk map, the BM25 index and the
+/// vector store all survive the promotion untouched, still holding chunks for
+/// files that no longer exist or no longer match the walker's include set —
+/// and both `embed_deferred_chunks_gated` and `flush_corpus_to_disk` enumerate
+/// that warm map, so deferred embedding gives the obsolete chunks vectors again
+/// and the next graceful shutdown writes them back into the promoted corpus.
+/// What: delegates to [`reconcile_with_id_reader`] with the real corpus scan.
+/// Test: `prune_tests::force_rebuild_drops_chunks_for_a_deleted_file` and
+/// `prune_tests::force_rebuild_drops_chunks_for_a_file_outside_the_include_set`.
+pub(super) async fn reconcile_warm_state_to_promoted_corpus(
+    handle: &IndexHandle,
+    index_id: &IndexId,
+) {
+    reconcile_with_id_reader(handle, index_id, |corpus| corpus.list_chunk_ids()).await
+}
+
+/// Share the real reconciliation with per-call id-scan failure coverage.
+///
+/// Why: `list_chunk_ids` has no reachable failure from outside — redb's file
+/// lock means a test cannot break a read behind the store's back — so the
+/// fail-closed arm has to be reached through an injected reader. Mirrors
+/// `corpus_swap::begin_staged_corpus_swap_with_schema_reader`, which exists for
+/// the same reason. The injection also lets a test hand over a DELIBERATELY
+/// STALE id set, which is what the concurrent-write race looks like from here.
+/// What: four steps, every failure arm leaving the warm state untouched — read
+/// the promoted id set, collect the warm ids absent from it, RE-CONFIRM those
+/// candidates against the corpus, then drop only the ones it no longer holds.
+///
+/// The re-confirmation is the race fix. `index_file` runs under
+/// `indexer.read()`, the same shared lock this pass takes, and nothing gates it
+/// on `ReindexStatus::Running`; a call landing between the id scan and the warm
+/// snapshot leaves its new id in the warm map but not in `keep`. Dropping it
+/// would strip a chunk from BM25 and the vector store while its redb row
+/// stayed — a write that answered `indexed: true` becoming unsearchable until
+/// the next reindex. `commit_parsed_batch` writes redb BEFORE the warm map, so
+/// any such id already has its row by the time the re-confirmation reads, and
+/// the candidate is kept.
+/// Test: `prune_tests::force_reconcile_keeps_a_chunk_written_after_the_id_snapshot`,
+/// `prune_tests::force_reconcile_leaves_warm_chunks_alone_when_the_id_scan_fails`,
+/// `prune_tests::force_reconcile_leaves_warm_chunks_alone_without_a_corpus`.
+async fn reconcile_with_id_reader(
+    handle: &IndexHandle,
+    index_id: &IndexId,
+    read_ids: impl FnOnce(
+            &crate::core::corpus::CorpusStore,
+        ) -> anyhow::Result<std::collections::HashSet<String>>
+        + Send
+        + 'static,
+) {
+    let corpus = {
+        let indexer = handle.indexer.read().await;
+        indexer.corpus_store()
+    };
+    let Some(corpus) = corpus else {
+        tracing::warn!(
+            "reindex[{}]: force reconcile: no corpus installed after promotion — \
+             warm chunks left as they are",
+            index_id.0
+        );
+        return;
+    };
+    let scan_corpus = std::sync::Arc::clone(&corpus);
+    let promoted_ids = match tokio::task::spawn_blocking(move || read_ids(&scan_corpus)).await {
+        Ok(Ok(ids)) => ids,
+        Ok(Err(e)) => {
+            tracing::warn!(
+                "reindex[{}]: force reconcile: could not list the promoted corpus's \
+                 chunk ids ({e}) — warm chunks left as they are",
+                index_id.0
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "reindex[{}]: force reconcile: chunk-id scan task panicked ({e}) — \
+                 warm chunks left as they are",
+                index_id.0
+            );
+            return;
+        }
+    };
+    let candidates = {
+        let indexer = handle.indexer.read().await;
+        indexer.warm_chunk_ids_absent_from(&promoted_ids).await
+    };
+    if candidates.is_empty() {
+        return;
+    }
+    // #7004: a candidate whose row is in the corpus was written by someone else
+    // between the two snapshots — keep it.
+    let confirm_corpus = std::sync::Arc::clone(&corpus);
+    let confirm_ids = candidates.clone();
+    let still_durable =
+        match tokio::task::spawn_blocking(move || confirm_corpus.existing_chunk_ids(&confirm_ids))
+            .await
+        {
+            Ok(Ok(present)) => present,
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "reindex[{}]: force reconcile: could not re-confirm {} candidate \
+                     chunk(s) against the promoted corpus ({e}) — warm chunks left as \
+                     they are",
+                    index_id.0,
+                    candidates.len()
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "reindex[{}]: force reconcile: re-confirmation task panicked ({e}) — \
+                     warm chunks left as they are",
+                    index_id.0
+                );
+                return;
+            }
+        };
+    let obsolete: Vec<String> = candidates
+        .into_iter()
+        .filter(|id| !still_durable.contains(id))
+        .collect();
+    if !still_durable.is_empty() {
+        tracing::info!(
+            "reindex[{}]: force reconcile: kept {} chunk(s) written after the id \
+             snapshot",
+            index_id.0,
+            still_durable.len(),
+        );
+    }
+    let dropped = {
+        let indexer = handle.indexer.read().await;
+        indexer.drop_warm_chunks(&obsolete).await
+    };
+    if dropped > 0 {
+        tracing::info!(
+            "reindex[{}]: force reconcile: dropped {} obsolete warm chunk(s) absent \
+             from the promoted corpus ({} promoted)",
+            index_id.0,
+            dropped,
+            promoted_ids.len(),
+        );
+    }
 }
 
 #[cfg(test)]

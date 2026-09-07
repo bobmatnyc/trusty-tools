@@ -73,7 +73,15 @@ pub(super) async fn stop_pollers(
 /// Why: extracted from `finish_reindex` to keep line count manageable.
 /// What: if `corpus_swap_tmp` is `Some`, commits or aborts the staged swap;
 /// otherwise writes `indexed_root` when the reindex succeeded without staging.
-/// Test: `reindex_walks_directory_and_emits_events` exercises the commit path.
+/// A CONFIRMED force promotion is followed by the #7004 warm-state
+/// reconciliation — the force path skips the prune pass, so this is the only
+/// place obsolete warm chunks are dropped. Incremental runs are unchanged:
+/// their prune pass already removed deleted files from every store.
+/// Test: `reindex_walks_directory_and_emits_events` exercises the commit path;
+/// `super::prune_tests::force_rebuild_drops_chunks_for_a_deleted_file` covers
+/// the reconciliation.
+// #7004 pushed this to 8 parameters; `rebuild_kg` below carries the same allow.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn resolve_corpus_swap(
     handle: &IndexHandle,
     index_id: &IndexId,
@@ -82,10 +90,17 @@ pub(super) async fn resolve_corpus_swap(
     staging_resolution: &staging::StagingResolution,
     reindex_outcome: &validate::ReindexOutcome,
     memory_aborted: bool,
+    force: bool,
 ) {
     if let Some(tmp_path) = corpus_swap_tmp {
         if staging_resolution.is_commit() {
-            commit_staged_corpus_swap(handle, index_id, tmp_path).await;
+            let promoted = commit_staged_corpus_swap(handle, index_id, tmp_path).await;
+            // #7004: force stages an EMPTY corpus and skips the prune pass, so
+            // the warm map, BM25 and vector store still hold the rebuild's
+            // obsolete chunks.
+            if force && promoted {
+                super::prune::reconcile_warm_state_to_promoted_corpus(handle, index_id).await;
+            }
             if let Err(e) = handle.write_indexed_root(canonical_root).await {
                 tracing::warn!(
                     "reindex[{}]: failed to persist indexed_root {} ({e}) — \

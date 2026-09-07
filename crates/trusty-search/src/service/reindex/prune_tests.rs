@@ -494,3 +494,397 @@ fn changed_file_orphan_chunks_removed_before_reinsert() {
         "#855 POST-FIX: orphan chunk shrunk:fn_c must be removed by delete-then-insert"
     );
 }
+
+// ── #7004: force rebuild must not retain obsolete chunks in the warm cache ──
+
+use crate::core::corpus::CorpusStore;
+use crate::core::embed::MockEmbedder;
+use crate::core::indexer::CodeIndexer;
+use crate::core::registry::{IndexHandle, IndexId};
+use crate::core::store::{UsearchStore, VectorStore};
+use crate::service::reindex::{spawn_reindex_awaitable, ReindexProgress, ReindexStatus};
+use std::sync::Arc;
+
+/// A disposable colocated index with a real redb corpus and HNSW store.
+///
+/// Why: the #7004 leak paths (`embed_deferred_chunks_gated`,
+/// `flush_corpus_to_disk`) only exist once a durable corpus is wired, and the
+/// promotion rename must land inside the tempdir rather than a daemon-global
+/// directory — which colocated storage is what makes true.
+/// What: `.trusty-search/index.redb` under a fresh tempdir, a `MockEmbedder`
+/// so no model is downloaded, `defer_embed = false` so vectors land inline.
+/// Test: the two `force_rebuild_*` tests below.
+fn colocated_fixture(tag: &str) -> (tempfile::TempDir, Arc<IndexHandle>, Arc<UsearchStore>) {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join(".trusty-search")).unwrap();
+    let corpus = CorpusStore::open(&root.path().join(".trusty-search/index.redb")).unwrap();
+    let id = format!(
+        "{tag}-{}",
+        root.path().file_name().unwrap().to_string_lossy()
+    );
+    let store = Arc::new(UsearchStore::new(8).unwrap());
+    let mut indexer = CodeIndexer::new(&id, root.path().to_path_buf())
+        .with_components(Arc::new(MockEmbedder::new(8)), store.clone());
+    indexer.set_corpus_store(Arc::new(corpus));
+    let mut handle = IndexHandle::bare(
+        IndexId::new(&id),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root.path().to_path_buf(),
+    );
+    handle.defer_embed = false;
+    handle.extra_skip_dirs.push(".trusty-search".into());
+    (root, Arc::new(handle), store)
+}
+
+/// Chunk ids currently stored for `file`, read from the installed corpus.
+async fn corpus_ids_for(handle: &IndexHandle, file: &str) -> Vec<String> {
+    let corpus = handle.indexer.read().await.corpus_store().unwrap();
+    let ids = corpus
+        .load_all_chunks()
+        .unwrap()
+        .into_iter()
+        .filter(|c| c.file == file)
+        .map(|c| c.id)
+        .collect();
+    drop(corpus);
+    ids
+}
+
+/// Flush the warm state the way graceful shutdown does, then reopen the corpus
+/// cold — the exact sequence #7004 reported as resurrecting removed chunks.
+async fn flush_and_reopen(handle: &IndexHandle) -> CorpusStore {
+    let redb = handle.root_path.join(".trusty-search/index.redb");
+    handle
+        .indexer
+        .read()
+        .await
+        .flush_corpus_to_disk(&redb)
+        .await
+        .unwrap();
+    drop(handle.indexer.write().await.take_corpus_store());
+    CorpusStore::open(&redb).unwrap()
+}
+
+/// Issue #7004: a file deleted between two runs must not survive a force
+/// rebuild in the warm cache, the vector store, or the next shutdown flush.
+///
+/// Why: force stages an EMPTY corpus and skips the #848 prune pass, so the
+/// promoted redb rows were already correct — but nothing reconciled the warm
+/// chunk map or the HNSW store, and `flush_corpus_to_disk` writes that same
+/// warm map back over the promoted corpus on graceful shutdown. Before the fix
+/// the reopened corpus below carried `b.rs` again.
+/// What: indexes `a.rs` + `b.rs`, deletes `b.rs`, force-rebuilds, then asserts
+/// the promoted corpus, the vector store, and the post-flush cold reopen all
+/// exclude `b.rs` while `a.rs` survives intact.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn force_rebuild_drops_chunks_for_a_deleted_file() {
+    let (root, handle, vectors) = colocated_fixture("force-prune-deleted");
+    std::fs::write(root.path().join("a.rs"), "pub fn alpha_survives() {}\n").unwrap();
+    std::fs::write(root.path().join("b.rs"), "pub fn beta_removed() {}\n").unwrap();
+
+    let first = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), first.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(first.status.load(), ReindexStatus::Complete);
+
+    let b_ids = corpus_ids_for(&handle, "b.rs").await;
+    assert!(!b_ids.is_empty(), "test setup: b.rs must produce chunks");
+    for id in &b_ids {
+        assert!(
+            vectors.contains(id).await,
+            "test setup: b.rs must have a vector before the rebuild ({id})"
+        );
+    }
+
+    std::fs::remove_file(root.path().join("b.rs")).unwrap();
+
+    let second = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), second.clone(), true)
+        .await
+        .unwrap();
+    assert_eq!(second.status.load(), ReindexStatus::Complete);
+
+    assert!(
+        corpus_ids_for(&handle, "b.rs").await.is_empty(),
+        "the promoted corpus must not carry the deleted file"
+    );
+
+    let reopened = flush_and_reopen(&handle).await;
+    let files: Vec<String> = reopened
+        .load_all_chunks()
+        .unwrap()
+        .into_iter()
+        .map(|c| c.file)
+        .collect();
+    assert!(
+        !files.iter().any(|f| f == "b.rs"),
+        "#7004: the shutdown flush wrote the deleted file back into the promoted \
+         corpus; reopened files: {files:?}"
+    );
+    assert!(
+        files.iter().any(|f| f == "a.rs"),
+        "the surviving file must still be there: {files:?}"
+    );
+    for id in &b_ids {
+        assert!(
+            !vectors.contains(id).await,
+            "#7004: the deleted file's vector survived the force rebuild ({id})"
+        );
+    }
+}
+
+/// Issue #7004: a file that stops matching the walker's include set is dropped
+/// exactly like a deleted one.
+///
+/// Why: the reconciliation is keyed on the promoted corpus's id set, not on
+/// whether a path still exists on disk, so an excluded file must not need its
+/// own code path. The moved file's bytes are still on disk here — the #848
+/// prune pass's disk-existence guard would have refused to touch it.
+/// What: indexes `a.rs` + `b.rs`, moves `b.rs` into the skipped
+/// `.trusty-search/` directory, force-rebuilds, and asserts the same three
+/// surfaces exclude `b.rs`.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn force_rebuild_drops_chunks_for_a_file_outside_the_include_set() {
+    let (root, handle, vectors) = colocated_fixture("force-prune-excluded");
+    std::fs::write(root.path().join("a.rs"), "pub fn alpha_survives() {}\n").unwrap();
+    std::fs::write(root.path().join("b.rs"), "pub fn beta_renamed() {}\n").unwrap();
+
+    let first = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), first.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(first.status.load(), ReindexStatus::Complete);
+    let b_ids = corpus_ids_for(&handle, "b.rs").await;
+    assert!(!b_ids.is_empty(), "test setup: b.rs must produce chunks");
+
+    std::fs::rename(
+        root.path().join("b.rs"),
+        root.path().join(".trusty-search/b.rs"),
+    )
+    .unwrap();
+
+    let second = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), second.clone(), true)
+        .await
+        .unwrap();
+    assert_eq!(second.status.load(), ReindexStatus::Complete);
+
+    let reopened = flush_and_reopen(&handle).await;
+    let files: Vec<String> = reopened
+        .load_all_chunks()
+        .unwrap()
+        .into_iter()
+        .map(|c| c.file)
+        .collect();
+    assert!(
+        !files.iter().any(|f| f == "b.rs"),
+        "#7004: a file outside the include set came back through the shutdown \
+         flush; reopened files: {files:?}"
+    );
+    assert!(
+        files.iter().any(|f| f == "a.rs"),
+        "the surviving file must still be there: {files:?}"
+    );
+    for id in &b_ids {
+        assert!(
+            !vectors.contains(id).await,
+            "#7004: the excluded file's vector survived the force rebuild ({id})"
+        );
+    }
+}
+
+/// Issue #7004 race: a file indexed between the promoted-id scan and the warm
+/// snapshot must survive the reconciliation.
+///
+/// Why: `index_file` runs under `indexer.read()`, the same shared lock this
+/// pass takes, and nothing gates it on `ReindexStatus::Running`. A call landing
+/// in that window leaves its new id in the warm map but not in the id set the
+/// scan returned. Dropping it strips the chunk from BM25 and the vector store
+/// while its redb row stays, so a write that answered `indexed: true` becomes
+/// unsearchable until the next reindex.
+/// What: reproduces the interleaving state exactly. `b.rs`'s rows are deleted
+/// from the corpus to model what an empty-staged force promotion leaves behind
+/// — durable rows gone, warm entries still there. The id snapshot is taken from
+/// that corpus, then a real `index_file` lands `c.rs` (redb row first, then the
+/// warm map, the production order in `commit_parsed_batch`), and the now-stale
+/// snapshot is handed to the reconciliation. Asserts `c.rs` keeps its vector
+/// and its rows while `b.rs` is still dropped, so the fix cannot be a blanket
+/// "keep everything".
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn force_reconcile_keeps_a_chunk_written_after_the_id_snapshot() {
+    let (root, handle, vectors) = colocated_fixture("force-reconcile-race");
+    std::fs::write(root.path().join("a.rs"), "pub fn alpha_survives() {}\n").unwrap();
+    std::fs::write(root.path().join("b.rs"), "pub fn beta_removed() {}\n").unwrap();
+    let first = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), first.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(first.status.load(), ReindexStatus::Complete);
+    let b_ids = corpus_ids_for(&handle, "b.rs").await;
+    assert!(!b_ids.is_empty(), "test setup: b.rs must produce chunks");
+
+    // Model the promoted corpus: b.rs's durable rows are gone, its warm
+    // entries are not. T1 — the id scan the reconciliation would have taken.
+    let snapshot = {
+        let corpus = handle.indexer.read().await.corpus_store().unwrap();
+        corpus.delete_chunks(&b_ids).unwrap();
+        let ids = corpus.list_chunk_ids().unwrap();
+        drop(corpus);
+        ids
+    };
+    for id in &b_ids {
+        assert!(
+            !snapshot.contains(id),
+            "test setup: b.rs must be absent from the promoted id set ({id})"
+        );
+    }
+
+    // Between the two snapshots: a real concurrent write.
+    handle
+        .indexer
+        .read()
+        .await
+        .index_file("c.rs", "pub fn gamma_written_mid_reconcile() {}\n")
+        .await
+        .unwrap();
+    let c_ids = corpus_ids_for(&handle, "c.rs").await;
+    assert!(!c_ids.is_empty(), "test setup: index_file must land chunks");
+    for id in &c_ids {
+        assert!(
+            !snapshot.contains(id),
+            "test setup: the new id must be absent from the stale snapshot ({id})"
+        );
+    }
+
+    // T2 — the reconciliation runs against the stale snapshot.
+    super::reconcile_with_id_reader(&handle, &handle.id.clone(), move |_| Ok(snapshot)).await;
+
+    for id in &c_ids {
+        assert!(
+            vectors.contains(id).await,
+            "#7004: a chunk written between the two snapshots lost its vector ({id})"
+        );
+    }
+    for id in &b_ids {
+        assert!(
+            !vectors.contains(id).await,
+            "the genuinely obsolete chunk must still lose its vector ({id})"
+        );
+    }
+    let reopened = flush_and_reopen(&handle).await;
+    let files: Vec<String> = reopened
+        .load_all_chunks()
+        .unwrap()
+        .into_iter()
+        .map(|c| c.file)
+        .collect();
+    assert!(
+        files.iter().any(|f| f == "c.rs"),
+        "the concurrent write must survive the reconciliation: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f == "b.rs"),
+        "the genuinely obsolete file must still be dropped: {files:?}"
+    );
+}
+
+/// Issue #7004: an id scan that fails leaves the warm state untouched.
+///
+/// Why: the reconciliation's decision is destructive and is taken from the
+/// ABSENCE of an id. An id set it could not read proves nothing, so every
+/// failure arm must fail closed; a version that dropped anyway would delete
+/// live data on a transient redb error.
+/// What: injects a failing reader and asserts the in-memory chunk count is
+/// unchanged.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn force_reconcile_leaves_warm_chunks_alone_when_the_id_scan_fails() {
+    let (root, handle, _vectors) = colocated_fixture("force-reconcile-scan-err");
+    std::fs::write(root.path().join("a.rs"), "pub fn alpha() {}\n").unwrap();
+    std::fs::write(root.path().join("b.rs"), "pub fn beta() {}\n").unwrap();
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(progress.status.load(), ReindexStatus::Complete);
+    let before = handle.indexer.read().await.chunk_count();
+    assert!(before > 0, "test setup: the warm map must be populated");
+
+    super::reconcile_with_id_reader(&handle, &handle.id.clone(), |_| {
+        anyhow::bail!("injected chunk-id scan failure")
+    })
+    .await;
+
+    assert_eq!(
+        handle.indexer.read().await.chunk_count(),
+        before,
+        "#7004: a failed id scan must not drop a single warm chunk"
+    );
+}
+
+/// Issue #7004: an id scan that PANICS leaves the warm state untouched.
+///
+/// Why: the scan runs on a blocking worker, so a panic there reaches the
+/// caller as a `JoinError` rather than the `Err` arm above — a separate branch
+/// that would be just as destructive if it fell through to an empty id set.
+/// What: injects a panicking reader and asserts the in-memory chunk count is
+/// unchanged.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn force_reconcile_leaves_warm_chunks_alone_when_the_id_scan_panics() {
+    let (root, handle, _vectors) = colocated_fixture("force-reconcile-scan-panic");
+    std::fs::write(root.path().join("a.rs"), "pub fn alpha() {}\n").unwrap();
+    std::fs::write(root.path().join("b.rs"), "pub fn beta() {}\n").unwrap();
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(progress.status.load(), ReindexStatus::Complete);
+    let before = handle.indexer.read().await.chunk_count();
+    assert!(before > 0, "test setup: the warm map must be populated");
+
+    super::reconcile_with_id_reader(&handle, &handle.id.clone(), |_| {
+        panic!("injected chunk-id scan panic")
+    })
+    .await;
+
+    assert_eq!(
+        handle.indexer.read().await.chunk_count(),
+        before,
+        "#7004: a panicked id-scan worker must not drop a single warm chunk"
+    );
+}
+
+/// Issue #7004: no corpus installed means nothing to reconcile against.
+///
+/// Why: a promotion that failed leaves the indexer without a corpus. Treating
+/// an absent corpus as an empty id set would drop every warm chunk the index
+/// has.
+/// What: takes the corpus out of the indexer, runs the real entry point, and
+/// asserts the in-memory chunk count is unchanged.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn force_reconcile_leaves_warm_chunks_alone_without_a_corpus() {
+    let (root, handle, _vectors) = colocated_fixture("force-reconcile-no-corpus");
+    std::fs::write(root.path().join("a.rs"), "pub fn alpha() {}\n").unwrap();
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(progress.status.load(), ReindexStatus::Complete);
+    let before = handle.indexer.read().await.chunk_count();
+    assert!(before > 0, "test setup: the warm map must be populated");
+
+    drop(handle.indexer.write().await.take_corpus_store());
+    super::reconcile_warm_state_to_promoted_corpus(&handle, &handle.id.clone()).await;
+
+    assert_eq!(
+        handle.indexer.read().await.chunk_count(),
+        before,
+        "#7004: an absent corpus must not read as an empty promoted id set"
+    );
+}

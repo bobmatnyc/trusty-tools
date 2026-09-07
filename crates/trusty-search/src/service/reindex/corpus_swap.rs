@@ -564,13 +564,20 @@ async fn clear_checkpoint_on_released_file(tmp_path: &Path, index_id: &IndexId) 
 /// `CorpusStore` on the swapped-in file, and installs it on the indexer. Any
 /// failure leaves the previous live corpus in place and logs at `warn` — a
 /// botched swap must not crash the daemon.
+///
+/// #7004: returns `true` only when the promoted corpus is INSTALLED on the
+/// indexer. Every failure arm below returns `false`, which is what gates the
+/// force path's warm-state reconciliation — that pass drops warm chunks against
+/// the promoted id set, so it must never run on a corpus that was not promoted.
 /// Test: `incremental_reindex_no_durable_data_loss` verifies the promoted
-/// corpus contains all chunks (changed + unchanged).
+/// corpus contains all chunks (changed + unchanged);
+/// `super::prune_tests::force_rebuild_drops_chunks_for_a_deleted_file` covers
+/// the `true` arm reaching the reconciliation.
 pub(super) async fn commit_staged_corpus_swap(
     handle: &IndexHandle,
     index_id: &IndexId,
     tmp_path: &Path,
-) {
+) -> bool {
     // Issue #403: route live corpus path to colocated or legacy storage.
     let live_path = if crate::service::colocated_storage::has_colocated_storage(&handle.root_path) {
         match crate::service::colocated_storage::colocated_redb_path(&handle.root_path) {
@@ -582,7 +589,7 @@ pub(super) async fn commit_staged_corpus_swap(
                     index_id.0,
                     tmp_path.display()
                 );
-                return;
+                return false;
             }
         }
     } else {
@@ -595,7 +602,7 @@ pub(super) async fn commit_staged_corpus_swap(
                     index_id.0,
                     tmp_path.display()
                 );
-                return;
+                return false;
             }
         }
     };
@@ -634,12 +641,16 @@ pub(super) async fn commit_staged_corpus_swap(
                 live_path.display(),
                 index_id.0
             );
+            true
         }
-        Err(e) => tracing::warn!(
-            "force reindex: atomic corpus swap failed for '{}' ({e}) — \
-             previous corpus preserved; in-memory state is the rebuilt one",
-            index_id.0
-        ),
+        Err(e) => {
+            tracing::warn!(
+                "force reindex: atomic corpus swap failed for '{}' ({e}) — \
+                 previous corpus preserved; in-memory state is the rebuilt one",
+                index_id.0
+            );
+            false
+        }
     }
 }
 

@@ -4,7 +4,7 @@
 //! lines. This file owns all chunk/entity upsert, load, delete, and query
 //! methods — nothing else.
 //! What: `impl CorpusStore` block covering `upsert_chunks`, `upsert_entities`,
-//! `upsert_batch`, `list_indexed_files`, `delete_file_hash_entries`,
+//! `upsert_batch`, `list_indexed_files`, `list_chunk_ids`, `delete_file_hash_entries`,
 //! `delete_chunks`, `delete_entities`, `load_all_chunks`, `get_chunks`,
 //! `load_all_entities`, `chunk_count`, and `db`.
 //! Test: covered by the `tests` submodule.
@@ -184,6 +184,76 @@ impl CorpusStore {
             }
         }
         Ok(seen.into_iter().collect())
+    }
+
+    /// Return every chunk id present in the corpus, keys only.
+    ///
+    /// Why (#7004): a force reindex promotes a corpus that was staged EMPTY, so
+    /// the promoted rows are the whole truth about what the index holds. The
+    /// indexer's warm chunk map is not rebuilt by that promotion, and both
+    /// `embed_deferred_chunks_gated` and `flush_corpus_to_disk` enumerate the
+    /// warm map — so a chunk the rebuild dropped comes back as a vector, and
+    /// then as a redb row on the next graceful shutdown. Reconciling needs the
+    /// promoted id set, and `list_indexed_files` cannot serve it: it answers
+    /// file paths, which cannot distinguish two chunks of one surviving file.
+    /// What: iterates `CHUNKS_TABLE` and collects the KEYS. No row is
+    /// deserialised, so a corrupt value cannot make an id invisible — the id
+    /// still exists in the corpus and must still be retained.
+    /// Test: `list_chunk_ids_returns_every_key` below;
+    /// `service::reindex::prune_tests::force_rebuild_drops_chunks_for_a_deleted_file`
+    /// covers the reconciliation it feeds.
+    ///
+    /// The set this returns is a SNAPSHOT. A concurrent write can add a row the
+    /// moment it is taken, so a caller acting on the absence of an id must
+    /// re-confirm with [`Self::existing_chunk_ids`] before destroying anything.
+    pub fn list_chunk_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let txn = self
+            .db
+            .begin_read()
+            .context("begin list_chunk_ids read txn")?;
+        let table = txn.open_table(CHUNKS_TABLE)?;
+        let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for entry in table.iter().context("iterate chunks for list_chunk_ids")? {
+            let (key, _) = entry.context("read chunk row for list_chunk_ids")?;
+            ids.insert(key.value().to_string());
+        }
+        Ok(ids)
+    }
+
+    /// Of `ids`, return those that have a row in the corpus right now.
+    ///
+    /// Why (#7004): [`Self::list_chunk_ids`] is a snapshot, and the force
+    /// reconciliation acts on ids ABSENT from it — a destructive decision. A
+    /// concurrent `index_file` commits its redb row BEFORE its warm-map insert
+    /// (`core::indexer::ingest::commit`), so an id that entered the warm map
+    /// after the snapshot already has its row here. Re-confirming immediately
+    /// before the drop therefore turns that interleaving into a no-op instead
+    /// of unsearchable data.
+    /// What: one read transaction, one point lookup per id, keys only. Empty
+    /// input is a no-op returning an empty set.
+    /// Test: `existing_chunk_ids_reports_only_rows_that_exist` below;
+    /// `service::reindex::prune_tests::force_reconcile_keeps_a_chunk_written_after_the_id_snapshot`
+    /// covers the interleaving it exists for.
+    pub fn existing_chunk_ids(&self, ids: &[String]) -> Result<std::collections::HashSet<String>> {
+        let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if ids.is_empty() {
+            return Ok(present);
+        }
+        let txn = self
+            .db
+            .begin_read()
+            .context("begin existing_chunk_ids read txn")?;
+        let table = txn.open_table(CHUNKS_TABLE)?;
+        for id in ids {
+            if table
+                .get(id.as_str())
+                .context("read chunk row for existing_chunk_ids")?
+                .is_some()
+            {
+                present.insert(id.clone());
+            }
+        }
+        Ok(present)
     }
 
     /// Delete `FILE_HASHES_TABLE` entries for the given file paths in one

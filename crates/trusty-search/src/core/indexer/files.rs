@@ -4,7 +4,9 @@
 //! orthogonal to the search/ingest hot paths. Lifting them out keeps each
 //! `impl` block focused on a single concern.
 //! What: `remove_file`, `remove_chunk`, the shared `remove_chunks_from_stores`
-//! helper, `find_chunk_id`, `entities_for`, and `entity_exact_match`.
+//! and `drop_chunk_ids_from_memory` helpers, the #7004 force-reconciliation
+//! pair `warm_chunk_ids_absent_from` / `drop_warm_chunks`, `find_chunk_id`,
+//! `entities_for`, and `entity_exact_match`.
 //! Test: covered by `test_remove_chunk_removes_from_results`,
 //! `test_entity_exact_match_*` in `indexer::tests`.
 
@@ -545,6 +547,23 @@ impl CodeIndexer {
     /// each in-memory structure under a single write lock per structure.
     /// Test: covered indirectly by `test_remove_chunk_removes_from_results`.
     async fn remove_chunks_from_stores(&self, ids: &[String]) {
+        self.drop_chunk_ids_from_memory(ids).await;
+        // Issue #28: mirror the deletion into the durable redb corpus.
+        self.delete_chunks_from_redb(ids).await;
+    }
+
+    /// Drop `ids` from the vector store and every in-memory chunk-keyed
+    /// structure, leaving the durable corpus alone.
+    ///
+    /// Why (#7004): the reconciliation after a force promotion must not write
+    /// to redb — the promoted corpus already excludes these ids, so a delete
+    /// there is a write transaction that changes nothing.
+    /// [`Self::remove_chunks_from_stores`] keeps the redb delete for the
+    /// deletion paths, which need it.
+    /// What: best-effort `store.remove` per id (HNSW deletion is non-fatal
+    /// here), then one write lock per in-memory structure for the whole batch.
+    /// Test: `service::reindex::prune_tests::force_rebuild_drops_chunks_for_a_deleted_file`.
+    async fn drop_chunk_ids_from_memory(&self, ids: &[String]) {
         if let Some(store) = &self.store {
             for id in ids {
                 store.remove(id).await.ok();
@@ -568,8 +587,77 @@ impl CodeIndexer {
                 bm25.remove_document(id);
             }
         }
-        // Issue #28: mirror the deletion into the durable redb corpus.
-        self.delete_chunks_from_redb(ids).await;
+    }
+
+    /// Warm chunk ids that `keep` does not contain — reconciliation candidates,
+    /// not a decision (#7004).
+    ///
+    /// Why: a force reindex stages an EMPTY corpus, so promotion replaces the
+    /// durable rows wholesale — but nothing rebuilds the warm map, the BM25
+    /// index, or the vector store, all of which still carry chunks for files
+    /// the rebuild did not walk. `embed_deferred_chunks_gated` enumerates the
+    /// warm map, so those chunks get vectors again; `flush_corpus_to_disk`
+    /// snapshots the same map, so a graceful shutdown upserts them back into
+    /// the promoted corpus. Splitting the scan from the drop is what lets the
+    /// caller re-confirm each candidate against the corpus first — `keep` is a
+    /// snapshot, and an id can enter the warm map after it was taken.
+    /// What: returns the ids under one read lock. Deliberately does NOT
+    /// rehydrate an idle-evicted map: an empty warm map holds nothing stale,
+    /// and both leak paths above read that same map.
+    /// Test: `service::reindex::prune_tests::force_rebuild_drops_chunks_for_a_deleted_file`.
+    pub(crate) async fn warm_chunk_ids_absent_from(
+        &self,
+        keep: &std::collections::HashSet<String>,
+    ) -> Vec<String> {
+        let chunks = self.chunks.read().await;
+        chunks
+            .keys()
+            .filter(|id| !keep.contains(id.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    /// Drop `ids` from the warm state, and with them the entity list of every
+    /// file that keeps no chunk (#7004). Returns how many chunks went.
+    ///
+    /// Why: the force reconciliation's destructive half, kept separate from
+    /// [`Self::warm_chunk_ids_absent_from`] so the caller can re-confirm the
+    /// candidates against the durable corpus in between.
+    /// What: resolves each id's file under one read lock, drops the ids via
+    /// [`Self::drop_chunk_ids_from_memory`], then removes the entity list of
+    /// each file no surviving warm chunk still claims. Never touches redb.
+    /// Test: `service::reindex::prune_tests::force_rebuild_drops_chunks_for_a_deleted_file`
+    /// and `force_rebuild_drops_chunks_for_a_file_outside_the_include_set`.
+    pub(crate) async fn drop_warm_chunks(&self, ids: &[String]) -> usize {
+        if ids.is_empty() {
+            return 0;
+        }
+        let dropped_files: std::collections::HashSet<String> = {
+            let chunks = self.chunks.read().await;
+            ids.iter()
+                .filter_map(|id| chunks.get(id).map(|c| c.file.clone()))
+                .collect()
+        };
+        self.drop_chunk_ids_from_memory(ids).await;
+        if !dropped_files.is_empty() {
+            // A file keeps its entity list while ANY of its chunks survives.
+            let orphaned: Vec<String> = {
+                let chunks = self.chunks.read().await;
+                let surviving: std::collections::HashSet<&str> =
+                    chunks.values().map(|c| c.file.as_str()).collect();
+                dropped_files
+                    .into_iter()
+                    .filter(|f| !surviving.contains(f.as_str()))
+                    .collect()
+            };
+            if !orphaned.is_empty() {
+                let mut entities = self.entities.write().await;
+                for file in &orphaned {
+                    entities.remove(file);
+                }
+            }
+        }
+        ids.len()
     }
 
     /// Empty every chunk-keyed structure so the caller can rebuild the corpus
