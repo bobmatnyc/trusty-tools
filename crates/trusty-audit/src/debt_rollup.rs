@@ -214,11 +214,19 @@ fn band_rank(tier: &str) -> u8 {
     }
 }
 
+/// The tier the excerpt collector acts on, as [`normalised_tier`] spells it.
+///
+/// // #6792: named here rather than in `crate::package::excerpts`, so the
+/// collector and the roll-up cannot come to disagree about what RED is.
+pub const RED_TIER: &str = "RED";
+
 /// A finding's `severity`, trimmed and upper-cased, or [`UNSPECIFIED_TIER`].
 ///
 /// Upper-casing matches how trusty-review's table ranks a band, so `Red` and
 /// `RED` from two collectors land in one bucket rather than two.
-fn normalised_tier(tier: &str) -> String {
+///
+/// Test: `debt_rollup_tests::an_unbanded_finding_is_counted_not_dropped`.
+pub fn normalised_tier(tier: &str) -> String {
     let trimmed = tier.trim();
     if trimmed.is_empty() {
         return UNSPECIFIED_TIER.to_owned();
@@ -258,15 +266,42 @@ struct FindingsBlock {
     findings: Vec<FindingRow>,
 }
 
-/// The two columns the roll-up counts on, out of a row that carries more.
+/// One declared finding, as the two readers of this array need to see it.
+///
+/// Why: the roll-up counts on `severity` and `category` alone, and #6792's
+/// excerpt collector needs the same rows plus what each one CITES. One reader
+/// serves both, so a second parse of `[report].findings` cannot come to
+/// disagree with this one about what a row is.
+/// What: the keys every collector writes (`crate::grounding::findings`), plus
+/// the `file`/`line` pair a collector may cite a location with directly.
+/// Unknown keys are dropped by serde for the reason the whole reader drops
+/// them: the array is a third party's, and a collector adding a column must not
+/// make this reader fail.
+/// Test: `debt_rollup_tests::a_manifest_yields_its_findings`,
+/// `crate::package::package_tests::a_red_finding_at_a_file_and_line_carries_an_excerpt`.
 #[derive(Debug, Default, Deserialize)]
-struct FindingRow {
+#[non_exhaustive]
+pub struct FindingRow {
     /// The producer's band — the roll-up's tier.
     #[serde(default)]
-    severity: String,
+    pub severity: String,
     /// The collector that produced it — the roll-up's dimension.
     #[serde(default)]
-    category: String,
+    pub category: String,
+    /// The advisory, rule or licence identifier, e.g. `RUSTSEC-2024-0421`.
+    #[serde(default)]
+    pub id: String,
+    /// What the row is ABOUT: a crate name for the dependency and licence
+    /// collectors, `file:line` for the secrets collector, a repo-relative path
+    /// for the churn collector.
+    #[serde(default)]
+    pub package: String,
+    /// The cited file, when a collector states one as its own column.
+    #[serde(default)]
+    pub file: Option<String>,
+    /// The cited line, when a collector states one as its own column.
+    #[serde(default)]
+    pub line: Option<u64>,
 }
 
 /// The `(tier, dimension)` of every finding one manifest declares.
@@ -282,17 +317,32 @@ struct FindingRow {
 /// `debt_rollup_tests::an_unreadable_manifest_contributes_nothing`.
 #[must_use]
 pub fn read_findings(manifest: &Path) -> Vec<(String, String)> {
+    read_finding_rows(manifest)
+        .into_iter()
+        .map(|row| (row.severity, row.category))
+        .collect()
+}
+
+/// Every finding one manifest declares, with the columns both readers need.
+///
+/// Why: the one parse of `[report].findings` in this crate. #6792's excerpt
+/// collector needs what a row CITES, which [`read_findings`] drops; giving it
+/// its own parse would have put two definitions of "a declared finding" in one
+/// crate, and they drift the first time a collector adds a column.
+/// What: the same fail-open read [`read_findings`] performs — an absent,
+/// unreadable, or unparseable manifest yields an empty list — returning whole
+/// [`FindingRow`]s in the order the manifest declares them.
+/// Test: `debt_rollup_tests::a_manifest_yields_its_findings`,
+/// `debt_rollup_tests::an_unreadable_manifest_contributes_nothing`.
+#[must_use]
+pub fn read_finding_rows(manifest: &Path) -> Vec<FindingRow> {
     let Ok(text) = std::fs::read_to_string(manifest) else {
         return Vec::new();
     };
     let Ok(doc) = toml::from_str::<FindingsDoc>(&text) else {
         return Vec::new();
     };
-    doc.report
-        .findings
-        .into_iter()
-        .map(|row| (row.severity, row.category))
-        .collect()
+    doc.report.findings
 }
 
 /// Roll every unit's manifest up into one [`DebtRollup`].

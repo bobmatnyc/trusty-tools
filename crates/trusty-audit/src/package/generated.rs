@@ -59,6 +59,14 @@ pub(super) struct Generated {
     /// from "this client is too old to write one" (#6032). Rendered by
     /// [`super::error_digest::render`].
     pub(super) digest: String,
+    /// [`super::EXCERPTS_ENTRY`] — the code each RED finding cites (#6792).
+    ///
+    /// `None` when the engagement did not set `[excerpts] enabled`, which is
+    /// the default. Unlike `digest`, an empty document would say the wrong
+    /// thing here: `entries: []` is "excerpts are on and no repository declared
+    /// a RED finding", and an engagement that bars code excerpts has not made
+    /// that claim. [`render_readme`] states the off case in words instead.
+    pub(super) excerpts: Option<String>,
 }
 
 /// The generated `package.toml`.
@@ -378,6 +386,13 @@ pub(super) fn render_metadata(
 /// The content claim is #5479's, worded as that issue requires: "no file
 /// content, diffs, patches, hunks, or blobs" — never "no code", because
 /// free-text columns carry whatever a human pasted into them.
+///
+/// // #6792: that claim is FALSE when the engagement turns excerpts on, so the
+/// two states are written as two different pages rather than one page with a
+/// footnote. This is the page the operator reads before deciding to send the
+/// file, and it is the only place they are told which way it went.
+/// Test: `super::package_tests::{the_readme_states_the_excerpt_member_when_it_is_on,
+/// the_readme_states_excerpts_are_off_when_they_are}`.
 pub(super) fn render_readme(
     config: &EngagementConfig,
     audited: &[&RepoRun],
@@ -394,15 +409,45 @@ pub(super) fn render_readme(
          | `reports/index.md` | start here — what every file below is, and a link to each report |\n\
          | `reports/<repo>/` | the rendered report and manifest for one repository |\n\
          | `extract/<repo>.db` | the tga extract database those reports were computed from |\n\
-         | `errors/digest.json` | every failure and degradation this run recorded — send it back so the auditor can fix them |\n\n\
-         ## What is not inside\n\n\
+         | `errors/digest.json` | every failure and degradation this run recorded — send it back so the auditor can fix them |\n",
+    );
+    if config.excerpts.enabled {
+        out.push_str(
+            "| `evidence/excerpts.json` | a few lines of your source around each RED finding's \
+             cited line, so the auditor can confirm it without a checkout |\n",
+        );
+    }
+    out.push_str(
+        "\n## What is not inside\n\n\
          - **No credential.** The OpenRouter key in your engagement config never \
-         reaches this package; every file was scanned for it while the zip was written.\n\
-         - **No source code as such.** The extract database holds no file content, \
-         diffs, patches, hunks, or blobs. It does hold free-text fields — commit \
-         messages, pull-request and work-item titles, classification notes — so a \
-         snippet a person pasted into one of those is in it.\n\
-         - **No signature yet.** Content signing is separate work (#5481); until it \
+         reaches this package; every file was scanned for it while the zip was written.\n",
+    );
+    // #6792: the source-code claim is the one line an excerpt makes false, so
+    // the two states are written as two different bullets rather than one with
+    // a caveat a reader has to apply themselves.
+    if config.excerpts.enabled {
+        out.push_str(&format!(
+            "- **Source code, in one place only.** This engagement turned code excerpts on, so \
+             `evidence/excerpts.json` carries up to {} lines either side of each RED finding's \
+             cited line, verbatim, scanned for your credentials on the way in. Everything else \
+             holds no file content, diffs, patches, hunks, or blobs — the extract database does \
+             hold free-text fields (commit messages, pull-request and work-item titles, \
+             classification notes), so a snippet a person pasted into one of those is in it.\n",
+            config.excerpts.context_lines()
+        ));
+    } else {
+        out.push_str(
+            "- **No source code as such.** The extract database holds no file content, \
+             diffs, patches, hunks, or blobs. It does hold free-text fields — commit \
+             messages, pull-request and work-item titles, classification notes — so a \
+             snippet a person pasted into one of those is in it.\n\
+             - **No code excerpts.** This engagement left `[excerpts] enabled` off, so no \
+             `evidence/` member was written and no line of your source travels with the \
+             findings.\n",
+        );
+    }
+    out.push_str(
+        "- **No signature yet.** Content signing is separate work (#5481); until it \
          lands nothing here proves the package was not altered after it was written.\n\n",
     );
     if let Some(client) = &config.client {

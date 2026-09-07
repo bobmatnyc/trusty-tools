@@ -473,6 +473,68 @@ pub struct OsvSettings {
     pub endpoint: Option<String>,
 }
 
+/// Whether a RED finding travels with an excerpt of the code it cites (#6792).
+///
+/// Why: a recipient of the return package holds no checkout, so every row in a
+/// repository's `[report].findings` is a claim about a file they cannot open.
+/// An excerpt is what makes the claim checkable — and it is also verbatim
+/// client source leaving the client's machine, which some engagements bar
+/// outright. So it is off unless this table turns it on, exactly as
+/// [`Collectors`] is: a config written before this table existed ships what it
+/// always did, and the README states which way it went either way.
+/// What: `enabled` gates the whole member; `context_lines` is how many lines
+/// either side of the cited line one excerpt carries. Read the second through
+/// [`ExcerptSettings::context_lines`], never directly — the budget is a BOUND,
+/// so a declared value above [`ExcerptSettings::MAX_CONTEXT_LINES`] is clamped
+/// rather than honoured, and an engagement cannot widen it into "ship the file".
+///
+/// ```toml
+/// [excerpts]
+/// enabled = true
+/// context_lines = 5
+/// ```
+///
+/// Test: `super::config_tests::{an_engagement_can_turn_excerpts_on,
+/// a_config_with_no_excerpts_table_leaves_them_off,
+/// an_oversized_context_budget_is_clamped}`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[non_exhaustive]
+pub struct ExcerptSettings {
+    /// Carry a bounded excerpt beside each RED finding that cites a file.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Lines either side of the cited line. Absent means
+    /// [`Self::DEFAULT_CONTEXT_LINES`].
+    #[serde(default)]
+    pub context_lines: Option<u64>,
+}
+
+impl ExcerptSettings {
+    /// Lines either side of the cited line when the config names none.
+    ///
+    /// The issue's own figure (#6792): five lines each way is enough to see
+    /// what a cited line is part of and short enough that the excerpt cannot
+    /// stand in for the file.
+    pub const DEFAULT_CONTEXT_LINES: u64 = 5;
+
+    /// The most an engagement may ask for, whatever it declares.
+    ///
+    /// A cap rather than a validation error: a config asking for 5000 is asking
+    /// for the file, and refusing to package at all would cost the recipient
+    /// every other member over one number.
+    pub const MAX_CONTEXT_LINES: u64 = 25;
+
+    /// The declared budget, clamped to [`Self::MAX_CONTEXT_LINES`].
+    ///
+    /// Test: `super::config_tests::an_oversized_context_budget_is_clamped`.
+    #[must_use]
+    pub fn context_lines(&self) -> u64 {
+        self.context_lines
+            .unwrap_or(Self::DEFAULT_CONTEXT_LINES)
+            .min(Self::MAX_CONTEXT_LINES)
+    }
+}
+
 /// The engagement config that travels inside the handoff package.
 ///
 /// Why: the recipient can read this file before running anything — that
@@ -513,6 +575,10 @@ pub struct EngagementConfig {
     /// How the OSV lookup runs once `[collectors] osv` turns it on (#6780).
     #[serde(default)]
     pub osv: OsvSettings,
+    // #6792: absent means no excerpt, so an existing config ships what it did.
+    /// Whether RED findings travel with an excerpt of the code they cite.
+    #[serde(default)]
+    pub excerpts: ExcerptSettings,
     /// What this engagement audits (#5979).
     ///
     /// Absent and empty are DIFFERENT states, which is why this is an `Option`
@@ -1421,6 +1487,40 @@ trusty-review = "0.15.1"
             "Debug leaked: {debug}"
         );
         assert!(!debug.contains("lin_api_secret"), "Debug leaked: {debug}");
+    }
+
+    /// #6792: the flag that lets a RED finding travel with the code it cites.
+    #[test]
+    fn an_engagement_can_turn_excerpts_on() {
+        let text = format!("{SAMPLE}\n[excerpts]\nenabled = true\ncontext_lines = 3\n");
+        let cfg = EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("parses");
+        assert!(cfg.excerpts.enabled);
+        assert_eq!(cfg.excerpts.context_lines(), 3);
+    }
+
+    /// 🔴 Off is the default, so a config written before the table existed
+    /// ships exactly what it always did.
+    #[test]
+    fn a_config_with_no_excerpts_table_leaves_them_off() {
+        let cfg = EngagementConfig::from_toml(SAMPLE, Path::new("engagement.toml"))
+            .expect("parses without the table");
+        assert!(!cfg.excerpts.enabled);
+        assert_eq!(
+            cfg.excerpts.context_lines(),
+            ExcerptSettings::DEFAULT_CONTEXT_LINES
+        );
+    }
+
+    /// The budget is a bound: a config asking for the whole file gets the cap,
+    /// rather than a parse error that would cost the recipient every member.
+    #[test]
+    fn an_oversized_context_budget_is_clamped() {
+        let text = format!("{SAMPLE}\n[excerpts]\nenabled = true\ncontext_lines = 5000\n");
+        let cfg = EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("parses");
+        assert_eq!(
+            cfg.excerpts.context_lines(),
+            ExcerptSettings::MAX_CONTEXT_LINES
+        );
     }
 
     /// The list both credential guards draw from holds every secret the config
