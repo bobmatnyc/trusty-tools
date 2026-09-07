@@ -39,10 +39,18 @@ use crate::cli::{CatalogAction, Command, SessionAction};
 /// PRs #4848 / #4876 / #4908). With no subscriber those events went nowhere, so
 /// the file stayed stale forever with no signal on the four paths an operator
 /// runs by hand.
-/// What: true for `tm sessions instructions` and its deprecated singular alias;
-/// for bare `tm` (`None`), which deploys in-process on both the launch and the
-/// in-place relaunch path; for `tm doctor`, whose `--fix-skills` redeploys; and
-/// for `tm catalog apply`, which redeploys the manifest-selected roster.
+/// #6754 added `tm sessions start` for the same reason. In a project with no
+/// git remote that verb cannot reach the daemon, so it falls back to
+/// `start_session_in_place`, which runs `prepare_session_with_home` in this
+/// process — including the stray-skill sweep, whose removals and declines are
+/// `warn!` events (`core/session_launch/skills.rs`). Two live removal runs on
+/// tm 1.5.18 left no trace anywhere: not stderr, not `~/.trusty-mpm/logs`, not
+/// the daemon's `stderr.log`, even though files were moved on disk.
+/// What: true for `tm sessions instructions` and `tm sessions start`, each with
+/// its deprecated singular alias; for bare `tm` (`None`), which deploys
+/// in-process on both the launch and the in-place relaunch path; for
+/// `tm doctor`, whose `--fix-skills` redeploys; and for `tm catalog apply`,
+/// which redeploys the manifest-selected roster.
 /// Test: `wants_cli_diagnostics_covers_every_in_process_deploy_path`,
 /// `wants_cli_diagnostics_skips_paths_that_own_stdout`,
 /// `instructions_emits_override_diagnostics_on_stderr`.
@@ -55,11 +63,13 @@ fn wants_cli_diagnostics(command: &Option<Command>) -> bool {
             | Some(Command::Catalog {
                 action: CatalogAction::Apply { .. }
             })
+            // #6754: `start` deploys in-process when the daemon path is
+            // unavailable, and its sweep reports only via `tracing`.
             | Some(Command::Sessions {
-                action: SessionAction::Instructions { .. }
+                action: SessionAction::Instructions { .. } | SessionAction::Start { .. }
             })
             | Some(Command::Session {
-                action: SessionAction::Instructions { .. }
+                action: SessionAction::Instructions { .. } | SessionAction::Start { .. }
             })
     )
 }
@@ -273,6 +283,12 @@ mod tests {
             vec!["tm", "catalog", "apply", "--force", "--prune"],
             vec!["tm", "sessions", "instructions"],
             vec!["tm", "session", "instructions"],
+            // #6754: with no daemon reachable, `start` deploys in-process via
+            // `start_session_in_place` and its stray-skill sweep warns through
+            // `tracing`. RED before the fix — neither arm matched.
+            vec!["tm", "sessions", "start"],
+            vec!["tm", "sessions", "start", "--dir", "/tmp/project"],
+            vec!["tm", "session", "start"],
         ] {
             assert!(
                 wants_cli_diagnostics(&command_for(&argv)),
