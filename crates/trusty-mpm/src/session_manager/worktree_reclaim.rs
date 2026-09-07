@@ -362,9 +362,12 @@ impl PrIndex {
     /// How many branches this index resolved (#2919).
     ///
     /// Why: a successful `gh` call against a repository with pull requests
-    /// yields a non-zero count, and a FAILED one yields zero — which is what
-    /// makes `pr_index_from_gh_reads_this_repository` able to tell a working
-    /// call from the silently-blocking one the `-C` bug produced.
+    /// yields a non-zero count, so a zero count from a call that ANSWERED is
+    /// the silently-blocking shape the `-C` bug produced.
+    /// What: this counts branches only. A failed call also yields zero, so a
+    /// caller distinguishing the two reads [`state_for`](Self::state_for) on an
+    /// absent branch first — `pr_index_from_gh_reads_this_repository` does, and
+    /// skips on `LookupFailed` rather than blaming the argv (#7038).
     /// Test: `pr_index_from_gh_reads_this_repository`.
     pub(crate) fn branch_count(&self) -> usize {
         self.by_branch.len()
