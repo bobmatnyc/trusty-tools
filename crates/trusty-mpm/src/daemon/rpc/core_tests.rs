@@ -954,7 +954,20 @@ async fn rpc_tmux_snapshot_unknown_session_reports_a_coded_error() {
 /// Why an adopt of a session that is not there: it is the write-shaped tmux
 /// route, and it must refuse identically over both transports rather than
 /// reporting success on one.
+///
+/// Why serial (#7047): both calls reach `TmuxService::adopt`, whose
+/// `discover_or_session_error` asks `host_state_gate::host_state_access()` —
+/// which reads the process `$HOME` afresh every call — and returns that
+/// verdict's sentence as the error. ~24 other test modules in this binary
+/// reassign `$HOME` process-wide. One landing between the two calls made the
+/// socket answer the #5784 scratch-`$HOME` sentence while HTTP had already
+/// answered "session not found", so the comparison failed on the environment
+/// moving rather than on the transports differing. Same reason and the same
+/// shared default group as
+/// [`rpc_tmux_snapshot_unknown_session_reports_a_coded_error`] above.
 /// Test: this function IS the test.
+// #7047: $HOME is process-global; both calls must read one value.
+#[serial_test::serial]
 #[tokio::test]
 async fn parity_tmux_adopt_unknown_session_agrees_across_transports() {
     let (state, _dir) = hermetic();
