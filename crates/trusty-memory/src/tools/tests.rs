@@ -133,7 +133,9 @@ fn tool_definitions_drops_palace_required_when_default_set() {
         ("palace_unalias", true),
         // #5000: `palace_embed_sweep` is absent on purpose — it takes no
         // arguments at all, so it has no conditional `palace` to drop.
-        ("palace_verify_embedded", true),
+        // #6318: `palace_verify_embedded` reads, so `palace` is required on
+        // neither branch.
+        ("palace_verify_embedded", false),
         ("kg_assert", true),
         ("kg_query", false),
         // Issue #664: add_alias and discover_aliases now include `palace`

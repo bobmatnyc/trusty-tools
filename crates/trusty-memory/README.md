@@ -296,7 +296,7 @@ this table is generated from it, not maintained by hand.
 | `palace_reembed` | `palace`, `dry_run?`, `limit?` | #4906: report drawers that have no vector (durable but unfindable), and optionally re-embed them. |
 | `palace_unalias` | `palace`, `dry_run?` | #5005: free drawers whose vector was destroyed by an id collision (`palace_reembed` reports these as `aliased`), so a re-embed can repair… |
 | `palace_update` | `palace_id`, `name` | Update the display name of an existing palace. |
-| `palace_verify_embedded` | `palace`, `drawer_ids` | #5000: answer whether YOUR OWN drawer ids are vector-findable. |
+| `palace_verify_embedded` | `drawer_ids`, `palace?` | #5000: answer whether YOUR OWN drawer ids are vector-findable. |
 | `remove_prompt_fact` | `subject`, `predicate` | Retract the active triple for a (subject, predicate) pair from the prompt-facts surface. |
 | `room_create` | `palace`, `label`, `description?`, `wing?` | Create a room in a palace, or return the existing one (ADR-0027). |
 | `room_list` | `palace?`, `wing?` | List every room registered in a palace (ADR-0027). |

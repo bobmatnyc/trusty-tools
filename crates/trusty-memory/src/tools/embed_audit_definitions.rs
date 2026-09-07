@@ -5,10 +5,13 @@
 //! adding to it fails the build with `recursion limit reached while expanding
 //! json_internal`. Splicing is the pattern the task, chat, room and wing groups
 //! already use, for the 500-SLOC cap; this group joins it for a second reason.
-//! What: returns `[palace_verify_embedded, palace_embed_sweep]`, conditioned on
-//! `has_default` the same way every other group is.
+//! What: returns `[palace_verify_embedded, palace_embed_sweep]`. It keeps every
+//! other group's `has_default` parameter for a uniform splice signature and
+//! ignores it: #6318 made `palace` optional for the reading tool, and the
+//! sweeping one never took a palace, so neither schema varies by branch.
 //! Test: spliced into `tool_definitions_with`; covered by
-//! `tool_definitions_lists_all_tools` in `tools::tests`.
+//! `tool_definitions_lists_all_tools` in `tools::tests` and
+//! `read_tool_schemas_never_require_palace` in `tools::tests::palace_index_tests`.
 
 use serde_json::{json, Value};
 
@@ -19,17 +22,17 @@ use serde_json::{json, Value};
 /// a proxy for "is it findable", `console_metrics` as a health sweep. The schema
 /// is where a model reads that, so it says which cheaper answer is wrong and
 /// what to use instead.
-/// Test: `tool_definitions_lists_all_tools`.
-pub(super) fn embed_audit_tool_definitions(has_default: bool) -> Vec<Value> {
-    let palace_required: Vec<&str> = if has_default {
-        vec!["drawer_ids"]
-    } else {
-        vec!["palace", "drawer_ids"]
-    };
+/// Test: `tool_definitions_lists_all_tools`, `read_tool_schemas_never_require_palace`.
+pub(super) fn embed_audit_tool_definitions(_has_default: bool) -> Vec<Value> {
+    // #6318: `palace_verify_embedded` reads, so `palace` is never required —
+    // with neither an argument nor a `--palace` default it answers with a
+    // palace index. `drawer_ids` stays required on both branches, which leaves
+    // this group with nothing left to condition on `has_default`.
+    let verify_required: Vec<&str> = vec!["drawer_ids"];
     vec![
         json!({
             "name": "palace_verify_embedded",
-            "description": "#5000: answer whether YOUR OWN drawer ids are vector-findable. Gate a migration or deletion on the single `verified` boolean — it is true only when every id you asked about is embedded AND the alias audit is clean, so a drawer lost to an id collision (which has a vector key and is still unreachable) cannot pass it. The three lists say why: `missing` exists with no vector, `unknown` is not a drawer in this palace at all. `memory_recall` is NOT a substitute — it can hit lexically and pass on a drawer no vector search will ever return. Reach for `palace_reembed` instead when you want the palace's whole missing set rather than an answer about specific ids.",
+            "description": "#5000: answer whether YOUR OWN drawer ids are vector-findable. Gate a migration or deletion on the single `verified` boolean — it is true only when every id you asked about is embedded AND the alias audit is clean, so a drawer lost to an id collision (which has a vector key and is still unreachable) cannot pass it. The three lists say why: `missing` exists with no vector, `unknown` is not a drawer in this palace at all. `memory_recall` is NOT a substitute — it can hit lexically and pass on a drawer no vector search will ever return. Reach for `palace_reembed` instead when you want the palace's whole missing set rather than an answer about specific ids. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -40,7 +43,7 @@ pub(super) fn embed_audit_tool_definitions(has_default: bool) -> Vec<Value> {
                         "description": "Drawer UUIDs to verify. A malformed entry is refused, never skipped."
                     }
                 },
-                "required": palace_required,
+                "required": verify_required,
             }
         }),
         json!({

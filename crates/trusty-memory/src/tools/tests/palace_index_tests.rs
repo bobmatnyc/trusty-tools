@@ -16,8 +16,7 @@ use crate::tools::palace_index::PALACE_INDEX_DETAIL_LIMIT;
 /// The palace-scoped READ tools that answer a no-palace call with an index.
 ///
 /// Why: one list, so a new read tool is added here rather than growing a
-/// fourteenth near-identical test. `palace_verify_embedded` is absent on
-/// purpose — it is being changed under #6836 and joins this list there.
+/// fifteenth near-identical test.
 /// What: every tool name whose handler calls `resolve_palace_or_index`.
 const READ_TOOLS: &[&str] = &[
     "memory_recall",
@@ -33,6 +32,10 @@ const READ_TOOLS: &[&str] = &[
     "chat_session_get",
     "chat_session_list",
     "chat_session_recall",
+    // #6318: deferred from the first wave while #6995 held `embed_audit.rs`.
+    // Its empty-args dispatch also pins that the index is decided before
+    // `drawer_ids` is validated.
+    "palace_verify_embedded",
 ];
 
 /// The mutating tools that still refuse a no-palace call.
