@@ -11,8 +11,9 @@
 //! other's labels.
 //! What: the [`PolicyLabel`] value type, the policy set ([`policy_labels`] =
 //! the [`CONVENTION_LABEL`] plus `ws/<session>` when a session name is known),
-//! the `ws/` name/color derivation, and [`create_label_argv`] — the single place
-//! in the crate that spells a `gh label create` command line.
+//! the `ws/` name/color derivation, and [`create_label_argv`] /
+//! [`list_labels_argv`] — the single place in the crate that spells a
+//! `gh label` command line.
 //!
 //! This module deliberately holds NO process-spawning code. Its two consumers
 //! reach `gh` through different, already-established seams (the launch path's
@@ -26,7 +27,9 @@
 //! `label_name_long_is_truncated_with_hash_suffix`,
 //! `label_name_distinct_long_names_get_distinct_labels`,
 //! `create_label_argv_full`, `create_label_argv_omits_empty_fields`,
-//! `create_label_argv_repo_and_force`,
+//! `create_label_argv_repo_and_force`, `list_labels_argv_full`,
+//! `list_labels_argv_repo`,
+//! `list_labels_argv_requests_more_than_the_gh_default`,
 //! `configured_labels_match_builtin_when_block_absent`,
 //! `configured_labels_append_extra_labels`,
 //! `configured_labels_restyle_a_builtin_by_name`.
@@ -217,6 +220,45 @@ pub fn create_label_argv(label: &PolicyLabel, repo: Option<&str>, force: bool) -
     }
     if force {
         argv.push("--force".to_string());
+    }
+    argv
+}
+
+/// The page size every `gh label list` in this crate asks for.
+///
+/// Why: `gh label list` returns 30 labels by default and says nothing when it
+/// truncates, so the seed probe read a partial set on any larger repo, judged
+/// every policy label missing, and `gh label create` then failed on the first
+/// one that already existed (#6914 — trusty-tools carries 89 labels, and all
+/// six policy labels fell outside that first page). Large enough that no
+/// realistic repo truncates; the caller treats a read that comes back exactly
+/// this full as an error rather than as a complete set.
+/// Test: `list_labels_argv_requests_more_than_the_gh_default`.
+pub const LABEL_LIST_LIMIT: usize = 1000;
+
+/// The `gh label list …` argv — the crate's single spelling of that command.
+///
+/// Why: #6914 — an omitted `--limit` is exactly the flag that goes missing when
+/// a command line is spelled inline at a call site, so this command joins
+/// [`create_label_argv`] in the one module that owns `gh label` argv.
+/// What: `label list --limit <limit> --json name,color,description` — those
+/// JSON fields are precisely [`PolicyLabel`]'s, so the output deserializes
+/// straight into the diff's "what the repo has" side — plus `--repo <repo>`
+/// when the caller targets a specific repository.
+/// Test: `list_labels_argv_full`, `list_labels_argv_repo`,
+/// `list_labels_argv_requests_more_than_the_gh_default`.
+pub fn list_labels_argv(repo: Option<&str>, limit: usize) -> Vec<String> {
+    let mut argv = vec![
+        "label".to_string(),
+        "list".to_string(),
+        "--limit".to_string(),
+        limit.to_string(),
+        "--json".to_string(),
+        "name,color,description".to_string(),
+    ];
+    if let Some(repo) = repo {
+        argv.push("--repo".to_string());
+        argv.push(repo.to_string());
     }
     argv
 }
@@ -528,6 +570,60 @@ mod tests {
                 "owner/repo",
                 "--force"
             ]
+        );
+    }
+
+    #[test]
+    fn list_labels_argv_full() {
+        assert_eq!(
+            list_labels_argv(None, 1000),
+            [
+                "label",
+                "list",
+                "--limit",
+                "1000",
+                "--json",
+                "name,color,description"
+            ]
+        );
+    }
+
+    #[test]
+    fn list_labels_argv_repo() {
+        assert_eq!(
+            list_labels_argv(Some("owner/repo"), 7),
+            [
+                "label",
+                "list",
+                "--limit",
+                "7",
+                "--json",
+                "name,color,description",
+                "--repo",
+                "owner/repo"
+            ]
+        );
+    }
+
+    /// Why: #6914 — the probe read only `gh label list`'s default first page,
+    /// so a repo with more labels than that reported every policy label
+    /// missing and the run died on the first `gh label create`.
+    #[test]
+    fn list_labels_argv_requests_more_than_the_gh_default() {
+        // gh's own default page size for `gh label list`.
+        const GH_DEFAULT_PAGE: usize = 30;
+        let argv = list_labels_argv(None, LABEL_LIST_LIMIT);
+        let limit: usize = argv
+            .iter()
+            .position(|a| a == "--limit")
+            .and_then(|i| argv.get(i + 1))
+            .expect("`gh label list` argv must carry an explicit --limit")
+            .parse()
+            .expect("--limit is a number");
+        assert_eq!(limit, LABEL_LIST_LIMIT);
+        assert!(
+            limit > GH_DEFAULT_PAGE,
+            "the seed probe must ask for more than gh's default {GH_DEFAULT_PAGE}-label page"
         );
     }
 }

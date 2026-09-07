@@ -46,21 +46,43 @@ pub(crate) enum AssigneeTarget {
     None,
 }
 
-/// `gh label list --json name,color,description` → existing repo labels.
+/// `gh label list --limit <n> --json name,color,description` → existing repo
+/// labels.
 ///
 /// Why: idempotent seeding needs the current label set so only missing labels
-/// are created (and present ones are left untouched).
-/// What: runs `gh label list` through `runner`, parses the JSON array into
-/// [`RepoLabel`]s; surfaces an actionable error on `gh` failure or bad JSON.
-/// Test: `gh_list_repo_labels_parses`, `gh_list_repo_labels_errors`.
+/// are created (and present ones are left untouched). #6914: a partial read is
+/// worse than no read — `gh label list` returns 30 labels by default and never
+/// says it truncated, so on any larger repo (trusty-tools carries 89) the seed
+/// judged every policy label missing and died on the first `gh label create`
+/// of a label that already existed.
+/// What: runs the argv from
+/// [`trusty_mpm::core::policy_labels::list_labels_argv`] through `runner` and
+/// parses the JSON array into [`RepoLabel`]s. A page that comes back exactly
+/// `LABEL_LIST_LIMIT` long is reported as an error rather than passed on as a
+/// complete set; `gh` failure and bad JSON surface actionable errors too.
+/// Test: `gh_list_repo_labels_parses`, `gh_list_repo_labels_errors`,
+/// `gh_list_repo_labels_reads_past_the_default_page`,
+/// `gh_list_repo_labels_rejects_a_truncated_page`.
 pub(crate) fn gh_list_repo_labels<R: CommandRunner>(runner: &R) -> anyhow::Result<Vec<RepoLabel>> {
-    let out = runner.run("gh", &["label", "list", "--json", "name,color,description"])?;
+    // #6914: the probe asked for gh's default 30-label page and read a partial
+    // label set as if it were the whole repo.
+    let limit = trusty_mpm::core::policy_labels::LABEL_LIST_LIMIT;
+    let argv = trusty_mpm::core::policy_labels::list_labels_argv(None, limit);
+    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let out = runner.run("gh", &args)?;
     let json = out.ok_or_stderr("gh label list")?;
     if json.is_empty() {
         return Ok(Vec::new());
     }
     let labels: Vec<RepoLabel> = serde_json::from_str(&json)
         .map_err(|e| anyhow::anyhow!("failed to parse `gh label list` JSON: {e}"))?;
+    if labels.len() >= limit {
+        anyhow::bail!(
+            "`gh label list` returned a full {limit}-label page, so the repo's label set may be \
+             truncated; seeding against a partial set would try to re-create labels that already \
+             exist (see #6914)"
+        );
+    }
     Ok(labels)
 }
 
@@ -272,7 +294,10 @@ mod tests {
         assert_eq!(labels[0].description, "Queued");
         assert_eq!(
             r.calls()[0].1,
-            vec!["label", "list", "--json", "name,color,description"]
+            trusty_mpm::core::policy_labels::list_labels_argv(
+                None,
+                trusty_mpm::core::policy_labels::LABEL_LIST_LIMIT
+            )
         );
     }
 
@@ -280,6 +305,44 @@ mod tests {
     fn gh_list_repo_labels_empty_is_empty() {
         let r = FakeRunner::new(vec![ok_out("")]);
         assert!(gh_list_repo_labels(&r).expect("empty ok").is_empty());
+    }
+
+    /// Why: #6914 — without an explicit `--limit`, `gh label list` returns its
+    /// default 30 labels and never says it truncated, so the seed read a
+    /// partial label set as the whole repo.
+    #[test]
+    fn gh_list_repo_labels_reads_past_the_default_page() {
+        let r = FakeRunner::new(vec![ok_out("[]")]);
+        gh_list_repo_labels(&r).expect("list");
+        let args = &r.calls()[0].1;
+        let limit: usize = args
+            .iter()
+            .position(|a| a == "--limit")
+            .and_then(|i| args.get(i + 1))
+            .expect("`gh label list` must carry an explicit --limit")
+            .parse()
+            .expect("--limit is a number");
+        assert!(limit > 30, "--limit {limit} must exceed gh's 30-label page");
+    }
+
+    /// Why: a page returned exactly as long as the one requested may be
+    /// truncated, and seeding against a truncated set is the #6914 failure.
+    #[test]
+    fn gh_list_repo_labels_rejects_a_truncated_page() {
+        let limit = trusty_mpm::core::policy_labels::LABEL_LIST_LIMIT;
+        let json: String = format!(
+            "[{}]",
+            (0..limit)
+                .map(|i| format!(r#"{{"name":"l{i}","color":"CCCCCC","description":""}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let r = FakeRunner::new(vec![ok_out(&json)]);
+        let err = gh_list_repo_labels(&r).expect_err("a full page is not a complete set");
+        assert!(
+            err.to_string().contains("truncated"),
+            "error must name the truncation; got {err}"
+        );
     }
 
     #[test]
