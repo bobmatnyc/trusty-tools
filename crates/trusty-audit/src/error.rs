@@ -384,6 +384,32 @@ pub enum AuditError {
         missing: Vec<&'static str>,
     },
 
+    /// An operator's tool override names a path that cannot be run.
+    ///
+    /// Why: #6132 gives an operator one documented way to point the chain at a
+    /// locally built binary, and the whole value of that is being able to trust
+    /// which binary ran. So a variable naming a path that cannot be executed
+    /// refuses the run rather than falling back to the pinned copy — an override
+    /// that quietly did not take is the #5454 skew class wearing the operator's
+    /// own intent, and it is worse than no override, because they believe they
+    /// tested their build.
+    /// What: names the variable, the path it carried, and what is wrong with
+    /// that path, so the operator knows which of the four to fix.
+    /// Test: `crate::tool_overrides::override_tests::an_override_naming_a_missing_path_is_refused`.
+    #[error(
+        "{variable} names {}, which {reason}; set it to an absolute path to an executable \
+         file, or unset it — it will not fall back to the pinned copy",
+        path.display()
+    )]
+    ToolOverride {
+        /// The environment variable the operator set.
+        variable: &'static str,
+        /// The path it carried.
+        path: PathBuf,
+        /// What is wrong with that path.
+        reason: &'static str,
+    },
+
     /// Listing the repositories a credential can reach failed.
     ///
     /// Why: #5487 routes discovery through `gh`, and every way that can fail —

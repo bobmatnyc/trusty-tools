@@ -812,18 +812,32 @@ fn human(d: Duration) -> String {
 /// Why: shared by the sweep's index and the return package's, which state the
 /// same fact from the same record — a second lookup would be a second place for
 /// "not recorded" to be worded differently.
+/// #6132: an override REPLACES the pin for a run, so an overridden tool's row
+/// states that instead of the version the install record still names. Without
+/// this the table would report the pinned version of a binary that did not run,
+/// which is the one reading of it nobody could catch.
+///
 /// What: one row per [`crate::tools::RequiredTool`], in that type's own order,
 /// so a tool missing from the record is a stated row rather than an absent one.
-/// The record is read fail-open: an unreadable one yields four stated gaps, not
+/// Both records are read fail-open: an unreadable one yields stated gaps, not
 /// a failed sweep.
 /// Test: `crate::run::run_tests::a_sweep_writes_an_index_beside_its_reports`,
+/// `crate::run::run_tests::an_overridden_tool_is_stamped_into_the_index`,
 /// `crate::package::package_tests::the_package_carries_an_index_of_its_reports`.
 pub fn recorded_tools(work: &crate::workdir::WorkDir) -> Vec<ToolVersion> {
     let recorded = crate::tools::read_record(work).unwrap_or_default();
+    let overrides = crate::tool_overrides::ToolOverrides::read(work).unwrap_or_default();
     crate::tools::RequiredTool::ALL
         .iter()
         .map(|tool| {
             let name = tool.crate_name();
+            // #6132: no version is claimed for an overridden tool. This client
+            // neither installed nor verified that binary, and inventing a
+            // version by asking the binary itself would state as fact something
+            // no record backs.
+            if let Some(why) = overrides.provenance_of(name) {
+                return ToolVersion::unknown(name, why);
+            }
             match recorded.iter().find(|t| t.crate_name == name) {
                 Some(installed) => {
                     ToolVersion::known(name, installed.version.clone(), "recorded at install")

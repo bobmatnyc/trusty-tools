@@ -52,6 +52,7 @@ use trusty_installer::download::pinned::{PinnedInstall, PinnedTool};
 use crate::config::{ToolPin, ToolPins};
 use crate::error::AuditError;
 use crate::progress::{Operation, Progress, UnitOutcome};
+use crate::tool_overrides::ToolOverrides;
 use crate::workdir::{Area, WorkDir};
 
 /// File under `state/` recording the exact versions that were installed.
@@ -112,6 +113,27 @@ impl RequiredTool {
     /// Where this tool's binary belongs under the working directory.
     pub fn path_in(self, work: &WorkDir) -> PathBuf {
         work.path(Area::Tools).join(self.binary_name())
+    }
+
+    /// The variable an operator names a locally built binary with (#6132).
+    ///
+    /// Why: an exhaustive match, for [`Self::pin_in`]'s reason — a fifth tool
+    /// must fail to compile here rather than resolve to "no override" at
+    /// runtime, which is how a tool silently loses its escape hatch.
+    ///
+    /// These are NOT `TRUSTY_SEARCH_BIN` and friends. Those are internal
+    /// plumbing that `crate::run::child` sets from the pinned paths on every
+    /// child, clobbering whatever the operator exported; see
+    /// [`crate::tool_overrides`] for the distinction and the precedence rule.
+    /// What: `TRUSTY_AUDIT_<TOOL>_BIN`, one per tool.
+    /// Test: `crate::tool_overrides::override_tests::an_override_naming_a_missing_path_is_refused`.
+    pub fn override_env(self) -> &'static str {
+        match self {
+            RequiredTool::Tga => "TRUSTY_AUDIT_TGA_BIN",
+            RequiredTool::TrustySearch => "TRUSTY_AUDIT_SEARCH_BIN",
+            RequiredTool::TrustyAnalyze => "TRUSTY_AUDIT_ANALYZE_BIN",
+            RequiredTool::TrustyReview => "TRUSTY_AUDIT_REVIEW_BIN",
+        }
     }
 
     /// This tool's pin, from the engagement config.
@@ -441,10 +463,39 @@ pub async fn install(
 ///
 /// # Errors
 ///
-/// Whatever [`status`] fails with — an unreadable or malformed version record.
+/// Whatever [`status`] fails with — an unreadable or malformed version record —
+/// plus [`AuditError::ToolOverride`] when this environment declares an override
+/// that cannot be run.
 pub fn unsatisfied(work: &WorkDir, pins: &ToolPins) -> Result<Vec<RequiredTool>, AuditError> {
+    unsatisfied_with(work, pins, &ToolOverrides::from_environment()?)
+}
+
+/// [`unsatisfied`], with the operator's overrides as an argument.
+///
+/// Why: #6132. An overridden tool is satisfied by definition — the operator has
+/// named the binary that will run, and this client will neither download nor
+/// check a pin for it. Demanding the download anyway would refuse the exact case
+/// the override exists for: a pin that is merged but not published, so
+/// `install_pinned_set` cannot resolve it at all.
+///
+/// Taking the set as an argument rather than reading the process environment is
+/// what lets `crate::run::run_tests::nothing_unsatisfied_is_exactly_what_the_preflight_accepts`
+/// keep asserting that this predicate and `pinned_binaries` agree, against the
+/// same overrides both are given.
+/// What: [`unsatisfied`]'s three conditions, over the tools no override covers.
+/// Test: `super::tool_tests::an_overridden_tool_needs_no_install`.
+///
+/// # Errors
+///
+/// Whatever [`status`] fails with.
+pub fn unsatisfied_with(
+    work: &WorkDir,
+    pins: &ToolPins,
+    overrides: &ToolOverrides,
+) -> Result<Vec<RequiredTool>, AuditError> {
     Ok(status(work)?
         .into_iter()
+        .filter(|s| overrides.path_of(s.tool).is_none())
         .filter(|s| {
             let pinned = s.tool.pin_in(pins).version();
             !(s.installed && s.version.as_deref() == Some(pinned))
@@ -1039,6 +1090,35 @@ trusty-review = "0.0.0-never-published"
             unsatisfied(&work, &pins).expect("reads").is_empty(),
             "a set installed at the pin needs nothing"
         );
+    }
+
+    /// 🔴 #6132: an overridden tool is satisfied by definition. The case the
+    /// override exists for is a pin that is merged but unpublished, so a
+    /// predicate that still demanded the download would send `install` at a
+    /// version `install_pinned_set` cannot resolve — refusing the exact run the
+    /// override enables.
+    #[cfg(unix)]
+    #[test]
+    fn an_overridden_tool_needs_no_install() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let local = tmp.path().join("locally-built-tga");
+        std::fs::write(&local, b"#!/bin/sh\nexit 0\n").expect("write stub");
+        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let value = local.display().to_string();
+        let overrides = ToolOverrides::resolve(|name| {
+            (name == RequiredTool::Tga.override_env()).then(|| value.clone())
+        })
+        .expect("the stub is executable");
+
+        let pending = unsatisfied_with(&work, &pins(), &overrides).expect("reads");
+        assert!(!pending.contains(&RequiredTool::Tga), "{pending:?}");
+        // The three nobody overrode are still unsatisfied: nothing here widened
+        // the escape hatch beyond the tool it was asked for.
+        assert_eq!(pending.len(), RequiredTool::ALL.len() - 1, "{pending:?}");
     }
 
     /// The `UNVERIFIED` state: a binary is there, nothing recorded it, so its
