@@ -226,8 +226,12 @@ const MENU_KEY_WIDTH: usize = 18;
 /// because the adjacent `r<N> <new-name>` row takes a VERBATIM full session
 /// name — without it the two `<name>` arguments read as interchangeable and
 /// are not.
+/// #3552: the `[s]` and `[/<text>]` rows are the discoverability half of the
+/// in-picker sort/filter feature — the whole issue is that `tm ls recent
+/// <filter>` is invisible to anyone already inside the picker.
 /// Test: `command_legend_empty_menu_shape`, `command_legend_populated_menu_shape`,
-/// `command_legend_columns_are_aligned`.
+/// `command_legend_columns_are_aligned`,
+/// `command_legend_names_the_sort_and_filter_keys`.
 pub(crate) fn command_legend(launch_slot: Option<u32>) -> Vec<String> {
     let row = |key: String, description: &str| format!("{key:<MENU_KEY_WIDTH$} {description}");
     let mut lines = match launch_slot {
@@ -255,6 +259,18 @@ pub(crate) fn command_legend(launch_slot: Option<u32>) -> Vec<String> {
             "rename session N (e.g. r1 tm-my-new-name)",
         ));
     }
+    // #3552: the sort/filter keys appear in BOTH menus. The empty one is
+    // reachable precisely because a filter hid every row, so that is the menu
+    // where `[/]` is least optional — a legend that dropped it would leave the
+    // operator staring at an empty list with no advertised way back.
+    lines.push(row(
+        "[s]".to_string(),
+        "cycle sort order (recent → alpha → recent)",
+    ));
+    lines.push(row(
+        "[/<text>]".to_string(),
+        "filter the list by text; [/] or Esc alone clears it",
+    ));
     lines.push(row("[ls]".to_string(), "re-print this list"));
     lines.push(row("[q]".to_string(), "quit"));
     lines

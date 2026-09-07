@@ -44,7 +44,22 @@ use crate::commands::guided_resume::{
 use trusty_mpm::daemon::orphan_gc::AlwaysIdleProbe;
 // The picker decision enum + parser moved to the shared `session_picker` module.
 use crate::commands::picker_launch_new::LaunchIsolation;
-use crate::commands::session_picker::{LaunchNewRequest, PickerDecision, parse_picker_choice};
+use crate::commands::session_picker::{LaunchNewRequest, PickerDecision};
+
+/// [`crate::commands::session_picker::parse_picker_choice`] with the pre-#3552
+/// bare-Enter target.
+///
+/// Why: #3552 gave the parser a `default_idx` so `[s]`/`/<text>` can reorder
+/// the menu without repointing what Enter does. Every test below predates the
+/// pin and asserts the `default_idx = 0` behavior it always asserted, so the
+/// shim states that once here rather than repeating a literal `0` at each call.
+fn parse_picker_choice(
+    line: &str,
+    sessions: &[trusty_mpm::client::ManagedSessionSummary],
+    first_needs_restart: bool,
+) -> PickerDecision {
+    crate::commands::session_picker::parse_picker_choice(line, sessions, 0, first_needs_restart)
+}
 
 // ── parse_picker_choice ───────────────────────────────────────────────────────
 

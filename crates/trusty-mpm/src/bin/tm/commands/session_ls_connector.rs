@@ -150,11 +150,14 @@ pub(crate) async fn run_ls_connector(
         .ok()
         .and_then(|cwd| super::guided::derive_project(&cwd))
         .map(|(_sid, _workspace, git_root)| git_root.to_string_lossy().to_string());
-    let scope = PickerScope {
+    // #3552: mutable — `[s]` / `/<text>` inside the picker rewrite `sort` and
+    // `term`, so what the CLI grammar set is the STARTING view, not a fixed one.
+    let mut scope = PickerScope {
         source_id: sid,
         repo_url,
         sort,
         term,
+        selected_id: None,
     };
-    run_tty_picker(client, url, &scope, sessions).await
+    run_tty_picker(client, url, &mut scope, sessions).await
 }

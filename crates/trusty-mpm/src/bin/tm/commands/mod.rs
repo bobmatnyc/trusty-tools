@@ -129,6 +129,7 @@ pub(crate) mod session_picker_order;
 pub(crate) mod session_picker_prune;
 pub(crate) mod session_picker_rename;
 pub(crate) mod session_picker_render;
+pub(crate) mod session_picker_view;
 // The `tm shell-init` wrapper emitter — print-only; it never writes an rc file.
 pub(crate) mod shell_init;
 pub(crate) mod slack;

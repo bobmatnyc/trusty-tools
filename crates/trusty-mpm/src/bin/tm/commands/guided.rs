@@ -404,8 +404,10 @@ async fn try_show_picker(
     // title bar, 24-row clipped art, project/workspace fields — no sleep.
     let daemon = DaemonInfo::from_lock_file_with_probe().with_count(sessions.len());
     crate::formatters::banner::print_daily_banner(&cwd.to_string_lossy(), &daemon);
-    let scope = super::session_picker::PickerScope::project(source_id, repo_url);
-    Some(super::session_picker::run_tty_picker(client, url, &scope, sessions).await)
+    // #3552: mutable — the picker's `[s]` / `/<text>` keys rewrite the scope's
+    // sort, filter, and pinned default in place.
+    let mut scope = super::session_picker::PickerScope::project(source_id, repo_url);
+    Some(super::session_picker::run_tty_picker(client, url, &mut scope, sessions).await)
 }
 
 // ── Project derivation ───────────────────────────────────────────────────────

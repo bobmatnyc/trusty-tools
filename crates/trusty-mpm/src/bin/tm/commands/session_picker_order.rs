@@ -88,8 +88,13 @@ pub(crate) struct Menu {
     pub(crate) stale_slots: bool,
     /// The "launch new session" menu number (see [`next_launch_slot`]).
     pub(crate) new_idx: u32,
-    /// #2148: bare Enter on position 0 would restart rather than resume.
+    /// #2148: bare Enter on [`Self::default_idx`] would restart rather than
+    /// resume.
     pub(crate) first_needs_restart: bool,
+    /// #3552: the row bare Enter targets — the scope's pinned session when it
+    /// survived the sort/filter, else `0`. See
+    /// [`super::session_picker_view::default_index`].
+    pub(crate) default_idx: usize,
 }
 
 /// Prepare one render of the picker menu from a freshly-obtained list (#6753).
@@ -103,19 +108,27 @@ pub(crate) struct Menu {
 /// `ConfirmRestart`) while the hint read "resume most recent", and the whole list
 /// reordered under the operator after the first action.
 /// What: [`normalize_for_scope`] first, then [`slots_are_stale`],
-/// [`next_launch_slot`] and the `first_needs_restart` flag off the NORMALIZED
-/// list. A deleted position 0 is never `first_needs_restart`, because
+/// [`next_launch_slot`], the #3552 pinned `default_idx`, and the
+/// `first_needs_restart` flag — all off the NORMALIZED list, and the last two
+/// off `default_idx` rather than position 0 so the restart gate follows
+/// whichever row bare Enter will actually hit. A deleted default row is never
+/// `first_needs_restart`, because
 /// [`decide_for_index`](super::session_picker::decide_for_index) checks `deleted` ahead of this flag.
 /// Test: `prepare_menu_orders_the_first_render_like_every_later_one`,
 /// `prepare_menu_bare_enter_targets_the_attached_session`,
 /// `prepare_menu_is_idempotent`, `prepare_menu_applies_the_scopes_term_filter`,
-/// `prepare_menu_launch_slot_is_the_maximum_not_the_last`.
+/// `prepare_menu_launch_slot_is_the_maximum_not_the_last`,
+/// `prepare_menu_keeps_the_pinned_default_across_a_resort`.
 pub(crate) fn prepare_menu(sessions: Vec<ManagedSessionSummary>, scope: &PickerScope) -> Menu {
     let sessions = normalize_for_scope(sessions, scope);
     let stale_slots = slots_are_stale(&sessions);
     let new_idx = next_launch_slot(&sessions);
+    // #3552: derived from the NORMALIZED list, so a pin that the scope's filter
+    // just hid resolves to `0` here rather than indexing a row nobody can see.
+    let default_idx =
+        super::session_picker_view::default_index(&sessions, scope.selected_id.as_deref());
     let first_needs_restart = sessions
-        .first()
+        .get(default_idx)
         .map(|s| !s.deleted && super::guided_resume::needs_restart(&s.state))
         .unwrap_or(false);
     Menu {
@@ -123,6 +136,7 @@ pub(crate) fn prepare_menu(sessions: Vec<ManagedSessionSummary>, scope: &PickerS
         stale_slots,
         new_idx,
         first_needs_restart,
+        default_idx,
     }
 }
 

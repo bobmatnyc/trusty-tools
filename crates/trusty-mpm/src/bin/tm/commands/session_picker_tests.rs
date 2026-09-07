@@ -13,11 +13,25 @@
 
 use trusty_mpm::client::ManagedSessionSummary;
 
-use super::{LaunchNewRequest, PickerDecision, next_launch_slot, parse_picker_choice};
+use super::{LaunchNewRequest, PickerDecision, next_launch_slot};
 use crate::commands::session_picker_render::{
     StateColor, colorize, command_legend, format_session_row, picker_use_color,
     restart_confirm_hint, state_color, table_use_color,
 };
+
+/// [`super::parse_picker_choice`] with the pre-#3552 bare-Enter target.
+///
+/// Why: #3552 gave the parser a `default_idx` so `[s]`/`/<text>` can reorder
+/// the menu without repointing what Enter does. Every test below predates the
+/// pin and asserts the `default_idx = 0` behavior it always asserted, so the
+/// shim states that once here rather than repeating a literal `0` at each call.
+fn parse_picker_choice(
+    line: &str,
+    sessions: &[ManagedSessionSummary],
+    first_needs_restart: bool,
+) -> PickerDecision {
+    super::parse_picker_choice(line, sessions, 0, first_needs_restart)
+}
 
 /// Minimal `ManagedSessionSummary` fixture with a given `slot`.
 fn session(name: &str, state: &str, slot: u32) -> ManagedSessionSummary {
@@ -121,6 +135,31 @@ fn parse_picker_choice_launch_new_uses_max_slot_after_reorder() {
     assert_eq!(
         parse_picker_choice("32", &sessions, false),
         PickerDecision::LaunchNew(LaunchNewRequest::unnamed())
+    );
+}
+
+// ── PickerDecision::View parsing (#3552) ────────────────────────────────────
+
+/// The sort key reaches the picker's own parser, not just the view module's.
+#[test]
+fn parse_picker_choice_s_cycles_the_sort_order() {
+    let sessions = vec![session("s1", "active", 1)];
+    assert_eq!(
+        parse_picker_choice("s", &sessions, false),
+        PickerDecision::View(crate::commands::session_picker_view::ViewCommand::CycleSort)
+    );
+}
+
+/// `/<text>` is a filter, not a session name — and `r`/`d`/`n`/numeric parsing
+/// must not have claimed it first.
+#[test]
+fn parse_picker_choice_slash_sets_the_filter() {
+    let sessions = vec![session("s1", "active", 1)];
+    assert_eq!(
+        parse_picker_choice("/auth", &sessions, false),
+        PickerDecision::View(
+            crate::commands::session_picker_view::ViewCommand::SetFilter("auth".to_string())
+        )
     );
 }
 
@@ -449,7 +488,12 @@ fn command_legend_empty_menu_shape() {
         .iter()
         .map(|l| l.split("  ").next().unwrap())
         .collect();
-    assert_eq!(keys, ["[Enter]", "[n <name>]", "[ls]", "[q]"]);
+    // #3552: `[s]`/`[/<text>]` are in BOTH shapes — the empty menu is reachable
+    // by filtering every row away, so that is where `[/]` matters most.
+    assert_eq!(
+        keys,
+        ["[Enter]", "[n <name>]", "[s]", "[/<text>]", "[ls]", "[q]"]
+    );
 }
 
 /// The populated menu leads with the launch slot and adds the delete/rename
@@ -469,6 +513,9 @@ fn command_legend_populated_menu_shape() {
             "[d<N>]",
             "[d <glob>]",
             "[r<N> <new-name>]",
+            // #3552: the in-picker sort/filter keys.
+            "[s]",
+            "[/<text>]",
             "[ls]",
             "[q]"
         ]
@@ -542,6 +589,9 @@ fn command_legend_columns_are_aligned() {
                     .or_else(|| l.find("delete"))
                     .or_else(|| l.find("rename"))
                     .or_else(|| l.find("re-print"))
+                    // #3552: the sort/filter rows' description verbs.
+                    .or_else(|| l.find("cycle"))
+                    .or_else(|| l.find("filter"))
                     .or_else(|| l.find("quit"))
                     .expect("every row has a description")
             })
@@ -809,6 +859,7 @@ fn prepare_menu_applies_the_scopes_term_filter() {
         repo_url: None,
         sort: super::SessionSortArg::Recent,
         term: Some(super::SessionFilter::visible("attached")),
+        selected_id: None,
     };
     let menu =
         crate::commands::session_picker_order::prepare_menu(daemon_ascending_slot_order(), &scope);
