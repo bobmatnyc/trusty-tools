@@ -1119,3 +1119,99 @@ fn plans_service_bootstrap_visits_a_retired_member() {
         "--no-service must still suppress the visit"
     );
 }
+
+// ── Bundle keywords (#4714) ──────────────────────────────────────────────────
+// These exercise the composition `run` itself performs — `expand_bundles`
+// feeding `select_members_transitive` — rather than re-deriving the sets, so a
+// regression in either half surfaces here.
+
+/// Why (#4714): `tctl install core` must resolve to exactly the always-on
+/// substrate `tctl up` boots as STAGE 1, in stable-set (topological) order.
+/// What: Expands the keyword and resolves it the way `run` does; asserts the
+/// resolved crate names and that nothing was reported unknown.
+/// Test: This is the test.
+#[test]
+fn bundle_core_resolves_to_the_two_core_daemons() {
+    let resolved = select_members_transitive(&expand_bundles(&["core".to_owned()]));
+    assert!(
+        resolved.unknown.is_empty(),
+        "core must resolve cleanly, got unknown: {:?}",
+        resolved.unknown
+    );
+    let names: Vec<&str> = resolved
+        .members
+        .iter()
+        .map(|m| m.crate_name.as_str())
+        .collect();
+    assert_eq!(names, ["trusty-search", "trusty-memory"]);
+}
+
+/// Why (#4714): `tctl install agents` must resolve to the members a verified
+/// from-scratch install has to bring up, CLOSED over the runtime-dependency
+/// graph — trusty-review pulls trusty-analyze in, so the closure is strictly
+/// larger than the four `required` members.
+/// What: Asserts the resolved order and that trusty-analyze arrives as a
+/// transitively-added member rather than an explicit one.
+/// Test: This is the test.
+#[test]
+fn bundle_agents_resolves_transitively_in_topological_order() {
+    let resolved = select_members_transitive(&expand_bundles(&["agents".to_owned()]));
+    assert!(
+        resolved.unknown.is_empty(),
+        "agents must resolve cleanly, got unknown: {:?}",
+        resolved.unknown
+    );
+    let names: Vec<&str> = resolved
+        .members
+        .iter()
+        .map(|m| m.crate_name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "trusty-search",
+            "trusty-memory",
+            "trusty-analyze",
+            "trusty-review",
+            "trusty-mpm",
+        ]
+    );
+    assert!(
+        resolved
+            .added
+            .iter()
+            .any(|a| a.crate_name == "trusty-analyze"),
+        "trusty-analyze must be reported as pulled in by trusty-review"
+    );
+}
+
+/// Why (#4714): `--dry-run` with a bundle keyword must preview and exit 0. On
+/// the pre-#4714 code `core` is an unknown member and this returns 3.
+/// What: Calls `run` in `--json --dry-run` mode with each keyword.
+/// Test: This is the test.
+#[test]
+fn run_dry_run_accepts_bundle_keywords() {
+    for keyword in ["core", "agents"] {
+        let code = run(&[keyword.to_owned()], false, true, false, true, false, true);
+        assert_eq!(code, 0, "--dry-run {keyword} must exit 0");
+    }
+}
+
+/// Why (#4714): a typo must still be a clean exit-3 error, and the message must
+/// now name the keywords so the operator can recover from `cores` → `core`.
+/// What: Pins the message text and re-asserts the unchanged exit code.
+/// Test: This is the test.
+#[test]
+fn unknown_members_message_names_bundle_keywords() {
+    let msg = unknown_members_message(&["cores".to_owned()]);
+    assert!(
+        msg.starts_with("unknown member(s): cores"),
+        "the pre-#4714 prefix must be unchanged: {msg}"
+    );
+    for keyword in crate::commands::bundles::BUNDLE_KEYWORDS {
+        assert!(msg.contains(keyword), "message must name {keyword}: {msg}");
+    }
+
+    let code = run(&["cores".to_owned()], true, true, false, false, false, true);
+    assert_eq!(code, 3, "an unknown keyword must still exit 3");
+}

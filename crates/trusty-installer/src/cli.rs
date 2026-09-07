@@ -231,6 +231,13 @@ pub enum Commands {
     /// (for the orchestrator) uv on PATH.
     Install {
         /// Specific member(s) to install; omit for all enabled members.
+        ///
+        /// Two bundle keywords stand in for a group of members (#4714):
+        /// `core` = trusty-memory, trusty-search (the always-on substrate
+        /// `tctl up` boots as STAGE 1); `agents` = trusty-search,
+        /// trusty-memory, trusty-review, trusty-mpm (the agent orchestrator
+        /// and the daemons it needs). Either may be mixed with member names,
+        /// and each expands transitively like any named member.
         members: Vec<String>,
 
         /// Install binaries only — skip the post-install launchd service
