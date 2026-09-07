@@ -657,11 +657,11 @@ monitor' — this doesn't make sense in the workstream context."*
 
 ### 11.1 Amendment: Session-binding cardinality override (2026-07-22)
 
-**Normative:** This spec's domain model defines `session_ids: Vec<SessionId>` as append-only (§2.1 line 81): "Sessions are never removed from the list; only new ones are added." That model permits **many sessions per workstream over time**.
+**Superseded (#4575).** The revision-2 override recorded here — a strict 1:1 session-per-workstream invariant, grandfathering of older multi-session arrays, and `len(session_ids) == 1` for new workstreams — was revoked by [DOC-52](./DOC-52-shared-workstream-definition.md) revision 3, §4.2.
 
-**DOC-52 (Shared Workstream Definition) OVERRIDES this with a stricter 1:1 invariant, effective for new workstreams going forward:** exactly ONE session binds to each workstream; when a workstream closes, its session is terminal; new work after closure creates a NEW workstream (never reopens a closed one).
+The governing invariant is now [DOC-52 §2.1](./DOC-52-shared-workstream-definition.md#SPEC-SHAREDWS-02~draft): "a workstream has many sessions over its lifetime, and at most one active at a time." This spec's original append-only `session_ids: Vec<SessionId>` (§2.1 line 81) is therefore correct as written and needs no migration or grandfathering.
 
-**Schema compatibility:** Persisted workstreams created under the old model may have `session_ids` arrays with >1 entries. These are grandfathered as historical artifacts (read-only; never migrated destructively). New workstreams enforce `len(session_ids) == 1` at all times.
+`pickActiveSessionInWorkstream` (§5.3, `:593`) is retained: selecting the one active session among many is exactly what DOC-52 §2.1 requires.
 
 ---
 
