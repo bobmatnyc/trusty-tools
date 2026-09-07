@@ -14,8 +14,8 @@
 //! `default_manifest_enables_both_mcp`, `default_manifest_carries_current_version`.
 
 use super::schema::{
-    AgentSet, ContentSource, HarnessManifest, InstructionLayers, MANIFEST_VERSION, McpServers,
-    ModelTiers, SkillSet, StyleSelection,
+    AgentSet, ContentSource, DivertConfig, HarnessManifest, InstructionLayers, MANIFEST_VERSION,
+    McpServers, ModelTiers, SkillSet, StyleSelection,
 };
 
 /// Build the compiled-in default harness manifest.
@@ -26,8 +26,11 @@ use super::schema::{
 /// What: returns a manifest that deploys every bundled agent/skill (empty
 /// include = all), enables all instruction layers, selects the professional
 /// `trusty-mpm` output style, injects both `trusty-memory` and `trusty-search`
-/// MCP servers, and leaves model tiers unset (HR-1 deploy-time mapping applies).
-/// Test: `default_manifest_reproduces_bundled_behavior`.
+/// MCP servers, leaves model tiers unset (HR-1 deploy-time mapping applies),
+/// and states `[divert]` off (#6887 — the one section whose absent state is
+/// off rather than on).
+/// Test: `default_manifest_reproduces_bundled_behavior`,
+/// `default_manifest_divert_disabled_by_default`.
 pub fn default_manifest() -> HarnessManifest {
     HarnessManifest {
         version: Some(MANIFEST_VERSION),
@@ -59,8 +62,32 @@ pub fn default_manifest() -> HarnessManifest {
             ..McpServers::default()
         }),
         models: Some(ModelTiers::default()),
+        // #6887: OPT-IN — the floor layer states the feature off explicitly, so
+        // a project that turns it on is the only way it ever runs.
+        divert: Some(DivertConfig {
+            enabled: Some(false),
+            min_lines: Some(DEFAULT_DIVERT_MIN_LINES),
+            worker_model: Some(String::new()),
+            worker_provider: Some(DEFAULT_DIVERT_WORKER_PROVIDER.to_string()),
+        }),
     }
 }
+
+/// Line count at or above which a bulk read is diverted (#6887).
+///
+/// Why: shunt's own default, and the value the #6882 POC measured against.
+/// What: `350` — the floor layer's `[divert] min_lines`, and the fallback the
+/// hook uses when `TRUSTY_DIVERT_MIN_LINES` is absent or unparseable.
+/// Test: `default_manifest_divert_disabled_by_default`, `plan_divert_toggles`.
+pub const DEFAULT_DIVERT_MIN_LINES: u32 = 350;
+
+/// Default `[divert] worker_provider` (#6887).
+///
+/// Why: `auto` runs the registry's credential precedence chain rather than
+/// pinning a provider the operator may have no credentials for.
+/// What: `"auto"`.
+/// Test: `default_manifest_divert_disabled_by_default`, `plan_divert_toggles`.
+pub const DEFAULT_DIVERT_WORKER_PROVIDER: &str = "auto";
 
 /// The default skill set: deploy every bundled skill from the bundled source.
 ///
@@ -79,6 +106,23 @@ fn all_skills() -> SkillSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (#6887): bulk-read diversion changes what the agent may do, so the
+    /// floor layer must state it OFF. A default that inherited the `[mcp]`
+    /// "absent -> on" convention would turn every project's reads into worker
+    /// calls the operator never asked for.
+    /// What: asserts the compiled-in default's `[divert]` carries
+    /// `enabled = Some(false)` and the documented `min_lines` / provider
+    /// defaults.
+    #[test]
+    fn default_manifest_divert_disabled_by_default() {
+        let divert = default_manifest().divert.expect("divert section present");
+        assert_eq!(divert.enabled, Some(false), "divert must be opt-in");
+        assert_eq!(divert.min_lines, Some(DEFAULT_DIVERT_MIN_LINES));
+        assert_eq!(divert.min_lines, Some(350));
+        assert_eq!(divert.worker_model.as_deref(), Some(""));
+        assert_eq!(divert.worker_provider.as_deref(), Some("auto"));
+    }
 
     #[test]
     fn default_manifest_carries_current_version() {

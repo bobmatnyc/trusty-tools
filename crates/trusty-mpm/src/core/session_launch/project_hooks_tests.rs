@@ -18,7 +18,7 @@ use tempfile::TempDir;
 
 #[test]
 fn project_managed_hook_additions_combines_all_three_sources() {
-    let additions = project_managed_hook_additions(true);
+    let additions = project_managed_hook_additions(true, false);
     let hooks = additions["hooks"]
         .as_object()
         .expect("hooks must be an object");
@@ -71,8 +71,8 @@ fn project_managed_hook_additions_combines_all_three_sources() {
 fn project_managed_hook_additions_is_stable_across_calls() {
     // Why: two independent calls must produce byte-identical output so the
     // caller's merge is idempotent across repeated `write_project_hooks` runs.
-    let first = project_managed_hook_additions(true);
-    let second = project_managed_hook_additions(true);
+    let first = project_managed_hook_additions(true, false);
+    let second = project_managed_hook_additions(true, false);
     assert_eq!(first, second);
 }
 
@@ -85,8 +85,8 @@ fn project_managed_hook_additions_is_stable_across_calls() {
 /// events are byte-identical to the enabled build.
 #[test]
 fn project_managed_hook_additions_omits_prompt_context_when_disabled() {
-    let enabled = project_managed_hook_additions(true);
-    let disabled = project_managed_hook_additions(false);
+    let enabled = project_managed_hook_additions(true, false);
+    let disabled = project_managed_hook_additions(false, false);
 
     let off = disabled["hooks"].as_object().expect("hooks is an object");
     assert!(
@@ -125,7 +125,7 @@ fn project_managed_hook_additions_omits_prompt_context_when_disabled() {
 fn project_managed_hook_events_is_a_superset_of_every_variant() {
     let owned = project_managed_hook_events();
     for enabled in [true, false] {
-        for key in project_managed_hook_additions(enabled)["hooks"]
+        for key in project_managed_hook_additions(enabled, false)["hooks"]
             .as_object()
             .unwrap()
             .keys()
@@ -176,7 +176,7 @@ fn write_project_hooks_writes_lifecycle_triad() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path();
 
-    super::super::settings::write_project_hooks(project, true).expect("write succeeds");
+    super::super::settings::write_project_hooks(project, true, false).expect("write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -231,7 +231,7 @@ fn write_project_hooks_preserves_foreign_hooks() {
     )
     .unwrap();
 
-    super::super::settings::write_project_hooks(project, true).expect("write succeeds");
+    super::super::settings::write_project_hooks(project, true, false).expect("write succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
@@ -253,7 +253,7 @@ fn write_project_hooks_preserves_foreign_hooks() {
     );
 
     // Re-running must not duplicate the foreign entry or our own groups.
-    super::super::settings::write_project_hooks(project, true).expect("second write succeeds");
+    super::super::settings::write_project_hooks(project, true, false).expect("second write succeeds");
     let value2: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
             .unwrap();
@@ -288,7 +288,7 @@ fn write_project_hooks_writes_via_atomic_path() {
     let bak_path = claude_dir.join("settings.json.bak");
     let tmp_path = claude_dir.join("settings.json.tmp");
 
-    super::super::settings::write_project_hooks(project, true).expect("first write succeeds");
+    super::super::settings::write_project_hooks(project, true, false).expect("first write succeeds");
     assert!(settings_path.exists(), "settings.json must be created");
     assert!(
         !bak_path.exists(),
@@ -300,7 +300,7 @@ fn write_project_hooks_writes_via_atomic_path() {
     );
     let first_content = std::fs::read_to_string(&settings_path).unwrap();
 
-    super::super::settings::write_project_hooks(project, true).expect("second write succeeds");
+    super::super::settings::write_project_hooks(project, true, false).expect("second write succeeds");
     assert!(
         bak_path.exists(),
         "write_json_atomic must back up the prior file before replacing it"
@@ -333,7 +333,7 @@ fn write_project_hooks_omits_prompt_context_when_disabled() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path();
 
-    super::super::settings::write_project_hooks(project, false).expect("write succeeds");
+    super::super::settings::write_project_hooks(project, false, false).expect("write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -408,7 +408,7 @@ fn write_project_hooks_strips_stale_prompt_context_when_disabled() {
     let project = tmp.path();
     let settings_path = project.join(".claude").join("settings.json");
 
-    super::super::settings::write_project_hooks(project, true).expect("enabled write succeeds");
+    super::super::settings::write_project_hooks(project, true, false).expect("enabled write succeeds");
     let seeded: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
     assert_eq!(
@@ -432,7 +432,7 @@ fn write_project_hooks_strips_stale_prompt_context_when_disabled() {
     )
     .unwrap();
 
-    super::super::settings::write_project_hooks(project, false).expect("disabled write succeeds");
+    super::super::settings::write_project_hooks(project, false, false).expect("disabled write succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -465,10 +465,10 @@ fn write_project_hooks_re_enabling_restores_the_hook() {
     let project = tmp.path();
     let settings_path = project.join(".claude").join("settings.json");
 
-    super::super::settings::write_project_hooks(project, true).expect("write 1");
+    super::super::settings::write_project_hooks(project, true, false).expect("write 1");
     let first = std::fs::read_to_string(&settings_path).unwrap();
-    super::super::settings::write_project_hooks(project, false).expect("write 2");
-    super::super::settings::write_project_hooks(project, true).expect("write 3");
+    super::super::settings::write_project_hooks(project, false, false).expect("write 2");
+    super::super::settings::write_project_hooks(project, true, false).expect("write 3");
     let third = std::fs::read_to_string(&settings_path).unwrap();
 
     assert_eq!(
@@ -497,7 +497,7 @@ fn write_project_hooks_enabled_output_is_unchanged_by_the_toggle() {
     // The pre-#5034 strip domain was the additions' own key set. With the hook
     // enabled the two derivations must be identical, which is what makes the
     // default path byte-identical to before.
-    let mut from_additions: Vec<String> = project_managed_hook_additions(true)["hooks"]
+    let mut from_additions: Vec<String> = project_managed_hook_additions(true, false)["hooks"]
         .as_object()
         .unwrap()
         .keys()
@@ -516,12 +516,176 @@ fn write_project_hooks_enabled_output_is_unchanged_by_the_toggle() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path();
     let settings_path = project.join(".claude").join("settings.json");
-    super::super::settings::write_project_hooks(project, true).expect("write 1");
+    super::super::settings::write_project_hooks(project, true, false).expect("write 1");
     let first = std::fs::read_to_string(&settings_path).unwrap();
-    super::super::settings::write_project_hooks(project, true).expect("write 2");
+    super::super::settings::write_project_hooks(project, true, false).expect("write 2");
     assert_eq!(
         std::fs::read_to_string(&settings_path).unwrap(),
         first,
         "the enabled write must be idempotent"
     );
+}
+
+
+/// Why (#6887): the toggle must add EXACTLY the two `PreToolUse` groups it
+/// promises and touch nothing else. A writer that `insert`ed `PreToolUse`
+/// instead of appending would silently drop the PM guard and the lifecycle
+/// triad — the failure mode this module's doc comment exists to prevent.
+/// What: builds the additions with the toggle on and off, asserts `PreToolUse`
+/// grows by exactly two groups (matcher `Read`, matcher `Bash`, both invoking
+/// `hook --divert-check`), and asserts every OTHER event key is byte-identical
+/// between the two builds.
+#[test]
+fn project_managed_hook_additions_includes_divert_when_enabled() {
+    let off = project_managed_hook_additions(true, false);
+    let on = project_managed_hook_additions(true, true);
+
+    let off_pre = off["hooks"]["PreToolUse"].as_array().expect("array");
+    let on_pre = on["hooks"]["PreToolUse"].as_array().expect("array");
+    assert_eq!(
+        on_pre.len(),
+        off_pre.len() + 2,
+        "the toggle must add exactly two PreToolUse groups"
+    );
+    assert_eq!(
+        &on_pre[..off_pre.len()],
+        &off_pre[..],
+        "the pre-existing PreToolUse groups must be byte-identical and in place"
+    );
+
+    let added: Vec<&serde_json::Value> = on_pre[off_pre.len()..].iter().collect();
+    let matchers: Vec<&str> = added.iter().map(|g| g["matcher"].as_str().unwrap()).collect();
+    assert_eq!(matchers, vec!["Read", "Bash"]);
+    for group in &added {
+        let cmd = group["hooks"][0]["command"].as_str().unwrap();
+        assert!(
+            cmd.ends_with(" hook --divert-check"),
+            "the divert group must invoke the divert-check hook: {cmd}"
+        );
+        assert!(
+            !cmd.contains("KEY") && !cmd.contains("TOKEN") && !cmd.contains("SECRET"),
+            "no credential may appear in the hook command string: {cmd}"
+        );
+    }
+
+    // Every other event key must be untouched by the toggle.
+    let off_obj = off["hooks"].as_object().unwrap();
+    let on_obj = on["hooks"].as_object().unwrap();
+    assert_eq!(off_obj.len(), on_obj.len(), "no new event key may appear");
+    for (event, value) in off_obj {
+        if event == "PreToolUse" {
+            continue;
+        }
+        assert_eq!(
+            on_obj.get(event),
+            Some(value),
+            "{event} must be unchanged by the divert toggle"
+        );
+    }
+}
+
+/// Why (#6887): the feature is OPT-IN, so the default build must carry zero
+/// diversion groups — a toggle that leaked one entry would divert every
+/// project's reads without anyone asking.
+/// What: with the toggle off, no hook command anywhere mentions
+/// `--divert-check`.
+#[test]
+fn project_managed_hook_additions_omits_divert_when_disabled() {
+    let off = project_managed_hook_additions(true, false);
+    let text = off.to_string();
+    assert!(
+        !text.contains("--divert-check"),
+        "a disabled toggle must write no diversion hook: {text}"
+    );
+}
+
+/// Why (#6887, the #2948 duplication lesson): the strip predicate must claim
+/// the divert command, or `write_project_hooks` appends a second copy on every
+/// relaunch and never removes one when the toggle flips back off. Note
+/// `is_mpm_hook_command` does NOT cover it — that predicate requires the
+/// command to end with exactly ` hook`.
+/// What: the predicate accepts the divert command and still rejects a foreign
+/// one.
+#[test]
+fn is_project_managed_hook_command_recognises_divert_check() {
+    assert!(is_project_managed_hook_command("/opt/bin/tm hook --divert-check"));
+    assert!(is_project_managed_hook_command("tm hook --divert-check"));
+    assert!(
+        !crate::core::standalone::hooks::is_mpm_hook_command("/opt/bin/tm hook --divert-check"),
+        "the triad predicate must not claim it; the divert arm is what covers it"
+    );
+    assert!(!is_project_managed_hook_command(
+        "claude-mpm hooks fire PreToolUse --divert"
+    ));
+}
+
+/// Why (#6887): the end-to-end write, and the property N relaunches must hold —
+/// exactly two divert groups, never 2N.
+/// What: writes with the toggle on three times and asserts the file is stable
+/// and carries exactly two `--divert-check` groups.
+#[test]
+fn write_project_hooks_writes_divert_groups_when_enabled() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let settings_path = project.join(".claude").join("settings.json");
+
+    super::super::settings::write_project_hooks(project, true, true).expect("write 1");
+    let first = std::fs::read_to_string(&settings_path).unwrap();
+    super::super::settings::write_project_hooks(project, true, true).expect("write 2");
+    super::super::settings::write_project_hooks(project, true, true).expect("write 3");
+    assert_eq!(
+        std::fs::read_to_string(&settings_path).unwrap(),
+        first,
+        "repeated launches must not duplicate the divert groups"
+    );
+
+    let value: serde_json::Value = serde_json::from_str(&first).unwrap();
+    let pre = value["hooks"]["PreToolUse"].as_array().expect("array");
+    let divert: Vec<&serde_json::Value> = pre
+        .iter()
+        .filter(|g| {
+            g["hooks"][0]["command"]
+                .as_str()
+                .is_some_and(|c| c.ends_with(" hook --divert-check"))
+        })
+        .collect();
+    assert_eq!(divert.len(), 2, "exactly two divert groups: {pre:?}");
+    // The credential-free rule, asserted against what actually lands on disk.
+    assert!(
+        !first.contains("TRUSTY_DIVERT_WORKER_MODEL") && !first.contains("api_key"),
+        "settings.json must carry no divert config and no credential: {first}"
+    );
+}
+
+/// Why (#6887, the #5034 lesson applied to this toggle): flipping `[divert]
+/// enabled` back to false must REMOVE what a prior launch wrote. Deriving the
+/// strip domain from the toggled-down additions would leave the groups firing
+/// forever.
+/// What: writes with the toggle on, then off, and asserts no `--divert-check`
+/// command survives while the PM guard and the lifecycle triad do.
+#[test]
+fn write_project_hooks_strips_stale_divert_when_disabled() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let settings_path = project.join(".claude").join("settings.json");
+
+    super::super::settings::write_project_hooks(project, true, true).expect("enabled write");
+    assert!(
+        std::fs::read_to_string(&settings_path)
+            .unwrap()
+            .contains("--divert-check"),
+        "precondition: the enabled write must land the groups"
+    );
+
+    super::super::settings::write_project_hooks(project, true, false).expect("disabled write");
+    let after = std::fs::read_to_string(&settings_path).unwrap();
+    assert!(
+        !after.contains("--divert-check"),
+        "the disabled write must strip the stale divert groups: {after}"
+    );
+
+    // And it must strip ONLY those: the rest of the enabled-off build survives.
+    let value: serde_json::Value = serde_json::from_str(&after).unwrap();
+    let pre = value["hooks"]["PreToolUse"].as_array().expect("array");
+    assert_eq!(pre.len(), 2, "PM guard + lifecycle triad must remain: {pre:?}");
 }

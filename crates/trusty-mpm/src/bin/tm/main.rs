@@ -450,13 +450,21 @@ async fn main() -> anyhow::Result<()> {
             .await
         }
         Some(Command::Reinstall(args)) => commands::reinstall::run(args).await,
-        Some(Command::Hook { pm_guard }) => {
+        Some(Command::Hook {
+            pm_guard,
+            divert_check,
+        }) => {
             if pm_guard {
                 commands::pm_guard::pm_guard(&url).await
+            // #6887: a separate hook mode, not a pm-guard variant.
+            } else if divert_check {
+                commands::divert_check::divert_check().await
             } else {
                 hook(&client, &url).await
             }
         }
+        // #6887: the cheap worker `--divert-check` steers the agent to.
+        Some(Command::Divert { action }) => commands::divert::run(action, &url).await,
         Some(Command::Memory { action }) => memory(action).await,
         Some(Command::Compress { tool }) => run_compress(&tool).await,
         // #5843: `tm wait` owns its own exit codes (0/75/1/2), so it never

@@ -1136,7 +1136,7 @@ fn write_project_hooks_writes_all_event_types() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    write_project_hooks(project, true).expect("write succeeds");
+    write_project_hooks(project, true, false).expect("write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -1166,7 +1166,7 @@ fn write_project_hooks_uses_canonical_commands() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    write_project_hooks(project, true).expect("write succeeds");
+    write_project_hooks(project, true, false).expect("write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -1200,7 +1200,7 @@ fn write_project_hooks_omits_post_tool_use_and_stop() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    write_project_hooks(project, true).expect("write succeeds");
+    write_project_hooks(project, true, false).expect("write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -1230,7 +1230,7 @@ fn write_project_hooks_registers_pm_guard() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    write_project_hooks(project, true).expect("write succeeds");
+    write_project_hooks(project, true, false).expect("write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -1271,8 +1271,8 @@ fn write_project_hooks_replaces_existing() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    write_project_hooks(project, true).expect("first write succeeds");
-    write_project_hooks(project, true).expect("second write succeeds");
+    write_project_hooks(project, true, false).expect("first write succeeds");
+    write_project_hooks(project, true, false).expect("second write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -1287,7 +1287,7 @@ fn write_project_hooks_replaces_existing() {
         "re-running must not duplicate our own handler groups"
     );
     // Unrelated keys must survive the replace.
-    write_project_hooks(project, true).expect("third write succeeds");
+    write_project_hooks(project, true, false).expect("third write succeeds");
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
     )

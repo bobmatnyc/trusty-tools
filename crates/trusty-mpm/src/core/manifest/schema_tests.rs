@@ -66,6 +66,12 @@ fn manifest_roundtrip() {
             high: None,
             intensive: Some("opus".into()),
         }),
+        divert: Some(DivertConfig {
+            enabled: Some(true),
+            min_lines: Some(350),
+            worker_model: Some("anthropic/claude-haiku".to_string()),
+            worker_provider: Some("anthropic".to_string()),
+        }),
     };
 
     let toml = manifest.to_toml().expect("serialize");
@@ -546,4 +552,66 @@ fn agent_categories_merge_is_whole_section() {
         inherited.agent_categories.unwrap().universal,
         vec!["qa".to_string()]
     );
+}
+
+/// Why (#6887): a project that overrides only `min_lines` must not silently
+/// turn the feature off. Whole-section replacement — the shape `[agents]` and
+/// `[style]` use — would do exactly that, because the higher layer's
+/// `enabled` is `None`.
+/// What: lower sets `enabled = true` + `min_lines = 350`; higher sets only
+/// `min_lines = 500`; asserts the merged section keeps `enabled = Some(true)`
+/// and takes the higher `min_lines`.
+#[test]
+fn divert_config_merge_field_level() {
+    let lower = HarnessManifest {
+        divert: Some(DivertConfig {
+            enabled: Some(true),
+            min_lines: Some(350),
+            worker_model: Some("anthropic/claude-haiku".to_string()),
+            worker_provider: Some("anthropic".to_string()),
+        }),
+        ..HarnessManifest::default()
+    };
+    let higher = HarnessManifest {
+        divert: Some(DivertConfig {
+            min_lines: Some(500),
+            ..DivertConfig::default()
+        }),
+        ..HarnessManifest::default()
+    };
+
+    let divert = lower.merge(higher).divert.expect("divert section present");
+    assert_eq!(
+        divert.enabled,
+        Some(true),
+        "a partial override must not reset the lower layer's `enabled`"
+    );
+    assert_eq!(divert.min_lines, Some(500), "higher wins the field it sets");
+    assert_eq!(
+        divert.worker_model.as_deref(),
+        Some("anthropic/claude-haiku"),
+        "an unmentioned field inherits the lower layer"
+    );
+    assert_eq!(divert.worker_provider.as_deref(), Some("anthropic"));
+}
+
+/// Why (#6887): the section must survive the TOML round-trip the resolver
+/// performs on every layer, or a project's `[divert]` table is silently
+/// dropped.
+/// What: serializes a fully-populated `[divert]` and parses it back.
+#[test]
+fn divert_config_roundtrip() {
+    let manifest = HarnessManifest {
+        version: Some(MANIFEST_VERSION),
+        divert: Some(DivertConfig {
+            enabled: Some(true),
+            min_lines: Some(400),
+            worker_model: Some("bedrock/anthropic.claude-haiku".to_string()),
+            worker_provider: Some("bedrock".to_string()),
+        }),
+        ..HarnessManifest::default()
+    };
+    let toml = manifest.to_toml().expect("serialize");
+    let parsed = HarnessManifest::from_toml(&toml).expect("parse");
+    assert_eq!(parsed.divert, manifest.divert);
 }

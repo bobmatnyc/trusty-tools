@@ -15,6 +15,11 @@
 //! [`resolve_conditional_mcp_toggles`] lives on after the trust derivation it was
 //! written for is gone: neither `runtime::claude_code` nor `bin/tm/commands/launch`
 //! has a `HarnessPlan` in scope, so each re-reads the manifest here.
+//!
+//! #6887 adds a third, non-MCP group to the same builder: the resolved
+//! `[divert]` values (`TRUSTY_DIVERT_*`). They ride here because this is the
+//! one place a spawn's per-project environment is composed, and because they
+//! are subject to the same "resolve the manifest at spawn time" rule.
 //! Test: `mcp_session_env_tests.rs`.
 
 use std::path::Path;
@@ -39,11 +44,30 @@ pub fn resolve_conditional_mcp_toggles(
     fw: &crate::core::paths::FrameworkPaths,
     project_dir: &Path,
 ) -> (bool, bool) {
+    let plan = resolve_plan(fw, project_dir);
+    (plan.inject_trusty_memory, plan.inject_trusty_search)
+}
+
+/// Re-resolve the full [`HarnessPlan`](crate::core::manifest::HarnessPlan) for
+/// `project_dir`.
+///
+/// Why (#6887): [`resolve_conditional_mcp_toggles`] and the divert export both
+/// need plan-derived values, and resolving the manifest twice per spawn would
+/// let the two answers drift if a layer changed between the reads. One
+/// resolution, two readers.
+/// What: the IDENTICAL layering `prepare_session_inner` performs
+/// (`ManifestSources::resolve` + `resolve_manifest` + `HarnessPlan::from_manifest`,
+/// project > user > catalog > default). Reads files; writes nothing.
+/// Test: `resolve_conditional_mcp_toggles_defaults_to_both_on`,
+/// `session_mcp_env_omits_divert_when_disabled`.
+fn resolve_plan(
+    fw: &crate::core::paths::FrameworkPaths,
+    project_dir: &Path,
+) -> crate::core::manifest::HarnessPlan {
     let catalog_root = crate::content::catalog_root_for(&fw.root);
     let sources = crate::core::manifest::ManifestSources::resolve(project_dir, &catalog_root);
     let manifest = crate::core::manifest::resolve_manifest(&sources);
-    let plan = crate::core::manifest::HarnessPlan::from_manifest(&manifest, fw, &catalog_root);
-    (plan.inject_trusty_memory, plan.inject_trusty_search)
+    crate::core::manifest::HarnessPlan::from_manifest(&manifest, fw, &catalog_root)
 }
 
 /// Build the per-project MCP environment assignments a session's `claude`
@@ -87,7 +111,8 @@ pub fn session_mcp_env_with(
     project_dir: &Path,
     git_remote: Option<&str>,
 ) -> Vec<(String, String)> {
-    let (memory_enabled, search_enabled) = resolve_conditional_mcp_toggles(fw, project_dir);
+    let plan = resolve_plan(fw, project_dir);
+    let (memory_enabled, search_enabled) = (plan.inject_trusty_memory, plan.inject_trusty_search);
     let mut env = Vec::new();
 
     if memory_enabled {
@@ -108,11 +133,62 @@ pub fn session_mcp_env_with(
         tracing::debug!("manifest disables trusty-search: no index pin exported");
     }
 
+    // #6887: the resolved (non-secret) divert config the `tm hook
+    // --divert-check` and `tm divert bulk-read` subprocesses read. Deliberately
+    // NOT written into `.claude/settings.json` or baked into the hook command
+    // string — see `session_launch::divert_hooks`.
+    if plan.divert_enabled {
+        env.push((
+            DIVERT_MIN_LINES_ENV.to_string(),
+            plan.divert_min_lines.to_string(),
+        ));
+        if let Some(model) = plan.divert_worker_model.as_ref() {
+            env.push((DIVERT_WORKER_MODEL_ENV.to_string(), model.clone()));
+        }
+        env.push((
+            DIVERT_WORKER_PROVIDER_ENV.to_string(),
+            plan.divert_worker_provider.clone(),
+        ));
+    } else {
+        tracing::debug!("manifest disables divert: no bulk-read diversion config exported");
+    }
+
     env
 }
 
 /// The variable `trusty-search`'s global `--index` flag reads (#5394).
 pub const SEARCH_INDEX_ENV: &str = "TRUSTY_INDEX";
+
+/// Line threshold the diversion hook compares a file against (#6887).
+///
+/// Why: `tm hook --divert-check` runs as a bare subprocess with no project
+/// context beyond its stdin payload, so the resolved manifest value has to
+/// reach it through the environment.
+/// What: `TRUSTY_DIVERT_MIN_LINES`, a decimal `u32`. Absent or unparseable →
+/// the hook falls back to
+/// [`DEFAULT_DIVERT_MIN_LINES`](crate::core::manifest::DEFAULT_DIVERT_MIN_LINES).
+/// Test: `session_mcp_env_exports_divert_when_enabled`.
+pub const DIVERT_MIN_LINES_ENV: &str = "TRUSTY_DIVERT_MIN_LINES";
+
+/// Worker model id for `tm divert bulk-read` (#6887).
+///
+/// Why: same reason as [`DIVERT_MIN_LINES_ENV`]. This is a MODEL ID, never a
+/// credential — the worker's credentials are resolved by
+/// `ProviderRegistry::from_env` inside the `tm` subprocess.
+/// What: `TRUSTY_DIVERT_WORKER_MODEL`, optionally provider-prefixed. Omitted
+/// entirely when the manifest leaves `worker_model` empty, so the provider's
+/// own cheap-tier default applies.
+/// Test: `session_mcp_env_exports_divert_when_enabled`.
+pub const DIVERT_WORKER_MODEL_ENV: &str = "TRUSTY_DIVERT_WORKER_MODEL";
+
+/// Worker provider selector for `tm divert bulk-read` (#6887).
+///
+/// Why: same reason as [`DIVERT_MIN_LINES_ENV`].
+/// What: `TRUSTY_DIVERT_WORKER_PROVIDER`, a value
+/// [`ProviderKind::parse`](crate::core::sm::providers::ProviderKind::parse)
+/// accepts (`auto` | `anthropic` | `bedrock` | `openrouter`).
+/// Test: `session_mcp_env_exports_divert_when_enabled`.
+pub const DIVERT_WORKER_PROVIDER_ENV: &str = "TRUSTY_DIVERT_WORKER_PROVIDER";
 
 #[cfg(test)]
 #[path = "mcp_session_env_tests.rs"]
