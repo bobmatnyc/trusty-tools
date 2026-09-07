@@ -337,6 +337,13 @@ fn maps_every_endpoint_the_spa_calls() {
         mapped(&Method::GET, "api/v1/palaces", None),
         unary(METHOD_PALACES_LIST, json!({}))
     );
+    // #6155: the fast roster. `counts=false` has to arrive as a BOOLEAN — the
+    // string `"false"` is `invalid_params` at the daemon, and the SPA would
+    // fall back to a spinner it never leaves.
+    assert_eq!(
+        mapped(&Method::GET, "api/v1/palaces", Some("counts=false")),
+        unary(METHOD_PALACES_LIST, json!({ "counts": false }))
+    );
     assert_eq!(
         mapped(&Method::GET, "api/v1/palaces/izzie", None),
         unary(METHOD_PALACE_GET, json!({ "palace_id": "izzie" }))

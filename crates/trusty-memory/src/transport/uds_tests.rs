@@ -632,6 +632,112 @@ async fn rpc_palaces_list_reports_an_unreadable_palace_rather_than_dropping_it()
     assert!(row["error"].is_null());
 }
 
+/// Why (#6155): the counting sweep opens every palace, which on a 93-palace
+/// install took 8.5-11 s and blew the console's 30 s bridge budget often enough
+/// that `/tools/memory` sat on "Loading palaces…". `counts: false` has to be a
+/// genuinely different code path — a version that still opened each palace and
+/// merely discarded the numbers would read identically on the wire and fix
+/// nothing.
+/// What: the instrument is a palace that CANNOT be opened. It is created off
+/// `state.registry` so no handle is resident, then a directory is put where its
+/// `identity.txt` belongs, exactly as
+/// `rpc_palaces_list_reports_an_unreadable_palace_rather_than_dropping_it` does.
+/// Under `counts: true` that palace reports an error; under `counts: false` it
+/// must report none, because an open that never happens cannot fail. The
+/// registry is empty afterwards, which is the same claim from the other side.
+/// Test: itself. It fails on a `counts: false` that still opens.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_palaces_list_without_counts_does_not_open_a_cold_palace() {
+    let state = test_state();
+    let cold = seed_palace_off_registry(&state, "roster-cold");
+    let dir = state.data_root.join(&cold);
+    std::fs::create_dir_all(dir.join("identity.txt")).expect("wedge the palace identity");
+
+    let observed = state.clone();
+    let daemon = Daemon::start(state).await;
+
+    let fast = daemon
+        .ok("memory.palaces_list", json!({"counts": false}))
+        .await;
+    let row = fast["palaces"]
+        .as_array()
+        .expect("palaces_list answers a palaces array")
+        .iter()
+        .find(|r| r["id"] == cold.as_str())
+        .expect("the cold palace is listed")
+        .clone();
+    assert!(
+        row["error"].is_null(),
+        "an open that never happened cannot fail — this row opened the palace: {row}"
+    );
+    assert_eq!(
+        row["palace"]["name"], "roster-cold",
+        "the fast roster still has to carry names: {row}"
+    );
+    assert_eq!(
+        row["palace"]["cached"],
+        json!(false),
+        "a peeked row must say its counts are unknown (#4637): {row}"
+    );
+    assert!(
+        observed.registry.list().is_empty(),
+        "the fast path must leave the registry cold: {:?}",
+        observed.registry.list()
+    );
+
+    // The same palace under the default: now it IS opened, and the open fails.
+    let counted = daemon.ok("memory.palaces_list", json!({})).await;
+    let row = counted["palaces"]
+        .as_array()
+        .expect("palaces_list answers a palaces array")
+        .iter()
+        .find(|r| r["id"] == cold.as_str())
+        .expect("the cold palace is listed")
+        .clone();
+    assert!(
+        row["error"].is_string(),
+        "the counting path opens, so the wedged palace must report why: {row}"
+    );
+    daemon.shutdown().await;
+}
+
+/// Why (#6155): `trusty_common`'s monitor and trusty-mpm's health TUI both send
+/// `{}` and need measured counts. A `counts` field that defaulted to `false`
+/// would turn every one of their rows into an unexplained `—` with no error and
+/// no wire change to point at.
+/// What: `{}` and `null` — the two shapes the pre-#6155 `NoParams` accepted —
+/// must both still open the palace and report its real drawer count.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_palaces_list_defaults_to_counting() {
+    let state = test_state();
+    let id = seed_palace(&state, "roster-default");
+    let daemon = Daemon::start(state).await;
+    daemon
+        .ok(
+            "memory.drawer_create",
+            json!({"palace_id": id, "content": "one drawer", "force": true}),
+        )
+        .await;
+
+    for params in [json!({}), Value::Null] {
+        let result = daemon.ok("memory.palaces_list", params.clone()).await;
+        let row = result["palaces"]
+            .as_array()
+            .expect("palaces_list answers a palaces array")
+            .iter()
+            .find(|r| r["id"] == id.as_str())
+            .expect("the palace is listed")
+            .clone();
+        assert_eq!(
+            row["palace"]["drawer_count"], 1,
+            "params {params} must still count: {row}"
+        );
+        assert_eq!(row["palace"]["cached"], json!(true), "{row}");
+    }
+    daemon.shutdown().await;
+}
+
 /// Why: the clamp is what stops a caller pulling a whole graph by asking for
 /// one page, and it used to live in the axum extractor layer that is gone. A
 /// clamp that did not survive the move would be invisible until a palace was

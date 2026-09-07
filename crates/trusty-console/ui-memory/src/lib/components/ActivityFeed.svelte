@@ -234,10 +234,12 @@
    * the feed needs a fallback id→name table so the description stays
    * readable.
    * What: Fetches `/api/v1/palaces` once at mount, builds a id→name map.
+   * #6155: `counts: false` — this is a name table, and the counted form opens
+   * every palace on disk to build numbers nothing here reads.
    */
   async function loadPalaceNames() {
     try {
-      const list = await api.listPalaces();
+      const list = await api.listPalaces({ counts: false });
       const map = {};
       for (const p of list || []) {
         if (p?.id) map[p.id] = p.name || p.id;

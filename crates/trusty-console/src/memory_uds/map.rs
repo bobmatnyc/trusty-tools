@@ -120,7 +120,12 @@ pub(crate) fn map_request(
         (&Method::POST, ["api", "v1", "admin", "stop"]) => unary(METHOD_ADMIN_STOP, json!({})),
 
         // ---- palaces ---------------------------------------------------------
-        (&Method::GET, ["api", "v1", "palaces"]) => unary(METHOD_PALACES_LIST, json!({})),
+        //
+        // #6155: the query goes through so `?counts=false` reaches the daemon.
+        // `query_json` coerces the literal `false`, and `memory.palaces_list`
+        // defaults `counts` to `true`, so a bare `/api/v1/palaces` still sends
+        // `{}` and still counts.
+        (&Method::GET, ["api", "v1", "palaces"]) => unary(METHOD_PALACES_LIST, q),
         (&Method::GET, ["api", "v1", "palaces", id]) => {
             unary(METHOD_PALACE_GET, json!({ "palace_id": id }))
         }

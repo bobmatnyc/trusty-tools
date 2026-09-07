@@ -15,11 +15,64 @@
 
 import { apiUrl } from './base.js';
 
+/**
+ * Why (#6155): a hung request has no deadline of its own, so a view that awaits
+ * one renders its spinner until the tab is closed. The console's bridge gives up
+ * on the daemon after 30 s (`CALL_TIMEOUT`), so anything still outstanding well
+ * past that is not going to answer — a client budget slightly beyond it turns
+ * "forever" into an error the view can render and offer a Retry for.
+ * What: the ceiling in milliseconds for one `request`.
+ * Test: `src/lib/api.test.js` — `gives up on a request that never answers`.
+ */
+const REQUEST_TIMEOUT_MS = 35_000;
+
+/**
+ * Why (#6155): every view rendered a failure as the thrown message alone, so a
+ * `502` and a `404` were one undifferentiated string and no caller could offer
+ * the right recovery. The status is what tells a spinner apart from a gone
+ * palace, and it belongs on the error rather than parsed back out of its text.
+ * What: an `Error` carrying `status` (the HTTP status, or `0` when the request
+ * never got one) and `statusText`.
+ * Test: `src/lib/api.test.js`.
+ */
+export class ApiError extends Error {
+  /**
+   * @param {string} message Human-readable failure text.
+   * @param {number} status HTTP status, or `0` for a transport failure.
+   * @param {string} statusText The status' reason phrase, or a short label.
+   */
+  constructor(message, status, statusText) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.statusText = statusText;
+  }
+}
+
 async function request(path, opts = {}) {
-  const res = await fetch(apiUrl(path), {
-    headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
-    ...opts
-  });
+  // `AbortSignal.timeout` is ES2023 and the bundle targets es2022 browsers, so
+  // fall back to a manual controller where it is missing.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(apiUrl(path), {
+      headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+      signal: controller.signal,
+      ...opts
+    });
+  } catch (e) {
+    const timedOut = e?.name === 'AbortError';
+    throw new ApiError(
+      timedOut
+        ? `timed out after ${REQUEST_TIMEOUT_MS / 1000}s: ${path}`
+        : `could not reach the console: ${e?.message || String(e)}`,
+      0,
+      timedOut ? 'Timeout' : 'Network error'
+    );
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     let detail = '';
     try {
@@ -27,7 +80,11 @@ async function request(path, opts = {}) {
     } catch {
       /* ignore */
     }
-    throw new Error(`${res.status} ${res.statusText}: ${detail}`);
+    throw new ApiError(
+      `${res.status} ${res.statusText}: ${detail}`,
+      res.status,
+      res.statusText
+    );
   }
   if (res.status === 204) return null;
   const ct = res.headers.get('content-type') || '';
@@ -82,12 +139,25 @@ export const api = {
   config: () => request('/api/v1/config'),
 
   /**
-   * List all memory palaces with their metadata + counts, flat.
+   * List all memory palaces, flat.
+   *
+   * Why `counts` (#6155): counting opens every palace. On a 93-palace install
+   * that ran 8.5-11 s and repeatedly blew the console bridge's 30 s budget, so
+   * the roster arrived as a `502` and this view showed a spinner that never
+   * ended. `counts: false` maps onto `GET /api/v1/palaces?counts=false`, which
+   * the daemon answers from `PalaceRegistry::peek` — ids, names and `cached`
+   * flags, no cold opens. Those rows report `cached: false`, which
+   * `countLabel` in `Palaces.svelte` already renders as `—` (unknown), and
+   * `getPalace(id)` fetches one palace's real counts when the operator asks for
+   * that palace specifically.
+   *
    * See `unwrapPalaceList` above for why the daemon's wrapper is unwrapped here.
+   * @param {{counts?: boolean}} [opts] `counts: false` for the names-only form.
    */
   // #6155: `memory.palaces_list` answers `{palaces: [{id, palace, error}]}`;
   // every view iterates palace objects.
-  listPalaces: () => request('/api/v1/palaces').then(unwrapPalaceList),
+  listPalaces: ({ counts = true } = {}) =>
+    request(`/api/v1/palaces${counts ? '' : '?counts=false'}`).then(unwrapPalaceList),
 
   /** Single palace detail by id. */
   getPalace: (id) => request(`/api/v1/palaces/${encodeURIComponent(id)}`),

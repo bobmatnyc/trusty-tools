@@ -28,20 +28,43 @@
   let offset = $state(0);
   let loading = $state(false);
   let error = $state(null);
+  // #6155: the palace roster has its own load state — an empty dropdown must
+  // not be the only account of a failed or still-running fetch.
+  let palacesLoading = $state(true);
+  let palacesError = $state(null);
+  let palacesErrorStatus = $state(0);
 
   // Subject panel filter + sort state.
   let subjectFilter = $state('');
   let subjectSort = $state('name'); // 'name' | 'count'
 
+  /**
+   * Why (#6155): the selector needs NAMES. It was asking for the counted
+   * roster, which opens every palace — 8.5-11 s on a 93-palace install, past
+   * the console bridge's 30 s budget often enough that the dropdown stayed on
+   * `(no palaces)` with nothing saying why. `counts: false` is peek-only, and
+   * this view reads no count off these rows anyway.
+   * What: loads the fast roster into the selector, tracking its own loading and
+   * error state so a failure renders as a named status with a Retry rather than
+   * an empty dropdown.
+   * Test: `src/lib/api.test.js` covers the fast form and its unwrap.
+   */
   async function refreshPalaces() {
+    palacesLoading = true;
+    palacesError = null;
+    palacesErrorStatus = 0;
     try {
-      palaces = await api.listPalaces();
+      palaces = await api.listPalaces({ counts: false });
       if (!palaceId && palaces.length > 0) {
         palaceId = palaces[0].id;
         await onPalaceChange();
       }
     } catch (e) {
-      error = e.message || String(e);
+      palacesError = e.message || String(e);
+      palacesErrorStatus = e.status ?? 0;
+      palaces = [];
+    } finally {
+      palacesLoading = false;
     }
   }
 
@@ -193,15 +216,28 @@
   <div class="card-body controls">
     <label class="ctl">
       <span class="lbl">Palace</span>
-      <select bind:value={palaceId} onchange={onPalaceChange}>
+      <select bind:value={palaceId} onchange={onPalaceChange} disabled={palacesLoading}>
+        <!-- #6155: an empty dropdown used to be the only account of both a
+             pending load and a failed one. -->
         {#if palaces.length === 0}
-          <option value="">(no palaces)</option>
+          <option value="">
+            {palacesLoading
+              ? '(loading…)'
+              : palacesError
+                ? '(unavailable)'
+                : '(no palaces)'}
+          </option>
         {/if}
         {#each palaces as p}
           <option value={p.id}>{p.name} ({p.id})</option>
         {/each}
       </select>
     </label>
+    {#if palacesError}
+      <button class="btn" onclick={refreshPalaces} disabled={palacesLoading}>
+        {palacesLoading ? 'Retrying…' : 'Retry palaces'}
+      </button>
+    {/if}
     <button type="button" class="btn" class:active={mode === 'all'} onclick={showAll}>
       All triples
     </button>
@@ -212,6 +248,16 @@
     {/if}
   </div>
 </div>
+
+<!-- #6155: the roster's own failure, named by status and separately retryable. -->
+{#if palacesError}
+  <div class="card mt-3" style="border-color: var(--trusty-danger, #ef4444)">
+    <div class="card-header" style="color: var(--trusty-danger, #ef4444)">
+      Could not load palaces{palacesErrorStatus ? ` — HTTP ${palacesErrorStatus}` : ''}
+    </div>
+    <div class="card-body">{palacesError}</div>
+  </div>
+{/if}
 
 {#if error}
   <div class="card mt-3" style="border-color: var(--trusty-danger, #ef4444)">

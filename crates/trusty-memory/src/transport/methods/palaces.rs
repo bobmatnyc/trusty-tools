@@ -11,7 +11,9 @@
 //! tool, answers bare ids; `GET /palaces` answered rows but with `peek`-based
 //! placeholder zeros for any palace not already resident (#4640). Neither is
 //! what a roster with counts needs, which is why the monitor was fanning out one
-//! [`get_palace`] per id — see [`palaces_list`] and [`PalaceListRow`].
+//! [`get_palace`] per id — see [`palaces_list`] and [`PalaceListRow`]. #6155
+//! adds [`PalacesListParams`]`::counts`, because a caller that wants only NAMES
+//! should not pay for the opens: see that type.
 //!
 //! What: each handler delegates to `MemoryService`, which is where the
 //! behaviour lived all along; the axum extractors become one params struct.
@@ -101,7 +103,56 @@ pub struct PalaceListRow {
     pub error: Option<String>,
 }
 
-/// `memory.palaces_list` — one row per palace, with real counts (#6286).
+/// Params for [`palaces_list`] — whether the roster is worth its counts.
+///
+/// Why (#6155): counting is the whole cost of this method. On the operator's
+/// 93-palace install one call took 8.5-11 s because every palace is opened, and
+/// the console's 30 s bridge budget was exceeded often enough that
+/// `/tools/memory` sat on "Loading palaces…" and the KG palace selector stayed
+/// empty. A roster of NAMES needs none of that work, and `list_palaces` has
+/// answered it from `PalaceRegistry::peek` — zero disk I/O — since #4637.
+///
+/// What: `counts` defaults to `true`, so `{}` and `null` both keep the #6286
+/// behaviour every existing caller relies on (`trusty_common`'s monitor and
+/// trusty-mpm's health TUI both send `{}` and want measurements). `null` is
+/// accepted because the method took [`NoParams`] before this field existed.
+/// Test: `rpc_palaces_list_without_counts_does_not_open_a_cold_palace`,
+/// `rpc_palaces_list_defaults_to_counting`.
+#[derive(Debug, Clone, Copy)]
+pub struct PalacesListParams {
+    /// Open every palace and report measured counts. `false` answers ids,
+    /// names and `cached` flags only.
+    pub counts: bool,
+}
+
+impl Default for PalacesListParams {
+    fn default() -> Self {
+        Self { counts: true }
+    }
+}
+
+impl<'de> Deserialize<'de> for PalacesListParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// `true` unless the caller says otherwise.
+        fn counts_default() -> bool {
+            true
+        }
+        /// The wire shape, with `counts` omissible.
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(default = "counts_default")]
+            counts: bool,
+        }
+        Ok(Option::<Wire>::deserialize(deserializer)?
+            .map(|w| Self { counts: w.counts })
+            .unwrap_or_default())
+    }
+}
+
+/// `memory.palaces_list` — one row per palace, counted or named (#6286, #6155).
 ///
 /// Why: this is the contract the retired `GET /api/v1/palaces` carried, with
 /// the counts it could not. That route used `PalaceRegistry::peek` since #4640,
@@ -110,34 +161,58 @@ pub struct PalaceListRow {
 /// `memory.palace_get` per id instead, and why the panel could disagree with
 /// itself about how many palaces there are.
 ///
-/// What: delegates to `MemoryService::list_palaces_with_counts`, which opens
-/// each palace and keeps per-palace failures. See that method for why opening
-/// every palace is the same cost as the fan-out it replaces, not a new one.
-/// Answers `{"palaces": [PalaceListRow, …]}` — an object rather than a bare
-/// array so a later addition (a total, a truncation flag) is not a breaking
-/// shape change.
+/// What: with `counts: true` (the default) it delegates to
+/// `MemoryService::list_palaces_with_counts`, which opens each palace and keeps
+/// per-palace failures. See that method for why opening every palace is the
+/// same cost as the fan-out it replaces, not a new one. With `counts: false`
+/// (#6155) it delegates to `MemoryService::list_palaces`, which peeks: a palace
+/// that is not already resident is never opened, so the call is bounded by the
+/// registry walk rather than by cold disk I/O. Those rows carry `cached: false`
+/// and zeroed counts, which #4637 defines as UNKNOWN rather than empty; a
+/// caller that wants one palace's real counts asks `memory.palace_get` for it.
+/// Answers `{"palaces": [PalaceListRow, …]}` either way — an object rather than
+/// a bare array so a later addition (a total, a truncation flag) is not a
+/// breaking shape change.
 ///
 /// Test: `rpc_palaces_list_reports_counts_per_palace`,
-/// `rpc_palaces_list_reports_an_unreadable_palace_rather_than_dropping_it`.
-pub async fn palaces_list(state: &AppState, _params: NoParams) -> Result<Value, ApiError> {
-    let rows = crate::service::MemoryService::new(state.clone())
-        .list_palaces_with_counts()
-        .await?;
-    let rows: Vec<PalaceListRow> = rows
-        .into_iter()
-        .map(|(id, result)| match result {
-            Ok(info) => PalaceListRow {
-                id,
+/// `rpc_palaces_list_reports_an_unreadable_palace_rather_than_dropping_it`,
+/// `rpc_palaces_list_without_counts_does_not_open_a_cold_palace`,
+/// `rpc_palaces_list_defaults_to_counting`.
+pub async fn palaces_list(state: &AppState, params: PalacesListParams) -> Result<Value, ApiError> {
+    let service = crate::service::MemoryService::new(state.clone());
+    let rows: Vec<PalaceListRow> = if params.counts {
+        service
+            .list_palaces_with_counts()
+            .await?
+            .into_iter()
+            .map(|(id, result)| match result {
+                Ok(info) => PalaceListRow {
+                    id,
+                    palace: Some(info),
+                    error: None,
+                },
+                Err(error) => PalaceListRow {
+                    id,
+                    palace: None,
+                    error: Some(error),
+                },
+            })
+            .collect()
+    } else {
+        // #6155: `list_palaces` is peek-only (#4637) — a palace that is not
+        // already resident is never opened, so this cannot fail per palace and
+        // no row carries an `error`.
+        service
+            .list_palaces()
+            .await?
+            .into_iter()
+            .map(|info| PalaceListRow {
+                id: info.id.clone(),
                 palace: Some(info),
                 error: None,
-            },
-            Err(error) => PalaceListRow {
-                id,
-                palace: None,
-                error: Some(error),
-            },
-        })
-        .collect();
+            })
+            .collect()
+    };
     to_value(json!({ "palaces": rows }))
 }
 

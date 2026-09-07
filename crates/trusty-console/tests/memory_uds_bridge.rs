@@ -164,6 +164,51 @@ async fn a_path_segment_reaches_the_daemon_as_a_params_field() {
     assert_eq!(parsed["palace_seen"], json!("izzie"));
 }
 
+/// Why (#6155): `memory.palaces_list` opens every palace to count it, which on
+/// a 93-palace install ran 8.5-11 s and repeatedly exceeded the bridge's 30 s
+/// budget — the Palaces view sat on "Loading palaces…" and the KG palace
+/// selector stayed empty. `?counts=false` is how the SPA asks for names only,
+/// so the row that carries it is the whole fix on this side. The bare path must
+/// stay `{}`, because trusty-common's monitor and trusty-mpm's health TUI both
+/// send that and want measurements.
+/// What: drives both forms through the real router and reads back the `params`
+/// the stub daemon saw.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_palace_roster_can_ask_for_names_without_counts() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), |request| {
+        vec![result_frame(json!({
+            "method_seen": request["method"].clone(),
+            "counts_seen": request["params"]["counts"].clone(),
+        }))]
+    });
+
+    let (status, _, body) = through_router(
+        socket.clone(),
+        "GET",
+        "/api/memory/api/v1/palaces?counts=false",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(parsed["method_seen"], json!("memory.palaces_list"));
+    assert_eq!(
+        parsed["counts_seen"],
+        json!(false),
+        "a `\"false\"` string is `invalid_params` at the daemon: {body}"
+    );
+
+    let (status, _, body) = through_router(socket, "GET", "/api/memory/api/v1/palaces").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    assert!(
+        parsed["counts_seen"].is_null(),
+        "the bare path must send no `counts`, so the daemon's `true` default \
+         keeps the monitor's rows counted: {body}"
+    );
+}
+
 /// Why: a query string is text while the RPC params are typed. A `"200"` string
 /// where `limit: usize` is expected answers `invalid_params`, and the KG
 /// explorer's subject list renders empty against a populated palace.

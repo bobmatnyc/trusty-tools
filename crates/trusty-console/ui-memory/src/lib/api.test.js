@@ -14,7 +14,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { api, unwrapPalaceList } from './api.js';
+import { ApiError, api, unwrapPalaceList } from './api.js';
 
 /** A palace row as `memory.palaces_list` serialises it. */
 function row(id, palace, error = null) {
@@ -104,5 +104,101 @@ describe('api.listPalaces — the daemon wrapper (issue #6155)', () => {
     expect(unwrapPalaceList(null)).toEqual([]);
     expect(unwrapPalaceList({})).toEqual([]);
     expect(unwrapPalaceList({ palaces: [null, 'nonsense'] })).toEqual([]);
+  });
+});
+
+// The fast roster and the failure surface (issue #6155).
+//
+// Why: `memory.palaces_list` opens every palace to count it. On the operator's
+// 93-palace install that ran 8.5-11 s and repeatedly exceeded the console
+// bridge's 30 s budget, so `/tools/memory` sat on "Loading palaces…" and the KG
+// palace selector stayed empty with nothing said. Two things had to change: the
+// views ask for names only, and a failure arrives carrying its status so a view
+// can render it and offer a Retry.
+describe('api.listPalaces — the fast roster (issue #6155)', () => {
+  it('asks for names only, and unwraps the peeked rows', async () => {
+    const calls = stubFetch({
+      palaces: [
+        row('trusty-tools', palace('trusty-tools', { cached: false, drawer_count: 0 })),
+        row('izzie', palace('izzie', { cached: false, drawer_count: 0 }))
+      ]
+    });
+
+    const palaces = await api.listPalaces({ counts: false });
+
+    expect(calls[0]).toContain('/api/v1/palaces?counts=false');
+    // Names are what the list and the KG selector render.
+    expect(palaces.map((p) => p.name)).toEqual(['trusty-tools', 'izzie']);
+    // `cached: false` is `countLabel`'s "unknown" — a `—` badge, not a `0`.
+    expect(palaces.every((p) => p.cached === false)).toBe(true);
+  });
+
+  it('asks for counts by default, so no other caller changes', async () => {
+    const calls = stubFetch({ palaces: [row('izzie', palace('izzie'))] });
+
+    await api.listPalaces();
+
+    expect(calls[0]).not.toContain('counts=');
+  });
+
+  it('throws an ApiError carrying the status a view names and retries on', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: false,
+      status: 502,
+      statusText: 'Bad Gateway',
+      headers: { get: () => 'application/json' },
+      text: async () => '{"error":"the daemon did not answer in 30s"}'
+    }));
+
+    const failure = await api.listPalaces({ counts: false }).then(
+      () => null,
+      (e) => e
+    );
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure.status).toBe(502);
+    expect(failure.message).toContain('502 Bad Gateway');
+  });
+
+  it('reports a transport failure as status 0 rather than a bare rejection', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new TypeError('Failed to fetch');
+    });
+
+    const failure = await api.listPalaces().then(
+      () => null,
+      (e) => e
+    );
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure.status).toBe(0);
+    expect(failure.statusText).toBe('Network error');
+  });
+
+  it('gives up on a request that never answers, instead of spinning', async () => {
+    // The real budget is 35 s; the point is that the abort signal is wired to
+    // the fetch at all, so aborting it produces the ApiError a view renders.
+    vi.stubGlobal('fetch', async (_url, opts) => {
+      const signal = opts?.signal;
+      expect(signal).toBeDefined();
+      return await new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          const err = new Error('aborted');
+          err.name = 'AbortError';
+          reject(err);
+        });
+        // Nothing ever resolves this — exactly the hung request.
+        queueMicrotask(() => signal.dispatchEvent(new Event('abort')));
+      });
+    });
+
+    const failure = await api.listPalaces().then(
+      () => null,
+      (e) => e
+    );
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure.status).toBe(0);
+    expect(failure.statusText).toBe('Timeout');
   });
 });
