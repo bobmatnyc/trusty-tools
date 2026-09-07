@@ -1,0 +1,4 @@
+Added
+
+- `inference::pricing` now prices the Claude 5 Fable/Mythos tier: any slug containing `claude-fable` or `claude-mythos` (so `claude-fable-5`, `claude-fable-5-1` and `claude-mythos-5-1`, with or without a routing prefix) returns $10.00 input / $50.00 output and $0.25 cache-read per million tokens. That tier names none of `opus`/`sonnet`/`haiku`, so before this it fell through every Claude arm and returned `None` — and a `None` is not cosmetic downstream: trusty-mpm's divert savings ledger declines to write a row for a model it cannot price, so a session running on `claude-fable-5-1` recorded no savings at all (#6972).
+- The Fable/Mythos arm is matched before opus/sonnet/haiku, and no existing rate moved. `claude-opus-5` and `claude-sonnet-5` already priced through the bare `claude-opus` / `claude-sonnet` substrings and still resolve to the same figures they did; `claude_5_opus_and_sonnet_keep_their_existing_rates` pins that (#6972).
