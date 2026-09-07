@@ -562,7 +562,13 @@ fn classify_tool_routes_known_tool_families() {
     assert_eq!(classify_tool("cargo clippy"), Some(ToolFilter::CargoCheck));
     assert_eq!(classify_tool("git diff"), Some(ToolFilter::GitDiff));
     assert_eq!(classify_tool("git log"), Some(ToolFilter::GitLog));
-    assert_eq!(classify_tool("cat file.rs"), Some(ToolFilter::FileRead));
+    // #6986: `cat file.rs` now short-circuits to `None` — a source read is a
+    // passthrough. The FileRead branch still routes for a read verb applied
+    // to something that is not source, which is what this line now pins.
+    assert_eq!(
+        classify_tool("cat /tmp/gate.txt"),
+        Some(ToolFilter::FileRead)
+    );
     assert_eq!(classify_tool("grep -n foo"), Some(ToolFilter::Grep));
     assert_eq!(classify_tool("rg foo"), Some(ToolFilter::Grep));
     assert_eq!(classify_tool("find ."), Some(ToolFilter::Grep));
@@ -645,4 +651,130 @@ fn uncovered_tool_output_passes_through_unchanged() {
         assert!(!has_filter_for(name));
         assert_eq!(compress_tool_output(name, &input), input, "{name}");
     }
+}
+
+// ── Source-file reads pass through (#6986) ─────────────────────────────
+
+/// A `.rs` file with doc comments and `#[test]` functions, `lines` lines long.
+fn rust_source_fixture(lines: usize) -> String {
+    let mut src = String::from("//! Module docs the agent needs to read.\n\n");
+    for i in 0..lines {
+        src.push_str(&format!("/// Why: item {i} exists for reason {i}.\n"));
+        src.push_str(&format!(
+            "#[test]\nfn checks_case_{i}() {{ assert!(true); }}\n\n"
+        ));
+    }
+    src
+}
+
+#[test]
+fn cat_of_a_rust_test_file_survives_compression_byte_for_byte() {
+    // The exact shape from #6986: `tm hook` derives the tool name from the
+    // command's first two tokens, so the PATH reached the substring dispatch
+    // and `tests.rs` matched the `test` branch. `filter_test_runner` found no
+    // `test result:` summary and returned an empty string —
+    // `bytes_before=6037 bytes_after=0 pct_reduction=100.0`.
+    let src = rust_source_fixture(40);
+    let tool = "cat crates/trusty-agents/src/ticketing/gh_cli/tests.rs";
+    assert!(src.len() > SIZE_GATE_BYTES);
+    let out = compress_tool_output(tool, &src);
+    assert!(!out.is_empty(), "compressor emptied a source read");
+    assert_eq!(out, src, "source read must round-trip byte-for-byte");
+}
+
+#[test]
+fn cat_of_a_rust_module_keeps_its_doc_comments() {
+    // The second symptom in #6986: `cat …/mod.rs` cleared the `test`/`cargo`
+    // substring branches, reached `FileRead`, and `filter_file_read` dropped
+    // every `//`-prefixed line — the doc comments were the point of the read.
+    let src = rust_source_fixture(120);
+    assert!(src.lines().count() > FILE_READ_LINE_GATE);
+    let out = compress_tool_output("cat crates/trusty-agents/src/ticketing/gh_cli/mod.rs", &src);
+    assert!(
+        out.contains("/// Why: item 0"),
+        "doc comments were stripped"
+    );
+    assert_eq!(out, src);
+}
+
+#[tokio::test]
+async fn native_fallback_passes_a_source_read_through_unchanged() {
+    // Ties the fix to the `compression_path=native_fallback` route the issue
+    // reported. `rtk` may be installed in this environment, so assert only on
+    // the run that actually took the native path.
+    let src = rust_source_fixture(40);
+    let tool = "cat crates/trusty-agents/src/ticketing/gh_cli/tests.rs";
+    let (text, path) = compress_tool_output_async_with_path(tool, &src).await;
+    if path == CompressionPath::NativeFallback {
+        assert_eq!(text, src);
+    }
+}
+
+#[test]
+fn classify_tool_passes_through_source_reads() {
+    // A path segment must never choose the filter: `tests.rs` picked the test
+    // runner, `logging.rs` would pick `git log`, `checks.rs` cargo-check.
+    for name in [
+        "cat crates/trusty-agents/src/ticketing/gh_cli/tests.rs",
+        "cat crates/trusty-mpm/src/logging.rs",
+        "cat crates/trusty-common/src/checks.rs",
+        "cat Cargo.toml",
+        "head crates/trusty-mpm/CHANGELOG.md",
+        "bat website/src/lib/tools.ts",
+    ] {
+        assert_eq!(classify_tool(name), None, "{name}");
+        assert!(!has_filter_for(name), "{name}");
+    }
+}
+
+#[test]
+fn is_source_file_read_matches_the_reported_shapes() {
+    assert!(is_source_file_read("cat crates/x/src/tests.rs"));
+    assert!(is_source_file_read("head -50 crates/x/src/mod.rs"));
+    assert!(is_source_file_read("sed -n 1,80p crates/x/build.rs"));
+    // Case-insensitive on both verb and extension, and a directory-qualified
+    // program name resolves to its basename.
+    assert!(is_source_file_read("/bin/CAT crates/x/src/Main.RS"));
+}
+
+#[test]
+fn is_source_file_read_requires_a_read_verb() {
+    // Same paths, non-read verbs — these keep their existing classification.
+    assert!(!is_source_file_read("cargo test crates/x/src/tests.rs"));
+    assert!(!is_source_file_read("grep -n foo crates/x/src/lib.rs"));
+    assert!(!is_source_file_read("rm crates/x/src/lib.rs"));
+    // A read verb with no file argument at all.
+    assert!(!is_source_file_read("cat"));
+    assert!(!is_source_file_read(""));
+}
+
+#[test]
+fn is_source_file_read_ignores_gate_capture_extensions() {
+    // `<gate> > /tmp/gate.txt` is this project's documented capture pattern,
+    // so reading one back is genuine gate output and stays compressible.
+    for name in [
+        "cat /tmp/gate.txt",
+        "cat /tmp/cargo-test.log",
+        "cat target/build.out",
+        "cat .zshrc",
+    ] {
+        assert!(!is_source_file_read(name), "{name}");
+    }
+}
+
+#[test]
+fn dispatch_never_returns_empty_for_non_empty_input() {
+    // The backstop behind the classification fix: any filter that consumed
+    // every byte hands the original back rather than emitting nothing.
+    let mut passing_only = String::new();
+    for i in 0..40 {
+        passing_only.push_str(&format!("test suite::case_{i} ... ok\n"));
+    }
+    // No `test result:` line, so `filter_test_runner` has no summary to fall
+    // back to and previously returned "".
+    assert_eq!(filter_test_runner(&passing_only), "");
+    assert_eq!(
+        compress_tool_output("cargo test", &passing_only),
+        passing_only
+    );
 }
