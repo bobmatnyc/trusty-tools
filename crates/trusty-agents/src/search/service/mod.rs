@@ -116,10 +116,12 @@ pub(crate) fn remove_retired_discovery_file(project_root: &Path) {
 /// daemon already holds the redb lock, and a socket file's existence does not
 /// prove anyone is serving it. Only an answered `search.health` does.
 /// What: dials [`search_socket_path`] with a [`HEALTH_PROBE_TIMEOUT`] budget
-/// and reports whether the daemon answered with a `result`. A daemon that
-/// answers a refusal counts as not running: a health method that refuses is not
-/// a healthy daemon, and treating it as up would let the watcher race the
-/// store lock.
+/// and reports whether the daemon answered with a `result`. An error frame
+/// counts as not running. [`handlers::health`] cannot produce one — it is
+/// infallible — so the case that reaches this branch is a daemon on this path
+/// that does not serve `search.health` at all: a binary from either side of a
+/// rename, answering `method_not_found`. Treating that as up would let the
+/// watcher race a store lock it cannot see.
 /// Test: `is_daemon_running_is_false_with_no_socket`,
 /// `is_daemon_running_is_true_against_a_live_daemon`.
 pub async fn is_daemon_running(project_root: &Path) -> bool {

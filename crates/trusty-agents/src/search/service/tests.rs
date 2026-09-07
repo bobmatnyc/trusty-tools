@@ -217,6 +217,12 @@ fn rpc_router_registers_every_documented_method() {
 /// an auto-assigned port, so there is no fixed address to find nothing on. What
 /// there is, is a type: a TCP listener cannot be bound without naming one. This
 /// fails on the pre-#6433 module, which binds one in `run_search_service`.
+///
+/// What it does NOT prove: that no TCP socket can be opened from these three
+/// files at all. A raw `socket(2)` through `libc` or `socket2`, or a listener
+/// built behind a type alias or a re-export under another name, passes. It
+/// catches the regression that is actually likely — someone reaching for the
+/// obvious type — not a deliberate evasion.
 #[test]
 fn the_daemon_binds_no_tcp_listener() {
     let needle = concat!("Tcp", "Listener");

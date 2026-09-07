@@ -13,3 +13,5 @@ Breaking
     sentinel `-1`.
   - `index_file` and `remove_file` both answer `{"chunks": N}`; the HTTP routes
     spelled the second one `removed`.
+  - `--search-service` in `--help` describes the socket and the five methods; it
+    named the five HTTP routes.
