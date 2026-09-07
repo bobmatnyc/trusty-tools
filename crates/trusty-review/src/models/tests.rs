@@ -118,8 +118,9 @@ fn finding_confidence_clamping() {
 ///
 /// Why: the LLM emits and the review log persists the category as a string;
 /// the back gate (#1359) keys verdict-floor behaviour off it, so the wire
-/// shape must be stable.  The test-coverage variant was added in #1418.
-/// What: serialises all three variants, asserts the exact tokens, deserialises
+/// shape must be stable.  The test-coverage variant was added in #1418, the
+/// style variant in #3474.
+/// What: serialises all four variants, asserts the exact tokens, deserialises
 /// back; also verifies the serde default.
 /// Test: this test itself.
 #[test]
@@ -138,9 +139,34 @@ fn finding_category_serde_roundtrip() {
     );
     let back: FindingCategory = serde_json::from_str("\"method-conformance\"").unwrap();
     assert_eq!(back, FindingCategory::MethodConformance);
+    assert_eq!(
+        serde_json::to_string(&FindingCategory::Style).unwrap(),
+        "\"style\""
+    );
+    let back: FindingCategory = serde_json::from_str("\"method-conformance\"").unwrap();
+    assert_eq!(back, FindingCategory::MethodConformance);
     let back_tc: FindingCategory = serde_json::from_str("\"test-coverage\"").unwrap();
     assert_eq!(back_tc, FindingCategory::TestCoverage);
+    let back_style: FindingCategory = serde_json::from_str("\"style\"").unwrap();
+    assert_eq!(back_style, FindingCategory::Style);
     assert_eq!(FindingCategory::default(), FindingCategory::Correctness);
+}
+
+/// `Style` is the only informational category (#3474).
+///
+/// Why: `grade::derive_verdict_with` and `github::inline::render_finding_comment`
+/// both key off `is_informational`, so the set it reports is the contract
+/// between the verdict ceiling and the reader-facing label.  `TestCoverage` is
+/// asserted OUT deliberately: its floor treatment predates #3474 and changing it
+/// is a separate calibration decision.
+/// What: asserts the predicate over all four variants.
+/// Test: this test itself.
+#[test]
+fn style_category_is_informational() {
+    assert!(FindingCategory::Style.is_informational());
+    assert!(!FindingCategory::Correctness.is_informational());
+    assert!(!FindingCategory::MethodConformance.is_informational());
+    assert!(!FindingCategory::TestCoverage.is_informational());
 }
 
 /// A `Finding` constructed via `new` defaults to the `Correctness` category.

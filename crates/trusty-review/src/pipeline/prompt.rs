@@ -141,8 +141,11 @@ pub fn review_response_schema() -> ResponseSchema {
                         // `review_schema_is_openai_strict_compliant` (prompt_tests.rs).
                         "category": {
                             "type": "string",
-                            "enum": ["correctness", "method-conformance", "test-coverage"],
-                            "description": "Almost always \"correctness\". Use \"method-conformance\" ONLY when the diff explicitly contradicts a method stated in the \"Intended method (ticket/spec)\" context. Use \"test-coverage\" ONLY for findings derived from an \"Unmet AC:\" snippet in the context (see test-plan-gaps instructions). Never use \"method-conformance\" for a missing method or stale-spec conflict."
+                            // #3474: "style" is the escape hatch for a taste nit.
+                            // Without it a preference lands in the `correctness`
+                            // default and can drive a blocking verdict.
+                            "enum": ["correctness", "method-conformance", "test-coverage", "style"],
+                            "description": "Almost always \"correctness\". Use \"method-conformance\" ONLY when the diff explicitly contradicts a method stated in the \"Intended method (ticket/spec)\" context. Use \"test-coverage\" ONLY for findings derived from an \"Unmet AC:\" snippet in the context (see test-plan-gaps instructions). Use \"style\" for any pure style, formatting, naming, idiom or personal-preference nit that has NO correctness, safety or conformance consequence — these are reported as informational and never block. Never use \"method-conformance\" for a missing method or stale-spec conflict."
                         },
                         // `consequence` (#1416) is a plain required string;
                         // pre-#1416 models / lenient providers that omit it funnel

@@ -549,6 +549,46 @@ fn parse_method_conformance_finding_category() {
     );
 }
 
+// ── Style / preference finding category (#3474) ──────────────────────────
+
+/// A finding emitting `"category":"style"` parses to the `Style` category.
+///
+/// Why: the #3474 ceiling is only reachable if the model's own tag survives the
+/// LLM-JSON → `Finding` normalisation.  An unrecognised token would fall to the
+/// `#[serde(default)]` `Correctness` and the nit would block again — the exact
+/// failure the ticket is about — so the wire token is pinned here on a realistic
+/// fixture rather than assumed from the enum definition.
+/// What: parses a direct-JSON finding carrying the style category, asserts the
+/// internal `Finding.category`.
+/// Test: no network.
+#[test]
+fn parse_style_finding_category() {
+    let body = r#"{
+        "verdict":"APPROVE",
+        "summary":"Naming preference only.",
+        "findings":[{
+            "title":"Prefer `user_id` over `uid`",
+            "body":"The surrounding module spells the field out in full.",
+            "severity":"low",
+            "confidence":0.9,
+            "file":"src/page.rs",
+            "category":"style"
+        }]
+    }"#;
+    let result = parse_review_response(body);
+    assert!(!result.is_fail_safe);
+    assert_eq!(result.findings.len(), 1);
+    assert_eq!(
+        result.findings[0].category,
+        FindingCategory::Style,
+        "the style category must survive parsing (#3474)"
+    );
+    assert!(
+        result.findings[0].category.is_informational(),
+        "a parsed style finding must report as informational"
+    );
+}
+
 /// A finding that OMITS `category` defaults to `Correctness` (back-compat).
 ///
 /// Why: existing fixtures and models that do not emit `category` must keep

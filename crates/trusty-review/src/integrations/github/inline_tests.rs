@@ -179,6 +179,52 @@ fn render_finding_comment_includes_kind_and_fix() {
     assert!(body.contains("_Fix:_"), "fix line present: {body}");
 }
 
+// ── #3474: style findings are labelled informational ─────────────────────────
+
+/// A style finding's comment says up front that it does not block.
+///
+/// Why: `grade::derive_verdict_with` already refuses to let a style nit move the
+/// verdict, but the author reading the comment on the diff cannot see that. Left
+/// unlabelled, a taste note reads exactly like a change request.
+/// What: renders a `FindingCategory::Style` finding, asserts the informational
+/// lead-in precedes the ordinary kind + description lead line.
+#[test]
+fn render_marks_style_finding_informational() {
+    let f = finding_at("src/db.rs", Some(11)).with_category(crate::models::FindingCategory::Style);
+    let body = render_finding_comment(&f);
+    assert!(
+        body.contains("Informational (style / preference)"),
+        "style finding must be labelled informational: {body}"
+    );
+    assert!(
+        body.contains("does not block"),
+        "the label must say it does not block: {body}"
+    );
+    assert!(
+        body.starts_with("> **Informational"),
+        "the label must lead the comment, above the claim: {body}"
+    );
+    assert!(
+        body.contains("**security**"),
+        "the ordinary lead line still renders: {body}"
+    );
+}
+
+/// An ordinary correctness finding gains no informational label.
+///
+/// Why: the label must be a signal, not decoration — if every comment carried it
+/// the reader would learn nothing from it. This is the negative half of
+/// `render_marks_style_finding_informational`.
+#[test]
+fn render_leaves_correctness_finding_unlabelled() {
+    let f = finding_at("src/db.rs", Some(11));
+    let body = render_finding_comment(&f);
+    assert!(
+        !body.contains("Informational"),
+        "a correctness finding must not be labelled informational: {body}"
+    );
+}
+
 // ── #1415: committable suggestion blocks ─────────────────────────────────────
 
 #[test]

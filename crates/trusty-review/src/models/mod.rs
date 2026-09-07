@@ -287,16 +287,24 @@ impl VerifyOutcome {
 /// correctness finding floors normally.  Threading a category through the finding
 /// model is the minimal way to carry that distinction from the LLM JSON all the
 /// way to `grade::severity_floor`.
-/// What: a three-variant enum serialised kebab-case (`"correctness"` /
-/// `"method-conformance"` / `"test-coverage"`).  It is `#[serde(default)]` (→
-/// `Correctness`) wherever it appears so pre-#1359 fixtures and LLM responses that
-/// omit `category` still deserialise unchanged (back-compat — every legacy finding
-/// is a correctness finding).  The `TestCoverage` variant was added in #1418.
+/// What: a four-variant enum serialised kebab-case (`"correctness"` /
+/// `"method-conformance"` / `"test-coverage"` / `"style"`).  It is
+/// `#[serde(default)]` (→ `Correctness`) wherever it appears so pre-#1359
+/// fixtures and LLM responses that omit `category` still deserialise unchanged
+/// (back-compat — every legacy finding is a correctness finding).  The
+/// `TestCoverage` variant was added in #1418, `Style` in #3474.
+///
+/// `#[non_exhaustive]` (#3474): adding `Style` was already a breaking change for
+/// an exhaustive public enum, so the marker is applied in the same bump — every
+/// future category is then additive for downstream matchers.  Matches WITHIN
+/// this crate stay exhaustive, so a new variant still has to be routed through
+/// `grade::severity_floor` deliberately.
 /// Test: `finding_category_serde_roundtrip`,
 /// `finding_defaults_category_correctness`, and the parser/grade tests that
-/// assert the conformance cap.
+/// assert the conformance cap and the #3474 style ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum FindingCategory {
     /// A correctness / logic / safety finding (the default, legacy behaviour).
     #[default]
@@ -308,6 +316,32 @@ pub enum FindingCategory {
     /// test coverage for an AC item from the linked ticket or PR test-plan section
     /// (#1418).  Informational — never drives BLOCK or REQUEST_CHANGES alone.
     TestCoverage,
+    /// A style / preference / taste nit: naming, formatting, idiom choice, or an
+    /// "I would have written it differently" observation with no correctness,
+    /// safety or conformance consequence (#3474).  Purely informational — see
+    /// [`FindingCategory::is_informational`]; a batch of nothing but these can
+    /// never yield REQUEST_CHANGES or BLOCK.
+    Style,
+}
+
+impl FindingCategory {
+    /// Return `true` when findings in this category are informational only.
+    ///
+    /// Why: before #3474 an untagged style nit landed in the `Correctness`
+    /// default and could drive a blocking verdict — the "a nit moved the grade"
+    /// failure pattern.  Naming the predicate once keeps
+    /// `grade::derive_verdict_with` (the verdict ceiling) and
+    /// `github::inline::render_finding_comment` (the reader-facing label) from
+    /// disagreeing about which categories are advisory.
+    /// What: returns `true` for [`FindingCategory::Style`] only.  `TestCoverage`
+    /// is deliberately NOT included: its floor treatment predates #3474 and
+    /// changing it is a separate calibration decision, not this one.
+    /// Test: `style_category_is_informational`,
+    /// `only_style_findings_never_block`.
+    #[must_use]
+    pub fn is_informational(self) -> bool {
+        matches!(self, FindingCategory::Style)
+    }
 }
 
 // ─── Finding ──────────────────────────────────────────────────────────────────

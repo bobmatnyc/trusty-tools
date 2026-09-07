@@ -1898,3 +1898,132 @@ fn pr84_disqualified_high_with_only_low_effort_companion_still_downgrades() {
          disqualified High must still downgrade the BLOCK"
     );
 }
+
+// ── #3474: the style / preference ceiling ────────────────────────────────────
+
+/// Build a style/preference finding (#3474) at a given effort + confidence.
+///
+/// Why: the ceiling tests need findings that are, in every OTHER respect, as
+/// strong as a finding can be — `code_provable`, high effort, high confidence —
+/// so a passing assertion proves the CATEGORY is what disarmed them, not weak
+/// evidence sneaking through `is_substantive` or the #PR84 citability gate.
+/// What: builds via `finding` (which sets `code_provable = true`) and tags the
+/// category `Style`.
+/// Test: used by the `style_*` / `only_style_*` tests below.
+fn style_finding(effort: Effort, confidence: f32) -> Finding {
+    finding(effort, confidence).with_category(FindingCategory::Style)
+}
+
+/// A batch of nothing but style nits can never block, however severe the model
+/// or the findings claim to be (#3474 acceptance criterion).
+///
+/// Why: before #3474 an untagged nit inherited the `Correctness` default and ran
+/// the ordinary floor, so a High-effort style opinion floored to BLOCK — the "a
+/// nit moved the grade" pattern the ticket names.  A model-proposed BLOCK is
+/// used deliberately: the floor alone is a MINIMUM and `stricter_of` could never
+/// pull it back down, so only a ceiling satisfies the acceptance criterion.
+/// What: two style findings, both High effort at 0.95 confidence, with the model
+/// proposing BLOCK → APPROVE.
+#[test]
+fn only_style_findings_never_block() {
+    let findings = vec![
+        style_finding(Effort::High, 0.95),
+        style_finding(Effort::Medium, 0.95),
+    ];
+    assert_eq!(
+        derive_verdict(Verdict::Block, &findings),
+        Verdict::Approve,
+        "a batch whose only substantive findings are style nits must grade \
+         APPROVE — never BLOCK (#3474)"
+    );
+}
+
+/// The same ceiling holds against every non-UNKNOWN model proposal.
+///
+/// Why: `only_style_findings_never_block` pins the BLOCK case; the ticket's
+/// acceptance is broader — "APPROVE (with comments), not REQUEST_CHANGES/BLOCK".
+/// REQUEST_CHANGES is the likelier real-world proposal and has its own path
+/// through `stricter_of`, so it is asserted rather than assumed.
+#[test]
+fn only_style_findings_never_request_changes() {
+    let findings = vec![style_finding(Effort::High, 0.99)];
+    for proposed in [
+        Verdict::Approve,
+        Verdict::ApproveWithReservations,
+        Verdict::RequestChanges,
+        Verdict::Block,
+    ] {
+        assert_eq!(
+            derive_verdict(proposed.clone(), &findings),
+            Verdict::Approve,
+            "style-only batch with model proposal {proposed} must grade APPROVE (#3474)"
+        );
+    }
+}
+
+/// A style nit alongside a real blocker still blocks (#3474).
+///
+/// Why: this is the other half of the ticket — the ceiling must lift the moment
+/// ONE non-style substantive finding is present, or adding a taste note to a
+/// review would launder a genuine critical bug into an APPROVE.  Without the
+/// `all(...)` guard on the ceiling this test fails.
+/// What: one High-effort escalation-eligible correctness finding plus a style
+/// nit → BLOCK, exactly as the correctness finding alone would.
+#[test]
+fn style_finding_alongside_blocker_still_blocks() {
+    let findings = vec![
+        style_finding(Effort::High, 0.95),
+        finding(Effort::High, 0.9),
+    ];
+    assert_eq!(
+        derive_verdict(Verdict::Approve, &findings),
+        Verdict::Block,
+        "a style nit must not disarm a co-occurring correctness blocker (#3474)"
+    );
+}
+
+/// A style nit contributes nothing to the floor when the ceiling has lifted.
+///
+/// Why: dropping style findings from the floor set is a separate rule from the
+/// ceiling, and only this shape distinguishes them.  A High-effort, cited style
+/// finding paired with a merely Low-effort correctness finding would reach
+/// `correctness_floor` Tier 1 and BLOCK if the style finding were still counted
+/// — the ceiling does not fire here, because a non-style finding is present.
+/// What: one Low-effort correctness finding plus a High-effort style finding →
+/// no BLOCK.
+#[test]
+fn style_finding_does_not_drive_the_floor() {
+    let findings = vec![finding(Effort::Low, 0.9), style_finding(Effort::High, 0.95)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_ne!(
+        verdict,
+        Verdict::Block,
+        "a High-effort style finding must never reach the BLOCK floor (#3474)"
+    );
+}
+
+/// The ceiling routes through `derive_verdict_with_grade` too, and drags the
+/// letter grade with it.
+///
+/// Why: the production entry point is `derive_verdict_with_grade` — it folds the
+/// model's letter grade into an `effective_model` proposal BEFORE the floor, so
+/// a grade of "F" is a second, independent way a style-only review could have
+/// blocked.  `reconcile_grade_with_verdict` must then bring the grade back in
+/// line with the APPROVE the ceiling produced.
+/// What: grade F + model BLOCK over a style-only batch → APPROVE, with a grade
+/// no longer implying a blocking verdict.
+#[test]
+fn style_ceiling_holds_through_derive_verdict_with_grade() {
+    let findings = vec![style_finding(Effort::High, 0.95)];
+    let (verdict, grade) = derive_verdict_with_grade(Verdict::Block, Grade::F, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::Approve,
+        "the style ceiling must survive the grade-aware entry point (#3474)"
+    );
+    assert_ne!(
+        grade,
+        Some(Grade::F),
+        "an F grade implies BLOCK — it must be reconciled down alongside the verdict"
+    );
+}
