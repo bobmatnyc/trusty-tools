@@ -399,6 +399,16 @@ crates/<crate>/changelog.d/<issue-or-pr-number>-<short-slug>.md
 
 - Format and category line: `Skill(skill="tm-workflow")`. Assembler and CI-gate
   specifics: [changelog-fragments.md](docs/reference/changelog-fragments.md).
+- 🔴 **The test-only exemption is decided by FILE PATH, not by what changed
+  inside the file (#7033).** `check_changelog_fragment.sh` (via
+  `scripts/lib/source_class.sh`) classifies a path as test-only when its
+  basename is exactly `tests.rs`, ends `_test.rs`/`_tests.rs`, or a path
+  segment is `/tests/`, `/benches/`, or `/testdata/` — nothing else. An edit
+  confined to an inline `#[cfg(test)] mod tests { … }` block inside a
+  `src/**` production file still owes a fragment: the file itself is a
+  production path under that rule, even though `check_line_cap.sh` excludes
+  that exact block from the SLOC count (#5153). Same input, two different
+  rulings, by design.
 - 🟡 `check_changelog_fragment.sh` diffs `origin/main..HEAD`, so the default run
   sees nothing until the change is committed. Before committing, use
   `--staged` (the index plus untracked files) or `--file <path>` (one
