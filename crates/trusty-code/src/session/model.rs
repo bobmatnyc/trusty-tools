@@ -164,6 +164,20 @@ pub struct Session {
     /// (predating this field) reading back as unbound.
     #[serde(default)]
     pub workstream_id: Option<crate::workstreams::model::WorkstreamId>,
+    /// (#4351) The actionable outcome of this session's last run — where the
+    /// change landed and whether it passed — set once the run reaches a
+    /// terminal state (`crate::task::executor` -> `SessionRegistry::
+    /// set_task_result`).
+    ///
+    /// `None` until then, and OMITTED from the JSON entirely while `None`, so
+    /// every pre-#4351 consumer sees a byte-identical `session.status`
+    /// payload for a session that has never run. `#[serde(default)]` is the
+    /// other half: a persisted or hand-written snapshot predating this field
+    /// still reads back.
+    /// Test: `model::tests::session_without_result_deserialises_and_omits_it`,
+    /// `model::tests::session_round_trips_with_a_result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<crate::session::task_result::TaskResult>,
 }
 
 #[cfg(test)]
@@ -264,6 +278,7 @@ mod tests {
             created_at: Utc::now(),
             mode: Some(crate::mode::HarnessMode::DailyDriver),
             workstream_id: None,
+            result: None,
         };
         let value = serde_json::to_value(&session).unwrap();
         assert_eq!(value["id"], "s-1");
@@ -276,6 +291,64 @@ mod tests {
         assert_eq!(back.id, session.id);
         assert_eq!(back.status, session.status);
         assert_eq!(back.mode, session.mode);
+    }
+
+    /// #4351 backward compatibility: the exact `session.status` payload a
+    /// pre-#4351 daemon emitted — no `result` key at all — must still
+    /// deserialise, and a session that has never run must still SERIALISE
+    /// without one, so a consumer written against the old shape sees a
+    /// byte-identical document.
+    #[test]
+    fn session_without_result_deserialises_and_omits_it() {
+        let legacy = json!({
+            "id": "s-1",
+            "task": "do the thing",
+            "agent": "engineer",
+            "project": null,
+            "status": "finished",
+            "created_at": "2026-01-01T00:00:00Z",
+            "mode": "daily-driver",
+            "binding": { "state": "projectless" },
+            "workstream_id": null
+        });
+
+        let parsed: Session = serde_json::from_value(legacy).expect("legacy payload deserialises");
+        assert_eq!(parsed.id, "s-1");
+        assert!(parsed.result.is_none());
+
+        let re_encoded = serde_json::to_value(&parsed).expect("serialize");
+        assert!(
+            re_encoded.get("result").is_none(),
+            "a session with no result must omit the key entirely, not emit null: {re_encoded}"
+        );
+    }
+
+    /// #4351: once a run finishes, the result rides along on the same snapshot.
+    #[test]
+    fn session_round_trips_with_a_result() {
+        let session = Session {
+            id: "s-2".to_string(),
+            task: "t".to_string(),
+            agent: None,
+            project: None,
+            binding: crate::binding::ProjectBinding::None,
+            status: SessionStatus::Finished,
+            created_at: Utc::now(),
+            mode: None,
+            workstream_id: None,
+            result: Some(
+                crate::session::TaskResult::new(crate::session::TaskResultStatus::Success)
+                    .with_diff_ref(Some("tree-sha".to_string())),
+            ),
+        };
+
+        let value = serde_json::to_value(&session).expect("serialize");
+        assert_eq!(value["result"]["status"], "success");
+        assert_eq!(value["result"]["diff_ref"], "tree-sha");
+        assert!(value["result"]["pr_ref"].is_null());
+
+        let back: Session = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back.result, session.result);
     }
 }
 
@@ -297,6 +370,7 @@ mod binding_model_tests {
             created_at: Utc::now(),
             mode: None,
             workstream_id: None,
+            result: None,
         };
         let value = serde_json::to_value(&session).expect("serialize");
         assert_eq!(value["binding"]["state"], "projectless");
@@ -337,6 +411,7 @@ mod binding_model_tests {
             created_at: Utc::now(),
             mode: None,
             workstream_id: Some(ws_id),
+            result: None,
         };
         let value = serde_json::to_value(&session).expect("serialize");
         assert_eq!(value["workstream_id"], ws_id.to_string());

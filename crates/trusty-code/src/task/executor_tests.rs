@@ -676,6 +676,48 @@ async fn spawn_task_run_turn_cap_exceeded_is_resumable() {
     );
 }
 
+/// (#4351) A finished run must leave an actionable `TaskResult` on the
+/// session, not just a status.
+///
+/// Why: before #4351 `session.status` handed a caller `id`/`status`/`mode` and
+/// nothing it could report to a user. This is the daemon half of the fix: the
+/// executor is the only producer, and it must fire on the ordinary success
+/// path, not just on the interesting ones.
+/// What: runs `EchoLlmClient` (a deterministic natural stop) against a plain,
+/// non-git temp project. Non-git means there is no ref to point at, so this
+/// also pins the "no diff, no invented refs" half of the contract: `diff_ref`,
+/// `branch` and `pr_ref` all `None`, with the status and a real summary still
+/// present.
+/// Test: this test.
+#[tokio::test]
+async fn spawn_task_run_records_a_task_result_on_the_session() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm: Arc<dyn InferenceAdapter> = Arc::new(EchoLlmClient::new());
+    spawn_task_run(
+        Arc::clone(&registry),
+        llm,
+        params(&agents, &project, &session.id),
+    )
+    .expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    let snapshot = registry.status(&session.id).expect("session must exist");
+    assert_eq!(snapshot.status, SessionStatus::Finished);
+    let result = snapshot
+        .result
+        .expect("#4351: a finished run must carry a TaskResult");
+    assert_eq!(result.status, crate::session::TaskResultStatus::Success);
+    assert_eq!(result.pr_ref, None, "the daemon never opens a pull request");
+    assert!(
+        result.summary.is_some(),
+        "a result must carry a user-facing summary"
+    );
+}
+
 // ── #2344: persistent session-scoped transcript across task.run calls ──────────
 
 /// Poll `registry.status(id)` until it reaches a terminal state, bounded by

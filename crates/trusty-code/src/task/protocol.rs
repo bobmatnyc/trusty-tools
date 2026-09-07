@@ -331,11 +331,16 @@ async fn task_run(
     };
     spawn_task_run(registry, llm, task_params)?;
 
+    // #4351: `result` rides alongside the pre-existing keys, never in place of
+    // them. `task.run` returns the moment the run is spawned, so the only
+    // truthful result at this instant is `pending` with no refs — the caller
+    // polls `session.status` for the terminal one, which the executor fills in.
     Ok(json!({
         "session_id": session_id,
         "status": "running",
         "mode": mode.as_str(),
         "binding": binding.to_json(),
+        "result": crate::session::TaskResult::pending(),
     }))
 }
 

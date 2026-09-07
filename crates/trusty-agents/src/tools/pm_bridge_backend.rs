@@ -29,6 +29,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::time::sleep;
+// #4351: the ONE definition of this wire type lives in the crate that produces
+// it — trusty-code's daemon. This crate relays, it does not redefine.
+use trusty_code::session::{TaskResult, TaskResultStatus};
 
 use crate::intent::route::BridgeRoute;
 use crate::plugins::stdio_mcp::StdioMcpClient;
@@ -71,6 +74,66 @@ const ACTIVITY_LINES: u64 = 200;
 #[async_trait]
 pub trait PmBridgeBackend: Send + Sync {
     async fn run(&self, route: BridgeRoute, target: Option<&str>, task: &str) -> Result<String>;
+
+    /// Same call as [`Self::run`], but keeping the backend's actionable result
+    /// alongside the transcript (#4351).
+    ///
+    /// Why: a transcript is prose. A caller that has to tell a user "the
+    /// change landed on branch X, here is the ref, it passed" cannot get that
+    /// out of prose reliably, which is exactly the gap #4351 names. This is a
+    /// SECOND method with a default body rather than a changed signature on
+    /// `run`, so every existing implementor — including the test doubles in
+    /// `pm_bridge_tests.rs` — keeps compiling untouched and simply reports no
+    /// result.
+    /// What: the default delegates to [`Self::run`] and reports `None`.
+    /// `ProcessPmBridge` overrides it.
+    /// Test: `pm_bridge_backend_tests::default_run_result_reports_no_result`.
+    async fn run_result(
+        &self,
+        route: BridgeRoute,
+        target: Option<&str>,
+        task: &str,
+    ) -> Result<BackendOutcome> {
+        Ok(BackendOutcome::opaque(self.run(route, target, task).await?))
+    }
+}
+
+/// What a backend produced: the raw transcript, plus the actionable result
+/// when the backend reports one (#4351).
+///
+/// Why: `run` has always returned a bare `String`, and everything downstream
+/// of it — the branding scrub, the `ProposalEnvelope` — is built around that.
+/// Widening it into a struct keeps the transcript exactly where it was while
+/// giving the refs somewhere to travel.
+/// What: `transcript` is the same un-scrubbed text `run` returns; `result` is
+/// `None` for a backend that cannot report one (the `Tm` leg, and every test
+/// double that only implements `run`). `#[non_exhaustive]`: construct through
+/// [`Self::opaque`] and [`Self::with_result`].
+/// Test: `pm_bridge_backend_tests::default_run_result_reports_no_result`,
+/// `pm_bridge_backend_tests::a_child_reporting_a_diff_relays_its_ref_and_partial_status`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct BackendOutcome {
+    /// The backend's raw, un-scrubbed output.
+    pub transcript: String,
+    /// The backend's actionable result, when it reports one.
+    pub result: Option<TaskResult>,
+}
+
+impl BackendOutcome {
+    /// An outcome carrying only a transcript — the pre-#4351 shape.
+    pub fn opaque(transcript: impl Into<String>) -> Self {
+        Self {
+            transcript: transcript.into(),
+            result: None,
+        }
+    }
+
+    /// Attach a result. `None` leaves the outcome opaque.
+    pub fn with_result(mut self, result: Option<TaskResult>) -> Self {
+        self.result = result;
+        self
+    }
 }
 
 /// The external agent the `Tcode` leg targets when no specialist is named.
@@ -131,7 +194,15 @@ impl ProcessPmBridge {
     /// The remote CLI already accepts any agent name (`run-task <AGENT>
     /// <TASK>`, `crates/trusty-code/src/cli/run_task.rs`) — the bottleneck was
     /// only ever this hardcoded argument.
-    async fn run_tcode(&self, target: Option<&str>, task: &str) -> Result<String> {
+    ///
+    /// #4351: `--json`'s snapshot now carries a `result` object
+    /// (`trusty_code::session::TaskResult`), so this leg no longer relays only
+    /// opaque prose — it hands the refs back up alongside the transcript. The
+    /// pass/fail classification comes from the CHILD'S EXIT CODE rather than
+    /// the reported one, because that is the value trusty-code computes from
+    /// the terminal session status and the on-disk diff together; see
+    /// [`extract_child_result`] for why exit 6 must not collapse into failure.
+    async fn run_tcode(&self, target: Option<&str>, task: &str) -> Result<BackendOutcome> {
         if !binary_on_path("tcode") {
             bail!("tcode backend unavailable: binary not found on PATH");
         }
@@ -156,11 +227,13 @@ impl ProcessPmBridge {
                 stderr.trim()
             );
         }
-        Ok(if stdout.trim().is_empty() {
+        let result = extract_child_result(&stdout, output.status.code());
+        let transcript = if stdout.trim().is_empty() {
             stderr
         } else {
             stdout
-        })
+        };
+        Ok(BackendOutcome::opaque(transcript).with_result(Some(result)))
     }
 
     /// Run the `Tm` route: spawn `tm serve --stdio` and drive the
@@ -192,7 +265,12 @@ impl ProcessPmBridge {
     /// content.
     /// Test: `process_pm_bridge_tm_route_fails_closed_without_binary`;
     /// `tm_route_smoke` (binary-gated).
-    async fn run_tm(&self, task: &str) -> Result<String> {
+    ///
+    /// #4351: this leg reports no [`TaskResult`]. tm's managed-session
+    /// lifecycle exposes tmux pane content and nothing structured — there is
+    /// no ref, branch or pass/fail to read — so the outcome stays opaque
+    /// rather than carrying invented fields.
+    async fn run_tm(&self, task: &str) -> Result<BackendOutcome> {
         if !binary_on_path("tm") {
             bail!("tm backend unavailable: binary not found on PATH");
         }
@@ -265,13 +343,22 @@ impl ProcessPmBridge {
         if transcript.trim().is_empty() {
             bail!("tm session produced no observable output within the poll window");
         }
-        Ok(transcript)
+        Ok(BackendOutcome::opaque(transcript))
     }
 }
 
 #[async_trait]
 impl PmBridgeBackend for ProcessPmBridge {
     async fn run(&self, route: BridgeRoute, target: Option<&str>, task: &str) -> Result<String> {
+        Ok(self.run_result(route, target, task).await?.transcript)
+    }
+
+    async fn run_result(
+        &self,
+        route: BridgeRoute,
+        target: Option<&str>,
+        task: &str,
+    ) -> Result<BackendOutcome> {
         match route {
             // #4026: only the Tcode leg can name a specialist; the Tm leg's
             // managed-session lifecycle has no per-agent selector, so a target
@@ -280,6 +367,35 @@ impl PmBridgeBackend for ProcessPmBridge {
             BridgeRoute::Tm => self.run_tm(task).await,
         }
     }
+}
+
+/// Fold a `tcode run-task --json` child's stdout and exit code into a
+/// [`TaskResult`] (#4351).
+///
+/// Why: the two halves arrive from different places and both matter. The
+/// child's stdout carries the refs the daemon recorded (`diff_ref`, `branch`,
+/// `summary`); its EXIT CODE carries the pass/fail classification, and that
+/// distinction is load-free only if exit 6 is preserved — trusty-code spends
+/// that code on "the turn budget ran out but a real deliverable is on disk"
+/// (`trusty_code::run_task::report::ExitCode::Partial`), so reading non-zero
+/// as failure would throw away working code.
+/// What: parses stdout as the `Session` snapshot, lifts its `result` object if
+/// present, and stamps the exit-code-derived status over whatever status the
+/// child reported. Unparseable stdout (an older child, or prose on the
+/// fallback stderr path) degrades to a status-only result rather than an
+/// error — this runs after the child has already finished, so there is nothing
+/// left to fail.
+/// Test: `pm_bridge_backend_tests::a_child_reporting_a_diff_relays_its_ref_and_partial_status`,
+/// `pm_bridge_backend_tests::a_child_with_no_diff_relays_nones_and_the_status`,
+/// `pm_bridge_backend_tests::unparseable_child_output_still_yields_a_status`.
+fn extract_child_result(stdout: &str, exit_code: Option<i32>) -> TaskResult {
+    let status = TaskResultStatus::from_exit_code(exit_code);
+    serde_json::from_str::<Value>(stdout)
+        .ok()
+        .and_then(|snapshot| snapshot.get("result").cloned())
+        .and_then(|reported| serde_json::from_value::<TaskResult>(reported).ok())
+        .unwrap_or_else(|| TaskResult::new(status))
+        .with_status(status)
 }
 
 /// Decide whether `name` is on `$PATH`, without spawning a subprocess.

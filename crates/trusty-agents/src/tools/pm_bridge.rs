@@ -77,6 +77,7 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
+use trusty_code::session::TaskResult;
 
 use crate::intent::route::{BridgeRoute, route_task};
 use crate::rbac::ServiceTier;
@@ -352,17 +353,21 @@ impl ToolExecutor for PmBridgeTool {
         };
         let reported_style = style.is_explicit().then_some(style);
 
+        // #4351: `run_result` keeps the backend's actionable refs alongside the
+        // transcript. Every backend that only implements `run` reaches this
+        // through the trait's default body and reports no result.
         match self
             .backend
-            .run(
+            .run_result(
                 route,
                 target.as_ref().and_then(DispatchTarget::backend_agent),
                 &body,
             )
             .await
         {
-            Ok(out) => {
-                let scrubbed = scrub_branding(&out);
+            Ok(outcome) => {
+                let scrubbed = scrub_branding(&outcome.transcript);
+                let task_result = outcome.result.map(scrub_task_result);
                 match target {
                     // #4028: a cross-product specialist's result is wrapped in
                     // the propose-only envelope — DOC-41 §5.5 line 1398.
@@ -377,6 +382,10 @@ impl ToolExecutor for PmBridgeTool {
                             scrubbed,
                         )
                         .with_style(reported_style)
+                        // #4351: the refs the backend reported, so the caller
+                        // can say where the change landed instead of pasting a
+                        // transcript.
+                        .with_task_result(task_result)
                         .render(),
                     ),
                     // Unnamed dispatch is the pre-#4026 opaque path, returned
@@ -435,6 +444,25 @@ fn branded_token_pattern() -> &'static Regex {
         Regex::new(r"(?i)\b(trusty[\s_-]*mpm|trusty[\s_-]*code|tcode|tm)\b")
             .expect("branded token pattern is a valid static regex")
     })
+}
+
+/// Scrub the free-form half of a backend-reported [`TaskResult`] (#4351).
+///
+/// Why: the tool layer, not the backend, owns branding removal (see
+/// `scrub_branding` below and the module docs). A `TaskResult`'s `summary` is
+/// generated prose and travels the same path a transcript does, so it gets the
+/// same treatment.
+/// What: scrubs `summary` only. `diff_ref`, `branch` and `pr_ref` are
+/// structured refs — a git SHA, a branch name, a PR URL — and the whole point
+/// of #4351 is that a caller can USE them; running a word-boundary substitution
+/// over a ref would silently corrupt the one field the caller acts on. They
+/// carry no backend identity: trusty-code's daemon builds them from git, never
+/// from its own name.
+/// Test: `a_reported_summary_is_branding_scrubbed`,
+/// `scrubbing_leaves_the_refs_intact`.
+fn scrub_task_result(result: TaskResult) -> TaskResult {
+    let scrubbed_summary = result.summary.as_deref().map(scrub_branding);
+    result.with_summary(scrubbed_summary)
 }
 
 /// Strip backend-identity tokens and session-id-shaped artifacts out of a

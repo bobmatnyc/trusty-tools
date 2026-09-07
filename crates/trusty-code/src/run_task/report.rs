@@ -69,6 +69,33 @@ impl ExitCode {
     pub fn code(self) -> i32 {
         self as i32
     }
+
+    /// Recover the typed outcome from a child process's numeric exit code
+    /// (#4351).
+    ///
+    /// Why: a caller that SPAWNS `tcode` (see
+    /// `trusty_agents::tools::pm_bridge_backend::ProcessPmBridge`) gets an
+    /// `i32` back and has to classify it. Without this, every such caller
+    /// re-types the literals `0`/`4`/`5`/`6`, and renumbering a variant here
+    /// silently misclassifies runs at each of those sites — a `Partial` read
+    /// as a failure discards working code.
+    /// What: the inverse of [`Self::code`], written against `code()` rather
+    /// than literals so the two can never disagree. `None` for a number this
+    /// enum does not define, which the caller decides how to treat.
+    /// Test: `tests::from_code_is_the_inverse_of_code`,
+    /// `tests::from_code_rejects_an_undefined_number`.
+    pub fn from_code(code: i32) -> Option<Self> {
+        [
+            Self::Success,
+            Self::ConfigError,
+            Self::RunFailure,
+            Self::NoChanges,
+            Self::DeadlineExceeded,
+            Self::Partial,
+        ]
+        .into_iter()
+        .find(|candidate| candidate.code() == code)
+    }
 }
 
 /// The full result of a `run-task` invocation, ready to render.
@@ -284,6 +311,36 @@ pub fn aggregate_usage_per_role(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every variant this enum defines must survive `code()` -> `from_code()`.
+    /// The list is written out so a NEW variant that `from_code`'s own lookup
+    /// forgot shows up here as a failure rather than as a silent `None`.
+    #[test]
+    fn from_code_is_the_inverse_of_code() {
+        for exit in [
+            ExitCode::Success,
+            ExitCode::ConfigError,
+            ExitCode::RunFailure,
+            ExitCode::NoChanges,
+            ExitCode::DeadlineExceeded,
+            ExitCode::Partial,
+        ] {
+            assert_eq!(
+                ExitCode::from_code(exit.code()),
+                Some(exit),
+                "{exit:?} did not round-trip through its own numeric code"
+            );
+        }
+    }
+
+    /// A number this enum does not define — including a negative one, or the
+    /// `1` no variant claims — is `None`, not a wrong variant.
+    #[test]
+    fn from_code_rejects_an_undefined_number() {
+        for code in [-1, 1, 7, 137] {
+            assert_eq!(ExitCode::from_code(code), None, "code {code}");
+        }
+    }
 
     fn sample_report(exit: ExitCode, diff: &str) -> RunReport {
         RunReport {

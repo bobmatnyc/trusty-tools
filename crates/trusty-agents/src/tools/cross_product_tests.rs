@@ -371,3 +371,48 @@ fn an_unstyled_envelope_is_byte_identical() {
     let json = serde_json::to_value(&env).expect("envelope serializes");
     assert!(json.get("style").is_none(), "unstyled envelope: {json}");
 }
+
+// =====================================================================
+// #4351 — the actionable result on the envelope
+// =====================================================================
+
+/// (#4351) Attaching a result carries the refs through and does NOT upgrade
+/// the disposition — the same invariant `with_style` had to preserve.
+#[test]
+fn a_result_bearing_envelope_is_still_only_a_proposal() {
+    let env = ProposalEnvelope::for_cross_product(
+        "assistant",
+        "coding-pm",
+        CallerAuthority::UserAuthority,
+        "transcript",
+    )
+    .with_task_result(Some(
+        TaskResult::new(trusty_code::session::TaskResultStatus::Partial)
+            .with_diff_ref(Some("abc123".to_string()))
+            .with_branch(Some("feat/x".to_string())),
+    ));
+
+    assert_eq!(env.disposition, Disposition::Proposal);
+    let json = serde_json::to_value(&env).expect("envelope serializes");
+    assert_eq!(json["disposition"], "proposal");
+    assert_eq!(json["task_result"]["status"], "partial");
+    assert_eq!(json["task_result"]["diff_ref"], "abc123");
+    assert_eq!(json["task_result"]["branch"], "feat/x");
+}
+
+/// (#4351) An envelope with no result omits the key entirely, so every
+/// pre-#4351 caller sees a byte-identical document.
+#[test]
+fn an_envelope_without_a_task_result_is_byte_identical() {
+    let env = ProposalEnvelope::for_cross_product(
+        "assistant",
+        "ticketing",
+        CallerAuthority::Standard,
+        "drafted",
+    );
+    let json = serde_json::to_value(&env).expect("envelope serializes");
+    assert!(
+        json.get("task_result").is_none(),
+        "resultless envelope must omit the key: {json}"
+    );
+}

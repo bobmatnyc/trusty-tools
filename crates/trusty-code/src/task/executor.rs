@@ -54,8 +54,9 @@ use crate::run_task::{
     RecordingLlmClient, SharedTranscript, aggregate_usage_per_role, resolve_agent_model_slug,
 };
 use crate::runner::{InProcessAgentRunner, RegistryFactory};
-use crate::session::{SessionRegistry, SessionStatus};
+use crate::session::{SessionRegistry, SessionStatus, TaskResult, TaskResultStatus};
 use crate::skills::{FsSkillResolver, format_skill_catalog, locate_skills_dir};
+use crate::task::result_capture;
 use crate::tools::{
     AgentOutput, AgentRunner, BashTool, ClearGoalTool, DelegateToAgentTool, EditTool,
     FinishTaskTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, RecallSessionTool, RunContext,
@@ -245,6 +246,11 @@ async fn run_and_record(
             return;
         }
     };
+
+    // #4351: the "before" half of the run's on-disk footprint, taken before a
+    // single turn executes so the after-comparison names THIS run's change and
+    // not pre-existing dirty-tree noise. Non-mutating (see `run_task::diff`).
+    let before_snapshot = crate::run_task::diff::capture_snapshot(&work_root);
 
     // Trusty-search-first discovery (PR B): at task START, best-effort/detached,
     // ensure the working project is indexed so the delegated engineer's
@@ -581,6 +587,13 @@ async fn run_and_record(
             SessionStatus::Failed
         }
     };
+    // #4351: record the actionable result BEFORE `finish`, so the terminal
+    // status and the refs that go with it become visible in the same
+    // `session.status` snapshot rather than in two observable steps.
+    registry.set_task_result(
+        &session_id,
+        result_capture::build_task_result(terminal_status, &before_snapshot, &work_root),
+    );
     let _ = registry.finish(&session_id, terminal_status);
     registry.finish_execution(&session_id);
 }
@@ -857,8 +870,17 @@ fn resolve_engineer_model(params: &TaskRunParams) -> String {
 /// Why: a PM-config load failure happens before any loop runs, so there is
 /// no transcript/usage to persist — just the terminal state and a reason an
 /// operator (or a future `session.get_transcript`) can see.
+///
+/// #4351: also records a refless `Failed` `TaskResult` carrying `message`, so
+/// a caller reading `session.status` gets the same shaped answer here as it
+/// does from a run that actually executed. No turn ran, so there is nothing on
+/// disk to point at — every ref stays `None` rather than being guessed.
 async fn finish_with_failure(registry: &SessionRegistry, session_id: &str, message: &str) {
     let _ = registry.record_log(session_id, "error", message);
+    registry.set_task_result(
+        session_id,
+        TaskResult::new(TaskResultStatus::Failed).with_summary(Some(message.to_string())),
+    );
     let _ = registry.finish(session_id, SessionStatus::Failed);
     registry.finish_execution(session_id);
 }

@@ -13,7 +13,7 @@
 //! passes a real `LlmClient` and tests pass a scripted mock — no live key needed.
 //! Test: `run_task::tests` drive the whole PM→engineer path offline.
 
-mod diff;
+pub(crate) mod diff;
 mod recorder;
 mod redelegation;
 mod report;

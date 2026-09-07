@@ -166,6 +166,53 @@ async fn task_run_creates_session_when_none_given() {
     );
 }
 
+/// (#4351) `task.run`'s response carries a `result` object, and every key it
+/// carried before #4351 is still there and unchanged.
+///
+/// Why: the whole point of the change is that a caller gets something
+/// actionable back — and that adding it broke nothing. `task.run` is
+/// asynchronous, so the only truthful status at return time is `pending` with
+/// no refs; a `success` here would be a lie about a run that has not happened.
+/// Test: this test.
+#[tokio::test]
+async fn task_run_response_carries_a_pending_result() {
+    let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+    unsafe {
+        std::env::set_var(
+            super::super::mock_llm::MOCK_LLM_ENV,
+            super::super::mock_llm::MOCK_LLM_ECHO,
+        );
+    }
+    let registry = Arc::new(SessionRegistry::new());
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let result = task_run(
+        Arc::clone(&registry),
+        json!({"task_description": "say hi"}),
+        ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
+    )
+    .await;
+    unsafe {
+        std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
+    }
+    let value = result.expect("task.run should succeed");
+
+    // Backward compatibility: the pre-#4351 keys are untouched.
+    assert!(value["session_id"].is_string());
+    assert_eq!(value["status"], "running");
+    assert!(value["mode"].is_string());
+    assert!(value["binding"].is_object());
+
+    assert_eq!(value["result"]["status"], "pending");
+    assert!(value["result"]["diff_ref"].is_null());
+    assert!(value["result"]["branch"].is_null());
+    assert!(value["result"]["pr_ref"].is_null());
+    assert!(value["result"]["summary"].is_null());
+}
+
 /// `task.run` must resolve `HarnessMode` per §5.9's three-tier
 /// precedence and report it BOTH in its own immediate response AND on
 /// the session (queryable via `session.status`/`get_transcript`

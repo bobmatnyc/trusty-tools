@@ -254,3 +254,111 @@ async fn tm_route_smoke() {
 fn default_tcode_agent_is_unchanged_by_the_4026_widening() {
     assert_eq!(super::DEFAULT_TCODE_AGENT, "pm");
 }
+
+// =====================================================================
+// #4351 — relaying the child's actionable result
+// =====================================================================
+
+/// The `--json` snapshot a `tcode run-task` child prints after a run that
+/// wrote something and then exhausted its turn budget.
+fn child_snapshot_with_a_diff() -> String {
+    json!({
+        "id": "s-1",
+        "task": "t",
+        "status": "turn_cap_exceeded",
+        "mode": "daily-driver",
+        "result": {
+            "status": "partial",
+            "diff_ref": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c",
+            "branch": "feat/thing",
+            "pr_ref": null,
+            "summary": "partial: changes captured at 0f1e2d3c on branch feat/thing"
+        }
+    })
+    .to_string()
+}
+
+/// #4351 acceptance: a run that produced a diff relays the child's ref AND
+/// classifies the outcome from the child's EXIT CODE — with exit 6 landing on
+/// `Partial`, never `Failed`.
+///
+/// Why: exit 6 is trusty-code's "the turn budget ran out but real work is on
+/// disk" code. Reading it as failure is how a caller throws away working code
+/// (`trusty_code::run_task::report::ExitCode::Partial`'s own docs).
+/// Test: this test.
+#[test]
+fn a_child_reporting_a_diff_relays_its_ref_and_partial_status() {
+    let result = extract_child_result(&child_snapshot_with_a_diff(), Some(6));
+
+    assert_eq!(result.status, TaskResultStatus::Partial);
+    assert_ne!(
+        result.status,
+        TaskResultStatus::Failed,
+        "exit 6 must not collapse into failure (#4351)"
+    );
+    assert_eq!(
+        result.diff_ref.as_deref(),
+        Some("0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c")
+    );
+    assert_eq!(result.branch.as_deref(), Some("feat/thing"));
+    assert_eq!(result.pr_ref, None);
+    assert!(result.summary.is_some());
+}
+
+/// #4351 acceptance: a run that changed nothing relays `None` refs and still
+/// reports its status.
+#[test]
+fn a_child_with_no_diff_relays_nones_and_the_status() {
+    let stdout = json!({
+        "id": "s-2",
+        "task": "t",
+        "status": "finished",
+        "result": { "status": "success", "summary": "success: no changes" }
+    })
+    .to_string();
+
+    let result = extract_child_result(&stdout, Some(0));
+    assert_eq!(result.status, TaskResultStatus::Success);
+    assert_eq!(result.diff_ref, None);
+    assert_eq!(result.branch, None);
+    assert_eq!(result.pr_ref, None);
+    assert_eq!(result.summary.as_deref(), Some("success: no changes"));
+}
+
+/// A child that printed prose rather than the JSON snapshot — an older binary,
+/// or the stderr fallback path — still yields a status rather than an error.
+/// The run has already finished by then; there is nothing left to fail.
+#[test]
+fn unparseable_child_output_still_yields_a_status() {
+    let result = extract_child_result("not json at all\n", Some(3));
+    assert_eq!(result.status, TaskResultStatus::Failed);
+    assert_eq!(result.diff_ref, None);
+    assert_eq!(result.summary, None);
+}
+
+/// A backend that only implements `run` — every pre-#4351 implementor,
+/// including the test doubles — reaches `run_result` through the trait's
+/// default body and honestly reports no result rather than an invented one.
+#[tokio::test]
+async fn default_run_result_reports_no_result() {
+    struct TranscriptOnlyBackend;
+
+    #[async_trait]
+    impl PmBridgeBackend for TranscriptOnlyBackend {
+        async fn run(
+            &self,
+            _route: BridgeRoute,
+            _target: Option<&str>,
+            _task: &str,
+        ) -> Result<String> {
+            Ok("just a transcript".to_string())
+        }
+    }
+
+    let outcome = TranscriptOnlyBackend
+        .run_result(BridgeRoute::Tcode, None, "t")
+        .await
+        .expect("the default body must not fail");
+    assert_eq!(outcome.transcript, "just a transcript");
+    assert_eq!(outcome.result, None);
+}
