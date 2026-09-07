@@ -182,6 +182,15 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "commit_detector_version",
         sql: include_str!("../sql/0028_commit_detector_version.sql"),
     },
+    // #4418: which signal family produced each stored AI verdict — the trailer,
+    // the message body, or an author address. Nullable, never backfilled here:
+    // DETECTOR_VERSION moves in the same change, so the v28 re-classification
+    // pass fills it in on the next collect.
+    Migration {
+        version: 29,
+        name: "commit_ai_detection_method",
+        sql: include_str!("../sql/0029_commit_ai_detection_method.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
@@ -1090,5 +1099,125 @@ mod tests {
             )
             .expect("count v28 rows");
         assert_eq!(applied, 1, "v28 is recorded exactly once");
+    }
+
+    /// Why: #4418 adds a column to `commits`, the table every deployed `tga.db`
+    /// has its whole corpus in. Two failures would be silent. A migration that
+    /// rewrote or dropped verdicts would move a published AI-adoption figure
+    /// with no command having asked for it — the exact class of error that
+    /// forced cto-reports to retract a bracket. And a column added NOT NULL
+    /// would break an older tga's `INSERT`, which names its columns and cannot
+    /// know about this one, turning "additive only" into a downgrade break.
+    /// What: builds a real v28 database, writes an AI-assisted commit through
+    /// the v28 column set, then upgrades to head and asserts every stored
+    /// verdict survives unchanged with the new column reading NULL. Then
+    /// asserts the two downgrade-safety properties directly against
+    /// `PRAGMA table_info` — nullable, no default — and that an older binary's
+    /// column-naming INSERT still succeeds. Re-running the migrations is a
+    /// no-op.
+    /// Test: this test itself.
+    #[test]
+    fn migration_v29_preserves_an_existing_v28_database() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        super::run_through(&mut conn, 28).expect("migrate to v28");
+
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                r.get(0)
+            })
+            .expect("read version");
+        assert_eq!(version, 28, "the fixture must be a real pre-#4418 database");
+
+        // A row written the way the v28 collector wrote it — no
+        // ai_detection_method, because the column did not exist.
+        conn.execute(
+            "INSERT INTO commits \
+             (sha, author_name, author_email, timestamp, message, repository, \
+              is_ai_assisted, ai_tool, agentic_mode, ai_detector_version) \
+             VALUES ('v28sha', 'Ada', 'ada@example.com', '2026-01-01T00:00:00Z', \
+                     ?1, 'testrepo', 1, 'claude', 'full_agentic', 1)",
+            params!["feat: x\n\nCo-Authored-By: Claude <noreply@anthropic.com>"],
+        )
+        .expect("insert v28-era commit");
+
+        // The upgrade every existing database performs on next open.
+        super::run(&mut conn).expect("migrate to head");
+
+        let (is_ai, tool, mode, method): (i64, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT is_ai_assisted, ai_tool, agentic_mode, ai_detection_method \
+                 FROM commits WHERE sha = 'v28sha'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("the pre-migration row must still be readable");
+        assert_eq!(is_ai, 1, "the existing verdict must survive untouched");
+        assert_eq!(tool, "claude");
+        assert_eq!(mode, "full_agentic");
+        assert_eq!(
+            method, None,
+            "the migration records no method it did not observe; the \
+             DETECTOR_VERSION bump is what fills it in"
+        );
+
+        // Downgrade safety, read off the live schema rather than asserted of
+        // the SQL text: an older tga must be able to write this table.
+        let (notnull, dflt): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT \"notnull\", dflt_value FROM pragma_table_info('commits') \
+                 WHERE name = 'ai_detection_method'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("the column exists");
+        assert_eq!(notnull, 0, "the column must be nullable, never NOT NULL");
+        assert_eq!(dflt, None, "and carry no default");
+
+        conn.execute(
+            "INSERT INTO commits \
+             (sha, author_name, author_email, timestamp, message, repository, \
+              is_ai_assisted, ai_tool, agentic_mode) \
+             VALUES ('oldbin', 'Ada', 'ada@example.com', '2026-01-02T00:00:00Z', \
+                     'chore: y', 'testrepo', 0, NULL, 'none')",
+            [],
+        )
+        .expect("an older binary's INSERT, which never names the new column");
+
+        // And the new column is writable on the upgraded database.
+        conn.execute(
+            "UPDATE commits SET ai_detection_method = 'trailer' WHERE sha = 'v28sha'",
+            [],
+        )
+        .expect("write the new column");
+        let round_trip: Option<String> = conn
+            .query_row(
+                "SELECT ai_detection_method FROM commits WHERE sha = 'v28sha'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read back");
+        assert_eq!(round_trip.as_deref(), Some("trailer"));
+
+        super::run(&mut conn).expect("re-run is idempotent");
+        let applied: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 29",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count v29 rows");
+        assert_eq!(applied, 1, "v29 is recorded exactly once");
+        let after: Option<String> = conn
+            .query_row(
+                "SELECT ai_detection_method FROM commits WHERE sha = 'v28sha'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read after re-run");
+        assert_eq!(
+            after.as_deref(),
+            Some("trailer"),
+            "a second run must not reset a written value"
+        );
     }
 }

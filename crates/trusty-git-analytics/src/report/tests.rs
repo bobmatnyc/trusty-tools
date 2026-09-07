@@ -429,6 +429,88 @@ fn weekly_activity_commit_count_net_excludes_reverts() {
     );
 }
 
+/// Why: #4418 — `ai_assisted_count` is the number cto-reports published a
+/// bracket on, having read it as a trailer-only floor. It is not one: a body
+/// footer or a bot address sets `is_ai_assisted` too, and roughly half this
+/// repo's own AI commits are footer-only. Exporting the total without the
+/// split leaves the reader no way to tell the difference, so the same
+/// misreading is available to the next consumer.
+/// What: seeds one commit per signal family plus a human commit in one ISO
+/// week, and asserts the weekly row carries the split — with the three parts
+/// summing to `ai_assisted_count`, which is what makes the trailer count a
+/// floor rather than another opaque number.
+/// Test: this test itself.
+#[test]
+fn weekly_activity_splits_ai_count_by_detection_method() {
+    let db = Database::open_in_memory().expect("open db");
+    let conn = db.connection();
+    let rows = [
+        ("m1", 1_i64, Some("trailer")),
+        ("m2", 1, Some("message")),
+        ("m3", 1, Some("email")),
+        ("m4", 0, None),
+    ];
+    for (sha, is_ai, method) in rows {
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, files_changed, insertions, deletions, is_merge, ticketed, \
+                 is_ai_assisted, ai_detection_method) \
+             VALUES (?1, 'Erin', 'erin@example.com', '2024-01-15T10:00:00+00:00', \
+                 'ENG-7 do work', 'repo-a', 1, 5, 1, 0, 1, ?2, ?3)",
+            rusqlite::params![sha, is_ai, method],
+        )
+        .expect("insert commit");
+    }
+
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    assert_eq!(data.weekly_activity.len(), 1);
+    let wa = &data.weekly_activity[0];
+
+    assert_eq!(wa.ai_assisted_count, 3, "the existing total is unchanged");
+    assert_eq!(wa.ai_trailer_count, 1);
+    assert_eq!(wa.ai_message_count, 1);
+    assert_eq!(wa.ai_email_count, 1);
+    assert_eq!(
+        wa.ai_trailer_count + wa.ai_message_count + wa.ai_email_count,
+        wa.ai_assisted_count,
+        "the split must partition the total on a corpus the current detector \
+         wrote, or the trailer count is not a floor of anything"
+    );
+}
+
+/// Why: #4418 — a database whose rows still predate migration v29 has a NULL
+/// method on every one of them. Folding those into a family would invent a
+/// signal nobody observed, and quietly inflate whichever count absorbed them.
+/// What: seeds AI-assisted commits with no recorded method and asserts the
+/// total still counts them while every split count stays zero, so the
+/// shortfall is visible as "unrecorded" rather than attributed.
+/// Test: this test itself.
+#[test]
+fn weekly_activity_leaves_an_unrecorded_method_unattributed() {
+    let db = Database::open_in_memory().expect("open db");
+    let conn = db.connection();
+    for i in 0..2 {
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, files_changed, insertions, deletions, is_merge, ticketed, \
+                 is_ai_assisted, ai_detection_method) \
+             VALUES (?1, 'Frank', 'frank@example.com', '2024-01-15T10:00:00+00:00', \
+                 'ENG-8 legacy row', 'repo-a', 1, 5, 1, 0, 1, 1, NULL)",
+            [format!("legacy{i}")],
+        )
+        .expect("insert pre-v29 commit");
+    }
+
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    let wa = &data.weekly_activity[0];
+    assert_eq!(wa.ai_assisted_count, 2);
+    assert_eq!(
+        (wa.ai_trailer_count, wa.ai_message_count, wa.ai_email_count),
+        (0, 0, 0),
+        "an unrecorded method is never assigned to a family"
+    );
+}
+
 #[test]
 fn weekly_quality_perfect_when_clean_and_ticketed() {
     // All commits ticketed, no reverts, no bugfixes ⇒ score 1.0, tshirt 5.
@@ -497,6 +579,65 @@ fn aggregator_counts_abandoned_prs() {
         data.weekly_activity[0].abandoned_pr_count, 1,
         "exactly one closed-unmerged PR attributed to eve"
     );
+}
+
+/// Why: #4418 — the weekly CSV is the file a downstream pipeline actually
+/// ingests, so the split reaching `WeeklyActivity` and not the writer would
+/// leave the consumer exactly where it started. The three columns are appended
+/// after `commit_count_net` for the same reason that one was appended last:
+/// an existing column-INDEX consumer must be unaffected.
+/// What: writes the CSV from the split fixture, asserts the header names the
+/// three columns AFTER every column that predates them, and asserts the data
+/// row carries the values rather than only the header naming them.
+/// Test: this test itself.
+#[test]
+fn weekly_csv_carries_the_ai_detection_method_split() {
+    let db = Database::open_in_memory().expect("open db");
+    let conn = db.connection();
+    for (sha, method) in [("s1", "trailer"), ("s2", "trailer"), ("s3", "message")] {
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, files_changed, insertions, deletions, is_merge, ticketed, \
+                 is_ai_assisted, ai_detection_method) \
+             VALUES (?1, 'Gina', 'gina@example.com', '2024-01-15T10:00:00+00:00', \
+                 'ENG-9 work', 'repo-a', 1, 5, 1, 0, 1, 1, ?2)",
+            rusqlite::params![sha, method],
+        )
+        .expect("insert commit");
+    }
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+
+    let dir = tmp_dir("weekly-ai-method-csv");
+    let path = csv_fmt::write_weekly_csv(&data, &dir).expect("write weekly");
+    let text = std::fs::read_to_string(&path).expect("read");
+    let header: Vec<&str> = text
+        .lines()
+        .next()
+        .expect("header line")
+        .split(',')
+        .collect();
+
+    let idx = |col: &str| {
+        header
+            .iter()
+            .position(|h| *h == col)
+            .unwrap_or_else(|| panic!("header missing {col}: {header:?}"))
+    };
+    let first_new = idx("ai_trailer_count");
+    assert_eq!(idx("ai_message_count"), first_new + 1);
+    assert_eq!(idx("ai_email_count"), first_new + 2);
+    assert!(
+        first_new > idx("commit_count_net"),
+        "the new columns must be appended, not inserted: {header:?}"
+    );
+
+    let row: Vec<&str> = text.lines().nth(1).expect("data row").split(',').collect();
+    assert_eq!(row[idx("ai_assisted_count")], "3");
+    assert_eq!(row[first_new], "2", "two trailer-detected commits");
+    assert_eq!(row[first_new + 1], "1");
+    assert_eq!(row[first_new + 2], "0");
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

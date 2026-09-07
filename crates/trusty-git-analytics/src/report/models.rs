@@ -92,9 +92,12 @@ pub struct WeeklyActivity {
     #[serde(default)]
     pub abandoned_pr_count: usize,
     /// Commits in this bucket where `is_ai_assisted = 1` (issue #445).
-    /// Counts commits with a recognised `Co-Authored-By:` AI tool trailer
-    /// (Claude, GitHub Copilot, Cursor). Additive — downstream can sum to
-    /// get an org-wide AI-adoption count.
+    /// Additive — downstream can sum to get an org-wide AI-adoption count.
+    ///
+    /// This is NOT a trailer-only count and never was a floor derivable from
+    /// commit messages: since #5249 a body footer or an agent-identifying
+    /// author address sets the flag too. The three `ai_*_count` fields below
+    /// break it down by which of those fired (#4418).
     #[serde(default)]
     pub ai_assisted_count: usize,
     /// Mean LLM-assigned complexity score (1–5) across commits in this bucket
@@ -113,6 +116,28 @@ pub struct WeeklyActivity {
     /// Counts inline-completion commits (Cursor, GitHub Copilot).
     #[serde(default)]
     pub ide_assisted_count: usize,
+    /// Why: [`Self::ai_assisted_count`] fuses three signal families, and a
+    /// consumer can independently re-derive only one of them — the literal
+    /// `Co-Authored-By:` trailer, by regexing commit messages. Read as if it
+    /// were that subset, the count is not the conservative floor it looks
+    /// like; read as the whole, it cannot be checked against anything. This
+    /// field is the subset (#4418), so the floor is stated rather than
+    /// assumed.
+    /// What: AI-assisted commits in this bucket whose evidence was a
+    /// `Co-Authored-By:` trailer. Additive — [`Self::ai_assisted_count`] keeps
+    /// its existing meaning.
+    /// Test: `report::tests::weekly_activity_splits_ai_count_by_detection_method`.
+    #[serde(default)]
+    pub ai_trailer_count: usize,
+    /// AI-assisted commits whose evidence was a message-body footer such as
+    /// `Generated with trusty-mpm` (#4418) — the rows a consumer's own trailer
+    /// regex cannot see.
+    #[serde(default)]
+    pub ai_message_count: usize,
+    /// AI-assisted commits whose evidence was an agent-identifying author or
+    /// committer address (#4418).
+    #[serde(default)]
+    pub ai_email_count: usize,
     /// Why: `commit_count` counts revert commits identically to original
     /// work, so a developer who lands N commits and reverts all N shows 2N
     /// commits with zero net code change — a 2x+ inflation downstream

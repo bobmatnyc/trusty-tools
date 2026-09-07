@@ -109,6 +109,9 @@ pub const CONSTRAINED: &[&str] = &[
     "commits.ticket_id",
     "commits.ai_tool",
     "commits.agentic_mode",
+    // #4418: one of 'trailer' / 'message' / 'email', or NULL. The writer is
+    // `MarkerScope::as_str`, so the value set is closed in code.
+    "commits.ai_detection_method",
     "deployment_failures.deploy_id",
     "deployment_failures.failure_commit_sha",
     "deployment_failures.recovery_commit_sha",

@@ -6,6 +6,7 @@
 //! makes the shared `build_commits_filter_sql` helper easy to find.
 
 use rusqlite::params;
+use tga::collect::ai_marker_config::MarkerScope;
 use tga::collect::ai_markers::{detect, CommitSignals, DETECTOR_VERSION};
 use tga::collect::ticket::{extract_ticket_id, is_ticketed};
 use tga::core::db::Database;
@@ -347,13 +348,15 @@ pub(super) fn backfill_ai_detection(db: &mut Database, dry_run: bool) -> anyhow:
 /// detects Claude, GitHub Copilot, and Cursor via `Co-Authored-By:` trailers AND
 /// recomputes `agentic_mode`, exactly as the forward `tga collect` path does.
 /// What: loads every commit (filtered by repos/since/until), runs detection
-/// over the stored message and author email, and updates rows where `ai_tool`
-/// OR `agentic_mode` differs from the stored value. No LLM required — pure
-/// string matching, identical to the extractor's INSERT path. The committer
-/// email is unavailable here because `commits` never stored it.
+/// over the stored message and author email, and updates rows where `ai_tool`,
+/// `agentic_mode`, or `ai_detection_method` differs from the stored value. No
+/// LLM required — pure string matching, identical to the extractor's INSERT
+/// path. The committer email is unavailable here because `commits` never
+/// stored it.
 /// Test: `tests::backfill_ai_detection_commits_detects_claude` (ai_tool),
-/// `tests::backfill_ai_detection_commits_repairs_agentic_mode` (agentic_mode)
-/// and `tests::backfill_ai_detection_commits_repairs_house_footer_and_openhands` (#5249).
+/// `tests::backfill_ai_detection_commits_repairs_agentic_mode` (agentic_mode),
+/// `tests::backfill_ai_detection_commits_repairs_house_footer_and_openhands` (#5249)
+/// and `tests::backfill_ai_detection_commits_records_the_detection_method` (#4418).
 ///
 /// # Errors
 ///
@@ -365,19 +368,27 @@ pub(super) fn backfill_ai_detection_commits(
     since: Option<&str>,
     until: Option<&str>,
 ) -> anyhow::Result<()> {
-    // (id, is_ai, ai_tool, agentic_mode) — agentic_mode is the forward-path
-    // string ("none" | "ide_assisted" | "full_agentic") via `AgenticMode::as_str`.
-    let mut to_update: Vec<(i64, i64, Option<String>, &'static str)> = Vec::new();
+    // (id, is_ai, ai_tool, agentic_mode, ai_detection_method) — agentic_mode is
+    // the forward-path string ("none" | "unknown" | "ide_assisted" |
+    // "full_agentic") via `AgenticMode::as_str`; the method is the matching
+    // marker's scope via `MarkerScope::as_str` (#4418), NULL when none matched.
+    type Repair = (i64, i64, Option<String>, &'static str, Option<&'static str>);
+    // One scanned row, in the SELECT's column order: id, message, stored
+    // `ai_tool`, stored `agentic_mode`, `author_email`, stored
+    // `ai_detection_method`.
+    type ScannedRow = (i64, String, Option<String>, String, String, Option<String>);
+    let mut to_update: Vec<Repair> = Vec::new();
     {
         let conn = db.connection();
         let (sql, params) = build_commits_filter_sql(
-            "SELECT id, message, ai_tool, agentic_mode, author_email FROM commits",
+            "SELECT id, message, ai_tool, agentic_mode, author_email, ai_detection_method \
+             FROM commits",
             repos_filter,
             since,
             until,
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows: Vec<(i64, String, Option<String>, String, String)> = stmt
+        let rows: Vec<ScannedRow> = stmt
             .query_map(rusqlite::params_from_iter(params.iter()), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -387,11 +398,13 @@ pub(super) fn backfill_ai_detection_commits(
                     row.get::<_, Option<String>>(3)?
                         .unwrap_or_else(|| "none".to_string()),
                     row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    // #4418: NULL on every row written before migration v29.
+                    row.get::<_, Option<String>>(5)?,
                 ))
             })?
             .collect::<Result<_, _>>()?;
 
-        for (id, message, current_tool, current_mode, author_email) in rows {
+        for (id, message, current_tool, current_mode, author_email, current_method) in rows {
             // #5249: `commits` has no committer_email column, so the email
             // family sees the author address only on this path.
             let detection = detect(&CommitSignals {
@@ -401,16 +414,21 @@ pub(super) fn backfill_ai_detection_commits(
             });
             let detected = detection.tool;
             let mode = detection.mode.as_str();
+            let method = detection.method.map(MarkerScope::as_str);
             let tool_changed = detected != current_tool.as_deref();
             let mode_changed = mode != current_mode;
-            if tool_changed || mode_changed {
+            // #4418: a row whose tool and mode already agree can still hold a
+            // NULL method — every row written before v29 does — so the method
+            // has to be its own reason to rewrite, or the repair skips them.
+            let method_changed = method != current_method.as_deref();
+            if tool_changed || mode_changed || method_changed {
                 let is_ai = if detected.is_some() { 1_i64 } else { 0_i64 };
-                to_update.push((id, is_ai, detected.map(str::to_string), mode));
+                to_update.push((id, is_ai, detected.map(str::to_string), mode, method));
             }
         }
     }
 
-    let with_tool = to_update.iter().filter(|(_, _, t, _)| t.is_some()).count();
+    let with_tool = to_update.iter().filter(|(_, _, t, ..)| t.is_some()).count();
 
     if dry_run {
         println!(
@@ -425,11 +443,11 @@ pub(super) fn backfill_ai_detection_commits(
     let tx = conn.transaction()?;
     {
         let mut up = tx.prepare(
-            "UPDATE commits SET is_ai_assisted = ?1, ai_tool = ?2, agentic_mode = ?3 \
-             WHERE id = ?4",
+            "UPDATE commits SET is_ai_assisted = ?1, ai_tool = ?2, agentic_mode = ?3, \
+             ai_detection_method = ?4 WHERE id = ?5",
         )?;
-        for (id, is_ai, tool, mode) in &to_update {
-            up.execute(params![is_ai, tool, mode, id])?;
+        for (id, is_ai, tool, mode, method) in &to_update {
+            up.execute(params![is_ai, tool, mode, method, id])?;
         }
     }
     // #6748: every row this pass looked at now holds the current detector's

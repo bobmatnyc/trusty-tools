@@ -8,8 +8,9 @@
 //! (DOC-67 §8), so a confidently wrong number is worse than an absent one.
 //! What: an ordered list of markers, each a tool label, an [`AgenticMode`], a
 //! scope naming which text it is matched against, and a compiled regex. One
-//! pass yields both `commits.ai_tool` and `commits.agentic_mode`, so they can
-//! never disagree. Callers use [`detect`]. Since #5414 the list is
+//! pass yields `commits.ai_tool`, `commits.agentic_mode` and — since #4418 —
+//! `commits.ai_detection_method`, so they can never disagree. Callers use
+//! [`detect`]. Since #5414 the list is
 //! [`BUILTIN`] plus whatever [`crate::collect::ai_marker_config`] loads from
 //! disk, so a house footer is addable without a code change or a release. The
 //! two halves are scanned in sequence, not merged: [`BUILTIN`] decides first,
@@ -59,18 +60,52 @@ impl<'a> CommitSignals<'a> {
 
 /// Outcome of one detection pass.
 ///
-/// Why: `ai_tool`, `is_ai_assisted` and `agentic_mode` are written from the
-/// same scan so they cannot disagree about whether a commit was AI-assisted.
+/// Why: `ai_tool`, `is_ai_assisted`, `agentic_mode` and `ai_detection_method`
+/// are written from the same scan so they cannot disagree about whether a
+/// commit was AI-assisted, or about what said so.
 /// What: `tool` is the winning marker's label; when nothing matched, `mode` is
 /// [`AgenticMode::None`], or [`AgenticMode::Unknown`] if the message shows a
-/// rewrite fingerprint (#5250).
-/// Test: `tests::detects_trusty_mpm_footer`.
+/// rewrite fingerprint (#5250). `method` is the winning marker's
+/// [`MarkerScope`] — which text family carried the evidence (#4418).
+///
+/// `tool` and `method` are always both `Some` or both `None`: a marker
+/// contributes its label and its scope together, and nothing else sets either.
+/// That equivalence is what lets `is_ai_assisted` and `ai_detection_method` be
+/// derived from one struct without a second decision.
+/// Test: `tests::detects_trusty_mpm_footer`,
+/// `tests::method_is_present_exactly_when_a_tool_is`.
+///
+/// `#[non_exhaustive]` since #4418 added `method`: the next signal recorded
+/// beside a verdict should not have to be a breaking change to name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Detection {
     /// Label of the highest-priority matching marker.
     pub tool: Option<&'static str>,
     /// Classification implied by the matching markers.
     pub mode: AgenticMode,
+    /// Signal family of the marker that matched — `Trailer`, `Message`, or
+    /// `Email` — persisted as `commits.ai_detection_method` (#4418). `None`
+    /// when no marker matched, which is exactly when `tool` is `None`.
+    pub method: Option<MarkerScope>,
+}
+
+impl Detection {
+    /// The verdict for a commit no marker claimed.
+    ///
+    /// Why: `Detection` is `#[non_exhaustive]`, and three call sites in this
+    /// module spell the same no-match result. One constructor keeps the
+    /// `tool`/`method` equivalence in a single place.
+    /// What: `tool` and `method` `None`, with the caller's `mode` — the two
+    /// unmatched modes are [`AgenticMode::None`] and [`AgenticMode::Unknown`].
+    /// Test: `tests::method_is_present_exactly_when_a_tool_is`.
+    fn unmatched(mode: AgenticMode) -> Self {
+        Detection {
+            tool: None,
+            mode,
+            method: None,
+        }
+    }
 }
 
 /// Generation number of the shipped detector, stamped onto every row it
@@ -100,7 +135,11 @@ pub struct Detection {
 /// they classified is not re-visited by a version bump alone — run
 /// `tga backfill ai-detection-commits` after editing the marker file.
 /// Test: `crate::collect::reclassify::tests::stale_rows_are_reclassified_and_current_rows_are_not`.
-pub const DETECTOR_VERSION: i64 = 1;
+///
+/// Generation 2 is #4418: [`detect`] now also returns the matching marker's
+/// [`MarkerScope`], and every row stored by generation 1 has a NULL
+/// `ai_detection_method` that only a re-classification pass can fill.
+pub const DETECTOR_VERSION: i64 = 2;
 
 /// Classify one commit against the marker set.
 ///
@@ -115,11 +154,14 @@ pub const DETECTOR_VERSION: i64 = 1;
 /// `IdeAssisted` match found earlier in that slice; among `IdeAssisted` matches
 /// the earliest supplies the label. When neither scan matches, the verdict
 /// splits on [`provenance_possibly_stripped`] (#5250) — that predicate reads the
-/// message only, never the identities the backfill lacks.
+/// message only, never the identities the backfill lacks. Whichever marker
+/// supplies the label also supplies [`Detection::method`], the signal family
+/// the label came from (#4418).
 /// Test: `tests::detects_trusty_mpm_footer`,
 /// `tests::full_agentic_wins_over_ide_assisted`,
 /// `tests::operator_full_agentic_cannot_upgrade_a_builtin_ide_match`,
-/// `tests::merge_summary_is_unknown_not_none`.
+/// `tests::merge_summary_is_unknown_not_none`,
+/// `tests::method_names_the_signal_family_that_matched`.
 pub fn detect(signals: &CommitSignals<'_>) -> Detection {
     detect_in(marker_set(), signals)
 }
@@ -161,20 +203,18 @@ fn detect_in(set: &MarkerSet, signals: &CommitSignals<'_>) -> Detection {
     // `scan` that returned `Unknown` itself would satisfy the `!= None` test
     // above and skip the operator markers #5414 added.
     if provenance_possibly_stripped(signals.message) {
-        return Detection {
-            tool: None,
-            mode: AgenticMode::Unknown,
-        };
+        return Detection::unmatched(AgenticMode::Unknown);
     }
-    Detection {
-        tool: None,
-        mode: AgenticMode::None,
-    }
+    Detection::unmatched(AgenticMode::None)
 }
 
 /// One ordered pass over a marker slice.
 fn scan(markers: &[AiMarker], signals: &CommitSignals<'_>, trailers: &[&str]) -> Detection {
-    let mut ide: Option<&'static str> = None;
+    // #4418: the label and the scope travel together, so the recorded method is
+    // always the scope of the marker that supplied the label — including on the
+    // IDE path, where an earlier match wins and a later one must not overwrite
+    // half the verdict.
+    let mut ide: Option<(&'static str, MarkerScope)> = None;
     for marker in markers {
         if !marker.matches(signals, trailers) {
             continue;
@@ -184,11 +224,12 @@ fn scan(markers: &[AiMarker], signals: &CommitSignals<'_>, trailers: &[&str]) ->
                 return Detection {
                     tool: Some(marker.tool),
                     mode: AgenticMode::FullAgentic,
+                    method: Some(marker.scope),
                 };
             }
             AgenticMode::IdeAssisted => {
                 if ide.is_none() {
-                    ide = Some(marker.tool);
+                    ide = Some((marker.tool, marker.scope));
                 }
             }
             AgenticMode::None | AgenticMode::Unknown => {}
@@ -196,16 +237,14 @@ fn scan(markers: &[AiMarker], signals: &CommitSignals<'_>, trailers: &[&str]) ->
     }
 
     match ide {
-        Some(tool) => Detection {
+        Some((tool, scope)) => Detection {
             tool: Some(tool),
             mode: AgenticMode::IdeAssisted,
+            method: Some(scope),
         },
         // "No marker in this slice" only. The #5250 Unknown split belongs to
         // `detect_in`, which alone knows both slices came up empty.
-        None => Detection {
-            tool: None,
-            mode: AgenticMode::None,
-        },
+        None => Detection::unmatched(AgenticMode::None),
     }
 }
 
@@ -640,6 +679,96 @@ mod tests {
             committer_email: "devin-ai-integration[bot]@users.noreply.github.com",
         };
         assert_eq!(detect(&by_committer).mode, AgenticMode::FullAgentic);
+    }
+
+    /// #4418: a commit classified by each detection path records the matching
+    /// method.
+    ///
+    /// Why: `is_ai_assisted` fuses three signal families, and a consumer can
+    /// independently re-derive only the first — regexing the message for a
+    /// literal trailer. Without the discriminator, "flagged by a trailer" and
+    /// "flagged by a bot address" are the same row, so no defensible floor can
+    /// be cut out of the flag. cto-reports published a bracket on that reading
+    /// and had to retract it.
+    /// What: one commit per builtin scope — a `Co-Authored-By:` trailer, a body
+    /// footer, and a bot committer address — asserting the recorded method
+    /// names the family that actually matched, not merely that something did.
+    #[test]
+    fn method_names_the_signal_family_that_matched() {
+        let trailer = detect(&CommitSignals::from_message(
+            "feat: auth\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+        ));
+        assert_eq!(trailer.method, Some(MarkerScope::Trailer));
+        assert_eq!(trailer.tool, Some("claude"));
+
+        let footer = detect(&CommitSignals::from_message(
+            "feat: add thing\n\n🤖🤖🤖 Generated with trusty-mpm — \
+             https://github.com/bobmatnyc/trusty-tools",
+        ));
+        assert_eq!(
+            footer.method,
+            Some(MarkerScope::Message),
+            "the house footer is a body match, not a trailer — this is exactly \
+             the row a consumer's own trailer regex cannot see"
+        );
+        assert_eq!(footer.tool, Some("trusty-mpm"));
+
+        let email = detect(&CommitSignals {
+            message: "fix: something",
+            author_email: "human@example.com",
+            committer_email: "devin-ai-integration[bot]@users.noreply.github.com",
+        });
+        assert_eq!(email.method, Some(MarkerScope::Email));
+        assert_eq!(email.tool, Some("devin"));
+
+        // The persisted strings, since the column is what a consumer reads.
+        assert_eq!(trailer.method.map(MarkerScope::as_str), Some("trailer"));
+        assert_eq!(footer.method.map(MarkerScope::as_str), Some("message"));
+        assert_eq!(email.method.map(MarkerScope::as_str), Some("email"));
+    }
+
+    /// #4418: a commit not classified as AI records no method.
+    ///
+    /// Why: `is_ai_assisted = 0` with a method set would be a row asserting
+    /// both "no AI" and "here is how we found the AI". The two columns are
+    /// written from one struct precisely so that cannot happen, and this
+    /// pins the equivalence rather than trusting the writer.
+    /// What: covers both unmatched verdicts — a plain human commit
+    /// ([`AgenticMode::None`]) and a merge summary whose provenance was
+    /// stripped ([`AgenticMode::Unknown`], #5250), which is not a positive
+    /// classification either.
+    #[test]
+    fn method_is_present_exactly_when_a_tool_is() {
+        let human = detect(&CommitSignals::from_message("chore: bump dep"));
+        assert_eq!(human.mode, AgenticMode::None);
+        assert_eq!(human.tool, None);
+        assert_eq!(human.method, None);
+
+        let stripped = detect(&CommitSignals::from_message(
+            "Merge branch 'main' into topic",
+        ));
+        assert_eq!(stripped.mode, AgenticMode::Unknown);
+        assert_eq!(stripped.tool, None);
+        assert_eq!(
+            stripped.method, None,
+            "Unknown means the evidence may have been discarded, so there is \
+             no family to name"
+        );
+
+        for msg in [
+            "chore: bump dep",
+            "Merge branch 'main' into topic",
+            "feat: auth\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+            "fix: npe\n\nCo-Authored-By: Cursor <noreply@cursor.sh>",
+            "docs: x\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+        ] {
+            let d = detect(&CommitSignals::from_message(msg));
+            assert_eq!(
+                d.tool.is_some(),
+                d.method.is_some(),
+                "tool and method must agree on {msg:?}"
+            );
+        }
     }
 
     /// Why: an All Hands employee's own commits are human work; a vendor

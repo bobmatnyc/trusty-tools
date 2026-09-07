@@ -12,6 +12,7 @@ use regex::Regex;
 use tracing::{debug, warn};
 
 use crate::collect::ai_attribution::AgenticMode;
+use crate::collect::ai_marker_config::MarkerScope;
 use crate::core::config::Config;
 use crate::core::db::Database;
 use crate::report::errors::{ReportError, Result};
@@ -50,6 +51,11 @@ pub(super) struct CommitRow {
     pub(super) complexity: Option<i64>,
     /// Canonical agentic mode (issue #1113): full_agentic / ide_assisted / none.
     pub(super) agentic_mode: AgenticMode,
+    /// Signal family that produced the AI verdict (#4418): the trailer, the
+    /// message body, or an author address. `None` for a commit no marker
+    /// claimed, and for any row written before migration v29 that has not yet
+    /// been re-classified.
+    pub(super) ai_detection_method: Option<MarkerScope>,
 }
 
 /// Minimal PR row used by velocity / DORA computations and (issue #377)
@@ -387,13 +393,16 @@ impl Aggregator {
         // Issue #445 batch B (request #6): include cl.complexity so the weekly
         // aggregator can surface avg_complexity without a second DB scan.
         // Issue #1113: include c.agentic_mode for per-week agentic-% aggregation.
+        // #4418: include c.ai_detection_method so the weekly row can break the
+        // AI-assisted count down by which signal family produced it.
         let sql_base = "SELECT c.sha, \
                         COALESCE(a.canonical_name,  c.author_name)  AS author_name, \
                         COALESCE(NULLIF(a.canonical_email, ''), c.author_email) AS author_email, \
                         c.timestamp, c.repository, \
                         c.insertions, c.deletions, c.files_changed, cl.category, \
                         c.message, c.ticketed, c.is_ai_assisted, cl.complexity, \
-                        COALESCE(c.agentic_mode, 'none') AS agentic_mode \
+                        COALESCE(c.agentic_mode, 'none') AS agentic_mode, \
+                        c.ai_detection_method \
                  FROM commits c \
                  LEFT JOIN authors a ON a.id = c.author_id \
                  LEFT JOIN classifications cl ON cl.id = c.classification_id";
@@ -419,6 +428,14 @@ impl Aggregator {
             let agentic_mode = agentic_mode_str
                 .parse::<AgenticMode>()
                 .unwrap_or(AgenticMode::Unknown);
+            // #4418: NULL until migration v29's row is re-classified, and an
+            // unparseable value means a newer tga recorded a family this build
+            // has no name for. Both read as "no method recorded" rather than
+            // being folded into one of the three this build does know.
+            let ai_detection_method: Option<MarkerScope> = row
+                .get::<_, Option<String>>(14)
+                .unwrap_or(None)
+                .and_then(|s| s.parse::<MarkerScope>().ok());
             Ok(CommitRow {
                 sha: row.get(0)?,
                 author_name: row.get(1)?,
@@ -434,6 +451,7 @@ impl Aggregator {
                 is_ai_assisted: is_ai_assisted != 0,
                 complexity,
                 agentic_mode,
+                ai_detection_method,
             })
         };
 
