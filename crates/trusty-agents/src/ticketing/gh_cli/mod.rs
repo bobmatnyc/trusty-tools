@@ -25,7 +25,84 @@ use anyhow::{Result, anyhow};
 use serde_json::Value;
 use trusty_common::gh::GhCommand;
 
-use super::types::{Ticket, TicketStatus, UpdateTicketReq};
+use super::types::{Tag, Ticket, TicketStatus, UpdateTicketReq};
+
+/// The page size every `gh label list` in this adapter asks for.
+///
+/// Why: `gh label list` returns 30 labels by default and says nothing when it
+/// truncates, so a repo with more labels than that read as missing every label
+/// past the first page — the ensure-labels path then re-created labels that
+/// already existed (#6953; trusty-tools carries 89). Large enough that no
+/// realistic repo truncates, and a page that comes back exactly this full is
+/// treated as a possibly-truncated read rather than a complete one.
+/// Test: `label_list_command_requests_more_than_the_gh_default`.
+pub(super) const LABEL_LIST_LIMIT: usize = 1000;
+
+/// gh's own default page size for `gh label list`.
+///
+/// Why: the number [`LABEL_LIST_LIMIT`] has to beat, named so the regression
+/// test asserts against gh's documented default rather than a magic literal.
+pub(super) const GH_DEFAULT_LABEL_PAGE: usize = 30;
+
+/// The `gh label list …` argv — the adapter's single spelling of that command.
+///
+/// Why: #6953 — an omitted `--limit` is exactly the flag that goes missing when
+/// a command line is spelled inline at a call site, so the argv lives in one
+/// named place with a test on it. Mirrors trusty-mpm's
+/// `core::policy_labels::list_labels_argv` (#6952), which is private to that
+/// crate's library and so cannot be shared through `trusty-common` without
+/// moving it; the `--repo` selector is omitted here because callers apply it
+/// through [`GhCommand::repo`].
+/// What: `label list --limit <limit> --json name,color,description` — those
+/// JSON fields are exactly [`Tag`]'s, so the output feeds [`labels_from_json`]
+/// directly.
+/// Test: `label_list_command_requests_more_than_the_gh_default`.
+pub(super) fn list_labels_argv(limit: usize) -> Vec<String> {
+    vec![
+        "label".to_string(),
+        "list".to_string(),
+        "--limit".to_string(),
+        limit.to_string(),
+        "--json".to_string(),
+        "name,color,description".to_string(),
+    ]
+}
+
+/// Parse a `gh label list --json name,color,description` page into [`Tag`]s.
+///
+/// Why: #6953 — a page that comes back exactly `limit` long may have been
+/// truncated by `gh`, and a partial label set read as complete is the defect
+/// being fixed, so it is an error rather than a set the caller trusts.
+/// What: maps each entry with a `name` into a [`Tag`], dropping entries without
+/// one; refuses a full page before mapping anything.
+/// Test: `labels_from_json_reads_past_the_default_label_page`,
+/// `labels_from_json_rejects_a_full_page`,
+/// `labels_from_json_skips_entries_without_a_name`.
+pub(super) fn labels_from_json(arr: &[Value], limit: usize) -> Result<Vec<Tag>> {
+    if arr.len() >= limit {
+        return Err(anyhow!(
+            "`gh label list` returned {} label(s), the full requested page — \
+             the repository may carry more than this adapter can read in one call",
+            arr.len()
+        ));
+    }
+    Ok(arr
+        .iter()
+        .filter_map(|l| {
+            let name = l.get("name").and_then(Value::as_str)?.to_string();
+            let color = l.get("color").and_then(Value::as_str).map(String::from);
+            let description = l
+                .get("description")
+                .and_then(Value::as_str)
+                .map(String::from);
+            Some(Tag {
+                name,
+                color,
+                description,
+            })
+        })
+        .collect())
+}
 
 /// Check if `gh` is on PATH and authenticated.
 ///
@@ -73,6 +150,19 @@ impl GhCliClient {
     /// The configured `owner/repo`, if any.
     pub(super) fn repo(&self) -> Option<&str> {
         self.repo.as_deref()
+    }
+
+    /// The `gh label list` invocation this client runs, repo selector included.
+    ///
+    /// Why: #6953 — the label listing had its argv spelled inline inside the
+    /// `TicketingClient` impl, where no test could see whether it carried a
+    /// `--limit`. Building it here makes the command the test's subject.
+    /// What: [`list_labels_argv`] at [`LABEL_LIST_LIMIT`], with `--repo`
+    /// prepended when this client targets a specific repository.
+    /// Test: `label_list_command_requests_more_than_the_gh_default`,
+    /// `label_list_command_carries_the_repo_selector`.
+    pub(super) fn label_list_command(&self) -> GhCommand {
+        GhCommand::new(list_labels_argv(LABEL_LIST_LIMIT)).repo(self.repo())
     }
 
     /// Run a `gh` command, prepending `--repo <repo>` if configured.
