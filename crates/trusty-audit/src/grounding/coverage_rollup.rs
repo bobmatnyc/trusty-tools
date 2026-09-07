@@ -23,6 +23,52 @@
 
 use std::path::{Path, PathBuf};
 
+/// Whether a coverage figure covers everything it counts, or a sample of it
+/// (#6138).
+///
+/// Why: the roll-up's percentage reads as a property of the whole estate, and a
+/// reader who takes it that way concludes the unread files were assessed and
+/// found clean. They were never opened. The distinction has to travel with the
+/// figure rather than be inferred from two counts sitting beside it.
+/// What: [`Sampling::Sampled`] carries the sample size and the population, so
+/// the renderer states both without recomputing them.
+/// Test: `super::coverage_rollup_tests::{a_sampled_rollup_is_labelled_sampled,
+/// an_exhaustive_rollup_carries_no_sampled_label}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Sampling {
+    /// Every file the denominator counts was read.
+    Exhaustive,
+    /// `read` of `population` files were read; the rest were never opened.
+    Sampled {
+        /// Files the pass actually read — the sample size.
+        read: usize,
+        /// Files it could have read — the population.
+        population: usize,
+    },
+}
+
+impl Sampling {
+    /// Which of the two a `read`-of-`population` pair is.
+    ///
+    /// A pass that read everything it could — `read >= population`, which
+    /// includes the degenerate empty repository — sampled nothing.
+    #[must_use]
+    pub fn of(read: usize, population: usize) -> Self {
+        if read < population {
+            Self::Sampled { read, population }
+        } else {
+            Self::Exhaustive
+        }
+    }
+
+    /// True when the figure is a sample rather than the whole population.
+    #[must_use]
+    pub fn is_sampled(self) -> bool {
+        matches!(self, Self::Sampled { .. })
+    }
+}
+
 /// One repository's investigation coverage, as its report recorded it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -56,6 +102,14 @@ impl RepoCoverage {
         #[allow(clippy::cast_precision_loss)]
         let share = (self.examined as f64 / self.eligible as f64) * 100.0;
         (share * 10.0).round() / 10.0
+    }
+
+    /// Whether this repository's figure is a sample or the whole of it (#6138).
+    ///
+    /// Test: `super::coverage_rollup_tests::a_sampled_rollup_is_labelled_sampled`.
+    #[must_use]
+    pub fn sampling(&self) -> Sampling {
+        Sampling::of(self.examined, self.eligible)
     }
 }
 
@@ -97,6 +151,29 @@ impl Rollup {
     #[must_use]
     pub fn analyze_lanes_dead(&self) -> usize {
         self.repos.iter().filter(|r| r.analyze_lane_dead).count()
+    }
+
+    /// Whether the estate figure is a sample or the whole of it (#6138).
+    ///
+    /// Why: one repository read at 6% makes the estate percentage a sample,
+    /// however complete the other 58 are. So the estate is exhaustive only when
+    /// every row is, and the sampled case carries the estate totals — the
+    /// numbers the renderer states.
+    /// What: the per-row predicate quantified over the rows, rather than
+    /// [`Sampling::of`] applied to the two sums, so a row that over-reports its
+    /// examined count cannot mask another row's shortfall.
+    /// Test: `super::coverage_rollup_tests::{a_sampled_rollup_is_labelled_sampled,
+    /// an_exhaustive_rollup_carries_no_sampled_label}`.
+    #[must_use]
+    pub fn sampling(&self) -> Sampling {
+        if self.repos.iter().any(|r| r.sampling().is_sampled()) {
+            Sampling::Sampled {
+                read: self.examined(),
+                population: self.eligible(),
+            }
+        } else {
+            Sampling::Exhaustive
+        }
     }
 }
 
@@ -247,9 +324,13 @@ pub const TOP_ROWS: usize = 15;
 /// [`super::osv_rollup::index_section`] draws.
 /// What: an empty roll-up renders the "not recorded" line, which is the state a
 /// bundle of reports written by a renderer too old to record coverage lands in.
-/// A populated one renders the estate totals and the worst [`TOP_ROWS`] rows.
+/// A populated one renders the estate totals and the worst [`TOP_ROWS`] rows,
+/// preceded by a sampled label when [`Rollup::sampling`] says the pass read less
+/// than it could have (#6138). An exhaustive run's wording is what it always
+/// was — the label is what a partial run adds, not a phrase every run carries.
 /// Test: `super::coverage_rollup_tests::{the_index_section_states_the_estate_share,
-/// a_bundle_with_no_coverage_records_says_so}`.
+/// a_bundle_with_no_coverage_records_says_so, a_sampled_rollup_is_labelled_sampled,
+/// an_exhaustive_rollup_carries_no_sampled_label}`.
 #[must_use]
 pub fn index_section(rollup: Option<&Rollup>) -> String {
     let Some(rollup) = rollup else {
@@ -277,6 +358,17 @@ pub fn index_section(rollup: Option<&Rollup>) -> String {
          the files that were read and states nothing about the rest.\n\n",
         repos = rollup.repos.len(),
     ));
+    // #6138: the share above reads as a property of the estate unless the
+    // section says which of the two it is.
+    if let Sampling::Sampled { read, population } = rollup.sampling() {
+        out.push_str(&format!(
+            "**Sampled, not exhaustive.** The pass read {read} of {population} tracked file(s) \
+             and never opened the remaining {unread}. Every coverage figure in this section is a \
+             sample size over a population, and says nothing about the files nobody read (issue \
+             #6138).\n\n",
+            unread = population.saturating_sub(read),
+        ));
+    }
     let dead = rollup.analyze_lanes_dead();
     if dead > 0 {
         out.push_str(&format!(

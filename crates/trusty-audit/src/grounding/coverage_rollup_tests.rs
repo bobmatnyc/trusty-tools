@@ -8,7 +8,8 @@
 //! Test: this file.
 
 use super::coverage_rollup::{
-    ANALYZE_LANE_DEAD_HEADLINE, RepoCoverage, Rollup, index_section, read_coverage, rollup,
+    ANALYZE_LANE_DEAD_HEADLINE, RepoCoverage, Rollup, Sampling, index_section, read_coverage,
+    rollup,
 };
 
 /// A report JSON stating one repository's coverage, with the gap list given.
@@ -137,6 +138,86 @@ fn a_bundle_with_no_coverage_records_says_so() {
         index_section(None),
         "",
         "a producer with no reports to read must claim nothing either way"
+    );
+}
+
+/// #6138 regression. The section stated a share and left the reader to work out
+/// whether it covered the estate or a sample of it; a share reads as the former,
+/// so an unread file was easy to take for an assessed one.
+///
+/// Against `origin/main` at fa5ea71bf this fails on the rendered text:
+/// `index_section` writes no sampled label, so the first assertion finds nothing.
+#[test]
+fn a_sampled_rollup_is_labelled_sampled() {
+    let rolled = Rollup {
+        repos: vec![
+            RepoCoverage {
+                name: "Big".to_owned(),
+                examined: 40,
+                eligible: 3_000,
+                analyze_lane_dead: false,
+            },
+            RepoCoverage {
+                name: "Small".to_owned(),
+                examined: 30,
+                eligible: 60,
+                analyze_lane_dead: false,
+            },
+        ],
+    };
+
+    assert_eq!(
+        rolled.sampling(),
+        Sampling::Sampled {
+            read: 70,
+            population: 3_060,
+        },
+        "the estate figure carries its sample size and population"
+    );
+    assert!(rolled.repos[0].sampling().is_sampled());
+
+    let text = index_section(Some(&rolled));
+
+    assert!(
+        text.contains(
+            "**Sampled, not exhaustive.** The pass read 70 of 3060 tracked file(s) and never \
+             opened the remaining 2990."
+        ),
+        "the label names the sample size, the population and the unread remainder:\n{text}"
+    );
+    assert!(text.contains("#6138"), "{text}");
+}
+
+/// #6138. The label is what a partial run ADDS. A run that read every tracked
+/// file states the share it always stated, with nothing hedging it — a phrase on
+/// every run is a phrase readers stop seeing.
+#[test]
+fn an_exhaustive_rollup_carries_no_sampled_label() {
+    let rolled = Rollup {
+        repos: vec![RepoCoverage {
+            name: "Whole".to_owned(),
+            examined: 120,
+            eligible: 120,
+            analyze_lane_dead: false,
+        }],
+    };
+
+    assert_eq!(rolled.sampling(), Sampling::Exhaustive);
+    assert_eq!(
+        Sampling::of(0, 0),
+        Sampling::Exhaustive,
+        "nothing to sample"
+    );
+
+    let text = index_section(Some(&rolled));
+
+    assert!(
+        !text.to_lowercase().contains("sampl"),
+        "an exhaustive run's wording is unchanged:\n{text}"
+    );
+    assert!(
+        text.contains("read 120 of 120 tracked file(s)"),
+        "the estate line is still there:\n{text}"
     );
 }
 
