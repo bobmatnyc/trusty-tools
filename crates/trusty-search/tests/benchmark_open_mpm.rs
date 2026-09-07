@@ -16,14 +16,16 @@
 //! `search_kg`, `search_all`), computes Hit@K per (tool × type), and
 //! deletes the index. KG-seed queries use a two-stage pattern: stage-1
 //! `search_lexical` to find the seed chunk_id, stage-2 `search_kg` with
-//! `seed_chunk_id` and `expand_graph=true` to traverse the symbol graph.
+//! the resolved seed as `text`, `stage="graph"`, and `expand_graph=true`.
+//! The original query remains in diagnostic output. Historical runs sent an
+//! ignored `seed_chunk_id` field, so their metrics are not directly comparable.
 //!
 //! Per-tool HTTP mapping (matches `crates/trusty-search/src/mcp/tools.rs`
 //! `run_lane_search` → `/indexes/:id/search` body shape):
 //!   - `search_lexical`  → `stage="lexical"`, `expand_graph=false`
 //!   - `search_semantic` → `stage="semantic"`, `expand_graph=false`
 //!   - `search_kg`       → `stage="graph"`, `expand_graph=true`
-//!   - `search_all`      → no `stage` field, `expand_graph=false`
+//!   - `search_all`      → no `stage` field, `expand_graph=true`
 //!
 //! Test: gated `#[ignore]` so it does not run during default `cargo test`.
 //! Run with:
@@ -142,7 +144,7 @@ impl Tool {
     /// Whether to set `expand_graph: true` in the request body.
     /// Mirrors `SearchLane::expand_graph_default` in the production code.
     fn expand_graph(self) -> bool {
-        matches!(self, Tool::Kg)
+        matches!(self, Tool::Kg | Tool::All)
     }
 }
 
@@ -453,6 +455,35 @@ async fn cleanup_index(client: &Client) {
 
 // ── Query execution ─────────────────────────────────────────────────────────
 
+/// Build the current MCP-equivalent request without unsupported seed fields.
+///
+/// Why: search_kg forwards its seed query as HTTP text; SearchQuery rejects
+/// seed_chunk_id. This mapping requests the supported graph lane and does not
+/// promise an exact-ID anchor beyond that request contract. Omit refine_query
+/// because its cosine threshold would change the benchmark's filtering.
+/// What: only KG uses a resolved seed as text; other lanes and unresolved seeds
+/// retain the original query. All lane pins/expansion flags match SearchLane.
+/// Test: organic_requests_match_current_mcp_lane_contract covers all lanes,
+/// mode hints, and resolved/unresolved seeds with the production SearchQuery.
+fn search_request(query: &GroundTruthQuery, tool: Tool, resolved_seed: Option<&str>) -> Value {
+    let text = if tool == Tool::Kg {
+        resolved_seed.unwrap_or(&query.text)
+    } else {
+        &query.text
+    };
+    let mut body = json!({
+        "text": text,
+        "top_k": 10,
+        "compact": false,
+        "mode": query.mode_hint,
+    });
+    if let Some(stage) = tool.stage_value() {
+        body["stage"] = json!(stage);
+    }
+    body["expand_graph"] = json!(tool.expand_graph());
+    body
+}
+
 /// Run one query in one tool mode and record the result.
 ///
 /// Why: the four per-lane tools must run the same code path so results are
@@ -478,24 +509,7 @@ async fn run_query(client: &Client, query: &GroundTruthQuery, tool: Tool) -> Que
         }
     }
 
-    let mut body = json!({
-        "text": query.text,
-        "top_k": 10,
-        "compact": false,
-        "mode": query.mode_hint,
-    });
-    if let Some(stage) = tool.stage_value() {
-        body["stage"] = json!(stage);
-    }
-    body["expand_graph"] = json!(tool.expand_graph());
-
-    // For the KG two-stage path, attach the seed so the daemon's graph
-    // expansion has an explicit anchor. The daemon also falls back to
-    // intent-based expansion when seed_chunk_id is absent, but supplying
-    // it makes the test deterministic.
-    if let Some(seed) = &kg_seed_chunk_id {
-        body["seed_chunk_id"] = json!(seed);
-    }
+    let body = search_request(query, tool, kg_seed_chunk_id.as_deref());
 
     let t0 = Instant::now();
     let resp = client
@@ -555,8 +569,8 @@ async fn run_query(client: &Client, query: &GroundTruthQuery, tool: Tool) -> Que
 /// lookup of the seed query string.
 ///
 /// Why: `search_kg` is most useful with an explicit seed. The production
-/// MCP tool exposes a `seed_chunk_id` parameter; the harness mirrors
-/// that contract by doing the lexical pre-search itself.
+/// MCP tool accepts a seed as its `query` string, forwarded as HTTP `text`.
+/// The harness resolves that seed with the lexical pre-search.
 /// What: POSTs /search with `stage=lexical` and `top_k=1`, returns the
 ///   first result's `id` field, or None if nothing was found.
 /// Test: implicit — kg_seed queries' KG runs succeed iff the seed
@@ -887,4 +901,49 @@ async fn benchmark_open_mpm_per_lane_tools() {
     );
 
     cleanup_index(&client).await;
+}
+
+/// Exercise the real wire parser and the MCP lane/seed mapping before HTTP.
+#[test]
+fn organic_requests_match_current_mcp_lane_contract() {
+    use trusty_search::core::indexer::{SearchQuery, SearchStage};
+
+    for mode_hint in ["code", "text", "data"] {
+        for seed in [None, Some("src/target.rs:10:14")] {
+            let query = GroundTruthQuery {
+                id: "request-contract".into(),
+                text: "who calls target".into(),
+                query_type: "kg_seed".into(),
+                mode_hint: mode_hint.into(),
+                ground_truth_files: vec!["caller.rs".into()],
+                kg_seed_query: Some("target".into()),
+                description: "KG seed request contract".into(),
+            };
+            for (tool, expected_stage) in [
+                (Tool::Lexical, Some(SearchStage::Lexical)),
+                (Tool::Semantic, Some(SearchStage::Semantic)),
+                (Tool::Kg, Some(SearchStage::Graph)),
+                (Tool::All, None),
+            ] {
+                let parsed: SearchQuery =
+                    serde_json::from_value(search_request(&query, tool, seed))
+                        .unwrap_or_else(|error| panic!("{} / {mode_hint}: {error}", tool.label()));
+                let expected_text = if tool == Tool::Kg {
+                    seed.unwrap_or(&query.text)
+                } else {
+                    &query.text
+                };
+                assert_eq!(parsed.text, expected_text);
+                assert_eq!(parsed.top_k, 10);
+                assert!(!parsed.compact);
+                assert_eq!(serde_json::to_value(parsed.mode).unwrap(), json!(mode_hint));
+                assert_eq!(parsed.stage, expected_stage);
+                assert_eq!(parsed.expand_graph, matches!(tool, Tool::Kg | Tool::All));
+                assert_eq!(
+                    parsed.refine_query, None,
+                    "do not introduce KG refinement filtering"
+                );
+            }
+        }
+    }
 }
