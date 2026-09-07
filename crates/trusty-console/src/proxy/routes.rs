@@ -108,16 +108,26 @@ fn full_id(service_key: &str) -> Option<&'static str> {
 /// non-loopback URL to enter the poller cache, forwarding to it would turn the
 /// console into an SSRF vector.  This guard prevents that by enforcing that the
 /// resolved base URL is always a local address before any bytes are sent.
-/// What: Returns `true` if `url` starts with `http://127.`, `http://[::1]`, or
-/// `http://localhost`; `false` for anything else.
-/// Test: `test_is_local_upstream_*` below.
+/// What: Requires the literal `http://` scheme (every upstream connection here
+/// is loopback HTTP), then hands the URL to
+/// [`origin_is_loopback`](crate::routes::origin_guard::origin_is_loopback) —
+/// the shared classifier that parses the authority and accepts only the host
+/// `localhost` or a host that parses as a loopback `IpAddr` (all of
+/// `127.0.0.0/8` and `::1`). Every other URL is `false`.
+///
+/// The host MUST be parsed, never prefix-matched: `url.starts_with("http://127.")`
+/// accepts the attacker-controlled DNS name `http://127.0.0.1.evil.com`, which
+/// resolves wherever its owner points it (#6945, the outbound-SSRF sibling of
+/// the inbound-CSRF #3319).
+/// Test: `test_is_local_upstream_*` below, incl.
+/// `test_is_local_upstream_rejects_loopback_lookalike_hosts`.
 // #6360: `pub(crate)` so the console's delete routes apply the same
 // loopback predicate before dialling a daemon, rather than minting a second
 // answer to "is this upstream local".
 pub(crate) fn is_local_upstream(url: &str) -> bool {
-    url.starts_with("http://127.")
-        || url.starts_with("http://[::1]")
-        || url.starts_with("http://localhost")
+    // #6945: scheme check stays a literal prefix — it is the only part of the
+    // URL a prefix test can decide — and the host goes to the shared parser.
+    url.starts_with("http://") && crate::routes::origin_guard::origin_is_loopback(url)
 }
 
 /// Normalize a service base URL to strip any accidental double-scheme prefix.
@@ -645,6 +655,43 @@ mod tests {
         assert!(!is_local_upstream("http://evil.example.com/steal"));
         assert!(!is_local_upstream("https://127.0.0.1:7878")); // https, not http
         assert!(!is_local_upstream("http://0.0.0.0:7878"));
+        // #6945: a URL with no scheme at all is not a loopback upstream.
+        assert!(!is_local_upstream("127.0.0.1:7878"));
+        assert!(!is_local_upstream(""));
+    }
+
+    /// Why: #6945 — the guard prefix-matched `http://127.`, `http://[::1]`, and
+    /// `http://localhost`, so every host below read as loopback while resolving
+    /// wherever its owner pointed it. The reverse proxy dials whatever passes
+    /// this predicate, which made the console an outbound-SSRF vector. Same
+    /// class as #3319 on the inbound CSRF guard, on the sibling that never got
+    /// the fix.
+    /// What: asserts each loopback-lookalike host is rejected — an IP- or
+    /// `localhost`-prefixed DNS name, a bracketed-IPv6 lookalike, and userinfo
+    /// in both directions.
+    /// Test: this test itself. Every assertion here FAILS on `origin/main`.
+    #[test]
+    fn test_is_local_upstream_rejects_loopback_lookalike_hosts() {
+        // IP-prefixed DNS names — the case named in the issue.
+        assert!(!is_local_upstream("http://127.0.0.1.evil.com"));
+        assert!(!is_local_upstream("http://127.0.0.1.evil.com:7878"));
+        assert!(!is_local_upstream("http://127.0.0.1.evil.com/steal"));
+        assert!(!is_local_upstream("http://127.attacker.com"));
+        // `localhost`-prefixed DNS names.
+        assert!(!is_local_upstream("http://localhost.evil.com"));
+        assert!(!is_local_upstream("http://localhostevil.com:7878"));
+        // Bracketed-IPv6 lookalikes.
+        assert!(!is_local_upstream("http://[::1].evil.com"));
+        assert!(!is_local_upstream("http://[::1]x.evil.com"));
+        // Userinfo, both directions: the host a client dials is what counts,
+        // and the parser refuses the shape rather than guessing which half wins.
+        // The `:80@` rows are the ones a naive host/port split gets wrong.
+        assert!(!is_local_upstream("http://127.0.0.1:80@evil.com"));
+        assert!(!is_local_upstream("http://[::1]:80@evil.com"));
+        assert!(!is_local_upstream("http://127.0.0.1@evil.com"));
+        assert!(!is_local_upstream("http://[::1]@evil.com"));
+        assert!(!is_local_upstream("http://localhost@evil.com"));
+        assert!(!is_local_upstream("http://evil.com@127.0.0.1"));
     }
 
     /// Why: full_id must map all known short service keys to their trusty-* IDs.
