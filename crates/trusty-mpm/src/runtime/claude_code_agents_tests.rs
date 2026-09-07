@@ -324,6 +324,36 @@ fn registry_sample_parses_every_entry_shape() {
     );
 }
 
+/// The pid the wedged stand-in recorded, or `None` when it recorded none.
+///
+/// Why (#7043): the stand-in writes its pid as its first action, which races
+/// `query_registry`'s own 3s deadline. `query_registry` SIGKILLs the probe and
+/// blocks on `waitpid` before it returns, so whatever the pid file holds when
+/// the call returns is what it holds forever — a starved probe that never
+/// reached its `echo` leaves no pid, and no amount of waiting afterwards
+/// produces one. Reading the file once and demanding a pid therefore failed a
+/// run whose only fault was losing that race.
+/// What: classifies the file into "the probe named itself" and "it did not".
+/// Absent or empty is the lost race; anything else is still a hard failure.
+/// Test: `query_registry_kills_and_reaps_a_wedged_probe`.
+#[cfg(unix)]
+fn recorded_probe_pid(pidfile: &Path) -> Option<libc::pid_t> {
+    let recorded = match std::fs::read_to_string(pidfile) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => panic!("pid file unreadable for a reason other than absence: {e}"),
+    };
+    let trimmed = recorded.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(
+        trimmed
+            .parse()
+            .unwrap_or_else(|e| panic!("a written pid file must hold a pid, got {trimmed:?}: {e}")),
+    )
+}
+
 /// Why (#6863): the probe is the module's only real spawn, and it runs on the
 /// interactive resume path. A `claude` that never answers must cost the deadline
 /// and nothing more — before this fix the reader thread owned the child and the
@@ -362,11 +392,13 @@ fn query_registry_kills_and_reaps_a_wedged_probe() {
         started.elapsed()
     );
 
-    let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
-        .expect("the stand-in must have recorded its pid before wedging")
-        .trim()
-        .parse()
-        .expect("pid file must hold a pid");
+    // #7043: a probe starved past the deadline before it could record its pid
+    // is a probe that did not outlive the deadline — the liveness check below
+    // only has something to check when the stand-in named itself.
+    let Some(pid) = recorded_probe_pid(&pidfile) else {
+        eprintln!("stand-in was killed before recording a pid; liveness unchecked (#7043)");
+        return;
+    };
     // SAFETY: signal 0 performs the existence/permission check only.
     let alive = unsafe { libc::kill(pid, 0) };
     assert_eq!(
