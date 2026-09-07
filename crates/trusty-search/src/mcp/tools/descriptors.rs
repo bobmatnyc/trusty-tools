@@ -18,10 +18,17 @@ use serde_json::Value;
 /// HTTP calls.
 /// What: returns a `Value::Array` containing one descriptor object per
 /// registered tool. Each object has `name`, `description`, and `inputSchema`.
+///
+/// #6317: the literal array below is the base; the read tools that answer an
+/// unresolvable index with a directory get `index_id` dropped from `required`
+/// and both descriptions annotated by
+/// [`super::index_directory::annotate_directory_tools`], which reads the same
+/// const the dispatcher does so the two cannot drift.
 /// Test: `test_tools_list_response` asserts every required tool is present and
-/// carries an `inputSchema`.
+/// carries an `inputSchema`; `directory_tools_drop_required_index_id` covers
+/// the annotation.
 pub fn tool_descriptors() -> Value {
-    serde_json::json!([
+    let mut defs = serde_json::json!([
         // Issue #138 — per-lane MCP tools. Tool descriptions are
         // first-class LLM prompts: each one opens with "when to use",
         // gives concrete fit/don't-fit examples, states the cost, and
@@ -442,7 +449,11 @@ pub fn tool_descriptors() -> Value {
                 ]
             }
         }
-    ])
+    ]);
+    // #6317: an unpinned read tool answers an omitted index_id with a directory,
+    // so the schema must let a client send the call without one.
+    super::index_directory::annotate_directory_tools(&mut defs);
+    defs
 }
 
 /// `tools/list` descriptors with the session's pinned index advertised (#1373).

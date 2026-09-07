@@ -17,18 +17,22 @@ use super::{
     McpServer,
 };
 
-/// Resolve `index_id` for an index-management tool, defaulting to the pinned
-/// index (#1373) when the caller omits it.
+/// Resolve `index_id` for a MUTATING index-management tool, defaulting to the
+/// pinned index (#1373) when the caller omits it.
 ///
 /// Why: a pinned trusty-search session (`serve --index <id>`) should let the
-/// LLM run `index_status`, `reindex`, `list_chunks`, etc. without repeating the
-/// project's index id, exactly as the search tools do. Centralising the
-/// precedence here keeps every index arm consistent with `search`.
+/// LLM run `reindex`, `remove_file`, etc. without repeating the project's index
+/// id, exactly as the search tools do. Centralising the precedence here keeps
+/// every index arm consistent with `search`.
 /// What: returns the caller's non-empty `index_id` argument, else the session's
 /// pinned index, else an `InvalidParams` error naming the missing field AND the
 /// tool that lists valid values for it (#5213 — an error that says only "field
 /// missing" leaves the caller guessing an id, which is the failure #1373 pinned
-/// the session to avoid in the first place).
+/// the session to avoid in the first place). #6317 split the read tools off
+/// this path: `index_status` answers an unresolvable id with the index
+/// directory, while `index_file`, `remove_file`, `delete_index`, and `reindex`
+/// keep erroring here — writing to a guessed index is not recoverable, so
+/// there is nothing useful to return in place of the error.
 /// Test: `resolve_index_id_prefers_explicit_then_pinned` pins the precedence
 /// and `missing_index_id_error_names_list_indexes` the error text.
 fn required_index_id(server: &McpServer, args: &Value) -> Result<String, DispatchError> {
@@ -202,9 +206,10 @@ pub(super) async fn dispatch_index_tool(
             )
         }
         "index_status" => {
-            let index_id = match required_index_id(server, args) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
+            // #6317: `index_status` is a read, so an unresolvable id answers
+            // with the indexes that exist rather than the write tools' error.
+            let Some(index_id) = server.resolve_index_id(args) else {
+                return Some(super::index_directory::index_directory(server, "index_status").await);
             };
             // #4715: `index_status` on a never-indexed pin 404'd the same way
             // `search` did; it gets the same honest not-ready answer.
