@@ -147,6 +147,12 @@ pub(crate) enum PickerDecision {
     /// dispatched choice, then redisplays the (refreshed) menu on the next
     /// loop iteration.
     ListSessions,
+    /// #3552: change WHAT the list shows — cycle the sort order (`s`) or set,
+    /// replace, or clear the inline filter (`/<text>`, `/`, Esc). Not a
+    /// selection and not a session action: the driver mutates the scope via
+    /// [`super::session_picker_view::apply_view_command`] and re-renders
+    /// without a daemon round-trip.
+    View(super::session_picker_view::ViewCommand),
 }
 
 /// Scope describing which sessions the picker operates over and how to launch new.
@@ -162,6 +168,11 @@ pub(crate) enum PickerDecision {
 /// (#3483) are the `tm ls` inline sort-keyword + filter grammar
 /// ([`parse_ls_terms`]) re-applied on every re-fetch inside [`run_tty_picker`]'s
 /// loop so the picker's ordering/filtering never drifts from the initial menu.
+///
+/// #3552: those two fields are now LIVE view state, not just the invocation's
+/// starting point — `[s]` and `/<text>` inside the picker rewrite them through
+/// [`super::session_picker_view::apply_view_command`], and `selected_id` pins
+/// the row bare Enter targets so a re-sort does not repoint the default.
 /// Test: constructed by `guided::try_show_picker` and [`run_ls_connector`](crate::commands::session_ls_connector::run_ls_connector);
 /// behavior is covered by the picker's e2e path.
 pub(crate) struct PickerScope {
@@ -174,6 +185,11 @@ pub(crate) struct PickerScope {
     /// Case-insensitive substring filter re-applied after every re-fetch
     /// (#3483); `None` shows every (live) session.
     pub(crate) term: Option<SessionFilter>,
+    /// #3552: id of the session bare Enter targets, or `None` to target the
+    /// first row. The driver re-pins it after every render, so it always names
+    /// a row that was actually on screen — see
+    /// [`super::session_picker_view::default_index`].
+    pub(crate) selected_id: Option<String>,
 }
 
 impl PickerScope {
@@ -192,6 +208,9 @@ impl PickerScope {
             repo_url: Some(repo_url.to_string()),
             sort: SessionSortArg::Recent,
             term: None,
+            // #3552: nothing pinned yet — the first render defaults to row 0,
+            // then pins whatever that turned out to be.
+            selected_id: None,
         }
     }
 }
@@ -454,6 +473,16 @@ impl SessionFilter {
     /// Filter over the `NAME` column only — `tm f <pattern>`.
     pub(crate) fn name(term: impl AsRef<str>) -> Self {
         Self::new(term, FilterScope::Name)
+    }
+
+    /// The term this filter matches on, lowercased (#3552).
+    ///
+    /// Why: the picker's status line has to name the active filter, and the
+    /// lowercased needle is what matching actually uses — echoing the operator's
+    /// original casing would advertise a distinction the filter does not make.
+    /// Test: `view_status_line_names_the_active_filter_and_its_undo`.
+    pub(crate) fn needle(&self) -> &str {
+        &self.needle_lower
     }
 
     fn new(term: impl AsRef<str>, scope: FilterScope) -> Self {
@@ -748,15 +777,36 @@ pub(crate) fn decide_for_index(
 /// `guided_picker_n_with_argument_carries_name_hint`,
 /// `guided_picker_n_grammar_is_bounded`,
 /// `guided_picker_n_sanitizes_the_name_cli_side`,
-/// `guided_picker_n_does_not_shadow_other_commands`.
+/// `guided_picker_n_does_not_shadow_other_commands`,
+/// `parse_picker_choice_s_cycles_the_sort_order`,
+/// `parse_picker_choice_slash_sets_the_filter`,
+/// `parse_picker_choice_bare_enter_targets_the_pinned_default`.
+///
+/// #3552: `default_idx` is which row bare Enter targets. It used to be
+/// hardcoded to `0`; now that `[s]` and `/<text>` reorder the list under the
+/// operator, the default follows the PINNED session instead — see
+/// [`super::session_picker_view::default_index`] for why a browsing key must
+/// not repoint an action key. It must be a valid index into `sessions`
+/// whenever `sessions` is non-empty, which
+/// [`super::session_picker_order::prepare_menu`] guarantees by deriving it
+/// from the same list it returns. Tests that predate the pin pass `0` through
+/// the three-argument shim each test file defines.
 pub(crate) fn parse_picker_choice(
     line: &str,
     sessions: &[ManagedSessionSummary],
+    default_idx: usize,
     first_needs_restart: bool,
 ) -> PickerDecision {
     let choice = line.trim();
     if choice.eq_ignore_ascii_case("q") {
         return PickerDecision::Quit;
+    }
+    // #3552: the in-picker sort/filter grammar. Checked before the `r<N>` /
+    // `d<N>` prefix strips and the numeric branches: `s`, `sort` and a leading
+    // `/` share no prefix with any of them, so this is a strict addition that
+    // cannot shadow an existing key.
+    if let Some(cmd) = super::session_picker_view::parse_view_command(choice) {
+        return PickerDecision::View(cmd);
     }
     // #3863: `ls` / `list` re-print the current list in place — checked
     // before the rename (`r<N>`)/delete (`d<N>`) prefix branches and the
@@ -853,7 +903,9 @@ pub(crate) fn parse_picker_choice(
         if sessions.is_empty() {
             return PickerDecision::LaunchNew(LaunchNewRequest::unnamed());
         }
-        return decide_for_index(sessions, 0, first_needs_restart);
+        // #3552: the pinned default, not position 0 — `[s]`/`/<text>` reorder
+        // the rows without repointing what Enter does.
+        return decide_for_index(sessions, default_idx, first_needs_restart);
     }
     if let Ok(n) = choice.parse::<u32>() {
         if let Some(idx) = find_slot(sessions, n) {
@@ -938,7 +990,7 @@ pub(crate) fn parse_picker_choice(
 pub(crate) async fn run_tty_picker(
     client: &reqwest::Client,
     url: &str,
-    scope: &PickerScope,
+    scope: &mut PickerScope,
     mut sessions: Vec<ManagedSessionSummary>,
 ) -> anyhow::Result<()> {
     // #3723: resolved ONCE per invocation, not per row — see
@@ -958,8 +1010,17 @@ pub(crate) async fn run_tty_picker(
         // `next_launch_slot`.
         let menu = super::session_picker_order::prepare_menu(sessions, scope);
         sessions = menu.sessions;
-        let (stale_slots, new_idx, first_needs_restart) =
-            (menu.stale_slots, menu.new_idx, menu.first_needs_restart);
+        let (stale_slots, new_idx, first_needs_restart, default_idx) = (
+            menu.stale_slots,
+            menu.new_idx,
+            menu.first_needs_restart,
+            menu.default_idx,
+        );
+        // #3552: re-pin to the row this render actually defaults to. A pin the
+        // filter just hid, or a session that left the fleet, resolved to `0`
+        // above — writing that back is what stops an invisible pin reclaiming
+        // the default the moment the filter is cleared.
+        scope.selected_id = sessions.get(default_idx).map(|s| s.id.clone());
         eprintln!();
         // #4965: the `[key] description` legend is built by
         // `session_picker_render::command_legend` — column-aligned in BOTH
@@ -968,6 +1029,16 @@ pub(crate) async fn run_tty_picker(
         if sessions.is_empty() {
             for l in super::session_picker_render::command_legend(None) {
                 eprintln!("{l}");
+            }
+            // #3552: an empty list normally means an empty fleet, where bare
+            // Enter launching a new session is the obvious next step. With a
+            // filter active it can instead mean "you hid everything", and
+            // spawning is not what the operator was reaching for.
+            if scope.term.is_some() {
+                eprintln!(
+                    "tm: nothing matches this filter — [Enter] would launch a NEW session; \
+                     [/] shows every session again."
+                );
             }
         } else {
             if stale_slots {
@@ -1001,8 +1072,10 @@ pub(crate) async fn run_tty_picker(
             for l in super::session_picker_render::command_legend(Some(new_idx)) {
                 eprintln!("{l}");
             }
-            let first = &sessions[0];
-            let first_num = shown_slot(&sessions, 0);
+            // #3552: the [Enter] hint follows the PINNED row, not position 0 —
+            // `[s]` and `/<text>` reorder the rows without repointing Enter.
+            let first = &sessions[default_idx];
+            let first_num = shown_slot(&sessions, default_idx);
             if first.deleted {
                 eprintln!("tm: [Enter] is a DELETED slot — type another number, or [q] to quit");
             } else if first.unresumable {
@@ -1017,9 +1090,18 @@ pub(crate) async fn run_tty_picker(
                     super::session_picker_render::restart_confirm_hint(first_num)
                 );
             } else {
-                eprintln!("tm: default: [{first_num}] resume most recent");
+                // #3552: name the session rather than saying "most recent" —
+                // once `[s]` can reorder the list and the pin can hold the
+                // default in place, "most recent" is no longer reliably what
+                // [Enter] resumes.
+                eprintln!("tm: default: [{first_num}] resume '{}'", first.name);
             }
         }
+        // #3552: what this list is showing, and the keys that change it.
+        eprintln!(
+            "{}",
+            super::session_picker_view::view_status_line(scope.sort, scope.term.as_ref())
+        );
         eprint!("tm: > ");
 
         let mut line = String::new();
@@ -1030,7 +1112,7 @@ pub(crate) async fn run_tty_picker(
             break;
         } // EOF (Ctrl-D): exit cleanly.
 
-        match parse_picker_choice(&line, &sessions, first_needs_restart) {
+        match parse_picker_choice(&line, &sessions, default_idx, first_needs_restart) {
             PickerDecision::Quit => {
                 eprintln!("tm: quit.");
                 break;
@@ -1171,14 +1253,26 @@ pub(crate) async fn run_tty_picker(
             // unconditional re-fetch below so the next loop iteration
             // redisplays a freshly-fetched menu.
             PickerDecision::ListSessions => {}
+            // #3552: `s` / `/<text>` change what the list SHOWS. Applying the
+            // change to the scope and looping is the whole action —
+            // `prepare_menu` at the top re-sorts and re-filters from the
+            // sessions already in hand, so re-rendering costs no daemon
+            // round-trip and cannot show a different order than a re-fetch
+            // would.
+            PickerDecision::View(ref cmd) => {
+                super::session_picker_view::apply_view_command(scope, cmd);
+                continue;
+            }
             // #3863: an unrecognised choice used to quit the picker outright
             // (a startling failure mode for a plain typo). Print a one-line
             // hint of the accepted tokens and redisplay the SAME menu
             // instead — no daemon round-trip.
             PickerDecision::Unrecognised => {
                 eprintln!(
+                    // #3552: `s` and `/<text>` join the accepted-token list —
+                    // a typo hint that omits them teaches the wrong grammar.
                     "tm: unrecognised choice '{}' — accepted: 1..{new_idx}, n [<name>], \
-                     ls, d<N>, d <glob>, r<N> <name>, q",
+                     ls, d<N>, d <glob>, r<N> <name>, s, /<text>, q",
                     line.trim()
                 );
                 continue;
