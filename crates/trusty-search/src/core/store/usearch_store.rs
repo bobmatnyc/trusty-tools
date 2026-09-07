@@ -524,6 +524,17 @@ impl UsearchStore {
     /// and `tests::test_save_allows_legitimate_shrink_after_deletions` cover the
     /// #1717 guard.
     pub async fn save(&self, hnsw_path: &Path) -> Result<()> {
+        self.save_with_publisher(hnsw_path, super::snapshot_publish::publish_snapshot)
+            .await
+    }
+
+    /// Share the complete save path with per-call publication fault tests.
+    /// Test: `super::snapshot_tests::sidecar_rename_failure_preserves_previous_snapshot`.
+    pub(super) async fn save_with_publisher(
+        &self,
+        hnsw_path: &Path,
+        publish: impl FnOnce(&Path, &StoreKeyMap) -> Result<()> + Send,
+    ) -> Result<()> {
         // #6961: the graph and maps are captured and published under one
         // outer gate shared by all mutation entry points. Inner locks alone
         // permit a map update to race graph serialization.
@@ -727,7 +738,7 @@ impl UsearchStore {
                 }
             }
         }
-        super::snapshot_publish::publish_snapshot(hnsw_path, &key_map)?;
+        publish(hnsw_path, &key_map)?;
         // Only a published pair establishes a new baseline for shrink credit.
         self.removed_since_save.store(0, Ordering::Release);
 

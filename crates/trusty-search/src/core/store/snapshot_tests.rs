@@ -177,11 +177,8 @@ async fn rewritten_keys_remain_dirty_until_saved_and_demoted() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn sidecar_rename_failure_preserves_previous_snapshot() {
-    use std::os::unix::fs::PermissionsExt;
-
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hnsw.usearch");
     let store = UsearchStore::new(4).unwrap();
@@ -192,16 +189,30 @@ async fn sidecar_rename_failure_preserves_previous_snapshot() {
     let sidecar = path.with_extension("keys.json");
     let keys = std::fs::read(&sidecar).unwrap();
     store.remove("a").await.unwrap();
-    // Existing writable staging files can be serialized even when the parent
-    // directory cannot be modified. The first rename then fails deterministically.
-    std::fs::write(staging_path(&path, "usearch"), []).unwrap();
-    std::fs::write(staging_path(&sidecar, "json"), []).unwrap();
-    let permissions = std::fs::metadata(dir.path()).unwrap().permissions();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-    let result = store.save(&path).await;
-    std::fs::set_permissions(dir.path(), permissions).unwrap();
-    let error = result.unwrap_err();
+    // Exercise real graph serialization and sidecar staging, but fail the
+    // first rename independently of the test process's OS privileges.
+    let error = store
+        .save_with_publisher(&path, |path, map| {
+            super::snapshot_publish::publish_snapshot_with_rename(path, map, |from, to| {
+                assert_eq!(from, staging_path(&sidecar, "json"));
+                assert_eq!(to, sidecar);
+                assert!(staging_path(path, "usearch").is_file());
+                let staged: super::types::StoreKeyMap =
+                    serde_json::from_slice(&std::fs::read(from).unwrap()).unwrap();
+                assert_eq!(staged.id_to_key.len(), 1);
+                assert!(staged.id_to_key.contains_key("b"));
+                Err(std::io::Error::other("injected first rename failure"))
+            })
+        })
+        .await
+        .unwrap_err();
     assert_eq!(error.to_string(), "rename hnsw key sidecar");
+    assert_eq!(
+        error.root_cause().to_string(),
+        "injected first rename failure"
+    );
+    assert!(!staging_path(&path, "usearch").exists());
+    assert!(!staging_path(&sidecar, "json").exists());
     assert_eq!(std::fs::read(&path).unwrap(), binary);
     assert_eq!(std::fs::read(&sidecar).unwrap(), keys);
     assert_eq!(store.removed_since_save.load(Ordering::Acquire), 1);

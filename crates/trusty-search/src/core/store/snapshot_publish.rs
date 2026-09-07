@@ -17,10 +17,21 @@ use super::usearch_store::staging_path;
 /// I/O failures restore the previous sidecar or explicitly report rollback failure.
 /// Test: `super::snapshot_tests::binary_publication_failure_restores_removed_and_rewritten_keys`.
 pub(super) fn publish_snapshot(path: &Path, key_map: &StoreKeyMap) -> Result<()> {
+    publish_snapshot_with_rename(path, key_map, |from, to| std::fs::rename(from, to))
+}
+
+/// Run publication with a per-call rename operation so I/O failures can be
+/// tested independently of filesystem privileges, without global failpoints.
+/// Test: `super::snapshot_tests::sidecar_rename_failure_preserves_previous_snapshot`.
+pub(super) fn publish_snapshot_with_rename(
+    path: &Path,
+    key_map: &StoreKeyMap,
+    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
     let binary_tmp = staging_path(path, "usearch");
     let sidecar = path.with_extension("keys.json");
     let sidecar_tmp = staging_path(&sidecar, "json");
-    let publish = || -> Result<()> {
+    let mut publish = || -> Result<()> {
         let json = serde_json::to_vec(key_map).context("serialize hnsw key map")?;
         std::fs::write(&sidecar_tmp, json).context("write hnsw key sidecar tmp")?;
         let previous = match std::fs::read(&sidecar) {
@@ -28,11 +39,11 @@ pub(super) fn publish_snapshot(path: &Path, key_map: &StoreKeyMap) -> Result<()>
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e).context("read previous hnsw key sidecar"),
         };
-        std::fs::rename(&sidecar_tmp, &sidecar).context("rename hnsw key sidecar")?;
-        if let Err(publish_error) = std::fs::rename(&binary_tmp, path) {
+        rename(&sidecar_tmp, &sidecar).context("rename hnsw key sidecar")?;
+        if let Err(publish_error) = rename(&binary_tmp, path) {
             let rollback = match previous {
                 Some(bytes) => std::fs::write(&sidecar_tmp, bytes)
-                    .and_then(|()| std::fs::rename(&sidecar_tmp, &sidecar)),
+                    .and_then(|()| rename(&sidecar_tmp, &sidecar)),
                 None => std::fs::remove_file(&sidecar),
             };
             if let Err(rollback_error) = rollback {
