@@ -801,7 +801,6 @@ crates/trusty-search/src/core/migration/mod.rs	test_run_migrations_applies_in_se
 crates/trusty-search/src/core/migration/mod.rs	test_run_migrations_idempotent_after_crash
 crates/trusty-search/src/core/migration/mod.rs	test_run_migrations_no_op_when_current
 crates/trusty-search/src/core/migration/mod.rs	test_schema_version_roundtrip
-crates/trusty-search/src/core/output.rs	truncation_flag_when_capped
 crates/trusty-search/src/core/registry.rs	stage_states_advance_through_pipeline
 crates/trusty-search/src/core/registry.rs	test_results_may_be_stale_when_head_changes
 crates/trusty-search/src/core/registry.rs	walk_diagnostics_error_captured_on_failure
