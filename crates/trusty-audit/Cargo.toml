@@ -22,7 +22,11 @@ name = "trusty-audit"
 # `grounding::coverage_rollup::Sampling` enum plus `RepoCoverage::sampling` and
 # `Rollup::sampling` — so no existing signature or struct shape changed and
 # `cargo-semver-checks` has nothing to report against 0.14.2.
-version = "0.14.3"
+# 0.14.3 -> 0.14.4 (#6794): PATCH. 0.14.3 is already on crates.io and this PR
+# changes `src/**`. The change is confined to the body of the private
+# `grounding::osv::absorb`, which now honours the producer's `resolved` flag;
+# no public item is added, removed, or reshaped.
+version = "0.14.4"
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"

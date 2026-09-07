@@ -48,10 +48,12 @@ fn dependency_section(inv: &Investigation) -> String {
     let mut out = String::from("\n\n## Dependency Inventory\n\n");
     if !any {
         out.push_str(&empty_inventory_line(inv));
+        // #6794: an unreadable lockfile is why a root can look dependency-free.
+        out.push_str(&lockfile_warning_block(inv));
         return out;
     }
     out.push_str(&format!(
-        "_Parsed deterministically from manifests + lockfiles{MEASURED_TAG}; staleness judgements, where present, are inferred{INFERRED_TAG}._\n\n",
+        "_Parsed deterministically from manifests + lockfiles{MEASURED_TAG}; staleness judgements, where present, are inferred{INFERRED_TAG}. The Resolved from column names the lockfile a version came from; `not resolved` means no lockfile answered and the Declared range is all this pass knows._\n\n",
     ));
     for repo in &inv.repos {
         if repo.deps.is_empty() {
@@ -61,6 +63,7 @@ fn dependency_section(inv: &Investigation) -> String {
         out.push_str(&dependency_table(&repo.deps));
         out.push('\n');
     }
+    out.push_str(&lockfile_warning_block(inv));
     out
 }
 
@@ -105,18 +108,58 @@ fn empty_inventory_line(inv: &Investigation) -> String {
 /// Test: `render_tests::{dependency_table_caps_and_overflows,
 /// dependency_table_draws_only_max_rows_of_a_full_inventory}`.
 fn dependency_table(inv: &DependencyInventory) -> String {
-    let mut out = String::from("| Package | Ecosystem | Declared | Locked |\n|---|---|---|---|\n");
+    let mut out = String::from(
+        "| Package | Ecosystem | Declared | Locked | Resolved from |\n|---|---|---|---|---|\n",
+    );
     for d in inv.rendered() {
         let spec = if d.spec.is_empty() { "—" } else { &d.spec };
         let locked = d.locked.as_deref().unwrap_or("—");
+        // #6794: an unresolved row shows the declared range in the Locked cell
+        // and says so, rather than reading as a pin the reader can act on.
+        let source = match (&d.source, d.resolved) {
+            (Some(file), true) => file.as_str(),
+            _ => "not resolved",
+        };
         out.push_str(&format!(
-            "| {} | {} | {} | {} |\n",
-            d.name, d.ecosystem, spec, locked
+            "| {} | {} | {} | {} | {} |\n",
+            d.name, d.ecosystem, spec, locked, source
         ));
     }
     let overflow = inv.overflow();
     if overflow > 0 {
-        out.push_str(&format!("| … and {overflow} more | | | |\n"));
+        out.push_str(&format!("| … and {overflow} more | | | | |\n"));
+    }
+    out
+}
+
+/// The warning block naming every lockfile that was present and did not parse.
+///
+/// Why: #6794 — a lockfile that fails to parse degrades its whole ecosystem to
+/// declared ranges. Without this the page shows those ranges with nothing
+/// saying why, which reads as "this project pins loosely" rather than "this
+/// pass could not read the pins".
+/// What: an empty string when every lockfile parsed; otherwise one bullet per
+/// warning, de-duplicated across repositories.
+/// Test: `render_tests::dependency_section_names_unparseable_lockfiles`.
+fn lockfile_warning_block(inv: &Investigation) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for warning in inv
+        .repos
+        .iter()
+        .flat_map(|r| r.deps.lockfile_warnings.iter())
+    {
+        if !seen.contains(&warning.as_str()) {
+            seen.push(warning);
+        }
+    }
+    if seen.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n**Lockfiles that could not be read**, so the rows above fall back to declared ranges:\n\n",
+    );
+    for warning in seen {
+        out.push_str(&format!("- {warning}\n"));
     }
     out
 }

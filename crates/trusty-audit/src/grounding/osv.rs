@@ -357,8 +357,10 @@ pub struct Inventory {
 /// What: `repos[].deps.{deps,total}` from the snapshot, folded across every
 /// repository entry the file carries — on the sweep path that is the one
 /// repository the directory belongs to. A row contributes a coordinate when it
-/// has a `locked` version AND a mappable ecosystem, and is named in `unpinned`
-/// or `unmapped` otherwise.
+/// has a `locked` version that the producer marks `resolved` (#6794) AND a
+/// mappable ecosystem, and is named in `unpinned` or `unmapped` otherwise. A
+/// snapshot written before `resolved` existed carries no such key, and there
+/// the presence of `locked` remains the only signal.
 ///
 /// # Errors
 /// One line, safe to show the recipient, when the snapshot is absent,
@@ -429,7 +431,16 @@ fn absorb(inventory: &mut Inventory, row: &serde_json::Value) {
         inventory.unmapped.push(format!("{name} ({label})"));
         return;
     };
-    match string("locked") {
+    // #6794: the producer now states whether `locked` is an exact resolution.
+    // A row it marks unresolved carries prose — `0.13.1, 0.22.1 (none satisfies
+    // ^0.30)` — and sending that as a version asks OSV a question about a
+    // package that does not exist. An older snapshot has no `resolved` key at
+    // all, and for those the presence of `locked` is still the only signal.
+    let resolved = row
+        .get("resolved")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    match string("locked").filter(|_| resolved) {
         Some(version) => inventory
             .coordinates
             .push(Coordinate::new(ecosystem, name, version)),

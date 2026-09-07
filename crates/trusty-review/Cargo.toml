@@ -106,7 +106,15 @@ name        = "trusty-review"
 # report. A MINOR bump would also have to widen the root
 # `[workspace.dependencies]` row (`trusty-review = { …, version = "0.35" }`),
 # which this change gives no reason to touch.
-version     = "0.35.1"
+#
+# 0.36.0 (#6794): MINOR — `Dependency` gains `resolved` and `source`,
+# `DependencyInventory` gains `lockfile_warnings`, and both become
+# `#[non_exhaustive]`. Each of those is a `cargo-semver-checks` major lint
+# (`constructible_struct_adds_field`, `struct_marked_non_exhaustive`), and for a
+# `0.y.z` crate the breaking bump is the MINOR position. `#[non_exhaustive]` is
+# the same choice made at 0.18.0 for the three report types: field additions
+# stay non-breaking from here on, so the next one costs no bump.
+version     = "0.36.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

@@ -47,6 +47,9 @@ fn dep(name: &str, locked: Option<&str>) -> Dependency {
         ecosystem: "cargo".to_string(),
         spec: "1.0".to_string(),
         locked: locked.map(str::to_string),
+        // #6794: a row with a locked version was resolved from Cargo.lock.
+        resolved: locked.is_some(),
+        source: locked.map(|_| "Cargo.lock".to_string()),
     }
 }
 
@@ -238,11 +241,7 @@ fn coverage_section_omits_the_verdict_line_without_verdicts() {
 
 /// An empty inventory, for fixtures that care about coverage only.
 fn deps_none() -> DependencyInventory {
-    DependencyInventory {
-        deps: vec![],
-        total: 0,
-        manifests_examined: vec![],
-    }
+    DependencyInventory::default()
 }
 
 /// Why: the dependency table must render declared + locked and an honest overflow.
@@ -254,12 +253,13 @@ fn dependency_table_caps_and_overflows() {
         deps: vec![dep("serde", Some("1.0.203")), dep("tokio", None)],
         total: 5,
         manifests_examined: vec!["Cargo.toml".to_string()],
+        lockfile_warnings: Vec::new(),
     };
     let out = dependency_table(&inv);
-    assert!(out.contains("| serde | cargo | 1.0 | 1.0.203 |"));
+    assert!(out.contains("| serde | cargo | 1.0 | 1.0.203 | Cargo.lock |"));
     assert!(
-        out.contains("| tokio | cargo | 1.0 | — |"),
-        "missing lock → em dash"
+        out.contains("| tokio | cargo | 1.0 | — | not resolved |"),
+        "missing lock → em dash + not resolved: {out}"
     );
     assert!(out.contains("and 3 more"));
 }
@@ -279,6 +279,7 @@ fn dependency_table_draws_only_max_rows_of_a_full_inventory() {
         total: deps.len(),
         deps,
         manifests_examined: vec!["Cargo.toml".to_string()],
+        lockfile_warnings: Vec::new(),
     };
     let out = dependency_table(&inv);
 
@@ -530,6 +531,54 @@ fn empty_inventory_names_the_manifests_it_read() {
         out.contains("no directly declared dependencies"),
         "out: {out}"
     );
+}
+
+/// #6794: a lockfile that was present and failed to parse leaves every row in
+/// its ecosystem showing a declared range. The section must say which file
+/// could not be read, so those ranges read as unassessed rather than as loose
+/// pinning — and it must say it whether or not any dependency row survived.
+#[test]
+fn dependency_section_names_unparseable_lockfiles() {
+    let warning = "Cargo.lock was found but could not be parsed (expected an equals, found a \
+                   newline); cargo dependencies fall back to their declared ranges"
+        .to_string();
+    let with_rows = Investigation {
+        repos: vec![repo(
+            InvestigationStatus::Available,
+            vec![],
+            DependencyInventory {
+                deps: vec![dep("serde", None)],
+                total: 1,
+                manifests_examined: vec!["Cargo.toml".to_string()],
+                lockfile_warnings: vec![warning.clone()],
+            },
+        )],
+    };
+    let out = dependency_section(&with_rows);
+    assert!(
+        out.contains("Lockfiles that could not be read"),
+        "out: {out}"
+    );
+    assert!(out.contains(&warning), "out: {out}");
+    assert!(
+        out.contains("| serde | cargo | 1.0 | — | not resolved |"),
+        "the row still renders from the manifest: {out}"
+    );
+
+    // The same warning must survive the empty-inventory early return.
+    let no_rows = Investigation {
+        repos: vec![repo(
+            InvestigationStatus::Available,
+            vec![],
+            DependencyInventory {
+                manifests_examined: vec!["Cargo.toml".to_string()],
+                lockfile_warnings: vec![warning.clone()],
+                ..Default::default()
+            },
+        )],
+    };
+    let out = dependency_section(&no_rows);
+    assert!(out.contains(&warning), "out: {out}");
 }
 
 /// Why: a truncated/failed batch must be NAMED — which files, which position,

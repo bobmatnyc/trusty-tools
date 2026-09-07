@@ -186,6 +186,43 @@ fn the_inventory_becomes_osv_coordinates() {
     assert_eq!(inventory.declared, 3);
 }
 
+/// #6794: the producer now states whether a `locked` cell is an exact
+/// resolution. A row it marks unresolved carries prose rather than a version —
+/// `0.13.1, 0.22.1 (none satisfies ^0.30)` — and asking OSV about that invents
+/// a package. It must be named as unpinned instead. A snapshot written before
+/// `resolved` existed has no such key, and there `locked` alone still decides.
+#[test]
+fn an_unresolved_locked_cell_is_unpinned_not_a_coordinate() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let snapshot = snapshot_at(
+        tmp.path(),
+        r#"{"name":"acme-parser","ecosystem":"cargo","spec":"1","locked":"1.2.3","resolved":true},
+           {"name":"base64","ecosystem":"cargo","spec":"^0.30",
+            "locked":"0.13.1, 0.22.1 (none satisfies ^0.30)","resolved":false}"#,
+        2,
+    );
+
+    let current = inventory(&snapshot).expect("the snapshot parses");
+    assert_eq!(
+        current.coordinates,
+        vec![Coordinate::new("crates.io", "acme-parser", "1.2.3")]
+    );
+    assert_eq!(current.unpinned, vec!["base64 (cargo)".to_string()]);
+
+    // A pre-#6794 snapshot omits the key entirely; `locked` alone still decides.
+    let legacy = snapshot_at(
+        tmp.path(),
+        r#"{"name":"acme-parser","ecosystem":"cargo","spec":"1","locked":"1.2.3"}"#,
+        1,
+    );
+    let legacy = inventory(&legacy).expect("the snapshot parses");
+    assert_eq!(
+        legacy.coordinates,
+        vec![Coordinate::new("crates.io", "acme-parser", "1.2.3")]
+    );
+    assert!(legacy.unpinned.is_empty());
+}
+
 /// 🔴 The producer caps its inventory at 30 rows, so a large workspace offers
 /// a fraction of itself to OSV. The report must say how much it left out — a
 /// scan over 30 of 134 packages that reads as a scan of the repository is the
