@@ -1617,6 +1617,12 @@ fn gh_command_runs_in_the_requested_directory() {
 /// a fork gets deleted by whoever hits it. Gating on the repository identity,
 /// rather than on "did we get rows", keeps the assertion meaningful wherever it
 /// DOES run.
+///
+/// #7038: the identity probe is not the only live call here — `from_gh` makes a
+/// second one, and a transient failure THERE returns an empty index, which the
+/// row assertion read as the `-C` bug. `PrIndex` records why a lookup failed, so
+/// the failed call is now skipped on the same terms as the probe. What still
+/// fails is a call that ANSWERED and answered nothing, which is the bug shape.
 #[test]
 fn pr_index_from_gh_reads_this_repository() {
     const UPSTREAM: &str = "bobmatnyc/trusty-tools";
@@ -1649,6 +1655,14 @@ fn pr_index_from_gh_reads_this_repository() {
         return;
     }
     let index = PrIndex::from_gh(repo_root);
+    // #7038: a branch this repository cannot have resolves to `LookupFailed`
+    // only when the `gh pr list` inside `from_gh` itself failed — a call that
+    // answered reports `NoPr` or `Unknown` instead.
+    const ABSENT: &str = "trusty-tools-7038/no-such-branch";
+    if let BranchPrState::LookupFailed { reason } = index.state_for(Some(ABSENT)) {
+        eprintln!("skipping: `gh pr list` failed — {reason}");
+        return;
+    }
     assert!(
         index.branch_count() > 0,
         "a successful `gh pr list` against {UPSTREAM} must yield branches; an empty \

@@ -1,0 +1,3 @@
+Fixed
+
+- `pr_index_from_gh_reads_this_repository` no longer fails when the `gh pr list` it makes cannot reach GitHub. The test already skipped when its repository-identity probe failed, but the `PrIndex::from_gh` call after it was unguarded, and a transient `gh` or network failure there returns an empty index — which the test read as the argv bug it exists to catch. It now asks the index for a branch this repository cannot have: a lookup that FAILED reports `LookupFailed` and the test skips naming `gh`'s own reason, while a call that answered reports `NoPr` or `Unknown` and the row assertion runs unchanged. An answered call that resolved zero branches still fails, which is the bug shape (#7038).
