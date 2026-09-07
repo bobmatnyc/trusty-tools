@@ -985,6 +985,119 @@ exit 1
         );
     }
 
+    /// Why: a zero PID during restart backoff must not end health forwarding.
+    /// What: kill this fixture's child, observe the gap and real replacement,
+    /// then verify the public PID catches up before cleaning up the supervisor.
+    /// Test: this test; fails when the forwarder exits at the temporary zero.
+    #[tokio::test]
+    async fn lazy_handle_pid_forwarder_survives_restart_gap() {
+        let (_dir, binary) = write_mock_embedderd();
+        let handle = LazyEmbedderHandle::new(
+            binary,
+            SupervisorConfig {
+                startup_timeout_secs: 5,
+                backoff_max_secs: 2,
+                max_restarts: 3,
+                idle_shutdown_secs: 0,
+                ..SupervisorConfig::default()
+            },
+        );
+        handle
+            .embed_via(|client| async move { client.embed_batch(vec!["probe".to_string()]).await })
+            .await
+            .expect("mock embed_batch must succeed");
+        let actual = Arc::clone(&handle.state.lock().await.as_ref().unwrap().pid_slot);
+        let public = handle.app_pid_slot();
+        let original_pid = actual.load(Ordering::Acquire);
+        assert!(original_pid > 0 && original_pid <= i32::MAX as u32);
+        assert_eq!(public.load(Ordering::Acquire), original_pid);
+        // The only signal target comes from this handle's own live spawn.
+        assert_eq!(actual.load(Ordering::Acquire), original_pid);
+        let killed = std::process::Command::new("kill")
+            .args(["-KILL", &original_pid.to_string()])
+            .status()
+            .expect("send SIGKILL to owned fixture child");
+        assert!(killed.success());
+        let observed = tokio::time::timeout(Duration::from_secs(10), async {
+            while actual.load(Ordering::Acquire) != 0 || public.load(Ordering::Acquire) != 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            loop {
+                let replacement = actual.load(Ordering::Acquire);
+                if replacement != 0 && replacement != original_pid {
+                    while public.load(Ordering::Acquire) != replacement {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    return replacement;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let final_pid = actual.load(Ordering::Acquire);
+        handle.shutdown().await;
+        assert!(!process_alive(original_pid));
+        assert!(final_pid > 0 && !process_alive(final_pid));
+        assert_eq!(public.load(Ordering::Acquire), 0);
+        assert!(
+            observed.is_ok(),
+            "public PID never followed replacement {final_pid} after the observed restart gap"
+        );
+    }
+
+    /// Why: shutdown and replacement must retire forwarding tasks (#829).
+    /// What: shut down a real child, immediately respawn, and verify only the
+    /// new task remains; final shutdown must stop that task and clear the PID.
+    /// Test: this test.
+    #[tokio::test]
+    async fn lazy_handle_pid_forwarder_retires_on_shutdown_and_respawn() {
+        let (_dir, binary) = write_mock_embedderd();
+        let handle = LazyEmbedderHandle::new(
+            binary,
+            SupervisorConfig {
+                startup_timeout_secs: 5,
+                idle_shutdown_secs: 0,
+                ..SupervisorConfig::default()
+            },
+        );
+        handle
+            .embed_via(|client| async move { client.embed_batch(vec!["probe".to_string()]).await })
+            .await
+            .expect("initial fixture embed");
+        let old_task = handle.pid_forwarder_handle.lock().await.clone().unwrap();
+        let old_pid = handle.app_pid_slot().load(Ordering::Acquire);
+        handle.shutdown().await;
+        assert!(!process_alive(old_pid));
+        handle
+            .embed_via(|client| async move { client.embed_batch(vec!["probe".to_string()]).await })
+            .await
+            .expect("replacement fixture embed");
+        let new_task = handle.pid_forwarder_handle.lock().await.clone().unwrap();
+        let new_pid = handle.app_pid_slot().load(Ordering::Acquire);
+        let old_finished = tokio::time::timeout(Duration::from_secs(5), async {
+            while !old_task.is_finished() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let observed_pid = handle.app_pid_slot().load(Ordering::Acquire);
+        let new_running = !new_task.is_finished();
+        handle.shutdown().await;
+        let new_finished = tokio::time::timeout(Duration::from_secs(5), async {
+            while !new_task.is_finished() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(old_finished.is_ok(), "old forwarder survived replacement");
+        assert!(new_pid > 0 && new_pid != old_pid);
+        assert_eq!(observed_pid, new_pid, "old forwarder overwrote replacement");
+        assert!(new_running, "new forwarder retired before its spawn");
+        assert!(new_finished.is_ok(), "forwarder survived final shutdown");
+        assert!(!process_alive(new_pid));
+        assert_eq!(handle.app_pid_slot().load(Ordering::Acquire), 0);
+    }
+
     /// `is_confirmed_terminated()` must be `false` when the handle has never
     /// spawned anything — there is no reason to believe an unspawned handle
     /// is "unrecoverably dead" (epic #3524 slice 6 PR-4 follow-up,
@@ -1055,10 +1168,24 @@ exit 1
             }
         })
         .await;
+        let forwarder = handle.pid_forwarder_handle.lock().await.clone().unwrap();
+        let forwarding_stopped = tokio::time::timeout(Duration::from_secs(5), async {
+            while !forwarder.is_finished() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let final_public_pid = handle.app_pid_slot().load(Ordering::Acquire);
+        handle.shutdown().await;
         assert!(
             gave_up.is_ok(),
             "is_confirmed_terminated() never flipped true within 45s of \
              exhausting max_restarts=1 against an always-crashing mock child"
         );
+        assert!(
+            forwarding_stopped.is_ok(),
+            "forwarder survived permanent give-up"
+        );
+        assert_eq!(final_public_pid, 0, "give-up must publish final zero PID");
     }
 }
