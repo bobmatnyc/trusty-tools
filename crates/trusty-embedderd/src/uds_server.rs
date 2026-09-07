@@ -55,15 +55,19 @@ pub fn bind_uds_listener(path: &Path) -> Result<UnixListener> {
 /// Why: a single-threaded accept loop with detached per-connection tasks
 /// scales well for the daemon's expected load (dozens of concurrent in-host
 /// clients, short-lived requests).
-/// What: loops `listener.accept().await`; on each accepted stream, verifies the
+/// What: loops `trusty_common::uds::accept_sized`; on each accepted stream, verifies the
 /// peer's uid matches this process's own (#5099) and then clones the
 /// `BatchQueue` handle and spawns [`handle_connection`]. A foreign-uid peer is
 /// dropped without being served — the filesystem mode should already have made
 /// that unreachable, and this is what turns the mode into an enforced boundary.
-/// Test: covered by `concurrent_embed.rs` integration test.
+/// Test: `uds_accept_loop_sizes_the_accepted_socket`, plus the
+/// `concurrent_embed.rs` integration test for the connection path.
 pub async fn run_uds_accept_loop(listener: UnixListener, queue: Arc<BatchQueue>) {
     loop {
-        match listener.accept().await {
+        // #6940: Linux builds the accepted socket from scratch and does not copy
+        // the listener's SO_SNDBUF/SO_RCVBUF onto it, so this loop has to size
+        // its own end (#6942).
+        match trusty_common::uds::accept_sized(&listener).await {
             Ok((stream, _addr)) => {
                 if let Err(e) = trusty_common::uds::ensure_peer_is_self(&stream) {
                     tracing::warn!("rejected UDS connection: {e}");
@@ -194,6 +198,47 @@ mod tests {
     fn test_queue() -> BatchQueue {
         let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(EMBED_DIM));
         BatchQueue::new(embedder, BatchConfig::default())
+    }
+
+    /// Why (#6940): Linux builds the server-side AF_UNIX socket from scratch in
+    /// `unix_stream_connect` and does not copy the listener's
+    /// `SO_SNDBUF`/`SO_RCVBUF` onto it, so an accept loop that calls
+    /// `UnixListener::accept` directly serves a socket at
+    /// `net.core.wmem_default` however the listener was sized. This daemon's
+    /// frames are the multi-KiB embedding payloads that sizing exists for.
+    ///
+    /// What: slices `run_uds_accept_loop`'s body out of the source at compile
+    /// time and asserts it awaits `trusty_common::uds::accept_sized` (#6942)
+    /// and holds no bare `listener.accept()`.
+    ///
+    /// What this proves, and what it does not: the sizing itself belongs to
+    /// `accept_sized_raises_the_accepted_socket_to_the_listeners_sizing` in
+    /// trusty-common. What that test cannot say is whether THIS call site
+    /// reaches it, and no behavioural test here can either — the loop never
+    /// hands the accepted socket back to a caller, and macOS copies the
+    /// listener's sizing in `sonewconn` regardless, so an assertion on granted
+    /// buffer sizes passes on `origin/main` on the platform this suite runs on
+    /// locally. The call graph is what regressed and the call graph is what
+    /// this asserts.
+    /// Test: this test itself.
+    #[test]
+    fn uds_accept_loop_sizes_the_accepted_socket() {
+        const SOURCE: &str = include_str!("uds_server.rs");
+        const SIGNATURE: &str = "pub async fn run_uds_accept_loop(";
+
+        let start = SOURCE.find(SIGNATURE).expect("accept-loop signature");
+        let rest = &SOURCE[start..];
+        let end = rest.find("\n}\n").expect("top-level closing brace");
+        let body = &rest[..end];
+
+        assert!(
+            body.contains("trusty_common::uds::accept_sized(&listener).await"),
+            "run_uds_accept_loop must accept through `accept_sized` (#6940), body was:\n{body}"
+        );
+        assert!(
+            !body.contains("listener.accept()"),
+            "run_uds_accept_loop must not call `UnixListener::accept` directly (#6940), body was:\n{body}"
+        );
     }
 
     /// #5099 regression: the daemon's own bind path must produce a 0600

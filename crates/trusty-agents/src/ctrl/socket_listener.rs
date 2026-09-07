@@ -52,12 +52,16 @@ use super::state::ConversationTurn;
 /// to actually stop the controller — Phase A leaves graceful shutdown for
 /// later). Each connection gets its own tokio task so a slow PM call does
 /// not block the listener.
-/// Test: Manual — `trusty-agents` from terminal A, then `trusty-agents "hello"` from
+/// Test: `ctrl_and_bus_accept_loops_size_the_accepted_socket`; end-to-end is
+/// manual — `trusty-agents` from terminal A, then `trusty-agents "hello"` from
 /// terminal B prints the PM's output in B and exits while A keeps running.
 pub async fn spawn_socket_listener(listener: tokio::net::UnixListener) {
     tracing::info!("ctrl: socket listener accepting connections");
     loop {
-        match listener.accept().await {
+        // #6940: Linux builds the accepted socket from scratch and does not copy
+        // the listener's SO_SNDBUF/SO_RCVBUF onto it, so this loop has to size
+        // its own end (#6942).
+        match trusty_common::uds::accept_sized(&listener).await {
             Ok((stream, _addr)) => {
                 // #5099: a foreign-uid peer is dropped without being served.
                 if let Err(e) = trusty_common::uds::ensure_peer_is_self(&stream) {
@@ -397,6 +401,63 @@ pub async fn forward_to_controller(
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt as _;
+
+    /// Why (#6940): Linux builds the server-side AF_UNIX socket from scratch in
+    /// `unix_stream_connect` and does not copy the listener's
+    /// `SO_SNDBUF`/`SO_RCVBUF` onto it, so an accept loop that calls
+    /// `UnixListener::accept` directly serves a socket at
+    /// `net.core.wmem_default` however the listener was sized.
+    /// `trusty_common::uds::accept_sized` (#6942) closes that, and this crate
+    /// drives two accept loops of its own.
+    ///
+    /// What: slices both accept-loop bodies out of the sources at compile time
+    /// and asserts each awaits `accept_sized` and holds no bare
+    /// `listener.accept()`.
+    ///
+    /// What this proves, and what it does not: the sizing itself belongs to
+    /// `accept_sized_raises_the_accepted_socket_to_the_listeners_sizing` in
+    /// trusty-common. What that test cannot say is whether THESE call sites
+    /// reach it, and no behavioural test here can either — neither loop hands
+    /// the accepted socket back to a caller, and macOS copies the listener's
+    /// sizing in `sonewconn` regardless, so an assertion on granted buffer
+    /// sizes passes on `origin/main` on the platform this suite runs on
+    /// locally. The call graph is what regressed and the call graph is what
+    /// this asserts.
+    /// Test: this test itself.
+    #[test]
+    fn ctrl_and_bus_accept_loops_size_the_accepted_socket() {
+        const CTRL: &str = include_str!("socket_listener.rs");
+        const BUS: &str = include_str!("../bus/mod.rs");
+
+        let loops = [
+            (
+                "ctrl::socket_listener::spawn_socket_listener",
+                CTRL,
+                "pub async fn spawn_socket_listener(",
+            ),
+            ("bus::accept_loop", BUS, "async fn accept_loop("),
+        ];
+
+        for (label, source, signature) in loops {
+            let start = source
+                .find(signature)
+                .unwrap_or_else(|| panic!("{label}: signature `{signature}` not found"));
+            let rest = &source[start..];
+            let end = rest.find("\n}\n").unwrap_or_else(|| {
+                panic!("{label}: no top-level closing brace after `{signature}`")
+            });
+            let body = &rest[..end];
+
+            assert!(
+                body.contains("trusty_common::uds::accept_sized(&listener).await"),
+                "{label} must accept through `accept_sized` (#6940), body was:\n{body}"
+            );
+            assert!(
+                !body.contains("listener.accept()"),
+                "{label} must not call `UnixListener::accept` directly (#6940), body was:\n{body}"
+            );
+        }
+    }
 
     /// Why (#5180): this connection is multi-message, so a send that emitted
     /// zero or two terminators would desynchronise the client's `read_line`
