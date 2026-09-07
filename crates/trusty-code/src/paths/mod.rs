@@ -31,6 +31,17 @@
 //! Test: `paths::tests::*`, `paths::private_state_tests::*`,
 //! `paths::import_tests::*`.
 //!
+//! Every link below is written as a `crate::paths::…` reference definition
+//! rather than a bare `[`name`]`. This module carries outer `///` docs at its
+//! `pub mod paths;` declaration in `lib.rs` as well as these inner `//!` docs,
+//! and rustdoc resolves the merged block in the scope of its first fragment —
+//! the crate root — where none of these names exist. See #7001.
+//!
+//! [`resolve_project_entry`]: crate::paths::resolve_project_entry
+//! [`SEARCH_ROOTS`]: crate::paths::SEARCH_ROOTS
+//! [`ConfigSource`]: crate::paths::ConfigSource
+//! [`native_config_dir`]: crate::paths::native_config_dir
+//! [`check_native_write_target`]: crate::paths::check_native_write_target
 //! [`private_state`]: crate::paths::private_state
 //! [`import`]: crate::paths::import
 
