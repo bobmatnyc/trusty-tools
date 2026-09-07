@@ -26,6 +26,9 @@ use trusty_common::memory_core::store::rooms::{
 use uuid::Uuid;
 
 use super::helpers::{open_palace_handle, resolve_palace};
+// #6318: `room_list` reads, so it falls back to a palace index; `room_create`
+// and `room_rename` write, so they keep `resolve_palace`'s error.
+use super::palace_index::{resolve_palace_or_index, PalaceScope};
 use crate::AppState;
 
 /// Validate the reserved `wing` argument.
@@ -72,7 +75,11 @@ fn room_json(room: &RoomSummary, drawer_count: usize) -> Value {
 
 pub(crate) async fn handle_room_list(state: &AppState, args: Value) -> Result<Value> {
     check_wing(&args, "room_list")?;
-    let palace = resolve_palace(state, &args, "room_list")?;
+    // #6318: no palace and no default is answered with an index, not an error.
+    let palace = match resolve_palace_or_index(state, &args, "room_list").await? {
+        PalaceScope::Palace(p) => p,
+        PalaceScope::Index(index) => return Ok(index),
+    };
     let handle = open_palace_handle(state, &palace)?;
     // Counted from the live drawer table rather than stored on the row: a
     // stored count would be a second source of truth that could drift from the

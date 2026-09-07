@@ -29,12 +29,12 @@ use serde_json::{json, Value};
 /// Test: spliced into `tool_definitions_with` and covered by
 /// `tool_definitions_lists_all_tools` in `tools::tests`.
 pub(super) fn chat_tool_definitions(has_default: bool) -> Vec<Value> {
-    let chat_session_palace_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
-    let chat_session_get_required: Vec<&str> = if has_default {
-        vec!["session_id"]
-    } else {
-        vec!["palace", "session_id"]
-    };
+    let chat_session_create_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
+    // #6318: `chat_session_list`, `chat_session_get` and `chat_session_recall`
+    // read, so `palace` is never required — with neither an argument nor a
+    // `--palace` default they answer with a palace index.
+    let chat_session_list_required: Vec<&str> = vec![];
+    let chat_session_get_required: Vec<&str> = vec!["session_id"];
     let chat_session_add_turn_required: Vec<&str> = if has_default {
         vec!["session_id", "role", "content"]
     } else {
@@ -57,7 +57,7 @@ pub(super) fn chat_tool_definitions(has_default: bool) -> Vec<Value> {
     vec![
         json!({
             "name": "chat_session_create",
-            "description": "Create a new chat session in a palace (spec-001 chat-session manager). Returns the session id, its creation timestamp, and the message count (0 for a fresh session). Pass an optional session_id to use a caller-chosen id (idempotent — an existing session is returned unchanged); pass an optional title to name a server-generated session. Sessions are stored in the palace's dedicated redb chat store, NOT the generic memory drawer surface.",
+            "description": "Create a new chat session in a palace (spec-001 chat-session manager). Returns the session id, its creation timestamp, and the message count (0 for a fresh session). Pass an optional session_id to use a caller-chosen id (idempotent — an existing session is returned unchanged); pass an optional title to name a server-generated session. Sessions are stored in the palace's dedicated redb chat store, NOT the generic memory drawer surface. Writes need a target, so this still errors when no `palace` resolves (#6318).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -65,7 +65,7 @@ pub(super) fn chat_tool_definitions(has_default: bool) -> Vec<Value> {
                     "session_id": {"type": "string", "description": "Optional caller-supplied session id; a UUID is generated when omitted."},
                     "title":      {"type": "string", "description": "Optional session name (applied only when session_id is omitted)."}
                 },
-                "required": chat_session_palace_required,
+                "required": chat_session_create_required,
             }
         }),
         json!({
@@ -84,7 +84,7 @@ pub(super) fn chat_tool_definitions(has_default: bool) -> Vec<Value> {
         }),
         json!({
             "name": "chat_session_get",
-            "description": "Retrieve a full chat session: metadata plus every turn in chronological order. Errors if the session id is unknown.",
+            "description": "Retrieve a full chat session: metadata plus every turn in chronological order. Errors if the session id is unknown. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -96,7 +96,7 @@ pub(super) fn chat_tool_definitions(has_default: bool) -> Vec<Value> {
         }),
         json!({
             "name": "chat_session_list",
-            "description": "List chat sessions in a palace as paginated metadata (id, title, timestamps, message_count) ordered most-recently-updated first. Does not include message bodies. Returns { sessions, total_count }.",
+            "description": "List chat sessions in a palace as paginated metadata (id, title, timestamps, message_count) ordered most-recently-updated first. Does not include message bodies. Returns { sessions, total_count }. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -104,7 +104,7 @@ pub(super) fn chat_tool_definitions(has_default: bool) -> Vec<Value> {
                     "limit":  {"type": "integer", "default": 50},
                     "offset": {"type": "integer", "default": 0}
                 },
-                "required": chat_session_palace_required,
+                "required": chat_session_list_required,
             }
         }),
         json!({
@@ -137,7 +137,7 @@ pub(super) fn chat_tool_definitions(has_default: bool) -> Vec<Value> {
         }),
         json!({
             "name": "chat_session_recall",
-            "description": "Retrieve a full chat session with all turns in order (alias for chat_session_get, preferred name for agent-facing recall). Errors if the session id is unknown.",
+            "description": "Retrieve a full chat session with all turns in order (alias for chat_session_get, preferred name for agent-facing recall). Errors if the session id is unknown. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

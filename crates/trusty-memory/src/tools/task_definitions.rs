@@ -33,7 +33,9 @@ pub(super) fn task_tool_definitions(has_default: bool) -> Vec<Value> {
     } else {
         vec!["palace", "drawer_id"]
     };
-    let task_list_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
+    // #6318: `task_list` reads, so `palace` is never required — with neither an
+    // argument nor a `--palace` default it answers with a palace index.
+    let task_list_required: Vec<&str> = vec![];
 
     vec![
         json!({
@@ -52,7 +54,7 @@ pub(super) fn task_tool_definitions(has_default: bool) -> Vec<Value> {
         }),
         json!({
             "name": "task_list",
-            "description": "List Task drawers in a palace (spec-001 issue #1722). Returns only open (incomplete) tasks by default; pass include_completed=true to include tasks with a completed_at timestamp. Returns { palace, tasks: [ { drawer_id, content, importance, tags, created_at, completed_at, drawer_type } ] }.",
+            "description": "List Task drawers in a palace (spec-001 issue #1722). Returns only open (incomplete) tasks by default; pass include_completed=true to include tasks with a completed_at timestamp. Returns { palace, tasks: [ { drawer_id, content, importance, tags, created_at, completed_at, drawer_type } ] }. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

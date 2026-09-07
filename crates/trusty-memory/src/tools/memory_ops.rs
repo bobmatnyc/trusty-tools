@@ -31,6 +31,9 @@ use super::helpers::{
     dedup_gate, mcp_remember_opts, open_palace_handle, open_palace_handle_within, parse_tags,
     resolve_palace, resolve_tier_c, room_label, skipped_envelope, write_drawer, WriteDrawerParams,
 };
+// #6318: the read tools below fall back to a palace index; the write tools in
+// this file keep `resolve_palace`'s error.
+use super::palace_index::{resolve_palace_or_index, PalaceScope};
 
 pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Result<Value> {
     // Issue #1970: writes no longer hard-block on embedder readiness. The
@@ -452,7 +455,11 @@ fn recall_scope(handle: &PalaceHandle, args: &Value, tool: &str) -> Result<Recal
 }
 
 pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Result<Value> {
-    let palace = resolve_palace(state, &args, "memory_recall")?;
+    // #6318: no palace and no default is answered with an index, not an error.
+    let palace = match resolve_palace_or_index(state, &args, "memory_recall").await? {
+        PalaceScope::Palace(p) => p,
+        PalaceScope::Index(index) => return Ok(index),
+    };
     let query = args
         .get("query")
         .and_then(|v| v.as_str())
@@ -503,7 +510,11 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
 }
 
 pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> Result<Value> {
-    let palace = resolve_palace(state, &args, "memory_recall_deep")?;
+    // #6318: no palace and no default is answered with an index, not an error.
+    let palace = match resolve_palace_or_index(state, &args, "memory_recall_deep").await? {
+        PalaceScope::Palace(p) => p,
+        PalaceScope::Index(index) => return Ok(index),
+    };
     let query = args
         .get("query")
         .and_then(|v| v.as_str())
@@ -541,7 +552,11 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
 }
 
 pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<Value> {
-    let palace = resolve_palace(state, &args, "memory_list")?;
+    // #6318: no palace and no default is answered with an index, not an error.
+    let palace = match resolve_palace_or_index(state, &args, "memory_list").await? {
+        PalaceScope::Palace(p) => p,
+        PalaceScope::Index(index) => return Ok(index),
+    };
     let handle = open_palace_handle(state, &palace)?;
     let tag = args
         .get("tag")

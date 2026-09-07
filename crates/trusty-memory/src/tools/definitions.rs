@@ -65,11 +65,11 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     } else {
         vec!["palace", "text"]
     };
-    let memory_recall_required: Vec<&str> = if has_default {
-        vec!["query"]
-    } else {
-        vec!["palace", "query"]
-    };
+    // #6318: `palace` is never required on a palace-scoped READ tool. With
+    // neither an argument nor a `--palace` default the handler answers with an
+    // index of the palaces on this host, so a client that cannot name one must
+    // still be allowed to call. The write tools below keep the conditional.
+    let memory_recall_required: Vec<&str> = vec!["query"];
     let kg_assert_required: Vec<&str> = if has_default {
         vec!["subject", "predicate", "object"]
     } else {
@@ -78,21 +78,17 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     // Retraction takes the same full triple key as the assertion it undoes, so
     // its `required` list is `kg_assert`'s by construction.
     let kg_retract_triple_required: Vec<&str> = kg_assert_required.clone();
-    let kg_query_required: Vec<&str> = if has_default {
-        vec!["subject"]
-    } else {
-        vec!["palace", "subject"]
-    };
-    // #4776: subject enumeration takes no argument of its own, so `palace` is
-    // the whole `required` list when no server default is configured.
-    let kg_list_subjects_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
-    let memory_list_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
+    let kg_query_required: Vec<&str> = vec!["subject"];
+    // #4776: subject enumeration takes no argument of its own. #6318: and
+    // `palace` is not required either, so the list is empty on both branches.
+    let kg_list_subjects_required: Vec<&str> = vec![];
+    let memory_list_required: Vec<&str> = vec![];
     let memory_forget_required: Vec<&str> = if has_default {
         vec!["drawer_id"]
     } else {
         vec!["palace", "drawer_id"]
     };
-    let palace_info_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
+    let palace_info_required: Vec<&str> = vec![];
     let palace_compact_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
     let memory_note_required: Vec<&str> = if has_default {
         vec!["content"]
@@ -154,7 +150,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_recall",
-                "description": "Recall memories using L0+L1+L2 progressive retrieval. Pass `room` to scope the search to one room, or `wing` to scope it to one owner's rooms (ADR-0027).",
+                "description": "Recall memories using L0+L1+L2 progressive retrieval. Pass `room` to scope the search to one room, or `wing` to scope it to one owner's rooms (ADR-0027). #6318: with no `palace` and no server default this succeeds with a palace index — ids, drawer/room/wing counts, rooms, and a `hint` — instead of erroring, so call it to find out which palace to name.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -169,7 +165,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_recall_deep",
-                "description": "Deep recall using L3 full HNSW search. Pass `room` to scope the search to one room (ADR-0027).",
+                "description": "Deep recall using L3 full HNSW search. Pass `room` to scope the search to one room (ADR-0027). #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -256,7 +252,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "kg_query",
-                "description": "Query active knowledge-graph triples for a subject.",
+                "description": "Query active knowledge-graph triples for a subject. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -268,7 +264,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "kg_list_subjects",
-                "description": "List the subjects this palace's knowledge graph actually holds, ordered by subject. Call this BEFORE kg_query instead of guessing a subject: kg_query needs a subject you already know, and a guessed name that misses costs a round trip that this call spends better. (A kg_query miss does say which miss it was — `graph_state: subject_not_found` vs `graph_empty` — so an empty result is never ambiguous.) Subjects are namespaced by kind — `tag:<name>`, `topic:<name>`, `drawer:<uuid>`, `room:<name>` — alongside bare entity names asserted by kg_assert. Returns {palace, subjects, with_counts, truncated}. `truncated: true` means a subject beyond this page was actually seen, so raising `limit` will show more; a page that exactly fills `limit` with nothing behind it reports `false`.",
+                "description": "List the subjects this palace's knowledge graph actually holds, ordered by subject. Call this BEFORE kg_query instead of guessing a subject: kg_query needs a subject you already know, and a guessed name that misses costs a round trip that this call spends better. (A kg_query miss does say which miss it was — `graph_state: subject_not_found` vs `graph_empty` — so an empty result is never ambiguous.) Subjects are namespaced by kind — `tag:<name>`, `topic:<name>`, `drawer:<uuid>`, `room:<name>` — alongside bare entity names asserted by kg_assert. Returns {palace, subjects, with_counts, truncated}. `truncated: true` means a subject beyond this page was actually seen, so raising `limit` will show more; a page that exactly fills `limit` with nothing behind it reports `false`. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -281,7 +277,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_list",
-                "description": "List drawers in a palace, optionally filtered by wing, room type, or tag.",
+                "description": "List drawers in a palace, optionally filtered by wing, room type, or tag. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -311,7 +307,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "palace_info",
-                "description": "Get metadata and stats for a single palace.",
+                "description": "Get metadata and stats for a single palace. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -414,7 +410,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "kg_gaps",
-                "description": "List knowledge gaps detected in the memory palace graph. Returns communities (clusters of related entities) with low internal density that may benefit from additional knowledge. Populated by the dream cycle; an empty list means no cycle has run yet.",
+                "description": "List knowledge gaps detected in the memory palace graph. Returns communities (clusters of related entities) with low internal density that may benefit from additional knowledge. Populated by the dream cycle; an empty list means no cycle has run yet. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

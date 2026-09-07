@@ -21,7 +21,9 @@ use serde_json::{json, Value};
 /// Test: spliced into `tool_definitions_with`, covered by
 /// `tool_definitions_lists_all_tools` and `wing_tools_are_listed`.
 pub(super) fn wing_tool_definitions(has_default: bool) -> Vec<Value> {
-    let wing_list_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
+    // #6318: `wing_list` reads, so `palace` is never required — with neither an
+    // argument nor a `--palace` default it answers with a palace index.
+    let wing_list_required: Vec<&str> = vec![];
     let wing_create_required: Vec<&str> = if has_default {
         vec!["label"]
     } else {
@@ -36,7 +38,7 @@ pub(super) fn wing_tool_definitions(has_default: bool) -> Vec<Value> {
     vec![
         json!({
             "name": "wing_list",
-            "description": "List the wings of a palace (ADR-0027). A WING is the scope/ownership axis — the 'who' — while a ROOM is the topic axis — the 'what'. Wings let two owners hold same-named rooms (engineer/Planning and pm/Planning are distinct rooms) without name mangling. Every palace has a 'default' wing that every room falls into unless a caller names another, so wings are never required. Returns { palace, wings: [ { wing_id, label, description, room_count, is_default, created_at } ] }.",
+            "description": "List the wings of a palace (ADR-0027). A WING is the scope/ownership axis — the 'who' — while a ROOM is the topic axis — the 'what'. Wings let two owners hold same-named rooms (engineer/Planning and pm/Planning are distinct rooms) without name mangling. Every palace has a 'default' wing that every room falls into unless a caller names another, so wings are never required. Returns { palace, wings: [ { wing_id, label, description, room_count, is_default, created_at } ] }. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

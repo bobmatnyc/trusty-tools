@@ -327,10 +327,16 @@ async fn default_palace_used_when_arg_omitted() {
     assert!(parsed["drawer_id"].as_str().is_some());
 }
 
-/// Why: When no default is set, `tools/call` for a palace-bound tool
-/// without a `palace` argument should error helpfully rather than panic.
+/// Why (#6318): the ruling is that a READ with no resolvable palace answers
+/// with an index. This test used to pin the opposite for `memory_recall` — a
+/// `-32603` carrying "missing 'palace'" — so it is the protocol-level proof
+/// that the new contract reaches an MCP client, not just `dispatch_tool`.
+/// What: calls `tools/call` for `memory_recall` with no `palace` and asserts a
+/// SUCCESS envelope whose content parses to the index.
+/// Test: this test itself; `tools::tests::palace_index_tests` covers the full
+/// read roster and the index's shape.
 #[tokio::test]
-async fn missing_palace_without_default_errors() {
+async fn missing_palace_without_default_returns_an_index() {
     let (state, _tmp) = test_state();
     let resp = handle_message(
         &state,
@@ -345,7 +351,37 @@ async fn missing_palace_without_default_errors() {
         }),
     )
     .await;
-    assert_eq!(resp["error"]["code"], -32603);
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected an index, got {resp}"));
+    let parsed: Value = serde_json::from_str(text).expect("parse content json");
+    assert_eq!(parsed["status"], "no_palace_specified", "parsed={parsed}");
+    assert!(parsed["palaces"].is_array(), "parsed={parsed}");
+    assert!(parsed["hint"].as_str().is_some_and(|h| !h.is_empty()));
+}
+
+/// Why (#6318): the read half above must not have loosened the write half. A
+/// `memory_remember` with no resolvable palace has no defensible target, so it
+/// still errors helpfully rather than storing anywhere or panicking.
+/// What: same `tools/call` shape, a write tool, and the original assertions.
+/// Test: this test itself.
+#[tokio::test]
+async fn missing_palace_without_default_errors_for_a_write() {
+    let (state, _tmp) = test_state();
+    let resp = handle_message(
+        &state,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "memory_remember",
+                "arguments": {"text": "a write with nowhere to go must not land"},
+            },
+        }),
+    )
+    .await;
+    assert_eq!(resp["error"]["code"], -32603, "resp={resp}");
     let msg = resp["error"]["message"].as_str().unwrap_or("");
     assert!(
         msg.contains("missing 'palace'"),

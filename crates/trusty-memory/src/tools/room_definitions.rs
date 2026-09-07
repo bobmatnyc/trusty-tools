@@ -23,7 +23,9 @@ use serde_json::{json, Value};
 /// Test: spliced into `tool_definitions_with` and covered by
 /// `tool_definitions_lists_all_tools` in `tools::tests`.
 pub(super) fn room_tool_definitions(has_default: bool) -> Vec<Value> {
-    let room_list_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
+    // #6318: `room_list` reads, so `palace` is never required — with neither an
+    // argument nor a `--palace` default it answers with a palace index.
+    let room_list_required: Vec<&str> = vec![];
     let room_create_required: Vec<&str> = if has_default {
         vec!["label"]
     } else {
@@ -45,7 +47,7 @@ pub(super) fn room_tool_definitions(has_default: bool) -> Vec<Value> {
     vec![
         json!({
             "name": "room_list",
-            "description": "List every room registered in a palace (ADR-0027). This is the discovery primitive: before it existed, a caller could not find out which rooms a palace had without already knowing their names. Rooms are registered automatically the first time a palace is opened, from the rooms its drawers already sit in — no drawer is ever moved or reclassified. Returns { palace, rooms: [ { room_id, label, room_type, wing_id, drawer_count, created_at, resolved, description } ] }. `resolved: false` means the migration could not recover the room's original name and synthesised an `unresolved-<id>` placeholder — fix it with room_rename.",
+            "description": "List every room registered in a palace (ADR-0027). This is the discovery primitive: before it existed, a caller could not find out which rooms a palace had without already knowing their names. Rooms are registered automatically the first time a palace is opened, from the rooms its drawers already sit in — no drawer is ever moved or reclassified. Returns { palace, rooms: [ { room_id, label, room_type, wing_id, drawer_count, created_at, resolved, description } ] }. `resolved: false` means the migration could not recover the room's original name and synthesised an `unresolved-<id>` placeholder — fix it with room_rename. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

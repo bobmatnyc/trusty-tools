@@ -21,6 +21,9 @@ use serde_json::{json, Value};
 use trusty_common::memory_core::store::chat_sessions::ChatMessage;
 
 use super::helpers::resolve_palace;
+// #6318: the three session READ tools fall back to a palace index; create,
+// add_turn, turn_append and delete write, so they keep `resolve_palace`'s error.
+use super::palace_index::{resolve_palace_or_index, PalaceScope};
 
 /// Roles accepted on a chat turn. Mirrors the OpenAI/Anthropic message-role
 /// vocabulary the spec's `chat_session_add_turn` schema enumerates.
@@ -127,7 +130,11 @@ pub(crate) async fn handle_chat_session_add_turn(state: &AppState, args: Value) 
 /// Test: `chat_session_get_round_trips`,
 /// `chat_session_get_missing_errors` in `tests/chat_mcp.rs`.
 pub(crate) async fn handle_chat_session_get(state: &AppState, args: Value) -> Result<Value> {
-    let palace = resolve_palace(state, &args, "chat_session_get")?;
+    // #6318: no palace and no default is answered with an index, not an error.
+    let palace = match resolve_palace_or_index(state, &args, "chat_session_get").await? {
+        PalaceScope::Palace(p) => p,
+        PalaceScope::Index(index) => return Ok(index),
+    };
     let session_id = args
         .get("session_id")
         .and_then(|v| v.as_str())
@@ -148,7 +155,11 @@ pub(crate) async fn handle_chat_session_get(state: &AppState, args: Value) -> Re
 /// to the slice it returns.
 /// Test: `chat_session_list_paginates` in `tests/chat_mcp.rs`.
 pub(crate) async fn handle_chat_session_list(state: &AppState, args: Value) -> Result<Value> {
-    let palace = resolve_palace(state, &args, "chat_session_list")?;
+    // #6318: no palace and no default is answered with an index, not an error.
+    let palace = match resolve_palace_or_index(state, &args, "chat_session_list").await? {
+        PalaceScope::Palace(p) => p,
+        PalaceScope::Index(index) => return Ok(index),
+    };
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
     let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
@@ -191,7 +202,11 @@ pub(crate) async fn handle_chat_session_delete(state: &AppState, args: Value) ->
 /// name in errors for correct attribution.
 /// Test: `chat_session_recall_returns_history` in `tests/chat_mcp.rs`.
 pub(crate) async fn handle_chat_session_recall(state: &AppState, args: Value) -> Result<Value> {
-    let palace = resolve_palace(state, &args, "chat_session_recall")?;
+    // #6318: no palace and no default is answered with an index, not an error.
+    let palace = match resolve_palace_or_index(state, &args, "chat_session_recall").await? {
+        PalaceScope::Palace(p) => p,
+        PalaceScope::Index(index) => return Ok(index),
+    };
     let session_id = args
         .get("session_id")
         .and_then(|v| v.as_str())
