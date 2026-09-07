@@ -369,6 +369,9 @@ fn synthesizer_ignores_unknown_trajectory() {
 /// about, which way they are trending, and that the prose is a fallback.
 /// What: applies the fallback directly, asserts the name, the failure notice,
 /// and the recurring count all appear.
+///
+/// The count assertion moved from 2 to 1 with #5490: the two findings here are
+/// one issue seen in two periods, and the sentence claims issues, not sightings.
 /// Test: this test itself.
 #[test]
 fn synthesizer_fail_safe_narrative() {
@@ -393,8 +396,48 @@ fn synthesizer_fail_safe_narrative() {
         profile.narrative
     );
     assert!(
+        profile.narrative.contains("1 recurring issue(s)"),
+        "one issue seen in two periods is one recurring issue: {}",
+        profile.narrative
+    );
+}
+
+/// Why: #5490 — counting tagged occurrences reported one issue spanning three
+/// periods as three, overstating how many distinct problems keep coming back.
+/// What: builds five `Recurring` occurrences that cluster into two issues and
+/// asserts the narrative says 2, not 5.
+/// Test: this test itself.
+#[test]
+fn synthesizer_fail_safe_narrative_counts_distinct_clusters() {
+    let mut profile = make_profile();
+    profile.all_findings = assign_trend_tags(vec![
+        make_finding("2026-Q1", "missing error propagation in async"),
+        make_finding(
+            "2026-Q1",
+            "unbounded channel growth starves the worker pool",
+        ),
+        make_finding("2026-Q2", "missing error propagation in async"),
+        make_finding("2026-Q3", "missing error propagation in async"),
+        make_finding(
+            "2026-Q3",
+            "unbounded channel growth starves the worker pool",
+        ),
+    ]);
+    assert_eq!(
+        profile
+            .all_findings
+            .iter()
+            .filter(|f| f.trend_tag == Some(TrendTag::Recurring))
+            .count(),
+        5,
+        "fixture must tag every occurrence Recurring for the count to mean anything"
+    );
+
+    apply_fallback_narrative(&mut profile);
+
+    assert!(
         profile.narrative.contains("2 recurring issue(s)"),
-        "fail-safe narrative must count the recurring findings: {}",
+        "five occurrences of two issues are two recurring issues: {}",
         profile.narrative
     );
 }
