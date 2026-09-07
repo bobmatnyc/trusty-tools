@@ -13,6 +13,12 @@
 //! Soft thresholds, not hard contracts: changes that drop MRR@5 below 0.3 mean
 //! warrant scrutiny but the harness itself stays advisory.
 
+// Live benchmarks require an isolated daemon and disposable source copy.
+// See support/isolated_benchmark.rs for the three required environment variables.
+#[path = "support/isolated_benchmark.rs"]
+mod isolated_benchmark;
+use isolated_benchmark::daemon_url;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -609,7 +615,7 @@ fn bench_bugdebt_grep_baseline() {
 // same hits as ripgrep for the same pattern and (b) doing so at competitive
 // wall-clock latency. This bench drives the live daemon end-to-end so the two
 // dimensions can be inspected in one table.
-// What: requires a daemon at `http://127.0.0.1:7878` with the `trusty-search`
+// What: requires an isolated fixture daemon with the `trusty-search`
 // index registered. For each fixed pattern it issues `POST
 // /indexes/trusty-search/grep`, shells out `rg` against the indexed root, and
 // prints per-pattern hit count + latency. Reports P50/P95 and the latency
@@ -630,7 +636,7 @@ const GREP_ENDPOINT_PATTERNS: &[(&str, &str)] = &[
 #[ignore]
 #[tokio::test]
 async fn bench_grep_endpoint_vs_ripgrep() {
-    const DAEMON: &str = "http://127.0.0.1:7878";
+    let daemon = daemon_url();
     const INDEX: &str = "trusty-search";
 
     let client = reqwest::Client::builder()
@@ -641,10 +647,10 @@ async fn bench_grep_endpoint_vs_ripgrep() {
     // Resolve the indexed root by asking the daemon — the test should still
     // work if the index was registered against a different on-disk path.
     let status = client
-        .get(format!("{DAEMON}/indexes/{INDEX}/status"))
+        .get(format!("{daemon}/indexes/{INDEX}/status"))
         .send()
         .await
-        .expect("daemon must be running on 127.0.0.1:7878 with the trusty-search index registered");
+        .expect("isolated benchmark daemon must have the trusty-search index registered");
     assert!(
         status.status().is_success(),
         "GET /indexes/{INDEX}/status returned {}: register the index first",
@@ -657,7 +663,7 @@ async fn bench_grep_endpoint_vs_ripgrep() {
     let root = std::path::Path::new(root_path);
 
     println!("\n=== /grep endpoint vs ripgrep ===");
-    println!("daemon: {DAEMON}   index: {INDEX}   root: {root_path}");
+    println!("daemon: {daemon}   index: {INDEX}   root: {root_path}");
     println!(
         "| {:<28} | {:>9} | {:>9} | {:>9} | {:>9} | {:>6} |",
         "pattern", "ep hits", "rg hits", "ep ms", "rg ms", "ratio"
@@ -678,7 +684,7 @@ async fn bench_grep_endpoint_vs_ripgrep() {
         });
         let t0 = Instant::now();
         let resp = client
-            .post(format!("{DAEMON}/indexes/{INDEX}/grep"))
+            .post(format!("{daemon}/indexes/{INDEX}/grep"))
             .json(&body)
             .send()
             .await

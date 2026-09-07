@@ -87,6 +87,7 @@ impl UsearchStore {
     /// left exactly as it was, because the swap is the last step.
     /// Test: see the module docs.
     pub async fn requantize(&self, target: VectorQuant, dry_run: bool) -> Result<RequantizeReport> {
+        let mutation_guard = self.save_lock.lock().await;
         let snapshot_path = self.hnsw_path.read().await.clone();
         let bytes_before = snapshot_path
             .as_deref()
@@ -156,6 +157,9 @@ impl UsearchStore {
 
         // #6822: the durable write keeps `save`'s own guards — a conversion
         // that lost most of the arena is refused there rather than published.
+        // The replacement is complete and dirty. Release before public save
+        // reacquires the same gate; any intervening writes are included there.
+        drop(mutation_guard);
         self.save(&path).await?;
         report.applied = true;
         report.bytes_after = std::fs::metadata(&path).ok().map(|m| m.len());

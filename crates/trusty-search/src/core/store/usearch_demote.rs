@@ -109,10 +109,8 @@ impl UsearchStore {
     /// holding the HNSW write lock, so a demote's under-lock re-check always
     /// observes it.
     ///
-    /// `rewrite_keys_to_relative` (#2179) deliberately does NOT call this: it
-    /// mutates only the id maps, and `save()` writes those unconditionally
-    /// whenever `is_view == false`, so the rewritten keys reach disk on the
-    /// next save without a demote gate.
+    /// Key rewrites also call this (#6961): an unsaved sidecar change must
+    /// prevent demotion, or a later view-mode save would skip those new IDs.
     /// Test: `super::tests::test_demote_to_view_skips_when_dirty`.
     pub(super) fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Release);
@@ -148,6 +146,7 @@ impl UsearchStore {
     /// `super::tests::test_demote_to_view_skips_when_dirty`,
     /// `super::tests::test_demote_to_view_skips_without_path`.
     pub(super) async fn try_demote_to_view(&self) -> Result<bool> {
+        let _mutation_guard = self.save_lock.lock().await;
         // Fast pre-check without the write lock: skip the common case
         // (already a view, dirty, or never associated with a source path)
         // without contending for the lock searches and writers also need.
@@ -216,33 +215,22 @@ impl UsearchStore {
     ///
     /// # Concurrency argument
     ///
-    /// **One lock does the excluding**: `self.index`'s `RwLock`. Searches take
-    /// it for read; `upsert` / `remove` / `upsert_batch` / `promote_view_to_
-    /// mutable` / the `Index::save` FFI / the `Index::view` swap all take it
-    /// for write. Lock ORDER never inverts: every path that needs both takes
-    /// `hnsw_path` first, clones out of it, releases it, and only then takes
-    /// `index` — `save`, `promote_view_to_mutable`, and both demotes all do.
-    /// `save_lock` is outermost, held across the whole of `save()`.
+    /// **The outer gate excludes mutation** (#6961): `save_lock` covers
+    /// capture and publication in `save`, and the complete mutation in each
+    /// writer. It also covers demotion's path lookup and view swap. Internal
+    /// promotion/adoption helpers do not reacquire it. This cooldown wrapper
+    /// holds no gate across its calls to `save` and `try_demote_to_view`.
     ///
-    /// **No torn read.** The `Index::view` swap happens while holding the
-    /// `index` write lock, so no searcher can observe the handle mid-swap: a
-    /// reader either completes before the swap (heap graph) or acquires after
-    /// it (completed view). The file it maps is complete by construction —
-    /// `save()` writes a per-process staging file and `rename`s it into place,
-    /// so `view()` never maps a partially written snapshot.
+    /// **No torn read.** Searches use the graph read lock, and serialization
+    /// and view replacement use its write lock. Snapshot files are staged
+    /// and renamed, so readers never map a partially written file.
     ///
-    /// **No lost write, in all three windows.** (1) A write arriving before the
-    /// save takes the `index` write lock is included in the snapshot. (2) A
-    /// write arriving while `save()` holds that lock waits, lands after the
-    /// serialize, and bumps [`WriteClock`]'s epoch — `save()` compares the
-    /// epoch it captured before starting and, seeing it changed, leaves `dirty`
-    /// SET, so the demote below refuses and the vector stays on the heap where
-    /// it is still served. (3) A write arriving after `save()` returns sets
-    /// `dirty` again, which `try_demote_to_view` re-reads under the write lock
-    /// it must acquire, so it refuses there. A write that arrives after a
-    /// completed demote hits `ensure_mutable`, which promotes the view back to
-    /// a heap copy first. There is no ordering in which the graph is re-viewed
-    /// from a snapshot that lacks an acknowledged vector.
+    /// **No lost write.** A mutation before save acquires the gate is included
+    /// in the snapshot. A mutation arriving during save waits for publication
+    /// and then marks the graph dirty. A mutation between save and demotion
+    /// also sets dirty; demotion rechecks it under both the gate and graph
+    /// write lock. A writer after demotion promotes before touching the graph.
+    /// The epoch comparison in save remains an additional safeguard.
     ///
     /// **The cooldown is advisory, not a gate.** It only decides WHEN to try;
     /// correctness rests entirely on the `dirty` re-check under the write lock,

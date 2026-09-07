@@ -11,7 +11,7 @@
 //! What: reads `GROUND_TRUTH.json`, registers a fresh `synthetic-benchmark`
 //! index pointing at the corpus, drives a reindex, polls until every stage
 //! is `Ready`, then runs each ground-truth query in three modes (lexical
-//! only / full hybrid / KG-leading), records Hit@1 and Hit@5, prints a
+//! only / full hybrid / graph-forced), records Hit@1 and Hit@5, prints a
 //! per-(mode × query-category) comparison table, and deletes the index.
 //!
 //! `mode_hint` support (v0.2.0): each query in GROUND_TRUTH.json carries a
@@ -24,12 +24,18 @@
 //!   cargo test --test benchmark_synthetic -- --include-ignored --nocapture
 //!
 //! Prerequisites:
-//!   - trusty-search daemon running at `http://127.0.0.1:7878`
+//!   - dedicated daemon and disposable source copy configured as documented
+//!     in `support/isolated_benchmark.rs`
 //!   - `OPENROUTER_API_KEY` not required (no chat calls)
 //!
 //! This harness intentionally does NOT spin up its own daemon. It uses the
-//! already-running daemon the developer started for everyday work, consistent
-//! with the pattern in `baseline_trusty_tools.rs`.
+//! dedicated fixture daemon the operator started for this benchmark run.
+
+// Live benchmarks require an isolated daemon and disposable source copy.
+// See support/isolated_benchmark.rs for the three required environment variables.
+#[path = "support/isolated_benchmark.rs"]
+mod isolated_benchmark;
+use isolated_benchmark::daemon_url;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -39,7 +45,6 @@ use serde_json::{json, Value};
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-const DAEMON_URL: &str = "http://127.0.0.1:7878";
 const INDEX_NAME: &str = "synthetic-benchmark";
 
 /// Maximum time we will wait for the reindex to bring every stage to `Ready`.
@@ -70,7 +75,7 @@ struct GroundTruthQuery {
 /// The three retrieval modes exercised per query.
 ///
 /// Why: running all three against every query reveals where each mode wins or
-/// loses and validates that hybrid/KG-leading is worth the overhead.
+/// loses and validates that hybrid/graph-forced is worth the overhead.
 /// What: enum with a label method for table output.
 /// Test: iterated in the main test body.
 #[derive(Debug, Clone, Copy)]
@@ -79,8 +84,8 @@ enum Mode {
     Lexical,
     /// No stage parameter — full hybrid (BM25 + vector + KG expansion + RRF).
     Hybrid,
-    /// `expand_graph=true, use_kg_first=true` — KG-leading retrieval.
-    KgLeading,
+    /// `stage=graph, expand_graph=true` — force KG expansion, as `search_kg` does.
+    GraphForced,
 }
 
 impl Mode {
@@ -88,7 +93,7 @@ impl Mode {
         match self {
             Mode::Lexical => "lexical",
             Mode::Hybrid => "hybrid",
-            Mode::KgLeading => "kg-leading",
+            Mode::GraphForced => "graph-forced",
         }
     }
 }
@@ -120,8 +125,8 @@ struct QueryResult {
 /// Build a reqwest client with the timeouts already tuned by
 /// `baseline_trusty_tools.rs`.
 ///
-/// Why: we share the same daemon as everyday work; generous but finite
-/// timeouts prevent the test hanging on a hung daemon.
+/// Why: generous but finite timeouts prevent the test hanging on a hung
+/// fixture daemon.
 /// What: returns a Client with 2 s connect and 30 s request timeouts.
 /// Test: any transport error will panic via .expect() in callers.
 fn make_client() -> Client {
@@ -134,15 +139,11 @@ fn make_client() -> Client {
 
 /// Absolute path of the synthetic corpus root.
 ///
-/// Why: the corpus root changes depending on where cargo runs the test.
-/// What: derives the path from CARGO_MANIFEST_DIR at compile time.
+/// Why: index cleanup must only touch a disposable source copy.
+/// What: resolves the synthetic fixture within TRUSTY_SEARCH_TEST_CORPUS_ROOT.
 /// Test: corpus_root().join("GROUND_TRUTH.json") must exist; load_ground_truth panics otherwise.
 fn corpus_root() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .join("tests")
-        .join("benchmark_corpus")
-        .join("synthetic")
+    isolated_benchmark::corpus_root("crates/trusty-search/tests/benchmark_corpus/synthetic")
 }
 
 /// Load and parse `GROUND_TRUTH.json`.
@@ -189,11 +190,12 @@ fn load_ground_truth() -> Vec<GroundTruthQuery> {
 /// What: GETs /health and asserts 200.
 /// Test: panics with a human-readable message if the daemon is unreachable.
 async fn assert_daemon_healthy(client: &Client) {
+    let daemon_url = daemon_url();
     let resp = client
-        .get(format!("{DAEMON_URL}/health"))
+        .get(format!("{daemon_url}/health"))
         .send()
         .await
-        .expect("daemon must be reachable at 127.0.0.1:7878 — start it with `trusty-search start`");
+        .expect("isolated benchmark daemon must be reachable at TRUSTY_SEARCH_TEST_URL");
     assert_eq!(resp.status().as_u16(), 200, "GET /health returned non-200");
 }
 
@@ -205,10 +207,12 @@ async fn assert_daemon_healthy(client: &Client) {
 /// What: DELETEs any existing index with this name, then POSTs to /indexes.
 /// Test: asserts 200 on POST; transport errors panic.
 async fn register_index(client: &Client) {
+    isolated_benchmark::assert_index_root(client, INDEX_NAME, &corpus_root()).await;
+    let daemon_url = daemon_url();
     // Delete first if it exists, to start from a clean slate.
     let _ = client
         .delete(format!(
-            "{DAEMON_URL}/indexes/{INDEX_NAME}?delete_data=true"
+            "{daemon_url}/indexes/{INDEX_NAME}?delete_data=true"
         ))
         .send()
         .await;
@@ -219,7 +223,7 @@ async fn register_index(client: &Client) {
         "root_path": root.to_string_lossy(),
     });
     let resp = client
-        .post(format!("{DAEMON_URL}/indexes"))
+        .post(format!("{daemon_url}/indexes"))
         .json(&body)
         .send()
         .await
@@ -239,13 +243,15 @@ async fn register_index(client: &Client) {
 ///   semantic + graph stages all report status="ready".
 /// Test: panics with last-known status on REINDEX_TIMEOUT.
 async fn reindex_and_wait(client: &Client) {
+    isolated_benchmark::assert_index_root(client, INDEX_NAME, &corpus_root()).await;
+    let daemon_url = daemon_url();
     let root = corpus_root();
     let body = json!({
         "root_path": root.to_string_lossy(),
         "force": true,
     });
     let resp = client
-        .post(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/reindex"))
+        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/reindex"))
         .json(&body)
         .send()
         .await
@@ -290,8 +296,9 @@ async fn reindex_and_wait(client: &Client) {
 /// What: GET /indexes/:id/status, returns parsed JSON Value.
 /// Test: transport or parse failures panic.
 async fn fetch_status(client: &Client) -> Value {
+    let daemon_url = daemon_url();
     let resp = client
-        .get(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/status"))
+        .get(format!("{daemon_url}/indexes/{INDEX_NAME}/status"))
         .send()
         .await
         .expect("GET /status transport failure");
@@ -305,9 +312,11 @@ async fn fetch_status(client: &Client) -> Value {
 /// What: DELETE /indexes/:id; prints the response status regardless.
 /// Test: failures are printed, not panicked (cleanup is best-effort).
 async fn cleanup_index(client: &Client) {
+    isolated_benchmark::assert_index_root(client, INDEX_NAME, &corpus_root()).await;
+    let daemon_url = daemon_url();
     let resp = client
         .delete(format!(
-            "{DAEMON_URL}/indexes/{INDEX_NAME}?delete_data=true"
+            "{daemon_url}/indexes/{INDEX_NAME}?delete_data=true"
         ))
         .send()
         .await;
@@ -322,15 +331,14 @@ async fn cleanup_index(client: &Client) {
     }
 }
 
-/// Run one query in one retrieval mode and record the result.
+/// Build the HTTP request shared by the live benchmark and contract test.
 ///
-/// Why: all three modes must run the same search path so results are
-/// comparable; only the JSON body fields differ.
-/// What: POSTs to /indexes/:id/search with mode-appropriate parameters
-///   plus the query's `mode_hint` forwarded as `mode`. Records Hit@1 and
-///   Hit@5 against the ground_truth_files list.
-/// Test: transport failures panic; JSON parse failures panic with status code.
-async fn run_query(client: &Client, query: &GroundTruthQuery, mode: Mode) -> QueryResult {
+/// Why: `use_kg_first` is an internal classifier weight, not a SearchQuery
+/// field. The public graph-stage selector forces KG expansion for every query.
+/// What: preserve query text, mode hints, result count, and each retrieval lane.
+/// Test: `synthetic_requests_match_current_search_query_contract` deserializes
+/// every lane/mode-hint combination with the production request type.
+fn search_request(query: &GroundTruthQuery, mode: Mode) -> Value {
     let mut body = json!({
         "text": query.text,
         "top_k": 10,
@@ -346,15 +354,32 @@ async fn run_query(client: &Client, query: &GroundTruthQuery, mode: Mode) -> Que
         Mode::Hybrid => {
             // No stage override — full hybrid is the daemon default.
         }
-        Mode::KgLeading => {
+        Mode::GraphForced => {
             body["expand_graph"] = json!(true);
-            body["use_kg_first"] = json!(true);
+            // #138: the graph stage forces expansion independently of intent.
+            // This is the current search_kg MCP request contract.
+            body["stage"] = json!("graph");
         }
     }
 
+    body
+}
+
+/// Run one query in one retrieval mode and record the result.
+///
+/// Why: all three modes must run the same search path so results are
+/// comparable; only the JSON body fields differ.
+/// What: POSTs to /indexes/:id/search with mode-appropriate parameters
+///   plus the query's `mode_hint` forwarded as `mode`. Records Hit@1 and
+///   Hit@5 against the ground_truth_files list.
+/// Test: transport failures panic; JSON parse failures panic with status code.
+async fn run_query(client: &Client, query: &GroundTruthQuery, mode: Mode) -> QueryResult {
+    let daemon_url = daemon_url();
+    let body = search_request(query, mode);
+
     let t0 = Instant::now();
     let resp = client
-        .post(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/search"))
+        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/search"))
         .json(&body)
         .send()
         .await
@@ -509,7 +534,7 @@ fn print_category_breakdown_table(results: &[QueryResult]) {
         "", "", "", "", "", "", ""
     );
 
-    for mode in [Mode::Lexical, Mode::Hybrid, Mode::KgLeading] {
+    for mode in [Mode::Lexical, Mode::Hybrid, Mode::GraphForced] {
         let mode_results: Vec<&QueryResult> = results
             .iter()
             .filter(|r| std::mem::discriminant(&r.mode) == std::mem::discriminant(&mode))
@@ -571,7 +596,7 @@ fn print_aggregate_table(results: &[QueryResult]) {
         "|{:-<12}|{:-<12}|{:-<12}|{:-<15}|{:-<15}|",
         "", "", "", "", ""
     );
-    for mode in [Mode::Lexical, Mode::Hybrid, Mode::KgLeading] {
+    for mode in [Mode::Lexical, Mode::Hybrid, Mode::GraphForced] {
         let subset: Vec<&QueryResult> = results
             .iter()
             .filter(|r| std::mem::discriminant(&r.mode) == std::mem::discriminant(&mode))
@@ -660,7 +685,7 @@ async fn benchmark_synthetic_corpus_all_modes() {
     let stages: Value = status["stages"].clone();
 
     let mut all_results: Vec<QueryResult> = Vec::with_capacity(queries.len() * 3);
-    for mode in [Mode::Lexical, Mode::Hybrid, Mode::KgLeading] {
+    for mode in [Mode::Lexical, Mode::Hybrid, Mode::GraphForced] {
         println!("\n--- mode = {} ---", mode.label());
         for q in &queries {
             let result = run_query(&client, q, mode).await;
@@ -699,4 +724,36 @@ async fn benchmark_synthetic_corpus_all_modes() {
     );
 
     cleanup_index(&client).await;
+}
+
+/// Reject stale request fields and lane drift before invoking a live daemon.
+#[test]
+fn synthetic_requests_match_current_search_query_contract() {
+    use trusty_search::core::indexer::{SearchQuery, SearchStage};
+
+    for mode_hint in ["code", "text", "data"] {
+        let query = GroundTruthQuery {
+            id: "request-contract".into(),
+            text: "callers of target".into(),
+            category: "usage".into(),
+            mode_hint: mode_hint.into(),
+            ground_truth_files: vec!["caller.rs".into()],
+        };
+        for (mode, expected_stage) in [
+            (Mode::Lexical, Some(SearchStage::Lexical)),
+            (Mode::Hybrid, None),
+            (Mode::GraphForced, Some(SearchStage::Graph)),
+        ] {
+            let parsed: SearchQuery = serde_json::from_value(search_request(&query, mode))
+                .unwrap_or_else(|error| panic!("{} / {mode_hint}: {error}", mode.label()));
+            assert_eq!(parsed.text, query.text);
+            assert_eq!(parsed.top_k, 10);
+            assert!(!parsed.compact);
+            assert_eq!(serde_json::to_value(parsed.mode).unwrap(), json!(mode_hint));
+            assert_eq!(parsed.stage, expected_stage);
+            if expected_stage == Some(SearchStage::Graph) {
+                assert!(parsed.expand_graph, "graph lane must request KG expansion");
+            }
+        }
+    }
 }

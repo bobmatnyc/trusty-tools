@@ -16,26 +16,34 @@
 //! `search_kg`, `search_all`), computes Hit@K per (tool × type), and
 //! deletes the index. KG-seed queries use a two-stage pattern: stage-1
 //! `search_lexical` to find the seed chunk_id, stage-2 `search_kg` with
-//! `seed_chunk_id` and `expand_graph=true` to traverse the symbol graph.
+//! the resolved seed as `text`, `stage="graph"`, and `expand_graph=true`.
+//! The original query remains in diagnostic output. Historical runs sent an
+//! ignored `seed_chunk_id` field, so their metrics are not directly comparable.
 //!
 //! Per-tool HTTP mapping (matches `crates/trusty-search/src/mcp/tools.rs`
 //! `run_lane_search` → `/indexes/:id/search` body shape):
 //!   - `search_lexical`  → `stage="lexical"`, `expand_graph=false`
 //!   - `search_semantic` → `stage="semantic"`, `expand_graph=false`
 //!   - `search_kg`       → `stage="graph"`, `expand_graph=true`
-//!   - `search_all`      → no `stage` field, `expand_graph=false`
+//!   - `search_all`      → no `stage` field, `expand_graph=true`
 //!
 //! Test: gated `#[ignore]` so it does not run during default `cargo test`.
 //! Run with:
 //!   cargo test --test benchmark_open_mpm -- --include-ignored --nocapture
 //!
 //! Prerequisites:
-//!   - trusty-search daemon running at `http://127.0.0.1:7878` (v0.10.0+)
-//!   - `crates/open-mpm/` source tree present (in-tree workspace member)
+//!   - dedicated daemon and disposable source copy configured as documented
+//!     in `support/isolated_benchmark.rs`
+//!   - `crates/trusty-agents/` present in the disposable workspace copy
 //!
 //! Like `benchmark_synthetic.rs`, this harness does NOT spin up its own
-//! daemon — it uses the developer's already-running instance and cleans up
-//! after itself.
+//! daemon — the operator starts an isolated fixture instance for this run.
+
+// Live benchmarks require an isolated daemon and disposable source copy.
+// See support/isolated_benchmark.rs for the three required environment variables.
+#[path = "support/isolated_benchmark.rs"]
+mod isolated_benchmark;
+use isolated_benchmark::daemon_url;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -44,8 +52,6 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 // ── Constants ───────────────────────────────────────────────────────────────
-
-const DAEMON_URL: &str = "http://127.0.0.1:7878";
 
 /// Why: do NOT clash with the existing `open-mpm` index in the daemon's
 /// registry (which points at the old `/Users/masa/Projects/open-mpm` path).
@@ -138,7 +144,7 @@ impl Tool {
     /// Whether to set `expand_graph: true` in the request body.
     /// Mirrors `SearchLane::expand_graph_default` in the production code.
     fn expand_graph(self) -> bool {
-        matches!(self, Tool::Kg)
+        matches!(self, Tool::Kg | Tool::All)
     }
 }
 
@@ -173,17 +179,12 @@ struct QueryResult {
 
 /// Absolute path of the trusty-agents crate root.
 ///
-/// Why: the daemon needs an absolute path; deriving it from
-/// `CARGO_MANIFEST_DIR` keeps the harness portable.
-/// What: trusty-search's manifest dir + `../trusty-agents`.
+/// Why: the daemon needs an absolute path inside the disposable source copy.
+/// What: resolves crates/trusty-agents within TRUSTY_SEARCH_TEST_CORPUS_ROOT.
 /// Test: `ground_truth_path()` and `open_mpm_root()` resolve to existing
 /// directories — `register_index` panics on a non-existent root.
 fn open_mpm_root() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent()
-        .expect("trusty-search manifest dir must have a parent (crates/)")
-        .join("trusty-agents")
+    isolated_benchmark::corpus_root("crates/trusty-agents")
 }
 
 /// Absolute path of the ground-truth JSON file.
@@ -249,11 +250,12 @@ fn make_client() -> Client {
 /// What: GETs /health, asserts 200, prints `version` + `rss_mb`.
 /// Test: panics with a human-readable message if the daemon is unreachable.
 async fn assert_daemon_healthy(client: &Client) -> Value {
+    let daemon_url = daemon_url();
     let resp = client
-        .get(format!("{DAEMON_URL}/health"))
+        .get(format!("{daemon_url}/health"))
         .send()
         .await
-        .expect("daemon must be reachable at 127.0.0.1:7878 — start it with `trusty-search start`");
+        .expect("isolated benchmark daemon must be reachable at TRUSTY_SEARCH_TEST_URL");
     assert_eq!(resp.status().as_u16(), 200, "GET /health returned non-200");
     let body: Value = resp.json().await.expect("health JSON parse failure");
     println!(
@@ -272,7 +274,8 @@ async fn assert_daemon_healthy(client: &Client) -> Value {
 /// What: GET /health, returns `rss_mb` (0 on parse failure).
 /// Test: transport errors panic; callers consume the u64.
 async fn fetch_rss_mb(client: &Client) -> u64 {
-    match client.get(format!("{DAEMON_URL}/health")).send().await {
+    let daemon_url = daemon_url();
+    match client.get(format!("{daemon_url}/health")).send().await {
         Ok(r) => match r.json::<Value>().await {
             Ok(v) => v["rss_mb"].as_u64().unwrap_or(0),
             Err(_) => 0,
@@ -288,9 +291,11 @@ async fn fetch_rss_mb(client: &Client) -> u64 {
 /// What: DELETEs any existing index with this name, then POSTs to /indexes.
 /// Test: asserts 200 on POST; transport errors panic.
 async fn register_index(client: &Client) {
+    isolated_benchmark::assert_index_root(client, INDEX_NAME, &open_mpm_root()).await;
+    let daemon_url = daemon_url();
     let _ = client
         .delete(format!(
-            "{DAEMON_URL}/indexes/{INDEX_NAME}?delete_data=true"
+            "{daemon_url}/indexes/{INDEX_NAME}?delete_data=true"
         ))
         .send()
         .await;
@@ -305,7 +310,7 @@ async fn register_index(client: &Client) {
         "root_path": root.to_string_lossy(),
     });
     let resp = client
-        .post(format!("{DAEMON_URL}/indexes"))
+        .post(format!("{daemon_url}/indexes"))
         .json(&body)
         .send()
         .await
@@ -331,13 +336,15 @@ async fn register_index(client: &Client) {
 ///
 /// Test: panics with last-known status on `REINDEX_TIMEOUT` or memory bail.
 async fn reindex_and_wait(client: &Client) -> (u64, Duration, u64) {
+    isolated_benchmark::assert_index_root(client, INDEX_NAME, &open_mpm_root()).await;
+    let daemon_url = daemon_url();
     let root = open_mpm_root();
     let body = json!({
         "root_path": root.to_string_lossy(),
         "force": true,
     });
     let resp = client
-        .post(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/reindex"))
+        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/reindex"))
         .json(&body)
         .send()
         .await
@@ -414,8 +421,9 @@ async fn reindex_and_wait(client: &Client) -> (u64, Duration, u64) {
 /// What: GET /indexes/:id/status, returns parsed JSON Value.
 /// Test: transport or parse failures panic.
 async fn fetch_status(client: &Client) -> Value {
+    let daemon_url = daemon_url();
     let resp = client
-        .get(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/status"))
+        .get(format!("{daemon_url}/indexes/{INDEX_NAME}/status"))
         .send()
         .await
         .expect("GET /status transport failure");
@@ -428,9 +436,11 @@ async fn fetch_status(client: &Client) -> Value {
 /// What: DELETE /indexes/:id; prints the response status regardless.
 /// Test: failures print, not panic (cleanup is best-effort).
 async fn cleanup_index(client: &Client) {
+    isolated_benchmark::assert_index_root(client, INDEX_NAME, &open_mpm_root()).await;
+    let daemon_url = daemon_url();
     let resp = client
         .delete(format!(
-            "{DAEMON_URL}/indexes/{INDEX_NAME}?delete_data=true"
+            "{daemon_url}/indexes/{INDEX_NAME}?delete_data=true"
         ))
         .send()
         .await;
@@ -445,6 +455,35 @@ async fn cleanup_index(client: &Client) {
 
 // ── Query execution ─────────────────────────────────────────────────────────
 
+/// Build the current MCP-equivalent request without unsupported seed fields.
+///
+/// Why: search_kg forwards its seed query as HTTP text; SearchQuery rejects
+/// seed_chunk_id. This mapping requests the supported graph lane and does not
+/// promise an exact-ID anchor beyond that request contract. Omit refine_query
+/// because its cosine threshold would change the benchmark's filtering.
+/// What: only KG uses a resolved seed as text; other lanes and unresolved seeds
+/// retain the original query. All lane pins/expansion flags match SearchLane.
+/// Test: organic_requests_match_current_mcp_lane_contract covers all lanes,
+/// mode hints, and resolved/unresolved seeds with the production SearchQuery.
+fn search_request(query: &GroundTruthQuery, tool: Tool, resolved_seed: Option<&str>) -> Value {
+    let text = if tool == Tool::Kg {
+        resolved_seed.unwrap_or(&query.text)
+    } else {
+        &query.text
+    };
+    let mut body = json!({
+        "text": text,
+        "top_k": 10,
+        "compact": false,
+        "mode": query.mode_hint,
+    });
+    if let Some(stage) = tool.stage_value() {
+        body["stage"] = json!(stage);
+    }
+    body["expand_graph"] = json!(tool.expand_graph());
+    body
+}
+
 /// Run one query in one tool mode and record the result.
 ///
 /// Why: the four per-lane tools must run the same code path so results are
@@ -458,6 +497,7 @@ async fn cleanup_index(client: &Client) {
 /// Test: transport failures panic; per-tool routing covered by per-query
 /// asserts in the main body.
 async fn run_query(client: &Client, query: &GroundTruthQuery, tool: Tool) -> QueryResult {
+    let daemon_url = daemon_url();
     // KG seed handling: only Tool::Kg on a kg_seed query exercises the two-
     // stage pattern. Other tool/query combinations fall through to the
     // standard single-stage path so we can compare each tool on the same
@@ -469,28 +509,11 @@ async fn run_query(client: &Client, query: &GroundTruthQuery, tool: Tool) -> Que
         }
     }
 
-    let mut body = json!({
-        "text": query.text,
-        "top_k": 10,
-        "compact": false,
-        "mode": query.mode_hint,
-    });
-    if let Some(stage) = tool.stage_value() {
-        body["stage"] = json!(stage);
-    }
-    body["expand_graph"] = json!(tool.expand_graph());
-
-    // For the KG two-stage path, attach the seed so the daemon's graph
-    // expansion has an explicit anchor. The daemon also falls back to
-    // intent-based expansion when seed_chunk_id is absent, but supplying
-    // it makes the test deterministic.
-    if let Some(seed) = &kg_seed_chunk_id {
-        body["seed_chunk_id"] = json!(seed);
-    }
+    let body = search_request(query, tool, kg_seed_chunk_id.as_deref());
 
     let t0 = Instant::now();
     let resp = client
-        .post(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/search"))
+        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/search"))
         .json(&body)
         .send()
         .await
@@ -546,13 +569,14 @@ async fn run_query(client: &Client, query: &GroundTruthQuery, tool: Tool) -> Que
 /// lookup of the seed query string.
 ///
 /// Why: `search_kg` is most useful with an explicit seed. The production
-/// MCP tool exposes a `seed_chunk_id` parameter; the harness mirrors
-/// that contract by doing the lexical pre-search itself.
+/// MCP tool accepts a seed as its `query` string, forwarded as HTTP `text`.
+/// The harness resolves that seed with the lexical pre-search.
 /// What: POSTs /search with `stage=lexical` and `top_k=1`, returns the
 ///   first result's `id` field, or None if nothing was found.
 /// Test: implicit — kg_seed queries' KG runs succeed iff the seed
 ///   resolves.
 async fn resolve_kg_seed(client: &Client, seed_text: &str) -> Option<String> {
+    let daemon_url = daemon_url();
     let body = json!({
         "text": seed_text,
         "top_k": 1,
@@ -560,7 +584,7 @@ async fn resolve_kg_seed(client: &Client, seed_text: &str) -> Option<String> {
         "compact": false,
     });
     let resp = client
-        .post(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/search"))
+        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/search"))
         .json(&body)
         .send()
         .await
@@ -877,4 +901,49 @@ async fn benchmark_open_mpm_per_lane_tools() {
     );
 
     cleanup_index(&client).await;
+}
+
+/// Exercise the real wire parser and the MCP lane/seed mapping before HTTP.
+#[test]
+fn organic_requests_match_current_mcp_lane_contract() {
+    use trusty_search::core::indexer::{SearchQuery, SearchStage};
+
+    for mode_hint in ["code", "text", "data"] {
+        for seed in [None, Some("src/target.rs:10:14")] {
+            let query = GroundTruthQuery {
+                id: "request-contract".into(),
+                text: "who calls target".into(),
+                query_type: "kg_seed".into(),
+                mode_hint: mode_hint.into(),
+                ground_truth_files: vec!["caller.rs".into()],
+                kg_seed_query: Some("target".into()),
+                description: "KG seed request contract".into(),
+            };
+            for (tool, expected_stage) in [
+                (Tool::Lexical, Some(SearchStage::Lexical)),
+                (Tool::Semantic, Some(SearchStage::Semantic)),
+                (Tool::Kg, Some(SearchStage::Graph)),
+                (Tool::All, None),
+            ] {
+                let parsed: SearchQuery =
+                    serde_json::from_value(search_request(&query, tool, seed))
+                        .unwrap_or_else(|error| panic!("{} / {mode_hint}: {error}", tool.label()));
+                let expected_text = if tool == Tool::Kg {
+                    seed.unwrap_or(&query.text)
+                } else {
+                    &query.text
+                };
+                assert_eq!(parsed.text, expected_text);
+                assert_eq!(parsed.top_k, 10);
+                assert!(!parsed.compact);
+                assert_eq!(serde_json::to_value(parsed.mode).unwrap(), json!(mode_hint));
+                assert_eq!(parsed.stage, expected_stage);
+                assert_eq!(parsed.expand_graph, matches!(tool, Tool::Kg | Tool::All));
+                assert_eq!(
+                    parsed.refine_query, None,
+                    "do not introduce KG refinement filtering"
+                );
+            }
+        }
+    }
 }
