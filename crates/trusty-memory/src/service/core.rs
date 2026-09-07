@@ -14,6 +14,7 @@ use crate::attribution::CreatorInfo;
 use crate::{ActivitySource, AppState, DaemonEvent};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
+use std::sync::Arc;
 use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
 use trusty_common::memory_core::retrieval::{
     recall_across_palaces_with_default_embedder, recall_deep_with_default_embedder,
@@ -212,8 +213,16 @@ impl MemoryService {
     /// Only when the registry itself cannot be walked. A palace that will not
     /// open is an `Err` entry, not an error for the whole call.
     ///
+    /// **Every open runs on the blocking pool (#6836).** The opens are cold
+    /// disk I/O, so running them inline on a tokio worker parked the executor
+    /// for the whole sweep — on a many-palace install that is minutes during
+    /// which nothing else the daemon serves makes progress. One
+    /// `spawn_blocking` per palace also gives the executor a yield point
+    /// between palaces rather than one uninterruptible block.
+    ///
     /// Test: `rpc_palaces_list_reports_counts_per_palace`,
-    /// `rpc_palaces_list_reports_an_unreadable_palace_rather_than_dropping_it`.
+    /// `rpc_palaces_list_reports_an_unreadable_palace_rather_than_dropping_it`,
+    /// `list_palaces_with_counts_opens_palaces_off_the_executor`.
     pub async fn list_palaces_with_counts(
         &self,
     ) -> ServiceResult<Vec<(String, Result<PalaceInfo, String>)>> {
@@ -225,15 +234,21 @@ impl MemoryService {
             if is_reserved_system_palace(&p.id) {
                 continue;
             }
-            let row = match self
-                .state
-                .registry
-                .open_palace(&self.state.data_root, &p.id)
-            {
-                Ok(handle) => Ok(palace_info_from(&p, Some(&handle))),
-                Err(e) => Err(format!("{e:#}")),
-            };
-            out.push((p.id.0.clone(), row));
+            let id = p.id.0.clone();
+            // #6836: the open is cold disk I/O — hop to the blocking pool so a
+            // full-estate sweep cannot park the async executor for its duration.
+            let registry = Arc::clone(&self.state.registry);
+            let root = self.state.data_root.clone();
+            let row =
+                tokio::task::spawn_blocking(move || match registry.open_palace(&root, &p.id) {
+                    Ok(handle) => Ok(palace_info_from(&p, Some(&handle))),
+                    Err(e) => Err(format!("{e:#}")),
+                })
+                .await
+                // A join failure is still a per-palace failure: the row says why
+                // rather than vanishing, exactly as an open failure does.
+                .unwrap_or_else(|e| Err(format!("join open palace: {e}")));
+            out.push((id, row));
         }
         Ok(out)
     }

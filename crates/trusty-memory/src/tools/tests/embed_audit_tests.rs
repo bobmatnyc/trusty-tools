@@ -289,3 +289,86 @@ async fn embed_sweep_reports_a_palace_it_could_not_open() {
         "one bad palace must not cost the readable palace its row: {out}"
     );
 }
+
+/// Why (#6836): the sweep opens every palace on disk and reads its coverage,
+/// and it ran both inline on a tokio worker. On a many-palace install that
+/// parks the executor for the whole sweep — every other request the daemon is
+/// serving stops until the last palace is open.
+/// What: a single-threaded runtime is the instrument. A concurrent heartbeat
+/// samples `registry.len()` — how many palaces the sweep has opened so far —
+/// and can only run when the executor is free. If the opens run inline the
+/// heartbeat sees 0 before the loop and never again during it, so no partial
+/// count is observable; with the opens on the blocking pool each per-palace
+/// `await` releases the executor and the partial counts appear.
+/// Test: itself. It fails on the pre-#6836 inline loop, where the recorded set
+/// is `{0}`.
+#[tokio::test]
+async fn embed_sweep_opens_palaces_off_the_executor() {
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    // Well under the registry's 64-handle LRU cap, so nothing is evicted
+    // mid-sweep and `len()` only ever grows.
+    const PALACES: usize = 12;
+
+    let (state, tmp) = test_state();
+    for i in 0..PALACES {
+        dispatch_tool(
+            &state,
+            "palace_create",
+            json!({ "name": format!("sweep-exec-{i}") }),
+        )
+        .await
+        .expect("palace_create");
+    }
+    drop(state);
+
+    // A state that has opened nothing: every open in the sweep is a real one,
+    // so `registry.len()` is a live count of the sweep's progress.
+    let cold = AppState::new(tmp.path().to_path_buf());
+    cold.set_ready();
+    assert!(
+        cold.registry.list().is_empty(),
+        "the fixture must start cold, or the handle count measures nothing"
+    );
+
+    let seen: Arc<Mutex<BTreeSet<usize>>> = Arc::new(Mutex::new(BTreeSet::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let heartbeat = {
+        let seen = Arc::clone(&seen);
+        let stop = Arc::clone(&stop);
+        let registry = Arc::clone(&cold.registry);
+        tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                seen.lock().expect("heartbeat lock").insert(registry.len());
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    let out = dispatch_tool(&cold, "palace_embed_sweep", json!({}))
+        .await
+        .expect("palace_embed_sweep");
+    stop.store(true, Ordering::Relaxed);
+    heartbeat.await.expect("heartbeat task");
+
+    assert_eq!(
+        out["palace_count"], PALACES,
+        "every palace must still be enumerated: {out}"
+    );
+    assert_eq!(out["unreadable"], 0, "every palace here is readable: {out}");
+
+    let seen = seen.lock().expect("seen lock");
+    let partial: Vec<usize> = seen
+        .iter()
+        .copied()
+        .filter(|n| *n > 0 && *n < PALACES)
+        .collect();
+    assert!(
+        !partial.is_empty(),
+        "a concurrent task never saw the sweep part-way through, so the opens \
+         ran on the executor thread and nothing else could make progress \
+         (#6836). Handle counts observed: {seen:?}"
+    );
+}

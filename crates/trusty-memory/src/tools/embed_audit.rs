@@ -186,8 +186,16 @@ pub(crate) async fn handle_palace_verify_embedded(state: &AppState, args: Value)
 /// Only when the palace directory itself cannot be listed. A per-palace failure
 /// is reported in its row.
 ///
+/// **Every open runs on the blocking pool (#6836).** Opening a palace and
+/// reading its coverage is cold disk I/O; running it inline on a tokio worker
+/// parked the executor for the whole sweep, which on a many-palace install is
+/// minutes during which nothing else the daemon serves makes progress. One
+/// `spawn_blocking` per palace also gives the executor a yield point between
+/// palaces rather than one uninterruptible block.
+///
 /// Test: `embed_sweep_sees_a_palace_the_cache_never_opened`,
-/// `embed_sweep_reports_a_palace_it_could_not_open`.
+/// `embed_sweep_reports_a_palace_it_could_not_open`,
+/// `embed_sweep_opens_palaces_off_the_executor`.
 pub(crate) async fn handle_palace_embed_sweep(state: &AppState, _args: Value) -> Result<Value> {
     let root = state.data_root.clone();
     // #4786: from disk, not `state.registry.list()`. The cache holds only what
@@ -204,9 +212,21 @@ pub(crate) async fn handle_palace_embed_sweep(state: &AppState, _args: Value) ->
     let (mut unhealthy, mut unreadable) = (0usize, 0usize);
     for palace in &palaces {
         let id = palace.id.as_str();
-        match open_palace_handle(state, id) {
-            Ok(handle) => {
-                let row = coverage(&handle);
+        // #6836: the open plus the coverage read are cold disk I/O — hop to the
+        // blocking pool so a full-estate sweep cannot park the async executor.
+        let state_for_open = state.clone();
+        let owned_id = id.to_string();
+        let opened = tokio::task::spawn_blocking(move || {
+            open_palace_handle(&state_for_open, &owned_id)
+                .map(|handle| coverage(&handle))
+                .map_err(|e| format!("{e:#}"))
+        })
+        .await
+        // A join failure is still a per-palace failure: the row says why rather
+        // than vanishing, exactly as an open failure does.
+        .unwrap_or_else(|e| Err(format!("join open palace: {e}")));
+        match opened {
+            Ok(row) => {
                 if row.get("healthy").and_then(Value::as_bool) != Some(true) {
                     unhealthy += 1;
                 }
@@ -214,8 +234,8 @@ pub(crate) async fn handle_palace_embed_sweep(state: &AppState, _args: Value) ->
             }
             Err(e) => {
                 unreadable += 1;
-                tracing::warn!(palace = %id, "embed sweep could not open palace: {e:#}");
-                rows.push(json!({ "palace": id, "error": format!("{e:#}") }));
+                tracing::warn!(palace = %id, "embed sweep could not open palace: {e}");
+                rows.push(json!({ "palace": id, "error": e }));
             }
         }
     }
