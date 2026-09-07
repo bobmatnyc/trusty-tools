@@ -1288,9 +1288,12 @@ numbers below are the ones they carried then.
    `SearchTab.svelte:206`), and, nested a level further inside it, deregisters
    unjudged registrations (`UnjudgedReview.svelte:73,109,110,116,117`,
    `POST /api/console/search/deregister-unjudged`, embedded at
-   `StaleIndexCleanup.svelte:313`).~~ Both components are deleted. Their routes
-   still serve; no console screen calls them until the search dashboard carries
-   the panel, which is not yet cut as an issue.
+   `StaleIndexCleanup.svelte:313`).~~ Both components are deleted, and
+   [#6941](https://github.com/bobmatnyc/trusty-tools/issues/6941) removed both
+   routes with them. The panel is now the search dashboard's
+   `ui-search/src/lib/views/Cleanup.svelte` at `#/indexes/cleanup`, reading
+   trusty-search's own `GET /registry/orphans` and `DELETE /indexes/{id}`
+   directly instead of a console proxy.
 3. **`MemoryTab.svelte`** compacts a palace inline, through
    `CompactAction.svelte:48,70,83` (`MemoryTab.svelte:212`, `POST`), and
    deletes one, through `DeleteAction.svelte:74,96,113`
@@ -1583,15 +1586,21 @@ reuses that same component.
 
 ### 16.4 Management actions, and the guards on clearing
 
-**The pattern to follow already exists.** `crates/trusty-console/src/routes/cleanup.rs`
-implements this exact shape for stale search-index registrations: a census, an
-operator review, an explicit confirm, then a batch action reporting a per-item
-outcome, never a single boolean "cleaned." Its UI half,
-`crates/trusty-console/ui/src/StaleIndexCleanup.svelte`, was removed from the
-console by §13's display-only ruling
-([#6923](https://github.com/bobmatnyc/trusty-tools/issues/6923)) and now lives
-only in history — read it with `git show
-6ee2b182b:crates/trusty-console/ui/src/StaleIndexCleanup.svelte`. The Disk
+**The pattern to follow already exists.**
+`crates/trusty-console/ui-search/src/lib/views/Cleanup.svelte` implements this
+exact shape for stale search-index registrations: a census, an operator review,
+an explicit confirm, then a batch action reporting a per-item outcome, never a
+single boolean "cleaned." Its pure decisions live beside it in
+`crates/trusty-console/ui-search/src/lib/cleanup.js`, which is where the two
+rules a destructive panel must honour are enforced and tested — eligibility
+reads the daemon's root classification and `chunk_count`, never a byte metric
+([#4706](https://github.com/bobmatnyc/trusty-tools/issues/4706)), and a delete
+is a removal only when the response BODY says so
+([#6363](https://github.com/bobmatnyc/trusty-tools/issues/6363)). It was the
+console's until §13's display-only ruling
+([#6923](https://github.com/bobmatnyc/trusty-tools/issues/6923)) and the port
+that followed it
+([#6941](https://github.com/bobmatnyc/trusty-tools/issues/6941)). The Disk
 dashboard follows it:
 
 - **Clear one worktree.** The confirm dialog names the exact path, branch,

@@ -75,32 +75,11 @@ impl ActionVerdict {
 
     /// True only when the daemon confirmed the work.
     ///
-    /// Used by the batch route, which reports one row per id and must not read
-    /// its own success off a status code it never sent.
+    /// Used by a route that must not read its own success off a status code it
+    /// never sent — the compact route re-polls the metrics cache only when the
+    /// daemon confirmed the work.
     pub(crate) fn succeeded(&self) -> bool {
         matches!(self, Self::Succeeded { .. })
-    }
-
-    /// The daemon's own words for a non-success, or an empty string.
-    ///
-    /// Test: `prune_reports_per_item_outcomes_for_a_partial_batch`.
-    pub(crate) fn reason(&self) -> &str {
-        match self {
-            Self::Succeeded { .. } => "",
-            Self::Refused { reason, .. }
-            | Self::Unreachable { reason, .. }
-            | Self::Invalid { reason, .. } => reason,
-        }
-    }
-
-    /// The id this verdict is about.
-    pub(crate) fn id(&self) -> &str {
-        match self {
-            Self::Succeeded { id, .. }
-            | Self::Refused { id, .. }
-            | Self::Unreachable { id, .. }
-            | Self::Invalid { id, .. } => id,
-        }
     }
 }
 

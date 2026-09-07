@@ -19,6 +19,7 @@
  */
 
 import { apiUrl } from './base.js';
+import { CENSUS_PATH } from './cleanup.js';
 
 /**
  * Why: Callers need a structured way to inspect HTTP errors without
@@ -84,6 +85,20 @@ export const api = {
   deleteIndex: (id) =>
     request(`/indexes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   indexStatus: (id) => request(`/indexes/${encodeURIComponent(id)}/status`),
+
+  /**
+   * Why (#6941): the daemon's own census of `indexes.toml` — the registrations
+   * whose `root_path` is gone. It reads the registry FILE, not the live
+   * handles, so it is the only endpoint that can show a registration the
+   * warm-boot allowlist excluded: that row is absent from `GET /indexes` and
+   * from every roster built on it, and it is exactly the row the cleanup panel
+   * exists to remove (#6363).
+   * What: `{ orphans: [...], indeterminate: [...], live_count, total }`.
+   * Removes nothing.
+   * Test: `cleanup.test.js` covers the reading of this body; the daemon side is
+   * `census_separates_gone_from_unjudgeable` in `service::orphan_report`.
+   */
+  registryOrphans: () => request(CENSUS_PATH),
 
   /** Per-index hybrid search. */
   search: (id, text, top_k = 10) =>
@@ -186,6 +201,45 @@ export const api = {
       method: 'POST'
     })
 };
+
+/**
+ * One `DELETE /indexes/{id}`, with the daemon's ANSWER kept intact (#6941).
+ *
+ * Why this does not go through `request()`: that helper throws on a non-2xx and
+ * keeps only the body text, and the two answers the cleanup panel must read are
+ * both non-2xx with a structured body — `404 {removed:false}` for an id in no
+ * store and no registry, and `500 {ok:false, error}` for a delete whose durable
+ * cleanup failed (#6363). Reducing either to a thrown string is how a caller
+ * ends up recording a removal that did not happen.
+ *
+ * What: returns the HTTP status and the parsed body, and never throws for an
+ * HTTP answer. `readDeleteOutcome` in `cleanup.js` turns the pair into a verdict.
+ * `expectedRootPath` pins the delete to the root the census reported (#6380): an
+ * id is derived from its root path, so a path wiped and recreated between the
+ * census and the confirm names a DIFFERENT, live index under the same id, and
+ * the daemon refuses rather than deleting it.
+ * Test: `cleanup.test.js` covers the verdicts; the daemon side is
+ * `delete_index_without_param_preserves_data` and `tests_3049`.
+ *
+ * @param {string} id                Registration id, from the census.
+ * @param {{deleteData?: boolean, expectedRootPath?: string|null}} opts
+ * @returns {Promise<{status: number, body: object|null}>}
+ */
+export async function deleteIndexReport(id, opts = {}) {
+  const params = new URLSearchParams({ delete_data: String(Boolean(opts.deleteData)) });
+  if (opts.expectedRootPath) params.set('expected_root_path', opts.expectedRootPath);
+  const res = await fetch(apiUrl(`/indexes/${encodeURIComponent(id)}?${params}`), {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' }
+  });
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+    // A non-JSON body is the "gave no reason" arm of `readDeleteOutcome`.
+  }
+  return { status: res.status, body };
+}
 
 /**
  * Why: the file-change feed is Server-Sent Events, not a fetch — `EventSource`

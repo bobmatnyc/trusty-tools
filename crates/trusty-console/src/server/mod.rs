@@ -591,23 +591,15 @@ fn build_router_inner(
             "/api/console/search/indexes/{id}",
             axum::routing::delete(crate::routes::deletes::delete_index_handler),
         )
-        // #6371: batch prune of stale index registrations, and palace
-        // compaction. `prune-indexes` is not `indexes/prune` because a static
-        // segment beside `indexes/{id}` would shadow an index named `prune`.
-        .route(
-            "/api/console/search/prune-indexes",
-            post(crate::routes::cleanup::prune_indexes_handler),
-        )
+        // #6941: `POST /api/console/search/prune-indexes` and
+        // `.../deregister-unjudged` are gone. The search dashboard carries that
+        // panel now (DOC-73 §13) and calls trusty-search's own
+        // `GET /registry/orphans` and `DELETE /indexes/{id}` directly, so the
+        // console proxying a management POST would be a second path to the same
+        // work — and console is display-only.
         .route(
             "/api/console/memory/palaces/{id}/compact",
             post(crate::routes::cleanup::compact_palace_handler),
-        )
-        // #6423: settle ONE registration the daemon could not check, after the
-        // operator reviewed it. Per-row on purpose — the batch prune above
-        // reads the census's `orphans` list alone and cannot reach these.
-        .route(
-            "/api/console/search/deregister-unjudged",
-            post(crate::routes::unjudged::deregister_unjudged_handler),
         )
         // Analyze on-demand routes — call the analyze stdio MCP directly (no /proxy).
         .route(

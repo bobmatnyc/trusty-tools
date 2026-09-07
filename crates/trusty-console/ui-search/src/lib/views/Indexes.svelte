@@ -409,9 +409,18 @@
 <div class="card">
   <div class="card-header flex-between">
     <span>Registered indexes</span>
-    <button class="btn btn-sm" onclick={refreshIndexes} disabled={loading}>
-      {loading ? 'Refreshing…' : 'Refresh'}
-    </button>
+    <div class="flex flex-gap-2">
+      <!-- #6941: this table shows the LIVE registry, so a registration the
+           warm-boot allowlist excluded has no row here at all (#6363). The
+           cleanup panel reads `indexes.toml` directly and is the only screen
+           that can list one. -->
+      <button class="btn btn-sm" onclick={() => navigate('/indexes/cleanup')}>
+        Stale registrations
+      </button>
+      <button class="btn btn-sm" onclick={refreshIndexes} disabled={loading}>
+        {loading ? 'Refreshing…' : 'Refresh'}
+      </button>
+    </div>
   </div>
 
   <!-- Bulk-action toolbar (issue #682): shown when ≥1 row is selected -->
