@@ -151,6 +151,43 @@ impl OpenAiCompatAdapter {
         req
     }
 
+    /// Produce the outbound JSON body: [`Self::prepare_body`] serialised, with the
+    /// neutral `response_schema` key rewritten into OpenAI's `response_format`.
+    ///
+    /// Why (#5588): [`ChatRequest::response_schema`] is deliberately dialect-free,
+    /// so its own key is not a parameter any OpenAI-compatible provider knows —
+    /// leaving it on the wire is a 400 for an unrecognised field. This is the one
+    /// place the whole OpenAI family (OpenRouter, Fireworks, OpenAI-direct,
+    /// Together, AtlasCloud, and the Local wrapper) translates it, so a sixth
+    /// provider in the family inherits structured output with no new code.
+    /// What: guards the capability via
+    /// [`InferenceAdapter::ensure_structured_output_supported`], serialises the
+    /// prepared request, then — when a schema is present — REMOVES
+    /// `response_schema` and inserts
+    /// [`StructuredOutput::openai_response_format`] under `response_format`. With
+    /// no schema the body is byte-identical to the pre-#5588 one, because
+    /// `skip_serializing_if` never emitted the key.
+    /// Test: `wire_body_translates_schema_into_response_format`,
+    /// `wire_body_omits_response_format_without_a_schema`,
+    /// `wire_body_rejects_a_schema_the_provider_cannot_honour`.
+    fn wire_body(&self, request: &ChatRequest) -> Result<Value, InferenceError> {
+        self.ensure_structured_output_supported(request)?;
+        let prepared = self.prepare_body(request);
+        let mut body =
+            serde_json::to_value(&prepared).map_err(|e| InferenceError::Deserialise {
+                message: e.to_string(),
+                body: String::new(),
+            })?;
+        if let (Value::Object(map), Some(schema)) = (&mut body, prepared.response_schema.as_ref()) {
+            map.remove("response_schema");
+            map.insert(
+                "response_format".to_string(),
+                schema.openai_response_format(),
+            );
+        }
+        Ok(body)
+    }
+
     /// Produce the streaming request body: the prepared request with `stream`
     /// and `stream_options.include_usage` set.
     ///
@@ -162,19 +199,16 @@ impl OpenAiCompatAdapter {
     /// than adding a `stream` field to the shared [`ChatRequest`] — keeps the
     /// non-streaming struct (and its many struct-literal construction sites)
     /// untouched; the flag exists only on the streaming path.
-    /// What: serialises [`Self::prepare_body`] to a JSON object and inserts
+    /// What: takes [`Self::wire_body`] (so the streaming path gets the same #5588
+    /// `response_format` translation and the same capability guard) and inserts
     /// `stream:true` plus `stream_options.include_usage:true`. Serialisation of a
     /// well-formed request cannot fail, but a failure maps to
     /// [`InferenceError::Deserialise`] rather than panicking.
     /// Test: `stream_body_sets_stream_and_usage_options`,
-    /// `stream_body_preserves_openrouter_usage_directive`.
+    /// `stream_body_preserves_openrouter_usage_directive`,
+    /// `stream_body_translates_schema_into_response_format`.
     fn stream_body(&self, request: &ChatRequest) -> Result<Value, InferenceError> {
-        let prepared = self.prepare_body(request);
-        let mut body =
-            serde_json::to_value(&prepared).map_err(|e| InferenceError::Deserialise {
-                message: e.to_string(),
-                body: String::new(),
-            })?;
+        let mut body = self.wire_body(request)?;
         if let Value::Object(map) = &mut body {
             map.insert("stream".to_string(), Value::Bool(true));
             map.insert(
@@ -203,7 +237,7 @@ impl InferenceAdapter for OpenAiCompatAdapter {
     /// Why: the one method the whole agent loop depends on; all HTTP mechanics
     /// (auth, headers, status classification, parsing) live here so callers only
     /// speak [`ChatRequest`]/[`ChatResponse`].
-    /// What: serialises [`Self::prepare_body`] as JSON, adds `Authorization:
+    /// What: serialises [`Self::wire_body`] as JSON, adds `Authorization:
     /// Bearer <key>` plus any attribution headers, and POSTs to the endpoint. A
     /// transport failure maps to [`InferenceError::Transport`]; a non-2xx status
     /// to [`InferenceError::Api`] (retryable for 429/5xx via
@@ -212,7 +246,8 @@ impl InferenceAdapter for OpenAiCompatAdapter {
     /// auth header and never appears in any returned error.
     /// Test: `crates/trusty-common/tests/inference_adapters.rs`.
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, InferenceError> {
-        let body = self.prepare_body(request);
+        // #5588: the guard inside `wire_body` runs before the socket opens.
+        let body = self.wire_body(request)?;
 
         let mut builder = self
             .http
@@ -344,7 +379,7 @@ impl InferenceAdapter for OpenAiCompatAdapter {
 mod tests {
     use super::*;
     use crate::inference::registry::{ProviderId, capabilities};
-    use crate::inference::types::ChatMessage;
+    use crate::inference::types::{ChatMessage, StructuredOutput};
 
     fn config_for(id: ProviderId, base_url: &str) -> OpenAiCompatConfig {
         OpenAiCompatConfig {
@@ -553,5 +588,147 @@ mod tests {
         let body = a.stream_body(&req).expect("body");
         assert_eq!(body["usage"], serde_json::json!({ "include": true }));
         assert_eq!(body["stream"], serde_json::json!(true));
+    }
+
+    fn schema_request(slug: &str) -> ChatRequest {
+        let mut req = ChatRequest::new(slug, vec![ChatMessage::user("hi")]);
+        req.response_schema = Some(StructuredOutput::new(
+            "review_output",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "verdict": { "type": "string" } },
+                "required": ["verdict"],
+                "additionalProperties": false,
+            }),
+        ));
+        req
+    }
+
+    /// Every structured-output-capable provider in the OpenAI family puts the
+    /// schema on the wire as `response_format`, and the neutral key never leaks.
+    ///
+    /// Why (#5588): the whole defect was a capability nothing honoured. Asserting
+    /// per provider — not once on OpenRouter — is what proves the translation is
+    /// in the SHARED core rather than one adapter, so a sixth provider inherits
+    /// it. `response_schema` must be gone from the body: it is not a parameter
+    /// any of these providers know, and leaving it is a 400.
+    /// What: for each of the five capable providers, build a schema-carrying
+    /// request and assert the envelope's three parts, plus the key's absence.
+    /// Test: this test.
+    #[test]
+    fn wire_body_translates_schema_into_response_format() {
+        for id in [
+            ProviderId::OpenRouter,
+            ProviderId::Fireworks,
+            ProviderId::OpenAI,
+            ProviderId::Together,
+            ProviderId::AtlasCloud,
+        ] {
+            let a =
+                OpenAiCompatAdapter::new(config_for(id, "https://example.test/v1")).expect("build");
+            assert!(
+                a.supports_structured_output(),
+                "{} must report the capability it is about to honour",
+                id.as_str()
+            );
+            let body = a.wire_body(&schema_request("m")).expect("body");
+            assert_eq!(
+                body["response_format"]["type"],
+                "json_schema",
+                "{}: {body}",
+                id.as_str()
+            );
+            assert_eq!(
+                body["response_format"]["json_schema"]["name"],
+                "review_output",
+                "{}: {body}",
+                id.as_str()
+            );
+            assert_eq!(
+                body["response_format"]["json_schema"]["schema"]["type"],
+                "object",
+                "{}: {body}",
+                id.as_str()
+            );
+            assert!(
+                body.get("response_schema").is_none(),
+                "{}: neutral key must not reach the wire — {body}",
+                id.as_str()
+            );
+        }
+    }
+
+    /// Why: a request with no schema must produce the pre-#5588 body exactly —
+    /// an unconditional `response_format` would 422 on models whose strict
+    /// support is partial.
+    /// Test: itself.
+    #[test]
+    fn wire_body_omits_response_format_without_a_schema() {
+        let a = OpenAiCompatAdapter::new(config_for(
+            ProviderId::OpenRouter,
+            "https://openrouter.ai/api/v1",
+        ))
+        .expect("build");
+        let req = ChatRequest::new("openai/gpt-4o-mini", vec![ChatMessage::user("hi")]);
+        let body = a.wire_body(&req).expect("body");
+        assert!(body.get("response_format").is_none(), "{body}");
+        assert!(body.get("response_schema").is_none(), "{body}");
+    }
+
+    /// A provider whose registry flag is false refuses the schema instead of
+    /// dropping it — and refuses before the socket opens.
+    ///
+    /// Why (#5588): the silent drop is the failure mode being prevented. The
+    /// caller believes the answer is schema-valid and parses it as such. Local is
+    /// the concrete case: it is an OpenAI-compatible endpoint, so the translation
+    /// would have "worked" and produced garbage from a model that ignores it.
+    /// What: `wire_body` is the pre-flight step of both `chat` and `chat_stream`,
+    /// so its `Err` proves no request was ever sent. Assert the variant carries
+    /// both the provider and the capability name.
+    /// Test: this test.
+    #[test]
+    fn wire_body_rejects_a_schema_the_provider_cannot_honour() {
+        let a =
+            OpenAiCompatAdapter::new(config_for(ProviderId::Local, "http://127.0.0.1:11434/v1"))
+                .expect("build");
+        assert!(!a.supports_structured_output());
+        let Err(err) = a.wire_body(&schema_request("llama3.1")) else {
+            panic!("a schema must be refused, never dropped");
+        };
+        assert!(
+            matches!(
+                err,
+                InferenceError::UnsupportedCapability {
+                    provider: ProviderId::Local,
+                    capability: "structured_output"
+                }
+            ),
+            "{err}"
+        );
+        // Without the schema the same adapter builds a body fine, so the refusal
+        // is about the capability and not about Local generally.
+        assert!(
+            a.wire_body(&ChatRequest::new("llama3.1", vec![ChatMessage::user("hi")]))
+                .is_ok()
+        );
+    }
+
+    /// Why: `chat_stream` is a separate wire path; a translation that lived only
+    /// in the buffered body would send an unconstrained streaming request while
+    /// the caller believed otherwise.
+    /// Test: itself.
+    #[test]
+    fn stream_body_translates_schema_into_response_format() {
+        let a = OpenAiCompatAdapter::new(config_for(
+            ProviderId::OpenRouter,
+            "https://openrouter.ai/api/v1",
+        ))
+        .expect("build");
+        let body = a
+            .stream_body(&schema_request("openai/gpt-4o-mini"))
+            .expect("body");
+        assert_eq!(body["response_format"]["type"], "json_schema", "{body}");
+        assert_eq!(body["stream"], serde_json::json!(true));
+        assert!(body.get("response_schema").is_none(), "{body}");
     }
 }

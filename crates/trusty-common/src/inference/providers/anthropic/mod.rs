@@ -176,6 +176,8 @@ impl InferenceAdapter for AnthropicAdapter {
     /// in a returned error.
     /// Test: `crates/trusty-common/tests/inference_adapters.rs`.
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, InferenceError> {
+        // #5588: refuse a schema this provider cannot constrain, before the socket.
+        self.ensure_structured_output_supported(request)?;
         let body = request::build_body(request, DEFAULT_MAX_TOKENS);
 
         // `reqwest::Error` display carries the URL/kind but never a header value,

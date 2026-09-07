@@ -15,6 +15,7 @@ mod message;
 mod request;
 mod response;
 mod secret;
+mod structured;
 mod tool;
 mod usage;
 
@@ -22,6 +23,7 @@ pub use message::ChatMessage;
 pub use request::ChatRequest;
 pub use response::{AssistantMessage, ChatChoice, ChatResponse, StopReason};
 pub use secret::SecretString;
+pub use structured::StructuredOutput;
 pub use tool::{
     CacheControl, FunctionCall, FunctionDefinition, RequestUsageConfig, ToolCall, ToolChoice,
     ToolDefinition, openai_tool_choice,

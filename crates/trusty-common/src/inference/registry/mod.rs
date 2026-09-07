@@ -217,8 +217,24 @@ pub struct ProviderCapabilities {
     pub streaming: bool,
     /// Whether Anthropic-style prompt caching is honoured.
     pub prompt_caching: bool,
-    /// Whether structured-output / JSON-schema response formatting is supported
-    /// (the `supports_structured_output` capability merged from trusty-review).
+    /// Whether the adapter renders [`ChatRequest::response_schema`] into this
+    /// provider's own schema-constrained request (#5588).
+    ///
+    /// Why: before #5588 this flag was advisory — no request could carry a schema,
+    /// so nothing could contradict it. It now has one testable meaning, and it is
+    /// the SINGLE source: an adapter reads it through
+    /// [`InferenceAdapter::supports_structured_output`] and never answers from a
+    /// local constant, so the flag cannot drift from what `chat` sends.
+    /// What: `true` for the OpenAI-dialect family (which take
+    /// `response_format: {type: json_schema, …}`) and for Anthropic-direct (which
+    /// takes `output_config.format`). `false` for Bedrock — the Converse API has
+    /// no equivalent parameter — and for Local, whose served models rarely honour
+    /// one. A `false` provider REJECTS a schema-carrying request with
+    /// [`InferenceError::UnsupportedCapability`] rather than dropping the schema.
+    ///
+    /// [`ChatRequest::response_schema`]: crate::inference::types::ChatRequest::response_schema
+    /// [`InferenceAdapter::supports_structured_output`]: crate::inference::adapter::InferenceAdapter::supports_structured_output
+    /// [`InferenceError::UnsupportedCapability`]: crate::inference::error::InferenceError::UnsupportedCapability
     pub structured_output: bool,
     /// Whether image/vision inputs are supported.
     pub vision: bool,
@@ -271,13 +287,20 @@ const SEED: [ProviderCapabilities; 8] = [
         default_model: "accounts/fireworks/models/llama-v3p1-70b-instruct",
         credential_env: Some("FIREWORKS_API_KEY"),
     },
+    // #5588: `structured_output` flipped true → false. The Converse API this
+    // adapter drives (`inference::bedrock`) has no schema-constrained-output
+    // parameter — no `response_format`, no `output_config` — so it cannot honour
+    // `ChatRequest.response_schema`, and the flag now means exactly that. Forcing
+    // a single tool via `toolConfig` would return the answer as a tool call
+    // instead of message content, which is a different response shape than the
+    // caller asked for; that is a separate change, not this one.
     ProviderCapabilities {
         id: ProviderId::Bedrock,
         native_tool_calling: true,
         tool_dialect: ToolDialect::AnthropicMessages,
         streaming: true,
         prompt_caching: false,
-        structured_output: true,
+        structured_output: false,
         vision: true,
         detailed_usage_accounting: false,
         max_context_window: 200_000,

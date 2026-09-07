@@ -292,6 +292,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            response_schema: None,
             stop: None,
         };
         // Best-effort: the call may error (missing key) or, with a real ambient
