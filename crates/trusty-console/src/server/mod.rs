@@ -149,6 +149,15 @@ pub struct AppState {
     /// What: `None` in production, which resolves the real path.
     /// Test: `tests/memory_uds_bridge.rs` sets it on every case.
     pub(crate) memory_socket: Option<Arc<PathBuf>>,
+    /// Override for the trusty-analyze socket path (#6155).
+    ///
+    /// Why: the same argument [`AppState::search_socket`] records — resolution
+    /// runs through `trusty_common::daemon_socket_path`, which reads the
+    /// process-global `TRUSTY_DATA_DIR_OVERRIDE`, and a test that redirected it
+    /// would redirect every sibling connector in the same binary at once.
+    /// What: `None` in production, which resolves the real path.
+    /// Test: `tests/analyze_uds_bridge.rs` sets it on every case.
+    pub(crate) analyze_socket: Option<Arc<PathBuf>>,
     /// When this server's state was built, which is when the console started
     /// serving (#6908).
     ///
@@ -262,6 +271,7 @@ impl AppState {
             mcp_handles: Arc::new(handles),
             search_socket: None,
             memory_socket: None,
+            analyze_socket: None,
             started_at: Instant::now(),
         }
     }

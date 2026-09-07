@@ -206,7 +206,7 @@ const ENFORCED = [
     // A trailing `:root { ... }` alias layer repoints crate-local names to
     // `--trusty-*` — not matched by either theme selector (#3490).
     name: "trusty-analyze",
-    file: "crates/trusty-analyze/ui/src/lib/styles/tokens.css",
+    file: "crates/trusty-console/ui-analyze/src/lib/styles/tokens.css",
     mode: "hex",
     lightSelector: /\[data-theme="light"\]\s*\{([\s\S]*?)\n\}/,
     darkSelector: /:root\s*,\s*\[data-theme="dark"\]\s*\{([\s\S]*?)\n\}/,

@@ -10,11 +10,10 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <!-- Injected by daemon at serve time. Defaults are dev-friendly. -->
-    <script>
-      window.__DAEMON_PORT__ = window.__DAEMON_PORT__ || 7879;
-      window.__SEARCH_URL__ = window.__SEARCH_URL__ || 'http://127.0.0.1:7878';
-    </script>
+    <!-- #6155: the daemon-injected `__DAEMON_PORT__` / `__SEARCH_URL__`
+         globals are gone. #6287 removed the listener that injected them and
+         nothing in src/ ever read them. The console injects
+         `window.__ANALYZE_BASE__` here instead (src/tools_ui.rs). -->
     <!-- Apply theme before first paint to avoid flash of wrong palette. -->
     <script>
       (function () {
@@ -29,9 +28,10 @@
         }
       })();
     </script>
+    <script type="module" crossorigin src="./assets/index-CQ1Q_I6T.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-DnbOmi_Y.css">
   </head>
   <body>
     <div id="app"></div>
-    <script type="module" src="/src/main.js"></script>
   </body>
 </html>

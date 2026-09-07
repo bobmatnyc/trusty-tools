@@ -31,15 +31,11 @@ readme               = "README.md"
 description = "Sidecar code-analysis daemon for trusty-search: complexity, smells, quality, facts"
 keywords    = ["code-analysis", "complexity", "code-smells", "mcp", "daemon"]
 categories  = ["development-tools", "command-line-utilities"]
-build       = "build.rs"
-exclude     = [
-    "ui/node_modules",
-    "ui/src",
-    "ui/package.json",
-    "ui/vite.config.js",
-    "ui/pnpm-lock.yaml",
-    "ui/pnpm-workspace.yaml",
-]
+# #6155: no `build` script and no `exclude` list any more. Both existed only for
+# the Svelte dashboard this crate used to embed; its source and its committed
+# bundle moved to `crates/trusty-console/ui-analyze`, which is where the console
+# serves it from at `/tools/analyze/`. #6287 had already deleted the listener
+# and the embed, leaving the bundle orphaned in this tree.
 
 [[bin]]
 name = "trusty-analyze"
@@ -103,8 +99,11 @@ libc               = { workspace = true }
 open               = { workspace = true }
 redb               = { workspace = true }
 dashmap            = { workspace = true }
-rust-embed         = { workspace = true }
-mime_guess         = { workspace = true }
+# Why (#6155): `rust-embed` and `mime_guess` were REMOVED. Both existed to embed
+#      and serve the admin dashboard's bundle. #6287 deleted the embed and the
+#      axum router that read them, leaving two dependencies nothing in `src/`
+#      referenced; #6155 moved the bundle itself out and takes the declarations
+#      with it.
 # `webhook-relay` (#5182): the console->target relay wire contract AND its
 # receive half — the durable inbox, the listener, and the hardened UDS bind
 # this crate mounts in `webhook_listener`. Implies `uds` and `webhook-hmac`.

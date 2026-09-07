@@ -1,17 +1,14 @@
 /*
- * Why: All UI components hit the same analyzer REST surface; centralizing fetch
+ * Why: All UI components hit the same analyzer surface; centralizing fetch
  * logic gives us one place to handle errors, base URL, and JSON parsing.
- * The analyzer serves the bundle at /ui and the API at flat paths
- * (/health, /indexes, /facts, ...) so requests are always same-origin in
- * production. In `vite dev`, vite.config.js proxies the API paths through to
- * 127.0.0.1:7879. When served through the trusty-console reverse-proxy at
- * /proxy/analyze/, apiUrl() rebases absolute paths to the proxy sub-path so
- * every API call reaches the daemon via the proxy instead of 404ing at the
- * console host root.
+ * #6155: the console serves this SPA at `/tools/analyze/` and answers these
+ * paths under `/api/analyze/`, where `analyze_uds` turns each one into a single
+ * `analyze.*` JSON-RPC call on the daemon's Unix socket (#6287, ADR-0032).
+ * The paths below are unchanged from the retired HTTP router's, so `base.js`
+ * reading the injected `window.__ANALYZE_BASE__` is the whole repoint.
  * What: Thin wrappers returning parsed JSON or throwing on non-2xx.
- * Test: Console-call api.health() and confirm shape matches /health.
- *   Proxy mode: open the SPA at /proxy/analyze/ and confirm api.health()
- *   fetches /proxy/analyze/health not /health.
+ * Test: `crates/trusty-console/tests/analyze_uds_bridge.rs` drives every one of
+ * these paths through the real router against a stub daemon socket.
  */
 
 import { apiUrl } from './base.js';
