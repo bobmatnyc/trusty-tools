@@ -37,6 +37,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use trusty_code::session::TaskResult;
+
 use crate::tools::execution_style::{ExecutionStyle, ResolvedStyle};
 
 /// Maximum serialized size of a [`HandoffContext`], in bytes (#2809 §5.2's
@@ -423,6 +425,19 @@ pub struct ProposalEnvelope {
     /// `an_unstyled_envelope_is_byte_identical`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style: Option<ResolvedStyle>,
+    /// The specialist's actionable result — where the change landed and
+    /// whether it passed (#4351).
+    ///
+    /// Why: `result` below is the raw transcript, and a caller cannot reliably
+    /// read a branch name or a pass/fail out of prose. These are the fields
+    /// #4351 exists to carry.
+    /// What: `None` (and omitted from the JSON) for a backend that reports no
+    /// result — the `Tm` leg, and every pre-#4351 caller — keeping the
+    /// envelope byte-identical for them.
+    /// Test: `a_result_bearing_envelope_is_still_only_a_proposal`,
+    /// `an_envelope_without_a_task_result_is_byte_identical`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_result: Option<TaskResult>,
     /// The specialist's output, already branding-scrubbed by the tool layer.
     pub result: String,
 }
@@ -450,6 +465,7 @@ impl ProposalEnvelope {
             // Never `Action` — see the type docs and DOC-41 §5.5 line 1398.
             disposition: Disposition::Proposal,
             style: None,
+            task_result: None,
             result: result.into(),
         }
     }
@@ -468,6 +484,24 @@ impl ProposalEnvelope {
     /// `a_styled_envelope_is_still_only_a_proposal`.
     pub fn with_style(mut self, style: Option<ResolvedStyle>) -> Self {
         self.style = style;
+        self
+    }
+
+    /// Record the specialist's actionable result on an already-built envelope
+    /// (#4351).
+    ///
+    /// Why: the caller renders this envelope to a user, and "here is a wall of
+    /// transcript" is not a report. The refs — where the change landed, on
+    /// which branch, whether it passed — are what makes it one. Same builder
+    /// shape as [`Self::with_style`] and for the same reason: the propose-only
+    /// invariant stays hardcoded in the sole constructor, so attaching a result
+    /// cannot upgrade the disposition.
+    /// What: sets [`Self::task_result`]; `None` leaves the envelope
+    /// byte-identical to a pre-#4351 one.
+    /// Test: `a_result_bearing_envelope_is_still_only_a_proposal`,
+    /// `an_envelope_without_a_task_result_is_byte_identical`.
+    pub fn with_task_result(mut self, task_result: Option<TaskResult>) -> Self {
+        self.task_result = task_result;
         self
     }
 

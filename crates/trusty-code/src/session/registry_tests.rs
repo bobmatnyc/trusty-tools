@@ -2656,3 +2656,48 @@ async fn context_floor_after_restart_is_absent_not_wrong() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ── #4351: the actionable TaskResult on a session snapshot ────────────────────
+
+/// `set_task_result` must land on the session's own snapshot, where
+/// `session.status` reads it.
+#[test]
+fn set_task_result_stores_the_result() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    assert!(
+        registry.status(&session.id).unwrap().result.is_none(),
+        "a session that has never run carries no result"
+    );
+
+    registry.set_task_result(
+        &session.id,
+        crate::session::TaskResult::new(crate::session::TaskResultStatus::Partial)
+            .with_diff_ref(Some("tree-sha".to_string()))
+            .with_branch(Some("feat/x".to_string()))
+            .with_summary(Some("partial: changes captured".to_string())),
+    );
+
+    let stored = registry
+        .status(&session.id)
+        .unwrap()
+        .result
+        .expect("result must be readable back through session.status");
+    assert_eq!(stored.status, crate::session::TaskResultStatus::Partial);
+    assert_eq!(stored.diff_ref.as_deref(), Some("tree-sha"));
+    assert_eq!(stored.branch.as_deref(), Some("feat/x"));
+    assert_eq!(stored.pr_ref, None);
+}
+
+/// A session that vanished between the run starting and finishing is a silent
+/// no-op, matching `set_run_outcome`'s contract — a detached background task
+/// has nothing useful to do with the error.
+#[test]
+fn set_task_result_on_unknown_session_is_a_no_op() {
+    let registry = SessionRegistry::new();
+    registry.set_task_result(
+        "no-such-session",
+        crate::session::TaskResult::new(crate::session::TaskResultStatus::Failed),
+    );
+    assert!(registry.status("no-such-session").is_err());
+}

@@ -28,6 +28,10 @@
 pub mod executor;
 pub mod mock_llm;
 pub mod protocol;
+/// (#4351) Folds a finished run's terminal status and on-disk footprint into
+/// the `session::TaskResult` a caller reads back. Private to this module —
+/// `executor` is its only caller.
+mod result_capture;
 pub mod sink;
 
 pub use executor::{TaskRunParams, spawn_task_run};

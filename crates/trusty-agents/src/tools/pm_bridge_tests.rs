@@ -776,3 +776,41 @@ fn schema_advertises_the_coding_pm_and_the_closed_style_vocabulary() {
         );
     }
 }
+
+// =====================================================================
+// #4351 — scrubbing a relayed TaskResult
+// =====================================================================
+
+/// A backend-reported `summary` is generated prose travelling the same path a
+/// transcript does, so it gets the same branding scrub.
+#[test]
+fn a_reported_summary_is_branding_scrubbed() {
+    let scrubbed = scrub_task_result(
+        TaskResult::new(trusty_code::session::TaskResultStatus::Success)
+            .with_summary(Some("tcode finished the run".to_string())),
+    );
+    let summary = scrubbed.summary.expect("summary survives");
+    assert!(
+        !summary.to_ascii_lowercase().contains("tcode"),
+        "summary leaked backend identity: {summary}"
+    );
+}
+
+/// The structured refs are NOT scrubbed — a word-boundary substitution over a
+/// SHA or a branch name would corrupt the one field a caller acts on, and they
+/// carry no backend identity to begin with (git builds them, not the harness).
+#[test]
+fn scrubbing_leaves_the_refs_intact() {
+    let scrubbed = scrub_task_result(
+        TaskResult::new(trusty_code::session::TaskResultStatus::Partial)
+            .with_diff_ref(Some("0f1e2d3c4b5a6978".to_string()))
+            .with_branch(Some("feat/tm-migration".to_string()))
+            .with_pr_ref(Some("https://example.invalid/pull/7".to_string())),
+    );
+    assert_eq!(scrubbed.diff_ref.as_deref(), Some("0f1e2d3c4b5a6978"));
+    assert_eq!(scrubbed.branch.as_deref(), Some("feat/tm-migration"));
+    assert_eq!(
+        scrubbed.pr_ref.as_deref(),
+        Some("https://example.invalid/pull/7")
+    );
+}

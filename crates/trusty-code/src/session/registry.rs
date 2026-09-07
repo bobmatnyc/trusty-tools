@@ -327,6 +327,7 @@ impl SessionRegistry {
             created_at: Utc::now(),
             mode: None,
             workstream_id: None,
+            result: None,
         };
         {
             let mut sessions = self.lock();
@@ -1083,6 +1084,11 @@ mod workstream_binding;
 /// `events` above.
 #[path = "registry_search_audit.rs"]
 mod search_audit;
+
+/// #4351's `SessionRegistry::set_task_result`, split out into its own file for
+/// the same 500-SLOC-cap reason as `events` above.
+#[path = "registry_task_result.rs"]
+mod task_result_ops;
 
 #[cfg(test)]
 #[path = "registry_tests.rs"]

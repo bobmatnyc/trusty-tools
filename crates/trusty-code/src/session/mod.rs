@@ -41,6 +41,8 @@ pub mod memory_sink;
 pub mod model;
 pub mod protocol;
 pub mod registry;
+/// (#4351) The actionable `TaskResult` carried beside a `Session` snapshot.
+pub mod task_result;
 pub mod transcript;
 
 /// (issue #3948) The per-session working-context floor `registry` folds into
@@ -53,4 +55,5 @@ pub use connector::TcodeConnector;
 pub use memory_sink::{MemoryFailureCategory, PalaceCreation, TurnMemorySink};
 pub use model::{Session, SessionStatus};
 pub use registry::SessionRegistry;
+pub use task_result::{TaskResult, TaskResultStatus};
 pub use transcript::{GoalSlotRecord, MemoryDurabilityStatus, TranscriptRecord};
