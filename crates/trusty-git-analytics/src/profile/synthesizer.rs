@@ -118,30 +118,13 @@ pub fn assign_trend_tags(findings: Vec<LongitudinalFinding>) -> Vec<Longitudinal
     let latest_period = period_order.last().cloned().unwrap_or_default();
 
     // Cluster by description similarity; `clusters` holds indices into `findings`.
-    let mut clusters: Vec<Vec<usize>> = Vec::new();
-    let mut assigned = vec![false; findings.len()];
-
-    for i in 0..findings.len() {
-        if assigned[i] {
-            continue;
-        }
-        let mut cluster = vec![i];
-        assigned[i] = true;
-        for j in (i + 1)..findings.len() {
-            if assigned[j] {
-                continue;
-            }
-            if jaccard_similarity(
-                &findings[i].finding.description,
-                &findings[j].finding.description,
-            ) >= JACCARD_THRESHOLD
-            {
-                cluster.push(j);
-                assigned[j] = true;
-            }
-        }
-        clusters.push(cluster);
-    }
+    let clusters = {
+        let descriptions: Vec<&str> = findings
+            .iter()
+            .map(|f| f.finding.description.as_str())
+            .collect();
+        cluster_by_similarity(&descriptions)
+    };
 
     let mut tagged = findings;
     for cluster in &clusters {
@@ -179,6 +162,42 @@ pub fn assign_trend_tags(findings: Vec<LongitudinalFinding>) -> Vec<Longitudinal
     }
 
     tagged
+}
+
+/// Group descriptions that name the same underlying issue.
+///
+/// Why: the trend tagger and the fallback narrative both have to agree on what
+/// counts as one issue; two independent clusterings would let the narrative
+/// report a different number of issues than the tags imply.
+/// What: greedy single-seed clustering — each still-unassigned description
+/// opens a cluster and absorbs every later unassigned description scoring at or
+/// above [`JACCARD_THRESHOLD`] against it. Returns index groups into
+/// `descriptions`, in seed order; an empty input yields no clusters.
+/// Test: `synthesizer_dedup_assigns_recurring`,
+/// `synthesizer_fail_safe_narrative_counts_distinct_clusters`.
+fn cluster_by_similarity(descriptions: &[&str]) -> Vec<Vec<usize>> {
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
+    let mut assigned = vec![false; descriptions.len()];
+
+    for i in 0..descriptions.len() {
+        if assigned[i] {
+            continue;
+        }
+        let mut cluster = vec![i];
+        assigned[i] = true;
+        for j in (i + 1)..descriptions.len() {
+            if assigned[j] {
+                continue;
+            }
+            if jaccard_similarity(descriptions[i], descriptions[j]) >= JACCARD_THRESHOLD {
+                cluster.push(j);
+                assigned[j] = true;
+            }
+        }
+        clusters.push(cluster);
+    }
+
+    clusters
 }
 
 /// Token-set Jaccard similarity between two descriptions.
@@ -610,19 +629,25 @@ pub fn apply_synthesis_json(profile: &mut ContributorProfile, body: &str) {
 /// "the narrative pass did not run", so the fallback states both the findings
 /// and the fact that it is a fallback.
 /// What: sets `narrative` to a template naming the contributor, the window, the
-/// trajectory, and the recurring-finding count.
-/// Test: `synthesizer_fail_safe_narrative`.
+/// trajectory, and the number of DISTINCT recurring issues — one issue seen in
+/// three periods is one issue, not three (#5490).
+/// Test: `synthesizer_fail_safe_narrative`,
+/// `synthesizer_fail_safe_narrative_counts_distinct_clusters`.
 pub fn apply_fallback_narrative(profile: &mut ContributorProfile) {
     let traj_str = match profile.improvement_trajectory {
         Trajectory::Improving => "improving",
         Trajectory::Stable => "stable",
         Trajectory::Declining => "declining",
     };
-    let n_recurring = profile
+    // #5490: the sentence says "recurring issue(s)", so count clusters, not the
+    // per-period occurrences that carry the tag.
+    let recurring: Vec<&str> = profile
         .all_findings
         .iter()
         .filter(|f| f.trend_tag == Some(TrendTag::Recurring))
-        .count();
+        .map(|f| f.finding.description.as_str())
+        .collect();
+    let n_recurring = cluster_by_similarity(&recurring).len();
     profile.narrative = format!(
         "Longitudinal profile for {} ({} to {}). \
          Quality trajectory: {}. \
