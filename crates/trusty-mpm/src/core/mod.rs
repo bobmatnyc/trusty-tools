@@ -167,6 +167,10 @@ pub mod binary_reinstall;
 // global `tm` binary regresses every session at once when it is.
 pub mod install_freshness;
 pub mod reinstall;
+// #6958: the per-session token-savings ledger every producer appends to, and
+// the instruction/language-compression producer that writes the first row.
+pub mod savings;
+pub mod savings_instructions;
 pub mod scaffold_gitignore;
 pub mod session;
 pub mod session_assets;

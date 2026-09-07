@@ -163,6 +163,7 @@ export const TOOLS: Tool[] = [
 			'One `tm` binary: daemon, CLI, TUI dashboard, and MCP server',
 			'Sessions and worktrees per project, tracked across restarts',
 			'Claude Code lifecycle hooks relayed into the daemon',
+			'A statusline estimate of the tokens the harness kept out of the session',
 			'Remote control from Telegram or Slack when you are away from the terminal'
 		],
 		lede: 'A project manager for coding sessions: it provisions them, watches them, and keeps the roster straight while you work in several at once.',
