@@ -101,36 +101,66 @@ fn rpc_router(state: &Arc<DaemonState>) -> RpcRouter {
     register(RpcRouter::new(), state)
 }
 
-/// RAII guard restoring `$HOME` on drop, including on a panic-driven unwind —
-/// mirrors `core::session_assets::tests::HomeGuard`.
-struct HomeGuard(Option<std::ffi::OsString>);
+/// RAII guard restoring `$HOME` and the host-state opt-in on drop, including on
+/// a panic-driven unwind — mirrors `core::session_assets::tests::HomeGuard` and
+/// `daemon::services::tmux_service::tests::HostEnvGuard`.
+struct HomeGuard {
+    home: Option<std::ffi::OsString>,
+    opt_in: Option<std::ffi::OsString>,
+}
 
 impl Drop for HomeGuard {
     fn drop(&mut self) {
         // SAFETY: every caller is `#[serial_test::serial]`, so no other test
         // thread reads or writes the environment concurrently.
-        match self.0.take() {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
+        unsafe {
+            match self.home.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.opt_in.take() {
+                Some(v) => std::env::set_var(crate::core::host_state_gate::ALLOW_HOST_STATE_ENV, v),
+                None => {
+                    std::env::remove_var(crate::core::host_state_gate::ALLOW_HOST_STATE_ENV);
+                }
+            }
         }
     }
 }
 
-/// Pin `$HOME` at a fresh tempdir for the guard's lifetime (#6580).
+/// Pin `$HOME` at a fresh tempdir and clear the host-state opt-in, for the
+/// guard's lifetime (#6580, #7076).
 ///
 /// Why: `core::host_state_gate` embeds the LIVE `$HOME` in the refusal it hands
 /// every tmux route, so a test that reads that refusal twice gets two different
 /// strings whenever a sibling moves `$HOME` between the reads. Pinning makes the
-/// classification — and therefore the message — the same for both reads. Both
-/// returned values must stay alive for the test's body: dropping the `TempDir`
-/// removes the directory `$HOME` names.
+/// classification — and therefore the message — the same for both reads. A
+/// tempdir can never be this uid's password-database home, so the gate
+/// classifies it scratch and refuses on every host.
+///
+/// Why the opt-in is cleared too (#7076): the gate re-reads
+/// [`crate::core::host_state_gate::ALLOW_HOST_STATE_ENV`] on every call and a
+/// truthy value outranks the `$HOME` classification, so a pin alone leaves the
+/// verdict — and every route that reads live tmux behind it — decided by the
+/// operator's ambient environment. Clearing both is what makes the refusal the
+/// same fact on every host, which is the whole reason to pin. Same shape as
+/// `daemon::services::tmux_service::tests::scratch_home` (#6736).
+///
+/// Both returned values must stay alive for the test's body: dropping the
+/// `TempDir` removes the directory `$HOME` names.
 /// Callers MUST be tagged `#[serial_test::serial]`.
 fn pinned_home() -> (TempDir, HomeGuard) {
     let home = tempfile::tempdir().expect("temp dir for a pinned $HOME");
-    let prior = std::env::var_os("HOME");
+    let guard = HomeGuard {
+        home: std::env::var_os("HOME"),
+        opt_in: std::env::var_os(crate::core::host_state_gate::ALLOW_HOST_STATE_ENV),
+    };
     // SAFETY: caller is `#[serial_test::serial]`.
-    unsafe { std::env::set_var("HOME", home.path()) };
-    (home, HomeGuard(prior))
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::remove_var(crate::core::host_state_gate::ALLOW_HOST_STATE_ENV);
+    }
+    (home, guard)
 }
 
 /// Drive one HTTP request through the real daemon router and decode the answer.
@@ -428,13 +458,44 @@ async fn parity_errors_agrees_across_transports() {
     assert_same("mpm.errors.list", body, result, &[]);
 }
 
+/// Why serial and a pinned `$HOME` (#7076): `list_tmux_sessions` reaches
+/// `TmuxService::list_all`, whose `TmuxDriver::discover` asks
+/// `core::host_state_gate::host_state_access()` — a fresh `$HOME` read on every
+/// call — and answers an EMPTY list when the gate refuses. `parity_doctor_*` and
+/// the other `pinned_home` cases move `$HOME` process-wide, so one landing
+/// between the two calls below made HTTP read the refusal (`{"sessions": []}`)
+/// while the socket read the operator's live six-session list. Reproduced 2 of
+/// 10 runs of `cargo test -p trusty-mpm --lib --no-fail-fast parity_` at
+/// f954009cb, both times empty-over-HTTP against a populated socket answer.
+///
+/// Pinning does more than order the reads: with the gate refusing, neither call
+/// consults tmux at all, so the machine's live session list — which any agent on
+/// the host adds to and removes from while the test runs — stops being an input.
+/// `#[serial]` is what holds under `cargo test`, where the `$HOME`-moving
+/// siblings share this process; the pin is what holds under nextest, where every
+/// test gets its own process and `#[serial]` orders nothing (#4162). Same
+/// reason and the same shared default group as
+/// [`rpc_tmux_snapshot_unknown_session_reports_a_coded_error`] and
+/// [`parity_tmux_adopt_unknown_session_agrees_across_transports`] below.
 /// Test: this function IS the test.
+// #7076: $HOME is process-global and gates the tmux read; both calls must see one value.
+#[serial_test::serial]
 #[tokio::test]
 async fn parity_tmux_sessions_agrees_across_transports() {
+    // #7076: pinned BEFORE the two calls, and held across both.
+    let (_home, _home_guard) = pinned_home();
     let (state, _dir) = hermetic();
     let (status, body) = http(&state, "GET", "/tmux/sessions", None).await;
     assert_eq!(status, StatusCode::OK);
     let result = rpc_ok(&rpc_router(&state), "mpm.tmux.sessions", Value::Null).await;
+    // The refused gate's answer, pinned rather than merely compared: a route
+    // that started reporting the host's real sessions under a scratch `$HOME`
+    // would be the #5784 leak, and this is where it would surface.
+    assert_eq!(
+        body["sessions"],
+        json!([]),
+        "a scratch $HOME must reach no host tmux session: {body}"
+    );
     assert_same("mpm.tmux.sessions", body, result, &[]);
 }
 
