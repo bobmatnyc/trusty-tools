@@ -1636,3 +1636,92 @@ fn session_worktree_without_a_remote_still_branches_from_head() {
         "a remote-less repo's worktree must start at the local HEAD commit"
     );
 }
+
+/// #4270: `clean -ffd` in the base clone must not delete session worktrees.
+///
+/// Why: the two review rounds contradicted each other on whether the missing
+/// `.git/info/exclude` entry was cosmetic, and the disagreement was a data-loss
+/// question, so it is settled here in the suite rather than by hand. Measured
+/// against real git: a single-force `clean` reports `Skipping repository` and
+/// is safe, which is what makes this look harmless — but `-ff` removes the
+/// worktrees directory outright, uncommitted session work included. The exclude
+/// entry is therefore a safety guard. This test moved here from the provisioner
+/// suite when #6000 removed that path; the guard is unchanged and now has one
+/// owner, [`ensure_base_clone`].
+/// What: builds the shipping topology with the production `ensure_base_clone`
+/// and `create_session_worktree`, writes an uncommitted file into the worktree,
+/// then runs a real `clean -ffd` in the base and asserts the file survives.
+/// Test: this function IS the test.
+#[test]
+fn worktrees_exclude_entry_protects_against_double_force_clean() {
+    let scratch = crate::test_support::hermetic_temp_dir();
+    let origin = scratch.path().join("origin");
+    std::fs::create_dir_all(&origin).expect("origin dir");
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test"],
+    ] {
+        let Ok(out) = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&origin)
+            .output()
+        else {
+            eprintln!("worktrees_exclude_entry_protects_against_double_force_clean: no git");
+            return;
+        };
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+    std::fs::write(origin.join("README"), b"seed").expect("seed file");
+    for args in [vec!["add", "."], vec!["commit", "-q", "-m", "seed"]] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&origin)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    let base = scratch.path().join("owner").join("repo");
+    let url = format!("file://{}", origin.display());
+    ensure_base_clone(&url, &base).expect("ensure_base_clone must succeed");
+
+    let worktree = create_session_worktree(
+        &base,
+        "sess-1",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("create_session_worktree must succeed");
+    let wip = worktree.join("WIP.txt");
+    std::fs::write(&wip, b"uncommitted session work").expect("write WIP");
+
+    // The guard itself: the worktrees directory must be excluded in the base.
+    let exclude = std::fs::read_to_string(base.join(".git").join("info").join("exclude"))
+        .expect("the base clone must have a .git/info/exclude");
+    let want = format!(
+        "{}/",
+        crate::session_manager::decommission::worktrees_dirname()
+    );
+    assert!(
+        exclude.lines().any(|l| l.trim() == want),
+        "ensure_base_clone must exclude {want}, got: {exclude}"
+    );
+
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&base)
+        .args(["clean", "-ffd"])
+        .output()
+        .expect("git clean -ffd");
+    let said = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        wip.exists(),
+        "#4270: `clean -ffd` in the base DELETED a session worktree's \
+         uncommitted work — git said: {said}"
+    );
+    assert!(
+        !said.contains(&want),
+        "`clean -ffd` must not touch the worktrees directory at all, got: {said}"
+    );
+}
