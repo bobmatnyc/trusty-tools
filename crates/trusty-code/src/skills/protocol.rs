@@ -330,10 +330,12 @@ mod tests {
 
     #[test]
     fn locate_skills_dir_matches_project_only_tier() {
-        // Pins the module doc's central claim: no user-level fallback.
+        // Pins the module doc's central claim: no user-level fallback. The
+        // directory itself is trusty-code's own (#5426) — nothing on disk here,
+        // so the resolver returns the native default.
         let root = std::path::Path::new("/fake/project");
         let s = SkillsCatalogState::new(Some(root));
-        assert_eq!(s.dir, Some(root.join(".claude").join("skills")));
+        assert_eq!(s.dir, Some(root.join(".trusty-code").join("skills")));
         let projectless = SkillsCatalogState::new(None);
         assert_eq!(projectless.dir, None);
     }

@@ -78,8 +78,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// The `.claude/plugins` directory name, relative to a project root.
-const PLUGINS_DIRNAME: &str = "plugins";
+// #5426: the `plugins` directory name moved to `crate::paths::plugins_dir`,
+// which owns the `.trusty-code` → `.claude` → `.open-mpm` precedence for it.
 
 /// `.claude-plugin/plugin.json` keys Phase 1 recognizes as later-phase
 /// surfaces (commands/hooks/MCP) — present but intentionally unimplemented,
@@ -140,22 +140,25 @@ struct PluginManifest {
     other: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Discover every plugin under `<project_root>/.claude/plugins/`.
+/// Discover every plugin under the project's resolved `plugins/` directory.
 ///
 /// Why: the single scan point [`agents::discover_plugin_agents`],
 /// [`skills::discover_plugin_skills`], and the namespaced-name resolvers in
 /// both submodules all build on.
-/// What: each immediate subdirectory of `.claude/plugins/` is one plugin
-/// root, resolved via `load_plugin_root`. A missing/unreadable
-/// `.claude/plugins/` directory yields an empty list (never an error — a
-/// project simply using no plugins is the common case, mirroring
-/// `agents::discover_agents`'s missing-dir handling). Non-directory entries
-/// are skipped. Sorted by resolved name.
+/// What: the directory comes from [`crate::paths::plugins_dir`], so a project
+/// that has moved to `.trusty-code/plugins/` is scanned there and one still on
+/// `.claude/plugins/` keeps working (#5426). Each immediate subdirectory is one
+/// plugin root, resolved via `load_plugin_root`. A missing/unreadable directory
+/// yields an empty list (never an error — a project simply using no plugins is
+/// the common case, mirroring `agents::discover_agents`'s missing-dir handling).
+/// Non-directory entries are skipped. Sorted by resolved name.
 /// Test: `tests::discover_plugin_roots_missing_dir_is_empty`,
 /// `tests::discover_plugin_roots_finds_subdirs`,
-/// `tests::discover_plugin_roots_honors_manifest_name_override`.
+/// `tests::discover_plugin_roots_honors_manifest_name_override`,
+/// `paths::tests::plugins_dir_prefers_trusty_code`.
 pub fn discover_plugin_roots(project_root: &Path) -> Vec<PluginRoot> {
-    let plugins_dir = project_root.join(".claude").join(PLUGINS_DIRNAME);
+    // #5426: resolved, not joined — `.trusty-code/plugins` then `.claude/plugins`.
+    let plugins_dir = crate::paths::plugins_dir(project_root).path;
     let Ok(entries) = std::fs::read_dir(&plugins_dir) else {
         tracing::debug!(
             "plugins dir not found or unreadable: {}",

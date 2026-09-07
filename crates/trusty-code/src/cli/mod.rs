@@ -34,6 +34,10 @@
 //! engineer-model resolution, LLM-client construction). It is a subcommand
 //! handler like every other file here, and was moved out of `main.rs` when
 //! that file reached 498 of the 500-SLOC cap; see its module docs.
+//! (#5426) [`paths`] is the fourth: `tcode paths show|import` reports which
+//! configuration root wins for each entry and migrates a `.claude/` catalog into
+//! `.trusty-code/`. It starts no daemon; every rule lives in
+//! `trusty_code::paths`.
 //! (#5441) [`bakeoff`] is the third: `bakeoff-gate` judges a retained
 //! bake-off evidence bundle entirely offline, so it starts no daemon and makes
 //! no JSON-RPC call at all. It is glue like the rest — every rule lives in
@@ -49,6 +53,7 @@ pub mod bakeoff;
 pub mod cancel;
 pub mod daemon_autospawn;
 pub mod legacy_run_task;
+pub mod paths;
 pub mod run_task;
 pub mod session;
 pub mod tcode_exe;

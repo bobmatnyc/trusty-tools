@@ -148,22 +148,56 @@ pub fn resolve_mode(task_param: Option<&str>, project_root: Option<&Path>) -> Ha
     HarnessMode::default()
 }
 
-/// Read `<project_root>/.claude/settings.json`'s `code_harness.mode` key.
+/// Read the project's `settings.json` `code_harness.mode` key.
 ///
-/// Why: the Claude-Code-compatible, project-scoped config location §5.9's
-/// example JSON uses.
-/// What: `None` when the file is missing, unreadable, not valid JSON, or
-/// the key is absent/unparseable — absence at any step is "this source
+/// Why: the project-scoped config location §5.9's example JSON uses. #5426
+/// moves it to Trusty Code's own `.trusty-code/settings.json` while keeping
+/// `.claude/settings.json` readable, so a project that has not imported yet
+/// still gets its configured mode.
+/// What: the file comes from [`crate::paths::settings_file`] — same precedence
+/// as agents, skills, and plugins. `None` when the file is missing, not valid
+/// JSON, or the key is absent/unparseable; absence at any step is "this source
 /// does not contribute", never an error (mirrors
-/// `project_context::load_project_context`'s same graceful-degrade
-/// convention for a project-scoped config file).
+/// `project_context::load_project_context`'s same graceful-degrade convention).
+/// A file that resolved but then fails to READ or PARSE is a different case — a
+/// config the operator wrote and expects to take effect — so it falls back to
+/// the next tier with a `warn` naming the path tried, rather than silently.
 /// Test: `mode::tests::settings_json_wins_over_default`,
 /// `mode::tests::missing_settings_json_is_not_an_error`,
-/// `mode::tests::malformed_settings_json_is_not_an_error`.
+/// `mode::tests::malformed_settings_json_is_not_an_error`,
+/// `mode::tests::trusty_code_settings_json_sets_the_mode_without_a_claude_dir`,
+/// `mode::tests::trusty_code_settings_json_outranks_claude`.
 fn read_settings_json_mode(project_root: &Path) -> Option<HarnessMode> {
-    let path = project_root.join(".claude").join("settings.json");
-    let raw = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    // #5426: resolved, not joined — `.trusty-code/settings.json` wins.
+    let resolved = crate::paths::settings_file(project_root);
+    if resolved.source == crate::paths::ConfigSource::Default {
+        return None;
+    }
+    let path = resolved.path;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "project settings.json resolved but could not be read; \
+                 falling back to the next harness-mode tier"
+            );
+            return None;
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "project settings.json is not valid JSON; \
+                 falling back to the next harness-mode tier"
+            );
+            return None;
+        }
+    };
     let mode_str = value.get("code_harness")?.get("mode")?.as_str()?;
     HarnessMode::parse_lenient(mode_str)
 }
@@ -346,5 +380,59 @@ mod tests {
     fn malformed_settings_json_is_not_an_error() {
         let project = project_with_settings(Some("not valid json"));
         assert_eq!(read_settings_json_mode(project.path()), None);
+    }
+
+    /// `.trusty-code/settings.json` sets the harness mode on a project with no
+    /// `.claude/` at all (#5426).
+    ///
+    /// Why: "a clean project can install and run without a `.claude/`
+    /// directory" is not true if the mode tier still requires one. On
+    /// `origin/main` this fails: `read_settings_json_mode` joined
+    /// `.claude/settings.json` directly, so a `.trusty-code`-only project fell
+    /// through to the default.
+    /// What: writes only `.trusty-code/settings.json` and asserts the mode.
+    /// Test: this function IS the test.
+    #[test]
+    fn trusty_code_settings_json_sets_the_mode_without_a_claude_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join(".trusty-code");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"code_harness": {"mode": "parity"}}"#,
+        )
+        .expect("write settings.json");
+        assert!(!tmp.path().join(".claude").exists());
+
+        assert_eq!(
+            read_settings_json_mode(tmp.path()),
+            Some(HarnessMode::Parity)
+        );
+    }
+
+    /// `.trusty-code/settings.json` outranks `.claude/settings.json`.
+    ///
+    /// Why: the compatibility root is an input of last resort; a project that
+    /// has stated its own configuration must not be overruled by the file it
+    /// migrated away from.
+    /// What: writes conflicting modes to both and asserts the native one wins.
+    /// Test: this function IS the test.
+    #[test]
+    fn trusty_code_settings_json_outranks_claude() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for (dirname, mode) in [(".trusty-code", "parity"), (".claude", "daily-driver")] {
+            let dir = tmp.path().join(dirname);
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            std::fs::write(
+                dir.join("settings.json"),
+                format!(r#"{{"code_harness": {{"mode": "{mode}"}}}}"#),
+            )
+            .expect("write settings.json");
+        }
+
+        assert_eq!(
+            read_settings_json_mode(tmp.path()),
+            Some(HarnessMode::Parity)
+        );
     }
 }

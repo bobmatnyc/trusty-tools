@@ -204,27 +204,21 @@ pub(crate) fn load_embedded_default_agents() -> Vec<AgentConfig> {
 
 /// Locate the agents directory for the given project root.
 ///
-/// Why: projects may use either `.claude/agents` (Claude Code native) or
-/// `.open-mpm/agents` (open-mpm legacy). Checking both preserves
-/// compatibility. Shared between `main.rs`'s `run-task` CLI path and (#2056)
-/// `serve::build_router`'s `task.run` wiring, so a project's agents resolve
-/// identically whether driven from the CLI or the daemon.
-/// What: returns the first of the two conventional directories that exists;
-/// falls back to `.claude/agents` (which may not exist yet — callers that
-/// need it to exist check separately, e.g. via [`md_loader::load_md_agent`]'s
-/// own error).
-/// Test: `agents::tests::locate_agents_dir_prefers_claude_then_open_mpm_then_default`.
+/// Why: this crate's agents live under Trusty Code's OWN `.trusty-code/agents`
+/// (#5426); `.claude/agents` and `.open-mpm/agents` remain readable so no
+/// existing project breaks. Shared between `main.rs`'s `run-task` CLI path and
+/// (#2056) `serve::build_router`'s `task.run` wiring, so a project's agents
+/// resolve identically whether driven from the CLI or the daemon.
+/// What: delegates to [`crate::paths::agents_dir`] — the single precedence rule
+/// (`.trusty-code` → `.claude` → `.open-mpm`) — and keeps only its path. Falls
+/// back to `.trusty-code/agents`, which may not exist yet; callers that need it
+/// to exist check separately, e.g. via [`md_loader::load_md_agent`]'s own error.
+/// Callers wanting to know WHICH root won call `paths::agents_dir` directly.
+/// Test: `agents::tests::locate_agents_dir_prefers_claude_then_open_mpm_then_default`,
+/// `paths::tests::agents_dir_prefers_trusty_code`.
 pub fn locate_agents_dir(project_root: &Path) -> std::path::PathBuf {
-    let claude_agents = project_root.join(".claude").join("agents");
-    if claude_agents.exists() {
-        return claude_agents;
-    }
-    let open_mpm_agents = project_root.join(".open-mpm").join("agents");
-    if open_mpm_agents.exists() {
-        return open_mpm_agents;
-    }
-    // Default to .claude/agents (may not exist yet).
-    claude_agents
+    // #5426: one resolver, not a second copy of the precedence chain.
+    crate::paths::agents_dir(project_root).path
 }
 
 /// Failure modes of [`resolve_agent`].
@@ -709,16 +703,22 @@ mod tests {
         assert_eq!(agents[0].agent.name, "custom");
     }
 
-    /// `locate_agents_dir` prefers `.claude/agents`, falls back to
-    /// `.open-mpm/agents`, and defaults to `.claude/agents` when neither
-    /// exists.
+    /// `locate_agents_dir` prefers `.trusty-code/agents`, then `.claude/agents`,
+    /// then `.open-mpm/agents`, and defaults to `.trusty-code/agents` when none
+    /// exists (#5426).
+    ///
+    /// Why: the default is the half that changed — a clean project must resolve
+    /// its agents to Trusty Code's OWN directory, not to Claude Code's, so a
+    /// project can install and run with no `.claude/` at all.
+    /// What: walks the three roots bottom-up, asserting the winner at each step.
+    /// Test: this function IS the test.
     #[test]
     fn locate_agents_dir_prefers_claude_then_open_mpm_then_default() {
         let tmp = tempfile::tempdir().expect("tempdir");
         assert_eq!(
             locate_agents_dir(tmp.path()),
-            tmp.path().join(".claude").join("agents"),
-            "default (neither exists) must be .claude/agents"
+            tmp.path().join(".trusty-code").join("agents"),
+            "default (none exists) must be .trusty-code/agents"
         );
 
         std::fs::create_dir_all(tmp.path().join(".open-mpm").join("agents")).expect("mkdir");
@@ -732,7 +732,14 @@ mod tests {
         assert_eq!(
             locate_agents_dir(tmp.path()),
             tmp.path().join(".claude").join("agents"),
-            "must prefer .claude/agents when both exist"
+            "must prefer .claude/agents over .open-mpm/agents"
+        );
+
+        std::fs::create_dir_all(tmp.path().join(".trusty-code").join("agents")).expect("mkdir");
+        assert_eq!(
+            locate_agents_dir(tmp.path()),
+            tmp.path().join(".trusty-code").join("agents"),
+            "must prefer .trusty-code/agents over every compatibility root"
         );
     }
 

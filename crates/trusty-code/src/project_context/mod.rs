@@ -56,25 +56,27 @@ pub fn load_project_context(project_root: &Path) -> Option<String> {
     Some(truncate_with_note(&raw, MAX_CONTEXT_BYTES))
 }
 
-/// Locate the project `CLAUDE.md`, preferring the root then the `.claude/` nest.
+/// Locate the project `CLAUDE.md`, preferring the root then a nested copy.
 ///
 /// Why: Claude Code reads a root `CLAUDE.md`; some projects nest it under
-/// `.claude/`. Checking both (root first) matches what a human session sees
-/// without forcing a particular layout.
-/// What: Returns the first existing path of `<root>/CLAUDE.md` or
-/// `<root>/.claude/CLAUDE.md`; `None` when neither exists.
+/// `.claude/`. Checking the root first matches what a human session sees
+/// without forcing a particular layout. #5426 adds the nested
+/// `.trusty-code/CLAUDE.md` ahead of `.claude/CLAUDE.md` so a project can hold
+/// its context entirely inside Trusty Code's own directory.
+/// What: `<root>/CLAUDE.md` if it exists; otherwise
+/// [`crate::paths::resolve_project_entry`] for `CLAUDE.md` as a file, which
+/// walks `.trusty-code/` → `.claude/` → `.open-mpm/`. `None` when none exists.
 /// Test: `loads_root_claude_md`, `loads_nested_claude_md`,
-/// `missing_file_returns_none`.
+/// `loads_trusty_code_claude_md`, `missing_file_returns_none`.
 fn locate_claude_md(project_root: &Path) -> Option<PathBuf> {
     let root = project_root.join(CLAUDE_MD);
     if root.is_file() {
         return Some(root);
     }
-    let nested = project_root.join(".claude").join(CLAUDE_MD);
-    if nested.is_file() {
-        return Some(nested);
-    }
-    None
+    // #5426: one resolver for every nested project-config lookup.
+    let nested =
+        crate::paths::resolve_project_entry(project_root, CLAUDE_MD, crate::paths::EntryKind::File);
+    (nested.source != crate::paths::ConfigSource::Default).then_some(nested.path)
 }
 
 /// Truncate `content` to at most `max_bytes`, appending a provenance note when
@@ -145,6 +147,36 @@ mod tests {
 
         let ctx = load_project_context(tmp.path()).expect("nested context loaded");
         assert_eq!(ctx, "NESTED RULES");
+    }
+
+    /// A nested `.trusty-code/CLAUDE.md` is loaded, and outranks `.claude/`.
+    ///
+    /// Why: #5426 — a project must be able to hold its context entirely inside
+    /// Trusty Code's own directory. On `origin/main` this fails: the loader
+    /// checked only `<root>/CLAUDE.md` and `<root>/.claude/CLAUDE.md`.
+    /// What: writes the `.trusty-code/` copy alone, then adds a `.claude/` one
+    /// and asserts the native copy still wins.
+    /// Test: this function IS the test.
+    #[test]
+    fn loads_trusty_code_claude_md() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let native = tmp.path().join(".trusty-code");
+        std::fs::create_dir_all(&native).expect("mkdir .trusty-code");
+        std::fs::write(native.join("CLAUDE.md"), "NATIVE RULES").expect("write native");
+
+        assert_eq!(
+            load_project_context(tmp.path()).expect("native context loaded"),
+            "NATIVE RULES"
+        );
+
+        let compat = tmp.path().join(".claude");
+        std::fs::create_dir_all(&compat).expect("mkdir .claude");
+        std::fs::write(compat.join("CLAUDE.md"), "COMPAT RULES").expect("write compat");
+
+        assert_eq!(
+            load_project_context(tmp.path()).expect("native context still wins"),
+            "NATIVE RULES"
+        );
     }
 
     /// The root file wins over a nested one when both exist.

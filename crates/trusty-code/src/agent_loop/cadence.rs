@@ -19,7 +19,7 @@
 //! for a single pathological oversized turn that would otherwise blow the
 //! budget between cadence fires.
 //! What: [`CadenceConfig`] (`cadence_turns` + `max_overhead_fraction_pct`,
-//! resolved from `.claude/settings.json`'s `code_harness.*` keys and two
+//! resolved from the project's `settings.json` `code_harness.*` keys and two
 //! escape-hatch env vars via [`resolve_cadence_config`], mirroring
 //! `crate::mode`'s precedence convention); [`maybe_cadence_compress`] (the
 //! turn-boundary entry point `agent_loop::AgentLoop` calls) which (1) ticks
@@ -125,8 +125,8 @@ impl CadenceConfig {
 }
 
 /// Resolve a project's [`CadenceConfig`] via the `code_harness.*`
-/// `.claude/settings.json` precedence chain `crate::mode::resolve_mode`
-/// establishes, adapted to this config's two knobs.
+/// `settings.json` precedence chain `crate::mode::resolve_mode` establishes,
+/// adapted to this config's two knobs.
 ///
 /// Why: An operator needs to tune cadence per-project (`settings.json`) or
 /// per-process (the escape-hatch env vars) without a code change, matching
@@ -134,7 +134,7 @@ impl CadenceConfig {
 /// there is no `task.run`-request tier — this ticket does not add a
 /// per-call cadence override to the wire protocol, so the chain is simply
 /// env var (highest) > `settings.json` > built-in default.
-/// What: Starts from `.claude/settings.json`'s `code_harness.cadence_turns`/
+/// What: Starts from the resolved `settings.json`'s `code_harness.cadence_turns`/
 /// `code_harness.max_overhead_fraction_pct` (via
 /// [`read_settings_json_cadence`], falling back to [`CadenceConfig::default`]
 /// when the file/keys are absent or malformed — never an error, matching
@@ -169,23 +169,56 @@ pub fn resolve_cadence_config(project_root: &Path) -> CadenceConfig {
     cfg
 }
 
-/// Read `<project_root>/.claude/settings.json`'s `code_harness.cadence_turns`
-/// / `code_harness.max_overhead_fraction_pct` keys.
+/// Read the project's `settings.json` `code_harness.cadence_turns` /
+/// `code_harness.max_overhead_fraction_pct` keys.
 ///
-/// Why: mirrors `crate::mode::read_settings_json_mode`'s graceful-degrade
-/// convention for the same project-scoped config file.
-/// What: `None` when the file is missing, unreadable, not valid JSON, or has
-/// no `code_harness` object at all; otherwise `Some(CadenceConfig)` starting
-/// from [`CadenceConfig::default`] with either field overridden by whichever
-/// of the two keys is present and a valid non-negative integer (a present
-/// but wrong-typed key is silently skipped for that field, not an error for
-/// the whole read).
+/// Why: this reader and `crate::mode::read_settings_json_mode` read the SAME
+/// physical file. #5426 moved that file to `.trusty-code/settings.json` and left
+/// this one joining `.claude/settings.json`, so a `.trusty-code`-only project
+/// kept its mode override and silently lost its cadence override (code-critic
+/// HIGH, PR #6980). Both now resolve through one function.
+/// What: the file comes from [`crate::paths::settings_file`] — `.trusty-code/`
+/// then `.claude/` then `.open-mpm/`. `None` when no file resolves or it has no
+/// `code_harness` object; otherwise `Some(CadenceConfig)` starting from
+/// [`CadenceConfig::default`] with either field overridden by whichever of the
+/// two keys is present and a valid non-negative integer (a present but
+/// wrong-typed key is skipped for that field, not an error for the whole read).
+/// A file that resolved but then fails to read or parse warns with the path
+/// tried before degrading, matching `mode`'s fail-open convention.
 /// Test: `cadence::tests::resolve_cadence_config_settings_json_override`,
-/// `cadence::tests::read_settings_json_cadence_missing_file_is_not_an_error`.
+/// `cadence::tests::read_settings_json_cadence_missing_file_is_not_an_error`,
+/// `cadence::tests::trusty_code_settings_json_sets_cadence_without_a_claude_dir`.
 fn read_settings_json_cadence(project_root: &Path) -> Option<CadenceConfig> {
-    let path = project_root.join(".claude").join("settings.json");
-    let raw = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    // #5426: resolved, not joined — the same resolver `crate::mode` uses.
+    let resolved = crate::paths::settings_file(project_root);
+    if resolved.source == crate::paths::ConfigSource::Default {
+        return None;
+    }
+    let path = resolved.path;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "project settings.json resolved but could not be read; \
+                 keeping the default cadence configuration"
+            );
+            return None;
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "project settings.json is not valid JSON; \
+                 keeping the default cadence configuration"
+            );
+            return None;
+        }
+    };
     let harness = value.get("code_harness")?;
 
     let mut cfg = CadenceConfig::default();
