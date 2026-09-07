@@ -812,7 +812,8 @@ pub(crate) async fn catalog(action: CatalogAction) -> anyhow::Result<()> {
             } else {
                 println!("agents ({}):", agents.len());
                 for a in &agents {
-                    println!("  {a}");
+                    // #4068: same identity color the roster and census use.
+                    println!("  {}", crate::formatters::agent_color::agent_label(a));
                 }
                 println!("skills ({}):", skills.len());
                 for s in &skills {

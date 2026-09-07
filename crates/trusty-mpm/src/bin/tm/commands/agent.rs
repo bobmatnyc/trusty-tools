@@ -23,6 +23,9 @@ use trusty_mpm::core::skill_tiers::{
 };
 
 use crate::cli::AgentAction;
+// #4068: agent NAME renders in its stable identity color; the skill-tier
+// labels beside it keep their existing uncolored rendering.
+use crate::formatters::agent_color::agent_label;
 
 /// `tm agent <list|show>` — dispatch to the requested view.
 pub(crate) async fn agent(action: AgentAction) -> anyhow::Result<()> {
@@ -127,14 +130,14 @@ fn list_agents(paths: &FrameworkPaths, json: bool) -> anyhow::Result<()> {
     for name in &names {
         let meta = read_agent_metadata(&agents_dir.join(format!("{name}.md")));
         if meta.skills.is_empty() {
-            println!("  {name}");
+            println!("  {}", agent_label(name));
         } else {
             let rendered: Vec<String> = meta
                 .skills
                 .iter()
                 .map(|s| format!("{s} ({})", tiers.tier_label(s)))
                 .collect();
-            println!("  {name}  skills: {}", rendered.join(", "));
+            println!("  {}  skills: {}", agent_label(name), rendered.join(", "));
         }
     }
     Ok(())
@@ -180,7 +183,13 @@ fn render_agent_show(
         return Ok(());
     }
 
-    println!("Name: {}", meta.name.as_deref().unwrap_or(name));
+    // #4068: the identity color keys off the SAME string that is printed, so
+    // an agent whose front-matter `name` differs from its file stem still
+    // renders under one consistent color everywhere that name appears.
+    println!(
+        "Name: {}",
+        agent_label(meta.name.as_deref().unwrap_or(name))
+    );
     if let Some(role) = &meta.role {
         println!("Role: {role}");
     }

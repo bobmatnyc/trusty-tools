@@ -2,9 +2,11 @@
 //!
 //! Why: keeping formatting helpers separate from handler logic makes each
 //! file focused and keeps the handler files below the 500-line cap.
-//! What: re-exports from `banner`, `services`, and `session` sub-modules.
+//! What: re-exports from `agent_color`, `banner`, `services`, and `session`
+//! sub-modules.
 //! Test: formatters are exercised by the unit tests in `tests.rs`.
 
+pub(crate) mod agent_color;
 pub(crate) mod banner;
 pub(crate) mod info_box;
 pub(crate) mod services;
