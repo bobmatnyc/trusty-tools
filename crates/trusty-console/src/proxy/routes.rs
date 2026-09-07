@@ -669,7 +669,9 @@ mod tests {
     /// What: asserts each loopback-lookalike host is rejected — an IP- or
     /// `localhost`-prefixed DNS name, a bracketed-IPv6 lookalike, and userinfo
     /// in both directions.
-    /// Test: this test itself. Every assertion here FAILS on `origin/main`.
+    /// Test: this test itself. 13 of the 14 assertions FAIL on `origin/main`;
+    /// the last one, `http://evil.com@127.0.0.1`, already passed there because
+    /// it matched none of the three prefixes. It stays as a no-loosening check.
     #[test]
     fn test_is_local_upstream_rejects_loopback_lookalike_hosts() {
         // IP-prefixed DNS names — the case named in the issue.
@@ -691,6 +693,8 @@ mod tests {
         assert!(!is_local_upstream("http://127.0.0.1@evil.com"));
         assert!(!is_local_upstream("http://[::1]@evil.com"));
         assert!(!is_local_upstream("http://localhost@evil.com"));
+        // Not a regression row — the prefix test rejected this one too. Kept so
+        // the parse-based guard cannot loosen it.
         assert!(!is_local_upstream("http://evil.com@127.0.0.1"));
     }
 
