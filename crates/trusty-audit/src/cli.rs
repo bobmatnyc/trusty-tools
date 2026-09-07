@@ -285,6 +285,26 @@ pub enum Verb {
         #[arg(long, value_name = "FILE")]
         review_bin: Option<PathBuf>,
     },
+    /// Check a package that came back against the key you retained (#5563).
+    ///
+    /// Exits 0 for a package whose signature verifies and whose every member
+    /// still hashes to what the signed manifest recorded, 3 for one that
+    /// carries no signature at all, and non-zero naming the specific failure
+    /// for anything else. Nothing is written: the package is read and left
+    /// exactly as it arrived.
+    ///
+    /// The key is REQUIRED and comes from a file you name. There is no default
+    /// and no fallback to `engagement.toml` — that file holds the private half,
+    /// it travelled to the recipient inside the package, and a key that arrives
+    /// with the thing it authenticates authenticates nothing.
+    Verify {
+        /// The package to check.
+        #[arg(value_name = "PACKAGE.ZIP")]
+        package: PathBuf,
+        /// A file holding the retained ed25519 public key, 64 hex characters.
+        #[arg(long, value_name = "FILE")]
+        public_key: PathBuf,
+    },
 }
 
 /// What `taudit add` was asked to register.
@@ -416,6 +436,15 @@ impl Cli {
                 out: out.clone(),
                 review: review_bin.clone(),
             }),
+            // #5563: both paths are operator input and neither has a default —
+            // the key especially, which must not be reachable from the package.
+            Some(Verb::Verify {
+                package,
+                public_key,
+            }) => Command::Verify {
+                package: package.clone(),
+                public_key: public_key.clone(),
+            },
         }
     }
 }
@@ -507,6 +536,15 @@ mod cli_tests {
             Command::Audit(_) => vec!["taudit", "audit"],
             Command::Distribute(_) => vec!["taudit", "distribute"],
             Command::Rerender(_) => vec!["taudit", "render"],
+            Command::Verify { .. } => {
+                vec![
+                    "taudit",
+                    "verify",
+                    "pkg.zip",
+                    "--public-key",
+                    "retained.pub",
+                ]
+            }
         }
     }
 
@@ -545,6 +583,10 @@ mod cli_tests {
             Command::Audit(ChainOptions::default()),
             Command::Distribute(DistributeOptions::default()),
             Command::Rerender(RerenderOptions::default()),
+            Command::Verify {
+                package: PathBuf::from("pkg.zip"),
+                public_key: PathBuf::from("retained.pub"),
+            },
         ]
     }
 

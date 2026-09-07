@@ -844,12 +844,27 @@ fn from_hex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// Packages for the tests that check what verification accepts and refuses.
+///
+/// Why (#5563): the `trusty-audit verify` CLI arm has to prove that each
+/// distinguishable refusal reaches the operator through
+/// [`crate::session::execute`], and those tests need exactly the archives this
+/// module's own tests need. A second builder of a signed zip would be free to
+/// drift from the one the check is written against, so there is one.
+/// What: [`fixture::package`] writes a well-formed package; each `with_*`
+/// function applies exactly one of the alterations verification must catch.
+/// Test-only, and `pub(crate)` for the seam tests alone.
+/// Test: `super::signing_tests`, `crate::session::verify::verify_tests`.
 #[cfg(test)]
-mod signing_tests {
+pub(crate) mod fixture {
     use super::*;
 
     /// A package with the members `entries` names, signed when `key` is set.
-    fn package(dir: &Path, entries: &[(&str, &str)], key: Option<&EngagementKey>) -> PathBuf {
+    pub(crate) fn package(
+        dir: &Path,
+        entries: &[(&str, &str)],
+        key: Option<&EngagementKey>,
+    ) -> PathBuf {
         let path = dir.join("package.zip");
         let file = std::fs::File::create(&path).expect("create");
         let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
@@ -878,7 +893,7 @@ mod signing_tests {
     }
 
     /// Rebuild `source`'s archive with `edit` applied to its member list.
-    fn rewrite(source: &Path, edit: impl Fn(&str, &[u8]) -> Option<Vec<u8>>) -> PathBuf {
+    pub(crate) fn rewrite(source: &Path, edit: impl Fn(&str, &[u8]) -> Option<Vec<u8>>) -> PathBuf {
         let destination = source.with_file_name("rewritten.zip");
         let mut archive = open(source).expect("open");
         let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
@@ -898,13 +913,73 @@ mod signing_tests {
         destination
     }
 
-    fn retained(key: &EngagementKey) -> RetainedKey {
-        RetainedKey::from_hex(&key.public_hex()).expect("public half parses")
+    /// `source` with one more member the signed manifest never listed.
+    pub(crate) fn with_extra_member(source: &Path, entry: &str, body: &[u8]) -> PathBuf {
+        let destination = source.with_file_name("with-extra.zip");
+        let mut archive = open(source).expect("open");
+        let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
+        let file = std::fs::File::create(&destination).expect("create");
+        let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        for name in names {
+            let bytes = read_member(&mut archive, source, &name)
+                .expect("read")
+                .expect("present");
+            zip.start_file(name, options).expect("start");
+            std::io::Write::write_all(&mut zip, &bytes).expect("write");
+        }
+        zip.start_file(entry.to_owned(), options).expect("start");
+        std::io::Write::write_all(&mut zip, body).expect("write");
+        zip.finish().expect("finish");
+        destination
+    }
+
+    /// `source` with a SECOND central-directory record under `name`, pointing
+    /// at `planted` bytes the parser will never show a caller.
+    pub(crate) fn with_duplicate_record(source: &Path, name: &str, planted: &[u8]) -> PathBuf {
+        let raw = std::fs::read(source).expect("read the package");
+        let eocd = eocd_at(&raw);
+        let entries = u16::from_le_bytes(raw[eocd + 10..eocd + 12].try_into().expect("two bytes"));
+        let directory_size = read_u32(&raw, eocd + 12) as usize;
+        let directory_at = read_u32(&raw, eocd + 16) as usize;
+
+        let mut forged = raw[..directory_at].to_vec();
+        let planted_at = forged.len() as u32;
+        forged.extend_from_slice(&local_header(name, planted));
+        let directory_moved_to = forged.len() as u32;
+        forged.extend_from_slice(&raw[directory_at..directory_at + directory_size]);
+        let duplicate = central_header(name, planted, planted_at);
+        let duplicate_len = duplicate.len();
+        forged.extend_from_slice(&duplicate);
+        // The EOCD, reframed: one more entry, a longer directory, a new offset.
+        let mut eocd_record = raw[eocd..].to_vec();
+        eocd_record[8..10].copy_from_slice(&le16(entries + 1));
+        eocd_record[10..12].copy_from_slice(&le16(entries + 1));
+        eocd_record[12..16].copy_from_slice(&le32((directory_size + duplicate_len) as u32));
+        eocd_record[16..20].copy_from_slice(&le32(directory_moved_to));
+        forged.extend_from_slice(&eocd_record);
+
+        let destination = source.with_file_name("forged.zip");
+        std::fs::write(&destination, &forged).expect("write the forged package");
+        destination
+    }
+
+    /// `source` with a whole fake EOCD planted in its archive comment, which
+    /// `zip` 2.4.2's backward scan takes and the raw walk does not.
+    pub(crate) fn with_decoy_directory(source: &Path) -> PathBuf {
+        let mut decoy = Vec::new();
+        decoy.extend_from_slice(&le32(0x0605_4b50));
+        decoy.extend_from_slice(&[0_u8; 18]);
+        decoy.extend_from_slice(b"trailing");
+        let raw = std::fs::read(source).expect("read");
+        let destination = source.with_file_name("decoy.zip");
+        std::fs::write(&destination, with_comment(&raw, &decoy)).expect("write");
+        destination
     }
 
     /// CRC-32 (IEEE), bitwise. Ten lines of test code rather than a dependency
     /// pulled in so one hand-built local header can be genuinely extractable.
-    fn crc32(bytes: &[u8]) -> u32 {
+    pub(crate) fn crc32(bytes: &[u8]) -> u32 {
         let mut crc = 0xFFFF_FFFF_u32;
         for byte in bytes {
             crc ^= u32::from(*byte);
@@ -919,20 +994,20 @@ mod signing_tests {
         !crc
     }
 
-    fn le16(v: u16) -> [u8; 2] {
+    pub(crate) fn le16(v: u16) -> [u8; 2] {
         v.to_le_bytes()
     }
 
-    fn le32(v: u32) -> [u8; 4] {
+    pub(crate) fn le32(v: u32) -> [u8; 4] {
         v.to_le_bytes()
     }
 
-    fn read_u32(bytes: &[u8], at: usize) -> u32 {
+    pub(crate) fn read_u32(bytes: &[u8], at: usize) -> u32 {
         u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
     }
 
     /// The offset of the archive's end-of-central-directory record.
-    fn eocd_at(raw: &[u8]) -> usize {
+    pub(crate) fn eocd_at(raw: &[u8]) -> usize {
         (0..=raw.len() - 22)
             .rev()
             .find(|at| read_u32(raw, *at) == 0x0605_4b50)
@@ -940,7 +1015,7 @@ mod signing_tests {
     }
 
     /// A STORED local file header plus its data, for a hand-built second copy.
-    fn local_header(name: &str, body: &[u8]) -> Vec<u8> {
+    pub(crate) fn local_header(name: &str, body: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&le32(0x0403_4b50));
         out.extend_from_slice(&le16(20)); // version needed
@@ -959,7 +1034,7 @@ mod signing_tests {
     }
 
     /// A central-directory file header naming `name` at `header_start`.
-    fn central_header(name: &str, body: &[u8], header_start: u32) -> Vec<u8> {
+    pub(crate) fn central_header(name: &str, body: &[u8], header_start: u32) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&le32(0x0201_4b50));
         out.extend_from_slice(&le16(20)); // version made by
@@ -980,6 +1055,35 @@ mod signing_tests {
         out.extend_from_slice(&le32(header_start));
         out.extend_from_slice(name.as_bytes());
         out
+    }
+
+    /// `raw` with `comment` appended and the EOCD's comment length updated.
+    pub(crate) fn with_comment(raw: &[u8], comment: &[u8]) -> Vec<u8> {
+        let eocd = eocd_at(raw);
+        let mut out = raw[..eocd].to_vec();
+        let mut record = raw[eocd..].to_vec();
+        record[20..22].copy_from_slice(&le16(comment.len() as u16));
+        out.extend_from_slice(&record);
+        out.extend_from_slice(comment);
+        out
+    }
+
+    pub(crate) fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).expect("write");
+        path
+    }
+}
+
+#[cfg(test)]
+mod signing_tests {
+    use super::*;
+    // #5563: one builder of a signed package, shared with the session seam's
+    // tests, rather than a second one free to drift from this one.
+    use super::fixture::*;
+
+    fn retained(key: &EngagementKey) -> RetainedKey {
+        RetainedKey::from_hex(&key.public_hex()).expect("public half parses")
     }
 
     #[test]
@@ -1091,23 +1195,7 @@ mod signing_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let key = EngagementKey::generate();
         let path = package(dir.path(), &[("README.md", "read me")], Some(&key));
-        let destination = dir.path().join("with-extra.zip");
-        let mut archive = open(&path).expect("open");
-        let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
-        let file = std::fs::File::create(&destination).expect("create");
-        let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
-        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
-        for name in names {
-            let bytes = read_member(&mut archive, &path, &name)
-                .expect("read")
-                .expect("present");
-            zip.start_file(name, options).expect("start");
-            std::io::Write::write_all(&mut zip, &bytes).expect("write");
-        }
-        zip.start_file("reports/planted.md".to_owned(), options)
-            .expect("start");
-        std::io::Write::write_all(&mut zip, b"planted").expect("write");
-        zip.finish().expect("finish");
+        let destination = with_extra_member(&path, "reports/planted.md", b"planted");
         match verify(&destination, &retained(&key)) {
             Err(SigningError::MemberUnexpected { entry, .. }) => {
                 assert_eq!(entry, "reports/planted.md");
@@ -1226,32 +1314,7 @@ mod signing_tests {
             ],
             Some(&key),
         );
-        let raw = std::fs::read(&path).expect("read the package");
-
-        let eocd = eocd_at(&raw);
-        let entries = u16::from_le_bytes(raw[eocd + 10..eocd + 12].try_into().expect("two bytes"));
-        let directory_size = read_u32(&raw, eocd + 12) as usize;
-        let directory_at = read_u32(&raw, eocd + 16) as usize;
-
-        let planted = b"read MF";
-        let mut forged = raw[..directory_at].to_vec();
-        let planted_at = forged.len() as u32;
-        forged.extend_from_slice(&local_header("README.md", planted));
-        let directory_moved_to = forged.len() as u32;
-        forged.extend_from_slice(&raw[directory_at..directory_at + directory_size]);
-        let duplicate = central_header("README.md", planted, planted_at);
-        let duplicate_len = duplicate.len();
-        forged.extend_from_slice(&duplicate);
-        // The EOCD, reframed: one more entry, a longer directory, a new offset.
-        let mut eocd_record = raw[eocd..].to_vec();
-        eocd_record[8..10].copy_from_slice(&le16(entries + 1));
-        eocd_record[10..12].copy_from_slice(&le16(entries + 1));
-        eocd_record[12..16].copy_from_slice(&le32((directory_size + duplicate_len) as u32));
-        eocd_record[16..20].copy_from_slice(&le32(directory_moved_to));
-        forged.extend_from_slice(&eocd_record);
-
-        let forged_path = dir.path().join("forged.zip");
-        std::fs::write(&forged_path, &forged).expect("write the forged package");
+        let forged_path = with_duplicate_record(&path, "README.md", b"read MF");
 
         // The exploit is real: the parser hides the second record entirely, so
         // nothing downstream of it could have caught this.
@@ -1410,12 +1473,6 @@ mod signing_tests {
         out
     }
 
-    fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
-        let path = dir.join(name);
-        std::fs::write(&path, bytes).expect("write");
-        path
-    }
-
     /// The EOCD sits behind the archive comment, so the scan has to reach past
     /// one. An ordinary comment must leave the verdict alone.
     #[test]
@@ -1463,15 +1520,7 @@ mod signing_tests {
         let key = EngagementKey::generate();
         let path = package(dir.path(), &[("README.md", "read me")], Some(&key));
         // A whole fake EOCD inside the comment, with bytes after it.
-        let mut decoy = Vec::new();
-        decoy.extend_from_slice(&le32(0x0605_4b50));
-        decoy.extend_from_slice(&[0_u8; 18]);
-        decoy.extend_from_slice(b"trailing");
-        let doctored = write(
-            dir.path(),
-            "decoy.zip",
-            &with_comment(&std::fs::read(&path).expect("read"), &decoy),
-        );
+        let doctored = with_decoy_directory(&path);
 
         assert_eq!(
             super::super::zip_directory::member_names(&doctored)
@@ -1566,17 +1615,6 @@ mod signing_tests {
             }
             other => panic!("expected a content disagreement, got {other:?}"),
         }
-    }
-
-    /// `raw` with `comment` appended and the EOCD's comment length updated.
-    fn with_comment(raw: &[u8], comment: &[u8]) -> Vec<u8> {
-        let eocd = eocd_at(raw);
-        let mut out = raw[..eocd].to_vec();
-        let mut record = raw[eocd..].to_vec();
-        record[20..22].copy_from_slice(&le16(comment.len() as u16));
-        out.extend_from_slice(&record);
-        out.extend_from_slice(comment);
-        out
     }
 
     /// A directory that stops in the middle of a record is refused rather than
