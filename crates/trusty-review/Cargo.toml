@@ -98,7 +98,15 @@ name        = "trusty-review"
 # neither of which is `#[non_exhaustive]` — an out-of-tree struct literal for
 # either stops compiling. `cargo-semver-checks` reports this as
 # `struct_missing_field`-class breakage against the 0.33.1 baseline.
-version     = "0.35.0"
+# 0.35.0 -> 0.35.1 (#6913): PATCH. 0.35.0 is already live on crates.io and this
+# PR edits `src/**`, so the `PR version bump vs crates.io` gate (#4421) requires
+# a bump. PATCH is the right position: the addition is a `version` subcommand on
+# the BINARY (`src/main.rs`, `src/commands/`), and nothing in the `lib` target
+# changes shape — `cargo-semver-checks` compares the library and has nothing to
+# report. A MINOR bump would also have to widen the root
+# `[workspace.dependencies]` row (`trusty-review = { …, version = "0.35" }`),
+# which this change gives no reason to touch.
+version     = "0.35.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

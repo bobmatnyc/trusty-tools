@@ -28,3 +28,7 @@ pub(crate) mod diff_source;
 #[cfg(feature = "mcp")]
 pub mod mcp_stdio;
 pub mod run;
+// #6913: `version` answers the DOC-1 capability envelope tctl's self-check
+// spawns. It needs no config, no runtime and no network, so `main` dispatches
+// it before either is built.
+pub mod version;
