@@ -535,3 +535,157 @@ async fn list_excludes_symlinked_plugin_agent_leak_file() {
         "the secret content must never appear anywhere in the response"
     );
 }
+
+/// `agents.describe` is reachable through the router like its three siblings
+/// (#2074).
+#[tokio::test]
+async fn register_wires_describe() {
+    use trusty_mcp::Request;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut router = Router::new();
+    register(&mut router, state(tmp.path(), true));
+
+    let req = Request {
+        jsonrpc: Some("2.0".to_string()),
+        id: Some(Value::from(1)),
+        method: "agents.describe".to_string(),
+        params: Some(json!({ "name": "engineer" })),
+    };
+    let resp = router.dispatch(req, &ctx()).await;
+    let result = resp.result.expect("agents.describe must be wired");
+    assert_eq!(result["name"], "engineer");
+    assert_eq!(result["tier"], "embedded");
+}
+
+/// A `name` that resolves nowhere is a typed `-32002 not_found`, not a panic
+/// and not an internal error (#2074).
+#[tokio::test]
+async fn describe_unknown_name_is_not_found() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let s = state(tmp.path(), true);
+
+    let err = agents_describe(&s, json!({ "name": "no-such-agent" }), ctx())
+        .await
+        .expect_err("an unknown agent must be an error");
+
+    assert_eq!(err.code, RpcError::not_found("x").code);
+}
+
+/// `agents.describe` applies the same name guard `create`/`delete` do, so a
+/// traversing name never reaches a path join (#2074).
+#[tokio::test]
+async fn describe_rejects_invalid_name() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let s = state(tmp.path(), true);
+
+    for bad in ["../../etc/passwd", "Engineer", ""] {
+        assert!(
+            agents_describe(&s, json!({ "name": bad }), ctx())
+                .await
+                .is_err(),
+            "'{bad}' must be rejected"
+        );
+    }
+}
+
+/// One unparseable disk file does not stop `agents.list` reporting the rest of
+/// the catalog, and the broken row is flagged (#2074).
+///
+/// Why: the operator repair path is "list, spot the bad one, delete it" — a
+/// listing that failed wholesale because of one file would remove the only
+/// affordance for finding which file it was.
+#[tokio::test]
+async fn list_still_lists_other_agents_when_one_disk_file_is_unparseable() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("engineer.md"),
+        "---\nname: engineer\nextends: nonexistent-parent\n---\n\nBody.\n",
+    )
+    .expect("write");
+
+    let s = state(tmp.path(), true);
+    let result = agents_list(&s, Value::Null, ctx()).await.expect("list");
+    let agents = result["agents"].as_array().expect("array");
+
+    assert_eq!(
+        agents.len(),
+        crate::assets::DEFAULT_AGENTS.len(),
+        "the broken file overrides one name; every other agent still lists"
+    );
+    let broken: Vec<_> = agents.iter().filter(|a| a["tier"] == "broken").collect();
+    assert_eq!(broken.len(), 1);
+    assert_eq!(broken[0]["has_warnings"], true);
+    assert!(
+        agents
+            .iter()
+            .filter(|a| a["name"] != "engineer")
+            .all(|a| a["has_warnings"] == false),
+        "one bad file must not taint its neighbours: {agents:?}"
+    );
+}
+
+/// `has_warnings` tracks the same divergence `agents.describe` reports (#2074).
+#[tokio::test]
+async fn list_flags_a_hand_edited_row_and_leaves_pristine_rows_clean() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    crate::agents::deploy::ensure_roster_deployed(project.path()).expect("deploy");
+    let target = crate::agents::deploy::roster_target(project.path());
+    std::fs::write(
+        target.join("engineer.md"),
+        "---\nname: engineer\n---\n\nEdited.\n",
+    )
+    .expect("hand-edit");
+
+    let s = state(&target, true);
+    let result = agents_list(&s, Value::Null, ctx()).await.expect("list");
+    let agents = result["agents"].as_array().expect("array");
+
+    let flagged: Vec<_> = agents
+        .iter()
+        .filter(|a| a["has_warnings"] == true)
+        .map(|a| a["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(
+        flagged,
+        vec!["engineer"],
+        "only the edited row carries a warning: {agents:?}"
+    );
+}
+
+/// The pre-#2074 `agents.list` wire shape still deserializes (#2074).
+///
+/// Why: `has_warnings` was added to every row. A client compiled against the
+/// four-field shape must keep working, so this deserializes each entry into a
+/// struct that knows nothing about the new key.
+#[tokio::test]
+async fn list_entries_still_parse_into_the_pre_2074_wire_shape() {
+    /// Exactly the fields `agents.list` returned before #2074.
+    #[derive(Deserialize)]
+    struct PreSliceEntry {
+        name: String,
+        tier: String,
+        description: Option<String>,
+        model: Option<String>,
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("my-custom.md"),
+        "---\nname: my-custom\ndescription: Custom\nmodel: sonnet\n---\n\nBody.\n",
+    )
+    .expect("write");
+
+    let s = state(tmp.path(), true);
+    let result = agents_list(&s, Value::Null, ctx()).await.expect("list");
+
+    let entries: Vec<PreSliceEntry> =
+        serde_json::from_value(result["agents"].clone()).expect("the old shape must still parse");
+    let custom = entries
+        .iter()
+        .find(|e| e.name == "my-custom")
+        .expect("the disk agent must be present");
+    assert_eq!(custom.tier, "project");
+    assert_eq!(custom.description.as_deref(), Some("Custom"));
+    assert_eq!(custom.model.as_deref(), Some("sonnet"));
+}

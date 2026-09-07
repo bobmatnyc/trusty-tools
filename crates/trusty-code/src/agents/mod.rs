@@ -35,6 +35,9 @@ pub mod config;
 // with a manifest and recorded provenance, reusing trusty-agents-common's
 // deployer unchanged.
 pub mod deploy;
+// #2074: read that provenance back out — the `agents.describe` inspection
+// surface pairing one resolved agent with the ledger beside its file.
+pub mod describe;
 pub mod md_loader;
 pub mod protocol;
 

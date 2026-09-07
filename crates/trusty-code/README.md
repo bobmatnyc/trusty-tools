@@ -209,6 +209,76 @@ stored under an unrelated key (`"endpoint": "https://user:pw@host"`) is not
 detected, and this check is not a substitute for a secret scanner on the
 repository itself.
 
+## Agent inspection — `agents.describe`
+
+`agents.list` answers "what could I dispatch": one row per agent with its name,
+tier, description, model, and a `has_warnings` flag. `agents.describe` answers
+the question after it — which definition actually runs under a name, and whether
+anything about it needs attention.
+
+```json
+{"method": "agents.describe", "params": {"name": "engineer"}}
+```
+
+```json
+{
+  "name": "engineer",
+  "tier": "project",
+  "path": "/w/.trusty-code/agents/engineer.md",
+  "role": "engineer",
+  "description": "General-purpose software engineer.",
+  "model": "sonnet",
+  "tools": {"allowed": null},
+  "skills": ["toolchains-rust-core"],
+  "instructions": {"length_bytes": 18422},
+  "provenance": {
+    "manifest": "present",
+    "origin": "bundled",
+    "framework_owned": true,
+    "checksum": "match",
+    "deployed_at": "2026-09-07T11:04:19Z",
+    "source_chain": ["base-agent", "base-engineer", "engineer"]
+  },
+  "warnings": []
+}
+```
+
+- **`tier`** — `embedded`, `project`, `user`, `plugin`, or `broken`. The name is
+  resolved through the same disk-wins/embedded-fallback chain dispatch uses, so
+  inspection and dispatch can never disagree about which definition wins.
+- **`tools.allowed`** — the agent's tool allowlist. `null` means every
+  registered tool is permitted, matching how the runtime reads it.
+- **`instructions`** — the resolved prompt's length in bytes. Pass
+  `"include_instructions": true` to get the text itself in
+  `instructions.text`; a composed roster prompt runs to tens of kilobytes, so it
+  is opt-in.
+- **`provenance`** — read back from the deployed-agent manifest beside the file.
+  `manifest` is `present`, `absent`, `corrupt`, or `not-applicable` (the agent
+  has no file on disk). `origin` and `framework_owned` say whether Trusty Code
+  wrote the file; `checksum` says whether it still matches what was written.
+- **`warnings`** — everything an operator would otherwise have to diff for: a
+  disk copy that diverges from the bundled roster, a file the manifest does not
+  track, a missing ledger in `.trusty-code/agents/`, an unreadable one, or a
+  parse failure. `agents.list`'s `has_warnings` is `true` for exactly the rows
+  that would return a non-empty list here.
+
+**A broken file is described, not raised.** An agent whose `.md` exists but
+fails to parse or compose comes back with `tier: "broken"` and the parse error
+in `warnings`, because the reason a name fell back to the embedded roster is
+what the operator is looking for. A name that resolves nowhere is a `not_found`
+error listing the agents that do exist.
+
+**Capability grants are not reported, because they do not exist yet.** An
+agent's declared authority in Trusty Code today is the flat `tools.allowed`
+allowlist and nothing else. The write, shell, network, credential, and
+delegation grants #2074 calls for are a later slice; until they are enforced,
+this payload carries no `grants` key rather than a field that would imply the
+runtime checks something it does not.
+
+There is no `tcode agents` CLI family — this surface is JSON-RPC only. Use
+`tcode paths show` for the directory-level view of which root won and what the
+ledger tracks.
+
 ## Build
 
 ```bash

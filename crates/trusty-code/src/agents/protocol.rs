@@ -39,6 +39,12 @@
 //!     permission_denied` (403); an already-existing disk file of the same
 //!     name with a `-32009 already_exists` conflict (409, use
 //!     delete-then-create to replace).
+//!   - `agents.describe{name, include_instructions?}` -> the effective
+//!     configuration, source provenance, and warnings for ONE agent (#2074).
+//!     Every field and every rule lives in [`super::describe`]; this module
+//!     only parses the params and forwards. `agents.list` gained nothing but a
+//!     per-row `has_warnings` flag computed from that same module, so a client
+//!     can badge the rows worth opening without describing all of them.
 //!   - `agents.delete{name}` -> removes `<dir>/<name>.md`. `-32002 not_found`
 //!     (404) if no disk file exists under that name; `-32001
 //!     permission_denied` (403) if `name` names an EMBEDDED agent (nothing
@@ -53,7 +59,7 @@ use serde_json::{Value, json};
 
 use crate::jsonrpc::{ConnectionContext, Router, RpcError};
 
-use super::{AgentConfig, discover_agents, load_embedded_default_agents, md_loader};
+use super::{AgentConfig, describe, discover_agents, load_embedded_default_agents, md_loader};
 
 /// Maximum length for a caller-supplied agent `name` in [`agents_create`].
 ///
@@ -95,14 +101,16 @@ impl AgentsCatalogState {
     }
 }
 
-/// Register `agents.list`, `agents.create`, `agents.delete` onto `router`.
+/// Register `agents.list`, `agents.describe`, `agents.create`, `agents.delete`
+/// onto `router`.
 ///
 /// Why: the one place listing this namespace's full surface, mirroring
 /// every other `*::protocol::register` in this crate.
 /// What: clones `state` once per method (cheap — `PathBuf` + `&'static
 /// str`) into a small adapter closure that forwards to the corresponding
 /// free function below.
-/// Test: `tests::register_wires_all_three_methods`.
+/// Test: `tests::register_wires_all_three_methods`,
+/// `tests::register_wires_describe`.
 pub fn register(router: &mut Router, state: AgentsCatalogState) {
     let s = state.clone();
     router.register(
@@ -110,6 +118,16 @@ pub fn register(router: &mut Router, state: AgentsCatalogState) {
         move |params: Value, ctx: ConnectionContext| {
             let s = s.clone();
             async move { agents_list(&s, params, ctx).await }
+        },
+    );
+
+    // #2074: the per-agent inspection surface beside the catalog listing.
+    let s = state.clone();
+    router.register(
+        "agents.describe",
+        move |params: Value, ctx: ConnectionContext| {
+            let s = s.clone();
+            async move { agents_describe(&s, params, ctx).await }
         },
     );
 
@@ -164,12 +182,22 @@ pub(crate) fn is_base_agent(name: &str) -> bool {
 
 /// Wire shape for one catalog entry — shared by `agents.list`'s embedded and
 /// disk halves so the two are indistinguishable to a client beyond `tier`.
-fn entry_json(cfg: &AgentConfig, tier: &str) -> Value {
+///
+/// `has_warnings` (#2074) is ADDITIVE: the four original keys keep their names,
+/// types, and meanings, so a client written against the pre-#2074 shape
+/// deserializes an entry unchanged. It answers only "would `agents.describe`
+/// have something to say about this row" — the reasons themselves live there,
+/// and both are computed by [`super::describe`] so the flag and the list can
+/// never disagree.
+/// Test: `tests::list_entries_still_parse_into_the_pre_2074_wire_shape`,
+/// `tests::list_flags_a_hand_edited_row_and_leaves_pristine_rows_clean`.
+fn entry_json(cfg: &AgentConfig, tier: &str, has_warnings: bool) -> Value {
     json!({
         "name": cfg.agent.name,
         "tier": tier,
         "description": cfg.agent.description,
         "model": cfg.agent.model,
+        "has_warnings": has_warnings,
     })
 }
 
@@ -225,15 +253,25 @@ async fn agents_list(
     let mut by_name: Vec<(String, Value)> = load_embedded_default_agents()
         .iter()
         .filter(|cfg| !is_base_agent(&cfg.agent.name))
-        .map(|cfg| (cfg.agent.name.clone(), entry_json(cfg, "embedded")))
+        // An embedded agent has no file and no ledger entry, so there is
+        // nothing about it that could be stale or diverged.
+        .map(|cfg| (cfg.agent.name.clone(), entry_json(cfg, "embedded", false)))
         .collect();
+
+    // #2074: read the deployed-agent ledger ONCE for the whole listing rather
+    // than once per row.
+    let ledger = describe::load_ledger(&state.dir);
 
     for (name, path) in discover_agents(&state.dir) {
         if is_base_agent(&name) {
             continue;
         }
         let entry = match md_loader::load_md_agent(&path) {
-            Ok(cfg) => entry_json(&cfg, state.tier),
+            Ok(cfg) => entry_json(
+                &cfg,
+                state.tier,
+                describe::disk_entry_has_warnings(&state.dir, &ledger, &name),
+            ),
             Err(e) => {
                 tracing::warn!("agents.list: disk agent '{name}' is unparseable: {e}");
                 json!({
@@ -241,6 +279,7 @@ async fn agents_list(
                     "tier": "broken",
                     "description": format!("unparseable agent file — dispatch of this name will fail until it is fixed or deleted: {e}"),
                     "model": Value::Null,
+                    "has_warnings": true,
                 })
             }
         };
@@ -260,7 +299,9 @@ async fn agents_list(
             // defense-in-depth so "additive only" holds even if two plugins
             // resolved to the same namespaced name (first one found wins).
             if !by_name.iter().any(|(n, _)| *n == name) {
-                by_name.push((name, entry_json(&cfg, "plugin")));
+                // A plugin agent lives outside `state.dir` and is never tracked
+                // by the deployed-agent ledger, so provenance cannot flag it.
+                by_name.push((name, entry_json(&cfg, "plugin", false)));
             }
         }
     }
@@ -268,6 +309,52 @@ async fn agents_list(
     by_name.sort_by(|a, b| a.0.cmp(&b.0));
     let agents: Vec<Value> = by_name.into_iter().map(|(_, v)| v).collect();
     Ok(json!({ "agents": agents }))
+}
+
+/// `params` shape for `agents.describe` (#2074).
+#[derive(Deserialize)]
+struct DescribeParams {
+    /// The agent to describe, bare or `<plugin>:<local-name>`.
+    name: String,
+    /// Return the resolved instruction TEXT, not only its length. Defaults to
+    /// `false`: a composed roster prompt runs to tens of kilobytes, and a
+    /// catalog client asking "is this agent healthy" does not want it.
+    #[serde(default)]
+    include_instructions: bool,
+}
+
+/// `agents.describe` -> one agent's effective config, provenance, and warnings.
+///
+/// Why: the operator-facing half of #2074 — slice 1 recorded which files
+/// Trusty Code wrote and what they hashed to; this reads that back beside the
+/// resolved configuration, so "which definition is actually running, and has
+/// anyone changed it" is one call rather than a manual diff.
+/// What: validates `name` (each half, for a namespaced plugin name) through the
+/// same [`validate_agent_name`] guard `create`/`delete` use, then forwards to
+/// [`super::describe::describe_agent`], which owns every field and rule. Errors:
+/// malformed params (`-32602`), an invalid name (`-32003`), or a name that
+/// resolves nowhere (`-32002 not_found`). A name whose disk file exists but
+/// fails to parse is NOT an error — see that function's docs.
+/// Test: `tests::register_wires_describe`,
+/// `tests::describe_unknown_name_is_not_found`,
+/// `tests::describe_rejects_invalid_name`.
+async fn agents_describe(
+    state: &AgentsCatalogState,
+    params: Value,
+    _ctx: ConnectionContext,
+) -> Result<Value, RpcError> {
+    let p: DescribeParams = serde_json::from_value(params)
+        .map_err(|e| RpcError::invalid_params(format!("agents.describe: {e}")))?;
+
+    match p.name.split_once(':') {
+        Some((plugin, agent)) => {
+            validate_agent_name(plugin)?;
+            validate_agent_name(agent)?;
+        }
+        None => validate_agent_name(&p.name)?,
+    }
+
+    describe::describe_agent(&state.dir, state.tier, &p.name, p.include_instructions)
 }
 
 /// `params` shape for `agents.create`.

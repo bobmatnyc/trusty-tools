@@ -219,14 +219,13 @@ pub(crate) fn extract_body(composed: &str) -> String {
 ///   wrapping in `Some(ToolsConfig { allowed })` is safe and matches the
 ///   instructed direct-map).
 /// - composed prose body -> `system_prompt.content`.
-/// - `skills:` -> intentionally DROPPED. `SystemPrompt::append_skills` exists
-///   in tcode's schema but has no consumer anywhere in the codebase (verified:
-///   `grep -rn append_skills crates/trusty-code/src` only shows the field
-///   declaration and TOML asset literals that set it — nothing reads it). The
-///   shared frontmatter's `skills:` list is real and populated
-///   (DOC-42/#2889), but mapping it into a dead field would fabricate a
-///   consumer that doesn't exist. Left as a gap for a future slice that adds
-///   an actual skills consumer to tcode.
+/// - `skills:` -> `system_prompt.append_skills` (direct map, #2074). This was
+///   deliberately DROPPED until `crate::agents::describe` gave it a consumer:
+///   an agent's declared skills are part of the effective configuration
+///   `agents.describe` reports. Nothing INJECTS them into the prompt yet, so
+///   the field is a reporting surface rather than a runtime one — a
+///   distinction the describe payload's own docs state, so no caller can read
+///   a reported skill as an enforced one.
 ///
 /// `pub(crate)`: also reused by `plugins::agents::load_plugin_agent` (#3539),
 /// which calls this with the plugin's LOCAL agent name (not yet namespaced)
@@ -252,10 +251,10 @@ pub(crate) fn project_to_agent_config(
         },
         system_prompt: SystemPrompt {
             content: body,
-            // Gap: no tcode consumer for agent-declared skills yet — see the
-            // doc comment above. Left empty rather than mapping into a dead
-            // field.
-            append_skills: Vec::new(),
+            // #2074: `agents.describe` reports an agent's declared skills, so
+            // this is no longer a dead field. Nothing INJECTS them into the
+            // prompt yet — see the doc comment above.
+            append_skills: meta.skills,
         },
         tools: Some(ToolsConfig {
             allowed: meta.tools,
