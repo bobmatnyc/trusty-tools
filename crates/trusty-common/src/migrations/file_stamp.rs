@@ -14,7 +14,7 @@
 //!
 //! Test: `file_stamp_roundtrip`, `read_returns_unversioned_when_missing`,
 //! `read_returns_unversioned_on_corrupt_payload`,
-//! `write_is_atomic_via_tmp_rename`.
+//! `write_is_atomic_via_tmp_rename`, `concurrent_scratch_dirs_never_collide`.
 
 use std::path::Path;
 
@@ -114,22 +114,73 @@ pub fn write_version_to_file(path: &Path, version: SchemaVersion) -> Result<()> 
 mod tests {
     use super::*;
 
-    fn tempdir() -> std::path::PathBuf {
-        let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let p = std::env::temp_dir().join(format!("trusty-common-stamp-test-{pid}-{nanos}"));
-        std::fs::create_dir_all(&p).expect("create scratch dir");
-        p
+    /// A scratch directory private to one test, removed when the returned
+    /// handle drops.
+    ///
+    /// Why (#6974): the previous helper named the directory
+    /// `trusty-common-stamp-test-{pid}-{nanos}` and returned a bare
+    /// `PathBuf`. Every test in this module runs in ONE process under
+    /// `cargo test`, so the pid is a constant, and `SystemTime::now()` has a
+    /// platform tick coarser than a nanosecond — two tests starting inside the
+    /// same tick got the same path and trampled each other's stamp file. The
+    /// name also leaked: nothing ever removed the directory.
+    /// What: `tempfile::TempDir` picks the name from the OS random source and
+    /// creates the directory with `O_EXCL`, so a collision cannot occur even
+    /// across concurrent processes; dropping the handle removes the tree.
+    /// Test: every test in this module.
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("trusty-common-stamp-test-")
+            .tempdir()
+            .expect("create scratch dir")
+    }
+
+    #[test]
+    fn concurrent_scratch_dirs_never_collide() {
+        // Why (#6974): the tests below all call `tempdir()` and all run in one
+        // process on the shared cargo test thread pool. The old pid+nanos name
+        // gave two simultaneous callers the same directory, so one test's
+        // stamp file became another's. Assert the property the helper now
+        // guarantees: distinct paths, and a file written under one path stays
+        // readable at the value its own thread wrote.
+        let threads: Vec<_> = (0..8u32)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    // The handle is returned, not dropped here, so every
+                    // directory is still on disk while the assertions run.
+                    let dir = tempdir();
+                    let path = dir.path().join("schema_version.json");
+                    write_version_to_file(&path, SchemaVersion(i)).expect("write");
+                    let got = read_version_from_file(&path).expect("read");
+                    (i, dir, got)
+                })
+            })
+            .collect();
+
+        // Join everything before asserting, so all eight directories are held
+        // open at once — a name a `TempDir` still owns cannot be handed out
+        // again.
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|t| t.join().expect("thread panicked"))
+            .collect();
+
+        let mut paths = std::collections::HashSet::new();
+        for (i, dir, got) in &results {
+            assert_eq!(*got, SchemaVersion(*i), "thread {i} read another's stamp");
+            assert!(
+                paths.insert(dir.path()),
+                "duplicate scratch dir {:?}",
+                dir.path()
+            );
+        }
     }
 
     #[test]
     fn file_stamp_roundtrip() {
         // Why: baseline — write a version, read it back, expect equality.
         let dir = tempdir();
-        let path = dir.join("schema_version.json");
+        let path = dir.path().join("schema_version.json");
         write_version_to_file(&path, SchemaVersion(7)).expect("write succeeds");
         let got = read_version_from_file(&path).expect("read succeeds");
         assert_eq!(got, SchemaVersion(7));
@@ -140,7 +191,7 @@ mod tests {
         // Why: a brand-new store has no stamp on disk yet. The reader must
         // map that to UNVERSIONED so the runner applies every step.
         let dir = tempdir();
-        let path = dir.join("missing.json");
+        let path = dir.path().join("missing.json");
         let got = read_version_from_file(&path).expect("missing file is not an error");
         assert_eq!(got, SchemaVersion::UNVERSIONED);
     }
@@ -149,7 +200,7 @@ mod tests {
     fn read_returns_unversioned_on_corrupt_payload() {
         // Why: a hand-edited / truncated stamp must not crash the daemon.
         let dir = tempdir();
-        let path = dir.join("schema_version.json");
+        let path = dir.path().join("schema_version.json");
         std::fs::write(&path, b"this is not json").expect("write garbage");
         let got = read_version_from_file(&path).expect("corrupt file is not an error");
         assert_eq!(got, SchemaVersion::UNVERSIONED);
@@ -161,7 +212,7 @@ mod tests {
         // rename) is what actually happens. Catches a future refactor that
         // accidentally switches to a direct write.
         let dir = tempdir();
-        let path = dir.join("schema_version.json");
+        let path = dir.path().join("schema_version.json");
         write_version_to_file(&path, SchemaVersion(3)).expect("write");
         // The `.tmp` file must not linger after a successful write.
         let tmp = {
@@ -182,7 +233,7 @@ mod tests {
         // Why: callers often pass a path under a not-yet-created data dir.
         // The writer must materialise the parent before writing.
         let dir = tempdir();
-        let nested = dir.join("a").join("b").join("c");
+        let nested = dir.path().join("a").join("b").join("c");
         let path = nested.join("schema_version.json");
         write_version_to_file(&path, SchemaVersion(1))
             .expect("nested write creates intermediate dirs");
@@ -194,7 +245,7 @@ mod tests {
         // Why: every successful migration step overwrites the stamp. Confirm
         // the second write replaces the first cleanly (no append, no error).
         let dir = tempdir();
-        let path = dir.join("schema_version.json");
+        let path = dir.path().join("schema_version.json");
         write_version_to_file(&path, SchemaVersion(1)).expect("first write");
         write_version_to_file(&path, SchemaVersion(2)).expect("second write");
         assert_eq!(
