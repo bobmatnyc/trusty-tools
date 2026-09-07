@@ -82,8 +82,8 @@ fn http_flag_is_refused_naming_the_adr() {
         vec!["trusty-embedderd", "--http"],
         vec!["trusty-embedderd", "--http", "127.0.0.1:7890", "--stdio"],
     ] {
-        let err = trusty_embedderd::resolve_transport(&parse(&argv))
-            .expect_err("--http must be refused");
+        let err =
+            trusty_embedderd::resolve_transport(&parse(&argv)).expect_err("--http must be refused");
         let msg = err.to_string();
         assert!(
             msg.contains("ADR-0032"),
@@ -133,13 +133,8 @@ async fn daemon_serves_a_hardened_socket_and_no_tcp_port() {
     let listener = uds_server::bind_uds_listener(&sock).expect("bind hardened socket");
     tokio::spawn(uds_server::run_uds_accept_loop(listener, mock_queue()));
 
-    let mode = |p: &std::path::Path| {
-        std::fs::metadata(p)
-            .expect("stat")
-            .permissions()
-            .mode()
-            & 0o777
-    };
+    let mode =
+        |p: &std::path::Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
     assert_eq!(mode(&sock), 0o600, "socket must be 0600");
     assert_eq!(mode(&dir), 0o700, "socket directory must be 0700");
 

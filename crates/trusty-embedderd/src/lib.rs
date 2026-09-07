@@ -365,7 +365,9 @@ pub async fn run_with_args(args: Args) -> Result<()> {
 /// OS delivers EOF on stdin when the parent exits — that is the clean
 /// termination signal. SIGTERM is still handled so `kill` works from a shell.
 /// What: races `stdio_server::run_stdio_server` against SIGTERM.
-/// Test: `embedder_supervisor_e2e` in `trusty-search` drives this path.
+/// Test: `stdio_flag_selects_the_stdio_transport` proves this arm is the one
+/// `--stdio` reaches; the loop itself is `stdio_eof_terminates_cleanly`, and
+/// `trusty-search`'s supervisor e2e suite drives it end to end.
 #[cfg(feature = "daemon")]
 async fn serve_stdio(queue: Arc<BatchQueue>) -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;

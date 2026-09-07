@@ -17,8 +17,9 @@
 //! frames**. Any stray `println!` will corrupt the protocol and cause the
 //! parent's `StdioEmbedderClient` to fail with a JSON parse error.
 //!
-//! Test: `stdio_eof_terminates_cleanly` (unit, no daemon required);
-//! `bit_identical_*` in `tests/bit_identical.rs` (ONNX, `#[ignore]`).
+//! Test: `stdio_eof_terminates_cleanly` (unit, no daemon required). The
+//! dispatch logic it shares with the socket transport is covered by
+//! `dispatch_happy_path_returns_embeddings` and its siblings in `uds_server`.
 
 use std::sync::Arc;
 
