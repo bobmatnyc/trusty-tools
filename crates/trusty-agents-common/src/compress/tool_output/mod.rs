@@ -12,6 +12,7 @@
 //! Module layout (see #366 split):
 //! - `mod.rs` — classification, dispatch, and the native per-tool filters
 //! - `structured.rs` — JSON/YAML/TOML/CSV passthrough detection
+//! - `source_read.rs` — read-verb-on-a-source-file passthrough detection (#6986)
 //! - `strategy.rs` — generic `FilterLevel`/`Language`/`FilterStrategy`
 //! - `rtk.rs` — RTK subprocess delegation + async wrapper, plus
 //!   `CompressionPath` (issue #1956 stats-logging signal)
@@ -26,6 +27,7 @@
 //! Test: See `tests` — covers each filter and the dispatch table.
 
 mod rtk;
+mod source_read;
 mod strategy;
 mod structured;
 
@@ -38,6 +40,7 @@ pub use rtk::{
     CompressionPath, compress_tool_output_async, compress_tool_output_async_with_path,
     compress_via_rtk,
 };
+pub use source_read::is_source_file_read;
 pub use strategy::{
     AggressiveFilter, FilterLevel, FilterStrategy, Language, MinimalFilter, NoFilter, get_filter,
 };
@@ -91,16 +94,30 @@ pub enum ToolFilter {
 /// tool name". [`compress_tool_output`] dispatches on its result and
 /// [`has_filter_for`] tests it, so the coverage question has exactly one
 /// answer (#6566, and the common-entry-point rule).
-/// What: Substring match against the lowercased name, in the order the
-/// dispatch has always used — the `test`/`cargo` family first (with
-/// `check`/`clippy` inside it taking the cargo-check filter), then `diff`,
-/// `log`, `read`/`cat`. `grep`/`rg`/`find`/`ls` match on the FIRST
-/// whitespace token rather than a substring, because `rg` is a substring of
-/// unrelated names this sees (`cargo`, `git merge`) that must not misfire
-/// (#1957). `None` means no filter covers the name.
+/// What: [`is_source_file_read`] runs FIRST and short-circuits to `None`
+/// (#6986 — see below). After it, substring match against the lowercased
+/// name, in the order the dispatch has always used — the `test`/`cargo`
+/// family first (with `check`/`clippy` inside it taking the cargo-check
+/// filter), then `diff`, `log`, `read`/`cat`. `grep`/`rg`/`find`/`ls` match
+/// on the FIRST whitespace token rather than a substring, because `rg` is a
+/// substring of unrelated names this sees (`cargo`, `git merge`) that must
+/// not misfire (#1957). `None` means no filter covers the name.
+///
+/// 🔴 The substring branches match the PATH as well as the program, because
+/// `tm hook`'s rewrite passes the command's first two tokens as the tool
+/// name. `cat crates/x/src/tests.rs` therefore hit the `test` branch and
+/// `filter_test_runner` returned an empty string — the whole file, gone
+/// (#6986). Ordering the source-read check ahead of them is what keeps a
+/// file's own path from choosing the filter that destroys it.
 /// Test: `classify_tool_routes_known_tool_families`,
-/// `classify_tool_returns_none_for_uncovered_tools`.
+/// `classify_tool_returns_none_for_uncovered_tools`,
+/// `classify_tool_passes_through_source_reads`.
 pub fn classify_tool(tool_name: &str) -> Option<ToolFilter> {
+    // #6986: a read verb on a source file is an agent reading code, not gate
+    // output — no filter here can shorten it without damaging it.
+    if is_source_file_read(tool_name) {
+        return None;
+    }
     let n = tool_name.to_ascii_lowercase();
     if n.contains("test") || n.contains("cargo") {
         // Note: "cargo check"/"cargo clippy" go to the cargo_check filter
@@ -170,7 +187,14 @@ pub fn has_filter_for(tool_name: &str) -> bool {
 /// dispatch handles it — that is what keeps [`has_filter_for`] from drifting
 /// away from what the dispatch actually filters (#6566). Unknown tools pass
 /// through unchanged. Always infallible.
-/// Test: `compress_tool_output_dispatch_test` plus per-filter tests.
+///
+/// A filter that consumed every byte returns the ORIGINAL instead (#6986):
+/// emitting nothing loses the caller's output with no way to tell that from
+/// a command that genuinely printed nothing. This is a backstop, not the
+/// fix — [`classify_tool`] keeps source reads away from the filters in the
+/// first place.
+/// Test: `compress_tool_output_dispatch_test` plus per-filter tests;
+/// `dispatch_never_returns_empty_for_non_empty_input`.
 pub fn compress_tool_output(tool_name: &str, output: &str) -> String {
     // Size gate: very small outputs aren't worth touching.
     if output.len() < SIZE_GATE_BYTES {
@@ -181,7 +205,7 @@ pub fn compress_tool_output(tool_name: &str, output: &str) -> String {
     if is_structured_format(output) {
         return output.to_string();
     }
-    match classify_tool(tool_name) {
+    let compressed = match classify_tool(tool_name) {
         None => output.to_string(),
         Some(ToolFilter::TestRunner) => filter_test_runner(output),
         Some(ToolFilter::CargoCheck) => filter_cargo_check(output),
@@ -202,7 +226,13 @@ pub fn compress_tool_output(tool_name: &str, output: &str) -> String {
         }
         Some(ToolFilter::Grep) => filter_grep_output(output),
         Some(ToolFilter::Ls) => filter_ls_output(output),
+    };
+    // #6986: a filter that emptied a non-empty input destroyed the caller's
+    // output rather than shortening it. Hand back the original.
+    if compressed.trim().is_empty() && !output.trim().is_empty() {
+        return output.to_string();
     }
+    compressed
 }
 
 /// Strip passing test lines from `cargo test` output.
