@@ -1994,7 +1994,10 @@ jobs:
           # context, so renaming it wedges no open PR.
           - name: trusty-console-memory
             dir: crates/trusty-console/ui-memory
-            command: pnpm run build
+            # #6155: `build` alone never ran src/lib/api.test.js, which pins the
+            # shape `memory.palaces_list` answers. Not a required context, so no
+            # open PR is wedged by the addition.
+            command: pnpm run build && pnpm run test
           - name: trusty-console
             dir: crates/trusty-console/ui
             # #6360: `build` alone left src/*.test.js unexecuted in CI — the
