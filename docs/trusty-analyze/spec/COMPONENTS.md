@@ -237,9 +237,11 @@ Per-subsystem specs. Each states **responsibility**, **key types/modules** (with
   `DEFAULT_PORT`; route handlers; `WebAssets` (rust-embed) + `ui_index_handler` /
   `ui_asset_handler`.
 - **Current (✅):** ~20 routes — health, index proxy, complexity/smells/quality,
-  diagnostics/graph/entities/clusters/ner, scip ingest, review/github-pr/deep,
-  github webhook, facts CRUD, `/ui` SPA (with index.html fallback for client-side
-  routing). Gated behind the `http-server` feature (#249); `serve` can also fork
+  diagnostics/graph/entities/clusters/ner, scip ingest, review/deep (GitHub PR
+  review is served via the `analyze.review_github_pr` JSON-RPC method over the
+  Unix socket, not this HTTP surface), github webhook, facts CRUD, `/ui` SPA
+  (with index.html fallback for client-side routing). Gated behind the
+  `http-server` feature (#249); `serve` can also fork
   an MCP stdio loop (`--mcp`) and/or an MCP HTTP/SSE server (`--mcp-port`).
   Graceful shutdown via `with_graceful_shutdown(trusty_common::shutdown_signal())`
   (#534/#535): drains in-flight requests on SIGTERM or SIGINT before process

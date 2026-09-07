@@ -48,10 +48,10 @@ pub enum GithubError {
     Api { status: u16, body: String },
 }
 
-/// Request body for `POST /review/github-pr` and the `review_github_pr` MCP
-/// tool.
+/// Request body for the `analyze.review_github_pr` JSON-RPC method and the
+/// `review_github_pr` MCP tool.
 ///
-/// Why: a single typed shape shared by the HTTP handler and the MCP dispatch
+/// Why: a single typed shape shared by the RPC handler and the MCP dispatch
 /// path so the two transports stay in lockstep.
 /// What: identifies a PR by `owner`/`repo`/`pr`, names the trusty-search index
 /// to cross-reference, and carries an opt-in `post_comment` flag.
