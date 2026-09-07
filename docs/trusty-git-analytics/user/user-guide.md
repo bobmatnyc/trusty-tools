@@ -341,6 +341,46 @@ tga aliases merge "jdoe-github" "John Doe"
 tga aliases merge "jdoe-github" "John Doe" --yes
 ```
 
+### Let tga suggest the pairs
+
+`tga aliases suggest` scores every identity pair the database holds and prints the
+ones at or above `--confidence`. It never merges on its own unless you ask it to.
+
+```bash
+# Print probable pairs (default threshold 0.85)
+tga aliases suggest
+
+# Merge the HIGH-confidence pairs without prompting
+tga aliases suggest --auto-accept
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--confidence <N>` | `0.85` | Minimum confidence to print a pair |
+| `--auto-accept` | false | Merge the HIGH-confidence pairs |
+| `--review-file <PATH>` | none | Write the near misses to a TSV |
+
+#### Review the near misses
+
+A pair scoring just under `--confidence` is the split most likely to go unnoticed:
+too weak to print, too strong to be a coincidence. `--review-file` writes those
+pairs — everything below `--confidence` and at or above 0.50 — to a tab-separated
+file instead, so a human can decide.
+
+```bash
+tga aliases suggest --review-file ./identity-review.tsv
+```
+
+```
+src	dst	reason	confidence	confirmed
+carolyn@company.com	carol@company.com	edit-distance 2 on local-part	0.78	no
+```
+
+Set `confirmed` to `yes` on the rows you accept, then merge them with
+`tga aliases merge <src> <dst>`. The file is rewritten on every run and carries
+nothing the printed suggestions would not — both addresses, the reason, and the
+score. Without the flag no file is written at all.
+
 ### Define aliases in config.yaml
 
 For deterministic identity resolution, declare aliases explicitly in `config.yaml`:

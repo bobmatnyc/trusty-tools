@@ -7,6 +7,7 @@
 //! consolidated identity.
 
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 use rusqlite::params;
@@ -36,6 +37,8 @@ Use these subcommands for manual corrections and audits.",
   tga aliases merge old@contractor.com alice@company.com\n\n\
   # Auto-detect probable alias pairs from commit history\n\
   tga aliases suggest\n\n\
+  # Also park the pairs that scored just under the threshold in a review file\n\
+  tga aliases suggest --review-file ./identity-review.tsv\n\n\
   # Detach a previously-merged alias back to its own identity\n\
   tga aliases unmerge old@contractor.com\n\n\
 TIPS:\n\
@@ -119,6 +122,13 @@ pub enum AliasesSubcommand {
         /// Automatically merge HIGH-confidence pairs above `--confidence`.
         #[arg(long, default_value_t = false)]
         auto_accept: bool,
+        // #6993: near misses are invisible in the normal output; this routes
+        // them to a file an operator confirms against.
+        /// Write near-miss pairs — scoring below `--confidence` but at or above
+        /// 0.50 — to this TSV for a human to confirm. Nothing is written unless
+        /// the flag is given.
+        #[arg(long, value_name = "PATH")]
+        review_file: Option<PathBuf>,
     },
 }
 
@@ -158,7 +168,8 @@ pub fn run(config: Config, db: &mut Database, args: AliasesArgs) -> anyhow::Resu
         AliasesSubcommand::Suggest {
             confidence,
             auto_accept,
-        } => suggest::run(&config, db, confidence, auto_accept),
+            review_file,
+        } => suggest::run(&config, db, confidence, auto_accept, review_file.as_deref()),
     }
 }
 
