@@ -157,6 +157,25 @@ repos:
         pass_filenames: false
         always_run: true
 
+  # Backtick path-citation gate (issue #5147). Fails the commit when a
+  # backtick-quoted `crates/`, `src/`, `scripts/`, `docs/` or `.github/` token
+  # in the live Markdown set (repo-root CLAUDE.md/README.md, docs/reference/**,
+  # docs/architecture/**, crates/*/{CLAUDE,README}.md) names a file that is not
+  # in the checkout — the shape a 500-SLOC split leaves behind when `foo.rs`
+  # becomes `foo/` and the docs stay put. Placeholders, globs, elisions and Rust
+  # module paths are excluded by documented rule; see the script's header.
+  # Runs against the whole tracked tree (pass_filenames: false), because the
+  # citation lives in a doc and the file it names lives in the code, so a
+  # staged-file subset cannot answer the question.
+  - repo: local
+    hooks:
+      - id: doc-paths
+        name: "Backtick path-citation lint"
+        entry: scripts/check_doc_paths.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
   # Leaked AI-generation / tool-call artifact lint (issue #3579). Fails the
   # commit when a raw `</content>`/`</invoke>`/`</parameter>`/
   # `<function_calls>`/`</function_calls>` fragment is found bare on a line

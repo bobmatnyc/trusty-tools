@@ -514,7 +514,7 @@ both the FDA (search) and App Data (mpm) categories.
 ### Single Source of Truth (#2558)
 
 The identifier scheme, signing flags, and guidance text live in exactly one
-place: `crates/trusty-installer/src/commands/macos_signing.rs`. Both
+place: `crates/trusty-installer/src/commands/macos_signing/mod.rs`. Both
 `tctl install` (automatic, fail-soft post-install hook) and the standalone
 `tctl sign <target>` command (hard-failing, for local-source builds or
 re-signing) call into it — there is no second, independently-maintained

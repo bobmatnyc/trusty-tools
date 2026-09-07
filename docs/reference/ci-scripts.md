@@ -56,6 +56,31 @@ gate that cannot fail makes its own green meaningless:
 own. Both carry a frozen baseline or a fetch that can fail open, which is the
 shape a self-test exists to pin, so both are candidates if either is edited.
 
+## Gated in a workflow, but not CI-only
+
+`scripts/check_doc_paths.sh` (issue #5147) is deliberately NOT in the table
+above: it runs in `.github/workflows/doc-paths.yml` **and** in the pre-commit
+hook, so it fails the definition this page is scoped to. It is named here
+because `scripts/` is where a reader looks, and the gate is new enough that
+nobody has yet met it by having a commit rejected.
+
+It resolves every backtick-quoted `crates/`, `src/`, `scripts/`, `docs/` and
+`.github/` token in the live Markdown set — repo-root `CLAUDE.md` and
+`README.md`, `docs/reference/`, `docs/architecture/`, and depth-1
+`crates/*/CLAUDE.md` and `crates/*/README.md` — against the checkout, and fails
+on any that names nothing. Its self-test is
+`scripts/check_doc_paths_selftest.sh`, which the workflow runs as the step
+before the gate: seven documented rules exclude placeholders, globs, elisions
+and Rust module paths, and each of those is a rule that could also suppress a
+real finding, so each is pinned to a fixture line under
+`scripts/test-data/doc-paths/`.
+
+Its workflow carries no `paths:` filter, which is the one thing that looks like
+an oversight and is not. The citation lives in a doc and the file it names lives
+in the code, so deleting or moving a source file is what breaks it — a filter
+over Markdown would miss exactly that case, and filtering on the union of every
+tree it can reach is every path in the repository.
+
 ## Which of these block a merge
 
 One does: `check_workspace_dep_versions.sh` runs as a step of `version-parity.yml`'s

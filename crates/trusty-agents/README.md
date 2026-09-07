@@ -135,8 +135,8 @@ cargo run -- --version
 | `src/memory`      | Local redb + usearch + fastembed vector store.             |
 | `src/search`      | Code indexer and file watcher (tree-sitter).               |
 | `src/init`        | Project self-initialization and auto-index seeding.        |
-| `src/build_info`  | Persistent build counter + version string.                 |
-| `src/session`     | Per-run session directory management.                      |
+| `src/build_info.rs` | Persistent build counter + version string.               |
+| `src/session.rs`  | Per-run session directory management.                      |
 | `src/subprocess`  | Spawn and NDJSON-interact with sub-agent processes.        |
 | `src/perf`        | Performance telemetry stamps.                              |
 | `src/cli`         | `memory search` / `code search` sub-commands.              |

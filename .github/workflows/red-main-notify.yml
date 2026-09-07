@@ -66,6 +66,7 @@ on:
       - "build.rs sync" # buildrs-sync.yml
       - "Capabilities drift" # capabilities-drift.yml
       - "Doc numbers" # doc-numbers.yml
+      - "Doc paths" # doc-paths.yml
       - "Generation artifact lint" # generation-artifact-lint.yml
       - "Homebrew formula" # homebrew-formula.yml
       - "Line cap" # line-cap.yml

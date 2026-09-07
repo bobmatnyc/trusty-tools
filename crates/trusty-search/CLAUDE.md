@@ -791,7 +791,7 @@ this table is generated from it, not maintained by hand.
 - **HTTP**: axum 0.7 + tower-http (CORS, trace, gzip), HTTP/2
 - **Vector store**: usearch 2.25 (HNSW), wrapped in `Arc<RwLock<>>` for concurrent reads
 - **Embeddings**: fastembed 5.x (ONNX, all-MiniLM-L6-v2, 384-dim, SIMD/AVX2/NEON)
-- **Lexical**: BM25 (zero-dep port from trusty-agents `src/context/bm25.rs`)
+- **Lexical**: BM25 (zero-dep port from `crates/trusty-agents/src/context/bm25.rs`)
 - **KV store**: redb 2.6 (chunk metadata, file→chunks mapping, `_meta` schema version)
 - **File watching**: notify 6 + notify-debouncer-mini 0.4 (500ms debounce, fsevent)
 - **Code parsing**: tree-sitter 0.24 (rust, python, js, ts, go, java, c, cpp)
@@ -833,7 +833,7 @@ Set `TRUSTY_DISABLE_MIGRATIONS=1` to skip auto-migrations.
 
 ### Adding a new migration
 
-1. Create `src/core/migration/m00N.rs` implementing `Migration` (`source_version`,
+1. Create `src/core/migration/m00<N>.rs` implementing `Migration` (`source_version`,
    `target_version`, `description`, `apply`). The `apply` method must be
    idempotent.
 2. Register it in `MigrationRegistry::new()` in `src/core/migration/mod.rs`.
@@ -1192,7 +1192,7 @@ the `pnpm install --frozen-lockfile && pnpm build`) and then mirrors
 `crates/trusty-console/ui-search-dist/` into the crate-root `ui-dist/`.
 
 🔴 **The `ui-dist-check` job this section used to cite was real, and it never
-ran once.** It lived in `crates/trusty-search/.github/workflows/ci.yml` — a
+ran once.** It lived in this crate's own `<crate>/.github/workflows/ci.yml` — a
 pre-monorepo leftover carried in by the initial import (`13f9fa2c0`,
 2026-05-19) — and did exactly the rebuild-then-diff the old text described.
 GitHub Actions only discovers workflows in the REPO-ROOT

@@ -245,25 +245,29 @@ Optimization:
 
 ```
 crates/trusty-mpm-gui/
-├── src-tauri/              # Rust/Tauri backend
+├── src/                    # Rust/Tauri backend
 │   ├── main.rs
-│   ├── handlers/           # HTTP request handlers
-│   └── config.rs
-├── src/                    # Svelte frontend
-│   ├── App.svelte
-│   ├── routes/
-│   ├── components/
-│   └── lib/
-├── tailwind.config.js
-└── package.json
+│   ├── lib.rs
+│   ├── commands.rs         # Tauri command handlers
+│   └── state.rs
+├── ui/                     # Svelte frontend
+│   ├── src/
+│   │   ├── App.svelte
+│   │   ├── components/
+│   │   ├── lib/
+│   │   └── stores/
+│   ├── tailwind.config.js
+│   └── package.json
+├── build.rs
+└── tauri.conf.json
 ```
 
 ### Adding a New Page
 
-1. Create Svelte component in `src/routes/+page.svelte`
-2. Add navigation link in `src/App.svelte`
+1. Create the Svelte component under `ui/src/components/`
+2. Add navigation link in `ui/src/App.svelte`
 3. Implement HTTP API calls using `fetch()`
-4. Add state management in `src/lib/store.ts`
+4. Add state management in `ui/src/stores/app.ts`
 
 ### Testing
 
