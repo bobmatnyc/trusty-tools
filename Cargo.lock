@@ -11907,7 +11907,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.13.5"
+version = "0.13.6"
 dependencies = [
  "anyhow",
  "async-trait",
