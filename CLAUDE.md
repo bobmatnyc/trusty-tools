@@ -58,6 +58,9 @@ count then proves: [test-ladder-baseline.md](docs/reference/test-ladder-baseline
   runs otherwise. Run `UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`, then
   read the diff of the three `crates/trusty-mpm/src/core/testdata/pm-prompt-*.md`
   goldens and confirm it carries only your edit.
+- 🟡 An exit 137 with no output from `cargo test -p <crate>` is a SIGKILL under
+  memory pressure (several agent worktrees building at once), not a test
+  failure; re-run with `-- --test-threads=4`.
 
 🔴 **`trusty-common` takes `--features` on every test run (#4901)** — its
 `default` set is empty, so a bare `cargo test -p trusty-common` is a
@@ -336,6 +339,9 @@ exits 0 both when it compared a crate cleanly and when it compared nothing.
 - Cargo's 0.x rule applies: for a `0.y.z` crate the breaking bump is MINOR.
 - A workspace `cargo check` never catches this class of break — the root
   `Cargo.toml` path override pairs local source with local dependency (#4088).
+- 🟡 A `0.y` member's MINOR bump also requires widening its root
+  `[workspace.dependencies]` row (`version = "0.y"`); a PATCH does not. Gate:
+  `scripts/check_workspace_dep_versions.sh` (issue #4421's `pr-version-bump` job).
 
 🟡 **On an ordinary PR the semver gate compares nothing** — `semver-checks.yml`
 exits in ~15s when no crate version is bumped (#5311). Expected, not something to
@@ -387,6 +393,9 @@ crates/<crate>/changelog.d/<issue-or-pr-number>-<short-slug>.md
 
 - Format and category line: `Skill(skill="tm-workflow")`. Assembler and CI-gate
   specifics: [changelog-fragments.md](docs/reference/changelog-fragments.md).
+- 🟡 `check_changelog_fragment.sh` diffs `origin/main..HEAD`, so it sees nothing
+  until the change is committed; run it after committing. `check_line_cap.sh`
+  reads tracked `git ls-files`, so a new file needs `git add` first too.
 
 ## Cross-Crate Development Workflow
 
@@ -514,6 +523,7 @@ testing) are not repeated here. Extended explanations:
 - **Workspace deps:** shared external crates are declared once in `[workspace.dependencies]` and referenced as `dep = { workspace = true }` — never pin locally if already in the workspace table; `default-features` is likewise owned by the root entry, so `default-features = false` on a member is ignored unless the root entry sets it too
 - **Internal deps:** reference sibling crates as `trusty-common = { workspace = true }`; the workspace manifest owns the path
 - **No global state:** helpers are free functions or small structs — no `lazy_static!` / `once_cell::sync::Lazy` except the tracing subscriber, which uses `try_init` to stay idempotent across test binaries
+- **No process-global env in the `tm` bin target (#5544):** `std::env::set_var`/`remove_var` under `crates/trusty-mpm/src/bin/tm/**` is ratcheted by `env_isolation_tests.rs` to a per-file budget of 0 for new files; inject the path or value instead (`BannerEnv`, `PathEnv`) — a `PATH`/`HOME` write also corrupts every other test in that binary
 - **MSRV drift:** prefer stable channel toolchains; don't break `rust-version = "1.94"`
 - **Edition mismatch:** the workspace *default* is edition 2024 (`edition.workspace = true`); 11 crates pin `edition = "2021"` explicitly. Let-chains (`if let … && let …`) only compile in 2024 — read the crate's `Cargo.toml` before copying one in
 - **Ignored tests:** ONNX-backed embedder tests are `#[ignore]`d so CI stays fast; they need `cargo test -- --include-ignored` to run at all
