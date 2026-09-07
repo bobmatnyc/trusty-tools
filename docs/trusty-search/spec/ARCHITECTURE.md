@@ -393,7 +393,7 @@ Single crate; three module trees (`core`, `service`, `mcp`) plus `commands`,
 | `core/registry.rs` | `IndexRegistry`, `IndexHandle`, `IndexId`, `WalkDiagnostics`. |
 | `core/repo_config.rs`, `project_config.rs` | `trusty-search.yaml` multi-index config. |
 | `core/scip_ingest.rs` | SCIP entity ingest trait (`from_refs` ✅, protobuf 🔵 #105). |
-| `core/git.rs`, `output.rs`, `embed.rs` | git diff helpers, result formatting, `Embedder` trait/`FastEmbedder`. |
+| `core/git.rs`, `embed.rs` | git diff helpers, `Embedder` trait/`FastEmbedder`. |
 | **`src/service/`** | The HTTP daemon and all server-side machinery. |
 | `service/server.rs` | axum router + `SearchAppState` (all HTTP handlers). |
 | `service/daemon.rs` | PID lockfile, auto-port, graceful shutdown, `daemon.env`. |
