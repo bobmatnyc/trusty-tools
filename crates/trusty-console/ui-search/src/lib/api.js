@@ -61,6 +61,21 @@ export const api = {
   health: () => request('/health'),
 
   listIndexes: () => request('/indexes'),
+  /**
+   * Every registered index with its roster row in one request (#6699).
+   *
+   * Why: the roster used to call this endpoint for the ids and then
+   * `GET /indexes/{id}/status` once per id, so a 41-index daemon cost 42
+   * requests and 41 per-index directory walks to draw one table. The details
+   * arm carries the same numbers, plus the vector-lane health the roster had
+   * no way to flag on.
+   * What: `{ indexes: [{ id, root_path, size_bytes, last_indexed,
+   * chunk_count, stages, search_capabilities, semantic_coverage,
+   * lexical_only, skip_vector, … }] }`. The lane-health keys sit at the same
+   * depth as in a `GET /indexes/{id}/status` body, so `vectorCoverageFault`
+   * reads either one unchanged.
+   */
+  listIndexesDetailed: () => request('/indexes?details=true'),
   createIndex: (id, root_path) =>
     request('/indexes', {
       method: 'POST',

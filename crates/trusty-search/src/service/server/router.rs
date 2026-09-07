@@ -74,6 +74,20 @@ pub(super) struct IndexDetailEntry {
     /// (`list_last_used_tests.rs`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_used_unix: Option<u64>,
+    /// When this index last finished indexing, RFC 3339 (#6699).
+    ///
+    /// Why: the console's roster shows a Last Indexed column and read it from a
+    /// per-index `GET /indexes/{id}/status` call per row. Serving it here is
+    /// what lets that roster drop the fan-out; without it, switching to this
+    /// endpoint would blank a column operators use.
+    /// What: the same value `GET /indexes/{id}/status` reports — the in-memory
+    /// `last_indexed_at` (#878) when the handle has one, else the newest
+    /// storage-directory mtime, which `index_disk_and_mtime` already computes
+    /// beside `size_bytes` and this arm used to discard. `None` for an index
+    /// that has never been indexed.
+    /// Test: `list_indexes_details_reports_last_indexed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_indexed: Option<String>,
     /// Vector-lane health, flattened onto this entry (#6699).
     ///
     /// Why: the console's Indexes view showed a zero-vector index green. The

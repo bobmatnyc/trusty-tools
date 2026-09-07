@@ -192,6 +192,78 @@ async fn list_indexes_details_reports_embed_lag() {
     );
 }
 
+/// `GET /indexes` without `?details=true` is byte-for-byte what it always was (#6699).
+///
+/// Why: this is closure condition 3. The whole change is additive on the details
+/// arm, and the plain arm — which every older consumer calls — must not grow a
+/// key, change a type, or turn its bare string array into objects. Nothing else
+/// asserts that; the details tests would all still pass if this arm had silently
+/// started returning rows.
+/// What: drives the handler with `details: false` over the same fixture the
+/// zero-vector test uses and asserts the response is exactly
+/// `{"indexes": ["<id>"]}` — one key, an array of strings.
+/// Test: this function.
+#[tokio::test]
+async fn list_indexes_without_details_is_unchanged() {
+    use super::indexes::ListIndexesParams;
+    let state = state_with("plain-arm", 17, 0).await;
+    let resp = list_indexes_handler(
+        State(state),
+        Query(ListIndexesParams {
+            format: None,
+            details: false,
+            repo_identity: None,
+        }),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(
+        value,
+        serde_json::json!({ "indexes": ["plain-arm"] }),
+        "the non-details arm must stay a bare array of ids: {value}"
+    );
+}
+
+/// The details row carries `last_indexed`, so the roster needs no per-row call (#6699).
+///
+/// Why: the console read Last Indexed from `GET /indexes/{id}/status`, one call
+/// per row. Serving the same value here is what lets that fan-out collapse to a
+/// single request; a row without it would blank a column operators use. The
+/// value must be the #878 in-memory timestamp when the handle has one, exactly
+/// as the per-index endpoint reports it — not the storage mtime.
+/// What: stamps `last_indexed_at` on the handle and asserts both endpoints
+/// report that string.
+/// Test: this function.
+#[tokio::test]
+async fn list_indexes_details_reports_last_indexed() {
+    let state = state_with("stamped", 3, 3).await;
+    {
+        let handle = state
+            .registry
+            .get(&IndexId::new("stamped"))
+            .expect("registered");
+        *handle.last_indexed_at.write().await = Some("2026-09-07T00:00:00Z".to_string());
+    }
+    let entry = detail_entry(Arc::clone(&state)).await;
+
+    let axum::Json(status) = super::status::index_status_handler(
+        State(Arc::clone(&state)),
+        axum::extract::Path("stamped".to_string()),
+    )
+    .await
+    .expect("a resident index reports status");
+
+    assert_eq!(entry["last_indexed"], "2026-09-07T00:00:00Z");
+    assert_eq!(
+        entry["last_indexed"], status["last_indexed"],
+        "the roster must show the same timestamp the per-index endpoint does"
+    );
+}
+
 /// The list row and the per-index status body report identical lane health (#6699).
 ///
 /// Why: two computations of the same verdict is how the roster and the expanded

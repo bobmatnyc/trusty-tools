@@ -244,7 +244,17 @@ pub(crate) async fn list_indexes_report(
             }
             // #4706: sum both storage layouts — a colocated index kept its
             // bytes outside the global dir and so reported 0, not null.
-            let (size_bytes, _) = index_disk_and_mtime(&handle.id.0, &handle.root_path);
+            let (size_bytes, disk_last_indexed) =
+                index_disk_and_mtime(&handle.id.0, &handle.root_path);
+            // #6699: the walk already produced this mtime and this arm threw it
+            // away, so the console paid a per-row `/status` call for it. Same
+            // #878 preference the per-index endpoint applies.
+            let last_indexed = handle
+                .last_indexed_at
+                .read()
+                .await
+                .clone()
+                .or(disk_last_indexed);
             let root_path = handle.root_path.to_str().map(|s| s.to_string());
             // #6699: the roster showed a zero-vector index green because this
             // row carried no lane health at all. Two O(1) reads per index —
@@ -258,6 +268,7 @@ pub(crate) async fn list_indexes_report(
                 size_bytes,
                 repo_identity,
                 last_used_unix: row.last_used_unix,
+                last_indexed,
                 vector_health,
             });
         }
