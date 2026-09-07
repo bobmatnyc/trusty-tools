@@ -142,12 +142,13 @@ fn credential_configured(id: ProviderId) -> bool {
 /// The default Ollama base URL, honoring the same `OLLAMA_HOST` override the
 /// rest of the local-inference stack uses.
 ///
-/// Why: Mirrors `llm::adapter::impls`'s / `repl::ollama`'s host resolution;
-/// duplicated here (rather than imported) because both source modules keep
-/// it private to their own tree — this is the same one-line default those
-/// two already carry.
+/// Why (#4490): this used to be a third copy of the same one-liner, kept
+/// because `llm::adapter` and `repl::ollama` each held their own. All three now
+/// delegate to one resolver, so the catalog reports availability for the host
+/// the adapter will actually dial.
+/// What: delegates to [`trusty_common::local_probe::local_host`].
 fn ollama_host() -> String {
-    std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string())
+    trusty_common::local_probe::local_host()
 }
 
 /// `GET /api/models` — the inference provider catalog.

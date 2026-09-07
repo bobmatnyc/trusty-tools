@@ -228,11 +228,14 @@ pub trait ModelAdapter: Send + Sync + std::fmt::Debug {
 /// Why: #3766 — both `OllamaAdapter::api_endpoint` and the conversational
 /// fast path's "local model unreachable" message must name the SAME host, or
 /// the message points the user at an endpoint that isn't the one that failed.
-/// What: `OLLAMA_HOST` if set, else the documented default. No trailing-slash
-/// normalisation — callers that build a path do their own trimming.
+/// What: delegates to [`trusty_common::local_probe::local_host`] (#4490) — the
+/// one reader of `OLLAMA_HOST` — so the adapter dials the host the shared probe
+/// declared reachable. Trailing slashes are trimmed there; callers that build a
+/// path append to a bare host.
 /// Test: `ollama_adapter_endpoint_uses_shared_host`.
 pub fn ollama_host() -> String {
-    std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string())
+    // #4490: one resolver, so probe and request cannot disagree on the host.
+    trusty_common::local_probe::local_host()
 }
 
 /// The default OpenRouter endpoint used by every non-direct path.
