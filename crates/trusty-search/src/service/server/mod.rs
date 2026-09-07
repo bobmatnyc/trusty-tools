@@ -37,6 +37,7 @@ mod indexes_relocate;
 // #6822: the scalar-precision backfill route.
 mod quantize_handlers;
 mod reindex_handlers;
+mod residency_sweep;
 mod router;
 mod routing;
 mod search;

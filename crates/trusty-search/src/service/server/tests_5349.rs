@@ -158,7 +158,15 @@ async fn cold_parked_index_accepts_a_delete_by_driving_the_load() {
         ));
     }
     assert!(
-        cold_park_index(&index_id, &state.registry, &state.cold_store, entry.clone()).await,
+        cold_park_index(
+            &index_id,
+            &state.registry,
+            &state.cold_store,
+            entry.clone(),
+            // #6957: no reindex is in flight in this test.
+            || false,
+        )
+        .await,
         "the index must be cold-parked before the delete is issued"
     );
 

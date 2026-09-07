@@ -448,19 +448,33 @@ pub fn ids_to_park(resident_entries: Vec<PersistedIndex>, cap: usize) -> Vec<Per
 /// further would require the sweep to re-read `indexes.toml` (or re-derive
 /// `entry`) per-id at park time rather than once per tick, a broader change
 /// than this fix's remit.
+/// Reindex re-check (#6957): `reindex_in_flight` is read once, immediately
+/// before the detach. The caller owns the reindex-progress map — this module
+/// deliberately depends on neither `SearchAppState` nor `ReindexStatus` (see
+/// the module doc) — so it supplies the read as a closure, the same shape
+/// `root_gate::evaluate_root_move` uses for its registry read. A caller that
+/// tracks no reindex state passes `|| false`. Returning `true` aborts the park
+/// with the registry untouched and this function's own cold-store insertion
+/// rolled back identity-guarded, so `id` stays exactly where it was. The
+/// window this closes is the one the sweep's single pre-park check leaves
+/// open: `persist_before_park` is a filesystem write, and a reindex request
+/// landing during it spawns against the SAME `Arc<IndexHandle>` — so the
+/// step-2 `Arc::ptr_eq` guard matches and the detach succeeds mid-reindex.
 /// Test: `cold_park_index_moves_hot_to_cold`,
 /// `cold_park_index_absent_returns_false_and_leaves_no_stray_entry`,
 /// `cold_park_index_never_orphans_a_racing_cold_load`,
 /// `cold_park_index_restores_concurrently_swapped_handle_instead_of_orphaning`,
-/// `cold_park_index_handler_reap_guarded_before_park_never_orphans` (round 5);
+/// `cold_park_index_handler_reap_guarded_before_park_never_orphans` (round 5),
+/// `sweep_aborts_park_when_a_reindex_starts_inside_the_park_window` (#6957);
 /// full disk-round-trip coverage in `tests/residency_cold_park.rs`.
 pub async fn cold_park_index(
     id: &IndexId,
     registry: &IndexRegistry,
     cold_store: &ColdIndexStore,
     entry: PersistedIndex,
+    reindex_in_flight: impl FnOnce() -> bool,
 ) -> bool {
-    cold_park_index_inner(id, registry, cold_store, entry, || {}).await
+    cold_park_index_inner(id, registry, cold_store, entry, reindex_in_flight, || {}).await
 }
 
 /// Test seam for [`cold_park_index`] (issue #3995 round 4 HIGH): `hook` runs
@@ -551,11 +565,12 @@ async fn persist_before_park(
     }
 }
 
-async fn cold_park_index_inner(
+pub(crate) async fn cold_park_index_inner(
     id: &IndexId,
     registry: &IndexRegistry,
     cold_store: &ColdIndexStore,
     entry: PersistedIndex,
+    reindex_in_flight: impl FnOnce() -> bool,
     hook: impl FnOnce(),
 ) -> bool {
     // 0. In-flight-cold-load guard: `id` still being a member of `cold_store`
@@ -589,6 +604,27 @@ async fn cold_park_index_inner(
         .into_iter()
         .next();
     hook();
+    // 1.5. #6957: re-read the caller's reindex-in-flight state IMMEDIATELY
+    //    before detaching. The sweep checks the same state once per id before
+    //    calling in, but step 0.75 above (`persist_before_park`) is a
+    //    filesystem write — a `POST /indexes/<id>/reindex` arriving during it
+    //    inserts a `Running` progress entry and spawns against this very
+    //    `Arc<IndexHandle>`, which the step-2 `Arc::ptr_eq` guard cannot
+    //    distinguish from an undisturbed handle (the handle was never
+    //    replaced). Detaching here wedges that reindex: it keeps writing
+    //    `handle.stages` on an `Arc` no future request can reach. Abort
+    //    instead, rolling our own step-1 insertion back identity-guarded so
+    //    `id` is left exactly as we found it — hot in the registry, absent
+    //    from the cold store. The next sweep tick retries.
+    if reindex_in_flight() {
+        tracing::info!(
+            "residency-park: aborting park of '{}' — a reindex started while the \
+             pre-park snapshot was being persisted (#6957)",
+            id.0
+        );
+        cold_store.mark_loaded_if(id, own_token);
+        return false;
+    }
     // 2. Atomically detach the live handle. In-flight readers holding the old
     //    Arc finish safely (see `IndexRegistry::remove_and_get`'s own doc).
     let (_removed, handle) = registry.remove_and_get(id);
@@ -915,7 +951,8 @@ mod tests {
         registry.register(build_mock_handle("hot-1"));
         assert!(registry.get(&id).is_some());
 
-        let parked = cold_park_index(&id, &registry, &cold, mk_entry("hot-1", Some(1))).await;
+        let parked =
+            cold_park_index(&id, &registry, &cold, mk_entry("hot-1", Some(1)), || false).await;
 
         assert!(parked, "resident index must be parked");
         assert!(
@@ -934,8 +971,14 @@ mod tests {
         let cold = ColdIndexStore::new();
         let id = IndexId::new("never-registered".to_string());
 
-        let parked =
-            cold_park_index(&id, &registry, &cold, mk_entry("never-registered", None)).await;
+        let parked = cold_park_index(
+            &id,
+            &registry,
+            &cold,
+            mk_entry("never-registered", None),
+            || false,
+        )
+        .await;
 
         assert!(!parked, "an id that was never resident cannot be parked");
         assert!(
@@ -957,7 +1000,10 @@ mod tests {
         let id = IndexId::new("order-1".to_string());
         registry.register(build_mock_handle("order-1"));
 
-        cold_park_index(&id, &registry, &cold, mk_entry("order-1", Some(42))).await;
+        cold_park_index(&id, &registry, &cold, mk_entry("order-1", Some(42)), || {
+            false
+        })
+        .await;
 
         let hot = registry.get(&id).is_some();
         let is_cold = cold.contains(&id);
@@ -1024,6 +1070,7 @@ mod tests {
                         &registry_for_restore,
                         &cold_for_restore,
                         restored_entry,
+                        || false,
                     )
                     .await;
                     assert!(
@@ -1097,6 +1144,7 @@ mod tests {
             &registry,
             &cold,
             mk_entry("race-swap", Some(1)),
+            || false,
             move || {
                 // Mirrors `relocate_index_handler` / `create_index_handler` /
                 // `reindex_handler`'s override arm, post-issue-#3995-round-5:
@@ -1185,6 +1233,7 @@ mod tests {
             &registry,
             &cold,
             mk_entry("handler-before-park", Some(1)),
+            || false,
             move || {
                 hook_cold.mark_loaded(&hook_id);
             },
@@ -1257,6 +1306,7 @@ mod tests {
             &registry,
             &cold,
             mk_entry("handler-before-park-guarded", Some(1)),
+            || false,
             move || {
                 // Same deferred-reap timing as the naive-reap reproduction
                 // above, but using the round-5 guarded pattern: the reap
