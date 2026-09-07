@@ -79,8 +79,8 @@ pub(super) const CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(130);
 ///
 /// Why: `DaemonClient::spawn_managed_session` (`POST
 /// /api/v1/sessions/managed`) has a server handler that runs
-/// `WorkspaceProvisioner::provision`/`provision_in` SYNCHRONOUSLY inside the
-/// request — a git clone/fetch plus worktree add plus agent/skill deploy. The
+/// `inproject::ensure_base_clone` + `create_session_worktree` SYNCHRONOUSLY
+/// inside the request — a fetch plus a worktree plus agent/skill deploy. The
 /// first spawn against a newly-registered project pays a full clone and can
 /// easily exceed [`DEFAULT_REQUEST_TIMEOUT`]'s 10s, which would hard-fail the
 /// client mid-provision while the daemon keeps working, orphaning a session

@@ -13,8 +13,7 @@
 //! What: session-lifecycle-independent tests (unknown-id error mapping,
 //! wrong-`BackendParams` client-side rejection) run first, needing no git
 //! binary. [`create_session_full_lifecycle`] is the one end-to-end test that
-//! exercises the REAL `WorkspaceProvisioner`/`RealGitBackend` path — the
-//! daemon's `spawn_managed_cloned` handler always uses `RealGitBackend`
+//! exercises the REAL daemon spawn path — the handler always uses real git
 //! (`crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs:564`), so a
 //! hermetic spawn test needs a real (but local-only, no network) git repo —
 //! mirroring `tests/session_manager_mvp.rs`'s `live_provision_real_repo`
@@ -36,7 +35,6 @@
 use std::future::IntoFuture;
 use std::process::Command;
 
-use tempfile::TempDir;
 use trusty_agents_common::connectors::{
     AgentSpec, BackendParams, ConnectorTestKit, CreateSessionReq,
 };
@@ -235,64 +233,50 @@ async fn list_sessions_is_bound_by_the_client_level_timeout() {
     }
 }
 
-/// Build a local, offline-clonable bare git repo with one commit on `main`.
+/// The env var `inproject::repos_root` reads first (#1807), duplicated here as
+/// a literal so this test file depends on no private module.
+const REPOS_ROOT_ENV: &str = "TRUSTY_MPM_REPOS_ROOT";
+
+/// Build the managed checkout a session can run in, offline.
 ///
-/// Why: [`create_session_full_lifecycle`] needs a `repo_url` the daemon's
-/// REAL `RealGitBackend` can clone without ever touching the network.
-/// What: `git init --bare -b main`, then clone/commit/push through a scratch
-/// checkout — mirrors `tests/session_manager_mvp.rs`'s
-/// `live_provision_real_repo` fixture. Returns the `TempDir` (kept alive for
-/// the caller's duration) and the `file://` URL to the bare repo.
-fn local_bare_repo() -> (TempDir, String) {
-    let scratch = crate::test_support::hermetic_temp_dir();
-    let bare = scratch.path().join("origin.git");
-    let work = scratch.path().join("seed");
-    assert!(
-        Command::new("git")
-            .args(["init", "--bare", "-b", "main"])
-            .arg(&bare)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false),
-        "git init --bare must succeed"
-    );
-    assert!(
-        Command::new("git")
-            .args(["clone"])
-            .arg(&bare)
-            .arg(&work)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false),
-        "git clone (seed checkout) must succeed"
-    );
-    std::fs::write(work.join("README.md"), "seed").expect("write seed file");
-    for args in [
-        vec!["-C", work.to_str().unwrap(), "add", "."],
-        vec![
-            "-C",
-            work.to_str().unwrap(),
-            "-c",
-            "user.email=connector-test@example.com",
-            "-c",
-            "user.name=connector-test",
-            "commit",
-            "-m",
-            "seed",
-        ],
-        vec!["-C", work.to_str().unwrap(), "push", "origin", "main"],
-    ] {
-        assert!(
-            Command::new("git")
-                .args(&args)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false),
-            "git {args:?} must succeed"
-        );
+/// Why (#6000 / ADR-0055): the daemon no longer clones anything for a session,
+/// so [`create_session_full_lifecycle`] must hand it a local checkout that
+/// already exists. Placing that checkout at exactly
+/// `<repos-root>/<owner>/<repo>` makes `managed_checkout::resolve_placement`
+/// return it unchanged, so no base clone is attempted and the test still
+/// touches no network.
+/// What: creates `<root>/<owner>/<repo>`, initialises it with one commit on
+/// `main` and a GitHub `origin` remote (never fetched — only parsed for the
+/// owner/repo identity), and returns its path.
+/// Test: used by `create_session_full_lifecycle`.
+fn managed_checkout_in(root: &std::path::Path, owner: &str, repo: &str) -> String {
+    let dir = root.join(owner).join(repo);
+    std::fs::create_dir_all(&dir).expect("managed checkout dir");
+    let origin = format!("https://github.com/{owner}/{repo}");
+    let setup: Vec<Vec<&str>> = vec![
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "connector-test@example.com"],
+        vec!["config", "user.name", "connector-test"],
+        vec!["remote", "add", "origin", &origin],
+    ];
+    for args in setup {
+        let out = Command::new("git")
+            .args(&args)
+            .current_dir(&dir)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?} must succeed");
     }
-    let url = format!("file://{}", bare.display());
-    (scratch, url)
+    std::fs::write(dir.join("README.md"), "seed").expect("write seed file");
+    for args in [vec!["add", "."], vec!["commit", "-q", "-m", "seed"]] {
+        let out = Command::new("git")
+            .args(&args)
+            .current_dir(&dir)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?} must succeed");
+    }
+    dir.to_string_lossy().into_owned()
 }
 
 /// `CreateSessionReq::backend` carrying `BackendParams::Tcode` must be
@@ -384,15 +368,17 @@ async fn delegate_unknown_session_is_backend_error() {
 
 /// End-to-end: create -> list -> status -> send_input (via
 /// [`ConnectorTestKit::assert_basic_lifecycle`]) -> attach -> delegate,
-/// against a REAL daemon spawn (real git clone via `RealGitBackend`, faked
-/// tmux via `FakeNoopTmuxDriver`).
+/// against a REAL daemon spawn (faked tmux via `FakeNoopTmuxDriver`).
+///
+/// #6000 / ADR-0055: the daemon clones nothing, so `repo_url` is the managed
+/// checkout [`managed_checkout_in`] stands up under the same isolated root.
 ///
 /// `#[serial_test::serial]` (#3450): this test mutates the process-global
-/// `TRUSTY_MPM_WORKSPACE_ROOT` env var — see the override comment below.
+/// `TRUSTY_MPM_WORKSPACE_ROOT` and `TRUSTY_MPM_REPOS_ROOT` env vars — see the
+/// override comment below.
 #[tokio::test]
 #[serial_test::serial]
 async fn create_session_full_lifecycle() {
-    let (_scratch, repo_url) = local_bare_repo();
     let (_daemon_root, url) = spawn_test_daemon().await;
     let connector = TmConnector::with_daemon_url(url.clone());
 
@@ -406,22 +392,30 @@ async fn create_session_full_lifecycle() {
     // `TRUSTY_MPM_WORKSPACE_ROOT` is unset — completely bypassing whatever
     // isolated root this test's `DaemonState` was built with. Compounding
     // this, `parse_github_path` treats ANY multi-segment URL (not just a
-    // `github.com` one) as an owner/repo pair, so the `file://<scratch
-    // tempdir>/origin.git` URL from `local_bare_repo()` launders the scratch
-    // tempdir's OWN random name into "owner" — the exact
-    // `~/trusty-mpm-projects/<tempdir-name>/origin/.base/...` shape observed
-    // live in #3450. Pointing `TRUSTY_MPM_WORKSPACE_ROOT` at the SAME
-    // hermetic `_daemon_root` this test already uses closes that gap.
+    // `github.com` one) as an owner/repo pair, so a `file://` URL used to
+    // launder a scratch tempdir's OWN random name into "owner" — the
+    // `~/trusty-mpm-projects/<tempdir-name>/origin/...` shape observed live in
+    // #3450. Pointing both roots at the SAME hermetic `_daemon_root` this test
+    // already uses closes that gap; `TRUSTY_MPM_REPOS_ROOT` is pinned too
+    // because `managed_checkout_for` reads it FIRST (#6000 — the placement
+    // resolver, not the removed provisioner, is what decides the path now).
     let prev_workspace_root =
         std::env::var(crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV).ok();
+    let prev_repos_root = std::env::var(REPOS_ROOT_ENV).ok();
     unsafe {
         std::env::set_var(
             crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV,
             _daemon_root.path(),
         );
+        std::env::set_var(REPOS_ROOT_ENV, _daemon_root.path());
     }
 
-    // #3965: the REAL `spawn_managed_cloned` handler this test drives also
+    // #6000 / ADR-0055: the checkout must EXIST before the spawn, and must sit
+    // exactly where `resolve_placement` expects, so the placement resolver
+    // returns it unchanged and no clone is attempted.
+    let repo_url = managed_checkout_in(_daemon_root.path(), "an-owner", "a-repo");
+
+    // #3965: the REAL spawn handler this test drives also
     // calls `session_launch::prepare_session_with_repo_url` /
     // `home_trust_seed::preseed_home_trust`, which seed `$HOME/.claude.json`
     // via the REAL process `$HOME` — a DIFFERENT resolution path from the
@@ -447,14 +441,14 @@ async fn create_session_full_lifecycle() {
     // NOT `ConnectorTestKit::assert_basic_lifecycle` (issue #3603 follow-up):
     // that helper's `send_input` step hard-asserts success, which assumes the
     // spawned session reaches `Active`. This test drives the REAL
-    // `spawn_managed_cloned` handler (module docs above), which calls the
+    // spawn handler (module docs above), which calls the
     // REAL `ClaudeCodeAdapter::spawn` — unlike every other tmux operation
     // here, that is NOT faked by `FakeNoopTmuxDriver`, and it resolves an
     // actual `claude` binary on `PATH`/well-known dirs
     // (`ClaudeCodeAdapter::resolve_claude`). On a developer machine with
     // Claude Code installed this succeeds and the record reaches `Active`;
     // on a CI runner with no `claude` binary it fails and
-    // `spawn_managed_cloned` calls `mark_errored`, leaving the record
+    // the spawn handler calls `mark_errored`, leaving the record
     // `Errored`. Before #3603's send_input readiness gate, this test's
     // `assert_basic_lifecycle` call "passed" in BOTH cases only because
     // `send_input` had no Provisioning/Errored guard at all — on an Errored
@@ -537,6 +531,10 @@ async fn create_session_full_lifecycle() {
     // Restore the env var immediately after the one call that provisions a
     // workspace — attach/delegate below never re-provision.
     unsafe {
+        match prev_repos_root {
+            Some(v) => std::env::set_var(REPOS_ROOT_ENV, v),
+            None => std::env::remove_var(REPOS_ROOT_ENV),
+        }
         match prev_workspace_root {
             Some(v) => std::env::set_var(crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV, v),
             None => std::env::remove_var(crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV),

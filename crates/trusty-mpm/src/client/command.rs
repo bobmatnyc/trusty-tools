@@ -158,7 +158,7 @@ pub enum TrustyCommand {
     /// What: the repo URL, git ref, task description, and optional name/runtime
     /// hints POSTed to `POST /api/v1/sessions/managed`.
     ManagedNew {
-        /// Repository URL to provision the session workspace from.
+        /// Absolute path to an EXISTING local directory the session runs in (ADR-0055).
         repo_url: String,
         /// Git branch or ref to check out.
         git_ref: String,

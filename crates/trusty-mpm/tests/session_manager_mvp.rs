@@ -15,21 +15,17 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use trusty_mpm::provisioner::{FakeGitBackend, WorkspaceProvisioner};
+use trusty_mpm::provisioner::FakeGitBackend;
 use trusty_mpm::session_manager::{
     ManagedError, ManagedSessionId, ManagedTmuxDriver, SessionManager,
 };
 
 // ── RAII HOME guard (#3965) ─────────────────────────────────────────────────
 //
-// Why: `WorkspaceProvisioner::provision`/`provision_in` call
-// `core::home_trust_seed::preseed_home_trust` UNCONDITIONALLY — even under
-// `without_prepare()` — because that seed sits BEFORE the
-// `if !self.prepare { return ... }` gate in `provisioner/workspace.rs`. It
-// resolves `~/.claude.json` from the REAL process `$HOME`, not from the
-// provisioner's `workspace_root`, so every test in this file driving
-// `.provision(...)`/`.provision_in(...)` must pin `$HOME` to its own
-// hermetic root or it writes into the operator's real `~/.claude.json`.
+// Why: a test that stands up a workspace and creates a session record for it
+// reaches `~/.claude.json` through code resolving the REAL process `$HOME`,
+// not the test's own root, so it writes into the operator's real
+// `~/.claude.json` unless `$HOME` is pinned.
 // Mirrors the identical pattern in `tests/standalone_isolation.rs`.
 // `std::env::set_var`/`remove_var` are `unsafe` in Rust 2024
 // (thread-unsafe), so every caller pairs this guard with
@@ -161,30 +157,6 @@ impl ManagedTmuxDriver for LiveTrackingTmux {
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(self.live.lock().unwrap().iter().cloned().collect())
     }
-}
-
-#[test]
-#[serial_test::serial]
-fn provisioner_isolates_workspace_under_root() {
-    let root = TempDir::new().unwrap();
-    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
-    // `preseed_home_trust` fires unconditionally in `provision`, even under
-    // `without_prepare()`.
-    let _home = HomeGuard::set(root.path());
-    // Skip the global `prepare_session` deploy — this test verifies path
-    // isolation only and must not touch the shared `~/.claude/` tree.
-    let prov = WorkspaceProvisioner::without_prepare(FakeGitBackend::new(), root.path().to_owned());
-    let id = ManagedSessionId::new();
-
-    let ws = prov
-        .provision(&id, "https://github.com/owner/trusty-tools", "main", "task")
-        .expect("provision");
-
-    // The workspace must live under the mpm-owned root and be id-scoped.
-    assert!(ws.path.starts_with(root.path()));
-    assert!(ws.path.to_string_lossy().contains(&id.to_string()));
-    assert_eq!(ws.repo_url, "https://github.com/owner/trusty-tools");
-    assert_eq!(ws.branch, "main");
 }
 
 #[test]
@@ -374,22 +346,21 @@ async fn front_gate_clear_pending_decision_no_injection() {
 // ── Handler-level anti-stub tests ────────────────────────────────────────────
 //
 // These tests call the critical path that the `spawn_session` HTTP handler
-// executes: (1) WorkspaceProvisioner::provision via FakeGitBackend — proves
-// workspace_path is set, is non-null, and lives under the expected root;
-// (2) ClaudeCodeAdapter::spawn via RecordingTmux — proves `env -u
-// ANTHROPIC_API_KEY claude` is sent to the pane. Any regression that stubs
-// these calls would break these assertions.
+// executes: (1) the workspace path is set, is non-null, and lives under the
+// expected root; (2) ClaudeCodeAdapter::spawn via RecordingTmux — proves
+// `env -u ANTHROPIC_API_KEY claude` is sent to the pane. Any regression that
+// stubs these calls would break these assertions.
 
 use trusty_mpm::runtime::{ClaudeCodeAdapter, RuntimeAdapter};
 
-/// Verify provision+spawn critical path wiring.
+/// Verify the workspace+spawn critical path wiring.
 ///
-/// Why: the `spawn_session` handler must ACTUALLY call provisioner and adapter;
-/// a stub that skips provision/spawn would have no workspace_path and no send
-/// on the recording tmux.
-/// What: runs the full create/provision/spawn sequence with FakeGitBackend and
-/// RecordingTmux, asserts workspace_path is non-null under the temp root, and
-/// asserts `env -u ANTHROPIC_API_KEY claude` was sent to the tmux pane.
+/// Why: the `spawn_session` handler must ACTUALLY record the workspace and call
+/// the adapter; a stub that skips either would have no workspace_path and no
+/// send on the recording tmux.
+/// What: runs the full create/record/spawn sequence against RecordingTmux,
+/// asserts workspace_path is non-null under the temp root, and asserts
+/// `env -u ANTHROPIC_API_KEY claude` was sent to the tmux pane.
 /// Test: this function IS the test.
 #[tokio::test]
 #[serial_test::serial]
@@ -423,37 +394,15 @@ async fn handler_spawn_wires_provision_and_spawn() {
         .await
         .expect("create");
 
-    // Step 2: provision workspace (same as handler step 2).
-    let prov = WorkspaceProvisioner::without_prepare(
-        FakeGitBackend::new(),
-        workspace_root_dir.path().to_owned(),
-    );
-    let prepared = prov
-        .provision(&record.id, repo_url, git_ref, task)
-        .expect("provision");
-
-    // workspace_path must be non-null and live under the temp root.
-    assert!(
-        prepared.path.starts_with(workspace_root_dir.path()),
-        "workspace must be under the expected root; got {}",
-        prepared.path.display()
-    );
-    assert!(
-        prepared
-            .path
-            .to_string_lossy()
-            .contains(&record.id.to_string()),
-        "workspace path must include the session id for isolation"
-    );
-    assert!(
-        prepared.path.exists(),
-        "FakeGitBackend must have created the directory"
-    );
+    // #6000 / ADR-0055: the handler no longer provisions a workspace — it is
+    // handed one that already exists. Stand up the directory the spawn runs in.
+    let prepared_path = workspace_root_dir.path().join(record.id.to_string());
+    std::fs::create_dir_all(&prepared_path).expect("workspace dir");
 
     // Step 3: update workspace_path in the record.
     mgr.set_workspace(
         &record.id,
-        prepared.path.clone(),
+        prepared_path.clone(),
         trusty_mpm::session_manager::ManagedSessionState::Active,
     )
     .await
@@ -472,22 +421,22 @@ async fn handler_spawn_wires_provision_and_spawn() {
     // not the binary availability.
     let _ = adapter.spawn(
         &record.tmux_name,
-        &prepared.path,
+        &prepared_path,
         task,
         &record.id.to_string(),
         &[],
     );
 
-    // Verify that the workspace directory was actually created on disk by the
-    // FakeGitBackend. This is the non-optional anti-stub assertion: a stub
-    // handler that skipped provision would have no directory at this path.
+    // The recorded workspace must exist on disk. This is the non-optional
+    // anti-stub assertion: a handler that recorded a path it never stood up
+    // would have no directory here.
     assert!(
         after
             .workspace_path
             .as_ref()
             .map(|p| p.exists())
             .unwrap_or(false),
-        "provisioned workspace directory must exist on disk (FakeGitBackend creates it)"
+        "the recorded workspace directory must exist on disk"
     );
 
     // On machines with `claude` in PATH the adapter send is also recorded;
@@ -590,8 +539,8 @@ async fn handler_activity_cache_hit() {
 /// Why: before the fix, `spawn_session` called `mgr.create(cwd=None)` which
 /// defaulted to `dirs::home_dir()`. This meant `tmux new-session -c $HOME` and
 /// claude opened in the wrong directory, breaking workspace isolation.
-/// What: exercises the corrected handler flow — pre-generate id, provision
-/// (FakeGitBackend), `create_with_id(cwd=workspace_path)` — and asserts the
+/// What: exercises the corrected handler flow — pre-generate id, stand up the
+/// workspace, `create_with_id(cwd=workspace_path)` — and asserts the
 /// `create_session` call was recorded with cwd == workspace_path.
 /// Test: this function IS the test.
 #[tokio::test]
@@ -615,15 +564,10 @@ async fn handler_spawn_creates_tmux_at_workspace_cwd() {
     // Simulate the fixed handler sequence: pre-generate id, provision, then
     // create_with_id(cwd = workspace_path).
     let session_id = ManagedSessionId::new();
-    let prov = WorkspaceProvisioner::without_prepare(
-        FakeGitBackend::new(),
-        workspace_root_dir.path().to_owned(),
-    );
-    let prepared = prov
-        .provision(&session_id, repo_url, git_ref, task)
-        .expect("provision");
-
-    let workspace_path = prepared.path.clone();
+    // #6000 / ADR-0055: the handler no longer provisions a workspace — it is
+    // handed one that already exists. Stand up the directory the spawn runs in.
+    let workspace_path = workspace_root_dir.path().join(session_id.to_string());
+    std::fs::create_dir_all(&workspace_path).expect("workspace dir");
 
     let record = mgr
         .create_with_id(
@@ -652,7 +596,7 @@ async fn handler_spawn_creates_tmux_at_workspace_cwd() {
     assert_eq!(
         cwd,
         &workspace_path.to_string_lossy().to_string(),
-        "tmux session cwd must equal the provisioned workspace path, not $HOME"
+        "tmux session cwd must equal the session workspace path, not $HOME"
     );
 
     // Must NOT be $HOME.
@@ -670,73 +614,6 @@ async fn handler_spawn_creates_tmux_at_workspace_cwd() {
         "workspace must be under the mpm workspace root; got {}",
         workspace_path.display()
     );
-}
-
-/// Live end-to-end test against real tmux + git.
-///
-/// Why: the unit tests stub tmux and git; this test verifies the real adapters
-/// against an actual `tmux` binary and a temporary bare git repo. It is
-/// `#[ignore]` so CI (which lacks tmux/git guarantees) stays green; run locally
-/// with `cargo test -p trusty-mpm -- --include-ignored`.
-/// What: provisions a workspace from a temp bare repo and asserts the checkout
-/// directory exists with the expected isolation properties.
-/// Test: this function IS the test.
-#[test]
-#[ignore = "requires a live git binary; run with --include-ignored"]
-fn live_provision_real_repo() {
-    use std::process::Command;
-    use trusty_mpm::provisioner::RealGitBackend;
-
-    let scratch = TempDir::new().unwrap();
-    let bare = scratch.path().join("origin.git");
-    // Create a bare repo with one commit on `main`.
-    let work = scratch.path().join("seed");
-    assert!(
-        Command::new("git")
-            .args(["init", "--bare", "-b", "main"])
-            .arg(&bare)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false),
-        "git init --bare must succeed"
-    );
-    assert!(
-        Command::new("git")
-            .args(["clone"])
-            .arg(&bare)
-            .arg(&work)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    );
-    std::fs::write(work.join("README.md"), "seed").unwrap();
-    for args in [
-        vec!["-C", work.to_str().unwrap(), "add", "."],
-        vec![
-            "-C",
-            work.to_str().unwrap(),
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "-m",
-            "seed",
-        ],
-        vec!["-C", work.to_str().unwrap(), "push", "origin", "main"],
-    ] {
-        let _ = Command::new("git").args(&args).status();
-    }
-
-    let root = TempDir::new().unwrap();
-    let prov = WorkspaceProvisioner::new(RealGitBackend::default(), root.path().to_owned());
-    let id = ManagedSessionId::new();
-    let repo_url = format!("file://{}", bare.display());
-    let ws = prov
-        .provision(&id, &repo_url, "main", "live task")
-        .expect("provision real repo");
-    assert!(ws.path.exists());
-    assert!(ws.path.join("README.md").exists());
 }
 
 // ── #1203: tcode-backed managed session integration ─────────────────────────

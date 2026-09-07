@@ -21,7 +21,7 @@
 //! inferred later.
 //!
 //! DETECTION ONLY. It reads; it never repairs, moves, or deletes.
-//! `provisioner::workspace::base_lock::stale_base_dir_error` already settles
+//! `inproject::migrate_old_layout_aside` already settles
 //! the repair side by refusing to touch a directory that may hold live
 //! worktrees, and this probe's remediation text points at the same quarantine
 //! discipline rather than inventing a second answer.

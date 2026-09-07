@@ -1,5 +1,7 @@
 # Trusty-Tools Installation Tiers — Draft Reference Material
 
+> **ADR-0055 (#6000):** `tm sessions new` no longer accepts a remote URL — trusty-mpm clones no repository and creates no worktree for a session. Clone the repository yourself first, then pass the resulting local path. Every `tm sessions new https://…` line below needs that two-step treatment before it will run.
+
 **Status:** Draft input for Bob's live-environment walkthrough documentation.  
 **Date:** 2026-07-26  
 **Purpose:** Structured reference for two coherent installation tiers; Bob will synthesize the final walkthrough prose.

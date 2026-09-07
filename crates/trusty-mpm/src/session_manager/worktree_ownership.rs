@@ -392,7 +392,7 @@ pub(crate) fn find_agent_worktree(store: &Path, agent_id: &str) -> Option<std::p
 /// Why: both real sentinel WRITE sites write the sentinel BEFORE the owning
 /// session's `SessionRecord` is persisted — real I/O (git clone/worktree-add,
 /// `prepare_session`) runs in between (`daemon::managed_routes::lifecycle::
-/// spawn_managed_cloned` and `spawn_managed_inproject`). An orphan-GC sweep
+/// spawn_managed_inproject` and `spawn_managed_on_main`). An orphan-GC sweep
 /// landing in that window would see "owner not found" and, absent this
 /// grace window, wrongly conclude the brand-new worktree is ownerless and
 /// reclaim it out from under its own provisioning. 10 minutes is a fixed,
@@ -419,7 +419,7 @@ impl SessionManager {
     /// is set post-creation (mirroring the existing `set_workspace_owned`
     /// precedent) rather than threaded through the many `create_with_id`/
     /// `create_with_reserved_name` call sites, so only the two real
-    /// provisioning call sites (`spawn_managed_cloned`, `spawn_managed_inproject`
+    /// provisioning call sites (`spawn_managed_inproject`, `spawn_managed_on_main`
     /// in `daemon::managed_routes::lifecycle`) need to call it. Every other
     /// creation path (local-path spawn, adopt, tests) leaves the field at its
     /// `#[serde(default)]` `None` — legacy/owner-unknown, the safe default.

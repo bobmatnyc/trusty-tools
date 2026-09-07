@@ -21,8 +21,8 @@
 //! This is a `#[cfg(test)]` module, so it never ships.
 //!
 //! Test: every caller — `core::memory_import::tests`,
-//! `tui::coordinator::tests`, `provisioner::identity_seed::tests`,
-//! `daemon::doctor_tests`, `daemon::doctor_search_pin_tests`,
+//! `tui::coordinator::tests`, `daemon::doctor_tests`,
+//! `daemon::doctor_search_pin_tests`,
 //! `session_manager::search_gc_guard_tests`,
 //! `session_manager::index_delete_guard::tests`.
 

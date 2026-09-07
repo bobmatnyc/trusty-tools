@@ -166,7 +166,7 @@ impl WorkstreamConnector for TmConnector {
     /// intentional, not a data-loss bug).
     ///
     /// The call carries an explicit [`PROVISION_REQUEST_TIMEOUT`] per-request
-    /// override (#4488). The daemon runs `WorkspaceProvisioner::provision`
+    /// override (#4488). The daemon runs the session-preparation flow
     /// SYNCHRONOUSLY inside this request, so its latency is a git clone plus a
     /// worktree add plus an agent deploy plus a harness spawn — minutes in the
     /// worst case, and ~9.5s even for this crate's own hermetic

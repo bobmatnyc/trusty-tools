@@ -338,7 +338,7 @@ pub(crate) async fn launch(
     let pm_model = trusty_mpm::core::model_inject::resolve_pm_model(&mpm_cfg, None);
 
     // Build the `--append-system-prompt` text from the managed clone (where the
-    // framework was deployed by provision_in). Style is not supported in managed
+    // framework was deployed at session prep). Style is not supported in managed
     // mode so we always pass `None` here.
     let prompt =
         trusty_mpm::core::session_launch::build_system_prompt_for_with_style(&managed_path, None);

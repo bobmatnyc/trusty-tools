@@ -22,7 +22,7 @@ use crate::session_manager::ManagedSessionId;
 ///
 /// Why (#1913): [`spawn_managed_inproject`] has no clone step to wrap this call
 /// in — unlike `spawn_managed`'s clone branch and `spawn_managed_local`, which
-/// both get preparation "for free" as part of `WorkspaceProvisioner::provision_in`
+/// both got preparation "for free" as part of the clone provisioner
 /// — so it must invoke [`crate::core::session_launch::prepare_session_with_repo_url`]
 /// directly. Extracted to a named, `fw`-parameterised function (rather than
 /// inlined) so it is unit-testable against a hermetic [`crate::core::paths::FrameworkPaths::under`]
@@ -34,7 +34,7 @@ use crate::session_manager::ManagedSessionId;
 /// (`report.skill_deploy.deployed.len()` — #1917; previously only the agent
 /// count was logged, so a skill-deploy no-op was invisible here too). On
 /// failure, logs a `tracing::warn!` and returns — mirroring
-/// `WorkspaceProvisioner::provision_in`'s non-fatal handling of the identical
+/// the clone provisioner's non-fatal handling of the identical
 /// call, so a prep failure never blocks the session from spawning.
 /// Test: `prepare_inproject_session_writes_statusline` in this module's `tests`
 /// submodule.

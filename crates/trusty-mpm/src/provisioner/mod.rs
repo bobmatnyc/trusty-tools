@@ -1,25 +1,20 @@
-//! Workspace provisioner for isolated agent session workspaces.
+//! Git operations behind the framework-catalog sync.
 //!
-//! Why: agent sessions must never share or collide with an operator's existing
-//! project checkout; each session needs a clean, isolated workspace with its
-//! own .mcp.json, .claude/settings.json, and deployed agents/skills.
-//! What: the [`WorkspaceProvisioner`] clones a repo into
-//! ~/.trusty-mpm/workspaces/<project>/<session-id>/, runs prepare_session,
-//! and returns a [`PreparedWorkspace`] struct. The [`GitBackend`] trait seam
-//! allows unit tests to substitute a [`FakeGitBackend`] without a real remote.
-//! Test: unit tests in workspace.rs use FakeGitBackend; integration test
-//! test_provision_real_repo uses a temp bare repo (marked `#[ignore]`).
+//! Why: this module used to own the session-workspace provisioner. ADR-0055
+//! (#6000) removed it — trusty-mpm clones no repository and creates no worktree
+//! for a session, and a `session_new` `repo_url` that is not already a local
+//! directory is refused by
+//! [`crate::core::local_repo_url::require_local_repo_url`]. The [`GitBackend`]
+//! seam survives because `content::catalog_sync` still clones and refreshes the
+//! framework catalog through it.
+//! What: re-exports [`GitBackend`], [`RealGitBackend`], the [`FakeGitBackend`]
+//! test double, and [`ProvisionError`].
+//! Test: unit tests in `workspace/tests.rs` plus the catalog-sync tests.
 //!
-//! [`WorkspaceProvisioner`]: crate::provisioner::WorkspaceProvisioner
-//! [`PreparedWorkspace`]: crate::provisioner::PreparedWorkspace
 //! [`GitBackend`]: crate::provisioner::GitBackend
 //! [`FakeGitBackend`]: crate::provisioner::FakeGitBackend
 
 mod clone_progress;
-mod identity_seed;
 pub mod workspace;
 
-pub use workspace::{
-    FakeGitBackend, GitBackend, PreparedWorkspace, ProvisionError, RealGitBackend,
-    WorkspaceProvisioner,
-};
+pub use workspace::{FakeGitBackend, GitBackend, ProvisionError, RealGitBackend};

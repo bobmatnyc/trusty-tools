@@ -46,7 +46,16 @@ impl CommandExecutor {
         }
     }
 
-    /// `managed-new` — spawn a managed session from a repo + ref + task.
+    /// `managed-new` — spawn a managed session in an existing local checkout.
+    ///
+    /// Why: since ADR-0055 (#6000) the daemon provisions no workspace of its
+    /// own, so a `repo_url` that is not already a directory on this host has
+    /// nowhere to run. Refusing here means `tm session new <url>` reports the
+    /// remedy immediately instead of after a round trip — and reports it even
+    /// when no daemon is reachable to answer.
+    /// What: applies [`crate::core::local_repo_url::require_local_repo_url`],
+    /// then POSTs the spawn request as before.
+    /// Test: `execute_managed_new_refuses_a_remote_repo_url` in `tests.rs`.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn managed_new(
         &self,
@@ -59,6 +68,11 @@ impl CommandExecutor {
         deliverable_id: Option<String>,
         force_new: bool,
     ) -> CommandResult {
+        // #6000 / ADR-0055: the same rule the daemon applies, applied one hop
+        // earlier so the refusal does not depend on a reachable daemon.
+        if let Err(e) = crate::core::local_repo_url::require_local_repo_url(&repo_url) {
+            return CommandResult::Error(format!("spawn failed: {e}"));
+        }
         let req = ManagedSpawnRequest {
             repo_url,
             git_ref,

@@ -10,11 +10,18 @@
 //! a CLI/SM-STDIO-origin spawn (`mcp_initiated: false`) is NEVER gated, even
 //! when MCP spawning is globally disabled (the default).
 //!
-//! No network / no real git clone: every case here is engineered to fail (or
-//! succeed) BEFORE the real-clone branch is reached — either the gate itself
-//! short-circuits, or the target is a local non-git directory that fails fast
-//! at "no git origin remote" (`spawn_managed_local`), which is itself a strong
-//! signal the MCP gate was NOT the reason for the failure.
+//! No network and no clone: every case here is engineered to fail (or succeed)
+//! before any side effect — either the gate itself short-circuits, or the
+//! target is a local non-git directory that fails fast at "no git origin
+//! remote", which is itself a strong signal the MCP gate was NOT the reason for
+//! the failure.
+//!
+//! #6000 / ADR-0055: `repo_url` is a LOCAL DIRECTORY in every gated case here.
+//! A remote URL no longer reaches the gate — `spawn_managed` refuses it first,
+//! before anything else — so a remote-URL fixture would test the refusal rather
+//! than the gate. The ARIA shape survives the change unaltered: an LLM naming an
+//! arbitrary target it was never authorised to spawn, which is now a directory
+//! path rather than a URL.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
 use serial_test::serial;
@@ -111,10 +118,12 @@ async fn mcp_initiated_spawn_rejected_by_default_creates_nothing() {
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
     );
 
+    // #6000: a local directory, so the gate is what refuses — see the module doc.
+    let target = TempDir::new().expect("target tempdir");
     let err = spawn_managed(
         &state,
         trusty_mpm::session_manager::ManagedSessionId::new(),
-        base_params("https://github.com/duettoresearch/aria", true),
+        base_params(&target.path().to_string_lossy(), true),
     )
     .await
     .expect_err("MCP-initiated spawn must be refused when spawning is disabled by default");
@@ -148,10 +157,12 @@ async fn mcp_initiated_spawn_rejected_for_unregistered_repo_when_enabled() {
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
     );
 
+    // #6000: a local directory, so the gate is what refuses — see the module doc.
+    let target = TempDir::new().expect("target tempdir");
     let err = spawn_managed(
         &state,
         trusty_mpm::session_manager::ManagedSessionId::new(),
-        base_params("https://github.com/duettoresearch/aria", true),
+        base_params(&target.path().to_string_lossy(), true),
     )
     .await
     .expect_err("an unregistered repo must be refused even when enabled");
@@ -175,9 +186,16 @@ async fn mcp_initiated_spawn_rejected_for_unregistered_repo_when_enabled() {
 /// segment ("trusty-tools") matched — reproducing the exact ARIA-incident
 /// shape (an arbitrary, LLM-supplied `repo_url` gets cloned) through the
 /// allowlist meant to prevent it. `spawn_managed` must reject this end-to-end.
-/// What: registers a legitimate project, enables spawning, then targets an
-/// impersonating URL with the same repo name but a different owner/host;
-/// asserts the call is refused as "unregistered" with zero side effects.
+/// What: registers a legitimate project, enables spawning, then targets the
+/// impersonating URL and asserts the call is refused with zero side effects.
+///
+/// #6000 / ADR-0055: the refusal now comes from the local-path requirement
+/// rather than the gate, because a remote URL no longer reaches the gate at
+/// all. The end-to-end property this test exists for — an impersonating URL
+/// spawns NOTHING — is unchanged and still proven here; the gate's own
+/// owner+repo identity matching is covered by
+/// `mcp_spawn_gate::tests::is_known_repo_rejects_same_repo_name_different_owner`,
+/// which calls `is_known_repo` directly and is unaffected.
 /// Test: this function IS the test.
 #[tokio::test]
 #[serial]
@@ -216,7 +234,10 @@ async fn mcp_initiated_spawn_rejects_repo_name_impersonation() {
     )
     .await
     .expect_err("a same-repo-name-different-owner URL must be refused, not impersonate");
-    assert!(err.contains("unregistered"), "{err}");
+    assert!(
+        err.contains("ADR-0055"),
+        "the impersonating URL must be refused outright; got: {err}"
+    );
 
     let mgr = state.session_manager().await;
     assert!(

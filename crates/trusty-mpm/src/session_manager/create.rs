@@ -334,7 +334,7 @@ impl SessionManager {
             pane_id,
             injection_status: Default::default(),
             // #3649: owner-unknown by default. The two real provisioning call
-            // sites (`spawn_managed_cloned`, `spawn_managed_inproject` in
+            // sites (`spawn_managed_inproject`, `spawn_managed_on_main` in
             // `daemon::managed_routes::lifecycle`) call
             // `SessionManager::set_worktree_owner` immediately after this
             // constructor returns, mirroring the existing `set_workspace_owned`

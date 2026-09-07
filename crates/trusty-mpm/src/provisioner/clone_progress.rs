@@ -90,8 +90,7 @@ pub(crate) fn parse_git_progress(line: &str) -> Option<String> {
 /// meaningful failing-first test for that change; the underlying
 /// `disclaimed_stderr_piped_spawn` wrapper is unit-tested directly (see its
 /// own doc). Exercised end-to-end via a real `git clone` through this exact
-/// function by `provisioner::workspace::tests::ensure_base_checkout_recovers_from_concurrent_race`
-/// and `ensure_base_checkout_rejects_stale_non_bare_directory`; the pure
+/// function by `content::catalog_sync`'s clone coverage; the pure
 /// parse logic is unit-tested by `parse_git_progress`'s own `tests` module
 /// below.
 pub(crate) fn clone_with_progress(cmd: Command) -> std::io::Result<CloneOutcome> {
