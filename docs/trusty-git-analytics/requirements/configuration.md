@@ -16,6 +16,7 @@ developer_aliases: {}     # dict[str, list[str]] — inline identity alias map
 aliases_file: ~           # path — external YAML alias file
 fuzzy_identity_fallback: ~ # bool — Tier-3/4 fuzzy identity fallback (issue #4251)
 analysis: {}              # AnalysisConfig
+audit: {}                 # AuditConfig — `tga audit` settings (issue #5482)
 output: {}                # OutputConfig
 cache: {}                 # CacheConfig
 jira: {}                  # JIRAConfig
@@ -331,6 +332,30 @@ downstream with no signal that it happened.
 | `directory` | path | `~/.tga-cache` |
 | `ttl_hours` | u32 | 168 (7 days) |
 | `max_size_mb` | u32 | 1024 |
+
+### `audit` — AuditConfig (added issue #5482)
+
+Settings for `tga audit`, the one-shot due-diligence sweep.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `window_weeks` | u32 | 52 (1 year) | Lookback window in ISO weeks, applied to the sweep's collect, classify, and pr-metrics stages |
+
+**Precedence** (highest first):
+
+1. `tga audit --weeks` — always wins.
+2. `audit.window_weeks:` in this config file.
+3. The 52-week default.
+
+```yaml
+# Example: a two-year engagement
+audit:
+  window_weeks: 104
+```
+
+The window is a real collection bound, not a report filter — a narrower window
+collects less. `trusty-audit` spawns `tga audit` with no `--weeks`, so this field
+is the only way an engagement states its own window.
 
 ### `jira` — JIRAConfig
 

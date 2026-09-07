@@ -292,12 +292,50 @@ pub struct Config {
     #[serde(default)]
     pub llm: Option<LlmConfig>,
 
+    /// `tga audit` settings (`audit:` in YAML).
+    ///
+    /// Why (#5482): the audit window was reachable only through `tga audit
+    /// --weeks`, and `trusty-audit` spawns `tga audit` with no such flag — so
+    /// an engagement could not state its own lookback and every run collected
+    /// unbounded history. A config section is what a generated engagement
+    /// config can carry.
+    /// What: holds [`AuditConfig`]. Absent means "take every default".
+    /// Test: `tests::audit_window_weeks_*`.
+    #[serde(default)]
+    pub audit: Option<AuditConfig>,
+
     /// Filesystem path to the loaded config file, if any.
     ///
     /// Populated by [`Config::load`] and used to resolve relative paths
     /// (notably [`Config::aliases_file`]). Not serialized to YAML.
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
+}
+
+/// The lookback window `tga audit` uses when nothing else names one.
+///
+/// Why (#5482): one year, per the owner's stated default. It lives here rather
+/// than at the sweep's call site so the config accessor and the docs quote the
+/// same number.
+/// What: `52` ISO weeks.
+/// Test: `tests::audit_window_weeks_defaults_when_the_section_is_absent`.
+pub const DEFAULT_AUDIT_WINDOW_WEEKS: u32 = 52;
+
+/// `tga audit` configuration (`audit:` in YAML).
+///
+/// Why (#5482): see [`Config::audit`].
+/// What: the audit-specific settings an engagement config declares. Today that
+/// is the collection window alone.
+/// Test: `tests::audit_window_weeks_reads_the_config_value`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AuditConfig {
+    /// Limit the audit's collection and PR metrics to the last N ISO weeks.
+    ///
+    /// Absent means [`DEFAULT_AUDIT_WINDOW_WEEKS`]. `tga audit --weeks` still
+    /// overrides whatever is set here.
+    #[serde(default)]
+    pub window_weeks: Option<u32>,
 }
 
 /// Analysis pipeline configuration (forward-compat with Python schema).
@@ -1641,6 +1679,25 @@ impl Config {
         database_path::resolve(self.database.as_deref(), self.config_dir())
     }
 
+    /// The audit lookback window in ISO weeks, with the default folded in.
+    ///
+    /// Why (#5482): `audit.window_weeks` had no reader, so the only way to bound
+    /// an audit was `tga audit --weeks` — and `trusty-audit` spawns `tga audit`
+    /// without it. Resolving the default here rather than at the call site is
+    /// what keeps the sweep's two consumers (the collect stage and PR metrics)
+    /// reading one number instead of each applying its own fallback.
+    /// What: `audit.window_weeks` when set, else [`DEFAULT_AUDIT_WINDOW_WEEKS`].
+    /// The CLI flag outranks both, and applies that precedence in
+    /// [`crate::audit::run_full_sweep`].
+    /// Test: `tests::audit_window_weeks_reads_the_config_value`,
+    /// `tests::audit_window_weeks_defaults_when_the_section_is_absent`.
+    pub fn audit_window_weeks(&self) -> u32 {
+        self.audit
+            .as_ref()
+            .and_then(|a| a.window_weeks)
+            .unwrap_or(DEFAULT_AUDIT_WINDOW_WEEKS)
+    }
+
     /// Validate cross-field invariants of the config.
     ///
     /// # Errors
@@ -2032,5 +2089,30 @@ mod tests {
             alice_email, bob_email,
             "distinct members must not collide on the same canonical_email"
         );
+    }
+
+    /// #5482: an `audit:` section states the window, and the accessor reads it
+    /// from YAML rather than from a field a caller happened to set.
+    #[test]
+    fn audit_window_weeks_reads_the_config_value() {
+        let yaml = "repositories: []\naudit:\n  window_weeks: 13\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse audit section");
+
+        assert_eq!(cfg.audit_window_weeks(), 13);
+    }
+
+    /// An absent section, and a present section that names no window, both mean
+    /// one year — never "unbounded". Every config written before `audit:`
+    /// existed takes this path.
+    #[test]
+    fn audit_window_weeks_defaults_when_the_section_is_absent() {
+        assert_eq!(
+            Config::default().audit_window_weeks(),
+            DEFAULT_AUDIT_WINDOW_WEEKS
+        );
+        assert_eq!(DEFAULT_AUDIT_WINDOW_WEEKS, 52);
+
+        let cfg: Config = serde_yaml::from_str("repositories: []\naudit: {}\n").expect("parse");
+        assert_eq!(cfg.audit_window_weeks(), DEFAULT_AUDIT_WINDOW_WEEKS);
     }
 }

@@ -2,11 +2,12 @@
 
 use std::time::Instant;
 
+use chrono::{Duration, Utc};
 use clap::{Args as _, FromArgMatches, Parser};
 
 use crate::audit::{run_full_sweep, AuditSweepStats, StageStatus, SweepOptions, SweepStage};
 use crate::commands::audit::AuditArgs;
-use crate::core::config::Config;
+use crate::core::config::{AuditConfig, Config, DEFAULT_AUDIT_WINDOW_WEEKS};
 use crate::core::db::Database;
 use crate::core::progress::{ProgressBus, Stage};
 
@@ -257,6 +258,122 @@ async fn sweep_writes_reports_into_the_requested_directory() {
             out.join(expected).is_file(),
             "expected artifact {expected} missing from {}: {written:?}",
             out.display()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The audit window: CLI flag > config field > 52 weeks (#5482)
+// ---------------------------------------------------------------------------
+
+/// A config carrying only an audit window.
+fn config_with_window(window_weeks: Option<u32>) -> Config {
+    Config {
+        audit: Some(AuditConfig { window_weeks }),
+        ..Config::default()
+    }
+}
+
+/// Run a sweep over an empty database and return the pr-metrics stage's
+/// failure message.
+///
+/// Why: the message is where the resolved window becomes observable without a
+/// network or a populated repository. #6796 made an empty pr-metrics result an
+/// error, and its text branches on whether a cutoff was applied: with one it
+/// quotes the cutoff timestamp, without one it reports the table as empty. So
+/// the message says both THAT a window reached the stage and WHICH one.
+async fn pr_metrics_failure(config: &Config, options: &SweepOptions) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut db = Database::open(&dir.path().join("tga.db")).expect("open db");
+    let mut options = options.clone();
+    options.output = Some(dir.path().join("out"));
+
+    let stats = run_full_sweep(config, &mut db, &options, None)
+        .await
+        .expect("sweep");
+
+    let outcome = stats
+        .outcomes
+        .iter()
+        .find(|o| o.stage == SweepStage::PrMetrics)
+        .expect("pr-metrics stage ran");
+    match &outcome.status {
+        StageStatus::Failed(message) => message.clone(),
+        StageStatus::Succeeded => panic!("an empty database must fail pr-metrics (#6796)"),
+    }
+}
+
+/// The two UTC dates a cutoff `weeks` back can legitimately carry.
+///
+/// Why: the cutoff is `Utc::now() - weeks`, evaluated inside the sweep, so a run
+/// that straddles midnight UTC lands on the day after the one the test computed.
+/// Accepting both is what makes the assertion deterministic rather than a
+/// once-a-day flake.
+fn plausible_cutoff_dates(weeks: u32) -> [String; 2] {
+    let cutoff = Utc::now() - Duration::weeks(i64::from(weeks));
+    [
+        (cutoff - Duration::days(1)).format("%Y-%m-%d").to_string(),
+        cutoff.format("%Y-%m-%d").to_string(),
+    ]
+}
+
+/// Assert `message` quotes a cutoff `weeks` back — and therefore that the sweep
+/// handed pr-metrics exactly that window.
+fn assert_window_reached_pr_metrics(message: &str, weeks: u32) {
+    let dates = plausible_cutoff_dates(weeks);
+    assert!(
+        dates.iter().any(|d| message.contains(d.as_str())),
+        "expected a cutoff {weeks} week(s) back (one of {dates:?}) in: {message}"
+    );
+}
+
+/// #5482's first closure condition: the config field reaches the sweep with no
+/// CLI flag involved. Before this change `SweepOptions::weeks` was the only
+/// source, so `None` collected unbounded history and pr-metrics reported the
+/// table as empty rather than naming a window.
+#[tokio::test]
+async fn the_sweep_window_falls_back_to_the_config_field() {
+    let message = pr_metrics_failure(
+        &config_with_window(Some(3)),
+        &SweepOptions {
+            weeks: None,
+            ..SweepOptions::default()
+        },
+    )
+    .await;
+
+    assert_window_reached_pr_metrics(&message, 3);
+}
+
+/// #5482's second closure condition: no `audit:` section at all resolves to 52
+/// weeks, not to unbounded. This is the case `trusty-audit` actually runs — it
+/// spawns `tga audit` with no `--weeks`.
+#[tokio::test]
+async fn the_sweep_window_defaults_to_a_year_when_nothing_declares_one() {
+    let message = pr_metrics_failure(&Config::default(), &SweepOptions::default()).await;
+
+    assert_window_reached_pr_metrics(&message, DEFAULT_AUDIT_WINDOW_WEEKS);
+    assert_eq!(DEFAULT_AUDIT_WINDOW_WEEKS, 52);
+}
+
+/// The CLI flag outranks the config field — same precedence `--database`
+/// already has over `database:` in `main.rs`.
+#[tokio::test]
+async fn an_explicit_sweep_window_beats_the_config_field() {
+    let message = pr_metrics_failure(
+        &config_with_window(Some(40)),
+        &SweepOptions {
+            weeks: Some(2),
+            ..SweepOptions::default()
+        },
+    )
+    .await;
+
+    assert_window_reached_pr_metrics(&message, 2);
+    for stale in plausible_cutoff_dates(40) {
+        assert!(
+            !message.contains(stale.as_str()),
+            "the config's 40-week window should have been overridden: {message}"
         );
     }
 }

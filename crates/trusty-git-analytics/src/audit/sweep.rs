@@ -44,14 +44,23 @@ pub(crate) const TOTAL_STAGES: usize = 9;
 /// they are deliberately the only ones — DOC-67 §2 forbids a mid-run choice,
 /// and §9 fixes the stale-refs policy rather than exposing it as an option.
 /// What: the directory reports are written to, and an optional lookback
-/// window in ISO weeks applied to collection and PR metrics.
-/// Test: `super::tests::sweep_writes_reports_into_the_requested_directory`.
+/// window in ISO weeks applied to collection and PR metrics. Both are
+/// OVERRIDES — an unset field falls back to `Config`, never to "no bound"
+/// (#5482).
+/// Test: `super::tests::sweep_writes_reports_into_the_requested_directory`,
+/// `super::tests::the_sweep_window_falls_back_to_the_config_field`.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct SweepOptions {
     /// Directory for the stage-3 report output. `None` uses the config default.
     pub output: Option<PathBuf>,
-    /// Limit collection and PR metrics to the last N ISO weeks.
+    /// Override the lookback window applied to collection and PR metrics.
+    ///
+    /// #5482: `None` no longer means "unbounded" — it means "the caller stated
+    /// nothing", and the sweep falls back to [`Config::audit_window_weeks`]
+    /// (the `audit.window_weeks` config field, itself defaulting to
+    /// [`crate::core::config::DEFAULT_AUDIT_WINDOW_WEEKS`]). Set it only to
+    /// override the config.
     pub weeks: Option<u32>,
 }
 
@@ -80,6 +89,13 @@ pub struct SweepOptions {
 /// its pipeline, so its per-repository [`Stage::Collect`] events land there
 /// too. `None` emits nothing at all.
 ///
+/// #5482: the lookback window is resolved once, here — `options.weeks` when the
+/// caller set it, else `config.audit.window_weeks`, else 52 weeks — and the
+/// collect, classify, and pr-metrics stages are all handed that one value. A
+/// caller that passes no window therefore gets a bounded sweep rather than the
+/// whole of history, which is what `trusty-audit` spawning `tga audit` with no
+/// `--weeks` needs.
+///
 /// A failed STAGE is reported inside `AuditSweepStats`, never as `Err` —
 /// `Err` means the run could not be started at all. Callers must therefore check
 /// [`AuditSweepStats::any_failed`] rather than treating `Ok` as a clean pass —
@@ -94,7 +110,9 @@ pub struct SweepOptions {
 ///
 /// Test: `super::tests::sweep_runs_every_stage_in_order_and_survives_failures`,
 /// `super::tests::failed_stage_is_recorded_and_does_not_stop_the_sweep`,
-/// `super::tests::sweep_emits_progress_for_non_collection_stages`.
+/// `super::tests::sweep_emits_progress_for_non_collection_stages`,
+/// `super::tests::the_sweep_window_falls_back_to_the_config_field`,
+/// `super::tests::an_explicit_sweep_window_beats_the_config_field`.
 ///
 /// `SPEC-TGAUDIT-05~draft` §5 "Executed stage order" lists the nine stages this
 /// body runs, in this order (#5306). Changing the sequence here means changing
@@ -118,6 +136,11 @@ pub async fn run_full_sweep(
         std::fs::create_dir_all(dir)?;
     }
 
+    // #5482: resolve the lookback window ONCE — CLI flag, else the
+    // `audit.window_weeks` config field, else 52 weeks. Both consumers below
+    // read this local, so neither can apply a different fallback.
+    let weeks = Some(options.weeks.unwrap_or_else(|| config.audit_window_weeks()));
+
     let mut stats = AuditSweepStats::default();
     // #6130: read the declarations BEFORE the stage they describe, so a sweep
     // that dies mid-collect still leaves the record of what it was never going
@@ -129,7 +152,7 @@ pub async fn run_full_sweep(
 
     let t = begin(progress, &stats, SweepStage::Collect);
     let args = CollectArgs {
-        weeks: options.weeks,
+        weeks,
         // #5217: DOC-67 §9 — a one-shot org sweep cannot inherit `tga
         // collect`'s abort-on-fetch-failure default; a stale repo is a named
         // gap, not a reason to halt the other 199.
@@ -154,7 +177,7 @@ pub async fn run_full_sweep(
 
     let t = begin(progress, &stats, SweepStage::Classify);
     let args = ClassifyArgs {
-        weeks: options.weeks,
+        weeks,
         ..ClassifyArgs::default()
     };
     let result = classify::run(config.clone(), db, args).await;
@@ -185,7 +208,7 @@ pub async fn run_full_sweep(
     // directory itself — passing the directory makes it write a regular file
     // there and the report stage then cannot create the directory.
     let args = PrMetricsArgs {
-        weeks: options.weeks,
+        weeks,
         csv: true,
         output: options.output.as_ref().map(|d| d.join("pr-metrics.csv")),
     };
