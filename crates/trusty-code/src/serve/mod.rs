@@ -183,6 +183,10 @@ async fn build_router_at(
     data_dir: &std::path::Path,
 ) -> Result<(Router, Arc<SessionRegistry>, SharedWorkstreamStore)> {
     let sessions = Arc::new(SessionRegistry::new());
+    // #2074: materialize the embedded roster to `<project>/.trusty-code/agents/`
+    // before resolving the agents directory, so every shipped role has a file, a
+    // manifest entry, and a recorded origin. Projectless daemons write nothing.
+    crate::agents::deploy::deploy_and_log(binding.root());
     let agents_dir = binding.agents_dir();
 
     let mut workstream_store = WorkstreamStore::load_for_binding(data_dir, &binding)
