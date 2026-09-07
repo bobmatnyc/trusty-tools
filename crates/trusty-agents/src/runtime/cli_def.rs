@@ -274,8 +274,10 @@ pub(super) struct Cli {
     pub(super) service: Option<String>,
 
     /// #374: Run the search-as-a-service daemon. Owns the redb code-store
-    /// lock and serves /search/{health,query,index-file,remove-file,reindex}
-    /// over HTTP for the lifetime of the process. Used by other trusty-agents
+    /// lock and serves search.health, search.query, search.index_file,
+    /// search.remove_file and search.reindex as JSON-RPC over a hardened
+    /// Unix socket at ~/.trusty-agents/sockets/<project>.search.sock for the
+    /// lifetime of the process (#6433, ADR-0032). Used by other trusty-agents
     /// processes (REPL, sub-agents, --api server) to share a single warm
     /// index without re-opening the on-disk store per process.
     #[arg(long = "search-service", default_value_t = false)]
@@ -450,6 +452,42 @@ pub(super) fn argv_as_task_text(args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::should_force_plain_cli;
+
+    /// `--help` describes the search daemon's real transport (#6433).
+    ///
+    /// Why: this text is what an operator reads before starting the daemon,
+    /// and it named five HTTP routes and a port that no longer exist after
+    /// ADR-0032. A doc comment that is also user-facing output rots the same
+    /// way any other doc does, and nothing else in this crate reads it.
+    /// What: renders the long help and asserts it names the five JSON-RPC
+    /// methods and no longer claims HTTP for this flag.
+    #[test]
+    fn search_service_help_names_the_rpc_methods_not_http() {
+        use clap::CommandFactory;
+        let help = super::Cli::command().render_long_help().to_string();
+        for method in [
+            "search.health",
+            "search.query",
+            "search.index_file",
+            "search.remove_file",
+            "search.reindex",
+        ] {
+            assert!(help.contains(method), "--help must name {method}");
+        }
+        // Scoped to this flag's own paragraph: other flags (`--api`, `--bind`)
+        // legitimately still say HTTP, and asserting over the whole help would
+        // fail on them.
+        let paragraph = help
+            .split("--search-service")
+            .nth(1)
+            .expect("--search-service must appear in the help");
+        // Clap separates each argument's help with a blank line.
+        let paragraph = paragraph.split("\n\n").next().unwrap_or(paragraph);
+        assert!(
+            !paragraph.contains("HTTP"),
+            "the search daemon serves no HTTP; help said: {paragraph}"
+        );
+    }
 
     #[test]
     fn should_force_plain_cli_flag_alone() {

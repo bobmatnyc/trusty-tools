@@ -16,11 +16,14 @@ implementation work, out of scope for this update. Read ADR-0032 before
 treating any row below as prescriptive.
 
 > 🟡 **Progress note (2026-08-26, Refs #6277 / PR #6281, then #6287, then
-> #6286).** `trusty-review` was the first daemon through ADR-0032's path,
-> `trusty-analyze` the second and `trusty-memory` the third; all three rows
-> below reflect the UDS socket each now serves. The remaining three
-> (`trusty-search`, `trusty-agents`, `trusty-mpm`) have not migrated and their
-> rows still describe the pre-ADR-0032 live topology.
+> #6286; updated 2026-09-07 for #6433).** `trusty-review` was the first daemon
+> through ADR-0032's path, `trusty-analyze` the second and `trusty-memory` the
+> third; all three rows below reflect the UDS socket each now serves.
+> `trusty-agents` is partly through: its per-project **search daemon** moved in
+> #6433 and has its own row below, while its `--serve` API server has not and
+> keeps the pre-ADR-0032 row. `trusty-search` and `trusty-mpm` have not
+> migrated at all, and their rows still describe the pre-ADR-0032 live
+> topology.
 
 This is the authoritative reference for **who can reach which trusty-\* HTTP
 surface, from where, and what stops them.** It exists because the
@@ -99,7 +102,8 @@ the daemons' listener setup code moves independently of this doc.
 | **trusty-memory** | **No TCP listener.** One hardened Unix socket at `daemon_socket_path("trusty-memory")` (`transport/uds.rs`, #6286, ADR-0032). `7070`–`7079` are free again and the `http_addr` discovery files are deleted at every start | **N/A** — the trust boundary is the `0700` directory, the `0600` socket, and the `ensure_peer_is_self` uid check on every accepted connection. The router-wide `SelfOrigins` guard was browser-CSRF defence and has no meaning here | **No** — the `memory` proxy row is deleted (#6286): it resolved a base URL from an `http_addr` file the daemon no longer writes, so it could only forward to whatever now holds 7070 | Console-hosted; the embedded `ui/` is served by `trusty-console` | CLI, native MCP stdio bridge (a pure proxy forwarding JSON-RPC to the socket; no local tool logic), `trusty_common::memory_rpc` for every other crate |
 | **trusty-analyze** | **No TCP listener.** Serves `<data dir>/trusty-analyze/trusty-analyze.sock` (`trusty_common::daemon_socket_path`), bound through `bind_singleton_hardened` (#6287, ADR-0032) | **n/a** — `SelfOrigins`/`with_guarded_middleware` deliberately not ported, for the reason the `trusty-review` row gives. Same boundary: the `0700` directory, the `0600` socket, and `ensure_peer_is_self` on every accepted connection | **n/a** — the `analyze` proxy row was removed with the listener | No embedded UI served by this daemon — `ui/dist` is still tracked, and the console-hosted mount is a follow-up | CLI, the native MCP stdio bridge (an RPC client of this daemon's own socket), `trusty-console`'s `AnalyzeConnector`, `tctl`'s health probe, `tga`'s audit guard, `trusty-audit`'s grounding guard, and `trusty-review`'s `report --analyze` adapter — all over that socket. **No webhook surface** — `POST /webhooks/github` was retired in #5181; `/sse` and the `--mcp-port` second listener went with the migration |
 | **trusty-review** | **No TCP listener.** Serves `<data dir>/trusty-review.sock` (`trusty_common::daemon_socket_path`), bound through `bind_singleton_hardened` (#6277, ADR-0032) | **n/a** — `SelfOrigins`/`with_guarded_middleware` deliberately not ported: browser-CSRF machinery has no meaning on a socket. The boundary is the `0700` directory, the `0600` socket, and `ensure_peer_is_self` on every accepted connection | **n/a** — nothing to proxy; ADR-0035 aggregator routing is deferred | No embedded UI | CLI, `trusty-console`'s `ReviewConnector`, `tctl`'s health probe — all over that socket. **No webhook surface** — `POST /pr/github/webhook` was retired in #5181; the webhook path is the separate `trusty-review-webhook.sock` (ADR-0034) |
-| **trusty-agents** | `127.0.0.1:8080` (`--port`; 7654 is the conventional dev/UI port, passed explicitly). `--bind` is an explicit non-loopback opt-in that `serve_with_config` **refuses to start without `--api-token`** (`api/server/routes.rs`) | **Yes** — router-wide `SelfOrigins` guard via `with_guarded_middleware` (`api/server/routes.rs::build_router_with_origins`) | Yes (`agents` → `trusty-agents`, #3331) | Yes, separate `agents-ui` crate | CLI, native MCP stdio bridge, `agents-ui` (Tauri — writes go over Tauri IPC, not HTTP), console proxy |
+| **trusty-agents** (`--serve` API) | `127.0.0.1:8080` (`--port`; 7654 is the conventional dev/UI port, passed explicitly). `--bind` is an explicit non-loopback opt-in that `serve_with_config` **refuses to start without `--api-token`** (`api/server/routes.rs`) | **Yes** — router-wide `SelfOrigins` guard via `with_guarded_middleware` (`api/server/routes.rs::build_router_with_origins`) | Yes (`agents` → `trusty-agents`, #3331) | Yes, separate `agents-ui` crate | CLI, native MCP stdio bridge, `agents-ui` (Tauri — writes go over Tauri IPC, not HTTP), console proxy |
+| **trusty-agents** (search daemon, `--search-service`) | **No TCP listener.** One hardened Unix socket per project at `~/.trusty-agents/sockets/<project_id>.search.sock` (`search::service::search_socket_path`), bound through `bind_singleton_hardened` (#6433, ADR-0032). It previously bound `127.0.0.1:0` and published the port to `.trusty-agents/state/search.pid`; that file is retired and deleted at every start | **n/a** — the boundary is the `0700` directory, the `0600` socket, and the `ensure_peer_is_self` uid check `serve_until` runs on every accepted connection before a byte is read. No `SelfOrigins` guard was ported: browser-CSRF machinery has no meaning on a socket | **n/a** — never proxied; it published no address for the console to resolve | No | `SearchDaemonClient` only — the `search_code` tool, the `code search` CLI, and the PM's background watcher's liveness probe, all in-process consumers of this crate |
 | **trusty-mpm** | `127.0.0.1:7880` | **Yes** — `guard_router` wraps the listener with the `SelfOrigins` guard (`daemon/api/origin_guard.rs`) | Yes (`mpm` → `trusty-mpm`, #1849 Phase 1) | No embedded UI (separate `trusty-mpm-gui` Tauri app) | CLI (`tm`), native MCP stdio bridge, `trusty-mpm-gui` (talks **directly** to the daemon, not gateway-first — migration tracked as [#3333](https://github.com/bobmatnyc/trusty-tools/issues/3333), #1849 Phase 2), console proxy |
 | **trusty-code** | `127.0.0.1:7882` (`serve/mod.rs::DEFAULT_HTTP_PORT`; `tcode serve --http`, auto-spawned by `tcode tui`) | **Yes** — router-wide `SelfOrigins` guard plus same-origin CORS via `with_guarded_middleware_same_origin_cors` (`serve/http.rs::build_axum_router`, #6003). It took the permissive-CORS stack with no guard until then | No — no `code` key in `full_id`, so `/api/code/*` is not proxied | No embedded UI (separate `trusty-code-gui` Tauri app) | `tcode tui`'s own HTTP client and the CodeEngine adapter (daemon located by `TCODE_DAEMON_URL`, else the `http_addr` discovery file), `trusty-code-gui` (talks **directly** to the daemon over HTTP, like `trusty-mpm-gui`, and reads the credential through its `get_daemon_token` IPC command). Since [#5439](https://github.com/bobmatnyc/trusty-tools/issues/5439) every route requires `Authorization: Bearer <token>` (`trusty_common::server::bearer_auth`), against a `0600` token `run_http` establishes before it binds; `GET /health` stays public but answers an anonymous caller with `{"status":"ok"}` alone ([#6472](https://github.com/bobmatnyc/trusty-tools/issues/6472)), and browser `EventSource` clients exchange the credential for a single-use ticket at `POST /auth/sse-ticket`. That boundary is OS-user and browser-origin: an untrusted process running as the SAME uid can read the token file, which is why #5439 stays open for the UDS transport (ADR-0032) that authenticates by peer credential |
 | **trusty-console** | `127.0.0.1:7788` by default; `--tailscale` widens to a dual listener (loopback + tailnet IP); Funnel mode (ADR-0017, Proposed) layers public HTTPS on top | Yes — the original router-wide guard this pattern was lifted from (`crates/trusty-common/src/server/origin_guard.rs` docs the provenance: #3268/#3269/#3280) | n/a — console is the proxy, not a proxied target (`full_id("console")` is explicitly `None`) | Yes, the dashboard SPA | Browsers (local or, in `--tailscale`/Funnel mode, remote), every CLI/UI above via the reverse proxy, and — the **sole off-loopback surface** per ADR-0018 |
@@ -186,15 +190,19 @@ firing a cross-origin write.
   reaches the backend. Latent, not yet triggered: no daemon currently exposes
   a WebSocket route. Whoever adds the first one needs to special-case the
   proxy to pass `Connection`/`Upgrade` through for that route.
-- **trusty-agents' undeclared 7th HTTP surface.** `crates/trusty-agents/src/search/service/mod.rs`
-  runs a per-project search-as-a-service daemon in the background (PID
-  tracked at `.trusty-agents/state/search.pid`). It does not appear in any
-  daemon inventory, port table, or (until this document) threat model. It does
-  bind loopback — `TcpListener::bind("127.0.0.1:0")`, hardcoded, so there is no
-  configuration that widens it — but that is incidental rather than enforced,
-  and it is not wrapped by the shared write-origin guard. Tracked as
-  [#3335](https://github.com/bobmatnyc/trusty-tools/issues/3335) — needs
-  either formal declaration (loopback bind + guard) or retirement.
+- ~~**trusty-agents' undeclared 7th HTTP surface.**~~ **Retired
+  ([#6433](https://github.com/bobmatnyc/trusty-tools/issues/6433)), and with it
+  [#3335](https://github.com/bobmatnyc/trusty-tools/issues/3335)'s open
+  question.** The per-project search-as-a-service daemon
+  (`crates/trusty-agents/src/search/service/`) bound loopback TCP on an
+  auto-assigned port and published `{pid, port}` to
+  `.trusty-agents/state/search.pid`, appearing in no daemon inventory or port
+  table. #3335 asked for formal declaration or retirement; ADR-0032 answers
+  retirement. The daemon now serves five JSON-RPC methods on a hardened Unix
+  socket and binds no TCP listener — see the trusty-agents (search daemon) row
+  above for the boundary that replaces the origin guard, and the changelog
+  fragment `crates/trusty-agents/changelog.d/6433-s1-search-service-uds.md` for
+  the wire change. The discovery file is deleted at every start.
 
 ## Credential delivery (not this document's scope)
 
