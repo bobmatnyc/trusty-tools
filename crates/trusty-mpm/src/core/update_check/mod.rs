@@ -20,9 +20,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::core::agent_builder::compose_agent;
+use crate::core::agent_builder::compose_agent_with_provenance;
 use crate::core::agent_manifest::{AgentManifest, checksum};
 use crate::core::skill_manifest::SkillManifest;
+use trusty_agents_common::agents::provenance::Provenance;
 
 mod apply;
 pub use apply::{ApplyError, ApplyReport, apply_catalog};
@@ -309,7 +310,13 @@ pub fn compute_agent_catalog_hashes(catalog_agents: &Path) -> HashMap<String, St
     md_stems(catalog_agents)
         .into_iter()
         .filter_map(|stem| {
-            let composed = compose_agent(&stem, catalog_agents).ok()?;
+            // #4698: hash what the DEPLOYER would write, stamp included. A bare
+            // `compose_agent` here would differ from every deployed file by the
+            // `provenance:` line alone and report the whole roster permanently
+            // stale.
+            let composed =
+                compose_agent_with_provenance(&stem, catalog_agents, Provenance::FrameworkOwned)
+                    .ok()?;
             let hash = checksum(&composed);
             Some((stem, hash))
         })

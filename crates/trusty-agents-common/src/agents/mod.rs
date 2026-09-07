@@ -35,6 +35,9 @@
 
 pub mod builder;
 pub mod builder_in_memory;
+// #4698: `builder`'s YAML scalar encoding, split out when adding `provenance:`
+// pushed `builder.rs` over the 500-SLOC production cap.
+mod builder_yaml;
 pub mod deployer;
 pub mod frontmatter;
 pub mod manifest;
@@ -48,6 +51,10 @@ pub mod tier_audit;
 // could not supply: `agent_schema` (is this trusty-mpm's artifact or another
 // project's?) and `vcs_claim` (does the repository claim this file?).
 pub mod agent_schema;
+// #4698: the `provenance:` frontmatter field — which of the three writers
+// (framework deploy, tm-agent-manager, the operator's own editor) produced a
+// given agent file. Additive: it records authorship, never a tier.
+pub mod provenance;
 pub mod quarantine;
 pub mod quarantine_receipt;
 pub mod vcs_claim;

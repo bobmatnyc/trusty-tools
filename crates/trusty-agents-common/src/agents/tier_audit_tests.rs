@@ -15,6 +15,8 @@ use std::collections::BTreeSet;
 
 use super::*;
 use crate::agents::manifest::{AgentManifest, ManifestEntry, Origin, checksum};
+// #4698: the frontmatter authorship claim reconciled against the ledger.
+use crate::agents::provenance::Provenance;
 
 /// Build a name set from string literals.
 fn roster(names: &[&str]) -> BTreeSet<String> {
@@ -371,4 +373,138 @@ fn audit_is_sorted_by_name() {
         audit_agent_tier(tmp.path(), &roster(&["qa", "engineer", "rust-engineer"])).unwrap();
     let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, vec!["engineer", "qa", "rust-engineer"]);
+}
+
+// ---------------------------------------------------------------------------
+// #4698: `provenance:` that contradicts the ledger, reported not swallowed.
+// ---------------------------------------------------------------------------
+
+/// Write `<dir>/<file_name>` declaring `provenance: <declared>` and track it in
+/// the ledger under `origin`.
+fn staged(dir: &std::path::Path, file_name: &str, declared: Option<&str>, origin: Origin) {
+    let line = declared
+        .map(|d| format!("provenance: {d}\n"))
+        .unwrap_or_default();
+    std::fs::write(
+        dir.join(file_name),
+        format!("---\nname: qa\nrole: qa\n{line}---\n\nBODY\n"),
+    )
+    .unwrap();
+    track(dir, file_name, origin);
+}
+
+/// The finding names the file and BOTH records — the whole point of carrying it
+/// out of `reconcile_with_ledger` instead of only logging it.
+#[test]
+fn audit_provenance_reports_a_contradicting_declaration() {
+    let tmp = tempfile::tempdir().unwrap();
+    staged(tmp.path(), "qa.md", Some("user-authored"), Origin::Bundled);
+
+    let found = audit_provenance(tmp.path()).unwrap();
+    assert_eq!(found.len(), 1, "one disagreement: {found:?}");
+    assert_eq!(found[0].path, tmp.path().join("qa.md"));
+    assert_eq!(found[0].declared, Provenance::UserAuthored);
+    assert!(
+        found[0].ledger_framework_owned,
+        "the ledger's value travels too"
+    );
+    assert!(
+        found[0].detail.contains("qa.md"),
+        "names the file: {}",
+        found[0].detail
+    );
+    assert!(
+        found[0].detail.contains("user-authored"),
+        "names the declaration: {}",
+        found[0].detail
+    );
+    assert!(
+        found[0].detail.contains("framework-owned"),
+        "names the ledger's record: {}",
+        found[0].detail
+    );
+}
+
+/// The mirror: a file claiming the framework wrote it while the ledger records
+/// the operator as its author.
+#[test]
+fn audit_provenance_reports_the_mirrored_contradiction() {
+    let tmp = tempfile::tempdir().unwrap();
+    staged(tmp.path(), "mine.md", Some("framework-owned"), Origin::User);
+
+    let found = audit_provenance(tmp.path()).unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].declared, Provenance::FrameworkOwned);
+    assert!(!found[0].ledger_framework_owned);
+}
+
+#[test]
+fn audit_provenance_is_silent_when_records_agree() {
+    let tmp = tempfile::tempdir().unwrap();
+    staged(
+        tmp.path(),
+        "qa.md",
+        Some("framework-owned"),
+        Origin::Bundled,
+    );
+    assert!(audit_provenance(tmp.path()).unwrap().is_empty());
+}
+
+/// An absent ledger entry is not a disagreement — a declaration anybody can
+/// type must never stand in for one (invariant 2).
+#[test]
+fn audit_provenance_ignores_an_untracked_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("qa.md"),
+        "---\nname: qa\nprovenance: framework-owned\n---\n\nBODY\n",
+    )
+    .unwrap();
+    assert!(audit_provenance(tmp.path()).unwrap().is_empty());
+}
+
+/// Every file written before #4698 declares nothing; that is not an anomaly.
+#[test]
+fn audit_provenance_ignores_a_file_declaring_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    staged(tmp.path(), "qa.md", None, Origin::Bundled);
+    assert!(audit_provenance(tmp.path()).unwrap().is_empty());
+}
+
+#[test]
+fn audit_provenance_missing_dir_is_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let absent = tmp.path().join("nope");
+    assert!(audit_provenance(&absent).unwrap().is_empty());
+}
+
+/// #5626's rule, applied to this scan too: a directory that exists but cannot
+/// be read has established nothing, and must not read as "found nothing".
+#[test]
+#[cfg(unix)]
+fn audit_provenance_unscannable_dir_is_an_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let locked = tmp.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = audit_provenance(&locked);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        matches!(result, Err(TierAuditError::Unscannable { .. })),
+        "{result:?}"
+    );
+}
+
+/// The placement verdict is untouched by a declaration — the ledger still wins
+/// for ownership, so a contradicting file classifies exactly as before.
+#[test]
+fn audit_verdict_is_unchanged_by_a_contradicting_declaration() {
+    let tmp = tempfile::tempdir().unwrap();
+    staged(tmp.path(), "qa.md", Some("user-authored"), Origin::Bundled);
+
+    let bundled: BTreeSet<String> = ["qa".to_string()].into_iter().collect();
+    let found = audit_agent_tier(tmp.path(), &bundled).unwrap();
+    assert_eq!(found.len(), 1, "still reported: {found:?}");
+    assert_eq!(found[0].class, TierResidentClass::ShadowsBundled);
 }

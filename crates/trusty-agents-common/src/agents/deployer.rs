@@ -46,13 +46,15 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::agents::builder::{AgentBuildError, compose_agent, source_chain};
+use crate::agents::builder::{AgentBuildError, compose_agent_with_provenance, source_chain};
 use crate::agents::frontmatter::validate_frontmatter;
 use crate::agents::manifest::{
     AgentManifest, MANIFEST_FILE, ManifestEntry, ManifestError, ManifestLoad, Origin, atomic_write,
     checksum, manifest_lock_path, with_agent_manifest_lock,
 };
 use crate::agents::metadata::agent_metadata_from_str;
+// #4698: every file this deployer writes is stamped framework-owned.
+use crate::agents::provenance::{Provenance, without_provenance_line};
 
 /// Summary of one [`deploy_agents`] run.
 ///
@@ -107,7 +109,7 @@ pub struct DeployResult {
     /// agent still needs to land, and the caller (`tm install`, session
     /// launch) needs to know WHICH agent(s) were skipped and why, rather than
     /// the whole operation failing with no roster deployed at all.
-    /// What: one entry per source agent whose [`compose_agent`] call
+    /// What: one entry per source agent whose [`compose_agent_with_provenance`] call
     /// returned `Err`; that agent is neither composed nor written, and
     /// processing continues with the next agent.
     /// Test: `deploy_isolates_single_malformed_agent_failure`.
@@ -220,6 +222,23 @@ pub fn deploy_agents_filtered(
 /// [`deploy_agents_filtered`]. Never call it directly; it is unsafe against
 /// concurrent writers by construction.
 /// Test: covered by every `deploy_*` test through the public wrapper.
+/// May an UNTRACKED target file be adopted as content this deployer wrote?
+///
+/// Why (#4698): adoption's test was byte equality with the fresh composition
+/// (#2504). Stamping `provenance:` changed those bytes, so every file deployed
+/// before the stamp existed would have failed the test and been permanently
+/// skipped — refused adoption, refused refresh. The pre-stamp spelling has to
+/// stay adoptable.
+/// What: `true` when `current` equals `composed`, or equals `composed` with its
+/// `provenance:` line removed. Nothing else is accepted — a file differing in
+/// any other byte is still treated as possibly the operator's.
+/// Test: `deploy_adopts_untracked_byte_identical_file`,
+/// `deploy_adopts_an_untracked_file_written_before_the_provenance_stamp`.
+fn is_adoptable(current: &str, composed: &str) -> bool {
+    checksum(current) == checksum(composed)
+        || checksum(current) == checksum(&without_provenance_line(composed))
+}
+
 fn deploy_agents_locked(
     source_dir: &Path,
     target_dir: &Path,
@@ -266,18 +285,24 @@ fn deploy_agents_locked(
         // failure instead of propagating it with `?` — one malformed asset
         // (e.g. unterminated frontmatter) must not abort the entire roster
         // deploy. Log loudly, record it, and move on to the next agent.
-        let composed = match compose_agent(&name, source_dir) {
-            Ok(c) => c,
-            Err(err) => {
-                tracing::error!(
-                    agent = %name,
-                    "agent compose FAILED — skipping this agent, roster deploy \
-                     continues for the rest of the roster: {err}"
-                );
-                result.failed.push(format!("{name}: {err}"));
-                continue;
-            }
-        };
+        // #4698: stamp `provenance: framework-owned` into the composed output
+        // before it is validated, checksummed, or written. Stamping at compose
+        // time (rather than editing the string afterwards) keeps ONE frontmatter
+        // grammar in play, and keeps the checksum the manifest records the
+        // checksum of the exact bytes on disk.
+        let composed =
+            match compose_agent_with_provenance(&name, source_dir, Provenance::FrameworkOwned) {
+                Ok(c) => c,
+                Err(err) => {
+                    tracing::error!(
+                        agent = %name,
+                        "agent compose FAILED — skipping this agent, roster deploy \
+                         continues for the rest of the roster: {err}"
+                    );
+                    result.failed.push(format!("{name}: {err}"));
+                    continue;
+                }
+            };
 
         // Issue #3556: `compose_agent`'s success only means trusty-mpm's own
         // LENIENT frontmatter reader could parse the result — it tolerates a
@@ -323,12 +348,21 @@ fn deploy_agents_locked(
                 // Otherwise keep the conservative skip (it may be genuinely
                 // user-owned) but flag it for the `--reset-agents` warning.
                 let current = std::fs::read_to_string(&target_path)?;
-                if checksum(&current) == checksum(&composed) {
+                if is_adoptable(&current, &composed) {
                     manifest.managed.insert(
                         filename.clone(),
                         ManifestEntry {
                             source_chain: source_chain(&name, source_dir)?,
-                            checksum: checksum(&composed),
+                            // #4698: the checksum of what is ON DISK, not of the
+                            // fresh composition. Adoption registers without
+                            // rewriting, so recording the composition's checksum
+                            // would make an adopted pre-#4698 file (which carries
+                            // no `provenance:` line) mismatch its own ledger row
+                            // the instant it was written. Recording the disk
+                            // content keeps the row true; the next deploy sees a
+                            // matching checksum, a differing composition, and
+                            // refreshes the file into the stamped form.
+                            checksum: checksum(&current),
                             deployed_at: now.clone(),
                             origin: Origin::Bundled,
                         },

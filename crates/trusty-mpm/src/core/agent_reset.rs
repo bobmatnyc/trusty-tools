@@ -34,12 +34,14 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::agent_builder::{AgentBuildError, compose_agent, source_chain};
+use crate::core::agent_builder::{AgentBuildError, compose_agent_with_provenance, source_chain};
+// #4698: a reset writes framework-owned files, stamped like the deployer's.
 use crate::core::agent_deployer::is_agent_file;
 use crate::core::agent_manifest::{
     AgentManifest, ManifestEntry, ManifestError, ManifestLoad, Origin, atomic_write, checksum,
     with_agent_manifest_lock,
 };
+use trusty_agents_common::agents::provenance::Provenance;
 
 /// Summary of one [`reset_agents`] run.
 ///
@@ -213,7 +215,12 @@ fn reset_agents_locked(
 
     for name in targets {
         let filename = format!("{name}.md");
-        let composed = compose_agent(&name, source_dir)?;
+        // #4698: a reset is the framework rewriting its own file, so it stamps
+        // exactly what `agents::deployer` stamps. Composing unstamped here would
+        // write a file that differs from the deployer's output by the
+        // `provenance:` line and read as stale until the next deploy.
+        let composed =
+            compose_agent_with_provenance(&name, source_dir, Provenance::FrameworkOwned)?;
         let target_path = target_dir.join(&filename);
         let fresh_checksum = checksum(&composed);
 
@@ -376,7 +383,11 @@ mod tests {
         let src = TempDir::new().unwrap();
         let tgt = TempDir::new().unwrap();
         write_sources(src.path());
-        let composed = compose_agent("engineer", src.path()).unwrap();
+        // #4698: the deployer and `reset_agents` both stamp, so the file
+        // that must be adopted without a rewrite is the STAMPED spelling.
+        let composed =
+            compose_agent_with_provenance("engineer", src.path(), Provenance::FrameworkOwned)
+                .unwrap();
         fs::write(tgt.path().join("engineer.md"), &composed).unwrap();
         let before = fs::metadata(tgt.path().join("engineer.md"))
             .unwrap()

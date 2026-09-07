@@ -84,6 +84,8 @@ use thiserror::Error;
 use crate::agents::deployer::is_agent_file;
 use crate::agents::manifest::{AgentManifest, ManifestLoad};
 use crate::agents::metadata::agent_metadata_from_str;
+// #4698: the file's own authorship claim, reconciled against the ledger.
+use crate::agents::provenance::{Provenance, reconcile_with_ledger};
 
 /// Why [`audit_agent_tier`] could not answer for a directory.
 ///
@@ -378,6 +380,100 @@ pub fn audit_agent_tier(
         })
         .collect();
     found.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(found)
+}
+
+/// One file whose declared `provenance:` contradicts its ledger entry (#4698).
+///
+/// Why: `provenance:` and the ownership ledger are two independent records of
+/// the same fact, so they can disagree once anybody edits a deployed file. The
+/// ledger wins for every OWNERSHIP decision — see
+/// [`crate::agents::provenance::reconcile_with_ledger`] — but the operator
+/// still needs to be told, and a `tracing::warn!` alone reaches no `tm doctor`
+/// report. This is the value that travels to one.
+/// What: the file, both records, and the rendered explanation. `detail` is
+/// [`crate::agents::provenance::Reconciled::disagreement`] verbatim, so the log
+/// line and the doctor finding cannot drift apart.
+/// Test: `audit_provenance_reports_a_contradicting_declaration`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceDisagreement {
+    /// Full path of the file whose declaration contradicts the ledger.
+    pub path: PathBuf,
+    /// What the file declares about its own author.
+    pub declared: Provenance,
+    /// What the ledger records — the value that WINS.
+    pub ledger_framework_owned: bool,
+    /// The rendered explanation, naming the file and both records.
+    pub detail: String,
+}
+
+/// Scan any agent directory for files whose `provenance:` contradicts the
+/// ledger (#4698).
+///
+/// Why: deliberately NOT folded into [`audit_agent_tier`], for two reasons that
+/// both point the same way. [`audit_agent_tier`] answers "is this file
+/// MISPLACED?", and a disagreement is a different question about a file that
+/// may be perfectly placed — folding them would put an unrelated fact inside
+/// [`MisplacedAgent`], which every consumer reads as "move or delete this".
+/// More decisively, [`audit_agent_tier`] must never run on the canonical deploy
+/// directory (every file there is tm-owned, correctly and uselessly), and the
+/// canonical directory is exactly where a hand-edited DEPLOYED agent lives.
+/// A disagreement check that could not look there would miss the case it exists
+/// for.
+/// What: READ-ONLY. Lists `.md` files directly under `dir`, reads this
+/// directory's ownership manifest, and returns one entry per file whose
+/// declaration contradicts its ledger row, sorted by path for stable output.
+/// A file with NO ledger entry yields nothing: an absent entry is not a
+/// disagreement, and a declaration cannot stand in for one (invariant 2 above).
+/// A file declaring nothing yields nothing — that is every file written before
+/// #4698. An ABSENT `dir` returns an empty vec; a `dir` that exists but cannot
+/// be enumerated returns [`TierAuditError::Unscannable`], matching
+/// [`audit_agent_tier`]. A corrupt or unreadable ledger yields nothing: with no
+/// second record to read, no contradiction can be established.
+/// Test: `audit_provenance_reports_a_contradicting_declaration`,
+/// `audit_provenance_is_silent_when_records_agree`,
+/// `audit_provenance_ignores_an_untracked_file`,
+/// `audit_provenance_ignores_a_file_declaring_nothing`,
+/// `audit_provenance_missing_dir_is_empty`,
+/// `audit_provenance_unscannable_dir_is_an_error`.
+pub fn audit_provenance(dir: &Path) -> Result<Vec<ProvenanceDisagreement>, TierAuditError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(TierAuditError::Unscannable {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let manifest = match AgentManifest::load_checked(dir) {
+        ManifestLoad::Ok(m) => m,
+        ManifestLoad::Corrupt(_) => return Ok(Vec::new()),
+    };
+
+    let mut found: Vec<ProvenanceDisagreement> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let file_name = entry.file_name().to_str()?.to_owned();
+            if !is_agent_file(&file_name) || !entry.path().is_file() {
+                return None;
+            }
+            let ledger = manifest.managed.get(&file_name)?;
+            let content = std::fs::read_to_string(entry.path()).ok()?;
+            let declared = agent_metadata_from_str(&content).provenance?;
+            let ledger_framework_owned = ledger.origin.is_framework_owned();
+            let detail = reconcile_with_ledger(&file_name, ledger_framework_owned, Some(declared))
+                .disagreement?;
+            Some(ProvenanceDisagreement {
+                path: entry.path(),
+                declared,
+                ledger_framework_owned,
+                detail,
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(found)
 }
 
