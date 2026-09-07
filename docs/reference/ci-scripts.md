@@ -2,13 +2,13 @@
 
 (Plus two operator scripts no workflow runs at all — see the last section.)
 
-Nine scripts in `scripts/` run in a GitHub Actions workflow and nowhere else —
+Ten scripts in `scripts/` run in a GitHub Actions workflow and nowhere else —
 no pre-commit hook, no `Makefile` target, no other doc page. Each was written
 for a specific failure and none of them announced itself anywhere a reader
 would look, so a change to one of the workflows below could drop it with
 nothing to notice.
 
-`check_public_docs.sh` is listed as a tenth row for the opposite reason: it ran
+`check_public_docs.sh` is listed as an eleventh row for the opposite reason: it ran
 in a pre-commit hook ALONE until #5134, which is unenforceable (`--no-verify`, a
 commit made outside the repo's hook path, a merge that runs no hook), and two
 files asserted a CI job that did not exist.
@@ -32,13 +32,14 @@ what it stops; the header says why it exists.
 | `classify-ci-results.sh` | `ci.yml`, `red-main-notify.yml` | Turns a set of job conclusions into the red-main verdict. `cancelled` is not `failure`, so the previous `contains(needs.*.result, 'failure')` test let an all-cancelled run report main verified (#4179). |
 | `ci-create-local-main.sh` | `ci.yml`, `pre-publish.yml` | Creates the local `main` branch the `trusty-agents` git tests need, and fails the step when creation genuinely fails. The `git fetch origin main:main \|\| true` it replaced swallowed a GitHub 500 and produced an unrelated test failure eleven minutes later (#5693). |
 | `detect-embedder-cuda-relevant.sh` | `ci.yml` | Decides whether a change can affect the `trusty-common` `embedder-cuda` build, so the CUDA leg runs when it is relevant and is skipped when it is not. |
+| `ci-crate-relevance.sh` | `ci.yml` | Decides whether a change can affect ONE crate's build, so the four required Tauri UI clippy jobs skip their expensive steps when the diff cannot reach that crate (#7063). The closure comes from `cargo metadata --no-deps` at run time, dev- and build-dependencies included, and matching is on path segments; every error answers `true`, so a broken detector costs a full build and never a silent skip. The jobs themselves still run and report — a required context that reports nothing wedges the PR BLOCKED (#4468). |
 | `check_workspace_dep_versions.sh` | `version-parity.yml` (`pr-version-bump`) | Asserts every internal `[workspace.dependencies]` row's `version` requirement actually accepts the member crate's own version, under Cargo's caret rules. The row's `path` wins in-tree, so no cargo command in the workspace can see the drift — `trusty-console` sat at `^0.9.0` against a 0.11.0 crate and `tga` at `^6.0.1` against 7.1.0, both invisible until `cargo publish` or an external consumer resolved from the registry (#6776, same class as #4088). |
 | `check_public_docs.sh` | `public-docs.yml`, plus the `public-docs` pre-commit hook | Validates `docs/public-manifest.tsv`, the allowlist the website publishes from: every PAGE row must resolve to an existing `.md` under `docs/`, outside the DO-NOT-PUBLISH trees, on a unique route. The STALE content pass runs in the same invocation and needs NO flag (#5134) — every published page is searched for the retired names in `docs/public-stale-terms.tsv`, whose waivers are a count ratchet in both directions. Both call sites invoke the script bare, so neither can drop the content check without deleting the gate outright. A page the gate cannot read fails as `UNREADABLE` rather than passing as clean. |
 | `check_token_drift.mjs` | `token-drift.yml` | Compares each Tailwind app's hand-transcribed `--color-*` RGB triples against the canonical Foundry `tokens.css`. `ci.yml` deliberately does NOT duplicate it (`ci.yml`, `ui-checks` job): `token-drift.yml` already runs it across all seven crates directly rather than through each `package.json`. |
 
 ## Self-tests
 
-Eight of the ten have a companion test that proves the gate can still fail — a
+Nine of the eleven have a companion test that proves the gate can still fail — a
 gate that cannot fail makes its own green meaningless:
 
 | Script | Its test |
@@ -48,6 +49,7 @@ gate that cannot fail makes its own green meaningless:
 | `generate-homebrew-formula.sh` | `scripts/generate-homebrew-formula-selftest.sh` |
 | `classify-ci-results.sh` | `scripts/check-ci-helpers-selftest.sh` |
 | `detect-embedder-cuda-relevant.sh` | `scripts/check-ci-helpers-selftest.sh` |
+| `ci-crate-relevance.sh` | `scripts/ci-crate-relevance-selftest.sh`, run as a step of `ci.yml`'s `changes` job before the step that consults the detector. Its closure cases run against a throwaway fixture workspace rather than this repo's graph, so an unrelated PR that adds a dependency edge does not turn them red; a short live section holds only #7063's four acceptance pairs |
 | `check_token_drift.mjs` | `scripts/check_token_drift.test.mjs`, a `node:test` suite `token-drift.yml` runs before the gate |
 | `check_workspace_dep_versions.sh` | `scripts/check_workspace_dep_versions_selftest.sh`, run as the step before the gate in the same job |
 | `check_public_docs.sh` | `scripts/check_public_docs_selftest.sh`, run as the step before the gate in the same job. Two of its cases pass no `--stale` flag at all, so a change that made the content pass opt-in again fails there rather than going quiet |
