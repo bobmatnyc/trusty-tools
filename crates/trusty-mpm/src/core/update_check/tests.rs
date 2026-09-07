@@ -39,7 +39,9 @@ fn write_skill(dir: &Path, stem: &str, body: &str) {
 /// Build a deployed agent manifest whose entry matches the COMPOSED catalog
 /// agent (i.e. as if it had just been deployed from this exact catalog).
 fn deployed_agent_matching(catalog_agents: &Path, stem: &str) -> AgentManifest {
-    let composed = compose_agent(stem, catalog_agents).unwrap();
+    // #4698: the ledger records what the DEPLOYER wrote, stamp included.
+    let composed =
+        compose_agent_with_provenance(stem, catalog_agents, Provenance::FrameworkOwned).unwrap();
     let mut m = AgentManifest::default();
     m.managed.insert(
         format!("{stem}.md"),
@@ -385,7 +387,9 @@ fn detect_unknown_when_only_one_tree_missing_is_not_unknown() {
 /// Write the COMPOSED catalog agent to a deployment dir, simulating a file tm
 /// deployed WITHOUT recording a manifest entry (the #1940 root-cause scenario).
 fn deploy_agent_on_disk(catalog_agents: &Path, deployed_dir: &Path, stem: &str) {
-    let composed = compose_agent(stem, catalog_agents).unwrap();
+    // #4698: simulate the deployer's bytes, stamp included.
+    let composed =
+        compose_agent_with_provenance(stem, catalog_agents, Provenance::FrameworkOwned).unwrap();
     fs::create_dir_all(deployed_dir).unwrap();
     fs::write(deployed_dir.join(format!("{stem}.md")), composed).unwrap();
 }

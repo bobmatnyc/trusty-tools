@@ -351,3 +351,89 @@ fn native_roster_dir_is_recognised_only_by_both_path_components() {
         &root.join(TRUSTY_CODE_DIRNAME).join("skills")
     ));
 }
+
+// ---------------------------------------------------------------------------
+// #4698: the file's own `provenance:` claim, reported beside the ledger origin.
+// ---------------------------------------------------------------------------
+
+/// EVERY bundled agent lands on disk carrying `provenance: framework-owned`
+/// after a real roster deploy — the guarantee #4698 asks for, asserted against
+/// the actual bundled assets rather than a fixture.
+#[test]
+fn every_deployed_bundled_agent_carries_the_framework_owned_stamp() {
+    let (_project, target) = deployed_project();
+
+    let mut checked = 0usize;
+    for entry in std::fs::read_dir(&target).expect("read the deployed roster") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().is_none_or(|e| e != "md") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).expect("read a deployed agent");
+        assert!(
+            content.contains("provenance: framework-owned"),
+            "{} is missing the stamp:\n{content}",
+            path.display()
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "the roster deployed at least one agent");
+}
+
+/// The payload reports the declaration beside the ledger's origin, and the two
+/// agree on a pristine deployed file.
+#[test]
+fn deployed_agent_reports_its_declared_provenance() {
+    let (_project, target) = deployed_project();
+
+    let payload = describe_agent(&target, "project", "engineer", false).expect("describe");
+    assert_eq!(payload["provenance"]["origin"], "bundled");
+    assert_eq!(payload["provenance"]["framework_owned"], true);
+    assert_eq!(
+        payload["provenance"]["declared_provenance"], "framework-owned",
+        "the file's own claim agrees with the ledger: {payload:?}"
+    );
+}
+
+/// A hand-edit that strips the field is visible as a null declaration against a
+/// still-framework-owned ledger row — the disagreement the checksum alone does
+/// not explain. The ledger stays authoritative.
+#[test]
+fn hand_edited_agent_reports_a_null_declared_provenance() {
+    let (_project, target) = deployed_project();
+    std::fs::write(
+        target.join("engineer.md"),
+        "---\nname: engineer\nmodel: marker/hand-edited\n---\n\nMine now.\n",
+    )
+    .expect("hand-edit the deployed agent");
+
+    let payload = describe_agent(&target, "project", "engineer", false).expect("describe");
+    assert_eq!(payload["provenance"]["checksum"], "mismatch");
+    assert_eq!(payload["provenance"]["framework_owned"], true);
+    assert!(
+        payload["provenance"]["declared_provenance"].is_null(),
+        "the edit dropped the field: {payload:?}"
+    );
+}
+
+/// The key is always present, so a client can tell "not declared" from "this
+/// server predates the field" — the same contract the other provenance keys hold.
+#[test]
+fn declared_provenance_key_is_present_even_with_no_ledger() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("solo.md"),
+        "---\nname: solo\n---\n\nHand-written.\n",
+    )
+    .expect("write an agent");
+
+    let payload = describe_agent(dir.path(), "project", "solo", false).expect("describe");
+    assert!(
+        payload["provenance"]
+            .as_object()
+            .expect("provenance object")
+            .contains_key("declared_provenance"),
+        "the key is always emitted: {payload:?}"
+    );
+    assert!(payload["provenance"]["declared_provenance"].is_null());
+}

@@ -15,6 +15,8 @@ use std::collections::BTreeSet;
 
 use super::*;
 use crate::agents::manifest::{AgentManifest, ManifestEntry, Origin, checksum};
+// #4698: the frontmatter authorship claim reconciled against the ledger.
+use crate::agents::provenance::Provenance;
 
 /// Build a name set from string literals.
 fn roster(names: &[&str]) -> BTreeSet<String> {
@@ -371,4 +373,89 @@ fn audit_is_sorted_by_name() {
         audit_agent_tier(tmp.path(), &roster(&["qa", "engineer", "rust-engineer"])).unwrap();
     let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, vec!["engineer", "qa", "rust-engineer"]);
+}
+
+// ---------------------------------------------------------------------------
+// #4698: reading the file's own `provenance:` claim beside the ledger.
+// ---------------------------------------------------------------------------
+
+/// A declaration that agrees with the ledger changes nothing.
+#[test]
+fn ownership_declared_agreeing_matches_ownership_of() {
+    let tmp = tempfile::tempdir().unwrap();
+    track(tmp.path(), "qa.md", Origin::Bundled);
+    let manifest = AgentManifest::load(tmp.path());
+    assert_eq!(
+        ownership_of_declared(&manifest, "qa.md", Some(Provenance::FrameworkOwned)),
+        ownership_of(&manifest, "qa.md")
+    );
+    assert_eq!(
+        ownership_of_declared(&manifest, "qa.md", Some(Provenance::FrameworkOwned)),
+        TierOwnership::FrameworkOwned
+    );
+}
+
+/// A declaration that CONTRADICTS the ledger loses. Anyone with an editor can
+/// change the frontmatter; only the deployer writes the ledger.
+#[test]
+fn ownership_declared_disagreement_keeps_the_ledger_verdict() {
+    // `track` rewrites the whole ledger, so each row needs its own directory.
+    let bundled_dir = tempfile::tempdir().unwrap();
+    track(bundled_dir.path(), "qa.md", Origin::Bundled);
+    let user_dir = tempfile::tempdir().unwrap();
+    track(user_dir.path(), "mine.md", Origin::User);
+
+    // A bundled file claiming to be the operator's stays framework-owned.
+    assert_eq!(
+        ownership_of_declared(
+            &AgentManifest::load(bundled_dir.path()),
+            "qa.md",
+            Some(Provenance::UserAuthored)
+        ),
+        TierOwnership::FrameworkOwned
+    );
+    // And the mirror.
+    assert_eq!(
+        ownership_of_declared(
+            &AgentManifest::load(user_dir.path()),
+            "mine.md",
+            Some(Provenance::FrameworkOwned)
+        ),
+        TierOwnership::UserOwned
+    );
+}
+
+/// The declaration never manufactures a ledger entry. An untracked file on a
+/// bundled name is still `Untracked` — the quarantine's whole target set — no
+/// matter what it declares about itself (invariant 2 in this module's docs).
+#[test]
+fn ownership_declared_never_exempts_an_untracked_file() {
+    let manifest = AgentManifest::default();
+    for declared in [
+        None,
+        Some(Provenance::UserAuthored),
+        Some(Provenance::FrameworkOwned),
+        Some(Provenance::TmAgentManagerBuilt),
+    ] {
+        assert_eq!(
+            ownership_of_declared(&manifest, "qa.md", declared),
+            TierOwnership::Untracked,
+            "declared {declared:?} must not stand in for a ledger entry"
+        );
+    }
+}
+
+/// End to end: the scan reads the declaration and still returns the ledger's
+/// classification, so #4698 adds a signal without moving any verdict.
+#[test]
+fn audit_verdict_is_unchanged_by_a_contradicting_declaration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let body = "---\nname: qa\nrole: qa\nprovenance: user-authored\n---\n\nBODY\n";
+    std::fs::write(tmp.path().join("qa.md"), body).unwrap();
+    track(tmp.path(), "qa.md", Origin::Bundled);
+
+    let bundled: BTreeSet<String> = ["qa".to_string()].into_iter().collect();
+    let found = audit_agent_tier(tmp.path(), &bundled).unwrap();
+    assert_eq!(found.len(), 1, "still reported: {found:?}");
+    assert_eq!(found[0].class, TierResidentClass::ShadowsBundled);
 }

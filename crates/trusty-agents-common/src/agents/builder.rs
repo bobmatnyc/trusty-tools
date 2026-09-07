@@ -33,7 +33,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use super::builder_yaml::{escape_yaml_double_quoted, render_scalar, unescape_yaml_double_quoted};
 use super::frontmatter::{parse_kv_line, parse_list_value};
+// #4698: the `provenance:` field's typed value and parse error.
+use super::provenance::{PROVENANCE_KEY, Provenance, UnknownProvenance};
 
 /// Maximum inheritance-chain depth before [`compose_agent`] gives up.
 ///
@@ -61,6 +64,11 @@ pub enum AgentBuildError {
     DepthExceeded(usize),
     /// An underlying filesystem operation failed.
     Io(std::io::Error),
+    /// #4698: the `provenance:` key carried a value outside the three accepted
+    /// spellings. A distinct variant, not a
+    /// [`AgentBuildError::FrontmatterParse`] string, so a caller can act on
+    /// exactly this fault — the typed payload names the offending value.
+    InvalidProvenance(UnknownProvenance),
 }
 
 impl fmt::Display for AgentBuildError {
@@ -75,6 +83,7 @@ impl fmt::Display for AgentBuildError {
                 write!(f, "inheritance chain exceeded depth limit of {depth}")
             }
             Self::Io(err) => write!(f, "io error: {err}"),
+            Self::InvalidProvenance(err) => write!(f, "frontmatter parse error: {err}"),
         }
     }
 }
@@ -83,8 +92,15 @@ impl std::error::Error for AgentBuildError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(err) => Some(err),
+            Self::InvalidProvenance(err) => Some(err),
             _ => None,
         }
+    }
+}
+
+impl From<UnknownProvenance> for AgentBuildError {
+    fn from(err: UnknownProvenance) -> Self {
+        Self::InvalidProvenance(err)
     }
 }
 
@@ -234,6 +250,24 @@ pub(crate) struct Frontmatter {
     pub(crate) description: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) extends: Option<String>,
+    /// Who wrote this file (#4698).
+    ///
+    /// Why: see [`super::provenance`]. The declaration is what lets a reader
+    /// tell a framework-deployed agent from a `tm-agent-manager`-composed one
+    /// from a hand-written one WITHOUT a ledger entry, which is the case the
+    /// ownership manifest cannot answer at all.
+    /// What: `None` when the key is absent — which
+    /// [`super::provenance::declared_or_default`] resolves to
+    /// [`Provenance::UserAuthored`], never to a framework-owned default. An
+    /// unrecognised value is REJECTED
+    /// ([`AgentBuildError::InvalidProvenance`]), not coerced. Merges SCALAR
+    /// CHILD-WINS across an `extends` chain, same as `model:`, and is
+    /// re-emitted by [`merge_frontmatter`] so a composed file stays
+    /// self-describing.
+    /// Test: `provenance_parsed_merged_and_emitted`,
+    /// `provenance_child_wins_across_chain`,
+    /// `unknown_provenance_value_is_rejected`.
+    pub(crate) provenance: Option<Provenance>,
     /// Auto-submitted first turn when the agent is spawned (claude-mpm parity).
     pub(crate) initial_prompt: Option<String>,
     /// Resource tier (`intensive`/`high`/`standard`/`lightweight`) used to
@@ -519,6 +553,22 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
         }
     });
 
+    // #4698: `provenance:` is a closed three-value scalar. Unlike every other
+    // malformed value above — which warns and degrades — an unrecognised value
+    // here HARD-ERRORS: silently degrading it to the absent default would read
+    // a typo'd `framework-owned` as user-authored and freeze a framework file
+    // permanently, which is #4408's unrecoverable shape reached through a new
+    // door. `parse_kv_line` lower-cases keys, and `PROVENANCE_KEY` is already
+    // lowercase, so the lookup matches directly.
+    let provenance = match fields.remove(PROVENANCE_KEY) {
+        None => None,
+        Some(raw_value) => Some(
+            unescape_yaml_double_quoted(&raw_value)
+                .parse::<Provenance>()
+                .map_err(AgentBuildError::from)?,
+        ),
+    };
+
     let fm = Frontmatter {
         // #3556: `merge_frontmatter`/`render_scalar` now double-quotes and
         // escapes any of these scalars that needed it on emit (mirroring the
@@ -559,6 +609,7 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
         skills: skills_block.or(inline_skills).unwrap_or_default(),
         max_tokens,
         tools,
+        provenance,
     };
     Ok((fm, body))
 }
@@ -574,152 +625,6 @@ fn first_line_len(s: &str) -> usize {
     match s.find('\n') {
         Some(idx) => idx + 1,
         None => s.len(),
-    }
-}
-
-/// Escape a string for emission inside a YAML double-quoted scalar.
-///
-/// Why: `merge_frontmatter` wraps the `initialPrompt` value — and, since
-/// issue #3556, any other scalar [`render_scalar`] decided needs quoting —
-/// in double-quotes. A raw `"` or `\` in the value would otherwise terminate
-/// the quote early or be misread as an escape, and a raw embedded newline
-/// would break the single-line frontmatter grammar entirely; either produces
-/// malformed YAML. claude-mpm parity requires the emitted frontmatter always
-/// be parseable.
-/// What: a single pass over `value`'s characters that escapes `\` → `\\`,
-/// `"` → `\"`, and a literal newline → the two-character sequence `\n` (so a
-/// multi-line description/model/etc. value still composes to one physical
-/// frontmatter line). Every other character passes through unchanged. The
-/// exact inverse of [`unescape_yaml_double_quoted`].
-/// Test: `initial_prompt_with_embedded_quote_round_trips`,
-/// `initial_prompt_with_backslash_round_trips`,
-/// `description_with_embedded_newline_round_trips` in builder_tests.rs.
-fn escape_yaml_double_quoted(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for c in value.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// Reverse [`escape_yaml_double_quoted`] on a parsed scalar value.
-///
-/// Why: a value parsed back from emitted frontmatter still carries the `\"`
-/// and `\\` escapes after [`parse_kv_line`] strips the single outer quote pair.
-/// Decoding them here makes a compose→deploy→re-compose round-trip yield the
-/// original `initialPrompt` string unchanged.
-/// What: collapses `\\` → `\`, `\"` → `"`, and `\n` (the two-character
-/// escape sequence) → a literal newline; any other `\x` sequence (and a
-/// trailing lone `\`) is left verbatim so non-escaped backslashes survive.
-/// Test: `initial_prompt_with_embedded_quote_round_trips`,
-/// `initial_prompt_with_backslash_round_trips`,
-/// `description_with_embedded_newline_round_trips` in builder_tests.rs.
-fn unescape_yaml_double_quoted(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut chars = value.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('\\') => out.push('\\'),
-                Some('"') => out.push('"'),
-                Some('n') => out.push('\n'),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
-                }
-                None => out.push('\\'),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Whether a frontmatter scalar value requires YAML quoting to stay parseable
-/// by a strict YAML reader.
-///
-/// Why (issue #3556): `merge_frontmatter` used to emit every scalar field
-/// (`name`, `role`, `description`, `model`, `resource_tier`) as a bare plain
-/// scalar regardless of content, even though `parse_kv_line` had already
-/// stripped any quotes the SOURCE file used. `split_frontmatter`'s own
-/// lenient parser (first-colon-only split) tolerates a colon anywhere in the
-/// value, so a source template quoting `description: 'Rust 2024 edition
-/// specialist: memory-safe systems...'` composed to the exact same UNQUOTED
-/// `description: Rust 2024 edition specialist: memory-safe systems...` line
-/// regardless of the source's quoting style — invalid YAML a strict parser
-/// (`serde_yaml`, used by `trusty-agents::agents::registry::md_agent::parse_md_agent`)
-/// rejects with "mapping values are not allowed in this context". Because
-/// compose output was invariant to source quoting, re-provisioning alone
-/// could never have fixed the 11 affected agents — recomposing reproduced
-/// byte-identical broken output. Quoting-on-emit whenever a value is unsafe
-/// as a plain scalar fixes it at the one place all consumers share.
-/// What: `true` when `value` is empty, opens with a YAML indicator
-/// character, has leading/trailing whitespace, contains an embedded newline,
-/// is one of the YAML core-schema null tokens (`null`/`Null`/`NULL`/`~`,
-/// which would otherwise round-trip through `Option<String>` as `None`
-/// instead of the literal string), or contains a `": "` / trailing `:` / a
-/// mid-string `" #"` sequence a plain scalar cannot represent. The `" #"`
-/// check exists because a space followed by `#` starts a YAML comment
-/// ANYWHERE in a plain scalar, not just at the start of the line — the
-/// leading-character check above only catches `#` as the very first
-/// character, so a value like `Model context protocol #1 tool for
-/// delegating` silently truncated to `Model context protocol` at the first
-/// `" #"` with no error anywhere in the pipeline (code-critic review of
-/// #3556's PR #3565): `compose_agent` succeeds, `validate_frontmatter`
-/// accepts it (truncated-but-still-valid YAML is syntactically fine), and
-/// the real consumer (`trusty-agents`' `.md` loader) silently drops
-/// everything from the `#` onward. Same blind spot as the #3556 root cause
-/// (trusty-mpm's own lenient `parse_kv_line` only treats `#` as a comment
-/// marker at the start of the trimmed line, so it never notices either) —
-/// just a different trigger character.
-/// Test: `needs_quoting_true_for_colon_space`, `needs_quoting_true_for_empty`,
-/// `needs_quoting_false_for_plain_value`, `needs_quoting_true_for_mid_string_hash_comment`,
-/// `needs_quoting_true_for_embedded_newline`, `needs_quoting_true_for_null_tokens`,
-/// `needs_quoting_indicator_characters` (table-driven) in builder_tests.rs.
-fn needs_quoting(value: &str) -> bool {
-    if value.is_empty() {
-        return true;
-    }
-    if matches!(value, "null" | "Null" | "NULL" | "~") {
-        return true;
-    }
-    let first = value.chars().next().expect("checked non-empty above");
-    if "!&*-?|>%@`\"'#,[]{}:".contains(first) {
-        return true;
-    }
-    if value.starts_with(' ') || value.ends_with(' ') {
-        return true;
-    }
-    if value.contains('\n') {
-        return true;
-    }
-    value.contains(": ") || value.ends_with(':') || value.contains(" #")
-}
-
-/// Render one frontmatter scalar value, quoting it when [`needs_quoting`]
-/// says a plain scalar would not survive a strict YAML parse.
-///
-/// Why: shared by every scalar field `merge_frontmatter` emits (`name`,
-/// `role`, `description`, `model`, `resource_tier`) so the quote-when-needed
-/// policy is applied uniformly rather than ad hoc per field (issue #3556).
-/// What: returns `value` unchanged when it is safe as a plain scalar;
-/// otherwise a double-quoted, escaped scalar via
-/// [`escape_yaml_double_quoted`] — the same quoting style `initialPrompt`
-/// already used, so `split_frontmatter`'s existing `unescape_yaml_double_quoted`
-/// decode (now applied to these fields too) round-trips it.
-/// Test: `compose_description_with_colon_is_quoted_and_strict_yaml_valid`,
-/// `compose_description_without_colon_is_unquoted` in builder_tests.rs.
-fn render_scalar(value: &str) -> String {
-    if needs_quoting(value) {
-        format!("\"{}\"", escape_yaml_double_quoted(value))
-    } else {
-        value.to_string()
     }
 }
 
@@ -786,6 +691,12 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
         if fm.max_tokens.is_some() {
             merged.max_tokens = fm.max_tokens;
         }
+        // #4698: scalar child-wins. A base that declares nothing leaves the
+        // child's declaration standing, and a child that declares nothing
+        // inherits the base's — the same rule `model:` follows.
+        if fm.provenance.is_some() {
+            merged.provenance = fm.provenance;
+        }
         // #2897: OVERRIDE, not union (contrast with `skills:` above) — a
         // child's `tools:` (whenever the key was present at all, i.e.
         // `Some`) replaces the parent's list entirely, so a restrictive leaf
@@ -822,6 +733,13 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
     }
     if let Some(v) = &merged.role {
         out.push_str(&format!("role: {}\n", render_scalar(v)));
+    }
+    // #4698: emitted right after the identity keys so an operator opening a
+    // deployed file sees who wrote it before anything else. Only when declared
+    // — an absent key is the "not ours, never touch" signal, and emitting a
+    // default would destroy it.
+    if let Some(v) = &merged.provenance {
+        out.push_str(&format!("{PROVENANCE_KEY}: {}\n", v.as_str()));
     }
     if let Some(v) = &merged.description {
         out.push_str(&format!("description: {}\n", render_scalar(v)));
@@ -955,6 +873,40 @@ pub fn compose_agent(name: &str, source_dir: &Path) -> Result<String, AgentBuild
     let sources = build_source_map(source_dir);
     let mut visiting = Vec::new();
     let (frontmatters, bodies) = resolve(name, &sources, &mut visiting)?;
+    Ok(render_composed(&frontmatters, &bodies))
+}
+
+/// [`compose_agent`], stamping the composed output with a `provenance:` value.
+///
+/// Why (#4698): provenance is a property of the WRITE, not of the source. The
+/// same source tree composed by the framework's deploy and by
+/// `tm-agent-manager` produces two files with different authors, so the writer
+/// must supply the value — exactly as it already supplies
+/// [`crate::agents::manifest::ManifestEntry::origin`] rather than reading it
+/// out of the agent. Stamping here rather than declaring the field in each
+/// bundled source asset also means a NEW asset cannot ship un-marked: there is
+/// no per-file declaration to forget.
+/// What: composes `name` as [`compose_agent`] does, then overrides the merged
+/// `provenance:` with `stamp` before rendering. A source-declared value is
+/// replaced, not merged — the writer's claim about its own authorship is the
+/// only one that can be true.
+/// Test: `compose_with_provenance_stamps_the_field`,
+/// `compose_with_provenance_overrides_a_source_declaration`.
+pub fn compose_agent_with_provenance(
+    name: &str,
+    source_dir: &Path,
+    stamp: Provenance,
+) -> Result<String, AgentBuildError> {
+    let sources = build_source_map(source_dir);
+    let mut visiting = Vec::new();
+    let (mut frontmatters, bodies) = resolve(name, &sources, &mut visiting)?;
+    // Push a frontmatter carrying ONLY the stamp: `merge_frontmatter` walks the
+    // chain base-first with scalar child-wins, so a last entry setting just
+    // this one key overrides any source declaration and touches nothing else.
+    frontmatters.push(Frontmatter {
+        provenance: Some(stamp),
+        ..Frontmatter::default()
+    });
     Ok(render_composed(&frontmatters, &bodies))
 }
 

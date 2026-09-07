@@ -34,6 +34,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use trusty_agents_common::agents::manifest::{AgentManifest, MANIFEST_FILE, ManifestLoad, Origin};
+// #4698: the file's own `provenance:` claim, reported beside the ledger's origin.
+use trusty_agents_common::agents::metadata::agent_metadata_from_str;
+use trusty_agents_common::agents::provenance::Provenance;
 
 use crate::jsonrpc::RpcError;
 use crate::paths::TRUSTY_CODE_DIRNAME;
@@ -104,6 +107,10 @@ struct DiskProvenance {
     deployed_at: Option<String>,
     /// The resolved `extends:` chain the deploy composed, base-first.
     source_chain: Vec<String>,
+    /// The `provenance:` the FILE declares about itself (#4698), independent of
+    /// the ledger. `None` when the file declares none or could not be read — an
+    /// absent field means user-authored, per #4698's design note.
+    declared_provenance: Option<Provenance>,
     /// Everything an operator should know that is not simply "this is fine".
     warnings: Vec<String>,
 }
@@ -114,7 +121,7 @@ impl DiskProvenance {
     /// Why: a client reading `provenance.origin` must be able to tell "not
     /// recorded" from "key missing because the server is older" — so the keys
     /// are always present and it is the VALUES that go null.
-    /// What: a fixed six-key object. `warnings` is not included here; the
+    /// What: a fixed seven-key object. `warnings` is not included here; the
     /// caller merges them into the response's single top-level `warnings` list
     /// so a client has one place to look.
     fn to_json(&self) -> Value {
@@ -125,6 +132,10 @@ impl DiskProvenance {
             "checksum": self.checksum,
             "deployed_at": self.deployed_at,
             "source_chain": self.source_chain,
+            // #4698: the file's own claim, beside the ledger's. A client
+            // comparing the two sees a hand-edit the checksum alone would not
+            // explain; the ledger stays authoritative either way.
+            "declared_provenance": self.declared_provenance.map(Provenance::as_str),
         })
     }
 }
@@ -149,7 +160,7 @@ fn origin_token(origin: Origin) -> &'static str {
 /// Why: an embedded or plugin agent has no ledger entry and never will, which
 /// is not the same condition as a missing ledger. Naming it keeps a client from
 /// reading `"absent"` as "something is wrong".
-/// What: the same six keys [`DiskProvenance::to_json`] emits, with
+/// What: the same seven keys [`DiskProvenance::to_json`] emits, with
 /// `manifest: "not-applicable"`.
 /// Test: `embedded_agent_has_no_disk_path_and_no_warnings`.
 fn not_applicable_provenance() -> Value {
@@ -160,6 +171,7 @@ fn not_applicable_provenance() -> Value {
         "checksum": Value::Null,
         "deployed_at": Value::Null,
         "source_chain": [],
+        "declared_provenance": Value::Null,
     })
 }
 
@@ -208,6 +220,7 @@ fn provenance_for(dir: &Path, ledger: &LedgerState, name: &str) -> DiskProvenanc
         checksum: None,
         deployed_at: None,
         source_chain: Vec::new(),
+        declared_provenance: None,
         warnings: Vec::new(),
     };
 
@@ -252,9 +265,13 @@ fn provenance_for(dir: &Path, ledger: &LedgerState, name: &str) -> DiskProvenanc
 
     match std::fs::read_to_string(dir.join(&filename)) {
         Ok(current) if manifest.checksum_matches(&filename, &current) => {
+            // #4698: report what the file says about its own author beside what
+            // the ledger recorded, so a client sees both records.
+            provenance.declared_provenance = agent_metadata_from_str(&current).provenance;
             provenance.checksum = Some("match");
         }
-        Ok(_) => {
+        Ok(current) => {
+            provenance.declared_provenance = agent_metadata_from_str(&current).provenance;
             provenance.checksum = Some("mismatch");
             provenance.warnings.push(format!(
                 "the disk copy of '{name}' diverges from the bundled roster: its content no \

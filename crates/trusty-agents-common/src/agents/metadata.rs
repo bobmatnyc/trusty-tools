@@ -33,6 +33,7 @@
 use std::path::Path;
 
 use super::builder::{Frontmatter, split_frontmatter};
+use super::provenance::Provenance;
 
 /// A deployed agent's parsed frontmatter, projected for display/diagnostics.
 ///
@@ -93,6 +94,24 @@ pub struct AgentMetadata {
     /// OVERRIDE-merged across an `extends` chain rather than unioned (see
     /// `builder::merge_frontmatter`).
     pub tools: Option<Vec<String>>,
+    /// The `provenance:` field — who wrote this file (#4698).
+    ///
+    /// Why: the read-only surfaces that already report a file's recorded
+    /// [`crate::agents::manifest::Origin`] need the frontmatter's own claim
+    /// beside it, because the two are independent records and a file with no
+    /// ledger entry has ONLY this one.
+    /// What: `None` when the key is absent, which
+    /// [`crate::agents::provenance::declared_or_default`] resolves to
+    /// [`Provenance::UserAuthored`]. `None` ALSO when the document failed to
+    /// parse at all — including the case where `provenance:` itself carried an
+    /// unrecognised value, since this projection degrades a parse failure to
+    /// [`AgentMetadata::default`] rather than propagating it. A caller that
+    /// must distinguish "absent" from "malformed" parses with
+    /// [`crate::agents::builder::compose_agent`] instead, which rejects.
+    /// Test: `metadata_from_str_reads_provenance`,
+    /// `metadata_from_str_provenance_absent_is_none`,
+    /// `metadata_from_str_unknown_provenance_is_default`.
+    pub provenance: Option<Provenance>,
 }
 
 impl From<Frontmatter> for AgentMetadata {
@@ -107,6 +126,7 @@ impl From<Frontmatter> for AgentMetadata {
             skills: fm.skills,
             max_tokens: fm.max_tokens,
             tools: fm.tools,
+            provenance: fm.provenance,
         }
     }
 }
@@ -195,6 +215,42 @@ mod tests {
         let meta = agent_metadata_from_str("---\nname: plain\nrole: engineer\n---\n\nBody.\n");
         assert_eq!(meta.role.as_deref(), Some("engineer"));
         assert_eq!(meta.agent_type, None);
+    }
+
+    /// #4698: the field a deployed framework agent now carries.
+    #[test]
+    fn metadata_from_str_reads_provenance() {
+        let doc = "---\nname: qa\nrole: qa\nprovenance: framework-owned\n---\n\nBody.\n";
+        assert_eq!(
+            agent_metadata_from_str(doc).provenance,
+            Some(Provenance::FrameworkOwned)
+        );
+        let doc = "---\nname: helper\nprovenance: tm-agent-manager-built\n---\n\nBody.\n";
+        assert_eq!(
+            agent_metadata_from_str(doc).provenance,
+            Some(Provenance::TmAgentManagerBuilt)
+        );
+    }
+
+    /// #4698: absence is the "not ours, never touch" signal, so it projects as
+    /// `None` here and is resolved by `provenance::declared_or_default`.
+    #[test]
+    fn metadata_from_str_provenance_absent_is_none() {
+        let meta = agent_metadata_from_str("---\nname: plain\nrole: engineer\n---\n\nBody.\n");
+        assert_eq!(meta.provenance, None);
+        assert_eq!(
+            super::super::provenance::declared_or_default(meta.provenance),
+            Provenance::UserAuthored
+        );
+    }
+
+    /// #4698: an unknown value hard-errors in the composer; this best-effort
+    /// projection degrades the whole document to a default rather than
+    /// propagating, exactly as it already does for malformed frontmatter.
+    #[test]
+    fn metadata_from_str_unknown_provenance_is_default() {
+        let doc = "---\nname: broken\nprovenance: framework_owned\n---\n\nBody.\n";
+        assert_eq!(agent_metadata_from_str(doc), AgentMetadata::default());
     }
 
     #[test]

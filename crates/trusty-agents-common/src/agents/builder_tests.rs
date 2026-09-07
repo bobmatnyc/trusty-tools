@@ -12,6 +12,11 @@
 //! Test: run with `cargo test -p trusty-agents-common -- agents::builder`.
 
 use super::*;
+// #4698: the YAML scalar helpers moved to `builder_yaml` when adding
+// `provenance:` pushed `builder.rs` over the SLOC cap. `render_scalar` and the
+// escape pair arrive through `super::*` (the composer imports them);
+// `needs_quoting` has no caller in `builder.rs`, so it is named directly.
+use crate::agents::builder_yaml::needs_quoting;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -863,7 +868,7 @@ fn compose_agent_with_no_skills_omits_the_key() {
     write_agent(
         tmp.path(),
         "plain",
-        "---\nname: plain\nrole: engineer\n---\n\n# Plain\n\nBODY\n",
+        "---\nname: plain\nrole: base\n---\n\n# Plain\n\nBODY\n",
     );
     let composed = compose_agent("plain", tmp.path()).unwrap();
     assert!(!composed.contains("skills:"));
@@ -1357,4 +1362,142 @@ fn agent_type_is_parsed_but_never_emitted() {
     // ...and compose still drops it, byte-identically to pre-#4511 output.
     let composed = compose_agent("aws-ops", tmp.path()).unwrap();
     assert_eq!(composed, "---\nname: aws-ops\n---\n\n# AWS Ops\n\nBODY\n");
+}
+
+// ---------------------------------------------------------------------------
+// #4698: the `provenance:` frontmatter field.
+// ---------------------------------------------------------------------------
+
+/// The field parses, merges, and is re-emitted, so a composed file stays
+/// self-describing about who wrote it.
+#[test]
+fn provenance_parsed_merged_and_emitted() {
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "qa",
+        "---\nname: qa\nrole: base\nprovenance: tm-agent-manager-built\n---\n\n# QA\n\nBODY\n",
+    );
+
+    let (fm, _body) =
+        split_frontmatter(&fs::read_to_string(tmp.path().join("qa.md")).unwrap()).unwrap();
+    assert_eq!(fm.provenance, Some(Provenance::TmAgentManagerBuilt));
+
+    let composed = compose_agent("qa", tmp.path()).unwrap();
+    assert_eq!(
+        composed,
+        "---\nname: qa\nrole: base\nprovenance: tm-agent-manager-built\n---\n\n# QA\n\nBODY\n"
+    );
+}
+
+/// Absence is the signal #4698 relies on, so an agent that declares nothing
+/// composes to output with no `provenance:` line at all — byte-identical to
+/// what the composer emitted before this field existed.
+#[test]
+fn absent_provenance_emits_no_line() {
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "plain",
+        "---\nname: plain\nrole: base\n---\n\n# Plain\n\nBODY\n",
+    );
+    let composed = compose_agent("plain", tmp.path()).unwrap();
+    assert_eq!(
+        composed,
+        "---\nname: plain\nrole: base\n---\n\n# Plain\n\nBODY\n"
+    );
+    assert!(!composed.contains("provenance"));
+}
+
+/// Scalar child-wins across an `extends` chain, matching `model:`.
+#[test]
+fn provenance_child_wins_across_chain() {
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base-agent",
+        "---\nname: base-agent\nprovenance: framework-owned\n---\n\nBASE\n",
+    );
+    write_agent(
+        tmp.path(),
+        "child",
+        "---\nname: child\nextends: base-agent\nprovenance: user-authored\n---\n\nCHILD\n",
+    );
+    let composed = compose_agent("child", tmp.path()).unwrap();
+    assert!(composed.contains("provenance: user-authored"));
+    assert!(!composed.contains("framework-owned"));
+
+    // And a child that declares nothing inherits the base's declaration.
+    write_agent(
+        tmp.path(),
+        "quiet",
+        "---\nname: quiet\nextends: base-agent\n---\n\nQUIET\n",
+    );
+    assert!(
+        compose_agent("quiet", tmp.path())
+            .unwrap()
+            .contains("provenance: framework-owned")
+    );
+}
+
+/// An unrecognised value is REJECTED with the typed error, never coerced to
+/// the absent default — coercion would read a typo as user-authored and freeze
+/// a framework file (#4408's shape).
+#[test]
+fn unknown_provenance_value_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "typo",
+        "---\nname: typo\nprovenance: framework_owned\n---\n\nBODY\n",
+    );
+    let err = compose_agent("typo", tmp.path()).unwrap_err();
+    match &err {
+        AgentBuildError::InvalidProvenance(inner) => assert_eq!(inner.value, "framework_owned"),
+        other => panic!("expected InvalidProvenance, got {other:?}"),
+    }
+    assert!(
+        err.to_string().contains("framework_owned"),
+        "the message names the offending value: {err}"
+    );
+    // The typed payload is reachable through `source()` too.
+    assert!(std::error::Error::source(&err).is_some());
+}
+
+/// The deployer supplies the value; the source need not declare one.
+#[test]
+fn compose_with_provenance_stamps_the_field() {
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "plain",
+        "---\nname: plain\nrole: base\n---\n\n# Plain\n\nBODY\n",
+    );
+    let composed =
+        compose_agent_with_provenance("plain", tmp.path(), Provenance::FrameworkOwned).unwrap();
+    assert_eq!(
+        composed,
+        "---\nname: plain\nrole: base\nprovenance: framework-owned\n---\n\n# Plain\n\nBODY\n"
+    );
+    // Removing the stamped line recovers the unstamped composition exactly —
+    // the property the deployer's adoption path depends on.
+    assert_eq!(
+        crate::agents::provenance::without_provenance_line(&composed),
+        compose_agent("plain", tmp.path()).unwrap()
+    );
+}
+
+/// The writer's claim about its own authorship overrides the source's.
+#[test]
+fn compose_with_provenance_overrides_a_source_declaration() {
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "claims",
+        "---\nname: claims\nprovenance: user-authored\n---\n\nBODY\n",
+    );
+    let composed =
+        compose_agent_with_provenance("claims", tmp.path(), Provenance::FrameworkOwned).unwrap();
+    assert!(composed.contains("provenance: framework-owned"));
+    assert!(!composed.contains("user-authored"));
 }

@@ -84,6 +84,8 @@ use thiserror::Error;
 use crate::agents::deployer::is_agent_file;
 use crate::agents::manifest::{AgentManifest, ManifestLoad};
 use crate::agents::metadata::agent_metadata_from_str;
+// #4698: the file's own authorship claim, reconciled against the ledger.
+use crate::agents::provenance::{Provenance, reconcile_with_ledger};
 
 /// Why [`audit_agent_tier`] could not answer for a directory.
 ///
@@ -271,6 +273,43 @@ pub fn ownership_of(manifest: &AgentManifest, file_name: &str) -> TierOwnership 
     }
 }
 
+/// [`ownership_of`], additionally checking the file's own `provenance:` claim
+/// against the ledger (#4698).
+///
+/// Why: #4698 adds a SECOND record of who wrote a file, and two records can
+/// disagree once anybody edits the deployed copy. The ledger has to win — it is
+/// the record the deployer wrote under a lock and checksummed — but a
+/// disagreement is still worth an operator seeing, so it is warned rather than
+/// swallowed.
+/// What: the verdict is byte-for-byte [`ownership_of`]'s in every case; the
+/// only added behaviour is the warning
+/// [`crate::agents::provenance::reconcile_with_ledger`] emits. Deliberately a
+/// no-op for [`TierOwnership::Untracked`]: an absent ledger entry is not a
+/// disagreement, and letting `provenance: user-authored` stand in for one would
+/// manufacture the user-owned exemption out of a field anybody can type —
+/// exactly the proof invariant 2 above says only a ledger entry supplies.
+/// Test: `ownership_declared_agreeing_matches_ownership_of`,
+/// `ownership_declared_disagreement_keeps_the_ledger_verdict`,
+/// `ownership_declared_never_exempts_an_untracked_file`.
+pub fn ownership_of_declared(
+    manifest: &AgentManifest,
+    file_name: &str,
+    declared: Option<Provenance>,
+) -> TierOwnership {
+    let ownership = ownership_of(manifest, file_name);
+    match ownership {
+        TierOwnership::Untracked => ownership,
+        TierOwnership::FrameworkOwned | TierOwnership::UserOwned => {
+            reconcile_with_ledger(
+                file_name,
+                ownership == TierOwnership::FrameworkOwned,
+                declared,
+            );
+            ownership
+        }
+    }
+}
+
 /// Classify one file in a non-canonical tier. Pure — no I/O.
 ///
 /// Why: the verdict is the shared contract between #4442 and #4448, so it is
@@ -369,7 +408,12 @@ pub fn audit_agent_tier(
             }
             let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
             let name = agent_identity(&content, &file_name);
-            let class = classify_tier_resident(&name, ownership_of(&manifest, &file_name), bundled);
+            // #4698: read the file's own `provenance:` claim so a disagreement
+            // with the ledger is reported. The verdict is unchanged — the
+            // ledger wins — so this scan's classification is identical.
+            let declared = agent_metadata_from_str(&content).provenance;
+            let ownership = ownership_of_declared(&manifest, &file_name, declared);
+            let class = classify_tier_resident(&name, ownership, bundled);
             class.is_tm_owned().then(|| MisplacedAgent {
                 path: entry.path(),
                 name,

@@ -772,3 +772,116 @@ fn retract_refuses_on_corrupt_manifest() {
         "no file may be removed when the ledger is unreadable"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #4698: every deployed agent carries `provenance: framework-owned`.
+// ---------------------------------------------------------------------------
+
+/// The deployer stamps the field on every file it writes, and the manifest
+/// round-trip still holds: the recorded checksum is the checksum of the bytes
+/// actually on disk, so a second run reports the file unchanged.
+#[test]
+fn deploy_stamps_provenance_and_the_manifest_still_round_trips() {
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+
+    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    assert_eq!(result.deployed.len(), 2, "both agents written: {result:?}");
+
+    for filename in ["base-agent.md", "engineer.md"] {
+        let on_disk = fs::read_to_string(tgt.path().join(filename)).unwrap();
+        assert!(
+            on_disk.contains("provenance: framework-owned"),
+            "{filename} carries the stamp:\n{on_disk}"
+        );
+        // The declaration and the ledger's `Origin` agree — the invariant
+        // `provenance::reconcile_with_ledger` exists to police.
+        let declared = crate::agents::metadata::agent_metadata_from_str(&on_disk).provenance;
+        assert_eq!(declared, Some(Provenance::FrameworkOwned));
+        let manifest = AgentManifest::load(tgt.path());
+        let entry = manifest.managed.get(filename).expect("tracked");
+        assert!(entry.origin.is_framework_owned());
+        assert_eq!(
+            declared.map(Provenance::is_framework_owned),
+            Some(entry.origin.is_framework_owned()),
+            "{filename}: frontmatter and ledger agree"
+        );
+        assert!(
+            manifest.checksum_matches(filename, &on_disk),
+            "{filename}: the recorded checksum is the on-disk content's"
+        );
+    }
+
+    // A second run sees everything current — no churn from the new field.
+    let again = deploy_agents(src.path(), tgt.path()).unwrap();
+    assert_eq!(again.unchanged.len(), 2, "idempotent: {again:?}");
+    assert!(again.deployed.is_empty());
+}
+
+/// A file deployed BEFORE the stamp existed is still adopted, then upgraded on
+/// the next run. Without this, every pre-#4698 untracked file would be refused
+/// adoption AND refused refresh — frozen, which is #4408's failure.
+#[test]
+fn deploy_adopts_an_untracked_file_written_before_the_provenance_stamp() {
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+
+    // The pre-#4698 spelling: what `compose_agent` alone emits, no stamp.
+    let unstamped = crate::agents::builder::compose_agent("engineer", src.path()).unwrap();
+    assert!(!unstamped.contains("provenance"));
+    fs::write(tgt.path().join("engineer.md"), &unstamped).unwrap();
+
+    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    assert!(
+        result.adopted.contains(&"engineer.md".to_string()),
+        "adopted, not skipped: {result:?}"
+    );
+    assert!(
+        !result
+            .untracked_modified
+            .contains(&"engineer.md".to_string())
+    );
+    // Adoption is registration-only, so the file is still the unstamped bytes
+    // and the ledger records THOSE bytes.
+    let after_adopt = fs::read_to_string(tgt.path().join("engineer.md")).unwrap();
+    assert_eq!(after_adopt, unstamped);
+    assert!(AgentManifest::load(tgt.path()).checksum_matches("engineer.md", &after_adopt));
+
+    // The next run finds a matching checksum and a differing composition, so it
+    // refreshes into the stamped form.
+    let second = deploy_agents(src.path(), tgt.path()).unwrap();
+    assert!(
+        second.deployed.contains(&"engineer.md".to_string()),
+        "upgraded on the next run: {second:?}"
+    );
+    let upgraded = fs::read_to_string(tgt.path().join("engineer.md")).unwrap();
+    assert!(upgraded.contains("provenance: framework-owned"));
+    assert!(AgentManifest::load(tgt.path()).checksum_matches("engineer.md", &upgraded));
+}
+
+/// A source asset that declares nothing still deploys stamped — there is no
+/// per-file declaration for a new bundled agent to forget.
+#[test]
+fn deploy_stamps_an_agent_whose_source_declares_no_provenance() {
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    fs::write(
+        src.path().join("solo.md"),
+        "---\nname: solo\nrole: engineer\n---\n\n# Solo\n\nBODY\n",
+    )
+    .unwrap();
+    assert!(
+        !fs::read_to_string(src.path().join("solo.md"))
+            .unwrap()
+            .contains("provenance")
+    );
+
+    deploy_agents(src.path(), tgt.path()).unwrap();
+    assert!(
+        fs::read_to_string(tgt.path().join("solo.md"))
+            .unwrap()
+            .contains("provenance: framework-owned")
+    );
+}
