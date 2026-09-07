@@ -16,6 +16,9 @@ use trusty_common::memory_core::palace::{Palace, PalaceId};
 use uuid::Uuid;
 
 use super::helpers::{open_palace_handle, resolve_palace};
+// #6318: `palace_info` reads, so it falls back to a palace index; `palace_compact`,
+// `palace_reembed` and `palace_unalias` can write, so they keep the error.
+use super::palace_index::{resolve_palace_or_index, PalaceScope};
 
 /// Validate that a palace slug is a safe, well-formed filesystem name.
 ///
@@ -224,7 +227,11 @@ pub(crate) async fn handle_palace_update(state: &AppState, args: Value) -> Resul
 }
 
 pub(crate) async fn handle_palace_info(state: &AppState, args: Value) -> Result<Value> {
-    let palace = resolve_palace(state, &args, "palace_info")?;
+    // #6318: no palace and no default is answered with an index, not an error.
+    let palace = match resolve_palace_or_index(state, &args, "palace_info").await? {
+        PalaceScope::Palace(p) => p,
+        PalaceScope::Index(index) => return Ok(index),
+    };
     let handle = open_palace_handle(state, &palace)?;
     let drawer_count = handle.list_drawers(None, None, usize::MAX).len();
     let data_dir = handle

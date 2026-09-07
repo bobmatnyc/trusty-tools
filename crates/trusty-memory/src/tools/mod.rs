@@ -38,6 +38,8 @@ pub mod embed_audit_definitions;
 pub mod helpers;
 pub mod kg_ops;
 pub mod memory_ops;
+// #6318: the no-palace fallback every palace-scoped READ tool shares.
+pub mod palace_index;
 pub mod palace_ops;
 pub mod room_definitions;
 pub mod room_ops;

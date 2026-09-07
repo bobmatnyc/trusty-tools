@@ -20,6 +20,10 @@ use trusty_common::memory_core::palace::PalaceId;
 use trusty_common::memory_core::store::kg::Triple;
 
 use super::helpers::{open_palace_handle, resolve_palace};
+// #6318: the KG READ tools fall back to a palace index; `kg_assert`,
+// `kg_retract_triple`, `add_alias`, `discover_aliases` and `kg_bootstrap` all
+// write, so they keep `resolve_palace`'s error.
+use super::palace_index::{resolve_palace_or_index, PalaceScope};
 
 pub(crate) async fn handle_kg_assert(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "kg_assert")?;
@@ -251,7 +255,11 @@ pub(crate) async fn handle_remove_prompt_fact(state: &AppState, args: Value) -> 
 /// `kg_query_reports_graph_empty_when_graph_has_no_triples`,
 /// `dispatch_kg_assert_then_query`.
 pub(crate) async fn handle_kg_query(state: &AppState, args: Value) -> Result<Value> {
-    let palace = resolve_palace(state, &args, "kg_query")?;
+    // #6318: no palace and no default is answered with an index, not an error.
+    let palace = match resolve_palace_or_index(state, &args, "kg_query").await? {
+        PalaceScope::Palace(p) => p,
+        PalaceScope::Index(index) => return Ok(index),
+    };
     let subject = args
         .get("subject")
         .and_then(|v| v.as_str())
@@ -306,7 +314,11 @@ pub(crate) async fn handle_kg_gaps(state: &AppState, args: Value) -> Result<Valu
     // cached vec (an empty array when the dream cycle has not yet
     // populated it).
     // Test: `dispatch_kg_gaps_returns_cached`.
-    let palace = resolve_palace(state, &args, "kg_gaps")?;
+    // #6318: no palace and no default is answered with an index, not an error.
+    let palace = match resolve_palace_or_index(state, &args, "kg_gaps").await? {
+        PalaceScope::Palace(p) => p,
+        PalaceScope::Index(index) => return Ok(index),
+    };
     // Ensure the palace exists; this also surfaces a useful error for
     // typos in the palace argument.
     let _handle = open_palace_handle(state, &palace)?;
@@ -346,7 +358,11 @@ pub(crate) async fn handle_kg_gaps(state: &AppState, args: Value) -> Result<Valu
 /// `dispatch_kg_list_subjects_with_counts_returns_pairs`,
 /// `dispatch_kg_list_subjects_exact_limit_is_not_truncated`.
 pub(crate) async fn handle_kg_list_subjects(state: &AppState, args: Value) -> Result<Value> {
-    let palace = resolve_palace(state, &args, "kg_list_subjects")?;
+    // #6318: no palace and no default is answered with an index, not an error.
+    let palace = match resolve_palace_or_index(state, &args, "kg_list_subjects").await? {
+        PalaceScope::Palace(p) => p,
+        PalaceScope::Index(index) => return Ok(index),
+    };
     let handle = open_palace_handle(state, &palace)?;
     let limit = args
         .get("limit")

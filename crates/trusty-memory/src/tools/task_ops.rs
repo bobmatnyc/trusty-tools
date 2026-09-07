@@ -20,6 +20,9 @@ use super::helpers::{
     begin_budgeted_write, open_palace_handle, parse_tags, resolve_palace, room_label, write_drawer,
     WriteDrawerParams,
 };
+// #6318: `task_list` reads, so it falls back to a palace index; `task_add` and
+// `task_complete` write, so they keep `resolve_palace`'s error.
+use super::palace_index::{resolve_palace_or_index, PalaceScope};
 
 /// Create a Task drawer in a palace via the MCP surface.
 ///
@@ -106,7 +109,11 @@ pub(crate) async fn handle_task_add(state: &AppState, args: Value) -> Result<Val
 /// Test: `task_add_and_list_via_mcp`, `task_complete_sets_completed_at`
 /// in `tests/task_mcp.rs`.
 pub(crate) async fn handle_task_list(state: &AppState, args: Value) -> Result<Value> {
-    let palace = resolve_palace(state, &args, "task_list")?;
+    // #6318: no palace and no default is answered with an index, not an error.
+    let palace = match resolve_palace_or_index(state, &args, "task_list").await? {
+        PalaceScope::Palace(p) => p,
+        PalaceScope::Index(index) => return Ok(index),
+    };
     let include_completed = args
         .get("include_completed")
         .and_then(|v| v.as_bool())

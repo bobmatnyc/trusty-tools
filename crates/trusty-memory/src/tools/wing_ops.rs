@@ -20,6 +20,9 @@ use trusty_common::memory_core::PalaceHandle;
 use uuid::Uuid;
 
 use super::helpers::{open_palace_handle, resolve_palace};
+// #6318: `wing_list` reads, so it falls back to a palace index; `wing_create`
+// and `wing_rename` write, so they keep `resolve_palace`'s error.
+use super::palace_index::{resolve_palace_or_index, PalaceScope};
 
 /// Render a `WingSummary` as the MCP wire shape.
 ///
@@ -78,7 +81,11 @@ pub(crate) fn resolve_wing_arg(
 /// created_at } ] }`.
 /// Test: `wing_list_shows_the_default_wing`, `wing_create_then_list`.
 pub(crate) async fn handle_wing_list(state: &AppState, args: Value) -> Result<Value> {
-    let palace = resolve_palace(state, &args, "wing_list")?;
+    // #6318: no palace and no default is answered with an index, not an error.
+    let palace = match resolve_palace_or_index(state, &args, "wing_list").await? {
+        PalaceScope::Palace(p) => p,
+        PalaceScope::Index(index) => return Ok(index),
+    };
     let handle = open_palace_handle(state, &palace)?;
     let wings = list_wings(&handle.kg).map_err(|e| anyhow!("wing_list: {e:#}"))?;
     let payload: Vec<Value> = wings.iter().map(wing_json).collect();

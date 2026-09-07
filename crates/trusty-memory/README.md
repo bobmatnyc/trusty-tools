@@ -263,9 +263,9 @@ this table is generated from it, not maintained by hand.
 | `chat_session_add_turn` | `palace`, `session_id`, `role`, `content` | Append a message (prompt or response) to a chat session's history. |
 | `chat_session_create` | `palace`, `session_id?`, `title?` | Create a new chat session in a palace (spec-001 chat-session manager). |
 | `chat_session_delete` | `palace`, `session_id` | Delete a chat session (and its full history) from a palace. |
-| `chat_session_get` | `palace`, `session_id` | Retrieve a full chat session: metadata plus every turn in chronological order. |
-| `chat_session_list` | `palace`, `limit?`, `offset?` | List chat sessions in a palace as paginated metadata (id, title, timestamps, message_count) ordered most-recently-updated first. |
-| `chat_session_recall` | `palace`, `session_id` | Retrieve a full chat session with all turns in order (alias for chat_session_get, preferred name for agent-facing recall). |
+| `chat_session_get` | `session_id`, `palace?` | Retrieve a full chat session: metadata plus every turn in chronological order. |
+| `chat_session_list` | `limit?`, `offset?`, `palace?` | List chat sessions in a palace as paginated metadata (id, title, timestamps, message_count) ordered most-recently-updated first. |
+| `chat_session_recall` | `session_id`, `palace?` | Retrieve a full chat session with all turns in order (alias for chat_session_get, preferred name for agent-facing recall). |
 | `chat_turn_append` | `palace`, `session_id`, `prompt`, `response` | Append a prompt/response PAIR to a chat session as two consecutive messages (user role then assistant role). |
 | `console_metrics` | — | Return a ConsoleMetricsReport with palace aggregate statistics (palace_count, counted_palace_count, cached_palace_count, total_drawers,… |
 | `discover_aliases` | `palace`, `project_root?` | Auto-discover project aliases by scanning Cargo workspace members, binary names, first-letter abbreviations, and the git remote. |
@@ -274,16 +274,16 @@ this table is generated from it, not maintained by hand.
 | `kg_assert` | `palace`, `subject`, `predicate`, `object`, `confidence?`, `provenance?` | Assert a fact in the temporal knowledge graph. |
 | `kg_bootstrap` | `palace?`, `project_path?` | Seed the knowledge graph from well-known project files (Cargo.toml, package.json, pyproject.toml, go.mod, CLAUDE.md, .git/config). |
 | `kg_gaps` | `palace?` | List knowledge gaps detected in the memory palace graph. |
-| `kg_list_subjects` | `palace`, `limit?`, `with_counts?` | List the subjects this palace's knowledge graph actually holds, ordered by subject. |
-| `kg_query` | `palace`, `subject` | Query active knowledge-graph triples for a subject. |
+| `kg_list_subjects` | `limit?`, `palace?`, `with_counts?` | List the subjects this palace's knowledge graph actually holds, ordered by subject. |
+| `kg_query` | `subject`, `palace?` | Query active knowledge-graph triples for a subject. |
 | `kg_retract_triple` | `palace`, `subject`, `predicate`, `object` | Retract one fact from the temporal knowledge graph — the inverse of kg_assert. |
 | `list_prompt_facts` | — | List every active prompt-fact triple (aliases, conventions, facts, shorthands) across all palaces. |
 | `memory_forget` | `palace`, `drawer_id` | Delete a drawer from a palace by its UUID. |
-| `memory_list` | `palace`, `limit?`, `room?`, `tag?`, `wing?` | List drawers in a palace, optionally filtered by wing, room type, or tag. |
+| `memory_list` | `limit?`, `palace?`, `room?`, `tag?`, `wing?` | List drawers in a palace, optionally filtered by wing, room type, or tag. |
 | `memory_note` | `palace`, `content`, `context?`, `cwd?`, `expires_at?`, `fact_key?`, `room?`, `tags?`, `workstream?` | Curated shortcut for short, high-signal facts ("User prefers snake_case", "Deploy target is prod-east"). |
-| `memory_recall` | `palace`, `query`, `room?`, `top_k?`, `wing?` | Recall memories using L0+L1+L2 progressive retrieval. |
+| `memory_recall` | `query`, `palace?`, `room?`, `top_k?`, `wing?` | Recall memories using L0+L1+L2 progressive retrieval. |
 | `memory_recall_all` | `q`, `deep?`, `top_k?` | Semantic search across ALL palaces simultaneously. |
-| `memory_recall_deep` | `palace`, `query`, `room?`, `top_k?` | Deep recall using L3 full HNSW search. |
+| `memory_recall_deep` | `query`, `palace?`, `room?`, `top_k?` | Deep recall using L3 full HNSW search. |
 | `memory_remember` | `palace`, `text`, `allow_secret_like?`, `context?`, `cwd?`, `expires_at?`, `fact_key?`, `force?`, `room?`, `tags?`, `wing?`, `workstream?` | Store a memory (drawer) in a palace room. |
 | `memory_send_message` | `to_palace`, `purpose`, `content`, `cwd?`, `from_palace?`, `workstream?` | Send an inter-project message (issue #99). |
 | `palace_compact` | `palace` | Remove orphaned vector index entries (vectors with no matching drawer row). |
@@ -291,7 +291,7 @@ this table is generated from it, not maintained by hand.
 | `palace_delete` | `palace_id`, `force?` | Delete an entire memory palace, including its drawers, vectors, and knowledge graph. |
 | `palace_dream` | `palace`, `compact?`, `dry_run?`, `max_age_days?`, `room?` | On-demand LLM-driven consolidation for a palace (issue #1721). |
 | `palace_embed_sweep` | — | #5000 / #4786: vector coverage for EVERY palace on disk, uncapped. |
-| `palace_info` | `palace` | Get metadata and stats for a single palace. |
+| `palace_info` | `palace?` | Get metadata and stats for a single palace. |
 | `palace_list` | — | List all palaces on this machine. |
 | `palace_reembed` | `palace`, `dry_run?`, `limit?` | #4906: report drawers that have no vector (durable but unfindable), and optionally re-embed them. |
 | `palace_unalias` | `palace`, `dry_run?` | #5005: free drawers whose vector was destroyed by an id collision (`palace_reembed` reports these as `aliased`), so a re-embed can repair… |
@@ -299,14 +299,14 @@ this table is generated from it, not maintained by hand.
 | `palace_verify_embedded` | `palace`, `drawer_ids` | #5000: answer whether YOUR OWN drawer ids are vector-findable. |
 | `remove_prompt_fact` | `subject`, `predicate` | Retract the active triple for a (subject, predicate) pair from the prompt-facts surface. |
 | `room_create` | `palace`, `label`, `description?`, `wing?` | Create a room in a palace, or return the existing one (ADR-0027). |
-| `room_list` | `palace`, `wing?` | List every room registered in a palace (ADR-0027). |
+| `room_list` | `palace?`, `wing?` | List every room registered in a palace (ADR-0027). |
 | `room_rename` | `palace`, `room`, `new_label` | Rename a room (ADR-0027). |
 | `task_add` | `palace`, `content`, `room?`, `tags?` | Create a Task drawer in a palace (spec-001 issue #1722). |
 | `task_complete` | `palace`, `drawer_id` | Mark a Task drawer as completed by setting its completed_at timestamp (spec-001 issue #1722). |
-| `task_list` | `palace`, `include_completed?` | List Task drawers in a palace (spec-001 issue #1722). |
+| `task_list` | `include_completed?`, `palace?` | List Task drawers in a palace (spec-001 issue #1722). |
 | `upgrade` | `check?`, `confirm?` | Check for or install a new version of trusty-memory (issue #537). |
 | `wing_create` | `palace`, `label` | Create a wing (scope) in a palace, or return the existing one with that label (ADR-0027). |
-| `wing_list` | `palace` | List the wings of a palace (ADR-0027). |
+| `wing_list` | `palace?` | List the wings of a palace (ADR-0027). |
 | `wing_rename` | `palace`, `wing`, `new_label` | Rename a wing (ADR-0027). |
 <!-- END GENERATED: mcp-tools -->
 

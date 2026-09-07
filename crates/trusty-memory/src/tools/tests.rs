@@ -110,6 +110,12 @@ fn test_state_warming() -> (crate::AppState, tempfile::TempDir) {
 /// Why: Issue #26 — when the server is started with `--palace`, the
 /// `tools/list` schema must drop `palace` from the `required` array for
 /// every tool that accepts it, so MCP clients know it's optional.
+///
+/// #6318 narrowed this to the WRITE tools. A palace-scoped read now answers a
+/// no-palace call with an index of the palaces on the host, so `palace` is not
+/// required on either branch — `false` rows below are the read tools, and
+/// `read_tool_schemas_never_require_palace` in `palace_index_tests` owns that
+/// half of the contract for the full read roster.
 /// Test: Build the schema both ways and check the required arrays.
 #[test]
 fn tool_definitions_drops_palace_required_when_default_set() {
@@ -117,11 +123,11 @@ fn tool_definitions_drops_palace_required_when_default_set() {
     let without_default = tool_definitions_with(false);
     for (name, palace_required_when_no_default) in [
         ("memory_remember", true),
-        ("memory_recall", true),
-        ("memory_recall_deep", true),
-        ("memory_list", true),
+        ("memory_recall", false),
+        ("memory_recall_deep", false),
+        ("memory_list", false),
         ("memory_forget", true),
-        ("palace_info", true),
+        ("palace_info", false),
         ("palace_compact", true),
         ("palace_reembed", true),
         ("palace_unalias", true),
@@ -129,9 +135,10 @@ fn tool_definitions_drops_palace_required_when_default_set() {
         // arguments at all, so it has no conditional `palace` to drop.
         ("palace_verify_embedded", true),
         ("kg_assert", true),
-        ("kg_query", true),
+        ("kg_query", false),
         // Issue #664: add_alias and discover_aliases now include `palace`
         // in their schema and follow the same conditional-required pattern.
+        // Both write, so #6318 leaves them here.
         ("add_alias", true),
         ("discover_aliases", true),
     ] {
@@ -548,6 +555,8 @@ mod embed_audit_tests;
 mod kg_retract_tests;
 // #6424: the console's Last Used column, end to end through the dispatcher.
 mod last_used_tests;
+// #6318: the no-palace palace index, and the read/write split that bounds it.
+mod palace_index_tests;
 mod write_budget_tests;
 
 /// Why: #4776 — `kg_list_subjects` is the discovery read that makes `kg_query`
