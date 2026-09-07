@@ -881,3 +881,127 @@ fn the_wrapper_scans_its_own_suggestions() {
         "the wrapper must answer exactly as the delegating form does"
     );
 }
+
+/// Seed the near-miss pair issue #6798 reports: one person committing as
+/// `Ada Lovelace <ada.lovelace@example.com>` and as
+/// `ada.lovelace <ada.lovelace@users.noreply.github.com>`.
+///
+/// Why: before #6798 no pass reached this pair. The same-name pass compared
+/// the raw lowercased display names, which differ by one dot; the noreply pass
+/// required an `<id>+` prefix the legacy address does not carry; and the
+/// edit-distance pass drops identical local-parts. The report therefore read
+/// two authors and raised no flag, and the split was found only by hand.
+fn seed_near_miss_identity_pair(db: &Database) {
+    for (sha, name, email) in [
+        ("n1", "Ada Lovelace", "ada.lovelace@example.com"),
+        (
+            "n2",
+            "ada.lovelace",
+            "ada.lovelace@users.noreply.github.com",
+        ),
+    ] {
+        let id = insert_author(db, name, email);
+        insert_commit(
+            db,
+            sha,
+            name,
+            email,
+            "2026-01-15T00:00:00Z",
+            "repo",
+            false,
+            &["src/lib.rs"],
+        );
+        link_commit(db, sha, id);
+    }
+}
+
+/// (#6798) The near-miss pair must raise the risk flag rather than pass
+/// silently — and must still not be merged without an operator's confirmation.
+#[test]
+fn the_near_miss_split_identity_raises_the_risk_flag() {
+    let db = Database::open_in_memory().expect("open");
+    seed_near_miss_identity_pair(&db);
+
+    let summary = summary_for(db.connection(), "repo").expect("summary");
+    assert_eq!(
+        summary.distinct_authors, 2,
+        "a suggestion nobody confirmed must never be auto-merged"
+    );
+
+    let risk = summary
+        .identity_merge_risk
+        .as_ref()
+        .expect("the near-miss pair must raise the flag");
+    assert_eq!(risk.suggested_unmerged, 1);
+    assert!(
+        summary
+            .caveats
+            .iter()
+            .any(|c| c.contains("suggested for merge")),
+        "a caveat-only renderer must still see the flag: {:?}",
+        summary.caveats
+    );
+}
+
+/// (#6798) Two different people whose names merely resemble each other must
+/// not pair — the normalisation is an exact match on the normalised form, and
+/// their email local-parts sit outside the edit-distance window.
+///
+/// The second identity is `Ada Lovelington`, not the tighter `Ada Lovelaces`
+/// that `suggest::tests::similar_but_distinct_display_names_are_not_paired`
+/// uses: this test runs the WHOLE scan, and a one-character local-part
+/// difference is a 0.85 edit-distance pair — pre-existing behaviour this
+/// change does not touch.
+#[test]
+fn similar_names_from_distinct_people_do_not_raise_the_flag() {
+    let db = Database::open_in_memory().expect("open");
+    for (sha, name, email) in [
+        ("d1", "Ada Lovelace", "ada.lovelace@example.com"),
+        ("d2", "Ada Lovelington", "ada.lovelington@example.com"),
+    ] {
+        let id = insert_author(&db, name, email);
+        insert_commit(
+            &db,
+            sha,
+            name,
+            email,
+            "2026-01-15T00:00:00Z",
+            "repo",
+            false,
+            &["src/lib.rs"],
+        );
+        link_commit(&db, sha, id);
+    }
+
+    let summary = summary_for(db.connection(), "repo").expect("summary");
+    assert_eq!(summary.distinct_authors, 2, "two people, two authors");
+    assert!(
+        summary.identity_merge_risk.is_none(),
+        "distinct people must not be flagged for merge, got {:?}",
+        summary.identity_merge_risk
+    );
+}
+
+/// (#6798) Once the operator confirms the near-miss merge, the report applies
+/// it and stops reporting it — a confirmed pair is not an outstanding one.
+#[test]
+fn a_confirmed_near_miss_merge_is_not_reported_again() {
+    let db = Database::open_in_memory().expect("open");
+    seed_near_miss_identity_pair(&db);
+    record_confirmed_alias(
+        &db,
+        "ada.lovelace@example.com",
+        "ada.lovelace@users.noreply.github.com",
+    );
+
+    let summary = summary_for(db.connection(), "repo").expect("summary");
+    assert_eq!(
+        summary.distinct_authors, 1,
+        "a confirmed merge must collapse the two identities"
+    );
+    assert!(
+        summary.identity_merge_risk.is_none(),
+        "a confirmed merge must clear the flag, got {:?}",
+        summary.identity_merge_risk
+    );
+}

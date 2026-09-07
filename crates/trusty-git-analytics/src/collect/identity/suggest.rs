@@ -12,8 +12,10 @@
 //! Test: the `tests` module below.
 //!
 //! Signals (highest signal first):
-//! 1. Same observed `author_name` string under two different emails
-//!    (confidence 0.95).
+//! 1. Same observed `author_name` under two different emails — byte-identical
+//!    once lowercased (confidence 0.95), or identical once punctuation and
+//!    whitespace are normalised away, e.g. `ada.lovelace` beside `Ada Lovelace`
+//!    (confidence 0.90, #6798).
 //! 2. Edit distance ≤ 2 on the email local-part with identical or
 //!    near-identical domains (confidence 0.78 – 0.85).
 //! 3. Known noise patterns: `*.local` hostnames, GitHub noreply emails,
@@ -112,15 +114,45 @@ pub fn detect_all(
     Ok(dedupe_and_rank(out, floor))
 }
 
-/// Signal 1: identical observed display names under two different emails.
+/// A display name reduced to lowercase words separated by single spaces.
+///
+/// Why (#6798): git configs spell one person's name several ways — `Ada
+/// Lovelace`, `ada.lovelace`, `Ada  Lovelace`, `ada_lovelace`. Comparing the
+/// raw lowercased strings reads every one of those as a different person,
+/// which is the near-miss #6798 reports: two identities left unmerged with
+/// nothing on the report saying so. Punctuation and whitespace carry no
+/// identity, so both are normalised away before the comparison.
+/// What: lowercases, replaces every non-alphanumeric character with a space,
+/// then joins the remaining words with one space. Word ORDER is preserved, so
+/// `Lovelace Ada` never matches `Ada Lovelace` — a reorder is a different
+/// claim than a respelling and this function does not make it.
+/// Test: `tests::a_dotted_display_name_matches_its_spaced_form`.
+fn normalize_display_name(name: &str) -> String {
+    let spaced: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
+    spaced
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Signal 1: the same observed display name under two different emails.
 ///
 /// Why: the strongest hint short of an explicit user action; if two authors
 /// share `canonical_name` and only the email differs, they are almost
 /// certainly the same person.
-/// What: groups distinct `(canonical_name, canonical_email)` pairs by name
-/// and emits one suggestion per non-canonical email pointing at the
-/// alphabetically-first email for the name (a deterministic destination).
-/// Test: `tests::same_name_different_email_detected`.
+/// What: groups distinct `(canonical_name, canonical_email)` pairs by
+/// [`normalize_display_name`] and emits one suggestion per non-canonical email
+/// pointing at the alphabetically-first email for the group (a deterministic
+/// destination). A pair whose raw lowercased names are byte-identical scores
+/// 0.95; one that matches only after normalisation scores 0.90 — still above
+/// [`HIGH_CONFIDENCE_CUTOFF`], because the group is an exact match on the
+/// normalised form rather than a fuzzy one (#6798).
+/// Test: `tests::{same_name_different_email_detected,
+/// a_dotted_display_name_matches_its_spaced_form}`.
 fn detect_same_name_pairs(conn: &Connection) -> Result<Vec<Suggestion>> {
     let mut stmt = conn.prepare(
         "SELECT canonical_name, canonical_email FROM authors \
@@ -130,26 +162,40 @@ fn detect_same_name_pairs(conn: &Connection) -> Result<Vec<Suggestion>> {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
 
-    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // #6798: keyed on the normalised name, with each email's raw lowercased
+    // name kept so an exact match still outranks a normalised-only one.
+    let mut groups: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for r in rows {
         let (name, email) = r?;
-        groups.entry(name.to_lowercase()).or_default().push(email);
+        let key = normalize_display_name(&name);
+        if key.is_empty() {
+            continue;
+        }
+        groups
+            .entry(key)
+            .or_default()
+            .push((email, name.to_lowercase()));
     }
 
     let mut out: Vec<Suggestion> = Vec::new();
-    for (_name, mut emails) in groups {
-        emails.sort();
-        emails.dedup();
-        if emails.len() < 2 {
+    for (_key, mut members) in groups {
+        members.sort();
+        members.dedup_by(|a, b| a.0 == b.0);
+        if members.len() < 2 {
             continue;
         }
-        let dst = emails[0].clone();
-        for src in emails.into_iter().skip(1) {
+        let (dst, dst_name) = members[0].clone();
+        for (src, src_name) in members.into_iter().skip(1) {
+            let exact = src_name == dst_name;
             out.push(Suggestion {
                 src,
                 dst: dst.clone(),
-                confidence: 0.95,
-                reason: "same canonical_name".to_string(),
+                confidence: if exact { 0.95 } else { 0.90 },
+                reason: if exact {
+                    "same canonical_name".to_string()
+                } else {
+                    "same canonical_name after normalisation".to_string()
+                },
             });
         }
     }
@@ -259,29 +305,33 @@ fn detect_noise_patterns(
 
         // 3b. GitHub noreply emails: `<id>+<login>@users.noreply.github.com`.
         if domain == "users.noreply.github.com" {
-            if let Some(login) = local.split_once('+').map(|(_, l)| l) {
-                for other in &emails {
-                    if other == email {
-                        continue;
-                    }
-                    let Some((other_local, _)) = split_email(other) else {
-                        continue;
-                    };
-                    if other_local == login {
-                        out.push(Suggestion {
-                            src: email.clone(),
-                            dst: other.clone(),
-                            confidence: 0.90,
-                            reason: format!("GitHub noreply login '{login}'"),
-                        });
-                    } else if other_local.contains(login) || login.contains(&other_local) {
-                        out.push(Suggestion {
-                            src: email.clone(),
-                            dst: other.clone(),
-                            confidence: 0.78,
-                            reason: format!("GitHub noreply login '{login}' (partial)"),
-                        });
-                    }
+            // #6798: the legacy form is `<login>@users.noreply.github.com`
+            // with no numeric `<id>+` prefix; requiring the `+` skipped that
+            // whole address, and no other pass reaches it either — the
+            // edit-distance pass drops identical local-parts and the domain is
+            // nowhere near a canonical one.
+            let login = local.split_once('+').map_or(local.as_str(), |(_, l)| l);
+            for other in &emails {
+                if other == email {
+                    continue;
+                }
+                let Some((other_local, _)) = split_email(other) else {
+                    continue;
+                };
+                if other_local == login {
+                    out.push(Suggestion {
+                        src: email.clone(),
+                        dst: other.clone(),
+                        confidence: 0.90,
+                        reason: format!("GitHub noreply login '{login}'"),
+                    });
+                } else if other_local.contains(login) || login.contains(&other_local) {
+                    out.push(Suggestion {
+                        src: email.clone(),
+                        dst: other.clone(),
+                        confidence: 0.78,
+                        reason: format!("GitHub noreply login '{login}' (partial)"),
+                    });
                 }
             }
         }
@@ -430,6 +480,60 @@ mod tests {
         assert_eq!(out.len(), 1, "exactly one pair expected, got {out:?}");
         assert!(out[0].confidence >= 0.9);
         assert!(out[0].reason.contains("same canonical_name"));
+    }
+
+    /// (#6798) One person spelling their name `Ada Lovelace` in one git config and
+    /// `ada.lovelace` in another must still pair — the dot is punctuation, not an
+    /// identity. The pair scores below the exact match but above the HIGH
+    /// cutoff, so it reaches the authorship report's risk flag.
+    #[test]
+    fn a_dotted_display_name_matches_its_spaced_form() {
+        let db = Database::open_in_memory().expect("open");
+        insert_author(&db, "Ada Lovelace", "ada.lovelace@example.com");
+        insert_author(&db, "ada.lovelace", "ada.lovelace@users.noreply.github.com");
+        let out = detect_same_name_pairs(db.connection()).expect("detect");
+        assert_eq!(out.len(), 1, "exactly one pair expected, got {out:?}");
+        assert_eq!(out[0].src, "ada.lovelace@users.noreply.github.com");
+        assert_eq!(out[0].dst, "ada.lovelace@example.com");
+        assert!(
+            out[0].confidence >= HIGH_CONFIDENCE_CUTOFF,
+            "a normalised name match must stay HIGH, got {}",
+            out[0].confidence
+        );
+        assert!(out[0].reason.contains("normalisation"), "got {out:?}");
+    }
+
+    /// (#6798) Two different people whose display names merely resemble each
+    /// other must not pair — normalisation is an exact match on the normalised
+    /// form, never a fuzzy one.
+    #[test]
+    fn similar_but_distinct_display_names_are_not_paired() {
+        let db = Database::open_in_memory().expect("open");
+        insert_author(&db, "Ada Lovelace", "ada.lovelace@example.com");
+        insert_author(&db, "Ada Lovelaces", "ada.lovelaces@example.com");
+        let out = detect_same_name_pairs(db.connection()).expect("detect");
+        assert!(out.is_empty(), "two distinct people must not pair: {out:?}");
+    }
+
+    /// (#6798) The legacy GitHub noreply form carries no `<id>+` prefix; the
+    /// login is the whole local-part, and it routes to the identity whose
+    /// local-part matches.
+    #[test]
+    fn a_legacy_github_noreply_address_routes_to_its_login() {
+        let db = Database::open_in_memory().expect("open");
+        insert_author(&db, "A", "ada.lovelace@users.noreply.github.com");
+        insert_author(&db, "B", "ada.lovelace@example.com");
+        let out = detect_noise_patterns(db.connection(), Some("example.com")).expect("detect");
+        let hit = out
+            .iter()
+            .find(|s| s.src == "ada.lovelace@users.noreply.github.com")
+            .unwrap_or_else(|| panic!("expected a noreply suggestion, got {out:?}"));
+        assert_eq!(hit.dst, "ada.lovelace@example.com");
+        assert!(
+            hit.confidence >= HIGH_CONFIDENCE_CUTOFF,
+            "an exact login match must stay HIGH, got {}",
+            hit.confidence
+        );
     }
 
     #[test]
