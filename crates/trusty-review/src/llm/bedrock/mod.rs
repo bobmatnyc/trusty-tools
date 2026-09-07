@@ -42,24 +42,16 @@ pub use tool_use::{build_tool_config, document_to_json_string, json_to_document}
 use std::time::Instant;
 
 use async_trait::async_trait;
-use aws_config::BehaviorVersion;
-use aws_sdk_bedrockruntime::Client as BedrockClient;
 use aws_sdk_bedrockruntime::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_bedrockruntime::types::{
     ContentBlock, ConversationRole, InferenceConfiguration, Message, SystemContentBlock,
 };
 use tracing::{debug, warn};
+use trusty_common::inference::BedrockAdapter;
 
 use super::{LlmProvider, LlmRequest, LlmResponse, error::LlmError};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-
-/// Region env var: trusty-specific override.
-const ENV_REGION_TRUSTY: &str = "TRUSTY_AWS_REGION";
-/// Region env var: standard AWS fallback.
-const ENV_REGION_AWS: &str = "AWS_REGION";
-/// Default AWS region when neither env var is set.
-const DEFAULT_REGION: &str = "us-east-1";
 
 /// Required prefix for Bedrock cross-region inference profiles.
 ///
@@ -81,47 +73,10 @@ const MAX_RETRIES: u32 = 3;
 
 // ─── Region resolution ────────────────────────────────────────────────────────
 
-/// Resolve the AWS region for the Bedrock client.
-///
-/// Why: operators may specify region via either `TRUSTY_AWS_REGION` (trusty-specific)
-/// or `AWS_REGION` (standard); the trusty var takes precedence.
-/// What: returns the first non-empty value of `explicit` > `TRUSTY_AWS_REGION`
-///       > `AWS_REGION` > `"us-east-1"`.
-/// Test: `bedrock_region_resolution`.
-pub fn resolve_bedrock_region(explicit: Option<&str>) -> String {
-    // #5706: read the env here so the precedence walk itself stays pure and
-    // testable without inheriting or mutating the ambient environment.
-    let trusty_env = std::env::var(ENV_REGION_TRUSTY).ok();
-    let aws_env = std::env::var(ENV_REGION_AWS).ok();
-    resolve_region_from(explicit, trusty_env.as_deref(), aws_env.as_deref())
-}
-
-/// Pick the first non-empty region among the four precedence tiers.
-///
-/// Why (#5706): [`resolve_bedrock_region`] reads process-wide env vars, so a
-/// test of its precedence either inherits the developer's `AWS_REGION` or has
-/// to mutate global state and race every other test in the binary. Taking the
-/// two env tiers as arguments makes the ordering provable with neither hazard.
-/// What: returns `explicit` > `trusty_env` > `aws_env` > [`DEFAULT_REGION`].
-/// An empty `explicit` counts as unset; an env tier is trimmed first, so a
-/// whitespace-only value counts as unset too.
-/// Test: `bedrock_region_resolution`.
-fn resolve_region_from(
-    explicit: Option<&str>,
-    trusty_env: Option<&str>,
-    aws_env: Option<&str>,
-) -> String {
-    if let Some(r) = explicit.filter(|s| !s.is_empty()) {
-        return r.to_string();
-    }
-    [trusty_env, aws_env]
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .find(|s| !s.is_empty())
-        .unwrap_or(DEFAULT_REGION)
-        .to_string()
-}
+// #5469: the region precedence walk (explicit > TRUSTY_AWS_REGION > AWS_REGION >
+// us-east-1) lives in the shared Bedrock adapter now; this crate re-exports the
+// resolver so the public path callers already use keeps resolving.
+pub use trusty_common::inference::bedrock::resolve_bedrock_region;
 
 // ─── Model id validation ──────────────────────────────────────────────────────
 
@@ -156,22 +111,24 @@ fn validate_model_id(model_id: &str) -> Result<(), LlmError> {
 /// Why: satisfies the [`LlmProvider`] trait using Bedrock so the review
 /// pipeline works without an OpenRouter API key; uses IAM-based auth suitable
 /// for production AWS deployments.
-/// What: holds a pre-built `BedrockClient` and the resolved model id and
-/// region.  `complete` calls `Converse` (non-streaming), extracts text + token
-/// usage from the response, measures latency, computes cost, and retries up to
-/// [`MAX_RETRIES`] times for transient errors.  When `response_schema` is set,
-/// the `Converse` call includes a `ToolConfiguration` that forces the model to
-/// call the named tool; the `toolUse.input` JSON is returned as
+/// What: holds the shared [`BedrockAdapter`] — which owns region resolution and
+/// the lazily-built Converse client — plus the default model id.  `complete`
+/// calls `Converse` (non-streaming) on the adapter's client, extracts text +
+/// token usage from the response, measures latency, computes cost, and retries
+/// up to [`MAX_RETRIES`] times for transient errors.  When `response_schema` is
+/// set, the `Converse` call includes a `ToolConfiguration` that forces the model
+/// to call the named tool; the `toolUse.input` JSON is returned as
 /// `LlmResponse.text`.
 /// Test: `bedrock_converse_request_construction`,
 /// `bedrock_no_credentials_returns_error`,
 /// `bedrock_request_includes_tool_config_when_schema_set`.
 pub struct BedrockProvider {
-    client: BedrockClient,
+    /// #5469: region resolution and Converse-client construction both come from
+    /// the shared adapter; this crate keeps only the review-specific mapping.
+    adapter: BedrockAdapter,
     /// Default model id; used in error messages and as fallback when the request
     /// does not override the model.
     pub model: String,
-    region: String,
 }
 
 impl BedrockProvider {
@@ -181,55 +138,47 @@ impl BedrockProvider {
     /// (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`),
     /// `~/.aws/credentials` profiles, IMDS v2, and SSO — covering both local
     /// dev and production deployments without code changes.
-    /// What: validates the model id (requires an inference-profile prefix),
-    /// resolves the region, loads AWS config, and builds a `BedrockClient`.
-    /// Returns `LlmError::Validation` if the model id is invalid.
-    /// Async because credential loading may touch the filesystem or IMDS.
+    /// What: validates the model id (requires an inference-profile prefix) and
+    /// builds a [`BedrockAdapter`] for the ambient region (`TRUSTY_AWS_REGION` >
+    /// `AWS_REGION` > `us-east-1`).  Returns `LlmError::Validation` if the model
+    /// id is invalid.  #5469: synchronous, because the adapter builds its AWS
+    /// client lazily on the first `Converse` call; the explicit-region parameter
+    /// went with it, since every caller passed `None`.
     /// Test: `bedrock_us_prefix_validation` (validation path, no network);
     /// real-credentials path tested in ignored integration tests.
-    pub async fn new(model: impl Into<String>, region: Option<&str>) -> Result<Self, LlmError> {
+    pub fn new(model: impl Into<String>) -> Result<Self, LlmError> {
         let model = model.into();
         validate_model_id(&model)?;
-
-        let region_str = resolve_bedrock_region(region);
-        let config = aws_config::defaults(BehaviorVersion::latest())
-            .region(aws_config::meta::region::RegionProviderChain::first_try(
-                aws_types::region::Region::new(region_str.clone()),
-            ))
-            .load()
-            .await;
-        let client = BedrockClient::new(&config);
         Ok(Self {
-            client,
+            adapter: BedrockAdapter::new(None),
             model,
-            region: region_str,
         })
     }
 
-    /// Construct from a pre-built `BedrockClient` (for testing).
+    /// Construct from a pre-built Converse client (for testing).
     ///
     /// Why: tests can inject a client built with `no_credentials()` to verify
     /// provider logic without touching AWS.
-    /// What: stores the client verbatim; skips model-id validation so tests
-    /// can pass any id.
-    /// Test: used by `bedrock_converse_request_construction` and
+    /// What: wraps the client in a [`BedrockAdapter`] via
+    /// `BedrockAdapter::with_client`, which pins `region` verbatim; skips
+    /// model-id validation so tests can pass any id.
+    /// Test: used by `bedrock_provider_stores_model_and_region` and
     /// `bedrock_no_credentials_returns_error`.
     #[cfg(test)]
     pub fn from_client(
-        client: BedrockClient,
+        client: aws_sdk_bedrockruntime::Client,
         model: impl Into<String>,
         region: impl Into<String>,
     ) -> Self {
         Self {
-            client,
+            adapter: BedrockAdapter::with_client(region, client),
             model: model.into(),
-            region: region.into(),
         }
     }
 
     /// The AWS region the client is configured for.
     pub fn region(&self) -> &str {
-        &self.region
+        self.adapter.region()
     }
 
     /// Execute a single Converse call and return the response.
@@ -242,6 +191,16 @@ impl BedrockProvider {
     /// the `toolUse.input` is extracted and returned as `LlmResponse.text`.
     /// Test: called by `complete`; error-mapping tested in unit tests.
     async fn call_once(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        // #5469: the adapter builds its AWS client on first use; take it before
+        // the latency clock starts so the one-off config load is not billed as
+        // model latency.
+        let client = self.adapter.client().await.map_err(|e| {
+            LlmError::Transport(format!(
+                "Bedrock client construction failed (region={}): {e}",
+                self.adapter.region()
+            ))
+        })?;
+
         let start = Instant::now();
 
         // #6123: one resolver decides the model for all three providers; this
@@ -280,8 +239,7 @@ impl BedrockProvider {
             .temperature(req.temperature)
             .build();
 
-        let mut sdk_req = self
-            .client
+        let mut sdk_req = client
             .converse()
             .model_id(model)
             .inference_config(inference)
@@ -314,7 +272,7 @@ impl BedrockProvider {
                     "AWS Bedrock access denied (model={model}, region={}): {msg}. \
                      Ensure AWS credentials are configured and the account has \
                      bedrock:InvokeModel permission.",
-                    self.region
+                    self.adapter.region()
                 ))
             } else if lower.contains("validationexception") || lower.contains("validation") {
                 LlmError::Validation(msg)
@@ -337,7 +295,7 @@ impl BedrockProvider {
             } else {
                 LlmError::Transport(format!(
                     "Bedrock Converse SDK error (model={model}, region={}): {msg}",
-                    self.region
+                    self.adapter.region()
                 ))
             }
         })?;
@@ -394,7 +352,7 @@ impl LlmProvider for BedrockProvider {
         debug!(
             model = %req.effective_model(&self.model),
             provider = "bedrock",
-            region = %self.region,
+            region = %self.adapter.region(),
             structured = req.response_schema.is_some(),
             "bedrock complete request"
         );

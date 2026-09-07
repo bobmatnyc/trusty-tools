@@ -170,8 +170,9 @@ pub async fn cmd_mcp_stdio(config: ReviewConfig, args: McpArgs) -> Result<()> {
 ///
 /// Why: the MCP tool surface shares the review pipeline's dependency set with
 /// every other caller; building it here keeps the stdio entry point's startup
-/// sequencing in one place. Async because `BedrockProvider::new` loads AWS
-/// credentials asynchronously.
+/// sequencing in one place. Async because it resolves the search index from the
+/// daemon (#5469: no longer because of `BedrockProvider::new`, whose AWS client
+/// is built lazily on first use).
 /// What: builds the reviewer and verifier LLM providers, resolves the search
 /// index from the daemon, constructs the search/analyze clients, and wraps them
 /// in `AppState`. `dedup_need` is `NotNeeded` for this surface (#5064) — it

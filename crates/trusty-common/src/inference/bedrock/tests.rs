@@ -12,6 +12,7 @@
 
 use std::collections::VecDeque;
 
+use aws_sdk_bedrockruntime::Client as BedrockRuntimeClient;
 use aws_sdk_bedrockruntime::operation::converse::ConverseOutput as ConverseOutputResponse;
 use aws_sdk_bedrockruntime::types::{
     CachePointType, ContentBlock, ContentBlockDelta as SdkContentBlockDelta,
@@ -30,7 +31,10 @@ use super::convert::{
     document_to_json_string, json_to_document,
 };
 use super::stream::{ConverseEventSource, drive};
-use super::{BedrockAdapter, bedrock_model_id, build_converse_parts, resolve_bedrock_region};
+use super::{
+    BedrockAdapter, DEFAULT_REGION, bedrock_model_id, build_converse_parts, resolve_bedrock_region,
+    resolve_region_from,
+};
 use crate::inference::adapter::InferenceAdapter;
 use crate::inference::error::InferenceError;
 use crate::inference::streaming::{ChatStreamEvent, StreamAssembly, ToolCallDelta};
@@ -165,6 +169,83 @@ async fn region_resolution_defaults_to_us_east_1() {
         assert_eq!(resolve_bedrock_region(None), "us-east-1");
     })
     .await;
+}
+
+/// The pure precedence walk pins explicit > `TRUSTY_AWS_REGION` > `AWS_REGION` >
+/// default without touching the environment.
+///
+/// Why (#5469): trusty-review resolved the Bedrock region with its own copy of
+/// this walk and now calls this one; the ordering it relied on has to stay
+/// provable here, at the single definition, and provable without the env
+/// mutation the four tests above need. Reorder the tiers in
+/// [`super::resolve_region_from`] and every assertion below fails.
+/// What: drives each tier with both env tiers passed as arguments — explicit
+/// winning, an empty explicit falling through, the trusty tier beating the AWS
+/// tier, the AWS tier as the last env stop, the default when nothing is set,
+/// and the trim that makes a whitespace-only env value count as unset.
+/// Test: this test.
+#[test]
+fn region_precedence_walk_tiers() {
+    assert_eq!(
+        resolve_region_from(Some("eu-west-1"), Some("ap-south-1"), Some("us-west-2")),
+        "eu-west-1",
+        "explicit must win over both env tiers"
+    );
+    assert_eq!(
+        resolve_region_from(Some(""), Some("ap-south-1"), Some("us-west-2")),
+        "ap-south-1",
+        "an empty explicit falls through to TRUSTY_AWS_REGION"
+    );
+    assert_eq!(
+        resolve_region_from(None, None, Some("us-west-2")),
+        "us-west-2",
+        "AWS_REGION is used when TRUSTY_AWS_REGION is unset"
+    );
+    assert_eq!(
+        resolve_region_from(None, None, None),
+        DEFAULT_REGION,
+        "nothing set reaches the default"
+    );
+    assert_eq!(
+        resolve_region_from(Some(""), Some("  "), Some("\t")),
+        DEFAULT_REGION,
+        "a whitespace-only env var counts as unset"
+    );
+    assert_eq!(
+        resolve_region_from(None, Some(" eu-central-1 "), None),
+        "eu-central-1",
+        "an env tier is trimmed before use"
+    );
+}
+
+/// `with_client` seeds the lazy cell so `client()` never loads AWS config.
+///
+/// Why (#5469): the injection seam trusty-review's unit tests depend on — they
+/// build a `no_credentials()` client and expect the adapter to hand back exactly
+/// that one. A `with_client` that left the cell empty would silently fall back
+/// to the credential chain and make those tests reach for real AWS config.
+/// What: builds a credential-free client, wraps it with `with_client`, and
+/// asserts the cell is already populated and that `client()` resolves without
+/// error against the region passed verbatim.
+/// Test: this test.
+#[tokio::test]
+async fn with_client_prefills_the_lazy_cell() {
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_types::region::Region::new("eu-west-1"))
+        .no_credentials()
+        .load()
+        .await;
+    let adapter = BedrockAdapter::with_client("eu-west-1", BedrockRuntimeClient::new(&config));
+
+    assert!(
+        adapter.client.get().is_some(),
+        "with_client must pre-fill the lazy client cell"
+    );
+    assert_eq!(adapter.region(), "eu-west-1", "region is stored verbatim");
+    assert!(
+        adapter.client().await.is_ok(),
+        "client() must return the injected client"
+    );
 }
 
 // ─── Message conversion ─────────────────────────────────────────────────────
