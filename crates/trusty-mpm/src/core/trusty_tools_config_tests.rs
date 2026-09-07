@@ -563,3 +563,102 @@ fn subpath_nests_owner_repo() {
 // untracked_sync (#2196) resolution + YAML round-trip tests live in
 // `untracked_sync::tests` (split out to keep this file under the
 // 500-SLOC cap; see that module's doc).
+
+/// #6927: no `disk:` section means an EMPTY keep-list — nothing is kept, and
+/// nothing is hard-coded to any operator's paths.
+#[test]
+fn disk_keep_list_defaults_to_empty() {
+    let config = TrustyToolsConfig::default();
+    assert!(config.disk.is_none());
+    assert!(disk_keep_list_patterns(&config).is_empty());
+}
+
+/// #6927: the `disk:` section round-trips through the YAML the console Config
+/// tab reads and writes.
+#[test]
+fn disk_config_yaml_round_trip() {
+    let yaml = "disk:\n  keep_list:\n    - ~/work/hotstats\n    - '**/scratch-*'\n";
+    let config: TrustyToolsConfig = serde_yaml::from_str(yaml).expect("parse the disk section");
+    assert_eq!(
+        disk_keep_list_patterns(&config),
+        vec!["~/work/hotstats".to_string(), "**/scratch-*".to_string()]
+    );
+    let back = serde_yaml::to_string(&config).expect("serialize");
+    assert!(back.contains("keep_list"), "{back}");
+    assert!(back.contains("hotstats"), "{back}");
+}
+
+/// Write `yaml` as the trusty-mpm config under a fake home, and return it.
+///
+/// Why: `load_disk_keep_list_at` is the hermetic half of the reader precisely
+/// so a test can put a real file on disk without touching the operator's own.
+fn config_home(yaml: &str) -> tempfile::TempDir {
+    let home = tempfile::tempdir().expect("tempdir");
+    let path = trusty_common::crate_config::crate_config_path_at(home.path(), CRATE_NAME);
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&path, yaml).expect("write config");
+    home
+}
+
+/// #6927: no config file at all is an EMPTY keep-list, which permits.
+#[test]
+fn an_absent_config_yields_an_empty_keep_list() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let list = load_disk_keep_list_at(home.path());
+    assert_eq!(
+        list.error(),
+        None,
+        "an absent file is not an unreadable one"
+    );
+    assert!(list.patterns().is_empty());
+    assert!(
+        list.keeps(std::path::Path::new("/anything")).is_none(),
+        "the documented default must keep nothing"
+    );
+}
+
+/// #6927: a readable config yields exactly the operator's patterns.
+#[test]
+fn a_valid_config_yields_the_operators_patterns() {
+    let home = config_home("disk:\n  keep_list:\n    - /work/hotstats\n");
+    let list = load_disk_keep_list_at(home.path());
+    assert_eq!(list.error(), None);
+    assert_eq!(list.patterns(), ["/work/hotstats".to_string()]);
+    assert!(
+        list.keeps(std::path::Path::new("/work/hotstats/wt"))
+            .is_some()
+    );
+}
+
+/// #6927 — the fail-open the review found: a YAML error ANYWHERE in the file
+/// used to yield an empty keep-list, because `TrustyToolsConfig::load`
+/// collapses every parse failure to `Default`. The keep-list reader is
+/// fallible for exactly this reason.
+#[test]
+fn an_unparseable_config_yields_an_unreadable_keep_list() {
+    // A valid keep-list entry, and a typo in an UNRELATED key. `auto_resume`
+    // is a bool, so this is the `crate_config::load_malformed_is_err` shape.
+    let home =
+        config_home("disk:\n  keep_list:\n    - /work/hotstats\nauto_resume: not-a-boolean\n");
+
+    // What the LENIENT reader still does, and why it cannot be the one a
+    // protective gate uses: `disk` is gone, so the patterns are empty.
+    let lenient = trusty_common::crate_config::load_at::<TrustyToolsConfig>(
+        &trusty_common::crate_config::crate_config_path_at(home.path(), CRATE_NAME),
+    );
+    assert!(lenient.is_err(), "the fixture must actually be malformed");
+
+    let list = load_disk_keep_list_at(home.path());
+    let error = list
+        .error()
+        .expect("an unparseable config must be reported, not silently defaulted");
+    assert!(
+        error.contains("YAML"),
+        "the reason must name the parse failure: {error}"
+    );
+    assert!(
+        list.keeps(std::path::Path::new("/anything/at/all"))
+            .is_some(),
+        "a keep-list that could not be read must keep EVERYTHING"
+    );
+}

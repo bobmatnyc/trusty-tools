@@ -227,6 +227,28 @@ impl OrchestratorBackend for MockBackend {
         Ok(json!({ "desired": enabled, "env": false, "pending_restart": enabled }))
     }
 
+    // ── #6927: the Disk dashboard's survey ───────────────────────────────────
+    async fn disk_survey(
+        &self,
+        project: Option<&str>,
+        budget_seconds: Option<u64>,
+    ) -> Result<Value, String> {
+        Ok(json!({
+            "generated_at": "2026-09-07T00:00:00Z",
+            "keep_list": { "patterns": [], "invalid": [] },
+            "project_filter": project,
+            "budget_seconds": budget_seconds,
+            "root": {
+                "path": "/home/test/trusty-mpm-projects",
+                "bytes": 0,
+                "projects": [],
+                "counts": { "stale": 0, "review": 0, "keep": 0, "missing": 0 },
+                "stale_bytes": 0,
+                "stale_measured": 0,
+            }
+        }))
+    }
+
     // ── #1220: config-convention mock impls ──────────────────────────────────
     async fn config_read(&self) -> Result<Value, String> {
         Ok(json!({
@@ -405,7 +427,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     // project-registry tools + #1517
     // WI-5 project_resolve + the four #2550 session-manager proxy tools + the
     // two PM pause/resume context tools `session_context_catchup` /
-    // `session_context_pause`).
+    // `session_context_pause` + the #6927 Disk survey `disk_survey`).
     let req = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(json!(1)),
@@ -414,7 +436,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 34);
+    assert_eq!(tools.as_array().unwrap().len(), 35);
 }
 
 /// Why: #6431's bulk delete must route through dispatch and report per-session
@@ -1585,4 +1607,39 @@ async fn dispatch_session_proxy_summary_tool() {
     let text = result["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("summary"), "{text}");
     assert!(text.contains("conv-3"), "{text}");
+}
+
+/// Why (#6927): the Disk view calls this tool and nothing else — DOC-73 §16.4
+/// bars it from the daemon's HTTP port — so the dispatch arm and its two
+/// optional arguments have to be wired, and a call with no arguments has to be
+/// legal.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_disk_survey_tool() {
+    let resp = dispatch(&MockBackend, call("disk_survey", json!({}))).await;
+    let result = resp.result.expect("a result");
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().expect("text");
+    assert!(text.contains("generated_at"), "{text}");
+    assert!(text.contains("keep_list"), "{text}");
+
+    let scoped = dispatch(
+        &MockBackend,
+        call(
+            "disk_survey",
+            json!({ "project": "owner/repo", "budget_seconds": 30 }),
+        ),
+    )
+    .await;
+    let result = scoped.result.expect("a result");
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().expect("text");
+    assert!(
+        text.contains("owner/repo"),
+        "the project filter must reach the backend: {text}"
+    );
+    assert!(
+        text.contains("30"),
+        "the budget must reach the backend: {text}"
+    );
 }

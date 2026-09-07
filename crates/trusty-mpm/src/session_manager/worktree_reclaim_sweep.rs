@@ -38,8 +38,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::worktree_reclaim::{
-    AgentStateProbe, BranchPrState, LiveClaims, NOT_INSPECTED_REASON, PrIndex, ReclaimCandidate,
-    ReclaimGate, ReclaimMode, ReclaimOutcome, ReclaimSurvey, ReclaimVerdict,
+    AgentStateProbe, BranchPrState, KeepList, LiveClaims, NOT_INSPECTED_REASON, PrIndex,
+    ReclaimCandidate, ReclaimGate, ReclaimMode, ReclaimOutcome, ReclaimSurvey, ReclaimVerdict,
     agent_ownership_blocks, classify, measure_bytes_until, pr_state_for_branch, tm_provisioned,
 };
 use super::worktree_registry::{list_registered_worktrees, scan_registered_worktrees};
@@ -111,6 +111,9 @@ pub(crate) fn survey_with_index(
     agent_state: AgentStateProbe<'_>,
     budget: SurveyBudget,
     per_branch_fallback: bool,
+    // #6927: the operator keep-list `classify`'s gate 0 applies. An empty list
+    // is a no-op gate, so every pre-#6927 caller keeps its exact behaviour.
+    keep_list: &KeepList,
 ) -> ReclaimSurvey {
     let mut indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
     let mut candidates = Vec::new();
@@ -154,6 +157,7 @@ pub(crate) fn survey_with_index(
             &pr,
             &inspect_dirt,
             agent_state,
+            keep_list,
         );
         candidates.push(ReclaimCandidate {
             // Measured in a SECOND pass — see below.
@@ -221,6 +225,9 @@ pub(crate) fn survey(
     agent_state: AgentStateProbe<'_>,
     budget: SurveyBudget,
     per_branch_fallback: bool,
+    // #6927: the operator keep-list `classify`'s gate 0 applies. An empty list
+    // is a no-op gate, so every pre-#6927 caller keeps its exact behaviour.
+    keep_list: &KeepList,
 ) -> ReclaimSurvey {
     survey_with_index(
         repos_root,
@@ -229,6 +236,7 @@ pub(crate) fn survey(
         agent_state,
         budget,
         per_branch_fallback,
+        keep_list,
     )
 }
 
@@ -283,14 +291,19 @@ fn git_still_permits(path: &Path) -> Result<(), String> {
 /// slice; deleting all three left every test passing, because re-asking a stale
 /// question yields the same stale answer. Each input here is re-read by the
 /// caller for THIS candidate, immediately before THIS deletion.
-/// What: `in_use_now` is `None` when the live session set could not be re-read
-/// at all — which REFUSES, because an unanswerable liveness question must never
-/// resolve to "nothing claims it". Then git's current verdict
-/// ([`git_still_permits`], which honours a lock applied since the survey), the
-/// ownership marker, the current pull-request state, and finally
+/// What: `keep_list_now` is the operator's keep-list as it reads RIGHT NOW, so
+/// an entry added while a sweep that has exceeded 600 s on 46 worktrees is
+/// still running stops every candidate it has not yet deleted (#6927). It is
+/// asked first, as gate 0 is, and costs an in-process path compare — no
+/// subprocess. Then `in_use_now`, which is `None` when the live session set
+/// could not be re-read at all — that REFUSES, because an unanswerable liveness
+/// question must never resolve to "nothing claims it". Then git's current
+/// verdict ([`git_still_permits`], which honours a lock applied since the
+/// survey), the ownership marker, the current pull-request state, and finally
 /// [`inspect_dirt`], which fails toward dirty. `Some(reason)` refuses;
 /// `None` permits.
 /// Test: one test per branch —
+/// `recheck_refuses_a_worktree_keep_listed_after_the_survey`,
 /// `recheck_refuses_when_the_live_set_cannot_be_read`,
 /// `recheck_refuses_a_worktree_a_session_claims_now`,
 /// `recheck_refuses_a_worktree_locked_after_the_survey`,
@@ -302,10 +315,17 @@ fn git_still_permits(path: &Path) -> Result<(), String> {
 /// `recheck_permits_a_clean_merged_owned_worktree`.
 pub(crate) fn recheck_before_delete(
     path: &Path,
+    keep_list_now: &KeepList,
     in_use_now: Option<&LiveClaims>,
     pr_now: &BranchPrState,
     agent_state: AgentStateProbe<'_>,
 ) -> Option<String> {
+    // #6927: gate 0, re-asked. The survey read the keep-list once, minutes ago;
+    // this reads what the operator has written since — including the
+    // fail-closed state a config that stopped parsing produces.
+    if let Some(kept) = keep_list_now.keeps(path) {
+        return Some(kept.detail());
+    }
     let Some(in_use_now) = in_use_now else {
         return Some("the live session set could not be re-read — refusing to delete".into());
     };
@@ -364,6 +384,16 @@ pub(crate) struct FreshProbes<'a> {
     /// deletion, so an agent dispatched during a minutes-long survey still
     /// protects its tree.
     pub agent_state: AgentStateProbe<'a>,
+    /// Read the operator's keep-list, for `classify`'s gate 0 (#6927).
+    ///
+    /// Why a probe and not a value: the answer CHANGES under a running sweep.
+    /// This pass is unbounded and has exceeded 600 s over 46 worktrees, and an
+    /// operator who adds an entry while it runs means it for the candidates
+    /// still queued, not only for the next invocation. Read once for the
+    /// survey and again per candidate immediately before its deletion, exactly
+    /// as `in_use_now` is. Reading it is a small local file, not a subprocess,
+    /// so the per-candidate cost is nil.
+    pub keep_list: &'a dyn Fn() -> KeepList,
 }
 
 /// Survey, and in [`ReclaimMode::Remove`] reclaim, merged-PR worktrees (#2919).
@@ -394,6 +424,7 @@ pub(crate) fn reclaim_with_probes(
         probes.agent_state,
         SurveyBudget::unbounded(),
         true,
+        &(probes.keep_list)(),
     );
     let mut out = ReclaimOutcome {
         removed: Vec::new(),
@@ -440,9 +471,15 @@ pub(crate) fn reclaim_with_probes(
         // FRESH, per candidate, and now genuinely immediately before the
         // re-check that judges it.
         let in_use_now = (probes.in_use_now)();
-        if let Some(reason) =
-            recheck_before_delete(&path, in_use_now.as_ref(), &pr_now, probes.agent_state)
-        {
+        // #6927: re-read, not reused — see `FreshProbes::keep_list`.
+        let keep_list_now = (probes.keep_list)();
+        if let Some(reason) = recheck_before_delete(
+            &path,
+            &keep_list_now,
+            in_use_now.as_ref(),
+            &pr_now,
+            probes.agent_state,
+        ) {
             tracing::warn!(
                 path = %path.display(),
                 "worktree-reclaim: re-check refused a surveyed candidate — {reason} (#2919)"
@@ -485,16 +522,19 @@ pub(crate) fn reclaim_with_probes(
 ///
 /// Why: the production entry point, reached only from the explicit
 /// `merged_prs` opt-in on `tm session prune-worktrees`.
-/// What: `in_use_paths` is re-invoked per candidate by the loop, so the caller
-/// must supply a closure that genuinely RE-READS rather than one that closes
-/// over a captured snapshot. It returns `None` when the set cannot be read,
-/// which refuses.
+/// What: `in_use_paths` and `keep_list` are both re-invoked per candidate by
+/// the loop, so the caller must supply closures that genuinely RE-READ rather
+/// than ones closing over a captured snapshot. `in_use_paths` returns `None`
+/// when the set cannot be read, which refuses; `keep_list` returns
+/// `KeepList::unreadable` when the config cannot be parsed, which keeps
+/// everything (#6927).
 /// Test: exercised through `reclaim_with_probes`' tests.
 pub(crate) fn reclaim_merged_pr_worktrees(
     repos_root: &Path,
     in_use_paths: &dyn Fn() -> Option<LiveClaims>,
     agent_state: AgentStateProbe<'_>,
     mode: ReclaimMode,
+    keep_list: &dyn Fn() -> KeepList,
 ) -> ReclaimOutcome {
     reclaim_with_probes(
         repos_root,
@@ -502,6 +542,7 @@ pub(crate) fn reclaim_merged_pr_worktrees(
             in_use_now: in_use_paths,
             index_for: &PrIndex::from_gh,
             agent_state,
+            keep_list,
         },
         mode,
     )

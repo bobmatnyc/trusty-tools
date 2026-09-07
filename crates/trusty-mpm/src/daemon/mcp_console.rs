@@ -294,6 +294,9 @@ fn config_to_json(config: &TrustyToolsConfig) -> Value {
         // #6535: the cloud log-drain section, so the Config tab can render
         // where logs go and whether the drain is on without a second read.
         "log_drain": config.log_drain,
+        // #6927: the Disk view renders the keep-list beside the worktrees it
+        // keeps, so the Config tab must be able to read it back.
+        "disk": config.disk,
         "projects": config.projects,
         "workspace_root": trusty_tools_config::workspace_root(config).to_string_lossy(),
     })

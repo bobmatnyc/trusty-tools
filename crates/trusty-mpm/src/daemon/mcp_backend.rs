@@ -509,6 +509,15 @@ impl OrchestratorBackend for StateBackend {
 
     // ── #1220: config-convention tools (delegate to mcp_console) ─────────────
 
+    /// Back `disk_survey` (#6927) — see [`crate::daemon::mcp_disk::disk_survey`].
+    async fn disk_survey(
+        &self,
+        project: Option<&str>,
+        budget_seconds: Option<u64>,
+    ) -> Result<Value, String> {
+        crate::daemon::mcp_disk::disk_survey(&self.state, project, budget_seconds).await
+    }
+
     async fn config_read(&self) -> Result<Value, String> {
         super::mcp_console::config_read()
     }

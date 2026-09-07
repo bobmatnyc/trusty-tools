@@ -6,13 +6,15 @@
 //! spans several concepts — the original orchestration/bug-reporting tools
 //! ([`core`]), the session-lifecycle tools ([`session`]), the console tools
 //! ([`console`]), the project-registry + NL-resolver tools ([`project`],
-//! #1519 / #1517), and the session-manager proxy tools ([`proxy`], #2550) — so
+//! #1519 / #1517), the session-manager proxy tools ([`proxy`], #2550), and the
+//! Disk-dashboard survey ([`disk`], #6927) — so
 //! this is a thin facade that re-exports all and concatenates their descriptors,
 //! keeping each leaf file well under the 500-SLOC production cap.
-//! What: [`tool_catalog`] builds the thirty-four MCP tool descriptors (nine core +
-//! eleven session + five console + four project + four proxy — #1222 / #1220 /
-//! #1508 / #1519 / #1517 WI-5 / #2012 / #2550 / session-context tools); [`TOOL_CATALOG`]
-//! lists their names for tests and the startup log; [`tool`] is the shared
+//! What: [`tool_catalog`] builds the thirty-five MCP tool descriptors (nine core +
+//! twelve session + five console + four project + four proxy + one disk — #1222 /
+//! #1220 / #1508 / #1519 / #1517 WI-5 / #2012 / #2550 / #6927 / session-context
+//! tools); [`TOOL_CATALOG`]
+//! lists their names for tests and the startup log; `tool` is the shared
 //! descriptor builder used by every submodule.
 //! Test: the `tests` module below asserts the catalog has the expected count,
 //! well-formed entries, and names matching [`TOOL_CATALOG`].
@@ -21,6 +23,8 @@ use serde_json::{Value, json};
 
 pub mod console;
 pub mod core;
+// #6927: the Disk dashboard's worktree survey.
+pub mod disk;
 pub mod project;
 pub mod proxy;
 pub mod session;
@@ -30,12 +34,12 @@ pub mod session;
 /// Why: tests, the daemon's startup log, and the loopback-`/rpc` audit all want
 /// the authoritative list without re-parsing the JSON schema. Keeping it exact
 /// resolves the #1221 review nit about ambiguous existing-vs-new counts.
-/// What: a static slice of the thirty-four tool names — the nine core/bug tools,
+/// What: a static slice of the thirty-five tool names — the nine core/bug tools,
 /// the twelve session-lifecycle tools, the five console-facing tools, the four
-/// project-registry + NL-resolver tools (#1519 WI-2, #1517 WI-5), and the four
-/// session-manager proxy tools (#2550).
+/// project-registry + NL-resolver tools (#1519 WI-2, #1517 WI-5), the four
+/// session-manager proxy tools (#2550), and the Disk survey (#6927).
 /// Test: `catalog_names_match_constant`.
-pub const TOOL_CATALOG: [&str; 34] = [
+pub const TOOL_CATALOG: [&str; 35] = [
     // ── 9 pre-existing tools (core.rs) ───────────────────────────────────────
     "session_list",
     "session_status",
@@ -80,6 +84,8 @@ pub const TOOL_CATALOG: [&str; 34] = [
     "session_proxy_unfocus",
     "session_proxy_message",
     "session_proxy_summary",
+    // ── 1 Disk-dashboard tool (#6927, DOC-73 §16.6 item 2) ──────────────────
+    "disk_survey",
 ];
 
 /// Build the MCP tool descriptor list returned by `tools/list`.
@@ -87,12 +93,12 @@ pub const TOOL_CATALOG: [&str; 34] = [
 /// Why: Claude Code reads `inputSchema` to validate calls; a single builder
 /// keeps the schemas and the dispatch argument-parsing in lockstep across all
 /// tool groups.
-/// What: concatenates [`core::core_tools`] (nine descriptors),
-/// [`session::session_tools`] (twelve descriptors), [`console::console_tools`]
-/// (five descriptors), [`project::project_tools`] (four descriptors, WI-5 adds
-/// `project_resolve`), and [`proxy::proxy_tools`] (four descriptors, #2550) in
-/// catalog order, returning thirty-four `{ name, description, inputSchema }`
-/// objects.
+/// What: concatenates `core::core_tools` (nine descriptors),
+/// `session::session_tools` (twelve descriptors), `console::console_tools`
+/// (five descriptors), `project::project_tools` (four descriptors, WI-5 adds
+/// `project_resolve`), `proxy::proxy_tools` (four descriptors, #2550) and
+/// `disk::disk_tools` (one descriptor, #6927) in catalog order, returning
+/// thirty-five `{ name, description, inputSchema }` objects.
 /// Test: `catalog_has_expected_tool_count` and `every_tool_has_input_schema`.
 pub fn tool_catalog() -> Vec<Value> {
     let mut tools = core::core_tools();
@@ -100,6 +106,7 @@ pub fn tool_catalog() -> Vec<Value> {
     tools.extend(console::console_tools());
     tools.extend(project::project_tools());
     tools.extend(proxy::proxy_tools());
+    tools.extend(disk::disk_tools());
     tools
 }
 
@@ -129,8 +136,9 @@ mod tests {
         // #2550 adds the 4 session-manager proxy tools;
         // session-context tools add session_context_catchup + session_context_pause → 11;
         // #6431 adds session_delete_records → 12)
-        assert_eq!(tool_catalog().len(), 34);
-        assert_eq!(TOOL_CATALOG.len(), 34);
+        // #6927 adds disk_survey → 35.
+        assert_eq!(tool_catalog().len(), 35);
+        assert_eq!(TOOL_CATALOG.len(), 35);
     }
 
     #[test]
@@ -255,6 +263,46 @@ mod tests {
         ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }
+    }
+
+    #[test]
+    fn disk_tools_present() {
+        let catalog = tool_catalog();
+        let names: Vec<&str> = catalog.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"disk_survey"), "{names:?}");
+    }
+
+    /// #6927: the tool's schema must survive a JSON round-trip unchanged — the
+    /// console reads `inputSchema` to build the call, so a schema that only
+    /// serialises one way would be a broken contract nothing else catches.
+    #[test]
+    fn disk_survey_schema_round_trips() {
+        let catalog = tool_catalog();
+        let disk = catalog
+            .iter()
+            .find(|t| t["name"] == "disk_survey")
+            .expect("disk_survey must be in the catalog");
+        let text = serde_json::to_string(disk).expect("serialize");
+        let back: Value = serde_json::from_str(&text).expect("deserialize");
+        assert_eq!(&back, disk, "the descriptor must round-trip unchanged");
+
+        let schema = &disk["inputSchema"];
+        assert_eq!(schema["type"], "object");
+        assert_eq!(
+            schema["additionalProperties"], false,
+            "the schema stays closed so no unrecognised argument is silently accepted"
+        );
+        assert_eq!(schema["properties"]["project"]["type"], "string");
+        assert_eq!(schema["properties"]["budget_seconds"]["type"], "integer");
+        assert!(
+            schema.get("required").is_none(),
+            "every argument is optional: {schema}"
+        );
+        let desc = disk["description"].as_str().expect("a description");
+        assert!(
+            desc.contains("READ-ONLY"),
+            "the description must state the tool removes nothing: {desc}"
+        );
     }
 
     #[test]

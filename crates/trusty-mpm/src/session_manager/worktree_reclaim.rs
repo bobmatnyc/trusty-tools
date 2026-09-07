@@ -46,6 +46,8 @@ use super::worktree_reclaim_gh::{
 };
 // #6867: the single-flight + backoff gate every `gh` poll passes through.
 use super::worktree_reclaim_gh_gate as gh_gate;
+// #6927: the operator keep-list gate 0 consults.
+pub(crate) use super::worktree_keep_list::KeepList;
 use super::worktree_registry::{Admission, HarnessLockState, harness_lock_state};
 // #7057: the repository every `gh` call below is pinned to, read from the
 // target directory's own `origin` rather than inferred by `gh`.
@@ -677,7 +679,13 @@ pub(crate) const NOT_INSPECTED_REASON: &str = "survey deadline reached before in
 /// Every gate `return`s, so no failure branch can advance toward deletion —
 /// the fail-open/cursor-advance shape that has bitten this repository
 /// repeatedly is structurally impossible here.
-/// What: five gates, in this order.
+/// What: seven gates, in this order.
+/// 0. **Owner keep-list** (#6927) — [`KeepList`]: the operator's standing veto,
+///    checked before anything that costs a subprocess. DOC-73 §16.4 makes it
+///    override every gate below, and it reports `Blocked` so a keep-listed
+///    worktree stays VISIBLE in the survey with a reason, rather than being
+///    filtered out and becoming indistinguishable from one that was never
+///    registered.
 /// 1. **Existence/eligibility** — git's own [`Admission`] verdict (ADR-0023
 ///    point 1). Excludes the main checkout, bare records, operator-LOCKED
 ///    worktrees, and anything outside the managed project.
@@ -703,7 +711,9 @@ pub(crate) const NOT_INSPECTED_REASON: &str = "survey deadline reached before in
 /// [`AgentDelegationState::Unknown`], which refuses, rather than by handing over
 /// an empty list that would read as "no agent claims this".
 ///
-/// Test: one refusal test per gate — `classify_blocks_non_admitted_worktree`,
+/// Test: one refusal test per gate — `classify_blocks_a_keep_listed_worktree`,
+/// `classify_keep_list_outranks_a_merged_clean_worktree`,
+/// `classify_blocks_non_admitted_worktree`,
 /// `classify_blocks_live_session_workspace`,
 /// `classify_allows_a_worktree_claimed_only_by_the_calling_session`,
 /// `classify_names_the_foreign_session_that_blocked_a_candidate`,
@@ -725,7 +735,16 @@ pub(crate) fn classify(
     pr: &BranchPrState,
     probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
     agent_state: AgentStateProbe<'_>,
+    keep_list: &KeepList,
 ) -> ReclaimVerdict {
+    // Gate 0 (#6927): the operator's own standing veto outranks every answer
+    // the gates below could compute, so it is asked first — see DOC-73 §16.4.
+    if let Some(kept) = keep_list.keeps(path) {
+        return ReclaimVerdict::blocked(
+            ReclaimGate::KeepList,
+            format!("{} (#6927)", kept.detail()),
+        );
+    }
     // Gate 1 (#2919): git decides existence and eligibility, per ADR-0023.
     // #6561: a harness agent lock is a refusal the operator must be TOLD about
     // — it means an agent is working in that tree — so it leaves gate 1 as its

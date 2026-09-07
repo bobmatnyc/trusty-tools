@@ -21,6 +21,19 @@ use super::core::{DaemonState, HOOK_HISTORY_LIMIT};
 use super::overseer::load_optimizer_config;
 
 impl DaemonState {
+    // ---- disk size index (#6926, #6927) --------------------------------
+
+    /// The daemon's shared directory-size index.
+    ///
+    /// Why: `disk_survey` must reuse ONE index across calls — see the field's
+    /// own doc. Handing out an `Arc` clone lets the survey run on the blocking
+    /// pool without borrowing the state for the whole pass.
+    pub fn disk_size_index(
+        &self,
+    ) -> std::sync::Arc<parking_lot::Mutex<crate::disk::size_index::DirSizeIndex>> {
+        std::sync::Arc::clone(&self.disk_size_index)
+    }
+
     // ---- circuit breakers ----------------------------------------------
 
     /// Get a snapshot of an agent's circuit breaker, creating a closed one if

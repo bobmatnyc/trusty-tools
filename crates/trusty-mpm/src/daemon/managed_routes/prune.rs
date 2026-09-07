@@ -310,6 +310,14 @@ pub(crate) async fn prune_worktrees_core(
                 // a stranger's. Validated ABOVE, before any survey work.
                 let caller = req.invoking_session.clone();
                 let root = repos_root.clone();
+                // #6927: read FALLIBLY and re-read PER CANDIDATE, not resolved
+                // from the lenient `config` this route already loaded. Lenient
+                // loading turns any YAML error anywhere in the file into an
+                // EMPTY keep-list, which is how a vetoed worktree could be
+                // deleted; the fallible reader keeps everything instead. It is
+                // a closure because this pass is unbounded, so an entry the
+                // operator adds mid-sweep must stop the candidates still
+                // queued — see `FreshProbes::keep_list`.
                 // #2919: a HANDLE to the manager, not a captured path list. The
                 // delete loop calls this closure per candidate and needs the
                 // CURRENT set, not one snapshotted before a survey that takes
@@ -357,7 +365,8 @@ pub(crate) async fn prune_worktrees_core(
                             &owner.agent_id,
                         )
                     };
-                    reclaim_merged_pr_worktrees(&root, &in_use_now, &agent_state, mode)
+                    let keep_list = crate::core::trusty_tools_config::load_disk_keep_list;
+                    reclaim_merged_pr_worktrees(&root, &in_use_now, &agent_state, mode, &keep_list)
                 })
                 .await
                 {
