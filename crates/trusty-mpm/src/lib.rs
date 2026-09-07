@@ -97,6 +97,17 @@ pub mod runtime;
 /// Test: `activity::*::tests`.
 pub mod activity;
 
+/// Disk accounting for the Disk dashboard (#6926, DOC-73 §16).
+///
+/// Why: the Disk view renders every project and every worktree as a sunburst
+/// sized by bytes, at hundreds of GB to TiB. Walking that cold on every load is
+/// the cost DOC-73 §16.1 says the view cannot pay, and neither existing
+/// byte-measurement primitive keeps anything between calls.
+/// What: re-exports [`disk::size_index::DirSizeIndex`], the path →
+/// bytes-with-timestamp cache whose refresh re-reads only changed directories.
+/// Test: `size_index_tests`.
+pub mod disk;
+
 /// Workspace provisioner: clones a repo into an isolated session workspace.
 ///
 /// Why: agent sessions must never collide with an operator's live checkout; each
