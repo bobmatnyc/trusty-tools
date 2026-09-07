@@ -163,6 +163,12 @@ change's blast radius. Risk labels map onto the rungs (1–2 Low, 3–4 Normal,
 - 🟡 **Do not use `gh pr merge --admin`** — the account is repo owner and the
   flag is not a no-op for `BLOCKED` or `BEHIND`. Every required context passing
   on the PR's own head remains the bar.
+- 🟡 **`Public API / SemVer` and `Rustdoc intra-doc links` are not required
+  contexts** (verified 2026-09-07 against the protection API) — a red run there
+  never blocks merge. PR #6981 merged with `Public API / SemVer` and its own
+  break self-test failing; #6981 and #6978 both merged with `Rustdoc intra-doc
+  links` failing. The one actual stop for a public-API break is
+  `preflight-publish.sh` CHECK 5 at release, run by `local-ops`.
 
 ### Baseline failures — the Rust specifics
 
@@ -399,6 +405,10 @@ crates/<crate>/changelog.d/<issue-or-pr-number>-<short-slug>.md
   fragment's placement, category line and body, no diff at all) — #6947; run the
   default gate after committing. `check_line_cap.sh` reads tracked
   `git ls-files`, so a new file needs `git add` first too.
+- 🟡 **`scripts/check-pr-version-bump.sh` is the second post-commit gate on the
+  same shape** — it diffs `merge-base..HEAD` and fails with `SCAN FLOOR` on a
+  diff that resolves to zero changed paths, so it too needs a real commit, not
+  the working tree.
 
 ## Cross-Crate Development Workflow
 
@@ -438,6 +448,12 @@ independently reviewable PR outcome, subagent confinement, cleanup — lives in
   ([ADR-0049](docs/adr/0049-docs-commits-are-permitted-in-a-main-checkout.md)).
 - Extended rationale and the throwaway-worktree fallback for a dirty checkout:
   [worktree-discipline.md](docs/reference/worktree-discipline.md).
+- 🟡 **The isolation-worktree guard's `git` detection can misfire on a path or a
+  heredoc body** — a shell loop over paths containing `git` (e.g.
+  `trusty-git-analytics`) or a `<<'PY'`-style scratch script can both be denied
+  as unverifiable inside the worktree ([#6982](https://github.com/bobmatnyc/trusty-tools/issues/6982),
+  open). Until it lands, write scratch scripts with the Write tool instead of a
+  shell heredoc, and avoid looping over such paths.
 
 ## Abbreviations & Aliases
 
