@@ -86,6 +86,23 @@ pub struct SavingsRow {
     pub cost_saved_usd: f64,
     /// Free text stating how the two figures above were arrived at.
     pub basis: String,
+    /// Which source named the model the row was priced at (#6972).
+    ///
+    /// Why: every producer prices its token delta at a model's published input
+    /// rate, and before #6972 a row priced from the config chain's Sonnet
+    /// default was indistinguishable from one priced at the model the session
+    /// was really running. That is how a whole session of Opus diversions
+    /// under-reported by five times without a single wrong-looking row. Naming
+    /// the source makes a wrong price diagnosable off the ledger line.
+    /// What: one of
+    /// [`crate::core::session_model::MODEL_SOURCE_ENV`],
+    /// `MODEL_SOURCE_STATUSLINE`, `MODEL_SOURCE_CONFIG_FALLBACK`, or
+    /// `MODEL_SOURCE_LAUNCH_CONFIG`. `#[serde(default)]` so rows written before
+    /// #6972 still fold, reading back as `""`.
+    /// Test: `divert_row_names_the_model_source`,
+    /// `instruction_compression_row_names_its_model_source`.
+    #[serde(default)]
+    pub model_source: String,
 }
 
 /// The folded total of every accepted row in one read.

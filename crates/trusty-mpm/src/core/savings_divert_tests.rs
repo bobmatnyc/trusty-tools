@@ -17,8 +17,12 @@ use crate::core::savings::{fold_session, savings_log_in};
 
 /// A price stand-in: Sonnet's published input rate, as the shared table carries
 /// it. Used so the arithmetic below is hand-checkable.
-fn sonnet_price() -> Option<(String, f64)> {
-    Some(("claude-sonnet-4-6".to_string(), 3.0))
+fn sonnet_price() -> Option<ParentModel> {
+    Some(ParentModel {
+        id: "claude-sonnet-4-6".to_string(),
+        input_per_million: 3.0,
+        source: MODEL_SOURCE_STATUSLINE,
+    })
 }
 
 /// Why (#6959 acceptance criterion 1): the hand-computed delta is the whole
@@ -85,7 +89,12 @@ fn no_row_when_the_parent_model_cannot_be_priced() {
         "an unpriceable parent model must write no row"
     );
     assert!(
-        divert_row("sess-a", 400_000, 4_000, 0.02, || Some(("m".into(), 0.0))).is_none(),
+        divert_row("sess-a", 400_000, 4_000, 0.02, || Some(ParentModel {
+            id: "m".to_string(),
+            input_per_million: 0.0,
+            source: MODEL_SOURCE_CONFIG_FALLBACK,
+        }))
+        .is_none(),
         "a zero rate must write no row"
     );
 }
@@ -129,7 +138,7 @@ fn no_row_when_the_worker_cost_exceeds_the_saving() {
 fn no_row_without_a_session_id() {
     let dir = tempfile::tempdir().expect("temp dir");
     let ledger = savings_log_in(dir.path());
-    record_divert_with(&ledger, "  ", 400_000, 4_000, 0.02, sonnet_price);
+    record_divert_with(dir.path(), "  ", 400_000, 4_000, 0.02, sonnet_price);
     assert!(
         !ledger.exists(),
         "an empty session id must not create a ledger"
@@ -144,7 +153,7 @@ fn no_row_without_a_session_id() {
 fn a_recorded_diversion_folds_into_the_session_total() {
     let dir = tempfile::tempdir().expect("temp dir");
     let ledger = savings_log_in(dir.path());
-    record_divert_with(&ledger, "sess-a", 400_000, 4_000, 0.02, sonnet_price);
+    record_divert_with(dir.path(), "sess-a", 400_000, 4_000, 0.02, sonnet_price);
 
     let total = fold_session(&ledger, "sess-a");
     assert_eq!(total.rows, 1);
@@ -169,7 +178,7 @@ fn a_ledger_write_failure_does_not_fail_the_diversion() {
     std::fs::write(&blocker, "not a directory").expect("write blocker");
     let ledger = savings_log_in(dir.path());
 
-    record_divert_with(&ledger, "sess-a", 400_000, 4_000, 0.02, sonnet_price);
+    record_divert_with(dir.path(), "sess-a", 400_000, 4_000, 0.02, sonnet_price);
 
     assert!(
         !ledger.exists(),
@@ -187,12 +196,158 @@ fn a_ledger_write_failure_does_not_fail_the_diversion() {
 /// Test: itself.
 #[test]
 fn resolve_session_price_agrees_with_the_shared_table() {
+    let dir = tempfile::tempdir().expect("temp dir");
     // A machine configured for a model outside the table resolves to `None`,
     // which declines the row — the documented behaviour, not a test failure.
-    if let Some((model, rate)) = resolve_session_price() {
-        let table = trusty_common::inference::pricing(&model)
+    if let Some(parent) = resolve_session_price(dir.path(), "sess-a") {
+        let table = trusty_common::inference::pricing(&parent.id)
             .expect("the resolved model must be one the table knows");
-        assert_eq!(rate, table.input, "the rate must be the table's input rate");
-        assert!(rate > 0.0, "a priced model must have a positive input rate");
+        assert_eq!(
+            parent.input_per_million, table.input,
+            "the rate must be the table's input rate"
+        );
+        assert!(
+            parent.input_per_million > 0.0,
+            "a priced model must have a positive input rate"
+        );
     }
+}
+
+/// Why (#6972): this is the precedence the issue is about, driven with every
+/// combination of the three sources present and absent. The third row is the
+/// bug itself — a session running Opus, no pinned `ANTHROPIC_MODEL`, and a
+/// config chain that answers Sonnet. Before #6972 that resolved Sonnet and
+/// priced the row at a fifth of what the diversion saved.
+/// Test: itself.
+#[test]
+fn parent_model_precedence_table() {
+    let opus = "claude-opus-4-5";
+    let haiku = "claude-haiku-4-5";
+    let sonnet = "claude-sonnet-4-6";
+
+    // (env, statusline, expected model, expected source)
+    let cases: &[(Option<&str>, Option<&str>, &str, &str)] = &[
+        // All three present: the operator's explicit pin wins.
+        (Some(haiku), Some(opus), haiku, MODEL_SOURCE_ENV),
+        // Env only.
+        (Some(haiku), None, haiku, MODEL_SOURCE_ENV),
+        // THE BUG: statusline says opus, env unset, config says sonnet.
+        (None, Some(opus), opus, MODEL_SOURCE_STATUSLINE),
+        // Neither: the config chain always answers, and it is a guess.
+        (None, None, sonnet, MODEL_SOURCE_CONFIG_FALLBACK),
+        // A blank source is an absent one, not an empty model id.
+        (Some(""), Some(opus), opus, MODEL_SOURCE_STATUSLINE),
+        (
+            Some("  "),
+            Some("   "),
+            sonnet,
+            MODEL_SOURCE_CONFIG_FALLBACK,
+        ),
+        // Surrounding whitespace is trimmed off whichever source answers.
+        (Some(" claude-haiku-4-5 "), None, haiku, MODEL_SOURCE_ENV),
+    ];
+
+    for (env, statusline, want_model, want_source) in cases {
+        let (model, source) = choose_parent_model(
+            env.map(str::to_string),
+            statusline.map(str::to_string),
+            || sonnet.to_string(),
+        );
+        assert_eq!(
+            (model.as_str(), source),
+            (*want_model, *want_source),
+            "env={env:?} statusline={statusline:?}"
+        );
+    }
+}
+
+/// Why (#6972): the three precedence rungs, each asserted on its own so a
+/// failure names which rung broke rather than only that the table disagreed.
+/// Test: itself.
+#[test]
+fn env_wins_over_every_other_source() {
+    let (model, source) = choose_parent_model(
+        Some("claude-haiku-4-5".to_string()),
+        Some("claude-opus-4-5".to_string()),
+        || panic!("the config chain must not be consulted when a better source answered"),
+    );
+    assert_eq!(model, "claude-haiku-4-5");
+    assert_eq!(source, MODEL_SOURCE_ENV);
+}
+
+/// Why (#6972 closure condition 1): the record the statusline hook wrote is the
+/// only source carrying the model Claude Code is actually running, so it must
+/// beat the config chain's default.
+/// Test: itself.
+#[test]
+fn the_statusline_record_outranks_the_config_chain() {
+    let (model, source) = choose_parent_model(None, Some("claude-opus-4-5".to_string()), || {
+        panic!("the config chain must not be consulted when the record answered")
+    });
+    assert_eq!(model, "claude-opus-4-5");
+    assert_eq!(source, MODEL_SOURCE_STATUSLINE);
+}
+
+/// Why (#6972 closure condition 2): before the first render there is no record,
+/// and behaviour must be unchanged from #6971 — the config chain answers. What
+/// changes is that the row says so.
+/// Test: itself.
+#[test]
+fn the_config_chain_is_the_last_resort() {
+    let (model, source) = choose_parent_model(None, None, || "claude-sonnet-4-6".to_string());
+    assert_eq!(model, "claude-sonnet-4-6");
+    assert_eq!(source, MODEL_SOURCE_CONFIG_FALLBACK);
+}
+
+/// Why (#6972): an unresolvable model must not price as Sonnet in silence. The
+/// row carries the source it was priced from, so an operator reading the ledger
+/// can tell a measured price from a guessed one without reproducing the machine.
+/// Test: itself.
+#[test]
+fn divert_row_names_the_model_source() {
+    let guessed = divert_row("sess-a", 400_000, 4_000, 0.02, || {
+        Some(ParentModel {
+            id: "claude-sonnet-4-6".to_string(),
+            input_per_million: 3.0,
+            source: MODEL_SOURCE_CONFIG_FALLBACK,
+        })
+    })
+    .expect("a row");
+    assert_eq!(guessed.model_source, MODEL_SOURCE_CONFIG_FALLBACK);
+    assert_eq!(guessed.model_source, "config-fallback");
+    assert!(
+        guessed.basis.contains("config-fallback"),
+        "the basis must name the guessed source too: {}",
+        guessed.basis
+    );
+
+    // A measured price is labelled differently, so the two are distinguishable.
+    let measured = divert_row("sess-a", 400_000, 4_000, 0.02, sonnet_price).expect("a row");
+    assert_eq!(measured.model_source, MODEL_SOURCE_STATUSLINE);
+    assert_ne!(measured.model_source, guessed.model_source);
+}
+
+/// Why (#6972 closure condition 1, end to end): the render writes the record,
+/// the diversion reads it, and the row that lands in the ledger is priced at
+/// Opus rather than the config chain's Sonnet. This is the whole issue in one
+/// assertion — 99,000 tokens at $15/Mtok is $1.485, less the worker's $0.02.
+/// Test: itself.
+#[test]
+fn a_recorded_opus_session_prices_its_diversion_at_opus() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    crate::core::session_model::record_session_model(dir.path(), "sess-a", "claude-opus-4-5");
+
+    let parent = resolve_session_price(dir.path(), "sess-a").expect("opus must price");
+    assert_eq!(parent.id, "claude-opus-4-5");
+    assert_eq!(parent.input_per_million, 15.0);
+    assert_eq!(parent.source, MODEL_SOURCE_STATUSLINE);
+
+    record_divert(dir.path(), "sess-a", 400_000, 4_000, 0.02);
+    let total = fold_session(&savings_log_in(dir.path()), "sess-a");
+    assert_eq!(total.rows, 1);
+    assert!(
+        (total.cost_saved_usd - 1.465).abs() < 1e-9,
+        "the row must be priced at Opus, not the config chain: {}",
+        total.cost_saved_usd
+    );
 }

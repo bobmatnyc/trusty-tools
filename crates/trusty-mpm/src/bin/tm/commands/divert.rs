@@ -229,9 +229,10 @@ pub(crate) fn source_bytes(sources: &[(String, String)]) -> usize {
 /// framework root HERE rather than inside the producer is what keeps the writer
 /// on the same root the segment reads from — both go through the `--root` /
 /// `TRUSTY_MPM_ROOT` / config chain, not the home-relative default.
-/// What: prices the file-vs-summary token delta at the parent session's model
-/// and appends one row. Declines quietly when there is no session id or no
-/// resolvable root; never fails the diversion.
+/// What: prices the file-vs-summary token delta at the parent session's model —
+/// which #6972 reads from the record the statusline hook wrote under the same
+/// root — and appends one row. Declines quietly when there is no session id or
+/// no resolvable root; never fails the diversion.
 /// Test: `source_bytes_sums_every_file_body`, and the producer's own suite in
 /// `savings_divert_tests.rs`.
 fn record_divert_savings(sources: &[(String, String)], reply: &WorkerReply) {
@@ -247,7 +248,9 @@ fn record_divert_savings(sources: &[(String, String)], reply: &WorkerReply) {
         }
     };
     trusty_mpm::core::savings_divert::record_divert(
-        &trusty_mpm::core::savings::savings_log_in(&root),
+        // #6972: the root, not the ledger path — the producer also reads the
+        // statusline's parent-model record from under it.
+        &root,
         &session_id,
         source_bytes(sources),
         reply.text.len(),

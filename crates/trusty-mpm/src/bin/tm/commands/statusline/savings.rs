@@ -70,6 +70,35 @@ pub(crate) fn savings_segment_at(ledger: &Path, session_id: &str) -> Option<Stri
     render_savings_segment(&fold_session(ledger, session_id))
 }
 
+/// Remember which model this session runs, for the divert producer to price at.
+///
+/// Why (#6972): `tm divert` runs in its own process and has no way to learn the
+/// parent session's model — Claude Code exports no model variable to a hook
+/// child, and the PreToolUse payload carries no model field. The `statusLine`
+/// payload is the ONE place the authoritative `model.id` reaches `tm`, so the
+/// render that already reads it is what persists it. Before this, every
+/// diversion priced at the config chain's Sonnet default: an Opus session
+/// under-reported its savings by five times, and three smoke diversions wrote no
+/// row at all because the Haiku worker's bill exceeded the understated delta.
+/// What: writes `model_id` under the same framework root the ledger uses, and
+/// only when it changed — the store does the comparison, so a steady session
+/// costs one small read per render. `model.display_name` is deliberately not a
+/// fallback: the price table matches on slugs (`claude-opus-…`), and a bare
+/// "Opus" would not price. The two early returns exist to skip resolving the
+/// root at all before Claude Code has assigned a session id.
+/// Test: the store's own suite — `a_recorded_model_reads_back`,
+/// `an_unchanged_model_leaves_the_file_untouched`,
+/// `a_blank_model_is_never_recorded`.
+pub(crate) fn record_parent_model(session_id: &str, model_id: &str) {
+    if session_id.is_empty() || model_id.trim().is_empty() {
+        return;
+    }
+    let Some(root) = savings_root() else {
+        return;
+    };
+    trusty_mpm::core::session_model::record_session_model(&root, session_id, model_id);
+}
+
 /// Resolve the framework root the ledger lives under.
 ///
 /// Why: `tm` lets an operator relocate the whole framework root, and a status
@@ -224,6 +253,7 @@ mod tests {
                 tokens_saved: 12_000,
                 cost_saved_usd: 0.18,
                 basis: "sources 60000 B - compiled 12000 B".to_string(),
+                model_source: "launch-config".to_string(),
             },
         )
         .expect("append");

@@ -177,6 +177,9 @@ pub mod scaffold_gitignore;
 pub mod session;
 pub mod session_assets;
 pub mod session_launch;
+// #6972: which model the parent session runs, remembered by the statusline hook
+// so the divert producer prices its rows at the parent's real rate.
+pub mod session_model;
 pub mod session_store;
 pub mod skill_deploy_tiers;
 pub mod skill_deployer;

@@ -165,6 +165,9 @@ fn instruction_compression_row(
              at {BYTES_PER_TOKEN} B/token, priced at {model} input \
              ${input_per_million}/Mtok"
         ),
+        // #6972: authoritative here, unlike in the divert producer — this runs at
+        // launch, off the chain that produced the session's own `--model` flag.
+        model_source: crate::core::session_model::MODEL_SOURCE_LAUNCH_CONFIG.to_string(),
     })
 }
 

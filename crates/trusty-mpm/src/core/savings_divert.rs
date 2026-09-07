@@ -31,30 +31,60 @@
 //!   stdout by the time this runs. An unwritable ledger logs a `warn!` and
 //!   nothing else — the agent still gets its answer.
 //!
+//! **Which model the row is priced at (#6972).** [`choose_parent_model`] takes
+//! the first of three sources that answers: [`SESSION_MODEL_ENV`], then the id
+//! the `statusLine` hook recorded for this session
+//! ([`crate::core::session_model`]), then the launcher's config chain. Only the
+//! middle one reflects what Claude Code is actually running, and only the last
+//! one always answers — so a row that landed on it carries
+//! [`MODEL_SOURCE_CONFIG_FALLBACK`] in its `model_source` and logged a `warn!`
+//! when it was written.
+//!
 //! Test: the inline suite in `savings_divert_tests.rs` —
 //! `a_hand_computed_delta_matches_the_row`,
 //! `no_row_when_the_summary_is_not_smaller_than_the_files`,
 //! `divert_row_carries_the_named_technique`,
 //! `no_row_when_the_parent_model_cannot_be_priced`,
-//! `a_ledger_write_failure_does_not_fail_the_diversion`.
+//! `a_ledger_write_failure_does_not_fail_the_diversion`,
+//! `parent_model_precedence_table`, `divert_row_names_the_model_source`.
 
 use std::path::Path;
 
 use crate::core::savings::{BYTES_PER_TOKEN, SavingsRow, TECHNIQUE_DIVERT, append_row, now_ts};
+use crate::core::session_model::{
+    MODEL_SOURCE_CONFIG_FALLBACK, MODEL_SOURCE_ENV, MODEL_SOURCE_STATUSLINE, read_session_model,
+};
 
 /// The environment variable naming the model the PARENT session runs on.
 ///
 /// Why (#6959): the row is attributed to the parent session, so it must be
 /// priced at the parent's rate — pricing a diverted Opus read at Haiku's rate
-/// would understate the saving by nearly twenty times. Claude Code exports this
-/// variable when the operator pins a model through it, and `tm divert` runs as a
-/// plain child of the session, so it arrives unmodified. The worker's own
-/// environment scrub (`divert_worker::NESTED_SESSION_ENV`) applies to the CHILD
-/// this command spawns, never to this process.
-/// What: `ANTHROPIC_MODEL`. Absent or blank falls back to
-/// [`resolve_session_price`]'s config chain.
-/// Test: `resolve_session_price_agrees_with_the_shared_table`.
+/// would understate the saving by nearly twenty times. Claude Code exports no
+/// model variable of its own to a hook child (#6972), so in practice this is
+/// present only when the operator pins a model through it — which is why it
+/// stays the top of the precedence: an explicit pin outranks anything inferred.
+/// What: `ANTHROPIC_MODEL`. Absent or blank falls through to the statusline
+/// record and then the config chain; see [`choose_parent_model`].
+/// Test: `env_wins_over_every_other_source`.
 pub const SESSION_MODEL_ENV: &str = "ANTHROPIC_MODEL";
+
+/// The parent session's model, its input rate, and where the model came from.
+///
+/// Why (#6972): the row needs all three — the slug for the `basis` string, the
+/// rate for the arithmetic, and the source so a wrong price is diagnosable
+/// without reproducing the machine's config.
+/// What: `input_per_million` is USD per million input tokens; `source` is one of
+/// the `MODEL_SOURCE_*` constants.
+/// Test: `divert_row_names_the_model_source`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParentModel {
+    /// The model slug the price table was queried with.
+    pub id: String,
+    /// That model's published input rate, USD per million tokens.
+    pub input_per_million: f64,
+    /// Which of the three sources named [`ParentModel::id`].
+    pub source: &'static str,
+}
 
 /// The smallest cost delta worth a row.
 ///
@@ -73,30 +103,31 @@ const MIN_COST_SAVED_USD: f64 = 1e-6;
 ///
 /// Why: the caller has the three numbers and nothing else — it should not also
 /// have to know the price table, the row shape, or which failures are worth a
-/// row. Taking `ledger` as an argument (rather than resolving
-/// `default_savings_log()` here) is what keeps the writer and the statusline
+/// row. Taking the framework `root` as an argument (rather than resolving
+/// `FrameworkPaths::default()` here) is what keeps the writer and the statusline
 /// reader on the SAME root: `tm` resolves `--root` / `TRUSTY_MPM_ROOT` at the
-/// call site, and the segment reads through the same resolver.
+/// call site, and both the ledger and the #6972 model record hang off it.
 /// What: declines on an empty `session_id`, an unpriceable parent model, or a
-/// non-positive delta; otherwise appends the row. Every failure is a `warn!` and
-/// a return — never an error to the caller.
+/// non-positive delta; otherwise appends the row to
+/// [`crate::core::savings::savings_log_in`]. Every failure is a `warn!` and a
+/// return — never an error to the caller.
 /// Test: `a_recorded_diversion_folds_into_the_session_total`,
 /// `no_row_without_a_session_id`,
 /// `a_ledger_write_failure_does_not_fail_the_diversion`.
 pub fn record_divert(
-    ledger: &Path,
+    root: &Path,
     session_id: &str,
     file_bytes: usize,
     summary_bytes: usize,
     worker_cost_usd: f64,
 ) {
     record_divert_with(
-        ledger,
+        root,
         session_id,
         file_bytes,
         summary_bytes,
         worker_cost_usd,
-        resolve_session_price,
+        || resolve_session_price(root, session_id),
     );
 }
 
@@ -106,22 +137,23 @@ pub fn record_divert(
 /// from a tempdir this way, with no configured model and no `set_var` — this
 /// crate's bin target carries an env-mutation ratchet (#5544) and a process-wide
 /// mutation corrupts sibling tests regardless.
-/// What: see [`record_divert`]. `price` resolves the parent model and its
-/// USD-per-million input rate.
+/// What: see [`record_divert`]. `price` resolves the parent model, its
+/// USD-per-million input rate, and which source named it.
 /// Test: `a_ledger_write_failure_does_not_fail_the_diversion`,
 /// `no_row_without_a_session_id`.
 fn record_divert_with(
-    ledger: &Path,
+    root: &Path,
     session_id: &str,
     file_bytes: usize,
     summary_bytes: usize,
     worker_cost_usd: f64,
-    price: impl FnOnce() -> Option<(String, f64)>,
+    price: impl FnOnce() -> Option<ParentModel>,
 ) {
     if session_id.trim().is_empty() {
         tracing::warn!("no parent session id: writing no divert savings row");
         return;
     }
+    let ledger = crate::core::savings::savings_log_in(root);
     let Some(row) = divert_row(
         session_id,
         file_bytes,
@@ -133,7 +165,7 @@ fn record_divert_with(
     };
     // #6959: the answer is already on stdout — a ledger failure must not turn a
     // diversion that worked into one that failed.
-    if let Err(source) = append_row(ledger, &row) {
+    if let Err(source) = append_row(&ledger, &row) {
         tracing::warn!(
             ledger = %ledger.display(),
             %source,
@@ -159,7 +191,7 @@ fn divert_row(
     file_bytes: usize,
     summary_bytes: usize,
     worker_cost_usd: f64,
-    price: impl FnOnce() -> Option<(String, f64)>,
+    price: impl FnOnce() -> Option<ParentModel>,
 ) -> Option<SavingsRow> {
     let file_tokens = (file_bytes as f64 / BYTES_PER_TOKEN).floor() as i64;
     let summary_tokens = (summary_bytes as f64 / BYTES_PER_TOKEN).ceil() as i64;
@@ -173,7 +205,12 @@ fn divert_row(
         );
         return None;
     }
-    let Some((model, input_per_million)) = price() else {
+    let Some(ParentModel {
+        id: model,
+        input_per_million,
+        source,
+    }) = price()
+    else {
         tracing::warn!(
             session_id,
             "the parent session's model is unknown or unpriceable; writing no divert savings row"
@@ -198,32 +235,82 @@ fn divert_row(
         cost_saved_usd,
         basis: format!(
             "files {file_tokens} tok - summary {summary_tokens} tok, \
-             at {BYTES_PER_TOKEN} B/token, priced at {model} input \
+             at {BYTES_PER_TOKEN} B/token, priced at {model} ({source}) input \
              ${input_per_million}/Mtok, less worker ${worker_cost_usd:.6}"
         ),
+        model_source: source.to_string(),
     })
 }
 
-/// Resolve the PARENT session's model and its input price.
+/// Pick the parent session's model from the three sources, most trusted first.
+///
+/// Why (#6972): this is the precedence the whole issue is about, and it is pure
+/// so it can be driven with every combination of present and absent sources
+/// without a `set_var`, a configured machine, or a written file. Before #6972
+/// the middle rung did not exist: the env variable is absent on every machine
+/// Claude Code has not been told to pin a model on, so every diversion fell
+/// straight to the config chain's Sonnet default and an Opus session
+/// under-reported by five times.
+/// What: `env` outranks `statusline` outranks the config chain, because an
+/// operator's explicit pin beats what the harness observed, which beats what the
+/// launcher would have guessed. `config` is a closure so the last resort — which
+/// reads config off disk — is not paid for when a better source answered.
+/// Test: `parent_model_precedence_table`, `env_wins_over_every_other_source`,
+/// `the_statusline_record_outranks_the_config_chain`,
+/// `the_config_chain_is_the_last_resort`.
+fn choose_parent_model(
+    env_model: Option<String>,
+    statusline_model: Option<String>,
+    config: impl FnOnce() -> String,
+) -> (String, &'static str) {
+    let usable = |m: Option<String>| m.filter(|s| !s.trim().is_empty());
+    if let Some(model) = usable(env_model) {
+        return (model.trim().to_string(), MODEL_SOURCE_ENV);
+    }
+    if let Some(model) = usable(statusline_model) {
+        return (model.trim().to_string(), MODEL_SOURCE_STATUSLINE);
+    }
+    (config(), MODEL_SOURCE_CONFIG_FALLBACK)
+}
+
+/// Resolve the PARENT session's model, its input price, and its source.
 ///
 /// Why: the saving is what the parent did not spend, so it is priced at the
 /// parent's rate, never the worker's. The price table is
 /// `trusty_common::inference::pricing` — the one this feature already uses — and
 /// a model it does not know declines the row rather than substituting a guess.
-/// What: [`SESSION_MODEL_ENV`] when the harness exported it, otherwise the same
-/// `resolve_pm_model` chain that produced the session's own `--model` flag.
-/// Returns `(slug, input USD per million tokens)`.
+/// What: [`choose_parent_model`] over [`SESSION_MODEL_ENV`], the statusline
+/// record under `root` (#6972), and the same `resolve_pm_model` chain that
+/// produced the session's own `--model` flag. Landing on the config chain emits
+/// one `warn!` naming it, because that price is a guess the operator cannot
+/// otherwise see.
 /// Test: `resolve_session_price_agrees_with_the_shared_table`.
-fn resolve_session_price() -> Option<(String, f64)> {
-    let model = std::env::var(SESSION_MODEL_ENV)
-        .ok()
-        .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| {
+fn resolve_session_price(root: &Path, session_id: &str) -> Option<ParentModel> {
+    let (model, source) = choose_parent_model(
+        std::env::var(SESSION_MODEL_ENV).ok(),
+        read_session_model(root, session_id),
+        || {
             let config = crate::core::config::MpmConfig::load_default();
             crate::core::model_inject::resolve_pm_model(&config, None)
-        });
+        },
+    );
+    if source == MODEL_SOURCE_CONFIG_FALLBACK {
+        // #6972: no statusline render has recorded this session's model yet, so
+        // the price below is whatever the launcher would have guessed.
+        tracing::warn!(
+            session_id,
+            %model,
+            env = SESSION_MODEL_ENV,
+            "no statusline model record for this session; pricing the divert row \
+             from the config chain, which may not be the model the session runs"
+        );
+    }
     let pricing = trusty_common::inference::pricing(&model)?;
-    Some((model, pricing.input))
+    Some(ParentModel {
+        id: model,
+        input_per_million: pricing.input,
+        source,
+    })
 }
 
 #[cfg(test)]
