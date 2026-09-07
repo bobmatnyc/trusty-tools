@@ -436,9 +436,14 @@ impl SessionRegistry {
     /// `Event::SessionDone` (`status: "cancelled"`) — matching the vision
     /// spec's `started/status-changed/input/cancelled/done` taxonomy — and
     /// returns the updated snapshot.
+    ///
+    /// #4351: also records a refless `Cancelled` `TaskResult`, so cancelling is
+    /// not the one terminal state that answers `session.status` with no
+    /// `result` — see [`Self::set_cancelled_result`].
     /// Test: `registry_tests::cancel_transitions_to_cancelled_and_publishes`,
     /// `registry_tests::cancel_is_idempotent_on_terminal_session`,
-    /// `registry_tests::cancel_unknown_session_errors`.
+    /// `registry_tests::cancel_unknown_session_errors`,
+    /// `registry_tests::cancel_records_a_refless_cancelled_result`.
     pub fn cancel(&self, id: &str) -> Result<Session, RpcError> {
         let already_terminal = {
             let sessions = self.lock();
@@ -450,6 +455,9 @@ impl SessionRegistry {
         if already_terminal {
             return self.status(id);
         }
+        // #4351: record the result BEFORE the transition, so the snapshot this
+        // returns and every terminal path agree — see `set_cancelled_result`.
+        self.set_cancelled_result(id);
         self.transition(id, SessionStatus::Cancelled);
         self.record(
             id,

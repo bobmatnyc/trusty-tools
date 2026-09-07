@@ -14,12 +14,14 @@
 //! builders, never a struct literal from outside this crate.
 //! Test: `tests::status_maps_every_session_status`,
 //! `tests::partial_exit_code_is_its_own_status_not_a_failure`,
+//! `tests::exit_code_mapping_reads_the_numbers_from_the_enum`,
 //! `tests::task_result_round_trips_through_json`,
 //! `tests::absent_optional_fields_deserialise_as_none`.
 
 use serde::{Deserialize, Serialize};
 
 use super::model::SessionStatus;
+use crate::run_task::ExitCode;
 
 /// Pass/fail classification of a run, wider than a boolean.
 ///
@@ -86,26 +88,46 @@ impl TaskResultStatus {
         }
     }
 
-    /// Classify a `tcode` process exit code (`ExitCode`, #4351).
+    /// Classify a typed [`ExitCode`].
+    ///
+    /// Why: `ExitCode` is the ONE definition of what a run's outcome means in
+    /// this crate; this match is exhaustive over it, so adding a variant there
+    /// fails to compile here until somebody decides what it classifies as.
+    /// A catch-all would have let `Partial` be absorbed silently — the exact
+    /// shape of #3888.
+    /// What: `NoChanges` is a SUCCESS — the run completed, it simply changed
+    /// nothing. `Partial` keeps its own status rather than collapsing into
+    /// `Failed`, because it means real work is on disk (see that variant's own
+    /// docs).
+    /// Test: `tests::every_exit_code_variant_classifies_deliberately`.
+    pub fn from_exit_kind(exit: ExitCode) -> Self {
+        match exit {
+            ExitCode::Success | ExitCode::NoChanges => Self::Success,
+            ExitCode::ConfigError | ExitCode::RunFailure => Self::Failed,
+            ExitCode::DeadlineExceeded => Self::DeadlineExceeded,
+            ExitCode::Partial => Self::Partial,
+        }
+    }
+
+    /// Classify a `tcode` child process's numeric exit code (#4351).
     ///
     /// Why: a caller that shells out to `tcode run-task` (see
     /// `trusty_agents::tools::pm_bridge_backend::ProcessPmBridge`) reads the
     /// child's exit status, not a `SessionStatus`. Without this mapping the
     /// only honest reading of "non-zero" is "failed", which silently throws
-    /// away the `Partial` (6) distinction the exit code exists to draw.
-    /// What: `0`/`4` (`Success`/`NoChanges` — the run completed, it simply
-    /// changed nothing) report `Success`; `5` reports `DeadlineExceeded`; `6`
-    /// reports `Partial`; every other code, including a signal-killed child
-    /// with no code at all, reports `Failed`.
+    /// away the `Partial` distinction the exit code exists to draw.
+    /// What: routes the number through [`ExitCode::from_code`] and then
+    /// [`Self::from_exit_kind`], so the numbers live in `ExitCode` alone and
+    /// renumbering a variant there carries this mapping with it. A number that
+    /// enum does not define — and a signal-killed child, which reports no code
+    /// at all — fails closed as `Failed`.
     /// Test: `tests::partial_exit_code_is_its_own_status_not_a_failure`,
-    /// `tests::exit_code_mapping_covers_every_documented_code`.
+    /// `tests::exit_code_mapping_reads_the_numbers_from_the_enum`,
+    /// `tests::an_undefined_exit_number_fails_closed`.
     pub fn from_exit_code(code: Option<i32>) -> Self {
-        match code {
-            Some(0) | Some(4) => Self::Success,
-            Some(5) => Self::DeadlineExceeded,
-            Some(6) => Self::Partial,
-            _ => Self::Failed,
-        }
+        code.and_then(ExitCode::from_code)
+            .map(Self::from_exit_kind)
+            .unwrap_or(Self::Failed)
     }
 }
 
@@ -243,31 +265,73 @@ mod tests {
         }
     }
 
-    /// #4351: exit 6 is `Partial`, NOT `Failed` — the whole point of the code.
+    /// #4351: `ExitCode::Partial` is `Partial`, NOT `Failed` — the whole point
+    /// of that exit code. Asserted through the enum, never the literal `6`, so
+    /// renumbering it cannot make this test pass against the wrong number.
     #[test]
     fn partial_exit_code_is_its_own_status_not_a_failure() {
-        let status = TaskResultStatus::from_exit_code(Some(6));
+        let status = TaskResultStatus::from_exit_code(Some(ExitCode::Partial.code()));
         assert_eq!(status, TaskResultStatus::Partial);
         assert_ne!(status, TaskResultStatus::Failed);
     }
 
-    /// Every exit code `crate::run_task::report::ExitCode` documents maps
-    /// deliberately, and an absent code (signal-killed child) fails closed.
+    /// Every `ExitCode` variant classifies deliberately. The match in
+    /// `from_exit_kind` is exhaustive, so a new variant breaks the build there
+    /// first; this pins what each existing one means.
     #[test]
-    fn exit_code_mapping_covers_every_documented_code() {
-        for (code, expected) in [
-            (Some(0), TaskResultStatus::Success),
-            (Some(2), TaskResultStatus::Failed),
-            (Some(3), TaskResultStatus::Failed),
-            (Some(4), TaskResultStatus::Success),
-            (Some(5), TaskResultStatus::DeadlineExceeded),
-            (Some(6), TaskResultStatus::Partial),
-            (None, TaskResultStatus::Failed),
+    fn every_exit_code_variant_classifies_deliberately() {
+        for (exit, expected) in [
+            (ExitCode::Success, TaskResultStatus::Success),
+            (ExitCode::ConfigError, TaskResultStatus::Failed),
+            (ExitCode::RunFailure, TaskResultStatus::Failed),
+            (ExitCode::NoChanges, TaskResultStatus::Success),
+            (
+                ExitCode::DeadlineExceeded,
+                TaskResultStatus::DeadlineExceeded,
+            ),
+            (ExitCode::Partial, TaskResultStatus::Partial),
         ] {
             assert_eq!(
-                TaskResultStatus::from_exit_code(code),
+                TaskResultStatus::from_exit_kind(exit),
                 expected,
-                "exit code {code:?} mapped to the wrong result status"
+                "{exit:?} classified wrongly"
+            );
+        }
+    }
+
+    /// `from_exit_code` reads its numbers from `ExitCode` itself, so the
+    /// numeric path agrees with the typed one for every variant.
+    #[test]
+    fn exit_code_mapping_reads_the_numbers_from_the_enum() {
+        for exit in [
+            ExitCode::Success,
+            ExitCode::ConfigError,
+            ExitCode::RunFailure,
+            ExitCode::NoChanges,
+            ExitCode::DeadlineExceeded,
+            ExitCode::Partial,
+        ] {
+            assert_eq!(
+                TaskResultStatus::from_exit_code(Some(exit.code())),
+                TaskResultStatus::from_exit_kind(exit),
+                "the numeric and typed paths disagree for {exit:?}"
+            );
+        }
+    }
+
+    /// A number `ExitCode` does not define, and a signal-killed child that
+    /// reports no code at all, both fail closed.
+    #[test]
+    fn an_undefined_exit_number_fails_closed() {
+        assert_eq!(
+            TaskResultStatus::from_exit_code(None),
+            TaskResultStatus::Failed
+        );
+        for code in [1, 7, 137] {
+            assert_eq!(
+                TaskResultStatus::from_exit_code(Some(code)),
+                TaskResultStatus::Failed,
+                "undefined code {code}"
             );
         }
     }

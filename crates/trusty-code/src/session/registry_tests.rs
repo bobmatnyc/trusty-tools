@@ -2689,6 +2689,36 @@ fn set_task_result_stores_the_result() {
     assert_eq!(stored.pr_ref, None);
 }
 
+/// (#4351) `session.cancel` must not be the one terminal state that answers
+/// `session.status` with no result. Cancellation is a status transition, not a
+/// run outcome, so the refs are `None` — but the status and summary are there.
+#[test]
+fn cancel_records_a_refless_cancelled_result() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+    let snapshot = registry.cancel(&session.id).expect("cancel succeeds");
+    assert_eq!(snapshot.status, SessionStatus::Cancelled);
+
+    let result = snapshot
+        .result
+        .clone()
+        .expect("#4351: a cancelled session must carry a TaskResult");
+    assert_eq!(result.status, crate::session::TaskResultStatus::Cancelled);
+    assert_eq!(result.diff_ref, None);
+    assert_eq!(result.branch, None);
+    assert_eq!(result.pr_ref, None);
+    assert!(
+        result.summary.is_some(),
+        "a cancelled result must still say what happened"
+    );
+
+    // The snapshot `cancel` returns and a later `session.status` read must
+    // agree — the result is on the session, not synthesised per call.
+    let reread = registry.status(&session.id).expect("session exists");
+    assert_eq!(reread.result, snapshot.result);
+}
+
 /// A session that vanished between the run starting and finishing is a silent
 /// no-op, matching `set_run_outcome`'s contract — a detached background task
 /// has nothing useful to do with the error.
