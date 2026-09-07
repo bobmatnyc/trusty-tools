@@ -44,6 +44,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_bedrockruntime::Client as BedrockClient;
+use aws_sdk_bedrockruntime::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_bedrockruntime::types::{
     ContentBlock, ConversationRole, InferenceConfiguration, Message, SystemContentBlock,
 };
@@ -297,7 +298,9 @@ impl BedrockProvider {
         }
 
         let resp = sdk_req.send().await.map_err(|sdk_err| {
-            let msg = sdk_err.to_string();
+            // #6912: SdkError's own Display flattens a service error to the bare
+            // word "service error"; read the AWS code and message instead.
+            let msg = describe_sdk_error(&sdk_err);
             let lower = msg.to_lowercase();
             // Map SDK errors to LlmError variants using the error message text.
             if lower.contains("resourcenotfound") || lower.contains("no such model") {
@@ -424,6 +427,41 @@ impl LlmProvider for BedrockProvider {
                 Err(err) => return Err(err),
             }
         }
+    }
+}
+
+// ─── Error rendering ──────────────────────────────────────────────────────────
+
+/// Render an `SdkError` with the AWS error code and message attached.
+///
+/// Why: `SdkError`'s own `Display` writes one fixed word per variant and never
+/// consults the modeled error, so every Bedrock service failure reached the
+/// operator as the literal "service error" — a wrong region, a missing
+/// credential, and an unapproved model all read identically. See #6912.
+/// What: for the `ServiceError` variant, reads the AWS error metadata and
+/// returns `"<code>: <message>"`. Metadata with no message falls back to the
+/// modeled error's own `Display`; metadata with no code falls back to it
+/// entirely, since a generated Bedrock exception already spells its code there.
+/// Every other variant (construction, timeout, dispatch, response) keeps
+/// `SdkError`'s existing rendering — those carry no metadata to read.
+/// Test: `bedrock_service_error_surfaces_code_and_message`,
+/// `bedrock_service_error_without_metadata_falls_back_to_display`,
+/// `bedrock_timeout_error_keeps_sdk_rendering`.
+fn describe_sdk_error<E, R>(sdk_err: &SdkError<E, R>) -> String
+where
+    E: ProvideErrorMetadata + std::fmt::Display,
+{
+    match sdk_err {
+        SdkError::ServiceError(ctx) => {
+            let service_err = ctx.err();
+            let meta = service_err.meta();
+            match (meta.code(), meta.message()) {
+                (Some(code), Some(message)) => format!("{code}: {message}"),
+                (Some(code), None) => format!("{code}: {service_err}"),
+                (None, _) => service_err.to_string(),
+            }
+        }
+        other => other.to_string(),
     }
 }
 
