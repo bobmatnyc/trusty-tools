@@ -64,7 +64,7 @@ fn run_diagnostics_blocking_two_files_same_basename() {
 #[test]
 fn smell_item_omit_content_default_strips_content() {
     let chunk = make_chunk("id1", "src/main.rs", "fn main() {}");
-    let item = SmellItem::from_chunk(&chunk, false);
+    let item = SmellItem::from_chunk(&chunk, Vec::new(), false);
     let json = serde_json::to_value(&item).unwrap();
     assert!(
         json.get("content").is_none(),
@@ -82,9 +82,47 @@ fn smell_item_omit_content_default_strips_content() {
 #[test]
 fn smell_item_include_content_restores_text() {
     let chunk = make_chunk("id2", "src/lib.rs", "fn foo() { 42 }");
-    let item = SmellItem::from_chunk(&chunk, true);
+    let item = SmellItem::from_chunk(&chunk, Vec::new(), true);
     let json = serde_json::to_value(&item).unwrap();
     assert_eq!(json["content"], "fn foo() { 42 }");
+}
+
+/// Why: #6155 — `analyze.smells` said "these chunks smell" and never said of
+/// what, so `Smells.svelte` had nothing to group its bar chart or its detail
+/// table by and rendered "No smells detected" over a smelly corpus.
+/// `match_reason` is the SEARCH daemon's hit reason and is not a substitute.
+/// What: runs the real detector over a long function and asserts the serialised
+/// item carries the `LongFunction` variant serde's external tagging produces —
+/// `smellCategory` in `ui-analyze/src/lib/api.js` reads exactly this shape.
+/// Test: this test.
+#[test]
+fn smells_carry_their_detected_categories() {
+    let mut body = String::from("fn big() {\n");
+    for _ in 0..60 {
+        body.push_str("    let _ = 1;\n");
+    }
+    body.push_str("}\n");
+    let chunks = vec![make_chunk("c0", "src/big.rs", &body)];
+
+    let smelly = quality::smelly_chunks_with_smells(&chunks);
+    assert_eq!(smelly.len(), 1, "the long function must be detected");
+
+    let (chunk, smells) = smelly.into_iter().next().unwrap();
+    let json = serde_json::to_value(SmellItem::from_chunk(&chunk, smells, false)).unwrap();
+    let names: Vec<String> = json["smells"]
+        .as_array()
+        .expect("smells must serialise as an array")
+        .iter()
+        .map(|s| match s {
+            serde_json::Value::String(name) => name.clone(),
+            serde_json::Value::Object(map) => map.keys().next().cloned().unwrap_or_default(),
+            other => panic!("unexpected smell shape: {other}"),
+        })
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "LongFunction"),
+        "expected LongFunction among {names:?}"
+    );
 }
 
 // ── Pagination envelope tests ─────────────────────────────────────────────
@@ -109,15 +147,15 @@ fn smells_pagination_slice_and_envelope() {
         })
         .collect();
 
-    let smelly = quality::smelly_chunks(&chunks);
+    let smelly = quality::smelly_chunks_with_smells(&chunks);
     let total = smelly.len();
     let offset = 3usize;
     let limit = 4usize;
     let page: Vec<SmellItem> = smelly
-        .iter()
+        .into_iter()
         .skip(offset)
         .take(limit)
-        .map(|c| SmellItem::from_chunk(c, false))
+        .map(|(c, smells)| SmellItem::from_chunk(&c, smells, false))
         .collect();
     let returned = page.len();
     let truncated = (offset + returned) < total;
@@ -144,15 +182,15 @@ fn smells_pagination_offset_beyond_total_returns_empty() {
         })
         .collect();
 
-    let smelly = quality::smelly_chunks(&chunks);
+    let smelly = quality::smelly_chunks_with_smells(&chunks);
     let total = smelly.len();
     let offset = 100usize;
     let limit = 10usize;
     let page: Vec<SmellItem> = smelly
-        .iter()
+        .into_iter()
         .skip(offset)
         .take(limit)
-        .map(|c| SmellItem::from_chunk(c, false))
+        .map(|(c, smells)| SmellItem::from_chunk(&c, smells, false))
         .collect();
     let returned = page.len();
     let truncated = (offset + returned) < total;

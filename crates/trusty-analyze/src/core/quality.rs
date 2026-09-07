@@ -15,7 +15,7 @@
 //! (previously every chunk was scored 3x redundantly with the text-only
 //! `compute_complexity`, regardless of its actual language).
 
-use crate::types::complexity::{ComplexityGrade, ComplexityMetrics};
+use crate::types::complexity::{CodeSmell, ComplexityGrade, ComplexityMetrics};
 use crate::types::CodeChunk;
 use serde::Serialize;
 
@@ -182,6 +182,29 @@ pub fn smelly_chunks(chunks: &[CodeChunk]) -> Vec<CodeChunk> {
         .iter()
         .filter(|c| !metrics_of(c).smells.is_empty())
         .cloned()
+        .collect()
+}
+
+/// The same chunks, each paired with the smells that selected it.
+///
+/// Why: `smelly_chunks` runs the detector, tests `smells.is_empty()` and then
+/// throws the smells away, so `analyze.smells` answered "these chunks smell"
+/// without saying of what. `Smells.svelte` groups its bar chart and its detail
+/// table by smell category, and with no category on any row it rendered "No
+/// smells detected for this index" over a corpus whose own quality card
+/// reported thousands (#6155).
+/// What: one pass, keeping the `Vec<CodeSmell>` that `metrics_of` already
+/// computed. Added beside `smelly_chunks` rather than replacing it, because
+/// changing that function's return type would break every external caller for
+/// the sake of one.
+/// Test: `smells_carry_their_detected_categories`.
+pub fn smelly_chunks_with_smells(chunks: &[CodeChunk]) -> Vec<(CodeChunk, Vec<CodeSmell>)> {
+    chunks
+        .iter()
+        .filter_map(|c| {
+            let smells = metrics_of(c).smells;
+            (!smells.is_empty()).then(|| (c.clone(), smells))
+        })
         .collect()
 }
 

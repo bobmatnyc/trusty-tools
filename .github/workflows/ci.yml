@@ -2007,7 +2007,10 @@ jobs:
           # a required context, so renaming it wedges no open PR.
           - name: trusty-console-analyze
             dir: crates/trusty-console/ui-analyze
-            command: pnpm run build
+            # #6155: `build` alone never ran src/lib/api.test.js, which pins the
+            # five list envelopes the daemon answers with. Not a required
+            # context, so no open PR is wedged by the addition.
+            command: pnpm run build && pnpm run test
           # #5477 phase 1. No test suite yet — the shell has one view and its
           # only logic (the Rust↔TypeScript wire shape) is asserted on the Rust
           # side by `guided_serialises_to_the_shape_the_window_reads`. `build`

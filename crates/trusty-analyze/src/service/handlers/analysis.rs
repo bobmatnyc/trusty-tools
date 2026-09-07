@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::complexity::{compute_complexity_for, detect_smells_with_thresholds};
 use crate::core::{analyze_refactor, quality, RefactorSuggestion, Severity};
 use crate::service::events::{fetch_chunks, AnalyzerAppState, ApiError};
+use crate::types::complexity::CodeSmell;
 use crate::types::CodeChunk;
 
 /// Params of a method whose only argument is which index to read.
@@ -93,7 +94,11 @@ pub struct SmellsRequest {
 /// Why: serialises a `CodeChunk` for the smells endpoint while supporting the
 /// `omit_content` flag without mutating the shared `CodeChunk` type.
 /// What: mirrors `CodeChunk` fields; `content` is `None` when omitted.
-/// Test: `smells_omit_content_default_strips_content` asserts the field absent.
+/// `smells` names what the detector found, which is the field that makes the
+/// row groupable — `match_reason` is the SEARCH daemon's hit reason and says
+/// nothing about code quality (#6155).
+/// Test: `smells_omit_content_default_strips_content` asserts the field absent;
+/// `smells_carry_their_detected_categories` asserts `smells` is populated.
 #[derive(Debug, Serialize)]
 pub struct SmellItem {
     pub id: String,
@@ -105,10 +110,13 @@ pub struct SmellItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_name: Option<String>,
     pub match_reason: String,
+    /// What the detector flagged on this chunk. Never empty — a chunk with no
+    /// smells is not in the result set at all.
+    pub smells: Vec<CodeSmell>,
 }
 
 impl SmellItem {
-    fn from_chunk(chunk: &CodeChunk, include_content: bool) -> Self {
+    fn from_chunk(chunk: &CodeChunk, smells: Vec<CodeSmell>, include_content: bool) -> Self {
         Self {
             id: chunk.id.clone(),
             file: chunk.file.clone(),
@@ -121,6 +129,7 @@ impl SmellItem {
             },
             function_name: chunk.function_name.clone(),
             match_reason: chunk.match_reason.clone(),
+            smells,
         }
     }
 }
@@ -182,13 +191,13 @@ pub async fn smells(
     req: SmellsRequest,
 ) -> Result<serde_json::Value, ApiError> {
     let chunks = fetch_chunks(state, &req.index_id).await?;
-    let smelly = quality::smelly_chunks(&chunks);
+    let smelly = quality::smelly_chunks_with_smells(&chunks);
     let total = smelly.len();
     let page: Vec<SmellItem> = smelly
-        .iter()
+        .into_iter()
         .skip(req.offset)
         .take(req.limit)
-        .map(|c| SmellItem::from_chunk(c, !req.omit_content))
+        .map(|(c, smells)| SmellItem::from_chunk(&c, smells, !req.omit_content))
         .collect();
     let returned = page.len();
     let truncated = (req.offset + returned) < total;
