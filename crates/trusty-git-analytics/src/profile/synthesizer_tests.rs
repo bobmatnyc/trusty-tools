@@ -541,8 +541,10 @@ use trusty_common::inference::{
 };
 
 use super::{
-    build_synthesis_request, Synthesizer, SYNTHESIZER_MAX_TOKENS, SYNTHESIZER_TEMPERATURE,
+    build_synthesis_request, Synthesizer, SYNTHESIS_OUTPUT_SCHEMA_NAME, SYNTHESIZER_MAX_TOKENS,
+    SYNTHESIZER_TEMPERATURE,
 };
+use crate::profile::test_support::RecordingAdapter;
 
 /// A scripted response carrying `body` and a usage block.
 fn scripted_response(body: &str) -> ChatResponse {
@@ -646,9 +648,110 @@ async fn synthesizer_transport_falls_back_and_reports_the_failure() {
 /// Test: this test itself.
 #[test]
 fn synthesis_request_preserves_routing_prefix_and_sampling() {
-    let req = build_synthesis_request(&profile_with_trend(), "bedrock/us.anthropic.claude");
+    let req = build_synthesis_request(&profile_with_trend(), "bedrock/us.anthropic.claude", false);
     assert_eq!(req.model, "bedrock/us.anthropic.claude");
     assert_eq!(req.temperature, Some(SYNTHESIZER_TEMPERATURE));
     assert_eq!(req.max_tokens, Some(SYNTHESIZER_MAX_TOKENS));
     assert_eq!(req.messages.len(), 2, "one system turn and one user turn");
+}
+
+/// Why: the builder can be given either delivery, so what has to be pinned at
+/// this call site is that `Synthesizer::synthesize` ASKS its adapter — a
+/// hard-coded `true` fails every `bedrock/…` narrative before the socket opens,
+/// a hard-coded `false` leaves the schema in prose forever. The period pass has
+/// the same guard in `period_reviewer_picks_the_delivery_the_adapter_supports`.
+/// What: synthesises the same profile against two `RecordingAdapter`s differing
+/// only in their capability seed, and asserts the OpenRouter one received
+/// `response_schema` with no prose copy while the Bedrock one received the
+/// reverse.
+/// Test: this test itself.
+#[tokio::test]
+async fn synthesizer_picks_the_delivery_the_adapter_supports() {
+    const BODY: &str = r#"{"strengths":["tests first"],"recurring_weaknesses":["broad error types"],
+        "improvement_trajectory":"improving","narrative":"Steady."}"#;
+
+    let structured = Arc::new(RecordingAdapter::new(
+        capabilities(ProviderId::OpenRouter),
+        scripted_response(BODY),
+    ));
+    Synthesizer::with_adapter(structured.clone(), "openrouter/anthropic/x")
+        .synthesize(&mut profile_with_trend())
+        .await;
+
+    let directive = structured
+        .only_request()
+        .response_schema
+        .expect("openrouter honours the field, so the transport must send it");
+    assert_eq!(directive.name, SYNTHESIS_OUTPUT_SCHEMA_NAME);
+    assert_eq!(directive.schema, synthesis_output_schema());
+    assert!(
+        !structured.only_system_turn().contains("## Response schema"),
+        "no prose copy alongside the field"
+    );
+
+    let prose = Arc::new(RecordingAdapter::new(
+        capabilities(ProviderId::Bedrock),
+        scripted_response(BODY),
+    ));
+    Synthesizer::with_adapter(prose.clone(), "bedrock/us.anthropic.claude")
+        .synthesize(&mut profile_with_trend())
+        .await;
+
+    assert!(
+        prose.only_request().response_schema.is_none(),
+        "bedrock cannot honour the field, and sending it fails the call outright"
+    );
+    assert!(
+        prose.only_system_turn().contains("\"narrative\""),
+        "the schema must still reach the model"
+    );
+}
+
+/// Why: #5588's closure condition for the narrative pass — a schema stated in
+/// prose is a suggestion, and a drifting answer sends `apply_synthesis_json`
+/// down the fallback path that presents a computed narrative as the model's.
+/// What: asserts the schema travels on `ChatRequest.response_schema` verbatim
+/// under its wire name, with no copy left in the system turn.
+/// Test: this test itself.
+#[test]
+fn synthesis_request_sends_the_schema_through_response_schema() {
+    let req = build_synthesis_request(&profile_with_trend(), "openrouter/anthropic/x", true);
+
+    let directive = req
+        .response_schema
+        .as_ref()
+        .expect("a structured-output provider gets the real field, not prose");
+    assert_eq!(directive.name, SYNTHESIS_OUTPUT_SCHEMA_NAME);
+    assert_eq!(directive.schema, synthesis_output_schema());
+    assert!(
+        !req.messages[0]
+            .content
+            .clone()
+            .unwrap_or_default()
+            .contains("## Response schema"),
+        "the schema must not also be pasted into the prompt"
+    );
+}
+
+/// Why: Bedrock cannot honour `response_schema`, and sending it there fails the
+/// call before any network I/O — the narrative would be the deterministic
+/// fallback on every `--model bedrock/…` run.
+/// What: asserts the field is absent and the schema reaches the system turn.
+/// Test: this test itself.
+#[test]
+fn synthesis_request_falls_back_to_prose_without_the_capability() {
+    let req = build_synthesis_request(&profile_with_trend(), "bedrock/us.anthropic.claude", false);
+
+    assert!(
+        req.response_schema.is_none(),
+        "a provider without the capability must not be sent the field"
+    );
+    assert!(
+        req.messages[0]
+            .content
+            .clone()
+            .unwrap_or_default()
+            .contains("\"narrative\""),
+        "the schema must still reach the model"
+    );
 }

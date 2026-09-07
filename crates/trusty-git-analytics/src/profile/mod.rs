@@ -23,6 +23,12 @@
 //! with a fallback narrative; a run where SOME periods failed reports that in
 //! [`PeriodRunSummary`] rather than presenting them as clean (#5465).
 //!
+//! Stages 4 and 5 both constrain their answer with a JSON Schema, and since
+//! #5588 both hand it over through
+//! [`trusty_common::inference::ChatRequest::response_schema`] where the provider
+//! can enforce it — [`schema_delivery`] owns that fork, and the prose fallback
+//! behind it.
+//!
 //! [`reporter_github`] publishes the rendered report to a per-contributor
 //! GitHub issue thread, and `tga profile` drives the whole pipeline from the
 //! command line (both #5465).
@@ -39,13 +45,17 @@ pub mod diff_sampler;
 pub mod error;
 pub mod reporter;
 pub mod reporter_github;
+pub mod schema_delivery;
 pub mod selector;
 pub mod synthesizer;
+#[cfg(test)]
+pub mod test_support;
 pub mod types;
 
 pub use batch::{assemble_period_batches, Window};
 pub use batch_reviewer::{
     build_period_request, PeriodReview, PeriodReviewer, PeriodRunSummary, SkippedPeriod,
+    PERIOD_FINDINGS_SCHEMA_NAME,
 };
 pub use diff_sampler::{sample_diffs_for_batches, DiffSamplerConfig, MAX_DIFF_CHARS};
 pub use error::{ProfileError, Result};
@@ -53,12 +63,13 @@ pub use reporter::{render_markdown, ReportFormat, Reporter};
 pub use reporter_github::{
     issue_title, upsert_profile_issue, GithubIssueConfig, PROFILE_ISSUE_LABEL,
 };
+pub use schema_delivery::deliver_schema;
 pub use selector::{
     resolve_contributor, resolve_db_path, ContributorSelector, ResolvedIdentity, ENV_TGA_DB,
 };
 pub use synthesizer::{
     apply_deterministic_synthesis, assign_trend_tags, build_synthesis_request, derive_trajectory,
-    Synthesizer,
+    Synthesizer, SYNTHESIS_OUTPUT_SCHEMA_NAME,
 };
 pub use types::{
     AuthorPeriodSummary, ContributorProfile, Effort, Finding, LongitudinalFinding, PeriodBatch,

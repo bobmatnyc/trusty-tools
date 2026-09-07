@@ -30,6 +30,7 @@ use trusty_common::inference::{
     InferenceError,
 };
 
+use super::schema_delivery::deliver_schema;
 use super::types::{
     ContributorProfile, LongitudinalFinding, PeriodBatch, TokenCostSummary, Trajectory, TrendTag,
 };
@@ -266,6 +267,12 @@ pub fn derive_trajectory(quality_trend: &[(String, f64)]) -> Trajectory {
 
 // ─── Narrative request ────────────────────────────────────────────────────────
 
+/// The name OpenAI-dialect providers attach to the narrative schema.
+///
+/// #5588: `StructuredOutput` requires one; it is a label on the wire, not a
+/// field the model fills in.
+pub const SYNTHESIS_OUTPUT_SCHEMA_NAME: &str = "contributor_synthesis";
+
 /// JSON Schema for the narrative response.
 ///
 /// Test: `synthesis_output_schema_has_expected_properties`.
@@ -397,20 +404,31 @@ pub fn build_synthesizer_user_message(profile: &ContributorProfile) -> String {
 
 /// Assemble the narrative request.
 ///
-/// Why: like the period request, [`ChatRequest`] carries no structured-output
-/// field, so the schema only reaches the model if the system turn states it.
-/// What: system turn = [`synthesizer_system_prompt`] plus
-/// [`synthesis_output_schema`] as JSON; user turn =
-/// [`build_synthesizer_user_message`]. `model` passes through unchanged so the
-/// commons' prefix routing keeps working.
-/// Test: `synthesis_request_preserves_routing_prefix_and_sampling`.
-pub fn build_synthesis_request(profile: &ContributorProfile, model: &str) -> ChatRequest {
-    // `to_string_pretty` over a `Value` this module built cannot fail.
-    let schema = serde_json::to_string_pretty(&synthesis_output_schema()).unwrap_or_default();
-    let system = format!(
-        "{}\n\n## Response schema\nReturn ONLY a JSON object conforming to this schema:\n\
-         ```json\n{schema}\n```",
-        synthesizer_system_prompt()
+/// Why: like the period request, the schema is what makes
+/// [`apply_synthesis_json`]'s parse succeed rather than fall back. #5588 gave
+/// [`ChatRequest`] a `response_schema` field, so on a provider that honours it
+/// the schema constrains the completion instead of asking for it in prose.
+/// What: system turn = [`synthesizer_system_prompt`], plus
+/// [`synthesis_output_schema`] as JSON only when `structured_output` is false;
+/// user turn = [`build_synthesizer_user_message`]. `structured_output` is the
+/// sending adapter's `supports_structured_output` — see
+/// [`super::schema_delivery::deliver_schema`] for why the fallback exists rather
+/// than a refusal. `model` passes through unchanged so the commons' prefix
+/// routing keeps working.
+/// Test: `synthesis_request_preserves_routing_prefix_and_sampling`,
+/// `synthesis_request_sends_the_schema_through_response_schema`,
+/// `synthesis_request_falls_back_to_prose_without_the_capability`.
+pub fn build_synthesis_request(
+    profile: &ContributorProfile,
+    model: &str,
+    structured_output: bool,
+) -> ChatRequest {
+    // #5588: one delivery or the other, never both.
+    let (system, response_schema) = deliver_schema(
+        synthesizer_system_prompt(),
+        SYNTHESIS_OUTPUT_SCHEMA_NAME,
+        synthesis_output_schema(),
+        structured_output,
     );
 
     let mut req = ChatRequest::new(
@@ -422,6 +440,7 @@ pub fn build_synthesis_request(profile: &ContributorProfile, model: &str) -> Cha
     );
     req.temperature = Some(SYNTHESIZER_TEMPERATURE);
     req.max_tokens = Some(SYNTHESIZER_MAX_TOKENS);
+    req.response_schema = response_schema;
     req
 }
 
@@ -501,9 +520,16 @@ impl Synthesizer {
     /// [`apply_fallback_narrative`] and RETURNS the error, so a caller can say
     /// the narrative is a fallback rather than presenting it as the model's.
     /// Test: `synthesizer_transport_applies_the_models_narrative`,
-    /// `synthesizer_transport_falls_back_and_reports_the_failure`.
+    /// `synthesizer_transport_falls_back_and_reports_the_failure`,
+    /// `synthesizer_picks_the_delivery_the_adapter_supports`.
     pub async fn synthesize(&self, profile: &mut ContributorProfile) -> Option<InferenceError> {
-        let request = build_synthesis_request(profile, &self.model);
+        // #5588: the adapter's own capability decides the delivery — asking it
+        // is what keeps a `bedrock/…` run from failing before the socket opens.
+        let request = build_synthesis_request(
+            profile,
+            &self.model,
+            self.adapter.supports_structured_output(),
+        );
         let start = Instant::now();
 
         let response = match self.adapter.chat(&request).await {

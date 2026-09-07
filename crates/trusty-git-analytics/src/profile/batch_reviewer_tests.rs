@@ -25,10 +25,13 @@ use trusty_common::inference::{
     UsageBlock,
 };
 
+use crate::profile::test_support::RecordingAdapter;
+
 use super::{
     build_period_request, build_period_user_message, parse_period_findings, period_findings_schema,
     period_reviewer_system_prompt, severity_to_effort, PeriodReview, PeriodReviewer,
-    PeriodRunSummary, PERIOD_REVIEWER_MAX_TOKENS, PERIOD_REVIEWER_TEMPERATURE,
+    PeriodRunSummary, PERIOD_FINDINGS_SCHEMA_NAME, PERIOD_REVIEWER_MAX_TOKENS,
+    PERIOD_REVIEWER_TEMPERATURE,
 };
 use crate::profile::types::{
     AuthorPeriodSummary, Effort, PeriodBatch, SampledDiff, TokenCostSummary,
@@ -282,25 +285,38 @@ fn scripted_response(body: &str, prompt_tokens: u32, completion_tokens: u32) -> 
 /// Test: this test itself.
 #[test]
 fn period_request_preserves_routing_prefix() {
-    let req = build_period_request(&make_batch(), "bedrock/us.anthropic.claude-sonnet-4-5-v1:0");
+    let req = build_period_request(
+        &make_batch(),
+        "bedrock/us.anthropic.claude-sonnet-4-5-v1:0",
+        false,
+    );
     assert_eq!(
         req.model, "bedrock/us.anthropic.claude-sonnet-4-5-v1:0",
         "the routing prefix is trusty_common's to consume, not tga's to strip"
     );
 
-    let req = build_period_request(&make_batch(), "openrouter/openai/gpt-5.4-mini");
+    let req = build_period_request(&make_batch(), "openrouter/openai/gpt-5.4-mini", true);
     assert_eq!(req.model, "openrouter/openai/gpt-5.4-mini");
 }
 
-/// Why: `ChatRequest` carries no structured-output field, so the schema only
-/// reaches the model if the system turn spells it out — and low temperature is
+/// Why: this is #5588's closure condition for the period pass — a schema
+/// described in prose is a suggestion the model may drift from, and the drift is
+/// what leaves `parse_period_findings` with nothing to parse. Low temperature is
 /// what keeps the answer extraction rather than prose.
-/// What: asserts the two-turn shape, the schema text in the system turn, the
-/// period label in the user turn, and both sampling parameters.
+/// What: asserts the schema travels on `ChatRequest.response_schema` verbatim,
+/// that no copy of it is left in the system turn, and that the two-turn shape,
+/// the period label, and both sampling parameters survive.
 /// Test: this test itself.
 #[test]
-fn period_request_carries_schema_and_sampling() {
-    let req = build_period_request(&make_batch(), "openai/gpt-5.4-mini");
+fn period_request_sends_the_schema_through_response_schema() {
+    let req = build_period_request(&make_batch(), "openai/gpt-5.4-mini", true);
+
+    let directive = req
+        .response_schema
+        .as_ref()
+        .expect("a structured-output provider gets the real field, not prose");
+    assert_eq!(directive.name, PERIOD_FINDINGS_SCHEMA_NAME);
+    assert_eq!(directive.schema, period_findings_schema());
 
     assert_eq!(req.messages.len(), 2, "one system turn, one user turn");
     assert_eq!(req.messages[0].role, "system");
@@ -308,14 +324,36 @@ fn period_request_carries_schema_and_sampling() {
 
     let system = req.messages[0].content.clone().unwrap_or_default();
     assert!(
-        system.contains("\"findings\""),
-        "the schema must reach the system turn: {system}"
+        !system.contains("## Response schema"),
+        "the schema must not also be pasted into the prompt: {system}"
     );
     let user = req.messages[1].content.clone().unwrap_or_default();
     assert!(user.contains("2026-Q1"), "the user turn carries the period");
 
     assert_eq!(req.temperature, Some(PERIOD_REVIEWER_TEMPERATURE));
     assert_eq!(req.max_tokens, Some(PERIOD_REVIEWER_MAX_TOKENS));
+}
+
+/// Why: Bedrock's Converse API cannot honour `response_schema`, and
+/// `tga profile --model bedrock/…` is a documented invocation — sending the
+/// field there is `UnsupportedCapability` before any network call, which would
+/// turn every period of that run into a skip.
+/// What: asserts the field is absent and the schema reaches the system turn
+/// instead, so a zero-capability provider still produces findings.
+/// Test: this test itself.
+#[test]
+fn period_request_falls_back_to_prose_without_the_capability() {
+    let req = build_period_request(&make_batch(), "bedrock/us.anthropic.claude", false);
+
+    assert!(
+        req.response_schema.is_none(),
+        "a provider without the capability must not be sent the field"
+    );
+    let system = req.messages[0].content.clone().unwrap_or_default();
+    assert!(
+        system.contains("\"findings\""),
+        "the schema must still reach the model: {system}"
+    );
 }
 
 /// Build a reviewer over a strict `ScriptedAdapter` serving `body` once.
@@ -352,6 +390,55 @@ async fn period_reviewer_routes_through_shared_inference() {
 
     assert_eq!(cost.input_tokens, 1200, "adapter usage must be accumulated");
     assert_eq!(cost.output_tokens, 340);
+}
+
+/// Why: the builder can be given either delivery, so the closure condition of
+/// #5588 for tga is that the TRANSPORT asks the adapter rather than hard-coding
+/// one — a hard-coded `true` breaks every `bedrock/…` run, a hard-coded `false`
+/// leaves the schema in prose forever.
+/// What: reviews the same period against two `RecordingAdapter`s differing only
+/// in their capability seed, and asserts the OpenRouter one received
+/// `response_schema` with no prose copy while the Bedrock one received the
+/// reverse.
+/// Test: this test itself.
+#[tokio::test]
+async fn period_reviewer_picks_the_delivery_the_adapter_supports() {
+    let structured = Arc::new(RecordingAdapter::new(
+        capabilities(ProviderId::OpenRouter),
+        scripted_response(JSON_RESPONSE, 10, 5),
+    ));
+    let mut cost = TokenCostSummary::default();
+    PeriodReviewer::with_adapter(structured.clone(), "openrouter/openai/gpt-5.4-mini")
+        .review_period(&make_batch(), &mut cost)
+        .await;
+
+    let directive = structured
+        .only_request()
+        .response_schema
+        .expect("openrouter honours the field, so the transport must send it");
+    assert_eq!(directive.schema, period_findings_schema());
+    assert!(
+        !structured.only_system_turn().contains("## Response schema"),
+        "no prose copy alongside the field"
+    );
+
+    let prose = Arc::new(RecordingAdapter::new(
+        capabilities(ProviderId::Bedrock),
+        scripted_response(JSON_RESPONSE, 10, 5),
+    ));
+    let mut cost = TokenCostSummary::default();
+    PeriodReviewer::with_adapter(prose.clone(), "bedrock/us.anthropic.claude")
+        .review_period(&make_batch(), &mut cost)
+        .await;
+
+    assert!(
+        prose.only_request().response_schema.is_none(),
+        "bedrock cannot honour the field, and sending it fails the call outright"
+    );
+    assert!(
+        prose.only_system_turn().contains("\"findings\""),
+        "the schema must still reach the model"
+    );
 }
 
 /// Why: a provider outage and a genuinely clean period both produce zero

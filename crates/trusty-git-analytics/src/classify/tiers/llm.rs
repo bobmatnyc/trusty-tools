@@ -620,6 +620,12 @@ impl LlmClassifier {
 
 // ---- request / response DTOs (private) ----
 
+// #5588: this `response_format` is JSON MODE (`{"type":"json_object"}`), not the
+// schema-constrained output `trusty_common::inference::StructuredOutput` renders
+// — the commons has no dialect for it, so this is not a second copy of that
+// translation. Folding the whole tier onto `trusty_common::inference` would move
+// its credential model (`LlmConfig::api_key_env`, `CredentialSource`) and its
+// configurable endpoint, and is a separate change from #5588.
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
