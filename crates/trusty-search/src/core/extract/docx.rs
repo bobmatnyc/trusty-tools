@@ -27,12 +27,12 @@
 //! `test_missing_document_xml_errors`, `test_not_a_zip_errors`.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::Path;
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
+use super::ooxml::{push_entity_ref, push_run_text, read_entry_bounded, MAX_PART_BYTES};
 use super::{ExtractError, Extracted};
 
 /// The zip entry holding the document body, per the OOXML WordprocessingML
@@ -63,7 +63,7 @@ const MAX_HEADING_DEPTH: u8 = 6;
 /// Maximum `<w:tbl>` nesting depth that allocates a [`TableCtx`].
 ///
 /// Why: the parse pushes one context per open table, so a crafted
-/// `document.xml` sitting under [`MAX_DOCUMENT_XML_BYTES`] could otherwise
+/// `document.xml` sitting under [`MAX_PART_BYTES`] could otherwise
 /// drive millions of allocated contexts from ~19 bytes of markup each. Real
 /// documents nest one or two deep; 16 is far past anything Word produces.
 /// What: tables opened past this depth are not tracked — their text still
@@ -80,26 +80,10 @@ const MAX_TABLE_NESTING_DEPTH: u8 = 16;
 /// Test: `test_outline_level_nine_is_not_a_heading`.
 const OUTLINE_LEVEL_BODY_TEXT: u8 = 9;
 
-/// Cap on the UNCOMPRESSED size of `word/document.xml` (bytes).
-///
-/// Why: `MAX_OFFICE_FILE_BYTES` caps only the compressed container on disk;
-/// DEFLATE ratios can reach ~1000:1, so without a decompressed-size bound a
-/// crafted ~10 MiB `.docx` (a zip bomb) could expand to multi-GB in memory
-/// before the post-hoc `MAX_EXTRACTED_TEXT_BYTES` truncation in
-/// `extract_text` ever runs — one hostile file in a watched directory would
-/// OOM the daemon. 50 MiB of XML gives ~10x markup overhead headroom over
-/// the 5 MiB extracted-text cap while keeping worst-case memory bounded.
-/// What: enforced twice in [`extract`] — the zip entry's declared
-/// uncompressed size is rejected up front, AND the reader is wrapped in
-/// `Read::take` so a lying size field cannot bypass the bound.
-/// Test: `test_oversized_document_xml_rejected_by_declared_size`,
-/// `test_bounded_read_rejects_underdeclared_entry`.
-const MAX_DOCUMENT_XML_BYTES: u64 = 50 * 1024 * 1024;
-
 /// Extract paragraph text from a `.docx` file.
 ///
 /// Why/What: see module docs. Decompression is bounded by
-/// [`MAX_DOCUMENT_XML_BYTES`] (zip-bomb defence; see that constant's docs).
+/// [`MAX_PART_BYTES`] (zip-bomb defence; see that constant's docs).
 /// Test: `test_extracts_paragraphs_preserving_breaks`,
 /// `test_oversized_document_xml_rejected_by_declared_size`.
 pub fn extract(path: &Path) -> Result<Extracted, ExtractError> {
@@ -117,7 +101,13 @@ pub fn extract(path: &Path) -> Result<Extracted, ExtractError> {
         .by_name(DOCUMENT_XML_PATH)
         .map_err(|e| ExtractError::Docx(format!("{DOCUMENT_XML_PATH}: {e}")))?;
     let declared = entry.size();
-    let xml = read_entry_bounded(entry, declared, DOCUMENT_XML_PATH, MAX_DOCUMENT_XML_BYTES)?;
+    let xml = read_entry_bounded(
+        entry,
+        declared,
+        DOCUMENT_XML_PATH,
+        MAX_PART_BYTES,
+        ExtractError::Docx,
+    )?;
 
     Ok(Extracted {
         text: paragraphs_from_document_xml(&xml, &styles)?,
@@ -145,8 +135,14 @@ fn heading_styles(
         return HashMap::new();
     };
     let declared = entry.size();
-    match read_entry_bounded(entry, declared, STYLES_XML_PATH, MAX_DOCUMENT_XML_BYTES)
-        .and_then(|xml| heading_styles_from_xml(&xml))
+    match read_entry_bounded(
+        entry,
+        declared,
+        STYLES_XML_PATH,
+        MAX_PART_BYTES,
+        ExtractError::Docx,
+    )
+    .and_then(|xml| heading_styles_from_xml(&xml))
     {
         Ok(map) => map,
         Err(e) => {
@@ -158,43 +154,6 @@ fn heading_styles(
             HashMap::new()
         }
     }
-}
-
-/// Read a zip entry to a `String`, refusing to decompress past `cap` bytes.
-///
-/// Why: the zip-bomb defence must hold even when the entry's central-directory
-/// size field lies, so the declared-size check alone is not enough — the
-/// actual decompressed byte stream is also hard-capped via `Read::take`.
-/// What: rejects when the entry DECLARES (`declared`) more than `cap`
-/// uncompressed bytes; otherwise reads at most `cap + 1` bytes and rejects if
-/// the stream exceeds `cap` (i.e. the declared size was false). `name` is the
-/// zip entry path, used only to name the offending part in the error. Content
-/// must be valid UTF-8. Generic over `Read` so the lying-size path is
-/// unit-testable without crafting a malicious zip.
-/// Test: `test_oversized_document_xml_rejected_by_declared_size`,
-/// `test_bounded_read_rejects_underdeclared_entry`.
-fn read_entry_bounded<R: Read>(
-    entry: R,
-    declared: u64,
-    name: &str,
-    cap: u64,
-) -> Result<String, ExtractError> {
-    if declared > cap {
-        return Err(ExtractError::Docx(format!(
-            "{name} declares {declared} uncompressed bytes, over the {cap} byte cap"
-        )));
-    }
-    let mut bytes = Vec::with_capacity(declared as usize);
-    entry
-        .take(cap + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| ExtractError::Docx(e.to_string()))?;
-    if bytes.len() as u64 > cap {
-        return Err(ExtractError::Docx(format!(
-            "{name} decompressed past the {cap} byte cap (declared {declared})"
-        )));
-    }
-    String::from_utf8(bytes).map_err(|e| ExtractError::Docx(e.to_string()))
 }
 
 /// Read the `w:val` attribute of a start/empty element.
@@ -462,43 +421,9 @@ fn paragraphs_from_document_xml(
         match reader.read_event() {
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"t" => in_text = true,
             Ok(Event::End(e)) if e.local_name().as_ref() == b"t" => in_text = false,
-            Ok(Event::Text(t)) if in_text => {
-                // quick-xml 0.41 removed `BytesText::unescape()` (dependency
-                // bump for RUSTSEC-2026-0194/0195, issue #3367): decode the
-                // raw bytes first, then unescape XML entities via the
-                // free-function equivalent. In 0.41 a `Text` event itself
-                // never contains an escaped entity (see the `GeneralRef` arm
-                // below), so `unescape` is a no-op here in practice — kept
-                // for defence-in-depth in case that reader behavior changes.
-                let decoded = t.decode().map_err(|e| ExtractError::Docx(e.to_string()))?;
-                let unescaped = quick_xml::escape::unescape(&decoded)
-                    .map_err(|e| ExtractError::Docx(e.to_string()))?;
-                para.push_str(&unescaped);
-            }
-            // quick-xml 0.41 stopped inlining entity/character references
-            // (`&amp;`, `&#233;`, ...) into surrounding `Text` events; each
-            // reference is now its own `GeneralRef` event. Without this arm,
-            // entity references inside `<w:t>` were silently dropped
-            // (`Tom &amp; Jerry` extracted as `Tom  Jerry`) rather than
-            // resolved — caught by
-            // `test_paragraphs_from_document_xml_unescapes_entities`.
+            Ok(Event::Text(t)) if in_text => push_run_text(&mut para, &t, ExtractError::Docx)?,
             Ok(Event::GeneralRef(r)) if in_text => {
-                if let Some(c) = r
-                    .resolve_char_ref()
-                    .map_err(|e| ExtractError::Docx(e.to_string()))?
-                {
-                    para.push(c);
-                } else {
-                    let name = r.decode().map_err(|e| ExtractError::Docx(e.to_string()))?;
-                    match quick_xml::escape::resolve_predefined_entity(&name) {
-                        Some(resolved) => para.push_str(resolved),
-                        None => {
-                            return Err(ExtractError::Docx(format!(
-                                "unresolvable XML entity reference: &{name};"
-                            )));
-                        }
-                    }
-                }
+                push_entity_ref(&mut para, &r, ExtractError::Docx)?
             }
             // #4879: a paragraph's heading depth is declared in <w:pPr>,
             // either by naming a style or by an explicit outline level.
@@ -954,43 +879,6 @@ mod tests {
         );
         let text = paragraphs_from_document_xml(&xml, &HashMap::new()).unwrap();
         assert_eq!(text.trim(), "Just one paragraph.");
-    }
-
-    #[test]
-    fn test_oversized_document_xml_rejected_by_declared_size() {
-        // declared size over the cap must be rejected BEFORE any decompression.
-        let data = b"whatever";
-        let result = read_entry_bounded(
-            std::io::Cursor::new(&data[..]),
-            1000,
-            DOCUMENT_XML_PATH,
-            100,
-        );
-        let err = result.expect_err("declared size over cap must error");
-        assert!(err.to_string().contains("over the 100 byte cap"), "{err}");
-    }
-
-    #[test]
-    fn test_bounded_read_rejects_underdeclared_entry() {
-        // A lying size field (declares under the cap, actually decompresses
-        // past it) must still be stopped by the Read::take hard bound.
-        let data = vec![b'x'; 200];
-        let result = read_entry_bounded(std::io::Cursor::new(data), 50, DOCUMENT_XML_PATH, 100);
-        let err = result.expect_err("stream past cap must error");
-        assert!(err.to_string().contains("decompressed past"), "{err}");
-    }
-
-    #[test]
-    fn test_bounded_read_accepts_within_cap() {
-        let data = b"hello world";
-        let text = read_entry_bounded(
-            std::io::Cursor::new(&data[..]),
-            data.len() as u64,
-            DOCUMENT_XML_PATH,
-            100,
-        )
-        .unwrap();
-        assert_eq!(text, "hello world");
     }
 
     #[test]
