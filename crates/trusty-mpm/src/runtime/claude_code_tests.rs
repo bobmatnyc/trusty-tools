@@ -2326,20 +2326,39 @@ fn build_inplace_resume_command_carries_oauth_token_when_available() {
 // ─── issue #4206: the trust seed must stay inside the redirected $HOME ────
 
 /// RAII guard that prepends `dir` to `PATH` and restores it on drop.
+///
+/// Why it also holds `env_test_lock` (#7059): this binary had TWO disjoint
+/// mutual-exclusion regimes over the process-global `PATH`. This guard relied on
+/// `#[serial]` alone, while `core::gh_account_enforce` and `core::git_identity`
+/// plant a fake `gh` on `PATH` under `core::trusty_tools_config::env_test_lock`
+/// and take no `#[serial]`. Neither regime excludes the other, so this guard's
+/// `Drop` restored the `PATH` it captured on ENTRY — erasing the fake-`gh`
+/// directory a concurrent gh test had prepended after it. `Command::new("gh")`
+/// then found the operator's real `gh`, and `gh auth status` either hit the
+/// network past the 5 s `GH_ENFORCE_TIMEOUT` or answered "not logged in to
+/// github.com account bobmatnyc". Taking BOTH the lock and `#[serial]` makes
+/// `PATH` one regime, so no gh test can run while this guard is alive.
+/// Test: `spawn_resume_trust_seed_stays_within_redirected_home` (this guard's
+/// only caller) beside
+/// `core::gh_account::enforce::tests::ensure_gh_account_in_dir_accepts_the_api_answer_over_a_stale_transcript`.
 struct PathGuard {
     prev: Option<std::ffi::OsString>,
+    /// Held for the guard's whole lifetime — see the type doc.
+    _env: std::sync::MutexGuard<'static, ()>,
 }
 impl PathGuard {
     fn prepend(dir: &Path) -> Self {
+        // #7059: one regime for PATH — the crate-wide env lock, not #[serial] alone.
+        let env = crate::core::trusty_tools_config::env_test_lock();
         let prev = std::env::var_os("PATH");
         let mut entries = vec![dir.to_path_buf()];
         if let Some(ref p) = prev {
             entries.extend(std::env::split_paths(p));
         }
         let joined = std::env::join_paths(entries).expect("join PATH");
-        // SAFETY: callers are #[serial].
+        // SAFETY: callers are #[serial] AND hold `env_test_lock` via `_env`.
         unsafe { std::env::set_var("PATH", joined) };
-        Self { prev }
+        Self { prev, _env: env }
     }
 }
 impl Drop for PathGuard {
