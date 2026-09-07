@@ -14,7 +14,8 @@ use serde_json::Value;
 use trusty_common::gh::GhCommand;
 
 use super::{
-    GhCliClient, LIST_JSON_FIELDS, TICKET_JSON_FIELDS, gh_issue_to_ticket, plan_gh_issue_edit_calls,
+    GhCliClient, LABEL_LIST_LIMIT, LIST_JSON_FIELDS, TICKET_JSON_FIELDS, gh_issue_to_ticket,
+    labels_from_json, plan_gh_issue_edit_calls,
 };
 use crate::ticketing::TicketingClient;
 use crate::ticketing::types::{
@@ -184,27 +185,10 @@ impl TicketingClient for GhCliClient {
     async fn list_available_tags(&self) -> Result<Vec<Tag>> {
         // #5475: `json` is the entry point's parse combinator — its failure
         // message names the argv, which the bare `from_str` context did not.
-        let arr: Vec<Value> = GhCommand::new(["label", "list", "--json", "name,color,description"])
-            .repo(self.repo())
-            .json()
-            .await?;
-        let out = arr
-            .iter()
-            .filter_map(|l| {
-                let name = l.get("name").and_then(Value::as_str)?.to_string();
-                let color = l.get("color").and_then(Value::as_str).map(String::from);
-                let description = l
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .map(String::from);
-                Some(Tag {
-                    name,
-                    color,
-                    description,
-                })
-            })
-            .collect();
-        Ok(out)
+        // #6953: the argv now comes from `list_labels_argv`, which carries the
+        // `--limit` this call omitted, and the page is checked for truncation.
+        let arr: Vec<Value> = self.label_list_command().json().await?;
+        labels_from_json(&arr, LABEL_LIST_LIMIT)
     }
 
     async fn assign(&self, id: &str, assignee: &str) -> Result<Ticket> {

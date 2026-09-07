@@ -171,6 +171,84 @@ fn plan_gh_issue_edit_calls_empty_label_vecs_are_noop() {
     assert!(plan_gh_issue_edit_calls("1", &req).is_empty());
 }
 
+/// #6953: `gh label list` pages at 30 by default and never says it truncated,
+/// so the listing must ask for an explicit, much larger `--limit`. Against the
+/// pre-fix argv (`label list --json name,color,description`) this fails: the
+/// `--limit` lookup finds nothing.
+#[test]
+fn label_list_command_requests_more_than_the_gh_default() {
+    let argv: Vec<String> = GhCliClient::new(None)
+        .label_list_command()
+        .argv_display()
+        .split(' ')
+        .map(str::to_string)
+        .collect();
+    let limit: usize = argv
+        .iter()
+        .position(|a| a == "--limit")
+        .and_then(|i| argv.get(i + 1))
+        .unwrap_or_else(|| panic!("`gh label list` argv must carry an explicit --limit: {argv:?}"))
+        .parse()
+        .expect("--limit is a number");
+    assert_eq!(limit, LABEL_LIST_LIMIT);
+    assert!(
+        limit > GH_DEFAULT_LABEL_PAGE,
+        "the listing must ask for more than gh's default {GH_DEFAULT_LABEL_PAGE}-label page"
+    );
+}
+
+/// #6953: adding `--limit` must not cost the repo selector.
+#[test]
+fn label_list_command_carries_the_repo_selector() {
+    let argv = GhCliClient::new(Some("owner/repo".to_string()))
+        .label_list_command()
+        .argv_display();
+    assert_eq!(
+        argv,
+        "--repo owner/repo label list --limit 1000 --json name,color,description"
+    );
+}
+
+/// #6953: the 31st label of a 35-label repo — the first one gh's default page
+/// drops — must come back from the parse.
+#[test]
+fn labels_from_json_reads_past_the_default_label_page() {
+    let page: Vec<Value> = (1..=35)
+        .map(|n| json!({"name": format!("label-{n}"), "color": "ededed"}))
+        .collect();
+    let tags = labels_from_json(&page, LABEL_LIST_LIMIT).expect("a 35-label page is not truncated");
+    assert_eq!(tags.len(), 35);
+    assert!(
+        tags.iter().any(|t| t.name == "label-31"),
+        "the 31st label must survive the parse"
+    );
+    assert_eq!(tags[34].name, "label-35");
+}
+
+/// #6953: a page exactly as long as the requested limit may itself have been
+/// truncated, so it is an error rather than a set treated as complete.
+#[test]
+fn labels_from_json_rejects_a_full_page() {
+    let page: Vec<Value> = (0..LABEL_LIST_LIMIT)
+        .map(|n| json!({"name": format!("label-{n}")}))
+        .collect();
+    let err =
+        labels_from_json(&page, LABEL_LIST_LIMIT).expect_err("a full page must not be trusted");
+    assert!(
+        err.to_string().contains("full requested page"),
+        "unexpected error: {err}"
+    );
+}
+
+/// An entry with no `name` is dropped, not fatal.
+#[test]
+fn labels_from_json_skips_entries_without_a_name() {
+    let page = vec![json!({"color": "ededed"}), json!({"name": "bug"})];
+    let tags = labels_from_json(&page, LABEL_LIST_LIMIT).expect("parses");
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].name, "bug");
+}
+
 /// Title + add_labels emits a combined main edit AND a separate
 /// add-label call (deltas are never folded into the main edit).
 #[test]
