@@ -10,13 +10,20 @@
 //! for the OpenAI-compatible `response_format` field and
 //! [`StructuredOutput::anthropic_output_config`] for the Anthropic Messages API
 //! `output_config` field. The struct is deliberately dialect-free so a third
-//! provider adds a renderer here rather than a field.
+//! provider adds a renderer here rather than a field. #7082: the OpenAI
+//! renderer normalizes a strict schema through
+//! [`super::strict_json_schema`] on the way out, because that dialect
+//! validates the schema document as well as the completion.
 //! Test: inline `tests` — `openai_envelope_carries_name_strict_and_schema`,
+//! `openai_envelope_normalizes_a_strict_schema`,
+//! `openai_envelope_leaves_a_lenient_schema_verbatim`,
 //! `anthropic_envelope_carries_only_the_schema`,
 //! `strict_defaults_true_and_round_trips`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use super::strict_schema::strict_json_schema;
 
 /// A JSON-Schema-constrained response directive attached to a
 /// [`super::ChatRequest`].
@@ -81,17 +88,38 @@ impl StructuredOutput {
     ///
     /// Why: OpenRouter, Fireworks, OpenAI-direct, Together and AtlasCloud all
     /// take the same `{type:"json_schema", json_schema:{…}}` envelope, so the
-    /// shared OpenAI-compat adapter renders it once here.
+    /// shared OpenAI-compat adapter renders it once here. #7082: with `strict`
+    /// set, those providers also validate the schema document and reject any
+    /// object node that leaves `additionalProperties` open or under-fills
+    /// `required` — so this is where the schema is normalized, and every caller
+    /// gets a strict-valid document without editing its own schema builder.
     /// What: returns
     /// `{"type":"json_schema","json_schema":{"name":…,"strict":…,"schema":…}}`.
-    /// Test: `openai_envelope_carries_name_strict_and_schema`.
+    /// When `strict` is set, `schema` is [`strict_json_schema`] applied to the
+    /// caller's schema (a copy — `self` is untouched). Normalization is
+    /// unconditional for a strict directive rather than opt-in: the rules it
+    /// enforces are exactly what the provider demands there, and the same
+    /// omission has now shipped three times (#1235, #5675, #7082) precisely
+    /// because it was each builder's job to remember. With
+    /// [`StructuredOutput::lenient`] the schema travels verbatim — no provider
+    /// requires the rules then, and forcing every optional property into
+    /// `required` would narrow a schema whose author asked for best-effort JSON.
+    /// Test: `openai_envelope_carries_name_strict_and_schema`,
+    /// `openai_envelope_normalizes_a_strict_schema`,
+    /// `openai_envelope_leaves_a_lenient_schema_verbatim`.
     pub fn openai_response_format(&self) -> Value {
+        // #7082: strict mode is validated against the schema document itself.
+        let schema = if self.strict {
+            strict_json_schema(&self.schema)
+        } else {
+            self.schema.clone()
+        };
         json!({
             "type": "json_schema",
             "json_schema": {
                 "name": self.name,
                 "strict": self.strict,
-                "schema": self.schema,
+                "schema": schema,
             }
         })
     }
@@ -139,6 +167,62 @@ mod tests {
         assert_eq!(v["json_schema"]["name"], "review_output");
         assert_eq!(v["json_schema"]["strict"], true);
         assert_eq!(v["json_schema"]["schema"]["type"], "object");
+    }
+
+    /// Why (#7082): OpenRouter rejected every `tga profile` call with `'addition\
+    /// alProperties' is required to be supplied and to be false`, because the
+    /// nested `items` object of a hand-written schema left it open. The renderer
+    /// closes it, so a caller's builder no longer has to.
+    /// Test: itself.
+    #[test]
+    fn openai_envelope_normalizes_a_strict_schema() {
+        let loose = json!({
+            "type": "object",
+            "properties": {
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"type": "string"},
+                            "severity": {"type": "string"}
+                        },
+                        "required": ["kind"]
+                    }
+                }
+            }
+        });
+        let directive = StructuredOutput::new("period_findings", loose.clone());
+        let sent = directive.openai_response_format();
+        let items = &sent["json_schema"]["schema"]["properties"]["findings"]["items"];
+        assert_eq!(items["additionalProperties"], json!(false), "{sent}");
+        assert_eq!(items["required"], json!(["kind", "severity"]), "{sent}");
+        assert_eq!(
+            sent["json_schema"]["schema"]["additionalProperties"],
+            json!(false),
+            "{sent}"
+        );
+        assert_eq!(
+            directive.schema, loose,
+            "the caller's schema must not change"
+        );
+    }
+
+    /// Why: `lenient` exists for gateways whose strict support is
+    /// model-dependent; normalizing there would force every optional property
+    /// into `required` for a caller who asked for best-effort JSON.
+    /// Test: itself.
+    #[test]
+    fn openai_envelope_leaves_a_lenient_schema_verbatim() {
+        let loose = json!({
+            "type": "object",
+            "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+            "required": ["a"]
+        });
+        let sent = StructuredOutput::new("x", loose.clone())
+            .lenient()
+            .openai_response_format();
+        assert_eq!(sent["json_schema"]["schema"], loose, "{sent}");
     }
 
     /// Why: Anthropic rejects a `name` or `strict` inside `output_config.format`

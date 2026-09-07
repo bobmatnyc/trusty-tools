@@ -73,3 +73,87 @@ fn the_schema_is_delivered_exactly_once() {
         );
     }
 }
+
+// ─── #7082: strict-mode compliance of the schemas this crate actually sends ───
+
+/// Assert every object node in a JSON Schema satisfies OpenAI strict mode.
+///
+/// Why: the rule is recursive, and #7082 was the nested `findings.items` node —
+/// a top-level-only check would have passed while every call still 400'd.
+/// What: for a node carrying a `properties` map, asserts
+/// `additionalProperties == false` and that `required` lists every property
+/// key; recurses through `properties`, `items`, and an object-valued
+/// `additionalProperties`. `path` names the failing node.
+/// Test: used by `the_sent_schemas_are_openai_strict_compliant`.
+fn assert_strict(node: &serde_json::Value, path: &str) {
+    let Some(map) = node.as_object() else { return };
+
+    if let Some(props) = map.get("properties").and_then(|p| p.as_object()) {
+        assert_eq!(
+            map.get("additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "{path}: object node must set additionalProperties:false"
+        );
+        let required: Vec<&str> = map
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|r| r.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            required.len(),
+            props.len(),
+            "{path}: required must list every property, got {required:?}"
+        );
+        for key in props.keys() {
+            assert!(
+                required.contains(&key.as_str()),
+                "{path}: property {key} missing from required"
+            );
+        }
+        for (key, child) in props {
+            assert_strict(child, &format!("{path}.{key}"));
+        }
+    }
+    if let Some(items) = map.get("items") {
+        assert_strict(items, &format!("{path}[]"));
+    }
+    match map.get("additionalProperties") {
+        Some(additional) if additional.is_object() => {
+            assert_strict(additional, &format!("{path}.*"));
+        }
+        _ => {}
+    }
+}
+
+/// Why (#7082): on installed tga 8.0.0 every period and synthesis call to
+/// `openai/gpt-4o-mini` via OpenRouter returned 400 — `Invalid schema for
+/// response_format 'period_findings': ... 'additionalProperties' is required to
+/// be supplied and to be false`. Both builders describe the shape they want and
+/// leave strict-mode compliance to the wire renderer, so the property has to be
+/// pinned on the value that actually leaves the process.
+/// What: takes both real schemas through [`deliver_schema`]'s structured arm and
+/// asserts the rendered `response_format` payload is strict-compliant at every
+/// object level. Fails on `origin/main`, where the renderer sent the schema
+/// verbatim and `findings.items` carried neither key.
+/// Test: this test itself.
+#[test]
+fn the_sent_schemas_are_openai_strict_compliant() {
+    let cases = [
+        (
+            crate::profile::batch_reviewer::PERIOD_FINDINGS_SCHEMA_NAME,
+            crate::profile::batch_reviewer::period_findings_schema(),
+        ),
+        (
+            crate::profile::synthesizer::SYNTHESIS_OUTPUT_SCHEMA_NAME,
+            crate::profile::synthesizer::synthesis_output_schema(),
+        ),
+    ];
+
+    for (name, schema) in cases {
+        let (_, directive) = deliver_schema("BASE", name, schema, true);
+        let directive = directive.expect("the structured arm yields a directive");
+        let sent = directive.openai_response_format();
+        assert_eq!(sent["json_schema"]["strict"], json!(true), "{sent}");
+        assert_strict(&sent["json_schema"]["schema"], name);
+    }
+}

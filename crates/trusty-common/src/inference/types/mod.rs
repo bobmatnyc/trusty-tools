@@ -15,6 +15,7 @@ mod message;
 mod request;
 mod response;
 mod secret;
+mod strict_schema;
 mod structured;
 mod tool;
 mod usage;
@@ -23,6 +24,7 @@ pub use message::ChatMessage;
 pub use request::ChatRequest;
 pub use response::{AssistantMessage, ChatChoice, ChatResponse, StopReason};
 pub use secret::SecretString;
+pub use strict_schema::strict_json_schema;
 pub use structured::StructuredOutput;
 pub use tool::{
     CacheControl, FunctionCall, FunctionDefinition, RequestUsageConfig, ToolCall, ToolChoice,
