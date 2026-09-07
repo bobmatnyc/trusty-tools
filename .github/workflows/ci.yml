@@ -210,6 +210,17 @@ jobs:
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
       embedder_cuda_relevant: ${{ steps.detect-cuda.outputs.embedder_cuda_relevant }}
+      # #7063: one pair per Tauri UI crate — the verdict the four clippy jobs
+      # gate their expensive steps on, and the one-line reason each job echoes
+      # so a skipped run says why in its own log instead of only in this one.
+      trusty_agents_ui_relevant: ${{ steps.detect-ui.outputs.trusty_agents_ui_relevant }}
+      trusty_agents_ui_reason: ${{ steps.detect-ui.outputs.trusty_agents_ui_reason }}
+      trusty_audit_ui_relevant: ${{ steps.detect-ui.outputs.trusty_audit_ui_relevant }}
+      trusty_audit_ui_reason: ${{ steps.detect-ui.outputs.trusty_audit_ui_reason }}
+      trusty_mpm_gui_relevant: ${{ steps.detect-ui.outputs.trusty_mpm_gui_relevant }}
+      trusty_mpm_gui_reason: ${{ steps.detect-ui.outputs.trusty_mpm_gui_reason }}
+      trusty_code_gui_relevant: ${{ steps.detect-ui.outputs.trusty_code_gui_relevant }}
+      trusty_code_gui_reason: ${{ steps.detect-ui.outputs.trusty_code_gui_reason }}
     steps:
       # fetch-depth: 0 — the detector needs `git merge-base` against the base
       # branch, which a shallow checkout cannot resolve.
@@ -229,6 +240,12 @@ jobs:
       # until a human notices main has been red for a day.
       - name: Red-main notifier coverage (#5657)
         run: bash scripts/check-red-main-coverage.sh
+
+      # #7063: the crate-relevance detector decides whether four REQUIRED jobs
+      # do any work, so its own regression fixtures run here — before the step
+      # that consults it — rather than nowhere.
+      - name: Crate-relevance selftest (#7063)
+        run: bash scripts/ci-crate-relevance-selftest.sh
 
       # Refresh the base branch ref (same fix as #4688 in version-parity.yml's
       # pr-version-bump job). `github.event.pull_request.base.sha` is a
@@ -308,6 +325,65 @@ jobs:
             exit 0
           fi
           CUDA_SCOPE_BASE="$before" bash scripts/detect-embedder-cuda-relevant.sh > /dev/null
+
+      # #7063: the four Tauri UI clippy jobs are REQUIRED contexts, so they run
+      # and report on every PR no matter what this step decides — only their
+      # expensive steps consult the booleans written here. Before this, their
+      # sole gate was `docs_only`, so a PR touching one unrelated crate still
+      # paid for a WebKit2GTK apt chain plus a cargo clippy in all four:
+      # trusty-mpm-gui has no workspace dependencies at all and still spent
+      # 1m20s on PR #7062, and trusty-code-gui spent 7m there and has timed out
+      # at 30m before (PR #5992).
+      #
+      # The change set is resolved ONCE here and piped to each crate, so all
+      # four answers and `docs_only` above are decisions about the same diff.
+      # Every failure arm writes `true` for all four: a detector that cannot
+      # answer must cost a full build, never a silent skip — the same rule the
+      # `!cancelled()` job conditions below encode.
+      - name: Classify Tauri UI crate relevance (#7063)
+        id: detect-ui
+        env:
+          UI_CRATES: "trusty-agents-ui trusty-audit-ui trusty-mpm-gui trusty-code-gui"
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -uo pipefail
+
+          fail_closed() {
+            echo "classify-ui: $1 — every Tauri UI job runs (fail closed)"
+            for crate in $UI_CRATES; do
+              key="$(printf '%s' "$crate" | tr - _)"
+              printf '%s_relevant=true\n' "$key" >> "$GITHUB_OUTPUT"
+              printf '%s_reason=fail closed: %s\n' "$key" "$1" >> "$GITHUB_OUTPUT"
+            done
+          }
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="origin/${BASE_REF}"
+          else
+            base="${PUSH_BEFORE}"
+          fi
+
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            fail_closed "no usable base SHA"
+            exit 0
+          fi
+
+          if ! merge_base="$(git merge-base "$base" HEAD)"; then
+            fail_closed "cannot resolve merge-base against '${base}'"
+            exit 0
+          fi
+
+          changed="${RUNNER_TEMP}/ui-changed-paths.txt"
+          if ! git diff --name-only --no-renames "$merge_base" HEAD > "$changed"; then
+            fail_closed "git diff against ${merge_base} failed"
+            exit 0
+          fi
+
+          for crate in $UI_CRATES; do
+            bash scripts/ci-crate-relevance.sh "$crate" < "$changed" > /dev/null
+          done
 
   # --------------------------------------------------------------------------
   # fmt: enforce cargo fmt --all --check (stable toolchain + rustfmt component)
@@ -1375,10 +1451,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # #7063: one line saying whether this job does real work and why.
+      # Unconditional, so the reason is present on a skipped run too. The
+      # `changes` job's `Classify Tauri UI crate relevance` step logs the
+      # full changed-file list and the derived closure this reason cites.
+      - name: Relevance decision (#7063)
+        env:
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          RELEVANT: ${{ needs.changes.outputs.trusty_agents_ui_relevant }}
+          REASON: ${{ needs.changes.outputs.trusty_agents_ui_reason }}
+        run: |
+          if [ "$DOCS_ONLY" = "true" ]; then
+            echo "trusty-agents-ui: skipped — the change set is Cargo-inert (docs_only=true)"
+          elif [ "$RELEVANT" = "false" ]; then
+            echo "trusty-agents-ui: skipped — ${REASON:-outside the dependency closure}"
+          else
+            echo "trusty-agents-ui: running — ${REASON:-relevance undetermined, failing closed}"
+          fi
+
       - uses: actions/checkout@v5
 
       - name: Install stable toolchain with clippy
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_agents_ui_relevant != 'false'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -1387,7 +1481,7 @@ jobs:
       # mirror the Tauri project's documented Linux prerequisites and are the
       # same reason the headless workspace jobs exclude this crate.
       - name: Install Tauri system dependencies
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_agents_ui_relevant != 'false'
         run: |
           bash scripts/ci-apt-install.sh \
             build-essential \
@@ -1401,7 +1495,7 @@ jobs:
             libjavascriptcoregtk-4.1-dev
 
       - name: Cache cargo artifacts
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_agents_ui_relevant != 'false'
         uses: Swatinem/rust-cache@v2
         with:
           key: agents-ui
@@ -1412,14 +1506,14 @@ jobs:
 
       # Stub the frontendDist so tauri::generate_context!() can embed it.
       - name: Stub frontend dist for generate_context!
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_agents_ui_relevant != 'false'
         run: |
           mkdir -p crates/trusty-agents/ui/dist
           printf '<!doctype html><html><head><meta charset="utf-8"><title>trusty-agents</title></head><body></body></html>\n' \
             > crates/trusty-agents/ui/dist/index.html
 
       - name: cargo clippy -p trusty-agents-ui --all-targets -- -D warnings
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_agents_ui_relevant != 'false'
         run: cargo clippy -p trusty-agents-ui --all-targets -- -D warnings
 
   # --------------------------------------------------------------------------
@@ -1450,16 +1544,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # #7063: one line saying whether this job does real work and why.
+      # Unconditional, so the reason is present on a skipped run too. The
+      # `changes` job's `Classify Tauri UI crate relevance` step logs the
+      # full changed-file list and the derived closure this reason cites.
+      - name: Relevance decision (#7063)
+        env:
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          RELEVANT: ${{ needs.changes.outputs.trusty_audit_ui_relevant }}
+          REASON: ${{ needs.changes.outputs.trusty_audit_ui_reason }}
+        run: |
+          if [ "$DOCS_ONLY" = "true" ]; then
+            echo "trusty-audit-ui: skipped — the change set is Cargo-inert (docs_only=true)"
+          elif [ "$RELEVANT" = "false" ]; then
+            echo "trusty-audit-ui: skipped — ${REASON:-outside the dependency closure}"
+          else
+            echo "trusty-audit-ui: running — ${REASON:-relevance undetermined, failing closed}"
+          fi
+
       - uses: actions/checkout@v5
 
       - name: Install stable toolchain with clippy
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_audit_ui_relevant != 'false'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
 
       - name: Install Tauri system dependencies
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_audit_ui_relevant != 'false'
         run: |
           bash scripts/ci-apt-install.sh \
             build-essential \
@@ -1473,7 +1585,7 @@ jobs:
             libjavascriptcoregtk-4.1-dev
 
       - name: Cache cargo artifacts
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_audit_ui_relevant != 'false'
         uses: Swatinem/rust-cache@v2
         with:
           key: audit-ui
@@ -1484,20 +1596,20 @@ jobs:
       # Stub the frontendDist so tauri::generate_context!() can embed it.
       # SKIP_UI_BUILD=1 below stops build.rs looking for pnpm.
       - name: Stub frontend dist for generate_context!
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_audit_ui_relevant != 'false'
         run: |
           mkdir -p crates/trusty-audit/ui/dist
           printf '<!doctype html><html><head><meta charset="utf-8"><title>trusty-audit</title></head><body></body></html>\n' \
             > crates/trusty-audit/ui/dist/index.html
 
       - name: cargo clippy -p trusty-audit-ui --all-targets -- -D warnings
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_audit_ui_relevant != 'false'
         env:
           SKIP_UI_BUILD: "1"
         run: cargo clippy -p trusty-audit-ui --all-targets -- -D warnings
 
       - name: cargo test -p trusty-audit-ui
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_audit_ui_relevant != 'false'
         env:
           SKIP_UI_BUILD: "1"
         run: cargo test -p trusty-audit-ui
@@ -1532,16 +1644,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # #7063: one line saying whether this job does real work and why.
+      # Unconditional, so the reason is present on a skipped run too. The
+      # `changes` job's `Classify Tauri UI crate relevance` step logs the
+      # full changed-file list and the derived closure this reason cites.
+      - name: Relevance decision (#7063)
+        env:
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          RELEVANT: ${{ needs.changes.outputs.trusty_mpm_gui_relevant }}
+          REASON: ${{ needs.changes.outputs.trusty_mpm_gui_reason }}
+        run: |
+          if [ "$DOCS_ONLY" = "true" ]; then
+            echo "trusty-mpm-gui: skipped — the change set is Cargo-inert (docs_only=true)"
+          elif [ "$RELEVANT" = "false" ]; then
+            echo "trusty-mpm-gui: skipped — ${REASON:-outside the dependency closure}"
+          else
+            echo "trusty-mpm-gui: running — ${REASON:-relevance undetermined, failing closed}"
+          fi
+
       - uses: actions/checkout@v5
 
       - name: Install stable toolchain with clippy
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_mpm_gui_relevant != 'false'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
 
       - name: Install Tauri system dependencies
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_mpm_gui_relevant != 'false'
         run: |
           bash scripts/ci-apt-install.sh \
             build-essential \
@@ -1555,7 +1685,7 @@ jobs:
             libjavascriptcoregtk-4.1-dev
 
       - name: Cache cargo artifacts
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_mpm_gui_relevant != 'false'
         uses: Swatinem/rust-cache@v2
         with:
           key: mpm-gui
@@ -1566,14 +1696,14 @@ jobs:
       # Stub the frontendDist so tauri::generate_context!() can embed it.
       # SKIP_UI_BUILD=1 below stops build.rs looking for pnpm.
       - name: Stub frontend dist for generate_context!
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_mpm_gui_relevant != 'false'
         run: |
           mkdir -p crates/trusty-mpm-gui/ui/dist
           printf '<!doctype html><html><head><meta charset="utf-8"><title>trusty-mpm-gui</title></head><body></body></html>\n' \
             > crates/trusty-mpm-gui/ui/dist/index.html
 
       - name: cargo clippy -p trusty-mpm-gui --all-targets -- -D warnings
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_mpm_gui_relevant != 'false'
         env:
           SKIP_UI_BUILD: "1"
         run: cargo clippy -p trusty-mpm-gui --all-targets -- -D warnings
@@ -1582,7 +1712,7 @@ jobs:
       # that tests added later actually run — clippy --all-targets only compiles
       # the test target, it never executes it.
       - name: cargo test -p trusty-mpm-gui
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_mpm_gui_relevant != 'false'
         env:
           SKIP_UI_BUILD: "1"
         run: cargo test -p trusty-mpm-gui
@@ -1604,16 +1734,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # #7063: one line saying whether this job does real work and why.
+      # Unconditional, so the reason is present on a skipped run too. The
+      # `changes` job's `Classify Tauri UI crate relevance` step logs the
+      # full changed-file list and the derived closure this reason cites.
+      - name: Relevance decision (#7063)
+        env:
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          RELEVANT: ${{ needs.changes.outputs.trusty_code_gui_relevant }}
+          REASON: ${{ needs.changes.outputs.trusty_code_gui_reason }}
+        run: |
+          if [ "$DOCS_ONLY" = "true" ]; then
+            echo "trusty-code-gui: skipped — the change set is Cargo-inert (docs_only=true)"
+          elif [ "$RELEVANT" = "false" ]; then
+            echo "trusty-code-gui: skipped — ${REASON:-outside the dependency closure}"
+          else
+            echo "trusty-code-gui: running — ${REASON:-relevance undetermined, failing closed}"
+          fi
+
       - uses: actions/checkout@v5
 
       - name: Install stable toolchain with clippy
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_code_gui_relevant != 'false'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
 
       - name: Install Tauri system dependencies
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_code_gui_relevant != 'false'
         run: |
           bash scripts/ci-apt-install.sh \
             build-essential \
@@ -1627,7 +1775,7 @@ jobs:
             libjavascriptcoregtk-4.1-dev
 
       - name: Cache cargo artifacts
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_code_gui_relevant != 'false'
         uses: Swatinem/rust-cache@v2
         with:
           key: code-gui
@@ -1638,20 +1786,20 @@ jobs:
       # Stub the frontendDist so tauri::generate_context!() can embed it.
       # SKIP_UI_BUILD=1 below stops build.rs looking for pnpm.
       - name: Stub frontend dist for generate_context!
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_code_gui_relevant != 'false'
         run: |
           mkdir -p crates/trusty-code-gui/ui/dist
           printf '<!doctype html><html><head><meta charset="utf-8"><title>trusty-code-gui</title></head><body></body></html>\n' \
             > crates/trusty-code-gui/ui/dist/index.html
 
       - name: cargo clippy -p trusty-code-gui --all-targets -- -D warnings
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_code_gui_relevant != 'false'
         env:
           SKIP_UI_BUILD: "1"
         run: cargo clippy -p trusty-code-gui --all-targets -- -D warnings
 
       - name: cargo test -p trusty-code-gui
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_code_gui_relevant != 'false'
         env:
           SKIP_UI_BUILD: "1"
         run: cargo test -p trusty-code-gui
