@@ -552,7 +552,7 @@ the private half into the engagement config that ships to the recipient:
 
 ```toml
 [signing]
-private_key = "9d61b19d…"   # 32 bytes of hex
+private_key = "<64 hex characters>"   # the ed25519 seed, 32 bytes
 ```
 
 The private key travels IN the inbound package on purpose, so the recipient
@@ -577,11 +577,21 @@ property the engagement did not ask for.
 
 Verification is a library call today —
 `trusty_audit::package::signing::verify(&path, &retained_key)` — and reports one
-of: a signed package that checks out, an unsigned package, or one of five
+of: a signed package that checks out, an unsigned package, or one of several
 distinguishable failures. A member altered after signing, a signature member
 removed, a signature made by a different key, a manifest-listed member that is
 gone, and a member the manifest never listed are five different errors, not one
-"verification failed". The `trusty-audit verify` CLI arm over the same call is
+"verification failed".
+
+Two more come before any of those, and before the manifest is even read. The
+`zip` crate keys its entry table by member name, so an archive whose central
+directory carries two records under one name presents one member to this crate
+and can present the other to Python's `zipfile`, Info-ZIP or Finder. So
+verification walks the raw central directory itself, refuses a repeated name,
+and refuses any other disagreement between that walk and the parser. Member
+bytes are streamed through a fixed buffer rather than into an allocation sized
+from the archive's own declared size, which is a number whoever sent the package
+chose. The `trusty-audit verify` CLI arm over the same call is
 [#5563](https://github.com/bobmatnyc/trusty-tools/issues/5563); this crate keeps
 one implementation behind it and any front end.
 

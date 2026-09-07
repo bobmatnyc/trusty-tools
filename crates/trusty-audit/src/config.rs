@@ -336,8 +336,12 @@ pub struct BoardCredentials {
 ///
 /// ```toml
 /// [signing]
-/// private_key = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+/// private_key = "0000000000000000000000000000000000000000000000000000000000000000"
 /// ```
+///
+/// The 64 zeros are a placeholder, not a usable key. Real key material never
+/// appears in this crate's production source — a credential scan over the
+/// source tree must not have to decide whether a quoted seed is live.
 ///
 /// Test: `super::config_tests::a_signing_key_loads_and_joins_the_scanned_secrets`,
 /// `super::config_tests::a_config_with_no_signing_table_still_loads`.

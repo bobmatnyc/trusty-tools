@@ -131,6 +131,12 @@ mod excerpts;
 // behind the CLI, the Tauri shell, and this module's own write path.
 pub mod signing;
 
+// #5481 security review: reading the central directory as it is on disk. `zip`
+// keys its entry table by member name, so a repeated name never reaches a
+// caller — see that module's docs. Its own file because it is zip-format
+// parsing, not signing.
+mod zip_directory;
+
 use generated::{
     Generated, exclusions, render_failures, render_index, render_metadata, render_readme,
 };

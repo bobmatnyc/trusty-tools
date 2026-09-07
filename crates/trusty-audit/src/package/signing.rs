@@ -36,6 +36,17 @@
 //! signature member was removed, which is [`SigningError::SignatureMissing`].
 //! The manifest's `[signature]` table is what separates the two.
 //!
+//! ## The member set is established before anything is read
+//!
+//! `zip` keys its entry table by member name, so an archive whose central
+//! directory repeats a name presents one member here and a different one to
+//! `zipfile` or Info-ZIP. [`verify`] therefore walks the raw directory itself
+//! ([`super::zip_directory`]) before reading the manifest, refuses a repeat as
+//! [`SigningError::DuplicateMember`], and refuses any other disagreement with
+//! the parser as [`SigningError::DirectoryMismatch`]. Nothing after that point
+//! sizes an allocation from the archive's own declared sizes either — members
+//! are streamed through a fixed buffer.
+//!
 //! Test: `super::signing_tests`.
 
 use std::path::{Path, PathBuf};
@@ -170,6 +181,49 @@ pub enum SigningError {
         path: PathBuf,
         /// The member the manifest does not account for.
         entry: String,
+    },
+
+    /// The raw central directory holds two records under one member name.
+    ///
+    /// Why (security review of #5481): `zip` 2.4.2 keys its entry table by name
+    /// and collapses the second record before any caller sees it, so `verify`
+    /// would check whichever copy that parser picked while `zipfile`, Info-ZIP
+    /// or Finder extracted the other. A repeated name is refused outright — it
+    /// has no legitimate use in a package this crate wrote.
+    #[error(
+        "{path}: the central directory holds more than one record named {entry} — the archive \
+         extracts differently depending on which tool opens it, so nothing about it can be verified"
+    )]
+    DuplicateMember {
+        /// The package that was read.
+        path: PathBuf,
+        /// The name carried by more than one record.
+        entry: String,
+    },
+
+    /// The raw directory and the zip parser disagree about the member set.
+    ///
+    /// The duplicate check above catches a repeated name; this catches every
+    /// other way the two views could diverge, so a shape neither this crate nor
+    /// its review anticipated fails closed rather than passing on the parser's
+    /// word.
+    #[error(
+        "{path}: the raw central directory and the zip parser disagree about the members: {reason}"
+    )]
+    DirectoryMismatch {
+        /// The package that was read.
+        path: PathBuf,
+        /// How the two views differ.
+        reason: String,
+    },
+
+    /// The central directory could not be framed.
+    #[error("{path}: the central directory cannot be read: {reason}")]
+    DirectoryMalformed {
+        /// The package that was read.
+        path: PathBuf,
+        /// What stopped the walk.
+        reason: String,
     },
 
     /// The package could not be opened or read.
@@ -426,6 +480,12 @@ pub(super) fn render(
 /// is raised by [`RetainedKey::from_hex`] before this is reached.
 pub fn verify(package: &Path, retained: &RetainedKey) -> Result<Verdict, SigningError> {
     let mut archive = open(package)?;
+    // Security review of #5481: FIRST, before a single member is read. The zip
+    // parser's view of the archive is deduped by name, so an archive whose raw
+    // directory repeats a name has no single answer to "what is in it" — and
+    // reading the manifest through the parser would already have picked one
+    // copy. See `super::zip_directory`.
+    let members = agreed_members(&mut archive, package)?;
     let manifest = match read_member(&mut archive, package, MANIFEST_ENTRY)? {
         Some(bytes) => bytes,
         None => {
@@ -451,11 +511,51 @@ pub fn verify(package: &Path, retained: &RetainedKey) -> Result<Verdict, Signing
         });
     };
     verify_signature(&mut archive, package, &manifest, block, retained)?;
-    check_members(&mut archive, package, &doc.file)?;
+    check_members(&mut archive, package, &doc.file, &members)?;
     Ok(Verdict::Signed {
         key_fingerprint: block.key_fingerprint.clone(),
         files: doc.file.len(),
     })
+}
+
+/// The member set, once the raw directory and the zip parser agree on it.
+///
+/// Why: `zip` 2.4.2 keys its entry table by name, so a second central-directory
+/// record under an existing name never reaches a caller — see
+/// [`super::zip_directory`]'s module docs for what that lets an archive do.
+/// What: walks the raw directory, refuses a repeated name, then refuses any
+/// other disagreement between that walk and `ZipArchive::file_names`. Callers
+/// downstream may then treat either view as the member set.
+///
+/// # Postconditions
+/// On `Ok`, the returned names are exactly `ZipArchive`'s and exactly the raw
+/// directory's, with no repeat in either.
+/// Test: `super::signing_tests::a_duplicate_central_directory_record_is_refused`,
+/// `super::signing_tests::the_raw_directory_matches_what_the_zip_parser_exposes`.
+fn agreed_members(archive: &mut Archive, package: &Path) -> Result<Vec<String>, SigningError> {
+    let raw = super::zip_directory::member_names(package)?;
+    let mut unique = std::collections::BTreeSet::new();
+    for name in &raw {
+        if !unique.insert(name.clone()) {
+            return Err(SigningError::DuplicateMember {
+                path: package.to_path_buf(),
+                entry: name.clone(),
+            });
+        }
+    }
+    let exposed: std::collections::BTreeSet<String> =
+        archive.file_names().map(str::to_owned).collect();
+    if exposed != unique {
+        return Err(SigningError::DirectoryMismatch {
+            path: package.to_path_buf(),
+            reason: format!(
+                "the directory holds {} member(s) and the parser exposes {}",
+                unique.len(),
+                exposed.len()
+            ),
+        });
+    }
+    Ok(raw)
 }
 
 /// The detached-signature half of [`verify`].
@@ -498,15 +598,17 @@ fn check_members(
     archive: &mut Archive,
     package: &Path,
     listed: &[ManifestFile],
+    members: &[String],
 ) -> Result<(), SigningError> {
     for file in listed {
-        let bytes = read_member(archive, package, &file.entry)?.ok_or_else(|| {
+        // Streamed, never materialized: a member can be a multi-gigabyte
+        // extract database, and its declared size is attacker-controlled.
+        let actual = digest_member(archive, package, &file.entry)?.ok_or_else(|| {
             SigningError::MemberMissing {
                 path: package.to_path_buf(),
                 entry: file.entry.clone(),
             }
         })?;
-        let actual = to_hex(&Sha256::digest(&bytes));
         if actual != file.sha256 {
             return Err(SigningError::ContentMismatch {
                 path: package.to_path_buf(),
@@ -519,15 +621,17 @@ fn check_members(
     // #5481: an addition is as much an alteration as an edit, and hashing only
     // what the manifest lists would never see one. The two signing members
     // account for themselves — neither can be in a manifest it is part of.
-    let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
-    for name in names {
+    // `members` is the raw central directory's own list, already proven to
+    // agree with the parser's by `agreed_members` — so a member the parser
+    // hides is not a member this loop can miss.
+    for name in members {
         if name == MANIFEST_ENTRY || name == SIGNATURE_ENTRY || name.ends_with('/') {
             continue;
         }
-        if !listed.iter().any(|f| f.entry == name) {
+        if !listed.iter().any(|f| &f.entry == name) {
             return Err(SigningError::MemberUnexpected {
                 path: package.to_path_buf(),
-                entry: name,
+                entry: name.clone(),
             });
         }
     }
@@ -548,33 +652,114 @@ fn open(package: &Path) -> Result<Archive, SigningError> {
     })
 }
 
+/// Bytes read per turn of either member loop.
+///
+/// Fixed, because the alternative is sizing an allocation from the archive's own
+/// declared size — which is attacker-controlled metadata, not a measurement
+/// (security review of #5481). `credential_scan::copy_member` streams the same
+/// way on the write side.
+const CHUNK_BYTES: usize = 64 * 1024;
+
+/// A member this module reads WHOLE — the manifest and its signature — is
+/// refused past this size rather than buffered.
+///
+/// Both are small by construction: the manifest is one row per delivered file
+/// and the signature is 129 bytes. A package claiming otherwise is not one this
+/// crate wrote, and reading it would mean trusting an attacker about how much
+/// memory to spend. The ceiling is generous enough for a package with hundreds
+/// of thousands of members.
+const MAX_INLINE_MEMBER_BYTES: u64 = 32 * 1024 * 1024;
+
 /// One member's uncompressed bytes, or `None` when the archive has no such
 /// entry. An unreadable entry that IS present is an error, never a `None` —
 /// silently treating a read failure as absence is how a tampered archive passes.
+///
+/// Only for the two small members this module reads whole; everything else goes
+/// through [`digest_member`], which never materializes one. The read streams
+/// through a fixed buffer and stops at [`MAX_INLINE_MEMBER_BYTES`], so no
+/// allocation here is sized from the archive's own claim about the member.
+/// Test: `super::signing_tests::a_forged_member_size_does_not_size_an_allocation`.
 fn read_member(
     archive: &mut Archive,
     package: &Path,
     entry: &str,
 ) -> Result<Option<Vec<u8>>, SigningError> {
-    use std::io::Read as _;
-    let mut member = match archive.by_name(entry) {
-        Ok(m) => m,
-        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
-        Err(e) => {
-            return Err(SigningError::Archive {
+    let Some(mut member) = member(archive, package, entry)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    let mut buffer = vec![0_u8; CHUNK_BYTES];
+    loop {
+        let read = read_chunk(&mut member, package, &mut buffer)?;
+        if read == 0 {
+            return Ok(Some(bytes));
+        }
+        if bytes.len() as u64 + read as u64 > MAX_INLINE_MEMBER_BYTES {
+            return Err(SigningError::DirectoryMalformed {
                 path: package.to_path_buf(),
-                source: std::io::Error::other(e),
+                reason: format!(
+                    "{entry} is larger than the {MAX_INLINE_MEMBER_BYTES} bytes this reader will \
+                     hold for it"
+                ),
             });
         }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+}
+
+/// One member's SHA-256, computed without holding the member in memory.
+///
+/// Why: an extract database can exceed 4 GiB, and its declared size in the
+/// archive is a number an attacker chose. Streaming answers both — the hash is
+/// over the bytes that actually decompress, and the only allocation is one
+/// fixed buffer (security review of #5481).
+/// Test: `super::signing_tests::a_tampered_member_fails_verification`,
+/// `super::signing_tests::a_forged_member_size_does_not_size_an_allocation`.
+fn digest_member(
+    archive: &mut Archive,
+    package: &Path,
+    entry: &str,
+) -> Result<Option<String>, SigningError> {
+    let Some(mut member) = member(archive, package, entry)? else {
+        return Ok(None);
     };
-    let mut bytes = Vec::with_capacity(usize::try_from(member.size()).unwrap_or_default());
-    member
-        .read_to_end(&mut bytes)
-        .map_err(|source| SigningError::Archive {
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; CHUNK_BYTES];
+    loop {
+        let read = read_chunk(&mut member, package, &mut buffer)?;
+        if read == 0 {
+            return Ok(Some(to_hex(&digest.finalize())));
+        }
+        digest.update(&buffer[..read]);
+    }
+}
+
+/// The named member, or `None` when the archive does not hold one.
+fn member<'a>(
+    archive: &'a mut Archive,
+    package: &Path,
+    entry: &str,
+) -> Result<Option<zip::read::ZipFile<'a>>, SigningError> {
+    match archive.by_name(entry) {
+        Ok(m) => Ok(Some(m)),
+        Err(zip::result::ZipError::FileNotFound) => Ok(None),
+        Err(e) => Err(SigningError::Archive {
             path: package.to_path_buf(),
-            source,
-        })?;
-    Ok(Some(bytes))
+            source: std::io::Error::other(e),
+        }),
+    }
+}
+
+fn read_chunk(
+    member: &mut zip::read::ZipFile<'_>,
+    package: &Path,
+    buffer: &mut [u8],
+) -> Result<usize, SigningError> {
+    use std::io::Read as _;
+    member.read(buffer).map_err(|source| SigningError::Archive {
+        path: package.to_path_buf(),
+        source,
+    })
 }
 
 /// The short fingerprint form both halves of a keypair produce.
@@ -678,6 +863,86 @@ mod signing_tests {
 
     fn retained(key: &EngagementKey) -> RetainedKey {
         RetainedKey::from_hex(&key.public_hex()).expect("public half parses")
+    }
+
+    /// CRC-32 (IEEE), bitwise. Ten lines of test code rather than a dependency
+    /// pulled in so one hand-built local header can be genuinely extractable.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFF_u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    fn le16(v: u16) -> [u8; 2] {
+        v.to_le_bytes()
+    }
+
+    fn le32(v: u32) -> [u8; 4] {
+        v.to_le_bytes()
+    }
+
+    fn read_u32(bytes: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+    }
+
+    /// The offset of the archive's end-of-central-directory record.
+    fn eocd_at(raw: &[u8]) -> usize {
+        (0..=raw.len() - 22)
+            .rev()
+            .find(|at| read_u32(raw, *at) == 0x0605_4b50)
+            .expect("an EOCD")
+    }
+
+    /// A STORED local file header plus its data, for a hand-built second copy.
+    fn local_header(name: &str, body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&le32(0x0403_4b50));
+        out.extend_from_slice(&le16(20)); // version needed
+        out.extend_from_slice(&le16(0)); // flags
+        out.extend_from_slice(&le16(0)); // method: stored
+        out.extend_from_slice(&le16(0)); // time
+        out.extend_from_slice(&le16(0)); // date
+        out.extend_from_slice(&le32(crc32(body)));
+        out.extend_from_slice(&le32(body.len() as u32));
+        out.extend_from_slice(&le32(body.len() as u32));
+        out.extend_from_slice(&le16(name.len() as u16));
+        out.extend_from_slice(&le16(0)); // extra
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// A central-directory file header naming `name` at `header_start`.
+    fn central_header(name: &str, body: &[u8], header_start: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&le32(0x0201_4b50));
+        out.extend_from_slice(&le16(20)); // version made by
+        out.extend_from_slice(&le16(20)); // version needed
+        out.extend_from_slice(&le16(0)); // flags
+        out.extend_from_slice(&le16(0)); // method: stored
+        out.extend_from_slice(&le16(0)); // time
+        out.extend_from_slice(&le16(0)); // date
+        out.extend_from_slice(&le32(crc32(body)));
+        out.extend_from_slice(&le32(body.len() as u32));
+        out.extend_from_slice(&le32(body.len() as u32));
+        out.extend_from_slice(&le16(name.len() as u16));
+        out.extend_from_slice(&le16(0)); // extra
+        out.extend_from_slice(&le16(0)); // comment
+        out.extend_from_slice(&le16(0)); // disk
+        out.extend_from_slice(&le16(0)); // internal attrs
+        out.extend_from_slice(&le32(0)); // external attrs
+        out.extend_from_slice(&le32(header_start));
+        out.extend_from_slice(name.as_bytes());
+        out
     }
 
     #[test]
@@ -897,5 +1162,159 @@ mod signing_tests {
         let rendered = format!("{key:?}");
         assert!(!rendered.contains(&key.private_hex()), "{rendered}");
         assert!(rendered.contains(&key.fingerprint()), "{rendered}");
+    }
+
+    /// 🔴 Security review of #5481: `zip` 2.4.2 keys its entry table by member
+    /// name, so a second central-directory record under an already-signed name
+    /// collapses before any caller sees it — `file_names()` yields the name
+    /// once and `by_name` resolves to one record. `verify` would then report
+    /// `Signed` over whichever copy this parser picked while Python's
+    /// `zipfile`, Info-ZIP or Finder extracted the other.
+    ///
+    /// The archive here is hand-built from a valid signed package's bytes: a
+    /// second STORED local header carrying altered data is appended, then a
+    /// duplicate central-directory record naming the same member and pointing
+    /// at it, with the EOCD's entry count, directory size and directory offset
+    /// patched to frame the enlarged directory. Both copies are genuinely
+    /// extractable — the planted one carries a correct CRC.
+    #[test]
+    fn a_duplicate_central_directory_record_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = EngagementKey::generate();
+        let path = package(
+            dir.path(),
+            &[
+                ("README.md", "read me"),
+                ("reports/a/report.md", "findings"),
+            ],
+            Some(&key),
+        );
+        let raw = std::fs::read(&path).expect("read the package");
+
+        let eocd = eocd_at(&raw);
+        let entries = u16::from_le_bytes(raw[eocd + 10..eocd + 12].try_into().expect("two bytes"));
+        let directory_size = read_u32(&raw, eocd + 12) as usize;
+        let directory_at = read_u32(&raw, eocd + 16) as usize;
+
+        let planted = b"read MF";
+        let mut forged = raw[..directory_at].to_vec();
+        let planted_at = forged.len() as u32;
+        forged.extend_from_slice(&local_header("README.md", planted));
+        let directory_moved_to = forged.len() as u32;
+        forged.extend_from_slice(&raw[directory_at..directory_at + directory_size]);
+        let duplicate = central_header("README.md", planted, planted_at);
+        let duplicate_len = duplicate.len();
+        forged.extend_from_slice(&duplicate);
+        // The EOCD, reframed: one more entry, a longer directory, a new offset.
+        let mut eocd_record = raw[eocd..].to_vec();
+        eocd_record[8..10].copy_from_slice(&le16(entries + 1));
+        eocd_record[10..12].copy_from_slice(&le16(entries + 1));
+        eocd_record[12..16].copy_from_slice(&le32((directory_size + duplicate_len) as u32));
+        eocd_record[16..20].copy_from_slice(&le32(directory_moved_to));
+        forged.extend_from_slice(&eocd_record);
+
+        let forged_path = dir.path().join("forged.zip");
+        std::fs::write(&forged_path, &forged).expect("write the forged package");
+
+        // The exploit is real: the parser hides the second record entirely, so
+        // nothing downstream of it could have caught this.
+        let hidden = open(&forged_path).expect("the forged archive still opens");
+        assert_eq!(
+            hidden.file_names().filter(|n| *n == "README.md").count(),
+            1,
+            "the parser is expected to collapse the duplicate — that is the whole finding"
+        );
+        assert_eq!(
+            super::super::zip_directory::member_names(&forged_path)
+                .expect("the raw directory walks")
+                .iter()
+                .filter(|n| *n == "README.md")
+                .count(),
+            2,
+            "the raw directory must show what the parser hides"
+        );
+
+        match verify(&forged_path, &retained(&key)) {
+            Err(SigningError::DuplicateMember { entry, .. }) => assert_eq!(entry, "README.md"),
+            other => panic!("expected a duplicate member, got {other:?}"),
+        }
+    }
+
+    /// The raw walk and the parser agree on an archive nobody tampered with, so
+    /// the check above refuses forgeries rather than ordinary packages.
+    #[test]
+    fn the_raw_directory_matches_what_the_zip_parser_exposes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = EngagementKey::generate();
+        let path = package(
+            dir.path(),
+            &[
+                ("README.md", "read me"),
+                ("reports/a/report.md", "findings"),
+            ],
+            Some(&key),
+        );
+        let archive = open(&path).expect("open");
+        let exposed: std::collections::BTreeSet<String> =
+            archive.file_names().map(str::to_owned).collect();
+        let raw: std::collections::BTreeSet<String> =
+            super::super::zip_directory::member_names(&path)
+                .expect("walks")
+                .into_iter()
+                .collect();
+        assert_eq!(raw, exposed);
+        assert_eq!(raw.len(), 4, "two members plus the manifest and signature");
+    }
+
+    /// 🔴 Security review of #5481: a member's declared uncompressed size is
+    /// metadata an attacker writes, so it must never size an allocation. Here
+    /// the central-directory record claims ~2 GiB for a seven-byte member; the
+    /// read streams through a fixed buffer, so the call returns a verdict
+    /// instead of trying to reserve what the archive asked for.
+    #[test]
+    fn a_forged_member_size_does_not_size_an_allocation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = EngagementKey::generate();
+        let path = package(dir.path(), &[("README.md", "read me")], Some(&key));
+        let mut raw = std::fs::read(&path).expect("read the package");
+
+        let eocd = eocd_at(&raw);
+        let directory_at = read_u32(&raw, eocd + 16) as usize;
+        // Walk to the record for README.md and overwrite its uncompressed size.
+        let mut at = directory_at;
+        let patched = loop {
+            assert_eq!(
+                read_u32(&raw, at),
+                0x0201_4b50,
+                "a central-directory record"
+            );
+            let name_len =
+                u16::from_le_bytes(raw[at + 28..at + 30].try_into().expect("two bytes")) as usize;
+            let extra_len =
+                u16::from_le_bytes(raw[at + 30..at + 32].try_into().expect("two bytes")) as usize;
+            let comment_len =
+                u16::from_le_bytes(raw[at + 32..at + 34].try_into().expect("two bytes")) as usize;
+            let name = String::from_utf8_lossy(&raw[at + 46..at + 46 + name_len]).into_owned();
+            if name == "README.md" {
+                raw[at + 24..at + 28].copy_from_slice(&le32(0x7FFF_FFF0));
+                break true;
+            }
+            at += 46 + name_len + extra_len + comment_len;
+        };
+        assert!(patched);
+
+        let forged_path = dir.path().join("forged-size.zip");
+        std::fs::write(&forged_path, &raw).expect("write");
+
+        // The point is that this RETURNS. A verdict either way is a pass; an
+        // abort or an out-of-memory kill is the failure this guards against.
+        let outcome = verify(&forged_path, &retained(&key));
+        assert!(
+            matches!(
+                outcome,
+                Ok(Verdict::Signed { .. }) | Err(SigningError::Archive { .. })
+            ),
+            "expected a verdict rather than an abort, got {outcome:?}"
+        );
     }
 }
