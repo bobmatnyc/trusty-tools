@@ -9,26 +9,33 @@
 //!
 //! What: re-exports the internal submodules (for integration tests that import
 //! by module path) and provides `run()`, which parses `std::env::args()` via
-//! clap, initialises tracing, loads the ONNX model, and dispatches to the
-//! selected transport. Returns `Ok(())` on clean shutdown; propagates any
-//! startup error.
+//! clap, resolves the transport, initialises tracing, loads the ONNX model, and
+//! serves. Returns `Ok(())` on clean shutdown; propagates any startup error.
+//!
+//! #6289: this daemon binds no TCP socket. The `--http` listener it used to
+//! offer at `127.0.0.1:7890` is retired under
+//! [ADR-0032](https://github.com/bobmatnyc/trusty-tools/blob/main/docs/adr/0032-no-service-owns-http-console-is-the-only-http-surface.md);
+//! `--stdio` (the auto-spawn transport) and `--socket` (a hardened Unix socket)
+//! are the two transports, and passing `--http` is refused at parse time.
 //!
 //! Issue #1633: the ONNX model load is bounded by `readiness::run_bounded`
 //! (default 180 s, `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS`). A provider-init
 //! deadlock (observed on AL2023/glibc 2.34 — the CPU(no-arena) execution
 //! provider blocks in `futex_wait_queue` indefinitely) now fails loudly with
 //! a nonzero exit and an actionable stderr message instead of hanging the
-//! process forever with no HTTP/stdio/UDS listener ever bound. Because every
-//! transport listener is only started *after* this call returns `Ok`, the
-//! daemon structurally cannot report readiness (`/health`, a stdio response,
-//! a UDS accept) while init is still outstanding — there is no code path that
-//! answers anything until model load has actually succeeded.
+//! process forever with no stdio/UDS listener ever bound. Because the listener
+//! is only started *after* this call returns `Ok`, the daemon structurally
+//! cannot report readiness (a stdio response, a UDS accept) while init is still
+//! outstanding — there is no code path that answers anything until model load
+//! has actually succeeded.
 //!
-//! Test: `cargo test -p trusty-embedderd` (unit + integration).
-//! The `run()` path is exercised indirectly by `embedder_supervisor_e2e`
-//! integration tests in `trusty-search` (which spawn the binary). The bounded
-//! model-init mechanics are unit-tested in `readiness` against synthetic
-//! futures (no ONNX runtime required).
+//! Test: `cargo test -p trusty-embedderd` (unit + integration), specifically
+//! `tests/no_tcp_listener.rs` for the retired listener and
+//! `tests/concurrent_embed.rs` for the UDS transport. The `run()` path is
+//! exercised indirectly by `embedder_supervisor_e2e` integration tests in
+//! `trusty-search` (which spawn the binary). The bounded model-init mechanics
+//! are unit-tested in `readiness` against synthetic futures (no ONNX runtime
+//! required).
 
 // docs.rs builds a release's documentation once, from the uploaded tarball,
 // so a broken intra-doc link is baked into that version forever and only a new
@@ -44,14 +51,14 @@ pub mod uds_server;
 // Why (issue #1633): bounds the model-init call below so an ORT
 // provider-init deadlock (observed on AL2023/glibc 2.34) fails loudly within
 // a fixed ceiling instead of hanging the process forever. Private — no
-// public API surface change, gated behind `http-server` since that is the
+// public API surface change, gated behind `daemon` since that is the
 // only place `FastEmbedder::new()` is called from this crate.
-#[cfg(feature = "http-server")]
+#[cfg(feature = "daemon")]
 mod readiness;
 
 // Why (issue #2222): a pre-init glibc probe that fails immediately (instead
 // of waiting out the full `readiness::run_bounded` timeout) when the host
-// glibc is too old for the bundled ONNX Runtime. Private, same `http-server`
+// glibc is too old for the bundled ONNX Runtime. Private, same `daemon`
 // gate as `readiness` — see `glibc_probe`'s module doc for the full
 // rationale and why only the Linux/glibc + `bundled-ort` call site actually
 // invokes the check. Also compiled under `cfg(test)` regardless of target so
@@ -61,49 +68,38 @@ mod readiness;
 // unreachable dead code, since the only call site is behind the same
 // Linux/gnu `cfg`.
 #[cfg(all(
-    feature = "http-server",
+    feature = "daemon",
     any(all(target_os = "linux", target_env = "gnu"), test)
 ))]
 mod glibc_probe;
 
-// Why (issue #250): the daemon's HTTP startup sequence (`run`, `run_with_args`,
-// `AppState`, `health_handler`, `embed_handler`, and the `Args` clap struct
-// that drives them) only compiles under the `http-server` feature, mirroring
-// the `trusty-common` / `trusty-memory` rule that axum + tower-http are
-// HTTP-server-only deps. The `protocol`, `batch_queue`, `stdio_server`, and
-// `uds_server` modules stay unconditional — they have no axum surface.
-#[cfg(feature = "http-server")]
+// Why (issue #250, narrowed by #6289): the daemon's startup sequence (`run`,
+// `run_with_args`, `resolve_transport`, and the `Args` clap struct that drives
+// them) only compiles under the `daemon` feature. The `protocol`,
+// `batch_queue`, `stdio_server`, and `uds_server` modules stay unconditional —
+// a library consumer that only needs the wire protocol pays for none of the
+// daemon's startup machinery. The feature was called `http-server` until
+// #6289 retired the HTTP listener it named; `http-server` survives as a
+// deprecated alias so an out-of-workspace consumer keeps building.
+#[cfg(feature = "daemon")]
+use std::path::PathBuf;
+#[cfg(feature = "daemon")]
 use std::sync::Arc;
-#[cfg(feature = "http-server")]
+#[cfg(feature = "daemon")]
 use std::time::Duration;
 
-#[cfg(feature = "http-server")]
+#[cfg(feature = "daemon")]
 use anyhow::{bail, Context, Result};
-#[cfg(feature = "http-server")]
-use axum::{
-    extract::State,
-    http::StatusCode,
-    routing::{get, post},
-    Json, Router,
-};
-#[cfg(feature = "http-server")]
+#[cfg(feature = "daemon")]
 use clap::Parser;
-#[cfg(feature = "http-server")]
-use serde_json::json;
-#[cfg(feature = "http-server")]
-use tokio::net::TcpListener;
-#[cfg(feature = "http-server")]
+#[cfg(feature = "daemon")]
 use tokio::signal::unix::{signal, SignalKind};
-#[cfg(feature = "http-server")]
-use tower_http::trace::TraceLayer;
-#[cfg(feature = "http-server")]
+#[cfg(feature = "daemon")]
 use tracing::info;
-#[cfg(feature = "http-server")]
+#[cfg(feature = "daemon")]
 use trusty_common::embedder::{Embedder as _, FastEmbedder};
-#[cfg(feature = "http-server")]
-use trusty_common::embedder_client::{EmbedRequest, EmbedResponse};
 
-#[cfg(feature = "http-server")]
+#[cfg(feature = "daemon")]
 use batch_queue::{BatchConfig, BatchQueue};
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -111,13 +107,16 @@ use batch_queue::{BatchConfig, BatchQueue};
 /// CLI arguments for `trusty-embedderd`.
 ///
 /// Why: clap derive is the workspace standard for all trusty-* binaries.
-/// What: `--stdio` for the sidecar transport (piped stdin/stdout),
-/// `--http` for the TCP listener, `--socket` for the UDS listener.
-/// `--stdio` is mutually exclusive with `--http` and `--socket`.
+///
+/// What: `--stdio` for the sidecar transport (piped stdin/stdout) and
+/// `--socket` for the hardened Unix-socket listener; exactly one is required.
 /// `--batch-size` and `--batch-window-ms` configure the `BatchQueue`
-/// coalescing window.
-/// Test: `clap::Parser::try_parse_from` in unit tests.
-#[cfg(feature = "http-server")]
+/// coalescing window. `--http` is accepted only so that
+/// [`resolve_transport`] can refuse it by name — see that field's docs.
+///
+/// Test: `bare_invocation_configures_no_transport` and
+/// `http_flag_is_refused_naming_the_adr` in `tests/no_tcp_listener.rs`.
+#[cfg(feature = "daemon")]
 #[derive(Parser, Debug)]
 #[command(
     name = "trusty-embedderd",
@@ -126,34 +125,39 @@ use batch_queue::{BatchConfig, BatchQueue};
 )]
 pub struct Args {
     /// Run in stdio sidecar mode: read JSON-RPC requests from stdin,
-    /// write responses to stdout. Mutually exclusive with --http and
-    /// --socket. This is the transport used when trusty-search auto-spawns
+    /// write responses to stdout. Mutually exclusive with --socket.
+    /// This is the transport used when trusty-search auto-spawns
     /// trusty-embedderd as a child process (issue #110 Phase 2 default).
     ///
     /// Why: avoids socket-file management — the parent owns the pipe handles
     /// and the child exits automatically when the parent closes its end.
-    #[arg(long, conflicts_with_all = ["http_addr", "socket"])]
+    #[arg(long, conflicts_with = "socket")]
     pub stdio: bool,
 
-    /// TCP address to listen on for HTTP (host:port).
+    /// Retired. Present only so the daemon can refuse it by name.
     ///
-    /// Why: configurable so CI / tests can bind to ephemeral ports and avoid
-    /// collisions with a running production daemon. Pass an empty string to
-    /// disable the HTTP listener (requires --socket or --stdio).
-    #[arg(
-        long = "http",
-        default_value = "127.0.0.1:7890",
-        env = "TRUSTY_EMBEDDERD_ADDR"
-    )]
-    pub http_addr: String,
+    /// Why (#6289): silently ignoring a flag that used to open a TCP listener
+    /// would leave an operator believing the daemon is reachable on
+    /// `127.0.0.1:7890`. Clap's own "unexpected argument" error would not say
+    /// why it went away, so the flag stays parseable and
+    /// [`resolve_transport`] turns it into an error naming ADR-0032.
+    ///
+    /// `num_args = 0..=1` so a bare `--http` lands in the same refusal as
+    /// `--http 127.0.0.1:7890`. Hidden from `--help`: it is not an option, it
+    /// is a gravestone.
+    #[arg(long = "http", value_name = "ADDR", num_args = 0..=1,
+          default_missing_value = "", hide = true)]
+    pub http: Option<String>,
 
     /// Path for the Unix domain socket.
     ///
-    /// Why: provides a low-latency in-host transport for consumers that
-    /// cannot reach the HTTP port or want sub-millisecond IPC. When omitted
-    /// no UDS listener is started.
+    /// Why: the in-host transport for consumers that manage the daemon
+    /// themselves rather than letting trusty-search auto-spawn it. Bound
+    /// through [`uds_server::bind_uds_listener`], which holds the containing
+    /// directory at `0700` and the socket at `0600`, and every accepted
+    /// connection is checked against this process's own uid.
     #[arg(long, env = "TRUSTY_EMBEDDERD_SOCKET")]
-    pub socket: Option<std::path::PathBuf>,
+    pub socket: Option<PathBuf>,
 
     /// Maximum number of texts in one ONNX batch.
     ///
@@ -178,25 +182,71 @@ pub struct Args {
     pub batch_window_ms: u64,
 }
 
-// ── HTTP state ───────────────────────────────────────────────────────────────
+// ── Transport selection ──────────────────────────────────────────────────────
 
-/// Shared application state passed to axum handlers.
+/// The transport this daemon will serve on.
 ///
-/// Why: axum requires `Clone` on state; wrapping in `Arc` gives cheap clones.
-/// What: holds the `BatchQueue` handle so every HTTP request is served through
-/// the shared batching worker rather than calling the ONNX session directly.
-/// Test: constructed in `run` after model load; exercised by handler tests.
-#[cfg(feature = "http-server")]
-#[derive(Clone)]
-pub struct AppState {
-    pub queue: Arc<BatchQueue>,
-    /// Human-readable name of the embedding model actually loaded (issue
-    /// #3530 — the `(Q)` observability bug). Resolved once, at model-load
-    /// time, via `FastEmbedder::model_name()`; surfaced verbatim on
-    /// `GET /health` instead of the previous hardcoded `"AllMiniLML6V2Q"`,
-    /// which stayed wrong after the default flipped to fp32 (#3486 / #3493
-    /// P0).
-    pub model_name: &'static str,
+/// Why (#6289): making the choice a value rather than a pair of booleans is
+/// what lets a test assert that no configuration — the default one included —
+/// can reach a TCP listener. There is no TCP variant to construct.
+///
+/// What: `Stdio` reads JSON-RPC frames from stdin; `Uds` serves a hardened
+/// Unix socket at the given path. Exactly one is selected per run.
+///
+/// Test: `bare_invocation_configures_no_transport`,
+/// `socket_flag_selects_the_uds_transport` in `tests/no_tcp_listener.rs`.
+#[cfg(feature = "daemon")]
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Transport {
+    /// Newline-framed JSON-RPC 2.0 over piped stdin/stdout.
+    Stdio,
+    /// Newline-framed JSON-RPC 2.0 over a hardened Unix socket.
+    Uds(PathBuf),
+}
+
+/// Resolve parsed arguments into the one transport this run will serve.
+///
+/// Why (#6289): the daemon used to default to binding `127.0.0.1:7890` when
+/// neither `--stdio` nor `--socket` was given, which is exactly the surface
+/// ADR-0032 removes. Resolving before the model loads also means a bad
+/// invocation fails in milliseconds instead of after a 22 MB ONNX download.
+///
+/// What: refuses `--http` with a message naming ADR-0032; otherwise returns
+/// [`Transport::Stdio`] for `--stdio`, [`Transport::Uds`] for `--socket`, and
+/// an error naming both flags when neither is given.
+///
+/// # Errors
+///
+/// When `--http` is present, or when no transport flag is given.
+///
+/// Test: `bare_invocation_configures_no_transport`,
+/// `http_flag_is_refused_naming_the_adr`,
+/// `socket_flag_selects_the_uds_transport`,
+/// `stdio_flag_selects_the_stdio_transport` in `tests/no_tcp_listener.rs`.
+#[cfg(feature = "daemon")]
+pub fn resolve_transport(args: &Args) -> Result<Transport> {
+    // #6289: refused, not ignored — see the `Args::http` field docs.
+    if args.http.is_some() {
+        bail!(
+            "--http was removed: trusty-embedderd no longer binds a TCP listener (ADR-0032 — \
+             no trusty-* service owns HTTP; trusty-console is the only HTTP surface). \
+             Use --socket <path> for a hardened Unix socket, or --stdio for the sidecar \
+             transport."
+        );
+    }
+
+    if args.stdio {
+        return Ok(Transport::Stdio);
+    }
+
+    match &args.socket {
+        Some(path) => Ok(Transport::Uds(path.clone())),
+        None => bail!(
+            "no transport configured: pass --stdio (sidecar) or --socket <path> \
+             (hardened Unix socket). trusty-embedderd binds no TCP port (ADR-0032)."
+        ),
+    }
 }
 
 // ── Library entry point ──────────────────────────────────────────────────────
@@ -207,21 +257,21 @@ pub struct AppState {
 /// both the standalone `trusty-embedderd` binary and the bundled shim inside
 /// `trusty-search`. Both binaries call `trusty_embedderd::run().await` and
 /// rely on clap's standard argv parsing — no change to user-visible CLI
-/// surface.
+/// surface beyond the retired `--http` (#6289).
 ///
-/// What: parse CLI args → validate flags → init tracing to stderr → load
-/// `FastEmbedder` → spawn `BatchQueue` → dispatch to the selected transport:
-///   - `--stdio`: run the stdio sidecar loop (exits on stdin EOF / SIGTERM)
-///   - `--http` / `--socket`: bind listeners, wait for SIGTERM/SIGINT, clean up
+/// What: parse CLI args → [`resolve_transport`] → init tracing to stderr →
+/// load `FastEmbedder` → spawn `BatchQueue` → serve the selected transport.
 ///
 /// Note: in `--stdio` mode stdout is reserved for JSON-RPC frames. All
 /// tracing goes to stderr in every mode (MCP policy).
 ///
-/// Test: `cargo run -p trusty-embedderd -- --http 127.0.0.1:7890` and verify
-/// `curl http://127.0.0.1:7890/health`. For stdio mode:
-/// `cargo run -p trusty-embedderd -- --stdio` (parent drives via pipes).
-/// Covered indirectly by `embedder_supervisor_e2e` in `trusty-search`.
-#[cfg(feature = "http-server")]
+/// Test: `cargo run -p trusty-search --bin trusty-embedderd -- --socket
+/// /tmp/trusty-<uid>/trusty-embedderd.sock`, then embed through
+/// `trusty_common::embedder_client::UdsEmbedderClient`. For stdio mode:
+/// `cargo run -p trusty-search --bin trusty-embedderd -- --stdio` (parent
+/// drives via pipes). Covered indirectly by `embedder_supervisor_e2e` in
+/// `trusty-search`.
+#[cfg(feature = "daemon")]
 pub async fn run() -> Result<()> {
     let args = Args::parse();
     run_with_args(args).await
@@ -233,9 +283,14 @@ pub async fn run() -> Result<()> {
 /// rather than relying on `std::env::args()`, which is process-global.
 /// What: performs the full daemon startup sequence using the provided args.
 /// Test: the public `run()` is tested indirectly via the supervisor e2e tests;
-/// `run_with_args` can be unit-tested with controlled `Args` values.
-#[cfg(feature = "http-server")]
+/// the transport decision it makes is unit-tested through
+/// [`resolve_transport`] in `tests/no_tcp_listener.rs`.
+#[cfg(feature = "daemon")]
 pub async fn run_with_args(args: Args) -> Result<()> {
+    // #6289: decide the transport before anything expensive happens, so a
+    // retired `--http` or a missing flag fails in milliseconds.
+    let transport = resolve_transport(&args)?;
+
     // Init tracing to stderr — never stdout (MCP policy; stdout is used for
     // JSON-RPC frames in --stdio mode).
     let _ = tracing_subscriber::fmt()
@@ -246,39 +301,17 @@ pub async fn run_with_args(args: Args) -> Result<()> {
         .with_writer(std::io::stderr)
         .try_init();
 
-    // Validate: at least one transport must be configured.
-    let stdio_mode = args.stdio;
-    let http_enabled = !stdio_mode && !args.http_addr.is_empty();
-    let uds_enabled = !stdio_mode && args.socket.is_some();
-
-    if !stdio_mode && !http_enabled && !uds_enabled {
-        bail!("at least one of --stdio, --http, or --socket must be specified");
-    }
-
     let config = BatchConfig {
         batch_size: args.batch_size.max(1),
         batch_window: Duration::from_millis(args.batch_window_ms),
     };
 
-    if stdio_mode {
-        info!(
-            "trusty-embedderd starting (transport=stdio, batch_size={}, batch_window_ms={})",
-            config.batch_size,
-            config.batch_window.as_millis(),
-        );
-    } else {
-        info!(
-            "trusty-embedderd starting (http={:?}, socket={:?}, batch_size={}, batch_window_ms={})",
-            if http_enabled {
-                Some(&args.http_addr)
-            } else {
-                None
-            },
-            args.socket,
-            config.batch_size,
-            config.batch_window.as_millis(),
-        );
-    }
+    info!(
+        "trusty-embedderd starting (transport={:?}, batch_size={}, batch_window_ms={})",
+        transport,
+        config.batch_size,
+        config.batch_window.as_millis(),
+    );
 
     // Why (issue #2222): fail immediately if this host's glibc is too old
     // for the bundled (statically-linked) ONNX Runtime, instead of letting
@@ -320,146 +353,73 @@ pub async fn run_with_args(args: Args) -> Result<()> {
         config.batch_window.as_millis()
     );
 
-    // ── Stdio sidecar mode ───────────────────────────────────────────────────
-    // In stdio mode we own stdout exclusively for JSON-RPC frames. We do NOT
-    // install signal handlers for SIGTERM/SIGINT here — the OS delivers EOF
-    // on stdin when the parent exits, which is the clean termination signal.
-    // We do handle SIGTERM so `kill` works from a shell.
-    if stdio_mode {
-        let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
-        let q = Arc::clone(&queue);
-        tokio::select! {
-            result = stdio_server::run_stdio_server(q) => {
-                if let Err(e) = result {
-                    tracing::error!("stdio server error: {e:#}");
-                    std::process::exit(1);
-                }
-            }
-            _ = sigterm.recv() => {
-                info!("received SIGTERM — shutting down");
-            }
-        }
-        return Ok(());
+    match transport {
+        Transport::Stdio => serve_stdio(queue).await,
+        Transport::Uds(path) => serve_uds(&path, queue).await,
     }
+}
 
-    // ── HTTP / UDS listener mode ─────────────────────────────────────────────
-
-    // Optionally bind the HTTP listener.
-    if http_enabled {
-        let state = AppState {
-            queue: Arc::clone(&queue),
-            model_name,
-        };
-        let app = Router::new()
-            .route("/health", get(health_handler))
-            .route("/embed", post(embed_handler))
-            .layer(TraceLayer::new_for_http())
-            .with_state(state);
-
-        let listener = TcpListener::bind(&args.http_addr)
-            .await
-            .with_context(|| format!("failed to bind HTTP to {}", args.http_addr))?;
-        let local_addr = listener.local_addr()?;
-        info!("trusty-embedderd HTTP listening on http://{local_addr}");
-
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
-                tracing::error!("HTTP server error: {e:#}");
-            }
-        });
-    }
-
-    // Optionally bind the UDS listener.
-    let socket_path_for_cleanup = args.socket.clone();
-    if let Some(socket_path) = &args.socket {
-        if let Some(parent) = socket_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create socket directory {}", parent.display()))?;
-        }
-        let listener = uds_server::bind_uds_listener(socket_path)
-            .with_context(|| format!("bind UDS socket at {}", socket_path.display()))?;
-        info!(
-            "trusty-embedderd UDS listening at {}",
-            socket_path.display()
-        );
-        let q = Arc::clone(&queue);
-        tokio::spawn(uds_server::run_uds_accept_loop(listener, q));
-    }
-
-    // Wait for shutdown signal.
+/// Run the stdio sidecar loop until stdin EOF or SIGTERM.
+///
+/// Why: in stdio mode we own stdout exclusively for JSON-RPC frames, and the
+/// OS delivers EOF on stdin when the parent exits — that is the clean
+/// termination signal. SIGTERM is still handled so `kill` works from a shell.
+/// What: races `stdio_server::run_stdio_server` against SIGTERM.
+/// Test: `stdio_flag_selects_the_stdio_transport` proves this arm is the one
+/// `--stdio` reaches; the loop itself is `stdio_eof_terminates_cleanly`, and
+/// `trusty-search`'s supervisor e2e suite drives it end to end.
+#[cfg(feature = "daemon")]
+async fn serve_stdio(queue: Arc<BatchQueue>) -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
-    let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
-
     tokio::select! {
+        result = stdio_server::run_stdio_server(Arc::clone(&queue)) => {
+            if let Err(e) = result {
+                tracing::error!("stdio server error: {e:#}");
+                std::process::exit(1);
+            }
+        }
         _ = sigterm.recv() => {
             info!("received SIGTERM — shutting down");
         }
-        _ = sigint.recv() => {
-            info!("received SIGINT — shutting down");
-        }
     }
-
-    // Remove the UDS socket file on clean exit so the next run starts fresh.
-    if let Some(socket_path) = &socket_path_for_cleanup {
-        if let Err(e) = std::fs::remove_file(socket_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!("failed to remove UDS socket on shutdown: {e}");
-            }
-        }
-    }
-
     Ok(())
 }
 
-// ── HTTP handlers ────────────────────────────────────────────────────────────
-
-/// `GET /health` — liveness probe.
+/// Bind the hardened Unix socket and serve it until SIGTERM/SIGINT.
 ///
-/// Why: allows operators and trusty-search to verify the daemon is up and
-/// serving requests before sending embedding work.
-/// What: returns a JSON body with `status`, `model` (issue #3530 — the
-/// RESOLVED model name, sourced from `AppState::model_name` rather than a
-/// hardcoded string), and `dim` fields.
-/// Test: `curl http://127.0.0.1:7890/health` returns HTTP 200.
-#[cfg(feature = "http-server")]
-pub async fn health_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(json!({
-        "status": "ok",
-        "model": state.model_name,
-        "dim": trusty_common::embedder::EMBED_DIM,
-    }))
-}
+/// Why (#6289): the only listener this daemon opens. `bind_uds_listener` holds
+/// the containing directory at `0700` and the socket at `0600`, and the accept
+/// loop refuses any peer whose uid is not this process's own (#5099).
+/// What: creates the parent directory, binds, spawns the accept loop, waits for
+/// a termination signal, then unlinks the socket so the next run starts fresh.
+/// Test: `daemon_serves_a_hardened_socket_and_no_tcp_port` in
+/// `tests/no_tcp_listener.rs`; concurrency in `tests/concurrent_embed.rs`.
+#[cfg(feature = "daemon")]
+async fn serve_uds(socket_path: &std::path::Path, queue: Arc<BatchQueue>) -> Result<()> {
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create socket directory {}", parent.display()))?;
+    }
+    let listener = uds_server::bind_uds_listener(socket_path)
+        .with_context(|| format!("bind UDS socket at {}", socket_path.display()))?;
+    info!(
+        "trusty-embedderd UDS listening at {}",
+        socket_path.display()
+    );
+    tokio::spawn(uds_server::run_uds_accept_loop(listener, queue));
 
-/// `POST /embed` — embed a batch of texts via the shared `BatchQueue`.
-///
-/// Why: the core HTTP service endpoint; routes embedding requests through the
-/// same `BatchQueue` as the UDS transport so the ONNX session is shared.
-/// What: deserialises `EmbedRequest`, enqueues via `BatchQueue::embed_many`,
-/// and returns `EmbedResponse`. On error returns HTTP 500 with a JSON body.
-/// Test: `cargo test -p trusty-embedderd --test bit_identical -- --include-ignored`
-#[cfg(feature = "http-server")]
-pub async fn embed_handler(
-    State(state): State<AppState>,
-    Json(req): Json<EmbedRequest>,
-) -> Result<Json<EmbedResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let texts = req.texts;
-    let n = texts.len();
-
-    if n == 0 {
-        return Ok(Json(EmbedResponse { vectors: vec![] }));
+    let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+    let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
+    tokio::select! {
+        _ = sigterm.recv() => info!("received SIGTERM — shutting down"),
+        _ = sigint.recv() => info!("received SIGINT — shutting down"),
     }
 
-    match state.queue.embed_many(texts).await {
-        Ok(vectors) => {
-            tracing::debug!(n, "embed_handler: batch complete");
-            Ok(Json(EmbedResponse { vectors }))
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "embed_handler: embed_many failed");
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": format!("{e:#}") })),
-            ))
+    // Remove the socket file on clean exit so the next run starts fresh.
+    if let Err(e) = std::fs::remove_file(socket_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("failed to remove UDS socket on shutdown: {e}");
         }
     }
+    Ok(())
 }

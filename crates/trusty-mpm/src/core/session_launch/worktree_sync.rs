@@ -1,6 +1,6 @@
 //! Sync a per-session git worktree with its upstream branch on resume (#2647).
 //!
-//! Why: `WorkspaceProvisioner`'s `fetch_and_reset`
+//! Why: `GitBackend::fetch_and_reset`
 //! (`crate::provisioner::workspace`) keeps the SHARED `.base` bare checkout
 //! current with `origin/main`, but the per-session worktree created off it
 //! (`<project>/.base/.worktrees/<session-id>/`) was never re-synced on
@@ -88,7 +88,7 @@ pub enum SyncOutcome {
 /// would require anything OTHER than a clean fast-forward.
 ///
 /// Why: see module docs — this is the resume-time counterpart to
-/// `WorkspaceProvisioner::fetch_and_reset` for the shared base checkout,
+/// `GitBackend::fetch_and_reset` for the shared base checkout,
 /// scoped to a single session worktree and safe to run against a workspace
 /// that may carry uncommitted operator edits.
 /// What: resolves `@{upstream}` for the current branch; if absent, returns

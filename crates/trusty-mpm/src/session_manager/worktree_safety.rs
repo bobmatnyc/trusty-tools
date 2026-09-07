@@ -917,7 +917,7 @@ fn landing_bases(path: &Path) -> Vec<String> {
 /// — `refs/heads/session/<leaf>` and the bare `refs/heads/<leaf>`. Every
 /// producer now emits the prefixed spelling: `worktree_branch_for` backs
 /// `inproject::create_session_worktree`, `remove_session_worktree`'s
-/// `branch -D`, and — since #4165 — `provisioner::workspace::provision_in`,
+/// `branch -D`, and — since #4165 — the session-worktree creation path,
 /// which used to name the branch bare and so leaked one branch per session.
 ///
 /// The bare check stays for the population already on disk. Worktrees

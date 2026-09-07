@@ -36,6 +36,11 @@ use tempfile::TempDir;
 #[path = "../../test_tmux_session.rs"]
 pub(crate) mod tmux_session;
 
+/// The spawn primitive [`tmux_session`] runs every tmux invocation through
+/// (#7060) — the binary target's spelling of the lib `test_support`'s
+/// re-export of the same function; see that module for why the seam exists.
+pub(crate) use trusty_mpm::core::spawn_disclaim::disclaimed_output as tmux_spawn;
+
 /// Same prefix the lib's fixture uses, so its sweep reaps these too.
 const TEST_DIR_PREFIX: &str = "tm-test-";
 

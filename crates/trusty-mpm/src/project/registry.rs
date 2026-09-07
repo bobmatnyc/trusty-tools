@@ -224,8 +224,8 @@ impl ProjectRegistry {
     /// missing forever — even though the daemon plainly knew about the
     /// session (stop/resume by explicit name still worked, since those go
     /// through the SEPARATE session-manager store, not the project
-    /// registry). Call sites: `spawn_managed_cloned`, `spawn_managed_inproject`,
-    /// `spawn_managed_local` (`daemon::managed_routes::lifecycle`), each
+    /// registry). Call sites: `spawn_managed_inproject` and
+    /// `spawn_managed_on_main` (`daemon::managed_routes`), each
     /// right after `SessionManager::create_with_id`/`create_with_reserved_name`
     /// returns the freshly persisted record.
     /// What: reuses the exact same derivation

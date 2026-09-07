@@ -58,7 +58,7 @@ use super::worktree_safety::git_command;
 ///
 /// Why: a managed project has at most TWO git checkouts that can own a worktree
 /// registry — the project checkout itself and the `.base` clone
-/// `provisioner::workspace::WorkspaceProvisioner` creates. Naming the segment
+/// `inproject::create_session_worktree` creates. Naming the segment
 /// once keeps [`enumerate_registered_worktrees`] from repeating the literal.
 /// This is NOT a worktree-location guess: it names a CHECKOUT to interrogate,
 /// and git then reports where that checkout's worktrees actually live.

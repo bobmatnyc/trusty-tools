@@ -518,6 +518,47 @@ async fn execute_send_empty_prompt_errors() {
     }
 }
 
+/// `tm session new <remote-url>` is refused before any HTTP call (ADR-0055).
+///
+/// Why: #6000 removed the clone path the CLI's remote-URL form depended on. The
+/// refusal has to reach the operator with the remedy in it, and has to arrive
+/// even when no daemon is listening — which is why it lives in the executor
+/// rather than only in the daemon.
+/// What: dispatches `ManagedNew` with an https URL against an unreachable
+/// daemon URL and asserts the error names ADR-0055 rather than a transport
+/// failure.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn execute_managed_new_refuses_a_remote_repo_url() {
+    let executor = CommandExecutor::new("http://unused");
+    match executor
+        .execute(TrustyCommand::ManagedNew {
+            repo_url: "https://github.com/owner/repo.git".into(),
+            git_ref: "main".into(),
+            task: "anything".into(),
+            name_hint: None,
+            runtime: None,
+            inject_task: None,
+            deliverable_id: None,
+            force_new: false,
+        })
+        .await
+    {
+        CommandResult::Error(msg) => {
+            assert!(
+                msg.contains("ADR-0055"),
+                "the refusal must cite the ADR that removed the clone path, not \
+                 report a transport failure; got: {msg}"
+            );
+            assert!(
+                msg.contains("tm session new"),
+                "the refusal must name the two-step remedy; got: {msg}"
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn execute_managed_adopt_requires_tmux_name() {
     // Validation is pure — no daemon needed. An empty tmux_name is rejected with a

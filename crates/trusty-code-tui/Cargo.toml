@@ -35,17 +35,16 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-# Slice 2 (#3414, DOC-50 §5 Slice 2 / Q2): the terminal layer. Deliberately
-# NOT `{ workspace = true }` — the workspace-wide `ratatui`/`crossterm`
-# pins (0.29/0.28, see root `Cargo.toml`) stay put for every other crate
-# (trusty-agents, trusty-mpm, trusty-common) until Slice 10 migrates
-# tagent. This crate alone adopts ratatui 0.30 now because it clears a
-# vulnerable transitive `lru` (#2886); crossterm 0.29 is 0.30's matching
-# minimum. Two ratatui majors coexist in the workspace dependency graph by
-# design during the migration window — see the Slice 2 PR report for the
-# 0.29→0.30 API-breakage spike Slices 4/10 will need.
-ratatui = "0.30"
-crossterm = "0.29"
+# Slice 2 (#3414, DOC-50 §5 Slice 2 / Q2): the terminal layer.
+# #2872 closed the migration window these lines used to describe. This crate
+# pinned ratatui 0.30 / crossterm 0.29 locally while trusty-agents,
+# trusty-mpm, trusty-common and tga stayed on the workspace 0.29/0.28 pair, so
+# two ratatui majors coexisted by design. That is done: the workspace pins are
+# now 0.30/0.29 and every TUI crate names them, so the local pins are gone and
+# the vulnerable `lru 0.12` ratatui 0.29 carried is out of the graph. The
+# 0.29→0.30 API-breakage spike Slices 4/10 were told to expect has been paid.
+ratatui = { workspace = true }
+crossterm = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

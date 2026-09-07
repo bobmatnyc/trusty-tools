@@ -109,7 +109,7 @@ where
              Remediation: (1) if this host legitimately needs more time, raise \
              TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS above {timeout:?}; (2) on AL2023 / older-glibc \
              hosts, reinstall with `--no-default-features --features \
-             http-server,embedder-load-dynamic` and set ORT_DYLIB_PATH to a host-compatible \
+             daemon,embedder-load-dynamic` and set ORT_DYLIB_PATH to a host-compatible \
              libonnxruntime.so (e.g. an Ubuntu 20.04 / glibc 2.31 build) instead of the \
              bundled static ORT — or use the prebuilt `x86_64-linux-al2023` release asset, \
              which already ships that configuration.",

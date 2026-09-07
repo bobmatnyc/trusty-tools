@@ -10,5 +10,5 @@
 # Regenerate with: scripts/check_line_cap.sh --update  (use --seed only to bootstrap).
 crates/trusty-git-analytics/src/collect/collector.rs	766
 crates/trusty-mpm/src/daemon/api.rs	1176
-crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	818
+crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	578
 crates/trusty-search/src/main.rs	617

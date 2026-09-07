@@ -46,6 +46,21 @@ use tempfile::TempDir;
 #[path = "test_tmux_session.rs"]
 pub(crate) mod tmux_session;
 
+/// The spawn primitive [`tmux_session`] runs every tmux invocation through
+/// (#7060).
+///
+/// Why: an undisclaimed tmux server takes its macOS TCC responsible process
+/// from the signed binary that forked it, so the operator is asked "tmux needs
+/// permission to access data from other apps" once per test run.
+/// [`crate::core::spawn_disclaim::disclaimed_output`] is the same primitive
+/// [`crate::core::tmux::run_tmux_with_bin`] uses for every production spawn.
+/// What: a re-export, so the fixture's spawn IS the primitive by construction
+/// rather than by a value some later edit could rebind. It lives here, not in
+/// the shared fixture file, because that file compiles into both the lib and
+/// the `tm` binary and the primitive's path has no spelling valid in both.
+/// Test: `tmux_session::tests::the_fixture_spawn_seam_captures_output`.
+pub(crate) use crate::core::spawn_disclaim::disclaimed_output as tmux_spawn;
+
 /// The loopback port every dead-daemon test points at (#4306, #4415).
 ///
 /// Why this specific port, rather than one the fixture binds for itself: the

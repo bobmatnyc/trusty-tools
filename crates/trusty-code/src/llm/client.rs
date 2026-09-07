@@ -48,7 +48,7 @@ use trusty_common::inference::{
     capabilities,
     credentials::{KeyStore, default_store, resolve_key_with},
     provider_for,
-    providers::{atlascloud, fireworks, openrouter, together},
+    providers::{atlascloud, fireworks, local, openrouter, together},
     registry::ProviderId,
 };
 
@@ -181,13 +181,21 @@ impl OpenAiCompatClient {
     /// routing can never disagree with normalisation.
     /// What: [`ProviderId::Fireworks`] iff that factory reports `"fireworks"`,
     /// [`ProviderId::Together`] iff it reports `"together"` (#2494),
-    /// [`ProviderId::AtlasCloud`] iff it reports `"atlascloud"` (#2536), else
-    /// [`ProviderId::OpenRouter`] (the default for every other slug).
+    /// [`ProviderId::AtlasCloud`] iff it reports `"atlascloud"` (#2536),
+    /// [`ProviderId::Local`] for a `local/` or `ollama/` slug (#4490 — read
+    /// from the shared registry's [`ProviderId::from_slug_prefix`], since
+    /// `crate::provider` has no local backend and would answer OpenRouter),
+    /// else [`ProviderId::OpenRouter`] (the default for every other slug).
     /// Test: `client::tests::selects_fireworks_for_prefixed_slug`,
     /// `client::tests::selects_together_for_prefixed_slug`,
     /// `client::tests::selects_atlascloud_for_prefixed_slug`,
+    /// `client::tests::selects_local_for_local_and_ollama_slugs`,
     /// `client::tests::selects_openrouter_for_plain_slug`.
     fn provider_for_slug(model: &str) -> ProviderId {
+        // #4490: without this a `local/*` slug reached the OpenRouter builder.
+        if ProviderId::from_slug_prefix(model) == Some(ProviderId::Local) {
+            return ProviderId::Local;
+        }
         match crate::provider::provider_for(model).name() {
             FIREWORKS_PROVIDER_NAME => ProviderId::Fireworks,
             TOGETHER_PROVIDER_NAME => ProviderId::Together,
@@ -206,13 +214,18 @@ impl OpenAiCompatClient {
     /// What: strips a leading `fireworks/` for [`ProviderId::Fireworks`], a
     /// leading `together/` for [`ProviderId::Together`] (#2494), and a leading
     /// `atlascloud/` for [`ProviderId::AtlasCloud`] (#2536 — the remainder, e.g.
-    /// `openai/gpt-5.6-sol`, is the AtlasCloud-native wire id); returns the slug
-    /// unchanged otherwise.
+    /// `openai/gpt-5.6-sol`, is the AtlasCloud-native wire id); strips a leading
+    /// `local/` or `ollama/` for [`ProviderId::Local`] (#4490 — Ollama serves
+    /// bare `qwen3:30b`-style ids, so the routing marker must not reach it);
+    /// returns the slug unchanged otherwise.
     /// Test: `client::tests::fireworks_wire_model_strips_prefix`,
     /// `client::tests::together_wire_model_strips_prefix`,
-    /// `client::tests::atlascloud_wire_model_strips_prefix`.
+    /// `client::tests::atlascloud_wire_model_strips_prefix`,
+    /// `client::tests::local_wire_model_strips_either_prefix`.
     fn wire_model(provider: ProviderId, model: &str) -> String {
         match provider {
+            // #4490: the registry already owns this strip for direct providers.
+            ProviderId::Local => ProviderId::Local.wire_model_id(model).to_string(),
             ProviderId::Fireworks => model
                 .strip_prefix("fireworks/")
                 .unwrap_or(model)
@@ -275,8 +288,13 @@ impl OpenAiCompatClient {
     /// `MissingCredential` structurally cannot. Only once the key is confirmed
     /// does it resolve on an `openrouter/` routing slug — the resolved model
     /// slug is irrelevant to the built adapter (it sends the per-request wire
-    /// model), so a fixed routing slug is used.
+    /// model), so a fixed routing slug is used. Local (#4490) is the one branch
+    /// with no key guard at all — it is keyless by construction — and instead
+    /// builds `providers::local`'s `LocalAdapter`, which probes the server
+    /// before every request; it needs its own arm because the wildcard below
+    /// would otherwise hand a `local/*` turn to OpenRouter.
     /// Test: `client::tests::missing_openrouter_key_errors_at_chat_time`,
+    /// `client::tests::local_slug_builds_the_local_adapter_not_openrouter`,
     /// `client::tests::missing_fireworks_key_errors_not_falls_back`,
     /// `client::tests::missing_together_key_errors_not_falls_back`,
     /// `client::tests::missing_atlascloud_key_errors_not_falls_back`.
@@ -323,6 +341,15 @@ impl OpenAiCompatClient {
                 // The key is present, so stage-1 of the resolver returns AtlasCloud.
                 let resolved = provider_for("atlascloud/route", self.store.as_ref())?;
                 atlascloud::build(&resolved, &self.atlascloud_base)
+            }
+            ProviderId::Local => {
+                // #4490: Local needs no key, so there is no guard to run — but
+                // it MUST get the shared `LocalAdapter`, which probes the
+                // server's `/v1/models` inside `LOCAL_PROBE_TIMEOUT` before
+                // sending. Falling through to the openrouter builder below sent
+                // a `local/*` turn to OpenRouter instead.
+                let resolved = provider_for("local/route", self.store.as_ref())?;
+                local::build(&resolved, local::LocalConfig::from_env())
             }
             _ => {
                 // #4614: restores the mapping #4436 dropped with `convert::map_error`.
@@ -518,6 +545,79 @@ mod tests {
                 "{slug} must select OpenRouter"
             );
         }
+    }
+
+    /// A `local/*` or `ollama/*` slug selects Local (#4490).
+    ///
+    /// Why: `crate::provider::provider_for` has no local backend, so both
+    /// spellings answered `"openrouter"` and every local turn was routed to the
+    /// cloud. This is the routing half of making the shared `LocalAdapter`
+    /// reachable from tcode at all.
+    /// What: assert the provider selection for both accepted prefixes, and that
+    /// `capabilities_for` agrees with it.
+    /// Test: this test.
+    #[test]
+    fn selects_local_for_local_and_ollama_slugs() {
+        let client = OpenAiCompatClient::with_store(Box::new(MemoryKeyStore::new()));
+        for slug in ["local/qwen3:30b", "ollama/llama3.1:8b", "OLLAMA/qwen3:30b"] {
+            assert_eq!(
+                OpenAiCompatClient::provider_for_slug(slug),
+                ProviderId::Local,
+                "{slug} must select Local"
+            );
+            assert_eq!(
+                client.capabilities_for(slug).id,
+                ProviderId::Local,
+                "capabilities and transport routing must agree for {slug}"
+            );
+        }
+    }
+
+    /// The `local/` and `ollama/` routing markers never reach the wire (#4490).
+    ///
+    /// Why: Ollama serves bare ids (`qwen3:30b`); sending `local/qwen3:30b`
+    /// makes it answer 404 for a model it has pulled.
+    /// What: assert both prefixes are stripped, and that a bare id survives.
+    /// Test: this test.
+    #[test]
+    fn local_wire_model_strips_either_prefix() {
+        assert_eq!(
+            OpenAiCompatClient::wire_model(ProviderId::Local, "local/qwen3:30b"),
+            "qwen3:30b"
+        );
+        assert_eq!(
+            OpenAiCompatClient::wire_model(ProviderId::Local, "ollama/llama3.1:8b"),
+            "llama3.1:8b"
+        );
+        assert_eq!(
+            OpenAiCompatClient::wire_model(ProviderId::Local, "qwen3:30b"),
+            "qwen3:30b"
+        );
+    }
+
+    /// `build_adapter(Local)` yields the shared local adapter, not OpenRouter's.
+    ///
+    /// Why (#4490): this is the defect the issue's live check found — every
+    /// `ProviderId` other than the three keyed ones fell through to
+    /// `openrouter::build`, so `trusty_common::inference::providers::local` had
+    /// no consumer at all. On `origin/main` this test cannot pass: with an empty
+    /// store the wildcard arm returns `MissingConfig` for `OPENROUTER_API_KEY`,
+    /// and with a key present it returns an adapter named `openrouter`.
+    /// What: build the adapter from an EMPTY store (Local is keyless, so it must
+    /// build regardless) and assert it reports the Local provider name and
+    /// Local's registry capabilities.
+    /// Test: this test.
+    #[tokio::test]
+    #[serial]
+    async fn local_slug_builds_the_local_adapter_not_openrouter() {
+        let _cleared = ClearedKey::new("OPENROUTER_API_KEY");
+        let client = OpenAiCompatClient::with_store(Box::new(MemoryKeyStore::new()));
+        let adapter = client
+            .adapter_for(ProviderId::Local)
+            .await
+            .expect("Local is keyless — it must build with an empty store");
+        assert_eq!(adapter.name(), ProviderId::Local.as_str());
+        assert_eq!(adapter.capabilities().id, ProviderId::Local);
     }
 
     /// A `fireworks/*` slug selects Fireworks.

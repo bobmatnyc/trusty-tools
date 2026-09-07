@@ -1,5 +1,7 @@
 # Clean-VM Demo Rehearsal Runbook — trusty-mpm 1.0.1 + trusty-installer 0.4.7
 
+> **ADR-0055 (#6000):** `tm sessions new` no longer accepts a remote URL — trusty-mpm clones no repository and creates no worktree for a session. Clone the repository yourself first, then pass the resulting local path. Every `tm sessions new https://…` line below needs that two-step treatment before it will run.
+
 **Duration:** ~10 minutes  
 **Target:** Fresh macOS Apple Silicon VM with NO Claude Code, NO tmux, NO ~/.trusty-tools  
 **Objective:** Dry-run the full install → workflow pipeline before the live demo.

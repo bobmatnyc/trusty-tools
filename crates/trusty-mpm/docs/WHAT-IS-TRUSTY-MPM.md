@@ -94,8 +94,7 @@ trusty-memory palace (see `crates/trusty-memory/src/prompt_facts.rs`), but no
 identity fact exists until one is seeded.
 
 **Automatic (DOC-28 §7 Phase 2, epic #1855):** every time `tm` provisions a
-brand-new managed-session workspace (`WorkspaceProvisioner::provision_in`,
-`crates/trusty-mpm/src/provisioner/workspace.rs`), it attempts this seed once
+brand-new managed-session workspace, it attempts this seed once
 against the session's derived palace. The attempt is guarded by a `kg_query`
 idempotency check (skips the assert if the triple already exists) and is
 fail-open: an unreachable trusty-memory daemon, a non-2xx response, or a parse

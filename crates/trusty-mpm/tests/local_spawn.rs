@@ -1,9 +1,10 @@
 //! Integration tests for the local-path (non-clone) managed spawn heuristic (#1433).
 //!
 //! Why: managed spawn must accept an EXISTING local directory as the workdir and
-//! use it directly (skipping the git clone), while a remote repo URL still takes
-//! the clone branch. The branch decision is entirely captured by the documented
-//! `is_local_workdir` heuristic, so these PURE-LOGIC tests pin that detection
+//! use it directly. Since ADR-0055 (#6000) anything else is refused rather than
+//! cloned, so `is_local_workdir` now decides run-or-refuse. The decision is
+//! entirely captured by that documented heuristic, so these PURE-LOGIC tests
+//! pin the detection
 //! deterministically — no daemon, no tmux, no runtime spawn (which would hit the
 //! known local tokio-runtime-drop env panic). The end-to-end create→cwd behaviour
 //! of the local path is covered by the manager unit tests (`create_with_id` with
@@ -13,48 +14,8 @@
 use trusty_mpm::daemon::managed_routes::{is_local_workdir, write_task_md};
 use trusty_mpm::session_manager::ManagedSessionId;
 
-/// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
-/// identical pattern in `tests/standalone_isolation.rs` and
-/// `tests/session_manager_mvp.rs` (each integration-test binary is a
-/// SEPARATE crate target, so none of these can share a single copy).
-///
-/// Why (#3965): `WorkspaceProvisioner::provision_in` calls
-/// `core::home_trust_seed::preseed_home_trust` UNCONDITIONALLY — even under
-/// `without_prepare()` — because that seed sits BEFORE the
-/// `if !self.prepare { return ... }` gate in `provisioner/workspace.rs`. It
-/// resolves `~/.claude.json` from the REAL process `$HOME`, not from the
-/// provisioner's workspace root, so `spawn_managed_local_redirects_to_managed_clone`
-/// (which drives `.provision_in(...)` directly) must pin `$HOME` to its own
-/// hermetic root or it writes into the operator's real `~/.claude.json`.
-/// `std::env::set_var`/`remove_var` are `unsafe` in Rust 2024
-/// (thread-unsafe), so every caller pairs this guard with
-/// `#[serial_test::serial]`.
-struct HomeGuard(Option<String>);
-
-impl HomeGuard {
-    /// Redirect `$HOME` to `dir` and return a guard that restores the
-    /// original value on drop (including on panic). Callers MUST be
-    /// `#[serial_test::serial]`.
-    fn set(dir: &std::path::Path) -> Self {
-        let prev = std::env::var("HOME").ok();
-        // SAFETY: guarded by #[serial_test::serial] on all callers — only one
-        // thread mutates HOME at a time.
-        unsafe { std::env::set_var("HOME", dir) };
-        HomeGuard(prev)
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        match &self.0 {
-            Some(p) => unsafe { std::env::set_var("HOME", p) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-    }
-}
-
 /// An existing absolute directory must be detected as a local workdir so the
-/// spawn uses it directly and SKIPS the clone (#1433).
+/// spawn uses it directly (#1433).
 ///
 /// Why: this is the positive half of the clone-vs-no-clone decision — a real
 /// on-disk directory (e.g. `/Users/masa/Projects/trusty-tools`) is the workspace.
@@ -146,8 +107,8 @@ fn is_local_workdir_follows_symlinked_dir() {
 /// The local-path spawn path MUST write TASK.md into the workspace when a task
 /// is provided (refs #1693).
 ///
-/// Why: `spawn_managed_local` previously bypassed `WorkspaceProvisioner::provision_in`
-/// (which owns TASK.md writing for clone sessions) and therefore NEVER wrote
+/// Why: the local spawn path previously bypassed the clone provisioner
+/// (which owned TASK.md writing for clone sessions) and therefore NEVER wrote
 /// TASK.md even when the caller supplied `--task "..."`. This test locks in the
 /// fix so both spawn paths produce TASK.md consistently.
 /// What: calls `write_task_md` (the shared helper called by `spawn_managed_local`)
@@ -293,7 +254,7 @@ fn parse_github_path_covers_https_and_ssh_forms() {
 }
 
 /// `workspace_subpath` nests the `owner/repo` identity under the workspace root,
-/// matching the expected `provision_in` `project_dir` argument (#1590).
+/// matching the expected managed-checkout `project_dir` (#1590).
 ///
 /// Why: `tm launch` and `spawn_managed_local` compute `project_dir` via
 /// `workspace_subpath`; this test locks in that the resulting path is
@@ -320,118 +281,6 @@ fn workspace_subpath_produces_owner_repo_path() {
         dir,
         std::path::PathBuf::from("/tmp/test-projects/myorg/myrepo"),
         "workspace_subpath must produce <root>/<owner>/<repo>"
-    );
-}
-
-// ── spawn_managed_local branch tests (#1590) ─────────────────────────────────
-
-/// `spawn_managed_local` provisions a MANAGED CLONE (not the live checkout) when
-/// the local directory has a parseable GitHub remote (#1590).
-///
-/// Why: the primary post-#1590 contract — `spawn_managed_local` must NOT operate
-/// in the live checkout; it must provision a managed clone under
-/// `<project_dir>/<session_uuid>/` and use that as the workspace, leaving the
-/// live checkout untouched.
-/// What: creates a temp git repo with a fake GitHub remote URL, then runs the
-/// same pipeline that `spawn_managed_local` executes —
-/// `get_origin_url → parse_github_path → workspace_subpath → provision_in` —
-/// with a `FakeGitBackend` (no real network) and a controlled workspace root.
-/// Asserts (a) the returned `prepared.path` equals `<project_dir>/<session_id>`,
-/// i.e. the managed-clone path; and (b) the path does NOT start with the live
-/// checkout directory.
-/// Test: this function IS the test.
-#[test]
-#[serial_test::serial]
-fn spawn_managed_local_redirects_to_managed_clone() {
-    use trusty_common::github_path::parse_github_path;
-    use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, workspace_subpath};
-    use trusty_mpm::daemon::managed_routes::inproject::get_origin_url;
-    use trusty_mpm::provisioner::{FakeGitBackend, WorkspaceProvisioner};
-    use trusty_mpm::session_manager::ManagedSessionId;
-
-    // Create a temp directory that acts as the operator's live checkout.
-    let live_checkout = tempfile::TempDir::new().expect("live checkout tempdir");
-    let live_dir = live_checkout.path();
-    let fake_origin = "https://github.com/test-owner/test-repo.git";
-
-    // Initialise a real git repo so get_origin_url can run git config.
-    let init = std::process::Command::new("git")
-        .args(["init", live_dir.to_str().expect("utf8 path")])
-        .output()
-        .expect("git init");
-    assert!(init.status.success(), "git init failed");
-
-    let remote_add = std::process::Command::new("git")
-        .args([
-            "-C",
-            live_dir.to_str().expect("utf8 path"),
-            "remote",
-            "add",
-            "origin",
-            fake_origin,
-        ])
-        .output()
-        .expect("git remote add");
-    assert!(remote_add.status.success(), "git remote add failed");
-
-    // Step 0 (mirrors spawn_managed_local): read the origin URL.
-    let origin_url = get_origin_url(live_dir)
-        .expect("git must succeed on a healthy repo")
-        .expect("get_origin_url must return Some for a repo with remote");
-    assert_eq!(
-        origin_url, fake_origin,
-        "origin URL must match what was set"
-    );
-
-    // Step 1: parse the GitHub identity — same call spawn_managed_local makes.
-    let gh = parse_github_path(&origin_url)
-        .expect("parse_github_path must succeed for a github.com HTTPS URL");
-    assert_eq!(gh.owner, "test-owner");
-    assert_eq!(gh.repo, "test-repo");
-
-    // Step 2: compute managed project_dir with a controlled workspace root so the
-    // test does not write into the real ~/trusty-mpm-projects.
-    let managed_root = tempfile::TempDir::new().expect("managed workspace root tempdir");
-    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
-    // `preseed_home_trust` fires unconditionally in `provision_in` below,
-    // even under `without_prepare()`.
-    let _home = HomeGuard::set(managed_root.path());
-    // #5204: see the note above on `#[non_exhaustive]`.
-    let mut cfg = TrustyToolsConfig::default();
-    cfg.workspace_root_template = Some(managed_root.path().to_string_lossy().into_owned());
-    let project_dir = workspace_subpath(&cfg, &gh);
-    // project_dir is <managed_root>/<owner>/<repo>, i.e. managed_root/test-owner/test-repo
-
-    // Step 3: provision via FakeGitBackend — mirrors the WorkspaceProvisioner::new
-    // call in spawn_managed_local but skips the real git clone and prepare_session.
-    let provisioner = WorkspaceProvisioner::without_prepare(
-        FakeGitBackend::new(),
-        std::path::PathBuf::new(), // unused: provision_in takes an explicit project_dir
-    );
-    let session_id = ManagedSessionId::new();
-    let prepared = provisioner
-        .provision_in(&project_dir, &session_id, &origin_url, "", "test task")
-        .expect("provision_in must succeed with FakeGitBackend");
-
-    // KEY ASSERTIONS: the workspace is the MANAGED clone path, NOT the live checkout.
-    // #1935 nested each session's git worktree under a shared, persistent base
-    // checkout rather than a full clone directly at `<project_dir>/<id>`.
-    // #4270 made that base the project dir itself, so the worktree is
-    // `<project_dir>/.worktrees/<id>` — the git convention, and the same shape
-    // the in-project spawn path produces.
-    let expected = project_dir.join(".worktrees").join(session_id.to_string());
-    assert_eq!(
-        prepared.path, expected,
-        "spawn_managed_local must route to <project_dir>/.worktrees/<session_id>, \
-         not the live checkout"
-    );
-    assert!(
-        !prepared.path.starts_with(live_dir),
-        "workspace must NOT be inside the live checkout directory"
-    );
-    assert_eq!(
-        prepared.repo_url, origin_url,
-        "provisioner must record the origin URL (not the local path)"
     );
 }
 

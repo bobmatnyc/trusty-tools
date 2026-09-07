@@ -142,7 +142,7 @@ fn leaf_dirs(root: &Path, depth: usize) -> Vec<PathBuf> {
 /// same nesting — the observed litter, `<tmp>/origin/.base`, matches it
 /// exactly) would read as a "discovered workspace" if this scanner is ever
 /// wired to a caller. Requiring the sentinel closes that gap: it is written
-/// by `WorkspaceProvisioner` at the root of every SM-created workspace (see
+/// at the root of every SM-created workspace (see
 /// `provisioner::workspace::finalize_worktree` /
 /// `session_manager::decommission::WORKTREE_SENTINEL_FILE`), so a directory
 /// missing it was never provisioned by trusty-mpm regardless of how closely
@@ -217,7 +217,7 @@ mod tests {
     }
 
     /// Write the `.trusty-mpm-worktree` sentinel into `leaf`, mirroring what
-    /// `WorkspaceProvisioner` writes into every real new-root workspace.
+    /// trusty-mpm writes into every real new-root workspace.
     fn write_marker(leaf: &Path) {
         std::fs::write(
             leaf.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE),

@@ -9,13 +9,16 @@ so trusty-search and other consumers can embed texts without loading the ONNX
 runtime into their own RSS budget. Decouples crash domains: a jetsam OOM kill
 of trusty-search doesn't destroy the model state.
 
-Three transports share a single `BatchQueue` and a single ONNX session:
+Two transports share a single `BatchQueue` and a single ONNX session:
 
 - **stdio** (`--stdio`): sidecar mode — JSON-RPC 2.0 over piped stdin/stdout.
   This is the **default auto-spawn transport** when `trusty-search start` spawns
   `trusty-embedderd` as a supervised child process (issue #110 Phase 2).
-- **HTTP** (`--http addr:port`): for network-capable consumers or cross-host setups.
-- **UDS** (`--socket /path`): low-latency in-host transport via a Unix Domain Socket.
+- **UDS** (`--socket /path`): low-latency in-host transport via a hardened Unix
+  domain socket, for a daemon the operator manages themselves.
+
+A third, **HTTP** (`--http addr:port`), was retired in #6289 — this daemon binds
+no TCP port. See "HTTP mode — removed" below.
 
 ### AL2023 / glibc < 2.38 hosts (issue #2222)
 
@@ -53,41 +56,37 @@ crate is **library-only** — the `trusty-embedderd` binary is produced solely b
 cargo run -p trusty-search --bin trusty-embedderd -- --stdio
 ```
 
-### HTTP mode
-
-```bash
-# Default: binds to 127.0.0.1:7890
-cargo run -p trusty-search --bin trusty-embedderd -- --http 127.0.0.1:7890
-
-# Custom address
-cargo run -p trusty-search --bin trusty-embedderd -- --http 127.0.0.1:9000
-
-# Via env var
-TRUSTY_EMBEDDERD_ADDR=127.0.0.1:9000 cargo run -p trusty-search --bin trusty-embedderd -- --http ""
-```
-
 ### UDS mode
 
 ```bash
 cargo run -p trusty-search --bin trusty-embedderd -- --socket /tmp/trusty-embedderd.sock
 ```
 
-### Combined HTTP + UDS (--stdio is mutually exclusive with both)
+The socket's directory is held at `0700` and the socket itself at `0600`, and
+every accepted connection is checked against this process's own uid before a
+byte is read.
 
-```bash
-cargo run -p trusty-search --bin trusty-embedderd -- --http 127.0.0.1:7890 --socket /tmp/trusty-embedderd.sock
-```
+### HTTP mode — removed (#6289)
+
+`--http` bound `127.0.0.1:7890` and did so by default. It is retired under
+[ADR-0032](../../docs/adr/0032-no-service-owns-http-console-is-the-only-http-surface.md):
+no trusty-\* service owns an HTTP surface, and `trusty-console` is the only
+one. Passing the flag now fails at startup with a message saying so. Use
+`--socket` for a manually managed daemon; `TRUSTY_EMBEDDERD_ADDR` is inert.
 
 All logs are written to **stderr**. Stdout is reserved for JSON-RPC frames in
-`--stdio` mode and is never written to in HTTP/UDS modes.
+`--stdio` mode and is never written to in UDS mode.
 
 ## CLI flags
 
 | Flag | Default | Env var | Description |
 |---|---|---|---|
-| `--stdio` | off | — | Stdio sidecar mode. Mutually exclusive with `--http` and `--socket`. |
-| `--http <addr>` | `127.0.0.1:7890` | `TRUSTY_EMBEDDERD_ADDR` | TCP address for HTTP listener. Pass `""` or omit to disable. |
-| `--socket <path>` | none | `TRUSTY_EMBEDDERD_SOCKET` | Path for the UDS socket. Omit to disable. |
+| `--stdio` | off | — | Stdio sidecar mode. Mutually exclusive with `--socket`. |
+| `--socket <path>` | none | `TRUSTY_EMBEDDERD_SOCKET` | Path for the UDS socket. |
+| `--http <addr>` | — | — | **Removed (#6289).** Accepted only so the daemon can refuse it by name; see above. |
+
+Exactly one of `--stdio` and `--socket` is required — there is no default
+transport, because the default used to be a TCP listener.
 | `--batch-size <n>` | 64 | `TRUSTY_EMBED_BATCH_SIZE` | Max texts per ONNX batch. |
 | `--batch-window-ms <ms>` | 10 | `TRUSTY_EMBED_BATCH_WINDOW_MS` | Coalescing window for concurrent requests. |
 
@@ -164,16 +163,6 @@ longer produced by this crate standalone — it is installed solely via
 crate is still published to crates.io as a **library** for dependent crates.
 
 Override with `TRUSTY_EMBEDDER=in-process` to use the legacy in-process path.
-
-### Manual HTTP remote
-
-```bash
-# Start the embedding daemon manually
-trusty-embedderd --http 127.0.0.1:7890
-
-# Point trusty-search at it
-TRUSTY_EMBEDDER=http://127.0.0.1:7890 trusty-search start
-```
 
 ### Manual UDS remote
 

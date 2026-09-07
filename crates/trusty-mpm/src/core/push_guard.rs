@@ -260,7 +260,7 @@ fn write_hook_atomically(hooks_dir: &Path, hook_path: &Path) -> Result<(), Strin
 /// a no-op, and a `warn!` naming the reason on a refusal or error. Never
 /// returns a value: no caller may fail a clone over hook installation.
 /// Test: `crates/trusty-mpm/tests/push_guard_hook.rs` (behaviour) and
-/// `provisioner::workspace::tests::ensure_base_checkout_installs_push_guard`
+/// `daemon::managed_routes::inproject::tests` base-clone coverage
 /// (call-site wiring).
 pub fn install_and_log(repo_path: &Path) {
     match install_pre_push_guard(repo_path) {

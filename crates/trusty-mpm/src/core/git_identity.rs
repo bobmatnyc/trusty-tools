@@ -38,7 +38,7 @@
 //! `core::gh_account::configured_account_pair`) — runs the verify/correct
 //! check on the Tokio blocking pool (it may shell out to `gh`) BEFORE
 //! returning, so a wrong-account `config_dir` can never reach the clone/push
-//! `RealGitBackend` performs. `spawn_managed_cloned` and the local→managed
+//! `RealGitBackend` performs. The catalog sync and the local→managed
 //! redirect path (`daemon::managed_routes::lifecycle`) both call this instead
 //! of the plain resolver.
 
@@ -222,7 +222,7 @@ pub fn select_github_config_for<'a>(
 /// `config_dir` may itself have the WRONG account active (the exact #2081
 /// incident shape), and only a real `gh auth status` check inside that
 /// directory can catch it. The daemon's two spawn paths
-/// (`spawn_managed_cloned`, the local→managed redirect) both provision a
+/// (the catalog sync, the local→managed redirect) both provision a
 /// clone via `RealGitBackend` using the identity this resolves — enforcing
 /// HERE, before either call, means a wrong-account `config_dir` can never
 /// reach a clone/push. The check runs on `tokio::task::spawn_blocking` (it

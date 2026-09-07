@@ -6,7 +6,8 @@
 //! `commands::guided_inplace::run_inplace_relaunch` — gated on
 //! `workspace_path.is_dir()` alone and then acted on the directory as if it
 //! were live. `is_dir()` is blind to the failure mode #4204 observed on
-//! 2026-07-27: worktree `.base/.worktrees/f443c12d-…` had its `.git` and its
+//! 2026-07-27: worktree `.base/.worktrees/f443c12d-…` (the pre-#4270 layout —
+//! there is no `.base` any more) had its `.git` and its
 //! entire source tree stripped and was absent from `git worktree list`, yet the
 //! directory node survived — so `is_dir()` returned `true`, and 45 files were
 //! recomposed into the husk's `.claude/agents/` while a `claude` process sat on
@@ -20,9 +21,11 @@
 //!
 //! 1. `.git` IS NOT A DIRECTORY IN A LINKED WORKTREE. `git worktree add` writes
 //!    `.git` as a FILE containing a `gitdir:` pointer (mirrored by
-//!    `provisioner::workspace::FakeGitBackend::worktree_add`). Every workspace
-//!    the provisioner creates is a linked worktree under
-//!    `<project>/.base/.worktrees/<session-id>`, so a guard spelled
+//!    `daemon::managed_routes::inproject::create_session_worktree`). Every
+//!    workspace trusty-mpm creates is a linked worktree under
+//!    `<project>/.worktrees/<name>` — since #4270 the base checkout IS the
+//!    project directory and the worktrees sit beside it, with no `.base`
+//!    intermediate — so a guard spelled
 //!    `.join(".git").is_dir()` would reject EVERY legitimate managed workspace —
 //!    the exact inverse of the bug. This module stats the `.git` name and
 //!    accepts whatever it finds: file, directory, or symlink.
@@ -141,8 +144,8 @@ impl std::fmt::Display for WorkspaceLiveness {
 /// is unaffected. (2) THE EXPECTATION RULE — a missing `.git`
 /// is evidence of death only where one is owed, which is true iff
 /// `workspace_owned || is_session_worktree(path)`: `workspace_owned` means
-/// `WorkspaceProvisioner::provision_in` created this directory (it takes a
-/// mandatory `repo_url` and always finishes with `GitBackend::worktree_add`, so
+/// `inproject::create_session_worktree` created this directory (it always
+/// finishes with a real `git worktree add`, so
 /// an owned workspace is ALWAYS a checkout), and `is_session_worktree`'s
 /// `.worktrees/<id>` path shape is only ever produced by `git worktree add`.
 /// This is deliberately the SAME predicate the #1511 ownership gate uses — it
@@ -205,7 +208,7 @@ mod tests {
     use tempfile::TempDir;
 
     /// Build `<tmp>/.worktrees/<leaf>` so `is_session_worktree` matches, exactly
-    /// as `WorkspaceProvisioner::provision_in` lays a managed worktree out.
+    /// as `inproject::create_session_worktree` lays a managed worktree out.
     fn worktree_shaped(base: &TempDir, leaf: &str) -> std::path::PathBuf {
         let p = base
             .path()

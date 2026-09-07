@@ -359,13 +359,13 @@ mod tests {
     /// Make `dir` look like a LIVE linked git worktree (#4204).
     ///
     /// Why: every workspace this sweep legitimately serves was created by
-    /// `GitBackend::worktree_add`, which writes `.git` as a FILE holding a
+    /// `inproject::create_session_worktree`, which writes `.git` as a FILE holding a
     /// `gitdir:` pointer — NOT a directory. The fixtures below must model that,
     /// or they would silently prove the opposite of what they claim (and a
     /// `.join(".git").is_dir()`-shaped guard would sail through them).
     /// What: writes a one-line `gitdir:` pointer file, mirroring both real
     /// `git worktree add` output and
-    /// `provisioner::workspace::FakeGitBackend::worktree_add`.
+    /// `daemon::managed_routes::inproject::create_session_worktree`.
     /// Test: used by `sweep_retracts_intact_workspace`,
     /// `sweep_serves_live_linked_worktree_with_git_file`,
     /// `sweep_ignores_the_project_manifest_exclude`.
@@ -698,7 +698,7 @@ mod tests {
     #[tokio::test]
     async fn sweep_serves_live_linked_worktree_with_git_file() {
         // THE ANTI-OVER-REFUSAL TEST, and it matters more than the one above.
-        // In a LINKED worktree — which is what `WorkspaceProvisioner` creates
+        // In a LINKED worktree — which is what the in-project spawn path creates
         // for every managed session — `.git` is a FILE containing a `gitdir:`
         // pointer, not a directory. A guard written as
         // `path.join(".git").is_dir()` would reject EVERY legitimate managed

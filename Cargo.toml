@@ -308,8 +308,14 @@ dotenvy = "0.15"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 # CLI / TUI / Telegram (trusty-mpm-tui, trusty-mpm-telegram).
-ratatui = "0.29"
-crossterm = "0.28"
+# #2872: 0.29 -> 0.30 (and crossterm 0.28 -> 0.29, 0.30's matching minimum).
+# ratatui 0.29 vendored `lru ^0.12`, whose 0.12.5 resolution carried
+# RUSTSEC-2026-0002; 0.30 splits into ratatui-core/ratatui-widgets and takes
+# `lru ^0.18` instead, so the 0.12 line leaves the graph entirely. Every TUI
+# crate in the workspace now names this one pin — `crates/trusty-code-tui`
+# no longer pins 0.30 locally, so there is exactly one ratatui major here.
+ratatui = "0.30"
+crossterm = "0.29"
 # `default-features = false` + `rustls` (issue #3538): teloxide's default
 # feature set pulls in `native-tls` -> `openssl-sys`, which needs a system
 # OpenSSL the Linux release environment doesn't have. Swap to the rustls

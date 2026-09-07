@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Why: the operator-visible ask was "show each main step: cloning, building
 /// instructions, loading agents, skills, etc." — a small closed enum matching
-/// the actual step boundaries in `provisioner::workspace::provision_in` and
+/// the actual step boundaries in `inproject::ensure_base_clone` and
 /// `core::session_launch::prepare_session_inner` is enough; this is
 /// deliberately NOT a generic progress-percentage system.
 /// What: eight variants covering clone → agent/skill deploy → instructions →
@@ -183,7 +183,7 @@ pub async fn scoped<F: Future>(emitter: StageEmitter, fut: F) -> F::Output {
 
 /// Publish a stage transition on the active [`StageEmitter`]'s channel, if any.
 ///
-/// Why: this is the ONLY seam the provisioning code (`provision_in`,
+/// Why: this is the ONLY seam the provisioning code (`ensure_base_clone`,
 /// `prepare_session_inner`, `spawn_managed`) needs to call — it is
 /// intentionally infallible and side-effect-free when no daemon SSE
 /// subscriber context is active, so sprinkling `emit(...)` calls through the
