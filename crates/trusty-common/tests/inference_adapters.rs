@@ -23,7 +23,8 @@ use trusty_common::inference::providers::{
 use trusty_common::inference::test_support::MockInferenceServer;
 use trusty_common::inference::{
     CacheControl, ChatMessage, ChatRequest, Configurator, FunctionDefinition, InferenceError,
-    ProviderId, ResolvedProvider, ToolChoice, ToolDefinition, register_default_factories,
+    ProviderId, ResolvedProvider, StructuredOutput, ToolChoice, ToolDefinition,
+    register_default_factories,
 };
 
 /// Clear every provider env var so the injected `MemoryKeyStore` is the only
@@ -782,6 +783,143 @@ async fn local_probe_passes_and_the_request_proceeds() {
     assert!(
         probe_index < post_index,
         "the probe must run BEFORE the chat POST, not after it"
+    );
+}
+
+// ── Structured output (#5588) ────────────────────────────────────────────────
+
+/// A schema on `ChatRequest` reaches an OpenAI-dialect provider as
+/// `response_format`.
+///
+/// Why (#5588): the inline `wire_body` tests prove the translation; this proves
+/// it survives the whole `Configurator` resolve → build → `chat` path and lands
+/// on a real socket. The gap the issue reports is a capability that was
+/// advertised and never sent, so the evidence that closes it has to be a
+/// captured request body, not a unit-tested helper.
+/// What: drives one `chat` through the mock and asserts the recorded POST body
+/// carries the full `response_format` envelope and none of the neutral key.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn openrouter_sends_the_schema_as_response_format() {
+    clear_provider_env();
+    let server = MockInferenceServer::spawn(200, text_response_body())
+        .await
+        .expect("spawn mock");
+
+    let base = server.url().to_string();
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::OpenRouter,
+        Box::new(move |r: &ResolvedProvider| openrouter::build(r, &base)),
+    );
+    let store = MemoryKeyStore::new();
+    store
+        .set("openrouter", "sk-or-test") // pragma: allowlist secret
+        .expect("store key");
+    let adapter = cfg
+        .build("openrouter/openai/gpt-4o-mini", &store)
+        .expect("build openrouter");
+
+    let mut req = ChatRequest::new(
+        "openai/gpt-4o-mini",
+        vec![ChatMessage::user("verdict please")],
+    );
+    req.response_schema = Some(StructuredOutput::new(
+        "review_output",
+        json!({
+            "type": "object",
+            "properties": { "verdict": { "type": "string" } },
+            "required": ["verdict"],
+            "additionalProperties": false,
+        }),
+    ));
+    adapter.chat(&req).await.expect("chat ok");
+
+    let sent = server.last_request().expect("a request was sent");
+    let body = sent.body.expect("json body");
+    assert_eq!(body["response_format"]["type"], "json_schema", "{body}");
+    assert_eq!(
+        body["response_format"]["json_schema"]["name"], "review_output",
+        "{body}"
+    );
+    assert_eq!(
+        body["response_format"]["json_schema"]["strict"], true,
+        "{body}"
+    );
+    assert_eq!(
+        body["response_format"]["json_schema"]["schema"]["required"][0], "verdict",
+        "{body}"
+    );
+    assert!(
+        body.get("response_schema").is_none(),
+        "the neutral key must not reach the wire — {body}"
+    );
+}
+
+/// A provider that cannot constrain output refuses the request without opening
+/// a socket.
+///
+/// Why (#5588): "raised before any network call" is the property that makes the
+/// refusal safe to introduce — a caller that gets an error has spent nothing and
+/// can re-route. Asserting the error variant alone would not prove it; the mock
+/// having recorded ZERO requests does. Local is the sharpest case because its
+/// adapter normally issues a liveness probe first, so a guard placed after the
+/// probe would still cost a round-trip and this assertion would fail.
+/// What: point a Local adapter (registry `structured_output = false`) at the
+/// mock, send a schema-carrying request, assert the typed variant and that
+/// `server.requests()` is empty.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn unsupported_capability_is_raised_before_any_network_call() {
+    clear_provider_env();
+    let server = MockInferenceServer::spawn(200, text_response_body())
+        .await
+        .expect("spawn mock");
+
+    let base = format!("{}/v1", server.url());
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::Local,
+        Box::new(move |r: &ResolvedProvider| {
+            local::build(
+                r,
+                LocalConfig {
+                    base_url: base.clone(),
+                    auth: None,
+                },
+            )
+        }),
+    );
+    let store = MemoryKeyStore::new();
+    let adapter = cfg.build("local/llama3.1", &store).expect("build local");
+
+    let mut req = ChatRequest::new("local/llama3.1", vec![ChatMessage::user("ping")]);
+    req.response_schema = Some(StructuredOutput::new("verdict", json!({"type": "object"})));
+
+    let Err(err) = adapter.chat(&req).await else {
+        panic!("a schema must be refused, never dropped");
+    };
+    assert!(
+        matches!(
+            err,
+            InferenceError::UnsupportedCapability {
+                provider: ProviderId::Local,
+                capability: "structured_output"
+            }
+        ),
+        "{err}"
+    );
+    assert!(err.is_alarm(), "a mis-routed schema needs an operator");
+    assert!(!err.is_retryable(), "the same provider will refuse forever");
+
+    let requests = server.requests();
+    assert!(
+        requests.is_empty(),
+        "the refusal must precede every network call, including the liveness probe — got {:?}",
+        requests
+            .iter()
+            .map(|r| format!("{} {}", r.method, r.path))
+            .collect::<Vec<_>>()
     );
 }
 

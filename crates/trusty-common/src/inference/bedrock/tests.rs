@@ -138,6 +138,50 @@ fn map_tool_choice_function() {
     assert_eq!(v, json!({"tool": {"name": "search_code"}}));
 }
 
+/// Bedrock refuses a schema-carrying request instead of dropping the schema.
+///
+/// Why (#5588): the Converse API has no schema-constrained-output parameter, so
+/// `build_converse_parts` would have discarded `response_schema` in silence and
+/// returned prose the caller then parsed as validated JSON. The registry flag
+/// says `false` for Bedrock and the guard makes that answer binding — asserted
+/// here on the CONVERSION side, before `chat` reaches an AWS client, because a
+/// guard that fires after the client is built is not "before any network call".
+/// What: assert the registry flag, then that the guard rejects a schema-carrying
+/// request with the typed variant and accepts the same request without one.
+/// Test: this test.
+#[test]
+fn schema_request_is_refused_before_any_aws_client_is_built() {
+    let a = BedrockAdapter::new(None);
+    assert!(
+        !a.supports_structured_output(),
+        "Converse has no response-format parameter"
+    );
+
+    let mut req = minimal_request(vec![ChatMessage::user("hi")]);
+    req.response_schema = Some(crate::inference::types::StructuredOutput::new(
+        "verdict",
+        json!({"type": "object"}),
+    ));
+    let Err(err) = a.ensure_structured_output_supported(&req) else {
+        panic!("a schema must be refused, never dropped");
+    };
+    assert!(
+        matches!(
+            err,
+            crate::inference::InferenceError::UnsupportedCapability {
+                provider: crate::inference::registry::ProviderId::Bedrock,
+                capability: "structured_output"
+            }
+        ),
+        "{err}"
+    );
+
+    req.response_schema = None;
+    assert!(a.ensure_structured_output_supported(&req).is_ok());
+    // The conversion path itself stays unchanged for a schema-free request.
+    assert!(build_converse_parts(&req).is_ok());
+}
+
 // ─── Region resolution ──────────────────────────────────────────────────────
 
 #[tokio::test]

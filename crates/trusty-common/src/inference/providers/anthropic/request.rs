@@ -250,8 +250,53 @@ mod tests {
     use super::*;
     use crate::inference::types::CacheControl;
     use crate::inference::types::{
-        ChatMessage, FunctionCall, FunctionDefinition, ToolCall, ToolDefinition,
+        ChatMessage, FunctionCall, FunctionDefinition, StructuredOutput, ToolCall, ToolDefinition,
     };
+
+    /// A set `response_schema` becomes Anthropic's own `output_config.format`.
+    ///
+    /// Why (#5588): Anthropic constrains output through `output_config`, and its
+    /// `format` object takes the schema ALONE — sending the OpenAI envelope, or
+    /// the schema name, or a `strict` flag, is a 400. Asserting the absent keys
+    /// is as load-bearing as asserting the present one.
+    /// What: build a schema-carrying request and assert `output_config.format`
+    /// carries the schema, that no OpenAI `response_format` key appears, and that
+    /// the neutral `response_schema` key does not either.
+    /// Test: this test.
+    #[test]
+    fn response_schema_becomes_output_config() {
+        let mut req = ChatRequest::new("claude-sonnet-4-5", vec![ChatMessage::user("hi")]);
+        req.response_schema = Some(StructuredOutput::new(
+            "review_output",
+            json!({"type": "object", "additionalProperties": false}),
+        ));
+        let body = build_body(&req, 1024);
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(
+            body["output_config"]["format"]["schema"]["type"], "object",
+            "{body}"
+        );
+        assert!(
+            body["output_config"]["format"].get("name").is_none(),
+            "{body}"
+        );
+        assert!(
+            body["output_config"]["format"].get("strict").is_none(),
+            "{body}"
+        );
+        assert!(body.get("response_format").is_none(), "{body}");
+        assert!(body.get("response_schema").is_none(), "{body}");
+    }
+
+    /// Why: an unconditional `output_config` would be sent to models that do not
+    /// support structured outputs, turning every ordinary call into a 400.
+    /// Test: itself.
+    #[test]
+    fn output_config_absent_without_a_schema() {
+        let req = ChatRequest::new("claude-sonnet-4-5", vec![ChatMessage::user("hi")]);
+        let body = build_body(&req, 1024);
+        assert!(body.get("output_config").is_none(), "{body}");
+    }
 
     /// Why: `system` must be hoisted out of the message list to the top-level
     /// param, and `max_tokens` must always be present (Anthropic requires it),
