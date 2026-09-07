@@ -734,3 +734,88 @@ async fn drawers_list_reads_through_the_folded_method() {
     .expect("the folded method must read the same palace the service wrote");
     assert!(listed.is_array(), "drawers_list answers an array: {listed}");
 }
+
+/// Why (#6836): `list_palaces_with_counts` opens every palace on disk, and it
+/// ran those opens inline on a tokio worker. On a many-palace install that
+/// parks the executor for the whole sweep — every other request the daemon is
+/// serving stops until the last palace is open.
+/// What: a single-threaded runtime is the instrument. A concurrent heartbeat
+/// samples `registry.len()` — how many palaces the sweep has opened so far —
+/// and can only run when the executor is free. If the opens run inline the
+/// heartbeat sees 0 before the loop and never again during it, so no partial
+/// count is observable; with the opens on the blocking pool each per-palace
+/// `await` releases the executor and the partial counts appear.
+/// Test: itself. It fails on the pre-#6836 inline loop, where the recorded set
+/// is `{0}`.
+#[tokio::test]
+async fn list_palaces_with_counts_opens_palaces_off_the_executor() {
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    // Well under the registry's 64-handle LRU cap, so nothing is evicted
+    // mid-sweep and `len()` only ever grows.
+    const PALACES: usize = 12;
+
+    let (svc, state) = service();
+    for i in 0..PALACES {
+        svc.create_palace(
+            palace_body(&format!("sweep-exec-{i}")),
+            ActivitySource::Http,
+        )
+        .await
+        .expect("create palace");
+    }
+    let root = state.data_root.clone();
+    drop(svc);
+    drop(state);
+
+    // A state that has opened nothing: every open in the sweep is a real one,
+    // so `registry.len()` is a live count of the sweep's progress.
+    let cold = AppState::new(root);
+    cold.set_ready();
+    assert!(
+        cold.registry.list().is_empty(),
+        "the fixture must start cold, or the handle count measures nothing"
+    );
+
+    let seen: Arc<Mutex<BTreeSet<usize>>> = Arc::new(Mutex::new(BTreeSet::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let heartbeat = {
+        let seen = Arc::clone(&seen);
+        let stop = Arc::clone(&stop);
+        let registry = Arc::clone(&cold.registry);
+        tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                seen.lock().expect("heartbeat lock").insert(registry.len());
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    let rows = MemoryService::new(cold.clone())
+        .list_palaces_with_counts()
+        .await
+        .expect("list_palaces_with_counts");
+    stop.store(true, Ordering::Relaxed);
+    heartbeat.await.expect("heartbeat task");
+
+    assert_eq!(rows.len(), PALACES, "every palace must get a row: {rows:?}");
+    assert!(
+        rows.iter().all(|(_, row)| row.is_ok()),
+        "every palace here is readable: {rows:?}"
+    );
+
+    let seen = seen.lock().expect("seen lock");
+    let partial: Vec<usize> = seen
+        .iter()
+        .copied()
+        .filter(|n| *n > 0 && *n < PALACES)
+        .collect();
+    assert!(
+        !partial.is_empty(),
+        "a concurrent task never saw the sweep part-way through, so the opens \
+         ran on the executor thread and nothing else could make progress \
+         (#6836). Handle counts observed: {seen:?}"
+    );
+}
