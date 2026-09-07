@@ -911,6 +911,74 @@ fn backfill_ai_detection_commits_repairs_house_footer_and_openhands() {
     }
 }
 
+/// Why: #4418 — the repair command is the path an operator runs to fix a
+/// database without a full walk, so it has to write the new column too. It
+/// carries a second hazard the collect path does not: it rewrites a row only
+/// when the verdict differs, and on a real corpus the tool and mode already
+/// agree while the method is NULL. Diffing on tool and mode alone would skip
+/// exactly the rows the repair exists for, and report "0 updated" while every
+/// method stayed empty.
+/// What: seeds one commit per builtin scope plus a human commit, runs the
+/// repair, and asserts each recorded method names the family that matched and
+/// the human commit records none. The email row is seeded with a bot AUTHOR
+/// address because `commits` has no committer column on this path.
+/// Test: this test itself.
+#[test]
+fn backfill_ai_detection_commits_records_the_detection_method() {
+    let mut db = Database::open_in_memory().expect("open");
+
+    seed(
+        &db,
+        "trailer1",
+        "feat: add auth\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+    );
+    seed(
+        &db,
+        "footer1",
+        "docs: add website link to README (#5330)\n\n\
+         🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools",
+    );
+    seed(&db, "human2", "chore: bump dep");
+    db.connection()
+        .execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, repository) \
+             VALUES ('email1', 'n', 'openhands@all-hands.dev', '2024-01-01T00:00:00Z', \
+                     'Fix flaky test', 'r')",
+            [],
+        )
+        .expect("insert bot-authored commit");
+
+    // A row a pre-#4418 collector left behind: the tool and mode are already
+    // right, only the method is missing. Nothing but the method can mark it.
+    db.connection()
+        .execute(
+            "UPDATE commits SET is_ai_assisted = 1, ai_tool = 'claude', \
+             agentic_mode = 'full_agentic' WHERE sha = 'trailer1'",
+            [],
+        )
+        .expect("pre-set the trailer row's verdict");
+
+    backfill_ai_detection_commits(&mut db, false, &[], None, None).expect("backfill ai-detection");
+
+    let method = |sha: &str| -> Option<String> {
+        db.connection()
+            .query_row(
+                "SELECT ai_detection_method FROM commits WHERE sha = ?1",
+                params![sha],
+                |r| r.get(0),
+            )
+            .expect("read method")
+    };
+    assert_eq!(
+        method("trailer1").as_deref(),
+        Some("trailer"),
+        "a row whose tool and mode already agreed must still be repaired"
+    );
+    assert_eq!(method("footer1").as_deref(), Some("message"));
+    assert_eq!(method("email1").as_deref(), Some("email"));
+    assert_eq!(method("human2"), None, "no verdict, no method");
+}
+
 /// Why: `backfill_top_level` must fill `top_level_category` for existing
 /// classifications where it is NULL, using the built-in taxonomy.
 /// What: seeds a classification with subcategory='bugfix' and

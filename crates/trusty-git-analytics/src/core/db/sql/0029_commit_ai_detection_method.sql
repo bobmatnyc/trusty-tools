@@ -1,0 +1,37 @@
+-- Migration v29: ai_detection_method column for issue #4418.
+--
+-- `commits.is_ai_assisted` is written by a multi-signal detector: a
+-- `Co-Authored-By:` trailer, a body footer such as `Generated with trusty-mpm`,
+-- and an agent-identifying author/committer address all set it to 1. The stored
+-- row says the verdict but not which of those fired, so a downstream consumer
+-- cannot separate the subset it can independently re-derive (the literal
+-- trailer) from the subset it cannot. cto-reports anchored a published estimate
+-- on `is_ai_assisted` read as a trailer-only floor and had to retract the
+-- bracket when that reading turned out to be an assumption rather than a
+-- property of the column.
+--
+-- This column records the signal family of the marker that produced the
+-- verdict: 'trailer', 'message', or 'email' — the three values of
+-- `collect::ai_marker_config::MarkerScope`, which is what a marker is matched
+-- against. NULL means no marker matched, so it is NULL for exactly the rows
+-- where `is_ai_assisted = 0`.
+--
+-- NULLABLE ON PURPOSE, and never NOT NULL. Two reasons:
+--   1. NULL is the honest value for a commit no marker claimed, and for a row
+--      written before this column existed.
+--   2. An older tga reading this database names its columns in every SELECT
+--      and INSERT, so a nullable column it never mentions is invisible to it.
+--      A NOT NULL column with no default would instead break that binary's
+--      INSERT, which is what "additive only" has to rule out.
+--
+-- Existing rows are NOT backfilled by this file. `collect::ai_markers::
+-- DETECTOR_VERSION` moves 1 -> 2 in the same change, so the #6748
+-- re-classification pass claims every stored row as stale and repopulates the
+-- column on the next `tga collect`. `tga backfill ai-detection-commits` writes
+-- it too, for an operator who wants the repair without a walk.
+--
+-- No index: the column is a per-row attribute read alongside the row, never a
+-- selective filter — `is_ai_assisted` and `ai_detector_version` are what the
+-- scans key on, and both already have theirs.
+
+ALTER TABLE commits ADD COLUMN ai_detection_method TEXT;

@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chrono::{DateTime, Datelike, Utc};
 
 use crate::collect::ai_attribution::AgenticMode;
+use crate::collect::ai_marker_config::MarkerScope;
 use crate::report::models::{
     AuthorSummary, RepositorySummary, UntrackedCommit, WeeklyActivity, WeeklyCategorization,
     WeeklyMetrics,
@@ -111,6 +112,13 @@ pub(super) struct WeekAcc {
     pub(super) agentic_count: usize,
     /// IDE-assisted commits (issue #1113: `agentic_mode = 'ide_assisted'`).
     pub(super) ide_assisted_count: usize,
+    /// AI-assisted commits whose evidence was a `Co-Authored-By:` trailer
+    /// (#4418).
+    pub(super) ai_by_trailer: usize,
+    /// AI-assisted commits whose evidence was a message-body footer (#4418).
+    pub(super) ai_by_message: usize,
+    /// AI-assisted commits whose evidence was an author address (#4418).
+    pub(super) ai_by_email: usize,
 }
 
 /// Cross-developer per-week running totals during accumulation.
@@ -239,6 +247,9 @@ pub(super) fn accumulate_rows(rows: &[CommitRow], flags: &RowFlags) -> Accumulat
             complexity_count: 0,
             agentic_count: 0,
             ide_assisted_count: 0,
+            ai_by_trailer: 0,
+            ai_by_message: 0,
+            ai_by_email: 0,
         });
         w.commits += 1;
         w.insertions += row.insertions;
@@ -263,6 +274,22 @@ pub(super) fn accumulate_rows(rows: &[CommitRow], flags: &RowFlags) -> Accumulat
         // so the weekly activity report can surface AI-adoption rates.
         if row.is_ai_assisted {
             w.ai_assisted += 1;
+        }
+        // #4418: break that count down by the signal family that produced it,
+        // so a consumer can cut the trailer-only subset — the one it could
+        // re-derive from commit messages alone — out of the AI-assisted total
+        // instead of assuming the total already is that subset.
+        //
+        // The three sum to `ai_assisted` on a corpus the current detector
+        // wrote. They fall short of it on a database whose rows still predate
+        // migration v29, where the method is NULL and the family is genuinely
+        // unrecorded — which is why the shortfall is left visible rather than
+        // being assigned to a family.
+        match row.ai_detection_method {
+            Some(MarkerScope::Trailer) => w.ai_by_trailer += 1,
+            Some(MarkerScope::Message) => w.ai_by_message += 1,
+            Some(MarkerScope::Email) => w.ai_by_email += 1,
+            None => {}
         }
         // Issue #1113: count agentic/IDE-assisted commits per bucket.
         match row.agentic_mode {
@@ -457,6 +484,10 @@ pub(super) fn materialize_weekly_activity(
                 // Issue #1113: agentic-mode commit counts.
                 agentic_count: w.agentic_count,
                 ide_assisted_count: w.ide_assisted_count,
+                // #4418: the AI-assisted count split by signal family.
+                ai_trailer_count: w.ai_by_trailer,
+                ai_message_count: w.ai_by_message,
+                ai_email_count: w.ai_by_email,
                 // Issue #660: net-new commits excluding reverts. `commit_count`
                 // is left untouched above so downstream consumers relying on
                 // the gross total keep working unmodified.

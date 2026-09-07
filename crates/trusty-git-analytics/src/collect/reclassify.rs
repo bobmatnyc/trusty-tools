@@ -22,6 +22,7 @@
 
 use rusqlite::params;
 
+use crate::collect::ai_marker_config::MarkerScope;
 use crate::collect::ai_markers::{detect, CommitSignals, Detection, DETECTOR_VERSION};
 use crate::collect::errors::Result;
 use crate::core::db::Database;
@@ -40,7 +41,23 @@ pub const RECLASSIFY_BATCH: usize = 1_000;
 /// alone would need one. See [`reclassify_batch_with`] for why `INDEXED BY` is
 /// there.
 /// Test: `tests::the_scan_uses_the_index_on_a_populated_database`.
-const SCAN_SQL: &str = "SELECT id, message, ai_tool, agentic_mode, author_email FROM commits \
+/// One row of [`SCAN_SQL`], in its column order: id, message, stored `ai_tool`,
+/// stored `agentic_mode`, `author_email`, stored `ai_detection_method`.
+type ScannedRow = (i64, String, Option<String>, String, String, Option<String>);
+
+/// One re-classified row awaiting its UPDATE: id, `is_ai_assisted`, `ai_tool`,
+/// `agentic_mode`, `ai_detection_method`, and whether the verdict moved.
+type PendingWrite = (
+    i64,
+    i64,
+    Option<String>,
+    &'static str,
+    Option<&'static str>,
+    bool,
+);
+
+const SCAN_SQL: &str =
+    "SELECT id, message, ai_tool, agentic_mode, author_email, ai_detection_method FROM commits \
      INDEXED BY idx_commits_ai_detector_version \
      WHERE ai_detector_version < ?1 \
      ORDER BY ai_detector_version, id LIMIT ?2";
@@ -50,7 +67,8 @@ const SCAN_SQL: &str = "SELECT id, message, ai_tool, agentic_mode, author_email 
 /// Why: the operator notice needs both numbers — how much was stale, and how
 /// much of it the current detector actually reads differently.
 /// What: `stamped` counts rows advanced to [`DETECTOR_VERSION`]; `changed`
-/// counts the subset whose `ai_tool` or `agentic_mode` moved.
+/// counts the subset whose `ai_tool`, `agentic_mode`, or (since #4418)
+/// `ai_detection_method` moved.
 /// Test: `tests::stale_rows_are_reclassified_and_current_rows_are_not`.
 ///
 /// `#[non_exhaustive]` because a later counter — rows skipped, batches
@@ -146,12 +164,11 @@ pub fn reclassify_batch_with<F>(
 where
     F: FnMut(&CommitSignals<'_>) -> Detection,
 {
-    // (id, is_ai_assisted, ai_tool, agentic_mode, verdict_changed)
-    let mut pending: Vec<(i64, i64, Option<String>, &'static str, bool)> = Vec::new();
+    let mut pending: Vec<PendingWrite> = Vec::new();
     {
         let conn = db.connection();
         let mut stmt = conn.prepare(SCAN_SQL)?;
-        let rows: Vec<(i64, String, Option<String>, String, String)> = stmt
+        let rows: Vec<ScannedRow> = stmt
             .query_map(params![DETECTOR_VERSION, batch as i64], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -161,11 +178,14 @@ where
                     row.get::<_, Option<String>>(3)?
                         .unwrap_or_else(|| "none".to_string()),
                     row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    // #4418: NULL on every row written before v29, which is
+                    // what makes the generation bump repopulate them.
+                    row.get::<_, Option<String>>(5)?,
                 ))
             })?
             .collect::<std::result::Result<_, _>>()?;
 
-        for (id, message, stored_tool, stored_mode, author_email) in rows {
+        for (id, message, stored_tool, stored_mode, author_email, stored_method) in rows {
             // #6748: `commits` has no committer_email column, so the email
             // family sees the author address only on this path — the same
             // limitation `tga backfill ai-detection-commits` carries.
@@ -176,9 +196,12 @@ where
             });
             let tool = detection.tool;
             let mode = detection.mode.as_str();
-            let changed = tool != stored_tool.as_deref() || mode != stored_mode;
+            let method = detection.method.map(MarkerScope::as_str);
+            let changed = tool != stored_tool.as_deref()
+                || mode != stored_mode
+                || method != stored_method.as_deref();
             let is_ai = i64::from(tool.is_some());
-            pending.push((id, is_ai, tool.map(str::to_string), mode, changed));
+            pending.push((id, is_ai, tool.map(str::to_string), mode, method, changed));
         }
     }
 
@@ -195,10 +218,10 @@ where
     {
         let mut up = tx.prepare(
             "UPDATE commits SET is_ai_assisted = ?1, ai_tool = ?2, agentic_mode = ?3, \
-             ai_detector_version = ?4 WHERE id = ?5",
+             ai_detector_version = ?4, ai_detection_method = ?5 WHERE id = ?6",
         )?;
-        for (id, is_ai, tool, mode, _) in &pending {
-            up.execute(params![is_ai, tool, mode, DETECTOR_VERSION, id])?;
+        for (id, is_ai, tool, mode, method, _) in &pending {
+            up.execute(params![is_ai, tool, mode, DETECTOR_VERSION, method, id])?;
         }
     }
     tx.commit()?;
@@ -258,6 +281,67 @@ mod tests {
         assert_eq!(tool.as_deref(), Some("claude"));
         assert_eq!(mode, "full_agentic");
         assert_eq!(version, DETECTOR_VERSION);
+    }
+
+    /// #4418: a row stored by generation 1 has a NULL `ai_detection_method`,
+    /// and the generation bump is the only thing that fills it in.
+    ///
+    /// Why: the column ships empty on every deployed database. If the
+    /// re-classification pass wrote the other three verdict columns and left
+    /// this one alone, the corpus would carry a permanently NULL method that
+    /// no `tga collect` ever repairs — the column would exist and answer
+    /// nothing, which is the state #4418 was filed against.
+    /// What: stores a house-footer commit at generation 1 with a correct
+    /// tool and mode and a NULL method — the shape a pre-#4418 collector left
+    /// behind — and asserts the pass fills the method in and counts the row as
+    /// changed even though nothing else about the verdict moved.
+    /// Test: this test itself.
+    #[test]
+    fn a_generation_1_row_gains_its_detection_method() {
+        let mut db = Database::open_in_memory().expect("open db");
+        let footer = "docs: link the website (#5330)\n\n\
+                      🤖🤖🤖 Generated with trusty-mpm — \
+                      https://github.com/bobmatnyc/trusty-tools\n";
+        db.connection()
+            .execute(
+                "INSERT INTO commits \
+                 (sha, author_name, author_email, timestamp, message, repository, \
+                  is_ai_assisted, ai_tool, agentic_mode, ai_detector_version, \
+                  ai_detection_method) \
+                 VALUES ('gen1', 'Ada', 'ada@example.com', '2026-01-01T00:00:00Z', ?1, \
+                         'testrepo', 1, 'trusty-mpm', 'full_agentic', 1, NULL)",
+                params![footer],
+            )
+            .expect("seed a generation-1 row");
+
+        let stats = reclassify_stale(&mut db).expect("reclassify");
+
+        assert_eq!(stats.stamped, 1);
+        assert_eq!(
+            stats.changed, 1,
+            "the method moved from NULL, so the row changed even though the \
+             tool and mode did not"
+        );
+        let method: Option<String> = db
+            .connection()
+            .query_row(
+                "SELECT ai_detection_method FROM commits WHERE sha = 'gen1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read method");
+        assert_eq!(method.as_deref(), Some("message"));
+        let (is_ai, tool, mode, version) = verdict(&db, "gen1");
+        assert_eq!(
+            (is_ai, tool.as_deref(), mode.as_str()),
+            (1, Some("trusty-mpm"), "full_agentic"),
+            "the rest of the verdict is unchanged"
+        );
+        assert_eq!(version, DETECTOR_VERSION);
+
+        // A second pass has nothing left to claim.
+        let again = reclassify_stale(&mut db).expect("reclassify twice");
+        assert_eq!(again.stamped, 0);
     }
 
     /// Why: the settled-corpus claim is about a query PLAN, and a plan is not

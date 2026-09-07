@@ -83,6 +83,14 @@ pub fn write_weekly_csv(data: &ReportData, output_dir: &Path) -> Result<PathBuf>
         // Issue #660: net-new commit count excluding reverts, appended last
         // so existing column-index consumers are unaffected.
         "commit_count_net",
+        // #4418: `ai_assisted_count` split by the signal family that produced
+        // each verdict, so a consumer can cut the trailer-only subset out of
+        // it rather than reading the total as if it already were that subset.
+        // Appended after `commit_count_net` for the same index-stability
+        // reason.
+        "ai_trailer_count",
+        "ai_message_count",
+        "ai_email_count",
     ])?;
     for row in &data.weekly_activity {
         let categories = serialize_categories(&row.categories);
@@ -107,6 +115,9 @@ pub fn write_weekly_csv(data: &ReportData, output_dir: &Path) -> Result<PathBuf>
             &row.ai_assisted_count.to_string(),
             avg_complexity_str.as_str(),
             &row.commit_count_net.to_string(),
+            &row.ai_trailer_count.to_string(),
+            &row.ai_message_count.to_string(),
+            &row.ai_email_count.to_string(),
         ])?;
     }
     w.flush()?;

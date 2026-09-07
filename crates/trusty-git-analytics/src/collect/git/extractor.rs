@@ -12,6 +12,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rusqlite::params;
 use tracing::{debug, info, warn};
 
+use crate::collect::ai_marker_config::MarkerScope;
 use crate::collect::ai_markers::{detect, CommitSignals, DETECTOR_VERSION};
 use crate::collect::collector::{FetchOutcome, PerRepoFetch};
 use crate::collect::errors::{CollectError, Result};
@@ -607,12 +608,18 @@ impl GitCollector {
             let ai_tool = detection.tool;
             let is_ai_assisted = ai_tool.is_some();
             let agentic_mode = detection.mode;
+            // #4418: which signal family carried the evidence, so a consumer
+            // can separate the trailer-matched subset it can re-derive itself
+            // from the footer- and address-matched rows it cannot.
+            let ai_detection_method = detection.method.map(MarkerScope::as_str);
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO commits \
                  (sha, author_name, author_email, timestamp, message, repository, \
                   files_changed, insertions, deletions, is_merge, ticketed, ticket_id, \
-                  is_ai_assisted, ai_tool, agentic_mode, ai_detector_version) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                  is_ai_assisted, ai_tool, agentic_mode, ai_detector_version, \
+                  ai_detection_method) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
+                         ?16, ?17)",
                 params![
                     sha_str,
                     author_name,
@@ -632,6 +639,7 @@ impl GitCollector {
                     // #6748: record which detector generation produced this
                     // verdict, so a later marker-set change can find the row.
                     DETECTOR_VERSION,
+                    ai_detection_method,
                 ],
             )?;
 
@@ -1058,6 +1066,86 @@ mod tests {
         let (mode, tool, is_ai) = stored_detection(&db, &human.to_string());
         assert_eq!(mode, "none", "a plain commit must stay unclassified");
         assert!(tool.is_none());
+        assert_eq!(is_ai, 0);
+    }
+
+    fn stored_method(db: &Database, sha_prefix: &str) -> Option<String> {
+        db.connection()
+            .query_row(
+                "SELECT ai_detection_method FROM commits WHERE sha LIKE ?1 || '%'",
+                params![sha_prefix],
+                |r| r.get(0),
+            )
+            .expect("read ai_detection_method")
+    }
+
+    /// #4418: the walk records which signal family produced each AI verdict.
+    ///
+    /// Why: this is the column a downstream consumer reads. Proving the
+    /// detector returns a method proves nothing about whether the INSERT
+    /// carries it, and the INSERT is where a forgotten placeholder would
+    /// silently leave every row NULL while every detector test stayed green.
+    /// What: walks one commit per builtin scope — a `Co-Authored-By:` trailer,
+    /// the house footer, and a bot committer address — plus a plain human
+    /// commit, then reads the stored strings back out of `commits`.
+    /// Test: this test itself.
+    #[test]
+    fn walk_records_the_ai_detection_method() {
+        let (repo_dir, repo) = init_repo("detection-method");
+        let ts = utc_seconds(2026, 8, 3, 12, 0, 0);
+        let trailer = commit_at(
+            &repo,
+            &repo_dir.path,
+            ts,
+            0,
+            "feat: add auth\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>\n",
+        );
+        let footer = commit_at(
+            &repo,
+            &repo_dir.path,
+            ts + 60,
+            0,
+            "docs: link the website (#5330)\n\n\
+             🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools\n",
+        );
+        let human = commit_at(&repo, &repo_dir.path, ts + 120, 0, "chore: bump dep\n");
+        let by_email = commit_with_identities(
+            &repo,
+            &repo_dir.path,
+            "Fix flaky integration test\n",
+            "human@example.com",
+            "openhands@all-hands.dev",
+        );
+
+        let mut db = open_in_memory_db();
+        make_collector(&repo_dir.path, None, None)
+            .collect_window(&mut db, None, None)
+            .expect("collect");
+
+        assert_eq!(
+            stored_method(&db, &trailer.to_string()).as_deref(),
+            Some("trailer")
+        );
+        assert_eq!(
+            stored_method(&db, &footer.to_string()).as_deref(),
+            Some("message"),
+            "the house footer is the family a consumer's own trailer regex \
+             cannot re-derive — the whole point of the column"
+        );
+        assert_eq!(
+            stored_method(&db, &by_email.to_string()).as_deref(),
+            Some("email")
+        );
+        assert_eq!(
+            stored_method(&db, &human.to_string()),
+            None,
+            "a commit with no AI verdict records no method"
+        );
+
+        // The method never contradicts the flag it explains.
+        let (_, _, is_ai) = stored_detection(&db, &footer.to_string());
+        assert_eq!(is_ai, 1);
+        let (_, _, is_ai) = stored_detection(&db, &human.to_string());
         assert_eq!(is_ai, 0);
     }
 

@@ -77,6 +77,46 @@ pub enum MarkerScope {
     Email,
 }
 
+impl MarkerScope {
+    /// Stable string for the `commits.ai_detection_method` TEXT column (#4418).
+    ///
+    /// Why: the signal family that produced a commit's AI verdict is the scope
+    /// of the marker that matched it, so the persisted discriminator and the
+    /// config-file vocabulary are the same three values. Giving the column its
+    /// own parallel enum would be a second spelling of one concept, free to
+    /// drift from this one on the next scope added.
+    /// What: the identity mapping onto this enum's own serde spellings, so a
+    /// `scope: trailer` line in a marker file and a `'trailer'` cell in the
+    /// database read as the same word.
+    /// Test: `tests::marker_scope_strings_round_trip`,
+    /// `tests::marker_scope_strings_match_the_yaml_spellings`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MarkerScope::Trailer => "trailer",
+            MarkerScope::Message => "message",
+            MarkerScope::Email => "email",
+        }
+    }
+}
+
+impl std::str::FromStr for MarkerScope {
+    type Err = ();
+
+    /// Inverse of [`MarkerScope::as_str`]; an unrecognised value is `Err(())`.
+    ///
+    /// A stored value this build has no name for means a newer tga wrote the
+    /// row. Callers read that as "no method recorded" rather than guessing one.
+    /// Test: `tests::marker_scope_strings_round_trip`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "trailer" => Ok(MarkerScope::Trailer),
+            "message" => Ok(MarkerScope::Message),
+            "email" => Ok(MarkerScope::Email),
+            _ => Err(()),
+        }
+    }
+}
+
 /// The classification an operator marker asserts when it matches.
 ///
 /// Why: [`AgenticMode`] carries a `None` variant that means "nothing matched",
@@ -339,6 +379,39 @@ mod tests {
             ]
         );
         assert_eq!(cfg.markers[1].mode, MarkerMode::IdeAssisted);
+    }
+
+    /// #4418: the persisted `commits.ai_detection_method` value must survive a
+    /// write and a read, or a downstream consumer filtering on `'trailer'`
+    /// silently selects nothing.
+    #[test]
+    fn marker_scope_strings_round_trip() {
+        for scope in [
+            MarkerScope::Trailer,
+            MarkerScope::Message,
+            MarkerScope::Email,
+        ] {
+            assert_eq!(scope.as_str().parse::<MarkerScope>(), Ok(scope));
+        }
+        assert_eq!("subject".parse::<MarkerScope>(), Err(()));
+        assert_eq!("".parse::<MarkerScope>(), Err(()));
+    }
+
+    /// #4418: the column vocabulary and the marker-file vocabulary are one set
+    /// of words. If `as_str` drifted from the serde spelling, an operator
+    /// reading `scope: email` in their own marker file would find a different
+    /// word in the column that marker wrote.
+    #[test]
+    fn marker_scope_strings_match_the_yaml_spellings() {
+        let cfg = MarkerConfig::from_yaml_str(
+            "markers:\n\
+             \x20 - { tool: a, mode: full_agentic, scope: trailer, pattern: x }\n\
+             \x20 - { tool: b, mode: ide_assisted, scope: message, pattern: y }\n\
+             \x20 - { tool: c, mode: full_agentic, scope: email, pattern: z }\n",
+        )
+        .expect("parses");
+        let spelled: Vec<&str> = cfg.markers.iter().map(|m| m.scope.as_str()).collect();
+        assert_eq!(spelled, vec!["trailer", "message", "email"]);
     }
 
     #[test]
