@@ -64,9 +64,9 @@ ADR-0018 governs bind-address reachability; ADR-0031 governs which local
 transport inter-crate callers use to reach an already-loopback-bound daemon —
 UDS for inter-crate same-host traffic, one shared HTTP server for everything
 external. **Migration has started but is not complete** — `trusty-review` (PR
-#6281) and `trusty-analyze` (#6287) have moved, see the progress note above;
-the inventory below still describes the live topology for the other four
-daemons. Whatever HTTP remains
+#6281) and `trusty-analyze` (#6287) have moved, and `trusty-embedderd` (#6289)
+retired its listener outright; see the progress note above. The inventory below
+still describes the live topology for the remaining daemons. Whatever HTTP remains
 under ADR-0031 stays governed by ADR-0018 exactly as written, and ADR-0031
 authorises no new off-loopback binding. If adopted it would *strengthen* this
 doctrine's goal: a loopback TCP port is reachable by any local process, a
@@ -76,7 +76,12 @@ doctrine's goal: a loopback TCP port is reachable by any local process, a
 
 1. **It is an inventory of HTTP surfaces, not of the whole transport topology.**
    One daemon has no HTTP surface and therefore no row: **trusty-embedderd**
-   (Unix socket + stdio). Its absence is correct here, not an omission.
+   (Unix socket + stdio). Its absence is correct here, not an omission — and
+   since #6289 it is also unconditional. It used to offer a `--http` mode on
+   `127.0.0.1:7890`, bound by default when no transport flag was given; ADR-0032
+   retired it rather than migrating it, because the daemon already served a
+   `0600` socket in a `0700` directory with an `ensure_peer_is_self` uid check
+   on every accept, and no in-repo consumer dialled the TCP one.
    #5329 removed a second, **trusty-bm25-daemon** — its per-palace Unix-socket
    JSON-RPC surface no longer exists at all, because the index it guarded now
    runs inside trusty-memory.

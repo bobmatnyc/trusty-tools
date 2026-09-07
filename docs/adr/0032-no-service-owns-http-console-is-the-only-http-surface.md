@@ -281,6 +281,25 @@ carve-out this ADR does not close.
   > agree. Still open for it: the console-hosted mount for `ui/dist`, which
   > this ADR's Scope leaves as follow-up work. Four daemons remain
   > (`trusty-search`, `trusty-memory`, `trusty-agents`, `trusty-mpm`).
+  >
+  > 🟡 **Progress note (2026-09-07, Refs #6289).** `trusty-embedderd` is the
+  > first crate this ADR reaches whose listener was RETIRED rather than
+  > migrated, and it was never in this ADR's Scope list — its `--http` mode on
+  > `127.0.0.1:7890` was a manual/dev-run opt-in that the original scoping
+  > missed, in the same class as `trusty-analyze`'s `--mcp-port`. It needed no
+  > migration: the daemon already served a hardened Unix socket
+  > (`bind_hardened`, `ensure_peer_is_self`) alongside its stdio sidecar
+  > transport, so ADR-0032's target shape was already built. What made the
+  > removal safe rather than merely tidy is that no in-repo consumer dialled
+  > it — the sole HTTP client was `trusty_common::embedder_client::
+  > RemoteEmbedderClient`, reachable only through `TRUSTY_EMBEDDER=http://…`,
+  > which no plist, install script, workflow or config in the repo sets. That
+  > client is deleted; `TRUSTY_EMBEDDER=http://…` is refused at trusty-search
+  > startup with a pointer at `unix:`; `--http` is refused by name rather than
+  > ignored; and `axum` leaves the crate's dependency graph. The sharper
+  > consequence is that the TCP bind was the DEFAULT — a bare
+  > `trusty-embedderd` with no flags took 7890 — so this closes a listener that
+  > opened without anyone asking for it.
 - ADR-0031 should be moved from Proposed to Accepted, or folded into this
   ADR's text, now that its central open question (adopt UDS?) is settled.
   **Recommendation, not a unilateral rewrite:** this ADR does not change

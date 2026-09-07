@@ -11848,15 +11848,12 @@ name = "trusty-embedderd"
 version = "0.3.12"
 dependencies = [
  "anyhow",
- "axum",
  "clap",
  "libc",
- "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "tower-http",
  "tracing",
  "tracing-subscriber",
  "trusty-common",
