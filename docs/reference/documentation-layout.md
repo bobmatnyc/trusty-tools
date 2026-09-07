@@ -73,8 +73,9 @@ as historical and link to the current replacement.
 The public website publishes only the allowlisted pages in
 [`docs/public-manifest.tsv`](../public-manifest.tsv). The manifest is a security
 and audience boundary, not an inventory of the internal documentation tree.
-`scripts/check_public_docs.sh --stale` validates its paths and retired-term
-ratchet.
+`scripts/check_public_docs.sh` validates its paths and, in the same run, each
+published page's content against the retired-term ratchet in
+`docs/public-stale-terms.tsv` (#5134 — no flag).
 
 ## Keeping documentation mapped to code
 

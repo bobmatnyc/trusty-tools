@@ -1,0 +1,11 @@
+# STALE fixture terms at the DEFAULT path the gate reads when no --stale-terms
+# is given: <root>/docs/public-stale-terms.tsv (#5134).
+#
+# It exists so the self-test can run the gate the way the pre-commit hook and
+# public-docs.yml run it — no --stale, no --stale-terms, no flag of any kind —
+# against pages this fixture tree controls. Those cases prove the WIRING; the
+# --stale-terms cases beside them prove the LOGIC, and one cannot stand in for
+# the other. Keep it in step with stale-terms.tsv.
+TERM	trusty-mpmd	there is no `trusty-mpmd` binary; use `tm daemon`.
+TERM	open[-_]mpm	renamed to `trusty-agents` (binary `tagent`).
+TERM	@FORMER_REPO_CLONE_URLS@	that repo was folded into `bobmatnyc/trusty-tools`.

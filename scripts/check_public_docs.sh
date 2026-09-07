@@ -28,9 +28,9 @@
 #     BAD-RECORD    a row whose first field is neither SECTION nor PAGE, or
 #                   whose field count is wrong
 #
-#   With `--stale` it additionally reads docs/public-stale-terms.tsv and fails
-#   on:
+#   It then reads docs/public-stale-terms.tsv and fails on:
 #     STALE         a published page contains a retired name or anti-pattern
+#     UNREADABLE    a published page could not be searched at all
 #     BAD-WAIVER    a waiver row is malformed, unexplained, dead, or off-count
 #     BAD-TERM      a TERM row is malformed, or its ERE cannot be built
 #
@@ -40,11 +40,17 @@
 #   human reading closely. A reader who copies `cargo install trusty-mpmd` off
 #   the public site gets an error, not a daemon.
 #
-#   It is OPT-IN and wired to nothing (issue #5125). The pre-commit hook and CI
-#   run this script with no arguments, which skips the pass entirely, because 10
-#   of the 27 published pages hit today and their repairs are in flight on other
-#   branches. Turning it on is a one-line change once those land; the self-test
-#   proves the logic against fixtures in the meantime.
+#   The pass is ON BY DEFAULT (issue #5134). It landed opt-in behind `--stale`
+#   (issue #5125) because 10 of the 27 published pages hit at the time and their
+#   repairs were in flight; those landed, and a flag every call site must
+#   remember is a gate that runs by accident. Both call sites — the `public-docs`
+#   pre-commit hook and .github/workflows/public-docs.yml — invoke this script
+#   with NO arguments, so neither can drift back into the weakened mode.
+#
+#   `--no-stale` is the one way off, and it is refused unless `--manifest` is
+#   also given. The committed manifest therefore cannot be checked without the
+#   STALE pass at all; only a fixture run (the self-test's manifest-shape cases,
+#   whose expectations are about SECTION/PAGE parsing) may disable it.
 #
 #   Scope is the published set — the sources of PAGE rows that passed every
 #   other check. Excluded trees may hold historical names, and often must.
@@ -64,16 +70,18 @@
 #   rendered because the site enumerates the manifest, never the tree.
 #
 # Usage:
-#   bash scripts/check_public_docs.sh                       # default manifest
+#   bash scripts/check_public_docs.sh                       # manifest + STALE
 #   bash scripts/check_public_docs.sh --manifest <path>     # explicit (self-test)
 #   bash scripts/check_public_docs.sh --root <path>         # resolve sources here
-#   bash scripts/check_public_docs.sh --stale               # add the STALE pass
-#   bash scripts/check_public_docs.sh --stale-terms <path>  # implies --stale
+#   bash scripts/check_public_docs.sh --stale               # explicit; the default
+#   bash scripts/check_public_docs.sh --stale-terms <path>  # override the terms file
+#   bash scripts/check_public_docs.sh --no-stale            # fixture runs ONLY
 #   bash scripts/check_public_docs.sh --help
 #
 # Exit: 0 when every listed page resolves inside the public boundary; 1 on any
 #   finding, with one `FAIL <CODE> line N: …` line per finding on stderr; 2 on a
-#   usage error or an unreadable manifest.
+#   usage error or an unreadable manifest — including `--no-stale` without
+#   `--manifest`, and `--no-stale` alongside `--stale`/`--stale-terms`.
 #
 #   A STALE finding's `line N` is the MANIFEST line that published the page; the
 #   page's own line number is in the message. A BAD-WAIVER or BAD-TERM finding's
@@ -84,7 +92,10 @@
 #   including the two the issue names explicitly (a row pointing into
 #   docs/specs/, and a row pointing at a file that does not exist). The STALE
 #   cases run against scripts/test-data/public-docs/fakeroot/ via --root, so
-#   they never depend on what the real docs/ tree happens to say today.
+#   they never depend on what the real docs/ tree happens to say today. Its
+#   `default invocation` cases pass no --stale flag at all, which is what proves
+#   the wiring rather than the logic, and its `unreadable` case pins the grep
+#   exit-2 path below.
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
 #   only — no associative arrays, no jq, no yq.
@@ -95,13 +106,22 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 MANIFEST=""
 ROOT="$REPO_ROOT"
-STALE_MODE=0
+# On by default (#5134). See the header: a call site that has to remember a flag
+# is a gate that runs by accident.
+STALE_MODE=1
 STALE_TERMS=""
+STALE_ASKED=0 # --stale or --stale-terms was given explicitly
+NO_STALE=0    # --no-stale was given
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --stale)
       STALE_MODE=1
+      STALE_ASKED=1
+      shift
+      ;;
+    --no-stale)
+      NO_STALE=1
       shift
       ;;
     --stale-terms)
@@ -113,6 +133,7 @@ while [[ $# -gt 0 ]]; do
       # searches for none of them is a trap, not a convenience.
       STALE_TERMS="$2"
       STALE_MODE=1
+      STALE_ASKED=1
       shift 2
       ;;
     --manifest)
@@ -132,7 +153,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h | --help)
-      sed -n '2,90p' "$0" >&2
+      sed -n '2,101p' "$0" >&2
       exit 0
       ;;
     *)
@@ -141,6 +162,23 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# --no-stale exists for the self-test's manifest-shape fixtures and nothing else
+# (#5134). Refusing it on the default manifest is what keeps "run the gate with
+# the content check off" from being reachable at a call site: the two real ones
+# pass no arguments at all, and neither can acquire a --manifest without saying
+# so in a diff.
+if [[ "$NO_STALE" -eq 1 ]]; then
+  if [[ "$STALE_ASKED" -eq 1 ]]; then
+    echo "ERROR: --no-stale contradicts --stale / --stale-terms" >&2
+    exit 2
+  fi
+  if [[ -z "$MANIFEST" ]]; then
+    echo "ERROR: --no-stale requires --manifest — the committed manifest is always checked for retired terms (#5134)." >&2
+    exit 2
+  fi
+  STALE_MODE=0
+fi
 
 [[ -n "$MANIFEST" ]] || MANIFEST="${ROOT}/docs/public-manifest.tsv"
 
@@ -396,14 +434,24 @@ stale_check_dead_waivers() {
 
 # Searches every published page for every term, enforcing the waiver ratchet.
 stale_scan_pages() {
-  local mline msrc tkey tpat tremedy hits mcount waived note pline h wl
+  local mline msrc tkey tpat tremedy hits mcount waived note pline h wl grc
 
   while IFS=$'\t' read -r mline msrc; do
     [[ -n "$mline" ]] || continue
     while IFS=$'\t' read -r tkey tpat tremedy; do
       [[ -n "$tkey" ]] || continue
 
-      hits="$(grep -nE -- "$tpat" "${ROOT}/${msrc}" || true)"
+      # grep exit 1 is "no match"; anything above it is "could not search" — an
+      # unreadable file, most often. `|| true` swallowed both identically and
+      # reported the page clean while it carried every term (#5134). Read the
+      # status instead: a page the gate cannot open is a finding, not a pass.
+      grc=0
+      hits="$(grep -nE -- "$tpat" "${ROOT}/${msrc}")" || grc=$?
+      if [[ "$grc" -gt 1 ]]; then
+        report UNREADABLE "$mline" \
+          "page '${msrc}' could not be searched for '${tkey}' (grep exited ${grc}). An unsearchable page is not a clean page — fix its permissions or its path."
+        continue
+      fi
       if [[ -z "$hits" ]]; then
         mcount=0
       else
@@ -602,8 +650,7 @@ fi
 
 # The STALE pass runs LAST and only over pages that cleared every check above,
 # so it never reports on a source the manifest could not resolve in the first
-# place. It is opt-in (issue #5125) — see the header for why it is wired to
-# nothing yet.
+# place. It runs unless a fixture run disabled it with --no-stale (#5134).
 stale_scanned=0
 manifest_fail="$fail" # findings raised before the STALE pass began
 if [[ "$STALE_MODE" -eq 1 ]]; then

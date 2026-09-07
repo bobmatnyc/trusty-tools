@@ -1,0 +1,77 @@
+# Public documentation gate for the trusty-tools workspace (issue #5096; the
+# retired-term pass #5125, wired on #5134).
+#
+# The website publishes only the pages docs/public-manifest.tsv lists, so that
+# file is an audience boundary. This job holds two properties on it:
+#   - every PAGE row still resolves to an existing .md file inside docs/, out of
+#     the DO-NOT-PUBLISH trees, on a unique route;
+#   - no published page names a binary, crate or clone URL that no longer
+#     exists (docs/public-stale-terms.tsv, count-ratcheted waivers).
+#
+# Until #5134 the gate ran only in a pre-commit hook, which is unenforceable:
+# `--no-verify`, a commit made outside the repo's hook path, or a merge that
+# never runs a hook at all all reach main with nothing checked. The audit on
+# #5134 found no workflow ran it and no workflow ran `pre-commit` either, while
+# two files asserted CI enforcement that did not exist.
+#
+# Pure text scanning — no Rust toolchain and no build, so this is its own
+# lightweight job (matches line-cap.yml / doc-numbers.yml).
+name: Public docs
+
+# Optional and pure shell: run only when something the verdict can observe
+# changes — a published page's content, the manifest, the term list, the gate or
+# its fixtures, or this workflow. A published page can be edited anywhere under
+# docs/, so that path is deliberately broad.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "scripts/check_public_docs.sh"
+      - "scripts/check_public_docs_selftest.sh"
+      - "scripts/test-data/public-docs/**"
+      - ".github/workflows/public-docs.yml"
+  pull_request:
+    # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
+    # (opened/synchronize/reopened) and is the event a base-branch RETARGET
+    # fires, so without it a stacked PR retargeted onto main never re-triggers
+    # and can merge with zero checks — PR #3838 did exactly that.
+    # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "scripts/check_public_docs.sh"
+      - "scripts/check_public_docs_selftest.sh"
+      - "scripts/test-data/public-docs/**"
+      - ".github/workflows/public-docs.yml"
+
+# Per-COMMIT concurrency group on push so a merge never cancels the previous
+# merge's verification (#4179); per-ref group on pull_request so a new push
+# still supersedes the superseded run. Matches ci.yml.
+concurrency:
+  group: public-docs-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+
+jobs:
+  public-docs:
+    name: Public documentation allowlist + retired-term gate
+    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      # Fixtures first: the suite proves the gate still REJECTS — a boundary
+      # check only ever observed passing is indistinguishable from one that
+      # returns 0 unconditionally. It also covers the parts the real run cannot
+      # reach on a healthy tree (FORBIDDEN, MISSING, a page carrying a retired
+      # term). Mirrors line-cap.yml's selftest-then-gate ordering.
+      - name: Public-docs gate selftest (fixtures)
+        run: bash scripts/check_public_docs_selftest.sh
+
+      # No arguments, exactly as the pre-commit hook invokes it. The retired-term
+      # pass is part of this run (#5134); a flag here would be a second place for
+      # the two call sites to drift apart.
+      - name: Enforce the public documentation boundary and retired terms
+        run: bash scripts/check_public_docs.sh
