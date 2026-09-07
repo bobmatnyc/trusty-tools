@@ -11,13 +11,12 @@
 //! middleware that protects the destructive write routes, plus the `deletes`
 //! submodule (#6360 — `DELETE` a trusty-memory palace or a trusty-search index
 //! by calling the owning daemon's own teardown), the `cleanup` submodule
-//! (#6371 — prune stale index registrations in one batch, compact a palace),
-//! and the `verdict` submodule both of those report through.
+//! (#6371 — compact a trusty-memory palace; #6941 moved the stale-index prune
+//! out of this crate and into the search dashboard), and the `verdict`
+//! submodule both of those report through.
 //! Test: each submodule carries its own `#[cfg(test)]` tests; the route wiring
 //! is exercised by `server.rs`'s integration tests.
 
-// #6380: the delete-time census re-check the batch prune applies to every id.
-pub mod census_guard;
 pub mod cleanup;
 pub mod config;
 pub mod deletes;
@@ -32,8 +31,6 @@ pub mod memory_rpc;
 pub mod metrics;
 pub mod origin_guard;
 pub mod sessions;
-// #6423: review and settle a registration trusty-search could not check.
-pub mod unjudged;
 pub mod verdict;
 
 use std::time::Duration;

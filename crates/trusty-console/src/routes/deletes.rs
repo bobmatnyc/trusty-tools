@@ -301,8 +301,8 @@ pub async fn delete_palace_handler(
 /// the explicit deregister-only opt-out. This deliberately does NOT match
 /// trusty-search's own wire default, which is still the #4123 `false`; the
 /// console always sends the flag explicitly, so the two never have to agree.
-/// Test: `index_delete_route_purges_by_default`,
-/// `prune_route_purges_by_default`.
+/// Test: `index_delete_route_purges_by_default`. (#6941 removed the batch
+/// prune's `prune_route_purges_by_default` with the route it covered.)
 pub(crate) fn purge_data_by_default() -> bool {
     true
 }

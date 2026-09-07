@@ -14,10 +14,12 @@
   import Search from './lib/views/Search.svelte';
   import Indexes from './lib/views/Indexes.svelte';
   import IndexConfig from './lib/views/IndexConfig.svelte';
+  import Cleanup from './lib/views/Cleanup.svelte';
   import Config from './lib/views/Config.svelte';
   import Health from './lib/views/Health.svelte';
   import Logs from './lib/views/Logs.svelte';
   import { getRoute } from './lib/router.svelte.js';
+  import { resolveView } from './lib/routes.js';
   import { refreshHealth, refreshIndexes } from './lib/state.svelte.js';
   import { onMount } from 'svelte';
 
@@ -37,24 +39,10 @@
 
   let route = $derived(getRoute());
 
-  let view = $derived.by(() => {
-    const segs = route.segments;
-    if (segs.length === 0) return { kind: 'dashboard' };
-    if (segs[0] === 'search') return { kind: 'search' };
-    // Drill-down: #/indexes/<id>/config → per-index hygiene settings (#1372).
-    if (
-      (segs[0] === 'indexes' || segs[0] === 'index') &&
-      segs.length >= 3 &&
-      segs[2] === 'config'
-    ) {
-      return { kind: 'index-config', id: decodeURIComponent(segs[1]) };
-    }
-    if (segs[0] === 'indexes' || segs[0] === 'index') return { kind: 'indexes' };
-    if (segs[0] === 'config') return { kind: 'config' };
-    if (segs[0] === 'health') return { kind: 'health' };
-    if (segs[0] === 'logs') return { kind: 'logs' };
-    return { kind: 'dashboard' };
-  });
+  // #6941: the dispatch moved to `lib/routes.js` so its ORDER is testable — the
+  // roster arm matches `#/indexes/*` on the first segment alone, and the cleanup
+  // route only reaches its view by sitting ahead of it.
+  let view = $derived(resolveView(route.segments));
 </script>
 
 <div class="layout">
@@ -81,6 +69,8 @@
         <Search />
       {:else if view.kind === 'indexes'}
         <Indexes />
+      {:else if view.kind === 'cleanup'}
+        <Cleanup />
       {:else if view.kind === 'index-config'}
         <IndexConfig id={view.id} />
       {:else if view.kind === 'config'}
