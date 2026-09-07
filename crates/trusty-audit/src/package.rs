@@ -110,6 +110,11 @@ mod generated;
 // what goes into the archive; that one decides what the digest says.
 mod error_digest;
 
+// #6792: the bounded, scrubbed code excerpt beside each RED finding. Its own
+// file for the same reason the three above are — this file decides what goes
+// into the archive; that one decides what an excerpt may contain.
+mod excerpts;
+
 use generated::{
     Generated, exclusions, render_failures, render_index, render_metadata, render_readme,
 };
@@ -159,6 +164,20 @@ pub const EXTRACT_PREFIX: &str = "extract";
 /// Test: `super::package_tests::the_package_carries_an_error_digest_on_a_clean_run`,
 /// `super::package_tests::a_stage_failure_reaches_the_error_digest`.
 pub const DIGEST_ENTRY: &str = "errors/digest.json";
+
+/// The generated member carrying an excerpt beside each RED finding (#6792).
+///
+/// Why: a recipient holds no checkout, so a RED finding arrives as a claim they
+/// cannot confirm. This member carries the lines the finding cites, bounded and
+/// scrubbed — see [`excerpts`]'s module docs for the three bounds and the one
+/// category it declines.
+/// What: absent unless `[excerpts] enabled` is set, because it is the one
+/// member that is verbatim client source and an engagement may bar it outright.
+/// The absence is not left to be inferred: [`render_readme`] states which way
+/// the engagement went either way.
+/// Test: `super::package_tests::the_excerpt_member_is_absent_unless_the_engagement_asks_for_it`,
+/// `super::package_tests::a_red_finding_at_a_file_and_line_carries_an_excerpt`.
+pub const EXCERPTS_ENTRY: &str = "evidence/excerpts.json";
 
 /// Directory inside the zip holding the record of every repository that failed.
 ///
@@ -409,6 +428,10 @@ pub fn assemble(
         // digest keeps the sweep's own failures and the never-attempted targets
         // as separate kinds where that list flattens them into prose.
         digest: error_digest::render(report, config, unattempted, github_token)?,
+        // #6792: `None` unless the engagement asked for excerpts. Built from
+        // the same manifests `debt` counts, so a RED finding in that table and
+        // its entry here are one row read twice, not two populations.
+        excerpts: excerpts::render(work, config, &audited, github_token)?,
     };
 
     write_archive(
@@ -722,6 +745,11 @@ fn fill_archive(
         // scrubbed; the refusal below is the second guard, for a secret too
         // short for `scrub_secrets` to accept as a needle.
         (DIGEST_ENTRY, Some(generated.digest)),
+        // #6792: absent unless the engagement asked for excerpts. Its lines are
+        // already scrubbed; the refusal below is the second guard, exactly as
+        // it is for the digest — and it matters more here, because these bytes
+        // came off the client's disk rather than out of this process.
+        (EXCERPTS_ENTRY, generated.excerpts),
     ];
     for (entry, text) in members.into_iter().filter_map(|(e, t)| t.map(|t| (e, t))) {
         // #6245: this member quotes the reason strings recorded for each failed
@@ -2173,5 +2201,632 @@ api_key = "lin_api_do-not-package-me"
         );
         assert!(!destination.exists());
         assert!(!destination.with_extension("zip.part").exists());
+    }
+
+    // ── #6792: the code excerpt beside each RED finding ──────────────────
+
+    /// The engagement config of [`config`], with excerpts turned on.
+    fn config_with_excerpts() -> EngagementConfig {
+        EngagementConfig::from_toml(
+            &format!("{CONFIG}\n[excerpts]\nenabled = true\n"),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses")
+    }
+
+    /// Twelve numbered lines, so a window's edges are visible in an assertion.
+    const NUMBERED: &str = "line one\nline two\nline three\nline four\nline five\n\
+                            line six\nline seven\nline eight\nline nine\nline ten\n\
+                            line eleven\nline twelve\n";
+
+    /// A repository that ran, declaring `findings` and holding `files` in its
+    /// checkout — the two inputs an excerpt is built from.
+    fn audited_citing(
+        work: &WorkDir,
+        stem: &str,
+        name: &str,
+        findings: &str,
+        files: &[(&str, &str)],
+    ) -> RepoRun {
+        let run = audited(work, stem, name);
+        std::fs::write(
+            run.output.join("manifest.toml"),
+            format!(
+                "[report]\ntitle = \"Acme\"\nfindings = [\n{findings}]\n\n\
+                 [[repositories]]\nname = \"acme\"\npath = \"/r\"\n"
+            ),
+        )
+        .expect("write manifest");
+        let checkout = work.root().join(&run.repo.path);
+        std::fs::create_dir_all(&checkout).expect("mkdir checkout");
+        for (relative, body) in files {
+            let path = checkout.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("mkdir source dir");
+            }
+            std::fs::write(&path, body).expect("write source");
+        }
+        run
+    }
+
+    /// The excerpt member's entries, parsed out of the finished zip.
+    fn excerpt_entries(path: &Path) -> Vec<serde_json::Value> {
+        let document: serde_json::Value =
+            serde_json::from_str(&read_entry(path, EXCERPTS_ENTRY)).expect("the member is JSON");
+        document["entries"]
+            .as_array()
+            .expect("entries is an array")
+            .clone()
+    }
+
+    /// 🔴 The whole point of #6792: a RED finding that names a file and a line
+    /// travels with the lines around it, bounded by the configured budget.
+    #[test]
+    fn a_red_finding_at_a_file_and_line_carries_an_excerpt() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited_citing(
+            &work,
+            "00-acme-api",
+            "acme-api",
+            "  { category = \"churn\", id = \"hot-file\", package = \"src/pay.rs\", \
+             file = \"src/pay.rs\", line = 6, severity = \"RED\", title = \"churns\" },\n",
+            &[("src/pay.rs", NUMBERED)],
+        );
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        assemble(
+            &work,
+            &config_with_excerpts(),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("assembles");
+
+        let rows = excerpt_entries(&destination);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(row["severity"], "RED", "{row}");
+        assert_eq!(row["cited_line"], 6, "{row}");
+        assert_eq!(row["first_line"], 1, "{row}");
+        assert_eq!(row["last_line"], 11, "{row}");
+        assert!(row.get("unavailable").is_none(), "{row}");
+        let excerpt = row["excerpt"].as_str().expect("an excerpt");
+        assert!(excerpt.contains("line six"), "{excerpt}");
+        assert!(excerpt.contains("line eleven"), "{excerpt}");
+        assert!(
+            !excerpt.contains("line twelve"),
+            "the window must stop at the budget: {excerpt}"
+        );
+        assert_eq!(excerpt.lines().count(), 11, "{excerpt}");
+    }
+
+    /// The other half of the same rule: an AMBER row is not a RED one, so it
+    /// contributes no entry at all — not an entry with an empty excerpt.
+    #[test]
+    fn a_non_red_finding_carries_no_excerpt() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited_citing(
+            &work,
+            "00-acme-api",
+            "acme-api",
+            "  { category = \"churn\", id = \"warm\", package = \"src/pay.rs\", \
+             file = \"src/pay.rs\", line = 6, severity = \"AMBER\", title = \"churns\" },\n",
+            &[("src/pay.rs", NUMBERED)],
+        );
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        assemble(
+            &work,
+            &config_with_excerpts(),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("assembles");
+
+        assert!(excerpt_entries(&destination).is_empty());
+        let member = read_entry(&destination, EXCERPTS_ENTRY);
+        assert!(!member.contains("line six"), "{member}");
+    }
+
+    /// 🔴 The excerpt is client source read off disk, so it is the one member
+    /// that can pick a credential up by accident. It ships scrubbed, and the
+    /// raw value appears neither in the rendered member nor in the zip.
+    #[test]
+    fn an_excerpt_carrying_a_configured_secret_is_scrubbed_not_shipped() {
+        const KEY: &str = "sk-or-v1-not-a-real-key";
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited_citing(
+            &work,
+            "00-acme-api",
+            "acme-api",
+            "  { category = \"churn\", id = \"hot-file\", package = \"src/pay.rs\", \
+             file = \"src/pay.rs\", line = 2, severity = \"RED\", title = \"churns\" },\n",
+            &[(
+                "src/pay.rs",
+                &format!("fn pay() {{\n    let key = \"{KEY}\";\n}}\n"),
+            )],
+        );
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        assemble(
+            &work,
+            &config_with_excerpts(),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("a scrubbed excerpt must not refuse the package");
+
+        let member = read_entry(&destination, EXCERPTS_ENTRY);
+        assert!(
+            !member.contains(KEY),
+            "the key reached the member: {member}"
+        );
+        assert!(member.contains("[REDACTED]"), "{member}");
+        let mut whole = Vec::new();
+        std::fs::File::open(&destination)
+            .expect("open package")
+            .read_to_end(&mut whole)
+            .expect("read package");
+        assert!(
+            !whole.windows(KEY.len()).any(|w| w == KEY.as_bytes()),
+            "the key reached the assembled package"
+        );
+    }
+
+    /// A file the finding cites and the checkout does not hold is a STATED
+    /// absence, not a missing row — and it costs the package nothing else.
+    #[test]
+    fn a_finding_whose_file_cannot_be_read_states_why() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited_citing(
+            &work,
+            "00-acme-api",
+            "acme-api",
+            "  { category = \"churn\", id = \"gone\", package = \"src/gone.rs\", \
+             file = \"src/gone.rs\", line = 3, severity = \"RED\", title = \"churns\" },\n\
+             \x20 { category = \"dependencies\", id = \"RUSTSEC-1\", package = \"idna\", \
+             severity = \"RED\", title = \"vulnerable\" },\n",
+            &[],
+        );
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        let package = assemble(
+            &work,
+            &config_with_excerpts(),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("an unreadable file must not stop the package");
+
+        let rows = excerpt_entries(&destination);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        for row in &rows {
+            assert!(row.get("excerpt").is_none(), "{row}");
+            let reason = row["unavailable"].as_str().expect("a stated reason");
+            assert!(!reason.trim().is_empty(), "{row}");
+        }
+        assert!(
+            rows[0]["unavailable"]
+                .as_str()
+                .is_some_and(|r| r.contains("src/gone.rs")),
+            "{rows:?}"
+        );
+        assert!(package.total_bytes > 0);
+        assert!(
+            entries(&destination).contains(&"reports/00-acme-api/report.md".to_owned()),
+            "the rest of the package must still assemble"
+        );
+    }
+
+    /// 🔴 The cited path comes from a manifest a third-party collector wrote.
+    /// Nothing it can say reaches a byte outside the checkout it belongs to.
+    #[test]
+    fn an_excerpt_never_reaches_outside_the_checkout() {
+        const OUTSIDE: &str = "OUTSIDE-THE-CHECKOUT-MARKER";
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let secret = tmp.path().join("outside.txt");
+        std::fs::write(&secret, format!("{OUTSIDE}\n")).expect("write outside file");
+
+        let run = audited_citing(
+            &work,
+            "00-acme-api",
+            "acme-api",
+            &format!(
+                "  {{ category = \"churn\", id = \"up\", package = \"p\", \
+                 file = \"../../outside.txt\", line = 1, severity = \"RED\", title = \"t\" }},\n\
+                 \x20 {{ category = \"churn\", id = \"abs\", package = \"p\", \
+                 file = \"{}\", line = 1, severity = \"RED\", title = \"t\" }},\n\
+                 \x20 {{ category = \"churn\", id = \"link\", package = \"p\", \
+                 file = \"src/escape.rs\", line = 1, severity = \"RED\", title = \"t\" }},\n",
+                secret.display()
+            ),
+            &[("src/keep.rs", NUMBERED)],
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, work.root().join("repos/acme-api/src/escape.rs"))
+            .expect("symlink");
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        assemble(
+            &work,
+            &config_with_excerpts(),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("assembles");
+
+        let member = read_entry(&destination, EXCERPTS_ENTRY);
+        assert!(
+            !member.contains(OUTSIDE),
+            "a cited path reached outside the checkout: {member}"
+        );
+        for row in excerpt_entries(&destination) {
+            assert!(row.get("excerpt").is_none(), "{row}");
+            assert!(row["unavailable"].as_str().is_some(), "{row}");
+        }
+    }
+
+    /// A line longer than the per-line cap is cut, and the entry says so —
+    /// a minified bundle must not turn "five lines" into two megabytes.
+    ///
+    /// 🔴 The cap counts CHARACTERS and cuts on a `char_indices` boundary, so
+    /// the multibyte rows are the ones that would panic on a byte slice. Both
+    /// scripts land at exactly the cap plus the marker.
+    #[test]
+    fn an_excerpt_line_longer_than_the_cap_is_cut() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited_citing(
+            &work,
+            "00-acme-api",
+            "acme-api",
+            "  { category = \"churn\", id = \"minified\", package = \"src/bundle.js\", \
+             file = \"src/bundle.js\", line = 1, severity = \"RED\", title = \"t\" },\n\
+             \x20 { category = \"churn\", id = \"accented\", package = \"src/accents.rs\", \
+             file = \"src/accents.rs\", line = 1, severity = \"RED\", title = \"t\" },\n\
+             \x20 { category = \"churn\", id = \"cjk\", package = \"src/cjk.rs\", \
+             file = \"src/cjk.rs\", line = 1, severity = \"RED\", title = \"t\" },\n",
+            &[
+                ("src/bundle.js", &format!("{}\n", "x".repeat(5_000))),
+                ("src/accents.rs", &format!("{}\n", "é".repeat(5_000))),
+                ("src/cjk.rs", &format!("{}\n", "日本語".repeat(2_000))),
+            ],
+        );
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        assemble(
+            &work,
+            &config_with_excerpts(),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("assembles");
+
+        let rows = excerpt_entries(&destination);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        for row in &rows {
+            assert!(row["truncated"].as_bool().unwrap_or(false), "{row}");
+            let excerpt = row["excerpt"].as_str().expect("an excerpt");
+            assert!(excerpt.ends_with('…'), "{excerpt}");
+            assert_eq!(
+                excerpt.chars().count(),
+                excerpts::MAX_LINE_CHARS + 1,
+                "the cap counts characters, not bytes: {} chars in {} bytes",
+                excerpt.chars().count(),
+                excerpt.len()
+            );
+        }
+        // The multibyte rows are wider in bytes than in chars, which is the
+        // whole reason the cut is made on a char boundary.
+        assert!(
+            rows[1]["excerpt"]
+                .as_str()
+                .is_some_and(|e| e.len() > e.chars().count()),
+            "{rows:?}"
+        );
+        assert!(
+            rows[2]["excerpt"]
+                .as_str()
+                .is_some_and(|e| e.starts_with('日')),
+            "{rows:?}"
+        );
+    }
+
+    /// A file that is not valid UTF-8 is a stated absence, not a panic and not
+    /// a lossy excerpt — the recipient is told the file could not be read.
+    #[test]
+    fn a_finding_citing_a_non_utf8_file_states_why() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited_citing(
+            &work,
+            "00-acme-api",
+            "acme-api",
+            "  { category = \"churn\", id = \"binary\", package = \"src/blob.rs\", \
+             file = \"src/blob.rs\", line = 1, severity = \"RED\", title = \"t\" },\n",
+            &[],
+        );
+        // Written as raw bytes: 0xFF is a byte no UTF-8 sequence can start.
+        std::fs::create_dir_all(work.root().join("repos/acme-api/src")).expect("mkdir src");
+        std::fs::write(
+            work.root().join("repos/acme-api/src/blob.rs"),
+            [0xFF_u8, 0xFE, 0xFD, b'\n'],
+        )
+        .expect("write non-utf8 file");
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        assemble(
+            &work,
+            &config_with_excerpts(),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("a non-UTF-8 file must not stop the package");
+
+        let rows = excerpt_entries(&destination);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].get("excerpt").is_none(), "{rows:?}");
+        assert!(
+            rows[0]["unavailable"]
+                .as_str()
+                .is_some_and(|r| r.contains("could not be read")),
+            "{rows:?}"
+        );
+        assert!(entries(&destination).contains(&"reports/00-acme-api/report.md".to_owned()));
+    }
+
+    /// A cited path that resolves to a DIRECTORY is refused before any read:
+    /// `canonicalize` succeeds for one, so the regular-file check is what
+    /// stops it rather than an IO error at open time.
+    #[test]
+    fn a_finding_citing_a_directory_states_why() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited_citing(
+            &work,
+            "00-acme-api",
+            "acme-api",
+            "  { category = \"churn\", id = \"dir\", package = \"src\", \
+             file = \"src\", line = 1, severity = \"RED\", title = \"t\" },\n",
+            &[("src/pay.rs", NUMBERED)],
+        );
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        assemble(
+            &work,
+            &config_with_excerpts(),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("a cited directory must not stop the package");
+
+        let rows = excerpt_entries(&destination);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].get("excerpt").is_none(), "{rows:?}");
+        assert!(
+            rows[0]["unavailable"]
+                .as_str()
+                .is_some_and(|r| r.contains("is not a regular file")),
+            "{rows:?}"
+        );
+        assert!(entries(&destination).contains(&"reports/00-acme-api/report.md".to_owned()));
+    }
+
+    /// A cited line the file does not reach yields no lines at all, and that
+    /// is stated rather than shipped as an excerpt with an empty string in it.
+    #[test]
+    fn a_finding_citing_a_line_past_the_end_states_why() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited_citing(
+            &work,
+            "00-acme-api",
+            "acme-api",
+            "  { category = \"churn\", id = \"past-eof\", package = \"src/pay.rs\", \
+             file = \"src/pay.rs\", line = 900, severity = \"RED\", title = \"t\" },\n",
+            &[("src/pay.rs", NUMBERED)],
+        );
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        assemble(
+            &work,
+            &config_with_excerpts(),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("a line past the end must not stop the package");
+
+        let rows = excerpt_entries(&destination);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].get("excerpt").is_none(), "{rows:?}");
+        assert!(
+            rows[0]["unavailable"]
+                .as_str()
+                .is_some_and(|r| r.contains("has no line 900")),
+            "{rows:?}"
+        );
+        assert!(entries(&destination).contains(&"reports/00-acme-api/report.md".to_owned()));
+    }
+
+    /// 🔴 `crate::grounding::secrets` redacts the matched value before it ever
+    /// reaches a manifest. Excerpting its neighbourhood would put it back, so
+    /// that category is declined outright and the entry says so.
+    #[test]
+    fn a_secrets_finding_is_never_excerpted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited_citing(
+            &work,
+            "00-acme-api",
+            "acme-api",
+            "  { category = \"secrets\", id = \"aws-access-token\", \
+             package = \"src/pay.rs:6\", version = \"\", severity = \"RED\", \
+             title = \"AWS key — redacted match AKIA…\" },\n",
+            &[("src/pay.rs", NUMBERED)],
+        );
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        assemble(
+            &work,
+            &config_with_excerpts(),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("assembles");
+
+        let rows = excerpt_entries(&destination);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].get("excerpt").is_none(), "{rows:?}");
+        assert!(
+            rows[0]["unavailable"]
+                .as_str()
+                .is_some_and(|r| r.contains("never excerpted")),
+            "{rows:?}"
+        );
+        let member = read_entry(&destination, EXCERPTS_ENTRY);
+        assert!(!member.contains("line six"), "{member}");
+    }
+
+    /// Off is the default: an engagement that never asked ships no `evidence/`
+    /// member at all, and one that asked ships it even with nothing to say.
+    #[test]
+    fn the_excerpt_member_is_absent_unless_the_engagement_asks_for_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+
+        let off = work.root().join("off.zip");
+        assemble(&work, &config(), &report, &[], &off, None).expect("assembles");
+        assert!(
+            !entries(&off).contains(&EXCERPTS_ENTRY.to_owned()),
+            "{:?}",
+            entries(&off)
+        );
+
+        let on = work.root().join("on.zip");
+        assemble(&work, &config_with_excerpts(), &report, &[], &on, None).expect("assembles");
+        assert!(
+            entries(&on).contains(&EXCERPTS_ENTRY.to_owned()),
+            "{:?}",
+            entries(&on)
+        );
+        assert!(excerpt_entries(&on).is_empty());
+    }
+
+    /// The README is what the operator reads before sending the file, so it
+    /// names the excerpt member and drops the no-source-code claim.
+    #[test]
+    fn the_readme_states_the_excerpt_member_when_it_is_on() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+
+        assemble(
+            &work,
+            &config_with_excerpts(),
+            &report,
+            &[],
+            &destination,
+            None,
+        )
+        .expect("assembles");
+
+        let readme = read_entry(&destination, README_ENTRY);
+        assert!(readme.contains(EXCERPTS_ENTRY), "{readme}");
+        assert!(
+            readme.contains("Source code, in one place only"),
+            "{readme}"
+        );
+        assert!(
+            !readme.contains("No source code as such"),
+            "the claim is false once excerpts are on: {readme}"
+        );
+        // 🔴 The scrub covers `configured_secrets()` plus the gh token and
+        // nothing else, so the page states that scope rather than claiming
+        // the excerpt was checked for the client's own hardcoded keys.
+        assert!(
+            readme.contains(
+                "scrubbed of the credentials in your engagement config and of the GitHub \
+                 token this run read from `gh` — and of nothing else"
+            ),
+            "{readme}"
+        );
+        assert!(
+            readme.contains(
+                "A credential hardcoded in your own source is not one this client \
+                 can recognise"
+            ),
+            "{readme}"
+        );
+        assert!(
+            !readme.contains("scanned for your credentials on the way in"),
+            "that phrasing claims a scope the scrub does not have: {readme}"
+        );
+    }
+
+    /// And the off case is stated rather than left to be inferred from an
+    /// absent directory — the #6246 rule, applied to a capability.
+    #[test]
+    fn the_readme_states_excerpts_are_off_when_they_are() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+
+        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+
+        let readme = read_entry(&destination, README_ENTRY);
+        assert!(readme.contains("No code excerpts"), "{readme}");
+        assert!(readme.contains("No source code as such"), "{readme}");
+        assert!(!readme.contains(EXCERPTS_ENTRY), "{readme}");
     }
 }
