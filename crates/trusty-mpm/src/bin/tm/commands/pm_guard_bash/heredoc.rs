@@ -143,7 +143,7 @@ impl HeredocBodies {
 /// destructive-delete rule that catches it today. `cat`, `python3`, `jq` and
 /// the rest consume the body as data instead.
 /// What: `true` when any whitespace-delimited token of the line, basename
-/// stripped, is one of [`QuoteScan`]'s sibling [`shell_lex::DASH_C_SHELLS`].
+/// stripped, is one of [`QuoteScan`]'s sibling [`super::shell_lex::DASH_C_SHELLS`].
 /// Scanning every token rather than the leading one keeps `sudo bash`,
 /// `env - bash` and `foo && bash <<EOF` on the conservative side; a false
 /// positive only restores the pre-#6946 splitting.
