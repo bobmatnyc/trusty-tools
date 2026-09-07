@@ -83,7 +83,15 @@ fn classify_no_agent(
     pr: &BranchPrState,
     probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
 ) -> ReclaimVerdict {
-    classify(path, admission, claim, pr, probe_dirt, &no_agents)
+    classify(
+        path,
+        admission,
+        claim,
+        pr,
+        probe_dirt,
+        &no_agents,
+        &KeepList::default(),
+    )
 }
 
 /// The gate-2 claim state a `live: bool` used to stand for (#6806).
@@ -229,6 +237,7 @@ fn classify_allows_a_worktree_claimed_only_by_the_calling_session() {
         &merged(42),
         &clean,
         &no_agents,
+        &KeepList::default(),
     );
     assert_eq!(
         v,
@@ -250,6 +259,7 @@ fn classify_blocks_the_callers_own_workspace() {
         &merged(42),
         &clean,
         &no_agents,
+        &KeepList::default(),
     );
     assert!(!v.is_reclaimable());
     assert!(reason(&v).contains("IS the caller"), "{}", reason(&v));
@@ -418,6 +428,7 @@ fn classify_blocks_a_live_agents_worktree() {
         &merged(101),
         &inspect_dirt,
         &agent_live,
+        &KeepList::default(),
     );
     assert!(!v.is_reclaimable(), "a live agent's worktree: {v:?}");
     assert!(reason(&v).contains("has not ended"), "{}", reason(&v));
@@ -452,6 +463,7 @@ fn classify_blocks_an_agent_the_harness_still_holds_after_a_restart() {
         &merged(102),
         &inspect_dirt,
         &no_agents,
+        &KeepList::default(),
     );
     assert!(!v.is_reclaimable(), "{v:?}");
     assert!(
@@ -497,6 +509,7 @@ fn classify_records_an_agent_refusal_as_its_own_verdict_kind() {
             &merged(105),
             &inspect_dirt,
             probe,
+            &KeepList::default(),
         );
         assert!(
             matches!(v, ReclaimVerdict::BlockedByAgent { .. }),
@@ -583,6 +596,7 @@ fn survey_lists_an_agent_held_candidate_in_exactly_one_place() {
         &merged(6508),
         &inspect_dirt,
         &agent_live,
+        &KeepList::default(),
     );
     assert!(
         matches!(
@@ -678,6 +692,7 @@ fn classify_allows_a_finished_agents_merged_worktree() {
         &merged(103),
         &inspect_dirt,
         &agent_ended,
+        &KeepList::default(),
     );
     assert_eq!(v, ReclaimVerdict::Reclaimable { pr: 103 });
 }
@@ -703,6 +718,7 @@ fn classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel() {
         &merged(104),
         &inspect_dirt,
         &agent_ended,
+        &KeepList::default(),
     );
     assert!(!v.is_reclaimable(), "malformed sentinel: {v:?}");
     assert!(reason(&v).contains("names no owner"), "{}", reason(&v));
@@ -718,6 +734,7 @@ fn classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel() {
         &merged(105),
         &inspect_dirt,
         &agent_ended,
+        &KeepList::default(),
     );
     assert!(!v.is_reclaimable(), "unreadable sentinel: {v:?}");
 }
@@ -739,6 +756,7 @@ fn classify_leaves_a_session_owned_worktree_alone() {
         &merged(106),
         &inspect_dirt,
         &no_agents,
+        &KeepList::default(),
     );
     assert_eq!(v, ReclaimVerdict::Reclaimable { pr: 106 });
 }
@@ -1558,6 +1576,7 @@ fn classify_blocks_a_failed_lookup_and_names_the_reason() {
         },
         &clean,
         &no_agents,
+        &KeepList::default(),
     );
     assert!(!verdict.is_reclaimable());
     let ReclaimVerdict::Blocked { reason, .. } = verdict else {
@@ -1669,5 +1688,75 @@ fn pr_index_from_gh_reads_this_repository() {
         "a successful `gh pr list` against {UPSTREAM} must yield branches; an empty \
          index here means the call failed and every branch will block — which is \
          exactly what the `gh -C` argv bug produced"
+    );
+}
+
+/// #6927 GATE 0: the operator's keep-list refuses a worktree every other gate
+/// would pass, and the refusal names gate 0 plus the operator's own entry.
+///
+/// Why this shape: a keep-listed worktree must stay VISIBLE in the survey as
+/// `Blocked`, not be filtered out of it — DOC-73 §16.2. Deleting the gate makes
+/// this test fail with `Reclaimable`.
+#[test]
+fn classify_blocks_a_keep_listed_worktree() {
+    let keeps = KeepList::from_patterns(&["/tmp/.worktrees".to_string()]);
+    let v = classify(
+        &wt(),
+        Admission::Admitted,
+        &ClaimState::Unclaimed,
+        &merged(42),
+        &clean,
+        &no_agents,
+        &keeps,
+    );
+    assert!(
+        matches!(
+            &v,
+            ReclaimVerdict::Blocked {
+                gate: ReclaimGate::KeepList,
+                ..
+            }
+        ),
+        "a keep-listed worktree must be blocked at gate 0: {v:?}"
+    );
+    let reason = reason(&v);
+    assert!(
+        reason.contains("/tmp/.worktrees"),
+        "the refusal must name the operator's own entry: {reason}"
+    );
+}
+
+/// #6927: gate 0 outranks every gate below it, so the merged, clean, unclaimed
+/// worktree that IS reclaimable without a keep-list stops being reclaimable
+/// with one. The CONTROL half is what proves the gate, not the fixture.
+#[test]
+fn classify_keep_list_outranks_a_merged_clean_worktree() {
+    let control = classify(
+        &wt(),
+        Admission::Admitted,
+        &ClaimState::Unclaimed,
+        &merged(42),
+        &clean,
+        &no_agents,
+        &KeepList::default(),
+    );
+    assert_eq!(
+        control,
+        ReclaimVerdict::Reclaimable { pr: 42 },
+        "CONTROL: without a keep-list this worktree must be reclaimable"
+    );
+
+    let kept = classify(
+        &wt(),
+        Admission::Admitted,
+        &ClaimState::Unclaimed,
+        &merged(42),
+        &clean,
+        &no_agents,
+        &KeepList::from_patterns(&["**/worktree-2919".to_string()]),
+    );
+    assert!(
+        !kept.is_reclaimable(),
+        "a keep-list glob must outrank a merged, clean, unclaimed worktree: {kept:?}"
     );
 }

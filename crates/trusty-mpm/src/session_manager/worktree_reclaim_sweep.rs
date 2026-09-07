@@ -38,8 +38,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::worktree_reclaim::{
-    AgentStateProbe, BranchPrState, LiveClaims, NOT_INSPECTED_REASON, PrIndex, ReclaimCandidate,
-    ReclaimGate, ReclaimMode, ReclaimOutcome, ReclaimSurvey, ReclaimVerdict,
+    AgentStateProbe, BranchPrState, KeepList, LiveClaims, NOT_INSPECTED_REASON, PrIndex,
+    ReclaimCandidate, ReclaimGate, ReclaimMode, ReclaimOutcome, ReclaimSurvey, ReclaimVerdict,
     agent_ownership_blocks, classify, measure_bytes_until, pr_state_for_branch, tm_provisioned,
 };
 use super::worktree_registry::{list_registered_worktrees, scan_registered_worktrees};
@@ -111,6 +111,9 @@ pub(crate) fn survey_with_index(
     agent_state: AgentStateProbe<'_>,
     budget: SurveyBudget,
     per_branch_fallback: bool,
+    // #6927: the operator keep-list `classify`'s gate 0 applies. An empty list
+    // is a no-op gate, so every pre-#6927 caller keeps its exact behaviour.
+    keep_list: &KeepList,
 ) -> ReclaimSurvey {
     let mut indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
     let mut candidates = Vec::new();
@@ -154,6 +157,7 @@ pub(crate) fn survey_with_index(
             &pr,
             &inspect_dirt,
             agent_state,
+            keep_list,
         );
         candidates.push(ReclaimCandidate {
             // Measured in a SECOND pass — see below.
@@ -221,6 +225,9 @@ pub(crate) fn survey(
     agent_state: AgentStateProbe<'_>,
     budget: SurveyBudget,
     per_branch_fallback: bool,
+    // #6927: the operator keep-list `classify`'s gate 0 applies. An empty list
+    // is a no-op gate, so every pre-#6927 caller keeps its exact behaviour.
+    keep_list: &KeepList,
 ) -> ReclaimSurvey {
     survey_with_index(
         repos_root,
@@ -229,6 +236,7 @@ pub(crate) fn survey(
         agent_state,
         budget,
         per_branch_fallback,
+        keep_list,
     )
 }
 
@@ -364,6 +372,15 @@ pub(crate) struct FreshProbes<'a> {
     /// deletion, so an agent dispatched during a minutes-long survey still
     /// protects its tree.
     pub agent_state: AgentStateProbe<'a>,
+    /// The operator keep-list `classify`'s gate 0 applies (#6927).
+    ///
+    /// Why it needs no re-check of its own: the delete loop only ever considers
+    /// candidates this survey classified `Reclaimable`, and gate 0 runs before
+    /// every other gate, so a keep-listed worktree never enters the approved
+    /// set at all. `recheck_before_delete` re-asks the questions whose ANSWERS
+    /// can change under it (liveness, locks, pull-request state, dirt); the
+    /// keep-list is operator config read once at the start of this pass.
+    pub keep_list: &'a KeepList,
 }
 
 /// Survey, and in [`ReclaimMode::Remove`] reclaim, merged-PR worktrees (#2919).
@@ -394,6 +411,7 @@ pub(crate) fn reclaim_with_probes(
         probes.agent_state,
         SurveyBudget::unbounded(),
         true,
+        probes.keep_list,
     );
     let mut out = ReclaimOutcome {
         removed: Vec::new(),
@@ -495,6 +513,7 @@ pub(crate) fn reclaim_merged_pr_worktrees(
     in_use_paths: &dyn Fn() -> Option<LiveClaims>,
     agent_state: AgentStateProbe<'_>,
     mode: ReclaimMode,
+    keep_list: &KeepList,
 ) -> ReclaimOutcome {
     reclaim_with_probes(
         repos_root,
@@ -502,6 +521,7 @@ pub(crate) fn reclaim_merged_pr_worktrees(
             in_use_now: in_use_paths,
             index_for: &PrIndex::from_gh,
             agent_state,
+            keep_list,
         },
         mode,
     )

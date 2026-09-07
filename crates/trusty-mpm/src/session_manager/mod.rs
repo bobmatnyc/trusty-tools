@@ -57,6 +57,9 @@ pub(crate) mod worktree_adopt;
 // #4311: the OS-level "is a process standing in here?" gate — the one removal
 // check that does not read a registry trusty-mpm or git wrote.
 pub(crate) mod worktree_liveness;
+// #6927: the operator's standing "never propose these" list, applied as
+// `worktree_reclaim::classify`'s first gate.
+pub(crate) mod worktree_keep_list;
 mod worktree_nested;
 pub(crate) mod worktree_ownership;
 // #2919: merged-PR reclamation + the disk accounting `tm doctor` reports.

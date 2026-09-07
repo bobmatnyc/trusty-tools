@@ -212,6 +212,42 @@ pub struct TrustyToolsConfig {
     /// cannot relax.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<AgentsConfig>,
+
+    /// Disk-dashboard settings (the `disk:` YAML section, #6927).
+    ///
+    /// `None` → an EMPTY keep-list, which is a no-op gate: nothing is kept and
+    /// the classifier behaves exactly as it did before #6927. Nothing is
+    /// hard-coded here — a keep-list is only ever what the operator wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<DiskConfig>,
+}
+
+/// The `disk:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#6927).
+///
+/// Why: DOC-73 §16.2 makes the owner keep-list a first-class gate in
+/// `worktree_reclaim::classify`, and a gate whose input is an operator
+/// decision needs a declarative home. This is that home: one list, in the file
+/// the console Config tab already reads and writes.
+/// What: `keep_list` holds directories and globs. A directory entry keeps that
+/// directory and everything under it, so naming a workspace keeps every
+/// worktree inside it; an entry containing `*?[]{` compiles as a glob. See
+/// [`crate::session_manager::worktree_keep_list::KeepList`] for the matching
+/// rules and for what happens to a pattern that will not compile.
+///
+/// ```yaml
+/// disk:
+///   keep_list:
+///     - ~/work/hotstats
+///     - "**/scratch-*"
+/// ```
+///
+/// Test: `disk_config_yaml_round_trip`, `disk_keep_list_defaults_to_empty`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct DiskConfig {
+    /// Worktree paths and glob patterns that are never proposed for reclaim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keep_list: Vec<String>,
 }
 
 /// The `daemon:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#1836).
@@ -712,6 +748,24 @@ pub fn workspace_root(config: &TrustyToolsConfig) -> PathBuf {
 pub fn worktrees_dirname(config: &TrustyToolsConfig) -> String {
     // #5203/#5204: one resolver, in trusty-common, for every consumer.
     trusty_common::workspace_layout::resolve_worktrees_dirname(config.worktrees_dirname.as_deref())
+}
+
+/// The operator's keep-list patterns, or an empty list (#6927).
+///
+/// Why: named rather than read inline at each call site so the DEFAULT — no
+/// `disk:` section means no kept worktrees — is stated once. The patterns stay
+/// raw here; compiling them into a matcher is
+/// [`KeepList::from_patterns`](crate::session_manager::worktree_keep_list::KeepList::from_patterns)'
+/// job, which keeps this module free of the matching rules and free of any
+/// dependency on the classifier.
+/// What: `config.disk.keep_list`, or `[]`.
+/// Test: `disk_keep_list_defaults_to_empty`, `disk_config_yaml_round_trip`.
+pub fn disk_keep_list_patterns(config: &TrustyToolsConfig) -> Vec<String> {
+    config
+        .disk
+        .as_ref()
+        .map(|d| d.keep_list.clone())
+        .unwrap_or_default()
 }
 
 /// Join a project's `<owner>/<repo>` identity onto the workspace root.

@@ -7,7 +7,7 @@
 //! MCP is the protocol Claude Code already speaks, so trusty-mpm exposes
 //! an MCP server rather than inventing a bespoke channel.
 //!
-//! What: defines the full MCP tool catalog ([`tools::TOOL_CATALOG`], thirty-three
+//! What: defines the full MCP tool catalog ([`tools::TOOL_CATALOG`], thirty-five
 //! tools) — nine orchestration/bug-reporting (six core + three bug-reporting:
 //! `list_recent_errors`, `preview_bug_report`, `report_bug`), eleven
 //! session-lifecycle tools (#1221: `session_new`, `session_stop`,
@@ -15,8 +15,8 @@
 //! plus the PM pause/resume context tools `session_context_catchup` +
 //! `session_context_pause` — a DIFFERENT concept from managed-sub-session
 //! lifecycle, kept in the same tool group for file-count reasons only), five
-//! console-facing tools, four project-registry tools, and four session-manager
-//! proxy tools — the [`OrchestratorBackend`] trait the daemon implements to
+//! console-facing tools, four project-registry tools, four session-manager
+//! proxy tools, and the Disk-dashboard survey (#6927) — the [`OrchestratorBackend`] trait the daemon implements to
 //! service them, and [`dispatch`], which routes a JSON-RPC [`Request`] to the
 //! backend. The daemon wires [`dispatch`] into both `run_stdio_loop` (the `tm
 //! daemon --mcp` path) and the loopback `POST /rpc` endpoint (the `serve
@@ -127,6 +127,25 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       issue_number }` or a graceful "no token" message.
     /// Test: `dispatch_report_bug_no_confirm_is_preview` in the `tests` module.
     async fn report_bug(&self, fingerprint: &str, confirm: bool) -> Result<Value, String>;
+
+    // ── #6927: the Disk dashboard's worktree survey ──────────────────────────
+
+    /// Back `disk_survey`: classify every managed worktree for the Disk view.
+    ///
+    /// Why: DOC-73 §16.4 — console reaches trusty-mpm through MCP only, and no
+    /// tool exposed the merged-PR survey. This is READ-ONLY: it classifies and
+    /// reports, and removes nothing.
+    /// What: returns DOC-73 §16.5's tree — `generated_at`, the keep-list that
+    /// was applied, and the workspace root's projects, each with its worktrees'
+    /// bytes, tier and reasons. `project` scopes to one managed project;
+    /// `budget_seconds` bounds classification, past which remaining worktrees
+    /// are listed as `review` rather than omitted.
+    /// Test: `dispatch_disk_survey_tool` in the `tests` module.
+    async fn disk_survey(
+        &self,
+        project: Option<&str>,
+        budget_seconds: Option<u64>,
+    ) -> Result<Value, String>;
 
     // ── #1221: session-lifecycle tools ───────────────────────────────────────
 
@@ -666,6 +685,12 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
             }
             Err(e) => Err(e),
         },
+        // ── #6927: the Disk dashboard's survey ───────────────────────────────
+        "disk_survey" => {
+            let project = args.get("project").and_then(Value::as_str);
+            let budget_seconds = args.get("budget_seconds").and_then(Value::as_u64);
+            backend.disk_survey(project, budget_seconds).await
+        }
         // ── #1222: console-facing tools ──────────────────────────────────────
         "console_metrics" => backend.console_metrics().await,
         "supervisor_status" => backend.supervisor_status().await,

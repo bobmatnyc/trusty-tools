@@ -26,3 +26,9 @@
 //! needs it.
 
 pub mod size_index;
+// #6927: the Disk dashboard's worktree survey — the classification the
+// `disk_survey` MCP tool returns, and the run that gathers its facts. Crate
+// -internal: every type in it names a `pub(crate)` reclaim type, and the MCP
+// tool is the only consumer.
+pub(crate) mod survey;
+pub(crate) mod survey_run;

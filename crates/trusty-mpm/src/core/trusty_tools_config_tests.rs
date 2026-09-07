@@ -563,3 +563,27 @@ fn subpath_nests_owner_repo() {
 // untracked_sync (#2196) resolution + YAML round-trip tests live in
 // `untracked_sync::tests` (split out to keep this file under the
 // 500-SLOC cap; see that module's doc).
+
+/// #6927: no `disk:` section means an EMPTY keep-list — nothing is kept, and
+/// nothing is hard-coded to any operator's paths.
+#[test]
+fn disk_keep_list_defaults_to_empty() {
+    let config = TrustyToolsConfig::default();
+    assert!(config.disk.is_none());
+    assert!(disk_keep_list_patterns(&config).is_empty());
+}
+
+/// #6927: the `disk:` section round-trips through the YAML the console Config
+/// tab reads and writes.
+#[test]
+fn disk_config_yaml_round_trip() {
+    let yaml = "disk:\n  keep_list:\n    - ~/work/hotstats\n    - '**/scratch-*'\n";
+    let config: TrustyToolsConfig = serde_yaml::from_str(yaml).expect("parse the disk section");
+    assert_eq!(
+        disk_keep_list_patterns(&config),
+        vec!["~/work/hotstats".to_string(), "**/scratch-*".to_string()]
+    );
+    let back = serde_yaml::to_string(&config).expect("serialize");
+    assert!(back.contains("keep_list"), "{back}");
+    assert!(back.contains("hotstats"), "{back}");
+}

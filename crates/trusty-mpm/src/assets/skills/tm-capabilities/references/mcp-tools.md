@@ -2,7 +2,7 @@
 
 Generated from `trusty_mpm::mcp::tools::tool_catalog()` — trusty-mpm's own MCP tool surface (`tools/list` over the `serve --stdio` bridge), in catalog order. Regenerate with `tm generate capabilities`.
 
-34 tools.
+35 tools.
 
 ## `session_list`
 
@@ -313,6 +313,15 @@ SUMMARIZE the conversation's focused session — a lightweight digest of what it
 | Parameter | Type | Required |
 |---|---|---|
 | `conversation_key` | `string` | yes |
+
+## `disk_survey`
+
+Survey every managed project and worktree for the console Disk view: per-worktree bytes (from the cached size index, with `from_cache` / `truncated` / `measured_at` passed through), a staleness tier (`stale` / `review` / `keep` / `missing`) and the REASONS behind it (`dirty`, `unpushed`, `live-session`, `keep-list`, `unknown-branch-state`, …), the reclaim gate that refused each worktree, and the owner keep-list that was applied. READ-ONLY: it classifies and reports, and removes nothing — clearing a worktree is a separate, explicitly confirmed action. A worktree holding uncommitted or unpushed work, claimed by a live session, owned by a dispatched agent, or named by the operator's `disk.keep_list` config is never reported `stale`. EXPENSIVE: classification runs git and `gh` subprocesses per worktree, so bound it with `budget_seconds` when polling — worktrees past the budget are still listed, as `review`.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `budget_seconds` | `integer` | no |
+| `project` | `string` | no |
 
 ## Sibling Daemon MCP Surfaces
 

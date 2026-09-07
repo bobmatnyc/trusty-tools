@@ -26,6 +26,17 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ReclaimGate {
+    /// Gate 0 — the operator's keep-list names this worktree (#6927).
+    ///
+    /// Why FIRST rather than last: DOC-73 §16.4 states the keep-list overrides
+    /// every other gate, and every other gate costs `git` and `gh`
+    /// subprocesses. A standing operator veto that could be reached only after
+    /// paying for the answers it makes irrelevant would be both slower and
+    /// weaker — the refusal would name whichever gate happened to fire first
+    /// instead of naming the operator's own decision.
+    /// Test: `classify_blocks_a_keep_listed_worktree`,
+    /// `classify_keep_list_outranks_a_merged_clean_worktree`.
+    KeepList,
     /// Gate 1 — git's own admission verdict.
     Admission,
     /// Gate 2 — a session still claims the workspace.
@@ -46,6 +57,7 @@ impl ReclaimGate {
     /// The operator-facing name of this gate.
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::KeepList => "gate 0 (owner keep-list)",
             Self::Admission => "gate 1 (admission)",
             Self::Liveness => "gate 2 (liveness)",
             Self::Removability => "gate 3 (removability)",

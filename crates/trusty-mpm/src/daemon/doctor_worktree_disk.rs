@@ -284,12 +284,21 @@ pub(super) async fn check_worktree_disk(
         // it advertises. Matching `worktree_reconcile::classify`, which has
         // never reported an agent tree reclaimable either.
         tokio::task::spawn_blocking(move || {
+            // #6927: the same operator keep-list the reclaim path applies, so a
+            // kept worktree is never counted into the reclaimable figure this
+            // probe prints or into the command it advertises.
+            let keep_list = crate::session_manager::worktree_keep_list::KeepList::from_patterns(
+                &crate::core::trusty_tools_config::disk_keep_list_patterns(
+                    &crate::core::trusty_tools_config::TrustyToolsConfig::load(),
+                ),
+            );
             survey(
                 &root,
                 &active,
                 &|_| AgentDelegationState::Unknown,
                 budget,
                 false,
+                &keep_list,
             )
         }),
     )

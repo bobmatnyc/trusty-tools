@@ -255,6 +255,7 @@ fn reclaim_remove_mode_spares_a_live_agents_merged_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &agent_live,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/live-agent-sweep-5661", 5661),
@@ -292,6 +293,7 @@ fn survey_discloses_a_live_agents_spared_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &agent_live,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/spared-agent-5829", 5829),
@@ -331,6 +333,7 @@ fn survey_discloses_nothing_when_no_agent_was_spared() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
             // `add_worktree` names the branch `session/<name>`, unlike
@@ -380,6 +383,7 @@ fn survey_reports_a_merged_worktree_as_reclaimable() {
         &no_agents,
         SurveyBudget::default(),
         false,
+        &KeepList::default(),
     );
     let found = s
         .candidates
@@ -410,6 +414,7 @@ fn survey_reclaims_a_worktree_claimed_only_by_the_calling_session() {
         &no_agents,
         SurveyBudget::default(),
         false,
+        &KeepList::default(),
     );
     let found = s
         .candidates
@@ -438,6 +443,7 @@ fn survey_still_blocks_a_worktree_a_foreign_session_claims() {
         &no_agents,
         SurveyBudget::default(),
         false,
+        &KeepList::default(),
     );
     let found = s
         .candidates
@@ -488,6 +494,7 @@ fn survey_reclaims_a_worktree_whose_two_commits_squash_merged_as_one() {
         &no_agents,
         SurveyBudget::default(),
         false,
+        &KeepList::default(),
     );
     let found = s
         .candidates
@@ -521,6 +528,7 @@ fn survey_names_the_gate_that_blocked_each_candidate() {
         &no_agents,
         SurveyBudget::default(),
         false,
+        &KeepList::default(),
     );
     let line = s
         .blocked_reasons
@@ -571,6 +579,7 @@ fn survey_excludes_a_worktree_trusty_mpm_cannot_remove() {
         &no_agents,
         SurveyBudget::default(),
         false,
+        &KeepList::default(),
     );
     let found = s
         .candidates
@@ -609,6 +618,7 @@ fn survey_refuses_an_unattributed_agent_store_worktree() {
         &no_agents,
         SurveyBudget::default(),
         false,
+        &KeepList::default(),
     );
     let found = s
         .candidates
@@ -641,6 +651,7 @@ fn survey_past_its_classify_deadline_reclaims_nothing() {
             classify: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
         },
         false,
+        &KeepList::default(),
     );
     assert!(!s.candidates.is_empty(), "candidates must still be listed");
     assert_eq!(s.reclaimable, 0, "an out-of-time survey approves nothing");
@@ -665,6 +676,7 @@ fn survey_past_its_measure_deadline_still_classifies() {
             classify: None,
         },
         false,
+        &KeepList::default(),
     );
     let found = s
         .candidates
@@ -688,6 +700,7 @@ fn reclaim_report_mode_removes_nothing() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("session/report-2919", 30),
@@ -728,6 +741,7 @@ fn reclaim_remove_mode_refuses_a_worktree_claimed_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &no_agents,
             in_use_now: &in_use_now,
             index_for: &|_: &Path| merged_index("session/claim-race-2919", 31),
@@ -763,6 +777,7 @@ fn reclaim_remove_mode_refuses_a_worktree_dirtied_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &no_agents,
             in_use_now: &in_use_now,
             index_for: &|_: &Path| merged_index("session/dirt-race-2919", 32),
@@ -802,6 +817,7 @@ fn reclaim_remove_mode_refuses_a_worktree_locked_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &no_agents,
             in_use_now: &in_use_now,
             index_for: &|_: &Path| merged_index("session/lock-race-2919", 33),
@@ -834,6 +850,7 @@ fn reclaim_remove_mode_refuses_when_the_pr_reopens_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
             index_for: &index,
@@ -859,6 +876,7 @@ fn reclaim_remove_mode_refuses_when_the_live_set_cannot_be_read() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &no_agents,
             in_use_now: &in_use_now,
             index_for: &|_: &Path| merged_index("session/unreadable-race-2919", 36),
@@ -880,6 +898,7 @@ fn reclaim_remove_mode_reclaims_a_clean_merged_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("session/reclaim-2919", 37),
@@ -938,7 +957,14 @@ fn e2e_survey_against_a_real_store() {
         measure: Some(std::time::Duration::from_secs(20)),
         classify: None,
     };
-    let s = survey(&root, &nobody(), &no_agents, budget, true);
+    let s = survey(
+        &root,
+        &nobody(),
+        &no_agents,
+        budget,
+        true,
+        &KeepList::default(),
+    );
     println!("--- #2919 e2e survey of {} ---", root.display());
     println!("elapsed           = {:?}", started.elapsed());
     println!("candidates        = {}", s.candidates.len());
@@ -998,6 +1024,7 @@ fn survey_measures_reclaimable_worktrees_before_blocked_ones() {
         &no_agents,
         SurveyBudget::default(),
         false,
+        &KeepList::default(),
     );
     let r = s
         .candidates
@@ -1024,6 +1051,7 @@ fn survey_measures_reclaimable_worktrees_before_blocked_ones() {
             classify: None,
         },
         false,
+        &KeepList::default(),
     );
     assert_eq!(starved.reclaimable_bytes, 0);
     assert!(starved.unmeasured > 0, "and it is disclosed as unmeasured");
@@ -1054,6 +1082,7 @@ fn survey_discloses_a_partially_measured_reclaimable_set() {
         &no_agents,
         SurveyBudget::default(),
         false,
+        &KeepList::default(),
     );
     assert_eq!(full.reclaimable, 2);
     assert_eq!(
@@ -1073,6 +1102,7 @@ fn survey_discloses_a_partially_measured_reclaimable_set() {
             classify: None,
         },
         false,
+        &KeepList::default(),
     );
     assert_eq!(starved.reclaimable, 2, "classification is unaffected");
     assert!(
@@ -1141,6 +1171,7 @@ fn survey_separates_deadline_skips_from_lookup_failures() {
             classify: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
         },
         false,
+        &KeepList::default(),
     );
     assert!(
         skipped.not_inspected > 0,
@@ -1160,6 +1191,7 @@ fn survey_separates_deadline_skips_from_lookup_failures() {
         &no_agents,
         SurveyBudget::default(),
         false,
+        &KeepList::default(),
     );
     assert_eq!(
         unresolved.not_inspected, 0,
@@ -1201,6 +1233,7 @@ fn survey_counts_a_failed_lookup_apart_from_an_unknown_state() {
         &no_agents,
         SurveyBudget::default(),
         false,
+        &KeepList::default(),
     );
     assert!(out.lookup_failed > 0, "the failure must be counted");
     assert_eq!(
@@ -1257,6 +1290,7 @@ fn survey_offers_a_merged_agent_worktree_the_harness_released() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/agent-6561e2e", 6561),
@@ -1288,6 +1322,7 @@ fn reclaim_reclaims_a_merged_agent_worktree_the_harness_released() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/agent-6561reclaim", 6562),
@@ -1311,6 +1346,7 @@ fn reclaim_never_offers_an_agent_worktree_whose_pr_is_open() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| open_index("wt/agent-6561open", 6563),
@@ -1342,6 +1378,7 @@ fn reclaim_never_offers_a_dirty_agent_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/agent-6561dirty", 6564),
@@ -1378,6 +1415,7 @@ fn survey_discloses_a_harness_locked_agent_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/agent-6561locked", 6565),
@@ -1553,6 +1591,7 @@ fn prune_resolves_each_projects_repo_from_its_own_origin_7057() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            keep_list: &KeepList::default(),
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
             index_for: &index_for,
