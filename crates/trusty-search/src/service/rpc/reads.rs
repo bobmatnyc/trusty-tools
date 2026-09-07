@@ -181,7 +181,7 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
         METHOD_INDEXES_LIST,
         ListIndexesParams,
         serde_json::Value,
-        |s, p| list_indexes_report(&s, &p)
+        |s, p| list_indexes_report(&s, &p).await
     );
     let r = fallible!(
         r,

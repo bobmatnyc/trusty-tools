@@ -74,6 +74,36 @@ pub(super) struct IndexDetailEntry {
     /// (`list_last_used_tests.rs`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_used_unix: Option<u64>,
+    /// When this index last finished indexing, RFC 3339 (#6699).
+    ///
+    /// Why: the console's roster shows a Last Indexed column and read it from a
+    /// per-index `GET /indexes/{id}/status` call per row. Serving it here is
+    /// what lets that roster drop the fan-out; without it, switching to this
+    /// endpoint would blank a column operators use.
+    /// What: the same value `GET /indexes/{id}/status` reports — the in-memory
+    /// `last_indexed_at` (#878) when the handle has one, else the newest
+    /// storage-directory mtime, which `index_disk_and_mtime` already computes
+    /// beside `size_bytes` and this arm used to discard. `None` for an index
+    /// that has never been indexed.
+    /// Test: `list_indexes_details_reports_last_indexed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_indexed: Option<String>,
+    /// Vector-lane health, flattened onto this entry (#6699).
+    ///
+    /// Why: the console's Indexes view showed a zero-vector index green. The
+    /// verdict #6689 built for the expanded panel needs `vectors_present`
+    /// against `chunk_count`, plus the stage status and advertised
+    /// capabilities that separate a genuine fault from a BM25-only index —
+    /// and this row carried none of them. Flattened rather than nested so a
+    /// row and a `GET /indexes/{id}/status` body carry the same key names at
+    /// the same depth, and one predicate reads either.
+    /// What: [`super::vector_health::VectorLaneHealth`], computed by the same
+    /// function the per-index endpoint calls. Purely additive: every field
+    /// above keeps its name, type and presence rule.
+    /// Test: `list_and_status_agree_on_vector_lane_health`,
+    /// `list_indexes_details_reports_zero_vectors` (`list_vector_health_tests.rs`).
+    #[serde(flatten)]
+    pub vector_health: super::vector_health::VectorLaneHealth,
 }
 
 #[derive(Deserialize)]

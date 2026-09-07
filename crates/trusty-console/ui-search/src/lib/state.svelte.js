@@ -157,44 +157,34 @@ export async function refreshHealth() {
 }
 
 /**
- * Why: The /indexes endpoint only returns names; the admin UI wants chunk
- * counts and root paths for every index. We fan out per-index /status calls
- * in parallel and merge into a single array.
- * What: Refreshes `_indexes` to a list of `{ id, chunk_count, root_path }`.
- * Indexes whose status call fails are still included with `error: true`.
- * Test: Register two indexes, call refreshIndexes(), assert length === 2.
+ * Why: the roster needs chunk counts, paths, freshness and vector-lane health
+ * for every index. It used to get them by calling `GET /indexes` for the ids
+ * and then `GET /indexes/{id}/status` once per id — 42 requests and 41 per-index
+ * directory walks on a 41-index daemon — and even then the rows carried no lane
+ * health, so a zero-vector index rendered green (#6699). `?details=true` serves
+ * all of it in one request.
+ * What: refreshes `_indexes` from that single call, keeping the field names the
+ * table already reads (`disk_bytes` is the row's name for the wire's
+ * `size_bytes`). The lane-health keys are passed through untouched so
+ * `vectorCoverageFault` can read a row exactly as it reads a status body.
+ * A failed call leaves `_indexes` empty and sets `_error`; per-row `error` stays
+ * on the row shape for the reindex/delete paths that set it.
+ * Test: `refreshIndexes_uses_one_details_call` (`state.test.js`).
  */
 export async function refreshIndexes() {
   _loading = true;
   _error = null;
   try {
-    const body = await api.listIndexes();
-    const names = body?.indexes || [];
-    const pairs = await Promise.all(
-      names.map(async (id) => {
-        try {
-          const s = await api.indexStatus(id);
-          return {
-            id,
-            chunk_count: s.chunk_count ?? 0,
-            root_path: s.root_path ?? '',
-            disk_bytes: s.disk_bytes ?? null,
-            last_indexed: s.last_indexed ?? null,
-            error: false
-          };
-        } catch (_e) {
-          return {
-            id,
-            chunk_count: 0,
-            root_path: '',
-            disk_bytes: null,
-            last_indexed: null,
-            error: true
-          };
-        }
-      })
-    );
-    _indexes = pairs;
+    const body = await api.listIndexesDetailed();
+    _indexes = (body?.indexes || []).map((row) => ({
+      ...row,
+      id: row.id,
+      chunk_count: row.chunk_count ?? 0,
+      root_path: row.root_path ?? '',
+      disk_bytes: row.size_bytes ?? null,
+      last_indexed: row.last_indexed ?? null,
+      error: false
+    }));
   } catch (e) {
     _error = e.message || String(e);
     _indexes = [];

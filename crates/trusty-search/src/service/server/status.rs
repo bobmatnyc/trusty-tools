@@ -310,11 +310,10 @@ pub(crate) async fn index_status_report(
     // array. The legacy `status` field stays at the top level, but
     // integrators wanting "is the vector lane ready" should consult
     // `search_capabilities`.
-    let mut stages_snapshot = handle.stages.read().await.clone();
-    // #6524: the pause flag lives on the handle, not inside `stages` — one
-    // owner, projected here at read time, so no writer has to keep two copies
-    // in step. Only `semantic` is pausable, so the other two stay `false`.
-    stages_snapshot.semantic.paused = handle.embedding_pause.is_paused();
+    // #6699: the stage snapshot, the pause projection (#6524) and the derived
+    // capabilities now live in `vector_health` so `GET /indexes?details=true`
+    // reports the identical values rather than recomputing them.
+    let stages_snapshot = super::vector_health::stages_snapshot(&handle).await;
     let search_capabilities = stages_snapshot.search_capabilities();
     // Issue #100: surface budget-truncation so callers can flag indexes that
     // hit the `TRUSTY_MAX_CHUNKS` cap during the last reindex. Defaults to
@@ -343,24 +342,6 @@ pub(crate) async fn index_status_report(
         walk_diag.last_walk_started_at.is_some(),
         crate::service::reindex::index_task_in_flight(&index_id),
     );
-    // Issue #681: prefer durable corpus count; in-memory map returns 0 after
-    // idle eviction (TRUSTY_CHUNKS_IDLE_EVICT_SECS default 60s). Falls back to
-    // in-memory for BM25-only / test indexers that have no corpus wired.
-    // #4333: when the corpus failed to open, the in-memory fallback below is
-    // NOT a measurement of the on-disk corpus — the quarantine invariant
-    // guarantees `corpus_arc()` is `None`, so this reported 122 for an index
-    // holding 201,206 chunks on disk, reading as catastrophic data loss.
-    // Report `null` (unknown) rather than a partial-looking number.
-    let chunk_count: Option<usize> = if indexer.corpus_open_failed {
-        None
-    } else {
-        Some(
-            indexer
-                .corpus_arc()
-                .and_then(|c| c.chunk_count().ok())
-                .unwrap_or_else(|| indexer.chunk_count()),
-        )
-    };
     // #4333: name the classified failure so a consumer can tell a transient
     // open timeout (retry) from a genuine format mismatch (rebuild).
     let corpus_open_failure = indexer.corpus_open_failure.map(|k| {
@@ -395,32 +376,14 @@ pub(crate) async fn index_status_report(
     // read as "not applicable" is this issue's own defect one level down, so
     // `vectors_unavailable_reason` names which of the two produced the null.
     // It is absent whenever `vectors_present` is a number.
-    let vectors_present = indexer.vector_count().await;
-    let vectors_unavailable_reason = match (vectors_present, indexer.has_vector_store()) {
-        (Some(_), _) => serde_json::Value::Null,
-        // A store is attached but `len()` errored — a real fault, not an
-        // absence, and distinct from `skip_vector`.
-        (None, true) => serde_json::Value::String("count_unreadable".into()),
-        // BM25-only, `skip_vector`, or a test indexer: there is nothing to
-        // count and that is the correct, healthy answer.
-        (None, false) => serde_json::Value::String("no_vector_store".into()),
-    };
-    // #6822: the precision the LIVE index holds, read from the index itself —
-    // NOT from `TRUSTY_VECTOR_QUANT`, which says what the NEXT index will be
-    // built with and therefore reads the opposite of the truth on exactly the
-    // indexes the `quantize` backfill exists for. `null` for a BM25-only /
-    // `skip_vector` index, which has no precision to report.
-    let vector_quant = indexer.vector_quant_label().await;
-    let semantic_coverage = serde_json::json!({
-        "vectors_present": vectors_present,
-        "vectors_unavailable_reason": vectors_unavailable_reason,
-        "vector_quant": vector_quant,
-        "chunk_count": chunk_count,
-        // The same number `stages.semantic.embedded` carries, restated here
-        // under a name that says what it measures. The field over in `stages`
-        // keeps its name for wire compatibility.
-        "embedded_this_boot": stages_snapshot.semantic.embedded,
-    });
+    //
+    // #6699: this block now lives in `vector_health` so the index list reports
+    // the same numbers from the same code rather than a second computation.
+    // `chunk_count` (issue #681, #4333) and `vector_quant` (#6822) come back
+    // inside it.
+    let semantic_coverage =
+        super::vector_health::semantic_coverage(&indexer, stages_snapshot.semantic.embedded).await;
+    let chunk_count = semantic_coverage.chunk_count;
     Ok(serde_json::json!({
         "index_id": index_id.0,
         "root_path": handle.root_path,

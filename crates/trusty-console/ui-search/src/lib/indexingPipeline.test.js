@@ -358,6 +358,49 @@ describe('indexHealth', () => {
   it('is unknown before a status arrives, never green', () => {
     expect(indexHealth(null)).toMatchObject({ healthy: null, label: 'Unknown' });
   });
+
+  // #6699: the roster reads `GET /indexes?details=true`, not a status body. The
+  // daemon flattens the lane-health keys onto the row at the same depth for
+  // exactly this reason — one predicate over either — so these assert the row
+  // shape the roster actually renders, verbatim as the endpoint serves it.
+  const DETAIL_ROW = {
+    id: 'tm-trusty-tools-19',
+    root_path: '/Users/me/code/trusty-tools',
+    size_bytes: 4102000,
+    last_indexed: '2026-09-04T12:00:00Z',
+    repo_identity: 'bobmatnyc/trusty-tools',
+    last_used_unix: 1757000000,
+    chunk_count: EMPTY_VECTOR_STORE.chunk_count,
+    stages: EMPTY_VECTOR_STORE.stages,
+    search_capabilities: EMPTY_VECTOR_STORE.search_capabilities,
+    semantic_coverage: EMPTY_VECTOR_STORE.semantic_coverage,
+    lexical_only: false,
+    skip_vector: false
+  };
+
+  it('flags a zero-vector list row, which the roster used to paint green', () => {
+    const health = indexHealth(DETAIL_ROW);
+    expect(health.healthy).toBe(false);
+    expect(health.label).toBe('Degraded');
+    expect(health.faults[0].label).toBe('Semantic lane empty');
+    expect(health.faults[0].detail).toContain('58,415');
+  });
+
+  it('leaves a list row whose store holds vectors alone', () => {
+    const health = indexHealth({
+      ...DETAIL_ROW,
+      semantic_coverage: { ...DETAIL_ROW.semantic_coverage, vectors_present: 58415 }
+    });
+    expect(health).toMatchObject({ healthy: true, label: 'Healthy', faults: [] });
+  });
+
+  it('stays green on a row from a daemon too old to carry the keys', () => {
+    // Back-compat: before #6699 a details row was `{id, root_path, size_bytes}`.
+    // Absent keys are not evidence of a fault, so such a row must not go red.
+    expect(indexHealth({ id: 'legacy', root_path: '/tmp/legacy', size_bytes: null })).toMatchObject(
+      { healthy: true, label: 'Healthy' }
+    );
+  });
 });
 
 describe('coverageMeta', () => {

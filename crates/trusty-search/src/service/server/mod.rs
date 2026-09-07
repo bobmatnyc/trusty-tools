@@ -49,6 +49,8 @@ mod tickers;
 mod typeahead;
 // #6688: `POST /upgrade`, split out of `health.rs` when it crossed the cap.
 mod upgrade;
+// #6699: the vector-lane health both `/indexes/:id/status` and `/indexes` report.
+mod vector_health;
 
 // cfg(test) sub-modules — each < 500 lines
 #[cfg(test)]
@@ -59,6 +61,9 @@ mod facet_route_tests;
 mod list_last_used_tests;
 #[cfg(test)]
 mod list_repo_identity_tests;
+// #6699: vector-lane health on the index list, and its agreement with status.
+#[cfg(test)]
+mod list_vector_health_tests;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]

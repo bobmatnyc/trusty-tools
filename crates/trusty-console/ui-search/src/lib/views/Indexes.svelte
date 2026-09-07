@@ -10,6 +10,10 @@
    * reindex shows a spinner + progress until the SSE `complete` event.
    * Issue #682 adds multi-select checkboxes and a bulk-action toolbar so
    * operators can delete or reindex many indexes in one click.
+   * #6699: the Status column shows a health verdict, not just the reindex-queue
+   * state — a zero-vector index answers nothing for every vector query and used
+   * to render green. The row data now comes from one `GET /indexes?details=true`
+   * call instead of a per-row `/status` fan-out.
    * Test: trigger a reindex on a seeded index and confirm the spinner shows
    * progress and clears on completion; select two rows and confirm bulk
    * Delete fires two DELETE calls and refreshes the list.
@@ -19,6 +23,7 @@
   import { apiUrl } from '../base.js';
   import { navigate } from '../router.svelte.js';
   import { getIndexes, getLoading, getError, refreshIndexes } from '../state.svelte.js';
+  import { indexHealth } from '../indexingPipeline.js';
   import IndexPipeline from '../components/IndexPipeline.svelte';
 
   let indexes = $derived(getIndexes());
@@ -534,7 +539,26 @@
                   {:else if ix.error}
                     <span class="badge badge-danger">error</span>
                   {:else}
-                    <span class="badge badge-success">ready</span>
+                    <!--
+                      #6699: `ready` is the reindex-queue state, not a health
+                      verdict — a zero-vector index answers nothing for every
+                      vector query and rendered green here. `indexHealth` is the
+                      same function the expanded panel's banner uses, over the
+                      lane-health keys `?details=true` now carries, so the row
+                      and the panel cannot word the same fault differently.
+                    -->
+                    {@const health = indexHealth(ix)}
+                    {#if health.healthy === false}
+                      <span
+                        class="badge badge-danger"
+                        data-testid="index-degraded"
+                        title={health.faults.map((f) => `${f.label}. ${f.detail}`).join('\n')}
+                      >
+                        {health.label}
+                      </span>
+                    {:else}
+                      <span class="badge badge-success">ready</span>
+                    {/if}
                   {/if}
                 </td>
                 <td style="text-align: right; white-space: nowrap">
