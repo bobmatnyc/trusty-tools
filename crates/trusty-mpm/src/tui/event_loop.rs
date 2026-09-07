@@ -29,12 +29,19 @@ use super::{Screen, coordinator_send, poll_daemon, render_screen, spawn_health_p
 /// polls the keyboard every 50ms so input feels instantaneous. Number keys
 /// switch screens; `q` quits from either.
 /// Test: the pure pieces (rendering, client, screen state) are unit-tested.
+// #2872: ratatui 0.30 gave `Backend` an associated `Error` type (0.29 hard-coded
+// `std::io::Error`), so `Terminal::draw` returns `Result<_, B::Error>` and `?`
+// into `anyhow::Result` needs that error `Send + Sync + 'static`. The crossterm
+// backend this TUI runs on keeps `Error = std::io::Error`.
 pub(super) async fn run_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     client: &mut DaemonClient,
     interval_ms: u64,
     focus_id: Option<String>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
     // The sidebar starts visible only when there is at least one session to
     // show; otherwise the coordinator chat gets the full width immediately.
     let mut state = DashboardState::default();
