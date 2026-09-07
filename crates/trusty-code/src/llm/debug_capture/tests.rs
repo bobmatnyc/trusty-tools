@@ -166,6 +166,7 @@ fn sample_request(user_text: &str) -> ChatRequest {
         tool_choice: None,
         stop: None,
         usage: None,
+        response_schema: None,
     }
 }
 

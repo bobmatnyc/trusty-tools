@@ -355,6 +355,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            response_schema: None,
             stop: None,
         };
 

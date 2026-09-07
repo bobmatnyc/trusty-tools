@@ -210,14 +210,20 @@ impl InferenceAdapter for LocalAdapter {
         self.inner.capabilities_for(model)
     }
 
-    /// Probe, then delegate (#4490).
+    /// Guard the capability (#5588), probe (#4490), then delegate.
+    ///
+    /// The guard runs BEFORE the probe: a schema this provider cannot honour
+    /// fails no matter what the probe finds, so spending a round-trip to learn
+    /// the server is alive tells the caller nothing.
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, InferenceError> {
+        self.ensure_structured_output_supported(request)?;
         self.probe().await?;
         self.inner.chat(request).await
     }
 
-    /// Probe, then delegate (#4490).
+    /// Guard, probe, then delegate — see [`Self::chat`].
     async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatStream, InferenceError> {
+        self.ensure_structured_output_supported(request)?;
         self.probe().await?;
         self.inner.chat_stream(request).await
     }

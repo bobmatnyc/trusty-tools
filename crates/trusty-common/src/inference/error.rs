@@ -11,7 +11,7 @@
 //! [`InferenceError::is_retryable`] and [`InferenceError::is_alarm`] classifiers.
 //! Concrete HTTP adapters (#2403) map `reqwest`/SDK errors into these variants.
 //! Test: inline `tests` — `retryable_classification`, `alarm_classification`,
-//! `display_includes_context`.
+//! `unsupported_capability_alarms_and_does_not_retry`, `display_includes_context`.
 
 use crate::inference::registry::ProviderId;
 
@@ -81,6 +81,27 @@ pub enum InferenceError {
     #[error("unsupported inference capability: {0}")]
     Unsupported(String),
 
+    /// The request asked for a capability the resolved provider does not have.
+    ///
+    /// Why (#5588): [`Self::Unsupported`] carries free text, so a caller cannot
+    /// tell WHICH provider refused WHICH capability without parsing the display
+    /// string — and the structured-output path needs exactly that, because the
+    /// recovery is "route this request to a provider that supports it". Raised
+    /// before any network call: a schema the provider cannot honour is a
+    /// mis-routed request, not a completion to send and hope about.
+    /// What: names the provider and the registry capability it lacks.
+    /// Classifies as an alarm (route or configure differently) and never as
+    /// retryable — the same provider will refuse the same request forever.
+    /// Test: `unsupported_capability_alarms_and_does_not_retry`.
+    #[error("provider {provider} does not support the {capability} capability")]
+    UnsupportedCapability {
+        /// The provider that would have served the request.
+        provider: ProviderId,
+        /// The registry capability the request needed, e.g.
+        /// `"structured_output"`.
+        capability: &'static str,
+    },
+
     /// A required configuration value is missing, described in free text.
     ///
     /// Why (#4425): [`Self::MissingCredential`] can only name a [`ProviderId`]
@@ -130,6 +151,7 @@ impl InferenceError {
             Self::MissingCredential { .. }
             | Self::NoAdapterRegistered { .. }
             | Self::Unsupported(_)
+            | Self::UnsupportedCapability { .. }
             | Self::MissingConfig(_) => true,
             Self::Api { status, .. } => matches!(status, 401 | 403 | 404),
             _ => false,
@@ -219,6 +241,28 @@ mod tests {
         assert!(e.is_alarm());
         assert!(!e.is_retryable());
         assert!(e.to_string().contains("OPENROUTER_API_KEY not set"), "{e}");
+    }
+
+    /// A missing provider capability alarms, never retries, and names both parts.
+    ///
+    /// Why (#5588): the caller's recovery is to route elsewhere or drop the
+    /// schema, so this must alarm; retrying the same provider can never succeed.
+    /// The display has to carry the provider AND the capability, because
+    /// "unsupported capability" alone tells an operator nothing about which
+    /// provider to reconfigure.
+    /// What: assert `is_alarm()`, `!is_retryable()`, and both halves of the text.
+    /// Test: this test.
+    #[test]
+    fn unsupported_capability_alarms_and_does_not_retry() {
+        let e = InferenceError::UnsupportedCapability {
+            provider: ProviderId::Local,
+            capability: "structured_output",
+        };
+        assert!(e.is_alarm());
+        assert!(!e.is_retryable());
+        let s = e.to_string();
+        assert!(s.contains("local"), "{s}");
+        assert!(s.contains("structured_output"), "{s}");
     }
 
     /// Why: display strings feed logs and must carry the actionable context.
