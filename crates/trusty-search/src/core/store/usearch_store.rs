@@ -372,7 +372,8 @@ pub struct UsearchStore {
     ///
     /// Holding the gate across map allocation, graph changes, and batch rollback
     /// prevents save from combining a sidecar from one mutation boundary with
-    /// a binary from another. It also serializes per-process staging writes.
+    /// a binary from another. A cancelled mutator can still leave partial state;
+    /// this gate does not provide rollback. It also serializes staging writes.
     /// Cancellation while the FFI worker runs still leaves its graph guard
     /// held until serialization finishes; the cancelled saver never publishes.
     /// Test: `super::snapshot_tests::snapshot_excludes_partial_mutations_and_reloads_vector_ids`,

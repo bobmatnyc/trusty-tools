@@ -176,3 +176,40 @@ async fn rewritten_keys_remain_dirty_until_saved_and_demoted() {
         "renamed"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sidecar_rename_failure_preserves_previous_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+    let store = UsearchStore::new(4).unwrap();
+    store.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    store.upsert("b", vec![0.0, 1.0, 0.0, 0.0]).await.unwrap();
+    store.save(&path).await.unwrap();
+    let binary = std::fs::read(&path).unwrap();
+    let sidecar = path.with_extension("keys.json");
+    let keys = std::fs::read(&sidecar).unwrap();
+    store.remove("a").await.unwrap();
+    // Existing writable staging files can be serialized even when the parent
+    // directory cannot be modified. The first rename then fails deterministically.
+    std::fs::write(staging_path(&path, "usearch"), []).unwrap();
+    std::fs::write(staging_path(&sidecar, "json"), []).unwrap();
+    let permissions = std::fs::metadata(dir.path()).unwrap().permissions();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result = store.save(&path).await;
+    std::fs::set_permissions(dir.path(), permissions).unwrap();
+    let error = result.unwrap_err();
+    assert_eq!(error.to_string(), "rename hnsw key sidecar");
+    assert_eq!(std::fs::read(&path).unwrap(), binary);
+    assert_eq!(std::fs::read(&sidecar).unwrap(), keys);
+    assert_eq!(store.removed_since_save.load(Ordering::Acquire), 1);
+    assert!(store.dirty.load(Ordering::Acquire));
+    let loaded = UsearchStore::load_from(&path).await.unwrap().unwrap();
+    assert_eq!(loaded.len().await.unwrap(), 2);
+    assert_eq!(
+        loaded.search(&[1.0, 0.0, 0.0, 0.0], 1).await.unwrap()[0].chunk_id,
+        "a"
+    );
+}
