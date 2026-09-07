@@ -17,11 +17,13 @@
 //! replace-by-identity strip (entry-level, per issue #2948) recognises every
 //! source this module combines.
 //! What: [`project_managed_hook_additions`] deep-merges the `trusty-memory`
-//! block, the PM-enforcement guard, and the lifecycle triad into one value;
+//! block, the PM-enforcement guard, the lifecycle triad, and (#6887, when the
+//! manifest opts in) the bulk-read diversion groups into one value;
 //! [`is_project_managed_hook_command`] recognises a command from ANY of those
-//! three sources.
+//! four sources.
 //! Test: `project_hooks_tests.rs`.
 
+use super::divert_hooks::{divert_hook_groups, is_divert_hook_command};
 use super::settings::{TRUSTY_MEMORY_HOOKS, pm_guard_hook_value};
 use crate::core::standalone::hooks::{is_mpm_hook_command, mpm_hook_additions_with_exe};
 
@@ -42,10 +44,19 @@ use crate::core::standalone::hooks::{is_mpm_hook_command, mpm_hook_additions_wit
 /// `inject_prompt_context` is the `[hooks] prompt_context` config key (#5034):
 /// `true` (the default) keeps the `UserPromptSubmit` entry; `false` drops that
 /// event key entirely and leaves every other source untouched.
+/// `divert_enabled` is the `[divert] enabled` manifest key (#6887): `true`
+/// APPENDS two more `PreToolUse` groups (matcher `Read`, matcher `Bash`) after
+/// every existing group, so no other group's bytes change either way; `false`
+/// (the default) writes none.
 /// Test: `project_managed_hook_additions_combines_all_three_sources`,
 /// `project_managed_hook_additions_is_stable_across_calls`,
-/// `project_managed_hook_additions_omits_prompt_context_when_disabled`.
-pub(super) fn project_managed_hook_additions(inject_prompt_context: bool) -> serde_json::Value {
+/// `project_managed_hook_additions_omits_prompt_context_when_disabled`,
+/// `project_managed_hook_additions_includes_divert_when_enabled`,
+/// `project_managed_hook_additions_omits_divert_when_disabled`.
+pub(super) fn project_managed_hook_additions(
+    inject_prompt_context: bool,
+    divert_enabled: bool,
+) -> serde_json::Value {
     let mut hooks: serde_json::Value =
         serde_json::from_str(TRUSTY_MEMORY_HOOKS).expect("bundled hook block is valid JSON");
     if let Some(obj) = hooks.as_object_mut() {
@@ -79,6 +90,23 @@ pub(super) fn project_managed_hook_additions(inject_prompt_context: bool) -> ser
         }
     }
 
+    // #6887: APPENDED last, and only onto `PreToolUse`, so the PM-guard and
+    // lifecycle-triad groups above keep byte-identical positions and
+    // content whether the toggle is on or off. Never `insert`
+    // `PreToolUse` — that clobbers both (module doc above).
+    if divert_enabled && let Some(hooks_obj) = hooks.as_object_mut() {
+        let target = hooks_obj
+            .entry("PreToolUse".to_string())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if let Some(target_arr) = target.as_array_mut() {
+            for group in divert_hook_groups() {
+                if !target_arr.contains(&group) {
+                    target_arr.push(group);
+                }
+            }
+        }
+    }
+
     serde_json::json!({ "hooks": hooks })
 }
 
@@ -92,13 +120,14 @@ pub(super) fn project_managed_hook_additions(inject_prompt_context: bool) -> ser
 /// `UserPromptSubmit` entry would sit in `.claude/settings.json` forever,
 /// still firing, because the strip no longer covered that key. The strip
 /// domain must therefore be the full owned set, not the write set.
-/// What: the event keys of [`project_managed_hook_additions`]`(true)` — a
-/// superset of every toggled variant by construction, so it cannot drift as
-/// toggles are added.
+/// What: the event keys of [`project_managed_hook_additions`] with EVERY
+/// toggle on — a superset of every toggled variant by construction, so it
+/// cannot drift as toggles are added (#6887 adds the second one).
 /// Test: `project_managed_hook_events_is_a_superset_of_every_variant`,
-/// `write_project_hooks_strips_stale_prompt_context_when_disabled`.
+/// `write_project_hooks_strips_stale_prompt_context_when_disabled`,
+/// `write_project_hooks_strips_stale_divert_when_disabled`.
 pub(super) fn project_managed_hook_events() -> Vec<String> {
-    project_managed_hook_additions(true)["hooks"]
+    project_managed_hook_additions(true, true)["hooks"]
         .as_object()
         .map(|events| events.keys().cloned().collect())
         .unwrap_or_default()
@@ -116,13 +145,17 @@ pub(super) fn project_managed_hook_events() -> Vec<String> {
 /// broader predicate, re-running `write_project_hooks` would duplicate the
 /// `trusty-memory`/PM-guard groups on every launch instead of replacing them.
 /// What: returns `true` for a lifecycle-triad command
-/// ([`is_mpm_hook_command`]), a `trusty-memory ` command, or a PM-guard
-/// command (ends with ` hook --pm-guard`).
-/// Test: `is_project_managed_hook_command_recognises_all_three_sources`.
+/// ([`is_mpm_hook_command`]), a `trusty-memory ` command, a PM-guard command
+/// (ends with ` hook --pm-guard`), or a diversion-check command (#6887,
+/// [`is_divert_hook_command`]).
+/// Test: `is_project_managed_hook_command_recognises_all_three_sources`,
+/// `is_project_managed_hook_command_recognises_divert_check`.
 pub(super) fn is_project_managed_hook_command(cmd: &str) -> bool {
     is_mpm_hook_command(cmd)
         || cmd.starts_with("trusty-memory ")
         || cmd.ends_with(" hook --pm-guard")
+        // #6887: without this arm the strip never removes a stale divert group.
+        || is_divert_hook_command(cmd)
 }
 
 #[cfg(test)]

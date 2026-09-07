@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-60 top-level commands.
+61 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -29,6 +29,8 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `coordinator` — Send a message to the cross-session coordinator / session manager
   - `serve` — Run the SM JSON-RPC 2.0 over STDIO adapter (the headless drive surface)
 - `daemon` — Run the trusty-mpm daemon
+- `divert` — Bulk-read diversion worker (issue #6887)
+  - `bulk-read` — Read files on a cheap worker model and print only the answer
 - `doctor` — Run a full system diagnostic of the trusty-mpm stack
 - `events` — Show the recent hook-event feed
 - `f` — Find a session by NAME, filtering as you type — `tm f [pattern]`

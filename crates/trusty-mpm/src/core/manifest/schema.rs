@@ -85,6 +85,12 @@ pub struct HarnessManifest {
     /// `[models]` — model-tier defaults for the harness's agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<ModelTiers>,
+
+    // #6887: bulk-read diversion is OPT-IN, so an absent section resolves to
+    // disabled rather than to the "absent → on" default the MCP toggles use.
+    /// `[divert]` — bulk-read diversion to a cheap worker model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub divert: Option<DivertConfig>,
 }
 
 /// `[agents]` — the agent set a harness deploys.
@@ -380,6 +386,56 @@ impl McpServers {
     }
 }
 
+/// `[divert]` — bulk-read diversion to a cheap worker model (#6887).
+///
+/// Why: a session that `Read`s a 2000-line file pays for every one of those
+/// lines in its own context, on its own (expensive) model. Diverting that read
+/// to a cheap worker that answers the question instead measured -45% cost and
+/// -54% output tokens in the #6882 POC. The feature changes what the agent is
+/// allowed to do, so it is OPT-IN: absent means off, unlike the `[mcp]`
+/// toggles whose absent state is on.
+/// What: three independent `Option` fields merged FIELD-BY-FIELD (see
+/// [`Self::merge`]), so a project that sets only `min_lines` keeps a lower
+/// layer's explicit `enabled`. `worker_model` is a model name `claude --model`
+/// accepts (empty = [`DEFAULT_DIVERT_WORKER_MODEL`](crate::core::manifest::DEFAULT_DIVERT_WORKER_MODEL)).
+/// There is no provider field: owner ruling 2026-09-07 fixed the worker as
+/// headless Claude Code under the developer's existing login, so there is
+/// nothing to select between.
+/// Test: `divert_config_merge_field_level`, `manifest_roundtrip`,
+/// `default_manifest_divert_disabled_by_default`, `plan_divert_toggles`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DivertConfig {
+    /// Divert oversized bulk reads to the worker model. Default `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Line count at or above which a read is diverted. Default `350`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_lines: Option<u32>,
+    /// Worker model name. Empty = `claude-haiku-4-5`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_model: Option<String>,
+}
+
+impl DivertConfig {
+    /// Field-by-field merge: each `Some` field in `higher` wins, `None` inherits.
+    ///
+    /// Why: same reasoning as [`McpServers::merge`] — a partial override like
+    /// `[divert] min_lines = 500` must not reset a lower layer's explicit
+    /// `enabled = true` back to `None`, which whole-section replacement would
+    /// do.
+    /// What: for each of the three fields, takes `higher`'s value when it is
+    /// `Some`, else falls through to `self`'s.
+    /// Test: `divert_config_merge_field_level`.
+    #[must_use]
+    pub fn merge(self, higher: DivertConfig) -> DivertConfig {
+        DivertConfig {
+            enabled: higher.enabled.or(self.enabled),
+            min_lines: higher.min_lines.or(self.min_lines),
+            worker_model: higher.worker_model.or(self.worker_model),
+        }
+    }
+}
+
 /// A single project-scope custom MCP server definition (issue #2739 follow-up).
 ///
 /// Why: `tm mcp add` (the USER-scope registry) already models a stdio-vs-remote
@@ -485,7 +541,7 @@ impl HarnessManifest {
     /// (project override > user config > catalog > default).
     /// What: each section merges according to its documented mode:
     ///
-    /// - **Field-by-field** (`[mcp]`, `[instructions]`): these are small structs
+    /// - **Field-by-field** (`[mcp]`, `[instructions]`, `[divert]`): these are small structs
     ///   of independent `Option<bool>` toggles, so a higher layer's `Some` wins
     ///   *per field* while a `None` field inherits the lower layer. This means a
     ///   partial override like `[mcp] trusty_search = false` no longer resets the
@@ -517,6 +573,8 @@ impl HarnessManifest {
                 lo.merge(hi)
             }),
             mcp: merge_optional(self.mcp, higher.mcp, |lo, hi| lo.merge(hi)),
+            // #6887: field-by-field, so a partial `[divert]` keeps the rest.
+            divert: merge_optional(self.divert, higher.divert, |lo, hi| lo.merge(hi)),
         }
     }
 }
