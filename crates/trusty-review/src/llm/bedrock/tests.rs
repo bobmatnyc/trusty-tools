@@ -3,16 +3,20 @@
 //! Why: extracted from `bedrock/mod.rs` to keep that file under the 500-line
 //! cap while preserving full test coverage.
 //! What: region resolution, model-id validation, cost estimation,
-//! provider construction, and structured-output (tool-use) behavior tests.
-//! All tests are unit-level — no real AWS calls.
+//! provider construction, SDK-error rendering, and structured-output (tool-use)
+//! behavior tests. All tests are unit-level — no real AWS calls.
 //! Test: this file is included as `#[cfg(test)] mod tests` from `bedrock/mod.rs`.
 
 use aws_config::BehaviorVersion;
 use aws_sdk_bedrockruntime::Client as BedrockClient;
+use aws_sdk_bedrockruntime::error::SdkError;
+use aws_sdk_bedrockruntime::operation::converse::ConverseError;
+use aws_sdk_bedrockruntime::types::error::ResourceNotFoundException;
+use aws_smithy_types::error::ErrorMetadata;
 
 use super::{
-    BedrockProvider, DEFAULT_REGION, LlmRequest, estimate_bedrock_cost_usd, normalize_model_family,
-    resolve_bedrock_region, resolve_region_from, validate_model_id,
+    BedrockProvider, DEFAULT_REGION, LlmRequest, describe_sdk_error, estimate_bedrock_cost_usd,
+    normalize_model_family, resolve_bedrock_region, resolve_region_from, validate_model_id,
 };
 use crate::llm::bedrock::tool_use::build_tool_config;
 use crate::llm::{ChatMessage, LlmError, LlmProvider, ResponseSchema};
@@ -421,5 +425,109 @@ async fn bedrock_structured_no_credentials_returns_error() {
     assert!(
         result.is_err(),
         "must fail without real credentials even with tool-use schema"
+    );
+}
+
+// ── SDK error rendering (#6912) ───────────────────────────────────────────
+
+/// Build the `SdkError` a real Bedrock `ResourceNotFoundException` produces.
+///
+/// Why: the deserializer fills `ErrorMetadata` with the AWS code (from
+/// `__type`) and message, and that pair is what the operator needs to see.
+/// What: wraps the modeled exception in `ConverseError` and in the
+/// `ServiceError` variant; the raw-response slot is `()` because
+/// `describe_sdk_error` never reads it.
+/// Test: used by the three tests below.
+fn resource_not_found_sdk_error(message: &str) -> SdkError<ConverseError, ()> {
+    let exception = ResourceNotFoundException::builder()
+        .message(message)
+        .meta(
+            ErrorMetadata::builder()
+                .code("ResourceNotFoundException")
+                .message(message)
+                .build(),
+        )
+        .build();
+    SdkError::service_error(ConverseError::ResourceNotFoundException(exception), ())
+}
+
+/// A Bedrock service error must surface its AWS code and message.
+///
+/// Why: #6912 — `SdkError`'s `Display` renders every service error as the bare
+/// literal "service error", so a wrong region, a missing credential, and an
+/// unapproved model were indistinguishable in the reported error. Sessions lost
+/// days to "inference: unreachable" diagnoses because of it.
+/// What: renders a `ResourceNotFoundException`-shaped service error and asserts
+/// the code and the message both survive. The last assertion pins the SDK
+/// behavior this works around: `to_string()` — the expression the mapper used
+/// before this fix — still yields only "service error", so the same assertions
+/// applied to `origin/main`'s expression fail.
+/// Test: this test.
+#[test]
+fn bedrock_service_error_surfaces_code_and_message() {
+    let message = "Model use case details have not been submitted for this account.";
+    let sdk_err = resource_not_found_sdk_error(message);
+
+    let rendered = describe_sdk_error(&sdk_err);
+    assert!(
+        rendered.contains("ResourceNotFoundException"),
+        "rendered error must name the AWS error code, got: {rendered}"
+    );
+    assert!(
+        rendered.contains(message),
+        "rendered error must carry the AWS message, got: {rendered}"
+    );
+    assert_ne!(
+        rendered, "service error",
+        "the flattened SDK Display must not be what reaches the operator"
+    );
+
+    assert_eq!(
+        sdk_err.to_string(),
+        "service error",
+        "SdkError's own Display is still the flattened literal this fix routes around"
+    );
+}
+
+/// A service error carrying no metadata falls back to the modeled Display.
+///
+/// Why: metadata is populated by the response deserializer, so a synthesized or
+/// unparsed error can reach the mapper with an empty `ErrorMetadata`; falling
+/// back to the SDK's flattened Display there would reintroduce #6912.
+/// What: builds the same exception with no `meta`, and asserts the fallback is
+/// the modeled error's own Display — which already spells the code and message.
+/// Test: this test.
+#[test]
+fn bedrock_service_error_without_metadata_falls_back_to_display() {
+    let exception = ResourceNotFoundException::builder()
+        .message("no metadata attached")
+        .build();
+    let sdk_err: SdkError<ConverseError, ()> =
+        SdkError::service_error(ConverseError::ResourceNotFoundException(exception), ());
+
+    let rendered = describe_sdk_error(&sdk_err);
+    assert_eq!(
+        rendered, "ResourceNotFoundException: no metadata attached",
+        "empty metadata must fall back to the modeled error's Display"
+    );
+}
+
+/// Non-service `SdkError` variants keep the SDK's existing rendering.
+///
+/// Why: timeout, dispatch, and construction failures carry no error metadata,
+/// so #6912's fix must leave their wording untouched rather than invent one.
+/// What: renders a timeout and a construction failure and asserts each matches
+/// `SdkError`'s own Display exactly.
+/// Test: this test.
+#[test]
+fn bedrock_timeout_error_keeps_sdk_rendering() {
+    let timeout: SdkError<ConverseError, ()> = SdkError::timeout_error("read timed out");
+    assert_eq!(describe_sdk_error(&timeout), "request has timed out");
+
+    let construction: SdkError<ConverseError, ()> =
+        SdkError::construction_failure("missing model id");
+    assert_eq!(
+        describe_sdk_error(&construction),
+        "failed to construct request"
     );
 }
