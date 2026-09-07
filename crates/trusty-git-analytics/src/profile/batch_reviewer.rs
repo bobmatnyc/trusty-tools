@@ -29,6 +29,7 @@ use trusty_common::inference::{
     InferenceError,
 };
 
+use super::schema_delivery::deliver_schema;
 use super::types::{Effort, Finding, LongitudinalFinding, PeriodBatch, TokenCostSummary};
 
 // ─── Request parameters ───────────────────────────────────────────────────────
@@ -45,6 +46,12 @@ pub const PERIOD_REVIEWER_MAX_TOKENS: u32 = 2048;
 const MAX_DIFFS_IN_PROMPT: usize = 10;
 
 // ─── Prompt construction ──────────────────────────────────────────────────────
+
+/// The name OpenAI-dialect providers attach to the period-findings schema.
+///
+/// #5588: `StructuredOutput` requires one; it is a label on the wire, not a
+/// field the model fills in.
+pub const PERIOD_FINDINGS_SCHEMA_NAME: &str = "period_findings";
 
 /// JSON Schema for the period-findings response.
 ///
@@ -184,25 +191,33 @@ pub fn build_period_user_message(batch: &PeriodBatch) -> String {
 
 /// Assemble the shared-inference request for one period.
 ///
-/// Why: [`trusty_common::inference::ChatRequest`] carries no structured-output
-/// field, so the schema only reaches the model if the system turn spells it
-/// out. Stating it there keeps [`parse_period_findings`]'s direct-JSON path —
+/// Why: the schema is what keeps [`parse_period_findings`]'s direct-JSON path —
 /// the one that needs no fence — the likely outcome rather than the lucky one.
-/// What: system turn = the reviewer role plus [`period_findings_schema`]
-/// rendered as JSON; user turn = [`build_period_user_message`]. `model` is
-/// passed through UNCHANGED: a `bedrock/` or `openrouter/` prefix is what
-/// `provider_for` routes on, and the adapter strips it for the wire in
-/// `ProviderId::wire_model_id`.
+/// #5588 gave [`trusty_common::inference::ChatRequest`] a `response_schema`
+/// field, so on a provider that honours it the schema now constrains the
+/// completion instead of asking for it in prose.
+/// What: system turn = the reviewer role, plus [`period_findings_schema`]
+/// rendered as JSON only when `structured_output` is false; user turn =
+/// [`build_period_user_message`]. `structured_output` is the sending adapter's
+/// [`InferenceAdapter::supports_structured_output`] — see
+/// [`super::schema_delivery::deliver_schema`] for why the fallback exists rather
+/// than a refusal. `model` is passed through UNCHANGED: a `bedrock/` or
+/// `openrouter/` prefix is what `provider_for` routes on, and the adapter strips
+/// it for the wire in `ProviderId::wire_model_id`.
 /// Test: `period_request_preserves_routing_prefix`,
-/// `period_request_carries_schema_and_sampling`.
-pub fn build_period_request(batch: &PeriodBatch, model: &str) -> ChatRequest {
-    // `to_string_pretty` over a `Value` this module built cannot fail; an empty
-    // string would still leave the prose instructions in the system turn.
-    let schema = serde_json::to_string_pretty(&period_findings_schema()).unwrap_or_default();
-    let system = format!(
-        "{}\n\n## Response schema\nReturn ONLY a JSON object conforming to this schema:\n\
-         ```json\n{schema}\n```",
-        period_reviewer_system_prompt()
+/// `period_request_sends_the_schema_through_response_schema`,
+/// `period_request_falls_back_to_prose_without_the_capability`.
+pub fn build_period_request(
+    batch: &PeriodBatch,
+    model: &str,
+    structured_output: bool,
+) -> ChatRequest {
+    // #5588: one delivery or the other, never both.
+    let (system, response_schema) = deliver_schema(
+        period_reviewer_system_prompt(),
+        PERIOD_FINDINGS_SCHEMA_NAME,
+        period_findings_schema(),
+        structured_output,
     );
 
     let mut req = ChatRequest::new(
@@ -214,6 +229,7 @@ pub fn build_period_request(batch: &PeriodBatch, model: &str) -> ChatRequest {
     );
     req.temperature = Some(PERIOD_REVIEWER_TEMPERATURE);
     req.max_tokens = Some(PERIOD_REVIEWER_MAX_TOKENS);
+    req.response_schema = response_schema;
     req
 }
 
@@ -477,7 +493,13 @@ impl PeriodReviewer {
         cost_out: &mut TokenCostSummary,
     ) -> PeriodReview {
         let period = &batch.stats.period_label;
-        let request = build_period_request(batch, &self.model);
+        // #5588: the adapter's own capability decides the delivery — asking it
+        // is what keeps a `bedrock/…` run from failing before the socket opens.
+        let request = build_period_request(
+            batch,
+            &self.model,
+            self.adapter.supports_structured_output(),
+        );
         let start = Instant::now();
 
         let response = match self.adapter.chat(&request).await {
