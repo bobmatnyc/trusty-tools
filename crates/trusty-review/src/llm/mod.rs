@@ -518,7 +518,9 @@ pub async fn build_provider(
     let (provider, bare_model) = resolve_provider_and_model(model, default_provider)?;
     match provider {
         Provider::Bedrock => {
-            let p = BedrockProvider::new(bare_model, None).await?;
+            // #5469: synchronous now — the shared adapter builds its AWS client
+            // lazily on the first Converse call.
+            let p = BedrockProvider::new(bare_model)?;
             Ok(Arc::new(p))
         }
         Provider::OpenRouter => {

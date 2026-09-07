@@ -420,8 +420,7 @@ mod tests {
     #[ignore]
     async fn stage_c_live_bedrock() {
         use crate::llm::BedrockProvider;
-        let provider = BedrockProvider::new(DEFAULT_CLASSIFIER_MODEL.to_string(), None)
-            .await
+        let provider = BedrockProvider::new(DEFAULT_CLASSIFIER_MODEL.to_string())
             .expect("BedrockProvider must build");
         let classifier = HunkClassifier::new(
             Arc::new(provider),

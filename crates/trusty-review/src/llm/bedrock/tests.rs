@@ -14,9 +14,11 @@ use aws_sdk_bedrockruntime::operation::converse::ConverseError;
 use aws_sdk_bedrockruntime::types::error::ResourceNotFoundException;
 use aws_smithy_types::error::ErrorMetadata;
 
+use trusty_common::inference::bedrock::{DEFAULT_REGION, resolve_region_from};
+
 use super::{
-    BedrockProvider, DEFAULT_REGION, LlmRequest, describe_sdk_error, estimate_bedrock_cost_usd,
-    normalize_model_family, resolve_bedrock_region, resolve_region_from, validate_model_id,
+    BedrockProvider, LlmRequest, describe_sdk_error, estimate_bedrock_cost_usd,
+    normalize_model_family, resolve_bedrock_region, validate_model_id,
 };
 use crate::llm::bedrock::tool_use::build_tool_config;
 use crate::llm::{ChatMessage, LlmError, LlmProvider, ResponseSchema};
@@ -30,7 +32,9 @@ use crate::llm::{ChatMessage, LlmError, LlmProvider, ResponseSchema};
 /// deployment contexts, so the ordering must stay stable. #5706: this test used
 /// to call `resolve_bedrock_region` and assert that an empty explicit region
 /// reaches the default, which skips the two env tiers and fails outright on any
-/// machine with `AWS_REGION` exported.
+/// machine with `AWS_REGION` exported. #5469: the walk itself now lives in
+/// `trusty_common::inference::bedrock`, so this test drives the SHARED
+/// implementation — reorder its tiers and these assertions fail.
 /// What: drives the pure `resolve_region_from` walk with both env tiers passed
 /// as arguments, so every case is deterministic. The one `resolve_bedrock_region`
 /// assertion left exercises the tier that is env-independent by construction.

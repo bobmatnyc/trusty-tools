@@ -420,8 +420,9 @@ pub fn dedup_need_for(diff_source: &DiffSource, allow_posting: bool) -> DedupNee
 /// Build the injected service dependencies from `ReviewConfig` and a model id.
 ///
 /// Why: both `run` and `compare` need the same set of deps; building them from
-/// config in one place avoids repetition.  Async because `BedrockProvider::new`
-/// loads AWS credentials asynchronously.
+/// config in one place avoids repetition.  Async because the search and dedup
+/// dependencies it opens are async (#5469: no longer because of
+/// `BedrockProvider::new`, whose AWS client is built lazily on first use).
 /// What: uses `build_provider` (which resolves the `bedrock/`/`openrouter/`
 /// prefix), builds the optional verifier, constructs search/analyze clients, and
 /// opens the dedup store when `dedup_need` says this invocation can post

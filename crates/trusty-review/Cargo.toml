@@ -202,7 +202,11 @@ clap         = { workspace = true }
 # it: the serve transport depends on `uds::server` directly now, and an implied
 # feature is one refactor away from disappearing under a consumer that never
 # said it needed it.
-trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay", "gh-cli", "uds", "uds-supervisor", "redb-open"] }  # `redb-open` (#5063): the workspace's single redb corruption classifier, which `store::redb_error_is_incompatible_format` delegates to
+# `bedrock-client` (#5469): the shared `inference::bedrock::BedrockAdapter`,
+# which owns AWS region resolution and Converse-client construction for this
+# crate's `llm::bedrock` provider — the one implementation of both, per
+# CLAUDE.md's common-entry-point rule.
+trusty-common = { workspace = true, features = ["intent-source", "bedrock-client", "config-cli", "webhook-relay", "gh-cli", "uds", "uds-supervisor", "redb-open"] }  # `redb-open` (#5063): the workspace's single redb corruption classifier, which `store::redb_error_is_incompatible_format` delegates to
 # JSON-RPC / MCP primitives (ADR-0040, #5803). Optional: only the `mcp` feature
 # compiles `src/mcp/`.
 trusty-mcp = { workspace = true, optional = true }
@@ -220,9 +224,10 @@ chrono       = { workspace = true }
 
 # ── AWS Bedrock (Converse API) ─────────────────────────────────────────────
 # Reuses the same versions already pinned by trusty-analyze in [workspace.dependencies].
-# aws-sdk-bedrockruntime: Converse (non-streaming) API for LLM calls.
-# aws-config: standard credential chain (env / ~/.aws / IAM / SSO).
-# aws-types: Region type for region_provider construction.
+# aws-sdk-bedrockruntime: Converse (non-streaming) API request/response types.
+# aws-config / aws-types: #5469 moved client construction to trusty-common's
+# shared adapter, so these two are now only used by the `no_credentials()` client
+# the `llm::bedrock` unit tests inject.
 aws-sdk-bedrockruntime = { workspace = true }
 aws-config             = { workspace = true }
 aws-types              = { workspace = true }

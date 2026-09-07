@@ -62,28 +62,57 @@ const ENV_REGION_TRUSTY: &str = "TRUSTY_AWS_REGION";
 /// Region env var: standard AWS fallback.
 const ENV_REGION_AWS: &str = "AWS_REGION";
 /// Default AWS region when neither env var is set.
-const DEFAULT_REGION: &str = "us-east-1";
+///
+/// #5469: public so a consumer that reports the resolved region — trusty-review's
+/// `BedrockProvider` — names this constant rather than repeating the literal.
+pub const DEFAULT_REGION: &str = "us-east-1";
 
 /// Resolve the AWS region for the Bedrock client.
 ///
 /// Why: operators may specify region via either `TRUSTY_AWS_REGION`
 /// (trusty-specific) or `AWS_REGION` (standard); the trusty var takes precedence.
-/// What: returns the first non-empty value, in priority order: `explicit`, then
-/// `TRUSTY_AWS_REGION`, then `AWS_REGION`, else `"us-east-1"`.
-/// Test: `super::tests::region_resolution_*`.
-pub(crate) fn resolve_bedrock_region(explicit: Option<&str>) -> String {
+/// #5469: public so trusty-review resolves the region through this walk instead
+/// of its own copy of it.
+/// What: reads the two env tiers and hands them to [`resolve_region_from`], which
+/// returns the first non-empty value in priority order: `explicit`, then
+/// `TRUSTY_AWS_REGION`, then `AWS_REGION`, else [`DEFAULT_REGION`].
+/// Test: `super::tests::region_resolution_explicit_wins`,
+/// `super::tests::region_resolution_trusty_env_wins_over_aws_env`,
+/// `super::tests::region_resolution_aws_env_fallback`,
+/// `super::tests::region_resolution_defaults_to_us_east_1`.
+pub fn resolve_bedrock_region(explicit: Option<&str>) -> String {
+    let trusty_env = std::env::var(ENV_REGION_TRUSTY).ok();
+    let aws_env = std::env::var(ENV_REGION_AWS).ok();
+    resolve_region_from(explicit, trusty_env.as_deref(), aws_env.as_deref())
+}
+
+/// Pick the first non-empty region among the four precedence tiers.
+///
+/// Why: [`resolve_bedrock_region`] reads process-wide env vars, so a test of its
+/// precedence either inherits the developer's `AWS_REGION` or has to mutate
+/// global state and race every other test in the binary. Taking the two env
+/// tiers as arguments makes the ordering provable with neither hazard (#5706,
+/// where trusty-review first drew this split; #5469 moved it here so the two
+/// crates share one walk).
+/// What: returns `explicit` > `trusty_env` > `aws_env` > [`DEFAULT_REGION`].
+/// An empty `explicit` counts as unset; an env tier is trimmed first, so a
+/// whitespace-only value counts as unset too.
+/// Test: `super::tests::region_precedence_walk_tiers`.
+pub fn resolve_region_from(
+    explicit: Option<&str>,
+    trusty_env: Option<&str>,
+    aws_env: Option<&str>,
+) -> String {
     if let Some(r) = explicit.filter(|s| !s.is_empty()) {
         return r.to_string();
     }
-    for var in [ENV_REGION_TRUSTY, ENV_REGION_AWS] {
-        if let Ok(val) = std::env::var(var) {
-            let val = val.trim().to_string();
-            if !val.is_empty() {
-                return val;
-            }
-        }
-    }
-    DEFAULT_REGION.to_string()
+    [trusty_env, aws_env]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_REGION)
+        .to_string()
 }
 
 /// AWS Bedrock Converse API inference adapter.
@@ -126,6 +155,27 @@ impl BedrockAdapter {
         }
     }
 
+    /// Construct a `BedrockAdapter` around an already-built Converse client.
+    ///
+    /// Why (#5469): a consumer that drives the Converse API itself —
+    /// trusty-review's `BedrockProvider`, which keeps its own error mapping,
+    /// pricing, and tool-use extraction — needs to inject a client built with
+    /// `no_credentials()` so its unit tests exercise provider logic with no AWS
+    /// reachable. The lazy `OnceCell` has no other seam for that, and without
+    /// this knob the consumer keeps a private client field, which is the
+    /// duplication this adapter exists to remove.
+    /// What: stores `region` verbatim (no env walk — the caller has already
+    /// resolved it) and pre-fills the client cell, so [`Self::client`] returns
+    /// the injected client and never loads AWS config.
+    /// Test: `super::tests::with_client_prefills_the_lazy_cell`.
+    pub fn with_client(region: impl Into<String>, client: BedrockRuntimeClient) -> Self {
+        Self {
+            region: region.into(),
+            client: OnceCell::new_with(Some(client)),
+            capabilities: *capabilities(ProviderId::Bedrock),
+        }
+    }
+
     /// The AWS region this adapter is configured for.
     ///
     /// Why: exposed for diagnostics and the region-resolution tests.
@@ -140,11 +190,15 @@ impl BedrockAdapter {
     /// Why: AWS credential/region resolution is async and must never run for an
     /// adapter that is built but never used; `OnceCell::get_or_try_init`
     /// guarantees at most one build and lets a failed attempt be retried on the
-    /// next `chat` rather than poisoning the adapter.
+    /// next `chat` rather than poisoning the adapter. #5469: public because a
+    /// consumer with its own Converse call path (trusty-review) borrows this
+    /// client rather than constructing a second one.
     /// What: loads AWS config pinned to [`Self::region`] via the standard
-    /// credential chain and builds a `BedrockRuntimeClient` on first use.
-    /// Test: exercised indirectly by the `#[ignore]`-gated live Converse call.
-    async fn client(&self) -> Result<&BedrockRuntimeClient, InferenceError> {
+    /// credential chain and builds a `BedrockRuntimeClient` on first use; an
+    /// adapter built by [`Self::with_client`] returns the injected client.
+    /// Test: `super::tests::with_client_prefills_the_lazy_cell`; the build path
+    /// is exercised by the `#[ignore]`-gated live Converse call.
+    pub async fn client(&self) -> Result<&BedrockRuntimeClient, InferenceError> {
         self.client
             .get_or_try_init(|| async {
                 let config = aws_config::defaults(BehaviorVersion::latest())
