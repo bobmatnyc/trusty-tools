@@ -522,43 +522,50 @@ const GREP_LATENCY_PATTERNS: &[&str] = &[
 /// Shell out to `rg` (preferred) or `grep` against `root` for `pattern`,
 /// returning `(hit_count, latency_ms)`.
 ///
-/// Why: a fair latency comparison needs both tools to scan the same on-disk
-/// bytes. We mirror the `/grep` endpoint's `--include=*.rs`-ish behaviour via
-/// `rg -t rust` so the universe of files is comparable; the latency captured
-/// is the full process spawn + scan + I/O wall-clock.
-/// What: prefers `rg --count` so we don't pay for parsing match text; falls
-/// back to `grep -rEc` which prints `<path>:<count>` per file we then sum.
-/// Returns `(hits, ms)`; on failure to launch returns `(0, 0)` so the caller
-/// still sees a row.
+/// Why: a fair comparison scans the same eligible source tree. Mirror the
+/// indexer's default directory exclusions so intentionally unindexed build,
+/// dependency, and fixture paths are not mistaken for lost search results.
+/// What: counts matching Rust lines, as `/grep` emits one hit per matching
+/// line. Scan errors fail the benchmark instead of becoming zero reference hits.
 /// Test: used by `test_grep_endpoint_latency_vs_ripgrep`.
 fn ripgrep_count(root: &Path, pattern: &str) -> (usize, u128) {
     let started = Instant::now();
-    let output = if Command::new("rg").arg("--version").output().is_ok() {
-        // `rg --count-matches` reports total match count per file; summing
-        // gives a comparable hit count to `/grep`'s `matches.len()`.
-        Command::new("rg")
-            .args(["--count-matches", "--no-heading", "-t", "rust", pattern])
-            .arg(root)
-            .output()
+    let mut command = if Command::new("rg").arg("--version").output().is_ok() {
+        let mut command = Command::new("rg");
+        command.args(["--count", "--no-heading", "-t", "rust", pattern]);
+        for dir in trusty_search::service::walker::SKIP_DIRS {
+            command.arg("--glob").arg(format!("!**/{dir}/**"));
+        }
+        command
     } else {
-        Command::new("grep")
-            .args(["-rEoc", "--include=*.rs", pattern])
-            .arg(root)
-            .output()
+        let mut command = Command::new("grep");
+        command.args(["-rEc", "--include=*.rs", pattern]);
+        for dir in trusty_search::service::walker::SKIP_DIRS {
+            command.arg(format!("--exclude-dir={dir}"));
+        }
+        command
     };
+    let out = command
+        .current_dir(root)
+        .arg(".")
+        .output()
+        .expect("reference grep must launch");
     let elapsed_ms = started.elapsed().as_millis();
-    let out = match output {
-        Ok(o) => o,
-        Err(_) => return (0, 0),
-    };
+    assert!(
+        matches!(out.status.code(), Some(0 | 1)),
+        "reference grep failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     let mut hits = 0_usize;
     for line in text.lines() {
-        if let Some((_, count)) = line.rsplit_once(':') {
-            if let Ok(n) = count.trim().parse::<usize>() {
-                hits += n;
-            }
-        }
+        let (_, count) = line
+            .rsplit_once(':')
+            .expect("grep must return per-file counts");
+        hits += count
+            .trim()
+            .parse::<usize>()
+            .expect("grep count must be numeric");
     }
     (hits, elapsed_ms)
 }
@@ -570,9 +577,9 @@ fn ripgrep_count(root: &Path, pattern: &str) -> (usize, u128) {
 /// ripgrep over the indexed source tree and (b) within reach of ripgrep's
 /// wall-clock latency — otherwise callers will just shell out themselves and
 /// we lose the centralised regex/glob/context surface plus rate limiting.
-/// What: hits `GET /indexes` to pick the first index, resolves its root via
+/// What: uses the verified fixture index, resolves its root via
 /// `GET /indexes/:id/status`, then for each of `GREP_LATENCY_PATTERNS` runs
-/// `POST /indexes/:id/grep` and `rg --count-matches` and prints both
+/// `POST /indexes/:id/grep` and `rg --count` and prints both
 /// latencies, both hit counts, and the ratio. Asserts the `/grep` endpoint
 /// returns at least as many matches as ripgrep for each pattern
 /// (correctness check).
@@ -591,24 +598,7 @@ async fn test_grep_endpoint_latency_vs_ripgrep() {
     .await;
     isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
 
-    // 1. Pick the first registered index.
-    let resp = client
-        .get(format!("{base}/indexes"))
-        .send()
-        .await
-        .expect("GET /indexes must reach the daemon — is it running?");
-    assert_eq!(resp.status().as_u16(), 200);
-    let body: Value = resp.json().await.expect("indexes response JSON");
-    let indexes = body["indexes"]
-        .as_array()
-        .expect("indexes.indexes should be an array");
-    let index_id = indexes
-        .first()
-        .and_then(Value::as_str)
-        .expect(
-            "at least one index must be registered; run `trusty-search index <path> --name <id>`",
-        )
-        .to_string();
+    let index_id = INDEX_NAME;
 
     // 2. Resolve the on-disk root for that index.
     let resp = client
@@ -641,7 +631,7 @@ async fn test_grep_endpoint_latency_vs_ripgrep() {
 
     for pattern in GREP_LATENCY_PATTERNS {
         // /grep endpoint.
-        let req_body = json!({ "pattern": pattern, "max_results": 1000 });
+        let req_body = json!({ "pattern": pattern, "max_results": 10_000 });
         let t0 = Instant::now();
         let resp = client
             .post(format!("{base}/indexes/{index_id}/grep"))
@@ -656,6 +646,10 @@ async fn test_grep_endpoint_latency_vs_ripgrep() {
             "POST /grep returned non-200 for pattern {pattern}"
         );
         let ep_body: Value = resp.json().await.expect("grep response JSON");
+        assert_eq!(
+            ep_body["truncated"], false,
+            "grep comparison requires an uncapped response for pattern {pattern}"
+        );
         let ep_hits = ep_body["matches"]
             .as_array()
             .map(Vec::len)
@@ -679,7 +673,8 @@ async fn test_grep_endpoint_latency_vs_ripgrep() {
 
         // Correctness: the endpoint walks the indexed file set and may legitimately
         // see *more* matches than rg when the index covers files rg's type filter
-        // misses. Require ep_hits >= rg_hits as the floor.
+        // misses. Both exclude the walker's default skipped directories.
+        // Require ep_hits >= rg_hits as the floor.
         if ep_hits < rg_hits {
             shortfalls.push(format!(
                 "pattern={pattern:?}: /grep returned {ep_hits} matches, rg returned {rg_hits}"
