@@ -408,11 +408,18 @@ async fn open_activity_feed(
 }
 
 /// Test: the pure pieces (state, log, rendering helpers) are unit-tested.
+// #2872: ratatui 0.30 gave `Backend` an associated `Error` type (0.29 hard-coded
+// `std::io::Error`), so `Terminal::draw` now returns `Result<_, B::Error>` and `?`
+// into `anyhow::Result` needs that error to be `Send + Sync + 'static`. The
+// crossterm backend this crate actually uses keeps `Error = std::io::Error`.
 pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
     terminal: &mut ratatui::Terminal<B>,
     state: &mut MemoryTuiState,
     client: &mut MemoryClient,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
     poll_daemon(state, client).await;
     let mut last_poll = Instant::now();
 

@@ -265,11 +265,15 @@ async fn run_search_all(state: &mut SearchTuiState, client: &SearchClient, query
 /// reindex task whose events are drained via `try_recv`; `[Enter]` runs a
 /// search; `Tab`, arrows, `?`, `q`/`Esc`, and `Ctrl-C` behave per [`KEY_HINT`].
 /// Test: the pure pieces (state, log, rendering helpers) are unit-tested.
+// #2872: `B::Error` bound — see the matching note in `memory_tui::event_loop`.
 async fn run_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     state: &mut SearchTuiState,
     client: &mut SearchClient,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
     poll_daemon(state, client).await;
     let mut last_poll = Instant::now();
 
