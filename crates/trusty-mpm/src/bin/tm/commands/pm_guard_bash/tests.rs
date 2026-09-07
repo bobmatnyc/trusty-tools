@@ -632,6 +632,57 @@ fn split_shell_segments_ignores_quoted_operators() {
     );
 }
 
+/// #6946: a here-document body is one segment with its operator line, so the
+/// ADR-0049 composed-commit guard no longer sees a commit that never runs.
+#[test]
+fn split_shell_segments_keeps_a_heredoc_body_whole() {
+    let command = "cat <<'EOF' > f\ngit commit -m x\nEOF";
+    assert_eq!(split_shell_segments(command), vec![command]);
+    // A separator of every kind inside the body is data too.
+    let mixed = "cat <<EOF > f\na && b ; c | d & e\nEOF";
+    assert_eq!(split_shell_segments(mixed), vec![mixed]);
+    // The operator line keeps its live syntax, and text after the terminator
+    // is a real second segment.
+    assert_eq!(
+        split_shell_segments("true && cat <<EOF\nbody\nEOF\ngit status"),
+        vec!["true ", " cat <<EOF\nbody\nEOF", "git status"]
+    );
+}
+
+/// #6946 fail-open check: an unterminated here-document claims nothing, so the
+/// pre-#6946 over-splitting stands and the guard keeps denying.
+#[test]
+fn split_shell_segments_still_splits_an_unterminated_heredoc() {
+    assert_eq!(
+        split_shell_segments("cat <<'EOF' > f\ngit commit -m x"),
+        vec!["cat <<'EOF' > f", "git commit -m x"]
+    );
+    // `$((1 << 3))` is not a here-document either.
+    assert_eq!(
+        split_shell_segments("echo $((1 << 3))\ngit status"),
+        vec!["echo $((1 << 3))", "git status"]
+    );
+}
+
+/// #6946 fail-open check: `bash <<EOF` runs its body as shell source, so the
+/// body's separators must keep splitting and reaching the verb rules.
+#[test]
+fn split_shell_segments_still_splits_a_shell_heredoc_body() {
+    assert_eq!(
+        split_shell_segments("bash <<'EOF'\ngit add x && git commit -m y\nEOF"),
+        vec!["bash <<'EOF'", "git add x ", " git commit -m y", "EOF"]
+    );
+    assert_eq!(
+        split_shell_segments("sudo /bin/sh <<EOF\nsed -i s/a/b/ f\nEOF"),
+        vec!["sudo /bin/sh <<EOF", "sed -i s/a/b/ f", "EOF"]
+    );
+    // …and the destructive verb in such a body is still denied end to end.
+    assert_eq!(
+        evaluate_bash_command("bash <<'EOF'\nsed -i s/a/b/ src/lib.rs\nEOF"),
+        Some(SHELL_EDIT_REASON)
+    );
+}
+
 #[test]
 fn has_file_write_redirection_ignores_quoted_gt() {
     // A `>` inside quotes is literal; an unquoted one is a real redirect.
