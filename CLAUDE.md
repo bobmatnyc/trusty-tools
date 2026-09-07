@@ -380,9 +380,10 @@ exactly like an OOM kill.
 🟢 **macOS TCC scope split — read before re-granting anything:** `trusty-search`
 (and other external-volume daemons) needs **Full Disk Access**; `trusty-mpm` /
 `tm` needs the separate **App Data** category only, and must never be granted
-Full Disk Access. Certificates, signed-install scripts, the `launchctl bootout`
-restart playbook, and orphan-listener verification (#873, #2558, #534, #2486,
-#4230): [release-workflow.md](docs/reference/release-workflow.md).
+Full Disk Access. `trusty-review` and `trusty-audit` need no signing at all —
+neither is a persistent daemon (#4750). Certificates, signed-install scripts,
+the `launchctl bootout` restart playbook, and orphan-listener verification
+(#873, #2558, #534, #2486, #4230): [release-workflow.md](docs/reference/release-workflow.md).
 
 ### Per-PR Changelog Fragment (issue #4476)
 
