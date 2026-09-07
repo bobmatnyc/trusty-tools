@@ -1,8 +1,11 @@
-// KEEP IN SYNC WITH crates/trusty-{analyze,search}/ui/src/lib/base.js
+// KEEP IN SYNC WITH crates/trusty-analyze/ui/src/lib/base.js and
+// crates/trusty-console/ui-search/src/lib/base.js (#6155 moved both search's
+// and this SPA's source into trusty-console).
 /*
- * Why: When the SPA is served through the trusty-console reverse-proxy at
- * `/proxy/memory/`, absolute fetch paths like `/health` or EventSource URLs
- * like `/sse` would resolve to the console host root instead of the daemon.
+ * Why: #6155 — the console serves this SPA at `/tools/memory/` and bridges its
+ * API calls under `/api/memory/`. Absolute fetch paths like `/health` or
+ * EventSource URLs like `/sse` would resolve to the console host root instead
+ * of that bridge prefix.
  * This helper derives the correct base URL from the document's actual location
  * so that all API calls work both when served directly by the daemon
  * (base = origin/) and when served under a proxy sub-path

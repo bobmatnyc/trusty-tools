@@ -500,8 +500,9 @@ everywhere: ticket descriptions, build commands, conversation.
 
 - **Rust**: `rustup`, toolchain at MSRV `1.94` or later
   (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
-- **Node / pnpm**: only for the Svelte UIs in `trusty-search` / `trusty-memory`
-  (`npm i -g pnpm`).
+- **Node / pnpm**: only for the Svelte UIs, which all live in
+  `crates/trusty-console` since #6155 — its own `ui/`, plus `ui-search/` and
+  `ui-memory/` (`npm i -g pnpm`).
 - **Env vars**: `RUST_LOG` and `SKIP_UI_BUILD=1` (skip the Svelte UI build in
   `build.rs`) are the day-to-day two. Full table:
   [environment-variables.md](docs/reference/environment-variables.md).
@@ -572,8 +573,9 @@ tokens/CSS/icons live in `design-system/`; a runnable Svelte component +
 14-screen reference lives in `design-system-svelte/` (dashboard-layout example
 `src/screens/search/Dashboard.svelte`, console screen `src/screens/console/`);
 design-canvas artboards are the `Foundry *.dc.html` files. Its `tokens.css` is
-already deployed in `trusty-console/ui-search`, `trusty-analyze/ui`,
-`trusty-memory/ui`. Reconcile new UI to it before inventing layout. Spec:
+already deployed in `crates/trusty-console/ui-search`,
+`crates/trusty-console/ui-memory`, and `crates/trusty-analyze/ui`. Reconcile new
+UI to it before inventing layout. Spec:
 [DOC-39](docs/specs/trusty-code-harness-ui.md) §8 (#3153).
 
 ## Reference Documentation

@@ -68,8 +68,11 @@
           <div class="card-body">
             <p>{bootError}</p>
             <p class="text-muted text-sm">
-              Make sure trusty-memory is running with
-              <code>trusty-memory serve --http 127.0.0.1:7079</code>.
+              <!-- #6155: trusty-memory has no HTTP listener since #6286; the
+                   console reaches it over its Unix socket. -->
+              Make sure the trusty-memory daemon is running
+              (<code>trusty-memory service start</code>) and that this console
+              can reach its socket.
             </p>
           </div>
         </div>

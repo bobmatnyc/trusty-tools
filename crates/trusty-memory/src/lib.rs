@@ -126,7 +126,6 @@ pub mod startup_scan;
 pub(crate) mod test_daemon;
 pub mod tools;
 pub mod transport;
-pub mod ui_assets;
 pub mod wordnet_pos;
 
 pub use activity::{ActivityEntry, ActivityFilter, ActivityLog, ActivitySource};

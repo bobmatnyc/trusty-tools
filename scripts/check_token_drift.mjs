@@ -223,7 +223,7 @@ const ENFORCED = [
   {
     // Identical token file + selectors to trusty-search (#3487).
     name: "trusty-memory",
-    file: "crates/trusty-memory/ui/src/lib/styles/tokens.css",
+    file: "crates/trusty-console/ui-memory/src/lib/styles/tokens.css",
     mode: "hex",
     lightSelector: /:root\s*\{([\s\S]*?)\n\}/,
     darkSelector: /\[data-theme=(['"])dark\1\]\s*\{([\s\S]*?)\n\}/,
