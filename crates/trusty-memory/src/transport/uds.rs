@@ -256,10 +256,13 @@ pub fn build_router(state: AppState) -> RpcRouter {
         PalaceParams,
         palaces::get_palace
     );
+    // #6155: `PalacesListParams` rather than `NoParams` — `counts: false` asks
+    // for the peek-only roster. It defaults to `true`, so `{}` and `null` are
+    // still the counting call every pre-#6155 caller sends.
     let router = bind!(
         router,
         "memory.palaces_list",
-        NoParams,
+        palaces::PalacesListParams,
         palaces::palaces_list
     );
     let router = bind!(

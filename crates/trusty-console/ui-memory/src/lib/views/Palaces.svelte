@@ -32,6 +32,8 @@
 
   let palaces = $state([]);
   let error = $state(null);
+  // #6155: the HTTP status behind `error`, so the panel can name it.
+  let errorStatus = $state(0);
   let loading = $state(true);
 
   // Filter / sort / group state.
@@ -49,13 +51,26 @@
 
   onMount(loadPalaces);
 
+  /**
+   * Why (#6155): this used to ask for the counted roster, which opens every
+   * palace — 8.5-11 s on a 93-palace install, often past the console bridge's
+   * 30 s budget, so the view sat on "Loading palaces…" indefinitely. The names
+   * are what this list renders; the counts were already lazy, because
+   * `refreshPalaceCounts` has fetched them per palace on expand since #4682.
+   * Asking for names only makes the first paint bounded by a registry walk.
+   * What: loads the peek-only roster, and on failure records the status so the
+   * panel can name it and offer a Retry rather than spinning.
+   * Test: `src/lib/api.test.js` covers the fast-form request and its unwrap.
+   */
   async function loadPalaces() {
     loading = true;
     error = null;
+    errorStatus = 0;
     try {
-      palaces = await api.listPalaces();
+      palaces = await api.listPalaces({ counts: false });
     } catch (e) {
       error = e.message || String(e);
+      errorStatus = e.status ?? 0;
       palaces = [];
     } finally {
       loading = false;
@@ -357,9 +372,18 @@
 
 <h1 class="page-title">Palaces</h1>
 
+<!-- #6155: a named status plus a Retry, never a spinner that never ends. -->
 {#if error}
-  <div class="card" style="border-color: var(--trusty-danger)">
-    <div class="card-body" style="color: var(--trusty-danger)">{error}</div>
+  <div class="card load-error">
+    <div class="card-header">
+      Could not load palaces{errorStatus ? ` — HTTP ${errorStatus}` : ''}
+    </div>
+    <div class="card-body">
+      <p class="err-detail">{error}</p>
+      <button class="btn btn-sm" onclick={loadPalaces} disabled={loading}>
+        {loading ? 'Retrying…' : 'Retry'}
+      </button>
+    </div>
   </div>
 {/if}
 
@@ -404,6 +428,9 @@
   <div class="card-body" style="padding: 0">
     {#if loading}
       <div class="empty">Loading palaces…</div>
+    {:else if error}
+      <!-- #6155: an empty list after a failure is unknown, not "no palaces". -->
+      <div class="empty">The roster could not be read — see the error above.</div>
     {:else if visiblePalaces.length === 0}
       <div class="empty">
         {palaces.length === 0 ? 'No palaces yet.' : 'No palaces match the filter.'}
@@ -734,5 +761,18 @@
     text-align: center;
     color: var(--trusty-text-muted, #9ca3af);
     font-size: 13px;
+  }
+  /* #6155: the load-failure panel — a named status and a Retry. */
+  .load-error {
+    border-color: var(--trusty-danger);
+  }
+  .load-error .card-header {
+    color: var(--trusty-danger);
+  }
+  .err-detail {
+    margin: 0 0 var(--trusty-space-3);
+    font-size: var(--trusty-fs-sm, 13px);
+    color: var(--trusty-text-secondary, #9ca3af);
+    word-break: break-word;
   }
 </style>
