@@ -135,6 +135,32 @@
 #   There is deliberately NO "trivial change" escape hatch: adding a fragment is
 #   one new file, and the rule it enforces has never had one.
 #
+# AUTHOR MODES (#6947). The default diff is `<base>..HEAD`, so before the commit
+#   exists the gate reports SCAN FLOOR and an author cannot check a fragment at
+#   all; after it, a shape error the gate could have caught earlier costs a
+#   commit-amend cycle. Two engineers lost a cycle to that on 2026-09-07 — one to
+#   the empty pre-commit scan, one to a two-heading fragment rejected only after
+#   committing. Two modes answer the question earlier. Neither replaces the
+#   default run, which stays the gate CI enforces:
+#
+#     --staged       attribute the INDEX plus untracked-but-not-ignored files
+#                    instead of `<base>..HEAD`, against HEAD. Same attribution,
+#                    same evidence rules, same exit codes; the scan floor becomes
+#                    "at least one staged or untracked path".
+#     --file <path>  validate ONE fragment's placement, category line and body
+#                    with no git diff at all. The content check is delegated to
+#                    `assemble-changelog.sh --fragment`, which is the same
+#                    validator the post-commit path reaches through
+#                    `assemble-changelog.sh <crate> --stdout`, so it prints the
+#                    same ERROR lines.
+#
+#   Two ways --staged is weaker than the default run, which is why it is a
+#   pre-flight and not the verdict: it reads the WORKING TREE for a crate's
+#   CHANGELOG.md and changelog.d/, so an unstaged edit to either still counts as
+#   evidence; and it compares against HEAD, so the #3732 crate-dissolution
+#   exemption is unreachable — a staged `git rm` of `crates/<crate>/Cargo.toml`
+#   leaves the manifest present at HEAD.
+#
 # CI shape (issue #4468 caution): this job has NO `paths:` filter, so it always
 #   runs and always reports on every PR — including an exempt docs-only PR,
 #   where it reports SUCCESS. A `paths:`-filtered required check never reports on
@@ -172,9 +198,15 @@
 #   bash scripts/check_changelog_fragment.sh                  # base: origin/main
 #   bash scripts/check_changelog_fragment.sh --base <ref>     # explicit base
 #   CHANGELOG_GATE_BASE=<ref> bash scripts/check_changelog_fragment.sh
+#   bash scripts/check_changelog_fragment.sh --staged         # before committing
+#   bash scripts/check_changelog_fragment.sh --file <path>    # one fragment only
+#
+#   --staged, --file and --base are mutually exclusive; passing two is exit 2.
 #
 # Exit: 0 when every crate with source changes has evidence (or is exempt);
-#   non-zero with a per-crate summary on stderr when one does not.
+#   non-zero with a per-crate summary on stderr when one does not. --file exits
+#   0 when the fragment is valid and 1 when it is not. Exit 2 is a usage error
+#   in every mode.
 #
 # Test: scripts/check_changelog_base_selftest.sh replays the #5018 shape on a
 #   synthetic repo — a branch touching crate A only, with crate B's src/**
@@ -192,6 +224,10 @@
 #   scripts/assemble_changelog_selftest.sh, the scan floor by
 #   scripts/check_scan_floor_selftest.sh, and the shared test-file
 #   classification by scripts/check_source_class_selftest.sh.
+#   scripts/check_changelog_staged_selftest.sh covers the #6947 author modes:
+#   --staged with and without a fragment, --file on a valid fragment, a
+#   two-heading fragment and one with no category line, and that a default run
+#   over the same tree is unchanged.
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
 #   only — `git`, `grep`, `sed`, `sort`.
@@ -199,6 +235,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+# --file takes a path from the caller, who typed it relative to THEIR cwd, not
+# to the repo root this script is about to move to.
+ORIG_PWD="$PWD"
 # The shared source/test path classification (#5765). Sourced from this script's
 # OWN directory, not from $REPO_ROOT, so a copy of the gate run out of tree
 # picks up the library beside it rather than a different checkout's.
@@ -206,6 +245,11 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/source_class.sh"
 cd "$REPO_ROOT"
 
+# base | staged | file — see AUTHOR MODES in the header (#6947).
+MODE="base"
+MODE_FLAGS=0
+BASE_EXPLICIT=0
+FILE_TARGET=""
 BASE="${CHANGELOG_GATE_BASE:-origin/main}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -215,11 +259,27 @@ while [[ $# -gt 0 ]]; do
         exit 2
       }
       BASE="$2"
+      BASE_EXPLICIT=1
+      shift 2
+      ;;
+    --staged)
+      MODE="staged"
+      MODE_FLAGS=$((MODE_FLAGS + 1))
+      shift
+      ;;
+    --file)
+      [[ $# -lt 2 ]] && {
+        echo "ERROR: --file needs a path to a fragment" >&2
+        exit 2
+      }
+      MODE="file"
+      FILE_TARGET="$2"
+      MODE_FLAGS=$((MODE_FLAGS + 1))
       shift 2
       ;;
     -h | --help)
-      # Through the exemption list — keep this range in step with the header.
-      sed -n '2,130p' "$0" >&2
+      # Through the author-mode notes — keep this range in step with the header.
+      sed -n '2,162p' "$0" >&2
       exit 0
       ;;
     *)
@@ -229,7 +289,105 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if ! MERGE_BASE="$(git merge-base "$BASE" HEAD 2>/dev/null)"; then
+# A caller who asked for two modes at once gets neither. `--staged --file x`
+# ran only the one that parsed last, and `--base` names a ref neither author
+# mode reads — reporting a verdict the flags did not ask for is how a pre-flight
+# starts being trusted as the gate. `CHANGELOG_GATE_BASE` is NOT a conflict: CI
+# exports it for every run, and `--staged` locally must not trip over that.
+if [[ "$MODE_FLAGS" -gt 1 ]]; then
+  echo "ERROR: --staged and --file are different questions; pass one" >&2
+  exit 2
+fi
+if [[ "$MODE_FLAGS" -eq 1 && "$BASE_EXPLICIT" -eq 1 ]]; then
+  echo "ERROR: --base names a base ref, which neither --staged nor --file reads." >&2
+  echo "       --staged compares the index against HEAD; --file reads no git" >&2
+  echo "       history at all. Pass --base or an author mode, not both." >&2
+  exit 2
+fi
+
+# Why: `case` globs let `*` span `/`, so the pattern `crates/*/changelog.d/*.md`
+# also matches `crates/a/b/changelog.d/x.md` and a naive sed extraction then
+# emits a whole path where a crate name belongs. Extract first, then verify the
+# reconstructed path — which only holds when there is exactly one directory level
+# under crates/ and the fragment sits directly in changelog.d/.
+# What: prints the crate name for a depth-1 fragment path, or fails.
+#
+# Defined here rather than beside the other evidence helpers because --file
+# reaches it BEFORE any git diff runs (#6947).
+fragment_crate() {
+  local path="$1" crate
+  crate="$(printf '%s' "$path" | sed -E 's#^crates/([^/]+)/changelog\.d/[^/]+\.md$#\1#')"
+  [[ "$crate" == "$path" ]] && return 1
+  [[ "$crate" == */* ]] && return 1
+  echo "$crate"
+}
+
+# #6947 --file. Validates ONE fragment with no diff, no base ref and no merge
+# base, so it answers before the commit exists. Placement is checked here —
+# `fragment_crate` is the same depth-1 rule the evidence arm applies — and the
+# CONTENT check is delegated to the assembler, so this mode and the post-commit
+# path cannot disagree about what a valid fragment is.
+if [[ "$MODE" == "file" ]]; then
+  case "$FILE_TARGET" in
+    /*) frag_path="$FILE_TARGET" ;;
+    *)
+      if [[ -e "${ORIG_PWD}/${FILE_TARGET}" ]]; then
+        frag_path="${ORIG_PWD}/${FILE_TARGET}"
+      else
+        frag_path="${REPO_ROOT}/${FILE_TARGET}"
+      fi
+      ;;
+  esac
+  # Resolve both sides before comparing them. macOS reaches $TMPDIR through the
+  # /var -> /private/var symlink, and `git rev-parse --show-toplevel` and `$PWD`
+  # need not hand back the same spelling of the same directory; comparing them
+  # unresolved made an IN-repo fragment look like an outside path and skipped
+  # the placement check, which passed a nested fragment the release would drop.
+  frag_dir="$(cd "$(dirname "$frag_path")" 2>/dev/null && pwd -P || true)"
+  [[ -n "$frag_dir" ]] && frag_path="${frag_dir}/${frag_path##*/}"
+  repo_root_phys="$(cd "$REPO_ROOT" && pwd -P)"
+  frag_rel="${frag_path#"$repo_root_phys"/}"
+
+  if [[ ! -f "$frag_path" ]]; then
+    echo "FAIL ${frag_rel}: no such file. --file validates a fragment you have" >&2
+    echo "       already written; it does not create one." >&2
+    exit 1
+  fi
+  if [[ "${frag_path##*/}" == "README.md" ]]; then
+    echo "FAIL ${frag_rel}: changelog.d/README.md is the tracked directory" >&2
+    echo "       placeholder that keeps changelog.d/ alive between releases. The" >&2
+    echo "       assembler skips it forever, so it is never a fragment." >&2
+    exit 1
+  fi
+  if [[ "$frag_rel" == crates/* ]] && ! fragment_crate "$frag_rel" >/dev/null; then
+    echo "FAIL ${frag_rel}: not a fragment path. A fragment is exactly" >&2
+    echo "       crates/<crate>/changelog.d/<issue-or-pr-number>-<slug>.md, sitting" >&2
+    echo "       DIRECTLY in changelog.d/ — a nested one is rejected at release" >&2
+    echo "       time and would never reach the CHANGELOG." >&2
+    exit 1
+  fi
+
+  if frag_err="$(bash "${REPO_ROOT}/scripts/assemble-changelog.sh" \
+    --fragment "$frag_path" 2>&1 >/dev/null)"; then
+    echo "OK   ${frag_rel}: valid changelog fragment"
+    exit 0
+  fi
+  echo "FAIL ${frag_rel}: the release assembler rejects this fragment" >&2
+  printf '%s\n' "$frag_err" | sed 's/^/       /' >&2
+  exit 1
+fi
+
+if [[ "$MODE" == "staged" ]]; then
+  # The index is compared against HEAD, so HEAD is what every later rev probe
+  # (the transitional assembler probe, crate attribution, the release-window
+  # base changelog) reads. A repo with no commits has no HEAD; the empty tree
+  # is the only honest base there and every probe accepts a tree-ish.
+  if git rev-parse --verify --quiet HEAD >/dev/null; then
+    MERGE_BASE="$(git rev-parse HEAD)"
+  else
+    MERGE_BASE="$(git hash-object -t tree /dev/null)"
+  fi
+elif ! MERGE_BASE="$(git merge-base "$BASE" HEAD 2>/dev/null)"; then
   echo "ERROR: cannot find a merge base between '$BASE' and HEAD." >&2
   echo "       Fetch the base ref first (CI must check out with fetch-depth: 0):" >&2
   echo "         git fetch origin main" >&2
@@ -260,7 +418,10 @@ fi
 #     is not stale;
 #   - BASE differs from HEAD^1: passing the merge ref's own base parent by SHA
 #     is exact, not stale, and stays allowed.
-if [[ "$BASE_IS_REF" -eq 0 ]] &&
+#
+# --staged reads no base ref at all, so there is no base to be stale (#6947).
+if [[ "$MODE" != "staged" ]] &&
+  [[ "$BASE_IS_REF" -eq 0 ]] &&
   git rev-parse --verify --quiet 'HEAD^2' >/dev/null &&
   git merge-base --is-ancestor "$BASE" 'HEAD^1' &&
   [[ "$(git rev-parse "$BASE")" != "$(git rev-parse 'HEAD^1')" ]]; then
@@ -284,8 +445,23 @@ fi
 # deleted fragment or changelog is the opposite of evidence — the presence-only
 # check counted `git rm crates/X/changelog.d/*.md` as a record while destroying
 # the one that existed.
-CHANGED="$(git diff --name-only --no-renames "$MERGE_BASE" HEAD)"
-PRESENT="$(git diff --name-only --no-renames --diff-filter=d "$MERGE_BASE" HEAD)"
+#
+# #6947 --staged takes the same two views of the INDEX against HEAD, then adds
+# every untracked-but-not-ignored path to both. An untracked path exists and was
+# not deleted, so it belongs in each view; and a fragment the author wrote but
+# has not `git add`-ed yet is exactly the evidence this mode exists to see.
+if [[ "$MODE" == "staged" ]]; then
+  UNTRACKED="$(git ls-files --others --exclude-standard)"
+  CHANGED="$(printf '%s\n%s\n' \
+    "$(git diff --cached --name-only --no-renames "$MERGE_BASE")" "$UNTRACKED" |
+    grep -v '^[[:space:]]*$' | LC_ALL=C sort -u || true)"
+  PRESENT="$(printf '%s\n%s\n' \
+    "$(git diff --cached --name-only --no-renames --diff-filter=d "$MERGE_BASE")" "$UNTRACKED" |
+    grep -v '^[[:space:]]*$' | LC_ALL=C sort -u || true)"
+else
+  CHANGED="$(git diff --name-only --no-renames "$MERGE_BASE" HEAD)"
+  PRESENT="$(git diff --name-only --no-renames --diff-filter=d "$MERGE_BASE" HEAD)"
+fi
 
 # #4618: the scan floor. "No changes at all against the base" used to exit 0 as
 # "nothing to check" — indistinguishable from a gate that examined the whole PR
@@ -294,10 +470,20 @@ PRESENT="$(git diff --name-only --no-renames --diff-filter=d "$MERGE_BASE" HEAD)
 # clean. Report the number examined so a future regression is visible in the log.
 CHANGED_COUNT="$(printf '%s\n' "$CHANGED" | grep -c '[^[:space:]]' || true)"
 if [[ "${CHANGED_COUNT:-0}" -lt 1 ]]; then
-  echo "FAIL: SCAN FLOOR — the diff ${MERGE_BASE}..HEAD lists 0 changed path(s)." >&2
-  echo "      Nothing was examined, so this gate could not have failed. Check that" >&2
-  echo "      '${BASE}' is the right base and that CI checked out with fetch-depth: 0." >&2
-  echo "      A gate that scans nothing is not a passing gate (issue #4618)." >&2
+  if [[ "$MODE" == "staged" ]]; then
+    # The floor is the same rule with the same exit code; only what counts as a
+    # scanned path differs (#6947). A clean index with no untracked file means
+    # the author has written nothing yet, not that the tree is recorded.
+    echo "FAIL: SCAN FLOOR — the index against HEAD plus untracked files lists 0" >&2
+    echo "      path(s). Nothing was examined, so this run could not have failed." >&2
+    echo "      Write the change (and its fragment) first, or stage it: git add -A" >&2
+    echo "      A gate that scans nothing is not a passing gate (issue #4618)." >&2
+  else
+    echo "FAIL: SCAN FLOOR — the diff ${MERGE_BASE}..HEAD lists 0 changed path(s)." >&2
+    echo "      Nothing was examined, so this gate could not have failed. Check that" >&2
+    echo "      '${BASE}' is the right base and that CI checked out with fetch-depth: 0." >&2
+    echo "      A gate that scans nothing is not a passing gate (issue #4618)." >&2
+  fi
   exit 1
 fi
 
@@ -419,18 +605,18 @@ resolve_source_crate() {
   [[ -n "$SOURCE_CRATE" ]]
 }
 
-# Why: `case` globs let `*` span `/`, so the pattern `crates/*/changelog.d/*.md`
-# also matches `crates/a/b/changelog.d/x.md` and a naive sed extraction then
-# emits a whole path where a crate name belongs. Extract first, then verify the
-# reconstructed path — which only holds when there is exactly one directory level
-# under crates/ and the fragment sits directly in changelog.d/.
-# What: prints the crate name for a depth-1 fragment path, or fails.
-fragment_crate() {
-  local path="$1" crate
-  crate="$(printf '%s' "$path" | sed -E 's#^crates/([^/]+)/changelog\.d/[^/]+\.md$#\1#')"
-  [[ "$crate" == "$path" ]] && return 1
-  [[ "$crate" == */* ]] && return 1
-  echo "$crate"
+# `fragment_crate` is defined near the top of this script — --file reaches it
+# before any diff runs (#6947).
+
+# The CHANGELOG.md-bullet evidence diff, per mode. #6947: in --staged the record
+# lives in the index, not in a commit, so `<base> HEAD` would report the file as
+# unchanged and drop real evidence.
+changelog_evidence_diff() {
+  if [[ "$MODE" == "staged" ]]; then
+    git diff --cached --unified=0 --no-renames "$MERGE_BASE" -- "$1"
+  else
+    git diff --unified=0 --no-renames "$MERGE_BASE" HEAD -- "$1"
+  fi
 }
 
 # Prints the body of a CHANGELOG's `## [<version>]` section, or nothing.
@@ -643,7 +829,7 @@ while IFS= read -r path; do
       crate="$(printf '%s' "$path" | sed -E 's#^crates/([^/]+)/CHANGELOG.md$#\1#')"
       [[ "$crate" == */* ]] && continue
       # A whitespace-only touch is not a changelog entry.
-      if git diff --unified=0 --no-renames "$MERGE_BASE" HEAD -- "$path" |
+      if changelog_evidence_diff "$path" |
         grep -qE '^\+[[:space:]]*-[[:space:]]'; then
         has_changelog="${has_changelog}${crate}"$'\n'
       fi
@@ -653,8 +839,14 @@ done <<<"$PRESENT"
 
 needs="$(printf '%s' "$needs" | grep -v '^$' | LC_ALL=C sort -u || true)"
 
+# #6947: name the mode on a --staged run so its verdict is never pasted as the
+# gate's. Empty in the default mode, which keeps that line byte-for-byte as it
+# was.
+MODE_LABEL=""
+[[ "$MODE" == "staged" ]] && MODE_LABEL=" --staged (index + untracked):"
+
 if [[ -z "$needs" ]]; then
-  echo "changelog-fragment gate: scanned ${CHANGED_COUNT} changed path(s); attributed ${attributed_count} crate-source path(s); no crate source changed (docs-only / CI-only / test-only) — OK."
+  echo "changelog-fragment gate:${MODE_LABEL} scanned ${CHANGED_COUNT} changed path(s); attributed ${attributed_count} crate-source path(s); no crate source changed (docs-only / CI-only / test-only) — OK."
   exit 0
 fi
 
@@ -733,4 +925,4 @@ EOF
 fi
 
 crate_count="$(printf '%s\n' "$needs" | grep -c '[^[:space:]]' || true)"
-echo "changelog-fragment gate: scanned ${CHANGED_COUNT} changed path(s); attributed ${attributed_count} crate-source path(s); all ${crate_count} crate(s) with source changes are recorded."
+echo "changelog-fragment gate:${MODE_LABEL} scanned ${CHANGED_COUNT} changed path(s); attributed ${attributed_count} crate-source path(s); all ${crate_count} crate(s) with source changes are recorded."

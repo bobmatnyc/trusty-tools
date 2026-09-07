@@ -46,6 +46,11 @@
 #               section instead of inserting a second one (issue #5298)
 #   --stdout    render the section to stdout as `## [Unreleased]` for preview —
 #               no writes, no deletions
+#   --fragment  validate ONE fragment file (`--fragment <path>`) and stop. Takes
+#               a path, not a crate: it reads no crate directory and no
+#               CHANGELOG.md, so an author can check a fragment before it is
+#               staged or committed. `check_changelog_fragment.sh --file`
+#               delegates here so both print the same ERROR lines (#6947).
 #
 # Idempotency: a successful default run leaves changelog.d/ holding only its
 # tracked README.md placeholder, so a second run inserts nothing rather than an
@@ -123,12 +128,14 @@ PLAN_MARKER="@@CATEGORY"
 usage() {
   echo "Usage: scripts/assemble-changelog.sh <crate-dir> <version> [--check|--merge]" >&2
   echo "       scripts/assemble-changelog.sh <crate-dir> --stdout" >&2
+  echo "       scripts/assemble-changelog.sh --fragment <path>" >&2
   echo "" >&2
   echo "  <crate-dir>   directory under crates/ (e.g. trusty-mpm)" >&2
   echo "  <version>     released version for the new heading (e.g. 1.3.2)" >&2
   echo "  --check       validate fragments only; write nothing, delete nothing" >&2
   echo "  --merge       fold the fragments into an EXISTING [<version>] section" >&2
   echo "  --stdout      preview the pending section as [Unreleased]; no writes" >&2
+  echo "  --fragment    validate ONE fragment file; no crate, no writes" >&2
   exit 2
 }
 
@@ -657,6 +664,25 @@ merge_fragments() {
 }
 
 main() {
+  # #6947 --fragment: validate ONE file and say so. The author-facing mode of
+  # scripts/check_changelog_fragment.sh (`--file`) delegates here rather than
+  # re-deriving what a valid fragment is, for the same reason the CI gate asks
+  # for a `--stdout` preview instead of validating fragments itself — one
+  # validator, one set of ERROR messages, no way for the two to disagree.
+  # Reads no crate directory and no CHANGELOG.md, so it works on a fragment
+  # written anywhere, before it is staged or committed.
+  if [[ "${1:-}" == "--fragment" ]]; then
+    [[ $# -ne 2 ]] && usage
+    local frag="$2" parsed_line
+    if [[ ! -f "${frag}" ]]; then
+      echo "ERROR: no fragment file at ${frag}" >&2
+      exit 1
+    fi
+    parsed_line="$(parse_fragment "${frag}")" || exit 1
+    echo "OK: $(basename "${frag}") is a valid fragment (category: ${parsed_line%%$'\t'*})." >&2
+    return 0
+  fi
+
   [[ $# -lt 2 || $# -gt 3 ]] && usage
 
   local crate_dir="$1" version="$2" mode="${3:-write}"

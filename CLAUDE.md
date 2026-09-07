@@ -393,9 +393,12 @@ crates/<crate>/changelog.d/<issue-or-pr-number>-<short-slug>.md
 
 - Format and category line: `Skill(skill="tm-workflow")`. Assembler and CI-gate
   specifics: [changelog-fragments.md](docs/reference/changelog-fragments.md).
-- 🟡 `check_changelog_fragment.sh` diffs `origin/main..HEAD`, so it sees nothing
-  until the change is committed; run it after committing. `check_line_cap.sh`
-  reads tracked `git ls-files`, so a new file needs `git add` first too.
+- 🟡 `check_changelog_fragment.sh` diffs `origin/main..HEAD`, so the default run
+  sees nothing until the change is committed. Before committing, use
+  `--staged` (the index plus untracked files) or `--file <path>` (one
+  fragment's placement, category line and body, no diff at all) — #6947; run the
+  default gate after committing. `check_line_cap.sh` reads tracked
+  `git ls-files`, so a new file needs `git add` first too.
 
 ## Cross-Crate Development Workflow
 
