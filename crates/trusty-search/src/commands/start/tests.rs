@@ -2181,8 +2181,18 @@ async fn swap_back_real_hardware_kills_sidecar_past_max_restarts() {
     let switchable =
         OrchestratorArc::new(SwitchableEmbedder::new(adapter, test_python_ready_active()));
 
-    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    // The HTTP registration gate requires an explicitly allowed safe root;
+    // OS temp roots such as /tmp are denied even in this hardware fixture.
+    let corpus = home_anchored_root("swap-back-e2e-");
+    let allowlist_dir = tempfile::tempdir().expect("create fixture allowlist directory");
+    let allowlist = approving(allowlist_dir.path(), &[corpus.path()]);
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new())
+        .with_allowlist_paths(allowlist);
     state.install_switchable_embedder(OrchestratorArc::clone(&switchable));
+    // Match daemon startup: publish both the concrete switchable handle and
+    // the trait slot that marks the embedder ready for HTTP registration.
+    let embedder: OrchestratorArc<dyn crate::core::Embedder> = switchable.clone();
+    state.install_embedder(embedder).await;
     state
         .install_embedderd_pid_slot(OrchestratorArc::clone(&pid_slot))
         .await;
@@ -2240,11 +2250,19 @@ async fn swap_back_real_hardware_kills_sidecar_past_max_restarts() {
     // search actually keeps working end-to-end.
     let create_resp = client
         .post(format!("http://{addr}/indexes"))
-        .json(&serde_json::json!({ "id": "swap-back-e2e", "root_path": "/tmp" }))
+        .json(&serde_json::json!({ "id": "swap-back-e2e", "root_path": corpus.path() }))
         .send()
         .await
         .expect("POST /indexes failed");
-    assert!(create_resp.status().is_success());
+    let create_status = create_resp.status();
+    assert!(
+        create_status.is_success(),
+        "fixture registration failed: {create_status}: {}",
+        create_resp
+            .text()
+            .await
+            .expect("registration response body")
+    );
 
     let search_resp = client
         .post(format!("http://{addr}/indexes/swap-back-e2e/search"))
