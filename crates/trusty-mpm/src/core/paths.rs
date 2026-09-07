@@ -845,9 +845,16 @@ mod tests {
     /// from — otherwise a test built on the explicit form would prove something
     /// production never does.
     ///
-    /// Needs no `$HOME` redirect and no `#[serial]`: both sides read the same
-    /// `home_base()` within one expression, so a concurrent `$HOME` mutation
-    /// cannot make them disagree in a way that means anything.
+    /// Needs no `$HOME` redirect, but does need `#[serial]` (#7033). The
+    /// earlier claim here — that both sides read one `home_base()` within a
+    /// single expression — was wrong: the left side captures `home_base()`
+    /// into `base`, while `for_managed_workspace` on the right calls
+    /// `home_base()` again internally. That is two separate `$HOME` reads
+    /// compared for equality, so a writer repointing `$HOME` between them
+    /// splits the sides. Same race class as
+    /// `home_base_is_what_default_resolves_against` below.
+    // #7033: serialized against this binary's `$HOME`-repointing writers.
+    #[serial_test::serial]
     #[test]
     fn for_managed_workspace_under_matches_for_managed_workspace_at_home() {
         let base = FrameworkPaths::home_base();
@@ -859,6 +866,18 @@ mod tests {
 
     /// #5040: `home_base` must be exactly the base `default` nests under, so a
     /// caller threading the base explicitly stays on the production layout.
+    ///
+    /// #7033: reads `$HOME` twice — once through `home_base()` on the left,
+    /// once inside `default()` on the right — and compares the two. A
+    /// `$HOME`-repointing writer landing between the reads makes the sides
+    /// disagree (observed: left a temp-dir root, right the real
+    /// `~/.trusty-mpm`), which is a race, not a `home_base` logic failure.
+    /// Joining the same `#[serial_test::serial]` group the writers and the
+    /// other two-read readers in this binary already use closes that window.
+    /// Only `cargo test`'s shared-process `--lib` binary is affected; under
+    /// `cargo nextest` every test gets its own process (#4162).
+    // #7033: serialized against this binary's `$HOME`-repointing writers.
+    #[serial_test::serial]
     #[test]
     fn home_base_is_what_default_resolves_against() {
         assert_eq!(
