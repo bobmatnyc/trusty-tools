@@ -45,5 +45,12 @@ export default defineConfig({
       '/health': 'http://127.0.0.1:7788/api/memory',
       '/sse': 'http://127.0.0.1:7788/api/memory'
     }
+  },
+  // Why (#6155): `src/lib/base.js` snapshots `document.baseURI` at module load,
+  // so anything importing `api.js` needs a DOM. jsdom gives vitest one.
+  // Test: `pnpm test` runs src/lib/api.test.js.
+  test: {
+    environment: 'jsdom',
+    include: ['src/**/*.test.js']
   }
 });

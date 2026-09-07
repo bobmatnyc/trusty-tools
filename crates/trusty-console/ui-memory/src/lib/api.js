@@ -35,6 +35,42 @@ async function request(path, opts = {}) {
   return res.text();
 }
 
+/**
+ * Why: `memory.palaces_list` answers `{"palaces": [{id, palace, error}]}` — a
+ * row per palace, because a palace whose counts cannot be read reports why
+ * instead of being dropped (see `PalaceListRow` in trusty-memory). Every view
+ * here iterates a flat array of palace objects, which is what the retired
+ * `GET /api/v1/palaces` route returned, so the wrapper reached
+ * `Palaces.svelte` and `KG.svelte` as `TypeError: S is not iterable` and both
+ * views stalled. The unwrap belongs here and not in the console bridge, which
+ * maps method NAMES and leaves payloads alone.
+ * What: one flat palace object per row. A row whose `palace` is missing keeps
+ * its id and its `error` and reports `cached: false`, so `countLabel` in
+ * `Palaces.svelte` renders `—` (unknown) rather than `0` (empty) — the row
+ * stays visible, which is the property the daemon's error field exists to
+ * preserve. A bare array passes through, so a daemon predating the wrapper
+ * still renders.
+ * Test: `src/lib/api.test.js`.
+ * @param {unknown} payload The parsed `/api/v1/palaces` body.
+ * @returns {Array<object>} Palace objects, flat.
+ */
+export function unwrapPalaceList(payload) {
+  const rows = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.palaces)
+      ? payload.palaces
+      : [];
+  return rows.flatMap((row) => {
+    if (!row || typeof row !== 'object') return [];
+    if (row.palace && typeof row.palace === 'object') {
+      // `PalaceInfo` carries its own id; fall back to the row's when it does not.
+      return [row.palace.id == null ? { ...row.palace, id: row.id } : row.palace];
+    }
+    if (row.error) return [{ id: row.id, error: row.error, cached: false }];
+    return [row];
+  });
+}
+
 export const api = {
   /** Daemon liveness + resource metrics. */
   health: () => request('/health'),
@@ -45,8 +81,13 @@ export const api = {
   /** Daemon configuration (provider, model, data root). */
   config: () => request('/api/v1/config'),
 
-  /** List all memory palaces with their metadata + counts. */
-  listPalaces: () => request('/api/v1/palaces'),
+  /**
+   * List all memory palaces with their metadata + counts, flat.
+   * See `unwrapPalaceList` above for why the daemon's wrapper is unwrapped here.
+   */
+  // #6155: `memory.palaces_list` answers `{palaces: [{id, palace, error}]}`;
+  // every view iterates palace objects.
+  listPalaces: () => request('/api/v1/palaces').then(unwrapPalaceList),
 
   /** Single palace detail by id. */
   getPalace: (id) => request(`/api/v1/palaces/${encodeURIComponent(id)}`),
