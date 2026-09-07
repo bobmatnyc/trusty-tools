@@ -34,13 +34,20 @@
 //!   cargo test --test benchmark_open_mpm_kg -- --include-ignored --nocapture
 //!
 //! Prerequisites:
-//!   - trusty-search daemon running at `http://127.0.0.1:7878` (v0.10.0+)
-//!   - `crates/open-mpm/` source tree present (in-tree workspace member)
+//!   - dedicated daemon and disposable source copy configured as documented
+//!     in `support/isolated_benchmark.rs`
+//!   - `crates/trusty-agents/` present in the disposable workspace copy
 //!
 //! Like `benchmark_open_mpm.rs`, this harness does NOT spin up its own
 //! daemon — it uses the developer's already-running instance. Unlike that
 //! harness, it does NOT delete the index at the end (so subsequent #145
 //! re-runs are fast); a follow-up cleanup task may drop it explicitly.
+
+// Live benchmarks require an isolated daemon and disposable source copy.
+// See support/isolated_benchmark.rs for the three required environment variables.
+#[path = "support/isolated_benchmark.rs"]
+mod isolated_benchmark;
+use isolated_benchmark::daemon_url;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -49,8 +56,6 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 // ── Constants ───────────────────────────────────────────────────────────────
-
-const DAEMON_URL: &str = "http://127.0.0.1:7878";
 
 /// Why: same name as `benchmark_open_mpm.rs` so we can REUSE its index if
 /// it persists — the harness checks /status first and skips reindex when
@@ -153,11 +158,7 @@ struct QueryResult {
 // ── Path helpers ────────────────────────────────────────────────────────────
 
 fn open_mpm_root() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent()
-        .expect("trusty-search manifest dir must have a parent (crates/)")
-        .join("trusty-agents")
+    isolated_benchmark::corpus_root("crates/trusty-agents")
 }
 
 fn ground_truth_path() -> PathBuf {
@@ -209,11 +210,12 @@ fn make_client() -> Client {
 }
 
 async fn assert_daemon_healthy(client: &Client) -> Value {
+    let daemon_url = daemon_url();
     let resp = client
-        .get(format!("{DAEMON_URL}/health"))
+        .get(format!("{daemon_url}/health"))
         .send()
         .await
-        .expect("daemon must be reachable at 127.0.0.1:7878 — start it with `trusty-search start`");
+        .expect("isolated benchmark daemon must be reachable at TRUSTY_SEARCH_TEST_URL");
     assert_eq!(resp.status().as_u16(), 200, "GET /health returned non-200");
     let body: Value = resp.json().await.expect("health JSON parse failure");
     println!(
@@ -226,7 +228,8 @@ async fn assert_daemon_healthy(client: &Client) -> Value {
 }
 
 async fn fetch_rss_mb(client: &Client) -> u64 {
-    match client.get(format!("{DAEMON_URL}/health")).send().await {
+    let daemon_url = daemon_url();
+    match client.get(format!("{daemon_url}/health")).send().await {
         Ok(r) => match r.json::<Value>().await {
             Ok(v) => v["rss_mb"].as_u64().unwrap_or(0),
             Err(_) => 0,
@@ -247,8 +250,9 @@ async fn fetch_rss_mb(client: &Client) -> u64 {
 /// Test: implicit — main() prints the reuse decision so the operator sees
 /// which path was taken.
 async fn probe_existing_index(client: &Client) -> Option<u64> {
+    let daemon_url = daemon_url();
     let resp = client
-        .get(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/status"))
+        .get(format!("{daemon_url}/indexes/{INDEX_NAME}/status"))
         .send()
         .await
         .ok()?;
@@ -286,9 +290,11 @@ async fn probe_existing_index(client: &Client) -> Option<u64> {
 }
 
 async fn register_index(client: &Client) {
+    isolated_benchmark::assert_index_root(client, INDEX_NAME, &open_mpm_root()).await;
+    let daemon_url = daemon_url();
     let _ = client
         .delete(format!(
-            "{DAEMON_URL}/indexes/{INDEX_NAME}?delete_data=true"
+            "{daemon_url}/indexes/{INDEX_NAME}?delete_data=true"
         ))
         .send()
         .await;
@@ -303,7 +309,7 @@ async fn register_index(client: &Client) {
         "root_path": root.to_string_lossy(),
     });
     let resp = client
-        .post(format!("{DAEMON_URL}/indexes"))
+        .post(format!("{daemon_url}/indexes"))
         .json(&body)
         .send()
         .await
@@ -317,13 +323,15 @@ async fn register_index(client: &Client) {
 }
 
 async fn reindex_and_wait(client: &Client) -> (u64, Duration, u64) {
+    isolated_benchmark::assert_index_root(client, INDEX_NAME, &open_mpm_root()).await;
+    let daemon_url = daemon_url();
     let root = open_mpm_root();
     let body = json!({
         "root_path": root.to_string_lossy(),
         "force": true,
     });
     let resp = client
-        .post(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/reindex"))
+        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/reindex"))
         .json(&body)
         .send()
         .await
@@ -392,8 +400,9 @@ async fn reindex_and_wait(client: &Client) -> (u64, Duration, u64) {
 }
 
 async fn fetch_status(client: &Client) -> Value {
+    let daemon_url = daemon_url();
     let resp = client
-        .get(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/status"))
+        .get(format!("{daemon_url}/indexes/{INDEX_NAME}/status"))
         .send()
         .await
         .expect("GET /status transport failure");
@@ -406,6 +415,7 @@ async fn fetch_status(client: &Client) -> Value {
 /// query string. Returns the (chunk_id, file) pair so the harness can log
 /// where the seed landed — useful for diagnosing wrong-seed KG drift.
 async fn resolve_kg_seed(client: &Client, seed_text: &str) -> Option<(String, String)> {
+    let daemon_url = daemon_url();
     let body = json!({
         "text": seed_text,
         "top_k": 1,
@@ -413,7 +423,7 @@ async fn resolve_kg_seed(client: &Client, seed_text: &str) -> Option<(String, St
         "compact": false,
     });
     let resp = client
-        .post(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/search"))
+        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/search"))
         .json(&body)
         .send()
         .await
@@ -430,6 +440,7 @@ async fn resolve_kg_seed(client: &Client, seed_text: &str) -> Option<(String, St
 }
 
 async fn run_query(client: &Client, query: &GroundTruthQuery, tool: Tool) -> QueryResult {
+    let daemon_url = daemon_url();
     // Every KG-targeted query gets a stage-1 seed lookup. The seed_chunk_id
     // is currently silently ignored by the daemon's SearchQuery struct, but
     // we still resolve it for forensic logging (to see WHERE stage-1 landed).
@@ -460,7 +471,7 @@ async fn run_query(client: &Client, query: &GroundTruthQuery, tool: Tool) -> Que
 
     let t0 = Instant::now();
     let resp = client
-        .post(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/search"))
+        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/search"))
         .json(&body)
         .send()
         .await

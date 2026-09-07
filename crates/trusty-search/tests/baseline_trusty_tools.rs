@@ -7,8 +7,8 @@
 //! PROVENANCE-ONLY decision in issue #145 / #152.
 //!
 //! What: Each test hits the live HTTP daemon, whose address is discovered at
-//! runtime via `daemon_url()` (see that function's doc comment for the
-//! three-step resolution order). Thresholds are documented in
+//! runtime via the explicit isolated fixture settings documented in
+//! `support/isolated_benchmark.rs`. Thresholds are documented in
 //! `docs/trusty-search/regression-testing/baseline-performance-2026-05-22.md`.
 //!
 //! Test: All tests are marked `#[ignore]` so the normal `cargo test` run stays
@@ -18,13 +18,20 @@
 //! ```
 //!
 //! # Prerequisites
-//! 1. trusty-search daemon running: `trusty-search start --foreground &`
-//! 2. trusty-tools indexed: `trusty-search index /path/to/trusty-tools --name trusty-tools`
+//! 1. Dedicated daemon and marked disposable workspace copy configured via
+//!    `support/isolated_benchmark.rs`; start with `--no-auto-discover`.
+//! 2. The copied workspace registered and fully indexed as `trusty-tools`.
 //!
 //! # Regression thresholds
 //! - Query latency p50: <= 500 ms
 //! - Query latency p99: <= 2000 ms
 //! - Index node count:  >= 1 000 (indicates indexing succeeded)
+
+// Live benchmarks require an isolated daemon and disposable source copy.
+// See support/isolated_benchmark.rs for the three required environment variables.
+#[path = "support/isolated_benchmark.rs"]
+mod isolated_benchmark;
+use isolated_benchmark::daemon_url;
 
 use std::path::Path;
 use std::process::Command;
@@ -36,41 +43,6 @@ use serde_json::{json, Value};
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const INDEX_NAME: &str = "trusty-tools";
-
-/// Resolve the daemon's base URL at test runtime.
-///
-/// Why: The daemon uses `bind_with_auto_port` and may not listen on the
-/// compiled-in default 7878 — for example 0.20.4+ shifts to 7879 when 7878 is
-/// occupied. Hardcoding the port causes "connection refused" failures that look
-/// like daemon-down errors but are really just a stale constant.
-///
-/// What: Checks three sources in priority order:
-///   1. `~/.trusty-search/http_addr` — written by the daemon on every start;
-///      contains the actual `host:port` string.
-///   2. `TRUSTY_SEARCH_TEST_PORT` env var — lets CI/test harnesses override the
-///      port without touching the discovery file (e.g. `TRUSTY_SEARCH_TEST_PORT=7879`).
-///   3. `trusty_search::service::DEFAULT_PORT` (7878) — compile-time fallback so
-///      the constant is still meaningful on machines where neither source is set.
-///
-/// Test: called by every `#[ignore]` test at the top of its body.
-fn daemon_url() -> String {
-    // 1. Canonical discovery file written by the daemon on startup.
-    if let Some(addr) = trusty_search::service::daemon::http_addr_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return format!("http://{addr}");
-    }
-    // 2. Explicit override for CI / test harnesses.
-    if let Ok(port_str) = std::env::var("TRUSTY_SEARCH_TEST_PORT") {
-        if let Ok(port) = port_str.trim().parse::<u16>() {
-            return format!("http://127.0.0.1:{port}");
-        }
-    }
-    // 3. Compiled-in default — correct when no auto-shift has occurred.
-    format!("http://127.0.0.1:{}", trusty_search::service::DEFAULT_PORT)
-}
 
 /// Maximum acceptable p50 query latency.
 const LATENCY_P50_THRESHOLD_MS: u128 = 500;
@@ -112,46 +84,21 @@ const REGRESSION_QUERIES: &[(&str, &str, &str)] = &[
         "chunker",
         "definition",
     ),
-    // Issue #82: HNSW lives in `core/store.rs`; the previous fragment
-    // "search" was too broad and matched many irrelevant files. The earlier
-    // wording "HNSW vector similarity search" routed inconsistently and
-    // never surfaced `store.rs` in the top 3 under any classifier path.
-    // Anchoring on concrete API terms that only appear in `store.rs`
-    // (`usearch`, `dim mismatch`, `VectorHit`, `UsearchStore::search`)
-    // routes to Conceptual and returns `store.rs:568` at rank 1.
-    //
-    // 2026-06 corpus update (#129): `open-mpm/src/tools/memory/vector_search.rs`
-    // was added in the tools-memory refactor (commit 2f25d46, PR #367). Under
-    // the Conceptual intent routing (alpha=0.8 vector, beta=0.2 BM25), this
-    // new file now ranks #1 because the embedding model gives high cosine
-    // similarity to "vector_search" for the query text — even though the file
-    // contains none of the literal API terms (VectorHit, dim mismatch, usearch).
-    // `store.rs` still ranks #1 WITHOUT graph expansion (lexical-dominated path),
-    // confirming the HNSW store code is correctly indexed; the change is that
-    // Conceptual-weighted fusion now ranks the open-mpm vector_search tool above
-    // it. Both are legitimate answers to "what code implements vector search".
-    //
-    // Assertion updated to accept `"vector_search"` which is specific enough to
-    // catch a real regression (top-3 drifting to completely unrelated files) while
-    // accepting the current corpus-correct top hit.
+    // #201 anchored this query on UsearchStore::search, query dimension checks,
+    // and VectorHit in core/store.rs. The #1137 module split moved that exact
+    // implementation to core/store/usearch_impl.rs; retain the intended symbol
+    // target instead of the unrelated vector_search.rs ranking captured in #129.
     (
         "usearch search query dim mismatch VectorHit",
-        "vector_search",
+        "core/store/usearch_impl.rs",
         "conceptual",
     ),
-    // Issue #82: project auto-detect logic lives in both `commands/discover.rs`
-    // and `detect.rs`. The earlier phrasing "auto-detect project root for
-    // indexing" was too vague — the classifier scored it `Unknown` and the
-    // fusion returned `monitor/dashboard.rs` as the top hit. Anchoring the
-    // query on the concrete domain terms that actually appear in
-    // `detect.rs`/`discover.rs` (`detect`, `project context`, `git root`,
-    // `marker file`) routes it to `Conceptual` and surfaces the detect/discover
-    // family. The `"detect"` fragment matches both `detect.rs` and
-    // `discover.rs` chunks (the latter's doc text references `detect_project`),
-    // so the assertion stays meaningful rather than vacuous.
+    // #556 moved detect_project_marker from commands/discover.rs into this
+    // dedicated module. Match its source path rather than the old "detect"
+    // filename fragment; the query and top-three requirement remain unchanged.
     (
         "detect project context git root marker file",
-        "detect",
+        "commands/discover/marker.rs",
         "definition",
     ),
 ];
@@ -238,6 +185,12 @@ async fn test_daemon_health() {
     let base = daemon_url();
     println!("daemon url: {base}");
     let client = make_client();
+    isolated_benchmark::assert_index_root(
+        &client,
+        INDEX_NAME,
+        &isolated_benchmark::corpus_root(""),
+    )
+    .await;
     let resp = client
         .get(format!("{base}/health"))
         .send()
@@ -264,6 +217,13 @@ async fn test_daemon_health() {
 async fn test_index_exists_and_has_content() {
     let base = daemon_url();
     let client = make_client();
+    isolated_benchmark::assert_index_root(
+        &client,
+        INDEX_NAME,
+        &isolated_benchmark::corpus_root(""),
+    )
+    .await;
+    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
 
     // Confirm the index is registered.
     let resp = client
@@ -316,6 +276,13 @@ async fn test_index_exists_and_has_content() {
 async fn test_query_latency_p50_under_threshold() {
     let base = daemon_url();
     let client = make_client();
+    isolated_benchmark::assert_index_root(
+        &client,
+        INDEX_NAME,
+        &isolated_benchmark::corpus_root(""),
+    )
+    .await;
+    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
     let mut latencies: Vec<u128> = Vec::with_capacity(REGRESSION_QUERIES.len());
 
     println!("\n{:<50} {:>12}  top_file", "query", "latency_ms");
@@ -354,6 +321,13 @@ async fn test_query_latency_p50_under_threshold() {
 async fn test_query_latency_p99_under_threshold() {
     let base = daemon_url();
     let client = make_client();
+    isolated_benchmark::assert_index_root(
+        &client,
+        INDEX_NAME,
+        &isolated_benchmark::corpus_root(""),
+    )
+    .await;
+    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
     let mut latencies: Vec<u128> = Vec::with_capacity(REGRESSION_QUERIES.len() * 3);
 
     for _ in 0..3 {
@@ -391,6 +365,13 @@ async fn test_query_latency_p99_under_threshold() {
 async fn test_result_relevance() {
     let base = daemon_url();
     let client = make_client();
+    isolated_benchmark::assert_index_root(
+        &client,
+        INDEX_NAME,
+        &isolated_benchmark::corpus_root(""),
+    )
+    .await;
+    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
     let mut failures = 0usize;
 
     println!(
@@ -454,6 +435,13 @@ async fn test_concurrent_queries_no_errors() {
     use tokio::task::JoinSet;
 
     let base = daemon_url();
+    isolated_benchmark::assert_index_root(
+        &make_client(),
+        INDEX_NAME,
+        &isolated_benchmark::corpus_root(""),
+    )
+    .await;
+    isolated_benchmark::assert_index_ready(&make_client(), INDEX_NAME).await;
 
     // 8 queries drawn from the regression set (cycled if shorter).
     let queries: Vec<&str> = REGRESSION_QUERIES
@@ -595,6 +583,13 @@ fn ripgrep_count(root: &Path, pattern: &str) -> (usize, u128) {
 async fn test_grep_endpoint_latency_vs_ripgrep() {
     let base = daemon_url();
     let client = make_client();
+    isolated_benchmark::assert_index_root(
+        &client,
+        INDEX_NAME,
+        &isolated_benchmark::corpus_root(""),
+    )
+    .await;
+    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
 
     // 1. Pick the first registered index.
     let resp = client

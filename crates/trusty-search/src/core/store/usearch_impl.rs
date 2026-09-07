@@ -25,6 +25,7 @@ use super::usearch_store::{
 #[async_trait]
 impl VectorStore for UsearchStore {
     async fn upsert(&self, id: &str, embedding: Vec<f32>) -> Result<()> {
+        let _mutation_guard = self.save_lock.lock().await;
         if embedding.len() != self.dim {
             return Err(anyhow!(
                 "embedding dim mismatch: got {}, expected {}",
@@ -176,6 +177,7 @@ impl VectorStore for UsearchStore {
     }
 
     async fn remove(&self, id: &str) -> Result<()> {
+        let _mutation_guard = self.save_lock.lock().await;
         // Promote view → mutable on first write. No-op when already mutable.
         self.ensure_mutable().await?;
         let key = {
@@ -261,6 +263,7 @@ impl VectorStore for UsearchStore {
         &self,
         remap: &(dyn for<'a> Fn(&'a str) -> Option<String> + Sync),
     ) -> Result<usize> {
+        let _mutation_guard = self.save_lock.lock().await;
         let mut id_map = self.id_to_key.write().await;
         let mut key_map = self.key_to_id.write().await;
 
@@ -305,6 +308,8 @@ impl VectorStore for UsearchStore {
         // mutable), keeping `is_view` truthful in both cases.
         if count > 0 {
             self.ensure_mutable().await?;
+            let _index = self.index.write().await;
+            self.mark_dirty();
         }
 
         Ok(count)
@@ -348,6 +353,7 @@ impl VectorStore for UsearchStore {
     /// cover ordering, idempotent overwrite, reader parallelism, and the
     /// per-item isolation path.
     async fn upsert_batch(&self, items: &[(String, Vec<f32>)]) -> Result<()> {
+        let _mutation_guard = self.save_lock.lock().await;
         if items.is_empty() {
             return Ok(());
         }

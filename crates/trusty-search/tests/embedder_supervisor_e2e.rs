@@ -25,6 +25,7 @@ mod e2e {
     /// assert a 384-dim unit vector.
     /// Test: this test. Run with `--include-ignored`.
     #[tokio::test]
+    #[serial_test::serial(embedder_supervisor_e2e)]
     #[ignore = "requires trusty-embedderd binary + ONNX model (~15 s first run)"]
     async fn supervisor_spawns_and_serves_embed_requests() {
         let binary = locate_embedderd_binary().expect("trusty-embedderd not found on PATH");
@@ -69,6 +70,7 @@ mod e2e {
     /// equality within floating-point tolerance.
     /// Test: this test. Run with `--include-ignored`.
     #[tokio::test]
+    #[serial_test::serial(embedder_supervisor_e2e)]
     #[ignore = "requires trusty-embedderd binary + ONNX model (~30 s, loads model twice)"]
     async fn supervisor_vectors_match_in_process() {
         use trusty_common::embedder::FastEmbedder;
@@ -127,6 +129,7 @@ mod e2e {
     /// vectors.
     /// Test: this test. Run with `--include-ignored`.
     #[tokio::test]
+    #[serial_test::serial(embedder_supervisor_e2e)]
     #[ignore = "requires trusty-embedderd binary + ONNX model (~15 s)"]
     async fn supervisor_handles_batch_correctly() {
         let texts: Vec<String> = vec![
@@ -170,6 +173,7 @@ mod e2e {
     /// What: spawn → get child PID → SIGKILL → wait for restart → embed.
     /// Test: this test. Run with `--include-ignored`.
     #[tokio::test]
+    #[serial_test::serial(embedder_supervisor_e2e)]
     #[ignore = "requires trusty-embedderd binary + ONNX model; kills a process (~30 s)"]
     async fn supervisor_restarts_after_crash() {
         let binary = locate_embedderd_binary().expect("trusty-embedderd not found");
@@ -185,11 +189,9 @@ mod e2e {
         // must be updated to the new child's PID.
         let pid_before_crash = pid_slot.load(std::sync::atomic::Ordering::Acquire);
         assert!(pid_before_crash > 0, "initial pid_slot should be non-zero");
-        // `SupervisorHandle` is `#[must_use]` (issue #2979) — bind it even
-        // though these lifecycle tests never call `.shutdown()` explicitly;
-        // the detached task and `kill_on_drop(true)` on the child still
-        // clean up when the test process exits.
-        let _handle = supervisor.start_supervisor_task();
+        // Keep the supervisor handle so the replacement child is explicitly
+        // shut down after the restart and embedding assertions (#6961).
+        let handle = supervisor.start_supervisor_task();
 
         // First embed succeeds.
         let client = slot.read().await.clone();
@@ -199,11 +201,30 @@ mod e2e {
             .expect("pre-crash embed failed");
         assert_eq!(vecs1[0].len(), 384);
 
-        // Give the supervisor loop time to restart and re-populate the slot.
-        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-
-        // Issue #282: pid_slot must point to the new child after restart.
-        let pid_after_restart = pid_slot.load(std::sync::atomic::Ordering::Acquire);
+        // #6961: trigger the crash this regression promises to exercise.
+        // The previous test only slept, so a healthy child correctly kept its PID.
+        assert_eq!(
+            pid_slot.load(std::sync::atomic::Ordering::Acquire),
+            pid_before_crash
+        );
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(
+                i32::try_from(pid_before_crash).expect("child PID fits i32"),
+            ),
+            nix::sys::signal::Signal::SIGKILL,
+        )
+        .expect("kill this test's spawned sidecar");
+        let pid_after_restart = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let pid = pid_slot.load(std::sync::atomic::Ordering::Acquire);
+                if pid != 0 && pid != pid_before_crash {
+                    break pid;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("supervisor must publish a new child PID after the crash");
         assert!(
             pid_after_restart > 0,
             "pid_slot should be non-zero after restart"
@@ -221,6 +242,7 @@ mod e2e {
             .await
             .expect("post-restart embed failed");
         assert_eq!(vecs2[0].len(), 384);
+        handle.shutdown().await;
     }
 
     /// A wedged-but-alive sidecar (process running, but not responding) must
@@ -257,6 +279,7 @@ mod e2e {
     /// `cargo test -p trusty-search --test embedder_supervisor_e2e \
     ///   supervisor_restarts_wedged_but_alive_sidecar -- --include-ignored --nocapture`
     #[tokio::test]
+    #[serial_test::serial(embedder_supervisor_e2e)]
     #[ignore = "requires trusty-embedderd binary + ONNX model; SIGSTOPs a process (~30-180 s)"]
     async fn supervisor_restarts_wedged_but_alive_sidecar() {
         use nix::sys::signal::{kill, Signal};
@@ -360,6 +383,7 @@ mod e2e {
     /// What: call `embed_batch` with an empty Vec and assert the result is Ok([]).
     /// Test: this test. Run with `--include-ignored`.
     #[tokio::test]
+    #[serial_test::serial(embedder_supervisor_e2e)]
     #[ignore = "requires trusty-embedderd binary + ONNX model (~15 s)"]
     async fn supervisor_handles_empty_batch() {
         let binary = locate_embedderd_binary().expect("trusty-embedderd not found");
@@ -390,6 +414,7 @@ mod e2e {
     /// What: join 10 concurrent `embed_batch` calls and assert all 10 succeed.
     /// Test: this test. Run with `--include-ignored`.
     #[tokio::test]
+    #[serial_test::serial(embedder_supervisor_e2e)]
     #[ignore = "requires trusty-embedderd binary + ONNX model (~20 s)"]
     async fn supervisor_handles_concurrent_requests() {
         let binary = locate_embedderd_binary().expect("trusty-embedderd not found");
@@ -441,6 +466,7 @@ mod e2e {
     ///
     /// Test: this test. Run with `--include-ignored`.
     #[tokio::test]
+    #[serial_test::serial(embedder_supervisor_e2e)]
     #[ignore = "requires trusty-embedderd binary; fast — no ONNX model needed, exits on stdin EOF before model loads"]
     async fn stdio_eof_terminates_child() {
         use std::process::Stdio;
@@ -488,9 +514,10 @@ mod e2e {
     /// What: set the var to a non-existent path and assert `Err`.
     /// Test: this test (no ONNX binary required; always runs).
     #[test]
+    #[serial_test::serial(embedder_supervisor_e2e)]
     #[ignore = "pure env-var test — safe to run but grouped with e2e for discoverability"]
     fn bad_explicit_bin_path_returns_error() {
-        // SAFETY: test-only, single-threaded by the time this assertion runs.
+        // SAFETY: every test in this module shares the same serial guard.
         let old = std::env::var("TRUSTY_EMBEDDERD_BIN").ok();
         unsafe {
             std::env::set_var("TRUSTY_EMBEDDERD_BIN", "/nonexistent/trusty-embedderd");

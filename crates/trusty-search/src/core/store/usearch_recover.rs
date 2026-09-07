@@ -86,6 +86,8 @@ impl UsearchStore {
     /// `TRUSTY_HNSW_MMAP_SERVE` exactly as `load_from` does.
     ///
     /// Test: see the module doc.
+    // Caller holds save_lock; reacquiring it here would deadlock save refusal
+    // and staged-swap abort recovery.
     pub(super) async fn adopt_on_disk_snapshot(&self, hnsw_path: &Path) -> Result<bool> {
         let path_str = hnsw_path
             .to_str()
@@ -199,6 +201,7 @@ impl UsearchStore {
         live: &Path,
         outcome: StagedSwapOutcome,
     ) -> Result<()> {
+        let _mutation_guard = self.save_lock.lock().await;
         let recorded_staged = {
             let guard = self.hnsw_path.read().await;
             guard.as_deref() == Some(staged)
