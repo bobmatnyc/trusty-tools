@@ -473,6 +473,19 @@ reason; an application's own data directory is not TCC-protected. See
 [Signed Install: trusty-memory](#signed-install-trusty-memory) and
 [Signed Install: trusty-analyze](#signed-install-trusty-analyze) below.
 
+🟢 **`trusty-review` and `trusty-audit` need no Developer-ID signing — neither
+is a persistent daemon.** `trusty-review` runs only as a Claude Code MCP stdio
+child per the managed `.mcp.json` (`serve --stdio`,
+`crates/trusty-mpm/src/core/mcp_config.rs`), or as a one-shot `report` child of
+`tga`/`trusty-audit`; `trusty-audit` itself is a one-shot CLI (`trusty-audit`
+and `taudit` are the same `src/main.rs`, no daemon mode). Neither walks `$HOME`
+nor touches a TCC-protected category, and each reads only the repository
+checkout and the config paths its caller names. Ad-hoc signing is the correct
+end state for both — owner ruling 2026-09-07 for `trusty-audit` ("leave ad hoc
+for now") and #4750 for `trusty-review` — so neither has a `tctl sign` target
+and neither belongs in `SIGNABLE_BINARIES`
+(`crates/trusty-installer/src/commands/macos_signing/mod.rs`).
+
 **Do not cross the categories:** granting `trusty-search` Full Disk Access does
 nothing for the `trusty-mpm` App-Data prompt, and `trusty-mpm` never needs —
 and should never be granted — Full Disk Access. Re-signing with a stable
