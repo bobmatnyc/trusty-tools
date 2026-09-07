@@ -51,18 +51,17 @@ else's guard test too).
 | 7878 | `trusty-search` (still bound; also serves `<data dir>/trusty-search.sock` since #6285 slice 1) | `trusty-search/src/service/constants.rs::DEFAULT_PORT` | Yes |
 | 7880 | `trusty-mpm` daemon (`trusty-mpmd` / `tm`) | `trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR` | No |
 | 7882 | `trusty-code` (`tcode serve --http`) | `trusty-code/src/serve/mod.rs::DEFAULT_HTTP_PORT` (mirrored by `trusty-code-gui/src/state.rs::DEFAULT_DAEMON_URL`) | No (#3364 follow-up) |
-| 7890 | `trusty-embedderd` `--http` mode (manual/dev-run only; auto-spawn always uses `--stdio`/UDS) | `trusty-embedderd/src/lib.rs::Args::http_addr` | No |
 | 8080 | `trusty-agents` API server | `trusty-agents/src/runtime/mode_dispatch.rs` / `trusty-agents/src/service/mod.rs::DEFAULT_SERVICE_PORT` | No |
 
 ## Next Free Port
 
 The next unclaimed value in the `78xx`/`79xx` block used by this workspace
-is **7892**. `7891`, `7881`, `7879` and `7070` are also free again — #6277 moved
-`trusty-review` off TCP onto a Unix socket, #6287 did the same for
-`trusty-analyze`, #6286 for `trusty-memory`, and #6288 retired the `trusty-mpm`
-supervisor's listener outright — but prefer sequential allocation over reusing a
-released value, so a stale reference to any of them in an old log or script
-cannot resolve to a different daemon.
+is **7892**. `7891`, `7890`, `7881`, `7879` and `7070` are also free again —
+#6277 moved `trusty-review` off TCP onto a Unix socket, #6287 did the same for
+`trusty-analyze`, #6286 for `trusty-memory`, and #6288 and #6289 retired the
+`trusty-mpm` supervisor's and `trusty-embedderd`'s listeners outright — but
+prefer sequential allocation over reusing a released value, so a stale reference
+to any of them in an old log or script cannot resolve to a different daemon.
 
 `7070` is the one to be most careful about: it was the workspace's
 longest-standing default, it is still named as a taken port by the
@@ -81,8 +80,8 @@ of those bind it; all three go when that client migrates. Whatever you pick:
    Neither `trusty-review` nor `trusty-analyze` has one — #6277 and #6287
    removed their `DEFAULT_PORT`s, and #6287 dropped `trusty-analyze`'s 7879
    row from the console's and `trusty-code`'s guard tables in the same change.
-   #6288 dropped the `trusty-mpm-supervisor` 7881 row from both for the same
-   reason.
+   #6288 dropped the `trusty-mpm-supervisor` 7881 row from both, and #6289
+   dropped `trusty-embedderd`'s 7890 row, for the same reason.
 4. Add a row to the table above.
 
 ## Incident History
@@ -96,7 +95,15 @@ of those bind it; all three go when that client migrates. Whatever you pick:
   known-siblings table omitted because embedderd's HTTP listener is a
   manual/dev-run opt-in rather than a `tctl`-managed daemon. Fixed by moving
   to 7891 and extending the known-siblings table to cover manual listeners
-  too, not just launchd-managed ones.
+  too, not just launchd-managed ones. Both defaults are gone now — see #6277
+  and #6289 below.
+- **#6289** — `trusty-embedderd` left this table. ADR-0032 retired its `--http`
+  mode rather than migrating it: the daemon already served a hardened Unix
+  socket, and the only in-repo consumer of the HTTP listener was the env-gated
+  `TRUSTY_EMBEDDER=http://…` path in trusty-search, which no plist, install
+  script or workflow set. `--stdio` and `--socket` are its transports; the flag
+  is refused by name rather than ignored, and `TRUSTY_EMBEDDER=http://…` is
+  refused at trusty-search startup with a pointer at `unix:`.
 - **#6277** — `trusty-review` left this table entirely. ADR-0032 makes UDS the
   inter-service transport and `trusty-console` the only HTTP surface, so the
   review daemon binds `<data dir>/trusty-review.sock`

@@ -215,7 +215,6 @@ crates/trusty-common/src/embedder/fast_embedder.rs	cache_hit_is_idempotent
 crates/trusty-common/src/embedder/fast_embedder.rs	embed_batch_returns_correct_dim
 crates/trusty-common/src/embedder_client/error.rs	error_display
 crates/trusty-common/src/embedder_client/in_process.rs	in_process_embed_batch_empty
-crates/trusty-common/src/embedder_client/remote.rs	remote_embed_url_construction
 crates/trusty-common/src/embedder_client/stdio.rs	decode_response_*
 crates/trusty-common/src/embedder_client/supervisor.rs	stdio_eof_terminates_child
 crates/trusty-common/src/embedder_client/supervisor.rs	supervisor_restarts_on_crash
@@ -275,7 +274,6 @@ crates/trusty-console/src/server/mod.rs	test_analyze_visualize_handler_absent_bi
 crates/trusty-console/src/server/mod.rs	test_analyze_visualize_handler_no_index_returns_400
 crates/trusty-console/src/server/mod.rs	test_services_route_daemon_version_overlay
 crates/trusty-cto-db/src/lib.rs	open_readonly_rejects_writes
-crates/trusty-embedderd/src/lib.rs	try_parse_from
 crates/trusty-embedderd/src/stdio_server.rs	stdio_eof_terminates_cleanly
 crates/trusty-git-analytics/src/classify/rules/loader_tests.rs	logs_contain
 crates/trusty-git-analytics/src/classify/rules/multi_loader.rs	single_string_back_compat

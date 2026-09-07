@@ -1,9 +1,10 @@
 //! Unix-domain-socket accept loop for `trusty-embedderd`.
 //!
-//! Why: adds a low-latency in-host transport alongside the existing HTTP
-//! listener. Both transports funnel through the same `BatchQueue` instance
-//! so there is exactly one ONNX session regardless of how many clients connect
-//! over how many transports (issue #164).
+//! Why: the daemon's low-latency in-host transport, and since #6289 its only
+//! listener — ADR-0032 retired the `--http` TCP mode. It shares one
+//! `BatchQueue` with the stdio sidecar transport, so there is exactly one ONNX
+//! session regardless of how many clients connect over how many transports
+//! (issue #164).
 //!
 //! What: `run_uds_accept_loop` binds a `UnixListener` at the given path
 //! and spawns a per-connection task for each accepted stream. Each connection
@@ -11,10 +12,10 @@
 //! requests to the shared `BatchQueue`, and writes response frames. The wire
 //! format is identical to the retired `trusty-embed-daemon` UDS protocol.
 //!
-//! Test: integration coverage in `tests/concurrent_embed.rs` (UDS-only and
-//! mixed HTTP+UDS concurrent tests). Unit dispatch tests are in
-//! `dispatch_request_*` functions below (shared with the HTTP integration test
-//! plumbing from `trusty-embed-daemon`).
+//! Test: integration coverage in `tests/concurrent_embed.rs` (concurrent UDS
+//! clients through one queue) and `tests/no_tcp_listener.rs` (socket modes,
+//! reachability, and the absent TCP listener). Unit dispatch tests are the
+//! `dispatch_*` functions below.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -208,8 +209,9 @@ mod tests {
     /// frames are the multi-KiB embedding payloads that sizing exists for.
     ///
     /// What: slices `run_uds_accept_loop`'s body out of the source at compile
-    /// time and asserts it awaits `trusty_common::uds::accept_sized` (#6942)
-    /// and holds no bare `listener.accept()`.
+    /// time and asserts it awaits `trusty_common::uds::accept_sized` (#6942),
+    /// holds no bare `listener.accept()`, and screens every accepted peer
+    /// through `ensure_peer_is_self` before serving it (#5099).
     ///
     /// What this proves, and what it does not: the sizing itself belongs to
     /// `accept_sized_raises_the_accepted_socket_to_the_listeners_sizing` in
@@ -238,6 +240,15 @@ mod tests {
         assert!(
             !body.contains("listener.accept()"),
             "run_uds_accept_loop must not call `UnixListener::accept` directly (#6940), body was:\n{body}"
+        );
+        // #6289: the socket is now the daemon's ONLY listener, so the peer-uid
+        // refusal is the whole access-control boundary above the filesystem
+        // mode. The verdict itself is proven by trusty-common's
+        // `peer_uid_verdict_refuses_a_foreign_uid`; what cannot be proven from
+        // there is that THIS accept loop consults it.
+        assert!(
+            body.contains("trusty_common::uds::ensure_peer_is_self(&stream)"),
+            "run_uds_accept_loop must refuse a foreign-uid peer (#5099), body was:\n{body}"
         );
     }
 

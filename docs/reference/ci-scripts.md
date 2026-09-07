@@ -8,6 +8,11 @@ for a specific failure and none of them announced itself anywhere a reader
 would look, so a change to one of the workflows below could drop it with
 nothing to notice.
 
+`check_public_docs.sh` is listed as a tenth row for the opposite reason: it ran
+in a pre-commit hook ALONE until #5134, which is unenforceable (`--no-verify`, a
+commit made outside the repo's hook path, a merge that runs no hook), and two
+files asserted a CI job that did not exist.
+
 Scripts that CLAUDE.md or another reference already covers are not repeated
 here: `check_line_cap.sh` ([sloc-cap.md](sloc-cap.md)), `check_semver.sh`
 ([semver-gate.md](semver-gate.md)), `check_changelog_fragment.sh`
@@ -28,11 +33,12 @@ what it stops; the header says why it exists.
 | `ci-create-local-main.sh` | `ci.yml`, `pre-publish.yml` | Creates the local `main` branch the `trusty-agents` git tests need, and fails the step when creation genuinely fails. The `git fetch origin main:main \|\| true` it replaced swallowed a GitHub 500 and produced an unrelated test failure eleven minutes later (#5693). |
 | `detect-embedder-cuda-relevant.sh` | `ci.yml` | Decides whether a change can affect the `trusty-common` `embedder-cuda` build, so the CUDA leg runs when it is relevant and is skipped when it is not. |
 | `check_workspace_dep_versions.sh` | `version-parity.yml` (`pr-version-bump`) | Asserts every internal `[workspace.dependencies]` row's `version` requirement actually accepts the member crate's own version, under Cargo's caret rules. The row's `path` wins in-tree, so no cargo command in the workspace can see the drift — `trusty-console` sat at `^0.9.0` against a 0.11.0 crate and `tga` at `^6.0.1` against 7.1.0, both invisible until `cargo publish` or an external consumer resolved from the registry (#6776, same class as #4088). |
+| `check_public_docs.sh` | `public-docs.yml`, plus the `public-docs` pre-commit hook | Validates `docs/public-manifest.tsv`, the allowlist the website publishes from: every PAGE row must resolve to an existing `.md` under `docs/`, outside the DO-NOT-PUBLISH trees, on a unique route. The STALE content pass runs in the same invocation and needs NO flag (#5134) — every published page is searched for the retired names in `docs/public-stale-terms.tsv`, whose waivers are a count ratchet in both directions. Both call sites invoke the script bare, so neither can drop the content check without deleting the gate outright. A page the gate cannot read fails as `UNREADABLE` rather than passing as clean. |
 | `check_token_drift.mjs` | `token-drift.yml` | Compares each Tailwind app's hand-transcribed `--color-*` RGB triples against the canonical Foundry `tokens.css`. `ci.yml` deliberately does NOT duplicate it (`ci.yml`, `ui-checks` job): `token-drift.yml` already runs it across all seven crates directly rather than through each `package.json`. |
 
 ## Self-tests
 
-Seven of the nine have a companion test that proves the gate can still fail — a
+Eight of the ten have a companion test that proves the gate can still fail — a
 gate that cannot fail makes its own green meaningless:
 
 | Script | Its test |
@@ -44,10 +50,36 @@ gate that cannot fail makes its own green meaningless:
 | `detect-embedder-cuda-relevant.sh` | `scripts/check-ci-helpers-selftest.sh` |
 | `check_token_drift.mjs` | `scripts/check_token_drift.test.mjs`, a `node:test` suite `token-drift.yml` runs before the gate |
 | `check_workspace_dep_versions.sh` | `scripts/check_workspace_dep_versions_selftest.sh`, run as the step before the gate in the same job |
+| `check_public_docs.sh` | `scripts/check_public_docs_selftest.sh`, run as the step before the gate in the same job. Two of its cases pass no `--stale` flag at all, so a change that made the content pass opt-in again fails there rather than going quiet |
 
 `check_deny_duplicates.sh` and `ci-create-local-main.sh` have no test of their
 own. Both carry a frozen baseline or a fetch that can fail open, which is the
 shape a self-test exists to pin, so both are candidates if either is edited.
+
+## Gated in a workflow, but not CI-only
+
+`scripts/check_doc_paths.sh` (issue #5147) is deliberately NOT in the table
+above: it runs in `.github/workflows/doc-paths.yml` **and** in the pre-commit
+hook, so it fails the definition this page is scoped to. It is named here
+because `scripts/` is where a reader looks, and the gate is new enough that
+nobody has yet met it by having a commit rejected.
+
+It resolves every backtick-quoted `crates/`, `src/`, `scripts/`, `docs/` and
+`.github/` token in the live Markdown set — repo-root `CLAUDE.md` and
+`README.md`, `docs/reference/`, `docs/architecture/`, and depth-1
+`crates/*/CLAUDE.md` and `crates/*/README.md` — against the checkout, and fails
+on any that names nothing. Its self-test is
+`scripts/check_doc_paths_selftest.sh`, which the workflow runs as the step
+before the gate: seven documented rules exclude placeholders, globs, elisions
+and Rust module paths, and each of those is a rule that could also suppress a
+real finding, so each is pinned to a fixture line under
+`scripts/test-data/doc-paths/`.
+
+Its workflow carries no `paths:` filter, which is the one thing that looks like
+an oversight and is not. The citation lives in a doc and the file it names lives
+in the code, so deleting or moving a source file is what breaks it — a filter
+over Markdown would miss exactly that case, and filtering on the union of every
+tree it can reach is every path in the repository.
 
 ## Which of these block a merge
 

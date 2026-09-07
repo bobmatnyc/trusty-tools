@@ -1,0 +1,8 @@
+# Fixture marker, not a package: scripts/check_doc_paths.sh finds a crate root
+# by walking up for a Cargo.toml, and the workspace's `crates/*` member glob
+# never reaches under scripts/. Nothing builds this.
+[package]
+name = "doc-paths-fixture-demo-crate"
+version = "0.0.0"
+edition = "2021"
+publish = false

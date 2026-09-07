@@ -142,11 +142,36 @@ repos:
   # published, so the gate only ever validates what IS listed. Runs against the
   # whole manifest (pass_filenames: false), matching the line-cap hook's
   # holistic scan.
+  #
+  # The same run also checks each published page's CONTENT against the retired
+  # names in docs/public-stale-terms.tsv (#5125, wired on in #5134). That pass
+  # takes NO flag, deliberately: an entry that had to carry `--stale` is an
+  # entry a later edit can drop without the diff looking like a removed gate.
+  # .github/workflows/public-docs.yml runs the identical bare invocation.
   - repo: local
     hooks:
       - id: public-docs
-        name: "Public documentation allowlist gate"
+        name: "Public documentation allowlist + retired-term gate"
         entry: scripts/check_public_docs.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
+  # Backtick path-citation gate (issue #5147). Fails the commit when a
+  # backtick-quoted `crates/`, `src/`, `scripts/`, `docs/` or `.github/` token
+  # in the live Markdown set (repo-root CLAUDE.md/README.md, docs/reference/**,
+  # docs/architecture/**, crates/*/{CLAUDE,README}.md) names a file that is not
+  # in the checkout — the shape a 500-SLOC split leaves behind when `foo.rs`
+  # becomes `foo/` and the docs stay put. Placeholders, globs, elisions and Rust
+  # module paths are excluded by documented rule; see the script's header.
+  # Runs against the whole tracked tree (pass_filenames: false), because the
+  # citation lives in a doc and the file it names lives in the code, so a
+  # staged-file subset cannot answer the question.
+  - repo: local
+    hooks:
+      - id: doc-paths
+        name: "Backtick path-citation lint"
+        entry: scripts/check_doc_paths.sh
         language: system
         pass_filenames: false
         always_run: true

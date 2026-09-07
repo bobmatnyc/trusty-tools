@@ -154,10 +154,42 @@ pub trait InferenceAdapter: Send + Sync {
     ///
     /// Why: the capability trusty-review needs to request schema-constrained
     /// responses; folded into the trait so every consumer shares one answer.
-    /// What: defaults to `capabilities().structured_output`.
-    /// Test: registry seed assertions.
+    /// What: defaults to `capabilities().structured_output`. #5588 gave that flag
+    /// a testable meaning — `true` says this adapter renders
+    /// [`ChatRequest::response_schema`] into the provider's own
+    /// schema-constrained request. Never answer it from a local constant: the
+    /// registry seed is the single source, and a second answer here can drift
+    /// from what [`Self::chat`] actually sends.
+    /// Test: registry seed assertions;
+    /// `crates/trusty-common/tests/inference_adapters.rs`.
     fn supports_structured_output(&self) -> bool {
         self.capabilities().structured_output
+    }
+
+    /// Reject a schema-carrying request the provider cannot constrain (#5588).
+    ///
+    /// Why: dropping `response_schema` silently is the exact failure this
+    /// capability was wired to prevent — the caller believes the response is
+    /// schema-valid and parses it as such. Refusing before the socket opens also
+    /// costs nothing: the same provider would refuse the same request forever, so
+    /// there is no completion worth paying for.
+    /// What: returns [`InferenceError::UnsupportedCapability`] when
+    /// `request.response_schema` is set and [`Self::supports_structured_output`]
+    /// is `false`; `Ok(())` otherwise. Every adapter calls this at the top of
+    /// `chat` and `chat_stream`.
+    /// Test: `unsupported_capability_is_raised_before_any_network_call`
+    /// (`crates/trusty-common/tests/inference_adapters.rs`).
+    fn ensure_structured_output_supported(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<(), InferenceError> {
+        if request.response_schema.is_some() && !self.supports_structured_output() {
+            return Err(InferenceError::UnsupportedCapability {
+                provider: self.capabilities().id,
+                capability: "structured_output",
+            });
+        }
+        Ok(())
     }
 
     /// Whether to request detailed usage accounting (OpenRouter's

@@ -1,0 +1,2 @@
+Removed
+- **`embedder_client::RemoteEmbedderClient` and the two error variants that served it.** It spoke `POST /embed` over TCP to `trusty-embedderd --http`, a listener ADR-0032 retired in [#6289](https://github.com/bobmatnyc/trusty-tools/issues/6289); a client for a server that no longer exists is dead code that reads as a supported path. `UdsEmbedderClient` is the remote transport. `EmbedderError` loses `Transport(reqwest::Error)` and `RemoteError { status, body }`, and gains `#[non_exhaustive]` in the same change so the next variant is not another breaking one

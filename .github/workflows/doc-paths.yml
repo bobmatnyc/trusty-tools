@@ -1,0 +1,60 @@
+# Backtick path-citation gate for the trusty-tools workspace (issue #5147).
+#
+# A doc that cites `crates/…/src/mcp/tools.rs` makes a checkable claim, and
+# nothing checked it. The doc/code consistency sweep found 18 broken citations
+# outside the archival trees, five of them in crates/trusty-search/CLAUDE.md,
+# all left behind when a 500-SLOC split turned a module file into a directory.
+# This job resolves every backtick-quoted `crates/`, `src/`, `scripts/`, `docs/`
+# and `.github/` token in the live Markdown set against the checkout.
+#
+# NO `paths:` FILTER, on purpose. Every sibling doc gate can name the corpus it
+# reads, so it filters on it. This one cannot: the citation lives in a doc and
+# the file it names lives in the code, so DELETING OR MOVING A SOURCE FILE is
+# what breaks it, and a filter over Markdown would miss exactly that. Filtering
+# on the union — crates/**, docs/**, scripts/**, .github/** — is every path in
+# the repository, so the filter would buy nothing but a way to be wrong. The job
+# is pure shell with no toolchain and finishes in seconds.
+#
+# Pure text scanning — no Rust toolchain or build needed, so this runs as its
+# own lightweight job (matches line-cap.yml / doc-numbers.yml checkout style).
+name: Doc paths
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
+    # (opened/synchronize/reopened) and is the event a base-branch RETARGET
+    # fires, so without it a stacked PR retargeted onto main never re-triggers
+    # and can merge with zero checks — PR #3838 did exactly that.
+    # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+
+# Per-COMMIT concurrency group on push so a merge never cancels the previous
+# merge's verification (#4179); per-ref group on pull_request so a new push
+# still supersedes the superseded run. Matches ci.yml.
+concurrency:
+  group: doc-paths-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+
+jobs:
+  doc-paths:
+    name: Backtick path-citation lint
+    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Full history is not needed — the gate resolves paths in the working
+      # tree, never against a base ref.
+      - uses: actions/checkout@v5
+
+      # Gate on the fixtures first. The token extraction and the seven exclusion
+      # rules are the part that can silently rot into "0 findings", and an
+      # exclusion that over-matches makes the real run's green meaningless.
+      # Mirrors line-cap.yml's selftest-then-gate ordering.
+      - name: Path-citation gate selftest (fixtures)
+        run: bash scripts/check_doc_paths_selftest.sh
+
+      - name: Resolve backtick path citations against the checkout
+        run: bash scripts/check_doc_paths.sh

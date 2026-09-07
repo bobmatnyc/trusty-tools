@@ -243,6 +243,9 @@ impl InferenceAdapter for BedrockAdapter {
     /// Test: `super::tests::*` cover the conversion helpers directly; the
     /// `#[ignore]`-gated `live_bedrock_call` exercises this end-to-end.
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, InferenceError> {
+        // #5588: Converse has no schema-constrained-output parameter — refuse
+        // before the client is built, never drop the schema silently.
+        self.ensure_structured_output_supported(request)?;
         let client = self.client().await?;
         let parts = build_converse_parts(request)?;
 
@@ -299,6 +302,8 @@ impl InferenceAdapter for BedrockAdapter {
     /// event sequence; `super::tests::live_bedrock_converse_stream` (`#[ignore]`)
     /// covers this method end to end against the real service.
     async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatStream, InferenceError> {
+        // #5588: same refusal as the unary path — the two transports share a body.
+        self.ensure_structured_output_supported(request)?;
         let client = self.client().await?;
         let parts = build_converse_parts(request)?;
 

@@ -249,6 +249,10 @@ fn inference_error_class(error: &InferenceError) -> &'static str {
         InferenceError::NoAdapterRegistered { .. } => "no_adapter_registered",
         InferenceError::Provider(_) => "provider",
         InferenceError::Unsupported(_) => "unsupported",
+        // #5588: distinct from `unsupported` — this one names a provider whose
+        // registry capabilities cannot serve the request, so an operator
+        // grouping by this label is looking at a routing problem.
+        InferenceError::UnsupportedCapability { .. } => "unsupported_capability",
         InferenceError::MissingConfig(_) => "missing_config",
     }
 }

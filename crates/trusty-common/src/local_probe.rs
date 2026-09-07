@@ -17,8 +17,12 @@
 //! [`models_url`](crate::local_probe::models_url) (the `{host}/v1/models`
 //! derivation),
 //! [`probe_models_endpoint`](crate::local_probe::probe_models_endpoint) (the GET
-//! plus status check), and [`probe_local`](crate::local_probe::probe_local) (the
-//! two composed). Failure is a typed
+//! plus status check), [`probe_local`](crate::local_probe::probe_local) (the
+//! two composed), [`list_models`](crate::local_probe::list_models) (the same
+//! request, reading back the served model ids), and
+//! [`local_host`](crate::local_probe::local_host) (the
+//! [`LOCAL_HOST_ENV`](crate::local_probe::LOCAL_HOST_ENV) resolution every
+//! caller shares). Failure is a typed
 //! [`LocalProbeError`](crate::local_probe::LocalProbeError) that always names the
 //! endpoint it dialled, so a caller can report which address was dead rather than
 //! surfacing a bare transport timeout.
@@ -42,7 +46,10 @@
 //! `models_url_does_not_double_an_existing_v1_suffix`,
 //! `probe_reports_unreachable_naming_the_endpoint`,
 //! `probe_reports_non_success_status`, `probe_accepts_a_live_endpoint`,
-//! `probe_timeout_is_one_second`.
+//! `probe_timeout_is_one_second`, `list_models_returns_the_served_ids`,
+//! `list_models_reports_an_unreadable_body`,
+//! `list_models_is_empty_when_the_server_serves_none`,
+//! `local_host_reads_the_env_override`, `local_host_defaults_when_unset`.
 
 use std::time::Duration;
 
@@ -61,6 +68,39 @@ pub const LOCAL_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// side-effect-free liveness check.
 pub const LOCAL_MODELS_PATH: &str = "/v1/models";
 
+/// Env var naming the local model server's BARE host (no `/v1` suffix).
+///
+/// Why: four modules across three crates read this variable to answer the same
+/// question — which host is the local model server on. Named `OLLAMA_HOST`
+/// rather than a `TRUSTY_*` spelling because `trusty-agents`' legacy adapter
+/// already read it, so one export configures every path.
+/// What: the variable name only; [`local_host`] applies it.
+/// Test: `local_host_reads_the_env_override`.
+pub const LOCAL_HOST_ENV: &str = "OLLAMA_HOST";
+
+/// The host a local model server listens on when nothing overrides it.
+pub const DEFAULT_LOCAL_HOST: &str = "http://localhost:11434";
+
+/// Resolve the local model server's bare host.
+///
+/// Why (#4490): `repl::ollama::ollama_host`, `llm::adapter::ollama_host`,
+/// `api::server::models::ollama_host` and `LocalConfig::from_env` were four
+/// independent copies of this one line, so a host spelled one way in the REPL
+/// and another in the model catalog could disagree about which server was being
+/// probed. One resolver is what keeps the probe and the request dialling the
+/// same machine.
+/// What: [`LOCAL_HOST_ENV`] when set and non-blank (trailing slashes trimmed),
+/// otherwise [`DEFAULT_LOCAL_HOST`]. The result carries NO `/v1` suffix —
+/// [`models_url`] and `LocalConfig::from_env` each append what they need.
+/// Test: `local_host_reads_the_env_override`, `local_host_defaults_when_unset`.
+pub fn local_host() -> String {
+    std::env::var(LOCAL_HOST_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(|host| host.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| DEFAULT_LOCAL_HOST.to_string())
+}
+
 /// Why the local model server could not be confirmed live.
 ///
 /// Why: the caller's job after a failed probe is to tell an operator WHICH
@@ -69,10 +109,11 @@ pub const LOCAL_MODELS_PATH: &str = "/v1/models";
 /// carries the endpoint, and [`Self::endpoint`] reads it back without a match.
 /// What: `ClientBuild` (the HTTP client could not be constructed at all),
 /// `Unreachable` (no response inside [`LOCAL_PROBE_TIMEOUT`] — refused, timed
-/// out, DNS, TLS), and `Status` (the server answered, but not 2xx). No variant
-/// carries a credential: the probe sends no `Authorization` header.
+/// out, DNS, TLS), `Status` (the server answered, but not 2xx), and `Body` (a
+/// 2xx whose payload [`list_models`] could not read). No variant carries a
+/// credential: the probe sends no `Authorization` header.
 /// Test: `probe_reports_unreachable_naming_the_endpoint`,
-/// `probe_reports_non_success_status`.
+/// `probe_reports_non_success_status`, `list_models_reports_an_unreadable_body`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LocalProbeError {
@@ -97,6 +138,15 @@ pub enum LocalProbeError {
         /// The HTTP status it returned.
         status: u16,
     },
+    /// The server answered 2xx, but the body was not the expected JSON shape
+    /// (#4490 — only [`list_models`] can produce this; a liveness probe never
+    /// reads the body).
+    Body {
+        /// The endpoint that answered.
+        endpoint: String,
+        /// The stringified decode error.
+        cause: String,
+    },
 }
 
 impl LocalProbeError {
@@ -110,7 +160,8 @@ impl LocalProbeError {
         match self {
             Self::ClientBuild { endpoint, .. }
             | Self::Unreachable { endpoint, .. }
-            | Self::Status { endpoint, .. } => endpoint,
+            | Self::Status { endpoint, .. }
+            | Self::Body { endpoint, .. } => endpoint,
         }
     }
 }
@@ -130,6 +181,10 @@ impl std::fmt::Display for LocalProbeError {
             Self::Status { endpoint, status } => write!(
                 f,
                 "local model server at {endpoint} answered HTTP {status}, not a success status"
+            ),
+            Self::Body { endpoint, cause } => write!(
+                f,
+                "local model server at {endpoint} answered with an unreadable model list: {cause}"
             ),
         }
     }
@@ -167,6 +222,20 @@ pub fn models_url(base_url: &str) -> String {
 /// Test: `probe_reports_unreachable_naming_the_endpoint`,
 /// `probe_reports_non_success_status`, `probe_accepts_a_live_endpoint`.
 pub async fn probe_models_endpoint(url: &str) -> Result<(), LocalProbeError> {
+    get_success(url).await.map(|_| ())
+}
+
+/// GET `url` inside the shared budget and return the 2xx response.
+///
+/// Why: [`probe_models_endpoint`] and [`list_models`] issue the IDENTICAL
+/// request and differ only in whether they read the body, so the client, the
+/// timeout, and the success criterion live here once.
+/// What: builds a client bounded by [`LOCAL_PROBE_TIMEOUT`] on connect and on
+/// the whole request, GETs `url`, and returns the response for any 2xx. Sends no
+/// credential.
+/// Test: `probe_reports_unreachable_naming_the_endpoint`,
+/// `probe_reports_non_success_status`, `probe_accepts_a_live_endpoint`.
+async fn get_success(url: &str) -> Result<reqwest::Response, LocalProbeError> {
     // #4490: proxies are deliberately left enabled — see the module's Scope note.
     let client = reqwest::Client::builder()
         .connect_timeout(LOCAL_PROBE_TIMEOUT)
@@ -178,7 +247,7 @@ pub async fn probe_models_endpoint(url: &str) -> Result<(), LocalProbeError> {
         })?;
 
     match client.get(url).send().await {
-        Ok(resp) if resp.status().is_success() => Ok(()),
+        Ok(resp) if resp.status().is_success() => Ok(resp),
         Ok(resp) => Err(LocalProbeError::Status {
             endpoint: url.to_string(),
             status: resp.status().as_u16(),
@@ -201,6 +270,42 @@ pub async fn probe_local(base_url: &str) -> Result<(), LocalProbeError> {
     probe_models_endpoint(&models_url(base_url)).await
 }
 
+/// Probe a local model server AND read back the model ids it serves.
+///
+/// Why (#4490): `trusty-agents`' `/provider local` needs more than liveness — it
+/// prints the pulled models so the user can pick one with `/model`. It answered
+/// that with its own `GET {host}/api/tags` and its own 2s timeout, a second
+/// independent implementation of this capability. Extending the shared probe to
+/// return the list is what lets that call site delegate instead: liveness and
+/// the catalog come from ONE request, one timeout, and one typed error.
+/// What: [`get_success`] against [`models_url`], then reads the OpenAI-dialect
+/// `{"data":[{"id":"…"}]}` body and collects the ids in server order. Ollama's
+/// `/v1/models` shim reports the same names its native `/api/tags` does, so a
+/// caller loses nothing by moving; LM Studio and vLLM serve the same shape,
+/// which `/api/tags` never covered. An unreadable body is
+/// [`LocalProbeError::Body`]; a missing or non-array `data` is an empty list,
+/// not an error — a server with no models pulled is live.
+/// Test: `list_models_returns_the_served_ids`,
+/// `list_models_reports_an_unreadable_body`,
+/// `list_models_is_empty_when_the_server_serves_none`.
+pub async fn list_models(base_url: &str) -> Result<Vec<String>, LocalProbeError> {
+    let url = models_url(base_url);
+    let resp = get_success(&url).await?;
+    let body: serde_json::Value = resp.json().await.map_err(|e| LocalProbeError::Body {
+        endpoint: url.clone(),
+        cause: e.to_string(),
+    })?;
+    Ok(body
+        .get("data")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -211,13 +316,15 @@ mod tests {
     ///
     /// Modelled on `http_client::tests::stub_server` — a real listener, so the
     /// probe under test drives the real transport.
-    async fn stub_server(response: &'static str) -> String {
+    async fn stub_server(response: impl Into<String>) -> String {
+        let response: std::sync::Arc<str> = response.into().into();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback stub");
         let addr = listener.local_addr().expect("stub addr").to_string();
         tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
+                let response = std::sync::Arc::clone(&response);
                 tokio::spawn(async move {
                     use tokio::io::AsyncWriteExt;
                     let _ = stream.write_all(response.as_bytes()).await;
@@ -225,6 +332,14 @@ mod tests {
             }
         });
         addr
+    }
+
+    /// A 200 response carrying `body` as JSON, correctly framed.
+    fn json_ok(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
     }
 
     /// An address with nothing listening: bind port 0, read it, release it.
@@ -321,5 +436,82 @@ mod tests {
     #[test]
     fn probe_timeout_is_one_second() {
         assert_eq!(LOCAL_PROBE_TIMEOUT, Duration::from_secs(1));
+    }
+
+    /// Why (#4490): the REPL's `/provider local` prints this list, so the shared
+    /// probe has to hand back the same names the bespoke `/api/tags` call did —
+    /// otherwise the delegation silently empties the model picker.
+    /// Test: this test.
+    #[tokio::test]
+    async fn list_models_returns_the_served_ids() {
+        let addr = stub_server(json_ok(
+            r#"{"object":"list","data":[{"id":"qwen3:30b"},{"id":"llama3.1:8b"}]}"#,
+        ))
+        .await;
+        let models = list_models(&format!("http://{addr}"))
+            .await
+            .expect("live endpoint must list");
+        assert_eq!(models, vec!["qwen3:30b", "llama3.1:8b"]);
+    }
+
+    /// Why: a 2xx with a body that is not JSON is a misconfigured endpoint (a
+    /// proxy login page, say), and must name the endpoint rather than surface as
+    /// an empty model list that reads like "no models pulled".
+    /// Test: this test.
+    #[tokio::test]
+    async fn list_models_reports_an_unreadable_body() {
+        let addr = stub_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 5\r\n\r\nnope!",
+        )
+        .await;
+        let base = format!("http://{addr}");
+        let err = list_models(&base).await.expect_err("non-JSON must fail");
+        assert!(
+            matches!(err, LocalProbeError::Body { .. }),
+            "expected Body, got {err:?}"
+        );
+        assert_eq!(err.endpoint(), format!("{base}/v1/models"));
+    }
+
+    /// Why: a running server with nothing pulled is LIVE — reporting that as an
+    /// error would make `/provider local` refuse a server the operator can fix
+    /// with one `ollama pull`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn list_models_is_empty_when_the_server_serves_none() {
+        let addr = stub_server(json_ok(r#"{"object":"list","data":[]}"#)).await;
+        assert!(
+            list_models(&format!("http://{addr}"))
+                .await
+                .expect("empty catalog is still live")
+                .is_empty()
+        );
+    }
+
+    /// Why (#4490): four call sites across three crates read this variable; if
+    /// the shared resolver ignored it, a remote Ollama host would be probed at
+    /// localhost and reported dead.
+    /// Test: this test.
+    #[test]
+    #[serial_test::serial]
+    fn local_host_reads_the_env_override() {
+        // SAFETY: guarded by `#[serial]`; no other thread reads the env here.
+        unsafe { std::env::set_var(LOCAL_HOST_ENV, "http://192.168.1.50:11434/") };
+        assert_eq!(local_host(), "http://192.168.1.50:11434");
+        unsafe { std::env::remove_var(LOCAL_HOST_ENV) };
+    }
+
+    /// Why: the default is what every caller gets on a bare install, so it must
+    /// survive an unset AND a blank override.
+    /// Test: this test.
+    #[test]
+    #[serial_test::serial]
+    fn local_host_defaults_when_unset() {
+        // SAFETY: guarded by `#[serial]`; no other thread reads the env here.
+        unsafe { std::env::remove_var(LOCAL_HOST_ENV) };
+        assert_eq!(local_host(), DEFAULT_LOCAL_HOST);
+        unsafe { std::env::set_var(LOCAL_HOST_ENV, "   ") };
+        assert_eq!(local_host(), DEFAULT_LOCAL_HOST);
+        unsafe { std::env::remove_var(LOCAL_HOST_ENV) };
     }
 }

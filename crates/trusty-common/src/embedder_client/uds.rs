@@ -1,10 +1,11 @@
 //! UDS (Unix Domain Socket) embedder client for the unified `trusty-embedderd`
 //! daemon.
 //!
-//! Why: the HTTP transport in `RemoteEmbedderClient` adds TCP overhead on
-//! hosts where the embedder runs as a local subprocess. The UDS transport
-//! provides microsecond-latency IPC while sharing the same `EmbedderClient`
-//! trait, so call sites are identical regardless of transport.
+//! Why: microsecond-latency IPC to a daemon the caller manages itself, sharing
+//! the `EmbedderClient` trait with every other transport so call sites are
+//! identical. Since #6289 it is also the only remote transport
+//! `trusty-embedderd` offers — ADR-0032 retired the TCP listener the former
+//! `RemoteEmbedderClient` dialled.
 //!
 //! What: `UdsEmbedderClient` opens a fresh `tokio::net::UnixStream` per call,
 //! writes one newline-terminated JSON-RPC 2.0 request, half-closes the write
@@ -187,8 +188,7 @@ impl EmbedderClient for UdsEmbedderClient {
     /// Embed a batch of texts via the UDS JSON-RPC 2.0 transport.
     ///
     /// Why: thin wrapper that opens a socket, performs one request/response
-    /// cycle, and returns vectors — identical semantics to `RemoteEmbedderClient`
-    /// but without TCP overhead.
+    /// cycle, and returns vectors.
     ///
     /// What: opens a fresh `UnixStream`, writes one newline-framed JSON-RPC
     /// request, half-closes the write side, reads one newline-framed response,

@@ -42,6 +42,7 @@ pub use helpers::{ChatResponse, ToolCall, create_client, should_retry_plain_text
 pub use single_turn::{chat, chat_adapter_aware};
 pub use tool_loop::{chat_with_tools, chat_with_tools_gated};
 
-pub(crate) use http::http_client;
+// #4490: the `http_client` re-export is gone — `repl::ollama` was its last
+// consumer outside `llm::http`, and it now uses `trusty_common::local_probe`.
 // #3766: transport-failure classifier for local-model fallback.
 pub(crate) use http::is_transport_error;

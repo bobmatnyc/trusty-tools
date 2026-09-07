@@ -326,9 +326,8 @@ mod tests {
     /// default (`crate::DEFAULT_PORT`), pointer-commented to each sibling's
     /// real source constant, so a future edit here that reintroduces a
     /// collision fails this test instead of shipping a crash-loop. #2573
-    /// extended this table to also cover trusty-embedderd's `--http` mode
-    /// default, which the original table omitted because it is a manual/
-    /// dev-run listener rather than a `tctl`-managed daemon.
+    /// extended this table to cover trusty-embedderd's `--http` mode default
+    /// too; #6289 removed that row again when ADR-0032 retired the listener.
     /// What: asserts `crate::DEFAULT_PORT` is absent from the known-sibling
     /// ports list.
     /// Test: this is the test.
@@ -351,11 +350,9 @@ mod tests {
                 7880,
                 "trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR",
             ),
-            (
-                "trusty-embedderd",
-                7890,
-                "trusty-embedderd/src/lib.rs::Args::http_addr (--http default_value, manual/dev-run only)",
-            ),
+            // #6289: no trusty-embedderd row. Its `--http` mode is retired
+            // (ADR-0032); it serves stdio and a Unix socket only, so 7890 is
+            // free and a guard naming it would refuse a value nothing holds.
             (
                 // #3331: trusty-agents joined the proxied-sibling set; its API
                 // server default port must not collide with the console's.

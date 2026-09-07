@@ -62,7 +62,10 @@ pub const LOCAL_BASE_URL: &str = "http://localhost:11434/v1";
 /// so it consolidates with the identical override `trusty-agents`' legacy
 /// `llm::adapter::impls::OllamaAdapter::api_endpoint` already reads — setting
 /// it once affects both the legacy dispatch and this registry-based path.
-pub const LOCAL_HOST_ENV: &str = "OLLAMA_HOST";
+///
+/// Re-exported from [`crate::local_probe`] (#4490), which is where the probe and
+/// every `trusty-agents` call site read it from too.
+pub use crate::local_probe::LOCAL_HOST_ENV;
 
 /// Env var providing an optional bearer credential for local OpenAI-compatible
 /// servers that DO enforce auth (e.g. LM Studio / vLLM configured with an API
@@ -102,18 +105,15 @@ impl LocalConfig {
     /// Why: the single place that implements the documented override
     /// mechanism, so [`factory`] and any future CLI/config surface share
     /// identical precedence.
-    /// What: reads [`LOCAL_HOST_ENV`]; when set and non-blank, trims any
-    /// trailing slash and appends `/v1` (mirroring the legacy `OllamaAdapter`
-    /// exactly). Reads [`LOCAL_API_KEY_ENV`]; when set and non-blank, wraps it
-    /// in a [`SecretString`]. Both env vars are optional.
+    /// What: resolves the bare host through
+    /// [`crate::local_probe::local_host`] — the one reader of [`LOCAL_HOST_ENV`]
+    /// (#4490) — and appends `/v1`. Reads [`LOCAL_API_KEY_ENV`]; when set and
+    /// non-blank, wraps it in a [`SecretString`]. Both env vars are optional.
     /// Test: `host_env_override_appends_v1_suffix`, `api_key_env_override_is_used`,
     /// `from_env_defaults_when_unset`.
     pub fn from_env() -> Self {
-        let base_url = std::env::var(LOCAL_HOST_ENV)
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .map(|host| format!("{}/v1", host.trim_end_matches('/')))
-            .unwrap_or_else(|| LOCAL_BASE_URL.to_string());
+        // #4490: one resolver, so the probe and the request dial the same host.
+        let base_url = format!("{}/v1", local_probe::local_host());
         let auth = std::env::var(LOCAL_API_KEY_ENV)
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -210,14 +210,20 @@ impl InferenceAdapter for LocalAdapter {
         self.inner.capabilities_for(model)
     }
 
-    /// Probe, then delegate (#4490).
+    /// Guard the capability (#5588), probe (#4490), then delegate.
+    ///
+    /// The guard runs BEFORE the probe: a schema this provider cannot honour
+    /// fails no matter what the probe finds, so spending a round-trip to learn
+    /// the server is alive tells the caller nothing.
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, InferenceError> {
+        self.ensure_structured_output_supported(request)?;
         self.probe().await?;
         self.inner.chat(request).await
     }
 
-    /// Probe, then delegate (#4490).
+    /// Guard, probe, then delegate — see [`Self::chat`].
     async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatStream, InferenceError> {
+        self.ensure_structured_output_supported(request)?;
         self.probe().await?;
         self.inner.chat_stream(request).await
     }

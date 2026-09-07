@@ -14,6 +14,7 @@
 //! `cargo test -p trusty-common --features config-cli,axum-server`.
 
 use std::io::Cursor;
+use std::time::Duration;
 
 use clap::Parser;
 use serial_test::serial;
@@ -24,6 +25,7 @@ use trusty_common::inference::config::{ConfigCommand, ops};
 use trusty_common::inference::providers::openrouter;
 use trusty_common::inference::test_support::MockInferenceServer;
 use trusty_common::inference::{Configurator, ProviderId, ResolvedProvider};
+use trusty_common::local_probe::{LOCAL_HOST_ENV, LOCAL_PROBE_TIMEOUT};
 
 /// A fake secret used across the flow tests; asserted NEVER to appear in output.
 const FAKE_KEY: &str = "sk-or-supersecretvalue-must-never-print-9999"; // pragma: allowlist secret
@@ -441,4 +443,122 @@ async fn test_probe_bedrock_is_unsupported() {
         matches!(outcome, ProbeOutcome::Unsupported(_)),
         "{outcome:?}"
     );
+}
+
+// ── test (local liveness probe, #4490) ───────────────────────────────────────
+
+/// A loopback stub answering one canned response per connection.
+///
+/// Modelled on `local_probe`'s own inline stub — a real listener, so the probe
+/// under test drives the real transport.
+async fn loopback_stub(response: &'static str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback stub");
+    let addr = listener.local_addr().expect("stub addr").to_string();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    addr
+}
+
+/// Point `OLLAMA_HOST` at `host` for the duration of one serial test.
+fn set_local_host(host: &str) {
+    // SAFETY: every caller is `#[serial(dotenv_credential_env)]`, so no other
+    // thread reads the process environment concurrently.
+    unsafe { std::env::set_var(LOCAL_HOST_ENV, host) };
+}
+
+/// Release the override [`set_local_host`] set.
+fn clear_local_host() {
+    // SAFETY: same `#[serial]` guard as `set_local_host`.
+    unsafe { std::env::remove_var(LOCAL_HOST_ENV) };
+}
+
+/// Why (#4490): Local is keyless like Bedrock, so it fell into the
+/// `credential_env.is_none()` branch and `config keys test local` told the
+/// operator their local Ollama "authenticates via the AWS credential chain".
+/// What it pins: a reachable local server reports REACHABLE naming the endpoint
+/// actually dialled, and the AWS wording is gone.
+/// Test: itself.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn probe_local_reports_reachability_not_an_aws_chain() {
+    clear_provider_env();
+    let addr = loopback_stub("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    set_local_host(&format!("http://{addr}"));
+
+    let cfg = mock_configurator("http://127.0.0.1:1".to_string());
+    let store = MemoryKeyStore::new();
+    let outcome = ops::probe(&store, &cfg, "local").await.expect("probe");
+    clear_local_host();
+
+    assert_eq!(
+        outcome,
+        ProbeOutcome::Reachable(format!("http://{addr}/v1/models"))
+    );
+    let label = outcome.label();
+    assert!(
+        !label.contains("AWS credential chain"),
+        "Local must not reuse Bedrock's wording: {label}"
+    );
+    assert!(label.contains(&addr), "{label}");
+    assert!(outcome.into_result().is_ok());
+}
+
+/// Why (#4490): routing through the shared probe is what makes a dead local
+/// server cost about a second and name the address it dialled — the underlying
+/// OpenAI-compat adapter's own client carries no timeout at all.
+/// What it pins: against a listener that accepts and never answers, `probe`
+/// returns inside the shared budget plus a generous margin, as FAILED carrying
+/// the probe's endpoint-naming text; against a closed port it names that
+/// endpoint too, and still never mentions AWS.
+/// Test: itself.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn probe_local_fails_inside_the_shared_budget() {
+    clear_provider_env();
+    let cfg = mock_configurator("http://127.0.0.1:1".to_string());
+    let store = MemoryKeyStore::new();
+
+    // A black hole: accepts the connection, writes nothing, never closes.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind black hole");
+    let addr = listener.local_addr().expect("addr").to_string();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    set_local_host(&format!("http://{addr}"));
+
+    let started = std::time::Instant::now();
+    let outcome = ops::probe(&store, &cfg, "local").await.expect("probe");
+    let elapsed = started.elapsed();
+    clear_local_host();
+
+    assert!(
+        elapsed < LOCAL_PROBE_TIMEOUT + Duration::from_secs(2),
+        "probe took {elapsed:?}, well past the {LOCAL_PROBE_TIMEOUT:?} budget"
+    );
+    let ProbeOutcome::Failed(message) = &outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert!(message.contains(&addr), "{message}");
+    assert!(outcome.clone().into_result().is_err());
+
+    // A closed port is the other half: still named, still not an AWS message.
+    set_local_host("http://127.0.0.1:1");
+    let outcome = ops::probe(&store, &cfg, "local").await.expect("probe");
+    clear_local_host();
+    let label = outcome.label();
+    assert!(label.contains("127.0.0.1:1/v1/models"), "{label}");
+    assert!(!label.contains("AWS credential chain"), "{label}");
 }

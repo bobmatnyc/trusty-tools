@@ -21,8 +21,10 @@ use crate::credentials::{
 };
 use crate::inference::configurator::Configurator;
 use crate::inference::error::InferenceError;
-use crate::inference::registry::{ProviderCapabilities, all, capabilities_for};
+use crate::inference::providers::local::LocalConfig;
+use crate::inference::registry::{ProviderCapabilities, ProviderId, all, capabilities_for};
 use crate::inference::types::{ChatMessage, ChatRequest};
+use crate::local_probe;
 
 /// Which resolution tier currently supplies a provider's key.
 ///
@@ -113,12 +115,20 @@ pub fn classify_tier(env: bool, env_local: bool, store: bool) -> Option<KeyTier>
 /// case), `Unsupported` (no probeable adapter, e.g. Bedrock's AWS chain or a
 /// not-yet-wired provider), and `Failed` (any other error — never contains the
 /// key, since [`InferenceError`] never does).
+/// `Reachable` is the keyless-Local counterpart of `Ok` (#4490): there is no
+/// credential to accept, so the question the probe actually answered was whether
+/// the server is up, and the label has to say that rather than claim a
+/// credential was validated.
 /// Test: `crates/trusty-common/tests/config_keys_cli.rs` (OK / 401 / 404 /
-/// unconfigured).
+/// unconfigured), `probe_local_reports_reachability_not_an_aws_chain`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ProbeOutcome {
     /// The provider accepted the credential.
     Ok,
+    /// A keyless local model server answered its `/v1/models` endpoint; the
+    /// attached string is the endpoint that answered.
+    Reachable(String),
     /// The provider rejected the credential (HTTP 401/403).
     Unauthorized,
     /// The provider returned 404 for the probe's model slug — the credential
@@ -155,6 +165,9 @@ impl ProbeOutcome {
     pub fn label(&self) -> String {
         match self {
             Self::Ok => "OK — credentials accepted".to_string(),
+            Self::Reachable(endpoint) => {
+                format!("OK — local model server reachable at {endpoint}")
+            }
             Self::Unauthorized => "UNAUTHORIZED — provider rejected the key (401/403)".to_string(),
             Self::ModelNotFound(reason) => format!(
                 "MODEL NOT FOUND — the provider's default model is not found/deployed on this \
@@ -180,7 +193,7 @@ impl ProbeOutcome {
     /// Test: covered structurally; the outcome itself is the asserted surface.
     pub fn into_result(self) -> anyhow::Result<()> {
         match self {
-            Self::Ok | Self::Unconfigured | Self::Unsupported(_) => Ok(()),
+            Self::Ok | Self::Reachable(_) | Self::Unconfigured | Self::Unsupported(_) => Ok(()),
             other => Err(anyhow::anyhow!("{}", other.label())),
         }
     }
@@ -290,7 +303,13 @@ pub fn list(store: &dyn KeyStore, out: &mut dyn Write) -> anyhow::Result<()> {
 /// Why: the `test` verb — the "api-testable-locally" check. It confirms a key is
 /// actually accepted (or rejected) by the provider without leaking it, and
 /// degrades cleanly when no key is configured.
-/// What: validates the provider; the keyless Bedrock chain is
+/// What: validates the provider. Local (#4490) is keyless but IS testable —
+/// what an operator wants to know is whether the server is up — so it runs
+/// [`crate::local_probe::probe_models_endpoint`] against
+/// [`crate::inference::providers::local::LocalConfig::from_env`]'s base URL and
+/// answers [`ProbeOutcome::Reachable`] or [`ProbeOutcome::Failed`] carrying the
+/// probe's own endpoint-naming text; that branch runs FIRST so Local never falls
+/// into the AWS-credential-chain message below. The keyless Bedrock chain is
 /// [`ProbeOutcome::Unsupported`]. Resolves the key (env > `.env.local` via the
 /// caller's prior load > `store`); a miss is [`ProbeOutcome::Unconfigured`]. Then
 /// forces this exact provider by prefixing its slug (a resolvable key means the
@@ -310,7 +329,9 @@ pub fn list(store: &dyn KeyStore, out: &mut dyn Write) -> anyhow::Result<()> {
 /// guarantees the resolved key never reaches `Failed`'s or `ModelNotFound`'s
 /// message even in that case. Returns `Err` only on an unknown provider.
 /// Test: `config_keys_cli.rs` OK / 401 / 404 / unconfigured probe cases,
-/// `probe_error_body_never_leaks_the_resolved_key`.
+/// `probe_error_body_never_leaks_the_resolved_key`,
+/// `config_keys_cli.rs::probe_local_reports_reachability_not_an_aws_chain`,
+/// `config_keys_cli.rs::probe_local_fails_inside_the_shared_budget`.
 pub async fn probe(
     store: &dyn KeyStore,
     cfg: &Configurator,
@@ -320,6 +341,19 @@ pub async fn probe(
         anyhow::anyhow!("unknown provider {provider:?}; known: {}", known_names())
     })?;
     let name = caps.id.as_str();
+
+    // #4490: Local has no key either, but it DOES have something to test — is
+    // the server up. Answer that instead of Bedrock's AWS-chain message, which
+    // the shared `credential_env.is_none()` branch below would otherwise print
+    // for a provider that has nothing to do with AWS.
+    if caps.id == ProviderId::Local {
+        let endpoint = local_probe::models_url(&LocalConfig::from_env().base_url);
+        return Ok(match local_probe::probe_models_endpoint(&endpoint).await {
+            Ok(()) => ProbeOutcome::Reachable(endpoint),
+            // The probe's own Display already names the endpoint and the budget.
+            Err(err) => ProbeOutcome::Failed(err.to_string()),
+        });
+    }
 
     // Bedrock (and any future keyless provider): no API key to probe.
     if caps.credential_env.is_none() {

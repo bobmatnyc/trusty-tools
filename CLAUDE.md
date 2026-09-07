@@ -574,9 +574,10 @@ already deployed in `trusty-console/ui-search`, `trusty-analyze/ui`,
 
 Most references are linked from the rule they serve, above. Not linked elsewhere:
 
-- [ci-scripts.md](docs/reference/ci-scripts.md) — the eight `scripts/` checks that run only in a workflow: where each runs, what it gates, and which have a self-test
+- [ci-scripts.md](docs/reference/ci-scripts.md) — the nine `scripts/` checks that run only in a workflow: where each runs, what it gates, and which have a self-test
 - [documentation-layout.md](docs/reference/documentation-layout.md) — docs layout conventions
 - [DOC-38](docs/specs/spec-linked-documentation.md) — SLD policy, enforced by `scripts/check_sld.sh`
 - [threat-model.md](docs/reference/threat-model.md) — per-daemon bind/guard/proxy inventory ([ADR-0018](docs/adr/0018-loopback-only-doctrine.md))
 - [generated-doc-regions.md](docs/reference/generated-doc-regions.md) — the `<!-- BEGIN GENERATED: … -->` contract and `UPDATE_DOCS=1 cargo test -p <crate> --test generated_docs`; a crate with no markers is not checked
 - [public-manifest.tsv](docs/public-manifest.tsv) — ALLOWLIST of publishable `docs/` pages (absent = never public), enforced by `scripts/check_public_docs.sh`; the internal mdBook is unaffected
+- `scripts/check_doc_paths.sh` (#5147) — resolves backtick-quoted `crates/`, `src/`, `scripts/`, `docs/` and `.github/` citations in this file, the crate `CLAUDE.md`/`README.md` set, `docs/reference/` and `docs/architecture/` against the checkout. Write a non-literal path in one of the shapes its header's EXCLUDED TOKENS list covers — a placeholder, a glob, an elision — rather than widening the gate
