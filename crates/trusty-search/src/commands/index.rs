@@ -9,6 +9,10 @@
 //! `exclude` values supply defaults that committed teammates and daemon
 //! restarts pick up automatically — CLI flags always override them.
 //!
+//! On a manifest-bearing root, `--name` selects one declared index and a
+//! `--name` matching none is refused rather than silently replaced — see
+//! [`select_manifest_indexes`] and #6920.
+//!
 //! Design invariant: the registered root is ALWAYS the directory the user
 //! explicitly pointed at (CLI `PATH` arg, canonicalized) or the CWD
 //! (canonicalized) — never a subdirectory narrowed by the
@@ -33,8 +37,9 @@ use colored::Colorize;
 /// is intentionally ignored so a committed config cannot silently narrow the
 /// indexed tree.
 /// What: (1) resolve root; (2) auto-start daemon; (3) load dotfile for
-/// `name`/`exclude` defaults; (4) fan-out if `trusty-search.yaml` present;
-/// (5) register one index otherwise.
+/// `name`/`exclude` defaults; (4) if `trusty-search.yaml` is present, index the
+/// declared indexes [`select_manifest_indexes`] picks; (5) register one index
+/// otherwise.
 /// Test: `cargo run -- index --force`. Dotfile merge precedence is covered by
 /// `core::project_config` tests and the `merge_*` tests below.
 pub async fn handle_index(
@@ -123,15 +128,11 @@ pub async fn handle_index(
                 cfg.indexes.len(),
                 if cfg.indexes.len() == 1 { "" } else { "es" },
             );
-            if cli_name.is_some() {
-                eprintln!(
-                    "{} --name is ignored when {} is present",
-                    "ℹ".yellow(),
-                    CONFIG_FILENAME
-                );
-            }
-            let n_indexes = cfg.indexes.len();
-            for (i, idx) in cfg.indexes.iter().enumerate() {
+            // #6920: an explicit `-n` naming no declared index is refused,
+            // never silently replaced by the manifest's first name.
+            let selected = select_manifest_indexes(cli_name.as_deref(), &cfg, &project_path)?;
+            let n_indexes = selected.len();
+            for (i, idx) in selected.iter().enumerate() {
                 // Issue #929: print a clear banner before each index so the
                 // operator can distinguish back-to-back completion blocks when
                 // a YAML declares multiple indexes (e.g. duetto-backend +
@@ -186,6 +187,48 @@ pub async fn handle_index(
         };
         index_one_with_filters(&index_name, &project_path, force, timeout, &filters).await
     }
+}
+
+/// Choose which manifest-declared indexes one `trusty-search index` run touches.
+///
+/// Why: #6920 — a `-n` that named no declared index used to be dropped, so
+/// `index --force -n flyr-duetto-monolith <root>` reindexed `duetto-backend`
+/// instead and tore that index's HNSW snapshot during the #6910 recovery.
+/// Refusing is the ruling: the operator either meant a declared name or meant
+/// a different root, and both mistakes are cheap to correct and expensive to
+/// discover after a reindex has run.
+/// What: `None` selects every declared index (the historical fan-out); a `-n`
+/// equal to one declared name selects exactly that index; any other `-n` is an
+/// error naming the manifest path, the declared names, the conflicting value,
+/// and the two ways forward.
+/// Test: `manifest_name_conflict_is_refused`,
+/// `manifest_name_conflict_message_names_manifest_and_ways_forward`,
+/// `manifest_name_match_selects_only_that_index`,
+/// `manifest_without_cli_name_selects_every_index`.
+fn select_manifest_indexes<'a>(
+    cli_name: Option<&str>,
+    cfg: &'a RepoConfig,
+    project_path: &std::path::Path,
+) -> Result<Vec<&'a IndexConfig>> {
+    let Some(name) = cli_name else {
+        return Ok(cfg.indexes.iter().collect());
+    };
+    if let Some(idx) = cfg.indexes.iter().find(|i| i.name == name) {
+        return Ok(vec![idx]);
+    }
+    let declared: Vec<&str> = cfg.indexes.iter().map(|i| i.name.as_str()).collect();
+    let declared = if declared.is_empty() {
+        "(none)".to_string()
+    } else {
+        declared.join(", ")
+    };
+    anyhow::bail!(
+        "--name '{name}' is not declared in {manifest}\n\
+         declared index names: {declared}\n\
+         Either omit --name to index every declared name, or pass one of the \
+         declared names.",
+        manifest = project_path.join(CONFIG_FILENAME).display(),
+    )
 }
 
 /// Resolve the exact directory to register and crawl.
@@ -387,6 +430,89 @@ mod tests {
             exclude: exclude.map(|v| v.into_iter().map(str::to_string).collect()),
             ..Default::default()
         }
+    }
+
+    // ── select_manifest_indexes (#6920) ────────────────────────────────────
+
+    fn manifest(names: &[&str]) -> RepoConfig {
+        RepoConfig {
+            version: 1,
+            indexes: names
+                .iter()
+                .map(|n| IndexConfig {
+                    name: (*n).to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+        }
+    }
+
+    /// #6920 regression: `-n flyr-duetto-monolith` on a root whose manifest
+    /// declares `duetto-backend` / `duetto-frontend` must fail, not fall back
+    /// to indexing the declared names. Before the fix this returned both
+    /// declared indexes and the reindex ran against `duetto-backend`.
+    #[test]
+    fn manifest_name_conflict_is_refused() {
+        let cfg = manifest(&["duetto-backend", "duetto-frontend"]);
+        let got = select_manifest_indexes(
+            Some("flyr-duetto-monolith"),
+            &cfg,
+            Path::new("/repo/flyr-duetto-monolith"),
+        );
+        assert!(
+            got.is_err(),
+            "a -n declared nowhere in the manifest must be refused, got {:?}",
+            got.map(|v| v.iter().map(|i| i.name.clone()).collect::<Vec<_>>()),
+        );
+    }
+
+    /// The refusal has to be actionable: it names the manifest, every declared
+    /// name, the conflicting value, and both ways forward.
+    #[test]
+    fn manifest_name_conflict_message_names_manifest_and_ways_forward() {
+        let cfg = manifest(&["duetto-backend", "duetto-frontend"]);
+        let err = select_manifest_indexes(
+            Some("flyr-duetto-monolith"),
+            &cfg,
+            Path::new("/repo/flyr-duetto-monolith"),
+        )
+        .expect_err("conflicting -n should error");
+        let msg = err.to_string();
+        for needle in [
+            "flyr-duetto-monolith",
+            "/repo/flyr-duetto-monolith/trusty-search.yaml",
+            "duetto-backend",
+            "duetto-frontend",
+            "omit --name",
+            "pass one of the declared names",
+        ] {
+            assert!(msg.contains(needle), "message missing {needle:?}: {msg}");
+        }
+    }
+
+    /// A `-n` naming one declared index narrows the run to that index.
+    #[test]
+    fn manifest_name_match_selects_only_that_index() {
+        let cfg = manifest(&["duetto-backend", "duetto-frontend"]);
+        let got =
+            select_manifest_indexes(Some("duetto-frontend"), &cfg, Path::new("/repo/monolith"))
+                .expect("a declared name must be accepted");
+        assert_eq!(
+            got.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
+            vec!["duetto-frontend"]
+        );
+    }
+
+    /// No `-n` keeps the historical fan-out over every declared index.
+    #[test]
+    fn manifest_without_cli_name_selects_every_index() {
+        let cfg = manifest(&["duetto-backend", "duetto-frontend"]);
+        let got = select_manifest_indexes(None, &cfg, Path::new("/repo/monolith"))
+            .expect("no -n must fan out");
+        assert_eq!(
+            got.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
+            vec!["duetto-backend", "duetto-frontend"]
+        );
     }
 
     // ── resolve_project_path ───────────────────────────────────────────────
