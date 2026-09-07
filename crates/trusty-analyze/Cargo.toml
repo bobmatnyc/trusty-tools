@@ -16,7 +16,12 @@ name        = "trusty-analyze"
 # `src/**`: `mcp::rpc_client` dials the daemon through the shared
 # `trusty_mcp::DaemonBridgeJsonRpc` instead of its own framed client. Nothing
 # public changed shape — `call` is `pub(super)`.
-version     = "0.12.6"
+#
+# 0.12.7 (#5176): PATCH — 0.12.6 is live on crates.io and this PR edits a doc
+# comment in `src/core/github.rs` under it (retired-route prose cleanup); no
+# public signature changed. Bumped so the `PR version bump vs crates.io` gate
+# clears.
+version     = "0.12.7"
 edition     = "2021"
 license.workspace    = true
 authors.workspace    = true
