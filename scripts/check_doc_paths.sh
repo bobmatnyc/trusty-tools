@@ -112,7 +112,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h | --help)
-      sed -n '2,105p' "$0" >&2
+      sed -n '2,92p' "$0" >&2
       exit 0
       ;;
     *)
