@@ -524,27 +524,34 @@ pub fn verify(package: &Path, retained: &RetainedKey) -> Result<Verdict, Signing
 /// record under an existing name never reaches a caller — see
 /// [`super::zip_directory`]'s module docs for what that lets an archive do.
 /// What: walks the raw directory, refuses two records carrying the same name
-/// BYTES, then refuses any count that differs from what the parser exposes.
+/// BYTES, then refuses either a count or a SET that differs from what the
+/// parser holds. Both checks are load-bearing and neither implies the other: a
+/// count alone accepts two independently walkable directories of equal size and
+/// different contents, which `super::zip_directory`'s candidate scan makes
+/// constructible; a set alone would miss two records that collapse into one.
 ///
-/// Comparing bytes and counts rather than decoded names is deliberate. `zip`
-/// picks UTF-8 or CP437 by general-purpose flag bit 11, so a decoded comparison
-/// would refuse a legitimate CP437-flagged member — and it would still have to
-/// answer the harder case, two records whose different bytes decode alike,
-/// which the parser also collapses. The count catches that one without this
-/// module owning an encoding rule at all: a collapse of any kind leaves the
-/// parser exposing fewer members than the directory holds records.
+/// The comparison is raw bytes against the parser's OWN raw bytes
+/// (`ZipFile::name_raw`), not decoded names. `zip` picks UTF-8 or CP437 by
+/// general-purpose flag bit 11 (`read.rs:1313-1316`) and its CP437 table is
+/// private, so any decode written here would be a second implementation of that
+/// rule and free to drift from it. Comparing what the parser actually stored
+/// answers the question exactly — are these the same records? — and cannot
+/// disagree with a decode it never performs.
 ///
 /// # Postconditions
-/// On `Ok`, the returned names are the parser's, and the raw directory holds
-/// exactly as many records with no two carrying the same bytes.
+/// On `Ok`, the raw directory and the parser hold the same number of records
+/// carrying the same set of name bytes, and no two records carry the same
+/// bytes. The returned names are the parser's decoded ones, for the manifest
+/// comparison downstream.
 /// Test: `super::signing_tests::a_duplicate_central_directory_record_is_refused`,
 /// `super::signing_tests::the_raw_directory_matches_what_the_zip_parser_exposes`,
+/// `super::signing_tests::a_second_self_consistent_directory_is_refused`,
 /// `super::signing_tests::a_cp437_flagged_name_is_not_refused`.
 fn agreed_members(archive: &mut Archive, package: &Path) -> Result<Vec<String>, SigningError> {
     let raw = super::zip_directory::member_names(package)?;
-    let mut seen: std::collections::BTreeSet<&[u8]> = std::collections::BTreeSet::new();
+    let mut walked: std::collections::BTreeSet<&[u8]> = std::collections::BTreeSet::new();
     for name in &raw {
-        if !seen.insert(name.as_slice()) {
+        if !walked.insert(name.as_slice()) {
             return Err(SigningError::DuplicateMember {
                 path: package.to_path_buf(),
                 // Lossy for the MESSAGE only. Nothing decides anything on it.
@@ -552,19 +559,40 @@ fn agreed_members(archive: &mut Archive, package: &Path) -> Result<Vec<String>, 
             });
         }
     }
-    let exposed: Vec<String> = archive.file_names().map(str::to_owned).collect();
-    if exposed.len() != raw.len() {
+
+    let mut held = Vec::with_capacity(archive.len());
+    for index in 0..archive.len() {
+        let member = archive
+            .by_index_raw(index)
+            .map_err(|e| SigningError::Archive {
+                path: package.to_path_buf(),
+                source: std::io::Error::other(e),
+            })?;
+        held.push(member.name_raw().to_vec());
+    }
+    if held.len() != raw.len() {
         return Err(SigningError::DirectoryMismatch {
             path: package.to_path_buf(),
             reason: format!(
-                "the directory holds {} record(s) and the parser exposes {} member(s), so at \
-                 least one record was collapsed",
+                "the directory holds {} record(s) and the parser holds {}, so at least one \
+                 record was collapsed",
                 raw.len(),
-                exposed.len()
+                held.len()
             ),
         });
     }
-    Ok(exposed)
+    let held_set: std::collections::BTreeSet<&[u8]> = held.iter().map(Vec::as_slice).collect();
+    if held_set != walked {
+        return Err(SigningError::DirectoryMismatch {
+            path: package.to_path_buf(),
+            reason: format!(
+                "the directory and the parser hold {} record(s) each but not the same ones — \
+                 the archive carries more than one central directory",
+                raw.len()
+            ),
+        });
+    }
+    Ok(archive.file_names().map(str::to_owned).collect())
 }
 
 /// The detached-signature half of [`verify`].
@@ -1466,6 +1494,80 @@ mod signing_tests {
         }
     }
 
+    /// 🔴 Two central directories, each self-framing and self-consistent, with
+    /// the SAME entry count and different member names. A count-only comparison
+    /// accepts this: the walk reports three records, the parser reports three
+    /// members, and they are not the same three.
+    ///
+    /// The decoy EOCD is last, so `zip` 2.4.2's backward scan takes it and lists
+    /// the planted name. The walk rejects it — its directory does not end where
+    /// the record describing it begins — and falls through to the real EOCD.
+    /// Both then hold three records, so only comparing WHICH names exist catches
+    /// it.
+    #[test]
+    fn a_second_self_consistent_directory_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = EngagementKey::generate();
+        let path = package(dir.path(), &[("README.md", "read me")], Some(&key));
+        let raw = std::fs::read(&path).expect("read");
+        let eocd = eocd_at(&raw);
+        let real_directory_at = read_u32(&raw, eocd + 16) as usize;
+        let real_directory_size = read_u32(&raw, eocd + 12) as usize;
+
+        // A three-record decoy directory: the planted name in place of
+        // README.md, the two signing members kept so the counts match.
+        let mut decoy = Vec::new();
+        for name in ["PLANTED.md", MANIFEST_ENTRY, SIGNATURE_ENTRY] {
+            decoy.extend_from_slice(&central_header(name, b"", 0));
+        }
+
+        let mut forged = raw[..real_directory_at].to_vec();
+        let decoy_at = forged.len() as u32;
+        forged.extend_from_slice(&decoy);
+        // The real directory, then the real EOCD naming it, then the decoy EOCD
+        // naming the decoy directory. Each frames itself; only the real one's
+        // directory ends where the record describing it begins.
+        let real_moved_to = forged.len() as u32;
+        forged.extend_from_slice(&raw[real_directory_at..real_directory_at + real_directory_size]);
+        let mut real_eocd = raw[eocd..eocd + 22].to_vec();
+        real_eocd[16..20].copy_from_slice(&le32(real_moved_to));
+        // Its comment is the decoy EOCD that follows, so it still frames to EOF.
+        real_eocd[20..22].copy_from_slice(&le16(22));
+        forged.extend_from_slice(&real_eocd);
+        let mut decoy_eocd = raw[eocd..eocd + 22].to_vec();
+        decoy_eocd[8..10].copy_from_slice(&le16(3));
+        decoy_eocd[10..12].copy_from_slice(&le16(3));
+        decoy_eocd[12..16].copy_from_slice(&le32(decoy.len() as u32));
+        decoy_eocd[16..20].copy_from_slice(&le32(decoy_at));
+        decoy_eocd[20..22].copy_from_slice(&le16(0));
+        forged.extend_from_slice(&decoy_eocd);
+        let forged_path = write(dir.path(), "two-directories.zip", &forged);
+
+        let walked = super::super::zip_directory::member_names(&forged_path).expect("walks");
+        let mut parser = open(&forged_path).expect("opens");
+        let held: Vec<Vec<u8>> = (0..parser.len())
+            .map(|i| parser.by_index_raw(i).expect("member").name_raw().to_vec())
+            .collect();
+
+        assert_eq!(walked.len(), held.len(), "equal cardinality is the premise");
+        assert_eq!(walked.len(), 3);
+        assert!(
+            walked.iter().any(|n| n.as_slice() == b"README.md"),
+            "the walk must take the real directory"
+        );
+        assert!(
+            held.iter().any(|n| n.as_slice() == b"PLANTED.md"),
+            "zip is expected to take the decoy — that is what makes the two disagree"
+        );
+
+        match verify(&forged_path, &retained(&key)) {
+            Err(SigningError::DirectoryMismatch { reason, .. }) => {
+                assert!(reason.contains("not the same ones"), "{reason}");
+            }
+            other => panic!("expected a content disagreement, got {other:?}"),
+        }
+    }
+
     /// `raw` with `comment` appended and the EOCD's comment length updated.
     fn with_comment(raw: &[u8], comment: &[u8]) -> Vec<u8> {
         let eocd = eocd_at(raw);
@@ -1553,6 +1655,15 @@ mod signing_tests {
 
         let walked = super::super::zip_directory::member_names(&path).expect("walks");
         assert_eq!(walked, vec![b"gr\x81ss.md".to_vec()], "raw, undecoded");
+
+        // The set comparison holds because both sides are the parser's own raw
+        // bytes — not because names stopped being compared.
+        let mut parser = open(&path).expect("open");
+        assert_eq!(
+            parser.by_index_raw(0).expect("member").name_raw(),
+            walked[0].as_slice(),
+            "the parser's stored bytes are what the walk is compared against"
+        );
 
         let archive = open(&path).expect("open");
         let exposed: Vec<String> = archive.file_names().map(str::to_owned).collect();
