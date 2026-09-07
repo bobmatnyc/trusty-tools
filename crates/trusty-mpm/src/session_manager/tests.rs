@@ -29,14 +29,11 @@ use std::sync::Arc;
 /// siblings (each module needs its own copy; `pub(super)`/module-private
 /// visibility does not cross sibling module trees — see those sites' docs).
 ///
-/// Why (#3965): `WorkspaceProvisioner::provision`/`provision_in` call
-/// `core::home_trust_seed::preseed_home_trust` UNCONDITIONALLY — even under
-/// `without_prepare()` — because that seed sits BEFORE the
-/// `if !self.prepare { return ... }` gate in `provisioner/workspace.rs`. It
-/// resolves `~/.claude.json` from the REAL process `$HOME`, not from
-/// `workspace_root`, so every test here driving `.provision(...)` must pin
-/// `$HOME` to its own hermetic root or it writes into the operator's real
-/// `~/.claude.json`. Pairs with `#[serial_test::serial]`.
+/// Why (#3965): a test that stands up a workspace and creates a session record
+/// for it reaches `~/.claude.json` through code that resolves the REAL process
+/// `$HOME`, not the test's own root, so it writes into the operator's real
+/// `~/.claude.json` unless `$HOME` is pinned. Pairs with
+/// `#[serial_test::serial]`.
 /// Test: used by `spawn_session_tmux_cwd_is_workspace`.
 struct HomeGuard(Option<String>);
 impl Drop for HomeGuard {
@@ -1683,16 +1680,10 @@ async fn spawn_session_tmux_cwd_is_workspace() {
     // Pre-generate the session id (as the fixed spawn_session handler does).
     let session_id = ManagedSessionId::new();
 
-    // Provision using FakeGitBackend (creates the workspace directory on disk).
-    let provisioner = crate::provisioner::WorkspaceProvisioner::without_prepare(
-        crate::provisioner::FakeGitBackend::new(),
-        workspace_root.path().to_owned(),
-    );
-    let prepared = provisioner
-        .provision(&session_id, "https://github.com/owner/repo", "main", "task")
-        .expect("provision");
-
-    let workspace_path = prepared.path.clone();
+    // #6000 / ADR-0055: trusty-mpm provisions no workspace any more, so the
+    // spawn handler is handed a directory that already exists. Stand one up.
+    let workspace_path = workspace_root.path().join(session_id.to_string());
+    std::fs::create_dir_all(&workspace_path).expect("workspace dir");
 
     // Create with the provisioned workspace as cwd — this is the fixed order.
     let record = mgr

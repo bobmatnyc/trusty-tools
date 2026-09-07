@@ -61,22 +61,23 @@ pub(super) fn session_tools() -> Vec<Value> {
         tool(
             "session_new",
             "Spawn a new managed Claude Code (or trusty-code) session for \
-             `repo_url` at `ref`. A LOCAL `repo_url` — an absolute path to an \
-             existing directory — runs the session on that main checkout \
-             itself (ADR-0037); only a remote URL is cloned into a \
-             freshly-provisioned workspace. A main-checkout session may write \
-             documents and configuration only, and the writers it dispatches \
-             are given their own worktrees (ADR-0044, ADR-0048). The daemon \
-             creates the tmux host, deploys agents/skills, and launches the \
-             harness with the given `task`. Returns the new managed session id, \
-             tmux name, workspace path, lifecycle state, and the \
-             `tmux attach-session` command.",
+             `repo_url` at `ref`. `repo_url` MUST be an absolute path to a \
+             directory that already exists on the daemon host; the session runs \
+             on that main checkout itself (ADR-0037). A remote URL is an error — \
+             trusty-mpm clones no repository and creates no worktree for a \
+             session (ADR-0055); clone it yourself first and pass the path. A \
+             main-checkout session may write documents and configuration only, \
+             and the writers it dispatches are given their own worktrees \
+             (ADR-0044, ADR-0048). The daemon creates the tmux host, deploys \
+             agents/skills, and launches the harness with the given `task`. \
+             Returns the new managed session id, tmux name, workspace path, \
+             lifecycle state, and the `tmux attach-session` command.",
             json!({
                 "type": "object",
                 "properties": {
                     "repo_url": {
                         "type": "string",
-                        "description": "Repository URL to clone into the session workspace."
+                        "description": "Absolute path to an EXISTING local directory the session runs in. A remote URL is refused (ADR-0055)."
                     },
                     "ref": {
                         "type": "string",

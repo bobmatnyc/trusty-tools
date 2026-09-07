@@ -110,6 +110,9 @@ pub mod instruction_pipeline;
 // delivered-prompt diff a content change produces is the review artifact.
 pub mod ipc;
 pub mod llm_overseer;
+// ADR-0055 / #6000: the local-path `repo_url` rule and its typed refusal,
+// shared by every `session_new` entry point.
+pub mod local_repo_url;
 pub mod managed_config;
 pub mod manifest;
 pub mod mcp_config;

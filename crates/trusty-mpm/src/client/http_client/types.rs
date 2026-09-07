@@ -706,7 +706,7 @@ pub struct ManagedDecommissionOutcome {
 /// Test: `managed_spawn_request_serializes`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedSpawnRequest {
-    /// Repository URL to provision the session workspace from.
+    /// Absolute path to an EXISTING local directory the session runs in (ADR-0055).
     pub repo_url: String,
     /// Git branch or ref to check out (wire key `ref`).
     #[serde(rename = "ref")]

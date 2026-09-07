@@ -111,7 +111,7 @@ use summary::{
 /// Test: spawn handler test in session_manager_mvp.rs; `spawn_request_runtime_*`.
 #[derive(Debug, Deserialize)]
 pub struct SpawnRequest {
-    /// Repository URL to provision the session workspace from.
+    /// Absolute path to an EXISTING local directory the session runs in (ADR-0055).
     pub repo_url: String,
     /// Git branch or ref to check out.
     #[serde(rename = "ref")]

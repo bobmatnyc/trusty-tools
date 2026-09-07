@@ -135,15 +135,18 @@ pub trait OrchestratorBackend: Send + Sync {
     /// Why: the driver skill needs a typed, JSON-native way to provision a
     ///      session workspace and launch a harness in it — without scraping
     ///      `tm session new` CLI text (the #842 defect).
-    /// What: a LOCAL `repo_url` runs the session on that main checkout itself,
-    ///       writing documents and configuration only (ADR-0037, ADR-0044); a
-    ///       remote `repo_url` is cloned into a freshly-provisioned isolated
-    ///       workspace. Either way this creates the tmux host, launches the
-    ///       selected `runtime` (default claude-code) with `task`, and returns
-    ///       the new session's id / tmux name / workspace path / state /
-    ///       attach command. An unknown `runtime` value is an error string.
+    /// What: `repo_url` must be an ABSOLUTE path to a directory that already
+    ///       exists on the daemon host — the session runs on that main checkout
+    ///       itself, writing documents and configuration only (ADR-0037,
+    ///       ADR-0044). A remote URL is an error: trusty-mpm clones nothing and
+    ///       creates no worktree for a session (ADR-0055). This creates the tmux
+    ///       host, launches the selected `runtime` (default claude-code) with
+    ///       `task`, and returns the new session's id / tmux name / workspace
+    ///       path / state / attach command. An unknown `runtime` value is an
+    ///       error string.
     /// Test: `dispatch_session_new_tool` (mock) + the daemon-side
-    ///       `session_new_spawns_via_manager` integration test.
+    ///       `session_new_spawns_via_manager` integration test; the ADR-0055
+    ///       refusal by `mcp_session_new_refuses_a_remote_repo_url`.
     async fn session_new(
         &self,
         repo_url: &str,

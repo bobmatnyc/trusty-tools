@@ -136,15 +136,22 @@ pub(crate) enum SessionAction {
     // These verbs operate on provisioned worktree sessions in the managed store.
     // They are NOT valid targets for local project-session IDs.
     // ──────────────────────────────────────────────────────────────────────
-    /// Spawn a new managed session from a repo + ref (session-manager MVP).
+    /// Spawn a new managed session in an existing local checkout.
     ///
-    /// Why: the session-manager MVP provisions an isolated workspace from a git
-    /// repo and starts a harness in it; `tm sessions new` is the operator-facing
-    /// entry point that posts to `POST /api/v1/sessions/managed`.
-    /// What: posts repo, ref, task, and an optional name hint to the daemon.
-    /// Test: `cli_parses_session_new`.
+    /// Why: `tm sessions new` is the operator-facing entry point that posts to
+    /// `POST /api/v1/sessions/managed`. Since ADR-0055 the daemon provisions no
+    /// workspace of its own, so `repo` names a checkout that already exists.
+    /// What: posts the local path, ref, task, and an optional name hint to the
+    /// daemon; a `repo` that is not an existing local directory is refused
+    /// before the request is sent.
+    /// Test: `cli_parses_session_new`;
+    /// `execute_managed_new_refuses_a_remote_repo_url` covers the refusal.
     New {
-        /// Repository URL to provision the session from.
+        /// Absolute path to an EXISTING local directory to run the session in.
+        ///
+        /// A remote URL is refused (ADR-0055): trusty-mpm clones no repository
+        /// and creates no worktree for a session. Clone it yourself, then pass
+        /// that path.
         repo: String,
         /// Git branch or ref to check out.
         #[arg(long, default_value = "main")]

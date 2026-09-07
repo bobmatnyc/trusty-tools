@@ -33,9 +33,7 @@ use super::deployment_check::{carrier_reachable, warn_if_no_persona_carrier};
 use super::inproject::try_inproject_spawn;
 use super::managed_checkout::deny_worktree_fallback;
 use super::resume_error::ResumeManagedError;
-use crate::core::git_identity::resolve_for_config_enforced;
 use crate::daemon::state::DaemonState;
-use crate::provisioner::WorkspaceProvisioner;
 use crate::runtime::{RuntimeKind, build_adapter};
 use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
 // `ManagedError` moved out of this file's non-test code with the #2577 review
@@ -81,7 +79,7 @@ pub(super) async fn resolve_gh_env(
 /// `session_new_invalid_runtime_errors` and the HTTP spawn tests.
 #[derive(Debug, Clone)]
 pub struct SpawnParams {
-    /// Repository URL to provision the session workspace from.
+    /// Absolute path to an EXISTING local directory the session runs in (ADR-0055).
     pub repo_url: String,
     /// Git branch or ref to check out.
     pub git_ref: String,
@@ -219,6 +217,14 @@ pub async fn spawn_managed(
         None => RuntimeKind::default(),
         Some(raw) => raw.parse::<RuntimeKind>().map_err(|e| e.to_string())?,
     };
+
+    // Step 0.2 — ADR-0055 / #6000: a `repo_url` that is not an existing local
+    // directory has nowhere to route now that trusty-mpm clones nothing. Refuse
+    // it here, ahead of the MCP spawn gate below, because this is the more
+    // specific defect: no daemon configuration can make a remote URL work, and
+    // the message names the two-step remedy that does.
+    crate::core::local_repo_url::require_local_repo_url(&params.repo_url)
+        .map_err(|e| e.to_string())?;
 
     // Step 0.4 — MCP SPAWN GATE (#1836, #1837): an MCP-triggered spawn (never a
     // `tm launch`/`tm ticket`/SM-STDIO call — see `SpawnParams::mcp_initiated`)
@@ -532,10 +538,17 @@ async fn spawn_managed_routed(
             // Same rule as the reservation arm above: see `deny_worktree_fallback`.
             Err(e) => deny_worktree_fallback(&session_id, params.worktree, &e)?,
         }
-        return spawn_managed_local(state, &session_id, &params, runtime).await;
+        return Err(spawn_managed_local(&session_id, &params));
     }
 
-    spawn_managed_cloned(state, session_id, params, runtime, config).await
+    // #6000 / ADR-0055: `spawn_managed` refuses a non-local `repo_url` before
+    // any side effect, so this arm is unreachable in production. It returns the
+    // same refusal rather than panicking, so a future caller that bypasses that
+    // gate fails loudly instead of taking the daemon down.
+    Err(crate::core::local_repo_url::NonLocalRepoUrl {
+        repo_url: params.repo_url.clone(),
+    }
+    .to_string())
 }
 
 /// Resolve the semantic tmux name and create the per-session worktree for the
@@ -609,244 +622,13 @@ async fn reserve_inproject_worktree(
     Ok((worktree, reserved_name))
 }
 
-/// The clone-based provisioning tail of [`spawn_managed_routed`] (issue #1904).
-///
-/// Why: split out so the (now-shared, #1919) stage-observer scope installed
-/// in `spawn_managed` has a clean per-branch extraction to call — mirroring
-/// `spawn_managed_inproject`/`spawn_managed_local`, which get the identical
-/// scope for free since #1919 moved the `scoped(...)` wrapper up to cover all
-/// three branches uniformly (before #1919 this was the ONLY branch it wrapped).
-/// What: provisions the workspace (emits `CloningRepo`/`DeployingAgents`/
-/// `DeployingSkills`/`BuildingInstructions`/`ConfiguringMcp` from deep inside
-/// `provision`/`provision_in`/`prepare_session_inner`), creates the tmux
-/// session (`CreatingTmuxSession`), runs the FRONT gate, spawns the runtime
-/// (`LaunchingRuntime`), and emits `Complete`. Identical behaviour to the
-/// pre-#1904 inline tail of `spawn_managed` — this is a pure extraction plus
-/// `emit(...)` calls.
-/// Test: `handler_spawn_wires_provision_and_spawn` /
-/// `handler_spawn_creates_tmux_at_workspace_cwd` in tests/session_manager_mvp.rs
-/// cover the behaviour; the stage-emission itself is unit-tested in
-/// `core::provisioning_stage` and `provisioner::workspace`/`session_launch`
-/// (no live daemon needed for the emission tests).
-async fn spawn_managed_cloned(
-    state: &Arc<DaemonState>,
-    session_id: ManagedSessionId,
-    params: SpawnParams,
-    runtime: RuntimeKind,
-    config: crate::core::trusty_tools_config::TrustyToolsConfig,
-) -> Result<SessionRecord, String> {
-    use crate::core::provisioning_stage::{ProvisioningStage, emit};
-
-    // #2184: resolve the per-project gh identity + commit identity ONCE for
-    // this spawn (project `github:`/commit fields in `config.projects` >
-    // global `github:` > fully ambient) and apply it to every git subprocess
-    // the provisioner runs below. #3312: also verifies/self-heals the #2081
-    // account pairing inside the resolved `config_dir` — see
-    // `core::git_identity` module docs. Surfaced as a spawn failure BEFORE
-    // any provisioning side effect, mirroring how the MCP spawn gate above
-    // already fails closed before touching disk.
-    let git_identity = resolve_for_config_enforced(&config, &params.repo_url)
-        .await
-        .map_err(|e| {
-            warn!(id = %session_id, "spawn_managed: git identity resolution failed: {e}");
-            format!("git identity resolution failed: {e}")
-        })?;
-
-    // Provision an isolated workspace under the pre-generated `session_id` (the id
-    // is generated ONCE in `spawn_managed`, before the local-path/clone branch
-    // split, so both branches register the same id).
-    //
-    // #1220: the workspace root defaults to `~/trusty-mpm-projects/` (overridable
-    // via the `TRUSTY_MPM_WORKSPACE_ROOT` env var or the
-    // `~/.trusty-tools/trusty-mpm/config.yaml` `workspace_root_template`), and the
-    // session nests under the target repo's GitHub `<owner>/<repo>` identity:
-    // `<root>/<owner>/<repo>/<session-id>/`. When the repo URL has no parseable
-    // GitHub identity we fall back to the legacy single-slug `provision` path so a
-    // bare/non-GitHub URL still provisions cleanly. `config` was already loaded
-    // in `spawn_managed` (before the MCP spawn gate); reused here for the
-    // workspace root. `CloningRepo`/`DeployingAgents`/`DeployingSkills`/
-    // `BuildingInstructions`/`ConfiguringMcp` are emitted from inside `provision`/
-    // `provision_in`/`prepare_session_inner` — not here — since those are the
-    // functions that actually perform each step.
-    let prepared = match trusty_common::github_path::parse_github_path(&params.repo_url) {
-        Some(gh) => {
-            let project_dir = crate::core::trusty_tools_config::workspace_subpath(&config, &gh);
-            // `provision_in` only appends the session id; pass an empty workspace
-            // root because the project dir is already absolute.
-            let provisioner = WorkspaceProvisioner::new(
-                crate::provisioner::RealGitBackend::new(git_identity),
-                std::path::PathBuf::new(),
-            );
-            provisioner.provision_in(
-                &project_dir,
-                &session_id,
-                &params.repo_url,
-                &params.git_ref,
-                &params.task,
-            )
-        }
-        None => {
-            let workspace_root = crate::core::trusty_tools_config::workspace_root(&config);
-            let provisioner = WorkspaceProvisioner::new(
-                crate::provisioner::RealGitBackend::new(git_identity),
-                workspace_root,
-            );
-            provisioner.provision(&session_id, &params.repo_url, &params.git_ref, &params.task)
-        }
-    }
-    .map_err(|e| {
-        warn!(id = %session_id, "spawn_managed: provision failed: {e}");
-        format!("workspace provisioning failed: {e}")
-    })?;
-
-    // Step 2: create the tmux session rooted at the provisioned workspace.
-    // #1935: `owned=false` — the workspace is now a `git worktree` slice of a
-    // shared, persistent base checkout, not an independently-owned full clone.
-    // #4270: that base checkout is `<project_dir>` itself and the worktree is
-    // `<project_dir>/.worktrees/<id>`, the same shape `spawn_managed_inproject`
-    // produces. Bulk `remove_dir_all` would leave the
-    // base checkout's git worktree metadata and session branch ref dangling;
-    // `session_manager::decommission` instead detects the `.worktrees/<id>`
-    // shape (`is_session_worktree`) and runs `git worktree remove --force` +
-    // branch cleanup via `remove_session_worktree`, mirroring exactly how the
-    // in-project spawn path (`spawn_managed_inproject`, below) already handles
-    // its own per-session worktrees.
-    emit(ProvisioningStage::CreatingTmuxSession);
-    let mgr = state.session_manager().await;
-    let record = mgr
-        .create_with_id(
-            session_id,
-            params.task.clone(),
-            Some(prepared.path.clone()),
-            params.name_hint,
-            Some(prepared.path.clone()),
-            Some(params.repo_url.clone()),
-            Some(params.git_ref.clone()),
-            runtime,
-            params.ephemeral.unwrap_or(false),
-            false, // owned: false — worktree of a shared base checkout, not a full clone
-        )
-        .await
-        .map_err(|e| {
-            warn!(id = %session_id, "spawn_managed: session create failed: {e}");
-            e.to_string()
-        })?;
-
-    // #3649: best-effort; see `worktree_ownership::set_worktree_owner_best_effort`.
-    mgr.set_worktree_owner_best_effort(&session_id, session_id)
-        .await;
-
-    // #3822: explicit spawn-time project registration — the one-shot
-    // `auto_register_from_sessions` boot pass (`ProjectRegistry::
-    // auto_register_from_sessions`) never sees a session created after the
-    // registry's first touch, so `tm project list` reported this project
-    // missing forever without this. Best-effort; never blocks the spawn.
-    state
-        .project_registry()
-        .await
-        .register_from_session(&record)
-        .await;
-
-    // Step 2.5 — INTENT-CONFORMANCE FRONT GATE (#1360, spec §5.1).
-    //
-    // Between record-creation and `adapter.spawn`, resolve the ticket+spec intent
-    // for this task and decide whether to auto-proceed or escalate BEFORE any code
-    // is written. The gate is fail-open (non-ticketed work, an unresolved ISR, or
-    // a gap all auto-proceed) so it can never be the reason a spawn stalls. On an
-    // escalation it withholds the spawn, writes `pending_decision`/`proposed_default`
-    // (surfaced through every existing channel), and leaves the session in its
-    // pre-spawn `Provisioning` state until a human resolves it via `POST …/answer`.
-    if let Some(record) =
-        front_gate_or_escalate(&mgr, &record, &params.repo_url, &params.task).await?
-    {
-        return Ok(record);
-    }
-
-    if let Err(e) = mgr
-        .set_workspace(
-            &record.id,
-            prepared.path.clone(),
-            ManagedSessionState::Active,
-        )
-        .await
-    {
-        warn!(id = %record.id, "spawn_managed: set_workspace failed: {e}");
-    }
-
-    // Deployment-completeness check (#2158, made non-blocking by #2172): best-
-    // effort auto-repair of an incomplete `.claude/` payload. #2171 tracks the
-    // validator over-reporting INCOMPLETE; until that lands, a false positive
-    // here must never withhold the runtime launch (P0: it was leaving every
-    // session at a bare shell). Any gap — real or falsely reported — is now
-    // logged and the session proceeds to `adapter.spawn` regardless.
-    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&prepared.path);
-    if let Err(reason) =
-        ensure_deployment_complete(&fw, &prepared.path, record.repo_url.as_deref(), &record.id)
-    {
-        warn!(id = %record.id, "spawn_managed: deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
-    }
-
-    // Workstream-activity label ensure (issue #3726): idempotent, best-effort,
-    // detached — see `session_launch::spawn_workstream_label_ensure`.
-    crate::core::session_launch::spawn_workstream_label_ensure(
-        record.repo_url.clone(),
-        prepared.path.clone(),
-        record.tmux_name.clone(),
-    );
-
-    // Step 3: spawn the selected runtime in the pane. A spawn failure is recorded
-    // (the record is marked errored) but is not fatal — the record exists and the
-    // caller still gets it back.
-    emit(ProvisioningStage::LaunchingRuntime);
-    let tmux_arc = mgr.tmux_driver();
-    let adapter = build_adapter(record.runtime, tmux_arc);
-    let gh_env = resolve_gh_env(state, &prepared.path).await;
-    if let Err(e) = adapter.spawn(
-        &record.tmux_name,
-        &prepared.path,
-        &params.task,
-        &record.id.to_string(),
-        &gh_env,
-    ) {
-        warn!(
-            id = %record.id,
-            name = %record.tmux_name,
-            runtime = %record.runtime.as_str(),
-            "spawn_managed: runtime adapter spawn failed: {e}"
-        );
-        let _ = mgr
-            .mark_errored(&record.id, &format!("spawn failed: {e}"))
-            .await;
-    } else {
-        info!(
-            id = %record.id,
-            name = %record.tmux_name,
-            path = %prepared.path.display(),
-            "managed session spawned successfully"
-        );
-    }
-
-    emit(ProvisioningStage::Complete);
-    Ok(mgr.get(&record.id).await.unwrap_or(record))
-}
-
 /// Whether `s` names an EXISTING local directory usable as a session workspace
 /// directly, i.e. without a git clone (#1433).
 ///
-/// Why: the local-path spawn fast path must reliably distinguish "an absolute
-/// directory the operator already has on disk" from "a remote repo URL to clone".
-/// A URL (`https://…`, `git@…:…`) is never an absolute filesystem path, a relative
-/// path is rejected (ambiguous against the daemon's cwd), and a non-existent path
-/// falls through to clone — so this errs toward the safe existing behaviour.
-/// What: returns `true` iff `s` is an ABSOLUTE path that is a directory. `is_dir()`
-/// already implies existence in a single `stat` syscall (a missing path is not a
-/// dir) and follows symlinks, so a separate `exists()` probe is redundant.
-/// Test: `is_local_workdir_detects_absolute_dir`,
-/// `is_local_workdir_rejects_url_relative_and_missing` in tests/local_spawn.rs.
-pub fn is_local_workdir(s: &str) -> bool {
-    let p = std::path::Path::new(s);
-    p.is_absolute() && p.is_dir()
-}
+// #6000 / ADR-0055: the rule moved to `core::local_repo_url`, where it now sits
+// beside the refusal every `session_new` entry point shares. Re-exported so the
+// long-standing `daemon::managed_routes::is_local_workdir` path keeps working.
+pub use crate::core::local_repo_url::is_local_workdir;
 
 /// Write the task description to `TASK.md` in a workspace directory (both paths).
 ///
@@ -1125,205 +907,59 @@ async fn spawn_managed_inproject(
     Ok(mgr.get(&record.id).await.unwrap_or(record))
 }
 
-/// Spawn a managed session rooted at a local directory, redirecting to a managed
-/// clone when the directory has a parseable GitHub remote (#1590).
+/// Refuse a local directory the surviving in-project path could not serve.
 ///
-/// Why: the local-path fast path of [`spawn_managed`]. Before #1590 this function
-/// used the live checkout directly; now it checks for a GitHub remote and, when
-/// found, provisions a managed clone under the canonical
-/// `~/trusty-mpm-projects/<owner>/<repo>/<session-id>/` path — keeping the live
-/// checkout untouched. A local directory with NO parseable GitHub remote is an
-/// error: managed sessions always operate on a remote clone so concurrent sessions
-/// are isolated from the operator's working tree.
-/// What: in order — (0) reads `remote.origin.url` from the local directory; if
-/// absent or unparseable, returns `Err` (the `tm connect` path handles remotes-less
-/// directories); (1) provisions a managed clone via `provision_in` and reassigns
-/// `workspace` to the clone path; (2) creates the tmux session record via
-/// `create_with_id` (with `cwd = workspace_path = <managed clone>`,
-/// `repo_url = Some(<origin_url>)`, `owned = true`); (3) sets `source_id` on the
-/// record; (4) runs the FRONT gate (fail-open); (5) marks the record `Active`;
-/// (6) spawns the runtime. A spawn failure marks the record errored (non-fatal).
-/// Returns the final record.
-/// Test: `spawn_managed_local_redirects_to_managed_clone` and
-/// `spawn_managed_local_errors_on_no_remote` in tests/local_spawn.rs cover the
-/// two key branches. The clone path assertions live in the existing
-/// `local_path_spawn_*` test suite.
-async fn spawn_managed_local(
-    state: &Arc<DaemonState>,
-    session_id: &ManagedSessionId,
-    params: &SpawnParams,
-    runtime: RuntimeKind,
-) -> Result<SessionRecord, String> {
-    use crate::core::provisioning_stage::{ProvisioningStage, emit};
-
+/// Why: ADR-0055 (#6000) removed trusty-mpm's own workspace provisioner, and
+/// this function was its second call site — it cloned the directory's origin
+/// into `<workspace-root>/<owner>/<repo>` and added a worktree there. With that
+/// gone there is no second route to try: a local checkout with a GitHub origin
+/// is served by `spawn_managed_routed`'s in-project branch, and everything
+/// reaching here has already failed that branch's own preconditions.
+/// What: reports which precondition failed — no `origin` remote, an origin no
+/// GitHub `owner/repo` parses out of, or (the ADR-0055 case) a directory that
+/// is inside a repository but is not its root, so it has no `.git` of its own
+/// for the in-project path to open.
+/// Test: `spawn_managed_local_errors_on_no_remote` in tests/local_spawn.rs;
+/// the ADR-0055 arm by `a_subdirectory_of_a_repo_is_refused_not_provisioned`
+/// in tests/session_new_requires_a_local_path.rs.
+fn spawn_managed_local(session_id: &ManagedSessionId, params: &SpawnParams) -> String {
     let local_dir = std::path::PathBuf::from(&params.repo_url);
 
-    // Step 0 (#1590): managed-path redirect.
-    //
-    // Check whether the local directory has a parseable GitHub remote. If it does,
-    // provision a managed clone and operate in that clone instead of the live
-    // checkout. If it does not, the managed path cannot be established — error so
-    // the caller (or the operator via `tm connect`) handles the no-remote case.
     // #4734: `?` first — a git failure is its own error, not "no remote".
-    let origin_url = super::inproject::get_origin_url(&local_dir)?.ok_or_else(|| {
-        format!(
-            "spawn failed: '{}' has no git origin remote; \
+    let origin_url = match super::inproject::get_origin_url(&local_dir) {
+        Err(e) => return e,
+        Ok(None) => {
+            return format!(
+                "spawn failed: '{}' has no git origin remote; \
                  managed sessions require a GitHub remote. \
                  Use `tm connect` / `tm launch --live` to run in the live checkout.",
-            local_dir.display()
-        )
-    })?;
+                local_dir.display()
+            );
+        }
+        Ok(Some(url)) => url,
+    };
 
-    let gh = trusty_common::github_path::parse_github_path(&origin_url).ok_or_else(|| {
-        format!(
+    if trusty_common::github_path::parse_github_path(&origin_url).is_none() {
+        return format!(
             "spawn failed: could not parse a GitHub owner/repo from origin remote \
              '{origin_url}' for '{}'. \
              Use `tm connect` to run in the live checkout instead.",
             local_dir.display()
-        )
-    })?;
-
-    let source_id_str = format!("{}/{}", gh.owner, gh.repo);
-    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
-    let project_dir = crate::core::trusty_tools_config::workspace_subpath(&config, &gh);
-    // #2184: same per-project identity resolution as the clone-based path
-    // (`spawn_managed_cloned`) — this branch also provisions a managed clone
-    // (of `origin_url`), so it must honour the same binding, including the
-    // #3312 account-pairing self-heal (see `core::git_identity` module docs).
-    let git_identity = resolve_for_config_enforced(&config, &origin_url)
-        .await
-        .map_err(|e| {
-            warn!(id = %session_id, "spawn_managed (local→managed): git identity resolution failed: {e}");
-            format!("git identity resolution failed: {e}")
-        })?;
-    let provisioner = crate::provisioner::WorkspaceProvisioner::new(
-        crate::provisioner::RealGitBackend::new(git_identity),
-        std::path::PathBuf::new(),
-    );
-    let prepared = provisioner
-        .provision_in(
-            &project_dir,
-            session_id,
-            &origin_url,
-            &params.git_ref,
-            &params.task,
-        )
-        .map_err(|e| {
-            warn!(id = %session_id, "spawn_managed (local→managed): provision failed: {e}");
-            format!("workspace provisioning failed: {e}")
-        })?;
-
-    // `workspace` now points at the MANAGED clone, not the live checkout.
-    let workspace = prepared.path;
-    info!(
-        id = %session_id,
-        live = %local_dir.display(),
-        managed = %workspace.display(),
-        source_id = %source_id_str,
-        "spawn_managed: local-path redirected to managed clone (#1590)"
-    );
-
-    // #1919: mirrors `spawn_managed_cloned`'s placement — the clone/prepare
-    // stages above already fired inside `provision_in`; announce the tmux
-    // stage right before the record (and its tmux session name) is created.
-    emit(ProvisioningStage::CreatingTmuxSession);
-    let mgr = state.session_manager().await;
-    let record = mgr
-        .create_with_id(
-            *session_id,
-            params.task.clone(),
-            Some(workspace.clone()),
-            params.name_hint.clone(),
-            Some(workspace.clone()),
-            Some(origin_url.clone()),
-            if params.git_ref.is_empty() {
-                None
-            } else {
-                Some(params.git_ref.clone())
-            },
-            runtime,
-            params.ephemeral.unwrap_or(false),
-            true, // owned: we provisioned a fresh clone; decommission may remove it
-        )
-        .await
-        .map_err(|e| {
-            warn!(id = %session_id, "spawn_managed (local→managed): create failed: {e}");
-            e.to_string()
-        })?;
-
-    // Record the source project identity so callers can reconnect by project.
-    if let Err(e) = mgr.set_source_id(session_id, &source_id_str).await {
-        warn!(id = %session_id, "spawn_managed (local→managed): set_source_id failed: {e}");
-    }
-
-    // #3822: mirrors `spawn_managed_cloned`'s identical explicit
-    // spawn-time project registration.
-    state
-        .project_registry()
-        .await
-        .register_from_session(&record)
-        .await;
-
-    // FRONT gate: origin_url is a real GitHub URL so the gate is active.
-    if let Some(record) = front_gate_or_escalate(&mgr, &record, &origin_url, &params.task).await? {
-        return Ok(record);
-    }
-
-    if let Err(e) = mgr
-        .set_workspace(&record.id, workspace.clone(), ManagedSessionState::Active)
-        .await
-    {
-        warn!(id = %record.id, "spawn_managed (local→managed): set_workspace failed: {e}");
-    }
-
-    // Deployment-completeness check (#2158, made non-blocking by #2172): see
-    // `spawn_managed_cloned`'s identical check for the full rationale.
-    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
-    if let Err(reason) =
-        ensure_deployment_complete(&fw, &workspace, record.repo_url.as_deref(), &record.id)
-    {
-        warn!(id = %record.id, "spawn_managed (local→managed): deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
-    }
-
-    // Workstream-activity label ensure (issue #3726): idempotent, best-effort,
-    // detached — see `session_launch::spawn_workstream_label_ensure`.
-    crate::core::session_launch::spawn_workstream_label_ensure(
-        record.repo_url.clone(),
-        workspace.clone(),
-        record.tmux_name.clone(),
-    );
-
-    emit(ProvisioningStage::LaunchingRuntime);
-    let tmux_arc = mgr.tmux_driver();
-    let adapter = build_adapter(record.runtime, tmux_arc);
-    let gh_env = resolve_gh_env(state, &workspace).await;
-    if let Err(e) = adapter.spawn(
-        &record.tmux_name,
-        &workspace,
-        &params.task,
-        &record.id.to_string(),
-        &gh_env,
-    ) {
-        warn!(
-            id = %record.id,
-            name = %record.tmux_name,
-            runtime = %record.runtime.as_str(),
-            "spawn_managed (local→managed): runtime adapter spawn failed: {e}"
-        );
-        let _ = mgr
-            .mark_errored(&record.id, &format!("spawn failed: {e}"))
-            .await;
-    } else {
-        info!(
-            id = %record.id,
-            name = %record.tmux_name,
-            path = %workspace.display(),
-            "managed session spawned successfully (local→managed clone)"
         );
     }
 
-    emit(ProvisioningStage::Complete);
-    Ok(mgr.get(&record.id).await.unwrap_or(record))
+    // #6000 / ADR-0055: git answered with a remote, so this directory sits
+    // INSIDE a repository — but the in-project branch already declined it,
+    // which for a directory with a remote means it is not the repository root
+    // (no `.git` of its own). trusty-mpm no longer clones a workspace to stand
+    // in for one.
+    format!(
+        "spawn failed for session {session_id}: '{}' resolves to the repository at \
+         '{origin_url}' but is not that repository's root, so there is no checkout to run \
+         the session in. trusty-mpm no longer provisions one for you (ADR-0055): pass the \
+         repository ROOT — the directory holding `.git` — instead.",
+        local_dir.display()
+    )
 }
 
 /// Perform the withheld spawn (Step 3) for a FRONT-gate-escalated session.
