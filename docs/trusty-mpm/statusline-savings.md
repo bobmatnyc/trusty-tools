@@ -52,7 +52,7 @@ do not see a `💸`, no producer has written anything for that session.
 ## The techniques, and what each one measures
 
 `technique` is an open string in the ledger, so a new producer needs no schema
-change. Today one producer ships.
+change. Today two producers ship.
 
 ### `instruction-compression`
 
@@ -76,20 +76,37 @@ nothing therefore produces a compiled prompt LARGER than its sources, and
 nothing, so there is nothing to claim. The row appears when a project's
 `CLAUDE.md` genuinely replaces a bundled section with a shorter one.
 
-### `divert` (once the shunt lands)
+### `divert`
 
-The shunt/divert hook routes a bulk read to a `claude -p` worker and returns a
-summary. When it lands it appends a `divert` row per diversion:
-`tokens_saved` is the file's token count minus the summary's, and
-`cost_saved_usd` is that delta priced at the parent model, minus what the worker
-itself cost. Nothing in this page changes when it does — the segment already
-folds whatever rows it finds.
+Written once per successful bulk-read diversion. `tm hook --divert-check` blocks
+an oversized read, `tm divert bulk-read` answers it on a cheap `claude -p`
+worker, and the session gets a summary instead of the file.
+
+- **Files** — the bytes the worker read, which the session therefore did not.
+- **Summary** — the bytes of the answer the session did read.
+- **Saved** — files minus summary, at four bytes per token, priced at the parent
+  session's published input rate, **minus what the worker itself billed**.
+
+That last subtraction is what makes the figure a net saving rather than a gross
+one: the worker is cheap, not free, and its own reported cost comes straight out
+of the delta. All three numbers land in the row's `basis` string.
+
+A diversion that returned a summary no smaller than the files it read saved
+nothing, and one whose worker cost as much as the avoided tokens were worth
+saved nothing either. Both write **no row**. A fall-through — no worker on
+`PATH`, a worker error, an error reported inside the worker's JSON — writes no
+row either, because no diversion happened.
+
+The parent model is read from `ANTHROPIC_MODEL` when the harness exports it, and
+otherwise from the same resolution chain that produced the session's own
+`--model` flag. A model the price table does not recognise declines the row and
+logs a warning rather than pricing it at a guessed rate.
 
 ### Adding another producer
 
 Any call site that can compute a before/after byte or token count appends a row
 with its own `technique` string. `tm compress`, which already knows the input
-and output size of every gate log it trims, is the obvious next one. No change
+and output size of every gate log it trims, is the obvious third one. No change
 to the ledger, the fold, or the segment is required.
 
 ## The ledger

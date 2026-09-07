@@ -170,6 +170,8 @@ pub mod reinstall;
 // #6958: the per-session token-savings ledger every producer appends to, and
 // the instruction/language-compression producer that writes the first row.
 pub mod savings;
+// #6959: the bulk-read diversion producer, the ledger's second row source.
+pub mod savings_divert;
 pub mod savings_instructions;
 pub mod scaffold_gitignore;
 pub mod session;
