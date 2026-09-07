@@ -8,6 +8,8 @@ ds_source: "Foundry v2 (docs/design/UI/design-system/); tokens.css + foundry.css
 
 # trusty-mpm vs trusty-agents: One Platform, Two Products
 
+> **ADR-0055 (#6000):** `tm sessions new` no longer accepts a remote URL — trusty-mpm clones no repository and creates no worktree for a session. Clone the repository yourself first, then pass the resulting local path. Every `tm sessions new https://…` line below needs that two-step treatment before it will run.
+
 ## Slide 1: Title Slide
 **Key Message:** One platform serving two distinct missions — learn which tool you need.
 

@@ -6,7 +6,8 @@
 //! `commands::guided_inplace::run_inplace_relaunch` — gated on
 //! `workspace_path.is_dir()` alone and then acted on the directory as if it
 //! were live. `is_dir()` is blind to the failure mode #4204 observed on
-//! 2026-07-27: worktree `.base/.worktrees/f443c12d-…` had its `.git` and its
+//! 2026-07-27: worktree `.base/.worktrees/f443c12d-…` (the pre-#4270 layout —
+//! there is no `.base` any more) had its `.git` and its
 //! entire source tree stripped and was absent from `git worktree list`, yet the
 //! directory node survived — so `is_dir()` returned `true`, and 45 files were
 //! recomposed into the husk's `.claude/agents/` while a `claude` process sat on
