@@ -12,6 +12,7 @@
 
 use super::*;
 use trusty_agents_common::agents::manifest::{AgentManifest, ManifestEntry, Origin, checksum};
+use trusty_agents_common::agents::provenance::Provenance;
 use trusty_agents_common::agents::tier_audit::TierResidentClass;
 
 /// A hermetic `FrameworkPaths` whose agent SOURCE dir is inside `base`.
@@ -275,7 +276,7 @@ fn roster_includes_on_disk_source_names() {
 fn verdict_project_hit_is_fail() {
     let dir = PathBuf::from("/w/.claude/agents");
     let canonical = PathBuf::from("/c/agents");
-    let check = verdict(&[scan("project", &dir, &["qa"])], &canonical);
+    let check = verdict(&[scan("project", &dir, &["qa"])], &canonical, &[]);
     assert_eq!(check.status, CheckStatus::Fail);
 }
 
@@ -283,7 +284,7 @@ fn verdict_project_hit_is_fail() {
 fn verdict_home_only_is_warn() {
     let dir = PathBuf::from("/h/.claude/agents");
     let canonical = PathBuf::from("/c/agents");
-    let check = verdict(&[scan("operator home", &dir, &["qa"])], &canonical);
+    let check = verdict(&[scan("operator home", &dir, &["qa"])], &canonical, &[]);
     assert_eq!(check.status, CheckStatus::Warn);
 }
 
@@ -291,7 +292,7 @@ fn verdict_home_only_is_warn() {
 fn verdict_clean_is_ok() {
     let dir = PathBuf::from("/w/.claude/agents");
     let canonical = PathBuf::from("/c/agents");
-    let check = verdict(&[scan("project", &dir, &[])], &canonical);
+    let check = verdict(&[scan("project", &dir, &[])], &canonical, &[]);
     assert_eq!(check.status, CheckStatus::Ok);
     assert!(check.message.contains("/c/agents"), "{}", check.message);
 }
@@ -302,7 +303,7 @@ fn verdict_unscannable_tier_is_warn() {
     // nothing. Pre-fix the same input produced `Ok` with "(scanned: <dir>)".
     let dir = PathBuf::from("/w/.claude/agents");
     let canonical = PathBuf::from("/c/agents");
-    let check = verdict(&[unscannable("project", &dir)], &canonical);
+    let check = verdict(&[unscannable("project", &dir)], &canonical, &[]);
     assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
     assert!(check.message.contains("UNDETERMINED"), "{}", check.message);
 }
@@ -320,6 +321,7 @@ fn verdict_unscannable_tier_is_not_reported_as_scanned() {
             unscannable("project", &failed_dir),
         ],
         &canonical,
+        &[],
     );
     let scanned_clause = check
         .message
@@ -351,6 +353,7 @@ fn verdict_names_the_files_and_both_tiers() {
             scan("operator home", &home, &["engineer"]),
         ],
         &canonical,
+        &[],
     );
     assert_eq!(check.status, CheckStatus::Fail);
     for needle in [
@@ -375,6 +378,152 @@ fn verdict_summarises_a_long_list() {
     let dir = PathBuf::from("/w/.claude/agents");
     let canonical = PathBuf::from("/c/agents");
     let names = ["a", "b", "c", "d", "e", "f"];
-    let check = verdict(&[scan("project", &dir, &names)], &canonical);
+    let check = verdict(&[scan("project", &dir, &names)], &canonical, &[]);
     assert!(check.message.contains("(+1 more)"), "{}", check.message);
+}
+
+// ---------------------------------------------------------------------------
+// #4698: a `provenance:` that contradicts the ledger reaches the operator.
+// ---------------------------------------------------------------------------
+
+/// One disagreement, as `audit_provenance` would return it.
+fn disagreement(
+    path: &str,
+    declared: Provenance,
+    ledger_framework_owned: bool,
+) -> ProvenanceDisagreement {
+    ProvenanceDisagreement {
+        path: PathBuf::from(path),
+        declared,
+        ledger_framework_owned,
+        detail: format!(
+            "'{}' declares `provenance: {}` but the deployed-agent manifest records it as {}; \
+             the manifest wins (#4698)",
+            path,
+            declared.as_str(),
+            if ledger_framework_owned {
+                "framework-owned"
+            } else {
+                "not framework-owned"
+            }
+        ),
+    }
+}
+
+/// THE regression this exists for: nothing is misplaced, but a deployed file's
+/// frontmatter contradicts its ledger row. Dropping the disagreement returns
+/// this to `Ok` with no mention of the file, which is what shipped before the
+/// critic caught it.
+#[test]
+fn verdict_disagreement_alone_is_warn_not_ok() {
+    let dir = PathBuf::from("/w/.claude/agents");
+    let canonical = PathBuf::from("/c/agents");
+    let check = verdict(
+        &[scan("project", &dir, &[])],
+        &canonical,
+        &[disagreement(
+            "/c/agents/rust-engineer.md",
+            Provenance::UserAuthored,
+            true,
+        )],
+    );
+    assert_eq!(
+        check.status,
+        CheckStatus::Warn,
+        "a clean placement scan with a contradicting declaration is not Ok: {}",
+        check.message
+    );
+    for needle in [
+        "/c/agents/rust-engineer.md",
+        "user-authored",
+        "framework-owned",
+        "#4698",
+    ] {
+        assert!(
+            check.message.contains(needle),
+            "message must carry `{needle}`: {}",
+            check.message
+        );
+    }
+}
+
+/// A disagreement never demotes a shadowing `Fail` — shadowing is the more
+/// actionable finding — but it is still named in the same message.
+#[test]
+fn verdict_reports_a_provenance_disagreement_alongside_shadowing() {
+    let dir = PathBuf::from("/w/.claude/agents");
+    let canonical = PathBuf::from("/c/agents");
+    let check = verdict(
+        &[scan("project", &dir, &["qa"])],
+        &canonical,
+        &[disagreement(
+            "/c/agents/qa.md",
+            Provenance::FrameworkOwned,
+            false,
+        )],
+    );
+    assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
+    assert!(
+        check.message.contains("/c/agents/qa.md"),
+        "the disagreement is not dropped when shadowing also fires: {}",
+        check.message
+    );
+}
+
+/// No disagreements means the message says nothing about provenance — this
+/// finding must not add noise to an otherwise clean run.
+#[test]
+fn verdict_clean_run_says_nothing_about_provenance() {
+    let dir = PathBuf::from("/w/.claude/agents");
+    let canonical = PathBuf::from("/c/agents");
+    let check = verdict(&[scan("project", &dir, &[])], &canonical, &[]);
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(
+        !check.message.contains("provenance"),
+        "no finding, no mention: {}",
+        check.message
+    );
+}
+
+/// End to end through the real probe: a hand-edited file in the CANONICAL tier
+/// — the directory the shadowing scan deliberately skips — still produces a
+/// finding. This is the case a `MisplacedAgent` field could never reach.
+#[test]
+fn check_asset_tier_reports_a_hand_edited_deployed_agent() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let paths = FrameworkPaths::for_managed_project(home.path(), project.path());
+    let canonical = paths.agent_deploy_dir();
+    std::fs::create_dir_all(&canonical).unwrap();
+
+    // A deployed agent whose ledger row says the framework wrote it, but whose
+    // frontmatter now claims otherwise.
+    let body = "---\nname: qa\nrole: qa\nprovenance: user-authored\n---\n\nMine now.\n";
+    std::fs::write(canonical.join("qa.md"), body).unwrap();
+    // `track` appends `.claude/agents` to a base; the canonical deploy dir is
+    // already a full path, so the ledger is written directly into it.
+    let mut manifest = AgentManifest::default();
+    manifest.managed.insert(
+        "qa.md".to_owned(),
+        ManifestEntry {
+            source_chain: vec![],
+            checksum: checksum(body),
+            deployed_at: "2026-07-31T00:00:00Z".to_owned(),
+            origin: Origin::Bundled,
+        },
+    );
+    manifest.save(&canonical).unwrap();
+
+    let check = check_asset_tier(&paths, Some(project.path()), home.path());
+    assert_eq!(
+        check.status,
+        CheckStatus::Warn,
+        "the canonical tier is scanned for disagreements: {}",
+        check.message
+    );
+    assert!(
+        check.message.contains("qa.md") && check.message.contains("user-authored"),
+        "names the file and the declaration: {}",
+        check.message
+    );
 }

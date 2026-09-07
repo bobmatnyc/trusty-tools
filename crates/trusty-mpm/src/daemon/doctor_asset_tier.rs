@@ -19,13 +19,22 @@
 //! neither side re-derives the predicate. READ-ONLY: this probe never deletes,
 //! moves, or rewrites anything.
 //!
+//! It also reports a second, independent fault (#4698): an agent file whose
+//! `provenance:` frontmatter contradicts what the deployed-agent manifest
+//! recorded for it. That check runs over the CANONICAL deploy directory as well
+//! as the two non-canonical tiers — the shadowing scan above skips the
+//! canonical one by construction, and it is precisely where a hand-edited
+//! DEPLOYED agent lives.
+//!
 //! Test: `crates/trusty-mpm/src/daemon/doctor_asset_tier_tests.rs`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use trusty_agents_common::agents::tier_audit::TierAuditError;
-use trusty_agents_common::agents::tier_audit::{MisplacedAgent, audit_agent_tier};
+use trusty_agents_common::agents::tier_audit::{
+    MisplacedAgent, ProvenanceDisagreement, audit_agent_tier, audit_provenance,
+};
 
 // #4448: the roster moved to `core::bundled_roster` so the quarantine in
 // `session_launch` shares this exact one — report and repair must agree.
@@ -86,11 +95,14 @@ impl TierScan {
 /// is never empty and the probe can never fall back to a false "nothing is
 /// bundled" green), then scans `<project_dir>/.claude/agents/` and
 /// `<home>/.claude/agents/`, skipping the canonical
-/// [`FrameworkPaths::agent_deploy_dir`] itself and any duplicate path. Verdict
-/// per [`verdict`].
+/// [`FrameworkPaths::agent_deploy_dir`] itself and any duplicate path. It then
+/// runs [`audit_provenance`] over those tiers AND the canonical one (#4698) —
+/// which the shadowing scan skips, and which is where a hand-edited deployed
+/// agent lives. Verdict per [`verdict`].
 /// Test: `project_tier_stub_on_a_bundled_name_fails`,
 /// `clean_project_tier_is_ok`, `custom_project_agent_does_not_fire`,
-/// `user_owned_project_agent_on_a_bundled_name_does_not_fire`.
+/// `user_owned_project_agent_on_a_bundled_name_does_not_fire`,
+/// `check_asset_tier_reports_a_hand_edited_deployed_agent`.
 pub(super) fn check_asset_tier(
     paths: &FrameworkPaths,
     project_dir: Option<&Path>,
@@ -100,6 +112,8 @@ pub(super) fn check_asset_tier(
     let canonical = paths.agent_deploy_dir();
 
     let mut scans: Vec<TierScan> = Vec::new();
+    // #4698: `provenance:` claims that contradict the ledger, from every tier.
+    let mut disagreements: Vec<ProvenanceDisagreement> = Vec::new();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
     seen.insert(canonical.clone());
     for (label, dir) in [
@@ -119,6 +133,9 @@ pub(super) fn check_asset_tier(
             Ok(found) => TierOutcome::Scanned(found),
             Err(e @ TierAuditError::Unscannable { .. }) => TierOutcome::Unscannable(e.to_string()),
         };
+        // #4698: a hand-edited `provenance:` is a fact about a file wherever it
+        // sits, so the same directory is checked for one.
+        disagreements.extend(audit_provenance(&dir).unwrap_or_default());
         scans.push(TierScan {
             label,
             dir,
@@ -126,7 +143,14 @@ pub(super) fn check_asset_tier(
         });
     }
 
-    verdict(&scans, &canonical)
+    // #4698: and the CANONICAL tier above all — it is skipped by the shadowing
+    // scan above (every file there is tm-owned, correctly and uselessly), yet it
+    // is exactly where a hand-edited DEPLOYED agent lives. A disagreement check
+    // that could not look there would miss the case it exists for.
+    disagreements.extend(audit_provenance(&canonical).unwrap_or_default());
+    disagreements.sort_by(|a, b| a.path.cmp(&b.path));
+
+    verdict(&scans, &canonical, &disagreements)
 }
 
 /// The `.claude/agents` tier under `base`.
@@ -158,11 +182,24 @@ fn agent_tier_of(base: &Path) -> PathBuf {
 /// list, and an otherwise-clean run holding one is `Warn`, not `Ok` — the
 /// question is open, not answered. A real hit still outranks it, since a
 /// confirmed shadowing is the more actionable finding.
+///
+/// #4698: `disagreements` never changes the severity a placement hit produced —
+/// shadowing stays the more actionable finding — but it is always named in the
+/// message, and it alone raises an otherwise-clean run from `Ok` to `Warn`. The
+/// manifest still wins for ownership, so nothing resolves wrongly; what the
+/// operator needs to know is that something other than a deploy edited the file.
 /// Test: `verdict_project_hit_is_fail`, `verdict_home_only_is_warn`,
 /// `verdict_clean_is_ok`, `verdict_names_the_files_and_both_tiers`,
 /// `verdict_unscannable_tier_is_warn`,
-/// `verdict_unscannable_tier_is_not_reported_as_scanned`.
-fn verdict(scans: &[TierScan], canonical: &Path) -> DoctorCheck {
+/// `verdict_unscannable_tier_is_not_reported_as_scanned`,
+/// `verdict_disagreement_alone_is_warn_not_ok`,
+/// `verdict_reports_a_provenance_disagreement_alongside_shadowing`,
+/// `verdict_clean_run_says_nothing_about_provenance`.
+fn verdict(
+    scans: &[TierScan],
+    canonical: &Path,
+    disagreements: &[ProvenanceDisagreement],
+) -> DoctorCheck {
     let unscannable: Vec<String> = scans
         .iter()
         .filter_map(|s| match &s.outcome {
@@ -196,6 +233,26 @@ fn verdict(scans: &[TierScan], canonical: &Path) -> DoctorCheck {
                 ),
             );
         }
+        // #4698: nothing is misplaced, but a file's own `provenance:` still
+        // contradicts what the deployer recorded for it. The ledger wins for
+        // ownership, so nothing is broken — but the file was edited by
+        // something, and an operator who never hears that has no way to find
+        // out. Not `Ok`.
+        if !disagreements.is_empty() {
+            return DoctorCheck::new(
+                CHECK_NAME,
+                CheckStatus::Warn,
+                format!(
+                    "no tm-owned agent files outside the canonical tier {}, but {}. The \
+                     deployed-agent manifest wins for ownership, so agent resolution is \
+                     unaffected — but the file's frontmatter was changed by something other \
+                     than a deploy. Re-run `tm install` to restore it, or delete the file if \
+                     it is yours (issue #4698).",
+                    canonical.display(),
+                    disagreement_list(disagreements)
+                ),
+            );
+        }
         return DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Ok,
@@ -224,6 +281,11 @@ fn verdict(scans: &[TierScan], canonical: &Path) -> DoctorCheck {
         })
         .collect();
     detail.extend(unscannable.iter().map(|u| format!("{u} (UNDETERMINED)")));
+    // #4698: a disagreement never changes the severity below — shadowing is the
+    // more actionable finding — but it is still reported rather than dropped.
+    if !disagreements.is_empty() {
+        detail.push(disagreement_list(disagreements));
+    }
 
     if shadowing {
         return DoctorCheck::new(
@@ -253,6 +315,38 @@ fn verdict(scans: &[TierScan], canonical: &Path) -> DoctorCheck {
             detail.join("; "),
             canonical.display()
         ),
+    )
+}
+
+/// Render the `provenance:` disagreements, naming both records per file.
+///
+/// Why (#4698): the finding is only useful if it says WHICH file and WHAT the
+/// two records disagree about — "a provenance mismatch was found" sends an
+/// operator hunting. Each entry's `detail` already names the file, the
+/// declaration, and the ledger's value, so this joins them rather than
+/// re-deriving the wording and letting the two spellings drift.
+/// What: up to [`MAX_NAMED`] entries, then a `(+N more)` tail, matching
+/// [`name_list`]'s bound so one pathological directory cannot flood the report.
+/// Test: `verdict_reports_a_provenance_disagreement_alongside_shadowing`,
+/// `verdict_disagreement_alone_is_warn_not_ok`.
+fn disagreement_list(disagreements: &[ProvenanceDisagreement]) -> String {
+    let named: Vec<&str> = disagreements
+        .iter()
+        .take(MAX_NAMED)
+        .map(|d| d.detail.as_str())
+        .collect();
+    let rest = disagreements.len().saturating_sub(named.len());
+    let body = named.join("; ");
+    let plural = if disagreements.len() == 1 { "" } else { "s" };
+    if rest == 0 {
+        return format!(
+            "{} agent file{plural} declare a `provenance:` that contradicts the deployed-agent manifest: {body}",
+            disagreements.len()
+        );
+    }
+    format!(
+        "{} agent file{plural} declare a `provenance:` that contradicts the deployed-agent manifest: {body} (+{rest} more)",
+        disagreements.len()
     )
 }
 

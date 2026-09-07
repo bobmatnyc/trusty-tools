@@ -13,13 +13,17 @@ Added
   writes. Provenance is a property of the write, not of the source, so the writer
   supplies it — which also means a new bundled asset has no per-file declaration
   to forget (#4698).
-- `agents::provenance::reconcile_with_ledger` and
-  `agents::tier_audit::ownership_of_declared` check a file's declaration against
-  its ledger row. The ledger wins in both directions — it is the record the
-  deployer wrote under a lock and checksummed, while the frontmatter is the copy
-  anyone with an editor can change — and a disagreement is warned with the file
-  named. An untracked file is exempt from the check entirely: a declaration
-  cannot stand in for a ledger entry, which would manufacture the user-owned
+- `agents::provenance::reconcile_with_ledger` checks a file's declaration
+  against its ledger row. The ledger wins in both directions — it is the record
+  the deployer wrote under a lock and checksummed, while the frontmatter is the
+  copy anyone with an editor can change (#4698).
+- `agents::tier_audit::audit_provenance` scans a directory and returns one
+  `ProvenanceDisagreement` per file whose declaration contradicts its ledger row,
+  naming the file and both records. Deliberately separate from
+  `audit_agent_tier`: that answers "is this file misplaced?", and it must never
+  run on the canonical deploy directory — which is exactly where a hand-edited
+  DEPLOYED agent lives. A file with no ledger entry yields nothing; a
+  declaration cannot stand in for one, which would manufacture the user-owned
   quarantine exemption out of a field anybody can type (#4698).
 - `agents::metadata::AgentMetadata` projects the declared `provenance:` so the
   read-only surfaces that already report a file's `Origin` can report both

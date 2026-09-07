@@ -273,43 +273,6 @@ pub fn ownership_of(manifest: &AgentManifest, file_name: &str) -> TierOwnership 
     }
 }
 
-/// [`ownership_of`], additionally checking the file's own `provenance:` claim
-/// against the ledger (#4698).
-///
-/// Why: #4698 adds a SECOND record of who wrote a file, and two records can
-/// disagree once anybody edits the deployed copy. The ledger has to win — it is
-/// the record the deployer wrote under a lock and checksummed — but a
-/// disagreement is still worth an operator seeing, so it is warned rather than
-/// swallowed.
-/// What: the verdict is byte-for-byte [`ownership_of`]'s in every case; the
-/// only added behaviour is the warning
-/// [`crate::agents::provenance::reconcile_with_ledger`] emits. Deliberately a
-/// no-op for [`TierOwnership::Untracked`]: an absent ledger entry is not a
-/// disagreement, and letting `provenance: user-authored` stand in for one would
-/// manufacture the user-owned exemption out of a field anybody can type —
-/// exactly the proof invariant 2 above says only a ledger entry supplies.
-/// Test: `ownership_declared_agreeing_matches_ownership_of`,
-/// `ownership_declared_disagreement_keeps_the_ledger_verdict`,
-/// `ownership_declared_never_exempts_an_untracked_file`.
-pub fn ownership_of_declared(
-    manifest: &AgentManifest,
-    file_name: &str,
-    declared: Option<Provenance>,
-) -> TierOwnership {
-    let ownership = ownership_of(manifest, file_name);
-    match ownership {
-        TierOwnership::Untracked => ownership,
-        TierOwnership::FrameworkOwned | TierOwnership::UserOwned => {
-            reconcile_with_ledger(
-                file_name,
-                ownership == TierOwnership::FrameworkOwned,
-                declared,
-            );
-            ownership
-        }
-    }
-}
-
 /// Classify one file in a non-canonical tier. Pure — no I/O.
 ///
 /// Why: the verdict is the shared contract between #4442 and #4448, so it is
@@ -408,12 +371,7 @@ pub fn audit_agent_tier(
             }
             let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
             let name = agent_identity(&content, &file_name);
-            // #4698: read the file's own `provenance:` claim so a disagreement
-            // with the ledger is reported. The verdict is unchanged — the
-            // ledger wins — so this scan's classification is identical.
-            let declared = agent_metadata_from_str(&content).provenance;
-            let ownership = ownership_of_declared(&manifest, &file_name, declared);
-            let class = classify_tier_resident(&name, ownership, bundled);
+            let class = classify_tier_resident(&name, ownership_of(&manifest, &file_name), bundled);
             class.is_tm_owned().then(|| MisplacedAgent {
                 path: entry.path(),
                 name,
@@ -422,6 +380,100 @@ pub fn audit_agent_tier(
         })
         .collect();
     found.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(found)
+}
+
+/// One file whose declared `provenance:` contradicts its ledger entry (#4698).
+///
+/// Why: `provenance:` and the ownership ledger are two independent records of
+/// the same fact, so they can disagree once anybody edits a deployed file. The
+/// ledger wins for every OWNERSHIP decision — see
+/// [`crate::agents::provenance::reconcile_with_ledger`] — but the operator
+/// still needs to be told, and a `tracing::warn!` alone reaches no `tm doctor`
+/// report. This is the value that travels to one.
+/// What: the file, both records, and the rendered explanation. `detail` is
+/// [`crate::agents::provenance::Reconciled::disagreement`] verbatim, so the log
+/// line and the doctor finding cannot drift apart.
+/// Test: `audit_provenance_reports_a_contradicting_declaration`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceDisagreement {
+    /// Full path of the file whose declaration contradicts the ledger.
+    pub path: PathBuf,
+    /// What the file declares about its own author.
+    pub declared: Provenance,
+    /// What the ledger records — the value that WINS.
+    pub ledger_framework_owned: bool,
+    /// The rendered explanation, naming the file and both records.
+    pub detail: String,
+}
+
+/// Scan any agent directory for files whose `provenance:` contradicts the
+/// ledger (#4698).
+///
+/// Why: deliberately NOT folded into [`audit_agent_tier`], for two reasons that
+/// both point the same way. [`audit_agent_tier`] answers "is this file
+/// MISPLACED?", and a disagreement is a different question about a file that
+/// may be perfectly placed — folding them would put an unrelated fact inside
+/// [`MisplacedAgent`], which every consumer reads as "move or delete this".
+/// More decisively, [`audit_agent_tier`] must never run on the canonical deploy
+/// directory (every file there is tm-owned, correctly and uselessly), and the
+/// canonical directory is exactly where a hand-edited DEPLOYED agent lives.
+/// A disagreement check that could not look there would miss the case it exists
+/// for.
+/// What: READ-ONLY. Lists `.md` files directly under `dir`, reads this
+/// directory's ownership manifest, and returns one entry per file whose
+/// declaration contradicts its ledger row, sorted by path for stable output.
+/// A file with NO ledger entry yields nothing: an absent entry is not a
+/// disagreement, and a declaration cannot stand in for one (invariant 2 above).
+/// A file declaring nothing yields nothing — that is every file written before
+/// #4698. An ABSENT `dir` returns an empty vec; a `dir` that exists but cannot
+/// be enumerated returns [`TierAuditError::Unscannable`], matching
+/// [`audit_agent_tier`]. A corrupt or unreadable ledger yields nothing: with no
+/// second record to read, no contradiction can be established.
+/// Test: `audit_provenance_reports_a_contradicting_declaration`,
+/// `audit_provenance_is_silent_when_records_agree`,
+/// `audit_provenance_ignores_an_untracked_file`,
+/// `audit_provenance_ignores_a_file_declaring_nothing`,
+/// `audit_provenance_missing_dir_is_empty`,
+/// `audit_provenance_unscannable_dir_is_an_error`.
+pub fn audit_provenance(dir: &Path) -> Result<Vec<ProvenanceDisagreement>, TierAuditError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(TierAuditError::Unscannable {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let manifest = match AgentManifest::load_checked(dir) {
+        ManifestLoad::Ok(m) => m,
+        ManifestLoad::Corrupt(_) => return Ok(Vec::new()),
+    };
+
+    let mut found: Vec<ProvenanceDisagreement> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let file_name = entry.file_name().to_str()?.to_owned();
+            if !is_agent_file(&file_name) || !entry.path().is_file() {
+                return None;
+            }
+            let ledger = manifest.managed.get(&file_name)?;
+            let content = std::fs::read_to_string(entry.path()).ok()?;
+            let declared = agent_metadata_from_str(&content).provenance?;
+            let ledger_framework_owned = ledger.origin.is_framework_owned();
+            let detail = reconcile_with_ledger(&file_name, ledger_framework_owned, Some(declared))
+                .disagreement?;
+            Some(ProvenanceDisagreement {
+                path: entry.path(),
+                declared,
+                ledger_framework_owned,
+                detail,
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(found)
 }
 
