@@ -45,6 +45,7 @@
 //! `no_row_when_the_summary_is_not_smaller_than_the_files`,
 //! `divert_row_carries_the_named_technique`,
 //! `no_row_when_the_parent_model_cannot_be_priced`,
+//! `a_fable_parent_session_produces_a_priced_row`,
 //! `a_ledger_write_failure_does_not_fail_the_diversion`,
 //! `parent_model_precedence_table`, `divert_row_names_the_model_source`.
 

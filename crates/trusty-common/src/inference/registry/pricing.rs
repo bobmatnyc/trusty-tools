@@ -10,8 +10,8 @@
 //! What: [`Pricing`] (USD per MILLION tokens, four buckets) and [`pricing`], a
 //! substring lookup returning `Some(Pricing)` for known families, `None`
 //! otherwise.
-//! Test: inline `tests` — `claude_family_rates`, `gpt5_and_gemini_rates`,
-//! `unknown_model_is_none`, `estimate_matches_hand_calc`.
+//! Test: inline `tests` — `claude_family_rates`, `claude_5_fable_and_mythos_rates`,
+//! `gpt5_and_gemini_rates`, `unknown_model_is_none`, `estimate_matches_hand_calc`.
 
 /// USD-per-million-tokens pricing for one model family.
 ///
@@ -63,14 +63,37 @@ impl Pricing {
 /// slugs) keeps version-stamped point releases priced without a table churn.
 /// What: returns `Some(Pricing)` for the Claude, GPT-5, and Gemini families this
 /// project uses; `None` for anything unrecognised (the caller then relies on the
-/// provider's authoritative cost or reports "unknown"). Claude rates are from
-/// tcode `perf::pricing`; GPT-5/Gemini rates from trusty-review
-/// `llm::openrouter` (OpenRouter pricing page, best-effort, 2026 snapshot).
-/// Test: `claude_family_rates`, `gpt5_and_gemini_rates`, `unknown_model_is_none`.
+/// provider's authoritative cost or reports "unknown"). Claude opus/sonnet/haiku
+/// rates are from tcode `perf::pricing`; the Fable/Mythos rates are from the
+/// bundled `claude-api` skill's published model table (see the arm's comment);
+/// GPT-5/Gemini rates from trusty-review `llm::openrouter` (OpenRouter pricing
+/// page, best-effort, 2026 snapshot).
+/// Test: `claude_family_rates`, `claude_5_fable_and_mythos_rates`,
+/// `gpt5_and_gemini_rates`, `unknown_model_is_none`.
 pub fn pricing(model: &str) -> Option<Pricing> {
     let m = model.to_ascii_lowercase();
 
-    // ── Claude family (source: tcode perf::pricing) ──
+    // ── Claude family ──
+    // #6972: the Fable/Mythos tier carries no `opus`/`sonnet`/`haiku` substring,
+    // so before this arm existed a `claude-fable-5-1` parent session priced as
+    // `None` and the divert savings ledger declined every row. Rates are the
+    // published Anthropic first-party figures for `claude-fable-5`,
+    // `claude-fable-5-1` and `claude-mythos-5-1` — $10.00 input / $50.00 output
+    // per million tokens — from the bundled `claude-api` skill's model table
+    // (cached 2026-06-24); Mythos 5.1 is the same underlying model at the same
+    // price. `cache_read` is Fable 5.1's published $0.25/Mtok; Mythos 5.1's is
+    // open at launch and inherits it rather than a fabricated figure. No
+    // cache-write rate is published for the family, so it stays 0.0 under this
+    // module's documented convention. Matched FIRST because it is the most
+    // specific Claude arm.
+    if m.contains("claude-fable") || m.contains("claude-mythos") {
+        return Some(Pricing {
+            input: 10.0,
+            output: 50.0,
+            cache_read: 0.25,
+            cache_write: 0.0,
+        });
+    }
     if m.contains("claude-haiku") || m.contains("haiku-3") || m.contains("haiku-4") {
         return Some(Pricing {
             input: 0.80,
@@ -184,6 +207,44 @@ mod tests {
         assert_eq!(sonnet.input, 3.0);
         let opus = pricing("claude-opus-4-1").expect("opus priced");
         assert_eq!(opus.output, 75.0);
+    }
+
+    /// Why (#6972): the Claude 5 Fable/Mythos tier names no
+    /// `opus`/`sonnet`/`haiku` family word, so it fell through every Claude arm
+    /// and priced as `None`. A `None` here is not a cosmetic gap — trusty-mpm's
+    /// divert savings ledger declines to write a row for a model it cannot
+    /// price, so a Fable parent session recorded no savings at all.
+    /// Test: itself.
+    #[test]
+    fn claude_5_fable_and_mythos_rates() {
+        for slug in [
+            "claude-fable-5-1",
+            "claude-fable-5",
+            "claude-mythos-5-1",
+            "anthropic/claude-fable-5-1",
+            "bedrock/us.anthropic.claude-mythos-5-1",
+        ] {
+            let p = pricing(slug).unwrap_or_else(|| panic!("{slug} must be priced, not None"));
+            assert_eq!(p.input, 10.0, "{slug} input rate");
+            assert_eq!(p.output, 50.0, "{slug} output rate");
+            assert_eq!(p.cache_read, 0.25, "{slug} cache-read rate");
+        }
+    }
+
+    /// Why (#6972): the Fable arm is matched before opus/sonnet/haiku, so it must
+    /// not swallow a slug from another tier — and adding it must not have moved
+    /// any existing Claude rate. Opus 5 and Sonnet 5 already priced through the
+    /// bare `claude-opus` / `claude-sonnet` substrings before this change; this
+    /// pins that they still resolve to the same rates they did.
+    /// Test: itself.
+    #[test]
+    fn claude_5_opus_and_sonnet_keep_their_existing_rates() {
+        let opus = pricing("claude-opus-5").expect("opus 5 priced");
+        assert_eq!(opus.input, 15.0);
+        assert_eq!(opus.output, 75.0);
+        let sonnet = pricing("claude-sonnet-5").expect("sonnet 5 priced");
+        assert_eq!(sonnet.input, 3.0);
+        assert_eq!(sonnet.output, 15.0);
     }
 
     /// Why: the GPT-5 and Gemini families must price via substring, most-specific

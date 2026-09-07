@@ -25,6 +25,25 @@ fn sonnet_price() -> Option<ParentModel> {
     })
 }
 
+/// The real price lookup, pinned to a Fable parent session.
+///
+/// Why (#6972): this is `resolve_session_price`'s tail with the model fixed
+/// instead of resolved from the three sources, so the test exercises the shared
+/// table rather than a stand-in. Before #6972 the table returned `None` for this
+/// slug and the closure declined, which is exactly what the test below rejects.
+/// What: `claude-fable-5-1` and its table input rate, attributed to the
+/// statusline record — the source a real Fable session prices from.
+/// Test: `a_fable_parent_session_produces_a_priced_row`.
+fn fable_price() -> Option<ParentModel> {
+    let model = "claude-fable-5-1".to_string();
+    let pricing = trusty_common::inference::pricing(&model)?;
+    Some(ParentModel {
+        input_per_million: pricing.input,
+        id: model,
+        source: MODEL_SOURCE_STATUSLINE,
+    })
+}
+
 /// Why (#6959 acceptance criterion 1): the hand-computed delta is the whole
 /// claim. 400,000 file bytes are 100,000 tokens at four bytes each; a 4,000-byte
 /// summary is 1,000; the delta is 99,000 tokens, which at Sonnet's $3/Mtok input
@@ -96,6 +115,47 @@ fn no_row_when_the_parent_model_cannot_be_priced() {
         }))
         .is_none(),
         "a zero rate must write no row"
+    );
+}
+
+/// Why (#6972): the owner's daily-driver parent session runs on
+/// `claude-fable-5-1`, and that slug carries none of the `opus`/`sonnet`/`haiku`
+/// family words the shared table matched on. It therefore priced as `None`, the
+/// producer took its "unpriceable parent model" decline branch, and the session
+/// that generates the most diversions recorded no savings at all — which is the
+/// one case the statusline segment exists to show. Driving the REAL table
+/// (rather than a stand-in) is what makes this test fail on a table without the
+/// Fable arm.
+/// Test: itself.
+#[test]
+fn a_fable_parent_session_produces_a_priced_row() {
+    let row = divert_row("sess-fable", 400_000, 4_000, 0.02, fable_price)
+        .expect("a Fable parent session must produce a priced row, not a decline");
+    assert_eq!(row.tokens_saved, 99_000);
+    // 99,000 tokens at Fable's $10/Mtok input rate is $0.99, less the worker's
+    // own $0.02 — $0.97.
+    assert!(
+        (row.cost_saved_usd - 0.97).abs() < 1e-9,
+        "cost was {}",
+        row.cost_saved_usd
+    );
+    assert!(
+        row.basis.contains("claude-fable-5-1"),
+        "the basis must name the parent model it priced at: {}",
+        row.basis
+    );
+    assert_eq!(row.model_source, MODEL_SOURCE_STATUSLINE);
+
+    // And the written row comes back out of the fold the statusline reads with.
+    let dir = tempfile::tempdir().expect("temp dir");
+    record_divert_with(dir.path(), "sess-fable", 400_000, 4_000, 0.02, fable_price);
+    let ledger = savings_log_in(dir.path());
+    let total = fold_session(&ledger, "sess-fable");
+    assert_eq!(total.rows, 1, "the Fable diversion must fold as one row");
+    assert!(
+        (total.cost_saved_usd - 0.97).abs() < 1e-9,
+        "folded cost was {}",
+        total.cost_saved_usd
     );
 }
 
