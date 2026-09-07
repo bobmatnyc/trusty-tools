@@ -13,7 +13,9 @@
 //! file declares both — the union is deliberately NOT taken, DOC-57 §9.4) is
 //! decided, so the persona-chat dispatch gate (`ctrl::pm_task::dispatch::persona`)
 //! and the `GET /api/agents/:name/permissions` route can never disagree about
-//! what is actually enforced.
+//! what is actually enforced. [`dropped_scopes`] is that decision's readable
+//! half (#4158) — the legacy entries CC-9 removed, so the route can report a
+//! drop the `tracing::warn!` alone never reaches an operator with.
 //! Test: `effective_scopes_prefers_permissions_over_legacy_tools_scopes`,
 //! `effective_scopes_falls_back_to_tools_scopes_when_permissions_absent`,
 //! `effective_scopes_absent_both_is_none`.
@@ -127,6 +129,49 @@ pub fn effective_scopes(
     tools.scopes.clone()
 }
 
+/// Why one legacy `[tools].scopes` entry is missing from the effective set.
+///
+/// Why: A bare list of dropped patterns tells an operator that something
+/// vanished, not what removed it. Naming the rule — and that CC-9 takes a
+/// winner rather than a union — is what makes the `/permissions` pane's
+/// `dropped_scopes[]` (#4158) actionable instead of merely alarming.
+/// What: the ONE reason a scope can be dropped today. A second drop rule
+/// would add a second constant beside this one rather than generalise its
+/// wording.
+/// Test: `dropped_scopes_lists_only_the_superseded_legacy_entries`.
+pub const SCOPE_DROPPED_SUPERSEDED: &str = concat!(
+    "declared in legacy [tools].scopes but absent from [permissions].scopes; ",
+    "DOC-57 CC-9 takes the winning declaration, not the union",
+);
+
+/// Legacy `[tools].scopes` entries that [`effective_scopes`] leaves out (#4158).
+///
+/// Why: CC-9's silent-drop is the exact silent-capability-loss class that has
+/// repeatedly cost investigation time here (#3844, #3987, #4093). Until this
+/// function existed the only signal was [`effective_scopes`]'s `tracing::warn!`,
+/// which no API or GUI consumer reads — and the app-launched daemon sends its
+/// logs to `/dev/null` (#4111), so in the shipped product that warning does not
+/// exist at all. This is the readable half of that same signal.
+/// What: the entries of `tools.scopes` that are not in `permissions.scopes`,
+/// in declaration order, when BOTH are declared; empty otherwise (nothing was
+/// superseded, so nothing was dropped). Deliberately NOT the same condition as
+/// the warning, which fires on any difference: a `[permissions].scopes` that
+/// only ADDS to the legacy list drops nothing and must report nothing.
+/// Pair each entry with [`SCOPE_DROPPED_SUPERSEDED`] when reporting it.
+/// Test: `dropped_scopes_lists_only_the_superseded_legacy_entries`,
+/// `dropped_scopes_is_empty_when_permissions_only_widens`,
+/// `dropped_scopes_is_empty_without_a_permissions_declaration`.
+pub fn dropped_scopes(tools: &ToolsConfig, permissions: &PermissionsConfig) -> Vec<String> {
+    let (Some(winning), Some(legacy)) = (&permissions.scopes, &tools.scopes) else {
+        return Vec::new();
+    };
+    legacy
+        .iter()
+        .filter(|pattern| !winning.contains(pattern))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,6 +224,38 @@ mod tests {
         assert_eq!(
             effective_scopes(&tools, &permissions),
             Some(vec!["search.read".to_string()])
+        );
+    }
+
+    // #4158: the drop list must name exactly what CC-9 removed — not every
+    // legacy entry, and not one the new declaration restates.
+    #[test]
+    fn dropped_scopes_lists_only_the_superseded_legacy_entries() {
+        let tools = tools_with_scopes(Some(vec!["memory.read", "search.read"]));
+        let permissions = permissions_with_scopes(Some(vec!["search.read", "google.gmail.*"]));
+        assert_eq!(
+            dropped_scopes(&tools, &permissions),
+            vec!["memory.read".to_string()],
+            "search.read survives because the new declaration restates it"
+        );
+        assert!(!SCOPE_DROPPED_SUPERSEDED.is_empty());
+    }
+
+    #[test]
+    fn dropped_scopes_is_empty_when_permissions_only_widens() {
+        // `effective_scopes` WARNS here (the lists differ) but nothing is
+        // lost, so the operator-facing list must stay empty.
+        let tools = tools_with_scopes(Some(vec!["memory.read"]));
+        let permissions = permissions_with_scopes(Some(vec!["memory.read", "search.read"]));
+        assert!(dropped_scopes(&tools, &permissions).is_empty());
+    }
+
+    #[test]
+    fn dropped_scopes_is_empty_without_a_permissions_declaration() {
+        let tools = tools_with_scopes(Some(vec!["memory.read"]));
+        assert!(dropped_scopes(&tools, &permissions_with_scopes(None)).is_empty());
+        assert!(
+            dropped_scopes(&tools_with_scopes(None), &permissions_with_scopes(None)).is_empty()
         );
     }
 

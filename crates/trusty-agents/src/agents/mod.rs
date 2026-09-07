@@ -52,9 +52,11 @@ pub use params::{
 };
 // #4172: the L0-only cross-project scope resolver (epic #4167).
 pub use cross_project::CrossProjectScope;
-// #3936: the `[permissions]` section (DOC-57 §7).
+// #3936: the `[permissions]` section (DOC-57 §7). #4158 adds `dropped_scopes`
+// — the operator-readable half of CC-9's silent supersession.
 pub use permissions::{
-    AutonomyMode, GrantMode, PermissionGrant, PermissionsConfig, effective_scopes,
+    AutonomyMode, GrantMode, PermissionGrant, PermissionsConfig, SCOPE_DROPPED_SUPERSEDED,
+    dropped_scopes, effective_scopes,
 };
 
 // Model resolution: `resolve_model` and `ModelSource` are part of the public
