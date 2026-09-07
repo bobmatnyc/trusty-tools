@@ -704,10 +704,14 @@ body all fall back silently to the bundled default — a customization attempt
 never blanks a section or crashes launch.
 
 The agent-delegation roster is DYNAMIC, not authored prose: it comes from
-`deployed_roster_section` → `roster_from_dirs`, a union of the project tier,
-`$CLAUDE_CONFIG_DIR/agents`, and `~/.claude/agents`, rendered by
-`generate_authority`. It is non-droppable — `validate_roster` rejects a package
-where the roster generator is optional or absent (#4069).
+`deployed_roster_section` → `roster_section_from_tiers`, a union of the project
+tier, `$CLAUDE_CONFIG_DIR/agents`, and `~/.claude/agents`. It renders only the
+agents Claude Code does NOT load itself, because the harness injects its own
+`Available agent types for the Agent tool` listing covering the rest (#4513);
+under tm that difference is the `~/.claude/agents` tier, which the harness never
+reads once `CLAUDE_CONFIG_DIR` points at the managed directory. The section is
+non-droppable — `validate_roster` rejects a package where the roster generator is
+optional or absent (#4069).
 
 ### Trigger Phrases
 

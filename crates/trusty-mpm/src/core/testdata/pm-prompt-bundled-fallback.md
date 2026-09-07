@@ -60,8 +60,10 @@ Anything not listed above is delegated.
 
 ## Agent Routing
 
-The Agent Delegation section is the single routing surface; the generated
-Delegation Authority roster below it is authoritative for which agents exist.
+The Agent Delegation section is the single routing surface. The harness's own
+`Available agent types for the Agent tool` listing is authoritative for which
+agents exist; the generated Delegation Authority roster below adds only the
+agents that listing does not carry (#4513).
 
 ## Delegating Well
 
@@ -362,7 +364,7 @@ appears there. What is bundled at all, and what deploys each:
 `framework-manifest.toml`, rendered in `tm-capabilities`'s
 `references/agents.md`.
 
-> The live roster below is authoritative for WHICH agents exist and what each handles; the tables above are routing doctrine only. Where the two disagree, trust the roster.
+> The harness's own `Available agent types for the Agent tool` listing is authoritative for WHICH agents exist; the tables above are routing doctrine only. Where the two disagree, trust the harness listing. The roster below adds only the agents that listing does not carry (#4513).
 >
 > Depending on how this session was launched, a listed agent may not be loadable. If a dispatch fails with an unknown agent type, re-route to the closest listed alternative — do not retry the same agent.
 

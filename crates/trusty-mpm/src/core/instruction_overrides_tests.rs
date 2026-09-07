@@ -41,10 +41,16 @@ fn bundled_delegation_appends_deployed_roster() {
     // Issue #4069 REGRESSION GATE. The delegation section must describe the
     // agents that are actually deployed, not the static asset's
     // hand-maintained table. `ticketing` and `memory-manager` are deployed
-    // in reality but appear NOWHERE in any bundled asset, so a rendered
-    // `### <name>` roster entry for them can only come from the live scan.
+    // in reality but appear NOWHERE in any bundled asset, so a section that
+    // accounts for exactly those two can only come from the live scan.
     // Against the pre-fix code this assertion fails: `resolve_pm_prompt`
     // returned the static `AGENT_DELEGATION.md` verbatim.
+    //
+    // #4513 changed HOW the live scan reaches the prompt for these two. They
+    // are deployed into `<project>/.claude/agents`, a tier Claude Code loads
+    // itself, so the harness's own Agent-type listing already carries them and
+    // the roster states the count instead of repeating the names. The count is
+    // still live-scan output — no static asset can produce it.
     let tmp = TempDir::new().unwrap();
     deploy_agent(tmp.path(), "ticketing");
     deploy_agent(tmp.path(), "memory-manager");
@@ -55,17 +61,25 @@ fn bundled_delegation_appends_deployed_roster() {
         prompt.contains("## Delegation Authority"),
         "the live roster section must be present"
     );
+    // Re-derived rather than hard-coded: the union spans the machine's own
+    // tiers too, so only the same computation is stable across machines. Both
+    // deployed agents are inside this number — the temp project tier is one of
+    // the harness-loaded tiers.
+    let harness_published = crate::core::delegation_authority::roster_from_dirs(
+        &crate::core::delegation_authority::harness_loaded_agent_dirs(tmp.path()),
+    )
+    .len();
     assert!(
-        prompt.contains("### ticketing"),
-        "a deployed agent absent from the static asset must reach the prompt"
+        harness_published >= 2,
+        "the two deployed agents must be in the harness-loaded union"
     );
     assert!(
-        prompt.contains("### memory-manager"),
-        "a deployed agent absent from the static asset must reach the prompt"
+        prompt.contains(&format!("the {harness_published} agents it carries")),
+        "the live scan must account for both deployed agents (#4069, #4513)"
     );
     assert!(
-        prompt.contains("**Model:** sonnet"),
-        "the roster's own value — the model hint — must reach the prompt"
+        !prompt.contains("### ticketing") && !prompt.contains("### memory-manager"),
+        "the harness publishes both; repeating them is the #4513 duplication"
     );
     assert!(
         !prompt.contains("Handles ticketing work."),
@@ -85,8 +99,9 @@ fn bundled_delegation_appends_deployed_roster() {
     // mode fully loads. Both are resolved by the note between them, which
     // must be present whenever a roster is rendered.
     assert!(
-        prompt.contains("trust the roster"),
-        "the roster must be declared authoritative over the stale doctrine table"
+        prompt.contains("trust the harness listing"),
+        "#4513: the harness's own listing, not the roster, is now the block \
+         declared authoritative over the stale doctrine table"
     );
     assert!(
         prompt.contains("re-route to the closest listed alternative"),
@@ -95,7 +110,7 @@ fn bundled_delegation_appends_deployed_roster() {
 
     // Ordering: doctrine first, note, roster after, BASE_PM floor last.
     let doctrine = prompt.find("# Agent Delegation Routing").expect("doctrine");
-    let note = prompt.find("trust the roster").expect("note");
+    let note = prompt.find("trust the harness listing").expect("note");
     let roster = prompt.find("## Delegation Authority").expect("roster");
     let base = prompt.find("# Framework Instructions").expect("base");
     assert!(doctrine < note, "doctrine precedes the note");
@@ -183,9 +198,16 @@ fn a_retired_delegation_file_no_longer_suppresses_the_live_roster() {
 
     assert!(!prompt.contains("ROUTE_ALL_TO_ENGINEER"));
     assert!(prompt.contains("# Agent Delegation Routing"));
+    let harness_published = crate::core::delegation_authority::roster_from_dirs(
+        &crate::core::delegation_authority::harness_loaded_agent_dirs(tmp.path()),
+    )
+    .len();
     assert!(
-        prompt.contains("### ticketing"),
-        "the live roster must reach the prompt — a retired file cannot suppress it"
+        prompt.contains(&format!("the {harness_published} agents it carries")),
+        "the live roster must reach the prompt — a retired file cannot suppress \
+         it. #4513: `ticketing` sits in the project tier, which the harness loads \
+         itself, so the live scan reaches the prompt as the count rather than as \
+         a `### ticketing` entry."
     );
 }
 

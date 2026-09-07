@@ -655,7 +655,7 @@ fn composed_prompt_carries_the_live_roster_and_the_precedence_note() {
     let doctrine = composed
         .find("# Agent Delegation Routing")
         .expect("doctrine");
-    let note = composed.find("trust the roster").expect("note");
+    let note = composed.find("trust the harness listing").expect("note");
     let roster = composed.find("### ticketing").expect("roster");
     let floor = composed.find("# Framework Instructions").expect("floor");
     assert!(doctrine < note && note < roster && roster < floor);

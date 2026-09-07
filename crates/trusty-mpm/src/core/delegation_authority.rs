@@ -10,7 +10,9 @@
 //! injected into the session launch instructions;
 //! [`resolve_roster`] is THE roster resolver every consumer shares — the PM
 //! prompt's delegation section, the `tm session start` count, and `tm doctor`
-//! (#4588); [`deployed_roster_section`] renders what it returns (#4069).
+//! (#4588); [`deployed_roster_section`] renders what it returns (#4069), minus
+//! the agents Claude Code already publishes in its own agent-type listing
+//! ([`harness_loaded_agent_dirs`], #4513).
 //! Test: `delegation_authority_tests.rs` covers scanning, foundation-file
 //! exclusion and its near misses, the `name:`-required admission rule (#4711),
 //! the empty directory, and both render branches.
@@ -452,6 +454,31 @@ pub const ROSTER_INCOMPLETE_MARKER: &str = "ROSTER INCOMPLETE";
 /// `an_unreadable_tier_directory_is_reported_not_silently_dropped`,
 /// `generate_authority_is_unchanged_when_nothing_was_lost`.
 pub fn generate_authority_reporting(agents: &[AgentSummary], unreadable: &[PathBuf]) -> String {
+    generate_authority_deduped(agents, 0, unreadable)
+}
+
+/// [`generate_authority_reporting`], stating how many entries the harness's own
+/// agent-type listing already carries so they need not be repeated.
+///
+/// Why (#4513): Claude Code injects an "Available agent types for the Agent
+/// tool" listing covering every agent it loads, and that listing — not this
+/// section — is what the Agent tool actually accepts. Rendering the same agents
+/// again put two copies of one list in every PM context. What the harness cannot
+/// publish is an agent it never loads, so those are the only entries this
+/// section still owes the PM.
+/// What: `harness_injected` is the count filtered out upstream by
+/// [`roster_section_from_tiers`]. At zero the output is byte-identical to the
+/// previous behaviour. Above zero the header points at the harness listing as
+/// the routing surface and renders only `agents`; when `agents` is then empty,
+/// it says so rather than claiming no agent is deployed.
+/// Test: `harness_injected_agents_are_not_repeated_in_the_roster`,
+/// `a_fully_harness_injected_roster_points_at_the_harness_listing`,
+/// `generate_authority_is_unchanged_when_nothing_was_deduped`.
+pub fn generate_authority_deduped(
+    agents: &[AgentSummary],
+    harness_injected: usize,
+    unreadable: &[PathBuf],
+) -> String {
     let mut out = String::from("## Delegation Authority\n\n");
 
     if !unreadable.is_empty() {
@@ -470,7 +497,7 @@ pub fn generate_authority_reporting(agents: &[AgentSummary], unreadable: &[PathB
         ));
     }
 
-    if agents.is_empty() {
+    if agents.is_empty() && harness_injected == 0 {
         out.push_str(
             "No delegatable agents are currently available. Handle all work \
              directly until agents are deployed.\n",
@@ -478,10 +505,31 @@ pub fn generate_authority_reporting(agents: &[AgentSummary], unreadable: &[PathB
         return out;
     }
 
-    out.push_str(
-        "The following agents are available for delegation. Route work to the\n\
-         appropriate agent based on task type.\n\n",
-    );
+    // #4513: the harness publishes its own agent-type listing, so repeating an
+    // agent it already carries buys nothing. Say where the full set lives.
+    if harness_injected > 0 {
+        out.push_str(&format!(
+            "The harness's own `Available agent types for the Agent tool` listing is the\n\
+             authoritative routing surface: the {harness_injected} agents it carries are not \
+             repeated\nhere. Route from that listing.\n\n",
+        ));
+    }
+
+    if agents.is_empty() {
+        return out;
+    }
+
+    if harness_injected > 0 {
+        out.push_str(
+            "Below are the agents resolved from a tier the harness does not load, which\n\
+             appear in no other listing.\n\n",
+        );
+    } else {
+        out.push_str(
+            "The following agents are available for delegation. Route work to the\n\
+             appropriate agent based on task type.\n\n",
+        );
+    }
 
     for agent in agents {
         out.push_str(&format!("### {}\n", agent.name));
@@ -561,6 +609,56 @@ pub fn deployed_agent_dirs_from(
     }
     dirs.push(framework_claude_agents.to_path_buf());
     dirs
+}
+
+/// The subset of [`deployed_agent_dirs`] that Claude Code loads agents from
+/// ITSELF, and therefore already publishes in its own agent-type listing.
+///
+/// Why (#4513): the harness injects "Available agent types for the Agent tool"
+/// into every session, covering every agent it loads. tm scans a WIDER set of
+/// tiers than the harness reads, so the two lists overlap but do not coincide,
+/// and the roster's only non-redundant content is the difference. The rule is
+/// derived, not enumerated: an agent is redundant exactly when its file sits in
+/// a tier the harness reads.
+/// What: the project tier — Claude Code always reads `<project>/.claude/agents` —
+/// plus ONE user tier, which is `$CLAUDE_CONFIG_DIR/agents` when that variable is
+/// set and `~/.claude/agents` when it is not. The asymmetry with
+/// [`deployed_agent_dirs`] is the whole point: under tm, `CLAUDE_CONFIG_DIR`
+/// points at the managed config directory, so `~/.claude/agents` is a tier tm
+/// scans and the harness never reads. Reads the raw env var rather than
+/// `managed_claude_config_dir`, because the env var is what Claude Code reads.
+/// Test: `harness_loaded_dirs_follow_claude_config_dir`,
+/// `harness_loaded_dirs_fall_back_to_the_home_tier`.
+pub fn harness_loaded_agent_dirs(project_dir: &Path) -> Vec<PathBuf> {
+    harness_loaded_agent_dirs_from(
+        project_dir,
+        std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .as_deref(),
+        &crate::core::paths::FrameworkPaths::default().claude_agents_dir(),
+    )
+}
+
+/// [`harness_loaded_agent_dirs`] with every environment lookup hoisted out.
+///
+/// Why: the shipped entry point reads `CLAUDE_CONFIG_DIR` and the caller's home
+/// directory, so its rule can only be tested by mutating process-global state.
+/// What: `<project>/.claude/agents`, then `<claude_config_dir>/agents` when one
+/// is supplied, otherwise `framework_claude_agents` verbatim. No I/O, no env.
+/// Test: `harness_loaded_dirs_follow_claude_config_dir`,
+/// `harness_loaded_dirs_fall_back_to_the_home_tier`.
+pub fn harness_loaded_agent_dirs_from(
+    project_dir: &Path,
+    claude_config_dir: Option<&Path>,
+    framework_claude_agents: &Path,
+) -> Vec<PathBuf> {
+    vec![
+        project_dir.join(".claude").join("agents"),
+        match claude_config_dir {
+            Some(dir) => dir.join("agents"),
+            None => framework_claude_agents.to_path_buf(),
+        },
+    ]
 }
 
 /// Merge the agents found across `dirs` into one roster, earlier dirs winning.
@@ -669,7 +767,8 @@ pub fn resolve_roster_reporting(project_dir: &Path) -> RosterScan {
 /// consults machine-global tiers, so it has no hermetic direct test.
 pub fn deployed_roster_section(project_dir: &Path) -> Option<String> {
     let dirs = deployed_agent_dirs(project_dir);
-    let section = roster_section_from_dirs(&dirs);
+    // #4513: render only what the harness's own agent-type listing omits.
+    let section = roster_section_from_tiers(&dirs, &harness_loaded_agent_dirs(project_dir));
     if section.is_none() {
         // #5544 review (LOW): the tier-only seam cannot name the project, and
         // dropping that field made the fallback event unattributable across
@@ -713,6 +812,70 @@ pub fn roster_section_from_dirs(dirs: &[PathBuf]) -> Option<String> {
         return None;
     }
     Some(generate_authority_reporting(&agents, &scan.unreadable))
+}
+
+/// [`roster_section_from_dirs`], omitting every agent the harness itself
+/// publishes.
+///
+/// Why (#4513): the composed prompt carried 43 agents while the harness's own
+/// "Available agent types for the Agent tool" listing carried 38 of the same
+/// names, so the PM read one list twice. The harness listing is authoritative —
+/// it is what the Agent tool accepts — so the duplicate half is pure cost. This
+/// is a RENDERING filter only: [`resolve_roster`] and every count taken from it
+/// (`tm session start`, `tm doctor`) still see the full union, because a cut
+/// agent is still deployed and still dispatchable.
+/// What: scans `dirs` once, recording which names came from a tier in
+/// `harness_dirs` (compared by path, and expected to be a subset of `dirs` — see
+/// [`harness_loaded_agent_dirs`]). Renders through
+/// [`generate_authority_deduped`] with the harness-carried names removed and
+/// counted. An all-harness roster still renders a section pointing at the
+/// harness listing; only a roster that is both empty and lost nothing is `None`,
+/// exactly as before.
+/// Test: `harness_injected_agents_are_not_repeated_in_the_roster`,
+/// `a_fully_harness_injected_roster_points_at_the_harness_listing`,
+/// `an_agent_in_both_tiers_counts_as_harness_injected`,
+/// `roster_section_from_tiers_with_no_harness_tier_matches_the_undeduped_render`,
+/// `a_cut_agent_stays_in_the_resolved_roster_and_so_stays_dispatchable`,
+/// `roster_section_from_tiers_is_none_when_nothing_is_deployed`.
+pub fn roster_section_from_tiers(dirs: &[PathBuf], harness_dirs: &[PathBuf]) -> Option<String> {
+    let mut by_name: BTreeMap<String, AgentSummary> = BTreeMap::new();
+    let mut harness_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut unreadable: Vec<PathBuf> = Vec::new();
+
+    for dir in dirs {
+        let harness_loaded = harness_dirs.iter().any(|h| h == dir);
+        let scan = scan_agents_reporting(dir);
+        unreadable.extend(scan.unreadable);
+        for agent in scan.agents {
+            let key = agent.name.to_ascii_lowercase();
+            if harness_loaded {
+                harness_names.insert(key.clone());
+            }
+            by_name.entry(key).or_insert(agent);
+        }
+    }
+    unreadable.sort();
+
+    if by_name.is_empty() && unreadable.is_empty() {
+        // Unchanged from `roster_section_from_dirs`: see the note there.
+        return None;
+    }
+
+    let harness_injected = by_name
+        .keys()
+        .filter(|name| harness_names.contains(*name))
+        .count();
+    let remaining: Vec<AgentSummary> = by_name
+        .into_iter()
+        .filter(|(name, _)| !harness_names.contains(name))
+        .map(|(_, agent)| agent)
+        .collect();
+
+    Some(generate_authority_deduped(
+        &remaining,
+        harness_injected,
+        &unreadable,
+    ))
 }
 
 #[cfg(test)]
