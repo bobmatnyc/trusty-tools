@@ -361,6 +361,104 @@ fn ops_seed_idempotent_when_all_present() {
     );
 }
 
+/// A `CommandRunner` that emulates gh's paging for `gh label list`: it returns
+/// the first `--limit` labels of `repo_labels`, defaulting to gh's own 30 when
+/// the caller passes no `--limit`, and never says that it truncated.
+///
+/// Why: #6914 — the seed probe asked for no limit, so on a repo with more than
+/// 30 labels it read a partial set, judged every policy label missing, and the
+/// run died on the first `gh label create` of a label that already existed.
+/// Only a runner that reproduces gh's silent cap can catch that.
+struct PagedGhRunner {
+    repo_labels: Vec<RepoLabel>,
+}
+
+impl crate::commands::ticket::runner::CommandRunner for PagedGhRunner {
+    fn run(
+        &self,
+        _program: &str,
+        args: &[&str],
+    ) -> anyhow::Result<crate::commands::ticket::runner::CommandOutput> {
+        assert_eq!(args.first(), Some(&"label"), "only `gh label` is scripted");
+        assert_eq!(args.get(1), Some(&"list"), "only `label list` is scripted");
+        let limit: usize = args
+            .iter()
+            .position(|a| *a == "--limit")
+            .and_then(|i| args.get(i + 1))
+            .map_or(30, |v| v.parse().expect("--limit must be a number"));
+        let page: Vec<serde_json::Value> = self
+            .repo_labels
+            .iter()
+            .take(limit)
+            .map(|l| {
+                serde_json::json!({
+                    "name": l.name,
+                    "color": l.color,
+                    "description": l.description,
+                })
+            })
+            .collect();
+        Ok(crate::commands::ticket::runner::CommandOutput {
+            success: true,
+            stdout: serde_json::to_string(&page).expect("serialize"),
+            stderr: String::new(),
+        })
+    }
+}
+
+/// Why: #6914's live failure — every policy label existed on the repo, yet the
+/// run reported all six missing and exited 1 on `gh label create`. This drives
+/// the real gh-backed system over a runner that reproduces gh's silent 30-label
+/// page, with the desired labels deliberately past that page.
+/// What: 40 filler labels ahead of the desired set; a correct probe reads the
+/// whole list and creates nothing.
+#[test]
+fn ops_seed_reads_past_the_default_label_page() {
+    let m = model();
+    let desired = desired_labels(&m, &ResolvedTicketing::default(), Some(SESSION));
+    // Filler ahead of the desired labels, so a 30-label read sees none of them.
+    let mut repo_labels: Vec<RepoLabel> = (0..40)
+        .map(|i| RepoLabel::new(format!("filler-{i:02}"), "CCCCCC", ""))
+        .collect();
+    repo_labels.extend(desired.iter().cloned());
+
+    let sys = crate::commands::ticket::system::GhTicketSystem::new(PagedGhRunner { repo_labels });
+    let report = seed_labels(&sys, &m, &ResolvedTicketing::default(), Some(SESSION), true)
+        .expect("seed reads the whole label set");
+
+    assert!(
+        report.created.is_empty(),
+        "every desired label already exists; got created {:?}",
+        report.created
+    );
+    assert_eq!(
+        report.already_present.len(),
+        desired.len(),
+        "all {} desired labels must be reported present",
+        desired.len()
+    );
+}
+
+/// Why: a read that comes back exactly as long as the requested page may be
+/// truncated, and seeding against a truncated set is the #6914 failure. It is
+/// an error, never a silently-accepted "complete" set.
+#[test]
+fn ops_seed_errors_when_the_label_page_is_full() {
+    let m = model();
+    let limit = trusty_mpm::core::policy_labels::LABEL_LIST_LIMIT;
+    let repo_labels: Vec<RepoLabel> = (0..limit + 5)
+        .map(|i| RepoLabel::new(format!("filler-{i:04}"), "CCCCCC", ""))
+        .collect();
+
+    let sys = crate::commands::ticket::system::GhTicketSystem::new(PagedGhRunner { repo_labels });
+    let err = seed_labels(&sys, &m, &ResolvedTicketing::default(), Some(SESSION), true)
+        .expect_err("a full page must not pass as a complete label set");
+    assert!(
+        err.to_string().contains("truncated"),
+        "error must name the truncation; got {err}"
+    );
+}
+
 // ---- transition -----------------------------------------------------------
 
 #[test]

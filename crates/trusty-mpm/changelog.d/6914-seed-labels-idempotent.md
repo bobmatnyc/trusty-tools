@@ -1,0 +1,3 @@
+Fixed
+
+- `tm issue seed-labels` is idempotent again on a repo with more than 30 labels. The existence probe ran `gh label list` with no `--limit`, so gh returned its default first 30 and said nothing about the rest — on bobmatnyc/trusty-tools, which carries 89 labels, all six policy labels fell outside that page, the run judged every one of them missing, and `gh label create` exited 1 on the first that already existed. The probe now goes through `policy_labels::list_labels_argv`, the crate's single `gh label list` spelling, which asks for `LABEL_LIST_LIMIT` (1000) labels; a page that comes back exactly that full is reported as a possibly-truncated read rather than passed on as a complete set (#6914).
