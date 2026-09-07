@@ -46,6 +46,8 @@ const EXPECTED_EDGES: &[(&str, &str)] = &[
     ("status:coded", "status:merged"),
     ("status:merged", "status:tested"),
     ("status:tested", "closed"),
+    // Backward: live verification failed and a fix PR is open.
+    ("status:merged", "status:coded"),
     // Release a claim, and reopen from anywhere.
     ("status:in-progress", "open"),
     ("status:coded", "open"),
@@ -105,6 +107,31 @@ fn project_model_rejects_skipping_a_rung() {
     assert!(!sm.transition_allowed(Some("status:in-progress"), "status:merged"));
     assert!(!sm.transition_allowed(Some("status:coded"), "status:tested"));
     assert!(!sm.transition_allowed(Some("status:merged"), "closed"));
+}
+
+/// Owner ruling 2026-09-07: a merged issue whose live verification failed and
+/// which drew a follow-up fix PR moves back to `status:coded`.
+///
+/// Before the edge existed, `tm issue transition 6914 status:coded` was refused
+/// because the model declared only `status:merged -> status:tested` and
+/// `status:merged -> open`. The forward and release edges are asserted here too,
+/// so widening the model does not quietly cost `status:merged` its other moves.
+#[test]
+fn project_model_allows_merged_back_to_coded_for_a_followup_fix() {
+    let m = project_model();
+    let sm = StateMachine::new(&m);
+    assert!(
+        sm.transition_allowed(Some("status:merged"), "status:coded"),
+        "a merged issue whose live verification failed must be codeable again"
+    );
+    assert!(sm.transition_allowed(Some("status:merged"), "status:tested"));
+    assert!(sm.transition_allowed(Some("status:merged"), "open"));
+    // The edge is one-directional per rung: nothing else gains a way back.
+    assert!(!sm.transition_allowed(Some("status:tested"), "status:merged"));
+    assert!(!sm.transition_allowed(Some("status:coded"), "status:in-progress"));
+    let mut targets = sm.allowed_targets_from(Some("status:merged"));
+    targets.sort_unstable();
+    assert_eq!(targets, vec!["open", "status:coded", "status:tested"]);
 }
 
 #[test]

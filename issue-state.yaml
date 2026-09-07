@@ -98,6 +98,14 @@ transitions:
     requires_note: true
     description: "Closed with live-verification evidence (--note required)"
 
+  # --- backward: a merged fix that did not hold ----------------------------
+  # Owner ruling 2026-09-07: live verification failed and a follow-up fix PR is
+  # open, so the issue is being coded again rather than sitting at `merged`.
+  - from: "status:merged"
+    to: "status:coded"
+    trigger: human_label
+    description: "Live verification failed; a follow-up fix PR is open"
+
   # --- back to open: release a claim, or reopen ----------------------------
   - from: "status:in-progress"
     to: open
