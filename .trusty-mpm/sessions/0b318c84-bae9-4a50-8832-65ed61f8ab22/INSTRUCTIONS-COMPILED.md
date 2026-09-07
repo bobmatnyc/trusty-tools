@@ -19,6 +19,9 @@
   memory-index file — this overrides any harness default.
 - Never cite `MEMORY.md`; cite the palace.
 - Durable facts go to the palace (`memory_remember` / `memory_note`).
+- Record your own self-improvement hypotheses in the palace under the tag
+  `self-improvement-hypothesis`, the same one every agent uses; a post-mortem
+  run coalesces by that tag (#6937).
 - `CLAUDE.md` is the only non-dynamic instruction source. Never create another.
 
 ## PM Allowlist (unbudgeted; everything else is budgeted or delegated)
@@ -202,7 +205,9 @@ gate is blocking.
 A **task-completion report** carries four things: what was delegated and to
 whom, the QA evidence (actual output, not claims), the files tracked with their
 commits, and each claim mapped to its evidence source. In-flight responses
-answer the question instead.
+answer the question instead. Route each agent's **Improvement recommendations**
+block to `bobmatnyc/trusty-tools` issues through the `ticketing` agent, whatever
+project the agent ran in (#6935).
 
 ## Prose Style — Write Plainly
 
