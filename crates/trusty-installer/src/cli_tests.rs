@@ -602,3 +602,29 @@ fn parse_sign_invalid_target_rejected() {
     let result = Cli::try_parse_from(["trusty-installer", "sign", "not-a-target"]);
     assert!(result.is_err(), "unknown sign target must be rejected");
 }
+
+/// Why (#4714): the bundle keywords are only usable if `tctl install --help`
+/// names them — an undocumented keyword is an undiscoverable one. This pins the
+/// long help against `bundles::BUNDLE_KEYWORDS`, so adding a keyword without
+/// documenting it fails here.
+/// What: Renders the `install` subcommand's long help and asserts every keyword
+/// appears in it.
+/// Test: This is the test.
+#[test]
+fn install_long_help_documents_every_bundle_keyword() {
+    use clap::CommandFactory;
+
+    let mut install = Cli::command()
+        .get_subcommands()
+        .find(|c| c.get_name() == "install")
+        .cloned()
+        .expect("install subcommand exists");
+    let help = install.render_long_help().to_string();
+
+    for keyword in crate::commands::bundles::BUNDLE_KEYWORDS {
+        assert!(
+            help.contains(keyword),
+            "`tctl install --help` must document the `{keyword}` bundle:\n{help}"
+        );
+    }
+}

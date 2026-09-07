@@ -6,7 +6,9 @@
 //! Idempotent: an already-installed member is re-run through the prebuilt-first
 //! path (Phase 2 / #1760) or `cargo install` (cheap no-op when current) and reported.
 //!
-//! What: Resolves the requested members against [`super::stable_set`], installs
+//! What: Rewrites any bundle keyword in the request via
+//! [`super::bundles::expand_bundles`] (#4714 — `core`, `agents`), resolves the
+//! result against [`super::stable_set`], installs
 //! each in order via the prebuilt-first strategy: on a Tier-1 platform a prebuilt
 //! tarball is downloaded, SHA-256 verified, and atomically placed into the install
 //! directory (since #5777 the canonical `$CARGO_HOME/bin`, falling back to
@@ -43,6 +45,7 @@ use std::path::{Path, PathBuf};
 
 use trusty_progress::{Component, ComponentState, ComponentTracker, LiveChecklist, Mode};
 
+use super::bundles::{expand_bundles, keywords_hint};
 use super::dependency_graph::describe_added;
 use super::install_gate::{decide_install_gate, GateInputs, InstallGate};
 use super::progress_ui::{narrator, prompt_yes_no};
@@ -63,7 +66,8 @@ use install_report::{
 ///
 /// Why: Phase-1 entry point for the system install flow (#1316 priority 1).
 ///
-/// What: Resolves `members` against the stable set (empty = all). When no
+/// What: Expands any bundle keyword in `members` ([`super::bundles`], #4714),
+/// then resolves the result against the stable set (empty = all). When no
 /// members are given AND stdin is a TTY AND `--json` is not set AND not
 /// `--dry-run`, presents the Phase-4 interactive component picker so the
 /// operator can choose a subset without needing to know crate names.
@@ -131,11 +135,14 @@ pub fn run(
         members
     };
 
-    let resolved = select_members_transitive(members);
+    // #4714: rewrite bundle keywords (`core`, `agents`) into explicit member
+    // names before resolution, so the resolver's name contract is unchanged.
+    let expanded = expand_bundles(members);
+    let resolved = select_members_transitive(&expanded);
     let (selected, unknown) = (resolved.members, resolved.unknown);
 
     if !unknown.is_empty() {
-        let msg = format!("unknown member(s): {}", unknown.join(", "));
+        let msg = unknown_members_message(&unknown);
         if json {
             if render_json(&serde_json::json!({
                 "command": "install",
@@ -952,6 +959,28 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
 /// `tests::binary_size_is_zero_for_a_missing_path`.
 fn binary_size(path: &Path) -> u64 {
     std::fs::metadata(path).map(|md| md.len()).unwrap_or(0)
+}
+
+/// The operator-facing text for a request naming something the stable set does
+/// not contain.
+///
+/// Why (#4714): the message used to be just the offending names, so a mistyped
+/// `cores` gave the operator nothing to correct it with — the bundle keywords
+/// were undiscoverable from the failure. Naming them here, off
+/// [`super::bundles::BUNDLE_KEYWORDS`], means the hint cannot go stale as
+/// keywords are added.
+///
+/// What: `"unknown member(s): <names> (bundle keywords: agents, core)"`. The
+/// exit code and the JSON envelope's shape are unchanged — only the `error`
+/// string grows.
+///
+/// Test: `tests::unknown_members_message_names_bundle_keywords`.
+fn unknown_members_message(unknown: &[String]) -> String {
+    format!(
+        "unknown member(s): {} ({})",
+        unknown.join(", "),
+        keywords_hint()
+    )
 }
 
 /// Resolve the cargo binary install directory.

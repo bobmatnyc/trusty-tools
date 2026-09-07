@@ -13,6 +13,8 @@
 //! runs them all.
 
 pub mod auto_update;
+// #4714: `tctl install` bundle keywords (`core`, `agents`).
+pub mod bundles;
 pub mod config;
 pub mod dependency_graph;
 pub mod doctor;
