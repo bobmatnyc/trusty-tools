@@ -576,6 +576,49 @@ fn review_schema_is_openai_strict_compliant() {
     );
 }
 
+/// The response schema offers `"style"` as a category the model may emit (#3474).
+///
+/// Why: the #3474 ceiling only ever fires on a finding the model TAGGED `style`,
+/// and a strict-mode provider rejects any value absent from the schema's `enum`.
+/// If the token is missing here the model has no way to reach the ceiling at
+/// all — the nit falls to the `correctness` default and blocks again, which is
+/// the ticket's failure. The description is asserted too: an unexplained enum
+/// value is one the model will not choose.
+/// What: reads the `findings.items.category` node of `review_response_schema()`,
+/// asserts the four wire tokens and that the description tells the model when
+/// `style` applies.
+/// Test: no network — pure schema inspection.
+#[test]
+fn review_schema_offers_style_category() {
+    let schema = review_response_schema();
+    let category = &schema.schema["properties"]["findings"]["items"]["properties"]["category"];
+    let variants: std::collections::BTreeSet<&str> = category["enum"]
+        .as_array()
+        .expect("category.enum array")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert_eq!(
+        variants,
+        [
+            "correctness",
+            "method-conformance",
+            "style",
+            "test-coverage"
+        ]
+        .into_iter()
+        .collect(),
+        "the schema must offer every FindingCategory wire token, `style` included (#3474)"
+    );
+    let description = category["description"]
+        .as_str()
+        .expect("category.description string");
+    assert!(
+        description.contains("\"style\""),
+        "the description must tell the model when to pick style: {description}"
+    );
+}
+
 /// Verify the system prompt describes UNKNOWN.
 ///
 /// Why: the model must know what UNKNOWN means and when to use it; if it is

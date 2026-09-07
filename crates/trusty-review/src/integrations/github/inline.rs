@@ -44,6 +44,18 @@ use crate::models::{Effort, Finding, VerifyOutcome};
 /// Test: `render_marks_refuted_finding`.
 const VERIFICATION_CAVEAT_PREFIX: &str = "> **Verification:**";
 
+/// Lead-in marking a style/preference finding as informational (#3474).
+///
+/// Why: `grade::derive_verdict_with` already refuses to let a style nit move the
+/// verdict, but a reader meeting the comment on the diff cannot see that. Saying
+/// it on the comment itself is what stops an author treating a taste note as a
+/// change request.
+/// What: prefixes the lead line of any finding whose category reports
+/// [`crate::models::FindingCategory::is_informational`].
+/// Test: `render_marks_style_finding_informational`,
+/// `render_leaves_correctness_finding_unlabelled`.
+const INFORMATIONAL_PREFIX: &str = "> **Informational (style / preference) — does not block.**";
+
 /// Confidence below which a finding is hedged rather than asserted (#1416).
 ///
 /// Why: an automated reviewer that asserts a low-confidence guess as fact erodes
@@ -360,9 +372,18 @@ pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -
 /// `render_emits_suggestion_block`, `render_falls_back_to_prose_fix`,
 /// `render_includes_consequence`, `low_confidence_finding_is_hedged`,
 /// `render_marks_refuted_finding`, `render_marks_error_refuted_as_unverified`,
-/// `render_leaves_confirmed_and_unjudged_findings_unmarked`.
+/// `render_leaves_confirmed_and_unjudged_findings_unmarked`,
+/// `render_marks_style_finding_informational` (#3474),
+/// `render_leaves_correctness_finding_unlabelled` (#3474).
 pub fn render_finding_comment(finding: &Finding) -> String {
     let mut out = String::with_capacity(256);
+
+    // #3474: say up front that a style nit is advisory, so the reader is never
+    // left inferring severity from a comment the verdict already discounted.
+    if finding.category.is_informational() {
+        out.push_str(INFORMATIONAL_PREFIX);
+        out.push_str("\n\n");
+    }
 
     // #5312: a finding the pipeline does not stand behind must say so before it
     // says anything else — keyed on the finding's own recorded outcome, never on

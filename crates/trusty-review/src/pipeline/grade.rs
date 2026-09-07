@@ -516,6 +516,15 @@ pub(crate) fn floor_min_confidence() -> f32 {
 ///    floor, regardless of the model's own proposed verdict.  EXCEPTION (#1897):
 ///    see the reconciliation cap below.
 ///
+/// 0. STYLE CEILING (#3474), applied BEFORE both of the above: a
+///    `FindingCategory::Style` finding is a taste note, so it contributes
+///    nothing to any floor, and a batch whose substantive findings are ALL
+///    style nits returns APPROVE outright.  A ceiling rather than a floor
+///    adjustment because `stricter_of` can only raise a verdict — a floor of
+///    APPROVE would still let a model-proposed BLOCK through.  The ceiling
+///    lifts the moment ONE non-style substantive finding is present: the
+///    style nits drop out and the remaining findings floor exactly as before.
+///
 /// Special case: `Verdict::Unknown` is always returned as-is — the model has
 /// determined the diff was unassessable and no floor or override applies.
 ///
@@ -586,6 +595,31 @@ fn derive_verdict_with(
     let substantive: Vec<&Finding> = findings
         .iter()
         .filter(|f| is_substantive(f, thresholds))
+        .collect();
+
+    // #3474: style/preference ceiling. A batch whose ONLY substantive findings
+    // are style nits is a taste report, not a quality signal — return APPROVE
+    // outright rather than merely lowering the floor, because the floor is a
+    // MINIMUM and `stricter_of` below could never pull a model-proposed
+    // REQUEST_CHANGES/BLOCK back down. This is the same ceiling shape as the
+    // low-confidence override immediately below.
+    if !substantive.is_empty() && substantive.iter().all(|f| f.category.is_informational()) {
+        debug!(
+            model_verdict = %model_proposed,
+            count = substantive.len(),
+            "style ceiling: every substantive finding is a style/preference nit → APPROVE (#3474)"
+        );
+        return Verdict::Approve;
+    }
+
+    // #3474: a style nit alongside real findings contributes nothing to the
+    // floor either — otherwise a High-effort, cited style finding would drive
+    // BLOCK through `correctness_floor` Tier 1. Dropping them here (rather than
+    // inside `severity_floor`) keeps `has_high`, `all_low_confidence` and the
+    // #PR84 gates below reading the same style-free set.
+    let substantive: Vec<&Finding> = substantive
+        .into_iter()
+        .filter(|f| !f.category.is_informational())
         .collect();
 
     // Low-confidence override (ceiling): if ALL substantive findings are advisory-
