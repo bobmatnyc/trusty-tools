@@ -89,12 +89,17 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
    for it before reaching for `sleep` at all.
 
    No `tm` on PATH? Fall back to a hand-rolled until-loop, backgrounding the
-   waiter too since foreground `sleep` is blocked either way:
+   waiter too since foreground `sleep` is blocked either way. Redirect into
+   your own scratchpad directory (given at the top of your system prompt),
+   never a fixed `/tmp` name — the scratchpad is SHARED across concurrently
+   dispatched agents in one session, so a fixed filename lets a sibling's
+   write clobber or shadow yours. Make the filename itself unique, e.g. with
+   the shell's own PID (`$$`):
 
    ```bash
    # both calls use run_in_background; then read the sentinel file
-   <long-command> > /tmp/op.txt 2>&1
-   until grep -q DONE /tmp/op.txt; do sleep 10; done; echo READY
+   <long-command> > <scratchpad>/op-$$.txt 2>&1
+   until grep -q DONE <scratchpad>/op-$$.txt; do sleep 10; done; echo READY
    ```
 
 4. Genuinely cannot finish in-turn? REPORT STATE AND STOP. "Still pending: head
@@ -343,8 +348,11 @@ output. An empty result is NOT a real result. Never fabricate output you did not
 see. Never report a pass/fail you could not observe.
 
 1. Retry the exact command up to 2 more times — it usually succeeds.
-2. Still empty → redirect to a file (`<command> > /tmp/out.txt 2>&1`) and open it
-   with the Read tool, not `cat` (which goes back through the same capture path).
+2. Still empty → redirect to a file under your scratchpad directory with a
+   unique filename (`<command> > <scratchpad>/out-$$.txt 2>&1`, never a fixed
+   `/tmp` name — the scratchpad is shared across concurrent agents) and open
+   it with the Read tool, not `cat` (which goes back through the same capture
+   path).
 3. Still unobservable → report "Could not verify — command output unavailable"
    and hand back.
 
@@ -362,18 +370,29 @@ an agent told to "rerun the suite until green" spent 415k tokens because
 
 1. **Run it into a file, never a pipe.** Don't watch, tail, or poll a live
    stream. A pipe eats the verdict — see "Never end a gate chain in a pipe".
+   Redirect into your scratchpad directory with a unique filename (never a
+   fixed `/tmp` name) — the scratchpad is shared across concurrently
+   dispatched agents, and a fixed name lets one agent read a sibling's build
+   output as its own result:
 
    ```bash
-   <command> > /tmp/gate.txt 2>&1; echo "EXIT=$?"
+   <command> > <scratchpad>/gate-<crate>-$$.txt 2>&1; echo "EXIT=$?"
    ```
 
+   Run in the foreground, the `EXIT=$?` above prints straight to your own tool
+   output — read it there. Backgrounded this command instead? `echo` then
+   writes to the tool's stdout, not into the redirected file, so `tm wait
+   --for file --contains "EXIT="` on that file never matches. Either append
+   the sentinel into the file too
+   (`<command> > <scratchpad>/gate-<crate>-$$.txt 2>&1; echo "EXIT=$?" >> <scratchpad>/gate-<crate>-$$.txt`)
+   or wait on the process itself with `tm wait --for run --pid <pid>` instead.
 2. **`EXIT=0` → stop. Do NOT read the file.** Nothing in it is information.
 3. **Non-zero → trim the file, then read it.** Trim reads FROM the file, never
    from the live command: `--quiet` on the command, `grep`/`tail` over the file,
    or this repo's Unix filter:
 
    ```bash
-   tm compress --tool "cargo test" < /tmp/gate.txt
+   tm compress --tool "cargo test" < <scratchpad>/gate-<crate>-$$.txt
    ```
 
    `--tool` is free-form, substring-matched (`"cargo test"`, `"git diff"`). Known
@@ -451,11 +470,17 @@ green twice in one day, once for an engineer and once for a reviewer. Redirect,
 then echo the status:
 
 ```bash
-( <gate> && <gate> ) > /tmp/gates.txt 2>&1; echo "EXIT=$?"
+( <gate> && <gate> ) > <scratchpad>/gates-$$.txt 2>&1; echo "EXIT=$?"
 ```
 
+Redirect into your scratchpad directory with a unique filename, never a fixed
+`/tmp` name — the same collision risk applies here as above. Backgrounded this
+chain? The same sentinel gap applies: append `echo "EXIT=$?"` into the file
+too, or use `tm wait --for run --pid <pid>` — see "Never Directly Monitor a
+Declarative Process" above.
+
 `EXIT=0` → don't read the file. Non-zero → Read only the failing portion. Trim
-the FILE when it is long (`tm compress --tool "cargo test" < /tmp/gates.txt`),
+the FILE when it is long (`tm compress --tool "cargo test" < <scratchpad>/gates-$$.txt`),
 never the live command. Must you genuinely pipe? `set -o pipefail` in the SAME
 invocation — `$PIPESTATUS` is a bashism and this harness runs zsh.
 
