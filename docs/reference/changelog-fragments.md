@@ -156,7 +156,7 @@ still not a record, and the fragment is still the rule.
 
 ## git-cliff No Longer Touches `CHANGELOG.md`
 
-`scripts/generate-changelog.sh` is deleted; it ran `git cliff --unreleased
+The old `generate-changelog.sh` is deleted; it ran `git cliff --unreleased
 --prepend`, which blindly stacked a fresh `## [Unreleased]` on top of the
 hand-written one — the defect #2793 tracks and the reason `bump-version.sh` used
 to carry a duplicate-heading stopgap. Both are gone: there is exactly ONE

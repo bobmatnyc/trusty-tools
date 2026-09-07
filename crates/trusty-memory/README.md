@@ -158,7 +158,8 @@ The same `trusty-memory start` daemon serves the embedded Svelte admin UI
 at the bound address (printed by `trusty-memory monitor web` once the
 daemon is running) and a REST API under `/api/v1/`.
 
-Key REST API field names (verified against `src/web.rs` and `src/service.rs`):
+Key REST API field names (verified against `src/transport/methods/palaces.rs`
+and `src/service/core.rs`):
 - Recall endpoints (`GET /api/v1/palaces/{id}/recall` and `GET /api/v1/recall`) accept
   the query string as **`q`** (not `query`): `?q=my+search+term&top_k=5`.
 - Drawer-create body (`POST /api/v1/palaces/{id}/drawers`) expects a **`content`** field
