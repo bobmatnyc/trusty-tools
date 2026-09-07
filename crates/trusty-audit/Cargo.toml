@@ -17,7 +17,12 @@ name = "trusty-audit"
 # `search_evidence` here, which `cargo-semver-checks` reports as
 # `struct_missing_field` against 0.13.3; for a 0.y.z crate the breaking bump is
 # the MINOR position.
-version = "0.14.2"
+# 0.14.2 -> 0.14.3 (#6138): PATCH. 0.14.2 is already on crates.io and this PR
+# changes `src/**`. The public surface only GAINS items — the
+# `grounding::coverage_rollup::Sampling` enum plus `RepoCoverage::sampling` and
+# `Rollup::sampling` — so no existing signature or struct shape changed and
+# `cargo-semver-checks` has nothing to report against 0.14.2.
+version = "0.14.3"
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"
