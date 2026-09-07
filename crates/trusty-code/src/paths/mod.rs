@@ -471,25 +471,48 @@ fn canonicalize_existing(path: &Path) -> Option<PathBuf> {
 /// project's repository by convention, so a credential landing there is a leak
 /// with a long tail. The import path checks against this list before copying a
 /// settings file rather than after.
-/// What: lowercase, separator-free WORD forms — not substrings. A key is split
-/// into words first ([`key_segments`]), so one entry covers every spelling of
-/// it: `api_key`, `API-KEY`, `x-api-key`, `xApiKey` and `APIKEY` all reduce to
-/// the `apikey` form. Multi-word entries (`apikey`, `accesskey`, `privatekey`)
-/// are matched against adjacent word PAIRS as well as against a single
-/// unseparated word.
+/// What: lowercase, separator-free, SINGULAR word forms — not substrings. A key
+/// is split into words first ([`key_segments`]) and each word is de-pluralised
+/// before matching, so one entry covers every spelling of it: `api_key`,
+/// `API-KEY`, `x-api-key`, `xApiKey`, `APIKEY` and `apiKeys` all reduce to the
+/// `apikey` form. Multi-word entries (`apikey`, `accesskey`, `privatekey`) are
+/// matched against adjacent word PAIRS as well as against a single unseparated
+/// word.
 /// Test: `paths::tests::secret_keys_match_across_separator_and_case_spellings`,
+/// `paths::tests::secret_keys_match_plural_spellings`,
 /// `paths::tests::benign_keys_containing_a_hint_are_not_flagged`.
 pub const SECRET_KEY_HINTS: &[&str] = &[
     "accesskey",
     "apikey",
     "authorization",
     "credential",
-    "credentials",
     "passphrase",
     "password",
     "privatekey",
     "secret",
     "token",
+];
+
+/// Whole keys that name a COUNT rather than a credential.
+///
+/// Why: de-pluralising makes `tokens` a hit, and `max_tokens` is an LLM sampling
+/// parameter this crate's own `code_harness` settings carry — refusing to import
+/// the very file the feature exists to migrate is a worse outcome than the leak
+/// risk of a key that holds an integer (code-critic round 2, PR #6980). The
+/// exemption is deliberately a short, closed list rather than a heuristic.
+/// What: normalised whole-key forms. The comparison is against the ENTIRE key,
+/// not a window of it, so appending a credential to an exempt name
+/// (`max_tokens_api_key`) does not inherit the exemption.
+/// Test: `paths::tests::max_tokens_stays_benign_as_a_count_not_a_credential`.
+pub const SECRET_KEY_EXEMPTIONS: &[&str] = &[
+    "maxtokens",
+    "mintokens",
+    "numtokens",
+    "tokenbudget",
+    "tokencount",
+    "tokenlimit",
+    "tokenusage",
+    "totaltokens",
 ];
 
 /// Split a key into lowercase word segments.
@@ -532,18 +555,50 @@ fn key_segments(key: &str) -> Vec<String> {
 ///
 /// Why: the single rule both the import refusal and its tests apply, so the
 /// spelling coverage cannot drift between them.
-/// What: `true` when any single word of the key, or any two ADJACENT words
-/// joined, equals an entry in [`SECRET_KEY_HINTS`]. Word-exact, so `tokenizer`
-/// and `secretary` are clean while `token` and `x-api-key` are not.
+/// What: `false` outright when the whole key is a [`SECRET_KEY_EXEMPTIONS`]
+/// entry. Otherwise `true` when any single word of the key, or any two ADJACENT
+/// words joined, matches [`SECRET_KEY_HINTS`] under [`matches_hint`]'s
+/// de-pluralising comparison. Word-exact, so `tokenizer` and `secretary` are
+/// clean while `token`, `tokens` and `x-api-key` are not.
 /// Test: `paths::tests::secret_keys_match_across_separator_and_case_spellings`,
+/// `paths::tests::secret_keys_match_plural_spellings`,
+/// `paths::tests::max_tokens_stays_benign_as_a_count_not_a_credential`,
 /// `paths::tests::benign_keys_containing_a_hint_are_not_flagged`.
 pub fn is_secret_key(key: &str) -> bool {
     let segments = key_segments(key);
+    // #5426: the exemption matches the WHOLE key, never a window of it, so a
+    // credential appended to an exempt name still trips the check below.
+    if SECRET_KEY_EXEMPTIONS.contains(&segments.concat().as_str()) {
+        return false;
+    }
     (1..=2).any(|width| {
         segments
             .windows(width)
-            .any(|window| SECRET_KEY_HINTS.contains(&window.concat().as_str()))
+            .any(|window| matches_hint(&window.concat()))
     })
+}
+
+/// Whether one normalised word (or word pair) is a hint, singular or plural.
+///
+/// Why: the hint list carried `credential` and `credentials` but left `secret`,
+/// `token`, `apikey`, `accesskey` and `privatekey` singular-only, so `tokens`,
+/// `secretsFile`, `apiKeys` and four more plural spellings walked past the
+/// matcher (code-critic round 2 HIGH, PR #6980). De-pluralising at the
+/// comparison keeps the list singular and closes every plural at once, instead
+/// of doubling the list and inviting the same omission again.
+/// What: matches `joined` against [`SECRET_KEY_HINTS`] as given, then again with
+/// one trailing `s` removed. Stripping only a trailing `s` is deliberately
+/// narrow: `passwordless` becomes `passwordles`, not `password`, and
+/// `secretary` has no trailing `s` to strip at all.
+/// Test: `paths::tests::secret_keys_match_plural_spellings`,
+/// `paths::tests::benign_keys_containing_a_hint_are_not_flagged`.
+fn matches_hint(joined: &str) -> bool {
+    if SECRET_KEY_HINTS.contains(&joined) {
+        return true;
+    }
+    joined
+        .strip_suffix('s')
+        .is_some_and(|singular| SECRET_KEY_HINTS.contains(&singular))
 }
 
 /// Find the first secret-bearing key path in a JSON value, if any.

@@ -446,6 +446,68 @@ fn secret_keys_match_across_separator_and_case_spellings() {
     }
 }
 
+/// Plural spellings match too — `tokens` is as much a credential as `token`.
+///
+/// Why: code-critic round 2 HIGH on PR #6980. The hint list carried
+/// `credential` AND `credentials` but left `secret`, `token`, `accesskey`,
+/// `apikey` and `privatekey` singular-only, so seven ordinary plural spellings
+/// walked past the matcher into a file the project commits.
+/// What: the seven spellings the critic probed, each asserted secret-bearing.
+/// Test: this function IS the test.
+#[test]
+fn secret_keys_match_plural_spellings() {
+    for key in [
+        "tokens",
+        "secretsFile",
+        "refreshTokens",
+        "apiSecrets",
+        "clientSecrets",
+        "accessKeys",
+        "apiKeys",
+        "credentials",
+        "private-keys",
+    ] {
+        assert!(
+            is_secret_key(key),
+            "{key} must be recognised as secret-bearing"
+        );
+    }
+}
+
+/// `max_tokens` names a COUNT, not a credential, and stays benign.
+///
+/// Why: making the match plural-insensitive turns `tokens` into a hit, which
+/// would sweep up `max_tokens` — an LLM sampling parameter this crate's own
+/// `code_harness` settings carry. Refusing to import the very file the feature
+/// exists to migrate is worse than the leak risk of a key that holds an integer,
+/// so a short exemption list of count-shaped compounds ([`SECRET_KEY_EXEMPTIONS`])
+/// is checked first. The exemption matches the WHOLE key only, so appending a
+/// real credential (`max_tokens_api_key`) still trips the scanner.
+/// What: asserts each count-shaped key is clean and that the exemption cannot be
+/// used as a prefix to smuggle a credential past the check.
+/// Test: this function IS the test.
+#[test]
+fn max_tokens_stays_benign_as_a_count_not_a_credential() {
+    for key in [
+        "max_tokens",
+        "maxTokens",
+        "min_tokens",
+        "token_count",
+        "tokenLimit",
+        "total_tokens",
+    ] {
+        assert!(
+            !is_secret_key(key),
+            "{key} names a count and must NOT be flagged"
+        );
+    }
+
+    assert!(
+        is_secret_key("max_tokens_api_key"),
+        "an exemption must not shield a real credential appended to it"
+    );
+}
+
 /// A benign key that merely CONTAINS a hint is not flagged.
 ///
 /// Why: the fix for the spelling gap must not be a looser substring match —

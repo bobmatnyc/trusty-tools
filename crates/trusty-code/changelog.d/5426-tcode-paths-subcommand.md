@@ -11,9 +11,11 @@ Added
   import never overwrites a user-authored file), a source that reaches through a
   symlink out of `.claude/`, a source carrying the executable bit, and a
   `settings.json` that holds a secret-bearing key or will not parse. The
-  secret check splits a key into words on separators and camelCase boundaries
-  and matches word-exactly, so `api_key`, `API-KEY`, `x-api-key` and `xApiKey`
-  are all caught while ordinary keys like `tokenizer` and `max_tokens` are not;
-  it reads key names only, never values. Plugins are not copied — their
+  secret check splits a key into words on separators and camelCase boundaries,
+  de-pluralises each word, and matches word-exactly, so `api_key`, `API-KEY`,
+  `x-api-key`, `xApiKey` and `apiKeys` are all caught while `tokenizer` and
+  `secretary` are not; a short whole-key exemption list keeps count-shaped
+  parameters like `max_tokens` and `token_count` importable. It reads key names
+  only, never values. Plugins are not copied — their
   provenance cannot be vouched for, so `.claude/plugins/` stays discoverable in
   place through the compatibility root.

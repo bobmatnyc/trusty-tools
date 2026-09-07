@@ -179,12 +179,18 @@ Plugins are deliberately not copied: their provenance cannot be vouched for, so
 `.claude/plugins/` stays discoverable in place through the compatibility root.
 
 **What counts as a secret-bearing key.** The key is split into words on
-separators and camelCase boundaries, then matched word-exactly against `token`,
-`secret`, `password`, `passphrase`, `credential`, `authorization`, `apikey`,
-`accesskey` and `privatekey`. One entry covers every spelling: `api_key`,
-`API-KEY`, `x-api-key`, `xApiKey` and `APIKEY` all match. Matching on words
-rather than substrings is what keeps ordinary keys like `tokenizer` and
-`max_tokens` from being refused.
+separators and camelCase boundaries, each word is de-pluralised, then matched
+word-exactly against `token`, `secret`, `password`, `passphrase`, `credential`,
+`authorization`, `apikey`, `accesskey` and `privatekey`. One entry covers every
+spelling: `api_key`, `API-KEY`, `x-api-key`, `xApiKey`, `APIKEY` and `apiKeys`
+all match. Matching on words rather than substrings keeps `tokenizer` and
+`secretary` from being refused.
+
+A short exemption list covers whole keys that name a COUNT rather than a
+credential — `max_tokens`, `min_tokens`, `token_count`, `token_limit` and
+friends. Without it, de-pluralising `tokens` would refuse the LLM sampling
+parameters this crate's own settings carry. The exemption matches the entire key
+only, so `max_tokens_api_key` is still refused.
 
 **Limitation — keys, not values.** The scan reads key NAMES only. A credential
 stored under an unrelated key (`"endpoint": "https://user:pw@host"`) is not
