@@ -268,7 +268,9 @@ pub async fn subscribe_and_drain(
     };
     let drained = tokio::time::timeout(timeout, async move {
         let mut out: Vec<BusEnvelope> = Vec::new();
-        if let Ok((stream, _)) = listener.accept().await {
+        // #6940: accept the way `accept_loop` does, so the stub's socket carries
+        // the same sizing the real bus gives its own end (#6942).
+        if let Ok((stream, _)) = trusty_common::uds::accept_sized(&listener).await {
             let reader = BufReader::new(stream);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -296,10 +298,14 @@ pub async fn subscribe_and_drain(
 /// handled in its own spawned task that reads lines until EOF, deserializes
 /// each as `BusEnvelope`, and sends it on the broadcast channel. Lagged
 /// receivers are silently ignored.
-/// Test: Implicit via `start` integration test.
+/// Test: `ctrl_and_bus_accept_loops_size_the_accepted_socket`; the connection
+/// path itself is implicit via the `start` integration test.
 async fn accept_loop(listener: UnixListener, tx: broadcast::Sender<BusEnvelope>) {
     loop {
-        match listener.accept().await {
+        // #6940: Linux builds the accepted socket from scratch and does not copy
+        // the listener's SO_SNDBUF/SO_RCVBUF onto it, so this loop has to size
+        // its own end (#6942).
+        match trusty_common::uds::accept_sized(&listener).await {
             Ok((stream, _addr)) => {
                 // #5099: a foreign-uid peer is dropped without being served.
                 if let Err(e) = trusty_common::uds::ensure_peer_is_self(&stream) {
