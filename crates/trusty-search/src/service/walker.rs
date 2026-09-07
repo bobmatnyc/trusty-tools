@@ -33,7 +33,8 @@ pub const SOURCE_EXTS: &[&str] = &[
     // Office documents — routed through crate::core::extract, never
     // tree-sitter (issue #2923). Subject to the larger MAX_OFFICE_FILE_BYTES
     // cap in should_skip_path, not the global MAX_FILE_BYTES cap.
-    "pdf", "docx", "xls", "xlsx", "xlsm",
+    // #6938: `pptx` — an extractor without a walk entry indexes nothing.
+    "pdf", "docx", "pptx", "xls", "xlsx", "xlsm",
 ];
 
 /// Directory names to skip when walking. Matched on basename only.
@@ -1825,10 +1826,10 @@ mod tests {
         );
     }
 
-    // --- Issue #2923: office document (pdf/docx/xlsx) walker wiring ---
+    // --- Issue #2923: office document (pdf/docx/pptx/xlsx) walker wiring ---
 
     /// PDFs are no longer hard-skipped (removed from `BINARY_EXTS`) and
-    /// docx/xls/xlsx/xlsm are now in `SOURCE_EXTS`, so all five enter the
+    /// docx/pptx/xls/xlsx/xlsm are in `SOURCE_EXTS`, so all six enter the
     /// walk output — the extraction dispatch itself happens downstream in
     /// `service::reindex::batch` / `service::watch_loop`, not here.
     #[test]
@@ -1837,6 +1838,8 @@ mod tests {
         let root = tmp.path();
         fs::write(root.join("report.pdf"), b"%PDF-1.4 fake").unwrap();
         fs::write(root.join("memo.docx"), b"PK fake docx").unwrap();
+        // #6938: a .pptx extractor is unreachable unless the walk yields it.
+        fs::write(root.join("deck.pptx"), b"PK fake pptx").unwrap();
         fs::write(root.join("budget.xlsx"), b"PK fake xlsx").unwrap();
         fs::write(root.join("legacy.xls"), b"fake xls").unwrap();
         fs::write(root.join("macro.xlsm"), b"PK fake xlsm").unwrap();
@@ -1850,6 +1853,7 @@ mod tests {
         for expected in [
             "report.pdf",
             "memo.docx",
+            "deck.pptx",
             "budget.xlsx",
             "legacy.xls",
             "macro.xlsm",

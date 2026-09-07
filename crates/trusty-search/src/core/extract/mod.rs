@@ -1,4 +1,5 @@
-//! Native document text extraction: pdf/docx/xls/xlsx/xlsm (issue #2923).
+//! Native document text extraction: pdf/docx/pptx/xls/xlsx/xlsm (issue #2923,
+//! `.pptx` added by #6938).
 //!
 //! Why: the walker previously hard-skipped `.pdf` (via `BINARY_EXTS`) and
 //! silently dropped `.docx`/`.xls`/`.xlsx` (absent from `SOURCE_EXTS`), so
@@ -8,7 +9,7 @@
 //! behaviour for these formats stays identical.
 //!
 //! What: [`extract_text`] dispatches on file extension to a per-format
-//! submodule ([`pdf`], [`docx`], [`xlsx`]) and returns the extracted text
+//! submodule ([`pdf`], [`docx`], [`pptx`], [`xlsx`]) and returns the extracted text
 //! plus an optional human-readable warning. The extracted text is handed to
 //! the existing `chunk_ast` entry point exactly like any other file's raw
 //! content — because none of these extensions are recognised by
@@ -25,7 +26,9 @@
 //! correctness lives in each submodule's own `#[cfg(test)]` block.
 
 pub mod docx;
+mod ooxml;
 pub mod pdf;
+pub mod pptx;
 pub mod xlsx;
 
 use std::path::Path;
@@ -38,7 +41,8 @@ use thiserror::Error;
 /// the ingest/watch call sites (dispatch decision) so the three never drift.
 /// What: lowercase extensions, no leading dot.
 /// Test: `test_is_extractable_ext`.
-pub const EXTRACT_EXTS: &[&str] = &["pdf", "docx", "xls", "xlsx", "xlsm"];
+// #6938: `pptx` decks extracted to nothing until this list named them.
+pub const EXTRACT_EXTS: &[&str] = &["pdf", "docx", "pptx", "xls", "xlsx", "xlsm"];
 
 /// Per-file size cap (bytes) for the [`EXTRACT_EXTS`] formats — larger than
 /// the walker's default 1 MiB `MAX_FILE_BYTES` source-file cap.
@@ -111,6 +115,9 @@ pub enum ExtractError {
     Pdf(String),
     #[error("docx extraction failed: {0}")]
     Docx(String),
+    // #6938: mirrors Docx so a failure names the format the caller handed in.
+    #[error("pptx extraction failed: {0}")]
+    Pptx(String),
     #[error("spreadsheet extraction failed: {0}")]
     Xlsx(String),
 }
@@ -171,6 +178,7 @@ pub fn extract_text(path: &Path) -> Result<Extracted, ExtractError> {
     let mut extracted = match ext.as_str() {
         "pdf" => pdf::extract(path)?,
         "docx" => docx::extract(path)?,
+        "pptx" => pptx::extract(path)?,
         "xls" | "xlsx" | "xlsm" => xlsx::extract(path)?,
         other => return Err(ExtractError::UnsupportedExtension(other.to_string())),
     };
@@ -202,7 +210,7 @@ pub fn extract_text(path: &Path) -> Result<Extracted, ExtractError> {
 /// What: returns the text, or a `Display`-able error string (kept as `String`
 /// rather than `std::io::Error` so both read and extraction failures share one
 /// error type for callers' `format!("read: {e}")`-style logging).
-/// Test: `core::extract::{pdf,docx,xlsx}` cover per-format extraction
+/// Test: `core::extract::{pdf,docx,pptx,xlsx}` cover per-format extraction
 /// directly; `service::walker` covers the extension-allowlist wiring this
 /// function's callers depend on.
 pub async fn read_content(path: &Path) -> Result<String, String> {
@@ -262,11 +270,63 @@ mod tests {
         assert!(is_extractable_ext("pdf"));
         assert!(is_extractable_ext("PDF"));
         assert!(is_extractable_ext("docx"));
+        assert!(is_extractable_ext("pptx")); // #6938
+        assert!(is_extractable_ext("PPTX"));
         assert!(is_extractable_ext("xlsx"));
         assert!(is_extractable_ext("xls"));
         assert!(is_extractable_ext("xlsm"));
         assert!(!is_extractable_ext("txt"));
         assert!(!is_extractable_ext("doc")); // legacy binary .doc: out of scope
+    }
+
+    /// #6938: `.pptx` was absent from [`EXTRACT_EXTS`], so every PowerPoint
+    /// deck in an indexed tree extracted to nothing. Drives a real two-slide
+    /// deck end-to-end through the public entry point, because that dispatch
+    /// is what the walker, the watcher, and M005's re-chunk all reach.
+    #[test]
+    fn test_extract_text_reads_pptx_slides_in_order_with_notes() {
+        use std::io::Write;
+        const NS: &str = r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main""#;
+        let slide = |paras: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sld {NS}><p:cSld><p:spTree><p:sp><p:txBody>{paras}</p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#
+            )
+        };
+        let para = |t: &str| format!("<a:p><a:r><a:t>{t}</a:t></a:r></a:p>");
+
+        let mut buf = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut zip = zip::ZipWriter::new(cursor);
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            zip.start_file("ppt/slides/slide1.xml", opts).unwrap();
+            let one = slide(&format!("{}{}", para("Title one"), para("Bullet A")));
+            zip.write_all(one.as_bytes()).unwrap();
+            zip.start_file("ppt/slides/slide2.xml", opts).unwrap();
+            zip.write_all(slide(&para("Second slide")).as_bytes())
+                .unwrap();
+            zip.start_file("ppt/notesSlides/notesSlide1.xml", opts)
+                .unwrap();
+            zip.write_all(slide(&para("Speaker note for one")).as_bytes())
+                .unwrap();
+            zip.finish().unwrap();
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("deck.pptx");
+        std::fs::write(&path, buf).unwrap();
+
+        let text = extract_text(&path)
+            .expect("pptx extraction must succeed")
+            .text;
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} missing from: {text}"))
+        };
+        // One paragraph per <a:p>, matching the docx paragraph-break convention.
+        assert!(text.contains("Title one\n\nBullet A"), "{text}");
+        // Slide order, and each slide's notes appended after that slide's text.
+        assert!(at("Title one") < at("Speaker note for one"), "{text}");
+        assert!(at("Speaker note for one") < at("Second slide"), "{text}");
     }
 
     #[test]
