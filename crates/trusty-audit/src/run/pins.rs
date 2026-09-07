@@ -65,8 +65,9 @@ pub(super) struct PinnedBinaries {
 ///
 /// [`AuditError::ToolsNotInstalled`] naming every non-overridden tool that is
 /// missing or unverified, [`AuditError::VersionMismatch`] for the first such
-/// tool whose recorded version is not the engagement's pin, and whatever
-/// [`tools::status`] fails with.
+/// tool whose recorded version is not the engagement's pin,
+/// [`AuditError::PinnedToolNotExecutable`] for the first whose execute bit is
+/// gone (#6139), and whatever [`tools::status`] fails with.
 pub(super) fn pinned_binaries(
     work: &WorkDir,
     pins: &ToolPins,
@@ -100,7 +101,9 @@ pub(super) fn pinned_binaries(
         })?;
         // `version` is Some: the missing check above rejected every None.
         match status.version.as_deref() {
-            Some(v) if v == pinned => Ok(status.path.clone()),
+            // #6139: the pin is right, so the last question is whether the file
+            // can run at all.
+            Some(v) if v == pinned => runnable(tool, status.path.clone()),
             Some(v) => Err(AuditError::VersionMismatch {
                 tool: tool.crate_name(),
                 pinned: pinned.to_owned(),
@@ -118,4 +121,38 @@ pub(super) fn pinned_binaries(
         analyze: path_of(RequiredTool::TrustyAnalyze)?,
         review: path_of(RequiredTool::TrustyReview)?,
     })
+}
+
+/// `path` back, or a refusal because the pinned binary cannot be executed.
+///
+/// Why: #6139 — the three pin conditions answer which binary would run, never
+/// whether it can. A pinned copy whose mode was lost to a `cp`, an archive
+/// extraction or a hand edit passed all three, and the run then failed once per
+/// repository at `crate::run::child`'s spawn with a raw
+/// `Permission denied (os error 13)` naming neither the tool nor the file.
+/// [`crate::tool_overrides`] has always checked this for an override; this is
+/// the same check on the pinned path, and it runs before the first child.
+/// What: refuses when no execute bit is set. A path whose metadata cannot be
+/// read is left to spawn, which reports the specific OS error — the missing
+/// check above already established the file is there, so an unreadable mode is
+/// a different fault from the one this refuses.
+/// Test: `crate::run::run_tests::a_pinned_binary_without_its_execute_bit_is_refused`,
+/// `crate::run::run_tests::nothing_unsatisfied_is_exactly_what_the_preflight_accepts`.
+fn runnable(tool: RequiredTool, path: PathBuf) -> Result<PathBuf, AuditError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Ok(meta) = std::fs::metadata(&path)
+            && meta.permissions().mode() & 0o111 == 0
+        {
+            return Err(AuditError::PinnedToolNotExecutable {
+                tool: tool.crate_name(),
+                path,
+            });
+        }
+    }
+    // Windows has no execute bit; spawn stays the only arbiter there.
+    #[cfg(not(unix))]
+    let _ = tool;
+    Ok(path)
 }
