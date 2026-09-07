@@ -240,7 +240,9 @@ fn an_unreadable_tier_is_unknown_not_ok() {
     let tier = paths.skill_deploy_dir();
     deploy(&tier, "tm-workflow");
 
-    let original = std::fs::metadata(&tier).expect("tier metadata").permissions();
+    let original = std::fs::metadata(&tier)
+        .expect("tier metadata")
+        .permissions();
     std::fs::set_permissions(&tier, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
     // Running as root, mode 0o000 does not stop the read and there is nothing
     // to assert. Probe first, restore, then decide.
@@ -273,7 +275,10 @@ fn the_probe_removes_nothing_it_reports() {
 
     let check = check_skill_reachability(&paths, Some(&project));
     assert_eq!(check.status, CheckStatus::Warn);
-    assert!(winner.exists() && loser.exists(), "the probe writes nothing");
+    assert!(
+        winner.exists() && loser.exists(),
+        "the probe writes nothing"
+    );
 }
 
 /// With no project directory in scope the probe still answers from the two

@@ -298,7 +298,11 @@ fn verdict(rostered: usize, unreachable: Vec<String>, shadowed: Vec<String>) -> 
     };
     let mut findings = unreachable;
     findings.extend(shadowed);
-    let shown: Vec<&str> = findings.iter().take(MAX_NAMED).map(String::as_str).collect();
+    let shown: Vec<&str> = findings
+        .iter()
+        .take(MAX_NAMED)
+        .map(String::as_str)
+        .collect();
     let suffix = if findings.len() > shown.len() {
         format!(" … (+{} more)", findings.len() - shown.len())
     } else {
