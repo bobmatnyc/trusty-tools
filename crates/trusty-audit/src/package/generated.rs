@@ -52,6 +52,13 @@ pub(super) struct Generated {
     /// `None` when the sweep had no failures: a `failures/` directory holding
     /// an index that says "none" reads worse than no directory at all (#6245).
     pub(super) failures: Option<String>,
+    /// [`super::DIGEST_ENTRY`] — every failure and degradation, machine-readable.
+    ///
+    /// Not an `Option`: a clean run ships a digest with an empty `entries`
+    /// array, which is what distinguishes "the collector ran and found nothing"
+    /// from "this client is too old to write one" (#6032). Rendered by
+    /// [`super::error_digest::render`].
+    pub(super) digest: String,
 }
 
 /// The generated `package.toml`.
@@ -386,7 +393,8 @@ pub(super) fn render_readme(
          | `package.toml` | which repositories were audited, at which tool versions |\n\
          | `reports/index.md` | start here — what every file below is, and a link to each report |\n\
          | `reports/<repo>/` | the rendered report and manifest for one repository |\n\
-         | `extract/<repo>.db` | the tga extract database those reports were computed from |\n\n\
+         | `extract/<repo>.db` | the tga extract database those reports were computed from |\n\
+         | `errors/digest.json` | every failure and degradation this run recorded — send it back so the auditor can fix them |\n\n\
          ## What is not inside\n\n\
          - **No credential.** The OpenRouter key in your engagement config never \
          reaches this package; every file was scanned for it while the zip was written.\n\

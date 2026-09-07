@@ -2003,6 +2003,7 @@ trusty-review = "0.0.0-never-published"
             gaps: Vec::new(),
             resumed: false,
             duration_ms: None,
+            finished_at: None,
             result: RepoResult::Succeeded,
         }];
         run::checkpoint::write_progress(
@@ -2059,6 +2060,7 @@ trusty-review = "0.0.0-never-published"
                     gaps: Vec::new(),
                     resumed: false,
                     duration_ms: None,
+                    finished_at: None,
                     result: RepoResult::Succeeded,
                 }],
                 run::github_issues::GithubCredentialRecord::NoToken,
@@ -2115,6 +2117,7 @@ trusty-review = "0.0.0-never-published"
             gaps: Vec::new(),
             resumed: false,
             duration_ms: None,
+            finished_at: None,
             result: RepoResult::Succeeded,
         }]);
         write_finished_progress(session.work_dir(), &report);

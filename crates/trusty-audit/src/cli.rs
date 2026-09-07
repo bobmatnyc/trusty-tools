@@ -1125,6 +1125,7 @@ mod cli_tests {
             gaps: vec!["Collection stage `jira sync` did not complete.".to_owned()],
             resumed: false,
             duration_ms: None,
+            finished_at: None,
             result,
         };
         let ok = run(RepoResult::Succeeded);
@@ -1180,6 +1181,7 @@ mod cli_tests {
             gaps: Vec::new(),
             resumed: false,
             duration_ms: None,
+            finished_at: None,
             result: RepoResult::Succeeded,
         };
         let gap = "linear:a1b2c3d4 was not audited — re-register it (#5982)";
@@ -1212,6 +1214,7 @@ mod cli_tests {
             gaps: Vec::new(),
             resumed,
             duration_ms: None,
+            finished_at: None,
             result: RepoResult::Succeeded,
         };
         let outcome = Outcome::Run(RunReport::of(vec![
@@ -1370,6 +1373,7 @@ mod cli_tests {
                 gaps: Vec::new(),
                 resumed: false,
                 duration_ms: None,
+                finished_at: None,
                 result: RepoResult::Succeeded,
             }]),
             package: ReturnPackage {

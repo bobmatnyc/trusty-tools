@@ -79,6 +79,24 @@ pub struct RepoRun {
     /// Test: `super::run_tests::a_swept_repository_records_how_long_it_took`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// When this repository's run ended, as a local timestamp (#6032).
+    ///
+    /// Why: the return package's error digest states WHEN each failure and each
+    /// degradation was recorded, so an auditor reading it at a distance can line
+    /// an entry up against the operator's own logs. `duration_ms` alone cannot
+    /// answer that — it says how long, never when. Recorded on the checkpoint
+    /// for the same reason `duration_ms` is: `super::checkpoint::plan`'s
+    /// `..entry.clone()` carries it over, so a RESUMED entry keeps the clock of
+    /// the run that actually did the work rather than the second it took to
+    /// verify the output.
+    ///
+    /// What: [`crate::index_report::local_now`]'s format, which is what every
+    /// other timestamp this crate writes uses. `None` for a repository no run
+    /// recorded one for — a checkpoint written before this field existed reads
+    /// that way, and the digest falls back to its own generation time.
+    /// Test: `crate::package::package_tests::a_stage_failure_reaches_the_error_digest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
     /// How it ended.
     pub result: RepoResult,
 }
