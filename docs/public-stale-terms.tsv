@@ -8,7 +8,9 @@
 #   `cargo install trusty-mpmd` off the public site gets an error, not a daemon.
 #
 # What: two record types, tab-separated, consumed by
-#   `scripts/check_public_docs.sh --stale`:
+#   `scripts/check_public_docs.sh` on every run — the pass needs no flag since
+#   #5134, and both call sites (the `public-docs` pre-commit hook and
+#   .github/workflows/public-docs.yml) invoke the gate with no arguments:
 #
 #     TERM   <ere>                              <remedy>
 #     WAIVE  <source>  <ere>  <count>  <reason>

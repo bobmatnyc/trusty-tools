@@ -36,9 +36,11 @@
 #   SvelteKit build (no YAML/TOML parser).
 #
 # Gate: scripts/check_public_docs.sh — fails when a source is missing, escapes
-#   docs/, lands in a DO-NOT-PUBLISH tree, or when a route is duplicated. With
-#   `--stale` it additionally checks each published page's CONTENT against
-#   docs/public-stale-terms.tsv (see "KEEPING A PUBLISHED PAGE CURRENT" below).
+#   docs/, lands in a DO-NOT-PUBLISH tree, or when a route is duplicated. It
+#   then checks each published page's CONTENT against docs/public-stale-terms.tsv
+#   (see "KEEPING A PUBLISHED PAGE CURRENT" below); that pass needs no flag
+#   (#5134). It runs in the `public-docs` pre-commit hook and in
+#   .github/workflows/public-docs.yml, both with no arguments.
 #   Self-test: scripts/check_public_docs_selftest.sh
 #
 # DO-NOT-PUBLISH trees (owner decision, enforced independently of this file by
@@ -85,11 +87,11 @@
 #   (naming a historical artifact by its recorded name, say), with a reason;
 #   waivers are a count ratchet, so raising one to cover new text fails.
 #
-#   Run it with `bash scripts/check_public_docs.sh --stale`. It is OPT-IN and
-#   wired to nothing while the current repairs are in flight (#5125); the hook
-#   and CI still run the plain gate.
+#   Run it with `bash scripts/check_public_docs.sh` — no flag. The pass is on by
+#   default since #5134, in the pre-commit hook and in CI, so a retired name in
+#   a published page fails the commit and the PR.
 #
-# Issue: #5096 (epic #5092). STALE content check: #5125.
+# Issue: #5096 (epic #5092). STALE content check: #5125, wired on in #5134.
 
 SECTION	getting-started	Getting Started
 PAGE	getting-started	docs/intro.md	/	Introduction

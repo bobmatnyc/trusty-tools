@@ -142,10 +142,16 @@ repos:
   # published, so the gate only ever validates what IS listed. Runs against the
   # whole manifest (pass_filenames: false), matching the line-cap hook's
   # holistic scan.
+  #
+  # The same run also checks each published page's CONTENT against the retired
+  # names in docs/public-stale-terms.tsv (#5125, wired on in #5134). That pass
+  # takes NO flag, deliberately: an entry that had to carry `--stale` is an
+  # entry a later edit can drop without the diff looking like a removed gate.
+  # .github/workflows/public-docs.yml runs the identical bare invocation.
   - repo: local
     hooks:
       - id: public-docs
-        name: "Public documentation allowlist gate"
+        name: "Public documentation allowlist + retired-term gate"
         entry: scripts/check_public_docs.sh
         language: system
         pass_filenames: false
