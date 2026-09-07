@@ -127,11 +127,11 @@ pub(super) async fn run_memory_search_all(
 ///
 /// Why: When the search daemon is running it holds an exclusive redb lock on
 /// the code store, so any direct `CodeStore::open()` from the CLI crashes with
-/// "Database already open." Routing through the daemon's HTTP API first
+/// "Database already open." Routing through the daemon's socket first
 /// (mirroring `SearchCodeTool::new_auto`) avoids that contention and gives the
 /// CLI the same hybrid-search quality as in-agent tool calls (#398, #402).
 /// What: 1) Probes for a running daemon via `SearchDaemonClient::connect_if_running`.
-/// 2) If connected, POSTs the query to `/search/query` and uses those hits
+/// 2) If connected, calls `search.query` over the socket and uses those hits
 ///    (note: daemon responses are already hybrid+KG; `--lang` filtering is
 ///    applied client-side here).
 /// 3) Otherwise falls back to opening the local store directly and runs
@@ -146,9 +146,10 @@ pub(super) async fn run_code_search(
     json: bool,
     code_dir: &Path,
 ) -> Result<()> {
-    // The daemon's pid file lives at `<project_root>/.trusty-agents/state/search.pid`,
-    // so the project root is the parent of the state dir (which is the parent
-    // of `code_dir`). Walk up two levels: code_dir -> state -> .trusty-agents/parent.
+    // #6433: the daemon's socket path is derived from the project root
+    // (`search_socket_path`), so the root is what the client needs. It is the
+    // parent of the state dir, which is the parent of `code_dir`. Walk up:
+    // code_dir -> state -> .trusty-agents -> project root.
     let project_root = code_dir
         .parent() // .trusty-agents/state
         .and_then(|p| p.parent()) // .trusty-agents

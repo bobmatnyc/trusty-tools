@@ -1,211 +1,277 @@
-//! HTTP client for the search-as-a-service daemon (#374).
+//! Socket client for the search-as-a-service daemon (#374, UDS since #6433).
 //!
-//! Why: Tools and the REPL need a typed, ergonomic way to ask the daemon
-//! for results without each caller reimplementing pid-file parsing,
-//! retries, and JSON shaping. Encapsulating those concerns in one place
-//! lets the rest of the codebase treat the daemon as just another
-//! injectable backend behind the existing `SearchCodeTool` abstraction.
-//! What: [`SearchDaemonClient`] reads `<project_root>/.trusty-agents/state/
-//! search.pid`, talks to `http://127.0.0.1:<port>/search/...` over
-//! `reqwest`, and exposes [`SearchDaemonClient::search`] +
-//! [`SearchDaemonClient::is_running`]. [`SearchDaemonClient::
-//! connect_if_running`] is a non-failing constructor — it returns
-//! `None` when no daemon is up so callers can transparently fall back
-//! to a local indexer.
-//! Test: See `tests` in this module — pid-file discovery and a happy
-//! path round-trip (`router_round_trip`) using `build_router` from
-//! `service.rs`.
+//! Why: tools and the REPL need a typed way to ask the daemon for results
+//! without each caller reimplementing the JSON-RPC envelope, the timeout and
+//! the reply unwrapping. Encapsulating those concerns here lets the rest of the
+//! codebase treat the daemon as just another injectable backend behind the
+//! existing `SearchCodeTool` abstraction.
+//! What: [`SearchDaemonClient`] derives the daemon's socket from the project
+//! root, and calls the five `search.*` methods over it.
+//! [`SearchDaemonClient::connect_if_running`] is a non-failing constructor — it
+//! returns `None` when no daemon answers, so callers can transparently fall
+//! back to a local indexer.
+//!
+//! #6433 replaced the HTTP half. This module used to read
+//! `.trusty-agents/state/search.pid` for a port and build a `reqwest::Client`
+//! per instance. There is no port and no discovery file now: caller and daemon
+//! derive the same path from the same project root
+//! ([`crate::search::service::search_socket_path`]), so there is nothing for a
+//! stale file to disagree with, and the client holds a path rather than a
+//! connection pool.
+//!
+//! Test: see `tests` in this module — the round trip drives every one of the
+//! five methods against a real socket served by `service::rpc::build_router`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
+use trusty_common::uds::server::RpcResponse;
 
 use crate::search::indexer::CodeChunk;
-use crate::search::service::{SearchDaemonState, read_pid_file};
+use crate::search::service::rpc::{
+    HealthResponse, IndexFileResponse, PathRequest, QueryRequest, ReindexResponse,
+};
+use crate::search::service::search_socket_path;
 
-/// Per-call timeout for daemon HTTP requests.
+/// Per-call budget for daemon requests.
 ///
-/// Why: Search must feel synchronous in a tool call; a 5-second budget
-/// is generous enough for a cold query against a large index but short
-/// enough that a hung daemon doesn't stall the whole agent loop.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Why: search must feel synchronous in a tool call; a 5-second budget is
+/// generous enough for a cold query against a large index but short enough that
+/// a hung daemon doesn't stall the whole agent loop.
+///
+/// The budget is applied ONCE, by the shared client:
+/// `trusty_common::uds::send_framed_request` wraps the whole dial-write-read
+/// exchange in `tokio::time::timeout` itself. An outer timeout of the same
+/// duration here could only lose that race.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Client for talking to a running search daemon over HTTP.
+/// Shorter budget for the two liveness probes.
 ///
-/// Why: Holding a pre-built `reqwest::Client` plus the cached daemon
-/// port avoids re-reading the pid file on every call and lets us reuse
-/// the connection pool.
-/// What: Three pieces of state — the underlying HTTP client, the
-/// daemon's port, and the project root (kept so callers can ask
-/// `is_running` without re-passing it).
-/// Test: `connect_if_running_returns_none_when_no_pid_file`,
-/// `router_round_trip`.
+/// Why: `connect_if_running` runs on paths that fall back to a local indexer,
+/// so the cost of a missing daemon is paid before any real work starts.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Client for talking to a running search daemon over its Unix socket.
+///
+/// Why: holding the derived socket path avoids recomputing it per call, and
+/// keeps `is_running` answerable without re-passing the project root.
+/// What: two paths — the daemon's socket and the project root it was derived
+/// from.
+/// Test: `connect_if_running_returns_none_when_no_daemon`,
+/// `round_trip_reaches_every_method`.
 #[derive(Clone)]
 pub struct SearchDaemonClient {
-    client: reqwest::Client,
-    port: u16,
+    socket: PathBuf,
     project_root: PathBuf,
 }
 
 impl SearchDaemonClient {
-    /// Construct a client only when a daemon is observably running.
+    /// Construct a client only when a daemon is observably answering.
     ///
-    /// Why: Callers (the auto-detecting `SearchCodeTool::new_auto`)
-    /// want a "connect or fall back" semantic. Returning `Option`
-    /// rather than `Result` makes that pattern one-liner clean.
-    /// What: Reads the pid file under `project_root`, probes
-    /// `/search/health` over a 500ms budget, returns `Some(client)`
-    /// on success or `None` for any failure (missing pid file, dead
-    /// pid, unhealthy probe).
-    /// Test: `connect_if_running_returns_none_when_no_pid_file`.
+    /// Why: callers (the auto-detecting `SearchCodeTool::new_auto`) want a
+    /// "connect or fall back" semantic. Returning `Option` rather than `Result`
+    /// makes that pattern one line.
+    /// What: derives the socket under `project_root`, calls `search.health`
+    /// with a [`PROBE_TIMEOUT`] budget, and returns `Some` only when the daemon
+    /// answered.
+    /// Test: `connect_if_running_returns_none_when_no_daemon`,
+    /// `round_trip_reaches_every_method`.
     pub async fn connect_if_running(project_root: &Path) -> Option<Self> {
-        let state = read_pid_file(project_root)?;
-        let client = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .ok()?;
-        let probe = client
-            .get(format!("http://127.0.0.1:{}/search/health", state.port))
-            .timeout(Duration::from_millis(500))
-            .send()
-            .await
-            .ok()?;
-        if !probe.status().is_success() {
-            return None;
-        }
-        Some(Self {
-            client,
-            port: state.port,
+        let client = Self {
+            socket: search_socket_path(project_root),
             project_root: project_root.to_path_buf(),
-        })
+        };
+        client.is_running().await.then_some(client)
     }
 
-    /// Return the daemon's record (port + pid + started_at) if present.
+    /// Build a client for `socket` without probing it.
     ///
-    /// Why: Some callers want the metadata, not just a yes/no liveness
-    /// answer (e.g. `/service status`-style display).
-    pub fn daemon_state(&self) -> Option<SearchDaemonState> {
-        read_pid_file(&self.project_root)
+    /// Why: a test serves a router on a temporary path rather than under the
+    /// real home directory, and `connect_if_running` can only reach the derived
+    /// one. Not a general-purpose constructor — a caller that has a project root
+    /// wants `connect_if_running`, which also tells it whether anyone is there.
+    /// Test: `round_trip_reaches_every_method`.
+    #[cfg(test)]
+    pub(crate) fn for_socket(socket: PathBuf, project_root: PathBuf) -> Self {
+        Self {
+            socket,
+            project_root,
+        }
     }
 
-    /// Re-probe `/search/health` with a 500ms budget.
+    /// The socket this client dials.
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    /// The project root this client's socket was derived from.
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    /// Re-probe `search.health`.
+    ///
+    /// Test: `round_trip_reaches_every_method`.
     pub async fn is_running(&self) -> bool {
-        let url = format!("http://127.0.0.1:{}/search/health", self.port);
-        match self
-            .client
-            .get(&url)
-            .timeout(Duration::from_millis(500))
-            .send()
+        self.call::<_, HealthResponse>("search.health", serde_json::Value::Null, PROBE_TIMEOUT)
             .await
-        {
-            Ok(r) => r.status().is_success(),
-            Err(_) => false,
-        }
+            .is_ok_and(|h| h.status == "ok")
     }
 
     /// Submit a hybrid search query and return the daemon's chunks.
     ///
-    /// Why: This is the hot path — the call `SearchCodeTool` makes from
-    /// inside an agent loop. Returns raw `CodeChunk` so the tool layer
-    /// can format hits identically to the local-indexer code path.
-    /// What: POSTs `{query, top_k}` JSON to `/search/query` and
-    /// deserializes the response array into `Vec<CodeChunk>`.
+    /// Why: this is the hot path — the call `SearchCodeTool` makes from inside
+    /// an agent loop. Returns raw `CodeChunk` so the tool layer formats hits
+    /// identically to the local-indexer code path.
+    /// What: calls `search.query` asking for KG expansion (#376 B1) and compact
+    /// snippets (#376 C1), the same two flags the HTTP client sent.
+    ///
+    /// # Errors
+    ///
+    /// When the exchange failed or the daemon answered a JSON-RPC error.
+    ///
+    /// Test: `round_trip_reaches_every_method`.
     pub async fn search(&self, query: &str, top_k: usize) -> Result<Vec<CodeChunk>> {
-        #[derive(Serialize)]
-        struct Body<'a> {
-            query: &'a str,
-            top_k: usize,
-            /// Ask the daemon to run KG expansion (#376 B1).
-            expand_graph: bool,
-            /// Ask the daemon to return compact snippets (#376 C1).
-            compact: bool,
-        }
-        let url = format!("http://127.0.0.1:{}/search/query", self.port);
-        let resp = self
-            .client
-            .post(&url)
-            .json(&Body {
-                query,
+        self.call(
+            "search.query",
+            QueryRequest {
+                query: query.to_string(),
                 top_k,
                 expand_graph: true,
                 compact: true,
-            })
-            .send()
-            .await
-            .with_context(|| format!("POST {url}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("search daemon returned {status}: {body}"));
-        }
-        let chunks: Vec<CodeChunk> = resp
-            .json()
-            .await
-            .context("decoding /search/query response")?;
-        Ok(chunks)
+            },
+            REQUEST_TIMEOUT,
+        )
+        .await
     }
 
-    /// Ask the daemon to (re)index a single file.
+    /// Ask the daemon to (re)index a single file. Returns the chunk count.
+    ///
+    /// # Errors
+    ///
+    /// As [`SearchDaemonClient::search`].
+    ///
+    /// Test: `round_trip_reaches_every_method`.
     pub async fn index_file(&self, path: &Path) -> Result<usize> {
-        #[derive(Serialize)]
-        struct Body<'a> {
-            path: &'a str,
-        }
-        let url = format!("http://127.0.0.1:{}/search/index-file", self.port);
-        let resp = self
-            .client
-            .post(&url)
-            .json(&Body {
-                path: &path.display().to_string(),
-            })
-            .send()
-            .await
-            .with_context(|| format!("POST {url}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("daemon returned {status}: {body}"));
-        }
-        let v: serde_json::Value = resp.json().await.context("decoding response")?;
-        Ok(v.get("chunks").and_then(|n| n.as_u64()).unwrap_or(0) as usize)
+        let resp: IndexFileResponse = self
+            .call(
+                "search.index_file",
+                PathRequest {
+                    path: path.display().to_string(),
+                },
+                REQUEST_TIMEOUT,
+            )
+            .await?;
+        Ok(resp.chunks)
     }
 
-    /// Ask the daemon to drop all chunks for a path.
+    /// Ask the daemon to drop all chunks for a path. Returns how many went.
+    ///
+    /// # Errors
+    ///
+    /// As [`SearchDaemonClient::search`].
+    ///
+    /// Test: `round_trip_reaches_every_method`.
     pub async fn remove_file(&self, path: &Path) -> Result<usize> {
-        #[derive(Serialize)]
-        struct Body<'a> {
-            path: &'a str,
+        let resp: IndexFileResponse = self
+            .call(
+                "search.remove_file",
+                PathRequest {
+                    path: path.display().to_string(),
+                },
+                REQUEST_TIMEOUT,
+            )
+            .await?;
+        Ok(resp.chunks)
+    }
+
+    /// Ask the daemon to start a full reindex.
+    ///
+    /// Why it answers immediately: the walk runs for minutes and the daemon
+    /// keeps serving queries off the old index while it does. The returned
+    /// status distinguishes a walk this call started from one already in
+    /// flight.
+    ///
+    /// # Errors
+    ///
+    /// As [`SearchDaemonClient::search`].
+    ///
+    /// Test: `round_trip_reaches_every_method`.
+    pub async fn reindex(&self) -> Result<String> {
+        let resp: ReindexResponse = self
+            .call("search.reindex", serde_json::Value::Null, REQUEST_TIMEOUT)
+            .await?;
+        Ok(resp.status)
+    }
+
+    /// One framed JSON-RPC exchange with the daemon.
+    ///
+    /// Why one place: the envelope, the budget and the two failure shapes —
+    /// the exchange failed, or the daemon answered a refusal — are stated once
+    /// rather than five times.
+    /// What: sends `{jsonrpc, id, method, params}` and unwraps `result`. The
+    /// response budget is `trusty_common::uds::MAX_FRAME_BYTES`, the shared
+    /// 8 MiB control-plane default, which is also what the daemon's
+    /// `RpcServeOptions::default` reads a request with. `search.query` is the
+    /// only method whose answer is bulk, and compact mode caps each hit at
+    /// seven lines.
+    ///
+    /// # Errors
+    ///
+    /// A transport failure, a daemon-side error frame, or a response carrying
+    /// neither `result` nor `error`. All three name the method, so an operator
+    /// reading the message knows which call failed.
+    async fn call<Req: Serialize, Resp: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Req,
+        timeout: Duration,
+    ) -> Result<Resp> {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        });
+        let response: RpcResponse =
+            trusty_common::uds::send_framed_request(&self.socket, &request, timeout)
+                .await
+                .map_err(|e| anyhow!("{method} over {}: {e}", self.socket.display()))?;
+        if let Some(error) = response.error {
+            return Err(anyhow!(
+                "{method} over {}: {} ({})",
+                self.socket.display(),
+                error.message,
+                error.code
+            ));
         }
-        let url = format!("http://127.0.0.1:{}/search/remove-file", self.port);
-        let resp = self
-            .client
-            .post(&url)
-            .json(&Body {
-                path: &path.display().to_string(),
-            })
-            .send()
-            .await
-            .with_context(|| format!("POST {url}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("daemon returned {status}: {body}"));
-        }
-        let v: serde_json::Value = resp.json().await.context("decoding response")?;
-        Ok(v.get("removed").and_then(|n| n.as_u64()).unwrap_or(0) as usize)
+        let result = response.result.ok_or_else(|| {
+            anyhow!(
+                "{method} over {}: response carried neither result nor error",
+                self.socket.display()
+            )
+        })?;
+        serde_json::from_value(result)
+            .map_err(|e| anyhow!("{method}: decoding response failed: {e}"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::service::SearchState;
+    use crate::search::service::rpc;
     use std::sync::Arc;
     use tempfile::TempDir;
+    use tokio::sync::Mutex;
 
+    /// A daemon that was never started answers nothing, and the client says so
+    /// rather than constructing itself against a dead path.
     #[tokio::test]
-    async fn connect_if_running_returns_none_when_no_pid_file() {
+    async fn connect_if_running_returns_none_when_no_daemon() {
         let dir = TempDir::new().unwrap();
         assert!(
             SearchDaemonClient::connect_if_running(dir.path())
@@ -214,110 +280,97 @@ mod tests {
         );
     }
 
+    /// Why: proves the client reaches ALL FIVE methods over the socket, which
+    /// is the contract #6433 moved. The HTTP round-trip this replaces exercised
+    /// two of them and left `index_file`, `remove_file` and `reindex` covered
+    /// only by the router test on the daemon's own side.
+    /// What: serves `rpc::build_router` over a real hardened socket in a temp
+    /// directory, then drives health, query, index_file, remove_file and
+    /// reindex through the public client methods.
     #[tokio::test]
-    async fn router_round_trip() {
-        // Why: Exercises the full client → daemon path without spinning
-        // up the real on-disk store. Mounts the same `build_router` the
-        // daemon uses, writes a synthetic pid file pointing at our
-        // bound port, then drives `connect_if_running` + `search`.
-        use crate::memory::{Embedder, MemoryResult, MemoryStore, Segment};
-        use crate::search::indexer::CodeIndexer;
-        use crate::search::service::{
-            SearchDaemonState, SearchState, build_router, write_pid_file,
-        };
-        use async_trait::async_trait;
-        use chrono::Utc;
-        use serde_json::Value;
-        use std::collections::HashMap;
-        use std::sync::Mutex as StdMutex;
-        use tokio::sync::Mutex;
-
-        struct MockStore {
-            inner: StdMutex<HashMap<String, (Vec<f32>, Value)>>,
-        }
-        #[async_trait]
-        impl MemoryStore for MockStore {
-            async fn insert(
-                &self,
-                _: Segment,
-                id: &str,
-                v: &[f32],
-                p: Value,
-            ) -> anyhow::Result<()> {
-                self.inner
-                    .lock()
-                    .unwrap()
-                    .insert(id.into(), (v.to_vec(), p));
-                Ok(())
-            }
-            async fn search(
-                &self,
-                _: Segment,
-                _: &[f32],
-                _: usize,
-            ) -> anyhow::Result<Vec<MemoryResult>> {
-                Ok(vec![])
-            }
-            async fn get(&self, _: Segment, _: &str) -> anyhow::Result<Option<Value>> {
-                Ok(None)
-            }
-            async fn delete(&self, _: Segment, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-        }
-        struct MockEmbedder;
-        impl Embedder for MockEmbedder {
-            fn embed(&self, t: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
-                Ok(t.iter().map(|s| vec![s.len() as f32; 8]).collect())
-            }
-            fn embed_single(&self, t: &str) -> anyhow::Result<Vec<f32>> {
-                Ok(vec![t.len() as f32; 8])
-            }
-            fn dimension(&self) -> usize {
-                8
-            }
-        }
-
+    async fn round_trip_reaches_every_method() {
         let dir = TempDir::new().unwrap();
-        std::fs::create_dir_all(dir.path().join(".trusty-agents").join("state")).unwrap();
-
-        let store: Arc<dyn MemoryStore> = Arc::new(MockStore {
-            inner: StdMutex::new(HashMap::new()),
-        });
-        let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder);
-        let indexer = Arc::new(CodeIndexer::new(store, embedder));
+        let socket = dir.path().join("search.sock");
         let state = SearchState {
-            indexer,
+            indexer: Arc::new(crate::search::service::tests::mock_indexer()),
             project_root: dir.path().to_path_buf(),
             reindex_in_flight: Arc::new(Mutex::new(false)),
         };
-        let app = build_router(state);
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        // Tell the client where to find us.
-        let pid_state = SearchDaemonState {
-            pid: std::process::id(),
-            started_at: Utc::now(),
-            port,
-            socket_path: dir.path().join("search.sock"),
-        };
-        write_pid_file(dir.path(), &pid_state).unwrap();
-
-        // Give the listener a beat to come up.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let client = SearchDaemonClient::connect_if_running(dir.path())
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let serve_socket = socket.clone();
+        let server = tokio::spawn(async move {
+            rpc::serve_with_shutdown(state, &serve_socket, async {
+                let _ = stop_rx.await;
+            })
             .await
-            .expect("daemon should look running");
-        assert!(client.is_running().await);
-        let hits = client.search("anything", 5).await.expect("search");
+        });
+        crate::search::service::tests::await_socket(&socket).await;
+
+        let client = SearchDaemonClient::for_socket(socket.clone(), dir.path().to_path_buf());
+
+        assert!(client.is_running().await, "search.health");
+
+        let hits = client.search("anything", 5).await.expect("search.query");
         assert!(hits.is_empty(), "mock store returns no hits");
 
-        handle.abort();
+        // The mock store accepts writes, so indexing a real file reports the
+        // chunks it produced and removing it reports them gone.
+        let source = dir.path().join("sample.rs");
+        std::fs::write(&source, "fn alpha() {\n    let x = 1;\n}\n").unwrap();
+        let indexed = client.index_file(&source).await.expect("search.index_file");
+        assert!(indexed > 0, "expected at least one chunk, got {indexed}");
+        let removed = client
+            .remove_file(&source)
+            .await
+            .expect("search.remove_file");
+        assert_eq!(removed, indexed, "removal should drop what indexing wrote");
+
+        assert_eq!(
+            client.reindex().await.expect("search.reindex"),
+            "started",
+            "first reindex should start a walk"
+        );
+
+        let _ = stop_tx.send(());
+        server.await.unwrap().expect("serve");
+    }
+
+    /// A method the daemon does not serve is a named refusal, not a hang — and
+    /// the error text carries the method so an operator can see which call was
+    /// wrong.
+    #[tokio::test]
+    async fn an_unknown_method_reports_the_method_that_failed() {
+        let dir = TempDir::new().unwrap();
+        let socket = dir.path().join("search.sock");
+        let state = SearchState {
+            indexer: Arc::new(crate::search::service::tests::mock_indexer()),
+            project_root: dir.path().to_path_buf(),
+            reindex_in_flight: Arc::new(Mutex::new(false)),
+        };
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let serve_socket = socket.clone();
+        let server = tokio::spawn(async move {
+            rpc::serve_with_shutdown(state, &serve_socket, async {
+                let _ = stop_rx.await;
+            })
+            .await
+        });
+        crate::search::service::tests::await_socket(&socket).await;
+
+        let client = SearchDaemonClient::for_socket(socket.clone(), dir.path().to_path_buf());
+        let err = client
+            .call::<_, serde_json::Value>(
+                "search.nonexistent",
+                serde_json::Value::Null,
+                PROBE_TIMEOUT,
+            )
+            .await
+            .expect_err("unknown method must fail");
+        let text = err.to_string();
+        assert!(text.contains("search.nonexistent"), "got: {text}");
+
+        let _ = stop_tx.send(());
+        server.await.unwrap().expect("serve");
     }
 }

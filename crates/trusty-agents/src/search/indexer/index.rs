@@ -66,12 +66,12 @@ pub struct CodeIndexer {
     ///
     /// Why: When the search daemon is actively re-indexing a tree, fastembed
     /// ONNX inference jobs run on the tokio blocking pool. Without a cap they
-    /// can saturate the pool and starve axum HTTP handler tasks, causing
-    /// `/search/query` and `/search/health` to time out (#399).
+    /// can saturate the pool and starve the daemon's RPC handler tasks, causing
+    /// `search.query` and `search.health` to time out (#399).
     /// What: `None` for in-process callers (CLI, tests) where indexing isn't
-    /// concurrent with HTTP traffic. The daemon installs a semaphore via
+    /// concurrent with daemon traffic. The daemon installs a semaphore via
     /// [`with_indexing_semaphore`](CodeIndexer::with_indexing_semaphore) sized
-    /// to roughly half the available parallelism so HTTP handlers always have
+    /// to roughly half the available parallelism so RPC handlers always have
     /// threads to run on.
     pub(crate) indexing_permits: Option<Arc<Semaphore>>,
 }
@@ -102,13 +102,13 @@ impl CodeIndexer {
     /// Install a bounded semaphore that gates indexing `spawn_blocking` jobs.
     ///
     /// Why: Prevents the search daemon from saturating the tokio blocking pool
-    /// during active re-indexing, which previously starved HTTP handler tasks
-    /// and caused `/search/query` to time out (#399).
+    /// during active re-indexing, which previously starved RPC handler tasks
+    /// and caused `search.query` to time out (#399).
     /// What: Builder-style; consumes self and stores the semaphore. Each
     /// indexing path (`extract_chunks`, `embed_single` during indexing)
     /// acquires one permit before running.
-    /// Test: Indirectly via `start_query_stop_round_trip` (the daemon now
-    /// installs this and HTTP handlers stay responsive under reindex load).
+    /// Test: Indirectly via `rpc_reindex_starts_and_refuses_a_concurrent_second`
+    /// (the daemon installs this and RPC handlers stay responsive under load).
     pub fn with_indexing_semaphore(mut self, permits: Arc<Semaphore>) -> Self {
         self.indexing_permits = Some(permits);
         self
@@ -255,7 +255,7 @@ impl CodeIndexer {
         // tree-sitter parsing is synchronous and potentially CPU-heavy; move
         // it off the async runtime to keep the reactor responsive. Acquire
         // an indexing permit (when configured) so the search daemon can cap
-        // concurrent indexing and leave threads for HTTP handlers (#399).
+        // concurrent indexing and leave threads for RPC handlers (#399).
         let src_clone = source.clone();
         let lang_clone = language.clone();
         let raw_chunks = {
@@ -285,7 +285,7 @@ impl CodeIndexer {
                 let embedder = Arc::clone(&self.embedder);
                 let text = chunk_text.clone();
                 // Cap concurrent embedding jobs when an indexing semaphore is
-                // installed so HTTP handler tasks stay responsive (#399).
+                // installed so RPC handler tasks stay responsive (#399).
                 let _permit = match &self.indexing_permits {
                     Some(sem) => Some(
                         Arc::clone(sem)

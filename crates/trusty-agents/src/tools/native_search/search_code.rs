@@ -45,7 +45,7 @@ pub struct SearchCodeTool {
     /// When true, replace the full chunk text with a 7-line snippet
     /// centred on the function start so a single search call can't
     /// blow the context window (#376 C1). Default `true` for the
-    /// `Remote` backend (where snippets travel over HTTP), `false`
+    /// `Remote` backend (where snippets travel over the socket), `false`
     /// for `Local`/`None` to preserve existing local behaviour.
     compact: bool,
 }
@@ -56,7 +56,7 @@ pub struct SearchCodeTool {
 /// #374 introduces a daemon variant; modeling the choice as an enum
 /// keeps `execute()` a small match instead of two near-duplicate paths
 /// and makes the priority order (Remote > Local > None) explicit.
-/// What: `Remote` talks HTTP to the search daemon, `Local` calls
+/// What: `Remote` talks JSON-RPC over the daemon's Unix socket, `Local` calls
 /// `CodeIndexer` in-process, `None` falls back to grep over CWD.
 /// Test: All three arms are exercised in `super::tests`.
 enum SearchBackend {
@@ -82,7 +82,7 @@ impl SearchCodeTool {
         }
     }
 
-    /// Construct with a daemon client that will forward queries over HTTP.
+    /// Construct with a daemon client that will forward queries over the socket.
     pub fn with_daemon(client: SearchDaemonClient) -> Self {
         Self {
             backend: SearchBackend::Remote(client),
@@ -175,7 +175,7 @@ impl ToolExecutor for SearchCodeTool {
         // Backend dispatch: prefer daemon, then local indexer, then grep.
         let indexer = match &self.backend {
             SearchBackend::Remote(client) => {
-                // Daemon path: forward the query over HTTP. On any error,
+                // Daemon path: forward the query over the socket. On any error,
                 // fall through to grep so the agent always gets *something*.
                 match client.search(query, top_n).await {
                     Ok(chunks) if !chunks.is_empty() => {
