@@ -24,12 +24,18 @@
 //!   cargo test --test benchmark_synthetic -- --include-ignored --nocapture
 //!
 //! Prerequisites:
-//!   - trusty-search daemon running at `http://127.0.0.1:7878`
+//!   - dedicated daemon and disposable source copy configured as documented
+//!     in `support/isolated_benchmark.rs`
 //!   - `OPENROUTER_API_KEY` not required (no chat calls)
 //!
 //! This harness intentionally does NOT spin up its own daemon. It uses the
-//! already-running daemon the developer started for everyday work, consistent
-//! with the pattern in `baseline_trusty_tools.rs`.
+//! dedicated fixture daemon the operator started for this benchmark run.
+
+// Live benchmarks require an isolated daemon and disposable source copy.
+// See support/isolated_benchmark.rs for the three required environment variables.
+#[path = "support/isolated_benchmark.rs"]
+mod isolated_benchmark;
+use isolated_benchmark::daemon_url;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -39,7 +45,6 @@ use serde_json::{json, Value};
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-const DAEMON_URL: &str = "http://127.0.0.1:7878";
 const INDEX_NAME: &str = "synthetic-benchmark";
 
 /// Maximum time we will wait for the reindex to bring every stage to `Ready`.
@@ -120,8 +125,8 @@ struct QueryResult {
 /// Build a reqwest client with the timeouts already tuned by
 /// `baseline_trusty_tools.rs`.
 ///
-/// Why: we share the same daemon as everyday work; generous but finite
-/// timeouts prevent the test hanging on a hung daemon.
+/// Why: generous but finite timeouts prevent the test hanging on a hung
+/// fixture daemon.
 /// What: returns a Client with 2 s connect and 30 s request timeouts.
 /// Test: any transport error will panic via .expect() in callers.
 fn make_client() -> Client {
@@ -134,15 +139,11 @@ fn make_client() -> Client {
 
 /// Absolute path of the synthetic corpus root.
 ///
-/// Why: the corpus root changes depending on where cargo runs the test.
-/// What: derives the path from CARGO_MANIFEST_DIR at compile time.
+/// Why: index cleanup must only touch a disposable source copy.
+/// What: resolves the synthetic fixture within TRUSTY_SEARCH_TEST_CORPUS_ROOT.
 /// Test: corpus_root().join("GROUND_TRUTH.json") must exist; load_ground_truth panics otherwise.
 fn corpus_root() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .join("tests")
-        .join("benchmark_corpus")
-        .join("synthetic")
+    isolated_benchmark::corpus_root("crates/trusty-search/tests/benchmark_corpus/synthetic")
 }
 
 /// Load and parse `GROUND_TRUTH.json`.
@@ -189,11 +190,12 @@ fn load_ground_truth() -> Vec<GroundTruthQuery> {
 /// What: GETs /health and asserts 200.
 /// Test: panics with a human-readable message if the daemon is unreachable.
 async fn assert_daemon_healthy(client: &Client) {
+    let daemon_url = daemon_url();
     let resp = client
-        .get(format!("{DAEMON_URL}/health"))
+        .get(format!("{daemon_url}/health"))
         .send()
         .await
-        .expect("daemon must be reachable at 127.0.0.1:7878 — start it with `trusty-search start`");
+        .expect("isolated benchmark daemon must be reachable at TRUSTY_SEARCH_TEST_URL");
     assert_eq!(resp.status().as_u16(), 200, "GET /health returned non-200");
 }
 
@@ -205,10 +207,12 @@ async fn assert_daemon_healthy(client: &Client) {
 /// What: DELETEs any existing index with this name, then POSTs to /indexes.
 /// Test: asserts 200 on POST; transport errors panic.
 async fn register_index(client: &Client) {
+    isolated_benchmark::assert_index_root(client, INDEX_NAME, &corpus_root()).await;
+    let daemon_url = daemon_url();
     // Delete first if it exists, to start from a clean slate.
     let _ = client
         .delete(format!(
-            "{DAEMON_URL}/indexes/{INDEX_NAME}?delete_data=true"
+            "{daemon_url}/indexes/{INDEX_NAME}?delete_data=true"
         ))
         .send()
         .await;
@@ -219,7 +223,7 @@ async fn register_index(client: &Client) {
         "root_path": root.to_string_lossy(),
     });
     let resp = client
-        .post(format!("{DAEMON_URL}/indexes"))
+        .post(format!("{daemon_url}/indexes"))
         .json(&body)
         .send()
         .await
@@ -239,13 +243,15 @@ async fn register_index(client: &Client) {
 ///   semantic + graph stages all report status="ready".
 /// Test: panics with last-known status on REINDEX_TIMEOUT.
 async fn reindex_and_wait(client: &Client) {
+    isolated_benchmark::assert_index_root(client, INDEX_NAME, &corpus_root()).await;
+    let daemon_url = daemon_url();
     let root = corpus_root();
     let body = json!({
         "root_path": root.to_string_lossy(),
         "force": true,
     });
     let resp = client
-        .post(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/reindex"))
+        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/reindex"))
         .json(&body)
         .send()
         .await
@@ -290,8 +296,9 @@ async fn reindex_and_wait(client: &Client) {
 /// What: GET /indexes/:id/status, returns parsed JSON Value.
 /// Test: transport or parse failures panic.
 async fn fetch_status(client: &Client) -> Value {
+    let daemon_url = daemon_url();
     let resp = client
-        .get(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/status"))
+        .get(format!("{daemon_url}/indexes/{INDEX_NAME}/status"))
         .send()
         .await
         .expect("GET /status transport failure");
@@ -305,9 +312,11 @@ async fn fetch_status(client: &Client) -> Value {
 /// What: DELETE /indexes/:id; prints the response status regardless.
 /// Test: failures are printed, not panicked (cleanup is best-effort).
 async fn cleanup_index(client: &Client) {
+    isolated_benchmark::assert_index_root(client, INDEX_NAME, &corpus_root()).await;
+    let daemon_url = daemon_url();
     let resp = client
         .delete(format!(
-            "{DAEMON_URL}/indexes/{INDEX_NAME}?delete_data=true"
+            "{daemon_url}/indexes/{INDEX_NAME}?delete_data=true"
         ))
         .send()
         .await;
@@ -331,6 +340,7 @@ async fn cleanup_index(client: &Client) {
 ///   Hit@5 against the ground_truth_files list.
 /// Test: transport failures panic; JSON parse failures panic with status code.
 async fn run_query(client: &Client, query: &GroundTruthQuery, mode: Mode) -> QueryResult {
+    let daemon_url = daemon_url();
     let mut body = json!({
         "text": query.text,
         "top_k": 10,
@@ -354,7 +364,7 @@ async fn run_query(client: &Client, query: &GroundTruthQuery, mode: Mode) -> Que
 
     let t0 = Instant::now();
     let resp = client
-        .post(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/search"))
+        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/search"))
         .json(&body)
         .send()
         .await
