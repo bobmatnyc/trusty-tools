@@ -363,30 +363,20 @@ pub struct UsearchStore {
     /// for why both readings are needed and
     /// [`Self::try_demote_after_write_cooldown`] for how they are used.
     pub(super) write_clock: Arc<super::usearch_demote::WriteClock>,
-    /// Serializes the entire `save()` operation (both the HNSW write+rename
-    /// and the sidecar write+rename) for this store instance.
+    /// Outer gate for snapshot capture, publication, and every mutation (#6961).
     ///
-    /// Why (issue #2922): `save()`'s HNSW write lock (`self.index`) only
-    /// covers the usearch FFI call itself, not the `std::fs::rename` that
-    /// follows it. Without an outer lock, two independent savers of the same
-    /// store — e.g. the graceful-shutdown flush (`shutdown_flush.rs`) racing
-    /// an in-flight `spawn_incremental_persist` background task that hadn't
-    /// finished when shutdown began — can interleave: saver A finishes its
-    /// FFI write to `hnsw_path.usearch.tmp` and is about to rename it, while
-    /// saver B (which started later) reuses the *same* tmp path, truncates
-    /// and rewrites it with its own snapshot, and renames first. A's later
-    /// rename then either clobbers B's fresher file with A's staler-but-still
-    /// complete one, or fails outright because its tmp file was already
-    /// consumed. Holding this lock across the whole save makes every save()
-    /// call fully serialized end-to-end, so the live file always ends up as
-    /// exactly one caller's complete, self-consistent snapshot — whichever
-    /// caller was last to acquire the lock — never a mix of two writers' tmp
-    /// files and never a stale rename racing a fresh one.
-    /// What: acquired via `lock_owned()` for the full body of [`Self::save`].
-    /// A task that is `abort()`-ed while suspended waiting on this lock (or
-    /// inside the FFI call it guards) never reaches its own rename — dropping
-    /// the future drops the guard, releasing the lock for the next waiter.
-    /// Test: `tests::test_concurrent_saves_are_serialized_and_end_consistent`.
+    /// Graph/map/path locks are acquired only after this gate. Searches retain
+    /// their existing read locks. Promotion and adoption are internal helpers
+    /// invoked by gated callers; they must not reacquire this non-reentrant
+    /// mutex. A fresh unpublished store may also promote during load.
+    ///
+    /// Holding the gate across map allocation, graph changes, and batch rollback
+    /// prevents save from combining a sidecar from one mutation boundary with
+    /// a binary from another. It also serializes per-process staging writes.
+    /// Cancellation while the FFI worker runs still leaves its graph guard
+    /// held until serialization finishes; the cancelled saver never publishes.
+    /// Test: `super::snapshot_tests::snapshot_excludes_partial_mutations_and_reloads_vector_ids`,
+    /// `tests::test_concurrent_saves_are_serialized_and_end_consistent`.
     pub(super) save_lock: Arc<tokio::sync::Mutex<()>>,
     /// Count of [`Self::remove`] calls that actually dropped a vector from the
     /// HNSW graph (not merely an `id_to_key` entry — see the removal-site
@@ -394,8 +384,8 @@ pub struct UsearchStore {
     /// [`Self::save`].
     ///
     /// Reset semantics: cleared to 0 ONLY when `save()` actually writes a new
-    /// snapshot — i.e. on the success path, after `index_guard.save(..)`
-    /// returns `Ok`. It is deliberately left untouched when a save is
+    /// snapshot — after BOTH files are published, not just FFI serialization.
+    /// It is deliberately left untouched when publication fails or a save is
     /// REFUSED by either guard (the #1711 zero-vector guard or the #1717
     /// shrink guard): a refused save leaves the on-disk snapshot exactly as
     /// it was, so the tracked removals still need to explain the SAME gap
@@ -502,8 +492,8 @@ impl UsearchStore {
     /// `commit_parsed_batch`) we save the in-memory HNSW so the daemon can
     /// warm-boot without re-embedding the entire corpus. Without this every
     /// restart costs minutes of re-indexing.
-    /// What: snapshots `id_to_key` + `next_key` under read locks, releases the
-    /// locks, then calls usearch's `Index::save(&str)` and writes the sidecar
+    /// What: holds the outer mutation gate while capturing `id_to_key`,
+    /// `next_key`, and the graph, then publishes the prepared binary and sidecar
     /// JSON. Both writes are atomic (tmp + rename) so a crash mid-save never
     /// leaves a partial file. The caller passes the HNSW path; the sidecar is
     /// written next to it with extension `.keys.json`. A data-loss guard
@@ -533,19 +523,14 @@ impl UsearchStore {
     /// and `tests::test_save_allows_legitimate_shrink_after_deletions` cover the
     /// #1717 guard.
     pub async fn save(&self, hnsw_path: &Path) -> Result<()> {
-        // Issue #2922: serialize the whole save (write+rename of both the
-        // HNSW binary and the JSON sidecar) against any other concurrent
-        // `save()` call on this store. See the `save_lock` field doc for why
-        // this is required beyond the HNSW `RwLock` alone.
+        // #6961: the graph and maps are captured and published under one
+        // outer gate shared by all mutation entry points. Inner locks alone
+        // permit a map update to race graph serialization.
         let _save_guard = self.save_lock.clone().lock_owned().await;
 
-        // #6826: the mutation epoch as of the moment this save began. The
-        // HNSW write lock covers only the FFI serialize, not the renames that
-        // follow, so a writer can land between them; clearing `dirty`
-        // unconditionally at the end would then mark a graph clean whose newest
-        // vector is not in the file, and the demote would re-view over it.
-        // Comparing this reading against the epoch after the renames is what
-        // makes "clean" mean "clean as of the bytes actually written".
+        // Retain the #6826 epoch check as defense in depth. The outer gate
+        // now excludes writers across capture and publication; any future
+        // mutation path that bypasses it must still never clear a newer write.
         let epoch_at_start = self.write_clock.epoch();
 
         // Fast path: in view mode the in-memory state is a mmap of the
@@ -570,8 +555,8 @@ impl UsearchStore {
             self.ensure_mutable().await?;
         }
 
-        // Snapshot the key map under read locks so we can release them before
-        // the (possibly slow) usearch save. The HNSW write lock is required
+        // The outer mutation gate keeps these maps and the graph at the same
+        // completed mutation boundary through capture and publication. The HNSW write lock is required
         // below because usearch's save is `&self` but mutates internal
         // serializer buffers; treating it as a write-side operation matches the
         // rest of this store.
@@ -692,10 +677,6 @@ impl UsearchStore {
                 index_guard
                     .save(&tmp_hnsw_str)
                     .map_err(|e| anyhow!("usearch save failed: {e}"))?;
-                // The snapshot now reflects every removal up to this point;
-                // clear the counter so future shrink checks only weigh
-                // removals that happen after this save.
-                removed_since_save.store(0, Ordering::Release);
                 Ok(SaveVerdict::Saved)
             })
             .await;
@@ -745,20 +726,9 @@ impl UsearchStore {
                 }
             }
         }
-        std::fs::rename(&tmp_hnsw, hnsw_path).map_err(|e| {
-            // #4395: as above — our staging file is ours alone to clean up.
-            let _ = std::fs::remove_file(&tmp_hnsw);
-            anyhow!("rename hnsw snapshot: {e}")
-        })?;
-
-        let sidecar = hnsw_path.with_extension("keys.json");
-        let sidecar_tmp = staging_path(&sidecar, "json");
-        let json =
-            serde_json::to_vec(&key_map).map_err(|e| anyhow!("serialize hnsw key map: {e}"))?;
-        std::fs::write(&sidecar_tmp, &json)
-            .map_err(|e| anyhow!("write hnsw key sidecar tmp: {e}"))?;
-        std::fs::rename(&sidecar_tmp, &sidecar)
-            .map_err(|e| anyhow!("rename hnsw key sidecar: {e}"))?;
+        super::snapshot_publish::publish_snapshot(hnsw_path, &key_map)?;
+        // Only a published pair establishes a new baseline for shrink credit.
+        self.removed_since_save.store(0, Ordering::Release);
 
         // The on-disk snapshot now matches the in-memory graph exactly: clear
         // the dirty flag (issue #2164) so the idle sweep can demote this

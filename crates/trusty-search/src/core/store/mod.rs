@@ -14,6 +14,9 @@ mod staging_reap;
 #[cfg(test)]
 mod tests;
 // #2936: staging-file reaping and the abort-race guarantee against a real save.
+mod snapshot_publish;
+#[cfg(test)]
+mod snapshot_tests;
 #[cfg(test)]
 mod tests_2936;
 mod types;
