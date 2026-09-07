@@ -35,11 +35,15 @@ use crate::inference::types::{ChatRequest, ToolChoice, ToolDefinition};
 /// requires it), the `messages` array (system messages hoisted to the top-level
 /// `system` param; `tool` messages remapped to `user` `tool_result` blocks;
 /// consecutive same-role turns coalesced), and the optional `system`,
-/// `temperature`, `stop_sequences`, `tools`, and `tool_choice` fields. Any
-/// `cache_control` breakpoint on a message/tool is rendered as
-/// `{"type":"ephemeral"}` on the corresponding block.
+/// `temperature`, `stop_sequences`, `tools`, `tool_choice`, and `output_config`
+/// fields. Any `cache_control` breakpoint on a message/tool is rendered as
+/// `{"type":"ephemeral"}` on the corresponding block. #5588: a set
+/// `response_schema` becomes `output_config.format` — Anthropic's own
+/// schema-constrained-output parameter, not the OpenAI `response_format` key.
 /// Test: `hoists_system_and_defaults_max_tokens`,
-/// `builds_alternating_user_assistant_turns`, `tool_result_becomes_user_turn`.
+/// `builds_alternating_user_assistant_turns`, `tool_result_becomes_user_turn`,
+/// `response_schema_becomes_output_config`,
+/// `output_config_absent_without_a_schema`.
 pub fn build_body(request: &ChatRequest, default_max_tokens: u32) -> Value {
     let mut system_blocks: Vec<Value> = Vec::new();
     let mut system_has_cache = false;
@@ -141,6 +145,11 @@ pub fn build_body(request: &ChatRequest, default_max_tokens: u32) -> Value {
     }
     if let Some(tc) = &request.tool_choice {
         body.insert("tool_choice".into(), tc.clone());
+    }
+    // #5588: Anthropic constrains output through `output_config.format`, not the
+    // OpenAI `response_format` field the shared compat core emits.
+    if let Some(schema) = &request.response_schema {
+        body.insert("output_config".into(), schema.anthropic_output_config());
     }
     Value::Object(body)
 }

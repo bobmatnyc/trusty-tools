@@ -151,6 +151,43 @@ impl OpenAiCompatAdapter {
         req
     }
 
+    /// Produce the outbound JSON body: [`Self::prepare_body`] serialised, with the
+    /// neutral `response_schema` key rewritten into OpenAI's `response_format`.
+    ///
+    /// Why (#5588): [`ChatRequest::response_schema`] is deliberately dialect-free,
+    /// so its own key is not a parameter any OpenAI-compatible provider knows —
+    /// leaving it on the wire is a 400 for an unrecognised field. This is the one
+    /// place the whole OpenAI family (OpenRouter, Fireworks, OpenAI-direct,
+    /// Together, AtlasCloud, and the Local wrapper) translates it, so a sixth
+    /// provider in the family inherits structured output with no new code.
+    /// What: guards the capability via
+    /// [`InferenceAdapter::ensure_structured_output_supported`], serialises the
+    /// prepared request, then — when a schema is present — REMOVES
+    /// `response_schema` and inserts
+    /// [`StructuredOutput::openai_response_format`] under `response_format`. With
+    /// no schema the body is byte-identical to the pre-#5588 one, because
+    /// `skip_serializing_if` never emitted the key.
+    /// Test: `wire_body_translates_schema_into_response_format`,
+    /// `wire_body_omits_response_format_without_a_schema`,
+    /// `wire_body_rejects_a_schema_the_provider_cannot_honour`.
+    fn wire_body(&self, request: &ChatRequest) -> Result<Value, InferenceError> {
+        self.ensure_structured_output_supported(request)?;
+        let prepared = self.prepare_body(request);
+        let mut body =
+            serde_json::to_value(&prepared).map_err(|e| InferenceError::Deserialise {
+                message: e.to_string(),
+                body: String::new(),
+            })?;
+        if let (Value::Object(map), Some(schema)) = (&mut body, prepared.response_schema.as_ref()) {
+            map.remove("response_schema");
+            map.insert(
+                "response_format".to_string(),
+                schema.openai_response_format(),
+            );
+        }
+        Ok(body)
+    }
+
     /// Produce the streaming request body: the prepared request with `stream`
     /// and `stream_options.include_usage` set.
     ///
@@ -162,19 +199,16 @@ impl OpenAiCompatAdapter {
     /// than adding a `stream` field to the shared [`ChatRequest`] — keeps the
     /// non-streaming struct (and its many struct-literal construction sites)
     /// untouched; the flag exists only on the streaming path.
-    /// What: serialises [`Self::prepare_body`] to a JSON object and inserts
+    /// What: takes [`Self::wire_body`] (so the streaming path gets the same #5588
+    /// `response_format` translation and the same capability guard) and inserts
     /// `stream:true` plus `stream_options.include_usage:true`. Serialisation of a
     /// well-formed request cannot fail, but a failure maps to
     /// [`InferenceError::Deserialise`] rather than panicking.
     /// Test: `stream_body_sets_stream_and_usage_options`,
-    /// `stream_body_preserves_openrouter_usage_directive`.
+    /// `stream_body_preserves_openrouter_usage_directive`,
+    /// `stream_body_translates_schema_into_response_format`.
     fn stream_body(&self, request: &ChatRequest) -> Result<Value, InferenceError> {
-        let prepared = self.prepare_body(request);
-        let mut body =
-            serde_json::to_value(&prepared).map_err(|e| InferenceError::Deserialise {
-                message: e.to_string(),
-                body: String::new(),
-            })?;
+        let mut body = self.wire_body(request)?;
         if let Value::Object(map) = &mut body {
             map.insert("stream".to_string(), Value::Bool(true));
             map.insert(
@@ -203,7 +237,7 @@ impl InferenceAdapter for OpenAiCompatAdapter {
     /// Why: the one method the whole agent loop depends on; all HTTP mechanics
     /// (auth, headers, status classification, parsing) live here so callers only
     /// speak [`ChatRequest`]/[`ChatResponse`].
-    /// What: serialises [`Self::prepare_body`] as JSON, adds `Authorization:
+    /// What: serialises [`Self::wire_body`] as JSON, adds `Authorization:
     /// Bearer <key>` plus any attribution headers, and POSTs to the endpoint. A
     /// transport failure maps to [`InferenceError::Transport`]; a non-2xx status
     /// to [`InferenceError::Api`] (retryable for 429/5xx via
@@ -212,7 +246,8 @@ impl InferenceAdapter for OpenAiCompatAdapter {
     /// auth header and never appears in any returned error.
     /// Test: `crates/trusty-common/tests/inference_adapters.rs`.
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, InferenceError> {
-        let body = self.prepare_body(request);
+        // #5588: the guard inside `wire_body` runs before the socket opens.
+        let body = self.wire_body(request)?;
 
         let mut builder = self
             .http

@@ -77,6 +77,7 @@ fn minimal_request(messages: Vec<ChatMessage>) -> ChatRequest {
         tool_choice: None,
         stop: None,
         usage: None,
+        response_schema: None,
     }
 }
 
@@ -1417,6 +1418,7 @@ fn build_converse_parts_carries_system_sampling_and_tools() {
         tool_choice: Some(json!({"auto": {}})),
         stop: None,
         usage: None,
+        response_schema: None,
     };
 
     let parts = build_converse_parts(&req).expect("parts must build");
@@ -1445,6 +1447,7 @@ fn build_converse_parts_omits_tool_config_without_tools() {
         tool_choice: None,
         stop: None,
         usage: None,
+        response_schema: None,
     };
     let parts = build_converse_parts(&req).expect("parts must build");
     assert!(parts.tool_config.is_none());
@@ -1482,6 +1485,7 @@ async fn live_bedrock_call() {
         tool_choice: None,
         stop: None,
         usage: None,
+        response_schema: None,
     };
 
     match adapter.chat(&req).await {
@@ -1528,6 +1532,7 @@ async fn live_bedrock_converse_stream() {
         tool_choice: None,
         stop: None,
         usage: None,
+        response_schema: None,
     };
 
     let mut stream = adapter

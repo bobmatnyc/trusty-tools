@@ -120,5 +120,6 @@ pub use tier::ModelTier;
 pub use types::{
     AssistantMessage, CacheControl, ChatChoice, ChatMessage, ChatRequest, ChatResponse,
     FunctionCall, FunctionDefinition, PromptTokensDetails, RequestUsageConfig, SecretString,
-    StopReason, ToolCall, ToolChoice, ToolDefinition, Usage, UsageBlock, openai_tool_choice,
+    StopReason, StructuredOutput, ToolCall, ToolChoice, ToolDefinition, Usage, UsageBlock,
+    openai_tool_choice,
 };

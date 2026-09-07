@@ -944,6 +944,7 @@ impl AgentLoop {
             // byte-identical to the pre-migration request.
             stop: None,
             usage,
+            response_schema: None,
         }
     }
 

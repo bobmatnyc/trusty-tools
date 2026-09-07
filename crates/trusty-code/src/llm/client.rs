@@ -658,6 +658,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            response_schema: None,
             stop: None,
         };
         let err = client
@@ -698,6 +699,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            response_schema: None,
             stop: None,
         };
         let err = client
@@ -738,6 +740,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            response_schema: None,
             stop: None,
         };
         let err = client
@@ -776,6 +779,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            response_schema: None,
             stop: None,
         };
         let err = client
@@ -823,6 +827,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            response_schema: None,
             stop: None,
         };
         let resp = client.chat(&req).await.expect("chat call succeeded");
@@ -865,6 +870,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            response_schema: None,
             stop: None,
         };
         let resp = client.chat(&req).await.expect("chat call succeeded");
@@ -907,6 +913,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            response_schema: None,
             stop: None,
         };
         let resp = client.chat(&req).await.expect("chat call succeeded");
