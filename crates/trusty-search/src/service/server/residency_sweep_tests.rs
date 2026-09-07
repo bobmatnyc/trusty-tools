@@ -224,3 +224,71 @@ async fn sweep_never_parks_index_with_running_reindex() {
     );
     clear_env();
 }
+
+/// #6957 regression: a reindex that starts AFTER the sweep's pre-park check
+/// but BEFORE the registry detach must still abort the park.
+///
+/// Why this window exists at all: `cold_park_index_inner` runs
+/// `persist_before_park` — a filesystem write of the HNSW snapshot — between
+/// the sweep's single `reindex_progress` read and `registry.remove_and_get`.
+/// A `POST /indexes/<id>/reindex` landing in that window inserts a `Running`
+/// progress entry and spawns against the SAME `Arc<IndexHandle>`, so the
+/// round-4 `Arc::ptr_eq` identity guard sees an undisturbed handle and the
+/// detach succeeds mid-reindex. The reindex task then keeps writing
+/// `handle.stages` on an `Arc` no later request can reach, and the first query
+/// afterwards lazily rebuilds a fresh handle from the cold entry — the reindex
+/// completes into nothing and its status is wedged forever.
+///
+/// What this drives: the `hook` seam fires inside the park, in exactly that
+/// window, and inserts the `Running` progress a real HTTP handler would. The
+/// late re-check must then abort with the registry entry intact and no
+/// leftover cold-store record — the park must leave `id` exactly as it found
+/// it, not half-parked.
+///
+/// Fails on origin/main (whose park has no late re-check): `'a' must still be
+/// resident — the park had to abort when the reindex started mid-park (#6957)`.
+#[tokio::test]
+#[serial_test::serial]
+async fn sweep_aborts_park_when_a_reindex_starts_inside_the_park_window() {
+    clear_env();
+    // "a" is coldest so it is the single park candidate at cap = 1; "b" stays.
+    let entries = vec![entry("a", Some(100)), entry("b", Some(200))];
+    let _tmp = isolate_and_seed_toml(&entries);
+    unsafe { std::env::set_var("TRUSTY_MAX_RESIDENT_INDEXES", "1") };
+
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    for e in &entries {
+        state.registry.register(bare_handle(&e.id));
+    }
+    // Precondition: the sweep's pre-park check sees nothing Running, so it
+    // reaches the park. Without this the test would pass for the wrong reason.
+    assert!(
+        state.reindex_progress.is_empty(),
+        "sanity: no reindex is in flight when the sweep starts"
+    );
+
+    let hook_state = Arc::clone(&state);
+    run_residency_sweep_tick_inner(&state, move |id| {
+        // What `reindex_handler` does at the moment it accepts the request.
+        let running = Arc::new(ReindexProgress::new());
+        running.status.store(ReindexStatus::Running);
+        hook_state.reindex_progress.insert(id.clone(), running);
+    })
+    .await;
+
+    assert!(
+        state.registry.get(&IndexId::new("a".to_string())).is_some(),
+        "'a' must still be resident — the park had to abort when the reindex \
+         started mid-park (#6957)"
+    );
+    assert!(
+        !state.cold_store.contains(&IndexId::new("a".to_string())),
+        "the aborted park must roll its own cold-store insertion back — 'a' in \
+         both stores would let a later loader reap the entry from under it (#6957)"
+    );
+    assert!(
+        state.registry.get(&IndexId::new("b".to_string())).is_some(),
+        "sanity: 'b' was inside the cap and was never a park candidate"
+    );
+    clear_env();
+}

@@ -43,6 +43,12 @@ pub use residency::{
 };
 pub use store::{select_warmboot_entries, ColdIndexStore};
 
+// #6957: the residency-sweep ticker parks through the hook-taking inner form so
+// the sweep-level regression test can force the reindex-arrives-mid-park
+// interleaving deterministically. Crate-internal on purpose — `cold_park_index`
+// stays the public entry point.
+pub(crate) use residency::cold_park_index_inner;
+
 #[cfg(test)]
 mod tests {
     use super::*;

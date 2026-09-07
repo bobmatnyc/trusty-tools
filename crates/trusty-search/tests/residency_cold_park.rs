@@ -162,7 +162,7 @@ async fn cold_park_then_reload_returns_identical_search_results() {
     let redb_size_before = std::fs::metadata(&redb_path).unwrap().len();
 
     // Park.
-    let parked = cold_park_index(&id, &registry, &cold, entry.clone()).await;
+    let parked = cold_park_index(&id, &registry, &cold, entry.clone(), || false).await;
     assert!(parked, "a resident index must be parkable");
     assert!(
         registry.get(&id).is_none(),
@@ -232,7 +232,7 @@ async fn park_reload_park_cycle_is_lossless() {
     registry.register(handle);
 
     // First park → reload.
-    assert!(cold_park_index(&id, &registry, &cold, entry.clone()).await);
+    assert!(cold_park_index(&id, &registry, &cold, entry.clone(), || false).await);
     let reloaded_1 =
         reload_via_cold_path(&id, &registry, &cold, entry.clone(), Arc::clone(&embedder)).await;
     let results_1 = search_signature(&reloaded_1, "gamma_function").await;
@@ -248,7 +248,7 @@ async fn park_reload_park_cycle_is_lossless() {
     // Second park (on the freshly-reloaded handle) → reload again.
     let redb_path = corpus_redb_path_for_entry(&entry).unwrap();
     let size_before_second_park = std::fs::metadata(&redb_path).unwrap().len();
-    assert!(cold_park_index(&id, &registry, &cold, entry.clone()).await);
+    assert!(cold_park_index(&id, &registry, &cold, entry.clone(), || false).await);
     assert_eq!(
         std::fs::metadata(&redb_path).unwrap().len(),
         size_before_second_park,
@@ -321,7 +321,7 @@ async fn cold_park_persists_a_dirty_vector_store_before_detaching() {
     let id = IndexId::new(id_str.to_string());
     registry.register(handle);
 
-    let parked = cold_park_index(&id, &registry, &cold, entry.clone()).await;
+    let parked = cold_park_index(&id, &registry, &cold, entry.clone(), || false).await;
     assert!(parked, "a resident index with a saveable store must park");
 
     // The registry files and the corpus stay untouched — only the index's own
