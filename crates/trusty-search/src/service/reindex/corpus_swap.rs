@@ -10,7 +10,7 @@
 //! - `staging_corpus_path` — the one place the staging path is resolved (#3979).
 //! - `begin_staged_corpus_swap` — open a fresh staging store, seed it from the
 //!   live corpus for an incremental reindex (#839), always carry the
-//!   contributed graph overlay across (ADR-0009), or ADOPT an interrupted run's
+//!   contributed graph overlay and applied migration stamp across, or ADOPT an interrupted run's
 //!   staging store when resuming (#3979).
 //! - `commit_staged_corpus_swap` — rename staging → live on success, gated on
 //!   the `PromotionRelease` token so the resume checkpoint cannot be left in a
@@ -79,7 +79,9 @@ pub(super) fn staging_corpus_path(handle: &IndexHandle, index_id: &IndexId) -> O
 ///
 /// What: when the index has a durable corpus store, opens a fresh
 /// `index.redb.tmp`, seeds it from the live corpus (whole corpus when
-/// `!force`, contributed overlay always), and swaps it onto the indexer.
+/// `!force`, contributed overlay and applied migration stamp always), and
+/// swaps it onto the indexer. Force preserves the exact prior schema version;
+/// only the migration runner can advance it after applying a migration (#6985).
 /// Returns `Ok(Some(path))` on success; `Ok(None)` when staging is skipped
 /// (BM25-only / unresolvable temp path) or, on the force path, when staging
 /// could not be opened or seeded — direct-write-to-live performs no rename, so
@@ -98,7 +100,9 @@ pub(super) fn staging_corpus_path(handle: &IndexHandle, index_id: &IndexId) -> O
 /// `incremental_reindex_carryover_failure_aborts`,
 /// `super::resume_tests::interrupted_reindex_resumes_to_identical_index`, and
 /// `super::contrib_survival_tests` for the contributed-overlay carry on both
-/// the force and incremental paths.
+/// the force and incremental paths; `schema_tests::staging_preserves_exact_applied_schema_without_advancing_it`
+/// and `schema_tests::force_reindex_preserves_schema_and_vectors_after_reopen`
+/// cover the migration stamp through actual promotion and cold reopen.
 pub(super) async fn begin_staged_corpus_swap(
     handle: &IndexHandle,
     index_id: &IndexId,
@@ -108,6 +112,29 @@ pub(super) async fn begin_staged_corpus_swap(
     // time, when the rename requires every handle released.
     resume: Option<ResumeState>,
     checkpoint: Option<&ReindexCheckpoint>,
+) -> Result<Option<PathBuf>, anyhow::Error> {
+    begin_staged_corpus_swap_with_schema_reader(
+        handle,
+        index_id,
+        force,
+        resume,
+        checkpoint,
+        crate::core::corpus::CorpusStore::read_schema_version_sync,
+    )
+    .await
+}
+
+/// Share the real staging path with per-call metadata read failure coverage.
+/// Why: a failed read must leave the live store installed, without global
+/// failpoints or constructing a corpus that violates redb's table invariants.
+/// Test: `schema_tests::failed_schema_read_does_not_promote_force_staging`.
+async fn begin_staged_corpus_swap_with_schema_reader(
+    handle: &IndexHandle,
+    index_id: &IndexId,
+    force: bool,
+    resume: Option<ResumeState>,
+    checkpoint: Option<&ReindexCheckpoint>,
+    read_schema: impl FnOnce(&crate::core::corpus::CorpusStore) -> anyhow::Result<u32> + Send + 'static,
 ) -> Result<Option<PathBuf>, anyhow::Error> {
     // #3979: adopt the already-validated staging corpus rather than deleting it.
     if let Some(state) = resume {
@@ -156,6 +183,21 @@ pub(super) async fn begin_staged_corpus_swap(
                          — aborting incremental reindex to preserve live corpus integrity"
                     )
                 })?;
+            } else {
+                // #6985: force rebuilds derived rows, but promotion must retain
+                // which migrations already ran. Copy only the applied stamp;
+                // using CURRENT_SCHEMA_VERSION would skip pending migrations.
+                // An absent/unversioned stamp remains absent in fresh staging.
+                let version = read_schema(&live).with_context(|| {
+                    format!("reindex[{index_id_str}]: read live migration stamp for force staging")
+                })?;
+                if version != 0 {
+                    store.write_schema_version_sync(version).with_context(|| {
+                        format!(
+                            "reindex[{index_id_str}]: preserve migration stamp in force staging"
+                        )
+                    })?;
+                }
             }
             // See PR #5527. ADR-0009: the promotion is a rename, so a contribution absent
             // from staging is destroyed by it — and nothing regenerates
@@ -735,3 +777,7 @@ pub(super) async fn abort_staged_corpus_swap(
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "corpus_swap_schema_tests.rs"]
+mod schema_tests;
