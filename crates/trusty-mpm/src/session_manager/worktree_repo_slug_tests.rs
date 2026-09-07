@@ -156,10 +156,11 @@ fn a_directory_with_no_origin_falls_back_to_its_owning_checkout() {
             wt.to_str().expect("utf8 worktree path"),
         ],
     );
-    // A worktree-local override with no value is how git spells "this worktree
-    // has no origin" without disturbing the shared config.
+    // A worktree-scoped override with an EMPTY value is how this fixture spells
+    // "this worktree carries no origin of its own" without disturbing the
+    // shared config the owning checkout reads.
     git_ok(&wt, &["config", "extensions.worktreeConfig", "true"]);
-    git_ok(&wt, &["config", "--worktree", "--unset-all", "remote.origin.url"]);
+    git_ok(&wt, &["config", "--worktree", "remote.origin.url", ""]);
     assert!(
         origin_url(&wt).is_none(),
         "fixture must leave the worktree without an origin"
@@ -177,7 +178,10 @@ fn a_non_repository_directory_resolves_to_no_repository() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let reason = repo_slug_for(tmp.path()).expect_err("a non-repository must refuse");
     assert!(reason.contains("cannot be established"), "{reason}");
-    assert!(reason.contains(&tmp.path().display().to_string()), "{reason}");
+    assert!(
+        reason.contains(&tmp.path().display().to_string()),
+        "{reason}"
+    );
 }
 
 /// A repository whose `origin` is a local clone path refuses, and says what it
@@ -189,4 +193,83 @@ fn an_unparseable_origin_refuses_and_quotes_the_url() {
     let reason = repo_slug_for(&repo).expect_err("a local-path origin must refuse");
     assert!(reason.contains("names no GitHub"), "{reason}");
     assert!(reason.contains("/tmp/fixtures/remote.git"), "{reason}");
+}
+
+// ---------------------------------------------------------------------------
+// The argv the resolved slug produces (#7057)
+// ---------------------------------------------------------------------------
+
+/// The `--repo` value in a rendered `gh` argv, or `None` when the flag is
+/// absent — which is what `origin/main` produces for every call.
+fn repo_flag(cmd: &Command) -> Option<String> {
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let at = args.iter().position(|a| a == "--repo")?;
+    args.get(at + 1).cloned()
+}
+
+/// 🔴 #7057: two worktrees, two origins, ONE run — and the argv `gh` is handed
+/// names a different repository for each.
+///
+/// Why an argv test and not a behaviour test: a lookup aimed at the wrong
+/// repository answers "no pull request" exactly as a correct lookup against a
+/// branch with no pull request does, so behaviour cannot tell them apart. Only
+/// the argv can. Fails on `origin/main`, where no call names a repository.
+#[test]
+fn two_worktrees_with_different_origins_produce_different_repo_flags() {
+    use crate::core::gh_identity::GhEnv;
+    use crate::session_manager::worktree_reclaim_gh::gh_pr_list_command;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let a = checkout_with_origin(
+        tmp.path(),
+        "adaptive-crm",
+        "https://github.com/1m-consulting/adaptive-crm.git",
+    );
+    let b = checkout_with_origin(
+        tmp.path(),
+        "hotstats-product-poc",
+        "git@github.com:hotstats/hotstats-product-poc.git",
+    );
+    let env = GhEnv::default();
+    let cmd_a = gh_pr_list_command(&a, &env, &repo_slug_for(&a).expect("a resolves"));
+    let cmd_b = gh_pr_list_command(&b, &env, &repo_slug_for(&b).expect("b resolves"));
+    assert_eq!(
+        repo_flag(&cmd_a).as_deref(),
+        Some("1m-consulting/adaptive-crm")
+    );
+    assert_eq!(
+        repo_flag(&cmd_b).as_deref(),
+        Some("hotstats/hotstats-product-poc")
+    );
+    assert_ne!(
+        repo_flag(&cmd_a),
+        repo_flag(&cmd_b),
+        "one run must not aim both worktrees at one repository — that IS the bug"
+    );
+}
+
+/// `--repo` belongs to `pr list`, so it has to follow the subcommand; `gh` has
+/// no such flag on its root command.
+#[test]
+fn gh_pr_list_command_names_the_repository_before_its_filters() {
+    use crate::core::gh_identity::GhEnv;
+    use crate::session_manager::worktree_reclaim_gh::gh_pr_list_command;
+
+    let cmd = gh_pr_list_command(
+        Path::new("/tmp"),
+        &GhEnv::default(),
+        "1m-consulting/adaptive-crm",
+    );
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        args,
+        vec!["pr", "list", "--repo", "1m-consulting/adaptive-crm"],
+        "callers append their own filters after this prefix"
+    );
 }

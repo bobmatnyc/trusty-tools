@@ -499,6 +499,29 @@ mod tests {
         assert!(reason.contains("feat/thing"), "{reason}");
     }
 
+    /// 🔴 #7057: the refusal names the repository it searched.
+    ///
+    /// Why: "no merged pull request" is also what a lookup aimed at the WRONG
+    /// repository says. A prune run for `1m-consulting/adaptive-crm` whose `gh`
+    /// answered for `hotstats/hotstats-product-poc` produced exactly this deny
+    /// for branches whose pull requests had merged, and nothing in the message
+    /// could have shown that. Fails on `origin/main`, where the deny names only
+    /// the branch.
+    #[test]
+    fn deny_names_the_repository_the_merged_pr_lookup_searched() {
+        let probe = FakeProbe {
+            merged: Ok(lookup(0)),
+            ..FakeProbe::reclaimable()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("an unmerged branch must deny removal");
+        assert!(
+            reason.contains(FAKE_REPO),
+            "the deny must name the repository searched: {reason}"
+        );
+        assert!(reason.contains("origin"), "{reason}");
+    }
+
     #[test]
     fn denies_worktree_remove_from_version_control_when_another_agent_holds_lock() {
         let owners = vec!["rust-engineer".to_string()];
