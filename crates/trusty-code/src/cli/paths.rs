@@ -21,6 +21,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use trusty_code::agents::deploy::{ManifestStatus, roster_manifest_status};
 use trusty_code::paths::{self, EntryKind, private_state};
 
 /// The entries `tcode paths show` reports, in display order.
@@ -41,15 +42,20 @@ const REPORTED: &[(&str, &str, EntryKind)] = &[
 ///
 /// Why: the diagnostic #5426 asks for — "report the winning source and target".
 /// What: one line per [`REPORTED`] entry as `<label>  <source>  <path>`, then
-/// the write root and the private state directory with its privacy status. With
-/// `json`, the same facts as one object on stdout so a script can assert on
-/// them. Unreadable candidates that were skipped are listed too — they already
-/// warned to stderr, and a diagnostic that hid them would be the wrong tool for
-/// the job it exists to do.
-/// Test: `tests/cli_e2e.rs::paths_show_reports_the_winning_source`.
+/// the deployed-roster manifest's state (#2074), the write root, and the private
+/// state directory with its privacy status. With `json`, the same facts as one
+/// object on stdout so a script can assert on them. Unreadable candidates that
+/// were skipped are listed too — they already warned to stderr, and a diagnostic
+/// that hid them would be the wrong tool for the job it exists to do.
+/// Test: `tests/cli_e2e.rs::paths_show_reports_the_winning_source`,
+/// `tests/roster_deploy_e2e.rs::paths_show_reports_the_roster_manifest`.
 pub fn show(project_root: &Path, json: bool) -> Result<()> {
     let state_dir = private_state::private_state_dir();
     let private_ok = private_state::is_restrictive(&state_dir).ok();
+    // #2074: the deployed roster's ledger — absent, present with a count, or
+    // corrupt. An operator debugging a stale or hand-edited agent asks this
+    // immediately after "which root wins?".
+    let (manifest_path, manifest_status) = roster_manifest_status(project_root);
 
     if json {
         let entries: serde_json::Map<String, serde_json::Value> = REPORTED
@@ -76,6 +82,18 @@ pub fn show(project_root: &Path, json: bool) -> Result<()> {
             "private_state_dir": state_dir.display().to_string(),
             "private_state_restrictive": private_ok,
             "entries": entries,
+            "roster_manifest": {
+                "path": manifest_path.display().to_string(),
+                "status": manifest_status.as_str(),
+                "managed": match &manifest_status {
+                    ManifestStatus::Present { managed } => Some(*managed),
+                    _ => None,
+                },
+                "detail": match &manifest_status {
+                    ManifestStatus::Corrupt { detail } => Some(detail.clone()),
+                    _ => None,
+                },
+            },
         });
         println!("{}", serde_json::to_string_pretty(&doc)?);
         return Ok(());
@@ -93,6 +111,25 @@ pub fn show(project_root: &Path, json: bool) -> Result<()> {
         for skipped in &r.unreadable {
             println!("{:<10} {:<12} {}", "", "unreadable", skipped.display());
         }
+    }
+    println!();
+    println!(
+        "roster manifest   {:<12} {}",
+        manifest_status.as_str(),
+        manifest_path.display()
+    );
+    match &manifest_status {
+        ManifestStatus::Absent => println!(
+            "{:<18}no roster deployed here yet — one lands on the next run",
+            ""
+        ),
+        ManifestStatus::Present { managed } => {
+            println!("{:<18}{managed} deployed agent file(s) tracked", "")
+        }
+        ManifestStatus::Corrupt { detail } => println!(
+            "{:<18}UNREADABLE — repair or delete it; deploys refuse until then ({detail})",
+            ""
+        ),
     }
     println!();
     println!("private state     {}", state_dir.display());

@@ -150,6 +150,9 @@ pub struct StdioSession {
     child: Child,
     stdin: ChildStdin,
     lines: Lines<BufReader<ChildStdout>>,
+    /// Kept alive so a session that owns its project root (see [`Self::spawn`])
+    /// removes that root on drop. `None` when the caller supplied the root.
+    _project: Option<tempfile::TempDir>,
 }
 
 impl StdioSession {
@@ -157,12 +160,21 @@ impl StdioSession {
     ///
     /// Why: `env!("CARGO_BIN_EXE_tcode")` resolves to the freshly-built
     /// binary for this exact test run — no separate install step needed.
-    /// What: `--project .` (any existing directory works; `session.*` does
-    /// not require a `.claude/` root), stdin/stdout piped, stderr discarded
-    /// (logs aren't asserted on here), `kill_on_drop` so a panicking test
-    /// still reaps the child instead of leaking a process.
+    /// What: a throwaway tempdir as `--project` (any existing directory works;
+    /// `session.*` does not require a configuration root), stdin/stdout piped,
+    /// stderr discarded (logs aren't asserted on here), `kill_on_drop` so a
+    /// panicking test still reaps the child instead of leaking a process. The
+    /// tempdir is owned by the returned session and removed with it.
+    ///
+    /// #2074: this used to pass `--project .`, which is the CRATE directory
+    /// when a test binary runs. `tcode serve` now materializes the agent roster
+    /// into its project's `.trusty-code/agents/`, so `.` wrote 33 agent files
+    /// and a manifest into the repository on every run.
     pub fn spawn() -> Self {
-        Self::spawn_inner(Some(std::path::Path::new(".")), None, None, &[], &[])
+        let project = tempfile::tempdir().expect("throwaway project root");
+        let mut session = Self::spawn_inner(Some(project.path()), None, None, &[], &[]);
+        session._project = Some(project);
+        session
     }
 
     /// Spawn `tcode serve --stdio` rooted at `project`, with
@@ -304,6 +316,7 @@ impl StdioSession {
             child,
             stdin,
             lines,
+            _project: None,
         }
     }
 
@@ -401,6 +414,10 @@ pub struct HttpDaemon {
     /// The daemon's own isolated data directory. Held so it outlives the
     /// daemon; dropping it removes the tree.
     pub data_dir: tempfile::TempDir,
+    /// Kept alive so a daemon that owns its project root (see
+    /// [`spawn_http_daemon`]) removes that root on drop. `None` when the caller
+    /// supplied the root.
+    _project: Option<tempfile::TempDir>,
 }
 
 /// Spawn `tcode serve --http --port 0` and discover its ephemeral bound
@@ -409,11 +426,19 @@ pub struct HttpDaemon {
 /// Why: `--port 0` avoids test-suite port collisions; the daemon logs the
 /// real bound `host:port` to stderr (never stdout) on startup, which this
 /// helper parses.
-/// What: thin wrapper over [`spawn_http_daemon_with_env`] rooted at `.`
-/// with no extra env vars — the shape every pre-#2062 caller
-/// (`tests/session_e2e.rs`) needs.
+/// What: thin wrapper over [`spawn_http_daemon_with_env`] rooted at a throwaway
+/// tempdir the returned daemon owns, with no extra env vars — the shape every
+/// pre-#2062 caller (`tests/session_e2e.rs`) needs.
+///
+/// #2074: this used to root at `.`, which is the CRATE directory when a test
+/// binary runs. `tcode serve` now materializes the agent roster into its
+/// project's `.trusty-code/agents/`, so `.` wrote 33 agent files and a manifest
+/// into the repository on every run.
 pub async fn spawn_http_daemon() -> HttpDaemon {
-    spawn_http_daemon_with_env(std::path::Path::new("."), &[]).await
+    let project = tempfile::tempdir().expect("throwaway project root");
+    let mut daemon = spawn_http_daemon_with_env(project.path(), &[]).await;
+    daemon._project = Some(project);
+    daemon
 }
 
 /// Spawn `tcode serve --http --port 0` rooted at `project`, with `envs` set
@@ -509,6 +534,7 @@ pub async fn spawn_http_daemon_with_env(
         base_url,
         token,
         data_dir,
+        _project: None,
     }
 }
 

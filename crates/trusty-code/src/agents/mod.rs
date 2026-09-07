@@ -31,6 +31,10 @@
 //! [`discover_agents`]: crate::agents::discover_agents
 
 pub mod config;
+// #2074: materialize the embedded roster to `<project>/.trusty-code/agents/`
+// with a manifest and recorded provenance, reusing trusty-agents-common's
+// deployer unchanged.
+pub mod deploy;
 pub mod md_loader;
 pub mod protocol;
 

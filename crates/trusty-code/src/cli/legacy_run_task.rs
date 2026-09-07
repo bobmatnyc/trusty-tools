@@ -93,6 +93,10 @@ pub async fn run(
         }
     };
 
+    // #2074: same materialization the daemon path runs in `serve::build_router`,
+    // so the in-process legacy path does not silently skip provenance.
+    trusty_code::agents::deploy::deploy_and_log(Some(&project_root));
+
     let agents_dir = trusty_code::agents::locate_agents_dir(&project_root);
 
     // Engineer-model override (#1035): CLI flag wins, then the env var; an empty
