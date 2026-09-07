@@ -29,6 +29,7 @@
 //! | [`cve`] | scanning the pinned dependency set for advisories (#6075) |
 //! | [`license`] | banding that same set by license obligation (#6076) |
 //! | [`churn`] | reading the checkout's own git history for change hotspots (#6079) |
+//! | [`citations`] | checking each finding's cited path and symbol while the checkout is still there (#6791) |
 //! | [`priority`] | writing that ranking, and the gaps, into the manifest |
 //!
 //! ## Fail-open, and never silently
@@ -59,6 +60,9 @@ use crate::tools::RequiredTool;
 use crate::workdir::WorkDir;
 
 pub mod churn;
+// #6791: the citation check, which must run here because here is where the
+// checkout still exists.
+pub mod citations;
 pub mod conflict;
 pub mod coverage_rollup;
 pub mod cve;
@@ -523,6 +527,13 @@ pub async fn ground_manifest(
     // they also feed the ranking. Only the write-back belongs here, on the same
     // `[report].findings` channel and the same gap list as the three legs above.
     manifest_leg_gaps.extend(churn::write_into(manifest, &grounding.churn, display));
+    // #6791: LAST of the manifest legs, and the only one whose value comes from
+    // WHEN it runs rather than from what it reads. The findings it checks were
+    // written by the `trusty-review report` that ran inside the `tga audit`
+    // child, and the checkout it checks them against is deleted once the sweep
+    // moves on — so a verdict this call does not record is a verdict no later
+    // render of the delivered bundle can produce.
+    manifest_leg_gaps.extend(citations::ground_into(manifest, checkout, display));
     // #6082: read BEFORE the write, which is what would otherwise make the two
     // states indistinguishable afterwards.
     let already_rendered = investigation_exists(manifest);
@@ -568,10 +579,11 @@ pub async fn ground_manifest(
 
 /// Name of the snapshot trusty-review writes beside a manifest it investigated.
 ///
-/// Spelled here rather than shared because it is read as EVIDENCE THAT A RENDER
-/// ALREADY HAPPENED, never as an interface — trusty-review owns the file and
-/// this only looks for it. Producer: `trusty_review::report::investigate`.
-const INVESTIGATION_SNAPSHOT: &str = "investigation.json";
+/// [`investigation_exists`] reads it as EVIDENCE THAT A RENDER ALREADY HAPPENED
+/// and looks no further; [`citations`] reads the findings out of it, so it is an
+/// interface to that caller (#6791). Producer:
+/// `trusty_review::report::investigate`.
+pub(crate) const INVESTIGATION_SNAPSHOT: &str = "investigation.json";
 
 /// True when a render has already investigated this manifest.
 ///
