@@ -120,7 +120,7 @@ trusty-common = { workspace = true, features = ["axum-server", "embedder", "embe
 # also states `default-features` explicitly AND agrees with the override —
 # in practice that means `workspace = true` cannot be used to turn a
 # dependency's default features off from just one consuming crate. Without
-# `default-features = false` + explicit `http-server` here, trusty-embedderd's
+# `default-features = false` + explicit `daemon` here, trusty-embedderd's
 # own default features (which include `bundled-ort`) stayed on regardless of
 # what was passed to `cargo build -p trusty-search`, so
 # `--no-default-features --features load-dynamic` silently still linked the
@@ -128,7 +128,7 @@ trusty-common = { workspace = true, features = ["axum-server", "embedder", "embe
 # The `bundled-ort`/`load-dynamic`/`cuda` features below forward this crate's
 # own ORT-mode selection down to `trusty-embedderd/*` explicitly.
 trusty-embedderd = { path = "../trusty-embedderd", version = "0.3.10", default-features = false, features = [
-    "http-server",
+    "daemon",
 ] }
 # Opt-in Python/MPS embedding sidecar launcher (epic #3524, slices 2-4). Pulls
 # in NO torch/ORT — it is a lightweight uv/venv bootstrapper + launcher used

@@ -392,19 +392,17 @@ async fn build_embedder_raw() -> Result<(
             Ok((embedder, None, BackendKind::InProcess, false))
         }
 
-        // ── HTTP remote (manually managed embedderd) ───────────────────────
-        addr if addr.starts_with("http://") || addr.starts_with("https://") => {
-            tracing::info!("embedder mode: remote http ({})", addr);
-            let client = trusty_common::embedder_client::RemoteEmbedderClient::new(addr.to_owned());
-            Ok((
-                Arc::new(RemoteEmbedderAdapter {
-                    client: EmbedderClientKind::Http(client),
-                }),
-                None,
-                BackendKind::Remote,
-                false,
-            ))
-        }
+        // ── HTTP remote — retired (#6289, ADR-0032) ────────────────────────
+        //
+        // Refused rather than ignored: silently falling through to the
+        // auto-spawn default would leave an operator believing their manually
+        // managed daemon is in the loop when it is not.
+        addr if addr.starts_with("http://") || addr.starts_with("https://") => anyhow::bail!(
+            "TRUSTY_EMBEDDER={addr:?} is no longer supported: trusty-embedderd retired its \
+             HTTP listener under ADR-0032 (#6289 — no trusty-* service owns HTTP). Run the \
+             daemon with `--socket <path>` and set \
+             TRUSTY_EMBEDDER=unix:/path/to/trusty-embedderd.sock instead."
+        ),
 
         // ── UDS remote (manually managed embedderd) ────────────────────────
         path if path.starts_with("unix:") => {
@@ -424,7 +422,7 @@ async fn build_embedder_raw() -> Result<(
              Expected: unset or 'auto' (default: graceful hot-swap to the Python/MPS \
              sidecar on Apple Silicon, plain ort sidecar elsewhere), 'stdio' (forces \
              the plain ort sidecar permanently), 'python' (opt-in Python/MPS sidecar), \
-             'in-process', 'http://...', or 'unix:/path/to/socket'"
+             'in-process', or 'unix:/path/to/socket'"
         ),
     }
 }
@@ -695,75 +693,6 @@ async fn build_in_process_embedder() -> Result<Arc<dyn crate::core::Embedder>> {
     Ok(Arc::new(embedder))
 }
 
-/// Internal enum for the HTTP remote adapter to hold either HTTP or UDS client.
-///
-/// Why: avoids duplicating the `RemoteEmbedderAdapter` struct for the two HTTP
-/// variants — both share identical adapter logic and differ only in the
-/// concrete `EmbedderClient` impl they hold.
-/// What: two variants, each wrapping the corresponding `trusty_common`
-/// client type.
-/// Test: exercised via `TRUSTY_EMBEDDER=http://...` (Http variant) startup.
-enum EmbedderClientKind {
-    Http(trusty_common::embedder_client::RemoteEmbedderClient),
-}
-
-/// Adapter that implements trusty-search's `Embedder` trait by delegating to
-/// a `RemoteEmbedderClient` (HTTP) (issue #110 Phase 1 / Phase 2).
-///
-/// Why: trusty-search's internal `Embedder` trait uses `&[&str]` slices;
-/// `EmbedderClient` uses `Vec<String>`. This adapter bridges the two without
-/// modifying either side.
-/// What: holds an `EmbedderClientKind` and impls the local `Embedder`
-/// facade that `CodeIndexer` and `EmbedPool` hold behind `Arc<dyn Embedder>`.
-/// Test: exercised end-to-end when `TRUSTY_EMBEDDER=http://...` is set at
-/// daemon startup; the `bit_identical` integration test validates correctness.
-struct RemoteEmbedderAdapter {
-    client: EmbedderClientKind,
-}
-
-#[async_trait::async_trait]
-impl crate::core::Embedder for RemoteEmbedderAdapter {
-    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
-        use trusty_common::embedder_client::EmbedderClient as _;
-        let mut v = match &self.client {
-            EmbedderClientKind::Http(c) => c
-                .embed_batch(vec![text.to_string()])
-                .await
-                .map_err(|e| anyhow::anyhow!("remote embed failed: {e}"))?,
-        };
-        v.pop()
-            .ok_or_else(|| anyhow::anyhow!("remote embedder returned no vector"))
-    }
-
-    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
-        use trusty_common::embedder_client::EmbedderClient as _;
-        let owned: Vec<String> = texts.iter().map(|s| (*s).to_owned()).collect();
-        match &self.client {
-            EmbedderClientKind::Http(c) => c
-                .embed_batch(owned)
-                .await
-                .map_err(|e| anyhow::anyhow!("remote embed_batch failed: {e}")),
-        }
-    }
-
-    fn dimension(&self) -> usize {
-        trusty_common::embedder::EMBED_DIM
-    }
-
-    /// Report the execution provider the remote `trusty-embedderd` resolves.
-    ///
-    /// Why: issue #604. The remote sidecar selects its EP through this crate's
-    /// `init_options`, which is a pure function of build features + env, so the
-    /// parent can predict the same answer and `/health` reports the real
-    /// provider instead of the trait-default `CPU`.
-    /// What: delegates to `trusty_common::embedder::resolve_expected_provider`.
-    /// Test: covered by trusty-common's `resolve_expected_provider_*` tests;
-    /// real-GPU end-to-end is hardware-gated.
-    fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
-        trusty_common::embedder::resolve_expected_provider()
-    }
-}
-
 /// Adapter that implements trusty-search's `Embedder` trait by delegating to
 /// a `UdsEmbedderClient` (issue #110 Phase 2).
 ///
@@ -807,9 +736,10 @@ impl crate::core::Embedder for UdsEmbedderAdapter {
 
     /// Report the execution provider the UDS-remote `trusty-embedderd` resolves.
     ///
-    /// Why: issue #604 — see `RemoteEmbedderAdapter::provider`. The UDS sidecar
-    /// runs the same `init_options` resolution, so the parent predicts the same
-    /// provider for `/health`.
+    /// Why: issue #604. The remote sidecar selects its execution provider
+    /// through this crate's `init_options`, which is a pure function of build
+    /// features + env, so the parent predicts the same answer and `/health`
+    /// reports the real provider instead of the trait-default `CPU`.
     /// What: delegates to `trusty_common::embedder::resolve_expected_provider`.
     /// Test: covered by trusty-common's `resolve_expected_provider_*` tests.
     fn provider(&self) -> trusty_common::embedder::ExecutionProvider {

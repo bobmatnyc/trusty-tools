@@ -27,7 +27,7 @@ Configured via environment variables:
 ## Integration Points
 
 - **trusty-search**: Calls `/embed` RPC endpoint
-- **HTTP API**: `POST /embed` for direct requests (used in testing)
+- **UDS API** (`--socket <path>`): newline-framed JSON-RPC 2.0 over a `0600` Unix socket, for a manually managed daemon. The former `POST /embed` HTTP API was retired in #6289 under ADR-0032
 - **Health checks**: `GET /health` endpoint
 
 ## See Also

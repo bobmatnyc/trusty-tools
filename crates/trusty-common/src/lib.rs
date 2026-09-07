@@ -396,18 +396,19 @@ pub mod embedder;
 /// Why: absorbs both the former `trusty-embedder-client` HTTP crate (PR #163)
 /// and the former `embed_client` UDS module (PR #157) into a single unified
 /// module. Reduces workspace crate count and provides one trait (`EmbedderClient`)
-/// with three concrete implementations (InProcess, HTTP remote, UDS remote) so
+/// with three concrete implementations (InProcess, UDS remote, stdio sidecar) so
 /// call sites are identical regardless of transport. The `embed-client` feature
 /// and `embed_client` module are retired by issue #164; use `embedder-client`
-/// and `trusty_common::embedder_client::UdsEmbedderClient` instead.
+/// and `trusty_common::embedder_client::UdsEmbedderClient` instead. The HTTP
+/// implementation went with `trusty-embedderd --http` in #6289 (ADR-0032).
 /// What: Gated behind the `embedder-client` feature. Exposes the
-/// `EmbedderClient` trait, `InProcessEmbedderClient`, `RemoteEmbedderClient`
-/// (HTTP), `UdsEmbedderClient` (UDS), `EmbedRequest` / `EmbedResponse` wire
-/// types, and `EmbedderError`. The UDS impl uses `tokio::net::UnixStream`
-/// with newline-framed JSON-RPC 2.0 — no additional dependencies.
+/// `EmbedderClient` trait, `InProcessEmbedderClient`, `UdsEmbedderClient`,
+/// `StdioEmbedderClient`, `EmbedRequest` / `EmbedResponse` wire types, and
+/// `EmbedderError`. The UDS impl uses `tokio::net::UnixStream` with
+/// newline-framed JSON-RPC 2.0 — no additional dependencies.
 /// Test: `cargo test -p trusty-common --features embedder-client` covers
-/// error-display, JSON round-trip, URL assembly, UDS wire types, and empty-
-/// batch short-circuits. ONNX-backed tests are in
+/// error-display, JSON round-trip, UDS wire types, and empty-batch
+/// short-circuits. ONNX-backed tests are in
 /// `trusty-embedderd/tests/bit_identical.rs` (`#[ignore]`).
 #[cfg(feature = "embedder-client")]
 pub mod embedder_client;

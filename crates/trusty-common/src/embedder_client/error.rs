@@ -14,19 +14,21 @@
 /// Why: distinct variants allow callers to decide whether to retry (transport
 /// errors), report a bug (dimension mismatch), or surface a model issue.
 ///
-/// What: covers the main failure modes across the in-process, HTTP remote,
-/// and UDS remote paths.
+/// What: covers the main failure modes across the in-process, UDS remote, and
+/// stdio sidecar paths.
+///
+/// #6289: the `Transport(reqwest::Error)` and `RemoteError { status, body }`
+/// variants are gone with the HTTP client they belonged to — ADR-0032 retired
+/// `trusty-embedderd --http`. `#[non_exhaustive]` was added in the same change
+/// so the next variant is not another breaking one.
 ///
 /// Test: `error_display` below and the bit_identical integration test.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum EmbedderError {
     /// The ONNX model raised an error during embedding.
     #[error("embedder model error: {0}")]
     ModelError(String),
-
-    /// An HTTP transport error occurred while communicating with trusty-embedderd.
-    #[error("embedder transport error: {0}")]
-    Transport(#[from] reqwest::Error),
 
     /// The remote server returned an unexpected number of vectors.
     ///
@@ -35,16 +37,12 @@ pub enum EmbedderError {
     #[error("embedder dimension mismatch: sent {sent} texts, got {got} vectors")]
     DimensionMismatch { sent: usize, got: usize },
 
-    /// The remote server returned an error response body.
-    #[error("embedder remote error (HTTP {status}): {body}")]
-    RemoteError { status: u16, body: String },
-
     /// A UDS transport error occurred while communicating with trusty-embedderd.
     ///
     /// Why: UDS failures (connect refused, broken pipe, decode error) are
-    /// distinct from HTTP transport errors — they carry a descriptive string
-    /// rather than a `reqwest::Error` because the UDS path uses `tokio::net`
-    /// directly without `reqwest`.
+    /// distinct from stdio ones — a socket that is absent or wrong-moded is a
+    /// deployment problem, not a crashed child. The string is the Display of
+    /// the underlying `UdsSecurityError`, which names the socket path.
     #[error("embedder UDS error: {0}")]
     Uds(String),
 
@@ -52,7 +50,7 @@ pub enum EmbedderError {
     /// `trusty-embedderd` process spawned with piped stdin/stdout.
     ///
     /// Why: stdio failures (broken pipe, EOF before response, decode error) are
-    /// distinct from UDS and HTTP errors — they indicate the sidecar process
+    /// distinct from UDS errors — they indicate the sidecar process
     /// has crashed or exited unexpectedly and the supervisor should respawn it.
     #[error("embedder stdio IPC error: {0}")]
     Stdio(String),
@@ -76,15 +74,6 @@ mod tests {
         let e = EmbedderError::DimensionMismatch { sent: 5, got: 3 };
         let s = e.to_string();
         assert!(s.contains("5") && s.contains("3"));
-    }
-
-    #[test]
-    fn error_display_remote_error() {
-        let e = EmbedderError::RemoteError {
-            status: 500,
-            body: "internal server error".to_string(),
-        };
-        assert!(e.to_string().contains("500"));
     }
 
     #[test]
