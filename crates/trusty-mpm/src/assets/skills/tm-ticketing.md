@@ -323,6 +323,7 @@ the label pass then and there:
 | PR opened for the fix | `tm issue transition N status:coded` |
 | Merge CONFIRMED (`gh pr view <n> --json state` reports `MERGED`) | `tm issue transition N status:merged` |
 | Live verification evidence in hand | `tm issue transition N status:tested` |
+| Live verification FAILED and a follow-up fix PR is open | `tm issue transition N status:coded` |
 | Claim released — session gone, nothing moved | `tm issue transition N open` |
 
 A confirmed merge with no label pass is an incomplete step, not a tidy-up for
@@ -336,8 +337,10 @@ verification evidence in the closing comment — what ran against the installed
 artifact and what it printed: `tm issue transition N closed --note "<evidence>"`.
 The model declares that edge only from `status:tested` and marks it
 `requires_note`, so a close without evidence is refused. A merged fix that fails
-live verification stays open at `status:merged`. A fix PR carries `Refs #N`, never `Closes #N`, so a
-merge cannot auto-close something nobody has verified.
+live verification stays open — at `status:merged` while nobody is working it, and
+back at `status:coded` once a follow-up fix PR is open (owner ruling 2026-09-07;
+the model declares `status:merged -> status:coded`). A fix PR carries `Refs #N`,
+never `Closes #N`, so a merge cannot auto-close something nobody has verified.
 
 **Comments along the way.** A progress comment at each meaningful transition —
 diagnosis confirmed, fix pushed, review verdict received, blocked — carrying

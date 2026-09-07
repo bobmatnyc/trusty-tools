@@ -357,6 +357,7 @@ event owes the label pass immediately.** Nothing sweeps for stale labels later.
 | PR opened for the fix | `tm issue transition N status:coded` |
 | Merge CONFIRMED — `gh pr view <n> --json state` reports `MERGED` | `tm issue transition N status:merged` |
 | Live verification evidence in hand | `tm issue transition N status:tested` |
+| Live verification FAILED and a follow-up fix PR is open | `tm issue transition N status:coded` |
 | Closing, with that evidence | `tm issue transition N closed --note "<evidence>"` |
 | Claim released — the session is gone and nothing moved | `tm issue transition N open` |
 
@@ -372,8 +373,9 @@ the advance happens then.
 the live verification evidence** — what was run against the installed artifact
 and what it printed. `tm issue transition N closed --note "<evidence>"` enforces
 both halves: the edge exists only from `status:tested`, and it refuses to run
-without the note. A merged fix that fails live verification stays open at
-`status:merged`.
+without the note. A merged fix that fails live verification stays open — at
+`status:merged` while nobody is working it, and back at `status:coded` once a
+follow-up fix PR is open (owner ruling 2026-09-07).
 
 🔴 **A fix PR references `Refs #N`, never `Closes #N`.** A merge must not
 auto-close an issue that has not been verified live. The PM relays this to

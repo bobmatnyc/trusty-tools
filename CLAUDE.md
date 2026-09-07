@@ -209,6 +209,9 @@ Four mutually exclusive labels between GitHub's native open/closed:
   the closing comment: `tm issue transition N closed --note "<evidence>"`, which
   refuses to run without the note. A merged fix that fails live verification
   stays open.
+- A merged fix that fails live verification and draws a follow-up fix PR goes
+  back to `status:coded` — `tm issue transition N status:coded` (owner ruling
+  2026-09-07). The issue is being coded again, so `status:merged` is stale.
 
 🔴 **`.trusty-mpm/sessions/` is TRACKED** (owner ruling 2026-08-31) — session
 snapshots and the pause log are committed so other sessions and harnesses can
