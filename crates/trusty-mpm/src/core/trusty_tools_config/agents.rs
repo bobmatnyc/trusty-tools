@@ -58,14 +58,16 @@ pub const DEFAULT_ASSIGNEE: &str = "@me";
 /// Test: `closes_pr_link_keyword_is_rejected`, `refs_pr_link_keyword_is_accepted`.
 pub const REQUIRED_PR_LINK_KEYWORD: &str = "Refs";
 
-/// A commented starter `agents.ticketing` block, for `tm issue seed-config`
-/// to hand an operator (#7067).
+/// The commented starter `agents.ticketing` block `tm issue seed-config`
+/// writes into `config.yaml` (#7067).
 ///
 /// Why: the verb seeds `issue-state.yaml` — the lifecycle half of the standard.
-/// The other half lives in a different file the operator has to write by hand,
-/// and #7067 added three keys to it, so a seeded lifecycle with no pointer at
-/// the block leaves the milestone and project rules undiscoverable. This is
-/// that pointer, in copy-pasteable form.
+/// The other half lives in a different file, and #7067 added three keys to it,
+/// so a seeded lifecycle with no block leaves the milestone and project rules
+/// undiscoverable. `seed_ticketing_block` lands this text in that file in three
+/// of its four outcomes; only the refusal case — an `agents:` key already
+/// present without `ticketing:`, where a second top-level `agents:` would make
+/// the file unparseable — prints it for the operator to paste by hand.
 /// What: every key set to its built-in default, so pasting the block changes
 /// nothing until an entry is edited. `default_project` is commented out —
 /// there is no default title to state.

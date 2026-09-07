@@ -16,8 +16,8 @@ use clap::Subcommand;
 /// What: `SeedLabels` (idempotent create-missing), `Transition` (validated
 /// atomic state change), `Current` (read state from labels), `States` (list the
 /// model), `Standard` (print the effective ticketing standard, #6918),
-/// `SeedConfig` (write the default YAML to disk), `Repair` (resolve a
-/// multi-state issue).
+/// `SeedConfig` (write the default lifecycle YAML plus the `agents.ticketing`
+/// block, #7067), `Repair` (resolve a multi-state issue).
 /// Test: `cli_parses_issue_*` in `tests.rs`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum IssueCmd {
@@ -63,7 +63,7 @@ pub(crate) enum IssueCmd {
         #[arg(long)]
         config: Option<std::path::PathBuf>,
     },
-    /// Write the embedded default model to the user config path.
+    /// Write the default lifecycle model and the `agents.ticketing` block to the user config path.
     SeedConfig {
         /// Overwrite an existing user config file.
         #[arg(long)]

@@ -225,7 +225,7 @@ commands:
           - name: config
             description: Explicit path to an issue-state YAML (overrides discovery)
       seed-config:
-        description: Write the embedded default model to ~/.trusty-tools/trusty-mpm/issue-state.yaml
+        description: Write the default model to ~/.trusty-tools/trusty-mpm/issue-state.yaml and the agents.ticketing block to config.yaml
         flags:
           - name: force
             description: Overwrite an existing user config file
