@@ -462,6 +462,16 @@ and two generated files: a `README.md` explaining what is inside, and a
 `package.toml` naming which repositories were covered and at which tool
 versions. The last line of the output is the path to send.
 
+It also carries `errors/digest.json`: every failure and degradation the run
+recorded — a repository whose child exited non-zero, a dimension a repository
+could not assess, a board the sweep could not collect, a config key this version
+does not act on — each as one entry naming the stage, whether the run stopped or
+carried on, the repository it concerns, when it was recorded, and the message. A
+run with none still ships the file with an empty `entries` array, so an empty
+digest means the collector ran and found nothing. Every message is scrubbed of
+the engagement's credentials before it is written; send the file back and the
+auditor can fix what it names.
+
 **It is unencrypted and has no password, deliberately.** You can open it and
 read exactly what you are about to send, which is the same premise as the
 readable engagement config. Encrypting it would defend against nobody — you hold

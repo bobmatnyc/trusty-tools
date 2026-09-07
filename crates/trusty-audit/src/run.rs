@@ -765,6 +765,10 @@ async fn run_one(
         gaps,
         resumed: false,
         duration_ms: Some(millis(started.elapsed())),
+        // #6032: the clock the return package's error digest stamps this
+        // repository's entries with. Read here, at the one point that knows
+        // this repository is finished.
+        finished_at: Some(crate::index_report::local_now()),
         result,
     })
 }
@@ -1640,6 +1644,7 @@ exit 0
             gaps: Vec::new(),
             resumed: false,
             duration_ms: None,
+            finished_at: None,
             result: RepoResult::Succeeded,
         };
         let bad = RepoRun {

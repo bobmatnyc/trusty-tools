@@ -105,6 +105,11 @@ mod credential_scan;
 // the result.
 mod generated;
 
+// #6032: the run's failures and degradations, flattened into one machine-readable
+// member. Its own file for the same reason the two above are — this file decides
+// what goes into the archive; that one decides what the digest says.
+mod error_digest;
+
 use generated::{
     Generated, exclusions, render_failures, render_index, render_metadata, render_readme,
 };
@@ -142,6 +147,18 @@ pub const DEBT_ENTRY: &str = "reports/report.json";
 
 /// Directory inside the zip holding the tga extract databases (#5479).
 pub const EXTRACT_PREFIX: &str = "extract";
+
+/// The generated member carrying every failure the run recorded (#6032).
+///
+/// Why: the owner's directive is that the errors travel back with the package
+/// so the auditor can fix them. They were spread across `package.toml`,
+/// `failures/index.md` and the reports' own Gaps & Caveats, in three different
+/// shapes, and no reader could take them as a set. Written UNCONDITIONALLY,
+/// empty array and all — see [`error_digest`]'s module docs for why that
+/// differs from [`FAILURES_ENTRY`], which is absent on a clean sweep.
+/// Test: `super::package_tests::the_package_carries_an_error_digest_on_a_clean_run`,
+/// `super::package_tests::a_stage_failure_reaches_the_error_digest`.
+pub const DIGEST_ENTRY: &str = "errors/digest.json";
 
 /// Directory inside the zip holding the record of every repository that failed.
 ///
@@ -385,6 +402,13 @@ pub fn assemble(
         // #6245: `None` on a clean sweep — a `failures/` directory holding an
         // index that says "none" is worse than no directory.
         failures: render_failures(report, &collected),
+        // #6032: everything the run recorded as gone wrong, from the same
+        // `report` the members above render — so a gap in Gaps & Caveats and
+        // its digest entry are one string, not two derivations of it. Takes
+        // `unattempted` rather than the assembled `excluded`, because the
+        // digest keeps the sweep's own failures and the never-attempted targets
+        // as separate kinds where that list flattens them into prose.
+        digest: error_digest::render(report, config, unattempted, github_token)?,
     };
 
     write_archive(
@@ -693,6 +717,11 @@ fn fill_archive(
         (DEBT_ENTRY, Some(generated.debt)),
         // #6245: absent on a clean sweep — see `Generated::failures`.
         (FAILURES_ENTRY, generated.failures),
+        // #6032: written unconditionally, so an empty `entries` array is the
+        // positive signal that the collector ran. Its messages are already
+        // scrubbed; the refusal below is the second guard, for a secret too
+        // short for `scrub_secrets` to accept as a needle.
+        (DIGEST_ENTRY, Some(generated.digest)),
     ];
     for (entry, text) in members.into_iter().filter_map(|(e, t)| t.map(|t| (e, t))) {
         // #6245: this member quotes the reason strings recorded for each failed
@@ -883,6 +912,7 @@ trusty-review = "0.15.1"
             gaps: Vec::new(),
             resumed: false,
             duration_ms: None,
+            finished_at: None,
             result: RepoResult::Succeeded,
         }
     }
@@ -904,6 +934,7 @@ trusty-review = "0.15.1"
                 gaps: Vec::new(),
                 resumed: false,
                 duration_ms: None,
+                finished_at: None,
                 result: RepoResult::Succeeded,
             }
         }
@@ -962,6 +993,217 @@ trusty-review = "0.15.1"
         }
         assert!(package.total_bytes > 0);
         assert!(package.excluded.is_empty());
+    }
+
+    /// The digest document, parsed out of the finished zip.
+    fn digest(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&read_entry(path, DIGEST_ENTRY)).expect("the digest is JSON")
+    }
+
+    /// Every entry in the digest, as `(stage, kind, target, message)`.
+    fn digest_rows(path: &Path) -> Vec<(String, String, String, String)> {
+        digest(path)["entries"]
+            .as_array()
+            .expect("entries is an array")
+            .iter()
+            .map(|e| {
+                let field = |name: &str| e[name].as_str().unwrap_or_default().to_owned();
+                (
+                    field("stage"),
+                    field("kind"),
+                    field("target"),
+                    field("message"),
+                )
+            })
+            .collect()
+    }
+
+    /// 🔴 #6032: a run that recorded nothing still ships the digest, with an
+    /// empty `entries` array. That is what distinguishes "the collector ran and
+    /// found nothing" from "this client is too old to write one" — an absent
+    /// file cannot say either, and the recipient has no other way to tell.
+    ///
+    /// Against `978367887` this fails on the first assertion: `errors/` is not a
+    /// member of the archive at all.
+    #[test]
+    fn the_package_carries_an_error_digest_on_a_clean_run() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+
+        let package =
+            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+
+        assert!(
+            entries(&destination).contains(&DIGEST_ENTRY.to_owned()),
+            "{:?}",
+            entries(&destination)
+        );
+        assert!(
+            package.files.iter().any(|f| f.entry == DIGEST_ENTRY),
+            "the digest must be reported as a member: {:?}",
+            package.files
+        );
+        let parsed = digest(&destination);
+        assert_eq!(
+            parsed["entries"].as_array().map(Vec::len),
+            Some(0),
+            "an empty array is the positive claim; an absent file is not: {parsed}"
+        );
+        assert!(
+            parsed["generated_at"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "{parsed}"
+        );
+        // The recipient is told what they are sending back and why.
+        let readme = read_entry(&destination, README_ENTRY);
+        assert!(readme.contains(DIGEST_ENTRY), "{readme}");
+    }
+
+    /// 🔴 #6032: a repository whose `tga audit` child failed, and a dimension a
+    /// repository could not assess, both reach the digest — the failure as a
+    /// `failure`, the gap as a `degradation`, each naming its stage, its
+    /// repository, and when the sweep recorded it.
+    ///
+    /// The gap assertion is the issue's fourth closure condition: the string in
+    /// the digest is the SAME string the report's Gaps & Caveats carries,
+    /// because both render from this one `RepoRun::gaps` entry.
+    ///
+    /// Against `978367887` this fails on the digest's absence, exactly as the
+    /// clean-run test does.
+    #[test]
+    fn a_stage_failure_reaches_the_error_digest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let mut broken = failed(&work, "01-acme-web", "acme-web");
+        broken.finished_at = Some("2026-09-07 01:02:03 -04:00".to_owned());
+        let mut degraded = audited(&work, "00-acme-api", "acme-api");
+        degraded.gaps = vec!["acme-api: trusty-analyze did not answer".to_owned()];
+        let report = RunReport::of(vec![degraded, broken]);
+        let destination = default_destination(&work);
+
+        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+
+        let rows = digest_rows(&destination);
+        assert!(
+            rows.contains(&(
+                "repository".to_owned(),
+                "degradation".to_owned(),
+                "acme-api".to_owned(),
+                "acme-api: trusty-analyze did not answer".to_owned()
+            )),
+            "{rows:?}"
+        );
+        let failure = rows
+            .iter()
+            .find(|(_, kind, _, _)| kind == "failure")
+            .unwrap_or_else(|| panic!("{rows:?}"));
+        assert_eq!(failure.0, "repository", "{rows:?}");
+        assert_eq!(failure.2, "acme-web", "{rows:?}");
+        assert!(failure.3.contains("exited with code 3"), "{rows:?}");
+        let stamped = digest(&destination)["entries"]
+            .as_array()
+            .expect("entries is an array")
+            .iter()
+            .find(|e| e["kind"] == "failure")
+            .and_then(|e| e["at"].as_str().map(str::to_owned));
+        assert_eq!(
+            stamped.as_deref(),
+            Some("2026-09-07 01:02:03 -04:00"),
+            "the entry carries the repository's own clock, not the digest's"
+        );
+    }
+
+    /// 🔴 #6032: a message the digest carries and NO other member does — a board
+    /// gap — is scrubbed rather than refused. The digest exists to carry error
+    /// text back, so refusing the whole package because one message quoted the
+    /// key would leave the auditor with neither the package nor the digest.
+    ///
+    /// This does not soften the refusal for anything else: the key in a
+    /// repository's failure reason still refuses the assembly through
+    /// `failures/index.md`, which
+    /// `a_failure_record_carrying_a_credential_is_refused` holds.
+    #[test]
+    fn a_credential_in_a_digest_message_is_scrubbed_rather_than_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let key = config().openrouter_key.expose().to_owned();
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")])
+            .stating(vec![format!("jira rejected the key {key}")]);
+        let destination = default_destination(&work);
+
+        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+
+        let text = read_entry(&destination, DIGEST_ENTRY);
+        assert!(!text.contains(&key), "the key reached the digest: {text}");
+        assert!(text.contains("[REDACTED]"), "{text}");
+        let rows = digest_rows(&destination);
+        assert!(
+            rows.iter()
+                .any(|(stage, kind, _, _)| stage == "boards" && kind == "degradation"),
+            "{rows:?}"
+        );
+    }
+
+    /// 🔴 #6032: the digest is ADDITIVE. Every member the package carried before
+    /// it is still there, under the same name, and `package.toml` grew no key —
+    /// a recipient's existing tooling reads the same bundle it always did.
+    #[test]
+    fn the_error_digest_leaves_the_rest_of_the_package_unchanged() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+
+        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+
+        let mut names = entries(&destination);
+        names.retain(|n| n != DIGEST_ENTRY);
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "README.md",
+                "extract/00-acme-api.db",
+                "package.toml",
+                "reports/00-acme-api/manifest.toml",
+                "reports/00-acme-api/report.md",
+                "reports/index.md",
+                "reports/report.json",
+            ],
+            "the digest is the only new member"
+        );
+        let metadata: toml::Value = read_entry(&destination, METADATA_ENTRY)
+            .parse()
+            .expect("package.toml is TOML");
+        let mut keys: Vec<&str> = metadata
+            .as_table()
+            .expect("a table")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "client",
+                "config_not_acted_on",
+                "generated_by",
+                "instructions",
+                "not_attempted",
+                "repositories",
+                "repositories_audited",
+                "repositories_excluded",
+                "tools",
+            ],
+            "the manifest grew no key"
+        );
     }
 
     /// 🔴 #6080: the RECIPIENT is the primary audience for an
