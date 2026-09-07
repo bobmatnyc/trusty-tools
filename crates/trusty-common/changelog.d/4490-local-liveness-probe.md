@@ -1,0 +1,3 @@
+Added
+
+- `inference::providers::local` probes the local model server before every request, so an unreachable or wedged Ollama fails inside a one-second budget with an `InferenceError::Transport` naming the endpoint instead of hanging on a client that carried no timeout. The probe itself is the new unconditional `local_probe` module, shared with `chat::auto_detect_local_provider` — one implementation and one `LOCAL_PROBE_TIMEOUT`, so the two callers cannot drift. This is the capability `ChatProvider`'s ecosystem had and `InferenceAdapter` lacked, and a prerequisite for migrating trusty-search and trusty-memory off `ChatProvider`

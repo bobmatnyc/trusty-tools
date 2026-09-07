@@ -21,7 +21,11 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
 
-const LOCAL_PROBE_TIMEOUT_SECS: u64 = 1;
+// #4490: the local-probe budget is `crate::local_probe::LOCAL_PROBE_TIMEOUT` —
+// one constant shared with `inference::providers::local`, not a literal per
+// call site.
+use crate::local_probe::LOCAL_PROBE_TIMEOUT;
+
 const LOCAL_REQUEST_TIMEOUT_SECS: u64 = 120;
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_CONNECT_TIMEOUT_SECS: u64 = 10;
@@ -201,7 +205,7 @@ impl ChatProvider for OllamaProvider {
         tx: Sender<ChatEvent>,
     ) -> Result<()> {
         let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(LOCAL_PROBE_TIMEOUT_SECS))
+            .connect_timeout(LOCAL_PROBE_TIMEOUT)
             .timeout(std::time::Duration::from_secs(LOCAL_REQUEST_TIMEOUT_SECS))
             .build()
             .context("build reqwest client for OllamaProvider::chat_stream")?;
@@ -250,22 +254,17 @@ impl ChatProvider for OllamaProvider {
 /// returns an error — the caller treats absence as "no local provider
 /// available" and is responsible for setting the model id afterwards (e.g.
 /// from [`super::LocalModelConfig::model`](crate::LocalModelConfig::model)).
+/// The probe itself is [`crate::local_probe::probe_local`] (#4490), shared with
+/// `inference::providers::local`; this wrapper only discards its typed error,
+/// which is what a caller choosing between providers wants.
 /// Test: `auto_detect_returns_none_on_unreachable` points at a closed port
 /// and asserts `None` within the 1-second budget;
 /// `auto_detect_returns_some_on_200` spins up an in-process server and
 /// asserts a provider is returned.
 pub async fn auto_detect_local_provider(base_url: &str) -> Option<OllamaProvider> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(LOCAL_PROBE_TIMEOUT_SECS))
-        .timeout(std::time::Duration::from_secs(LOCAL_PROBE_TIMEOUT_SECS))
-        .build()
-        .ok()?;
-
-    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            Some(OllamaProvider::new(base_url.to_string(), String::new()))
-        }
-        _ => None,
-    }
+    // #4490: one probe implementation, shared with `inference::providers::local`.
+    crate::local_probe::probe_local(base_url)
+        .await
+        .ok()
+        .map(|()| OllamaProvider::new(base_url.to_string(), String::new()))
 }
