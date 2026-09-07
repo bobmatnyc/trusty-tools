@@ -1,0 +1,3 @@
+Fixed
+
+- `trusty-search index -n <name>` on a root carrying a `trusty-search.yaml` manifest no longer discards `-n` (#6920). A `-n` that names no declared index is now refused, with an error naming the manifest path, every declared index name, the conflicting value, and the two ways forward. It used to be dropped with only an informational line, so `index --force -n flyr-duetto-monolith <root>` reindexed the manifest's `duetto-backend` instead and tore that index's HNSW snapshot during the #6910 recovery. A `-n` that matches one declared name now indexes only that index; it previously ran every declared index. Omitting `-n` still fans out over every declared index, and a root without a manifest is unchanged.
