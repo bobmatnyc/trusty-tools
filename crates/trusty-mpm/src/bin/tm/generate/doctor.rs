@@ -64,6 +64,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "The framework's own skill source directory is present and readable.",
     ),
     (
+        "skill_reachability",
+        "Fails when a skill the framework's own source roster declares deployable reached no tier the harness reads, or when the copy that would load has frontmatter that does not parse, declares no `name`, or declares a `name` that disagrees with the name it is deployed under. This is the skill mirror of `agent_reachability`: every other skill probe audits something INSIDE the tiers it is handed — `skill_staleness` compares checksums, `skill_unmanaged` compares against a deploy ledger, `skill_project_tier` reports a retired duplicate — and none can fail when a rostered skill reaches no tier at all, which is what `deploy_skills_filtered` did to directory-shaped skills for weeks while every presence-only probe stayed green (issue #4949). Warns instead when one skill is deployed at two tiers, naming both paths and the copy to delete: only the higher-precedence copy ever loads, and bundled skills are user-tier only since the 2026-09-01 owner ruling (#6586). Reports UNKNOWN — never `Ok` — for an empty roster or a tier that exists and cannot be listed. Scans `$CLAUDE_CONFIG_DIR/skills`, `~/.claude/skills`, and the project's `.claude/skills`. Read-only; removes nothing it reports (issue #4947).",
+    ),
+    (
         "output_style",
         "The `trusty-mpm` Claude Code output style is configured and its file exists (DOC-28 F4).",
     ),

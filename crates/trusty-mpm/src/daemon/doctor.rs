@@ -120,6 +120,15 @@ use doctor_skill_unmanaged::check_skill_unmanaged;
 mod doctor_skill_project_tier;
 use doctor_skill_project_tier::check_skill_project_tier;
 
+// #4947: the skill mirror of `agent_reachability`. Every probe above audits
+// something INSIDE the tiers it is handed — checksums, a deploy ledger, a
+// retired duplicate — and none can fail when a rostered skill reaches no tier
+// at all, which is what `deploy_skills_filtered` did to directory-shaped skills
+// for weeks (#4949).
+#[path = "doctor_skill_reachability.rs"]
+mod doctor_skill_reachability;
+use doctor_skill_reachability::check_skill_reachability;
+
 // Split out to keep this file under the 500-SLOC production cap (DOC-42,
 // issue #2889 — the agent-bundled-skills dangling-reference / prose-mention
 // probe).
@@ -407,6 +416,11 @@ pub async fn run_doctor(
         check_transcript_saving(),
         check_skills(skills_root),
         check_skill_source(&paths),
+        // #4947: `check_skills` above counts deployed files; this proves every
+        // skill the framework's own roster declares deployable actually reached
+        // a tier the harness reads, parses there, and resolves under its own
+        // name — and warns when two tiers hold the same one.
+        check_skill_reachability(&paths, project_dir),
         check_output_style(project_dir, &home),
         check_output_style_staleness(project_dir, &home),
         check_output_style_legacy_ids(project_dir, &home),

@@ -1213,6 +1213,8 @@ async fn doctor_endpoint_returns_report() {
         "transcript_saving",
         "skills",
         "skill_source",
+        // #4947: every rostered bundled skill reaches a tier the harness reads.
+        "skill_reachability",
         "output_style",
         "output_style_staleness",
         "output_style_legacy_ids",
