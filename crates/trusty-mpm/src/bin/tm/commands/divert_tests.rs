@@ -147,3 +147,35 @@ fn record_diversion_counts_per_session() {
     record_diversion(tmp.path(), "../escape", 1, &reply).expect("ledger write");
     assert!(tmp.path().join("divert").join(".._escape.log").exists());
 }
+
+/// Why (#6959): the savings row is priced against the bytes the session did not
+/// ingest, so the count has to be every file body the diversion gathered. A
+/// count that read only the first file would understate every multi-file
+/// diversion.
+/// What: the sum of the bodies, with the path labels contributing nothing.
+#[test]
+fn source_bytes_sums_every_file_body() {
+    let sources = vec![
+        (
+            "a/very/long/path/that/must/not/count.rs".to_string(),
+            "abcd".to_string(),
+        ),
+        ("b.rs".to_string(), "efghij".to_string()),
+    ];
+    assert_eq!(source_bytes(&sources), 10);
+    assert_eq!(source_bytes(&[]), 0);
+}
+
+/// Why (#6959): the savings row is attributed to the PARENT session, which only
+/// works because this process keeps the harness's session id while the worker it
+/// spawns does not. If the id were ever scrubbed here too, every row would be
+/// declined and the statusline would stay empty with nothing saying why.
+/// What: asserts the variable this module reads is on the worker's scrub list —
+/// the child loses it, this process keeps it.
+#[test]
+fn parent_session_id_env_is_scrubbed_from_the_worker_only() {
+    assert!(
+        crate::commands::divert_worker::NESTED_SESSION_ENV.contains(&PARENT_SESSION_ID_ENV),
+        "the worker must be scrubbed of the parent session id"
+    );
+}

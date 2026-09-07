@@ -22,6 +22,11 @@
 //! token and cost numbers. A bare hook block appends nothing — only real worker
 //! traffic is counted, because the number is meant to answer "what did
 //! diversion save", not "how often did we say no".
+//!
+//! #6959 adds the second half of that answer: each successful round trip also
+//! appends one `divert` row to the per-session savings ledger (see
+//! [`record_divert_savings`]), so the `💸` statusline segment folds real
+//! diversion traffic. A fall-through writes neither record.
 //! Test: the `#[cfg(test)]` suite in `divert_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -114,6 +119,9 @@ async fn bulk_read(
         Ok(reply) => {
             println!("{}", reply.text);
             log_diversion(sources.len(), &reply);
+            // #6959: only a diversion that answered is worth a savings row — the
+            // fall-through arm below returns before ever reaching here.
+            record_divert_savings(&sources, &reply);
             Ok(())
         }
         Err(reason) => {
@@ -169,13 +177,82 @@ fn read_sources(files: &[PathBuf]) -> anyhow::Result<Vec<(String, String)>> {
 /// Test: `diversion_line_carries_the_count_and_the_child_usage`,
 /// `record_diversion_counts_per_session`.
 fn log_diversion(files: usize, reply: &WorkerReply) {
-    let session = std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_else(|_| "unknown".to_string());
+    let session = parent_session_id().unwrap_or_else(|| "unknown".to_string());
     let count = trusty_common::resolve_data_dir("trusty-mpm")
         .ok()
         .and_then(|dir| record_diversion(&dir, &session, files, reply).ok())
         .unwrap_or(1);
     tracing::info!("{}", diversion_line(count, files, reply));
     eprintln!("{}", diversion_line(count, files, reply));
+}
+
+/// The environment variable carrying the PARENT session's id.
+///
+/// Why (#6959): `tm divert` runs as a plain child of the session, so the
+/// harness's own session id arrives here unmodified — the scrub in
+/// [`crate::commands::divert_worker::NESTED_SESSION_ENV`] strips this variable
+/// from the WORKER this command spawns, never from this process. That is what
+/// lets a savings row be attributed to the session the statusline folds for.
+/// What: `CLAUDE_CODE_SESSION_ID`.
+/// Test: `parent_session_id_env_is_scrubbed_from_the_worker_only`.
+pub(crate) const PARENT_SESSION_ID_ENV: &str = "CLAUDE_CODE_SESSION_ID";
+
+/// The parent session's id, when the harness supplied one.
+///
+/// Why: the diversion ledger line tolerates an unknown session (it is a counter,
+/// and an uncounted diversion is worse than a mislabelled one), but a savings row
+/// under no id is unattributable and must be declined instead.
+/// What: [`PARENT_SESSION_ID_ENV`], `None` when absent or blank.
+/// Test: `parent_session_id_env_is_scrubbed_from_the_worker_only`.
+fn parent_session_id() -> Option<String> {
+    std::env::var(PARENT_SESSION_ID_ENV)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// Total bytes of file content this diversion kept out of the session.
+///
+/// Why: this is the "before" half of the savings figure, and it counts the bytes
+/// actually gathered rather than each file's size on disk — a read truncated at
+/// [`MAX_CONTENT_BYTES`] avoided only what it gathered, so the count stays a
+/// conservative floor.
+/// What: the sum of every source body's length.
+/// Test: `source_bytes_sums_every_file_body`.
+pub(crate) fn source_bytes(sources: &[(String, String)]) -> usize {
+    sources.iter().map(|(_, text)| text.len()).sum()
+}
+
+/// Record what this diversion saved, on the session's savings ledger (#6959).
+///
+/// Why: the diversion ledger line above answers "how often"; this answers "what
+/// was it worth", and the `💸` statusline segment renders the fold. Resolving the
+/// framework root HERE rather than inside the producer is what keeps the writer
+/// on the same root the segment reads from — both go through the `--root` /
+/// `TRUSTY_MPM_ROOT` / config chain, not the home-relative default.
+/// What: prices the file-vs-summary token delta at the parent session's model
+/// and appends one row. Declines quietly when there is no session id or no
+/// resolvable root; never fails the diversion.
+/// Test: `source_bytes_sums_every_file_body`, and the producer's own suite in
+/// `savings_divert_tests.rs`.
+fn record_divert_savings(sources: &[(String, String)], reply: &WorkerReply) {
+    let Some(session_id) = parent_session_id() else {
+        tracing::debug!("no parent session id: writing no divert savings row");
+        return;
+    };
+    let root = match crate::commands::managed_root::resolve_managed_paths(None) {
+        Ok(paths) => paths.root,
+        Err(source) => {
+            tracing::warn!(%source, "cannot resolve the framework root: writing no divert savings row");
+            return;
+        }
+    };
+    trusty_mpm::core::savings_divert::record_divert(
+        &trusty_mpm::core::savings::savings_log_in(&root),
+        &session_id,
+        source_bytes(sources),
+        reply.text.len(),
+        reply.cost_usd,
+    );
 }
 
 /// Append one diversion to a session's ledger and return its running count.
