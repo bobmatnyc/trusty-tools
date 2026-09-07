@@ -264,7 +264,7 @@ mod tests {
         CHECK_CLEAN_TREE, CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER, CHECK_UNPUSHED_COMMITS,
         evaluate_removal_rechecks,
     };
-    use trusty_mpm::core::worktree_removal_facts::WorktreeRemovalProbe;
+    use trusty_mpm::core::worktree_removal_facts::{MergedPrLookup, WorktreeRemovalProbe};
 
     /// The subagent shape the #5791 deny still binds in full.
     fn engineer() -> DispatchIdentity<'static> {
@@ -312,8 +312,16 @@ mod tests {
         dirty: Result<usize, String>,
         unpushed: Result<usize, String>,
         branch: Result<String, String>,
-        merged: Result<usize, String>,
+        merged: Result<MergedPrLookup, String>,
     }
+
+    /// A merged-PR answer for the fixture repository (#7057).
+    fn lookup(count: usize) -> MergedPrLookup {
+        MergedPrLookup::new(count, FAKE_REPO)
+    }
+
+    /// The repository the fake probe reports having searched (#7057).
+    const FAKE_REPO: &str = "1m-consulting/adaptive-crm";
 
     impl FakeProbe {
         /// Clean, pushed, on a branch with one merged pull request.
@@ -322,7 +330,7 @@ mod tests {
                 dirty: Ok(0),
                 unpushed: Ok(0),
                 branch: Ok("feat/thing".to_string()),
-                merged: Ok(1),
+                merged: Ok(lookup(1)),
             }
         }
     }
@@ -337,7 +345,11 @@ mod tests {
         fn branch(&self, _dir: &Path) -> Result<String, String> {
             self.branch.clone()
         }
-        fn merged_pull_requests(&self, _dir: &Path, _branch: &str) -> Result<usize, String> {
+        fn merged_pull_requests(
+            &self,
+            _dir: &Path,
+            _branch: &str,
+        ) -> Result<MergedPrLookup, String> {
             self.merged.clone()
         }
     }
@@ -478,13 +490,36 @@ mod tests {
     #[test]
     fn denies_worktree_remove_from_version_control_when_no_merged_pr() {
         let probe = FakeProbe {
-            merged: Ok(0),
+            merged: Ok(lookup(0)),
             ..FakeProbe::reclaimable()
         };
         let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
             .expect("an unmerged branch must deny removal");
         assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
         assert!(reason.contains("feat/thing"), "{reason}");
+    }
+
+    /// 🔴 #7057: the refusal names the repository it searched.
+    ///
+    /// Why: "no merged pull request" is also what a lookup aimed at the WRONG
+    /// repository says. A prune run for `1m-consulting/adaptive-crm` whose `gh`
+    /// answered for `hotstats/hotstats-product-poc` produced exactly this deny
+    /// for branches whose pull requests had merged, and nothing in the message
+    /// could have shown that. Fails on `origin/main`, where the deny names only
+    /// the branch.
+    #[test]
+    fn deny_names_the_repository_the_merged_pr_lookup_searched() {
+        let probe = FakeProbe {
+            merged: Ok(lookup(0)),
+            ..FakeProbe::reclaimable()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("an unmerged branch must deny removal");
+        assert!(
+            reason.contains(FAKE_REPO),
+            "the deny must name the repository searched: {reason}"
+        );
+        assert!(reason.contains("origin"), "{reason}");
     }
 
     #[test]

@@ -30,6 +30,13 @@
 //! reports "not merged" for a tree that is safe to reclaim. `gh pr list --head
 //! <branch> --state merged` is the only question that answers correctly.
 //!
+//! **Which repository is STATED, never inferred (#7057).** The `--repo` slug
+//! comes from the target worktree's own `origin` remote
+//! ([`crate::session_manager::worktree_repo_slug`]); a worktree whose
+//! repository cannot be established denies rather than asking `gh` to guess,
+//! and the deny message names the repository that WAS searched so a
+//! wrong-repository answer is visible instead of reading as "no pull request".
+//!
 //! Test: `merged_pull_request_argv_asks_github_for_the_branch`,
 //! `detached_head_is_not_a_branch`, `dirty_entry_count_ignores_blank_lines`
 //! below; the policy that consumes these answers is tested in
@@ -37,7 +44,10 @@
 
 use std::path::Path;
 
-use crate::session_manager::worktree_reclaim_gh::{GH_TIMEOUT, gh_command, resolve_daemon_gh_env};
+use crate::session_manager::worktree_reclaim_gh::{
+    GH_TIMEOUT, gh_pr_list_command, resolve_daemon_gh_env,
+};
+use crate::session_manager::worktree_repo_slug::repo_slug_for;
 use crate::session_manager::worktree_safety::git_stdout;
 
 /// The `gh pr list` argv the merged-PR re-check runs, without the branch.
@@ -46,9 +56,49 @@ use crate::session_manager::worktree_safety::git_stdout;
 /// `--state merged` half cannot drift into `--state all` — which would report
 /// an OPEN pull request as a reason to delete the tree holding its work.
 /// `--limit 1` because the re-check needs existence, not a census.
-/// What: interpolated with `--head <branch>` by [`GitAndGhProbe`].
+/// What: interpolated with `--repo <owner/repo> --head <branch>` by
+/// [`GitAndGhProbe`].
 /// Test: `merged_pull_request_argv_asks_github_for_the_branch`.
 const MERGED_PR_ARGS: &[&str] = &["--state", "merged", "--json", "number", "--limit", "1"];
+
+/// What the merged-PR re-check learned, and WHERE it looked (#7057).
+///
+/// Why: a count of zero is the answer both a branch with no merged pull request
+/// and a lookup aimed at the wrong repository produce. The two used to be
+/// indistinguishable in the deny message, which is how a prune run against
+/// `1m-consulting/adaptive-crm` reported "no pull request found" for branches
+/// whose pull requests had merged — while `gh` was answering for
+/// `hotstats/hotstats-product-poc`. Returning the repository alongside the
+/// count is what lets the refusal name it.
+/// What: `count` is how many MERGED pull requests GitHub reported; `repo` is
+/// the `[host/]owner/repo` that was asked, resolved from the worktree's own
+/// `origin` — host-qualified when that remote is not on github.com, so the
+/// refusal distinguishes the wrong SERVER as well as the wrong repository
+/// (#7057).
+/// Test: `deny_names_the_repository_the_merged_pr_lookup_searched` in
+/// `bin/tm/commands/pm_guard_bash/worktree_remove`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MergedPrLookup {
+    /// MERGED pull requests GitHub reported for the branch.
+    pub count: usize,
+    /// The `[host/]owner/repo` that was searched.
+    pub repo: String,
+}
+
+impl MergedPrLookup {
+    /// The answer `count` merged pull requests in `repo`.
+    ///
+    /// Why: the struct is `#[non_exhaustive]`, so the `tm` binary's fake probe
+    /// — a different crate — cannot build one with a struct expression.
+    #[must_use]
+    pub fn new(count: usize, repo: impl Into<String>) -> Self {
+        Self {
+            count,
+            repo: repo.into(),
+        }
+    }
+}
 
 /// What `git rev-parse --abbrev-ref HEAD` prints for a detached HEAD.
 const DETACHED_HEAD: &str = "HEAD";
@@ -76,8 +126,9 @@ pub trait WorktreeRemovalProbe {
     /// The branch `dir` has checked out. A detached HEAD is an `Err`.
     fn branch(&self, dir: &Path) -> Result<String, String>;
 
-    /// How many MERGED pull requests GitHub has for `branch`.
-    fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<usize, String>;
+    /// How many MERGED pull requests GitHub has for `branch`, and in WHICH
+    /// repository the question was asked (#7057).
+    fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<MergedPrLookup, String>;
 }
 
 /// The production probe: git for the local facts, `gh` for the merge state.
@@ -123,7 +174,12 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         Ok(name)
     }
 
-    fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<usize, String> {
+    fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<MergedPrLookup, String> {
+        // #7057: the repository — and its host, when that is not github.com —
+        // comes from THIS worktree's `origin`, not from whatever `gh` would
+        // infer at this working directory. An origin that cannot be read or
+        // parsed is an `Err`, which denies — never a lookup aimed at a guess.
+        let repo = repo_slug_for(dir)?;
         // #6623: the same per-project `github:` binding an interactive `tm`
         // resolves. The hook inherits the operator's shell environment in the
         // common case, but not when Claude Code is launched from a GUI, and a
@@ -132,18 +188,24 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         // the identical hang shape, and a `dir` whose `gh` has wedged must stop
         // being polled here too. Its own key: the argv asks a DIFFERENT
         // question (merged only) from `pr_state_for_branch`'s, so the two must
-        // never share a reply.
+        // never share a reply. #7057: the repository is part of that key —
+        // two directories resolving to different repositories do not have the
+        // same answer for the same branch name.
         let stdout = crate::session_manager::worktree_reclaim_gh_gate::shared()
-            .poll(dir, &format!("merged-count:{branch}"), || {
-                let mut cmd = gh_command(dir, &resolve_daemon_gh_env(dir));
-                cmd.arg("pr").arg("list").arg("--head").arg(branch);
+            .poll(dir, &format!("merged-count:{repo}:{branch}"), || {
+                let mut cmd = gh_pr_list_command(dir, &resolve_daemon_gh_env(dir), &repo);
+                cmd.arg("--head").arg(branch);
                 cmd.args(MERGED_PR_ARGS);
                 crate::session_manager::worktree_reclaim_gh::run_with_timeout(cmd, GH_TIMEOUT)
             })
-            .map_err(|f| f.to_string())?;
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&stdout)
-            .map_err(|e| format!("`gh pr list --head {branch}` JSON did not parse: {e}"))?;
-        Ok(rows.len())
+            .map_err(|f| format!("{f} (repository searched: {repo})"))?;
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&stdout).map_err(|e| {
+            format!("`gh pr list --repo {repo} --head {branch}` JSON did not parse: {e}")
+        })?;
+        Ok(MergedPrLookup {
+            count: rows.len(),
+            repo,
+        })
     }
 }
 

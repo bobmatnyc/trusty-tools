@@ -162,13 +162,18 @@ pub(crate) fn evaluate_removal_rechecks(
         Err(e) => return Some(recheck_deny(CHECK_MERGED_PULL_REQUEST, target, &e)),
     };
     match probe.merged_pull_requests(target, &branch) {
-        Ok(0) => Some(recheck_deny(
+        // #7057: the repository is named. "No merged pull request" is what a
+        // lookup aimed at the WRONG repository says too, so the answer is
+        // useless without knowing where it was asked.
+        Ok(lookup) if lookup.count == 0 => Some(recheck_deny(
             CHECK_MERGED_PULL_REQUEST,
             target,
             &format!(
-                "GitHub has no MERGED pull request for `{branch}`. Ancestry is not an \
-                 acceptable substitute — a squash merge leaves the branch tip no ancestry \
-                 relationship to the squash commit."
+                "GitHub has no MERGED pull request for `{branch}` in `{repo}` (resolved \
+                 from this worktree's `origin` remote). Ancestry is not an acceptable \
+                 substitute — a squash merge leaves the branch tip no ancestry \
+                 relationship to the squash commit.",
+                repo = lookup.repo
             ),
         )),
         Ok(_) => None,

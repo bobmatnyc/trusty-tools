@@ -1396,3 +1396,201 @@ fn survey_discloses_a_harness_locked_agent_worktree() {
         "the disclosure must name the worktree: {disclosed}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #7057 — one machine, two registered projects, two repositories
+// ---------------------------------------------------------------------------
+
+/// Run `git -C <dir> <args>`, panicking with git's own stderr on failure.
+fn git_ok_7057(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("fixture: `git {}` could not be run: {e}", args.join(" ")));
+    assert!(
+        out.status.success(),
+        "fixture: `git {}` failed in {}: {}",
+        args.join(" "),
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A SECOND managed project under the same repos root, with one landed worktree.
+///
+/// Why: [`GitWorktreeFixture`] owns one project, and the bug this test exists
+/// for needs two on one machine — the sweep enumerates every
+/// `<repos_root>/<owner>/<repo>` it finds, so a second project is what makes
+/// "which repository does this lookup belong to" a question with two answers.
+/// What: a bare remote parked OUTSIDE the repos root (so it is not itself
+/// enumerated as a project), a checkout at `<repos_root>/<owner>/<repo>` with
+/// one pushed commit, and one worktree on a pushed branch. Returns
+/// `(checkout, worktree)`.
+fn second_project(repos_root: &Path, owner: &str, name: &str, branch: &str) -> (PathBuf, PathBuf) {
+    let outside = repos_root
+        .parent()
+        .expect("repos root has a parent")
+        .join(format!("{name}-remote.git"));
+    let repo = repos_root.join(owner).join(name);
+    std::fs::create_dir_all(&outside).expect("fixture: remote dir");
+    std::fs::create_dir_all(&repo).expect("fixture: repo dir");
+    git_ok_7057(&outside, &["init", "--bare", "--initial-branch=main"]);
+    git_ok_7057(&repo, &["init", "--initial-branch=main"]);
+    for (k, v) in [
+        ("user.email", "ci@test.invalid"),
+        ("user.name", "CI"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git_ok_7057(&repo, &["config", k, v]);
+    }
+    std::fs::write(repo.join("README.md"), "base\n").expect("fixture: README");
+    git_ok_7057(&repo, &["add", "README.md"]);
+    git_ok_7057(&repo, &["commit", "-m", "base"]);
+    git_ok_7057(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            outside.to_str().expect("utf8 remote"),
+        ],
+    );
+    git_ok_7057(&repo, &["push", "origin", "main"]);
+    git_ok_7057(&repo, &["fetch", "origin"]);
+    let wt = repo.join(".worktrees").join(name);
+    git_ok_7057(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            wt.to_str().expect("utf8 worktree path"),
+        ],
+    );
+    for (k, v) in [
+        ("user.email", "ci@test.invalid"),
+        ("user.name", "CI"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git_ok_7057(&wt, &["config", k, v]);
+    }
+    land(&wt);
+    (repo, wt)
+}
+
+/// Repoint a checkout's `origin` at `url` now that the local pushes are done.
+///
+/// The remote-tracking refs already exist locally, so nothing after this needs
+/// to reach the (now fictional) remote — which is what lets the projects carry
+/// real GitHub URLs while the test stays offline.
+fn set_origin_7057(repo: &Path, url: &str) {
+    git_ok_7057(repo, &["remote", "set-url", "origin", url]);
+}
+
+/// 🔴 #7057 regression: a prune sweep resolves EACH project's pull-request
+/// lookups against that project's own `origin`.
+///
+/// Why: on 2026-09-07 a `tm session prune-worktrees --merged-prs` run for
+/// `1m-consulting/adaptive-crm` resolved against `hotstats/hotstats-product-poc`
+/// — a different registered project on the same machine — reclaimed nothing,
+/// and reported "no pull request found" for branches whose pull requests had
+/// merged. The two projects here reproduce that shape: same repos root, two
+/// remotes, one sweep.
+///
+/// What: records the `--repo` slug the production argv builder produces for each
+/// registry root the sweep visits, asserts each root got its OWN repository, and
+/// asserts the worktree whose branch is merged in the SECOND project is the one
+/// reported reclaimable. Fails on `origin/main`, where no lookup names a
+/// repository at all and the slug map is empty.
+#[test]
+fn prune_resolves_each_projects_repo_from_its_own_origin_7057() {
+    use crate::core::gh_identity::GhEnv;
+    use crate::session_manager::worktree_reclaim_gh::gh_pr_list_command;
+    use crate::session_manager::worktree_repo_slug::repo_slug_for;
+
+    const A_URL: &str = "https://github.com/1m-consulting/adaptive-crm.git";
+    const A_SLUG: &str = "1m-consulting/adaptive-crm";
+    const B_URL: &str = "git@github.com:hotstats/hotstats-product-poc.git";
+    const B_SLUG: &str = "hotstats/hotstats-product-poc";
+    const B_BRANCH: &str = "feat/demo-seed-fixtures";
+
+    let fx = GitWorktreeFixture::new();
+    let a_wt = fx.add_worktree("adaptive-7057");
+    land(&a_wt);
+    let (b_repo, b_wt) =
+        second_project(&fx.repos_root, "hotstats", "hotstats-product-poc", B_BRANCH);
+    set_origin_7057(&fx.repo, A_URL);
+    set_origin_7057(&b_repo, B_URL);
+
+    // What the production argv builder was handed, per registry root.
+    let seen: RefCell<Vec<(PathBuf, String)>> = RefCell::new(Vec::new());
+    let index_for = |root: &Path| -> PrIndex {
+        let slug = repo_slug_for(root).expect("each project's origin resolves");
+        let cmd = gh_pr_list_command(root, &GhEnv::default(), &slug);
+        let argv: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = argv
+            .iter()
+            .position(|a| a == "--repo")
+            .expect("every pull-request lookup names its repository (#7057)");
+        let named = argv[at + 1].clone();
+        seen.borrow_mut().push((root.to_path_buf(), named.clone()));
+        // Only the SECOND project has the merged pull request. A lookup that
+        // leaked into the wrong repository would hand this branch to the wrong
+        // root and the reclaimable set below would be wrong too.
+        if named == B_SLUG {
+            merged_index(B_BRANCH, 61)
+        } else {
+            PrIndex::from_json("[]", 400)
+        }
+    };
+
+    let out = reclaim_with_probes(
+        &fx.repos_root,
+        &FreshProbes {
+            agent_state: &no_agents,
+            in_use_now: &|| Some(nobody()),
+            index_for: &index_for,
+        },
+        ReclaimMode::Report,
+    );
+
+    let seen = seen.into_inner();
+    let slug_for = |root: &Path| -> Option<String> {
+        seen.iter().find(|(r, _)| r == root).map(|(_, s)| s.clone())
+    };
+    let a_root = std::fs::canonicalize(&fx.repo).expect("canonical a");
+    let b_root = std::fs::canonicalize(&b_repo).expect("canonical b");
+    assert_eq!(
+        slug_for(&a_root).as_deref(),
+        Some(A_SLUG),
+        "project A's lookup must name its own repository; saw {seen:?}"
+    );
+    assert_eq!(
+        slug_for(&b_root).as_deref(),
+        Some(B_SLUG),
+        "project B's lookup must name its own repository; saw {seen:?}"
+    );
+
+    let reclaimable: Vec<&PathBuf> = out
+        .survey
+        .candidates
+        .iter()
+        .filter(|c| c.verdict.is_reclaimable())
+        .map(|c| &c.path)
+        .collect();
+    assert_eq!(
+        reclaimable,
+        vec![&b_wt],
+        "only the worktree whose branch merged in {B_SLUG} is reclaimable; outcome: {out:?}"
+    );
+    assert!(
+        !reclaimable.contains(&&a_wt),
+        "project A's worktree has no merged pull request in its own repository"
+    );
+}
