@@ -125,6 +125,23 @@ enum Commands {
     /// Always dry-run safe: never posts to GitHub.
     Calibrate(CalibrateArgs),
 
+    /// Print the crate version, or (with `--json`) the DOC-1
+    /// capability-discovery envelope `tctl doctor --self-check` reads.
+    ///
+    /// Why (#6913): `tctl doctor --self-check trusty-review` spawns this exact
+    /// form and requires `contract_version` + a non-empty `verbs[]`;
+    /// trusty-review had no `version` subcommand, so the self-check died on a
+    /// clap usage error (exit 2) before it could parse anything.
+    /// What: delegates to `commands::version::run`. Answers from the binary
+    /// alone — no config, no tokio runtime, no network.
+    /// Test: `commands::version::envelope_satisfies_the_doc1_self_check`,
+    /// `tests/version_cli.rs::version_json_parses_and_carries_the_crate_version`.
+    Version {
+        /// Emit the DOC-1 capability-discovery envelope as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Manage inference provider configuration (API keys) — the universal
     /// `config keys set/list/test/unset` surface shared by every trusty-*
     /// binary (epic #2400 Wave 1, #2405).
@@ -174,6 +191,15 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // #6913: `version` is answered from the binary alone, ahead of the tokio
+    // runtime and of `ReviewConfig::from_env_and_file`. tctl's self-check
+    // spawns this on hosts with no trusty-review config at all, so anything it
+    // depends on is a way for capability discovery to fail.
+    if let Commands::Version { json } = &cli.command {
+        commands::version::run(*json);
+        return Ok(());
+    }
+
     // #6290: no synchronous launchd pre-dispatch any more — there is no
     // `service` subcommand, because there is no unit for it to manage.
     let rt = tokio::runtime::Runtime::new().context("build tokio runtime")?;
@@ -210,6 +236,10 @@ async fn async_main(cli: Cli) -> Result<()> {
         Commands::Calibrate(args) => cmd_calibrate(config, args).await,
         Commands::WebhookListen => trusty_review::webhook_listener::run(config).await,
         Commands::Config(cmd) => cmd.run().await,
+        // #6913: dispatched in `main`, before the runtime and the config.
+        Commands::Version { .. } => {
+            unreachable!("version dispatched before the tokio runtime is built")
+        }
     }
 }
 

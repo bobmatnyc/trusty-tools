@@ -55,6 +55,11 @@ pub const BYTES_PER_TOKEN: f64 = 4.0;
 /// Test: `instruction_compression_row_carries_the_named_technique`.
 pub const TECHNIQUE_INSTRUCTION_COMPRESSION: &str = "instruction-compression";
 
+/// `technique` value written by the bulk-read diversion producer (#6959).
+///
+/// Test: `divert_row_carries_the_named_technique`.
+pub const TECHNIQUE_DIVERT: &str = "divert";
+
 /// One producer's claim that a technique avoided sending some tokens.
 ///
 /// Why: estimates and measurements share one row shape, which is why `basis` is
