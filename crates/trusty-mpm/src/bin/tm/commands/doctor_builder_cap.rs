@@ -104,8 +104,31 @@ fn configured(cap: u32) -> String {
 
 /// `agent (running 12m)`, comma-separated.
 fn render(rows: &[CensusRow]) -> String {
+    render_with(rows, crate::formatters::agent_color::color_enabled())
+}
+
+/// [`render`] with the color decision passed in.
+///
+/// Why (#4068): this is the closest thing `tm` prints to a dispatch line — the
+/// agents currently holding a builder slot — so each name carries its identity
+/// color. Taking `use_color` explicitly rather than probing `colored`'s
+/// process-global override keeps both paths testable without the shared
+/// mutable state that made the #1858 color tests flaky.
+/// What: paints each agent name via
+/// [`crate::formatters::agent_color::agent_label_with`]; the elapsed-minutes
+/// suffix and the separators stay uncolored, so with `use_color` false the
+/// line is byte-identical to what this rendered before #4068.
+/// Test: `the_census_line_names_each_agent_in_its_identity_color`,
+/// `the_census_line_is_byte_identical_when_color_is_disabled`.
+fn render_with(rows: &[CensusRow], use_color: bool) -> String {
     rows.iter()
-        .map(|r| format!("{} (running {}m)", r.agent, r.elapsed_secs / 60))
+        .map(|r| {
+            format!(
+                "{} (running {}m)",
+                crate::formatters::agent_color::agent_label_with(&r.agent, use_color),
+                r.elapsed_secs / 60
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -190,6 +213,51 @@ mod tests {
             agent: agent.to_string(),
             elapsed_secs,
         }
+    }
+
+    /// #4068: each agent holding a builder slot is named in ITS OWN color, so
+    /// two concurrent agents are tellable apart on this line. Before #4068 the
+    /// line carried no escape at all, so this fails on the pre-change render.
+    #[test]
+    fn the_census_line_names_each_agent_in_its_identity_color() {
+        let rows = [row("rust-engineer", 720), row("code-critic", 60)];
+        let rendered = render_with(&rows, true);
+        // `rust-engineer` hashes to palette slot 3, periwinkle.
+        assert!(
+            rendered.contains("\u{1b}[38;2;130;170;255mrust-engineer\u{1b}[0m (running 12m)"),
+            "{rendered:?}"
+        );
+        // …and `code-critic` to a DIFFERENT slot, which is the whole point.
+        assert!(
+            rendered.contains("\u{1b}[38;2;176;176;208mcode-critic\u{1b}[0m (running 1m)"),
+            "{rendered:?}"
+        );
+        // Status colors stay the exclusive property of `formatters::services`:
+        // nothing here emits a plain green/red/yellow/cyan foreground.
+        for reserved in ["\u{1b}[32m", "\u{1b}[31m", "\u{1b}[33m", "\u{1b}[36m"] {
+            assert!(
+                !rendered.contains(reserved),
+                "census line must not emit the reserved sequence {reserved:?}"
+            );
+        }
+    }
+
+    /// #4068: with color disabled — `NO_COLOR`, a pipe, any non-TTY — the line
+    /// must stay byte-identical to what `format!("{} (running {}m)", …)`
+    /// produced before that change, so scripts and the doctor's own
+    /// assertions see no drift.
+    #[test]
+    fn the_census_line_is_byte_identical_when_color_is_disabled() {
+        let rows = [row("rust-engineer", 720), row("code-critic", 60)];
+        let rendered = render_with(&rows, false);
+        assert_eq!(
+            rendered,
+            "rust-engineer (running 12m), code-critic (running 1m)"
+        );
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "no-color census line must carry no ANSI escape: {rendered:?}"
+        );
     }
 
     #[test]

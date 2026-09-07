@@ -245,7 +245,15 @@ pub(crate) async fn session(
                         .get("consecutive_failures")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    println!("{:<24} {:<12} {}", r.agent, state, failures);
+                    // #4068: the AGENT cell carries the identity color and is
+                    // padded outside the color run, so the STATE and FAILURES
+                    // columns stay aligned; state text is left uncolored.
+                    println!(
+                        "{} {:<12} {}",
+                        crate::formatters::agent_color::agent_label_padded(&r.agent, 24),
+                        state,
+                        failures
+                    );
                 }
             }
         }
