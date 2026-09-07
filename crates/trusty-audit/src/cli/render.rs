@@ -267,8 +267,12 @@ pub fn render(outcome: &Outcome) -> String {
         Outcome::Audit(report) => render_chain(report),
         Outcome::Distributed(package) => render_install_package(package),
         Outcome::Rerendered(report) => render_rerender(report),
+        Outcome::Verified(report) => verify::render(report),
     }
 }
+
+// #5563: the verify arm's own file, because this one is at the 500-SLOC cap.
+mod verify;
 
 /// The regenerated reports, where they landed, and what did not come back.
 ///

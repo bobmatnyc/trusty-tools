@@ -25,6 +25,11 @@ use std::path::{Path, PathBuf};
 // #6159: creating an engagement without a terminal. Its own module because this
 // file is at the 500-SLOC production cap.
 pub mod init;
+// #5563: the pre-sweep flow and the received-package check, each in its own
+// module for the same reason `init` is — this file is at that cap, and a
+// capability is the line available to split along.
+pub mod guided;
+pub mod verify;
 
 use crate::chain::{self, ChainOptions, ChainReport};
 // #6159: `PinResolver` is the seam that keeps `init`'s test off the release list.
@@ -44,6 +49,7 @@ use crate::tools::{self, InstalledTool, RequiredTool, ToolStatus};
 use crate::validate;
 use crate::workdir::{Area, WorkDir};
 use init::InitReport;
+use verify::VerifyReport;
 
 /// Everything `trusty-audit` can be asked to do.
 ///
@@ -152,6 +158,19 @@ pub enum Command {
     /// engagement config, no pinned tools. It carries its options because all
     /// three are operator choices with defaults; see [`crate::rerender`].
     Rerender(RerenderOptions),
+    /// Check a received handoff package against the retained key (#5563).
+    ///
+    /// The one capability the AUDITOR runs on a file that came back, so it
+    /// touches no engagement state at all — both paths are operator input, and
+    /// the key deliberately is not read from the engagement config. See
+    /// [`crate::session::verify`] for why a key that travelled with the package
+    /// cannot answer this question.
+    Verify {
+        /// The package to check.
+        package: PathBuf,
+        /// A file holding the retained ed25519 public half, as hex.
+        public_key: PathBuf,
+    },
 }
 
 /// How hard a front end should look for the inference credential (#5868).
@@ -221,7 +240,9 @@ impl Command {
             | Self::CloneRepos { .. }
             | Self::AddTarget { .. }
             | Self::ListTargets
-            | Self::RemoveTarget { .. } => CredentialNeed::None,
+            | Self::RemoveTarget { .. }
+            // #5563: the check reads a zip and a key file and sends nothing.
+            | Self::Verify { .. } => CredentialNeed::None,
         }
     }
 }
@@ -349,6 +370,13 @@ pub enum Outcome {
     /// the renders ran and some of them did not work, and those failures are
     /// data the front end must show.
     Rerendered(RerenderReport),
+    /// From [`Command::Verify`] — what the received package checks out as.
+    ///
+    /// [`crate::package::signing::Verdict::Unsigned`] is an ordinary `Ok` here,
+    /// for the same reason a partly-failed sweep is: it is the answer, not a
+    /// failure to produce one. [`Outcome::exit_code`] is what stops it reading
+    /// as success.
+    Verified(VerifyReport),
 }
 
 /// Exit status for a run that succeeded but did not cover everything asked for.
@@ -356,6 +384,14 @@ pub const EXIT_INCOMPLETE: i32 = 2;
 
 /// Exit status for a sweep that partly failed.
 pub const EXIT_PARTIAL: i32 = 1;
+
+/// Exit status for a package that carries no signature to check (#5563).
+///
+/// Its own code rather than [`EXIT_INCOMPLETE`]: an unsigned package is what a
+/// manifest rewritten by anyone at all also produces, so a caller must be able
+/// to tell it from every other outcome — including the removed-signature
+/// failure, which is an error and exits 1.
+pub const EXIT_UNSIGNED: i32 = 3;
 
 impl Outcome {
     /// The process exit status this outcome should produce.
@@ -410,6 +446,10 @@ impl Outcome {
             // did produce are worth having, and `taudit render && open …` must
             // not read that as a whole deliverable.
             Outcome::Rerendered(report) if report.failures().next().is_some() => EXIT_PARTIAL,
+            // #5563: a package nothing authenticates must not chain onward as
+            // if it had verified — `taudit verify pkg.zip && unzip pkg.zip`
+            // reads the status, not the UNSIGNED line above it.
+            Outcome::Verified(report) if report.is_unsigned() => EXIT_UNSIGNED,
             _ => 0,
         }
     }
@@ -639,7 +679,7 @@ impl Session {
     ///
     /// The cold-start launch reads it to decide whether to preflight and install
     /// after writing the config, so `--no-install` means the same thing there as
-    /// it does in [`Session::guided`] rather than only in one of the two.
+    /// it does in [`guided::guided`] rather than only in one of the two.
     pub fn auto_install(&self) -> bool {
         self.auto_install
     }
@@ -669,7 +709,7 @@ impl Session {
     /// capability a later milestone lands.
     pub async fn execute(&self, command: Command) -> Result<Outcome, AuditError> {
         match command {
-            Command::Guided => self.guided().await.map(Outcome::Guided),
+            Command::Guided => guided::guided(self).await.map(Outcome::Guided),
             // #6159: the cold start without the prompt. It shares
             // `bootstrap::create_engagement` with the interactive path rather
             // than growing a second writer of a plaintext key.
@@ -717,6 +757,12 @@ impl Session {
             // #6080: the render step of the sweep, run on its own against the
             // manifests a delivered package already carries.
             Command::Rerender(options) => self.rerender(&options).await.map(Outcome::Rerendered),
+            // #5563: no session state at all — both paths are operator input,
+            // and the check reads them without creating the working directory.
+            Command::Verify {
+                package,
+                public_key,
+            } => verify::verify(&package, &public_key).map(Outcome::Verified),
         }
     }
 
@@ -1137,111 +1183,6 @@ impl Session {
         Ok(AuditManifest::load_if_present(&self.manifest_path)?
             .map(|m| m.repositories)
             .unwrap_or_default())
-    }
-
-    async fn guided(&self) -> Result<GuidedStatus, AuditError> {
-        self.work.create()?;
-        let manifest = AuditManifest::load_if_present(&self.manifest_path)?;
-        // #5979: read ONCE here rather than twice below — the flow's repository
-        // check and its auto-install both need it, and reading the file twice
-        // lets the two disagree about an engagement edited in between.
-        let config = EngagementConfig::load_if_present(&self.config_path)?;
-
-        // #5502: the epic's pre-sweep order is repo selection, then tooling —
-        // so a missing repository set outranks a missing binary.
-        //
-        // #5885: the REGISTRY counts, not only the manifest. `SelectRepositories`
-        // tells the operator to run `add`, and `add` writes the registry — so
-        // reading only the manifest left the flow repeating that instruction
-        // after they had done it, with the manifest not written until a sweep
-        // finishes. Either record means the operator has named an engagement.
-        //
-        // #5896 review: REPOSITORIES, not any target. `Registry::targets` mixes
-        // repositories and boards, so `taudit add board jira:ACME` against an
-        // otherwise empty registry skipped `SelectRepositories`, triggered a
-        // real multi-tool download through `auto_install_tools`, and reported
-        // `ReadyForRun` over an engagement with nothing to sweep. A board is not
-        // a unit of the sweep — `crate::chain::split_targets` says the same.
-        let repos_known = manifest
-            .as_ref()
-            .is_some_and(|m| !m.repositories.is_empty())
-            || registry::engagement_targets(config.as_ref(), &self.work)?
-                .iter()
-                .any(|target| target.kind() == TargetKind::Repo);
-
-        // #5797: install at the point the flow would otherwise have printed
-        // "now go run `install`", and not one step earlier. Repository selection
-        // comes first, so a working directory with nothing chosen yet reports
-        // its state without this process reaching the network — the operator
-        // has not committed to an engagement here.
-        let installed = if self.auto_install && repos_known {
-            self.auto_install_tools(config.as_ref()).await?
-        } else {
-            None
-        };
-
-        let tools = tools::status(&self.work)?;
-        let missing: Vec<RequiredTool> = tools
-            .iter()
-            .filter(|s| !s.installed)
-            .map(|s| s.tool)
-            .collect();
-
-        // #5499: a finished sweep that audited something is the last state the
-        // guided flow can advance from — without this the flow's final word is
-        // "run the sweep", and the recipient is left holding a working directory
-        // with no instruction to send anything back.
-        //
-        // #5494: FINISHED, not merely recorded. A checkpoint left by a sweep
-        // that died names audited repositories too, and pointing at the return
-        // package there would send a partial engagement instead of resuming.
-        let audited = run::read_progress(&self.work)?.is_some_and(|progress| {
-            progress.complete && progress.repos.iter().any(|r| r.result.succeeded())
-        });
-
-        let next = if audited {
-            NextStep::ReturnPackage
-        } else if !repos_known {
-            NextStep::SelectRepositories
-        } else if !missing.is_empty() {
-            NextStep::InstallTools(missing)
-        } else {
-            NextStep::ReadyForRun
-        };
-
-        Ok(GuidedStatus {
-            root: self.work.root().to_path_buf(),
-            manifest,
-            tools,
-            installed,
-            next,
-        })
-    }
-
-    /// Install the pinned set for the guided flow, when there is a set to pin to.
-    ///
-    /// Why: #5797. The guided flow runs against a working directory that may
-    /// carry no engagement config — it is the flow you enter before anything is
-    /// set up — and that case has to keep reporting rather than fail. There are
-    /// no pins without a config, and installing without pins means installing
-    /// whatever is current, which is the #5454 defect. So an absent config
-    /// declines to install and the flow names the step, exactly as before.
-    ///
-    /// A config that is PRESENT and unreadable or malformed is not that case and
-    /// propagates: the caller's `load_if_present` tolerates only absence.
-    /// What: takes the config [`Session::guided`] already read, so the two
-    /// cannot see different files. `Ok(None)` when there is no config or the set
-    /// was already satisfied; `Ok(Some(installed))` naming what this call placed.
-    /// Test: `super::session_tests::guided_without_a_config_still_names_the_step`,
-    /// `super::session_tests::guided_propagates_a_malformed_config`.
-    async fn auto_install_tools(
-        &self,
-        config: Option<&EngagementConfig>,
-    ) -> Result<Option<Vec<InstalledTool>>, AuditError> {
-        let Some(config) = config else {
-            return Ok(None);
-        };
-        tools::ensure(&self.work, &config.tools, &self.progress).await
     }
 }
 

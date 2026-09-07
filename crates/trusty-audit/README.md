@@ -575,13 +575,34 @@ property the engagement did not ask for.
 
 ### Checking a received package
 
-Verification is a library call today —
-`trusty_audit::package::signing::verify(&path, &retained_key)` — and reports one
-of: a signed package that checks out, an unsigned package, or one of several
-distinguishable failures. A member altered after signing, a signature member
-removed, a signature made by a different key, a manifest-listed member that is
-gone, and a member the manifest never listed are five different errors, not one
-"verification failed".
+```bash
+trusty-audit verify return-package.zip --public-key retained.pub
+```
+
+`retained.pub` is the file holding the public half the auditor kept out of band,
+as 64 hex characters. The flag is required and there is no fallback to
+`engagement.toml`: that file carries the PRIVATE key, it travelled to the
+recipient inside the inbound package, and a key that arrives with the thing it
+authenticates authenticates nothing.
+
+The verb reads and writes nothing — the package is left exactly as it arrived —
+and the exit status is the answer a script reads:
+
+| Status | Meaning |
+|---|---|
+| `0` | Signed, the signature verifies against your key, and every member still hashes to what the manifest records |
+| `3` | UNSIGNED — the package carries a manifest and no signature, so nothing in it is authenticated |
+| non-zero otherwise | One named failure, printed as its own line |
+
+Exit 3 is its own code because an unsigned package is what a rewritten manifest
+also produces. It is not a weaker pass, and it is not the same as a signed
+package whose signature member was removed.
+
+The same check is a library call — `trusty_audit::package::signing::verify(&path,
+&retained_key)` — and the verb is a thin arm over it, so the two cannot disagree.
+A member altered after signing, a signature member removed, a signature made by a
+different key, a manifest-listed member that is gone, and a member the manifest
+never listed are five different errors, not one "verification failed".
 
 Two more come before any of those, and before the manifest is even read. The
 `zip` crate keys its entry table by member name, so an archive whose central
@@ -591,9 +612,11 @@ verification walks the raw central directory itself, refuses a repeated name,
 and refuses any other disagreement between that walk and the parser. Member
 bytes are streamed through a fixed buffer rather than into an allocation sized
 from the archive's own declared size, which is a number whoever sent the package
-chose. The `trusty-audit verify` CLI arm over the same call is
-[#5563](https://github.com/bobmatnyc/trusty-tools/issues/5563); this crate keeps
-one implementation behind it and any front end.
+chose.
+
+One refusal the verb cannot show you: an archive whose central directory cannot
+be framed at all is rejected by the zip parser before the raw walk runs, so it
+arrives as "cannot read the package" rather than as the directory error.
 
 ### What the signature proves, and what it does not
 
