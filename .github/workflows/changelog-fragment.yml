@@ -112,6 +112,17 @@ jobs:
       - name: Source-classification selftest (both gates share one definition)
         run: bash scripts/check_source_class_selftest.sh
 
+      # Author-mode selftest (#6947): the gate diffs `<base>..HEAD`, so before a
+      # commit exists it reports SCAN FLOOR and an author cannot check a
+      # fragment; after it, a shape error that was knowable when the file was
+      # written costs a commit-amend cycle. `--staged` and `--file` answer
+      # earlier. This proves both, and — the case that matters most here — that
+      # the DEFAULT verdict this job runs below is unchanged: a pre-flight that
+      # passes what the gate fails is worse than none, because it is the one an
+      # author runs first.
+      - name: Author-mode selftest (--staged and --file must not weaken the gate)
+        run: bash scripts/check_changelog_staged_selftest.sh
+
       # Bump-mode selftest (#5674): `bump-version.sh` used to consume this
       # crate's changelog.d/ fragments unconditionally, so a bump landing in the
       # same PR as its source change deleted the fragments THIS gate then failed

@@ -47,6 +47,31 @@ four categories under `### Removed`). Split it: same number, different slug.
 The heading form (`## Changed`) counts as a second category too; anything inside
 a code fence does not, so a fragment may show example output freely.
 
+## Validate Before Committing
+
+The CI gate diffs `origin/main..HEAD`, so it sees nothing until the change is
+committed — and then rejects shape errors that were knowable the moment the file
+was written. Two flags answer earlier (#6947):
+
+```bash
+# one fragment: placement, category line and body — no git diff at all
+bash scripts/check_changelog_fragment.sh --file crates/<crate>/changelog.d/<n>-<slug>.md
+
+# the whole change: the index plus untracked files, attributed as the gate does
+bash scripts/check_changelog_fragment.sh --staged
+```
+
+`--file` delegates the content check to `scripts/assemble-changelog.sh
+--fragment`, the same validator the post-commit run reaches, so it prints the
+same `ERROR:` lines. `--staged` runs the same crate attribution, the same
+exemptions and the same exit codes as the default run; its scan floor is "at
+least one staged or untracked path".
+
+Both are pre-flights, not the verdict. `--staged` reads the working tree for a
+crate's `CHANGELOG.md` and `changelog.d/`, so an unstaged edit still counts as
+evidence, and it compares against `HEAD`, so the crate-dissolution exemption is
+unreachable. Run the default gate after committing.
+
 ## Preview the Pending Set
 
 ```bash
