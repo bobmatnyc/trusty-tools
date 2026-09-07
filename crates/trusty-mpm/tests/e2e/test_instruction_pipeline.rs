@@ -125,12 +125,23 @@ fn pipeline_counts_deployed_agents() {
     assert!(out.agent_count >= 1, "deployed agents counted");
 
     // The delegation section the PM actually receives is rendered by the same
-    // resolver the count comes from (#4588), so assert it lists the agent.
+    // resolver the count comes from (#4588), so assert it accounts for the
+    // agent. #4513: the agent is deployed into `<project>/.claude/agents`, a
+    // tier Claude Code loads itself, so the section accounts for it by count
+    // and leaves the name to the harness's own Agent-type listing.
     let delivered =
         trusty_mpm::core::delegation_authority::deployed_roster_section(&input.project_dir)
             .expect("a roster is deployed, so a section must render");
+    // Re-derived, not `out.agent_count`: that count spans all three tiers, and
+    // on a developer machine `~/.claude/agents` holds agents the harness does
+    // not load. Only the harness-loaded union is the number the section states.
+    let harness_published = trusty_mpm::core::delegation_authority::roster_from_dirs(
+        &trusty_mpm::core::delegation_authority::harness_loaded_agent_dirs(&input.project_dir),
+    )
+    .len();
     assert!(
-        delivered.contains("engineer"),
-        "deployed engineer listed in the delivered delegation authority: {delivered}"
+        delivered.contains(&format!("the {harness_published} agents it carries")),
+        "the delivered delegation authority must account for every deployed \
+         agent: {delivered}"
     );
 }

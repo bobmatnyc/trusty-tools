@@ -881,3 +881,201 @@ fn generate_authority_is_unchanged_when_nothing_was_lost() {
     );
     assert!(!generate_authority(&agents).contains(ROSTER_INCOMPLETE_MARKER));
 }
+
+// ---------------------------------------------------------------------------
+// #4513: the roster must not repeat what the harness injects itself.
+// ---------------------------------------------------------------------------
+
+/// A two-tier fixture: the first stands for a tier Claude Code loads, the
+/// second for one it does not.
+fn harness_and_extra_tiers() -> (TempDir, TempDir) {
+    (TempDir::new().unwrap(), TempDir::new().unwrap())
+}
+
+#[test]
+fn harness_injected_agents_are_not_repeated_in_the_roster() {
+    // The whole point of #4513: an agent the harness already publishes costs
+    // nothing to omit, and an agent it cannot publish must survive.
+    let (harness, extra) = harness_and_extra_tiers();
+    write_agent(
+        harness.path(),
+        "rust-engineer",
+        "---\nname: rust-engineer\nrole: engineer\nmodel: opus\n---\n",
+    );
+    write_agent(
+        extra.path(),
+        "copyeditor",
+        "---\nname: copyeditor\nmodel: sonnet\n---\n",
+    );
+
+    let dirs = vec![harness.path().to_path_buf(), extra.path().to_path_buf()];
+    let harness_dirs = vec![harness.path().to_path_buf()];
+    let section = roster_section_from_tiers(&dirs, &harness_dirs).expect("section");
+
+    assert!(
+        !section.contains("### rust-engineer"),
+        "the harness publishes rust-engineer; the roster must not repeat it:\n{section}"
+    );
+    assert!(
+        section.contains("### copyeditor"),
+        "copyeditor is in no harness tier, so only the roster can name it:\n{section}"
+    );
+    assert!(
+        section.contains("Available agent types for the Agent tool"),
+        "the PM must be told where the authoritative listing is:\n{section}"
+    );
+    assert!(
+        section.contains("the 1 agents it carries"),
+        "the count of omitted agents must be stated:\n{section}"
+    );
+}
+
+#[test]
+fn a_cut_agent_stays_in_the_resolved_roster_and_so_stays_dispatchable() {
+    // The filter is a RENDERING concern only. `roster_from_dirs` — what
+    // `tm session start` counts and `tm doctor` checks — must still see the
+    // agent, because it is still deployed and the harness still dispatches it.
+    let (harness, extra) = harness_and_extra_tiers();
+    write_agent(
+        harness.path(),
+        "ticketing",
+        "---\nname: ticketing\nmodel: sonnet\n---\n",
+    );
+    write_agent(extra.path(), "writer", "---\nname: writer\n---\n");
+
+    let dirs = vec![harness.path().to_path_buf(), extra.path().to_path_buf()];
+    let names: Vec<String> = roster_from_dirs(&dirs)
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec!["ticketing".to_string(), "writer".to_string()],
+        "the resolved roster is unfiltered; only the rendered section is"
+    );
+}
+
+#[test]
+fn a_fully_harness_injected_roster_points_at_the_harness_listing() {
+    // Every agent cut must NOT degrade to `None` — that is the #4069 regression
+    // where the prompt reverted to a stale hand-maintained 8-row table.
+    let (harness, extra) = harness_and_extra_tiers();
+    write_agent(harness.path(), "qa", "---\nname: qa\nmodel: sonnet\n---\n");
+
+    let dirs = vec![harness.path().to_path_buf(), extra.path().to_path_buf()];
+    let harness_dirs = vec![harness.path().to_path_buf()];
+    let section = roster_section_from_tiers(&dirs, &harness_dirs).expect("section still renders");
+
+    assert!(section.starts_with("## Delegation Authority"));
+    assert!(
+        !section.contains("### qa"),
+        "qa is harness-published:\n{section}"
+    );
+    assert!(
+        section.contains("Available agent types for the Agent tool"),
+        "an all-harness roster must still name the routing surface:\n{section}"
+    );
+    assert!(
+        !section.contains("No delegatable agents"),
+        "agents ARE deployed; claiming none is the failure this guards:\n{section}"
+    );
+}
+
+#[test]
+fn an_agent_in_both_tiers_counts_as_harness_injected() {
+    // Precedence and dedup must agree: a name the harness carries anywhere is
+    // published by the harness, whichever tier tm resolves the file from.
+    let (harness, extra) = harness_and_extra_tiers();
+    write_agent(harness.path(), "qa", "---\nname: qa\nmodel: sonnet\n---\n");
+    write_agent(extra.path(), "QA", "---\nname: QA\nmodel: haiku\n---\n");
+
+    let dirs = vec![extra.path().to_path_buf(), harness.path().to_path_buf()];
+    let harness_dirs = vec![harness.path().to_path_buf()];
+    let section = roster_section_from_tiers(&dirs, &harness_dirs).expect("section");
+
+    assert!(
+        !section.contains("### QA") && !section.contains("### qa"),
+        "the harness carries this name; the case of the winning file is irrelevant:\n{section}"
+    );
+}
+
+#[test]
+fn roster_section_from_tiers_with_no_harness_tier_matches_the_undeduped_render() {
+    // With nothing to cut the output must be byte-identical to the previous
+    // renderer, so the golden prompts and every existing fixture still hold.
+    let (a, b) = harness_and_extra_tiers();
+    write_agent(
+        a.path(),
+        "writer",
+        "---\nname: writer\nmodel: sonnet\n---\n",
+    );
+    write_agent(b.path(), "proofreader", "---\nname: proofreader\n---\n");
+
+    let dirs = vec![a.path().to_path_buf(), b.path().to_path_buf()];
+    assert_eq!(
+        roster_section_from_tiers(&dirs, &[]),
+        roster_section_from_dirs(&dirs)
+    );
+}
+
+#[test]
+fn roster_section_from_tiers_is_none_when_nothing_is_deployed() {
+    // The unprovisioned case is unchanged: no agents, no losses, no section.
+    assert!(roster_section_from_tiers(&[PathBuf::from("/nonexistent/agents")], &[]).is_none());
+    assert!(roster_section_from_tiers(&[], &[]).is_none());
+}
+
+#[test]
+fn generate_authority_is_unchanged_when_nothing_was_deduped() {
+    // `harness_injected == 0` is the compatibility contract for every caller
+    // that never learned about the filter.
+    let agents = vec![AgentSummary {
+        name: "qa".to_string(),
+        role: "qa".to_string(),
+        description: None,
+        model: Some("sonnet".to_string()),
+        extends_chain: vec!["qa".to_string()],
+    }];
+    assert_eq!(
+        generate_authority_deduped(&agents, 0, &[]),
+        generate_authority(&agents)
+    );
+}
+
+#[test]
+fn harness_loaded_dirs_follow_claude_config_dir() {
+    // Claude Code reads `$CLAUDE_CONFIG_DIR/agents` when the variable is set, so
+    // the home tier is one tm scans and the harness never loads. That gap IS the
+    // rule the roster filter derives its keep-set from.
+    let dirs = harness_loaded_agent_dirs_from(
+        Path::new("/proj"),
+        Some(Path::new("/managed")),
+        Path::new("/home/.claude/agents"),
+    );
+    assert_eq!(
+        dirs,
+        vec![
+            PathBuf::from("/proj/.claude/agents"),
+            PathBuf::from("/managed/agents"),
+        ]
+    );
+    assert!(
+        !dirs.contains(&PathBuf::from("/home/.claude/agents")),
+        "the home tier is invisible to the harness once CLAUDE_CONFIG_DIR is set"
+    );
+}
+
+#[test]
+fn harness_loaded_dirs_fall_back_to_the_home_tier() {
+    // Without the variable Claude Code reads `~/.claude/agents`, and it is the
+    // MANAGED tier that becomes harness-invisible instead.
+    let dirs =
+        harness_loaded_agent_dirs_from(Path::new("/proj"), None, Path::new("/home/.claude/agents"));
+    assert_eq!(
+        dirs,
+        vec![
+            PathBuf::from("/proj/.claude/agents"),
+            PathBuf::from("/home/.claude/agents"),
+        ]
+    );
+}

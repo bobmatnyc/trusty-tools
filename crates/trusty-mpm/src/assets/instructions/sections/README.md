@@ -143,8 +143,9 @@ Two blocks are computed at launch, not authored:
 
 - **`agent-roster`** — the live deployed-agent inventory, built by
   `delegation_authority.rs` (`deployed_roster_section`), which unions the project
-  tier, `$CLAUDE_CONFIG_DIR/agents`, and `~/.claude/agents`. Appended inside the
-  `agent-delegation` section.
+  tier, `$CLAUDE_CONFIG_DIR/agents`, and `~/.claude/agents`, then renders only the
+  agents the harness's own `Available agent types for the Agent tool` listing does
+  not already carry (#4513). Appended inside the `agent-delegation` section.
 - **`stack-profile`** — the project's detected stack, from `stack_profile.rs`.
   Optional; emits a neutral detect-first block when nothing is detected.
 

@@ -60,8 +60,10 @@ Anything not listed above is delegated.
 
 ## Agent Routing
 
-The Agent Delegation section is the single routing surface; the generated
-Delegation Authority roster below it is authoritative for which agents exist.
+The Agent Delegation section is the single routing surface. The harness's own
+`Available agent types for the Agent tool` listing is authoritative for which
+agents exist; the generated Delegation Authority roster below adds only the
+agents that listing does not carry (#4513).
 
 ## Delegating Well
 

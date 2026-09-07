@@ -78,8 +78,10 @@ impl RosterTiers {
     }
 
     /// Tier 3 — the operator's own generic `~/.claude/agents`, which tm never
-    /// writes to but a launched session still resolves agents from. This tier
-    /// held the five agents behind #4588's observed 34-vs-39 delta.
+    /// writes to. This tier held the five agents behind #4588's observed
+    /// 34-vs-39 delta. #4513: with `CLAUDE_CONFIG_DIR` set, Claude Code reads
+    /// tier 2 as its user tier and never loads this one, so tier 3 is the only
+    /// tier whose agents the harness cannot publish for itself.
     fn generic_tier(&self) -> PathBuf {
         self.tmp.path().join("home").join(".claude").join("agents")
     }
@@ -696,7 +698,7 @@ fn delegation_doctrine_carries_the_precedence_note() {
     let doctrine = delegation_doctrine();
     assert!(doctrine.starts_with(AGENT_DELEGATION.trim()));
     assert!(doctrine.ends_with("do not retry the same agent."));
-    assert!(doctrine.contains("trust the roster"));
+    assert!(doctrine.contains("trust the harness listing"));
 }
 
 #[test]
@@ -1153,16 +1155,75 @@ fn session_start_count_matches_the_delivered_delegation_roster() {
     let delivered = crate::core::delegation_authority::deployed_roster_section(&tiers.project())
         .expect("a roster is deployed in three tiers, so a section must render");
     let delivered_entries = delivered.matches("\n### ").count();
+    // #4513: the PM now receives the roster in TWO listings — the harness's own
+    // agent-type listing, and this section for the tiers the harness does not
+    // load. The gate is unchanged in meaning: every agent the printed count
+    // claims must be reachable by the PM through one of them.
+    let harness_published = crate::core::delegation_authority::roster_from_dirs(
+        &crate::core::delegation_authority::harness_loaded_agent_dirs(&tiers.project()),
+    )
+    .len();
 
     assert_eq!(
-        out.agent_count, delivered_entries,
+        out.agent_count,
+        delivered_entries + harness_published,
         "the count `tm session start` prints must equal the number of agents \
-         the PM was actually given (#4588)\nprinted: {}\ndelivered roster:\n{delivered}",
+         the PM was actually given (#4588)\nprinted: {}\nharness-published: \
+         {harness_published}\ndelivered roster:\n{delivered}",
         out.agent_count
     );
     assert_eq!(
         out.agent_count, 4,
         "engineer + qa + writer + ticketing, with the cross-tier `qa` counted once"
+    );
+    assert_eq!(
+        delivered_entries, 1,
+        "only `writer` sits in a tier the harness cannot publish (#4513); the \
+         other three must not be repeated:\n{delivered}"
+    );
+}
+
+#[serial_test::serial]
+#[test]
+fn the_composed_prompt_names_only_the_agents_the_harness_cannot_publish() {
+    // #4513 END-TO-END. The two halves the PM must receive: every agent Claude
+    // Code loads for itself is accounted for by a count, and every agent it does
+    // NOT load still arrives as a full entry with its model hint — otherwise the
+    // cut would make an agent invisible rather than merely unrepeated.
+    let tiers = RosterTiers::new();
+    write_roster_agent(&tiers.managed_tier(), "rust-engineer");
+    write_roster_agent(&tiers.project_tier(), "ticketing");
+    // Written by hand rather than via `write_roster_agent`: this one must carry
+    // a `model:`, so the assertion below can prove the roster's own field
+    // survives the cut and is not merely the header text.
+    fs::create_dir_all(tiers.generic_tier()).expect("create generic tier");
+    fs::write(
+        tiers.generic_tier().join("copyeditor.md"),
+        "---\nname: copyeditor\nrole: editor\nmodel: sonnet\n---\n",
+    )
+    .expect("write copyeditor");
+
+    let prompt = crate::core::instruction_overrides::resolve_pm_prompt(&tiers.project());
+
+    assert!(
+        prompt.contains("## Delegation Authority"),
+        "the roster header must survive the cut:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("the 2 agents it carries"),
+        "the two harness-loaded tiers must be accounted for by count"
+    );
+    assert!(
+        !prompt.contains("### rust-engineer") && !prompt.contains("### ticketing"),
+        "a harness-published agent must not be repeated"
+    );
+    assert!(
+        prompt.contains("### copyeditor"),
+        "an agent in the home tier is published NOWHERE else and must be named"
+    );
+    assert!(
+        prompt.contains("**Model:** sonnet"),
+        "the roster's own value — the model hint — must still reach the prompt"
     );
 }
 
