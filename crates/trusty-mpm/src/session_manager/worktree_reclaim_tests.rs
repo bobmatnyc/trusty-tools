@@ -18,7 +18,7 @@ use super::*;
 // #6867: the runner's own vocabulary — the failure type, and the keychain
 // predicate whose answer decides whether a poll can hang in `securityd`.
 use crate::session_manager::worktree_reclaim_gh::{
-    GhFailure, consults_the_keychain, keychain_warning,
+    GhFailure, consults_the_keychain, gh_command, keychain_warning,
 };
 
 use crate::session_manager::worktree_git_fixture::{GitWorktreeFixture, deny_all};
@@ -1597,9 +1597,10 @@ fn gh_command_passes_no_dash_c_flag() {
 
 #[test]
 fn gh_command_runs_in_the_requested_directory() {
-    // The repository is resolved from the working directory, so this IS the
-    // repository selection — if it stops being set, every call silently
-    // resolves whatever repository the daemon happens to be sitting in.
+    // #7057: the working directory is no longer the repository SELECTION —
+    // `gh_pr_list_command` states that with `--repo` — but it still decides
+    // which `github:` binding `resolve_daemon_gh_env` picks, so an unset cwd
+    // still authenticates as whoever the daemon happens to be.
     let cmd = gh_command(
         Path::new("/tmp"),
         &crate::core::gh_identity::GhEnv::default(),

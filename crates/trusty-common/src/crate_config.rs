@@ -205,8 +205,31 @@ pub fn save_at<T: Serialize>(path: &Path, value: &T) -> Result<PathBuf, ConfigEr
                   # Managed by the trusty-tools config convention (#1220).\n\
                   # Edit by hand or via the trusty-console Config tab.\n\n";
     let content = format!("{header}{yaml}");
+    save_raw_at(path, &content)
+}
+
+/// Write `contents` verbatim to a config path, atomically.
+///
+/// Why: the atomic half of [`save_at`], reachable by a caller that already holds
+/// the exact bytes to land — `tm issue seed-config` appends a template textually
+/// so it can preserve an operator's comments, which a serialise-and-write cannot
+/// (#7067). Without this seam that caller would reimplement the temp-and-rename
+/// dance, giving the workspace a second atomic-config-write implementation.
+/// What: creates the parent directory, writes a sibling `<stem>.yaml.tmp`, then
+/// renames it over the target. A reader never observes a torn file, and a failed
+/// write leaves the target byte-identical because the target is never opened for
+/// writing. Returns the path written.
+/// Test: `save_then_load_round_trips`, `save_raw_at_leaves_no_tmp_sibling`,
+/// `a_failed_raw_write_leaves_the_target_byte_identical`.
+pub fn save_raw_at(path: &Path, contents: &str) -> Result<PathBuf, ConfigError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| ConfigError::Io {
+            path: parent.to_path_buf(),
+            source: e,
+        })?;
+    }
     let tmp = path.with_extension("yaml.tmp");
-    std::fs::write(&tmp, &content).map_err(|e| ConfigError::Io {
+    std::fs::write(&tmp, contents).map_err(|e| ConfigError::Io {
         path: tmp.clone(),
         source: e,
     })?;
@@ -291,6 +314,71 @@ mod tests {
         // where it came from.
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("trusty-tools config convention"));
+    }
+
+    /// Why: the temp-and-rename write must leave nothing behind — a surviving
+    /// `config.yaml.tmp` would be a half-written config sitting next to the real
+    /// one, and the next reader that globs the directory would find two.
+    /// Test: itself.
+    #[test]
+    fn save_raw_at_leaves_no_tmp_sibling() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = crate_config_path_at(tmp.path(), "trusty-mpm");
+
+        let written = save_raw_at(&path, "name: demo\n").unwrap();
+
+        assert_eq!(written, path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "name: demo\n");
+        let siblings: Vec<PathBuf> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(siblings, vec![path], "a .tmp sibling survived the write");
+    }
+
+    /// Why: the reason [`save_raw_at`] exists. A plain `std::fs::write` truncates
+    /// the target and then writes into it, so a write that cannot complete costs
+    /// the operator their config. Writing a sibling first means the target is
+    /// never opened for writing at all, so a failure leaves it byte-identical.
+    /// What: a read-only parent directory blocks creating the `.tmp` sibling
+    /// while leaving the existing file readable and (to `write(2)`) writable —
+    /// exactly the case that distinguishes the two writes. Skipped when the
+    /// process can create files in a read-only directory anyway (running as
+    /// root), since the failure being asserted cannot be provoked there.
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_raw_write_leaves_the_target_byte_identical() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = crate_config_path_at(tmp.path(), "trusty-mpm");
+        let dir = path.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = "# hand-written\nname: operator\n";
+        std::fs::write(&path, original).unwrap();
+
+        let restore = std::fs::metadata(&dir).unwrap().permissions();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let root_can_still_write = std::fs::write(dir.join("probe"), b"x").is_ok();
+
+        let result = if root_can_still_write {
+            std::fs::remove_file(dir.join("probe")).ok();
+            None
+        } else {
+            Some(save_raw_at(&path, "name: clobbered\n"))
+        };
+
+        std::fs::set_permissions(&dir, restore).unwrap();
+        let Some(result) = result else {
+            return; // running as root: the write cannot be made to fail here.
+        };
+        assert!(result.is_err(), "the write was expected to fail");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "a failed write modified the target"
+        );
     }
 
     /// Why: `load_or_default` must collapse an absent file to `T::default()` so

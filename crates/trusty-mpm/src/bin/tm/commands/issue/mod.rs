@@ -17,7 +17,9 @@
 
 pub(crate) mod config;
 pub(crate) mod ops;
+pub(crate) mod seed_ticketing;
 pub(crate) mod standard;
+pub(crate) mod standard_live;
 pub(crate) mod state;
 pub(crate) mod validate;
 
@@ -28,13 +30,18 @@ mod project_model_tests;
 use std::path::PathBuf;
 
 use crate::cli::IssueCmd;
-use crate::commands::ticket::runner::RealCommandRunner;
+use crate::commands::ticket::runner::{CommandRunner, RealCommandRunner};
 use crate::commands::ticket::system::{
     GhTicketSystem, TicketSystem, TicketSystemKind, not_yet_supported,
 };
 
 use config::{StateModel, load_model};
-use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, resolve_ticketing};
+use seed_ticketing::{
+    TicketingSeedOutcome, seed_outcome_result, seed_ticketing_block, ticketing_config_path,
+};
+use trusty_mpm::core::trusty_tools_config::{
+    TICKETING_BLOCK_TEMPLATE, TrustyToolsConfig, resolve_ticketing,
+};
 
 /// `tm issue <subcommand>` dispatcher.
 ///
@@ -47,12 +54,16 @@ pub(crate) fn issue(cmd: IssueCmd, system: TicketSystemKind) -> anyhow::Result<(
     // #1265: bind the active project's GitHub identity to every `gh` call this
     // verb makes (empty binding → ambient gh identity, no regression).
     let gh_env = crate::gh_identity::load_gh_env()?;
+    // #7067: `standard`'s live milestone/project read-back needs a runner of
+    // its own — the backend owns one but does not expose it. Same binding, so
+    // both halves of the verb speak to GitHub as the same identity.
+    let runner = RealCommandRunner::with_gh_env(&gh_env);
     let backend = match system {
         TicketSystemKind::Gh => GhTicketSystem::new(RealCommandRunner::with_gh_env(&gh_env)),
         TicketSystemKind::Jira => return Err(not_yet_supported("jira")),
         TicketSystemKind::Linear => return Err(not_yet_supported("linear")),
     };
-    dispatch(&backend, cmd)
+    dispatch(&backend, &runner, cmd)
 }
 
 /// Dispatch a parsed [`IssueCmd`] against a backend (generic for testability).
@@ -62,7 +73,11 @@ pub(crate) fn issue(cmd: IssueCmd, system: TicketSystemKind) -> anyhow::Result<(
 /// What: matches each verb, loads the model where required, runs the op, and
 /// prints a human summary.
 /// Test: per-verb ops are unit-tested; this is thin glue.
-fn dispatch<S: TicketSystem>(backend: &S, cmd: IssueCmd) -> anyhow::Result<()> {
+fn dispatch<S: TicketSystem>(
+    backend: &S,
+    runner: &dyn CommandRunner,
+    cmd: IssueCmd,
+) -> anyhow::Result<()> {
     // #6918: resolve the operator's ticketing standard ONCE. An absent
     // `agents.ticketing` block yields the built-in defaults; a malformed one is
     // an error here rather than a silent revert to them.
@@ -80,7 +95,7 @@ fn dispatch<S: TicketSystem>(backend: &S, cmd: IssueCmd) -> anyhow::Result<()> {
         }
         IssueCmd::Standard { config } => {
             let model = load_model(config.as_deref(), lifecycle)?;
-            standard::print_standard(&ticketing, &model);
+            standard::print_standard(&ticketing, &model, runner);
         }
         IssueCmd::Transition {
             issue,
@@ -164,14 +179,25 @@ fn print_states(model: &StateModel) {
     }
 }
 
-/// `tm issue seed-config [--force]` — write the embedded default to user config.
+/// `tm issue seed-config [--force]` — write both halves of the standard.
 ///
 /// Why: lets operators start from a copy of the default model and edit it,
 /// mirroring `tm services init` (RFC §6).
 /// What: writes [`config::DEFAULT_MODEL_YAML`] to
 /// `~/.trusty-tools/trusty-mpm/issue-state.yaml`, creating parent dirs; refuses
-/// to overwrite an existing file unless `--force`.
-/// Test: side-effect-only (filesystem); covered manually + by the dispatch glue.
+/// to overwrite an existing file unless `--force`. Then seeds the
+/// [`TICKETING_BLOCK_TEMPLATE`] into `config.yaml` — the file
+/// [`TrustyToolsConfig::load`] reads — via
+/// [`seed_ticketing_block`] (#7067), so the milestone and project half of the
+/// standard lands on disk rather than being printed for the operator to paste.
+/// That half is never overwritten: an existing `agents.ticketing` is left as
+/// the operator wrote it. One outcome exits NONZERO — an `agents:` key with no
+/// `ticketing:` cannot be appended to, so the block is printed for a manual
+/// paste and the command fails rather than reporting a seed it did not do.
+/// Test: side-effect-only (filesystem/stdout); the write itself is covered by
+/// the `seed_ticketing` tests, the exit split by
+/// `only_the_refusal_outcome_exits_nonzero`, the template by
+/// `the_seed_template_parses_to_the_builtin_defaults`.
 fn seed_config(force: bool) -> anyhow::Result<()> {
     let path: PathBuf = config::user_config_path()
         .ok_or_else(|| anyhow::anyhow!("could not resolve home directory for the user config"))?;
@@ -189,5 +215,33 @@ fn seed_config(force: bool) -> anyhow::Result<()> {
     std::fs::write(&path, config::DEFAULT_MODEL_YAML)
         .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
     println!("wrote default issue-state model to {}", path.display());
-    Ok(())
+
+    // #7067: the milestone/project keys live in a DIFFERENT file, so write
+    // them there too rather than leaving the operator to paste a block.
+    let config_yaml = ticketing_config_path()
+        .ok_or_else(|| anyhow::anyhow!("could not resolve home directory for the user config"))?;
+    let shown = config_yaml.display();
+    let outcome = seed_ticketing_block(&config_yaml)?;
+    match outcome {
+        TicketingSeedOutcome::Created => {
+            println!("created {shown} with the agents.ticketing block");
+        }
+        TicketingSeedOutcome::Appended => {
+            println!("appended the agents.ticketing block to {shown}");
+        }
+        TicketingSeedOutcome::AlreadyPresent => {
+            println!("{shown} already declares agents.ticketing — left unchanged");
+        }
+        TicketingSeedOutcome::AgentsBlockPresent => {
+            println!(
+                "{shown} declares `agents:` without `ticketing:` — left unchanged, \
+                 since a second `agents:` key would make the file unreadable. \
+                 Add this entry under the `agents:` block by hand:\n"
+            );
+            print!("{TICKETING_BLOCK_TEMPLATE}");
+        }
+    }
+    // #7067: the refusal arm exits nonzero — the standard is half-applied and a
+    // script must not read that as a completed seed.
+    seed_outcome_result(outcome, &config_yaml)
 }

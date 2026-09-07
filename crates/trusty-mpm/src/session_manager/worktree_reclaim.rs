@@ -42,11 +42,14 @@ use super::worktree_ownership::{
     read_sentinel_owner,
 };
 use super::worktree_reclaim_gh::{
-    GH_TIMEOUT, PR_JSON_FIELDS, gh_command, resolve_daemon_gh_env, run_with_timeout,
+    GH_TIMEOUT, PR_JSON_FIELDS, gh_pr_list_command, resolve_daemon_gh_env, run_with_timeout,
 };
 // #6867: the single-flight + backoff gate every `gh` poll passes through.
 use super::worktree_reclaim_gh_gate as gh_gate;
 use super::worktree_registry::{Admission, HarnessLockState, harness_lock_state};
+// #7057: the repository every `gh` call below is pinned to, read from the
+// target directory's own `origin` rather than inferred by `gh`.
+use super::worktree_repo_slug::repo_slug_for;
 use super::worktree_safety::DirtyWorktree;
 // #6507: the verdict vocabulary lives next door so this file stays under the
 // SLOC cap; the re-export keeps every call site (and `super::*` in the tests)
@@ -282,11 +285,16 @@ impl PrIndex {
     ///
     /// Why: this is the ONLY I/O in the module's classification path, isolated
     /// here so every gate above it is a pure function.
-    /// What: `gh pr list --state all --limit <PR_INDEX_LIMIT> --json
-    /// number,headRefName,state,isCrossRepository`, run with its WORKING
-    /// DIRECTORY set to `registry_root` (never `-C`, which `gh` does not
-    /// have — see [`gh_command`]) and with the repository-redirecting
-    /// environment stripped. A failure to spawn, a timeout, a non-zero exit, or
+    /// What: `gh pr list --repo <owner/repo> --state all --limit
+    /// <PR_INDEX_LIMIT> --json number,headRefName,state,isCrossRepository`, run
+    /// with its WORKING DIRECTORY set to `registry_root` (never `-C`, which
+    /// `gh` does not have — see
+    /// [`gh_command`](super::worktree_reclaim_gh::gh_command)) and with the
+    /// repository-redirecting environment stripped. #7057: the `--repo` slug
+    /// comes from `registry_root`'s own `origin` remote, so the repository is
+    /// STATED rather than inferred from the working directory; a root whose
+    /// repository cannot be established refuses without spawning `gh` at all.
+    /// A failure to spawn, a timeout, a non-zero exit, or
     /// unparsable output all yield
     /// [`unavailable_because`](Self::unavailable_because) carrying `gh`'s own
     /// one-line complaint (#6561) — never an empty-but-complete index, and
@@ -297,6 +305,22 @@ impl PrIndex {
     /// `pr_index_from_gh_reads_this_repository` (a real successful call);
     /// `pr_index_malformed_json_is_unavailable` (failure-to-unavailable).
     pub(crate) fn from_gh(registry_root: &Path) -> Self {
+        // #7057: WHICH repository, read from this root's own `origin` rather
+        // than left to `gh` to infer from the working directory. Resolved
+        // before the gate because a root whose repository cannot be
+        // established must not spawn a poll at all.
+        let repo = match repo_slug_for(registry_root) {
+            Ok(repo) => repo,
+            Err(reason) => {
+                tracing::warn!(
+                    root = %registry_root.display(),
+                    reason = %reason,
+                    "worktree-reclaim: the repository for this root could not be \
+                     established — every branch under it will block (#7057)"
+                );
+                return Self::unavailable_because(reason);
+            }
+        };
         // #6867: through the gate, so a survey that overlaps another spawns no
         // second `gh`, and a root that has hung three times running is skipped
         // rather than polled again. The identity resolution sits INSIDE the
@@ -308,8 +332,8 @@ impl PrIndex {
             // `GH_CONFIG_DIR`.
             let gh_env = resolve_daemon_gh_env(registry_root);
             let identity = gh_env.describe();
-            let mut cmd = gh_command(registry_root, &gh_env);
-            cmd.args(["pr", "list", "--state", "all", "--limit"])
+            let mut cmd = gh_pr_list_command(registry_root, &gh_env, &repo);
+            cmd.args(["--state", "all", "--limit"])
                 .arg(PR_INDEX_LIMIT.to_string())
                 .args(["--json", PR_JSON_FIELDS]);
             run_with_timeout(cmd, GH_TIMEOUT).map_err(|f| f.with_identity(identity))
@@ -322,6 +346,7 @@ impl PrIndex {
                 // `-C` flag produced, which was otherwise invisible.
                 tracing::debug!(
                     root = %registry_root.display(),
+                    repo = %repo,
                     branches = index.branch_count(),
                     complete = index.is_complete(),
                     "worktree-reclaim: built pull-request index (#2919)"
@@ -336,12 +361,16 @@ impl PrIndex {
                 // differently from "used none at all".
                 tracing::warn!(
                     root = %registry_root.display(),
+                    repo = %repo,
                     reason = %failure,
                     identity = %failure.identity(),
                     "worktree-reclaim: the pull-request lookup failed — every branch \
                      will block, and the survey reports this reason (#6561, #6623)"
                 );
-                Self::unavailable_because(failure.to_string())
+                // #7057: the repository is part of the reason. A lookup aimed
+                // at the wrong repository fails exactly like one aimed at the
+                // right one, so the slug rides along to the operator.
+                Self::unavailable_because(format!("{failure} (repository searched: {repo})"))
             }
         }
     }
@@ -416,10 +445,12 @@ impl PrIndex {
 /// one call per unresolved branch, so only the operator-invoked reclaim path
 /// uses it; the `tm doctor` probe has a 3-second budget and discloses the
 /// truncation instead.
-/// What: `gh pr list --head <branch> --state all`. Fork rows are dropped by
-/// [`PrIndex::from_json`] exactly as in the bulk path. A failure or timeout
+/// What: `gh pr list --repo <owner/repo> --head <branch> --state all`, with the
+/// slug read from `registry_root`'s own `origin` (#7057). Fork rows are dropped
+/// by [`PrIndex::from_json`] exactly as in the bulk path. A failure or timeout
 /// yields [`BranchPrState::LookupFailed`] carrying `gh`'s own first stderr line
-/// (#6561); it used to yield a cause-free `Unknown`. Either blocks.
+/// and the repository that was searched (#6561, #7057); it used to yield a
+/// cause-free `Unknown`. Either blocks.
 ///
 /// #6561: this resolves a SQUASH-MERGED pull request whose head branch was
 /// deleted at merge. `--head` matches the pull request's recorded
@@ -430,6 +461,21 @@ impl PrIndex {
 /// `pr_index_resolves_a_squash_merged_pr_whose_head_branch_was_deleted`.
 pub(crate) fn pr_state_for_branch(registry_root: &Path, branch: &str) -> BranchPrState {
     const PER_BRANCH_LIMIT: usize = 50;
+    // #7057: same per-directory resolution as the bulk index, and the same
+    // refusal when it cannot be established.
+    let repo = match repo_slug_for(registry_root) {
+        Ok(repo) => repo,
+        Err(reason) => {
+            tracing::warn!(
+                root = %registry_root.display(),
+                branch = %branch,
+                reason = %reason,
+                "worktree-reclaim: the repository for this root could not be \
+                 established — this branch will block (#7057)"
+            );
+            return BranchPrState::LookupFailed { reason };
+        }
+    };
     // #6867: keyed by the BRANCH, not merely the root — two branches do not
     // have the same answer, so sharing one call's stdout between them would
     // be a correctness bug rather than a saving.
@@ -439,8 +485,8 @@ pub(crate) fn pr_state_for_branch(registry_root: &Path, branch: &str) -> BranchP
         // environment either.
         let gh_env = resolve_daemon_gh_env(registry_root);
         let identity = gh_env.describe();
-        let mut cmd = gh_command(registry_root, &gh_env);
-        cmd.args(["pr", "list", "--head", branch, "--state", "all", "--limit"])
+        let mut cmd = gh_pr_list_command(registry_root, &gh_env, &repo);
+        cmd.args(["--head", branch, "--state", "all", "--limit"])
             .arg(PER_BRANCH_LIMIT.to_string())
             .args(["--json", PR_JSON_FIELDS]);
         run_with_timeout(cmd, GH_TIMEOUT).map_err(|f| f.with_identity(identity))
@@ -455,6 +501,7 @@ pub(crate) fn pr_state_for_branch(registry_root: &Path, branch: &str) -> BranchP
             // count.
             tracing::warn!(
                 root = %registry_root.display(),
+                repo = %repo,
                 branch = %branch,
                 reason = %failure,
                 identity = %failure.identity(),
@@ -462,7 +509,8 @@ pub(crate) fn pr_state_for_branch(registry_root: &Path, branch: &str) -> BranchP
                  branch will block, and the survey reports this reason (#6507)"
             );
             BranchPrState::LookupFailed {
-                reason: failure.to_string(),
+                // #7057: which repository was asked is part of the reason.
+                reason: format!("{failure} (repository searched: {repo})"),
             }
         }
     }

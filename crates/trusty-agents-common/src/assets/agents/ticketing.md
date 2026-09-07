@@ -159,8 +159,9 @@ family.
 
 🟡 **Read the standard rather than assuming it.** `tm issue standard` prints
 what is in effect — the component labels, the lifecycle labels, the default
-assignee, and whether a claim comment and a closing note are expected. Those
-values come from the `agents.ticketing` block in
+assignee, whether a claim comment and a closing note are expected, and (#7067)
+whether a milestone and a project are required, plus the live lists that satisfy
+them. Those values come from the `agents.ticketing` block in
 `~/.trusty-tools/trusty-mpm/config.yaml`, so a project can add a component
 label, restyle one, name a different assignee, or point at its own
 `issue-state.yaml` (#6918). Two things the block cannot change, and the command
@@ -169,23 +170,59 @@ the deliberate `tm pr open --closes` flag), and `trusty-mpm` stays a component
 label, never a lifecycle one. A block that tries either is refused at load with
 the field named.
 
-## Milestones Are Release Slots, Not a Field to Fill
+## Milestone, Project, Relationships — Set on Every New Issue
 
-🔴 **Leave the milestone UNSET by default.** A milestone is a slot in a named
-release or epic (`tm 1.3.5`, `trusty-agents 0.39`) — not bookkeeping every
-issue receives. Most bugs and enhancements never get one, and even
-`epic`-labelled issues split about evenly between a named milestone and none.
+🔴 **Every issue you file carries exactly one milestone, at least one GitHub
+Project, and every relationship the brief names.** All three are set with the
+call that creates the issue, natively, never in prose and never in a follow-up
+pass. An issue filed with no milestone and no project is a standard violation.
 
-Set one only when deliberately scheduling the issue into a release you have
-confirmed is open:
+🔴 **`tm issue standard` is the source of truth.** It prints
+`milestone_required`, `project_required`, the configured `default_project`, and
+live lists of the repository's open milestones and the owner's open projects.
+Read it before your first filing and take every title from it — a hand-typed
+name is the failure this replaces.
 
 ```bash
-gh api "repos/{owner}/{repo}/milestones" --jq '.[].title'   # gh has no `milestone` subcommand
+gh issue create --title "…" --body "…" \
+  --milestone "Backlog · mpm/core" --add-project "trusty-mpm" --parent 7067 \
+  --assignee @me --label "ws/$WS_NAME" --label bug --label trusty-mpm
+gh issue edit 7070 --milestone "mpm 1.4" --add-project "trusty-mpm"
 ```
 
-Never invent a milestone name, and never put a `ws/<session-name>` value in the
-milestone slot — that is a label. An issue holds many labels and exactly one
-milestone, so a workstream parked there evicts the real release slot.
+Installed `gh` is 2.98 — `--milestone`, `--add-project` and `--parent` all work
+on `issue create` and `issue edit`, and the token carries the `project` scope.
+Blocked-by has no flag; it is the API call in `tm-ticketing`, "Relationships
+(native, never prose)":
+
+```bash
+BLOCKER_ID=$(gh api repos/OWNER/REPO/issues/BLOCKER_NUM --jq .id)
+gh api --method POST repos/OWNER/REPO/issues/ISSUE_NUM/dependencies/blocked_by -F issue_id="$BLOCKER_ID"
+```
+
+**Pick the milestone by rule, in this order:** the parent's milestone when the
+issue is a sub-issue; else the owning crate's `Backlog · <crate>` milestone;
+else the one `tm issue standard` names. Never invent a title, and never put a
+`ws/<session-name>` value in the milestone slot — that is a label. An issue
+holds many labels and exactly one milestone, so a workstream parked there evicts
+the real slot.
+
+**An issue may carry no milestone only with a reason on the record.** When none
+of the three rules yields one, post `no-milestone: <reason>` as a comment on the
+issue in the same dispatch. Without that comment an unset milestone is a defect.
+
+**Verify before you report the filing done:**
+
+```bash
+gh issue view 7070 --json milestone,projectItems
+```
+
+A `null` milestone with no `no-milestone` comment, or an empty `projectItems`,
+is yours to fix now.
+
+If `tm issue standard` reports `milestones: unavailable (…)`, the fetch failed —
+the requirement did not lift. Fix the `gh` error, or say in your report that the
+milestone is unset because the list could not be read.
 
 ## Integration Priority
 
@@ -198,8 +235,10 @@ set, so `gh` is available regardless of which MCP servers are configured.
 **2. GitHub Issues**: When the project's tracker is GitHub (no ticketing MCP,
 a `gh`-authenticated repo — this is the common case), use `gh` directly:
 ```bash
-# full label set per "Label at Creation" above — type + component + optional priority
+# full label set per "Label at Creation" above — type + component + optional
+# priority — plus the milestone and project every new issue carries (#7067)
 gh issue create --title "Title" --body "Details" \
+  --milestone "Backlog · search/core" --add-project "trusty-search" \
   --assignee @me --label "ws/$WS_NAME" --label bug --label trusty-search
 gh issue edit 4069 --add-label refactor --add-label trusty-common
 gh issue list --search "search terms" --state all   # search open AND closed FIRST
@@ -410,14 +449,16 @@ When PM delegates a TODO list for conversion:
 
 Report scope classification, and for anything that could have become a ticket,
 which of the four dispositions you took, what you searched, and — for anything
-created — the labels applied and the milestone (or that you left it unset):
+created — the labels applied, the milestone, the project, and any relationship
+set. An unset milestone is reported with the `no-milestone` reason you posted:
 
 ```
 Searched: "reconcile" / "WatcherManager" / -p trusty-search — open + closed
 REOPEN #3712 (same root cause recurred; commented)
 COMMENT on open #4409
 NEW REGRESSION #5002 — different failure mode after #3990's verified fix
-CREATED #5001 — bug, trusty-search, P1; milestone unset
+CREATED #5001 — bug, trusty-search, P1; milestone "Backlog · search/core";
+              project "trusty-search"; sub-issue of #4990
 NO TICKET (1 item — fixed in the current PR)
 
 status:in-progress -> #5001 (claimed by session ws/search-watcher, 2026-08-31)
