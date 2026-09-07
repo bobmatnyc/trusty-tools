@@ -399,19 +399,24 @@ async fn not_ready_payload_points_at_list_indexes_not_only_a_fallback() {
     );
 }
 
-/// An unresolvable `index_id` names `list_indexes` in the error itself.
+/// An unresolvable `index_id` names `list_indexes` in a MUTATING tool's error.
 ///
 /// Why (#5213): "missing required string field: index_id" is true and
 /// unactionable. A caller that does not know a valid id guesses one — which is
 /// the wrong-index failure #1373 pinned the session to avoid, arriving by a
 /// different route. Pre-fix the message was the bare field name, so the
 /// `contains("list_indexes")` assertion fails against the pre-fix commit.
+/// #6317 moved `search`, `search_semantic`, and `index_status` off this path —
+/// they are reads and now answer with the index directory — so the tools
+/// asserted here are the writes that still error;
+/// `mutating_tools_still_error_when_no_index_resolves` guards that boundary
+/// from the other side.
 /// Test: this test.
 #[tokio::test]
 async fn missing_index_id_error_names_list_indexes() {
     // No pin, no explicit id: there is genuinely nothing to resolve.
     let server = McpServer::new("http://127.0.0.1:1");
-    for tool in ["search", "search_semantic", "index_status"] {
+    for tool in ["reindex", "index_file", "remove_file"] {
         let resp = server
             .dispatch(req(tool, serde_json::json!({ "query": "q" })))
             .await;

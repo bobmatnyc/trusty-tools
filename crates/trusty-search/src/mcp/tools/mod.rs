@@ -20,6 +20,9 @@
 //! - [`not_ready`]   — the `INDEX_NOT_READY` contract (issue #4715): a daemon
 //!   404 on the index this session ADVERTISED means "not built yet", which is
 //!   retryable, not "no such index", which is permanent
+//! - [`index_directory`] — the no-index answer (issue #6317): a read tool with
+//!   no explicit id, no session pin, and no fan-out returns the indexes that
+//!   exist plus a retry hint, as a SUCCESS; mutating tools still error
 //! - [`unavailable`] — the `INDEX_UNAVAILABLE` contract (issue #5350): a daemon
 //!   503 carries a structured availability verdict, which must reach the caller
 //!   as data rather than as a flattened prose string
@@ -41,6 +44,7 @@ pub(crate) mod descriptors;
 pub(crate) mod health;
 pub(crate) mod http;
 pub(crate) mod index;
+pub(crate) mod index_directory;
 pub(crate) mod misc;
 pub(crate) mod not_ready;
 pub(crate) mod search;
@@ -390,3 +394,6 @@ mod tests_unavailable;
 // #5264: structured `search_health` diagnostics.
 #[cfg(test)]
 mod tests_health;
+// #6317: the NO_INDEX_RESOLVED directory answer, and the write tools it spares.
+#[cfg(test)]
+mod tests_index_directory;

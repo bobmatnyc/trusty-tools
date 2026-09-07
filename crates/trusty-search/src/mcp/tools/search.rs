@@ -89,11 +89,11 @@ pub(super) async fn dispatch_search_tool(
             // (#1373); an explicit caller-supplied id still wins.
             let index_id = match server.resolve_index_id(args) {
                 Some(v) => v,
-                // #5213: name `list_indexes`, not just the missing field.
+                // #6317: nothing resolved — answer with the indexes that exist
+                // plus a retry hint, as a success. #5213's error named
+                // `list_indexes`; this returns what that call would have said.
                 None => {
-                    return Some(Err(DispatchError::InvalidParams(
-                        super::types::MISSING_INDEX_ID.into(),
-                    )))
+                    return Some(super::index_directory::index_directory(server, "search").await)
                 }
             };
             // Accept the spec form `{query: string, top_k?: int}` and
@@ -244,10 +244,11 @@ impl McpServer {
     ) -> Result<Value, DispatchError> {
         // Default `index_id` to the session's pinned index when omitted (#1373);
         // an explicit caller-supplied id still wins.
-        // #5213: name `list_indexes`, not just the missing field.
-        let index_id = self
-            .resolve_index_id(args)
-            .ok_or_else(|| DispatchError::InvalidParams(super::types::MISSING_INDEX_ID.into()))?;
+        // #6317: with neither, return the index directory as a success rather
+        // than #5213's error — these lanes are reads.
+        let Some(index_id) = self.resolve_index_id(args) else {
+            return super::index_directory::index_directory(self, lane.tool_name()).await;
+        };
         let query_text = require_str(args, "query")?;
 
         // Pre-flight stage check for lanes that need Stage 2 or Stage 3.

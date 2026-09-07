@@ -457,20 +457,32 @@ fn blank_pin_is_treated_as_no_pin() {
     assert_eq!(s.resolve_index_id(&serde_json::json!({})), None);
 }
 
-/// Without a pin, `search` with no `index_id` fast-fails (unchanged).
+/// Without a pin, `search` with no `index_id` goes looking for the index
+/// directory instead of fast-failing (#6317).
 ///
-/// Why: backward-compatibility — the pre-#1373 contract requires `index_id`,
-/// and the fix must not relax that when no pin is configured.
-/// What: dispatches `search` (no index_id, no pin) and asserts INVALID_PARAMS.
+/// Why: this test asserted INVALID_PARAMS, which was the #1373 contract until
+/// the owner ruling of 2026-08-27 replaced the error with a listing of what
+/// exists. The behaviour it guards now is that the arm consults the daemon:
+/// against an unreachable daemon that surfaces as a transport failure, never as
+/// a parameter error. The success shape is asserted in
+/// `tests_index_directory::unresolved_read_tools_return_the_index_directory`,
+/// which drives a live mock.
+/// What: dispatches `search` (no index_id, no pin) at a dead port and asserts
+/// the error is INTERNAL_ERROR, not INVALID_PARAMS.
 /// Test: this is the test.
 #[tokio::test]
-async fn search_without_pin_requires_index_id() {
+async fn search_without_pin_consults_the_index_directory() {
     let server = McpServer::new("http://127.0.0.1:1");
     let resp = server
         .dispatch(req("search", serde_json::json!({ "query": "fn main" })))
         .await;
     let err = resp.error.expect("expected error");
-    assert_eq!(err.code, error_codes::INVALID_PARAMS);
+    assert_eq!(
+        err.code,
+        error_codes::INTERNAL_ERROR,
+        "an omitted index_id must reach the daemon listing, not fail on params: {}",
+        err.message
+    );
 }
 
 /// With a pin, `search` with no `index_id` targets the pinned index endpoint.

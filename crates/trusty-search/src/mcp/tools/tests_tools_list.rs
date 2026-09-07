@@ -109,11 +109,16 @@ async fn per_lane_tool_descriptions_carry_when_to_use_hooks() {
     }
 }
 
-/// Missing-arg fast-fail: every per-lane tool rejects an empty arg
-/// object before any HTTP round-trip.
+/// Missing-arg fast-fail: every per-lane tool rejects a missing `query`
+/// before any HTTP round-trip.
+///
+/// #6317: the server is pinned here because an unpinned lane with no
+/// `index_id` no longer fails — it fetches the index directory, which is an
+/// HTTP call and so cannot demonstrate a fast-fail. Pinning supplies the index
+/// and leaves `query` as the one missing argument this test is about.
 #[tokio::test]
 async fn per_lane_tools_require_index_id_and_query() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = McpServer::new("http://127.0.0.1:1").with_pinned_index("pinned-proj");
     for tool in ["search_lexical", "search_semantic", "search_kg"] {
         let resp = server.dispatch(req(tool, serde_json::json!({}))).await;
         let err = resp.error.expect("expected error");
