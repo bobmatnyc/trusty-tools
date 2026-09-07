@@ -1625,6 +1625,73 @@ exit 0
         );
     }
 
+    /// 🔴 #6139: the three pin conditions prove WHICH binary would run, never
+    /// that it CAN run. A pinned copy at the right version with its execute bit
+    /// gone satisfied all three, so the preflight passed it and every repository
+    /// then failed at spawn with `Permission denied (os error 13)` — a message
+    /// naming neither the tool nor the file.
+    ///
+    /// Both halves live here because the mode is the only thing that differs
+    /// between them: the same fixture is accepted at 0755 and refused at 0644.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pinned_binary_without_its_execute_bit_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+        install_stubs(&work, "#!/bin/sh\nexit 0\n");
+        let none = ToolOverrides::default();
+
+        // Executable, installed, at the pin: accepted, exactly as before.
+        pinned_binaries(&work, &config().tools, &none).expect("0755 stubs are runnable");
+
+        // The same files, still present and still at the pinned version. Only
+        // the mode changes.
+        let tga = RequiredTool::Tga.path_in(&work);
+        std::fs::set_permissions(&tga, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        let err = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect_err("a binary that cannot be executed cannot be driven");
+        let AuditError::PinnedToolNotExecutable { tool, path } = err else {
+            panic!("expected PinnedToolNotExecutable, got {err:?}");
+        };
+        assert_eq!(tool, "tga");
+        assert_eq!(path, tga);
+
+        // The refusal came before the sweep, so the deliverable was never
+        // opened — this is the whole point of catching it in the preflight.
+        assert!(
+            std::fs::read_dir(work.path(Area::Output))
+                .expect("output area exists")
+                .next()
+                .is_none(),
+            "nothing may be written when the preflight refuses"
+        );
+
+        let rendered = AuditError::PinnedToolNotExecutable {
+            tool,
+            path: path.clone(),
+        }
+        .to_string();
+        assert!(rendered.contains("tga"), "names the tool: {rendered}");
+        assert!(
+            rendered.contains(&path.display().to_string()),
+            "names the path: {rendered}"
+        );
+        assert!(
+            rendered.contains("not executable"),
+            "says what is wrong: {rendered}"
+        );
+        assert!(
+            !rendered.contains("os error"),
+            "never a raw OS error: {rendered}"
+        );
+    }
+
     /// A stub `tga` that names ITSELF in the output, so a test can prove which
     /// binary ran rather than that one did (#6132).
     fn writes_a_manifest_naming(marker: &str) -> String {

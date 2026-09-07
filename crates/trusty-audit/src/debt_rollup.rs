@@ -374,14 +374,24 @@ where
 /// Why: a named block rather than a bare roll-up at the document root, so a
 /// later run-level fact can join it without moving the counts a consumer has
 /// already wired to.
-/// What: the run's local timestamp — the same string the index states — and the
-/// `debt_rollup` block itself.
-/// Test: `debt_rollup_tests::the_json_carries_the_rollup_block`.
+/// What: the run's local timestamp — the same string the index states — the
+/// version of the binary that produced it, and the `debt_rollup` block itself.
+/// Test: `debt_rollup_tests::the_json_carries_the_rollup_block`,
+/// `debt_rollup_tests::the_json_names_the_binary_that_produced_it`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct BundleReport<'a> {
     /// Local time with its UTC offset, from `crate::index_report::local_now`.
     pub generated_at: &'a str,
+    /// The `trusty-audit` version that wrote this document.
+    ///
+    /// #6139: every other generated artifact already stamps it — the index's
+    /// "Produced by" line and Versions table, the excerpt and error-digest
+    /// headers — and this bundle-level document was the one that did not, so a
+    /// recipient reading `report.json` alone could not say which build's
+    /// counting rules produced the numbers. Additive: a reader that does not
+    /// model the field ignores it.
+    pub trusty_audit_version: &'static str,
     /// The counts, by tier, by dimension, by repository, and by tier × dimension.
     pub debt_rollup: &'a DebtRollup,
 }
@@ -391,11 +401,15 @@ pub struct BundleReport<'a> {
 /// Serialisation of `BTreeMap`s and `usize`s cannot fail, so the fallible arm is
 /// unreachable; it still yields an empty document rather than panicking, because
 /// a run that has just written every report must not die on its index.
-/// Test: `debt_rollup_tests::the_json_carries_the_rollup_block`.
+/// Test: `debt_rollup_tests::the_json_carries_the_rollup_block`,
+/// `debt_rollup_tests::the_json_names_the_binary_that_produced_it`.
 #[must_use]
 pub fn to_json(rollup: &DebtRollup, generated_at: &str) -> String {
     let document = BundleReport {
         generated_at,
+        // #6139: the stamp is this binary's own version, never a caller's
+        // argument — a report cannot then name a build that did not write it.
+        trusty_audit_version: env!("CARGO_PKG_VERSION"),
         debt_rollup: rollup,
     };
     serde_json::to_string_pretty(&document).unwrap_or_else(|_| "{}".to_owned())
@@ -404,7 +418,8 @@ pub fn to_json(rollup: &DebtRollup, generated_at: &str) -> String {
 /// Write `report.json` into `dir`, replacing any earlier one.
 ///
 /// # Postconditions
-/// On `Ok`, `dir/report.json` carries this run's `debt_rollup` block. Nothing
+/// On `Ok`, `dir/report.json` carries this run's `debt_rollup` block and the
+/// version of the binary that wrote it (#6139). Nothing
 /// outside `dir` is written, which is what keeps `crate::rerender`'s "the source
 /// package is only read" postcondition true.
 ///
@@ -617,6 +632,28 @@ mod debt_rollup_tests {
         assert_eq!(block["by_dimension"]["churn"], 1);
         assert_eq!(block["by_repo"]["acme-ops"]["RED"], 1);
         assert_eq!(block["by_tier_dimension"]["RED"]["secrets"], 2);
+    }
+
+    /// 🔴 #6139: the bundle-level `report.json` was the one generated artifact
+    /// carrying no version, so a recipient reading it alone could not say which
+    /// build's counting rules produced the numbers. The index states it, the
+    /// excerpt and error-digest headers state it, and now so does this.
+    ///
+    /// Read back off disk rather than out of [`to_json`], because the file is
+    /// what the recipient gets.
+    #[test]
+    fn the_json_names_the_binary_that_produced_it() {
+        let (tmp, rollup) = three_repositories();
+        let out = tmp.path().join("out");
+        std::fs::create_dir_all(&out).expect("mkdir out");
+        write(&rollup, "2026-09-04 11:00:00 -04:00", &out).expect("writes");
+
+        let text = std::fs::read_to_string(out.join(REPORT_FILE)).expect("reads");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(parsed["trusty_audit_version"], env!("CARGO_PKG_VERSION"));
+        // Additive: the fields an older reader already models are untouched.
+        assert_eq!(parsed["generated_at"], "2026-09-04 11:00:00 -04:00");
+        assert_eq!(parsed["debt_rollup"]["total"], 6);
     }
 
     #[test]

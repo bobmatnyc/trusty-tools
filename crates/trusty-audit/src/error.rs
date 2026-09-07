@@ -384,6 +384,30 @@ pub enum AuditError {
         missing: Vec<&'static str>,
     },
 
+    /// A pinned tool is present at the pinned version but cannot be executed.
+    ///
+    /// Why: #6139 — the three pin conditions prove WHICH binary would run, not
+    /// that it CAN run. A pinned copy whose execute bit is gone satisfies all
+    /// three, so the preflight passed it and every repository then failed at
+    /// spawn with `Permission denied (os error 13)` — a message naming neither
+    /// the tool nor the file, repeated once per repository. An operator's
+    /// override already refuses on the same condition
+    /// ([`AuditError::ToolOverride`]); the pinned path had no such check.
+    /// What: names the tool and the path, and says the mode is the problem, so
+    /// the reader knows to restore the execute bit rather than to reinstall.
+    /// Test: `crate::run::run_tests::a_pinned_binary_without_its_execute_bit_is_refused`.
+    #[error(
+        "the pinned {tool} at {} is not executable; restore its execute bit \
+         (`chmod +x`) or reinstall it (`trusty-audit install`) — nothing was audited",
+        path.display()
+    )]
+    PinnedToolNotExecutable {
+        /// The tool whose binary cannot be run.
+        tool: &'static str,
+        /// The pinned binary's path.
+        path: PathBuf,
+    },
+
     /// An operator's tool override names a path that cannot be run.
     ///
     /// Why: #6132 gives an operator one documented way to point the chain at a
