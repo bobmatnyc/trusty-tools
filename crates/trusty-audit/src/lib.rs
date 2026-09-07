@@ -25,6 +25,7 @@
 //! | [`config`] | the engagement config that ships TO the recipient — and the key it carries |
 //! | [`manifest`] | reading tga's `manifest.toml` rather than duplicating it |
 //! | [`tools`] | which pinned tools are needed, and the call that installs them |
+//! | [`tool_overrides`] | the operator's explicit replacement for a pinned binary (#6132) |
 //! | [`discover`] | which repositories the recipient's `gh` credential can reach (#5487) |
 //! | [`registry`] | the repositories and boards this engagement targets (#5822) |
 //! | [`validate`] | proving a target can be read, before it is registered (#5822) |
@@ -122,6 +123,10 @@ pub mod run;
 // the same binary and both were masked by the same update-availability notice.
 pub(crate) mod search_stderr;
 pub mod session;
+// #6132: the operator's one documented way to run the chain on a locally built
+// binary, kept beside `tools` rather than inside it — `tools` owns the pinned
+// set and its installation, this owns the explicit escape hatch from it.
+pub mod tool_overrides;
 pub mod tools;
 pub mod validate;
 pub mod workdir;

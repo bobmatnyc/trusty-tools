@@ -216,8 +216,9 @@ fn an_empty_report_parses_to_no_leaks() {
 #[cfg(unix)]
 #[test]
 // #6789: the sweep at the end reads `std::env::temp_dir()`, one real path every
-// process on the host shares, so a file lock is the only thing that can keep a
-// concurrent copy of THIS test out of the listing.
+// process on the host shares. `report_dir_prefix` is what narrows the listing to
+// this thread's own directories; the file lock stays because a second copy of
+// THIS test in another process runs the same assertions over the same TMPDIR.
 #[serial_test::file_serial(trusty_audit_secrets_report_dirs)]
 fn the_raw_report_lives_in_a_private_directory_and_does_not_outlive_the_run() {
     use std::os::unix::fs::PermissionsExt;
@@ -267,10 +268,16 @@ fn the_raw_report_lives_in_a_private_directory_and_does_not_outlive_the_run() {
     );
 }
 
-/// Every [`REPORT_DIR_PREFIX`] directory the shared temp directory holds right
+/// Every report directory THIS THREAD owns in the shared temp directory right
 /// now, as a set two readings can be differenced across (#6789).
+///
+/// Filtering on [`report_dir_prefix`] rather than the shared
+/// [`REPORT_DIR_PREFIX`] stem is what makes the difference exact: a sibling
+/// test whose sweep scans for real writes under its own prefix, so it cannot
+/// appear here however the two runs interleave.
 #[cfg(unix)]
 fn report_dirs_in_temp() -> BTreeSet<PathBuf> {
+    let mine = report_dir_prefix();
     std::fs::read_dir(std::env::temp_dir())
         .expect("read the temp dir")
         .filter_map(Result::ok)
@@ -279,9 +286,34 @@ fn report_dirs_in_temp() -> BTreeSet<PathBuf> {
             entry
                 .file_name()
                 .and_then(std::ffi::OsStr::to_str)
-                .is_some_and(|name| name.starts_with(REPORT_DIR_PREFIX))
+                .is_some_and(|name| name.starts_with(&mine))
         })
         .collect()
+}
+
+/// 🔴 #6789: two scanners must never name the same directory family, or the
+/// difference above is not a difference of one scanner's work.
+///
+/// Sibling THREADS share a pid, so this is the assertion a pid-only prefix
+/// fails — and sibling threads are what the observed flake actually was.
+#[test]
+fn two_threads_get_different_report_dir_prefixes() {
+    let mine = report_dir_prefix();
+    let theirs = std::thread::spawn(report_dir_prefix)
+        .join()
+        .expect("the sibling thread ran");
+
+    assert_ne!(
+        mine, theirs,
+        "two threads sharing a prefix put each other's directories in the other's difference set"
+    );
+    for prefix in [&mine, &theirs] {
+        assert!(prefix.starts_with(REPORT_DIR_PREFIX), "{prefix}");
+        assert!(
+            prefix.contains(&format!("{}-", std::process::id())),
+            "the prefix must still separate processes: {prefix}"
+        );
+    }
 }
 
 /// `Run` holds gitleaks' `Secret` and `Match` verbatim, so its `Debug` is

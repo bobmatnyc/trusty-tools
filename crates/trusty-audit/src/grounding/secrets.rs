@@ -441,7 +441,7 @@ fn run_gitleaks(checkout: &Path) -> Result<Run, String> {
 /// descriptor, files created in it after the mode changed. So the report goes in
 /// a SUBDIRECTORY made by `mkdir(2)` with an explicit 0700 — a umask can only
 /// clear bits, so that one is private from birth and there is no window at all.
-/// What: a `TempDir` named [`REPORT_DIR_PREFIX`]`<random>` holding a 0700
+/// What: a `TempDir` named [`report_dir_prefix`]`<random>` holding a 0700
 /// [`REPORT_SUBDIR`]. The caller keeps it alive for exactly as long as it needs
 /// the report, and reads the path from [`report_path_in`].
 ///
@@ -459,7 +459,9 @@ fn private_report_dir() -> Result<TempDir, String> {
         )
     };
     let dir = tempfile::Builder::new()
-        .prefix(REPORT_DIR_PREFIX)
+        // #6789: per-process, per-thread prefix so the private-dir test's TMPDIR
+        // difference is exact under parallel scans
+        .prefix(&report_dir_prefix())
         .tempdir()
         .map_err(|e| refuse("directory", e))?;
 
@@ -480,8 +482,39 @@ fn report_path_in(dir: &TempDir) -> PathBuf {
     dir.path().join(REPORT_SUBDIR).join(REPORT_FILE)
 }
 
-/// Prefix of the private directory [`private_report_dir`] creates.
+/// Stem shared by every private directory [`private_report_dir`] creates.
 const REPORT_DIR_PREFIX: &str = "trusty-audit-secrets-";
+
+/// The prefix THIS scanner's report directories carry (#6789).
+///
+/// Why: every report directory lands in `std::env::temp_dir()`, one real path
+/// the whole host shares, and the private-directory test proves nothing survives
+/// a scan by differencing that listing around its own. With one prefix for
+/// everybody the difference caught other people's directories, and the test
+/// failed intermittently — `#[file_serial]` excludes only a second copy of that
+/// same test, never the other tests whose sweeps scan for real.
+///
+/// A pid alone does not fix it: the collisions observed were sibling THREADS in
+/// one test binary, which share a pid. So the thread is in the prefix too, and
+/// the difference a scanner takes over its own prefix cannot hold anyone else's
+/// directory — in this process or another.
+/// What: `trusty-audit-secrets-<pid>-<thread>-`, where `<thread>` is this
+/// thread's [`std::thread::ThreadId`] hashed to a value stable for as long as
+/// the thread lives. Hashed rather than printed because `ThreadId`'s only
+/// portable rendering is a `Debug` string with punctuation in it.
+/// Test: `secrets_tests::two_threads_get_different_report_dir_prefixes`,
+/// `secrets_tests::the_raw_report_lives_in_a_private_directory_and_does_not_outlive_the_run`.
+fn report_dir_prefix() -> String {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    format!(
+        "{REPORT_DIR_PREFIX}{}-{:x}-",
+        std::process::id(),
+        hasher.finish()
+    )
+}
 
 /// The 0700 subdirectory the raw report actually lives in.
 const REPORT_SUBDIR: &str = "private";

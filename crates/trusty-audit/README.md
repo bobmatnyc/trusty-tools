@@ -237,6 +237,37 @@ a Unix socket derived from the data directory (overridable with
 `TRUSTY_ANALYZE_SOCKET`, #6287), so whatever is serving that path is what
 answers.
 
+**Running a locally built tool (#6132).** Four variables replace a pinned binary
+for one run, one per tool:
+
+| Variable | Replaces |
+| --- | --- |
+| `TRUSTY_AUDIT_TGA_BIN` | the pinned `tga` |
+| `TRUSTY_AUDIT_SEARCH_BIN` | the pinned `trusty-search` |
+| `TRUSTY_AUDIT_ANALYZE_BIN` | the pinned `trusty-analyze` |
+| `TRUSTY_AUDIT_REVIEW_BIN` | the pinned `trusty-review` |
+
+Each takes an absolute path to an executable file. Precedence is the override,
+then the pin — and there is no third branch: a variable naming a path that does
+not exist, is relative, or is not executable **refuses the run** naming the
+variable, rather than quietly falling back to the pinned copy. An operator who
+believes they tested their build while the published one ran is worse off than
+one with no override at all.
+
+An overridden tool is also excused from install, which is the case this exists
+for: a version that is merged but not yet published cannot be downloaded at all,
+so demanding it would refuse the very run the override enables.
+
+The override is stamped into the `index.md` **Versions** table of both the sweep
+and the return package, in that tool's row, led by the word `OVERRIDDEN` and
+naming the variable and the path. No version is claimed for it — this client
+neither installed nor verified that binary — so an audit run driven by a local
+build can never be mistaken for a pinned one.
+
+These are not `TRUSTY_REVIEW_BIN` / `TRUSTY_SEARCH_BIN` / `TRUSTY_ANALYZE_BIN`,
+which are internal plumbing: the sweep SETS those on every child from the pinned
+paths, so a value you export is clobbered before any child reads it.
+
 **The code-analysis leg (#6081, #6082).** After each repository is audited, this
 client indexes its checkout in `trusty-search` and measures it with
 `trusty-analyze`, starting either daemon if it is not already answering, and

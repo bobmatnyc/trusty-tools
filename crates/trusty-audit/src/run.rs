@@ -372,7 +372,18 @@ where
     // #6080: the sweep's own wall clock, for the index it writes at the end.
     let sweep_started = std::time::Instant::now();
     work.create()?;
-    let binaries = pinned_binaries(work, &config.tools)?;
+    // #6132: the operator's explicit overrides, resolved before anything is
+    // checked against a pin — this is the one thing that can replace a pinned
+    // binary, and a variable naming a path that cannot run refuses right here
+    // rather than as a spawn failure per repository.
+    let overrides = crate::tool_overrides::ToolOverrides::resolve(&operator)?;
+    let binaries = pinned_binaries(work, &config.tools, &overrides)?;
+    // #6132: written down before the first child, because the deliverable is
+    // read on a machine whose shell never exported these variables. This is what
+    // stops a run driven by a local binary reading as a pinned one — see
+    // `crate::index_report::recorded_tools`. Recording an EMPTY set deletes an
+    // earlier run's claim, so a clean pinned run never inherits one.
+    overrides.record(work)?;
     // Resolved once, before any child: a half-named selection is identical for
     // every repository, so failing per-repo would just repeat one misconfiguration.
     // #6135: both halves at once — the pairs the child inherits, and the
@@ -877,6 +888,7 @@ pub const PER_REPO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 mod run_tests {
     use super::*;
     use crate::progress::{ProgressUpdate, Recorder, StageEvent, StageState};
+    use crate::tool_overrides::ToolOverrides;
     use crate::tools::{self, RequiredTool};
     // The selection document itself, so a test can write a torn one by hand.
     use crate::run::selection::Selection;
@@ -1545,14 +1557,26 @@ exit 0
         let work = work_in(tmp.path());
         let pins = config().tools;
 
+        // #6132: both sides read the same overrides, so the agreement asserted
+        // here is about the pins rather than about what a shell exported.
+        let none = ToolOverrides::default();
+
         // Unsatisfied and refused.
-        assert!(!tools::unsatisfied(&work, &pins).expect("reads").is_empty());
-        assert!(pinned_binaries(&work, &pins).is_err());
+        assert!(
+            !tools::unsatisfied_with(&work, &pins, &none)
+                .expect("reads")
+                .is_empty()
+        );
+        assert!(pinned_binaries(&work, &pins, &none).is_err());
 
         // Satisfied and accepted.
         install_stubs(&work, "#!/bin/sh\nexit 0\n");
-        assert!(tools::unsatisfied(&work, &pins).expect("reads").is_empty());
-        assert!(pinned_binaries(&work, &pins).is_ok());
+        assert!(
+            tools::unsatisfied_with(&work, &pins, &none)
+                .expect("reads")
+                .is_empty()
+        );
+        assert!(pinned_binaries(&work, &pins, &none).is_ok());
     }
 
     /// A binary this client did not install and verify is not a usable binary.
@@ -1563,7 +1587,7 @@ exit 0
         for tool in RequiredTool::ALL {
             std::fs::write(tool.path_in(&work), b"stub").expect("stub");
         }
-        let err = pinned_binaries(&work, &config().tools)
+        let err = pinned_binaries(&work, &config().tools, &ToolOverrides::default())
             .expect_err("no version record means unverified");
         let AuditError::ToolsNotInstalled { missing } = err else {
             panic!("expected ToolsNotInstalled, got {err:?}");
@@ -1585,7 +1609,8 @@ exit 0
         )
         .expect("parses");
 
-        let err = pinned_binaries(&work, &bumped.tools).expect_err("2.9.4 is not 2.10.0");
+        let err = pinned_binaries(&work, &bumped.tools, &ToolOverrides::default())
+            .expect_err("2.9.4 is not 2.10.0");
         let AuditError::VersionMismatch {
             tool,
             pinned,
@@ -1598,6 +1623,171 @@ exit 0
             (tool, pinned.as_str(), installed.as_str()),
             ("tga", "2.10.0", "2.9.4")
         );
+    }
+
+    /// A stub `tga` that names ITSELF in the output, so a test can prove which
+    /// binary ran rather than that one did (#6132).
+    fn writes_a_manifest_naming(marker: &str) -> String {
+        let mut script = writes_a_manifest(None)
+            .trim_end_matches("exit 0\n")
+            .to_owned();
+        script.push_str(&format!(
+            "echo \"{marker}\" > \"$out/which-tga.txt\"\nexit 0\n"
+        ));
+        script
+    }
+
+    /// Write `script` at `path` and make it runnable.
+    fn write_executable(path: &Path, script: &str) {
+        std::fs::write(path, script).expect("write stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+    }
+
+    /// The three tools this client installed, and no tga at all — the state of
+    /// an engagement whose tga pin is merged but not yet published (#6132).
+    fn install_stubs_without_tga(work: &WorkDir) {
+        install_stubs(work, SEARCH_APPROVES);
+        std::fs::remove_file(RequiredTool::Tga.path_in(work)).expect("remove the pinned tga");
+        let record = format!(
+            "[[tools]]\ncrate_name = \"trusty-search\"\nversion = \"0.47.0\"\nbinary = \"{s}\"\n\
+             [[tools]]\ncrate_name = \"trusty-analyze\"\nversion = \"0.9.2\"\nbinary = \"{a}\"\n\
+             [[tools]]\ncrate_name = \"trusty-review\"\nversion = \"0.15.1\"\nbinary = \"{r}\"\n",
+            s = RequiredTool::TrustySearch.path_in(work).display(),
+            a = RequiredTool::TrustyAnalyze.path_in(work).display(),
+            r = RequiredTool::TrustyReview.path_in(work).display(),
+        );
+        std::fs::write(tools::record_path(work), record).expect("write record");
+    }
+
+    /// An environment naming `path` as the tga override, and nothing else.
+    fn tga_override(path: &Path) -> impl Fn(&str) -> Option<String> + use<'_> {
+        let value = path.display().to_string();
+        move |name: &str| (name == RequiredTool::Tga.override_env()).then(|| value.clone())
+    }
+
+    /// 🔴 #6132: the whole feature. An operator points `TRUSTY_AUDIT_TGA_BIN` at
+    /// a locally built binary and the sweep runs THAT — with no tga in `tools/`
+    /// and no install record naming one, which is the state of a pin that is
+    /// merged but unpublished. The #6131 verification ran published tga 3.2.0
+    /// while 3.3.0 sat merged, because there was nowhere to say this.
+    ///
+    /// Against `origin/main` this fails at the `pinned_binaries` preflight:
+    /// nothing could replace a pin, so a tga the client had not installed
+    /// refused the run with `ToolsNotInstalled`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_override_replaces_a_pin_the_client_never_installed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs_without_tga(&work);
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let local = tmp.path().join("locally-built-tga");
+        write_executable(&local, &writes_a_manifest_naming("built-from-source"));
+
+        let report = sweep_with_operator(&work, tga_override(&local))
+            .await
+            .expect("the override supplies what the pin cannot");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+        assert_eq!(
+            std::fs::read_to_string(report.repos[0].output.join("which-tga.txt"))
+                .expect("the local binary ran")
+                .trim(),
+            "built-from-source"
+        );
+    }
+
+    /// 🔴 #6132: an audit run driven by a local binary must never read as a
+    /// pinned one. The index's Versions table is where a reader looks, so the
+    /// override is stamped into that tool's row — and the three tools nobody
+    /// overrode still state the versions this client installed and verified.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_overridden_tool_is_stamped_into_the_index() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs_without_tga(&work);
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let local = tmp.path().join("locally-built-tga");
+        write_executable(&local, &writes_a_manifest_naming("built-from-source"));
+
+        sweep_with_operator(&work, tga_override(&local))
+            .await
+            .expect("the sweep completes");
+
+        let index = index_of(&work);
+        assert!(index.contains(crate::tool_overrides::MARKER), "{index}");
+        assert!(index.contains("TRUSTY_AUDIT_TGA_BIN"), "{index}");
+        assert!(index.contains(&local.display().to_string()), "{index}");
+        assert!(index.contains("| `trusty-review` | 0.15.1 |"), "{index}");
+    }
+
+    /// 🔴 #6132: no silent fallback. A variable naming a path that cannot be run
+    /// refuses the sweep, even though the pinned copy is right there and would
+    /// have worked — an operator who believes they tested their build while the
+    /// published one ran is worse off than one with no override at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_override_naming_nothing_refuses_rather_than_using_the_pin() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest_naming("the-pinned-copy"));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let absent = tmp.path().join("never-built-tga");
+        let err = sweep_with_operator(&work, tga_override(&absent))
+            .await
+            .expect_err("an override that cannot run must not fall back");
+        let AuditError::ToolOverride {
+            variable, reason, ..
+        } = err
+        else {
+            panic!("expected ToolOverride, got {err:?}");
+        };
+        assert_eq!(variable, "TRUSTY_AUDIT_TGA_BIN");
+        assert_eq!(reason, "does not exist");
+        assert!(
+            !work
+                .path(Area::Output)
+                .join(crate::index_report::INDEX_FILE)
+                .exists(),
+            "the refusal must land before any child runs"
+        );
+    }
+
+    /// 🔴 #6132: a run that overrides nothing must not inherit an earlier run's
+    /// confession — a stale record would have every later report claiming a
+    /// local binary that no longer runs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_later_pinned_run_clears_an_earlier_override() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest_naming("the-pinned-copy"));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let local = tmp.path().join("locally-built-tga");
+        write_executable(&local, &writes_a_manifest_naming("built-from-source"));
+        sweep_with_operator(&work, tga_override(&local))
+            .await
+            .expect("the overridden sweep completes");
+        assert!(index_of(&work).contains(crate::tool_overrides::MARKER));
+
+        sweep_with_operator(&work, |_| None)
+            .await
+            .expect("the pinned sweep completes");
+        let index = index_of(&work);
+        assert!(!index.contains(crate::tool_overrides::MARKER), "{index}");
+        assert!(index.contains("| `tga` | 2.9.4 |"), "{index}");
     }
 
     #[test]
@@ -2655,6 +2845,10 @@ exit 0
     /// none of the four onto the child, so nothing of ours can contradict
     /// theirs. The injected lookup reports all four set without exporting them,
     /// so an emitted default would show up here as a non-empty value.
+    ///
+    /// #6132: the lookup answers for those four BY NAME rather than for
+    /// everything. A blanket answer now also claims `TRUSTY_AUDIT_TGA_BIN` is
+    /// set to `operator`, which the override resolution correctly refuses.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_fully_set_operator_environment_is_left_alone() {
@@ -2662,9 +2856,17 @@ exit 0
         let work = work_in(tmp.path());
         one_repo_ready(&work);
 
-        let report = sweep_with_operator(&work, |_| Some("operator".to_owned()))
-            .await
-            .expect("a whole operator selection resolves");
+        let selection = [
+            inference::ENV_PROVIDER,
+            inference::ENV_REVIEWER_MODEL,
+            inference::ENV_VERIFIER_MODEL,
+            inference::ENV_SUMMARIZER_MODEL,
+        ];
+        let report = sweep_with_operator(&work, |name| {
+            selection.contains(&name).then(|| "operator".to_owned())
+        })
+        .await
+        .expect("a whole operator selection resolves");
         assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
 
         let dumped = child_env(&report);

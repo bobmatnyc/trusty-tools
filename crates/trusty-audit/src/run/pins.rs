@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use crate::config::ToolPins;
 use crate::error::AuditError;
+use crate::tool_overrides::ToolOverrides;
 use crate::tools::{self, RequiredTool};
 use crate::workdir::WorkDir;
 
@@ -46,25 +47,39 @@ pub(super) struct PinnedBinaries {
 /// hand reads as `installed` with no version — unverified is not a weaker kind
 /// of installed. The third matters because install and run are separate steps,
 /// so the config can change between them.
-/// What: reads [`tools::status`], checks all three conditions, and returns the
-/// paths by name.
+/// #6132 adds ONE branch ahead of those three, and only one: an explicit
+/// operator override REPLACES the pin for that tool. It is not a fallback —
+/// [`ToolOverrides::resolve`] has already proven the path executable and refused
+/// the run if it could not, so nothing here can silently return to the pin. A
+/// tool nobody overrode is unaffected, which is every tool on an ordinary run.
+///
+/// What: reads [`tools::status`], applies the override where there is one,
+/// checks all three conditions where there is not, and returns the paths by
+/// name.
 /// Test: `crate::run::run_tests::a_run_without_the_pinned_tools_is_refused`,
 /// `crate::run::run_tests::an_unverified_binary_does_not_count_as_installed`,
-/// `crate::run::run_tests::a_binary_installed_at_a_different_pin_is_refused`.
+/// `crate::run::run_tests::a_binary_installed_at_a_different_pin_is_refused`,
+/// `crate::run::run_tests::an_override_replaces_a_pin_the_client_never_installed`.
 ///
 /// # Errors
 ///
-/// [`AuditError::ToolsNotInstalled`] naming every tool that is missing or
-/// unverified, [`AuditError::VersionMismatch`] for the first tool whose recorded
-/// version is not the engagement's pin, and whatever [`tools::status`] fails
-/// with.
+/// [`AuditError::ToolsNotInstalled`] naming every non-overridden tool that is
+/// missing or unverified, [`AuditError::VersionMismatch`] for the first such
+/// tool whose recorded version is not the engagement's pin, and whatever
+/// [`tools::status`] fails with.
 pub(super) fn pinned_binaries(
     work: &WorkDir,
     pins: &ToolPins,
+    overrides: &ToolOverrides,
 ) -> Result<PinnedBinaries, AuditError> {
     let statuses = tools::status(work)?;
     let missing: Vec<&'static str> = statuses
         .iter()
+        // #6132: an overridden tool is not required to be installed at all. The
+        // case this exists for is a pin that cannot be downloaded because it is
+        // merged and unpublished, so demanding the install would refuse the run
+        // the override enables.
+        .filter(|s| overrides.path_of(s.tool).is_none())
         .filter(|s| !s.installed || s.version.is_none())
         .map(|s| s.tool.binary_name())
         .collect();
@@ -73,6 +88,10 @@ pub(super) fn pinned_binaries(
     }
 
     let path_of = |tool: RequiredTool| -> Result<PathBuf, AuditError> {
+        // #6132: explicit override, then the pin. There is no third branch.
+        if let Some(local) = overrides.path_of(tool) {
+            return Ok(local.to_path_buf());
+        }
         let pinned = tool.pin_in(pins).version();
         let status = statuses.iter().find(|s| s.tool == tool).ok_or_else(|| {
             AuditError::ToolsNotInstalled {
