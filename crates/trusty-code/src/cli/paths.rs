@@ -107,29 +107,49 @@ pub fn show(project_root: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// The exit code `tcode paths import` uses when at least one entry was refused.
+///
+/// Why: #6999 — the refusal was printed but the process exited 0, so a caller
+/// scripting the import could not tell a clean migration from one that silently
+/// left a symlink escape, an executable, or a secret-bearing `settings.json`
+/// behind. A distinct nonzero code is the only signal a script can branch on.
+/// What: `1`. Deliberately outside the `run-task` ladder
+/// (`trusty_code::run_task::ExitCode` uses `0` and `2`–`6`), so no caller can
+/// confuse the two.
+/// Test: `tests/cli_e2e.rs::paths_import_exits_nonzero_when_an_entry_is_refused`.
+pub const IMPORT_REFUSED_EXIT_CODE: i32 = 1;
+
 /// Plan, print, and (unless `dry_run`) apply the `.claude/` → `.trusty-code/`
-/// import.
+/// import, returning the process exit code.
 ///
 /// Why: the plan is printed in both modes so `--dry-run` output and the real
 /// run's output describe the same work — the property that makes a dry run
-/// worth trusting.
+/// worth trusting. #6999 extends that property to the exit code: a plan holding
+/// a refusal reports [`IMPORT_REFUSED_EXIT_CODE`] in BOTH modes, so a dry run
+/// and the run it previews cannot disagree on whether the migration is clean.
 /// What: [`paths::import::plan_import`], printed one line per entry; with
 /// `dry_run` it stops there, otherwise it applies the plan and prints the
 /// created and refused counts. It also creates and tightens the private state
 /// directory, since that is the other half of the layout an operator running
-/// this command is adopting.
-/// Test: `tests/cli_e2e.rs::paths_import_dry_run_writes_nothing`.
-pub fn import(project_root: &Path, dry_run: bool) -> Result<()> {
+/// this command is adopting. Returns `0` when nothing was refused and
+/// [`IMPORT_REFUSED_EXIT_CODE`] otherwise — including the benign
+/// "target already exists" refusal, which is what a re-run of a completed
+/// import reports.
+/// Test: `tests/cli_e2e.rs::paths_import_dry_run_writes_nothing`,
+/// `tests/cli_e2e.rs::paths_import_exits_nonzero_when_an_entry_is_refused`.
+pub fn import(project_root: &Path, dry_run: bool) -> Result<i32> {
     let plan = paths::import::plan_import(project_root);
     if plan.entries.is_empty() {
         println!("nothing to import: no .claude/agents, .claude/skills, or .claude/settings.json");
     }
+    let mut refused = 0usize;
     for entry in &plan.entries {
         match &entry.action {
             paths::import::ImportAction::Copy => {
                 println!("copy    {}", entry.to.display());
             }
             paths::import::ImportAction::Refuse(reason) => {
+                refused += 1;
                 println!("skip    {} — {reason}", entry.from.display());
             }
         }
@@ -137,7 +157,8 @@ pub fn import(project_root: &Path, dry_run: bool) -> Result<()> {
 
     if dry_run {
         println!("\n--dry-run: nothing was written.");
-        return Ok(());
+        // #6999: the dry run reports the exit code the real run would.
+        return Ok(exit_code_for(refused));
     }
 
     let report = paths::import::apply_import(&plan);
@@ -156,5 +177,19 @@ pub fn import(project_root: &Path, dry_run: bool) -> Result<()> {
             println!("  {}", path.display());
         }
     }
-    Ok(())
+    Ok(exit_code_for(report.refused.len()))
+}
+
+/// Map a refusal count onto the import's exit code.
+///
+/// Why: the dry-run and applied paths must agree, so the mapping is written
+/// once (#6999).
+/// What: `0` for no refusals, [`IMPORT_REFUSED_EXIT_CODE`] otherwise.
+/// Test: `tests/cli_e2e.rs::paths_import_exits_nonzero_when_an_entry_is_refused`.
+fn exit_code_for(refused: usize) -> i32 {
+    if refused == 0 {
+        0
+    } else {
+        IMPORT_REFUSED_EXIT_CODE
+    }
 }

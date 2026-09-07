@@ -507,5 +507,19 @@ fn default_data_dir_falls_back_to_workstreams_default_when_unset() {
     if std::env::var(DATA_DIR_ENV_VAR).is_ok() {
         return;
     }
-    assert_eq!(default_data_dir(), crate::workstreams::default_data_dir());
+    // #6999: this used to compare `default_data_dir()` with
+    // `workstreams::default_data_dir()`. Both now CREATE and chmod
+    // `~/.trusty-code`, so the comparison did real I/O in whatever `$HOME` the
+    // run had. The two halves are asserted separately instead: the override is
+    // unset, and the path the unset branch resolves is the private-state root.
+    assert_eq!(
+        data_dir_override(),
+        None,
+        "the override must be unset for the fallback branch to be the one taken"
+    );
+    assert_eq!(
+        crate::paths::private_state::private_state_dir().file_name(),
+        Some(std::ffi::OsStr::new(".trusty-code")),
+        "the fallback resolves the workstream private state root"
+    );
 }

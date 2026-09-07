@@ -30,24 +30,62 @@ const HASH_LEN: usize = 8;
 /// store regardless of which directory `tcode serve` happened to start in.
 const PROJECTLESS_FILENAME: &str = "workstreams-projectless.json";
 
-/// Resolve `~/.trusty-code`, the trusty-code private state directory.
+/// Resolve `~/.trusty-code`, creating it at mode `0700` and tightening it if a
+/// previous run left it permissive.
 ///
 /// Why: mirrors `trusty-mpm`'s `~/.trusty-mpm` precedent
 /// (`crates/trusty-mpm/src/core/paths.rs`) rather than inventing a new
 /// resolution convention. #5426 moved the resolution itself into
 /// [`crate::paths::private_state`], which also owns the `0700` mode this
 /// directory must carry — a workstream store sitting beside transcripts and
-/// logs is private state, not an independent location.
-/// What: delegates to [`crate::paths::private_state::private_state_dir`]:
-/// `dirs::home_dir()/.trusty-code`, falling back to a relative `.trusty-code`
-/// (with a `warn`) if the home directory cannot be resolved. Never panics, and
-/// creates nothing — [`crate::paths::private_state::ensure_private_state_dir`]
-/// is the creating variant.
+/// logs is private state, not an independent location. #6999: this function is
+/// the ONE place every private-state writer resolves that root — the workstream
+/// store, `serve`'s router, and `agent_loop::telemetry`'s own `default_data_dir`
+/// all end here — so the mode guarantee is applied here rather than at each
+/// writer's own `create_dir_all`, which would apply the process umask and leave
+/// `0755`. Applying it anywhere else would be a second copy of the rule.
+/// What: delegates to [`crate::paths::private_state::ensure_private_state_dir`]:
+/// `dirs::home_dir()/.trusty-code`, created if missing and chmod'd to `0700` if
+/// any group or other bit is set. On an I/O failure it falls back to the plain
+/// [`crate::paths::private_state::private_state_dir`] path, logging at `warn` —
+/// a harness that cannot create its state directory should still report what it
+/// tried, not panic. Never panics.
 /// Test: `path_tests::default_data_dir_is_dot_trusty_code`,
+/// `path_tests::ensure_or_report_creates_and_tightens_a_permissive_dir`,
+/// `tests/cli_e2e.rs::a_non_import_command_tightens_a_permissive_private_state_dir`,
 /// `paths::private_state::private_state_tests::private_state_dir_matches_home_when_available`.
 pub fn default_data_dir() -> PathBuf {
-    // #5426: one resolver for the private state root, shared with its mode guard.
-    crate::paths::private_state::private_state_dir()
+    // #6999: the README promised an existing permissive `~/.trusty-code` is
+    // tightened on the next run; before this, only `tcode paths import` did it.
+    // `private_state_dir` owns home resolution, including the no-home fallback.
+    ensure_or_report(crate::paths::private_state::private_state_dir())
+}
+
+/// Create and tighten an already-resolved private-state root, or report why not.
+///
+/// Why: the hermetic core of [`default_data_dir`] (#6999), mirroring
+/// [`crate::paths::private_state::private_state_dir_at`]'s reason for existing —
+/// a test drives it with a temp directory, so no test creates, chmods, or
+/// reports on the developer's real `~/.trusty-code`.
+/// What: [`crate::paths::private_state::ensure_dir`], returning `dir` either
+/// way. On failure — the path is a regular file, the home directory is
+/// read-only, the filesystem is full — it logs at `warn` with the path and the
+/// error and hands back the same path, so a harness that cannot create its state
+/// directory still runs and still says what it tried. Never panics.
+/// Test: `path_tests::ensure_or_report_creates_and_tightens_a_permissive_dir`,
+/// `path_tests::ensure_or_report_falls_back_when_the_path_is_a_file`,
+/// `tests/cli_e2e.rs::an_unusable_private_state_path_warns_instead_of_panicking`.
+pub(crate) fn ensure_or_report(dir: PathBuf) -> PathBuf {
+    if let Err(e) = crate::paths::private_state::ensure_dir(&dir) {
+        tracing::warn!(
+            path = %dir.display(),
+            error = %e,
+            "could not create the trusty-code private state directory; \
+             continuing with the resolved path, which may not exist or may \
+             be readable by other users on this machine"
+        );
+    }
+    dir
 }
 
 /// Turn an arbitrary string into a filesystem-safe, lowercase, hyphenated

@@ -150,8 +150,14 @@ Run `tcode paths show [--json]` to see which root won for each entry.
 Transcripts, logs, compression telemetry, daemon discovery files, and the
 workstream store are per-user runtime state, not project configuration. They
 live in `~/.trusty-code/`, which is created at mode `0700`; an existing
-directory with a permissive mode is tightened on the next run. `tcode paths
-show` reports whether the mode is currently owner-only.
+directory with a permissive mode is tightened on the next run. Every `tcode`
+run that resolves the directory applies both — not only `tcode paths import`
+(#6999). `tcode paths show` reports whether the mode is currently owner-only,
+and resolves the path without creating it.
+
+Files and subdirectories already inside `~/.trusty-code/` keep their own modes;
+only the root is chmod'd. `0700` on the root blocks the ordinary traversal path
+into them.
 
 ### Importing an existing `.claude/` catalog
 
@@ -174,6 +180,12 @@ Four sources are refused rather than copied, each named in the output:
 - `settings.json` carries a secret-bearing key, or will not parse. Put
   credentials in the environment or the secure store, never in a file the
   project commits.
+
+**Exit code.** A clean import exits `0`. If any entry was refused, the command
+exits `1` (#6999) — so a script can branch on it instead of parsing the plan.
+`--dry-run` reports the code the real run would, which keeps the preview and the
+run in agreement. Re-running a completed import therefore exits `1`: every
+target already exists, so every entry is refused.
 
 Plugins are deliberately not copied: their provenance cannot be vouched for, so
 `.claude/plugins/` stays discoverable in place through the compatibility root.
