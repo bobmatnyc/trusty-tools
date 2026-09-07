@@ -627,3 +627,63 @@ fn clear_kg_graph_drops_the_format_stamp() {
         "clearing twice is a no-op"
     );
 }
+
+/// #7004: `list_chunk_ids` answers the exact key set, including two chunks of
+/// one file, which `list_indexed_files` collapses to a single path.
+#[test]
+fn list_chunk_ids_returns_every_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = CorpusStore::open(&dir.path().join("index.redb")).unwrap();
+    assert!(
+        store.list_chunk_ids().unwrap().is_empty(),
+        "an empty corpus lists no ids"
+    );
+
+    let mut second = raw("src/lib.rs:11:20", "fn beta() {}");
+    second.file = "src/lib.rs".to_string();
+    store
+        .upsert_chunks(&[raw("src/lib.rs:1:10", "fn alpha() {}"), second])
+        .unwrap();
+
+    let ids = store.list_chunk_ids().unwrap();
+    assert_eq!(
+        ids.len(),
+        2,
+        "both chunks of one file must be listed: {ids:?}"
+    );
+    assert!(ids.contains("src/lib.rs:1:10"));
+    assert!(ids.contains("src/lib.rs:11:20"));
+    assert_eq!(
+        store.list_indexed_files().unwrap().len(),
+        1,
+        "the file-level view collapses them — that is why the id view exists"
+    );
+}
+
+/// #7004: the re-confirmation read reports exactly the ids that have a row.
+#[test]
+fn existing_chunk_ids_reports_only_rows_that_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = CorpusStore::open(&dir.path().join("index.redb")).unwrap();
+    store
+        .upsert_chunks(&[raw("here:1:1", "fn here() {}")])
+        .unwrap();
+
+    let present = store
+        .existing_chunk_ids(&["here:1:1".to_string(), "gone:1:1".to_string()])
+        .unwrap();
+    assert_eq!(present.len(), 1, "only the stored id: {present:?}");
+    assert!(present.contains("here:1:1"));
+
+    assert!(
+        store.existing_chunk_ids(&[]).unwrap().is_empty(),
+        "empty input is a no-op"
+    );
+    assert!(
+        store
+            .existing_chunk_ids(&["gone:1:1".to_string()])
+            .unwrap()
+            .is_empty(),
+        "an all-missing input yields an empty set, never an error"
+    );
+}

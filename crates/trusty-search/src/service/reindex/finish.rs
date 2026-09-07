@@ -285,6 +285,8 @@ pub(super) async fn finish_reindex(
         &staging_resolution,
         &reindex_outcome,
         memory_aborted,
+        // #7004: the force path's warm-state reconciliation lives behind this.
+        force,
     )
     .await;
     stage_timings.corpus_commit_ms = corpus_commit_started.elapsed().as_millis() as u64;
