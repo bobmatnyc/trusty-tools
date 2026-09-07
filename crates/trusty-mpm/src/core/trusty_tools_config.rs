@@ -43,7 +43,8 @@ pub use untracked_sync::{
 pub mod agents;
 pub use agents::{
     AgentsConfig, ConfiguredLabel, DEFAULT_ASSIGNEE, LabelRole, REQUIRED_PR_LINK_KEYWORD,
-    ResolvedTicketing, TicketingConfig, TicketingConfigError, resolve_ticketing,
+    ResolvedTicketing, TICKETING_BLOCK_TEMPLATE, TicketingConfig, TicketingConfigError,
+    resolve_ticketing,
 };
 
 /// Cloud log-drain config shape + resolution (#6535), split out for the same

@@ -58,6 +58,38 @@ pub const DEFAULT_ASSIGNEE: &str = "@me";
 /// Test: `closes_pr_link_keyword_is_rejected`, `refs_pr_link_keyword_is_accepted`.
 pub const REQUIRED_PR_LINK_KEYWORD: &str = "Refs";
 
+/// A commented starter `agents.ticketing` block, for `tm issue seed-config`
+/// to hand an operator (#7067).
+///
+/// Why: the verb seeds `issue-state.yaml` — the lifecycle half of the standard.
+/// The other half lives in a different file the operator has to write by hand,
+/// and #7067 added three keys to it, so a seeded lifecycle with no pointer at
+/// the block leaves the milestone and project rules undiscoverable. This is
+/// that pointer, in copy-pasteable form.
+/// What: every key set to its built-in default, so pasting the block changes
+/// nothing until an entry is edited. `default_project` is commented out —
+/// there is no default title to state.
+/// Test: `the_seed_template_parses_to_the_builtin_defaults`.
+pub const TICKETING_BLOCK_TEMPLATE: &str = "\
+# The ticketing standard. Read the resolved values back with `tm issue standard`.
+agents:
+  ticketing:
+    # #7067: every new issue carries exactly one milestone. An issue filed with
+    # none needs a `no-milestone: <reason>` comment on it.
+    milestone_required: true
+    # #7067: every new issue joins at least one GitHub Project.
+    project_required: true
+    # #7067: the Project TITLE new issues join by default. Leave it out to pick
+    # per issue from the live list `tm issue standard` prints.
+    # default_project: trusty-mpm
+    # Whether session launch ensures the component labels exist.
+    ensure_labels: true
+    # Whether claiming an issue posts a comment naming the claiming session.
+    claim_comment: true
+    # Whether closing requires live-verification evidence.
+    close_requires_note: true
+";
+
 /// The `agents:` group of `~/.trusty-tools/trusty-mpm/config.yaml` (#6918).
 ///
 /// Why: settings that belong to ONE bundled agent are grouped under that
@@ -85,7 +117,8 @@ pub struct AgentsConfig {
 /// What: every field is optional so a partial block falls back per-field.
 /// [`resolve_ticketing`] is what turns it into usable values, and is where the
 /// two non-negotiable rules are enforced.
-/// Test: `ticketing_config_yaml_round_trip`, `extra_labels_extend_the_policy_set`.
+/// Test: `ticketing_config_yaml_round_trip`, `extra_labels_extend_the_policy_set`,
+/// `filing_target_keys_round_trip`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct TicketingConfig {
@@ -139,6 +172,31 @@ pub struct TicketingConfig {
     /// model is referenced, never inlined here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle_model: Option<PathBuf>,
+
+    // #7067: the milestone/project slice of the standard. Titles, never ids —
+    // an agent reads a title back from `tm issue standard` and hands the same
+    // string to `gh issue create --add-project`.
+    /// GitHub Project (v2) TITLE every new issue joins by default.
+    ///
+    /// `None` → no default; the agent picks a project by crate/topic fit from
+    /// the live list `tm issue standard` prints. Present but blank is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_project: Option<String>,
+
+    /// Whether every new issue must carry exactly one milestone.
+    ///
+    /// `None` → `true`. Setting `false` is how a project that does not use
+    /// milestones says so; it does not make an unset milestone invisible —
+    /// `tm issue standard` still prints the flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone_required: Option<bool>,
+
+    /// Whether every new issue must join at least one GitHub Project.
+    ///
+    /// `None` → `true`. Read by the ticketing agent through
+    /// `tm issue standard`; trusty-mpm files no issues itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_required: Option<bool>,
 }
 
 /// What a [`ConfiguredLabel`] is FOR.
@@ -233,6 +291,13 @@ pub enum TicketingConfigError {
     /// `default_assignee` was present but blank.
     #[error("agents.ticketing.default_assignee: cannot be blank (omit the key for `@me`)")]
     BlankAssignee,
+
+    /// `default_project` was present but blank (#7067).
+    #[error(
+        "agents.ticketing.default_project: cannot be blank (omit the key to let the agent pick \
+         a project from the live list `tm issue standard` prints)"
+    )]
+    BlankDefaultProject,
 }
 
 /// The ticketing standard in effect, after applying the block on top of the
@@ -262,6 +327,12 @@ pub struct ResolvedTicketing {
     pub lifecycle_model: Option<PathBuf>,
     /// Component labels the block adds to (or restyles in) the policy table.
     pub extra_labels: Vec<PolicyLabel>,
+    /// GitHub Project title new issues join by default, or `None` (#7067).
+    pub default_project: Option<String>,
+    /// Whether every new issue must carry exactly one milestone (#7067).
+    pub milestone_required: bool,
+    /// Whether every new issue must join at least one project (#7067).
+    pub project_required: bool,
 }
 
 impl ResolvedTicketing {
@@ -292,6 +363,23 @@ impl ResolvedTicketing {
         self.ensure_labels = ensure;
         self
     }
+
+    /// This standard with a `default_project` title (#7067).
+    /// Test: `standard_reports_the_filing_targets`.
+    #[must_use]
+    pub fn with_default_project(mut self, project: impl Into<String>) -> Self {
+        self.default_project = Some(project.into());
+        self
+    }
+
+    /// This standard with the two filing requirements set (#7067).
+    /// Test: `standard_reports_the_filing_targets`.
+    #[must_use]
+    pub fn with_filing_requirements(mut self, milestone: bool, project: bool) -> Self {
+        self.milestone_required = milestone;
+        self.project_required = project;
+        self
+    }
 }
 
 impl Default for ResolvedTicketing {
@@ -305,6 +393,12 @@ impl Default for ResolvedTicketing {
             pr_link_keyword: REQUIRED_PR_LINK_KEYWORD,
             lifecycle_model: None,
             extra_labels: Vec::new(),
+            // #7067: both default ON. A filing that carries neither is a
+            // standard violation the agent can be held to, and an operator who
+            // does not use milestones or projects turns the flag off by hand.
+            default_project: None,
+            milestone_required: true,
+            project_required: true,
         }
     }
 }
@@ -324,7 +418,8 @@ impl Default for ResolvedTicketing {
 /// `closes_pr_link_keyword_is_rejected`,
 /// `lifecycle_role_on_the_convention_label_is_rejected`,
 /// `blank_label_name_is_rejected`, `blank_assignee_is_rejected`,
-/// `extra_labels_extend_the_policy_set`.
+/// `extra_labels_extend_the_policy_set`, `filing_target_keys_round_trip`,
+/// `blank_default_project_is_rejected`.
 pub fn resolve_ticketing(
     config: &TrustyToolsConfig,
 ) -> Result<ResolvedTicketing, TicketingConfigError> {
@@ -346,6 +441,15 @@ pub fn resolve_ticketing(
         Some(a) if a.trim().is_empty() => return Err(TicketingConfigError::BlankAssignee),
         Some(a) => a.trim().to_string(),
         None => DEFAULT_ASSIGNEE.to_string(),
+    };
+
+    // #7067: same shape as `default_assignee` — a present-but-blank title is a
+    // typo, not "no default", and resolving it silently to `None` would leave
+    // the agent picking a project the operator thought they had named.
+    let default_project = match block.default_project.as_deref() {
+        Some(p) if p.trim().is_empty() => return Err(TicketingConfigError::BlankDefaultProject),
+        Some(p) => Some(p.trim().to_string()),
+        None => None,
     };
 
     let mut extra_labels = Vec::with_capacity(block.extra_labels.len());
@@ -375,6 +479,9 @@ pub fn resolve_ticketing(
         pr_link_keyword: REQUIRED_PR_LINK_KEYWORD,
         lifecycle_model: block.lifecycle_model.clone(),
         extra_labels,
+        default_project,
+        milestone_required: block.milestone_required.unwrap_or(true),
+        project_required: block.project_required.unwrap_or(true),
     })
 }
 
@@ -399,6 +506,67 @@ mod tests {
         assert_eq!(resolved.pr_link_keyword, "Refs");
         assert!(resolved.extra_labels.is_empty());
         assert!(resolved.lifecycle_model.is_none());
+        // #7067: an absent block still REQUIRES a milestone and a project.
+        assert!(resolved.default_project.is_none());
+        assert!(resolved.milestone_required);
+        assert!(resolved.project_required);
+    }
+
+    #[test]
+    fn filing_target_keys_round_trip() {
+        // #7067: the three new keys parse where they live, survive a
+        // serialise/re-parse, and resolve to the values written.
+        let cfg = config_from(
+            "agents:\n\
+             \x20 ticketing:\n\
+             \x20   default_project: trusty-mpm\n\
+             \x20   milestone_required: false\n\
+             \x20   project_required: false\n",
+        );
+        let back = serde_yaml::to_string(&cfg).expect("serialises");
+        let again: TrustyToolsConfig = serde_yaml::from_str(&back).expect("re-parses");
+        assert_eq!(cfg, again);
+
+        let resolved = resolve_ticketing(&cfg).expect("resolves");
+        assert_eq!(resolved.default_project.as_deref(), Some("trusty-mpm"));
+        assert!(!resolved.milestone_required);
+        assert!(!resolved.project_required);
+    }
+
+    #[test]
+    fn the_seed_template_parses_to_the_builtin_defaults() {
+        // #7067: pasting the seeded block must be a no-op until an entry is
+        // edited — otherwise seeding it silently changes the standard.
+        let cfg = config_from(TICKETING_BLOCK_TEMPLATE);
+        assert_eq!(
+            resolve_ticketing(&cfg).expect("the template resolves"),
+            ResolvedTicketing::default()
+        );
+        // Every #7067 key is named, so the template cannot drift from the schema.
+        for key in ["milestone_required", "project_required", "default_project"] {
+            assert!(TICKETING_BLOCK_TEMPLATE.contains(key), "missing {key}");
+        }
+    }
+
+    #[test]
+    fn blank_default_project_is_rejected() {
+        let cfg = config_from("agents:\n  ticketing:\n    default_project: \"  \"\n");
+        let err = resolve_ticketing(&cfg).expect_err("blank project title");
+        assert_eq!(err, TicketingConfigError::BlankDefaultProject);
+        assert!(
+            err.to_string().contains("agents.ticketing.default_project"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_filing_key_is_dropped_not_fatal() {
+        // #7067: the surrounding parse stays LENIENT — a misspelt key must not
+        // take the whole config down, which is why the three real keys are
+        // declared rather than left to the warn-and-drop path.
+        let cfg = config_from("agents:\n  ticketing:\n    default_projects: trusty-mpm\n");
+        let resolved = resolve_ticketing(&cfg).expect("resolves");
+        assert!(resolved.default_project.is_none());
     }
 
     #[test]

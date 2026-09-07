@@ -223,19 +223,72 @@ the deliberate `tm pr open --closes` flag), and `trusty-mpm` stays a component
 label, never a lifecycle one. A block that tries either is refused at load with
 the field named.
 
-## Milestones
+## Every New Issue Carries a Milestone, a Project, and Its Relationships
 
-🔴 **Leave the milestone UNSET by default.** A milestone is a delivery slot in a
-named release or epic — not a field every issue receives. Set one only when the
-issue is one of:
+🔴 **Three things are set at creation, natively, on every issue you file:**
+exactly one milestone, at least one GitHub Project, and every relationship the
+brief names. An issue filed with no milestone and no project is a standard
+violation, not a tidy-up for later. The relationship half is "Relationships
+(native, never prose)" below — parent/child and blocked-by, set with the same
+`gh` call that files the issue.
 
-- deliberately scheduled into a release you have confirmed is open;
-- child work that a release-gating parent already carries into that release;
-- identified as a blocker for a release already in flight.
+`tm issue standard` is the source of truth for all three. It prints
+`milestone_required`, `project_required`, the configured `default_project`, and
+the live lists of open milestones and open projects. Read it before the first
+filing in a repository; never hand-type a title it did not print.
 
-A milestone is not a label and not a project view. An issue holds many labels and
-exactly one milestone, so parking a workstream or a theme there evicts the real
-release slot. `ws/<session-name>` is always a label.
+```bash
+gh issue create --title "…" --body "…" \
+  --milestone "Backlog · mpm/core" --add-project "trusty-mpm" \
+  --label bug --label trusty-mpm
+gh issue edit 7067 --milestone "mpm 1.4" --add-project "trusty-mpm"
+```
+
+Installed `gh` is 2.98; `--milestone`, `--add-project`, and `--parent` are all
+supported on `issue create` and `issue edit`, and the token carries the
+`project` scope.
+
+**Choosing the milestone — a stated rule, in order:**
+
+1. The parent's milestone, when the issue is a sub-issue.
+2. Otherwise the owning crate's backlog milestone — `Backlog · <crate>`.
+3. Otherwise the one `tm issue standard` names for the repository.
+
+Never invent a title. If none of the three yields a milestone, file with none
+and post a `no-milestone: <reason>` comment on the issue in the same dispatch.
+That comment is the only thing that makes an unset milestone legitimate.
+
+An issue holds many labels and exactly one milestone, so a workstream or a theme
+parked there evicts the real slot. `ws/<session-name>` is always a label.
+
+## Projects
+
+🔴 **Every new issue joins at least one project**, chosen by crate/topic fit
+from the list `tm issue standard` prints. `agents.ticketing.default_project`
+names one when the project always applies; when it does not, pick from the live
+list rather than guessing a title.
+
+```bash
+# -L is required: gh silently caps the list at 30 without it (#7067)
+gh project list --owner <owner> -L 200 --format json  # what `tm issue standard` reads
+gh issue edit 7067 --add-project "trusty-mpm"
+```
+
+A project is a view; a milestone is a delivery slot. An issue can sit in several
+projects and still carry exactly one milestone.
+
+**Checking a filing.** One command says whether both landed:
+
+```bash
+gh issue view 7067 --json milestone,projectItems
+```
+
+A `null` milestone with no `no-milestone` comment, or an empty `projectItems`,
+is the violation to fix — on the issue you just filed, before reporting it done.
+
+**If `tm issue standard` prints `milestones: unavailable (…)`,** the fetch
+failed; the requirement did not lift. Resolve the `gh` error, or file and say in
+your report that the milestone is unset because the list could not be read.
 
 ## Relationships (native, never prose)
 
@@ -251,11 +304,17 @@ used for anything but the literal fix link.
 - "Companion" or "related" in prose is not a relationship. Use sub-issue,
   blocked-by, or nothing.
 
-**Commands.** Both endpoints take the child/blocker's numeric database id, not
-its issue number. `-F` sends a field as an integer; `-f` sends it as a string
-and the call fails.
+**Commands.** For parent/child, `gh issue create --parent <n>` and
+`gh issue edit <n> --parent <p>` take the parent's ISSUE NUMBER and are the
+shortest path (gh 2.98). The API forms below take the child/blocker's numeric
+database id instead, and remain the only route for blocked-by. `-F` sends a
+field as an integer; `-f` sends it as a string and the call fails.
 
 ```bash
+# parent/child, by issue number
+gh issue create --title "…" --body "…" --parent 7067
+gh issue edit 7070 --parent 7067
+
 CHILD_ID=$(gh api repos/OWNER/REPO/issues/CHILD_NUM --jq .id)   # number -> id
 
 # sub-issue: add / remove
@@ -268,9 +327,10 @@ gh api --method POST repos/OWNER/REPO/issues/ISSUE_NUM/dependencies/blocked_by -
 gh api --method DELETE repos/OWNER/REPO/issues/ISSUE_NUM/dependencies/blocked_by/$BLOCKER_ID
 ```
 
-**On filing.** When the brief names a parent or a blocker, set the
-relationship in the same dispatch that files the issue, and report it —
-"filed #N as a sub-issue of #P", or "filed #N, blocked-by #B".
+**On filing.** Every relationship the brief names is set in the same dispatch
+that files the issue — alongside the milestone and the project — and reported:
+"filed #N as a sub-issue of #P", or "filed #N, blocked-by #B". A relationship
+left for a follow-up pass is a relationship that does not exist.
 
 **On closing a parent.** List its open sub-issues first. Refuse to close while
 any are open unless the user explicitly says to close anyway.

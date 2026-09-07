@@ -18,6 +18,7 @@
 pub(crate) mod config;
 pub(crate) mod ops;
 pub(crate) mod standard;
+pub(crate) mod standard_live;
 pub(crate) mod state;
 pub(crate) mod validate;
 
@@ -28,13 +29,15 @@ mod project_model_tests;
 use std::path::PathBuf;
 
 use crate::cli::IssueCmd;
-use crate::commands::ticket::runner::RealCommandRunner;
+use crate::commands::ticket::runner::{CommandRunner, RealCommandRunner};
 use crate::commands::ticket::system::{
     GhTicketSystem, TicketSystem, TicketSystemKind, not_yet_supported,
 };
 
 use config::{StateModel, load_model};
-use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, resolve_ticketing};
+use trusty_mpm::core::trusty_tools_config::{
+    TICKETING_BLOCK_TEMPLATE, TrustyToolsConfig, resolve_ticketing,
+};
 
 /// `tm issue <subcommand>` dispatcher.
 ///
@@ -47,12 +50,16 @@ pub(crate) fn issue(cmd: IssueCmd, system: TicketSystemKind) -> anyhow::Result<(
     // #1265: bind the active project's GitHub identity to every `gh` call this
     // verb makes (empty binding → ambient gh identity, no regression).
     let gh_env = crate::gh_identity::load_gh_env()?;
+    // #7067: `standard`'s live milestone/project read-back needs a runner of
+    // its own — the backend owns one but does not expose it. Same binding, so
+    // both halves of the verb speak to GitHub as the same identity.
+    let runner = RealCommandRunner::with_gh_env(&gh_env);
     let backend = match system {
         TicketSystemKind::Gh => GhTicketSystem::new(RealCommandRunner::with_gh_env(&gh_env)),
         TicketSystemKind::Jira => return Err(not_yet_supported("jira")),
         TicketSystemKind::Linear => return Err(not_yet_supported("linear")),
     };
-    dispatch(&backend, cmd)
+    dispatch(&backend, &runner, cmd)
 }
 
 /// Dispatch a parsed [`IssueCmd`] against a backend (generic for testability).
@@ -62,7 +69,11 @@ pub(crate) fn issue(cmd: IssueCmd, system: TicketSystemKind) -> anyhow::Result<(
 /// What: matches each verb, loads the model where required, runs the op, and
 /// prints a human summary.
 /// Test: per-verb ops are unit-tested; this is thin glue.
-fn dispatch<S: TicketSystem>(backend: &S, cmd: IssueCmd) -> anyhow::Result<()> {
+fn dispatch<S: TicketSystem>(
+    backend: &S,
+    runner: &dyn CommandRunner,
+    cmd: IssueCmd,
+) -> anyhow::Result<()> {
     // #6918: resolve the operator's ticketing standard ONCE. An absent
     // `agents.ticketing` block yields the built-in defaults; a malformed one is
     // an error here rather than a silent revert to them.
@@ -80,7 +91,7 @@ fn dispatch<S: TicketSystem>(backend: &S, cmd: IssueCmd) -> anyhow::Result<()> {
         }
         IssueCmd::Standard { config } => {
             let model = load_model(config.as_deref(), lifecycle)?;
-            standard::print_standard(&ticketing, &model);
+            standard::print_standard(&ticketing, &model, runner);
         }
         IssueCmd::Transition {
             issue,
@@ -170,8 +181,12 @@ fn print_states(model: &StateModel) {
 /// mirroring `tm services init` (RFC §6).
 /// What: writes [`config::DEFAULT_MODEL_YAML`] to
 /// `~/.trusty-tools/trusty-mpm/issue-state.yaml`, creating parent dirs; refuses
-/// to overwrite an existing file unless `--force`.
-/// Test: side-effect-only (filesystem); covered manually + by the dispatch glue.
+/// to overwrite an existing file unless `--force`. Then prints the
+/// [`TICKETING_BLOCK_TEMPLATE`] starter block (#7067) — the lifecycle half of
+/// the standard lands on disk, and the operator is shown the other half,
+/// including the milestone and project keys, rather than having to find them.
+/// Test: side-effect-only (filesystem/stdout); the template itself is covered by
+/// `the_seed_template_parses_to_the_builtin_defaults`.
 fn seed_config(force: bool) -> anyhow::Result<()> {
     let path: PathBuf = config::user_config_path()
         .ok_or_else(|| anyhow::anyhow!("could not resolve home directory for the user config"))?;
@@ -189,5 +204,15 @@ fn seed_config(force: bool) -> anyhow::Result<()> {
     std::fs::write(&path, config::DEFAULT_MODEL_YAML)
         .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
     println!("wrote default issue-state model to {}", path.display());
+
+    // #7067: the milestone/project keys live in a DIFFERENT file, so name it
+    // and print the block rather than leaving the operator to find both.
+    let config_yaml = path.with_file_name("config.yaml");
+    println!(
+        "\nthe rest of the standard lives in {} — paste this block to state it \
+         explicitly (every value below is already the default):\n",
+        config_yaml.display()
+    );
+    print!("{TICKETING_BLOCK_TEMPLATE}");
     Ok(())
 }
