@@ -52,13 +52,44 @@ fn https_remote_yields_its_owner_and_repo() {
         "https://github.com/1m-consulting/adaptive-crm.git",
         "https://github.com/1m-consulting/adaptive-crm",
         "https://user@github.com/1m-consulting/adaptive-crm.git/",
-        "http://github.example.invalid/1m-consulting/adaptive-crm.git",
+        // Hostnames are case-insensitive, so this is still the default host and
+        // still earns the bare two-segment slug.
+        "https://GitHub.com/1m-consulting/adaptive-crm.git",
     ] {
         assert_eq!(
             parse_repo_slug(url).as_deref(),
             Some("1m-consulting/adaptive-crm"),
             "{url}"
         );
+    }
+}
+
+/// 🔴 #7057: a remote on any host but `github.com` keeps that host, in every URL
+/// shape. `gh --repo` takes `[HOST/]OWNER/REPO`, so dropping the host aimed the
+/// lookup at whatever `gh`'s default host is — silently answering for a
+/// same-named repository there, which is the substitution this module exists to
+/// stop.
+#[test]
+fn a_non_default_host_survives_into_the_slug() {
+    for (url, want) in [
+        (
+            "http://github.example.invalid/1m-consulting/adaptive-crm.git",
+            "github.example.invalid/1m-consulting/adaptive-crm",
+        ),
+        (
+            "https://ghe.example/owner/repo.git",
+            "ghe.example/owner/repo",
+        ),
+        // The port addresses the SERVER, not the repository — kept out of the
+        // slug, while the host it qualifies is kept in.
+        (
+            "ssh://git@ghe.example:22/owner/repo",
+            "ghe.example/owner/repo",
+        ),
+        ("git://ghe.example/owner/repo.git", "ghe.example/owner/repo"),
+        ("git@ghe.example:owner/repo.git", "ghe.example/owner/repo"),
+    ] {
+        assert_eq!(parse_repo_slug(url).as_deref(), Some(want), "{url}");
     }
 }
 
@@ -248,6 +279,54 @@ fn two_worktrees_with_different_origins_produce_different_repo_flags() {
         repo_flag(&cmd_a),
         repo_flag(&cmd_b),
         "one run must not aim both worktrees at one repository — that IS the bug"
+    );
+}
+
+/// 🔴 #7057: an enterprise worktree's origin reaches the argv host and all.
+///
+/// Why: `gh --repo owner/repo` resolves against `gh`'s DEFAULT host, so a bare
+/// slug built from a GitHub Enterprise remote asks github.com — and answers, if
+/// a repository with those two names exists there. Nothing in the reply says it
+/// came from another host, so the argv is the only place the difference is
+/// visible. Fails against a448fb807, where the host is discarded and the flag
+/// reads `--repo owner/repo`.
+#[test]
+fn an_enterprise_worktree_names_its_host_in_the_repo_flag() {
+    use crate::core::gh_identity::GhEnv;
+    use crate::session_manager::worktree_reclaim_gh::gh_pr_list_command;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ghe = checkout_with_origin(tmp.path(), "ghe", "ssh://git@ghe.example:22/owner/repo.git");
+    let scp = checkout_with_origin(tmp.path(), "scp", "git@ghe.example:owner/repo.git");
+    let com = checkout_with_origin(
+        tmp.path(),
+        "dotcom",
+        "https://github.com/1m-consulting/adaptive-crm.git",
+    );
+
+    let slug = repo_slug_for(&ghe).expect("the enterprise origin resolves");
+    assert_eq!(slug, "ghe.example/owner/repo");
+    assert_eq!(
+        repo_slug_for(&scp).expect("the scp-like enterprise origin resolves"),
+        "ghe.example/owner/repo",
+        "the two spellings of one remote must not disagree"
+    );
+
+    let env = GhEnv::default();
+    assert_eq!(
+        repo_flag(&gh_pr_list_command(&ghe, &env, &slug)).as_deref(),
+        Some("ghe.example/owner/repo")
+    );
+    // A github.com worktree in the same run keeps the bare two-segment form —
+    // the host qualification is per-remote, not a blanket rewrite.
+    assert_eq!(
+        repo_flag(&gh_pr_list_command(
+            &com,
+            &env,
+            &repo_slug_for(&com).expect("the github.com origin resolves"),
+        ))
+        .as_deref(),
+        Some("1m-consulting/adaptive-crm")
     );
 }
 

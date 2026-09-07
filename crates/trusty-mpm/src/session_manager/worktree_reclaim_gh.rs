@@ -163,8 +163,12 @@ pub(crate) fn gh_command(dir: &Path, gh_env: &GhEnv) -> Command {
 /// What: [`gh_command`] plus `pr list --repo <repo>`. Callers append their own
 /// filters (`--state`, `--head`, `--json`, `--limit`) after it. The slug comes
 /// from [`super::worktree_repo_slug::repo_slug_for`], which fails closed — a
-/// caller that cannot resolve one must refuse rather than call this.
+/// caller that cannot resolve one must refuse rather than call this — and which
+/// gives `gh --repo`'s `[HOST/]OWNER/REPO` its optional host whenever the
+/// remote is not on github.com, so an enterprise worktree's lookup names the
+/// server as well as the repository (#7057).
 /// Test: `two_worktrees_with_different_origins_produce_different_repo_flags`,
+/// `an_enterprise_worktree_names_its_host_in_the_repo_flag`,
 /// `gh_pr_list_command_names_the_repository_before_its_filters`.
 pub(crate) fn gh_pr_list_command(dir: &Path, gh_env: &GhEnv, repo: &str) -> Command {
     let mut cmd = gh_command(dir, gh_env);

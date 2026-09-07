@@ -71,7 +71,10 @@ const MERGED_PR_ARGS: &[&str] = &["--state", "merged", "--json", "number", "--li
 /// `hotstats/hotstats-product-poc`. Returning the repository alongside the
 /// count is what lets the refusal name it.
 /// What: `count` is how many MERGED pull requests GitHub reported; `repo` is
-/// the `owner/repo` that was asked, resolved from the worktree's own `origin`.
+/// the `[host/]owner/repo` that was asked, resolved from the worktree's own
+/// `origin` — host-qualified when that remote is not on github.com, so the
+/// refusal distinguishes the wrong SERVER as well as the wrong repository
+/// (#7057).
 /// Test: `deny_names_the_repository_the_merged_pr_lookup_searched` in
 /// `bin/tm/commands/pm_guard_bash/worktree_remove`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +82,7 @@ const MERGED_PR_ARGS: &[&str] = &["--state", "merged", "--json", "number", "--li
 pub struct MergedPrLookup {
     /// MERGED pull requests GitHub reported for the branch.
     pub count: usize,
-    /// The `owner/repo` that was searched.
+    /// The `[host/]owner/repo` that was searched.
     pub repo: String,
 }
 
@@ -172,10 +175,10 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
     }
 
     fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<MergedPrLookup, String> {
-        // #7057: the repository comes from THIS worktree's `origin`, not from
-        // whatever `gh` would infer at this working directory. An origin that
-        // cannot be read or parsed is an `Err`, which denies — never a lookup
-        // aimed at a guess.
+        // #7057: the repository — and its host, when that is not github.com —
+        // comes from THIS worktree's `origin`, not from whatever `gh` would
+        // infer at this working directory. An origin that cannot be read or
+        // parsed is an `Err`, which denies — never a lookup aimed at a guess.
         let repo = repo_slug_for(dir)?;
         // #6623: the same per-project `github:` binding an interactive `tm`
         // resolves. The hook inherits the operator's shell environment in the
