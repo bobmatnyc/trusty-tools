@@ -1,233 +1,149 @@
-//! Unit tests for [`super`] (`tm divert bulk-read`, #6887).
+//! Tests for `tm divert bulk-read` (#6887).
 //!
-//! Why: split out of `divert.rs` to keep the production module under the
-//! 500-SLOC cap.
-//! What: drives [`super::bulk_read_answer`] against a SCRIPTED
-//! [`LlmProvider`] — one that answers, one that errors — so the fall-through
-//! branch the design marks BLOCKING is an executed path, not a claim. Also
-//! covers the synthetic config's routing inputs (including the
-//! provider/model contradiction the registry must catch) and the usage
-//! payload's shape.
-//! Test: this module IS the test suite for `super`.
-
-use async_trait::async_trait;
-use trusty_mpm::core::sm::providers::{LlmResponse, SmLlmError};
+//! Why: these cover what the command decides around the worker call — how files
+//! are gathered and bounded, and what the diversion ledger records. The worker
+//! call itself is covered in `divert_worker_tests.rs`.
+//! What: the `#[cfg(test)]` module `divert.rs` includes.
 
 use super::*;
 
-/// A scripted provider: replies with a canned response, or fails.
-///
-/// Why: the fall-through path must be tested without a network or a
-/// credential, and the success path must populate the telemetry the usage
-/// event reads.
-/// What: `Ok`-variant returns the given [`LlmResponse`]; `Err`-variant returns
-/// the given [`SmLlmError`].
-struct ScriptedProvider(Result<LlmResponse, SmLlmError>);
-
-#[async_trait]
-impl LlmProvider for ScriptedProvider {
-    fn name(&self) -> &'static str {
-        "scripted"
+/// Build a reply with the shape a real child returns.
+fn reply() -> WorkerReply {
+    WorkerReply {
+        text: "two functions".to_string(),
+        model: "claude-haiku-4-5".to_string(),
+        input_tokens: 10,
+        output_tokens: 412,
+        cache_read_tokens: 9094,
+        cache_creation_tokens: 21922,
+        cost_usd: 0.019422,
     }
-
-    async fn complete(&self, _request: LlmRequest) -> Result<LlmResponse, SmLlmError> {
-        match &self.0 {
-            Ok(r) => Ok(r.clone()),
-            Err(e) => Err(SmLlmError::Degraded(e.to_string())),
-        }
-    }
-}
-
-fn canned_response() -> LlmResponse {
-    LlmResponse {
-        text: "It parses TOML and returns a manifest.".to_string(),
-        model: "claude-haiku".to_string(),
-        input_tokens: 4200,
-        output_tokens: 180,
-        latency_ms: 900,
-        cost_usd: 0.0031,
-    }
-}
-
-/// Why (#6887 §9.9): the worker round trip must return the model's text AND
-/// the token/cost telemetry the usage event is built from — a response that
-/// dropped the counts would make every diversion report zero saved.
-/// What: a scripted success reaches [`BulkReadOutcome::Answered`] with every
-/// field carried through verbatim.
-#[tokio::test]
-async fn bulk_read_answer_returns_the_worker_text() {
-    let provider = ScriptedProvider(Ok(canned_response()));
-    let outcome = bulk_read_answer(
-        &provider,
-        "claude-haiku",
-        "=== a.rs ===\nfn main() {}\n",
-        "What does this do?",
-        1024,
-    )
-    .await;
-
-    let BulkReadOutcome::Answered {
-        text,
-        model,
-        input_tokens,
-        output_tokens,
-        cost_usd,
-    } = outcome
-    else {
-        panic!("a scripted success must answer, got {outcome:?}");
-    };
-    assert_eq!(text, "It parses TOML and returns a manifest.");
-    assert_eq!(model, "claude-haiku");
-    assert_eq!(input_tokens, 4200);
-    assert_eq!(output_tokens, 180);
-    assert!((cost_usd - 0.0031).abs() < f64::EPSILON);
-}
-
-/// Why (#6887, BLOCKING design precondition (b)): a provider failure must
-/// produce a DISTINGUISHABLE fall-through signal, not a bare failure. A bare
-/// error reads to the agent as "transient, retry", and it would loop against a
-/// worker that can never answer.
-/// What: a scripted `Err` reaches [`BulkReadOutcome::FallThrough`] carrying the
-/// provider's own message, and the marker the hook's block reason quotes is the
-/// literal the caller prints for it.
-#[tokio::test]
-async fn bulk_read_answer_signals_fall_through_on_provider_error() {
-    let provider = ScriptedProvider(Err(SmLlmError::Degraded(
-        "no ANTHROPIC_API_KEY, AWS credentials, or OPENROUTER_API_KEY available".to_string(),
-    )));
-    let outcome = bulk_read_answer(&provider, "claude-haiku", "content", "q", 1024).await;
-
-    let BulkReadOutcome::FallThrough { reason } = outcome else {
-        panic!("a provider error must fall through, got {outcome:?}");
-    };
-    assert!(
-        reason.contains("ANTHROPIC_API_KEY"),
-        "the provider's own message must survive: {reason}"
-    );
-    assert_eq!(FALLTHROUGH_MARKER, "divert: fall-through");
-    assert_eq!(FALLTHROUGH_EXIT, 3);
 }
 
 /// Why: the hook's block reason quotes [`FALLTHROUGH_MARKER`] verbatim so the
-/// agent has a literal to match. If the two drift, the recovery instruction
-/// names a string the command never prints.
-/// What: the hook's reason text contains the marker constant.
+/// agent has a literal to match. If the two drift, a fall-through leaves the
+/// agent with a string it was told to look for and cannot find, and no next
+/// move.
+/// What: asserts the hook's reason contains the marker this module prints.
 #[test]
 fn fallthrough_marker_matches_the_hook_reason() {
-    let reason = crate::commands::divert_check::block_reason("/f.rs", 900);
+    let reason = crate::commands::divert_check::block_reason("a.rs", 900);
     assert!(
         reason.contains(FALLTHROUGH_MARKER),
-        "the hook reason must quote the marker verbatim: {reason}"
+        "the block reason must quote the fall-through marker verbatim: {reason}"
     );
 }
 
-/// Why (#6887 §9.8): a contradiction between an explicit `provider` and a
-/// provider-PREFIXED model must be caught by the registry's own
-/// `resolve_provider_and_model`, not by a bespoke shortcut here. This asserts
-/// the synthetic config feeds that machinery the inputs it needs.
-/// What: `provider = "openrouter"` with a `bedrock/`-prefixed worker model
-/// resolves to a validation error naming both, with no credentials involved.
-#[tokio::test]
-async fn resolve_worker_reports_a_provider_model_contradiction() {
-    let cfg = worker_config(
-        Some("bedrock/anthropic.claude-haiku".to_string()),
-        Some("openrouter".to_string()),
-    );
-    assert_eq!(cfg.provider, "openrouter");
-    assert_eq!(cfg.summary_model, "bedrock/anthropic.claude-haiku");
-
-    let err = ProviderRegistry::default()
-        .build(&cfg, SmModelTier::Summary)
-        .await
-        .expect_err("a provider/model contradiction must be an error");
-    let text = err.to_string().to_lowercase();
+/// Why (#6887 acceptance criterion 2): the block reason is the agent's ONLY
+/// channel back, so it must name the exact replacement command. A reason that
+/// only says "too big" strands the agent.
+/// What: asserts the reason names `tm divert bulk-read` and the file.
+#[test]
+fn block_reason_names_the_worker_command() {
+    let reason = crate::commands::divert_check::block_reason("src/big.rs", 1200);
     assert!(
-        text.contains("bedrock") && text.contains("openrouter"),
-        "the error must name both sides of the contradiction: {err}"
+        reason.contains("tm divert bulk-read src/big.rs"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("1200"),
+        "the reason must state the line count"
     );
 }
 
-/// Why: an empty `[divert] worker_model` must mean "the provider's cheap-tier
-/// default", not "no model" — the latter would degrade every session that did
-/// not name a model explicitly.
-/// What: empty/absent inputs fall back to the [`SmInferenceConfig`] defaults;
-/// non-empty inputs are carried through.
-#[test]
-fn worker_config_falls_back_to_the_tier_default() {
-    let defaults = SmInferenceConfig::default();
-
-    let empty = worker_config(None, None);
-    assert_eq!(empty.provider, "auto");
-    assert_eq!(empty.summary_model, defaults.summary_model);
-
-    let blank = worker_config(Some("  ".to_string()), Some(String::new()));
-    assert_eq!(blank.provider, "auto");
-    assert_eq!(blank.summary_model, defaults.summary_model);
-
-    let set = worker_config(
-        Some("anthropic/claude-haiku".to_string()),
-        Some("anthropic".to_string()),
-    );
-    assert_eq!(set.provider, "anthropic");
-    assert_eq!(set.summary_model, "anthropic/claude-haiku");
-}
-
-/// Why (#6887 §7): #6873's ledger is not merged, so this payload IS the
-/// interim record. Its `diversion: true` marker is how a later consumer tells
-/// a diversion apart from ordinary token accounting, and the estimate must
-/// never go negative when a worker answers at length.
-/// What: asserts the four required keys and the saturating estimate.
-#[test]
-fn diversion_usage_payload_carries_the_diversion_marker() {
-    let payload = diversion_usage_payload("claude-haiku", "anthropic", 4200, 180, 0.0031);
-    assert_eq!(payload["diversion"], serde_json::json!(true));
-    assert_eq!(payload["tokens_saved_estimate"], serde_json::json!(4020));
-    assert_eq!(payload["worker_model"], serde_json::json!("claude-haiku"));
-    assert_eq!(payload["worker_provider"], serde_json::json!("anthropic"));
-
-    // A verbose worker reports zero saved, never a negative.
-    let inverted = diversion_usage_payload("claude-haiku", "auto", 10, 900, 0.0);
-    assert_eq!(inverted["tokens_saved_estimate"], serde_json::json!(0));
-}
-
-/// Why: the worker must be told which bytes came from which file, or its
-/// answer cannot cite anything; and a named file it cannot read is a hard
-/// error, because silently skipping it yields an answer about the wrong thing.
-/// What: each file gets a `=== <path> ===` header; a missing file errors.
+/// Why: the worker must be told which bytes came from which file, or its answer
+/// silently describes the wrong one. A named file that cannot be read is a hard
+/// error for the same reason — a skipped file yields a confident answer about
+/// content that was never sent.
+/// What: each file becomes one `(path, content)` pair; a missing file errors.
 #[test]
 fn read_sources_labels_each_file() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let a = dir.path().join("a.rs");
-    let b = dir.path().join("b.rs");
-    std::fs::write(&a, "fn a() {}").expect("write a");
-    std::fs::write(&b, "fn b() {}").expect("write b");
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.rs");
+    let b = tmp.path().join("b.rs");
+    std::fs::write(&a, "fn a() {}\n").unwrap();
+    std::fs::write(&b, "fn b() {}\n").unwrap();
 
-    let blob = read_sources(&[a.clone(), b.clone()]).expect("read");
-    assert!(blob.contains(&format!("=== {} ===", a.display())));
-    assert!(blob.contains(&format!("=== {} ===", b.display())));
-    assert!(blob.contains("fn a() {}"));
-    assert!(blob.contains("fn b() {}"));
+    let sources = read_sources(&[a.clone(), b.clone()]).expect("both files read");
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0].0, a.display().to_string());
+    assert_eq!(sources[0].1, "fn a() {}\n");
+    assert_eq!(sources[1].0, b.display().to_string());
 
-    let missing = dir.path().join("absent.rs");
-    let err = read_sources(&[missing]).expect_err("a missing file must be an error");
-    assert!(err.to_string().contains("cannot read"));
+    let missing = tmp.path().join("nope.rs");
+    let err = read_sources(&[missing]).expect_err("a missing file must not be skipped");
+    assert!(err.to_string().contains("cannot read"), "{err}");
 }
 
-/// Why: an unbounded blob would fail provider-side as a transport error, which
-/// the caller cannot tell from a real outage — it would report fall-through
-/// for a cause the operator cannot see.
-/// What: content past the budget is cut at a char boundary and marked.
+/// Why: an unbounded blob would fail API-side as a transport error, which reads
+/// as a worker outage rather than as "these files are too big". Truncating
+/// explicitly keeps the diagnosis local.
+/// What: content past the budget is cut, marked, and stops the loop.
 #[test]
 fn read_sources_truncates_past_the_budget() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let big = dir.path().join("big.rs");
-    std::fs::write(&big, "x".repeat(MAX_CONTENT_BYTES + 10_000)).expect("write");
+    let tmp = tempfile::tempdir().unwrap();
+    let big = tmp.path().join("big.rs");
+    let tail = tmp.path().join("tail.rs");
+    std::fs::write(&big, "x".repeat(MAX_CONTENT_BYTES + 4096)).unwrap();
+    std::fs::write(&tail, "fn never_sent() {}").unwrap();
 
-    let blob = read_sources(&[big]).expect("read");
-    assert!(blob.contains("[truncated: content budget reached]"));
-    assert!(
-        blob.len() < MAX_CONTENT_BYTES + 200,
-        "the blob must stay near the budget, got {}",
-        blob.len()
+    let sources = read_sources(&[big, tail]).expect("truncation is not an error");
+    assert_eq!(sources.len(), 1, "the loop stops once the budget is spent");
+    assert!(sources[0].1.contains("truncated: content budget reached"));
+    assert!(sources[0].1.len() <= MAX_CONTENT_BYTES + 64);
+}
+
+/// Why (#6887 acceptance criterion 6): this line IS the record — #6873's usage
+/// ledger is not merged — so it has to carry the running count AND the child's
+/// own token and cost numbers. A line missing any of them cannot answer "what
+/// did diversion save".
+/// What: asserts the greppable marker and every field a reader needs, including
+/// the cache counters that dominate a Claude Code child's prompt spend.
+#[test]
+fn diversion_line_carries_the_count_and_the_child_usage() {
+    let line = diversion_line(3, 2, &reply());
+    assert!(line.starts_with(DIVERSION_LOG_MARKER), "{line}");
+    for field in [
+        "count=3",
+        "files=2",
+        "model=claude-haiku-4-5",
+        "input_tokens=10",
+        "output_tokens=412",
+        "cache_read_tokens=9094",
+        "cache_creation_tokens=21922",
+        "cost_usd=0.019422",
+    ] {
+        assert!(line.contains(field), "missing {field} in: {line}");
+    }
+}
+
+/// Why (#6887 acceptance criterion 6): "count per session" cannot come from a
+/// process that exits after one diversion, so it has to be durable. The ledger
+/// file is the count — one line per diversion — and two sessions must not share
+/// one counter.
+/// What: three diversions on one session count 1, 2, 3; a second session starts
+/// at 1 again; the file holds one line per diversion.
+#[test]
+fn record_diversion_counts_per_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let reply = reply();
+
+    for expected in 1..=3 {
+        let count = record_diversion(tmp.path(), "sess-a", 1, &reply).expect("ledger write");
+        assert_eq!(count, expected, "the count must advance per diversion");
+    }
+    assert_eq!(
+        record_diversion(tmp.path(), "sess-b", 1, &reply).expect("ledger write"),
+        1,
+        "a different session must not inherit another's count"
     );
+
+    let log = std::fs::read_to_string(tmp.path().join("divert").join("sess-a.log")).unwrap();
+    assert_eq!(log.lines().count(), 3);
+    assert!(log.lines().next().unwrap().contains("count=1"));
+    assert!(log.lines().last().unwrap().contains("count=3"));
+
+    // A session id carrying a path separator must not escape the ledger dir.
+    record_diversion(tmp.path(), "../escape", 1, &reply).expect("ledger write");
+    assert!(tmp.path().join("divert").join(".._escape.log").exists());
 }

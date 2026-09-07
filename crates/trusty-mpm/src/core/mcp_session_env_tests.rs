@@ -136,12 +136,11 @@ fn session_mcp_env_omits_index_when_search_disabled() {
     );
 }
 
-
 /// Why (#6887): the hook and the worker run as bare subprocesses; the resolved
 /// (non-secret) `[divert]` config can only reach them through the environment.
 /// A launch that wrote the hook but not these variables would silently apply
 /// the compiled-in fallbacks instead of the project's own configuration.
-/// What: an enabled project manifest exports all three variables with the
+/// What: an enabled project manifest exports both variables with the
 /// configured values, and exports no credential-looking name.
 #[test]
 #[serial_test::serial]
@@ -154,7 +153,7 @@ fn session_mcp_env_exports_divert_when_enabled() {
         &project,
         "[mcp]\ntrusty_memory = false\ntrusty_search = false\n\n\
          [divert]\nenabled = true\nmin_lines = 420\n\
-         worker_model = \"anthropic/claude-haiku\"\nworker_provider = \"anthropic\"\n",
+         worker_model = \"claude-haiku-4-5\"\n",
     );
 
     let env = session_mcp_env_with(&fw, &project, None);
@@ -165,8 +164,7 @@ fn session_mcp_env_exports_divert_when_enabled() {
             .unwrap_or_else(|| panic!("{name} must be exported: {env:?}"))
     };
     assert_eq!(get(DIVERT_MIN_LINES_ENV), "420");
-    assert_eq!(get(DIVERT_WORKER_MODEL_ENV), "anthropic/claude-haiku");
-    assert_eq!(get(DIVERT_WORKER_PROVIDER_ENV), "anthropic");
+    assert_eq!(get(DIVERT_WORKER_MODEL_ENV), "claude-haiku-4-5");
     assert!(
         !env.iter()
             .any(|(n, _)| n.contains("API_KEY") || n.contains("SECRET") || n.contains("TOKEN")),
@@ -176,8 +174,7 @@ fn session_mcp_env_exports_divert_when_enabled() {
 
 /// Why (#6887): the manifest toggle off must mean NO new env vars, which is
 /// acceptance criterion 1 on the issue.
-/// What: a project with no `[divert]` section exports none of the three
-/// variables.
+/// What: a project with no `[divert]` section exports neither variable.
 #[test]
 #[serial_test::serial]
 fn session_mcp_env_omits_divert_when_disabled() {
@@ -185,14 +182,13 @@ fn session_mcp_env_omits_divert_when_disabled() {
     let fw = crate::core::paths::FrameworkPaths::under(tmp.path());
     let project = tmp.path().join("proj");
     std::fs::create_dir_all(&project).unwrap();
-    write_manifest(&project, "[mcp]\ntrusty_memory = false\ntrusty_search = false\n");
+    write_manifest(
+        &project,
+        "[mcp]\ntrusty_memory = false\ntrusty_search = false\n",
+    );
 
     let env = session_mcp_env_with(&fw, &project, None);
-    for name in [
-        DIVERT_MIN_LINES_ENV,
-        DIVERT_WORKER_MODEL_ENV,
-        DIVERT_WORKER_PROVIDER_ENV,
-    ] {
+    for name in [DIVERT_MIN_LINES_ENV, DIVERT_WORKER_MODEL_ENV] {
         assert!(
             !env.iter().any(|(n, _)| n == name),
             "{name} must not be exported with divert off: {env:?}"

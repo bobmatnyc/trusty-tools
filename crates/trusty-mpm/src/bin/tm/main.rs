@@ -58,6 +58,11 @@ mod tests;
 #[path = "tests_behavior_a.rs"]
 mod tests_behavior_a;
 
+// #6887: the divert CLI pair, split out so `tests_behavior_a.rs` stays capped.
+#[cfg(test)]
+#[path = "divert_cli_tests.rs"]
+mod divert_cli_tests;
+
 #[cfg(test)]
 #[path = "install_policy_tests.rs"]
 mod install_policy_tests;
@@ -464,7 +469,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         // #6887: the cheap worker `--divert-check` steers the agent to.
-        Some(Command::Divert { action }) => commands::divert::run(action, &url).await,
+        Some(Command::Divert { action }) => commands::divert::run(action).await,
         Some(Command::Memory { action }) => memory(action).await,
         Some(Command::Compress { tool }) => run_compress(&tool).await,
         // #5843: `tm wait` owns its own exit codes (0/75/1/2), so it never

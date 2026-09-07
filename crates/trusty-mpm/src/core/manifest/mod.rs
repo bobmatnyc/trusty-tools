@@ -24,7 +24,7 @@ mod schema;
 mod workspace;
 
 pub use apply::HarnessPlan;
-pub use default::{DEFAULT_DIVERT_MIN_LINES, DEFAULT_DIVERT_WORKER_PROVIDER, default_manifest};
+pub use default::{DEFAULT_DIVERT_MIN_LINES, DEFAULT_DIVERT_WORKER_MODEL, default_manifest};
 pub use framework::{
     FRAMEWORK_MANIFEST_FILE, FrameworkManifestError, framework_agent_categories,
     framework_skill_categories,

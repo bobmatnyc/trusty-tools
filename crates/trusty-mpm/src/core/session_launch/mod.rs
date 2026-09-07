@@ -973,8 +973,11 @@ fn prepare_session_inner(
     // #5034: `[hooks] prompt_context = false` suppresses the per-prompt
     // `trusty-memory prompt-context` injection (and strips one a prior launch
     // wrote). Default `true` — every other hook is written either way.
-    let hooks_written =
-        match write_project_hooks(project_dir, config.hooks.prompt_context, plan.divert_enabled) {
+    let hooks_written = match write_project_hooks(
+        project_dir,
+        config.hooks.prompt_context,
+        plan.divert_enabled,
+    ) {
         Ok(()) => true,
         Err(err) => {
             tracing::warn!("failed to write trusty-mpm project hooks: {err}");

@@ -91,9 +91,9 @@ pub(super) fn project_managed_hook_additions(
     }
 
     // #6887: APPENDED last, and only onto `PreToolUse`, so the PM-guard and
-            // lifecycle-triad groups above keep byte-identical positions and
-            // content whether the toggle is on or off. Never `insert`
-            // `PreToolUse` — that clobbers both (module doc above).
+    // lifecycle-triad groups above keep byte-identical positions and
+    // content whether the toggle is on or off. Never `insert`
+    // `PreToolUse` — that clobbers both (module doc above).
     if divert_enabled && let Some(hooks_obj) = hooks.as_object_mut() {
         let target = hooks_obj
             .entry("PreToolUse".to_string())

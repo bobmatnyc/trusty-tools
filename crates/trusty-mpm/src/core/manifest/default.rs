@@ -67,8 +67,7 @@ pub fn default_manifest() -> HarnessManifest {
         divert: Some(DivertConfig {
             enabled: Some(false),
             min_lines: Some(DEFAULT_DIVERT_MIN_LINES),
-            worker_model: Some(String::new()),
-            worker_provider: Some(DEFAULT_DIVERT_WORKER_PROVIDER.to_string()),
+            worker_model: Some(DEFAULT_DIVERT_WORKER_MODEL.to_string()),
         }),
     }
 }
@@ -81,13 +80,15 @@ pub fn default_manifest() -> HarnessManifest {
 /// Test: `default_manifest_divert_disabled_by_default`, `plan_divert_toggles`.
 pub const DEFAULT_DIVERT_MIN_LINES: u32 = 350;
 
-/// Default `[divert] worker_provider` (#6887).
+/// Default `[divert] worker_model` (#6887).
 ///
-/// Why: `auto` runs the registry's credential precedence chain rather than
-/// pinning a provider the operator may have no credentials for.
-/// What: `"auto"`.
+/// Why: Haiku 4.5 is the arm the #6882 POC measured. Owner ruling 2026-09-07
+/// fixed the worker as headless Claude Code under the developer's existing
+/// login, so this is a model name `claude --model` accepts, never a provider
+/// route.
+/// What: `"claude-haiku-4-5"`.
 /// Test: `default_manifest_divert_disabled_by_default`, `plan_divert_toggles`.
-pub const DEFAULT_DIVERT_WORKER_PROVIDER: &str = "auto";
+pub const DEFAULT_DIVERT_WORKER_MODEL: &str = "claude-haiku-4-5";
 
 /// The default skill set: deploy every bundled skill from the bundled source.
 ///
@@ -120,8 +121,7 @@ mod tests {
         assert_eq!(divert.enabled, Some(false), "divert must be opt-in");
         assert_eq!(divert.min_lines, Some(DEFAULT_DIVERT_MIN_LINES));
         assert_eq!(divert.min_lines, Some(350));
-        assert_eq!(divert.worker_model.as_deref(), Some(""));
-        assert_eq!(divert.worker_provider.as_deref(), Some("auto"));
+        assert_eq!(divert.worker_model.as_deref(), Some("claude-haiku-4-5"));
     }
 
     #[test]

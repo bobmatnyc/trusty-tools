@@ -3,14 +3,14 @@
 //! Why: split out of `divert_check.rs` so the production module stays well
 //! under the 500-SLOC cap, mirroring the `project_hooks.rs`/`project_hooks_tests.rs`
 //! split.
-//! What: covers the classifier ([`super::divert_targets`]), the credential
-//! predicate ([`super::worker_credentials_present`]), and — the pair the design
-//! calls out as BLOCKING — the two fail-open branches of [`super::decide`].
+//! What: covers the classifier ([`super::divert_targets`]) and — the pair the
+//! design calls out as BLOCKING — the two fail-open branches of
+//! [`super::decide`].
 //!
-//! The two fail-open tests are written so that an implementation which blocks
-//! on SIZE ALONE fails them: `divert_check_allows_when_no_worker_credentials`
-//! feeds an oversized file with `worker_available = false` and demands `Allow`,
-//! which a size-only implementation answers with `Block`.
+//! The fail-open test is written so that an implementation which blocks on SIZE
+//! ALONE fails it: `divert_check_allows_with_a_warning_when_no_worker` feeds an
+//! oversized file with `worker_present = false` and demands an allow, which a
+//! size-only implementation answers with `Block`.
 //! Test: this module IS the test suite for `super`.
 
 use super::*;
@@ -20,29 +20,22 @@ fn fixed(n: u32) -> impl Fn(&str) -> Option<u32> {
     move |_| Some(n)
 }
 
-/// A registry with every credential present.
-fn full_registry() -> ProviderRegistry {
-    ProviderRegistry {
-        anthropic_api_key: Some("sk-test".to_string()),
-        aws_credentials_available: true,
-        openrouter_api_key: Some("or-test".to_string()),
-    }
-}
-
 fn read_input(path: &str) -> Value {
     serde_json::json!({ "file_path": path })
 }
 
-// ─── §9 test 6: fail-open with no worker credential ────────────────────────────
+// ─── §9 test 6: fail-open with no worker binary ───────────────────────────────
 
-/// Why (#6887, BLOCKING): the hook must never deny a read AND deny the
-/// replacement. With no credential anywhere, `tm divert bulk-read` cannot run,
-/// so blocking would strand the agent with no next move.
+/// Why (#6887 acceptance criterion 4, BLOCKING): the hook must never deny a
+/// read AND deny the replacement. With no `claude` on `PATH`, `tm divert
+/// bulk-read` cannot run, so blocking would strand the agent with no next move.
 /// What: an oversized file (900 lines vs a 350 threshold) with
-/// `worker_available = false` must ALLOW. An implementation that blocks on size
-/// alone returns `Block` here and fails.
+/// `worker_present = false` must allow AND carry the warning. An implementation
+/// that blocks on size alone returns `Block` here and fails; one that allows
+/// silently returns bare `Allow` and also fails, because criterion 4 requires
+/// the warning.
 #[test]
-fn divert_check_allows_when_no_worker_credentials() {
+fn divert_check_allows_with_a_warning_when_no_worker() {
     let decision = decide(
         "Read",
         Some(&read_input("/repo/huge.rs")),
@@ -50,71 +43,44 @@ fn divert_check_allows_when_no_worker_credentials() {
         false,
         &fixed(900),
     );
-    assert_eq!(
-        decision,
-        DivertDecision::Allow,
-        "an oversized read with no reachable worker must fail OPEN"
+    let DivertDecision::AllowWithWarning(warning) = decision else {
+        panic!("an oversized read with no worker must fail OPEN with a warning: {decision:?}");
+    };
+    assert!(
+        warning.contains(WORKER_BINARY),
+        "the warning must name the missing binary: {warning}"
+    );
+    assert!(
+        warning.contains("/repo/huge.rs"),
+        "the warning must name the file it let through: {warning}"
     );
 
     // The same must hold for the Bash route, which reaches the same bytes.
     let bash = serde_json::json!({ "command": "cat /repo/huge.rs" });
-    assert_eq!(
+    assert!(matches!(
         decide("Bash", Some(&bash), 350, false, &fixed(900)),
-        DivertDecision::Allow
-    );
+        DivertDecision::AllowWithWarning(_)
+    ));
 }
 
-/// Why: [`worker_credentials_present`] is what test 6 depends on, so its own
-/// truth table needs asserting rather than inferring.
-/// What: `auto` accepts any single credential; an explicit provider accepts
-/// only its own; a fully-empty registry is false for every selector.
+/// Why (#6887): the warning must be distinguishable from "nothing to do". A
+/// read that is simply under threshold produces no warning at all, so an
+/// operator grepping for the warning sees only the reads that were let through
+/// because the worker was missing.
+/// What: an under-threshold read with no worker returns bare `Allow`.
 #[test]
-fn worker_credentials_present_requires_a_matching_credential() {
-    let empty = ProviderRegistry::default();
-    for provider in ["auto", "anthropic", "openrouter", "bedrock", "nonsense"] {
-        assert!(
-            !worker_credentials_present(&empty, provider),
-            "an empty registry must report no worker for {provider}"
-        );
-    }
-
-    let anthropic_only = ProviderRegistry {
-        anthropic_api_key: Some("sk-test".to_string()),
-        ..ProviderRegistry::default()
-    };
-    assert!(worker_credentials_present(&anthropic_only, "auto"));
-    assert!(worker_credentials_present(&anthropic_only, "anthropic"));
-    assert!(
-        !worker_credentials_present(&anthropic_only, "openrouter"),
-        "an explicit provider must not borrow another provider's credential"
+fn divert_check_warns_only_for_reads_it_would_have_diverted() {
+    assert_eq!(
+        decide(
+            "Read",
+            Some(&read_input("/repo/small.rs")),
+            350,
+            false,
+            &fixed(12)
+        ),
+        DivertDecision::Allow,
+        "an under-threshold read was never a diversion candidate"
     );
-
-    let openrouter_only = ProviderRegistry {
-        openrouter_api_key: Some("or-test".to_string()),
-        ..ProviderRegistry::default()
-    };
-    assert!(worker_credentials_present(&openrouter_only, "auto"));
-    assert!(worker_credentials_present(&openrouter_only, "openrouter"));
-
-    // An unrecognised selector falls back to `auto`, not to "no worker".
-    assert!(worker_credentials_present(&full_registry(), "NoNsEnSe"));
-}
-
-/// Why (#6887): `aws_credentials_available` says a credential exists, not that
-/// this build can use it. Without the `bedrock` feature `construct_bedrock`
-/// returns a config error, so counting AWS as a usable worker would produce
-/// exactly the dead-end block the fail-open rule forbids.
-/// What: an AWS-only registry reports a worker ONLY in a `--features bedrock`
-/// build; the assertion is written against `cfg!` so it holds in both.
-#[test]
-fn worker_credentials_present_ignores_aws_without_the_bedrock_feature() {
-    let aws_only = ProviderRegistry {
-        aws_credentials_available: true,
-        ..ProviderRegistry::default()
-    };
-    let expected = cfg!(feature = "bedrock");
-    assert_eq!(worker_credentials_present(&aws_only, "bedrock"), expected);
-    assert_eq!(worker_credentials_present(&aws_only, "auto"), expected);
 }
 
 // ─── §9 test 7: threshold behaviour when a worker IS available ─────────────────

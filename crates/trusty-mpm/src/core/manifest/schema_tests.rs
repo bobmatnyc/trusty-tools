@@ -69,8 +69,7 @@ fn manifest_roundtrip() {
         divert: Some(DivertConfig {
             enabled: Some(true),
             min_lines: Some(350),
-            worker_model: Some("anthropic/claude-haiku".to_string()),
-            worker_provider: Some("anthropic".to_string()),
+            worker_model: Some("claude-haiku-4-5".to_string()),
         }),
     };
 
@@ -567,8 +566,7 @@ fn divert_config_merge_field_level() {
         divert: Some(DivertConfig {
             enabled: Some(true),
             min_lines: Some(350),
-            worker_model: Some("anthropic/claude-haiku".to_string()),
-            worker_provider: Some("anthropic".to_string()),
+            worker_model: Some("claude-haiku-4-5".to_string()),
         }),
         ..HarnessManifest::default()
     };
@@ -589,10 +587,9 @@ fn divert_config_merge_field_level() {
     assert_eq!(divert.min_lines, Some(500), "higher wins the field it sets");
     assert_eq!(
         divert.worker_model.as_deref(),
-        Some("anthropic/claude-haiku"),
+        Some("claude-haiku-4-5"),
         "an unmentioned field inherits the lower layer"
     );
-    assert_eq!(divert.worker_provider.as_deref(), Some("anthropic"));
 }
 
 /// Why (#6887): the section must survive the TOML round-trip the resolver
@@ -606,8 +603,7 @@ fn divert_config_roundtrip() {
         divert: Some(DivertConfig {
             enabled: Some(true),
             min_lines: Some(400),
-            worker_model: Some("bedrock/anthropic.claude-haiku".to_string()),
-            worker_provider: Some("bedrock".to_string()),
+            worker_model: Some("claude-haiku-4-5-20251001".to_string()),
         }),
         ..HarnessManifest::default()
     };

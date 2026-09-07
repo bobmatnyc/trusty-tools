@@ -253,7 +253,8 @@ fn write_project_hooks_preserves_foreign_hooks() {
     );
 
     // Re-running must not duplicate the foreign entry or our own groups.
-    super::super::settings::write_project_hooks(project, true, false).expect("second write succeeds");
+    super::super::settings::write_project_hooks(project, true, false)
+        .expect("second write succeeds");
     let value2: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
             .unwrap();
@@ -288,7 +289,8 @@ fn write_project_hooks_writes_via_atomic_path() {
     let bak_path = claude_dir.join("settings.json.bak");
     let tmp_path = claude_dir.join("settings.json.tmp");
 
-    super::super::settings::write_project_hooks(project, true, false).expect("first write succeeds");
+    super::super::settings::write_project_hooks(project, true, false)
+        .expect("first write succeeds");
     assert!(settings_path.exists(), "settings.json must be created");
     assert!(
         !bak_path.exists(),
@@ -300,7 +302,8 @@ fn write_project_hooks_writes_via_atomic_path() {
     );
     let first_content = std::fs::read_to_string(&settings_path).unwrap();
 
-    super::super::settings::write_project_hooks(project, true, false).expect("second write succeeds");
+    super::super::settings::write_project_hooks(project, true, false)
+        .expect("second write succeeds");
     assert!(
         bak_path.exists(),
         "write_json_atomic must back up the prior file before replacing it"
@@ -408,7 +411,8 @@ fn write_project_hooks_strips_stale_prompt_context_when_disabled() {
     let project = tmp.path();
     let settings_path = project.join(".claude").join("settings.json");
 
-    super::super::settings::write_project_hooks(project, true, false).expect("enabled write succeeds");
+    super::super::settings::write_project_hooks(project, true, false)
+        .expect("enabled write succeeds");
     let seeded: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
     assert_eq!(
@@ -432,7 +436,8 @@ fn write_project_hooks_strips_stale_prompt_context_when_disabled() {
     )
     .unwrap();
 
-    super::super::settings::write_project_hooks(project, false, false).expect("disabled write succeeds");
+    super::super::settings::write_project_hooks(project, false, false)
+        .expect("disabled write succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -526,7 +531,6 @@ fn write_project_hooks_enabled_output_is_unchanged_by_the_toggle() {
     );
 }
 
-
 /// Why (#6887): the toggle must add EXACTLY the two `PreToolUse` groups it
 /// promises and touch nothing else. A writer that `insert`ed `PreToolUse`
 /// instead of appending would silently drop the PM guard and the lifecycle
@@ -554,7 +558,10 @@ fn project_managed_hook_additions_includes_divert_when_enabled() {
     );
 
     let added: Vec<&serde_json::Value> = on_pre[off_pre.len()..].iter().collect();
-    let matchers: Vec<&str> = added.iter().map(|g| g["matcher"].as_str().unwrap()).collect();
+    let matchers: Vec<&str> = added
+        .iter()
+        .map(|g| g["matcher"].as_str().unwrap())
+        .collect();
     assert_eq!(matchers, vec!["Read", "Bash"]);
     for group in &added {
         let cmd = group["hooks"][0]["command"].as_str().unwrap();
@@ -608,7 +615,9 @@ fn project_managed_hook_additions_omits_divert_when_disabled() {
 /// one.
 #[test]
 fn is_project_managed_hook_command_recognises_divert_check() {
-    assert!(is_project_managed_hook_command("/opt/bin/tm hook --divert-check"));
+    assert!(is_project_managed_hook_command(
+        "/opt/bin/tm hook --divert-check"
+    ));
     assert!(is_project_managed_hook_command("tm hook --divert-check"));
     assert!(
         !crate::core::standalone::hooks::is_mpm_hook_command("/opt/bin/tm hook --divert-check"),
@@ -687,5 +696,9 @@ fn write_project_hooks_strips_stale_divert_when_disabled() {
     // And it must strip ONLY those: the rest of the enabled-off build survives.
     let value: serde_json::Value = serde_json::from_str(&after).unwrap();
     let pre = value["hooks"]["PreToolUse"].as_array().expect("array");
-    assert_eq!(pre.len(), 2, "PM guard + lifecycle triad must remain: {pre:?}");
+    assert_eq!(
+        pre.len(),
+        2,
+        "PM guard + lifecycle triad must remain: {pre:?}"
+    );
 }

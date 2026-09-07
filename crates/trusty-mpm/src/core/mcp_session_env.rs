@@ -142,12 +142,9 @@ pub fn session_mcp_env_with(
             DIVERT_MIN_LINES_ENV.to_string(),
             plan.divert_min_lines.to_string(),
         ));
-        if let Some(model) = plan.divert_worker_model.as_ref() {
-            env.push((DIVERT_WORKER_MODEL_ENV.to_string(), model.clone()));
-        }
         env.push((
-            DIVERT_WORKER_PROVIDER_ENV.to_string(),
-            plan.divert_worker_provider.clone(),
+            DIVERT_WORKER_MODEL_ENV.to_string(),
+            plan.divert_worker_model.clone(),
         ));
     } else {
         tracing::debug!("manifest disables divert: no bulk-read diversion config exported");
@@ -170,25 +167,14 @@ pub const SEARCH_INDEX_ENV: &str = "TRUSTY_INDEX";
 /// Test: `session_mcp_env_exports_divert_when_enabled`.
 pub const DIVERT_MIN_LINES_ENV: &str = "TRUSTY_DIVERT_MIN_LINES";
 
-/// Worker model id for `tm divert bulk-read` (#6887).
+/// Worker model for `tm divert bulk-read` (#6887).
 ///
-/// Why: same reason as [`DIVERT_MIN_LINES_ENV`]. This is a MODEL ID, never a
-/// credential — the worker's credentials are resolved by
-/// `ProviderRegistry::from_env` inside the `tm` subprocess.
-/// What: `TRUSTY_DIVERT_WORKER_MODEL`, optionally provider-prefixed. Omitted
-/// entirely when the manifest leaves `worker_model` empty, so the provider's
-/// own cheap-tier default applies.
+/// Why: same reason as [`DIVERT_MIN_LINES_ENV`]. This is a MODEL NAME, never a
+/// credential — the worker is headless Claude Code running under the session's
+/// own `CLAUDE_CONFIG_DIR`, so there is no key to pass.
+/// What: `TRUSTY_DIVERT_WORKER_MODEL`, a name `claude --model` accepts.
 /// Test: `session_mcp_env_exports_divert_when_enabled`.
 pub const DIVERT_WORKER_MODEL_ENV: &str = "TRUSTY_DIVERT_WORKER_MODEL";
-
-/// Worker provider selector for `tm divert bulk-read` (#6887).
-///
-/// Why: same reason as [`DIVERT_MIN_LINES_ENV`].
-/// What: `TRUSTY_DIVERT_WORKER_PROVIDER`, a value
-/// [`ProviderKind::parse`](crate::core::sm::providers::ProviderKind::parse)
-/// accepts (`auto` | `anthropic` | `bedrock` | `openrouter`).
-/// Test: `session_mcp_env_exports_divert_when_enabled`.
-pub const DIVERT_WORKER_PROVIDER_ENV: &str = "TRUSTY_DIVERT_WORKER_PROVIDER";
 
 #[cfg(test)]
 #[path = "mcp_session_env_tests.rs"]

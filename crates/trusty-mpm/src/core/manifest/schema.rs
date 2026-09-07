@@ -394,13 +394,14 @@ impl McpServers {
 /// -54% output tokens in the #6882 POC. The feature changes what the agent is
 /// allowed to do, so it is OPT-IN: absent means off, unlike the `[mcp]`
 /// toggles whose absent state is on.
-/// What: four independent `Option` fields merged FIELD-BY-FIELD (see
+/// What: three independent `Option` fields merged FIELD-BY-FIELD (see
 /// [`Self::merge`]), so a project that sets only `min_lines` keeps a lower
-/// layer's explicit `enabled`. `worker_model` is an optionally
-/// provider-prefixed model id (empty = the provider's cheap-tier default);
-/// `worker_provider` is a value [`crate::core::sm::providers::ProviderKind`]
-/// parses (`auto` | `anthropic` | `bedrock` | `openrouter`).
-/// Test: `divert_config_merge_field_level`, `divert_config_roundtrip`,
+/// layer's explicit `enabled`. `worker_model` is a model name `claude --model`
+/// accepts (empty = [`DEFAULT_DIVERT_WORKER_MODEL`](crate::core::manifest::DEFAULT_DIVERT_WORKER_MODEL)).
+/// There is no provider field: owner ruling 2026-09-07 fixed the worker as
+/// headless Claude Code under the developer's existing login, so there is
+/// nothing to select between.
+/// Test: `divert_config_merge_field_level`, `manifest_roundtrip`,
 /// `default_manifest_divert_disabled_by_default`, `plan_divert_toggles`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DivertConfig {
@@ -410,12 +411,9 @@ pub struct DivertConfig {
     /// Line count at or above which a read is diverted. Default `350`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_lines: Option<u32>,
-    /// Worker model id, optionally provider-prefixed. Empty = tier default.
+    /// Worker model name. Empty = `claude-haiku-4-5`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_model: Option<String>,
-    /// Worker provider selector. Default `"auto"`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_provider: Option<String>,
 }
 
 impl DivertConfig {
@@ -425,7 +423,7 @@ impl DivertConfig {
     /// `[divert] min_lines = 500` must not reset a lower layer's explicit
     /// `enabled = true` back to `None`, which whole-section replacement would
     /// do.
-    /// What: for each of the four fields, takes `higher`'s value when it is
+    /// What: for each of the three fields, takes `higher`'s value when it is
     /// `Some`, else falls through to `self`'s.
     /// Test: `divert_config_merge_field_level`.
     #[must_use]
@@ -434,7 +432,6 @@ impl DivertConfig {
             enabled: higher.enabled.or(self.enabled),
             min_lines: higher.min_lines.or(self.min_lines),
             worker_model: higher.worker_model.or(self.worker_model),
-            worker_provider: higher.worker_provider.or(self.worker_provider),
         }
     }
 }

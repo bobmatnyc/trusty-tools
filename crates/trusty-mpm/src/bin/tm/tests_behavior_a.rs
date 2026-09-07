@@ -112,60 +112,6 @@ fn cli_parses_hook_pm_guard() {
     ));
 }
 
-/// Why (#6887): the managed launcher registers `tm hook --divert-check` as the
-/// bulk-read diversion hook, and `tm divert bulk-read` is the command its block
-/// reason names. Both must parse, or the feature is wired to commands that do
-/// not exist.
-#[test]
-fn cli_parses_hook_divert_check() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "hook", "--divert-check"]).unwrap();
-    assert!(matches!(
-        cli.command.unwrap(),
-        Command::Hook {
-            pm_guard: false,
-            divert_check: true
-        }
-    ));
-}
-
-/// Why (#6887): see above — this is the worker half of the pair.
-/// What: the files are required, `--prompt` is optional, and `--max-tokens`
-/// carries its default.
-#[test]
-fn cli_parses_divert_bulk_read() {
-    let cli = Cli::try_parse_from([
-        "trusty-mpm",
-        "divert",
-        "bulk-read",
-        "a.rs",
-        "b.rs",
-        "--prompt",
-        "what does this do?",
-    ])
-    .unwrap();
-    match cli.command.unwrap() {
-        Command::Divert {
-            action:
-                crate::cli::DivertAction::BulkRead {
-                    files,
-                    prompt,
-                    max_tokens,
-                },
-        } => {
-            assert_eq!(files.len(), 2);
-            assert_eq!(prompt.as_deref(), Some("what does this do?"));
-            assert_eq!(max_tokens, 2048);
-        }
-        other => panic!("expected Divert, got {other:?}"),
-    }
-
-    // At least one file is required.
-    assert!(
-        Cli::try_parse_from(["trusty-mpm", "divert", "bulk-read"]).is_err(),
-        "bulk-read must require at least one file"
-    );
-}
-
 /// Why (#1956): `tm compress --tool bash` is the pipe-filter stage the
 /// `tm hook` PreToolUse Bash rewrite targets; parsing must round-trip the
 /// required `--tool` flag.

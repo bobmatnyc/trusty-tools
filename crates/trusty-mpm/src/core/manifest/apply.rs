@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use super::default::{DEFAULT_DIVERT_MIN_LINES, DEFAULT_DIVERT_WORKER_PROVIDER};
+use super::default::{DEFAULT_DIVERT_MIN_LINES, DEFAULT_DIVERT_WORKER_MODEL};
 use super::schema::{ContentSource, CustomMcpServer, HarnessManifest, selection_matches};
 use crate::core::paths::FrameworkPaths;
 
@@ -74,11 +74,10 @@ pub struct HarnessPlan {
     pub divert_enabled: bool,
     /// `[divert] min_lines` — line count at or above which a read is diverted.
     pub divert_min_lines: u32,
-    /// `[divert] worker_model` — worker model id, or `None` when unset/empty
-    /// (the provider's own cheap-tier default is then used).
-    pub divert_worker_model: Option<String>,
-    /// `[divert] worker_provider` — the provider selector for the worker call.
-    pub divert_worker_provider: String,
+    /// `[divert] worker_model` — the model the headless worker runs on, always
+    /// resolved (an unset or empty key becomes
+    /// [`DEFAULT_DIVERT_WORKER_MODEL`]).
+    pub divert_worker_model: String,
 }
 
 impl HarnessPlan {
@@ -147,28 +146,22 @@ impl HarnessPlan {
         // #6887: the divert section is the one whose ABSENT state is OFF. Do
         // not copy the `.unwrap_or(true)` the MCP toggles above use — a
         // manifest that never mentions `[divert]` must leave the feature dark.
-        let (divert_enabled, divert_min_lines, divert_worker_model, divert_worker_provider) =
-            match &manifest.divert {
-                Some(divert) => (
-                    divert.enabled.unwrap_or(false),
-                    divert.min_lines.unwrap_or(DEFAULT_DIVERT_MIN_LINES),
-                    divert
-                        .worker_model
-                        .clone()
-                        .filter(|m| !m.trim().is_empty()),
-                    divert
-                        .worker_provider
-                        .clone()
-                        .filter(|p| !p.trim().is_empty())
-                        .unwrap_or_else(|| DEFAULT_DIVERT_WORKER_PROVIDER.to_string()),
-                ),
-                None => (
-                    false,
-                    DEFAULT_DIVERT_MIN_LINES,
-                    None,
-                    DEFAULT_DIVERT_WORKER_PROVIDER.to_string(),
-                ),
-            };
+        let (divert_enabled, divert_min_lines, divert_worker_model) = match &manifest.divert {
+            Some(divert) => (
+                divert.enabled.unwrap_or(false),
+                divert.min_lines.unwrap_or(DEFAULT_DIVERT_MIN_LINES),
+                divert
+                    .worker_model
+                    .clone()
+                    .filter(|m| !m.trim().is_empty())
+                    .unwrap_or_else(|| DEFAULT_DIVERT_WORKER_MODEL.to_string()),
+            ),
+            None => (
+                false,
+                DEFAULT_DIVERT_MIN_LINES,
+                DEFAULT_DIVERT_WORKER_MODEL.to_string(),
+            ),
+        };
 
         Self {
             agent_source,
@@ -185,7 +178,6 @@ impl HarnessPlan {
             divert_enabled,
             divert_min_lines,
             divert_worker_model,
-            divert_worker_provider,
         }
     }
 
@@ -350,8 +342,8 @@ mod tests {
     /// value, and it is the one place the opt-in default could be lost by
     /// copying the `[mcp]` toggles' `.unwrap_or(true)`. This asserts the three
     /// states that matter: absent, partial, full.
-    /// What: absent `[divert]` -> `(false, 350, None, "auto")`; a partial
-    /// section that sets only `enabled` keeps the other three defaults; a full
+    /// What: absent `[divert]` -> `(false, 350, "claude-haiku-4-5")`; a partial
+    /// section that sets only `enabled` keeps the other defaults; a full
     /// section reaches the plan verbatim.
     #[test]
     fn plan_divert_toggles() {
@@ -367,8 +359,7 @@ mod tests {
         let plan = HarnessPlan::from_manifest(&absent, &fw, catalog);
         assert!(!plan.divert_enabled, "an absent section must not enable it");
         assert_eq!(plan.divert_min_lines, 350);
-        assert_eq!(plan.divert_worker_model, None);
-        assert_eq!(plan.divert_worker_provider, "auto");
+        assert_eq!(plan.divert_worker_model, "claude-haiku-4-5");
 
         // Partial section: only `enabled` set; the rest keep their defaults.
         let partial = HarnessManifest {
@@ -381,35 +372,26 @@ mod tests {
         let plan = HarnessPlan::from_manifest(&partial, &fw, catalog);
         assert!(plan.divert_enabled);
         assert_eq!(plan.divert_min_lines, 350);
-        assert_eq!(plan.divert_worker_model, None);
-        assert_eq!(plan.divert_worker_provider, "auto");
+        assert_eq!(plan.divert_worker_model, "claude-haiku-4-5");
 
         // The compiled-in default states it off explicitly.
         let plan = HarnessPlan::from_manifest(&default_manifest(), &fw, catalog);
         assert!(!plan.divert_enabled);
-        assert_eq!(
-            plan.divert_worker_model, None,
-            "the default's empty worker_model must normalize to None"
-        );
+        assert_eq!(plan.divert_worker_model, "claude-haiku-4-5");
 
         // Full section: every field reaches the plan verbatim.
         let full = HarnessManifest {
             divert: Some(DivertConfig {
                 enabled: Some(true),
                 min_lines: Some(120),
-                worker_model: Some("anthropic/claude-haiku".to_string()),
-                worker_provider: Some("anthropic".to_string()),
+                worker_model: Some("claude-haiku-4-5-20251001".to_string()),
             }),
             ..HarnessManifest::default()
         };
         let plan = HarnessPlan::from_manifest(&full, &fw, catalog);
         assert!(plan.divert_enabled);
         assert_eq!(plan.divert_min_lines, 120);
-        assert_eq!(
-            plan.divert_worker_model.as_deref(),
-            Some("anthropic/claude-haiku")
-        );
-        assert_eq!(plan.divert_worker_provider, "anthropic");
+        assert_eq!(plan.divert_worker_model, "claude-haiku-4-5-20251001");
     }
 
     #[test]
