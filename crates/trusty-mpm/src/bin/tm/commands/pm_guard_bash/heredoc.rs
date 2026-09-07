@@ -34,13 +34,15 @@ struct Delimiter {
 ///
 /// Why: the guard's byte scanners need one shared answer to "is this byte
 /// here-document content rather than shell syntax", computed once per command.
-/// What: half-open `[start, end)` ranges covering the text between a
-/// here-document's operator line and its terminator line, terminator excluded.
-/// Empty whenever [`HeredocBodies::scan`] could not parse the command with
-/// confidence.
+/// What: `spans` holds half-open `[start, end)` ranges covering the text
+/// between a here-document's operator line and its terminator line, terminator
+/// excluded. `frames` holds the wider separator-suppression ranges #6946 needs
+/// — see [`HeredocBodies::suppresses_separator`]. Both are empty whenever
+/// [`HeredocBodies::scan`] could not parse the command with confidence.
 /// Test: `heredoc_bodies_*`.
 pub(super) struct HeredocBodies {
     spans: Vec<(usize, usize)>,
+    frames: Vec<(usize, usize)>,
 }
 
 impl HeredocBodies {
@@ -52,32 +54,54 @@ impl HeredocBodies {
     /// running to its own terminator line. A delimiter with no terminator line
     /// abandons the whole scan and yields no spans, so an unterminated
     /// here-document and an arithmetic left-shift both leave every byte live.
+    ///
+    /// #6946: each body also contributes a `frames` entry, unless its operator
+    /// line names a shell ([`line_runs_a_shell`]) — see
+    /// [`HeredocBodies::suppresses_separator`].
     /// Test: `heredoc_bodies_cover_a_quoted_delimiter_body`,
     /// `heredoc_bodies_claim_nothing_when_unterminated`,
-    /// `heredoc_bodies_span_two_heredocs_on_one_line`.
+    /// `heredoc_bodies_span_two_heredocs_on_one_line`,
+    /// `heredoc_frames_cover_the_terminator_line`,
+    /// `heredoc_frames_are_empty_for_a_shell_operator_line`.
     pub(super) fn scan(command: &str) -> Self {
         let quotes = QuoteScan::new(command);
         if !quotes.balanced {
-            return Self { spans: Vec::new() };
+            return Self::empty();
         }
         let lines = line_spans(command);
         let mut spans = Vec::new();
+        let mut frames = Vec::new();
         let mut line = 0;
         while line < lines.len() {
             let (start, end) = lines[line];
-            let delimiters = delimiters_on(&command[start..end], start, &quotes);
+            let operator_line = &command[start..end];
+            let delimiters = delimiters_on(operator_line, start, &quotes);
+            let framing = !delimiters.is_empty() && !line_runs_a_shell(operator_line);
             line += 1;
             for delimiter in delimiters {
-                let Some((body, next)) = body_span(command, &lines, line, &delimiter) else {
-                    return Self { spans: Vec::new() };
+                let Some(body) = body_span(command, &lines, line, &delimiter) else {
+                    return Self::empty();
                 };
-                if body.0 < body.1 {
-                    spans.push(body);
+                if body.span.0 < body.span.1 {
+                    spans.push(body.span);
                 }
-                line = next;
+                if framing {
+                    // The frame opens on the newline that ended the operator
+                    // line so that separator too stops splitting.
+                    frames.push((body.span.0.saturating_sub(1), body.frame_end));
+                }
+                line = body.next_line;
             }
         }
-        Self { spans }
+        Self { spans, frames }
+    }
+
+    /// The no-confidence result: every byte stays live shell syntax.
+    fn empty() -> Self {
+        Self {
+            spans: Vec::new(),
+            frames: Vec::new(),
+        }
     }
 
     /// Whether byte `idx` is here-document body content.
@@ -88,6 +112,47 @@ impl HeredocBodies {
             .iter()
             .any(|(start, end)| idx >= *start && idx < *end)
     }
+
+    /// Whether byte `idx` is here-document framing, so a separator there is
+    /// data rather than a composition operator (#6946).
+    ///
+    /// Why: [`super::split_shell_segments_raw`] cuts on every bare newline, so
+    /// `cat <<'EOF' > notes.md` / `git commit -m wip` / `EOF` reached the
+    /// ADR-0049 composed-commit guard as three segments and the whole call was
+    /// denied — with no git process anywhere in it. The body is stdin data to
+    /// `cat`; nothing in it runs.
+    /// What: `true` across a body, the newline that opened it, and its
+    /// terminator line — the terminator is delimiter text, not a segment of its
+    /// own. `false` for every byte of the operator line, which keeps its live
+    /// syntax, and for every body whose operator line names a shell, where the
+    /// body IS shell source and its separators must still split.
+    /// Test: `heredoc_frames_cover_the_terminator_line`,
+    /// `heredoc_frames_are_empty_for_a_shell_operator_line`,
+    /// `split_shell_segments_keeps_a_heredoc_body_whole`.
+    pub(super) fn suppresses_separator(&self, idx: usize) -> bool {
+        self.frames
+            .iter()
+            .any(|(start, end)| idx >= *start && idx < *end)
+    }
+}
+
+/// Whether a here-document operator line hands its body to a shell.
+///
+/// Why (#6946 fail-open check): `bash <<'EOF'` runs the body as shell source,
+/// so suppressing the body's separators there would hide `rm -rf …` from the
+/// destructive-delete rule that catches it today. `cat`, `python3`, `jq` and
+/// the rest consume the body as data instead.
+/// What: `true` when any whitespace-delimited token of the line, basename
+/// stripped, is one of [`QuoteScan`]'s sibling [`shell_lex::DASH_C_SHELLS`].
+/// Scanning every token rather than the leading one keeps `sudo bash`,
+/// `env - bash` and `foo && bash <<EOF` on the conservative side; a false
+/// positive only restores the pre-#6946 splitting.
+/// Test: `heredoc_frames_are_empty_for_a_shell_operator_line`.
+fn line_runs_a_shell(line: &str) -> bool {
+    line.split_whitespace().any(|token| {
+        let base = token.rsplit('/').next().unwrap_or(token);
+        super::shell_lex::DASH_C_SHELLS.contains(&base)
+    })
 }
 
 /// Half-open `[start, end)` byte ranges of each line, newline excluded.
@@ -161,8 +226,17 @@ fn is_word_break(byte: u8) -> bool {
     )
 }
 
-/// The body span for one delimiter, starting at line `from`, plus the line
-/// index the next body starts from.
+/// One located here-document body.
+struct Body {
+    /// Half-open body range, terminator line excluded.
+    span: (usize, usize),
+    /// End of the terminator line, its own newline excluded (#6946).
+    frame_end: usize,
+    /// Line index the next body on the same operator line starts from.
+    next_line: usize,
+}
+
+/// The body for one delimiter, starting at line `from`.
 ///
 /// What: `None` when no later line consists solely of the delimiter word (with
 /// leading tabs allowed under `<<-`) — the caller then claims nothing.
@@ -172,7 +246,7 @@ fn body_span(
     lines: &[(usize, usize)],
     from: usize,
     delimiter: &Delimiter,
-) -> Option<((usize, usize), usize)> {
+) -> Option<Body> {
     let body_start = lines.get(from)?.0;
     for (index, (start, end)) in lines.iter().enumerate().skip(from) {
         let text = command[*start..*end].trim_end_matches('\r');
@@ -182,7 +256,11 @@ fn body_span(
             text
         };
         if candidate == delimiter.word {
-            return Some(((body_start, *start), index + 1));
+            return Some(Body {
+                span: (body_start, *start),
+                frame_end: *end,
+                next_line: index + 1,
+            });
         }
     }
     None
@@ -228,6 +306,43 @@ mod tests {
         let shift = "echo $((1 << 3))\necho x > f.rs";
         let redirect = shift.rfind('>').expect("redirect");
         assert!(!HeredocBodies::scan(shift).contains(redirect));
+    }
+
+    /// #6946: the frame runs from the newline that opened the body through the
+    /// end of the terminator line, and stops there.
+    #[test]
+    fn heredoc_frames_cover_the_terminator_line() {
+        let command = "cat <<'EOF' > f\nbody\nEOF\nnext";
+        let bodies = HeredocBodies::scan(command);
+        let opening_newline = command.find('\n').expect("operator line ends");
+        assert!(bodies.suppresses_separator(opening_newline));
+        assert!(!bodies.suppresses_separator(opening_newline - 1));
+        let terminator = command.find("EOF\nnext").expect("terminator line");
+        for idx in terminator..terminator + 3 {
+            assert!(bodies.suppresses_separator(idx));
+        }
+        // The newline after the terminator is a live separator again.
+        assert!(!bodies.suppresses_separator(terminator + 3));
+    }
+
+    /// #6946 fail-open check: a body handed to a shell is shell source, so it
+    /// gets no frame and its separators keep splitting.
+    #[test]
+    fn heredoc_frames_are_empty_for_a_shell_operator_line() {
+        for command in [
+            "bash <<'EOF'\nbody\nEOF",
+            "sudo /bin/sh <<EOF\nbody\nEOF",
+            "true && zsh <<EOF\nbody\nEOF",
+        ] {
+            let bodies = HeredocBodies::scan(command);
+            let newline = command.find('\n').expect("operator line ends");
+            assert!(
+                !bodies.suppresses_separator(newline),
+                "{command} should not be framed"
+            );
+            // The #5356 body span is still claimed — only framing differs.
+            assert!(bodies.contains(newline + 1), "{command} body span");
+        }
     }
 
     /// `<<-` allows a tab-indented terminator.

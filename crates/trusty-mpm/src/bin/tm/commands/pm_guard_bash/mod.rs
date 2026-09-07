@@ -294,15 +294,29 @@ fn expand_shell_segments(command: &str, depth: usize, out: &mut Vec<String>) {
 }
 
 /// The composition-operator split itself, without the #6660 wrapper descent.
+///
+/// Heredoc-aware (#6946): [`QuoteScan`] knows only `'` and `"`, so every bare
+/// newline in a here-document body was a cut. `cat <<'EOF' > notes.md` /
+/// `git commit -m wip` / `EOF` arrived at the ADR-0049 composed-commit guard as
+/// three segments, and the guard denied a call that runs no git at all.
+/// [`heredoc::HeredocBodies::suppresses_separator`] marks the body, the newline
+/// that opened it, and the terminator line as data, so the whole here-document
+/// stays one segment. The operator line keeps its live syntax, an unterminated
+/// here-document suppresses nothing, and a body handed to a shell still splits.
+/// Test: `split_shell_segments_keeps_a_heredoc_body_whole`,
+/// `split_shell_segments_still_splits_an_unterminated_heredoc`,
+/// `split_shell_segments_still_splits_a_shell_heredoc_body`.
 fn split_shell_segments_raw(command: &str) -> Vec<&str> {
     let scan = QuoteScan::new(command);
     let quoted = |i: usize| scan.balanced && !scan.is_unquoted(i);
+    let bodies = heredoc::HeredocBodies::scan(command);
     let bytes = command.as_bytes();
     let mut segments = Vec::new();
     let mut start = 0;
     let mut i = 0;
     while i < bytes.len() {
-        if quoted(i) {
+        // #6946: a here-document body and its terminator are data, not syntax.
+        if quoted(i) || bodies.suppresses_separator(i) {
             i += 1;
             continue;
         }

@@ -31,7 +31,10 @@ use crate::commands::hook_rewrite::{COMMAND_WRAPPERS, is_env_assignment, strip_w
 /// in one list is what stops the fix from covering a single spelling.
 /// What: the basenames whose `-c` argument is an inner command to re-classify.
 /// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
-const DASH_C_SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];
+// `pub(super)` since #6946: [`super::heredoc`] asks the same question of a
+// here-document operator line — a body fed to one of these IS shell source, so
+// its separators must keep splitting.
+pub(super) const DASH_C_SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];
 
 /// `xargs` options that consume the FOLLOWING token as their value.
 ///

@@ -329,6 +329,48 @@ fn pm_guard_readonly_heredoc_turn_never_touches_the_file_change_budget() {
 }
 
 #[test]
+fn pm_guard_allows_a_heredoc_whose_body_mentions_git_commit() {
+    // #6946: `split_shell_segments_raw` cut on every bare newline, so the body
+    // line of
+    //
+    //     cat <<'EOF'
+    //     git commit -m "wip"
+    //     EOF
+    //
+    // became its own segment, `command_is_a_lone_commit` saw a commit chained
+    // after a non-commit, and the ADR-0049 composed-commit guard denied a call
+    // that runs no git at all. Reproduced live twice on 2026-09-07.
+    //
+    // The live reproduction also redirected to a file; this one does not, so
+    // the assertion turns on the composed-commit guard alone and never on the
+    // shared per-turn file-change budget.
+    let (_dir, repo) = main_checkout_fixture();
+    let heredoc = run_pm_guard(
+        &bash_payload_at("cat <<'EOF'\\ngit commit -m 'wip'\\nEOF", &repo, ""),
+        &[],
+    );
+    assert_eq!(
+        heredoc.trim(),
+        "",
+        "a here-document body is stdin data, not a command: {heredoc}"
+    );
+
+    // The guard itself is intact: a real chained commit in the same fixture is
+    // still denied, and so is an UNTERMINATED here-document, which claims no
+    // body and therefore splits exactly as it did before #6946.
+    let chained = run_pm_guard(
+        &bash_payload_at("git add x && git commit -m 'y'", &repo, ""),
+        &[],
+    );
+    assert_denied(&chained);
+    let unterminated = run_pm_guard(
+        &bash_payload_at("cat <<'EOF'\\ngit add x && git commit -m 'y'", &repo, ""),
+        &[],
+    );
+    assert_denied(&unterminated);
+}
+
+#[test]
 fn pm_guard_allows_read_tool() {
     let stdout = run_pm_guard(
         r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/x/a.rs"}}"#,
