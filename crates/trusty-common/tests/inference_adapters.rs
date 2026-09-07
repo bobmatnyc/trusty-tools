@@ -16,8 +16,9 @@
 use serde_json::{Value, json};
 use serial_test::serial;
 use trusty_common::credentials::{KeyStore, MemoryKeyStore};
+use trusty_common::inference::providers::local::LocalConfig;
 use trusty_common::inference::providers::{
-    anthropic, atlascloud, fireworks, openai, openrouter, together,
+    anthropic, atlascloud, fireworks, local, openai, openrouter, together,
 };
 use trusty_common::inference::test_support::MockInferenceServer;
 use trusty_common::inference::{
@@ -718,6 +719,70 @@ async fn http_429_maps_to_retryable_api_error() {
     assert!(matches!(err, InferenceError::Api { status: 429, .. }));
     assert!(err.is_retryable());
     assert!(!err.is_alarm());
+}
+
+// ── Local provider liveness probe (#4490) ────────────────────────────────────────
+
+/// A live local endpoint passes the probe and the request proceeds (#4490).
+///
+/// Why: the ported probe must gate the request without blocking it. The failure
+/// half is covered inline in `local.rs`; this is the half that proves the gate
+/// opens — a probe that rejected a healthy server would disable local inference
+/// entirely, which is the same silent cost regression #4490 exists to prevent,
+/// only inverted.
+/// What: points a Local adapter at [`MockInferenceServer`] (which answers every
+/// path), issues one `chat`, and asserts BOTH that the canned response came back
+/// AND that the mock recorded the probe's `GET /v1/models` ahead of the
+/// `POST /v1/chat/completions`. The recorded GET is what makes this a test of
+/// the probe rather than of the adapter it wraps.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn local_probe_passes_and_the_request_proceeds() {
+    clear_provider_env();
+    let server = MockInferenceServer::spawn(200, text_response_body())
+        .await
+        .expect("spawn mock");
+
+    let base = format!("{}/v1", server.url());
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::Local,
+        Box::new(move |r: &ResolvedProvider| {
+            local::build(
+                r,
+                LocalConfig {
+                    base_url: base.clone(),
+                    auth: None,
+                },
+            )
+        }),
+    );
+
+    let store = MemoryKeyStore::new();
+    let adapter = cfg.build("local/llama3.1", &store).expect("build local");
+    assert_eq!(adapter.name(), "local");
+
+    let req = ChatRequest::new("local/llama3.1", vec![ChatMessage::user("ping")]);
+    let resp = adapter.chat(&req).await.expect("chat ok");
+    assert_eq!(resp.first_text().as_deref(), Some("pong"));
+
+    let requests = server.requests();
+    let probe_index = requests
+        .iter()
+        .position(|r| r.method == "GET" && r.path == "/v1/models")
+        .expect("the liveness probe must have been issued");
+    let post_index = requests
+        .iter()
+        .position(|r| r.method == "POST" && r.path == "/v1/chat/completions")
+        .expect("the chat request must have been sent");
+    assert!(
+        requests[probe_index].header("authorization").is_none(),
+        "the probe must not send a credential"
+    );
+    assert!(
+        probe_index < post_index,
+        "the probe must run BEFORE the chat POST, not after it"
+    );
 }
 
 // ── Default factory registration ─────────────────────────────────────────────────

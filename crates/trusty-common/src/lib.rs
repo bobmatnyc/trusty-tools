@@ -1101,6 +1101,21 @@ pub mod daemon_addr;
 /// Test: covered via daemon_addr integration tests.
 pub mod health_probe;
 
+/// The single liveness probe for a local OpenAI-compatible model server
+/// (#4490).
+///
+/// Why: `chat::auto_detect_local_provider` and `inference::providers::local`
+/// both need "is a local model server reachable right now?", and a second
+/// independent copy of that probe is what the common-entry-point rule forbids.
+/// Sharing it also shares the timeout, so the two callers cannot drift.
+/// What: Exposes [`local_probe::LOCAL_PROBE_TIMEOUT`],
+/// [`local_probe::models_url`], [`local_probe::probe_models_endpoint`],
+/// [`local_probe::probe_local`], and the endpoint-naming
+/// [`local_probe::LocalProbeError`].
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// local_probe::tests`.
+pub mod local_probe;
+
 /// The local-client credential a loopback daemon and its clients share
 /// through a `0600` file (#5439).
 ///
