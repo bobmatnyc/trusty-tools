@@ -311,14 +311,21 @@ impl JiraComment {
     }
 }
 
-/// Wire shape of `POST /rest/api/3/search` with `expand=changelog`.
+/// Wire shape of `POST /rest/api/3/search/jql` with `expand=changelog`.
 ///
-/// Neither `startAt` nor `total` is modelled: the keyset walk terminates on
-/// a short page and tracks its own window (see [`super::paging`]), so it
-/// depends on no server-side bookkeeping field.
+/// Neither `startAt` nor `total` exists on this endpoint — Atlassian removed
+/// `/rest/api/3/search` (HTTP 410, CHANGE-2046, issue #6812). The walk still
+/// tracks its own JQL window (see [`super::paging`]), so the one server field
+/// it depends on is the continuation token.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ChangelogSearchResponse {
     pub(crate) issues: Vec<ChangelogApiIssue>,
+    /// Continuation token for the next page of the CURRENT window; absent on
+    /// the last page. This is the only end-of-window signal the endpoint
+    /// gives: it may return fewer items than the requested `maxResults` while
+    /// more pages remain, so page length proves nothing.
+    #[serde(rename = "nextPageToken", default)]
+    pub(crate) next_page_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

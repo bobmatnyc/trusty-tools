@@ -19,25 +19,32 @@
 //! longer read from and reappear later in the ordering, where we read them
 //! again.
 //!
-//! Why an offset survives at all: JQL date literals are minute-resolution
-//! (`"yyyy-MM-dd HH:mm"`, see [`super::sync::jql_date`](crate::collect::jira::jql_time::jql_date)), and JQL offers no
+//! Why a within-window cursor survives at all: JQL date literals are
+//! minute-resolution (`"yyyy-MM-dd HH:mm"`, see [`super::sync::jql_date`](crate::collect::jira::jql_time::jql_date)), and JQL offers no
 //! tiebreak key, so a pure keyset walk cannot make progress through a minute
 //! containing more tickets than one page. Inside a single minute the pager
-//! therefore falls back to offset paging — bounding the residual race to
-//! "one minute of tickets, edited in the seconds between two requests"
-//! rather than "the entire remaining walk".
+//! therefore follows the server's own page cursor — bounding the residual
+//! race to "one minute of tickets, edited in the seconds between two
+//! requests" rather than "the entire remaining walk".
+//!
+//! That cursor is `/rest/api/3/search/jql`'s `nextPageToken` (issue #6812).
+//! Atlassian removed the `startAt` offset this module was written against,
+//! so a within-window position is now an opaque token the server issues; the
+//! argument above is unchanged, because it was never about the offset's
+//! representation, only about paging inside one minute versus paging across
+//! the whole walk.
 //!
 //! Re-anchoring re-reads the boundary minute, so the caller must deduplicate;
 //! [`KeysetPager::record_page`] reports which items in a page are new.
 //!
 //! # Why the residual is reported, not clamped away
 //!
-//! Inside an offset-paged minute a concurrent edit can still drop exactly one
+//! Inside a cursor-paged minute a concurrent edit can still drop exactly one
 //! ticket, and that loss is permanent. The obvious remedy — hold the run's
 //! cursor at the start of such a minute so the next run re-reads it — is
 //! **not** safe: a minute containing more tickets than one page is precisely
-//! the case that triggers the offset branch, so every subsequent run would
-//! offset-page it again, clamp again, and never advance. That converts a
+//! the case that triggers the cursor branch, so every subsequent run would
+//! cursor-page it again, clamp again, and never advance. That converts a
 //! rare, bounded loss into a guaranteed permanent stall with no forward
 //! progress at all.
 //!
@@ -62,9 +69,10 @@ pub struct PageRequest {
     /// Lower bound for the JQL `updated >=` clause. `None` = no bound
     /// (first page of a full backfill).
     pub since: Option<DateTime<Utc>>,
-    /// Offset within that window, used only to walk through a minute
-    /// containing more tickets than one page.
-    pub start_at: u64,
+    /// `/rest/api/3/search/jql` continuation token for the CURRENT window,
+    /// used only to walk through a minute containing more tickets than one
+    /// page. `None` requests that window's first page.
+    pub next_page_token: Option<String>,
 }
 
 /// Result of feeding one fetched page back to the pager.
@@ -81,7 +89,7 @@ pub struct PageStep {
 #[derive(Debug)]
 pub struct KeysetPager {
     since: Option<DateTime<Utc>>,
-    start_at: u64,
+    next_page_token: Option<String>,
     seen: HashSet<String>,
     pages: usize,
     max_pages: usize,
@@ -100,7 +108,7 @@ impl KeysetPager {
     pub fn new(since: Option<DateTime<Utc>>, max_pages: usize) -> Self {
         Self {
             since,
-            start_at: 0,
+            next_page_token: None,
             seen: HashSet::new(),
             pages: 0,
             max_pages: max_pages.max(1),
@@ -108,16 +116,16 @@ impl KeysetPager {
         }
     }
 
-    /// The window/offset the next request should use.
+    /// The window and continuation token the next request should use.
     pub fn request(&self) -> PageRequest {
         PageRequest {
             since: self.since,
-            start_at: self.start_at,
+            next_page_token: self.next_page_token.clone(),
         }
     }
 
-    /// The earliest minute the walk had to traverse by offset rather than by
-    /// window re-anchoring, if any.
+    /// The earliest minute the walk had to traverse by following the server's
+    /// page cursor rather than by re-anchoring the window, if any.
     ///
     /// Why a caller wants this: inside such a minute the walk is exposed to
     /// the same shift-under-pagination race that keyset paging exists to
@@ -127,6 +135,13 @@ impl KeysetPager {
     /// unremarked. See the module header for why the window cannot simply be
     /// held back to this minute instead.
     ///
+    /// The name predates issue #6812, which replaced the `startAt` offset
+    /// with `/search/jql`'s `nextPageToken`. What it reports is unchanged:
+    /// the minute the walk had to page through as one server-driven sequence
+    /// instead of re-anchoring past it. Atlassian documents no snapshot
+    /// isolation across tokens, so the race the offset had is not proven
+    /// gone.
+    ///
     /// Test: `pager_reports_the_minute_it_offset_paged`.
     pub fn offset_paged_minute(&self) -> Option<DateTime<Utc>> {
         self.offset_paged_minute
@@ -134,20 +149,30 @@ impl KeysetPager {
 
     /// Record one fetched page and advance the window.
     ///
-    /// `page_size` is the `maxResults` that was requested; a page shorter
-    /// than that means the server has nothing further to give.
+    /// `next_page_token` is the token the server returned with this page.
+    /// `None` means it has nothing further to give in the current window,
+    /// and since that window is `updated >= since` with no upper bound,
+    /// exhausting it exhausts the walk.
+    ///
+    /// Page length is deliberately not consulted (issue #6812).
+    /// `/rest/api/3/search/jql` may return fewer items than the requested
+    /// `maxResults` while more pages remain, so the short page that ended
+    /// this walk against the retired `/rest/api/3/search` would now truncate
+    /// it silently.
     ///
     /// # Invariant
     ///
     /// Every call strictly advances the read position — either `since` moves
-    /// to a later minute (with `start_at` reset past the items already read
-    /// in that minute) or `start_at` grows — so the walk always terminates.
+    /// to a later minute (restarting that window at its first page, whose
+    /// already-held items deduplicate) or the walk follows the server's
+    /// continuation token — so the walk always terminates.
     ///
     /// Test: `pager_reanchors_window_on_a_later_minute`,
-    /// `pager_falls_back_to_offset_within_one_minute`,
+    /// `pager_falls_back_to_the_page_cursor_within_one_minute`,
     /// `pager_deduplicates_reread_boundary_items`,
-    /// `pager_stops_on_a_short_page`, `pager_stops_at_max_pages`.
-    pub fn record_page(&mut self, items: &[PagedItem], page_size: usize) -> PageStep {
+    /// `pager_stops_when_the_server_returns_no_token`,
+    /// `pager_does_not_stop_on_a_short_page`, `pager_stops_at_max_pages`.
+    pub fn record_page(&mut self, items: &[PagedItem], next_page_token: Option<&str>) -> PageStep {
         self.pages += 1;
 
         let mut is_new = Vec::with_capacity(items.len());
@@ -159,12 +184,12 @@ impl KeysetPager {
             }
         }
 
-        if items.len() < page_size {
+        let Some(token) = next_page_token else {
             return PageStep {
                 is_new,
                 more: false,
             };
-        }
+        };
         if self.pages >= self.max_pages {
             warn!(
                 pages = self.pages,
@@ -180,22 +205,22 @@ impl KeysetPager {
 
         match page_max {
             // The page reached a later minute than the current window start:
-            // re-anchor there, skipping past the items of that minute we
-            // already hold. The skip count can only ever be an UNDER-estimate
-            // (earlier pages may also hold items in that minute), which costs
-            // a deduplicated re-read — never a skipped ticket.
+            // re-anchor there and drop the token, since a token addresses a
+            // position in the query that produced it and the query is about
+            // to change. The new window is re-read from its first page, so
+            // the boundary minute's already-held items come back and
+            // deduplicate — the same cost the `startAt` skip this replaces
+            // was already paying, because that skip could only ever
+            // UNDER-estimate (earlier pages may hold items in that minute
+            // too).
             Some(max) if minute(Some(max)) > minute(self.since) => {
-                let skip = items
-                    .iter()
-                    .filter(|(_, u)| minute(*u) == minute(Some(max)))
-                    .count();
                 self.since = Some(max);
-                self.start_at = skip as u64;
+                self.next_page_token = None;
             }
-            // A full page that did not advance the minute (a bulk edit, or a
-            // page with no usable timestamps): keep offset-paging inside the
-            // current window so the walk still makes progress. Record it —
-            // this is the one band where the shift race survives, and the
+            // A page that did not advance the minute (a bulk edit, or a page
+            // with no usable timestamps): follow the server's cursor inside
+            // the current window so the walk still makes progress. Record it
+            // — this is the one band where the shift race survives, and the
             // caller surfaces it rather than letting it pass silently.
             _ => {
                 let stalled = minute(self.since).or_else(|| minute(page_max));
@@ -203,7 +228,7 @@ impl KeysetPager {
                     (Some(existing), Some(new)) => Some(existing.min(new)),
                     (existing, new) => existing.or(new),
                 };
-                self.start_at += items.len() as u64;
+                self.next_page_token = Some(token.to_string());
             }
         }
 
@@ -243,17 +268,31 @@ mod tests {
             pager.request(),
             PageRequest {
                 since: Some(dt("2026-01-01T00:00:00Z")),
-                start_at: 0,
+                next_page_token: None,
             }
         );
     }
 
     #[test]
-    fn pager_stops_on_a_short_page() {
+    fn pager_stops_when_the_server_returns_no_token() {
         let mut pager = KeysetPager::new(None, 10);
-        let step = pager.record_page(&[item("P-1", "2026-01-01T00:00:00Z")], 2);
-        assert!(!step.more, "a page shorter than page_size ends the walk");
+        let step = pager.record_page(&[item("P-1", "2026-01-01T00:00:00Z")], None);
+        assert!(!step.more, "an absent continuation token ends the walk");
         assert_eq!(step.is_new, vec![true]);
+    }
+
+    /// Issue #6812: `/rest/api/3/search/jql` may return fewer items than the
+    /// requested `maxResults` while more pages remain, so page length must
+    /// not end the walk. Ending on it truncated a run silently — the exact
+    /// failure family this module exists to prevent.
+    #[test]
+    fn pager_does_not_stop_on_a_short_page() {
+        let mut pager = KeysetPager::new(None, 10);
+        let step = pager.record_page(&[item("P-1", "2026-01-01T00:00:00Z")], Some("t1"));
+        assert!(
+            step.more,
+            "a short page carrying a token must not end the walk"
+        );
     }
 
     /// The core fix: after a full page the window re-anchors to the page's
@@ -266,39 +305,42 @@ mod tests {
             item("P-1", "2026-01-01T00:01:00Z"),
             item("P-2", "2026-01-01T00:02:00Z"),
         ];
-        let step = pager.record_page(&page, 2);
+        let step = pager.record_page(&page, Some("t1"));
         assert!(step.more);
         assert_eq!(
             pager.request(),
             PageRequest {
                 since: Some(dt("2026-01-01T00:02:00Z")),
-                // exactly one item of this page lives in the 00:02 minute
-                start_at: 1,
+                // The token addresses a position in the query that produced
+                // it, and that query is about to change, so it is dropped.
+                next_page_token: None,
             },
-            "the next window must start at the page's max updated, not at an \
-             absolute offset into a mutating result set"
+            "the next window must start at the page's max updated, not at a \
+             position carried over from a different query"
         );
     }
 
     /// More tickets in one minute than fit in a page: JQL cannot express a
-    /// sub-minute bound, so the pager must offset-page through that minute
-    /// instead of stalling (which would silently truncate the walk).
+    /// sub-minute bound, so the pager must follow the server's cursor through
+    /// that minute instead of stalling (which would silently truncate the
+    /// walk).
     #[test]
-    fn pager_falls_back_to_offset_within_one_minute() {
+    fn pager_falls_back_to_the_page_cursor_within_one_minute() {
         let mut pager = KeysetPager::new(Some(dt("2026-01-01T00:00:00Z")), 10);
         let page = vec![
             item("P-1", "2026-01-01T00:00:10Z"),
             item("P-2", "2026-01-01T00:00:20Z"),
         ];
-        let step = pager.record_page(&page, 2);
+        let step = pager.record_page(&page, Some("t1"));
         assert!(step.more);
         assert_eq!(
             pager.request(),
             PageRequest {
                 since: Some(dt("2026-01-01T00:00:00Z")),
-                start_at: 2,
+                next_page_token: Some("t1".to_string()),
             },
-            "a page confined to the window's own minute must advance by offset"
+            "a page confined to the window's own minute must advance by the \
+             server's continuation token"
         );
     }
 
@@ -311,14 +353,14 @@ mod tests {
             item("P-1", "2026-01-01T00:01:00Z"),
             item("P-2", "2026-01-01T00:02:00Z"),
         ];
-        pager.record_page(&first, 2);
+        pager.record_page(&first, Some("t1"));
 
         let second = vec![
             // P-2 comes back because the window re-anchored onto its minute.
             item("P-2", "2026-01-01T00:02:00Z"),
             item("P-3", "2026-01-01T00:03:00Z"),
         ];
-        let step = pager.record_page(&second, 2);
+        let step = pager.record_page(&second, Some("t2"));
         assert_eq!(step.is_new, vec![false, true]);
     }
 
@@ -329,18 +371,18 @@ mod tests {
             item("P-1", "2026-01-01T00:01:00Z"),
             item("P-2", "2026-01-01T00:02:00Z"),
         ];
-        assert!(pager.record_page(&page, 2).more);
+        assert!(pager.record_page(&page, Some("t1")).more);
         let page2 = vec![
             item("P-3", "2026-01-01T00:03:00Z"),
             item("P-4", "2026-01-01T00:04:00Z"),
         ];
         assert!(
-            !pager.record_page(&page2, 2).more,
+            !pager.record_page(&page2, Some("t2")).more,
             "the page cap must stop the walk rather than loop forever"
         );
     }
 
-    /// The offset branch is the one band where the shift race survives, so
+    /// The cursor branch is the one band where the shift race survives, so
     /// the pager must name the minute it happened in for the run summary.
     #[test]
     fn pager_reports_the_minute_it_offset_paged() {
@@ -351,7 +393,7 @@ mod tests {
             item("P-1", "2026-01-01T00:00:40Z"),
             item("P-2", "2026-01-01T00:00:50Z"),
         ];
-        pager.record_page(&page, 2);
+        pager.record_page(&page, Some("t1"));
         assert_eq!(
             pager.offset_paged_minute(),
             Some(dt("2026-01-01T00:00:00Z")),
@@ -368,18 +410,18 @@ mod tests {
             item("P-1", "2026-01-01T00:01:00Z"),
             item("P-2", "2026-01-01T00:02:00Z"),
         ];
-        pager.record_page(&page, 2);
+        pager.record_page(&page, Some("t1"));
         assert_eq!(pager.offset_paged_minute(), None);
     }
 
-    /// A full page with no parseable timestamps must still make progress
-    /// (offset branch) rather than re-requesting the same window forever.
+    /// A page with no parseable timestamps must still make progress (cursor
+    /// branch) rather than re-requesting the same window forever.
     #[test]
-    fn pager_advances_by_offset_when_a_page_has_no_timestamps() {
+    fn pager_advances_by_cursor_when_a_page_has_no_timestamps() {
         let mut pager = KeysetPager::new(Some(dt("2026-01-01T00:00:00Z")), 10);
         let page = vec![("P-1".to_string(), None), ("P-2".to_string(), None)];
-        let step = pager.record_page(&page, 2);
+        let step = pager.record_page(&page, Some("t1"));
         assert!(step.more);
-        assert_eq!(pager.request().start_at, 2);
+        assert_eq!(pager.request().next_page_token.as_deref(), Some("t1"));
     }
 }

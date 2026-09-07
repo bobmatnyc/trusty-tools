@@ -409,7 +409,7 @@ mod sync_e2e {
     async fn run_sync_writes_transitions_comments_and_advances_cursor() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/rest/api/3/search"))
+            .and(path("/rest/api/3/search/jql"))
             .respond_with(ResponseTemplate::new(200).set_body_json(search_response_body()))
             .mount(&server)
             .await;
@@ -467,7 +467,7 @@ mod sync_e2e {
     async fn run_sync_dry_run_fetches_comments_but_writes_nothing() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/rest/api/3/search"))
+            .and(path("/rest/api/3/search/jql"))
             .respond_with(ResponseTemplate::new(200).set_body_json(search_response_body()))
             .mount(&server)
             .await;
@@ -531,7 +531,7 @@ mod sync_e2e {
     async fn run_sync_with_no_matching_tickets_leaves_cursor_untouched() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/rest/api/3/search"))
+            .and(path("/rest/api/3/search/jql"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "startAt": 0,
                 "total": 0,
@@ -688,7 +688,7 @@ mod partial_failure {
     async fn server_with_failing_first_ticket(jqls: Arc<Mutex<Vec<String>>>) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/rest/api/3/search"))
+            .and(path("/rest/api/3/search/jql"))
             .respond_with(WindowedSearch::new(jqls))
             .mount(&server)
             .await;
@@ -771,7 +771,7 @@ mod partial_failure {
         // Second run: same dataset, but PROJ-1's comments are now reachable.
         let healthy = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/rest/api/3/search"))
+            .and(path("/rest/api/3/search/jql"))
             .respond_with(WindowedSearch::new(Arc::clone(&jqls)))
             .mount(&healthy)
             .await;
@@ -886,7 +886,7 @@ mod partial_failure {
             }
         }
         Mock::given(method("POST"))
-            .and(path("/rest/api/3/search"))
+            .and(path("/rest/api/3/search/jql"))
             .respond_with(ManyTickets)
             .mount(&server)
             .await;
@@ -984,7 +984,7 @@ mod partial_failure {
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/rest/api/3/search"))
+            .and(path("/rest/api/3/search/jql"))
             .respond_with(TruncatedSearch)
             .mount(&server)
             .await;

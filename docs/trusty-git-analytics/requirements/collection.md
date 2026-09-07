@@ -145,7 +145,9 @@ metrics fresh without re-fetching closed PRs.
 ## JIRA Data Collection
 
 - **Auth**: HTTP Basic Auth with `access_user` + `access_token`
-- **Endpoint**: `/rest/api/3/search` with JQL
+- **Endpoint**: `/rest/api/3/search/jql` with JQL. Atlassian removed
+  `/rest/api/3/search` (HTTP 410, CHANGE-2046, issue #6812); the replacement
+  paginates by an opaque `nextPageToken` and reports no `total`.
 - **Batch size**: 50 tickets per request
 - **JQL**: `project IN (KEY1, KEY2) AND updated >= "YYYY-MM-DD"`
 - **Story point field discovery**: GET `/rest/api/3/field`, match by name patterns
