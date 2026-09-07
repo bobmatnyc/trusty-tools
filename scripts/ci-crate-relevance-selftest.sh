@@ -27,13 +27,16 @@
 #   against an input that answers `false` when cargo works, so it proves the
 #   arm was reached rather than that the answer happened to be true.
 #
-#   One section builds real single-commit git repos and drives the script
-#   through its OWN `git diff` (#7063). Feeding paths on stdin cannot reach
-#   that defect: git C-quotes a path holding a non-ASCII byte, a double quote
-#   or a backslash, and the quoted string matches no crate directory, so a
-#   change INSIDE a crate answered `false` and that crate's required clippy job
-#   was skipped. Its last case is a non-ASCII path OUTSIDE the closure,
-#   asserting `false`, so the section cannot pass by answering `true` always.
+#   One section builds real single-commit git repos and drives the script over
+#   a diff git actually produced (#7063). A hand-fed path list cannot reach that
+#   defect: git C-quotes a path holding a non-ASCII byte, a double quote or a
+#   backslash, and the quoted string matches no crate directory, so a change
+#   INSIDE a crate answered `false` and that crate's required clippy job was
+#   skipped. The section covers BOTH ways a caller supplies the change set —
+#   CRATE_RELEVANCE_BASE, where the script diffs for itself, and stdin, which is
+#   what ci.yml's Classify step uses — because the fix has to hold on each. Two
+#   cases are non-ASCII paths OUTSIDE the closure asserting `false`, one per
+#   route, so neither can pass by answering `true` always.
 #
 # Usage: bash scripts/ci-crate-relevance-selftest.sh
 # Exit: 0 when every case matches; 1 otherwise, printing both sides of each
@@ -151,38 +154,74 @@ live_verdict() {
   (cd "${REPO_ROOT}" && printf '%s\n' "$@" | bash "${SCRIPT}" "${crate}" 2>/dev/null)
 }
 
-# gitfix_verdict <crate> <added path>... — build a throwaway git repo from the
-# pristine fixture, add the named files in a second commit, and let the script
-# resolve the change set with its OWN `git diff` (#7063). A fresh repo per case
+# build_gitfix <added path>... — copy the pristine fixture into a throwaway git
+# repo, commit it, add the named files in a second commit, and print the repo
+# path on line 1 with the base commit's SHA on line 2. A fresh repo per case
 # keeps the cases independent and needs no history rewriting between them.
-gitfix_verdict() {
-  local crate="$1" repo path base
-  shift
-  repo="$(mktemp -d "${WORK}/gitcase.XXXXXX")" || return 1
-  cp -R "${PRISTINE}/." "${repo}/" || return 1
+# Printing nothing means the fixture could not be built; both verdict helpers
+# below turn that into a visible failure rather than letting the script's
+# fail-closed arm answer `true` for a reason unrelated to path quoting.
+build_gitfix() {
+  local repo path base
+  repo="$(mktemp -d "${WORK}/gitcase.XXXXXX")" || return 0
+  cp -R "${PRISTINE}/." "${repo}/" || return 0
   (
-    cd "${repo}" || exit 1
+    cd "${repo}" || exit 0
     git init -q . >/dev/null 2>&1
     git config user.email selftest@example.invalid >/dev/null 2>&1
     git config user.name selftest >/dev/null 2>&1
     git add -A >/dev/null 2>&1
     git commit -qm base >/dev/null 2>&1
     base="$(git rev-parse HEAD 2>/dev/null)"
-    # Without this, a git that could not build the fixture would leave
-    # CRATE_RELEVANCE_BASE empty, the script would read its empty stdin, and
-    # the fail-closed arm would answer `true` — passing five of the six cases
-    # below for a reason that has nothing to do with path quoting.
-    if [ -z "${base}" ]; then
-      echo "git-fixture-setup-failed"
-      exit 0
-    fi
+    [ -n "${base}" ] || exit 0
     for path in "$@"; do
       mkdir -p "$(dirname "${path}")"
       printf 'pub fn x() {}\n' >"${path}"
     done
     git add -A >/dev/null 2>&1
     git commit -qm change >/dev/null 2>&1
-    CRATE_RELEVANCE_BASE="${base}" bash "${SCRIPT}" "${crate}" </dev/null 2>/dev/null
+    printf '%s\n%s\n' "${repo}" "${base}"
+  )
+}
+
+# gitfix_verdict <crate> <added path>... — the CRATE_RELEVANCE_BASE route: the
+# script resolves the change set itself, with its own `git diff -z` (#7063).
+gitfix_verdict() {
+  local crate="$1" fixture repo base
+  shift
+  fixture="$(build_gitfix "$@")"
+  repo="$(printf '%s\n' "${fixture}" | sed -n '1p')"
+  base="$(printf '%s\n' "${fixture}" | sed -n '2p')"
+  if [ -z "${repo}" ] || [ -z "${base}" ]; then
+    echo "git-fixture-setup-failed"
+    return 0
+  fi
+  (cd "${repo}" && CRATE_RELEVANCE_BASE="${base}" bash "${SCRIPT}" "${crate}" </dev/null 2>/dev/null)
+}
+
+# #7063: stdin_gitfix_verdict <crate> <added path>... — the OTHER route, and the
+# one ci.yml's Classify step actually uses: the CALLER runs `git diff -z`, writes
+# the NUL-delimited result to a file, and hands that file to the script on stdin
+# with CRATE_RELEVANCE_BASE unset, so the script takes its `cat` branch instead
+# of diffing anything. The fix has to hold on both routes, and only this one
+# covers the workflow's own call shape.
+stdin_gitfix_verdict() {
+  local crate="$1" fixture repo base changed
+  shift
+  fixture="$(build_gitfix "$@")"
+  repo="$(printf '%s\n' "${fixture}" | sed -n '1p')"
+  base="$(printf '%s\n' "${fixture}" | sed -n '2p')"
+  if [ -z "${repo}" ] || [ -z "${base}" ]; then
+    echo "git-fixture-setup-failed"
+    return 0
+  fi
+  # Beside the repo, not inside it, so the fixture's own diff stays what the
+  # case set up.
+  changed="${repo}.changed-paths"
+  (
+    cd "${repo}" || exit 1
+    git diff -z --name-only --no-renames "${base}" HEAD >"${changed}" 2>/dev/null
+    bash "${SCRIPT}" "${crate}" <"${changed}" 2>/dev/null
   )
 }
 
@@ -255,6 +294,23 @@ assert_eq "top <- crates/unrelated/src/café.rs (non-ASCII, outside)" \
 # did not break the common case.
 assert_eq "top <- crates/top/src/plain.rs (ASCII, own dir)" \
   "true" "$(gitfix_verdict top 'crates/top/src/plain.rs')"
+
+# The cases above take the CRATE_RELEVANCE_BASE route. ci.yml's Classify step
+# takes the other one — it runs `git diff -z` itself and pipes the result in on
+# stdin — so the same two answers are asserted through that call shape too.
+assert_eq "stdin: top <- crates/mid/src/café.rs (non-ASCII, in the closure)" \
+  "true" "$(stdin_gitfix_verdict top 'crates/mid/src/café.rs')"
+assert_eq "stdin: top <- crates/unrelated/src/café.rs (non-ASCII, outside)" \
+  "false" "$(stdin_gitfix_verdict top 'crates/unrelated/src/café.rs')"
+# Two paths, the inert one sorting first, so `git diff -z` writes them as
+# `crates/mid/…\0crates/top-extra/…\0` on a single line. A reader that splits on
+# newlines sees one token beginning `crates/mid/`, which is outside top-extra's
+# closure, and answers `false`; splitting on NUL finds the second path under the
+# crate's own directory. This is the case that separates the two parsers — with
+# one path the trailing NUL lands past the directory prefix and a line-splitting
+# reader gets the right answer by accident.
+assert_eq "stdin: top-extra <- inert path first, then its own café.rs" \
+  "true" "$(stdin_gitfix_verdict top-extra 'crates/mid/src/x.rs' 'crates/top-extra/src/café.rs')"
 
 echo "fixture: fail-closed arms"
 assert_eq "no crate name" \
