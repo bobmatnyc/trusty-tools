@@ -13,6 +13,8 @@
 //! `deploy_output_style`) rather than inventing a third redeploy path.
 //! What: [`sync_session_assets`] resolves the harness manifest/plan for
 //! `project_dir` exactly as launch does, redeploys the manifest-selected agents,
+//! sweeps the project tier's stray bundled skill copies (#6754, the same
+//! `skills::sweep_project_tier_strays` session start runs),
 //! redeploys skills to the two destinations #6586 split them across (the
 //! bundled roster to the managed user tier, the user-custom tier to the
 //! project), and refreshes
@@ -188,6 +190,11 @@ pub fn sync_session_assets(
                 Some(format!("agent quarantine refused: {err}"))
             }
         };
+
+    // #6754: the same automatic stray sweep session start runs, before the
+    // redeploys, so a long-lived session reaches a clean project tier without a
+    // relaunch. Non-fatal and self-reporting — see `skills::sweep_project_tier_strays`.
+    super::skills::sweep_project_tier_strays(fw, project_dir);
 
     // #6586: bundled skills refresh in the managed user tier, the same
     // destination `session_launch::skills` and `managed_config` write. Without
