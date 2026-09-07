@@ -41,6 +41,13 @@ pub(crate) const SEARCH_SERVICE_ID: &str = "trusty-search";
 /// The daemon whose socket carries `palace_delete` and `palace_compact`.
 pub(crate) const MEMORY_SERVICE: &str = "trusty-memory";
 
+/// The daemon whose socket carries the `analyze.*` methods (#6155).
+///
+/// Declared here beside its two siblings rather than inside `analyze_uds`, so
+/// the three service ids this console dials read as one list. `analyze_uds`
+/// imports it; nothing else defines it.
+pub(crate) const ANALYZE_SERVICE: &str = "trusty-analyze";
+
 /// How long one operator-driven daemon action may take, end to end.
 ///
 /// Why not the 3s the health probe uses: tearing down a palace drops a redb

@@ -244,6 +244,19 @@ fn build_router_inner(
             "/proxy/memory/{*path}",
             any(crate::memory_uds::routes::deprecated_memory_api_handler),
         )
+        // #6155: nor is `analyze` — #6287 deleted its proxy row for the same
+        // reason, when trusty-analyze moved onto a Unix socket and stopped
+        // writing the `http_addr` file. This literal route takes the prefix and
+        // translates each request into an RPC call, which is what makes the
+        // dashboard at /tools/analyze/ reachable.
+        .route(
+            "/api/analyze/{*path}",
+            any(crate::analyze_uds::routes::analyze_api_handler),
+        )
+        .route(
+            "/proxy/analyze/{*path}",
+            any(crate::analyze_uds::routes::deprecated_analyze_api_handler),
+        )
         // Primary reverse-proxy: /api/{service}/{*path} (#1849 Phase 2).
         // {service} ∈ {review, mpm, agents}.
         // No collision with /api/console/*: axum (matchit 0.8) routes literal
@@ -276,6 +289,16 @@ fn build_router_inner(
         .route(
             "/tools/memory/{*path}",
             get(crate::tools_ui::memory_ui_asset),
+        )
+        // #6155: the trusty-analyze SPA, served from this binary under
+        // /tools/analyze/. Its API calls resolve to /api/analyze/*, which the
+        // bridge above translates onto the daemon's socket — the only way in
+        // since #6287 took its HTTP listener away.
+        .route("/tools/analyze", get(crate::tools_ui::analyze_ui_redirect))
+        .route("/tools/analyze/", get(crate::tools_ui::analyze_ui_index))
+        .route(
+            "/tools/analyze/{*path}",
+            get(crate::tools_ui::analyze_ui_asset),
         )
         .route("/", get(crate::console_ui::spa_index_handler))
         // #6519: /ui/screensaver already reaches the shell through the SPA

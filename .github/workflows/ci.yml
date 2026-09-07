@@ -2004,9 +2004,16 @@ jobs:
             # delete flow's fail-open property is asserted there. Not a new
             # required context, so no open PR is wedged by the addition.
             command: pnpm run build && pnpm run test
-          - name: trusty-analyze
-            dir: crates/trusty-analyze/ui
-            command: pnpm run build
+          # #6155: the analyze dashboard's source moved into trusty-console as
+          # its fourth UI project, alongside ui-search and ui-memory. The matrix
+          # name follows the directory so a failure names the tree to open. Not
+          # a required context, so renaming it wedges no open PR.
+          - name: trusty-console-analyze
+            dir: crates/trusty-console/ui-analyze
+            # #6155: `build` alone never ran src/lib/api.test.js, which pins the
+            # five list envelopes the daemon answers with. Not a required
+            # context, so no open PR is wedged by the addition.
+            command: pnpm run build && pnpm run test
           # #5477 phase 1. No test suite yet — the shell has one view and its
           # only logic (the Rust↔TypeScript wire shape) is asserted on the Rust
           # side by `guided_serialises_to_the_shape_the_window_reads`. `build`

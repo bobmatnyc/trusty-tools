@@ -9,6 +9,7 @@
    */
   import * as d3 from 'd3';
   import { onMount, onDestroy, tick } from 'svelte';
+  import { smellCategory } from '../api.js';
   import {
     getSelectedIndex,
     getSmells,
@@ -27,18 +28,22 @@
   });
 
   /*
-   * Why: API may return one row per chunk with a `smells: [...]` array, or
-   * pre-flattened rows; we normalize to a flat list of {category, chunk}.
-   * What: Returns Array<{ category, chunk }>.
-   * Test: Pass [{ smells: [{ category: 'long_function' }], file: 'a.rs' }]
-   * and expect [{ category: 'long_function', chunk: {...} }].
+   * Why: `analyze.smells` returns one row per smelly chunk carrying a `smells`
+   * array; a row can also arrive pre-flattened. Both normalize to a flat list
+   * of {category, chunk} so the bar chart and the detail table group the same
+   * way. #6155: `smellCategory` is what reads serde's externally-tagged
+   * `CodeSmell` — before it every row fell through to `unknown`, and before the
+   * daemon carried `smells` at all there was nothing to group by.
+   * What: Returns Array<{ category, chunk, smell }>.
+   * Test: `smellCategory` is covered in `../api.test.js`; end to end, select an
+   * index and expect one bar per detected smell variant.
    */
   function flatten(rows) {
     const out = [];
     for (const r of rows || []) {
       if (Array.isArray(r.smells) && r.smells.length) {
         for (const s of r.smells) {
-          out.push({ category: s.category || s.name || 'unknown', chunk: r, smell: s });
+          out.push({ category: smellCategory(s), chunk: r, smell: s });
         }
       } else if (r.category || r.name) {
         out.push({ category: r.category || r.name, chunk: r, smell: r });

@@ -3,12 +3,13 @@
 //! Why: ADR-0032 makes the console the only HTTP surface in the workspace, so
 //! every trusty-* dashboard has to be reachable from this binary or not at all.
 //! #6285 deletes trusty-search's HTTP server — including the `/ui` mount that
-//! was the only way to its dashboard — and #6286 already deleted
-//! trusty-memory's, leaving that SPA embedded in a daemon with no listener.
-//! Both are served here instead.
-//! What: `rust_embed` embeds two bundles, each the Vite output of one of this
-//! crate's own UI projects — build.rs builds `ui-search/` → `ui-search-dist/`
-//! and `ui-memory/` → `ui-memory-dist/` alongside `ui/`. Each gets three routes:
+//! was the only way to its dashboard — #6286 already deleted trusty-memory's,
+//! and #6287 deleted trusty-analyze's, leaving each SPA in a crate with no
+//! listener. All three are served here instead.
+//! What: `rust_embed` embeds three bundles, each the Vite output of one of this
+//! crate's own UI projects — build.rs builds `ui-search/` → `ui-search-dist/`,
+//! `ui-memory/` → `ui-memory-dist/` and `ui-analyze/` → `ui-analyze-dist/`
+//! alongside `ui/`. Each gets three routes:
 //!   - `GET /tools/<tool>`         → redirect to `/tools/<tool>/`
 //!   - `GET /tools/<tool>/`        → index.html with the API base injected
 //!   - `GET /tools/<tool>/{*path}` → static asset, index.html on a miss
@@ -17,8 +18,8 @@
 //! so pointing every API call at the console's bridge is one injected global —
 //! no fork of either SPA and no build-time base-path knob.
 //! Test: `tests` below cover the injection and the path/MIME resolution;
-//! `tests/search_ui_mount.rs` and `tests/memory_ui_mount.rs` drive the routes
-//! through the real router.
+//! `tests/search_ui_mount.rs`, `tests/memory_ui_mount.rs` and
+//! `tests/analyze_ui_mount.rs` drive the routes through the real router.
 
 use axum::{
     body::Body,
@@ -50,6 +51,16 @@ struct SearchUiAssets;
 #[derive(RustEmbed)]
 #[folder = "ui-memory-dist/"]
 struct MemoryUiAssets;
+
+/// The analyze dashboard bundle, committed under `ui-analyze-dist/`.
+///
+/// Same arrangement as [`SearchUiAssets`], one manifest row over:
+/// `trusty-console-analyze`, rebuilt by `make -C crates/trusty-console
+/// analyze-ui`.
+/// Test: `analyze_index_is_embedded` below.
+#[derive(RustEmbed)]
+#[folder = "ui-analyze-dist/"]
+struct AnalyzeUiAssets;
 
 /// One dashboard's mount: where its bytes are and where its API calls go.
 ///
@@ -91,6 +102,18 @@ const MEMORY: SpaMount = SpaMount {
     base_global: "__MEMORY_BASE__",
     api_base: "/api/memory/",
     remedy: "memory dashboard assets not bundled — run `make -C crates/trusty-console memory-ui`.",
+};
+
+/// Where the analyze SPA's API calls go when the console serves it.
+///
+/// Same shape as [`SEARCH`], over `analyze_uds::routes`: `/api/analyze/health`
+/// reaches `analyze.health` and `/api/analyze/indexes` reaches
+/// `analyze.list_indexes`.
+const ANALYZE: SpaMount = SpaMount {
+    get: AnalyzeUiAssets::get,
+    base_global: "__ANALYZE_BASE__",
+    api_base: "/api/analyze/",
+    remedy: "analyze dashboard assets not bundled — run `make -C crates/trusty-console analyze-ui`.",
 };
 
 /// `GET /tools/search` — redirect to the trailing-slash form.
@@ -143,6 +166,28 @@ pub async fn memory_ui_index() -> Response {
 /// `tests/memory_ui_mount.rs`.
 pub async fn memory_ui_asset(Path(path): Path<String>) -> Response {
     serve_asset(&MEMORY, &path)
+}
+
+/// `GET /tools/analyze` — redirect to the trailing-slash form.
+///
+/// Same reason as [`search_ui_redirect`]: the bundle's asset refs are relative.
+/// Test: `analyze_ui_bare_path_redirects` in `tests/analyze_ui_mount.rs`.
+pub async fn analyze_ui_redirect() -> Redirect {
+    Redirect::permanent("/tools/analyze/")
+}
+
+/// `GET /tools/analyze/` — the SPA shell.
+pub async fn analyze_ui_index() -> Response {
+    serve_index(&ANALYZE)
+}
+
+/// `GET /tools/analyze/{*path}` — one bundle file, or the shell on a miss.
+///
+/// Test: `analyze_ui_serves_every_asset_the_shell_references` and
+/// `analyze_ui_unknown_path_falls_back_to_the_shell` in
+/// `tests/analyze_ui_mount.rs`.
+pub async fn analyze_ui_asset(Path(path): Path<String>) -> Response {
+    serve_asset(&ANALYZE, &path)
 }
 
 /// Serve one bundle file, falling back to the shell when it is not one.
@@ -265,17 +310,35 @@ mod tests {
         assert!(out.contains(r#"new URL("/api/search/", document.baseURI)"#));
     }
 
-    /// Why: the two mounts must set DIFFERENT globals at different prefixes, or
-    /// one dashboard's API calls reach the other's daemon.
+    /// Why: the analyze bundle is built from this crate's `ui-analyze/` since
+    /// #6155; embedding the wrong tree would serve another dashboard at
+    /// `/tools/analyze/` and every API call would go to the wrong daemon.
+    /// Test: this is the test.
+    #[test]
+    fn analyze_index_is_embedded() {
+        let index = AnalyzeUiAssets::get("index.html").expect("bundle carries index.html");
+        let html = String::from_utf8_lossy(index.data.as_ref());
+        assert!(html.contains("trusty-analyzer"), "wrong bundle embedded");
+        assert!(
+            html.contains("./assets/"),
+            "bundle must use relative asset refs so the /tools/analyze/ mount resolves them"
+        );
+    }
+
+    /// Why: the three mounts must set DIFFERENT globals at different prefixes,
+    /// or one dashboard's API calls reach another's daemon.
     /// Test: this is the test.
     #[test]
     fn each_mount_injects_its_own_global_and_prefix() {
         let html = "<html><head></head></html>";
         let search = inject_api_base(html, SEARCH.base_global, SEARCH.api_base);
         let memory = inject_api_base(html, MEMORY.base_global, MEMORY.api_base);
+        let analyze = inject_api_base(html, ANALYZE.base_global, ANALYZE.api_base);
         assert!(search.contains(r#"window.__SEARCH_BASE__ = new URL("/api/search/""#));
         assert!(memory.contains(r#"window.__MEMORY_BASE__ = new URL("/api/memory/""#));
+        assert!(analyze.contains(r#"window.__ANALYZE_BASE__ = new URL("/api/analyze/""#));
         assert!(!memory.contains("__SEARCH_BASE__"));
+        assert!(!analyze.contains("__MEMORY_BASE__"));
     }
 
     #[test]

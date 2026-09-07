@@ -46,6 +46,12 @@
 # a bundle it never rebuilt. Its source_dir keeps the pre-move path as a second
 # entry so `--rev` can still audit a commit from before the move.
 #
+# #6155: trusty-analyze's row is GONE for the same reason, and
+# `trusty-console-analyze` is the console's fourth bundle. #6287 had already
+# deleted that crate's embed and its HTTP listener, leaving a committed bundle
+# with no Rust code referencing it; this move takes the bundle, the build.rs and
+# the row with it.
+#
 # crates/trusty-agents has a ui/ but its dist is gitignored (Tauri packages it
 # at build time, nothing is embedded from git), so it ships no committed bundle
 # and correctly has no row. Adding one would fail NO-BUNDLE.
@@ -70,7 +76,7 @@
 #
 # crate_dir	source_dir	bundle_dir
 trusty-search	crates/trusty-console/ui-search,crates/trusty-search/ui	crates/trusty-search/ui-dist
-trusty-analyze	crates/trusty-analyze/ui	crates/trusty-analyze/ui/dist
 trusty-console	crates/trusty-console/ui	crates/trusty-console/ui/dist
 trusty-console-search	crates/trusty-console/ui-search,crates/trusty-search/ui	crates/trusty-console/ui-search-dist
 trusty-console-memory	crates/trusty-console/ui-memory,crates/trusty-memory/ui	crates/trusty-console/ui-memory-dist
+trusty-console-analyze	crates/trusty-console/ui-analyze,crates/trusty-analyze/ui	crates/trusty-console/ui-analyze-dist

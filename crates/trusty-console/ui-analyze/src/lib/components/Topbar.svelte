@@ -17,7 +17,6 @@
     refreshSmells,
     refreshRefactors,
     refreshClusters,
-    getSseConnected,
     getTheme,
     setTheme
   } from '../state.svelte.js';
@@ -34,7 +33,6 @@
   let indexes = $derived(getIndexes());
   let selected = $derived(getSelectedIndex());
   let route = $derived(getRoute());
-  let sseOn = $derived(getSseConnected());
 
   let crumbs = $derived.by(() => {
     const segs = route.segments;
@@ -108,11 +106,8 @@
       {/each}
     </div>
 
-    <span class="pill" title="Server-Sent Events stream">
-      <span class="dot" class:ok={sseOn}></span>
-      sse
-    </span>
-
+    <!-- #6155: the `sse` pill is gone. #6287 deleted this daemon's event
+         broadcast, so the badge reported a stream that no longer exists. -->
     <span
       class="pill"
       title={searchReachable ? 'trusty-search reachable' : 'trusty-search unreachable'}

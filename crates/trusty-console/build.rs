@@ -1,17 +1,18 @@
 //! build.rs — build the UIs before compiling so rust-embed has assets.
 //!
-//! Why: The web console ships THREE embedded Svelte SPAs. Its own management UI
+//! Why: The web console ships FOUR embedded Svelte SPAs. Its own management UI
 //! lives in `ui/src/` and builds to `ui/dist/`; the search dashboard lives in
 //! `ui-search/src/` and builds to `ui-search-dist/`; the memory dashboard lives
-//! in `ui-memory/src/` and builds to `ui-memory-dist/`. `src/tools_ui.rs` serves
-//! the latter two at `/tools/search/` and `/tools/memory/`. Running `pnpm build`
-//! here means a plain
-//! `cargo build` always produces a binary with up-to-date assets, with no
+//! in `ui-memory/src/` and builds to `ui-memory-dist/`; the analyze dashboard
+//! lives in `ui-analyze/src/` and builds to `ui-analyze-dist/`.
+//! `src/tools_ui.rs` serves the latter three at `/tools/search/`,
+//! `/tools/memory/` and `/tools/analyze/`. Running `pnpm build` here means a
+//! plain `cargo build` always produces a binary with up-to-date assets, with no
 //! separate UI build step.
 //!
-//! #6155: the search and memory dashboards' sources used to live in
-//! `crates/trusty-search` and `crates/trusty-memory`, which is why build.rs
-//! built only the console's own bundle. Both now live here, so all three are
+//! #6155: the three dashboards' sources used to live in `crates/trusty-search`,
+//! `crates/trusty-memory` and `crates/trusty-analyze`, which is why build.rs
+//! built only the console's own bundle. All now live here, so all four are
 //! built the same way from this crate's own tree.
 //! What: Skips entirely if `SKIP_UI_BUILD=1` (CI / first-time bootstrap
 //! when pnpm is unavailable). Otherwise runs `<pm> install [--frozen-lockfile]`
@@ -21,15 +22,17 @@
 //!
 //! NOTE: The core UI-build logic (SKIP_UI_BUILD guard, pnpm detection,
 //! install+build pipeline, placeholder fallback, and the #5078 committed-bundle
-//! freshness guard) is intentionally kept identical across trusty-analyze,
-//! trusty-console, and trusty-search (issue #987).
+//! freshness guard) is intentionally kept identical across trusty-console and
+//! trusty-search (issue #987).
 //! `scripts/check_buildrs_sync.sh` asserts that the canonical implementation
-//! block does not drift between these three files. #6155 removed the fourth,
-//! trusty-memory: that crate ships no bundle any more, so it has no build.rs.
+//! block does not drift between these two files. #6155 removed the other two:
+//! neither trusty-memory nor trusty-analyze ships a bundle any more, so neither
+//! has a build.rs.
 //!
 //! Test: `SKIP_UI_BUILD=1 cargo check -p trusty-console` exits without invoking
-//! pnpm; a normal `cargo build` populates `ui/dist/index.html` and
-//! `ui-search-dist/index.html`, and `ui-memory-dist/index.html`.
+//! pnpm; a normal `cargo build` populates `ui/dist/index.html`,
+//! `ui-search-dist/index.html`, `ui-memory-dist/index.html` and
+//! `ui-analyze-dist/index.html`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -53,6 +56,11 @@ fn main() {
     println!("cargo:rerun-if-changed=ui-memory/vite.config.js");
     println!("cargo:rerun-if-changed=ui-memory/index.html");
     println!("cargo:rerun-if-changed=ui-memory/src");
+    // #6155: the analyze dashboard is this crate's fourth UI project.
+    println!("cargo:rerun-if-changed=ui-analyze/package.json");
+    println!("cargo:rerun-if-changed=ui-analyze/vite.config.js");
+    println!("cargo:rerun-if-changed=ui-analyze/index.html");
+    println!("cargo:rerun-if-changed=ui-analyze/src");
 
     // The console's own management UI, embedded from `ui/dist/`.
     build_bundle(
@@ -81,6 +89,16 @@ fn main() {
         &crate_root.join("ui-memory-dist"),
         "trusty-console-memory",
     );
+
+    // #6155: the analyze dashboard, embedded from `ui-analyze-dist/`. Same shape
+    // as the two bundles above — its Vite config writes straight to the
+    // crate-root directory, so there is no mirror step.
+    build_bundle(
+        &crate_root,
+        &crate_root.join("ui-analyze"),
+        &crate_root.join("ui-analyze-dist"),
+        "trusty-console-analyze",
+    );
 }
 
 /// Rebuild one committed UI bundle, unless it already matches its source.
@@ -94,12 +112,13 @@ fn main() {
 /// and otherwise runs the canonical build pipeline and re-stamps only when the
 /// build actually ran. `stamp_key` is the bundle's `ui-bundle-manifest.tsv` row
 /// key — `trusty-console` for `ui/dist/`, `trusty-console-search` for
-/// `ui-search-dist/`, `trusty-console-memory` for `ui-memory-dist/`. The three
-/// keys must differ: `stamp-ui-bundle.sh` stamps every row matching the name it
-/// is given, so a shared key would have one bundle's build certify another.
+/// `ui-search-dist/`, `trusty-console-memory` for `ui-memory-dist/`, and
+/// `trusty-console-analyze` for `ui-analyze-dist/`. The four keys must differ:
+/// `stamp-ui-bundle.sh` stamps every row matching the name it is given, so a
+/// shared key would have one bundle's build certify another.
 /// Test: `git status --porcelain` is empty after `cargo test -p trusty-console`;
 /// `FORCE_UI_BUILD=1 cargo build -p trusty-console` rebuilds and re-stamps all
-/// three.
+/// four.
 fn build_bundle(crate_root: &Path, ui_dir: &Path, dist_dir: &Path, stamp_key: &str) {
     if std::env::var("FORCE_UI_BUILD").as_deref() != Ok("1")
         && committed_bundle_is_fresh(crate_root, dist_dir, stamp_key)

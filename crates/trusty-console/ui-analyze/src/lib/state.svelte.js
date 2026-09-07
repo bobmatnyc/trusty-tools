@@ -4,12 +4,10 @@
  * complexity, smells, refactor, clusters, and facts panes. Persisting the
  * selected index in localStorage keeps context when the analyst reloads.
  * What: $state primitives + getter functions + refresh helpers calling the
- * analyzer HTTP API. Also exports initEventStream() which opens the daemon's
- * /sse stream and dispatches AnalyzerEvent frames to the right refresher.
+ * analyzer API through the console's /api/analyze/ bridge.
  * Test: Call refreshHealth() in console, then getHealth() — assert non-null.
  */
 import { api } from './api.js';
-import { apiUrl } from './base.js';
 
 const LS_KEY = 'trusty-analyzer.selectedIndex';
 const LS_THEME_KEY = 'trusty-analyzer.theme';
@@ -73,7 +71,6 @@ let _smells = $state([]);
 let _refactors = $state([]);
 let _clusters = $state([]);
 let _facts = $state([]);
-let _sseConnected = $state(false);
 
 export const getHealth = () => _health;
 export const getIndexes = () => _indexes;
@@ -84,7 +81,6 @@ export const getSmells = () => _smells;
 export const getRefactors = () => _refactors;
 export const getClusters = () => _clusters;
 export const getFacts = () => _facts;
-export const getSseConnected = () => _sseConnected;
 
 export function setSelectedIndex(id) {
   _selectedIndex = id || '';
@@ -152,59 +148,8 @@ export async function refreshFacts(subject, predicate) {
   return _facts;
 }
 
-/*
- * Why: The analyzer pushes `AnalyzerEvent` frames on /sse whenever an index is
- * re-analyzed, a fact is upserted, or SCIP data is ingested — so the dashboard
- * can refresh affected slices without polling.
- * What: Opens an EventSource and routes each event to the appropriate refresher
- * for the currently selected index. Returns the source so callers can close it
- * on teardown. EventSource auto-reconnects on transient disconnects.
- * Test: POST a fact and watch the facts table update without manual refresh.
- */
-export function initEventStream() {
-  const es = new EventSource(apiUrl('/sse'));
-  es.onopen = () => {
-    _sseConnected = true;
-  };
-  es.onmessage = (e) => {
-    let event;
-    try {
-      event = JSON.parse(e.data);
-    } catch {
-      return;
-    }
-    const id = _selectedIndex;
-    switch (event.type) {
-      case 'connected':
-        _sseConnected = true;
-        break;
-      case 'analysis_started':
-        // Just an in-flight marker; nothing to refetch until completion.
-        break;
-      case 'analysis_completed':
-        refreshIndexes().catch(() => {});
-        if (id) {
-          refreshQuality(id).catch(() => {});
-          refreshHotspots(id).catch(() => {});
-          refreshSmells(id).catch(() => {});
-          refreshRefactors(id).catch(() => {});
-        }
-        break;
-      case 'fact_upserted':
-      case 'fact_deleted':
-        refreshFacts().catch(() => {});
-        break;
-      case 'scip_ingested':
-        if (id) refreshClusters(id).catch(() => {});
-        break;
-      default:
-        break;
-    }
-  };
-  es.onerror = () => {
-    _sseConnected = false;
-    // EventSource reconnects automatically.
-    console.warn('SSE connection lost, will reconnect...');
-  };
-  return es;
-}
+// #6155: `initEventStream()` was deleted here. It opened an EventSource on
+// `/sse`, which #6287 removed along with this daemon's HTTP listener and its
+// `AnalyzerEvent` broadcast — nothing has served that path since, and the
+// console has no stream method to bridge onto. App.svelte's 10-second
+// `refreshHealth()` poll is the liveness signal that remains.

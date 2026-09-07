@@ -62,15 +62,18 @@ pub mod poller;
 pub mod proxy;
 pub mod routes;
 // #6285: the console's client to trusty-search, which no longer serves HTTP.
-// #6155: the trusty-memory bridge, the sibling of `search_uds`. It maps the
-// memory dashboard's REST-shaped paths onto the daemon's `memory.*` methods.
+// #6155: the trusty-memory and trusty-analyze bridges, siblings of
+// `search_uds`. Each maps one dashboard's REST-shaped paths onto that daemon's
+// own `<domain>.*` methods.
+pub mod analyze_uds;
 pub mod memory_uds;
 pub mod search_uds;
 pub mod server;
 pub mod service;
 // #6642: per-service pid discovery + CPU sampling for the home-page graphs.
 pub mod service_metrics;
-// #6155: the trusty-search SPA, mounted under /tools/search/.
+// #6155: the trusty-search, trusty-memory and trusty-analyze SPAs, mounted
+// under /tools/<tool>/.
 pub mod tools_ui;
 // #6155: the SSE plumbing both UDS bridges hand an opened stream to.
 pub(crate) mod uds_sse;

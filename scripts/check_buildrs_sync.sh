@@ -5,9 +5,11 @@
 # same build-time logic duplicate it by necessity. This script is the anti-drift
 # gate that fails CI whenever the copies diverge. Two independent families exist:
 #
-#   "daemon"  — trusty-analyze, trusty-console, trusty-search. #6155 dropped
-#               trusty-memory: it ships no committed bundle any more, so it
-#               has no build.rs to keep in sync.
+#   "daemon"  — trusty-console, trusty-search. #6155 dropped trusty-memory and
+#               then trusty-analyze: neither ships a committed bundle any more,
+#               so neither has a build.rs to keep in sync. Both dashboards'
+#               Svelte source lives in crates/trusty-console now, and that one
+#               build.rs builds all four of its bundles through this block.
 #               (issue #987). Embeds an OPTIONAL web UI; degrades to a
 #               placeholder when the JS toolchain is missing.
 #   "tauri-ui" — trusty-code-gui, trusty-mpm-gui, trusty-agents-ui,
@@ -36,7 +38,6 @@ set -euo pipefail
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 DAEMON_FILES=(
-    "crates/trusty-analyze/build.rs"
     "crates/trusty-console/build.rs"
     "crates/trusty-search/build.rs"
 )

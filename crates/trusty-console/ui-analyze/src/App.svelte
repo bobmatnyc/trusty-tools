@@ -21,14 +21,12 @@
   import {
     refreshHealth,
     refreshIndexes,
-    initEventStream,
     applyTheme,
     getTheme
   } from './lib/state.svelte.js';
-  import { onDestroy, onMount } from 'svelte';
+  import { onMount } from 'svelte';
 
   let bootError = $state(null);
-  let eventSource = null;
 
   // Re-apply theme whenever the user preference changes (also handles
   // first-paint sync for the data-theme attribute on <html>).
@@ -42,24 +40,14 @@
     } catch (e) {
       bootError = e.message || String(e);
     }
-    // Poll /health every 10s so the health pill stays live even if SSE drops.
+    // #6155: polling is the only liveness signal left. #6287 deleted this
+    // daemon's `/sse` broadcast along with its HTTP listener and put nothing
+    // streaming in its place, so the EventSource this component used to open
+    // subscribed to a route no daemon answers.
     const t = setInterval(() => {
       refreshHealth().catch(() => {});
     }, 10_000);
-    // Open the live event stream so views auto-refresh on analyzer events.
-    try {
-      eventSource = initEventStream();
-    } catch {
-      /* SSE optional; polling fallback covers /health */
-    }
     return () => clearInterval(t);
-  });
-
-  onDestroy(() => {
-    if (eventSource) {
-      eventSource.close();
-      eventSource = null;
-    }
   });
 
   let route = $derived(getRoute());
