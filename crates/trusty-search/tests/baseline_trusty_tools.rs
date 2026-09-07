@@ -84,46 +84,21 @@ const REGRESSION_QUERIES: &[(&str, &str, &str)] = &[
         "chunker",
         "definition",
     ),
-    // Issue #82: HNSW lives in `core/store.rs`; the previous fragment
-    // "search" was too broad and matched many irrelevant files. The earlier
-    // wording "HNSW vector similarity search" routed inconsistently and
-    // never surfaced `store.rs` in the top 3 under any classifier path.
-    // Anchoring on concrete API terms that only appear in `store.rs`
-    // (`usearch`, `dim mismatch`, `VectorHit`, `UsearchStore::search`)
-    // routes to Conceptual and returns `store.rs:568` at rank 1.
-    //
-    // 2026-06 corpus update (#129): `open-mpm/src/tools/memory/vector_search.rs`
-    // was added in the tools-memory refactor (commit 2f25d46, PR #367). Under
-    // the Conceptual intent routing (alpha=0.8 vector, beta=0.2 BM25), this
-    // new file now ranks #1 because the embedding model gives high cosine
-    // similarity to "vector_search" for the query text — even though the file
-    // contains none of the literal API terms (VectorHit, dim mismatch, usearch).
-    // `store.rs` still ranks #1 WITHOUT graph expansion (lexical-dominated path),
-    // confirming the HNSW store code is correctly indexed; the change is that
-    // Conceptual-weighted fusion now ranks the open-mpm vector_search tool above
-    // it. Both are legitimate answers to "what code implements vector search".
-    //
-    // Assertion updated to accept `"vector_search"` which is specific enough to
-    // catch a real regression (top-3 drifting to completely unrelated files) while
-    // accepting the current corpus-correct top hit.
+    // #201 anchored this query on UsearchStore::search, query dimension checks,
+    // and VectorHit in core/store.rs. The #1137 module split moved that exact
+    // implementation to core/store/usearch_impl.rs; retain the intended symbol
+    // target instead of the unrelated vector_search.rs ranking captured in #129.
     (
         "usearch search query dim mismatch VectorHit",
-        "vector_search",
+        "core/store/usearch_impl.rs",
         "conceptual",
     ),
-    // Issue #82: project auto-detect logic lives in both `commands/discover.rs`
-    // and `detect.rs`. The earlier phrasing "auto-detect project root for
-    // indexing" was too vague — the classifier scored it `Unknown` and the
-    // fusion returned `monitor/dashboard.rs` as the top hit. Anchoring the
-    // query on the concrete domain terms that actually appear in
-    // `detect.rs`/`discover.rs` (`detect`, `project context`, `git root`,
-    // `marker file`) routes it to `Conceptual` and surfaces the detect/discover
-    // family. The `"detect"` fragment matches both `detect.rs` and
-    // `discover.rs` chunks (the latter's doc text references `detect_project`),
-    // so the assertion stays meaningful rather than vacuous.
+    // #556 moved detect_project_marker from commands/discover.rs into this
+    // dedicated module. Match its source path rather than the old "detect"
+    // filename fragment; the query and top-three requirement remain unchanged.
     (
         "detect project context git root marker file",
-        "detect",
+        "commands/discover/marker.rs",
         "definition",
     ),
 ];
@@ -248,6 +223,7 @@ async fn test_index_exists_and_has_content() {
         &isolated_benchmark::corpus_root(""),
     )
     .await;
+    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
 
     // Confirm the index is registered.
     let resp = client
@@ -306,6 +282,7 @@ async fn test_query_latency_p50_under_threshold() {
         &isolated_benchmark::corpus_root(""),
     )
     .await;
+    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
     let mut latencies: Vec<u128> = Vec::with_capacity(REGRESSION_QUERIES.len());
 
     println!("\n{:<50} {:>12}  top_file", "query", "latency_ms");
@@ -350,6 +327,7 @@ async fn test_query_latency_p99_under_threshold() {
         &isolated_benchmark::corpus_root(""),
     )
     .await;
+    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
     let mut latencies: Vec<u128> = Vec::with_capacity(REGRESSION_QUERIES.len() * 3);
 
     for _ in 0..3 {
@@ -393,6 +371,7 @@ async fn test_result_relevance() {
         &isolated_benchmark::corpus_root(""),
     )
     .await;
+    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
     let mut failures = 0usize;
 
     println!(
@@ -462,6 +441,7 @@ async fn test_concurrent_queries_no_errors() {
         &isolated_benchmark::corpus_root(""),
     )
     .await;
+    isolated_benchmark::assert_index_ready(&make_client(), INDEX_NAME).await;
 
     // 8 queries drawn from the regression set (cycled if shorter).
     let queries: Vec<&str> = REGRESSION_QUERIES
@@ -609,6 +589,7 @@ async fn test_grep_endpoint_latency_vs_ripgrep() {
         &isolated_benchmark::corpus_root(""),
     )
     .await;
+    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
 
     // 1. Pick the first registered index.
     let resp = client

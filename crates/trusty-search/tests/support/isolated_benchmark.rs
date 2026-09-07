@@ -98,6 +98,42 @@ pub async fn assert_index_root(client: &reqwest::Client, index: &str, expected: 
     validate_registered_root(Path::new(actual), expected).unwrap_or_else(|error| panic!("{error}"));
 }
 
+/// Check only enabled lanes; incomplete fixtures are a prerequisite failure.
+pub fn validate_ready(status: &serde_json::Value) -> Result<(), String> {
+    for (stage, disabled) in [
+        ("lexical", false),
+        ("semantic", status["skip_vector"].as_bool() == Some(true)),
+        ("graph", status["skip_kg"].as_bool() == Some(true)),
+    ] {
+        if !disabled && status["stages"][stage]["status"].as_str() != Some("ready") {
+            return Err(format!(
+                "enabled {stage} stage is not ready: {}",
+                status["stages"][stage]
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Keep fixture indexing outside timed quality/performance measurements.
+pub async fn assert_index_ready(client: &reqwest::Client, index: &str) {
+    let base = daemon_url();
+    let response = client
+        .get(format!("{base}/indexes/{index}/status"))
+        .send()
+        .await
+        .expect("read benchmark readiness prerequisite");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "benchmark prerequisite failed: index status must be available"
+    );
+    let body: serde_json::Value = response.json().await.expect("benchmark readiness JSON");
+    validate_ready(&body).unwrap_or_else(|error| {
+        panic!("benchmark prerequisite failed: {error}; wait for indexing before rerunning")
+    });
+}
+
 /// Resolve only an explicitly configured fixture, never the user's discovery file.
 pub fn daemon_url() -> String {
     let url = std::env::var("TRUSTY_SEARCH_TEST_URL")
@@ -162,6 +198,40 @@ mod tests {
     #[test]
     fn accepts_matching_isolated_discovery_address() {
         assert!(validate_endpoint("http://127.0.0.1:17878", "127.0.0.1:17878\n").is_ok());
+    }
+
+    #[test]
+    fn readiness_rejects_missing_in_progress_and_failed_enabled_stages() {
+        assert!(validate_ready(&serde_json::json!({})).is_err());
+        for stage in ["lexical", "semantic", "graph"] {
+            for state in ["in_progress", "failed", "not_started"] {
+                let mut status = serde_json::json!({"stages": {
+                    "lexical": {"status": "ready"}, "semantic": {"status": "ready"},
+                    "graph": {"status": "ready"}
+                }});
+                status["stages"][stage]["status"] = serde_json::json!(state);
+                assert!(validate_ready(&status).is_err(), "accepted {stage}={state}");
+            }
+        }
+    }
+
+    #[test]
+    fn readiness_accepts_ready_stages_and_explicitly_disabled_optional_lanes() {
+        assert!(validate_ready(&serde_json::json!({"stages": {
+            "lexical": {"status": "ready"}, "semantic": {"status": "ready"},
+            "graph": {"status": "ready"}
+        }}))
+        .is_ok());
+        assert!(validate_ready(&serde_json::json!({
+            "skip_kg": true, "skip_vector": true,
+            "stages": {"lexical": {"status": "ready"}}
+        }))
+        .is_ok());
+        assert!(validate_ready(&serde_json::json!({
+            "skip_kg": true, "skip_vector": true,
+            "stages": {"lexical": {"status": "in_progress"}}
+        }))
+        .is_err());
     }
 
     #[test]
