@@ -37,8 +37,18 @@
 //!   the pane rather than requiring a reader to simulate `merge_extends`.
 //!   Multi-level provenance is approximated to the IMMEDIATE base — see
 //!   [`permissions_at`]'s doc for why that is still a true statement.
+//! - `dropped_scopes[]` names every legacy `[tools].scopes` entry CC-9
+//!   superseded, with the `source` and `reason` for each (#4158). Before it
+//!   the only signal was `effective_scopes`'s `tracing::warn!`, which no API
+//!   or GUI consumer reads — and the app-launched daemon writes its logs to
+//!   `/dev/null` (#4111), so in the shipped product that warning does not
+//!   exist. A pane showing only the winning set is accurate and still hides
+//!   the drift this route was built (DOC-57) to make visible. Present only
+//!   when something was actually dropped, like `extends_warning`.
 //! - This route grants or widens nothing (C-06.4, PM-4) — it is a read
 //!   surface over `AgentConfig::by_name_in`'s existing resolution.
+//!   `dropped_scopes[]` reports patterns that are NOT in effect; it never
+//!   re-widens what CC-9 narrowed.
 //!
 //! What: [`agent_permissions_route`] is the axum shim; [`permissions_at`] is
 //! the testable core.
@@ -56,7 +66,9 @@ use serde_json::{Value, json};
 
 use super::agent_patch::resolve_agent_paths;
 use super::state::AppState;
-use crate::agents::permissions::{PermissionsConfig, effective_scopes};
+use crate::agents::permissions::{
+    PermissionsConfig, SCOPE_DROPPED_SUPERSEDED, dropped_scopes, effective_scopes,
+};
 use crate::agents::{AgentConfig, RbacConfig, ToolsConfig};
 use crate::rbac::ServiceTier;
 
@@ -112,7 +124,11 @@ pub(super) async fn agent_permissions_route(
 /// Test: `permissions_route_reports_declared_and_inherited_scopes`,
 /// `permissions_route_never_inherits_user_authority`,
 /// `permissions_route_degrades_on_malformed_toml`,
-/// `permissions_route_degrades_gracefully_on_unresolvable_extends`.
+/// `permissions_route_degrades_gracefully_on_unresolvable_extends`,
+/// `permissions_route_reports_dropped_legacy_scopes`,
+/// `permissions_route_attributes_an_inherited_dropped_scope_to_its_base`,
+/// `permissions_route_omits_dropped_scopes_when_nothing_is_superseded`,
+/// `permissions_route_old_wire_shape_still_parses`.
 pub(super) async fn permissions_at(dirs: &[PathBuf], name: &str) -> Response {
     if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
         return (
@@ -143,39 +159,56 @@ pub(super) async fn permissions_at(dirs: &[PathBuf], name: &str) -> Response {
     let (own_tools, own_permissions, extends_target, config_error) =
         parse_permission_sections(&raw);
     let own_scopes = effective_scopes(&own_tools, &own_permissions).unwrap_or_default();
+    // #4158: what THIS file's `[permissions].scopes` superseded, used below to
+    // attribute a dropped pattern to `declared` rather than the base.
+    let own_dropped = dropped_scopes(&own_tools, &own_permissions);
 
     // Resolve the full `extends` chain so inherited scopes/tiers/autonomy are
     // visible (PM-7). Falls back to the single-file view on ANY resolution
     // failure — the pane still renders this agent's own declarations rather
     // than going dark over an unrelated ancestor's typo.
     let resolved = AgentConfig::by_name_in(dirs, name).ok();
-    let (all_scopes, permissions, rbac) = match &resolved {
+    // #4158: `extends::merge_extends` leaves the resolved `tools.scopes` as the
+    // union of every level's LEGACY list and `permissions.scopes` as the union
+    // of every level's CC-9-resolved list, so `dropped_scopes` over the
+    // resolved pair is exactly the set no level's effective scopes kept — a
+    // pattern one level superseded but another still declares is correctly
+    // absent from it.
+    let (all_scopes, all_dropped, permissions, rbac) = match &resolved {
         Some(cfg) => (
             effective_scopes(&cfg.tools, &cfg.permissions).unwrap_or_default(),
+            dropped_scopes(&cfg.tools, &cfg.permissions),
             cfg.permissions.clone(),
             cfg.rbac.clone(),
         ),
         None => (
             own_scopes.clone(),
+            own_dropped.clone(),
             own_permissions.clone(),
             RbacConfig::default(),
         ),
     };
 
+    // PM-7 provenance, decided identically for an effective scope and a
+    // dropped one (#4158): `own` is whichever list THIS file contributed.
+    let source_of = |pattern: &String, own: &[String]| -> String {
+        if own.contains(pattern) {
+            "declared".to_string()
+        } else if let Some(base) = &extends_target {
+            format!("inherited:{base}")
+        } else {
+            // No `extends` on this file at all, yet the pattern isn't in
+            // `own` — only possible if `extends` resolution itself failed
+            // (see the doc comment); report it honestly rather than
+            // asserting a provenance we cannot back.
+            "declared".to_string()
+        }
+    };
+
     let scopes: Vec<Value> = all_scopes
         .iter()
         .map(|pattern| {
-            let source = if own_scopes.contains(pattern) {
-                "declared".to_string()
-            } else if let Some(base) = &extends_target {
-                format!("inherited:{base}")
-            } else {
-                // No `extends` on this file at all, yet the pattern isn't in
-                // `own_scopes` — only possible if `extends` resolution itself
-                // failed (see the doc comment); report it honestly rather
-                // than asserting a provenance we cannot back.
-                "declared".to_string()
-            };
+            let source = source_of(pattern, &own_scopes);
             json!({
                 "pattern": pattern,
                 "source": source,
@@ -220,6 +253,24 @@ pub(super) async fn permissions_at(dirs: &[PathBuf], name: &str) -> Response {
             "enforced": false,
         })).collect::<Vec<_>>(),
     });
+    // #4158: additive and conditional, matching `extends_warning` — a pane
+    // renders this only when a declaration actually lost, so an agent with no
+    // conflict carries no empty banner and an existing client sees the exact
+    // shape it saw before.
+    if !all_dropped.is_empty() {
+        body["dropped_scopes"] = Value::Array(
+            all_dropped
+                .iter()
+                .map(|pattern| {
+                    json!({
+                        "pattern": pattern,
+                        "source": source_of(pattern, &own_dropped),
+                        "reason": SCOPE_DROPPED_SUPERSEDED,
+                    })
+                })
+                .collect(),
+        );
+    }
     if let Some(err) = config_error {
         body["config_error"] = Value::String(err);
     } else if resolved.is_none() && extends_target.is_some() {

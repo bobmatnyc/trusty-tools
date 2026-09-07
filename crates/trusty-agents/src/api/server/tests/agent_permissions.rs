@@ -88,6 +88,44 @@ max_tokens = 1024
 content = "test"
 "#;
 
+/// A base that supersedes its OWN legacy `[tools].scopes`, so a child which
+/// declares nothing still has a dropped entry to attribute to that base
+/// (#4158).
+const CC9_BASE_FIXTURE: &str = r#"[agent]
+name = "migrated-base"
+role = "assistant"
+model = "claude-sonnet-4-6"
+description = "test"
+
+[tools]
+scopes = ["memory.read"]
+
+[permissions]
+scopes = ["search.read"]
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "test"
+"#;
+
+const CC9_CHILD_FIXTURE: &str = r#"[agent]
+name = "migrated-child"
+role = "assistant"
+model = "claude-sonnet-4-6"
+description = "test"
+extends = "migrated-base"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "test"
+"#;
+
 /// A base with `user_authority = true` and a child that extends it without
 /// declaring its own (PM-3: must never inherit `true`).
 const AUTHORITY_BASE_FIXTURE: &str = r#"[agent]
@@ -195,6 +233,135 @@ async fn permissions_route_permissions_scopes_supersedes_legacy_tools_scopes() {
     assert_eq!(scopes.len(), 1, "CC-9: the union is not taken, {scopes:?}");
     assert_eq!(scopes[0]["pattern"], "search.read");
     assert_eq!(scopes[0]["source"], "declared");
+}
+
+/// #4158: CC-9 drops the legacy entry, and until now the ONLY signal was a
+/// `tracing::warn!` no consumer reads — the app-launched daemon writes its
+/// logs to `/dev/null` (#4111), so in the shipped product it did not exist.
+/// `CC9_FIXTURE` is exactly the one-valid/one-dropped case.
+#[tokio::test]
+async fn permissions_route_reports_dropped_legacy_scopes() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("migrated.toml"), CC9_FIXTURE).unwrap();
+
+    let resp = permissions_at(&[dir.path().to_path_buf()], "migrated").await;
+    let body = body_json(resp).await;
+
+    // The winning set is unchanged — this field ADDS a signal, it does not
+    // re-widen the scope set CC-9 narrowed (C-06.4).
+    let scopes = body["scopes"].as_array().unwrap();
+    assert_eq!(scopes.len(), 1, "CC-9: the union is still not taken");
+    assert_eq!(scopes[0]["pattern"], "search.read");
+
+    let dropped = body["dropped_scopes"].as_array().unwrap_or_else(|| {
+        panic!("a superseded legacy scope must be reported, not only logged: {body:?}")
+    });
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+    assert_eq!(dropped[0]["pattern"], "memory.read");
+    assert_eq!(dropped[0]["source"], "declared");
+    assert!(
+        dropped[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("[permissions].scopes"),
+        "each entry must carry the reason it lost: {dropped:?}"
+    );
+}
+
+/// A scope superseded by a BASE, on a child that declares nothing, must name
+/// the base rather than claim the child declared it (PM-7).
+#[tokio::test]
+async fn permissions_route_attributes_an_inherited_dropped_scope_to_its_base() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("migrated-base.toml"), CC9_BASE_FIXTURE).unwrap();
+    std::fs::write(dir.path().join("migrated-child.toml"), CC9_CHILD_FIXTURE).unwrap();
+
+    let resp = permissions_at(&[dir.path().to_path_buf()], "migrated-child").await;
+    let body = body_json(resp).await;
+    let dropped = body["dropped_scopes"].as_array().unwrap();
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+    assert_eq!(dropped[0]["pattern"], "memory.read");
+    assert_eq!(dropped[0]["source"], "inherited:migrated-base");
+}
+
+/// The field is conditional, like `extends_warning` — an agent whose chain
+/// lost nothing must not render an empty drop banner. `CHILD_FIXTURE`
+/// declares `[permissions].scopes` and its base declares `[tools].scopes`, so
+/// the chain-level union keeps both.
+#[tokio::test]
+async fn permissions_route_omits_dropped_scopes_when_nothing_is_superseded() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("assistant.toml"), BASE_FIXTURE).unwrap();
+    std::fs::write(dir.path().join("cto-assistant.toml"), CHILD_FIXTURE).unwrap();
+
+    let resp = permissions_at(&[dir.path().to_path_buf()], "cto-assistant").await;
+    let body = body_json(resp).await;
+    assert_eq!(body["scopes"].as_array().unwrap().len(), 2);
+    assert!(
+        body.get("dropped_scopes").is_none(),
+        "no declaration lost, so no drop list: {body:?}"
+    );
+}
+
+/// #4158 is additive: a client written against the pre-#4158 wire shape must
+/// still parse a response that now carries `dropped_scopes`, and every field
+/// it already read must be unchanged.
+#[tokio::test]
+async fn permissions_route_old_wire_shape_still_parses() {
+    #[derive(serde::Deserialize)]
+    struct OldScope {
+        pattern: String,
+        source: String,
+        enforced: bool,
+        enforced_on: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct OldFlag {
+        enforced: bool,
+    }
+    #[derive(serde::Deserialize)]
+    struct OldTiers {
+        default: String,
+        unauthenticated: String,
+        enforced: bool,
+    }
+    #[derive(serde::Deserialize)]
+    struct OldAutonomy {
+        mode: String,
+        enforced: bool,
+    }
+    #[derive(serde::Deserialize)]
+    struct OldBody {
+        scopes: Vec<OldScope>,
+        user_authority: OldFlag,
+        tiers: OldTiers,
+        autonomy: OldAutonomy,
+        grants: Vec<serde_json::Value>,
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("migrated.toml"), CC9_FIXTURE).unwrap();
+
+    let resp = permissions_at(&[dir.path().to_path_buf()], "migrated").await;
+    let body = body_json(resp).await;
+    assert!(
+        body.get("dropped_scopes").is_some(),
+        "precondition: this fixture DOES carry the new field"
+    );
+
+    let old: OldBody = serde_json::from_value(body).unwrap();
+    assert_eq!(old.scopes.len(), 1);
+    assert_eq!(old.scopes[0].pattern, "search.read");
+    assert_eq!(old.scopes[0].source, "declared");
+    assert!(old.scopes[0].enforced);
+    assert_eq!(old.scopes[0].enforced_on, vec!["persona_chat".to_string()]);
+    assert!(!old.user_authority.enforced);
+    assert_eq!(old.tiers.default, "all");
+    assert_eq!(old.tiers.unauthenticated, "all");
+    assert!(!old.tiers.enforced);
+    assert_eq!(old.autonomy.mode, "ask-first");
+    assert!(!old.autonomy.enforced);
+    assert!(old.grants.is_empty());
 }
 
 #[tokio::test]
