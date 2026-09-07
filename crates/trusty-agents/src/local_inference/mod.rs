@@ -13,48 +13,44 @@
 //! manually via the `/local test` REPL command.
 
 use std::sync::OnceLock;
-use std::time::Duration;
 
 use crate::intent::IntentClass;
 
 /// Cached result of the per-process ollama probe.
 ///
 /// Why: `is_ollama_available` opens a TCP connection and waits for a 200 from
-/// `/api/tags` — fine on startup but unacceptable on every turn. We probe
+/// `/v1/models` — fine on startup but unacceptable on every turn. We probe
 /// once and remember the answer for the rest of the process; users who start
 /// ollama mid-session can re-probe via `/local test`.
 /// What: `OnceLock<bool>` initialized lazily by `is_ollama_available_cached`.
 static OLLAMA_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
-/// Probe an ollama server's `/api/tags` endpoint.
+/// Probe the local model server's liveness.
 ///
 /// Why: Health-check before routing local — if ollama isn't running we want a
 /// clean fall-through to the remote model instead of a 500 on the next turn.
-/// 500 ms timeout keeps the hot path responsive when the user has nothing
-/// listening on the port.
-/// What: GETs `<host>/api/tags`, returns `true` on a 2xx response. Any error
-/// (timeout, connection refused, non-2xx) returns `false` without panicking.
+///
+/// Why it no longer dials `/api/tags` itself (#4490): this was a third
+/// independent copy of the liveness probe, with its own client and its own
+/// 500 ms budget. Delegating to [`trusty_common::local_probe::probe_local`]
+/// leaves one implementation, one endpoint, and one budget. The budget moves
+/// from 500 ms to the shared
+/// [`trusty_common::local_probe::LOCAL_PROBE_TIMEOUT`] (1 s) — the extra half
+/// second is paid at most ONCE per process, since
+/// [`is_ollama_available_cached`] is what the hot path calls, and it buys the
+/// wedged-server case a plain connect timeout does not cover.
+/// What: probes `<host>/v1/models`, returns `true` on a 2xx response. Any
+/// error (timeout, connection refused, non-2xx) returns `false` without
+/// panicking.
 /// Test: `is_ollama_available_returns_false_for_bad_host`.
 pub async fn is_ollama_available(host: &str) -> bool {
-    let url = format!("{}/api/tags", host.trim_end_matches('/'));
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_millis(500))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    client
-        .get(&url)
-        .send()
-        .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+    // #4490: one probe, one budget — see `trusty_common::local_probe`.
+    trusty_common::local_probe::probe_local(host).await.is_ok()
 }
 
 /// Memoized variant of `is_ollama_available`.
 ///
-/// Why: The hot path (every ctrl turn) cannot afford a 500 ms TCP probe.
+/// Why: The hot path (every ctrl turn) cannot afford a TCP probe at all.
 /// Caching the first result means subsequent turns pay nothing. When the
 /// probe fails, logs a warn! so the user knows local inference is enabled
 /// but unreachable — graceful degradation via `fallback_on_error`.
@@ -190,8 +186,9 @@ mod tests {
 
     #[tokio::test]
     async fn is_ollama_available_returns_false_for_bad_host() {
-        // 1.2.3.4:1 is guaranteed unreachable; the 500 ms timeout keeps this
-        // test fast even when the system network stack is slow to fail.
+        // 1.2.3.4:1 is guaranteed unreachable; the shared
+        // `local_probe::LOCAL_PROBE_TIMEOUT` bounds this at ~1s even when the
+        // system network stack is slow to fail (#4490).
         let ok = is_ollama_available("http://1.2.3.4:1").await;
         assert!(!ok);
     }
