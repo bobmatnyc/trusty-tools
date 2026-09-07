@@ -28,6 +28,8 @@ use serde::{Deserialize, Serialize};
 
 use trusty_common::github_path::GithubPath;
 
+use crate::session_manager::worktree_keep_list::KeepList;
+
 /// Untracked/secret file sync config shape + resolution (#2196), split into
 /// its own module to keep this file under the 500-SLOC production cap. See
 /// that module's doc for the full rationale.
@@ -766,6 +768,53 @@ pub fn disk_keep_list_patterns(config: &TrustyToolsConfig) -> Vec<String> {
         .as_ref()
         .map(|d| d.keep_list.clone())
         .unwrap_or_default()
+}
+
+/// Read the operator's keep-list, FAILING CLOSED on a config that will not
+/// parse (#6927).
+///
+/// Why: [`TrustyToolsConfig::load`] collapses every YAML error to `Default`, by
+/// design — a bad config must not stop the daemon starting. Applied to a
+/// PROTECTIVE list that rule inverts its meaning: a typo in an unrelated
+/// section left `disk` at `None`, produced an empty keep-list, and let
+/// `tm session prune-worktrees --merged-prs` delete a worktree the operator had
+/// vetoed, with only a `warn!` line to say so. This loader is why every
+/// keep-list consumer now distinguishes "no `disk:` section" from "config
+/// unreadable".
+/// What: the fallible [`trusty_common::crate_config::load`], not
+/// `load_or_default`. An absent file (or an unknown home) is an EMPTY list,
+/// which is the documented default and permits. A read or parse failure builds
+/// [`KeepList::unreadable`], which keeps every path — see that constructor.
+/// Test: `an_unparseable_config_yields_an_unreadable_keep_list`,
+/// `an_absent_config_yields_an_empty_keep_list`,
+/// `a_valid_config_yields_the_operators_patterns`,
+/// `a_malformed_config_refuses_to_reclaim_a_merged_clean_worktree`.
+pub(crate) fn load_disk_keep_list() -> KeepList {
+    // An unknown home is "no config", which is the documented empty default —
+    // the same answer `crate_config::load` gives for it.
+    let Some(home) = dirs::home_dir() else {
+        return KeepList::default();
+    };
+    load_disk_keep_list_at(&home)
+}
+
+/// [`load_disk_keep_list`] against an explicit home directory (hermetic).
+///
+/// Why: the production reader resolves `dirs::home_dir()`, which a test must
+/// not depend on. Pointing `base` at a `tempfile::TempDir` is what lets the
+/// fail-closed path be proved end to end — write a config there, run a reclaim
+/// against a scratch worktree store, assert nothing was deleted.
+/// What: `<base>/.trusty-tools/trusty-mpm/config.yaml`, with the same
+/// absent/valid/unreadable three-way as [`load_disk_keep_list`].
+/// Test: `an_unparseable_config_yields_an_unreadable_keep_list`,
+/// `a_malformed_config_refuses_to_reclaim_a_merged_clean_worktree`.
+pub(crate) fn load_disk_keep_list_at(base: &Path) -> KeepList {
+    let path = trusty_common::crate_config::crate_config_path_at(base, CRATE_NAME);
+    match trusty_common::crate_config::load_at::<TrustyToolsConfig>(&path) {
+        Ok(Some(config)) => KeepList::from_patterns(&disk_keep_list_patterns(&config)),
+        Ok(None) => KeepList::default(),
+        Err(e) => KeepList::unreadable(e.to_string()),
+    }
 }
 
 /// Join a project's `<owner>/<repo>` identity onto the workspace root.

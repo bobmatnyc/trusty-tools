@@ -19,7 +19,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -27,8 +27,8 @@ use serde_json::Value;
 
 use crate::core::trusty_tools_config::{self, TrustyToolsConfig};
 use crate::daemon::state::DaemonState;
-use crate::disk::survey_run::{DiskProbes, run};
-use crate::session_manager::worktree_keep_list::KeepList;
+use crate::disk::size_index::DirSize;
+use crate::disk::survey_run::{self, DiskProbes, run};
 use crate::session_manager::worktree_ownership::AgentWorktreeOwner;
 use crate::session_manager::worktree_reclaim::{
     BranchPrState, LiveClaims, PrIndex, WorkspaceClaim, pr_state_for_branch,
@@ -44,9 +44,10 @@ use crate::session_manager::worktree_safety::inspect_dirt;
 /// runtime worker would stall the daemon's other routes.
 /// What: resolves the workspace root and keep-list from the operator's config,
 /// snapshots the live session claims, and hands `disk::survey_run::run` a
-/// `gh`-backed pull-request probe plus the
-/// daemon's SHARED [`crate::disk::size_index::DirSizeIndex`] — never a second
-/// index, so a poll every few seconds costs cache hits rather than walks.
+/// `gh`-backed pull-request probe plus a measurement closure over the daemon's
+/// SHARED [`crate::disk::size_index::DirSizeIndex`] — never a second index, so
+/// a poll every few seconds costs cache hits rather than walks, and the mutex
+/// is held for each measurement alone rather than for the whole pass.
 /// `budget_seconds` bounds classification; worktrees past it are listed as
 /// `review`, never omitted and never `stale`.
 /// Test: `crate::disk::survey_tests`, and `dispatch_disk_survey_tool` for the
@@ -58,7 +59,10 @@ pub async fn disk_survey(
 ) -> Result<Value, String> {
     let config = TrustyToolsConfig::load();
     let repos_root = trusty_tools_config::workspace_root(&config);
-    let keep_patterns = trusty_tools_config::disk_keep_list_patterns(&config);
+    // #6927: read FALLIBLY, separately from the lenient `load` above. A config
+    // that will not parse yields a keep-list that keeps everything and says so
+    // in `keep_list.error`, rather than an empty one that protects nothing.
+    let keep_list = trusty_tools_config::load_disk_keep_list();
     // The claim set is a SNAPSHOT, which is correct here and would not be on a
     // destructive path: this tool only displays, and the delete path re-reads
     // liveness per candidate immediately before each removal (#2919).
@@ -83,7 +87,6 @@ pub async fn disk_survey(
     let deadline = budget_seconds.map(|s| Instant::now() + Duration::from_secs(s));
 
     tokio::task::spawn_blocking(move || {
-        let keep_list = KeepList::from_patterns(&keep_patterns);
         let agent_state = |owner: &AgentWorktreeOwner| {
             crate::daemon::services::agent_worktree_reap::delegation_state_for_agent(
                 &state_for_agents,
@@ -94,19 +97,26 @@ pub async fn disk_survey(
         // amortization `survey_with_index` applies, for the same reason.
         let indexes: RefCell<BTreeMap<PathBuf, PrIndex>> = RefCell::new(BTreeMap::new());
         let pr_state = |scanned: &ScannedWorktree| -> BranchPrState { pr_for(&indexes, scanned) };
+        // #6927 review: the lock spans ONE measurement, not the pass. Held
+        // across `run` it would also cover every `git status` and `gh pr list`
+        // that `classify` shells out to, so a second `disk_survey` — or the
+        // #6926 background refresher — would queue behind minutes of network
+        // work for an index it only wanted to read.
+        let measure = |path: &Path| -> Option<DirSize> {
+            let mut index = index.lock();
+            survey_run::measure(&mut index, path)
+        };
         let probes = DiskProbes {
             pr_state: &pr_state,
             claims: &claims,
             agent_state: &agent_state,
             dirt: &inspect_dirt,
+            measure: &measure,
         };
-        let mut index = index.lock();
         let survey = run(
             &repos_root,
             &keep_list,
-            &keep_patterns,
             &probes,
-            &mut index,
             deadline,
             project.as_deref(),
         );

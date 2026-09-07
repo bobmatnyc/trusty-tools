@@ -183,11 +183,8 @@ pub(crate) fn classify_tier(
 ) -> Classification {
     // The keep-list outranks every other answer (DOC-73 §16.4), and costs no
     // subprocess, so it is asked first here exactly as it is in `classify`.
-    if let Some(entry) = keep_list.keeps(facts.path) {
-        return keep(vec![Reason::new(
-            ReasonCode::KeepList,
-            format!("kept by the owner keep-list entry `{entry}`"),
-        )]);
+    if let Some(kept) = keep_list.keeps(facts.path) {
+        return keep(vec![Reason::new(ReasonCode::KeepList, kept.detail())]);
     }
     // A pointer whose directory is gone holds no bytes to clear, so it is
     // neither stale nor kept — `git worktree prune` is its remedy, not this
@@ -456,7 +453,7 @@ pub(crate) struct DiskRoot {
     pub stale_measured: usize,
 }
 
-/// What the operator's keep-list contained, and what of it did not compile.
+/// What the operator's keep-list contained, and what of it did not take effect.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct KeepListReport {
     /// The patterns as configured.
@@ -464,6 +461,15 @@ pub(crate) struct KeepListReport {
     /// Patterns that would not compile, as `"<pattern>: <error>"`. A non-empty
     /// list means the operator believes something is protected that is not.
     pub invalid: Vec<String>,
+    /// Why the config could not be read at all, when it could not be (#6927).
+    ///
+    /// Why the console must render this: a `Some` here means the keep-list is
+    /// in its fail-closed state — EVERY worktree is kept and nothing can be
+    /// reclaimed until the operator fixes their config. Without the field the
+    /// dashboard would show a plausible all-`keep` view with no way to tell it
+    /// apart from a workspace that genuinely has nothing to clear.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// The whole Disk survey — DOC-73 §16.5's `GET /api/console/disk/tree` body.

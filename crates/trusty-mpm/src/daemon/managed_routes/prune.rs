@@ -19,7 +19,7 @@ use tracing::warn;
 
 use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
-use crate::session_manager::worktree_reclaim::{KeepList, LiveClaims, ReclaimMode, WorkspaceClaim};
+use crate::session_manager::worktree_reclaim::{LiveClaims, ReclaimMode, WorkspaceClaim};
 use crate::session_manager::worktree_reclaim_sweep::reclaim_merged_pr_worktrees;
 use crate::session_manager::{DirtyWorktreePolicy, PruneFilter};
 
@@ -310,12 +310,14 @@ pub(crate) async fn prune_worktrees_core(
                 // a stranger's. Validated ABOVE, before any survey work.
                 let caller = req.invoking_session.clone();
                 let root = repos_root.clone();
-                // #6927: the operator's keep-list, resolved from the same
-                // config this route already loaded. It becomes `classify`'s
-                // gate 0, so a kept worktree never reaches the approved set
-                // this pass deletes from.
-                let keep_patterns =
-                    crate::core::trusty_tools_config::disk_keep_list_patterns(&config);
+                // #6927: read FALLIBLY and re-read PER CANDIDATE, not resolved
+                // from the lenient `config` this route already loaded. Lenient
+                // loading turns any YAML error anywhere in the file into an
+                // EMPTY keep-list, which is how a vetoed worktree could be
+                // deleted; the fallible reader keeps everything instead. It is
+                // a closure because this pass is unbounded, so an entry the
+                // operator adds mid-sweep must stop the candidates still
+                // queued — see `FreshProbes::keep_list`.
                 // #2919: a HANDLE to the manager, not a captured path list. The
                 // delete loop calls this closure per candidate and needs the
                 // CURRENT set, not one snapshotted before a survey that takes
@@ -363,7 +365,7 @@ pub(crate) async fn prune_worktrees_core(
                             &owner.agent_id,
                         )
                     };
-                    let keep_list = KeepList::from_patterns(&keep_patterns);
+                    let keep_list = crate::core::trusty_tools_config::load_disk_keep_list;
                     reclaim_merged_pr_worktrees(&root, &in_use_now, &agent_state, mode, &keep_list)
                 })
                 .await

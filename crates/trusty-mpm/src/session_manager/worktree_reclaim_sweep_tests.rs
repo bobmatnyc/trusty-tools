@@ -49,6 +49,13 @@ fn nobody() -> LiveClaims {
     LiveClaims::default()
 }
 
+/// A keep-list that keeps nothing — the default everywhere gate 0 is not the
+/// subject. A function rather than a value because `FreshProbes::keep_list` is
+/// a PROBE since #6927: the delete loop re-reads it per candidate.
+fn no_keeps() -> KeepList {
+    KeepList::default()
+}
+
 /// A delegation registry that has never heard of any agent (#5661).
 ///
 /// The REFUSING answer, used as the default here for the same reason
@@ -83,7 +90,7 @@ fn recheck_refuses_when_the_live_set_cannot_be_read() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("unreadable-2919");
     land(&path);
-    let reason = recheck_before_delete(&path, None, &merged(1), &no_agents)
+    let reason = recheck_before_delete(&path, &no_keeps(), None, &merged(1), &no_agents)
         .expect("an unreadable live set must refuse");
     assert!(reason.contains("could not be re-read"), "{reason}");
 }
@@ -95,6 +102,7 @@ fn recheck_refuses_a_worktree_a_session_claims_now() {
     land(&path);
     let reason = recheck_before_delete(
         &path,
+        &no_keeps(),
         Some(&LiveClaims::foreign(vec![WorkspaceClaim::new(
             "tm-other-01",
             &path,
@@ -124,7 +132,7 @@ fn recheck_permits_a_worktree_claimed_only_by_the_calling_session() {
         caller: Some("tm-client-03".to_string()),
     };
     assert_eq!(
-        recheck_before_delete(&path, Some(&claims), &merged(1), &no_agents),
+        recheck_before_delete(&path, &no_keeps(), Some(&claims), &merged(1), &no_agents),
         None,
         "the caller's own claim on the enclosing workspace must not refuse"
     );
@@ -141,11 +149,12 @@ fn recheck_refuses_a_worktree_locked_after_the_survey() {
     let path = fx.add_worktree("locked-2919");
     land(&path);
     assert!(
-        recheck_before_delete(&path, Some(&nobody()), &merged(1), &no_agents).is_none(),
+        recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
+            .is_none(),
         "precondition: the worktree is reclaimable before the lock"
     );
     fx.lock_worktree(&path);
-    let reason = recheck_before_delete(&path, Some(&nobody()), &merged(1), &no_agents)
+    let reason = recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
         .expect("a locked worktree must refuse");
     assert!(reason.contains("git-locked"), "{reason}");
 }
@@ -157,8 +166,9 @@ fn recheck_refuses_a_path_git_no_longer_lists() {
     let fx = GitWorktreeFixture::new();
     let plain = fx.repo.join("not-a-worktree");
     std::fs::create_dir_all(&plain).expect("mkdir");
-    let reason = recheck_before_delete(&plain, Some(&nobody()), &merged(1), &no_agents)
-        .expect("an unlisted path must refuse");
+    let reason =
+        recheck_before_delete(&plain, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
+            .expect("an unlisted path must refuse");
     assert!(reason.contains("no longer lists"), "{reason}");
 }
 
@@ -167,8 +177,14 @@ fn recheck_refuses_when_git_cannot_be_queried() {
     // Outside any repository, git answers nothing — which must refuse, not
     // pass for lack of a contradiction.
     let tmp = tempfile::tempdir().expect("tempdir");
-    let reason = recheck_before_delete(tmp.path(), Some(&nobody()), &merged(1), &no_agents)
-        .expect("an unqueryable path must refuse");
+    let reason = recheck_before_delete(
+        tmp.path(),
+        &no_keeps(),
+        Some(&nobody()),
+        &merged(1),
+        &no_agents,
+    )
+    .expect("an unqueryable path must refuse");
     assert!(reason.contains("could not be queried"), "{reason}");
 }
 
@@ -184,7 +200,7 @@ fn recheck_refuses_a_worktree_that_lost_its_ownership_marker() {
     let fx = GitWorktreeFixture::new();
     let parent = fx.repo.join("elsewhere");
     let path = fx.add_worktree_at(&parent, "unowned-2919");
-    let reason = recheck_before_delete(&path, Some(&nobody()), &merged(1), &no_agents)
+    let reason = recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
         .expect("an unowned worktree must refuse");
     assert!(reason.contains("ownership marker"), "{reason}");
 }
@@ -200,7 +216,7 @@ fn recheck_refuses_when_the_pr_is_no_longer_merged() {
         BranchPrState::NoPr,
         BranchPrState::Unknown,
     ] {
-        let reason = recheck_before_delete(&path, Some(&nobody()), &state, &no_agents)
+        let reason = recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &state, &no_agents)
             .unwrap_or_else(|| panic!("{state:?} must refuse"));
         assert!(reason.contains("no longer a merge"), "{reason}");
     }
@@ -212,11 +228,12 @@ fn recheck_refuses_a_worktree_dirtied_after_the_survey() {
     let path = fx.add_worktree("dirtied-2919");
     land(&path);
     assert!(
-        recheck_before_delete(&path, Some(&nobody()), &merged(1), &no_agents).is_none(),
+        recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
+            .is_none(),
         "precondition: clean before the write"
     );
     std::fs::write(path.join("appeared.rs"), "fn main() {}\n").expect("write");
-    let reason = recheck_before_delete(&path, Some(&nobody()), &merged(1), &no_agents)
+    let reason = recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
         .expect("a dirtied worktree must refuse");
     assert!(reason.contains("unsaved work"), "{reason}");
 }
@@ -232,12 +249,14 @@ fn recheck_refuses_a_worktree_an_agent_claimed_after_the_survey() {
     let path = fx.add_worktree("agent-race-5661");
     land(&path);
     assert!(
-        recheck_before_delete(&path, Some(&nobody()), &merged(1), &no_agents).is_none(),
+        recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
+            .is_none(),
         "precondition: permitted before the agent claims it"
     );
     GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-arrived-mid-sweep");
-    let reason = recheck_before_delete(&path, Some(&nobody()), &merged(1), &agent_live)
-        .expect("a tree an agent claimed mid-sweep must refuse");
+    let reason =
+        recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &agent_live)
+            .expect("a tree an agent claimed mid-sweep must refuse");
     assert!(reason.contains("agent-arrived-mid-sweep"), "{reason}");
 }
 
@@ -255,7 +274,7 @@ fn reclaim_remove_mode_spares_a_live_agents_merged_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &agent_live,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/live-agent-sweep-5661", 5661),
@@ -293,7 +312,7 @@ fn survey_discloses_a_live_agents_spared_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &agent_live,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/spared-agent-5829", 5829),
@@ -333,7 +352,7 @@ fn survey_discloses_nothing_when_no_agent_was_spared() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
             // `add_worktree` names the branch `session/<name>`, unlike
@@ -362,7 +381,7 @@ fn recheck_permits_a_clean_merged_owned_worktree() {
     let path = fx.add_worktree("permitted-2919");
     land(&path);
     assert_eq!(
-        recheck_before_delete(&path, Some(&nobody()), &merged(1), &no_agents),
+        recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents),
         None
     );
 }
@@ -700,7 +719,7 @@ fn reclaim_report_mode_removes_nothing() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("session/report-2919", 30),
@@ -741,7 +760,7 @@ fn reclaim_remove_mode_refuses_a_worktree_claimed_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &in_use_now,
             index_for: &|_: &Path| merged_index("session/claim-race-2919", 31),
@@ -777,7 +796,7 @@ fn reclaim_remove_mode_refuses_a_worktree_dirtied_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &in_use_now,
             index_for: &|_: &Path| merged_index("session/dirt-race-2919", 32),
@@ -817,7 +836,7 @@ fn reclaim_remove_mode_refuses_a_worktree_locked_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &in_use_now,
             index_for: &|_: &Path| merged_index("session/lock-race-2919", 33),
@@ -850,7 +869,7 @@ fn reclaim_remove_mode_refuses_when_the_pr_reopens_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
             index_for: &index,
@@ -876,7 +895,7 @@ fn reclaim_remove_mode_refuses_when_the_live_set_cannot_be_read() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &in_use_now,
             index_for: &|_: &Path| merged_index("session/unreadable-race-2919", 36),
@@ -886,6 +905,166 @@ fn reclaim_remove_mode_refuses_when_the_live_set_cannot_be_read() {
     assert_eq!(out.survey.reclaimable, 1, "must reach the delete loop");
     assert!(out.removed.is_empty(), "deleted on an unknown live set");
     assert!(path.exists());
+}
+
+/// Gate 0 is re-asked at the delete, not only at the survey (#6927).
+///
+/// Why: the sweep is unbounded and has exceeded 600 s over 46 worktrees. An
+/// operator who adds a keep-list entry while it runs means it for the
+/// candidates still queued; before this the survey's one read was the only
+/// read, so those candidates were deleted anyway.
+#[test]
+fn recheck_refuses_a_worktree_keep_listed_after_the_survey() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("recheck-keep-6927");
+    land(&path);
+    // Permitted by every other re-check — only the keep-list refuses it.
+    assert!(
+        recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
+            .is_none(),
+        "the fixture must otherwise be deletable, or this test proves nothing"
+    );
+    let keeps = KeepList::from_patterns(&[path.to_string_lossy().to_string()]);
+    let reason = recheck_before_delete(&path, &keeps, Some(&nobody()), &merged(1), &no_agents)
+        .expect("a keep-listed worktree must be refused at the delete");
+    assert!(
+        reason.contains("keep-list"),
+        "the refusal must name the operator's own decision: {reason}"
+    );
+}
+
+/// A keep-list that stopped PARSING mid-sweep refuses every remaining
+/// candidate (#6927).
+#[test]
+fn recheck_refuses_when_the_keep_list_cannot_be_read() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("recheck-unreadable-6927");
+    land(&path);
+    let broken = KeepList::unreadable("config YAML error at /x/config.yaml: bad");
+    let reason = recheck_before_delete(&path, &broken, Some(&nobody()), &merged(1), &no_agents)
+        .expect("an unreadable keep-list must refuse the delete");
+    assert!(
+        reason.contains("could not be read"),
+        "the refusal must say the config is broken: {reason}"
+    );
+}
+
+/// The whole loop, with the keep-list changing between survey and delete
+/// (#6927).
+///
+/// Why: the direct unit test above proves the branch; only this shape proves
+/// the LOOP re-reads. A probe that answered once and was reused would classify
+/// the candidate reclaimable and then delete it.
+#[test]
+fn reclaim_remove_mode_refuses_a_worktree_keep_listed_after_the_survey() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("reclaim-keep-6927");
+    land(&path);
+    // The first read — the survey's — keeps nothing, so the candidate is
+    // approved. Every read after it names the worktree.
+    let reads = RefCell::new(0usize);
+    let keep_list = || {
+        let mut n = reads.borrow_mut();
+        *n += 1;
+        if *n == 1 {
+            KeepList::default()
+        } else {
+            KeepList::from_patterns(&[path.to_string_lossy().to_string()])
+        }
+    };
+    let out = reclaim_with_probes(
+        &fx.repos_root,
+        &FreshProbes {
+            keep_list: &keep_list,
+            agent_state: &no_agents,
+            in_use_now: &|| Some(nobody()),
+            index_for: &|_: &Path| merged_index("session/reclaim-keep-6927", 41),
+        },
+        ReclaimMode::Remove,
+    );
+    assert_eq!(
+        out.survey.reclaimable, 1,
+        "the survey must approve it, or the delete loop never runs: {out:?}"
+    );
+    assert!(
+        out.removed.is_empty(),
+        "deleted a keep-listed worktree: {out:?}"
+    );
+    assert!(path.exists(), "the directory must still be there");
+    assert_eq!(out.refused_at_recheck.len(), 1, "{out:?}");
+    assert!(
+        out.refused_at_recheck[0].contains("keep-list"),
+        "the refusal must name the keep-list: {:?}",
+        out.refused_at_recheck
+    );
+    assert!(
+        *reads.borrow() >= 2,
+        "the delete loop must RE-READ the keep-list, not reuse the survey's answer"
+    );
+}
+
+/// A keep-list the operator wrote but the config parser could not read must
+/// stop the sweep, not be treated as an empty list (#6927).
+///
+/// Why this is the regression and not a nicety: `TrustyToolsConfig::load` goes
+/// through `crate_config::load_or_default`, which warns and returns `Default`
+/// on ANY YAML error — including a typo in a section the keep-list has nothing
+/// to do with. `disk` then reads `None`, the patterns are `[]`, and
+/// `tm session prune-worktrees --merged-prs` deleted a worktree the operator
+/// had explicitly vetoed, leaving one `warn!` line behind. The fixture below is
+/// exactly that: a valid `disk.keep_list` entry naming the worktree, plus a
+/// malformed unrelated value.
+///
+/// This test fails against the pre-fix loader — the worktree is deleted.
+#[test]
+fn a_malformed_config_refuses_to_reclaim_a_merged_clean_worktree() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("keep-config-6927");
+    land(&path);
+
+    // The operator's own config: the worktree IS on the keep-list, and an
+    // unrelated key is a typo. `auto_resume` is a bool.
+    let home = tempfile::tempdir().expect("tempdir");
+    let config = trusty_common::crate_config::crate_config_path_at(
+        home.path(),
+        crate::core::trusty_tools_config::CRATE_NAME,
+    );
+    std::fs::create_dir_all(config.parent().expect("parent")).expect("mkdir");
+    std::fs::write(
+        &config,
+        format!(
+            "disk:\n  keep_list:\n    - {}\nauto_resume: not-a-boolean\n",
+            path.display()
+        ),
+    )
+    .expect("write config");
+
+    let keep_list = || crate::core::trusty_tools_config::load_disk_keep_list_at(home.path());
+    let out = reclaim_with_probes(
+        &fx.repos_root,
+        &FreshProbes {
+            keep_list: &keep_list,
+            agent_state: &no_agents,
+            in_use_now: &|| Some(nobody()),
+            index_for: &|_: &Path| merged_index("session/keep-config-6927", 43),
+        },
+        ReclaimMode::Remove,
+    );
+
+    assert!(
+        path.exists(),
+        "a vetoed worktree was deleted because its keep-list would not parse: {out:?}"
+    );
+    assert!(out.removed.is_empty(), "{out:?}");
+    assert_eq!(
+        out.survey.reclaimable, 0,
+        "an unreadable keep-list must make nothing reclaimable: {out:?}"
+    );
+    let blocked = format!("{:?}", out.survey.blocked_reasons);
+    assert!(
+        blocked.contains("could not be read"),
+        "the operator must be told their config is what stopped the sweep: {blocked}"
+    );
 }
 
 #[test]
@@ -898,7 +1077,7 @@ fn reclaim_remove_mode_reclaims_a_clean_merged_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("session/reclaim-2919", 37),
@@ -1290,7 +1469,7 @@ fn survey_offers_a_merged_agent_worktree_the_harness_released() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/agent-6561e2e", 6561),
@@ -1322,7 +1501,7 @@ fn reclaim_reclaims_a_merged_agent_worktree_the_harness_released() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/agent-6561reclaim", 6562),
@@ -1346,7 +1525,7 @@ fn reclaim_never_offers_an_agent_worktree_whose_pr_is_open() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| open_index("wt/agent-6561open", 6563),
@@ -1378,7 +1557,7 @@ fn reclaim_never_offers_a_dirty_agent_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/agent-6561dirty", 6564),
@@ -1415,7 +1594,7 @@ fn survey_discloses_a_harness_locked_agent_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
             index_for: &|_: &Path| merged_index("wt/agent-6561locked", 6565),
@@ -1591,7 +1770,7 @@ fn prune_resolves_each_projects_repo_from_its_own_origin_7057() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
-            keep_list: &KeepList::default(),
+            keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
             index_for: &index_for,

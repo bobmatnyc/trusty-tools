@@ -42,8 +42,15 @@ use crate::session_manager::worktree_safety::DirtyWorktree;
 /// Why: see the module docs — injection is what makes the run hermetic. It is
 /// also what lets the daemon hand in a `gh`-backed index while `tm doctor` or a
 /// test hands in a fixed answer.
-/// What: the four fact sources. `pr_state` is called once per worktree with the
-/// scan record, so an implementation may batch per repository behind it.
+/// What: the five fact sources. `pr_state` is called once per worktree with
+/// the scan record, so an implementation may batch per repository behind it.
+/// `measure` is a probe rather than a borrowed
+/// [`DirSizeIndex`](super::size_index::DirSizeIndex) for a reason #6927's
+/// review found: the daemon's index is shared behind a mutex, and taking that
+/// borrow for the whole pass held the lock across every `git` and `gh`
+/// subprocess `classify` runs, serialising a second `disk_survey` (or the
+/// #6926 refresher) behind minutes of network work. Measuring through a
+/// closure lets the caller hold the lock for the measurement alone.
 pub(crate) struct DiskProbes<'a> {
     /// The pull-request state of one scanned worktree's branch.
     pub pr_state: &'a dyn Fn(&ScannedWorktree) -> BranchPrState,
@@ -53,6 +60,11 @@ pub(crate) struct DiskProbes<'a> {
     pub agent_state: AgentStateProbe<'a>,
     /// Whether a directory holds work a removal would destroy.
     pub dirt: &'a dyn Fn(&Path) -> Option<DirtyWorktree>,
+    /// Bytes under a directory, or `None` when no figure could be obtained.
+    ///
+    /// See the struct docs for why this is a probe. [`measure`] is the
+    /// implementation every caller wraps.
+    pub measure: &'a dyn Fn(&Path) -> Option<DirSize>,
 }
 
 /// Survey every worktree under `repos_root` for the Disk dashboard (#6927).
@@ -73,16 +85,14 @@ pub(crate) struct DiskProbes<'a> {
 pub(crate) fn run(
     repos_root: &Path,
     keep_list: &KeepList,
-    keep_patterns: &[String],
     probes: &DiskProbes<'_>,
-    index: &mut DirSizeIndex,
     deadline: Option<Instant>,
     project: Option<&str>,
 ) -> DiskSurvey {
     // Measured first so the root walk populates the directory cache every
     // project and worktree measurement below then revalidates at one stat per
     // directory instead of re-walking.
-    let root_size = measure(index, repos_root);
+    let root_size = (probes.measure)(repos_root);
     let mut grouped: BTreeMap<PathBuf, Vec<DiskWorktree>> = BTreeMap::new();
     let cache: RefCell<HashMap<PathBuf, Option<DirtyWorktree>>> = RefCell::new(HashMap::new());
     // One dirt probe per worktree, shared by the reclaim classifier and the
@@ -109,7 +119,7 @@ pub(crate) fn run(
             // clearable.
             not_inspected(&scanned)
         } else {
-            inspect(&scanned, keep_list, probes, &probe_dirt, index)
+            inspect(&scanned, keep_list, probes, &probe_dirt)
         };
         grouped
             .entry(scanned.project.clone())
@@ -136,7 +146,7 @@ pub(crate) fn run(
                 WorktreeTier::Missing => counts.missing += 1,
             }
         }
-        let size = measure(index, &path);
+        let size = (probes.measure)(&path);
         projects.push(DiskProject {
             name: project_name(&path, repos_root),
             bytes: size.as_ref().map(|s| s.bytes),
@@ -149,8 +159,9 @@ pub(crate) fn run(
     DiskSurvey {
         generated_at: Utc::now().to_rfc3339(),
         keep_list: KeepListReport {
-            patterns: keep_patterns.to_vec(),
+            patterns: keep_list.patterns().to_vec(),
             invalid: keep_list.invalid().to_vec(),
+            error: keep_list.error().map(str::to_string),
         },
         root: DiskRoot {
             path: repos_root.to_path_buf(),
@@ -174,7 +185,6 @@ fn inspect(
     keep_list: &KeepList,
     probes: &DiskProbes<'_>,
     probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
-    index: &mut DirSizeIndex,
 ) -> DiskWorktree {
     let pr = (probes.pr_state)(scanned);
     let claim = probes.claims.claim_state(&scanned.path);
@@ -201,7 +211,7 @@ fn inspect(
     let size = if classification.tier == WorktreeTier::Missing {
         None
     } else {
-        measure(index, &scanned.path)
+        (probes.measure)(&scanned.path)
     };
     row(scanned, classification, &verdict, &pr, &claim, size)
 }
@@ -271,14 +281,18 @@ fn claiming_session(
     }
 }
 
-/// Ask the index for a directory's bytes, treating a refusal as "no figure".
+/// Ask an index for a directory's bytes, treating a refusal as "no figure".
 ///
 /// Why: [`DirSizeIndex::measure`] refuses a forbidden root and a
 /// non-directory. Both are reported as an absent figure rather than as a failed
 /// survey — this view is read-only, and a missing number is strictly better
 /// than no view. The refusal is logged so an operator whose workspace root sits
 /// somewhere the index will not walk can find out why.
-fn measure(index: &mut DirSizeIndex, path: &Path) -> Option<DirSize> {
+/// What: the body every [`DiskProbes::measure`] implementation wraps. A caller
+/// holding a shared index locks it around THIS call and nothing else — see the
+/// [`DiskProbes`] docs for why the lock may not span the survey.
+/// Test: `a_survey_groups_worktrees_under_their_project_and_measures_bytes`.
+pub(crate) fn measure(index: &mut DirSizeIndex, path: &Path) -> Option<DirSize> {
     match index.measure(path) {
         Ok(size) => Some(size),
         Err(e) => {

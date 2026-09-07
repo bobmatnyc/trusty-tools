@@ -739,10 +739,10 @@ pub(crate) fn classify(
 ) -> ReclaimVerdict {
     // Gate 0 (#6927): the operator's own standing veto outranks every answer
     // the gates below could compute, so it is asked first — see DOC-73 §16.4.
-    if let Some(entry) = keep_list.keeps(path) {
+    if let Some(kept) = keep_list.keeps(path) {
         return ReclaimVerdict::blocked(
             ReclaimGate::KeepList,
-            format!("kept by the owner keep-list entry `{entry}` (#6927)"),
+            format!("{} (#6927)", kept.detail()),
         );
     }
     // Gate 1 (#2919): git decides existence and eligibility, per ADR-0023.

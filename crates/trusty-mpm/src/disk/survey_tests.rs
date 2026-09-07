@@ -11,17 +11,18 @@
 //! state, the live-session set, and the agent-liveness answer are injected.
 //! Test target: `super::survey`, `super::survey_run`.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::{ReasonCode, WorktreeFacts, WorktreeTier, classify_tier};
 use crate::disk::size_index::{DirSizeIndex, IndexPolicy};
-use crate::disk::survey_run::{DiskProbes, run};
+use crate::disk::survey_run::{self, DiskProbes, run};
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 use crate::session_manager::worktree_keep_list::KeepList;
 use crate::session_manager::worktree_ownership::{AgentDelegationState, AgentWorktreeOwner};
 use crate::session_manager::worktree_reclaim::{
-    BranchPrState, LiveClaims, ReclaimGate, ReclaimVerdict, WorkspaceClaim,
+    BranchPrState, LiveClaims, ReclaimGate, ReclaimVerdict, WorkspaceClaim, classify,
 };
 use crate::session_manager::worktree_reclaim_claim::ClaimState;
 use crate::session_manager::worktree_registry::{Admission, ScannedWorktree};
@@ -311,19 +312,165 @@ fn a_keep_listed_merged_worktree_is_never_stale() {
 
 /// The display may never be narrower than the deleter: anything
 /// `worktree_reclaim::classify` would delete has to show as clearable.
+///
+/// Why a TABLE over the real `classify`, and not a hand-built verdict: the
+/// first cut of this test constructed `Reclaimable` itself and hand-picked
+/// facts that already resolved to `Stale`, so it asserted a tautology.
+/// `classify_tier` never branches on `Reclaimable`, which is exactly why the
+/// two functions can drift — the only test that catches that drift is one where
+/// the verdict comes out of `classify` over the SAME facts the tier is computed
+/// from, the way `survey_run::inspect` runs them.
+/// Test target: the implication `classify(..).is_reclaimable() => Stale`.
+/// The display may never be narrower than the deleter: anything
+/// `worktree_reclaim::classify` would delete has to show as clearable, and
+/// nothing it refuses may be advertised as clearable.
+///
+/// Why a TABLE over the real `classify`, and not a hand-built verdict: the
+/// first cut of this test constructed `Reclaimable` itself and hand-picked
+/// facts that already resolved to `Stale`, so it asserted a tautology.
+/// `classify_tier` never branches on `Reclaimable`, which is exactly why the
+/// two can drift — the only test that catches that drift is one where the
+/// verdict comes out of `classify` over the SAME facts the tier is computed
+/// from, the way `survey_run::inspect` runs them.
 #[test]
 fn a_reclaimable_verdict_is_always_shown_stale() {
-    let pr = BranchPrState::Merged { pr: 7 };
-    let claim = ClaimState::Unclaimed;
-    let verdict = reclaimable();
-    let wt = existing();
-    let c = classify_tier(
-        &facts(wt.path(), Some("feat/x"), &pr, &claim, &verdict),
-        &no_keeps(),
-        &clean,
+    // Two directories, because gate 4 keys on which OWNER the sentinel names:
+    // a session-owned tree for every row but the last, and an agent-owned one
+    // for the row that asks what a live agent does.
+    let session_wt = existing();
+    GitWorktreeFixture::stamp_reclaimable_sentinel(session_wt.path());
+    let agent_wt = existing();
+    let owner = GitWorktreeFixture::stamp_agent_sentinel(agent_wt.path(), "agent-6927");
+    let _ = &owner;
+
+    let claimed = ClaimState::Foreign {
+        session: "tm-other-01".to_string(),
+        caller: None,
+    };
+    let dirty = dirt_with(1, 0);
+    let unclaimed = ClaimState::Unclaimed;
+    let merged = BranchPrState::Merged { pr: 7 };
+
+    // Every axis `classify` gates on, at a value that admits and at one that
+    // refuses: (label, path, admission, claim, pr, dirt probe, agent state).
+    #[allow(clippy::type_complexity)]
+    let cases: Vec<(
+        &str,
+        &Path,
+        Admission,
+        &ClaimState,
+        &BranchPrState,
+        &dyn Fn(&Path) -> Option<DirtyWorktree>,
+        AgentDelegationState,
+    )> = vec![
+        (
+            "merged, clean, unclaimed, no live agent",
+            session_wt.path(),
+            Admission::Admitted,
+            &unclaimed,
+            &merged,
+            &clean,
+            AgentDelegationState::Ended,
+        ),
+        (
+            "a foreign session claims it",
+            session_wt.path(),
+            Admission::Admitted,
+            &claimed,
+            &merged,
+            &clean,
+            AgentDelegationState::Ended,
+        ),
+        (
+            "git does not admit it",
+            session_wt.path(),
+            Admission::Locked,
+            &unclaimed,
+            &merged,
+            &clean,
+            AgentDelegationState::Ended,
+        ),
+        (
+            "the pull request is still open",
+            session_wt.path(),
+            Admission::Admitted,
+            &unclaimed,
+            &BranchPrState::Open { pr: 7 },
+            &clean,
+            AgentDelegationState::Ended,
+        ),
+        (
+            "no pull request at all",
+            session_wt.path(),
+            Admission::Admitted,
+            &unclaimed,
+            &BranchPrState::NoPr,
+            &clean,
+            AgentDelegationState::Ended,
+        ),
+        (
+            "the tree holds unsaved work",
+            session_wt.path(),
+            Admission::Admitted,
+            &unclaimed,
+            &merged,
+            &dirty,
+            AgentDelegationState::Ended,
+        ),
+        (
+            "a finished agent owned it",
+            agent_wt.path(),
+            Admission::Admitted,
+            &unclaimed,
+            &merged,
+            &clean,
+            AgentDelegationState::Ended,
+        ),
+        (
+            "a live agent owns it",
+            agent_wt.path(),
+            Admission::Admitted,
+            &unclaimed,
+            &merged,
+            &clean,
+            AgentDelegationState::Live,
+        ),
+    ];
+
+    let mut ever_reclaimable = false;
+    for (label, path, admission, claim, pr, dirt, agent) in cases {
+        let agent_state = |_: &AgentWorktreeOwner| agent;
+        let verdict = classify(path, admission, claim, pr, dirt, &agent_state, &no_keeps());
+        let facts = WorktreeFacts {
+            path,
+            branch: Some("feat/x"),
+            admission,
+            claim,
+            pr,
+            verdict: &verdict,
+        };
+        let c = classify_tier(&facts, &no_keeps(), dirt);
+        if verdict.is_reclaimable() {
+            ever_reclaimable = true;
+            assert_eq!(
+                c.tier,
+                WorktreeTier::Stale,
+                "{label}: the deleter would remove this, so the view must show it \
+                 clearable — verdict {verdict:?}, classification {c:?}"
+            );
+        } else {
+            assert_ne!(
+                c.tier,
+                WorktreeTier::Stale,
+                "{label}: the deleter refuses this, so the view must not advertise it \
+                 as clearable — verdict {verdict:?}, classification {c:?}"
+            );
+        }
+    }
+    assert!(
+        ever_reclaimable,
+        "at least one row must reach Reclaimable, or the implication is vacuous"
     );
-    assert!(verdict.is_reclaimable());
-    assert_eq!(c.tier, WorktreeTier::Stale, "{c:?}");
 }
 
 // ── the whole survey, over scratch git repositories ──────────────────────────
@@ -338,22 +485,16 @@ fn survey_fixture(
     let keep_list = KeepList::from_patterns(keep_patterns);
     let pr_state = |_: &ScannedWorktree| fixed.pr.clone();
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
+    let index = RefCell::new(test_index());
+    let measure = |path: &Path| survey_run::measure(&mut index.borrow_mut(), path);
     let probes = DiskProbes {
         pr_state: &pr_state,
         claims: &fixed.claims,
         agent_state: &agent_state,
         dirt: &inspect_dirt,
+        measure: &measure,
     };
-    let mut index = test_index();
-    run(
-        &fx.repos_root,
-        &keep_list,
-        keep_patterns,
-        &probes,
-        &mut index,
-        deadline,
-        None,
-    )
+    run(&fx.repos_root, &keep_list, &probes, deadline, None)
 }
 
 /// Every worktree row in the survey, flattened out of its project.
@@ -576,6 +717,10 @@ fn a_survey_serializes_the_documented_shape() {
     assert!(json["generated_at"].is_string(), "{json:#}");
     assert!(json["keep_list"]["patterns"].is_array(), "{json:#}");
     assert!(json["keep_list"]["invalid"].is_array(), "{json:#}");
+    assert!(
+        json["keep_list"]["error"].is_null(),
+        "a readable keep-list carries no error: {json:#}"
+    );
     assert!(json["root"]["path"].is_string(), "{json:#}");
     assert!(json["root"]["projects"].is_array(), "{json:#}");
     assert!(json["root"]["counts"]["stale"].is_number(), "{json:#}");
@@ -602,6 +747,55 @@ fn a_survey_serializes_the_documented_shape() {
     assert_eq!(row["session"], serde_json::Value::Null, "{row:#}");
 }
 
+/// An unreadable keep-list is DISCLOSED, and shows every worktree as kept
+/// (#6927).
+///
+/// Why the console must be able to see this: the fail-closed state renders an
+/// all-`keep` view, which is byte-for-byte what a workspace with nothing to
+/// clear also renders. Only `keep_list.error` tells them apart, and without it
+/// an operator would read a broken config as a tidy workspace.
+#[test]
+fn an_unreadable_keep_list_is_reported_and_keeps_every_row() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("unreadable-keeps");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+    GitWorktreeFixture::commit_all_and_push(&wt, "pushed");
+
+    let keep_list = KeepList::unreadable("config YAML error at /x/config.yaml: bad");
+    let fixed = Fixed::new(BranchPrState::Merged { pr: 4 });
+    let pr_state = |_: &ScannedWorktree| fixed.pr.clone();
+    let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
+    let index = RefCell::new(test_index());
+    let measure = |path: &Path| survey_run::measure(&mut index.borrow_mut(), path);
+    let probes = DiskProbes {
+        pr_state: &pr_state,
+        claims: &fixed.claims,
+        agent_state: &agent_state,
+        dirt: &inspect_dirt,
+        measure: &measure,
+    };
+    let survey = run(&fx.repos_root, &keep_list, &probes, None, None);
+
+    assert_eq!(survey.root.counts.stale, 0, "{:#?}", survey.root);
+    let row = rows(&survey)
+        .into_iter()
+        .find(|r| r.path == wt)
+        .unwrap_or_else(|| panic!("no row for {}", wt.display()));
+    assert_eq!(row.tier, WorktreeTier::Keep, "{row:#?}");
+    assert_eq!(row.reasons[0].code, ReasonCode::KeepList, "{row:#?}");
+    assert!(
+        row.reasons[0].detail.contains("could not be read"),
+        "{row:#?}"
+    );
+    assert!(!row.reclaimable, "{row:#?}");
+
+    let json = serde_json::to_value(&survey).expect("serialize");
+    assert_eq!(
+        json["keep_list"]["error"], "config YAML error at /x/config.yaml: bad",
+        "the console has to be able to say WHY everything is kept: {json:#}"
+    );
+}
+
 /// A `project` filter selects one managed project and nothing else.
 #[test]
 fn a_project_filter_selects_only_that_project() {
@@ -614,19 +808,19 @@ fn a_project_filter_selects_only_that_project() {
     let pr_state = |_: &ScannedWorktree| pr.clone();
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
     let claims = LiveClaims::default();
+    let index = RefCell::new(test_index());
+    let measure = |path: &Path| survey_run::measure(&mut index.borrow_mut(), path);
     let probes = DiskProbes {
         pr_state: &pr_state,
         claims: &claims,
         agent_state: &agent_state,
         dirt: &inspect_dirt,
+        measure: &measure,
     };
-    let mut index = test_index();
     let miss = run(
         &fx.repos_root,
         &keep_list,
-        &[],
         &probes,
-        &mut index,
         None,
         Some("someone-else/repo"),
     );
@@ -635,9 +829,7 @@ fn a_project_filter_selects_only_that_project() {
     let hit = run(
         &fx.repos_root,
         &keep_list,
-        &[],
         &probes,
-        &mut index,
         None,
         Some("owner/repo"),
     );
