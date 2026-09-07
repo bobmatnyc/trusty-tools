@@ -8,9 +8,15 @@ Added
   through the same `gh` runner the rest of `tm issue` uses. A `gh` failure
   prints `milestones: unavailable (<error>)` rather than an empty list, so a
   fetch failure cannot be read as "no milestone needed"; the requirement lines
-  come from config and are unaffected. `tm issue seed-config` now also prints a
-  copy-pasteable `agents.ticketing` starter block carrying the new keys, since
-  the lifecycle model and the standard live in different files. The
+  come from config and are unaffected. `tm issue seed-config` now also WRITES
+  the `agents.ticketing` starter block carrying the new keys into
+  `~/.trusty-tools/trusty-mpm/config.yaml` — the same file the runtime loader
+  reads — since the lifecycle model and the standard live in different files.
+  It creates that file if it is absent, appends the block textually if the file
+  exists without one (every prior byte and comment preserved), and leaves an
+  existing `agents.ticketing` exactly as the operator wrote it; it prints the
+  path and which of the three happened. Every key in the written block is at
+  its built-in default, so seeding does not change the standard. The
   `tm-ticketing` skill reverses its old "leave the milestone unset by default"
   rule: every new issue carries exactly one milestone chosen by a stated rule
   (the parent's, else the crate's `Backlog · <crate>`, else the one

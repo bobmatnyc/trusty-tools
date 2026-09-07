@@ -17,6 +17,7 @@
 
 pub(crate) mod config;
 pub(crate) mod ops;
+pub(crate) mod seed_ticketing;
 pub(crate) mod standard;
 pub(crate) mod standard_live;
 pub(crate) mod state;
@@ -35,6 +36,7 @@ use crate::commands::ticket::system::{
 };
 
 use config::{StateModel, load_model};
+use seed_ticketing::{TicketingSeedOutcome, seed_ticketing_block, ticketing_config_path};
 use trusty_mpm::core::trusty_tools_config::{
     TICKETING_BLOCK_TEMPLATE, TrustyToolsConfig, resolve_ticketing,
 };
@@ -175,17 +177,21 @@ fn print_states(model: &StateModel) {
     }
 }
 
-/// `tm issue seed-config [--force]` — write the embedded default to user config.
+/// `tm issue seed-config [--force]` — write both halves of the standard.
 ///
 /// Why: lets operators start from a copy of the default model and edit it,
 /// mirroring `tm services init` (RFC §6).
 /// What: writes [`config::DEFAULT_MODEL_YAML`] to
 /// `~/.trusty-tools/trusty-mpm/issue-state.yaml`, creating parent dirs; refuses
-/// to overwrite an existing file unless `--force`. Then prints the
-/// [`TICKETING_BLOCK_TEMPLATE`] starter block (#7067) — the lifecycle half of
-/// the standard lands on disk, and the operator is shown the other half,
-/// including the milestone and project keys, rather than having to find them.
-/// Test: side-effect-only (filesystem/stdout); the template itself is covered by
+/// to overwrite an existing file unless `--force`. Then seeds the
+/// [`TICKETING_BLOCK_TEMPLATE`] into `config.yaml` — the file
+/// [`TrustyToolsConfig::load`] reads — via
+/// [`seed_ticketing_block`] (#7067), so the milestone and project half of the
+/// standard lands on disk rather than being printed for the operator to paste.
+/// That half is never overwritten: an existing `agents.ticketing` is left as
+/// the operator wrote it.
+/// Test: side-effect-only (filesystem/stdout); the write itself is covered by
+/// the `seed_ticketing` tests, the template by
 /// `the_seed_template_parses_to_the_builtin_defaults`.
 fn seed_config(force: bool) -> anyhow::Result<()> {
     let path: PathBuf = config::user_config_path()
@@ -205,14 +211,29 @@ fn seed_config(force: bool) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
     println!("wrote default issue-state model to {}", path.display());
 
-    // #7067: the milestone/project keys live in a DIFFERENT file, so name it
-    // and print the block rather than leaving the operator to find both.
-    let config_yaml = path.with_file_name("config.yaml");
-    println!(
-        "\nthe rest of the standard lives in {} — paste this block to state it \
-         explicitly (every value below is already the default):\n",
-        config_yaml.display()
-    );
-    print!("{TICKETING_BLOCK_TEMPLATE}");
+    // #7067: the milestone/project keys live in a DIFFERENT file, so write
+    // them there too rather than leaving the operator to paste a block.
+    let config_yaml = ticketing_config_path()
+        .ok_or_else(|| anyhow::anyhow!("could not resolve home directory for the user config"))?;
+    let shown = config_yaml.display();
+    match seed_ticketing_block(&config_yaml)? {
+        TicketingSeedOutcome::Created => {
+            println!("created {shown} with the agents.ticketing block");
+        }
+        TicketingSeedOutcome::Appended => {
+            println!("appended the agents.ticketing block to {shown}");
+        }
+        TicketingSeedOutcome::AlreadyPresent => {
+            println!("{shown} already declares agents.ticketing — left unchanged");
+        }
+        TicketingSeedOutcome::AgentsBlockPresent => {
+            println!(
+                "{shown} declares `agents:` without `ticketing:` — left unchanged, \
+                 since a second `agents:` key would make the file unreadable. \
+                 Add this entry under the `agents:` block by hand:\n"
+            );
+            print!("{TICKETING_BLOCK_TEMPLATE}");
+        }
+    }
     Ok(())
 }

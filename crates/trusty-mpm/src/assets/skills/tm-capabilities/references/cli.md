@@ -46,7 +46,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `issue` — YAML-configurable issue state-management (labels/transitions/assignee)
   - `current` — Report an issue's current state, derived from its labels
   - `repair` — Resolve a mid-transition issue carrying multiple state labels
-  - `seed-config` — Write the embedded default model to the user config path
+  - `seed-config` — Write the default lifecycle model and the `agents.ticketing` block to the user config path
   - `seed-labels` — Create any missing labels (states + extra families) in the repo
   - `standard` — Print the ticketing standard in effect (#6918; reads config, no `gh`)
   - `states` — List the configured states and transitions (reads YAML only)
