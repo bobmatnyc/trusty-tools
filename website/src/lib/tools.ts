@@ -1,11 +1,12 @@
 /**
- * Why: the flagship crates each get a hand-authored page under
- * `src/routes/tools/`, and the landing page cards link into them. Keeping the
- * shared per-tool facts here means the card and the page can never disagree
- * about a crate's name, package flag, install command, or docs link.
+ * Why: the flagship crates each get a page under `src/routes/tools/`, and the
+ * landing page cards link into them. Keeping the shared per-tool facts here
+ * means the card and the page can never disagree about a crate's name, package
+ * flag, install command, or docs link.
  *
- * What: one `Tool` record per flagship. Prose that appears on only ONE page
- * lives in that page's `.svelte` file; only what BOTH surfaces need is here.
+ * What: one `Tool` record per flagship — the FACTS a page's chrome needs. The
+ * PROSE lives in markdown, one file per slug under `src/content/tools/`, and is
+ * rendered by `$lib/flagship/content`; nothing in this file is page copy.
  *
  * Sourcing rule: every string below was checked against the crate's own
  * source — `Cargo.toml`, the clap subcommand enums, the MCP tool descriptor
@@ -66,6 +67,14 @@ export interface Tool {
 	/** How the page's Install section reads. */
 	install: ToolInstall;
 	/**
+	 * Short label/value pairs `ToolPage.svelte` renders under the lede.
+	 *
+	 * Here rather than in the page component because one shell now serves every
+	 * markdown-driven flagship (`src/routes/tools/[slug]/`), so there is no
+	 * per-tool `.svelte` file left to hold them.
+	 */
+	facts: { label: string; value: string }[];
+	/**
 	 * Whether this crate has a published release, and so appears on the
 	 * release-driven surfaces — the card's "What's new" strip and `/whats-new`.
 	 *
@@ -111,6 +120,12 @@ export const TOOLS: Tool[] = [
 			'Branch-aware ranking and caller/callee chain expansion'
 		],
 		lede: 'Three retrieval lanes over one corpus, fused into a single ranking, served by one daemon for every project on the machine.',
+		facts: [
+			{ label: 'Package', value: 'trusty-search' },
+			{ label: 'Default port', value: '7878' },
+			{ label: 'Languages parsed', value: '14 tree-sitter grammars' },
+			{ label: 'MCP tools', value: '21' }
+		],
 		install: { via: 'tctl', target: 'trusty-search' },
 		released: true,
 		docsPath: '/docs/tools/trusty-search'
@@ -128,6 +143,12 @@ export const TOOLS: Tool[] = [
 			'A dream cycle that consolidates near-duplicates instead of hoarding them'
 		],
 		lede: 'Long-term memory an assistant can write to and recall from across sessions, organised per project rather than per conversation.',
+		facts: [
+			{ label: 'Package', value: 'trusty-memory' },
+			{ label: 'Default port', value: '7070' },
+			{ label: 'MCP tools', value: '49' },
+			{ label: 'Storage', value: 'usearch + redb, on disk' }
+		],
 		install: { via: 'tctl', target: 'trusty-memory' },
 		released: true,
 		docsPath: '/docs/tools/trusty-memory'
@@ -145,6 +166,12 @@ export const TOOLS: Tool[] = [
 			'Remote control from Telegram or Slack when you are away from the terminal'
 		],
 		lede: 'A project manager for coding sessions: it provisions them, watches them, and keeps the roster straight while you work in several at once.',
+		facts: [
+			{ label: 'Package', value: 'trusty-mpm' },
+			{ label: 'Binaries', value: 'tm, trusty-mpm' },
+			{ label: 'Surfaces', value: 'CLI, daemon, TUI, MCP' },
+			{ label: 'Remote', value: 'Telegram, Slack' }
+		],
 		install: { via: 'tctl', target: 'trusty-mpm' },
 		released: true,
 		docsPath: '/docs/tools/trusty-mpm'
@@ -162,6 +189,12 @@ export const TOOLS: Tool[] = [
 			'Tree-sitter adapters for 14 languages, behind one HTTP API and one MCP server'
 		],
 		lede: 'A second daemon that reads trusty-search’s corpus and answers the question search cannot: not where the code is, but how bad it is.',
+		facts: [
+			{ label: 'Package', value: 'trusty-analyze' },
+			{ label: 'Default port', value: '7879' },
+			{ label: 'Languages', value: '14 tree-sitter adapters' },
+			{ label: 'Requires', value: 'trusty-search on 7878' }
+		],
 		install: { via: 'tctl', target: 'trusty-analyze' },
 		released: true,
 		docsPath: '/docs/tools/trusty-analyze'
@@ -179,6 +212,12 @@ export const TOOLS: Tool[] = [
 			'Skips a review it cannot ground rather than issue a confident guess'
 		],
 		lede: 'A reviewer that reads the rest of the repository before it reads your diff, and says so plainly when it cannot.',
+		facts: [
+			{ label: 'Package', value: 'trusty-review' },
+			{ label: 'Default port', value: '7880' },
+			{ label: 'Providers', value: 'AWS Bedrock, OpenRouter' },
+			{ label: 'MCP tools', value: 'review_pr, review_diff, review_health' }
+		],
 		install: { via: 'tctl', target: 'trusty-review' },
 		released: true,
 		docsPath: null
@@ -196,6 +235,12 @@ export const TOOLS: Tool[] = [
 			'CSV, JSON, and Markdown output from one `tga analyze` run'
 		],
 		lede: 'Turns git history into per-author and per-week reporting, with a classification cascade that names the work each commit did.',
+		facts: [
+			{ label: 'Package', value: 'tga' },
+			{ label: 'Binary', value: 'tga' },
+			{ label: 'Store', value: 'SQLite, on disk' },
+			{ label: 'Output', value: 'CSV, JSON, Markdown' }
+		],
 		install: { via: 'tctl', target: 'tga' },
 		released: true,
 		docsPath: '/docs/tools/trusty-git-analytics'
@@ -213,6 +258,12 @@ export const TOOLS: Tool[] = [
 			'One resumable run — install, clone, audit, package — ending in a zip to send back'
 		],
 		lede: 'The client-side half of an audit engagement: it installs the tooling it pins, collects from the repositories you register, and writes one zip to return to your auditor.',
+		facts: [
+			{ label: 'Package', value: 'trusty-audit' },
+			{ label: 'Runs on', value: 'macOS, Apple Silicon' },
+			{ label: 'Needs', value: 'gh, authenticated' },
+			{ label: 'Returns', value: 'audit-return-package.zip' }
+		],
 		install: {
 			via: 'script',
 			// #5873 adds `crates/trusty-audit/install.sh`; this is the Usage line

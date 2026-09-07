@@ -38,6 +38,14 @@ unlisted docs/ file`).
 | `site.ts`     | Orchestrates the two render phases and memoises the result.             |
 | `errors.ts`   | `DocFailure` and its `FAIL CODE file:line: problem — remedy` rendering. |
 
+## A second consumer
+
+`$lib/flagship/content` renders the six markdown-driven `/tools/<slug>` pages
+(#6960) through `render.ts` and `links.ts`, so both surfaces share one
+markdown pipeline and one link rule. It passes a `siteHrefs` allowlist that
+`docs/` pages deliberately do not, which is the only place the two diverge —
+see `../../../README.md`, "The flagship tool pages".
+
 ## The link rule
 
 A relative link resolves to a **site route** when its target is on the manifest,

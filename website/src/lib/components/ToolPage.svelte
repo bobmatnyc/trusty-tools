@@ -3,11 +3,13 @@
 	 * Why: the flagship pages share a hero, an install block, and a footer of
 	 * outbound links. Writing that markup once per page would let the pages
 	 * drift apart visually and would repeat the `<svelte:head>` wiring as many
-	 * ways. The BODY is not shared — each page writes its own sections through
-	 * the `children` snippet, because the copy is the point.
+	 * ways. The BODY is not shared — the caller supplies it through the
+	 * `children` snippet, because the copy is the point.
 	 *
-	 * What: chrome only. Takes the tool's record from `$lib/tools`, plus the
-	 * facts strip that page wants above the fold.
+	 * What: chrome only, all of it derived from the tool's `$lib/tools` record.
+	 * Six of the seven pages fill `children` with markdown rendered by
+	 * `$lib/flagship/content`; trusty-audit fills it with Svelte, because its
+	 * copy embeds live `CopyButton` components.
 	 *
 	 * Test: `tests/build-smoke.test.ts` walks every emitted `tools/*.html`
 	 * and asserts it loads no third-party subresource.
@@ -17,12 +19,10 @@
 
 	interface Props {
 		tool: Tool;
-		/** Short label/value pairs rendered under the lede. */
-		facts: { label: string; value: string }[];
 		children: import('svelte').Snippet;
 	}
 
-	let { tool, facts, children }: Props = $props();
+	let { tool, children }: Props = $props();
 
 	const sourceUrl = $derived(`${GITHUB_URL}/tree/main/crates/${tool.name}`);
 </script>
@@ -52,7 +52,7 @@
 		</div>
 
 		<dl class="mt-12 flex flex-wrap gap-x-10 gap-y-4">
-			{#each facts as fact (fact.label)}
+			{#each tool.facts as fact (fact.label)}
 				<div>
 					<dt class="eyebrow">{fact.label}</dt>
 					<dd class="mt-1 font-mono text-sm text-foundry-text">{fact.value}</dd>
