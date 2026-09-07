@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use super::default::{DEFAULT_DIVERT_MIN_LINES, DEFAULT_DIVERT_WORKER_MODEL};
 use super::schema::{ContentSource, CustomMcpServer, HarnessManifest, selection_matches};
 use crate::core::paths::FrameworkPaths;
 
@@ -67,6 +68,16 @@ pub struct HarnessPlan {
     /// the `[style] active` config key both override it (HR-4 precedence is
     /// preserved by the launch path).
     pub style: Option<String>,
+    /// `[divert] enabled` — write the bulk-read diversion hooks for this
+    /// session (#6887). An absent `[divert]` section resolves to `false`: the
+    /// feature is opt-in, so it is never on by omission.
+    pub divert_enabled: bool,
+    /// `[divert] min_lines` — line count at or above which a read is diverted.
+    pub divert_min_lines: u32,
+    /// `[divert] worker_model` — the model the headless worker runs on, always
+    /// resolved (an unset or empty key becomes
+    /// [`DEFAULT_DIVERT_WORKER_MODEL`]).
+    pub divert_worker_model: String,
 }
 
 impl HarnessPlan {
@@ -83,7 +94,7 @@ impl HarnessPlan {
     /// Absent sections fall back to bundled-source/all/on so a default manifest
     /// reproduces today's behavior.
     /// Test: `plan_default_uses_bundled_sources`, `plan_catalog_source_paths`,
-    /// `plan_mcp_toggles`.
+    /// `plan_mcp_toggles`, `plan_divert_toggles`.
     pub fn from_manifest(
         manifest: &HarnessManifest,
         fw: &FrameworkPaths,
@@ -132,6 +143,26 @@ impl HarnessPlan {
 
         let style = manifest.style.as_ref().and_then(|s| s.active.clone());
 
+        // #6887: the divert section is the one whose ABSENT state is OFF. Do
+        // not copy the `.unwrap_or(true)` the MCP toggles above use — a
+        // manifest that never mentions `[divert]` must leave the feature dark.
+        let (divert_enabled, divert_min_lines, divert_worker_model) = match &manifest.divert {
+            Some(divert) => (
+                divert.enabled.unwrap_or(false),
+                divert.min_lines.unwrap_or(DEFAULT_DIVERT_MIN_LINES),
+                divert
+                    .worker_model
+                    .clone()
+                    .filter(|m| !m.trim().is_empty())
+                    .unwrap_or_else(|| DEFAULT_DIVERT_WORKER_MODEL.to_string()),
+            ),
+            None => (
+                false,
+                DEFAULT_DIVERT_MIN_LINES,
+                DEFAULT_DIVERT_WORKER_MODEL.to_string(),
+            ),
+        };
+
         Self {
             agent_source,
             agent_include,
@@ -144,6 +175,9 @@ impl HarnessPlan {
             inject_trusty_search,
             custom_mcp_servers,
             style,
+            divert_enabled,
+            divert_min_lines,
+            divert_worker_model,
         }
     }
 
@@ -302,6 +336,62 @@ mod tests {
         let plan = HarnessPlan::from_manifest(&manifest, &fw, std::path::Path::new("/c"));
         assert!(!plan.inject_trusty_memory);
         assert!(plan.inject_trusty_search);
+    }
+
+    /// Why (#6887): the plan is where "absent section" becomes a concrete
+    /// value, and it is the one place the opt-in default could be lost by
+    /// copying the `[mcp]` toggles' `.unwrap_or(true)`. This asserts the three
+    /// states that matter: absent, partial, full.
+    /// What: absent `[divert]` -> `(false, 350, "claude-haiku-4-5")`; a partial
+    /// section that sets only `enabled` keeps the other defaults; a full
+    /// section reaches the plan verbatim.
+    #[test]
+    fn plan_divert_toggles() {
+        use super::super::schema::DivertConfig;
+        let fw = FrameworkPaths::under("/base");
+        let catalog = std::path::Path::new("/c");
+
+        // Absent section: the feature is dark, with the documented fallbacks.
+        let absent = HarnessManifest {
+            divert: None,
+            ..HarnessManifest::default()
+        };
+        let plan = HarnessPlan::from_manifest(&absent, &fw, catalog);
+        assert!(!plan.divert_enabled, "an absent section must not enable it");
+        assert_eq!(plan.divert_min_lines, 350);
+        assert_eq!(plan.divert_worker_model, "claude-haiku-4-5");
+
+        // Partial section: only `enabled` set; the rest keep their defaults.
+        let partial = HarnessManifest {
+            divert: Some(DivertConfig {
+                enabled: Some(true),
+                ..DivertConfig::default()
+            }),
+            ..HarnessManifest::default()
+        };
+        let plan = HarnessPlan::from_manifest(&partial, &fw, catalog);
+        assert!(plan.divert_enabled);
+        assert_eq!(plan.divert_min_lines, 350);
+        assert_eq!(plan.divert_worker_model, "claude-haiku-4-5");
+
+        // The compiled-in default states it off explicitly.
+        let plan = HarnessPlan::from_manifest(&default_manifest(), &fw, catalog);
+        assert!(!plan.divert_enabled);
+        assert_eq!(plan.divert_worker_model, "claude-haiku-4-5");
+
+        // Full section: every field reaches the plan verbatim.
+        let full = HarnessManifest {
+            divert: Some(DivertConfig {
+                enabled: Some(true),
+                min_lines: Some(120),
+                worker_model: Some("claude-haiku-4-5-20251001".to_string()),
+            }),
+            ..HarnessManifest::default()
+        };
+        let plan = HarnessPlan::from_manifest(&full, &fw, catalog);
+        assert!(plan.divert_enabled);
+        assert_eq!(plan.divert_min_lines, 120);
+        assert_eq!(plan.divert_worker_model, "claude-haiku-4-5-20251001");
     }
 
     #[test]

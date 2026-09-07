@@ -276,6 +276,10 @@ pub(super) fn write_output_style(
 /// framework-owned either way: a hand-deleted entry is re-added on the next
 /// launch when the key is `true`. The config key, not a manual edit, is the
 /// supported off switch.
+/// `divert_enabled` carries the `[divert] enabled` manifest key (#6887) and
+/// behaves the same way: `true` writes the two bulk-read diversion
+/// `PreToolUse` groups, `false` writes none AND removes any a prior launch
+/// wrote (the strip domain covers them either way).
 /// Test: `write_project_hooks_writes_all_event_types`,
 /// `write_project_hooks_registers_pm_guard`,
 /// `write_project_hooks_replaces_existing`,
@@ -284,10 +288,13 @@ pub(super) fn write_output_style(
 /// `project_hooks_tests::write_project_hooks_writes_via_atomic_path`,
 /// `project_hooks_tests::write_project_hooks_omits_prompt_context_when_disabled`,
 /// `project_hooks_tests::write_project_hooks_strips_stale_prompt_context_when_disabled`,
-/// `project_hooks_tests::write_project_hooks_enabled_output_is_unchanged_by_the_toggle`.
+/// `project_hooks_tests::write_project_hooks_enabled_output_is_unchanged_by_the_toggle`,
+/// `project_hooks_tests::write_project_hooks_writes_divert_groups_when_enabled`,
+/// `project_hooks_tests::write_project_hooks_strips_stale_divert_when_disabled`.
 pub(super) fn write_project_hooks(
     project_dir: &Path,
     inject_prompt_context: bool,
+    divert_enabled: bool,
 ) -> Result<(), PrepError> {
     let claude_dir = project_dir.join(".claude");
     std::fs::create_dir_all(&claude_dir).map_err(|source| PrepError::Io {
@@ -306,7 +313,11 @@ pub(super) fn write_project_hooks(
         Err(_) => serde_json::Value::Object(serde_json::Map::new()),
     };
 
-    let additions = super::project_hooks::project_managed_hook_additions(inject_prompt_context);
+    // #6887: `divert_enabled` adds two `PreToolUse` groups; the strip below is
+    // deliberately NOT narrowed by it, so flipping the manifest key back to
+    // false removes what a prior launch wrote.
+    let additions =
+        super::project_hooks::project_managed_hook_additions(inject_prompt_context, divert_enabled);
 
     // Replace-by-identity at entry granularity: strip any existing entry we
     // own (trusty-memory / PM-guard / lifecycle-triad), so re-running this on
@@ -919,7 +930,7 @@ const STATUSLINE_BIN_NAMES: &[&str] = crate::core::own_binary_names::OWN_BINARY_
 /// Test: exercised indirectly by `write_status_line_injects_when_absent`; the
 /// resolution priority itself is covered by the `resolve_statusline_binary_with_*`
 /// unit tests, which inject fake sources.
-fn resolve_statusline_binary() -> String {
+pub(super) fn resolve_statusline_binary() -> String {
     resolve_statusline_binary_with(
         || std::env::current_exe().map(|exe| exe.canonicalize().unwrap_or(exe)),
         trusty_common::bin_resolve::resolve_binary,

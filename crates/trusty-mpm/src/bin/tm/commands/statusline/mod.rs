@@ -5,8 +5,9 @@
 //! ` | `-separated segment string on stdout. All fields degrade gracefully.
 //! What: reads a JSON object from stdin and renders the fixed-order layout
 //! `TM <ver> ● | <project> ⎇ <branch> | @<gh> | ✻<account> | <model> | ctx% |
-//! <cost> | <usage>` (#2011, extended #2140 with the trailing account-usage%
-//! segment, #6304 dropped the daemon port and added the Claude Code account)
+//! <cost> | <usage> | <savings>` (#2011, extended #2140 with the trailing
+//! account-usage% segment, #6304 dropped the daemon port and added the Claude
+//! Code account, #6958 appended the estimated token-savings segment)
 //! to stdout. The leading `TM <ver>` text is an OSC 8 hyperlink to the
 //! trusty-console on its selected port, so Cmd-click opens the dashboard while
 //! the rendered columns stay exactly as wide as before. Missing or invalid
@@ -21,6 +22,8 @@ pub(crate) mod account;
 // `tmux_session_name` probe rather than growing a second copy of it.
 pub(crate) mod branch;
 pub(crate) mod compaction;
+// #6958: the estimated token-savings segment, folded from the usage ledger.
+mod savings;
 mod usage;
 
 use std::io::Read as _;
@@ -31,6 +34,7 @@ use crate::formatters::info_box::DaemonInfo;
 use account::{claude_account_segment_probe, claude_json_path};
 use branch::project_segment;
 use compaction::{ContextWindow, colorize_ctx_segment, compaction_segment};
+use savings::savings_segment_probe;
 use usage::{RateLimits, usage_segment};
 
 /// Claude Code `statusLine` hook input (all fields optional via `#[serde(default)]`).
@@ -107,9 +111,9 @@ pub(crate) fn run_statusline() -> anyhow::Result<()> {
 /// results to the pure [`assemble_statusline`] lets the fixed segment ORDER be
 /// pinned by a deterministic unit test with hand-supplied strings, independent
 /// of real git/gh/daemon state.
-/// What: probes each of the eight segments (version+daemon dot, project+branch,
-/// gh account, Claude Code account, model, ctx%, cost, account-usage%) in spec
-/// order and joins them via [`assemble_statusline`].
+/// What: probes each of the nine segments (version+daemon dot, project+branch,
+/// gh account, Claude Code account, model, ctx%, cost, account-usage%,
+/// estimated savings) in spec order and joins them via [`assemble_statusline`].
 /// Test: `render_statusline_minimal_input`, `render_statusline_full_payload`,
 /// `render_statusline_full_payload_matches_pipe_format`.
 pub(crate) fn render_statusline(input: &StatusInput) -> String {
@@ -156,18 +160,26 @@ fn render_statusline_from(input: &StatusInput, account_config: Option<&Path>) ->
     // accounts (Claude Code simply omits `rate_limits` in those cases).
     let usage = usage_segment(input.rate_limits.as_ref());
 
-    assemble_statusline(version, project, gh, account, model, ctx, cost, usage)
+    // #6958: estimated tokens the harness avoided sending for THIS session,
+    // folded from the usage ledger at render time. Absent whenever the ledger
+    // is missing, unreadable, or sums to nothing.
+    let savings = savings_segment_probe(&input.session_id);
+
+    assemble_statusline(
+        version, project, gh, account, model, ctx, cost, usage, savings,
+    )
 }
 
-/// Join the eight statusline segments in spec order, omitting absent ones.
+/// Join the nine statusline segments in spec order, omitting absent ones.
 ///
-/// Why (#2011 follow-up, extended #2140 and #6304): separating ORDER + JOIN
-/// from the I/O-bound probes that produce each segment value is what makes the
-/// exact layout — `TM <ver> ● | <project> ⎇ <branch> | @<gh> | ✻<account> |
-/// <model> | ctx% | <cost> | <usage>` — pinned by a deterministic test using
-/// hand-supplied synthetic strings. Without this split, a future refactor could
-/// transpose or silently drop a middle segment and no test would catch it.
-/// What: takes the eight segments in fixed spec order (`version` is always
+/// Why (#2011 follow-up, extended #2140, #6304 and #6958): separating ORDER +
+/// JOIN from the I/O-bound probes that produce each segment value is what makes
+/// the exact layout — `TM <ver> ● | <project> ⎇ <branch> | @<gh> | ✻<account> |
+/// <model> | ctx% | <cost> | <usage> | <savings>` — pinned by a deterministic
+/// test using hand-supplied synthetic strings. Without this split, a future
+/// refactor could transpose or silently drop a middle segment and no test would
+/// catch it.
+/// What: takes the nine segments in fixed spec order (`version` is always
 /// present; the rest are `Option<String>`), filters out `None`s, and joins the
 /// survivors with ` | `. Pure — no I/O, no panics.
 /// Test: `assemble_statusline_full_payload_pins_order_and_format`,
@@ -183,12 +195,23 @@ fn assemble_statusline(
     ctx: Option<String>,
     cost: Option<String>,
     usage: Option<String>,
+    savings: Option<String>,
 ) -> String {
-    [Some(version), project, gh, account, model, ctx, cost, usage]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" | ")
+    [
+        Some(version),
+        project,
+        gh,
+        account,
+        model,
+        ctx,
+        cost,
+        usage,
+        savings,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" | ")
 }
 
 /// Build the leading `TM <ver> ●` segment as a link to the trusty-console.
@@ -443,10 +466,11 @@ mod tests {
             Some("ctx 41%".to_string()),
             Some("$1.23".to_string()),
             Some("\u{23f3}24% \u{1f4c5}41%".to_string()),
+            Some("\u{1f4b8}~$0.42".to_string()),
         );
         assert_eq!(
             out,
-            "TM 1.2.3 \u{25cf} | bobmatnyc/trusty-tools \u{2387} main | @bobmatnyc | \u{273b}someone@example.com | Claude Sonnet 4.6 | ctx 41% | $1.23 | \u{23f3}24% \u{1f4c5}41%"
+            "TM 1.2.3 \u{25cf} | bobmatnyc/trusty-tools \u{2387} main | @bobmatnyc | \u{273b}someone@example.com | Claude Sonnet 4.6 | ctx 41% | $1.23 | \u{23f3}24% \u{1f4c5}41% | \u{1f4b8}~$0.42"
         );
     }
 
@@ -469,17 +493,18 @@ mod tests {
             Some("CTX".to_string()),
             Some("COST".to_string()),
             Some("USAGE".to_string()),
+            Some("SAVINGS".to_string()),
         );
         assert_eq!(
             out,
-            "VERSION | PROJECT | GH | ACCOUNT | MODEL | CTX | COST | USAGE"
+            "VERSION | PROJECT | GH | ACCOUNT | MODEL | CTX | COST | USAGE | SAVINGS"
         );
         assert_eq!(
             out.split(" | ").collect::<Vec<_>>(),
             vec![
-                "VERSION", "PROJECT", "GH", "ACCOUNT", "MODEL", "CTX", "COST", "USAGE"
+                "VERSION", "PROJECT", "GH", "ACCOUNT", "MODEL", "CTX", "COST", "USAGE", "SAVINGS"
             ],
-            "segment order must exactly match [version, project, gh, account, model, ctx, cost, usage]"
+            "segment order must exactly match [version, project, gh, account, model, ctx, cost, usage, savings]"
         );
     }
 
@@ -492,6 +517,7 @@ mod tests {
         // All optional segments absent → only the lead-in segment appears.
         let out = assemble_statusline(
             "TM 1.2.3".to_string(),
+            None,
             None,
             None,
             None,
@@ -512,6 +538,7 @@ mod tests {
             Some("model".to_string()),
             None,
             Some("$0.50".to_string()),
+            None,
             None,
         );
         assert_eq!(out, "TM 1.2.3 | proj | model | $0.50");

@@ -153,6 +153,19 @@ tm tui
 tm telegram pair
 ```
 
+### Cost savings on the statusline
+
+The `tm statusline` bar ends with a 💸 segment estimating what the harness
+saved this session by not sending tokens — instruction sources folded into one
+compiled prompt, and (once the shunt lands) bulk reads diverted to a worker.
+It reads `💸~$0.36`, or `💸~5k tok` below a cent, and is absent entirely when
+nothing has been recorded. It never renders `$0.00`.
+
+Rows live in `~/.trusty-mpm/usage/savings.jsonl` and are folded at read time.
+The figure is an estimate, and it is NOT subtractable from the cost segment
+beside it. Mechanism, per-technique basis, and how to read the ledger:
+[docs/trusty-mpm/statusline-savings.md](../../docs/trusty-mpm/statusline-savings.md).
+
 ## GUI Note
 
 The Tauri desktop GUI lives in the separate `trusty-mpm-gui` crate (it owns

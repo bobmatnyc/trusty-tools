@@ -26,6 +26,10 @@ pub(crate) mod banner;
 pub(crate) mod compress;
 pub(crate) mod daemon;
 pub(crate) mod delete;
+// #6887: the bulk-read diversion hook and its cheap worker.
+pub(crate) mod divert;
+pub(crate) mod divert_check;
+pub(crate) mod divert_worker;
 // #4230: the client-side orphan-daemon check — the daemon's own `run_doctor`
 // cannot detect that the process answering it is the unsupervised one.
 // #6892: the machine-wide builder-slot row — holders, the cap, and a Warn

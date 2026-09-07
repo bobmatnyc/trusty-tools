@@ -495,6 +495,12 @@ pub(crate) enum Command {
     /// failures and missing env vars degrade silently so a hook firing during
     /// a daemon restart never blocks the user's prompt.
     ///
+    /// `--divert-check` (issue #6887) switches it into bulk-read diversion
+    /// mode: it reads the same `PreToolUse` payload, and denies a `Read` or a
+    /// `cat`/`head`/`tail` of a file at or over the configured line threshold —
+    /// but ONLY when a worker credential is plausibly present, so a block never
+    /// strands the agent. See `commands::divert_check`.
+    ///
     /// `--pm-guard` (issue #1977) switches this invocation into PM-enforcement
     /// mode instead of the observability relay: it reads the `PreToolUse` stdin
     /// payload, classifies the tool locally (no daemon round-trip), and emits a
@@ -507,6 +513,23 @@ pub(crate) enum Command {
         /// Run in PM-enforcement mode (blocks direct edits; steers to delegate).
         #[arg(long)]
         pm_guard: bool,
+        /// Run in bulk-read diversion mode (#6887): block an oversized
+        /// `Read`/`cat` and steer the agent to `tm divert bulk-read`.
+        #[arg(long)]
+        divert_check: bool,
+    },
+    /// Bulk-read diversion worker (issue #6887).
+    ///
+    /// Why: a session that reads a 2000-line file pays for every line on its
+    /// own expensive model. `tm hook --divert-check` blocks that read and names
+    /// this command, which answers the question on a CHEAP model instead — the
+    /// #6882 POC measured -45% cost and -54% output tokens for the swap.
+    /// What: the `tm divert <action>` command group (currently `bulk-read`).
+    /// Test: `cli_parses_divert_bulk_read` in `tests.rs`.
+    Divert {
+        /// Action to run.
+        #[command(subcommand)]
+        action: DivertAction,
     },
     /// Deterministic trusty-memory palace maintenance (issue #4837).
     ///

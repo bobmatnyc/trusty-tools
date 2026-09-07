@@ -68,6 +68,21 @@ export interface DocSite {
 	commitSha: string;
 	/** Link totals across the corpus, by class. Build-log evidence. */
 	linkCounts: Record<LinkClass, number>;
+	/**
+	 * The manifest's source→page map, as `resolveLink` consumes it.
+	 *
+	 * Exposed for `$lib/tools/content`, which renders flagship page copy
+	 * through the same pipeline and must resolve a relative link into `docs/`
+	 * to the SAME site route this reader publishes it at. Recomputing the
+	 * manifest there would be a second parse of the boundary file.
+	 */
+	bySource: ReadonlyMap<string, DocPage>;
+	/**
+	 * Every heading id in each published source, so a caller outside this
+	 * module can check an `other.md#fragment` link against the target page.
+	 * `BuiltPage.toc` is not a substitute: it lists h2/h3 only.
+	 */
+	headingIdsBySource: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 let cached: DocSite | undefined;
@@ -128,7 +143,11 @@ export function buildDocSite(repoRootOverride?: string): DocSite {
 		pages,
 		bySlug: new Map(pages.map((page) => [page.slug, page])),
 		commitSha,
-		linkCounts
+		linkCounts,
+		bySource: manifest.bySource,
+		headingIdsBySource: new Map(
+			[...parsed].map(([source, page]) => [source, page.headingIds] as const)
+		)
 	};
 
 	if (repoRootOverride === undefined) cached = site;

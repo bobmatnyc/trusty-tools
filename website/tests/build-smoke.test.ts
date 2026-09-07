@@ -306,6 +306,51 @@ describe('production build', () => {
 		}
 	});
 
+	/**
+	 * Why: the six markdown-driven flagship pages (#6960) can fail in a way no
+	 * other assertion here sees — the shell prerenders, the hero fills from the
+	 * tool record, and the BODY comes out empty because the markdown was not
+	 * read. The Cost savings section is asserted by name on top of that,
+	 * because it arrives through the include directive from a `docs/` file the
+	 * page's own markdown does not otherwise quote: it is the one piece of copy
+	 * that proves the include ran.
+	 * What: for each markdown-driven slug, the rendered body's own prose read
+	 * off the built artifact; then the included section, and the same source
+	 * serving its `/docs` page too.
+	 */
+	it('renders each markdown-driven flagship body from its own source', () => {
+		const opening: Record<string, string> = {
+			'trusty-search': 'Three lanes, one ranking',
+			'trusty-memory': 'A place to put what was learned',
+			'trusty-mpm': 'One binary, one daemon, many sessions',
+			'trusty-analyze': 'A sidecar, on purpose',
+			'trusty-review': 'Context first, opinion second',
+			'trusty-git-analytics': 'Three stages, one command'
+		};
+		for (const [slug, heading] of Object.entries(opening)) {
+			const file = `tools/${slug}.html`;
+			const text = visibleText(readFileSync(path.join(STATIC, file), 'utf8'));
+			expect(text, `${file} is missing its opening section`).toContain(heading);
+		}
+	});
+
+	it('renders the Cost savings section on /tools/trusty-mpm and at /docs', () => {
+		const source = 'docs/trusty-mpm/statusline-savings.md';
+		expect(existsSync(path.join(REPO_ROOT, source)), source).toBe(true);
+
+		const tool = readFileSync(path.join(STATIC, 'tools/trusty-mpm.html'), 'utf8');
+		expect(tool, 'no Cost savings heading on the tool page').toContain('>Cost savings</h2>');
+		expect(visibleText(tool), 'the section rendered as a bare heading').toContain(
+			'statusline is an estimate'
+		);
+		// One <h1> per page: the hero's. An included file's own title is dropped.
+		expect(tool.match(/<h1\b/g) ?? [], 'more than one h1').toHaveLength(1);
+
+		const docs = path.join(STATIC, 'docs/tools/trusty-mpm/statusline-savings.html');
+		expect(existsSync(docs), 'the same source has no /docs page').toBe(true);
+		expect(visibleText(readFileSync(docs, 'utf8'))).toContain('Cost savings');
+	});
+
 	// Why: the failure mode a nested route actually has is a dead link — the
 	// teaser on the tool page points at a route that never prerendered, and
 	// nothing else here reads either file, so the site ships a 404 the build

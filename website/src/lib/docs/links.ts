@@ -27,6 +27,11 @@
  *      is the only way to reach this site's readers with one, so the guard is
  *      against a mistake or a compromised commit, not an untrusted visitor —
  *      still worth stopping the way a broken relative link already does.
+ *   7. root-relative (`/claude-mpm-migration`) → a `docs/` page passes no
+ *      `siteHrefs` and the link fails ABSOLUTE-PATH-LINK, because that source
+ *      is read on GitHub as often as on the site and `/foo` means a different
+ *      thing in each. Site-owned copy (`$lib/tools/content`) passes the routes
+ *      the build knows about; a path outside that set fails UNKNOWN-SITE-ROUTE.
  *
  * Permalink rather than dropping the link: dropping keeps the sentence ("see
  * `docs/specs/foo.md`") while removing every way to act on it, so the reader is
@@ -74,6 +79,16 @@ export interface LinkContext {
 	commitSha: string;
 	/** Heading ids of a published source, for anchor checking. */
 	headingIds: (source: string) => ReadonlySet<string>;
+	/**
+	 * Root-relative site paths this content is allowed to link to, WITHOUT the
+	 * fragment. Omit it — as every `docs/` page does — and a root-relative link
+	 * still fails `ABSOLUTE-PATH-LINK`, because a `docs/` source is read on
+	 * GitHub as often as on the site and `/foo` means a different thing in each.
+	 * Flagship page copy (`$lib/tools/content`) is read only on this site and
+	 * genuinely needs `/claude-mpm-migration`, so it passes the routes the build
+	 * knows about and an unknown one still fails.
+	 */
+	siteHrefs?: ReadonlySet<string>;
 	/** Line in `fromSource` the link sits on, for failure reporting. */
 	line?: number;
 }
@@ -170,12 +185,24 @@ export function resolveLink(raw: string, ctx: LinkContext): LinkOutcome {
 	}
 
 	if (href.startsWith('/')) {
-		return fail(
-			ctx,
-			'ABSOLUTE-PATH-LINK',
-			`\`${href}\` is a root-relative path, which means one thing on GitHub and another on the site`,
-			'write the target relative to this file instead'
-		);
+		const hash = href.indexOf('#');
+		const pathname = hash === -1 ? href : href.slice(0, hash);
+		if (ctx.siteHrefs?.has(pathname)) {
+			return { link: { class: 'site', href, external: false } };
+		}
+		return ctx.siteHrefs
+			? fail(
+					ctx,
+					'UNKNOWN-SITE-ROUTE',
+					`\`${href}\` names no route this site builds`,
+					'link to a route the site prerenders, or use an absolute https:// URL'
+				)
+			: fail(
+					ctx,
+					'ABSOLUTE-PATH-LINK',
+					`\`${href}\` is a root-relative path, which means one thing on GitHub and another on the site`,
+					'write the target relative to this file instead'
+				);
 	}
 
 	const hash = href.indexOf('#');

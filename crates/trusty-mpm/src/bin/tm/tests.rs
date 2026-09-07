@@ -1452,7 +1452,10 @@ fn cli_exact_match_wins_over_prefix_ambiguity() {
     let cli = Cli::try_parse_from(["trusty-mpm", "hook"]).unwrap();
     assert!(matches!(
         cli.command.unwrap(),
-        Command::Hook { pm_guard: false }
+        Command::Hook {
+            pm_guard: false,
+            divert_check: false
+        }
     ));
 
     let cli = Cli::try_parse_from(["trusty-mpm", "hooks", "clean"]).unwrap();

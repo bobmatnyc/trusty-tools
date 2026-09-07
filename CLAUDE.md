@@ -475,11 +475,20 @@ with DIFFERENT update semantics:
   `docs/public-manifest.tsv`. Edit a listed `docs/` file, merge to main, and the
   live site updates. A `PAGE` row naming a missing file FAILS the build; a
   `docs/` file absent from the manifest is never public (allowlist, not a bug).
-- **`/tools/<crate>`** — six hand-authored flagship pages (search, memory, mpm,
-  analyze, review, tga), static prose in `website/src/lib/tools.ts` and
-  `website/src/routes/tools/*/+page.svelte`.
+- **`/tools/<crate>`** — seven flagship pages. Six of them (search, memory, mpm,
+  analyze, review, tga) render their PROSE from markdown at
+  `website/src/content/tools/<slug>.md`, served by the single
+  `website/src/routes/tools/[slug]/` route. To change what one of those pages
+  says, edit that one `.md` file and nothing else. Per-tool FACTS — hero
+  tagline, lede, fact cards, install target, docs link — stay in
+  `website/src/lib/tools.ts`; `trusty-audit` is still a hand-authored
+  `+page.svelte`, because its copy embeds live `CopyButton` components.
+- A flagship page can also pull in a `docs/` file with a
+  `<!-- include: docs/<path>.md -->` line, which is how one source publishes
+  both at `/docs` and inside a flagship page — `/tools/trusty-mpm`'s Cost
+  savings section is `docs/trusty-mpm/statusline-savings.md`.
 - 🔴 **Editing a crate README does NOT update its flagship page** — nothing in
-  the build reads crate READMEs. Update those files by hand.
+  the build reads crate READMEs. Edit `website/src/content/tools/<slug>.md`.
 - Vercel rebuilds only when a push touches `website/`, `docs/`, `Cargo.lock`, or
   `crates/*/Cargo.toml` — not a `README.md` or `CLAUDE.md` change.
 - 🔴 There is no `vercel.json`. Root Directory, "Include source files outside of

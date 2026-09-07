@@ -90,7 +90,10 @@ fn cli_parses_hook() {
     let cli = Cli::try_parse_from(["trusty-mpm", "hook"]).unwrap();
     assert!(matches!(
         cli.command.unwrap(),
-        Command::Hook { pm_guard: false }
+        Command::Hook {
+            pm_guard: false,
+            divert_check: false
+        }
     ));
 }
 
@@ -102,7 +105,10 @@ fn cli_parses_hook_pm_guard() {
     let cli = Cli::try_parse_from(["trusty-mpm", "hook", "--pm-guard"]).unwrap();
     assert!(matches!(
         cli.command.unwrap(),
-        Command::Hook { pm_guard: true }
+        Command::Hook {
+            pm_guard: true,
+            divert_check: false
+        }
     ));
 }
 

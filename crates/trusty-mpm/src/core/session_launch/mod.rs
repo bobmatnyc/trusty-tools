@@ -16,6 +16,8 @@
 
 // #6649: the launch lines an operator sees when an asset tier is not clean.
 mod asset_notices;
+// #6887: the bulk-read diversion `PreToolUse` groups.
+mod divert_hooks;
 /// The ONE way a non-terminal launch path surfaces a `PrepReport`'s findings.
 ///
 /// Why: five spawn paths wrote the same two loops by hand, and a sixth would
@@ -971,7 +973,11 @@ fn prepare_session_inner(
     // #5034: `[hooks] prompt_context = false` suppresses the per-prompt
     // `trusty-memory prompt-context` injection (and strips one a prior launch
     // wrote). Default `true` — every other hook is written either way.
-    let hooks_written = match write_project_hooks(project_dir, config.hooks.prompt_context) {
+    let hooks_written = match write_project_hooks(
+        project_dir,
+        config.hooks.prompt_context,
+        plan.divert_enabled,
+    ) {
         Ok(()) => true,
         Err(err) => {
             tracing::warn!("failed to write trusty-mpm project hooks: {err}");

@@ -20,6 +20,8 @@ mod auth;
 mod catalog;
 mod coordinator;
 mod deliverables;
+// #6887: `tm divert` — the bulk-read worker.
+mod divert;
 mod generate;
 mod hooks;
 mod issue;
@@ -51,6 +53,7 @@ pub(crate) use deliverables::{
     DeliverableKindArg, DeliverableStatusArg, DeliverablesAction, EstimationTierArg,
     MilestonesAction,
 };
+pub(crate) use divert::DivertAction;
 pub(crate) use generate::GenerateAction;
 pub(crate) use hooks::HooksAction;
 pub(crate) use issue::IssueCmd;

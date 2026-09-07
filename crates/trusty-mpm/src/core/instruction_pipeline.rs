@@ -373,7 +373,12 @@ pub fn write_compiled_prompt_to(dest: &std::path::Path, prompt: &str) -> std::io
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(dest, prompt)
+    std::fs::write(dest, prompt)?;
+    // #6958: this is the one choke point that knows both halves of the
+    // instruction fold, so the savings row is recorded here rather than at each
+    // of the three launch paths. Best-effort by contract — see the producer.
+    crate::core::savings_instructions::record_instruction_compression(dest, prompt);
+    Ok(())
 }
 
 /// Compose a project's prompt and refresh its compiled prompt on disk — fatally.
