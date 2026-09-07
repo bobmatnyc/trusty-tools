@@ -20,13 +20,14 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-/// Errors produced by the workspace provisioner.
+/// Errors produced by a [`GitBackend`] operation.
 ///
-/// Why: callers need structured errors to distinguish git failures from
-/// prepare_session failures and I/O errors.
+/// Why: callers need structured errors to distinguish a git failure from an
+/// I/O one. `#[non_exhaustive]` so a future variant is not a breaking change.
 /// What: one variant per failure class.
-/// Test: each variant is exercised by WorkspaceProvisioner unit tests.
+/// Test: each variant is exercised by the catalog-sync tests.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ProvisionError {
     /// The git clone or checkout operation failed.
     #[error("git error: {0}")]
@@ -35,10 +36,6 @@ pub enum ProvisionError {
     /// Directory creation or I/O failed.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-
-    /// The prepare_session step failed.
-    #[error("session preparation failed: {0}")]
-    PrepareSession(String),
 }
 
 /// Trait seam over the git operations catalog sync performs.
@@ -50,7 +47,7 @@ pub enum ProvisionError {
 pub trait GitBackend: Send + Sync {
     /// Clone repo_url at git_ref into target_dir.
     ///
-    /// Why: the provisioner calls this to create an isolated checkout.
+    /// Why: catalog sync calls this to establish the framework catalog checkout.
     /// What: performs git clone --branch git_ref repo_url target_dir (or equivalent).
     /// Test: FakeGitBackend records the call and creates the directory.
     fn clone_repo(
@@ -97,9 +94,9 @@ pub trait GitBackend: Send + Sync {
 /// subprocess. When `git_ref` is blank the `--branch` flag is OMITTED so git
 /// uses the remote's default branch (HEAD) — passing `--branch ""` to git
 /// would produce `fatal: '' is not a valid branch name` and fail.
-/// Test: used in the `#[ignore]` integration test only; unit tests use
-/// `FakeGitBackend`. The empty-ref contract is locked in by
-/// `blank_git_ref_omits_branch_flag` in `workspace.rs` tests.
+/// Test: `default_identity_produces_plain_git_command` and the two
+/// `git_identity_*_applied_to_command` tests; catalog sync exercises the git
+/// calls themselves against a `FakeGitBackend`.
 #[derive(Debug, Clone, Default)]
 pub struct RealGitBackend {
     /// Resolved per-project GitHub identity (#2184): env overrides applied to
@@ -115,9 +112,9 @@ impl RealGitBackend {
     /// Construct a backend bound to a resolved per-project [`GitIdentity`](crate::core::git_identity::GitIdentity)
     /// (#2184).
     ///
-    /// Why: the daemon's `spawn_managed` path resolves ONE identity per spawn
-    /// (via `core::git_identity::resolve_for_config`) and must apply it to
-    /// every git subprocess the provisioner runs for that session.
+    /// Why: a caller resolves ONE identity per project (via
+    /// `core::git_identity::resolve_for_config`) and must apply it to every git
+    /// subprocess this backend runs.
     /// What: stores `identity`; every `GitBackend` method below applies it via
     /// [`Self::command`].
     /// Test: `git_identity_env_applied_to_command`,
@@ -243,7 +240,6 @@ impl GitBackend for RealGitBackend {
             Err(ProvisionError::Git(format!("git reset failed: {stderr}")))
         }
     }
-
 }
 
 /// Fake git backend for unit tests.
@@ -252,7 +248,7 @@ impl GitBackend for RealGitBackend {
 /// What: records clone calls and creates the target directory to simulate a checkout.
 /// Use `new()` for a permissive fake; use `new_strict()` to simulate real `git clone`
 /// exit-128 failures when the target directory already exists.
-/// Test: used by every WorkspaceProvisioner unit test and catalog_sync_idempotent tests.
+/// Test: used by the catalog-sync idempotency tests.
 pub struct FakeGitBackend {
     /// Calls recorded for assertions.
     pub calls: std::sync::Mutex<Vec<(String, String, PathBuf)>>,
@@ -358,7 +354,6 @@ impl GitBackend for FakeGitBackend {
         // Fake: always succeeds — no network or filesystem operation needed.
         Ok(())
     }
-
 }
 
 #[cfg(test)]

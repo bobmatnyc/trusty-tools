@@ -101,7 +101,7 @@ pub mod activity;
 ///
 /// Why: agent sessions must never collide with an operator's live checkout; each
 /// session gets a clean, isolated workspace under `~/.trusty-mpm/workspaces/`.
-/// What: re-exports `WorkspaceProvisioner`, `GitBackend`, `PreparedWorkspace`.
+/// What: re-exports `GitBackend` and its two implementations.
 /// Test: `provisioner::workspace::tests`.
 pub mod provisioner;
 

@@ -107,8 +107,8 @@ fn is_local_workdir_follows_symlinked_dir() {
 /// The local-path spawn path MUST write TASK.md into the workspace when a task
 /// is provided (refs #1693).
 ///
-/// Why: `spawn_managed_local` previously bypassed `WorkspaceProvisioner::provision_in`
-/// (which owns TASK.md writing for clone sessions) and therefore NEVER wrote
+/// Why: the local spawn path previously bypassed the clone provisioner
+/// (which owned TASK.md writing for clone sessions) and therefore NEVER wrote
 /// TASK.md even when the caller supplied `--task "..."`. This test locks in the
 /// fix so both spawn paths produce TASK.md consistently.
 /// What: calls `write_task_md` (the shared helper called by `spawn_managed_local`)
@@ -254,7 +254,7 @@ fn parse_github_path_covers_https_and_ssh_forms() {
 }
 
 /// `workspace_subpath` nests the `owner/repo` identity under the workspace root,
-/// matching the expected `provision_in` `project_dir` argument (#1590).
+/// matching the expected managed-checkout `project_dir` (#1590).
 ///
 /// Why: `tm launch` and `spawn_managed_local` compute `project_dir` via
 /// `workspace_subpath`; this test locks in that the resulting path is

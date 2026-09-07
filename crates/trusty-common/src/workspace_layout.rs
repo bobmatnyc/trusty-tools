@@ -44,7 +44,7 @@
 //! from without a project in hand.
 //!
 //! That argument covers detection only. The CREATION sites
-//! (`inproject::worktree_path_for`, `provisioner::workspace::provision_in`) DO
+//! (`inproject::worktree_path_for`) DO
 //! hold the project checkout and could read its `.trusty-mpm.toml` — but a base
 //! that creation and detection disagree about is worse than either choice alone:
 //! worktrees would be created somewhere the remover, the pruner, the indexer,

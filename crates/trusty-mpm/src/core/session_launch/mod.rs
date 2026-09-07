@@ -440,7 +440,7 @@ pub fn prepare_session_with_repo_url(
 ///
 /// Why: the compiled prompt is now per-SESSION
 /// (`.trusty-mpm/sessions/<id>/INSTRUCTIONS-COMPILED.md`), and the two callers
-/// that provision a managed session — `WorkspaceProvisioner::provision_in` and
+/// that provision a managed session — `inproject::create_session_worktree` and
 /// the daemon's in-project `prepare_inproject_session` — hold that id before
 /// they call here. Without it, preparation would write into the unmanaged
 /// `local` bucket while the spawn (which does know the id) refreshed the real

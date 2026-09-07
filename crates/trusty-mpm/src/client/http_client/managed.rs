@@ -93,8 +93,8 @@ impl DaemonClient {
     /// Spawn a managed session via `POST /api/v1/sessions/managed`.
     ///
     /// Why: provision an isolated workspace and start a harness in it. The
-    /// server handler runs `WorkspaceProvisioner::provision`/`provision_in`
-    /// SYNCHRONOUSLY inside the request (git clone/fetch, worktree add,
+    /// server handler runs `inproject::ensure_base_clone` +
+    /// `create_session_worktree` SYNCHRONOUSLY inside the request (fetch,
     /// agent/skill deploy) for both the clone-based and in-project spawn
     /// paths — a first spawn against a newly-registered project can easily
     /// exceed [`config::DEFAULT_REQUEST_TIMEOUT`]'s 10s client-level default.

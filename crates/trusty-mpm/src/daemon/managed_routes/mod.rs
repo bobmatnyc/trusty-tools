@@ -451,7 +451,7 @@ pub struct AttachCmdResponse {
 /// isolated agent workspace and start a harness in it.
 /// What: in order —
 ///   (a) pre-generates a `ManagedSessionId` so the workspace path can embed it;
-///   (b) provisions an isolated workspace via `WorkspaceProvisioner::provision`
+///   (b) resolves the session's workspace (ADR-0055: an existing local one)
 ///       (clone + prepare_session deploy of agents/skills);
 ///   (c) creates the tmux session via `SessionManager::create_with_id` with
 ///       `cwd = workspace_path` so `tmux new-session -c <workspace>` is issued

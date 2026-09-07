@@ -978,7 +978,7 @@ fn ensure_worktrees_gitignored_idempotent() {
 /// Why: this is the single most important observable gap #1919 identified —
 /// `try_inproject_spawn` (and therefore `ensure_base_clone`) runs from inside
 /// `spawn_managed`'s `is_local_workdir` branch, several layers below any
-/// `emit(...)` call `provision_in` already had; before this fix nothing in
+/// `emit(...)` call the clone provisioner already had; before this fix nothing in
 /// the in-project path announced the clone stage at all.
 /// What: builds a real local source repo (same fixture pattern as
 /// `ensure_base_clone_migrates_old_layout_dir_aside`), calls `ensure_base_clone`

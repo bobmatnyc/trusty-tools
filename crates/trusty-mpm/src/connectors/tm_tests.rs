@@ -13,8 +13,7 @@
 //! What: session-lifecycle-independent tests (unknown-id error mapping,
 //! wrong-`BackendParams` client-side rejection) run first, needing no git
 //! binary. [`create_session_full_lifecycle`] is the one end-to-end test that
-//! exercises the REAL `WorkspaceProvisioner`/`RealGitBackend` path — the
-//! daemon's `spawn_managed_cloned` handler always uses `RealGitBackend`
+//! exercises the REAL daemon spawn path — the handler always uses real git
 //! (`crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs:564`), so a
 //! hermetic spawn test needs a real (but local-only, no network) git repo —
 //! mirroring `tests/session_manager_mvp.rs`'s `live_provision_real_repo`
@@ -421,7 +420,7 @@ async fn create_session_full_lifecycle() {
         );
     }
 
-    // #3965: the REAL `spawn_managed_cloned` handler this test drives also
+    // #3965: the REAL spawn handler this test drives also
     // calls `session_launch::prepare_session_with_repo_url` /
     // `home_trust_seed::preseed_home_trust`, which seed `$HOME/.claude.json`
     // via the REAL process `$HOME` — a DIFFERENT resolution path from the
@@ -447,14 +446,14 @@ async fn create_session_full_lifecycle() {
     // NOT `ConnectorTestKit::assert_basic_lifecycle` (issue #3603 follow-up):
     // that helper's `send_input` step hard-asserts success, which assumes the
     // spawned session reaches `Active`. This test drives the REAL
-    // `spawn_managed_cloned` handler (module docs above), which calls the
+    // spawn handler (module docs above), which calls the
     // REAL `ClaudeCodeAdapter::spawn` — unlike every other tmux operation
     // here, that is NOT faked by `FakeNoopTmuxDriver`, and it resolves an
     // actual `claude` binary on `PATH`/well-known dirs
     // (`ClaudeCodeAdapter::resolve_claude`). On a developer machine with
     // Claude Code installed this succeeds and the record reaches `Active`;
     // on a CI runner with no `claude` binary it fails and
-    // `spawn_managed_cloned` calls `mark_errored`, leaving the record
+    // the spawn handler calls `mark_errored`, leaving the record
     // `Errored`. Before #3603's send_input readiness gate, this test's
     // `assert_basic_lifecycle` call "passed" in BOTH cases only because
     // `send_input` had no Provisioning/Errored guard at all — on an Errored

@@ -9,7 +9,7 @@
 //! local `main` all pointing at the same three-week-old commit. This repo's
 //! `CLAUDE.md` names `origin/<default>` the source of truth for exactly this
 //! reason, and the clone-based sibling path
-//! (`provisioner::workspace::worktree_add`) already fetches before adding.
+//! (`inproject::create_session_worktree`) already fetches before adding.
 //! What: [`resolve`] fetches the repo's actual default branch from `origin`
 //! and returns the ref `git worktree add` should be given, plus whether that
 //! ref is freshly fetched, stale, or absent. Degradation is never silent: a

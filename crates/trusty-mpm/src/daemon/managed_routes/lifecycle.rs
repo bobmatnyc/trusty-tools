@@ -239,7 +239,7 @@ pub async fn spawn_managed(
 
     // Wrap the ENTIRE spawn dispatch — in-project, local-path, AND clone-based
     // — in a `provisioning_stage` scope (issue #1904 stretch goal; #1919 fix).
-    // Before #1919 only the clone-based tail (`spawn_managed_cloned`) was
+    // Before #1919 only the (since removed, ADR-0055) clone-based tail was
     // wrapped here, so the `is_local_workdir` branch below — covering BOTH
     // `spawn_managed_inproject` and `spawn_managed_local` — returned before
     // this scope was ever installed. Since #1916 unified `tm session start`
@@ -372,8 +372,9 @@ fn spawn_task_injection(state: Arc<DaemonState>, record: SessionRecord, inject_f
 /// is derived in exactly ONE place). A failure in detection, name resolution,
 /// or worktree creation is an ERROR when this launch asked for a worktree and
 /// falls through to `spawn_managed_local` only when it did not — see
-/// [`super::managed_checkout::deny_worktree_fallback`]. A remote repo URL (the
-/// common case) falls straight through to `spawn_managed_cloned`.
+/// [`super::managed_checkout::deny_worktree_fallback`]. A `repo_url` that is
+/// not a local directory never reaches here — [`spawn_managed`] refuses it
+/// (ADR-0055).
 ///
 /// The no-worktree branch runs in the MANAGED checkout
 /// (`<workspace-root>/<owner>/<repo>`), not in the launch directory:
@@ -634,9 +635,8 @@ pub use crate::core::local_repo_url::is_local_workdir;
 ///
 /// Why: the agent's initial brief must be available as a file in the workspace
 /// so it can be read without interactive input (closes #1693). This helper is
-/// shared by both the clone path (via `WorkspaceProvisioner::provision_in`) and
-/// the local-path fast path (`spawn_managed_local`) so the two call sites cannot
-/// diverge. Writing is non-fatal: a failed write is logged but never aborts the
+/// shared by the in-project and launch-on-main spawn paths so the call sites
+/// cannot diverge. Writing is non-fatal: a failed write is logged but never aborts the
 /// spawn. Overwrite semantics are intentional — the caller's task always wins.
 /// What: when `task` is non-empty, writes `task` to `<workspace>/TASK.md` and
 /// logs a warning on I/O failure. When `task` is empty, does nothing (avoids
@@ -727,17 +727,16 @@ fn reconnect_candidate(
 /// worktree is inside the base clone dir, which the operator should manage; the
 /// session does NOT own it for decommission purposes).
 ///
-/// #1913: unlike `spawn_managed`'s clone path and `spawn_managed_local`, this
-/// path does not go through `WorkspaceProvisioner::provision_in` (there is no
-/// clone step — the worktree already exists via `try_inproject_spawn` +
+/// #1913: this path performs no clone step of its own — the worktree already
+/// exists via `try_inproject_spawn` +
 /// `reserve_inproject_worktree`), so it must call
 /// [`crate::core::session_launch::prepare_session_with_repo_url`] itself.
 /// Before this fix it never did, so every in-project session silently got no
 /// statusline, no deployed agents/skills, no injected trusty-memory/
 /// trusty-search MCP config, and no merged CLAUDE.md.
 /// What: in order — (1) writes `TASK.md` into the worktree; (2) runs
-/// [`prepare_inproject_session`] (best-effort, mirrors `provision_in`'s
-/// non-fatal error handling); (3) creates the tmux session rooted at the
+/// [`prepare_inproject_session`] (best-effort: a prep failure is a warning,
+/// never a failed spawn); (3) creates the tmux session rooted at the
 /// worktree via `create_with_reserved_name` (issue #2032 — `reserved_name` was
 /// already resolved by `reserve_inproject_worktree` and used to name the
 /// worktree/branch, so this step reuses it verbatim instead of re-deriving);
@@ -789,7 +788,7 @@ async fn spawn_managed_inproject(
     // which gives `tm session ls` useful project context even for in-project
     // sessions that did not clone a fresh workspace. It also doubles as the
     // `repo_url` threaded into `prepare_inproject_session` below, for the same
-    // trusty-memory palace-pinning reason `provision_in` threads its `repo_url`.
+    // trusty-memory palace-pinning reason the session's `repo_url` is threaded.
     let synthetic_repo_url = format!("https://github.com/{owner}/{repo}");
 
     // Prepare the session BEFORE spawning the runtime (#1913). See the
@@ -803,7 +802,7 @@ async fn spawn_managed_inproject(
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&worktree);
     prepare_inproject_session(&fw, session_id, &worktree, &synthetic_repo_url)?;
 
-    // #1919: mirrors `spawn_managed_cloned`'s placement — announce the tmux
+    // #1919: announce the tmux
     // stage right before the record (and its tmux session name) is created.
     emit(ProvisioningStage::CreatingTmuxSession);
     let mgr = state.session_manager().await;
@@ -832,12 +831,12 @@ async fn spawn_managed_inproject(
         warn!(id = %session_id, "spawn_managed (inproject): set_source_id failed: {e}");
     }
 
-    // #3649: mirrors `spawn_managed_cloned`'s identical call.
+    // #3649: see `worktree_ownership::set_worktree_owner_best_effort`.
     mgr.set_worktree_owner_best_effort(session_id, *session_id)
         .await;
 
-    // #3822: mirrors `spawn_managed_cloned`'s identical explicit
-    // spawn-time project registration.
+    // #3822: explicit spawn-time project registration — the one-shot boot
+    // pass never sees a session created after the registry's first touch.
     state
         .project_registry()
         .await
@@ -858,9 +857,9 @@ async fn spawn_managed_inproject(
         warn!(id = %session_id, "spawn_managed (inproject): set_workspace failed: {e}");
     }
 
-    // Deployment-completeness check (#2158, made non-blocking by #2172): see
-    // `spawn_managed_cloned`'s identical check for the full rationale. Reuses
-    // the `fw` already resolved above for `prepare_inproject_session`.
+    // Deployment-completeness check (#2158, made non-blocking by #2172): a
+    // false positive must never withhold the runtime launch. Reuses the `fw`
+    // already resolved above for `prepare_inproject_session`.
     if let Err(reason) =
         ensure_deployment_complete(&fw, &worktree, record.repo_url.as_deref(), session_id)
     {
@@ -1173,8 +1172,8 @@ pub async fn resume_managed(
     // -only, best-effort, never blocks the resume — see
     // `core::session_launch::resume_self_heal` for the full safety contract
     // (never resets the branch, never touches uncommitted changes). This is
-    // the resume-time counterpart to `WorkspaceProvisioner::fetch_and_reset`
-    // for the shared `.base` checkout, closing the gap that let a session
+    // the resume-time counterpart to `GitBackend::fetch_and_reset`
+    // for the shared base checkout, closing the gap that let a session
     // worktree silently drift from `origin/main` forever.
     crate::core::session_launch::resume_self_heal(&workspace, &record.id.to_string()).await;
 
@@ -1186,8 +1185,8 @@ pub async fn resume_managed(
         );
     }
 
-    // Deployment-completeness check (#2158, made non-blocking by #2172): see
-    // `spawn_managed_cloned`'s identical check for the full rationale.
+    // Deployment-completeness check (#2158, made non-blocking by #2172): a
+    // false positive must never withhold the runtime launch.
     // `ensure_deployment_complete` itself no-ops for an unresolved (`/unknown`)
     // workspace — an adopted session with no known cwd is handled separately by
     // the reconcile-on-boot fix, not here.

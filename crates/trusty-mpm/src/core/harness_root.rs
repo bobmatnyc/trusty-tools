@@ -62,7 +62,7 @@ pub const SESSIONS_DIR: &str = "sessions";
 /// BARE repository before rewriting it.
 /// Test: `harness_root_maps_a_base_clone_back_to_the_project`,
 /// `harness_root_for_a_non_bare_repo_named_base_is_itself`,
-/// `provision_in_leaves_an_existing_dot_base_store_untouched`.
+/// `migrate_old_layout_aside_refuses_a_dir_holding_a_dot_base_store`.
 pub(crate) const BASE_CLONE_DIRNAME: &str = ".base";
 
 /// Name the protected state `dir` holds, or `None` when it holds none.

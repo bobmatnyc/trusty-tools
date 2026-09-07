@@ -371,7 +371,7 @@ pub struct SessionRecord {
     /// unconditionally, which deleted a real user repository when the #1502
     /// local-path spawn set `workspace_path` to a pre-existing on-disk directory.
     /// This flag marks ownership: `true` ONLY when the SM provisioned the directory
-    /// via a git clone (the normal `SpawnParams` + `WorkspaceProvisioner` path);
+    /// via a git clone (the pre-ADR-0055 `SpawnParams` clone path);
     /// `false` for local-path spawn (#1502), explicit `adopt_existing` (#1433), and
     /// every legacy record (safe default — prefer NOT deleting over accidental
     /// deletion). The decommission path checks this flag BEFORE calling
@@ -511,7 +511,7 @@ pub struct SessionRecord {
     /// without re-reading a sentinel file for every check. This field is set
     /// to `Some(self.id)` immediately after a session's workspace is
     /// provisioned via [`super::decommission::WORKTREE_SENTINEL_FILE`]'s
-    /// JSON-payload sentinel (`workspace.rs::provision_in`,
+    /// JSON-payload sentinel (`inproject::create_session_worktree`,
     /// `inproject.rs::create_session_worktree`) — see
     /// [`super::SessionManager::set_worktree_owner`].
     ///

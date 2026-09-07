@@ -6,7 +6,7 @@
 //! `config_dir` > `token_env` > `account` precedence chain that turns it into
 //! concrete env overrides for a `gh` subprocess, but that logic originally
 //! lived only in the `tm` binary (`bin/tm/gh_identity.rs`), unreachable from
-//! library code (the daemon's `spawn_managed`/`WorkspaceProvisioner`). #2184
+//! library code (the daemon's `spawn_managed`). #2184
 //! adds a PER-PROJECT `github:` binding (`ProjectConfig::github` /
 //! `Project::github`) that must resolve identically for both the CLI and the
 //! daemon, so the core precedence engine — everything that does NOT depend on

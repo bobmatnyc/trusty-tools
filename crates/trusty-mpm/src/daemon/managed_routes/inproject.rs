@@ -295,8 +295,8 @@ pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), Strin
     // Announce the clone stage (issue #1904, #1919). Placed here — after the
     // idempotent `.git`-exists reuse check above returns early — so the event
     // fires ONLY on an actual first-run clone, mirroring
-    // `WorkspaceProvisioner::provision_in`'s placement (which always clones,
-    // so it emits unconditionally). This is the exact "tm: first run for X —
+    // the (since removed, ADR-0055) clone provisioner's placement, which
+    // always cloned and so emitted unconditionally. This is the exact "tm: first run for X —
     // cloning into ..., this may take a few minutes…" scenario #1904 set out
     // to make observable, and #1919 found it was never wired up here. No-op
     // unless the daemon's `spawn_managed` wrapped this call tree in

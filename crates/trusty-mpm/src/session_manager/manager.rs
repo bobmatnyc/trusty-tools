@@ -1150,7 +1150,7 @@ impl SessionManager {
 
     /// Update a session's workspace path and transition to a new state.
     ///
-    /// Why: after `WorkspaceProvisioner::provision` returns the workspace path
+    /// Why: after the workspace path is resolved
     /// must be persisted so `tm session ls` shows it and `activity` can infer
     /// context.
     /// What: looks up the record, sets `workspace_path` and `state`, and persists.
