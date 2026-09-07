@@ -39,7 +39,10 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use super::helpers::{open_palace_handle, resolve_palace};
+use super::helpers::open_palace_handle;
+// #6318: `palace_verify_embedded` reads, so it falls back to a palace index.
+// `palace_embed_sweep` takes no palace at all, so nothing there changes.
+use super::palace_index::{resolve_palace_or_index, PalaceScope};
 use crate::AppState;
 
 /// Read a palace's coverage into the shape both handlers report.
@@ -99,18 +102,29 @@ fn audit_state(audit: &trusty_common::memory_core::retrieval::AliasAudit) -> &'s
 /// clean, so an id-collision victim (which HAS a vector key and is still
 /// unreachable) cannot pass.
 ///
+/// #6318: this reads, so a call with no `palace` argument and no `--palace`
+/// default succeeds with the palace index instead of erroring. The index is
+/// decided before `drawer_ids` is validated, so a caller who does not yet know
+/// which palace to name learns that first rather than being told its ids are
+/// missing.
+///
 /// # Errors
 ///
-/// When the palace cannot be resolved or opened, or when `drawer_ids` is absent,
-/// empty, or holds a value that is not a UUID. A malformed id is refused rather
-/// than skipped: a caller about to delete files must not have one of its ids
+/// When a NAMED palace cannot be opened, or when `drawer_ids` is absent, empty,
+/// or holds a value that is not a UUID. A malformed id is refused rather than
+/// skipped: a caller about to delete files must not have one of its ids
 /// silently dropped from the answer.
 ///
 /// Test: `verify_embedded_names_the_unembedded_id`,
 /// `verify_embedded_separates_an_unknown_id_from_an_unembedded_one`,
-/// `verify_embedded_refuses_a_malformed_id`.
+/// `verify_embedded_refuses_a_malformed_id`,
+/// `every_read_tool_returns_an_index_with_no_palace`.
 pub(crate) async fn handle_palace_verify_embedded(state: &AppState, args: Value) -> Result<Value> {
-    let palace = resolve_palace(state, &args, "palace_verify_embedded")?;
+    // #6318: no palace and no default is answered with an index, not an error.
+    let palace = match resolve_palace_or_index(state, &args, "palace_verify_embedded").await? {
+        PalaceScope::Palace(p) => p,
+        PalaceScope::Index(index) => return Ok(index),
+    };
     let raw = args
         .get("drawer_ids")
         .and_then(|v| v.as_array())

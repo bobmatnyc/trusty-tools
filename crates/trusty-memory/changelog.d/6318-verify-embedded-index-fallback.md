@@ -1,0 +1,6 @@
+Changed
+
+- **`palace_verify_embedded` called with no palace now returns the same palace index the other read tools return.** It was the one palace-scoped READ tool left out of the first wave, because `embed_audit.rs` was being changed concurrently; it now calls the same `resolve_palace_or_index` helper and answers a call with no `palace` argument and no `--palace` default with a successful, structured index — every palace on the host, ordered most-recently-used first, with drawer / room / wing counts, a row per room, and a `hint` naming the retry. Before this it returned `Err("palace_verify_embedded: missing 'palace' (no --palace default configured)")` (owner ruling 2026-08-27, [#6318](https://github.com/bobmatnyc/trusty-tools/issues/6318))
+  - The index is decided before `drawer_ids` is validated, so a caller who does not yet know which palace to name is told which palaces exist rather than that its ids are missing
+  - `palace` is gone from the tool's `inputSchema` `required` list on both schema branches, so a compliant MCP client can omit it; `drawer_ids` stays required
+  - Behaviour with an explicit or a defaulted palace is unchanged, and `palace_embed_sweep` — which never took a palace — is untouched. A `verified: true` gate cannot be passed by an index, so `tm memory import --refresh` still fails closed
