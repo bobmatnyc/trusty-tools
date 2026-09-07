@@ -637,7 +637,19 @@ async fn parity_sessions_reap_removes_the_dead_and_spares_the_live_on_both_trans
     }
 }
 
+/// Why serial (#7047): `discover_all` recomputes
+/// `host_state_gate::host_state_access_for_root` per call, reading the process
+/// `$HOME` each time, and returns the verdict's sentence in the response's
+/// `skipped` field. This case calls it twice; ~24 other test modules in this
+/// binary reassign `$HOME` process-wide. One landing between the two calls
+/// makes the socket answer the #5784 scratch-`$HOME` sentence while HTTP
+/// answered the #6348 scratch-data-root one — a comparison that fails on the
+/// environment moving, not on the transports differing. Same reason, and the
+/// same shared default group, as
+/// [`parity_sessions_reap_removes_the_dead_and_spares_the_live_on_both_transports`].
 /// Test: this function IS the test.
+// #7047: $HOME is process-global; both calls must read one value.
+#[serial_test::serial]
 #[tokio::test]
 async fn parity_sessions_discover_agrees_across_transports() {
     let (state, _dir) = hermetic();
