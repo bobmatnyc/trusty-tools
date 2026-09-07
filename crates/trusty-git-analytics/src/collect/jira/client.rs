@@ -41,6 +41,15 @@ const USER_AGENT_VALUE: &str = "trusty-git-analytics/0.1";
 /// Page size for JQL search pagination.
 const SEARCH_PAGE_SIZE: usize = 50;
 
+/// Extra pages [`JiraClient::search_issues`] will follow beyond the ideal
+/// page count before declaring the server's cursor runaway.
+///
+/// `/rest/api/3/search/jql` reports no total and may return a short page with
+/// more to come (#6812), so the only thing left to bound the loop is a page
+/// budget: a server that hands out a continuation token with every empty page
+/// would otherwise never terminate it.
+const SEARCH_PAGE_BUDGET_SLACK: usize = 8;
+
 /// Async JIRA Cloud / Server client.
 pub struct JiraClient {
     client: reqwest::Client,
@@ -120,18 +129,24 @@ struct MyselfResponse {
     time_zone: Option<String>,
 }
 
-/// Wire shape of a JQL search response.
+/// Wire shape of a `POST /rest/api/3/search/jql` response.
 ///
-/// `startAt` is deliberately NOT modelled: the client tracks its own offset.
-/// Deriving the next offset from the server's echo is unsafe under
-/// `#[serde(default)]`, which silently yields `0` when the field is absent —
-/// pinning the loop on page 2 forever. The `/search/jql` successor endpoint
-/// omits `startAt` entirely, so this is a live hazard, not a hypothetical.
+/// Neither `startAt` nor `total` exists on this endpoint. Atlassian removed
+/// `/rest/api/3/search` — it answers HTTP 410 (CHANGE-2046, issue #6812) —
+/// and its successor paginates by an opaque `nextPageToken` and reports no
+/// result count. A caller that needs a count asks
+/// `POST /rest/api/3/search/approximate-count` instead; this client needs
+/// none, because [`JiraClient::search_issues`] is bounded by the caller's own
+/// `max_results` and was only ever reading `total` to decide when to stop.
+///
+/// `nextPageToken` is absent (or `null`) on the last page, and that is the
+/// only end-of-results signal the endpoint gives: it may return fewer items
+/// than the requested `maxResults` while more pages remain.
 #[derive(Debug, Deserialize)]
 struct SearchResponse {
     issues: Vec<ApiIssue>,
-    #[serde(default)]
-    total: u64,
+    #[serde(rename = "nextPageToken", default)]
+    next_page_token: Option<String>,
 }
 
 impl JiraClient {
@@ -308,17 +323,24 @@ impl JiraClient {
     /// Why: many JIRA workflows (sprint rollups, ticket-id enrichment for
     /// commit messages) need bulk reads; single-issue fetches would be O(N)
     /// HTTP round-trips.
-    /// What: `POST /rest/api/3/search` with `{ jql, startAt, maxResults }`,
-    /// loops until either `max_results` issues are collected or the server
-    /// reports no more pages.
-    /// Test: covered by `jira_search_response_deserializes` (wire shape).
+    /// What: `POST /rest/api/3/search/jql` with
+    /// `{ jql, maxResults, nextPageToken, fields }`, following the server's
+    /// `nextPageToken` until it is absent or `max_results` issues are held.
+    /// The retired `/rest/api/3/search` took a `startAt` offset and reported
+    /// a `total`; its replacement has neither (#6812), so the loop terminates
+    /// on the token alone.
+    /// Test: `jira_search_response_deserializes` (wire shape),
+    /// `search_issues_posts_to_the_jql_endpoint`,
+    /// `search_issues_follows_the_next_page_token`.
     ///
     /// # Errors
     ///
     /// - [`CollectError::Http`] on transport / non-success HTTP responses.
     /// - [`CollectError::Json`] on payload parse failures.
+    /// - [`CollectError::PagingBudgetExceeded`] when the server keeps issuing
+    ///   continuation tokens past the page budget.
     pub async fn search_issues(&self, jql: &str, max_results: usize) -> Result<Vec<JiraIssue>> {
-        let url = format!("{}/rest/api/3/search", self.base_url);
+        let url = format!("{}/rest/api/3/search/jql", self.base_url);
         let story_field = self.get_story_point_field().await?;
         // Request the story-point field explicitly when we know its key so
         // JIRA includes it; otherwise rely on `*all` to get every field.
@@ -332,41 +354,51 @@ impl JiraClient {
             None => vec!["*all".into()],
         };
 
+        let max_pages = max_results.div_ceil(SEARCH_PAGE_SIZE) + SEARCH_PAGE_BUDGET_SLACK;
         let mut out: Vec<JiraIssue> = Vec::new();
-        let mut start_at = 0u64;
+        let mut next_page_token: Option<String> = None;
+        let mut pages = 0usize;
         loop {
             let remaining = max_results.saturating_sub(out.len());
             if remaining == 0 {
                 break;
             }
             let page_size = remaining.min(SEARCH_PAGE_SIZE);
-            let body = json!({
+            let mut body = json!({
                 "jql": jql,
-                "startAt": start_at,
                 "maxResults": page_size,
                 "fields": fields,
             });
-            debug!(url = %url, %jql, start_at, "POST");
+            if let Some(token) = &next_page_token {
+                body["nextPageToken"] = Value::String(token.clone());
+            }
+            debug!(url = %url, %jql, paged = next_page_token.is_some(), "POST");
             let mut req = self.client.post(&url).json(&body);
             if let Some((user, token)) = &self.credentials {
                 req = req.basic_auth(user, Some(token));
             }
             let resp = req.send().await?.error_for_status()?;
             let parsed: SearchResponse = resp.json().await?;
-            let n = parsed.issues.len();
+            pages += 1;
             for issue in parsed.issues {
                 out.push(Self::convert_issue(issue, story_field.as_deref()));
                 if out.len() >= max_results {
                     break;
                 }
             }
-            if n < page_size {
+            // An absent token is the endpoint's only end-of-results signal:
+            // a short page no longer proves one (#6812).
+            let Some(token) = parsed.next_page_token else {
                 break;
+            };
+            if pages >= max_pages {
+                return Err(CollectError::PagingBudgetExceeded {
+                    endpoint: "search/jql",
+                    key: jql.to_string(),
+                    pages,
+                });
             }
-            start_at += n as u64;
-            if start_at >= parsed.total {
-                break;
-            }
+            next_page_token = Some(token);
         }
         Ok(out)
     }
@@ -446,16 +478,19 @@ impl JiraClient {
     /// issue's changelog `histories` inline, avoiding an N+1 per-issue
     /// `/changelog` call for the common case.
     ///
-    /// What: `POST /rest/api/3/search` with
-    /// `{ jql, startAt, maxResults, fields: ["project", "updated"],
-    /// expand: ["changelog"] }`, looping until `max_results` issues are
-    /// collected or the server reports no more pages. Each returned
+    /// What: `POST /rest/api/3/search/jql` with
+    /// `{ jql, maxResults, nextPageToken, fields: ["project", "updated"],
+    /// expand: "changelog" }`, looping until `max_results` issues are
+    /// collected or the server returns no continuation token. Atlassian
+    /// removed `/rest/api/3/search` (HTTP 410, CHANGE-2046, #6812); its
+    /// replacement takes `expand` as a comma-delimited string rather than an
+    /// array, and has no `startAt`. Each returned
     /// [`ChangelogIssue`] carries only the `status`-field changelog items;
     /// all other changelog item kinds (e.g. `assignee`, `priority`) are
     /// dropped since only status transitions are in scope for this fact
     /// table.
     ///
-    /// Pagination is **keyset**, not offset: the caller passes the sync
+    /// Pagination is **keyset**, not server-position: the caller passes the sync
     /// [`SyncScope`] rather than a pre-built JQL string so each page can
     /// re-anchor the `updated >=` window onto the previous page's maximum.
     /// Offset paging over `ORDER BY updated ASC` — paging on the same
@@ -496,7 +531,7 @@ impl JiraClient {
         scope: &SyncScope,
         max_results: usize,
     ) -> Result<ChangelogWalk> {
-        let url = format!("{}/rest/api/3/search", self.base_url);
+        let url = format!("{}/rest/api/3/search/jql", self.base_url);
         let fields = vec!["project".to_string(), "updated".to_string()];
         // Every JQL bound this walk emits — the initial scope and every
         // re-anchor — must be rendered in the account's zone, or the window
@@ -525,20 +560,25 @@ impl JiraClient {
                 },
                 tz,
             )?;
-            let body = json!({
+            let mut body = json!({
                 "jql": jql,
-                "startAt": request.start_at,
                 "maxResults": page_size,
                 "fields": fields,
-                "expand": ["changelog"],
+                // `/search/jql` reads `expand` as a comma-delimited string;
+                // the array the retired `/search` took is rejected there.
+                "expand": "changelog",
             });
-            debug!(url = %url, %jql, start_at = request.start_at, "POST (with changelog)");
+            if let Some(token) = &request.next_page_token {
+                body["nextPageToken"] = Value::String(token.clone());
+            }
+            debug!(url = %url, %jql, paged = request.next_page_token.is_some(), "POST (with changelog)");
             let parsed: ChangelogSearchResponse =
                 with_retry("search_with_changelog", &self.retry, &self.budget, || {
                     self.post(&url, &body)
                 })
                 .await?;
 
+            let next_page_token = parsed.next_page_token;
             // Conversion is pure — `from_api` records the truncation verdict
             // (issue #4084) but issues no request, so nothing in this walk can
             // fail on a single ticket's account.
@@ -548,7 +588,7 @@ impl JiraClient {
                 .map(ChangelogIssue::from_api)
                 .collect();
             let items: Vec<PagedItem> = issues.iter().map(|i| (i.key.clone(), i.updated)).collect();
-            let step = pager.record_page(&items, page_size);
+            let step = pager.record_page(&items, next_page_token.as_deref());
 
             for (issue, is_new) in issues.into_iter().zip(step.is_new) {
                 if !is_new {

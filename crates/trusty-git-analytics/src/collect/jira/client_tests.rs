@@ -10,17 +10,20 @@ use super::*;
 // exercising them stayed here.
 use crate::collect::jira::model::*;
 
-/// Confirm a JQL search response shape parses end-to-end.
+/// Confirm a `/rest/api/3/search/jql` response shape parses end-to-end.
 ///
-/// Why: `search_issues` terminates on `total`; if JIRA renames it our loop
-/// terminates incorrectly. `startAt` is deliberately not modelled (the
-/// client tracks its own offset), so an unmodelled `startAt` in the payload
-/// must simply be ignored rather than breaking the parse.
-/// What: parse a representative search payload with one issue.
-/// Test: assert `total` and inner issue fields all populate.
+/// Why: `search_issues` terminates on `nextPageToken`; if that field does not
+/// bind, every walk ends after one page and the loop reports a silent
+/// truncation as success. The retired `/rest/api/3/search` envelope's
+/// `startAt` and `total` are still accepted-and-ignored, so a JIRA Server/DC
+/// instance answering the old shape cannot break the parse.
+/// What: parse a representative search payload with one issue and a token.
+/// Test: assert the token and inner issue fields all populate.
 #[test]
 fn jira_search_response_deserializes() {
     let json = r#"{
+        "isLast": false,
+        "nextPageToken": "CAEaAggD",
         "startAt": 0,
         "total": 1,
         "issues": [
@@ -36,7 +39,7 @@ fn jira_search_response_deserializes() {
         ]
     }"#;
     let resp: SearchResponse = serde_json::from_str(json).expect("parses");
-    assert_eq!(resp.total, 1);
+    assert_eq!(resp.next_page_token.as_deref(), Some("CAEaAggD"));
     assert_eq!(resp.issues.len(), 1);
     let issue = JiraClient::convert_issue(
         resp.issues.into_iter().next().expect("one"),
@@ -345,6 +348,10 @@ mod paged_http {
 
     use crate::collect::jira::retry::RetryPolicy;
 
+    /// `(jql, nextPageToken)` recorded for each search request a fixture
+    /// serves, shared with the test that asserts over them.
+    type RecordedSearches = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
     fn fast_retry() -> RetryPolicy {
         RetryPolicy {
             max_attempts: 3,
@@ -386,41 +393,44 @@ mod paged_http {
     /// Page 1 (no `updated >=` bound) returns PROJ-1..PROJ-50. Between pages,
     /// PROJ-3 is "edited" and re-sorts to the very end of the result set —
     /// the exact mutation that made offset pagination skip a ticket.
+    ///
+    /// Each request is recorded as `(jql, nextPageToken)` so the test can
+    /// assert both that the window re-anchored and that the token from the
+    /// previous query was not carried into it (#6812).
     struct ShiftingChangelog {
-        seen: Arc<Mutex<Vec<(String, u64)>>>,
+        seen: RecordedSearches,
     }
 
     impl Respond for ShiftingChangelog {
         fn respond(&self, request: &Request) -> ResponseTemplate {
             let body: serde_json::Value = serde_json::from_slice(&request.body).expect("json body");
             let jql = body["jql"].as_str().unwrap_or_default().to_string();
-            let start_at = body["startAt"].as_u64().unwrap_or_default();
-            self.seen
-                .lock()
-                .expect("lock")
-                .push((jql.clone(), start_at));
+            let token = body["nextPageToken"].as_str().map(str::to_string);
+            self.seen.lock().expect("lock").push((jql.clone(), token));
 
             if !jql.contains("updated >=") {
-                // First page: the unbounded window, 50 issues (a full page).
+                // First page: the unbounded window, 50 issues, with a token
+                // saying more remains.
                 let issues: Vec<serde_json::Value> = (1..=50)
                     .map(|i| issue(&format!("PROJ-{i}"), &at_minute(i)))
                     .collect();
-                return ResponseTemplate::new(200).set_body_json(json!({"issues": issues}));
+                return ResponseTemplate::new(200)
+                    .set_body_json(json!({"issues": issues, "nextPageToken": "page-2"}));
             }
 
             // Second page: the re-anchored window `updated >= 00:50`. Its
             // full contents are PROJ-50 (the boundary minute we already
             // hold), the unread tail, and PROJ-3 — which now sorts at the
-            // very end because of its mid-walk edit. The client's offset
-            // skips the boundary item; PROJ-3 must be deduplicated.
-            let mut issues: Vec<serde_json::Value> = vec![
+            // very end because of its mid-walk edit. Both repeats must be
+            // deduplicated by key, since the new window is read from its
+            // first page and `/search/jql` offers nothing to skip with.
+            let issues: Vec<serde_json::Value> = vec![
                 issue("PROJ-50", &at_minute(50)),
                 issue("PROJ-51", &at_minute(51)),
                 issue("PROJ-52", &at_minute(52)),
                 issue("PROJ-53", &at_minute(53)),
                 issue("PROJ-3", "2026-01-01T09:00:00.000+0000"),
             ];
-            issues.drain(..(start_at as usize).min(issues.len()));
             ResponseTemplate::new(200).set_body_json(json!({"issues": issues}))
         }
     }
@@ -437,7 +447,7 @@ mod paged_http {
         let server = MockServer::start().await;
         let seen = Arc::new(Mutex::new(Vec::new()));
         Mock::given(method("POST"))
-            .and(path("/rest/api/3/search"))
+            .and(path("/rest/api/3/search/jql"))
             .respond_with(ShiftingChangelog {
                 seen: Arc::clone(&seen),
             })
@@ -484,8 +494,9 @@ mod paged_http {
             requests[1].0
         );
         assert_eq!(
-            requests[1].1, 1,
-            "only the single item already held from the 00:50 minute is skipped"
+            requests[1].1, None,
+            "a continuation token addresses a position in the query that issued \
+             it, so re-anchoring the window must drop it"
         );
     }
 
@@ -991,6 +1002,153 @@ mod paged_http {
         }
     }
 
+    // ---- `/rest/api/3/search/jql` migration (issue #6812) ---------------
+
+    /// A minimal issue payload for the plain `search_issues` walk.
+    fn search_issue(key: &str) -> serde_json::Value {
+        json!({
+            "key": key,
+            "fields": {
+                "summary": "Fix bug",
+                "status": {"name": "Done"},
+                "issuetype": {"name": "Bug"},
+            }
+        })
+    }
+
+    /// Mount the story-point field lookup `search_issues` makes before its
+    /// first page. An empty list means "no story-point field on this
+    /// instance", which keeps these fixtures about pagination.
+    async fn mount_empty_field_list(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/field"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(server)
+            .await;
+    }
+
+    /// The regression: Atlassian removed `/rest/api/3/search` and answers it
+    /// with HTTP 410 (CHANGE-2046), so `tga jira sync` wrote zero rows while
+    /// only `tga jira freshness` noticed.
+    ///
+    /// Only `/search/jql` is mounted, so a client still posting to the
+    /// retired path gets wiremock's 404 and this fails — which is what it
+    /// does on `origin/main`.
+    #[tokio::test]
+    async fn search_issues_posts_to_the_jql_endpoint() {
+        let server = MockServer::start().await;
+        mount_empty_field_list(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/rest/api/3/search/jql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "issues": [search_issue("PROJ-1")],
+            })))
+            .mount(&server)
+            .await;
+
+        let issues = client_for(&server)
+            .search_issues("project = PROJ", 10)
+            .await
+            .expect("the search must reach the endpoint Atlassian still serves");
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].key, "PROJ-1");
+    }
+
+    /// Serves two token-paginated pages, recording the `nextPageToken` each
+    /// request carried. Page 1 is deliberately SHORT (one issue against a
+    /// 50-item `maxResults`) — `/search/jql` may do that with more pages to
+    /// come, so a walk that stopped on page length would lose PROJ-2.
+    struct TokenPaged {
+        seen: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    impl Respond for TokenPaged {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).expect("json body");
+            let token = body["nextPageToken"].as_str().map(str::to_string);
+            self.seen.lock().expect("lock").push(token.clone());
+            match token.as_deref() {
+                None => ResponseTemplate::new(200).set_body_json(json!({
+                    "issues": [search_issue("PROJ-1")],
+                    "nextPageToken": "page-2",
+                })),
+                Some("page-2") => ResponseTemplate::new(200).set_body_json(json!({
+                    "issues": [search_issue("PROJ-2")],
+                    "isLast": true,
+                })),
+                Some(other) => panic!("unexpected continuation token: {other}"),
+            }
+        }
+    }
+
+    /// The new pagination contract end to end: follow `nextPageToken` until
+    /// the server stops returning one, and send the token back verbatim.
+    #[tokio::test]
+    async fn search_issues_follows_the_next_page_token() {
+        let server = MockServer::start().await;
+        mount_empty_field_list(&server).await;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        Mock::given(method("POST"))
+            .and(path("/rest/api/3/search/jql"))
+            .respond_with(TokenPaged {
+                seen: Arc::clone(&seen),
+            })
+            .mount(&server)
+            .await;
+
+        let issues = client_for(&server)
+            .search_issues("project = PROJ", 10)
+            .await
+            .expect("search succeeds");
+
+        let keys: Vec<&str> = issues.iter().map(|i| i.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["PROJ-1", "PROJ-2"],
+            "a short first page carrying a token must not end the walk"
+        );
+        assert_eq!(
+            seen.lock().expect("lock").clone(),
+            vec![None, Some("page-2".to_string())],
+            "page 2 must carry the token page 1 returned, unaltered"
+        );
+    }
+
+    /// The same path regression for the walk `tga jira sync` actually runs.
+    /// Mounting only `/search/jql` makes a client still posting to the
+    /// retired `/rest/api/3/search` fail here, as it does on `origin/main`.
+    #[tokio::test]
+    async fn changelog_walk_posts_to_the_jql_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rest/api/3/search/jql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_body(1, vec![newest()])))
+            .mount(&server)
+            .await;
+
+        let walk = client_for(&server)
+            .search_with_changelog(&scope(), 10)
+            .await
+            .expect("the sync walk must reach the endpoint Atlassian still serves");
+
+        assert_eq!(walk.issues.len(), 1);
+        let requests = server.received_requests().await.expect("recorded");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/rest/api/3/search/jql");
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("json body");
+        assert_eq!(
+            body["expand"],
+            json!("changelog"),
+            "`/search/jql` reads `expand` as a comma-delimited string, not the \
+             array the retired `/search` took"
+        );
+        assert!(
+            body.get("startAt").is_none(),
+            "the replacement endpoint has no offset parameter: {body}"
+        );
+    }
+
     /// Count how many requests the mock server saw for a path suffix.
     async fn hits(server: &MockServer, suffix: &str) -> usize {
         server
@@ -1013,7 +1171,7 @@ mod paged_http {
     async fn search_with_changelog_flags_a_truncated_embedded_changelog() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/rest/api/3/search"))
+            .and(path("/rest/api/3/search/jql"))
             // Claims 3 entries; embeds only the newest.
             .respond_with(ResponseTemplate::new(200).set_body_json(search_body(3, vec![newest()])))
             .mount(&server)
@@ -1043,7 +1201,7 @@ mod paged_http {
     async fn search_with_changelog_does_not_flag_a_complete_embedded_changelog() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/rest/api/3/search"))
+            .and(path("/rest/api/3/search/jql"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(search_body(2, vec![middle(), newest()])),
             )
@@ -1077,7 +1235,7 @@ mod paged_http {
             }]
         });
         Mock::given(method("POST"))
-            .and(path("/rest/api/3/search"))
+            .and(path("/rest/api/3/search/jql"))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .mount(&server)
             .await;
@@ -1310,7 +1468,7 @@ mod paged_http {
     async fn a_broken_changelog_endpoint_does_not_abort_the_search_walk() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/rest/api/3/search"))
+            .and(path("/rest/api/3/search/jql"))
             .respond_with(ResponseTemplate::new(200).set_body_json(search_body(3, vec![newest()])))
             .mount(&server)
             .await;
@@ -1344,7 +1502,7 @@ mod paged_http {
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/rest/api/3/search"))
+            .and(path("/rest/api/3/search/jql"))
             // `newest()` appears in BOTH the embedded page and the full walk.
             .respond_with(ResponseTemplate::new(200).set_body_json(search_body(3, vec![newest()])))
             .mount(&server)

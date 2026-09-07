@@ -171,7 +171,9 @@ pub enum CollectError {
     /// A paged JIRA walk did not terminate within its page budget.
     ///
     /// Why: every termination condition on a paged walk trusts the server to
-    /// honour `startAt` or to eventually return an empty page. One that
+    /// honour its own pagination — `startAt` on the comment endpoint, the
+    /// `nextPageToken` cursor on `/search/jql` (#6812) — or to eventually
+    /// stop offering another page. One that
     /// replays the same page forever satisfies neither, and these walks run
     /// once per ticket across a window of up to 10,000 tickets. Surfacing a
     /// runaway as an error keeps it a bounded, named failure instead of a
@@ -179,12 +181,13 @@ pub enum CollectError {
     /// produced — it can never be mistaken for a complete result.
     #[error(
         "JIRA {endpoint} paging for {key} did not terminate within {pages} pages; \
-         the server is not honouring `startAt`"
+         the server is not advancing its pagination"
     )]
     PagingBudgetExceeded {
         /// Short name of the endpoint being walked, e.g. `changelog`.
         endpoint: &'static str,
-        /// JIRA issue key whose walk ran away, e.g. `PROJ-123`.
+        /// What the runaway walk was reading: a JIRA issue key for the
+        /// per-ticket endpoints (`PROJ-123`), or the JQL for `search/jql`.
         key: String,
         /// Page budget that was exhausted.
         pages: usize,

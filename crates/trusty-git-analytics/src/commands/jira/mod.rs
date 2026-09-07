@@ -457,15 +457,16 @@ pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> 
     if let Some(minute) = walk.offset_paged_minute {
         println!(
             "  note: {} contained more tickets than one page, so that minute was walked by \
-             offset. A ticket edited during that walk could have been missed; re-cover it \
-             with `tga jira sync --project {project_key} --since {}` if in doubt.",
+             following the server's page cursor. A ticket edited during that walk could have \
+             been missed; re-cover it with `tga jira sync --project {project_key} --since {}` \
+             if in doubt.",
             minute.to_rfc3339(),
             minute.date_naive()
         );
         warn!(
             project = %project_key,
             minute = %minute.to_rfc3339(),
-            "walked a single minute by offset; see `collect::jira::paging` for the residual"
+            "walked a single minute by page cursor; see `collect::jira::paging` for the residual"
         );
     }
 
