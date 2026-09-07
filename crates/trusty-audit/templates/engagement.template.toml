@@ -159,6 +159,29 @@ code_only = true
 # api_key = "lin_api_…"
 
 # ---------------------------------------------------------------------------
+# Signing the return package
+# ---------------------------------------------------------------------------
+
+# The ed25519 private key this engagement signs its return package with
+# (#5481). 32 bytes of hex. Your auditor mints one keypair per engagement, puts
+# the private half here, and keeps the public half to check what you send back.
+#
+# Absent or blank means the package ships UNSIGNED: the manifest of file
+# hashes is still written, `taudit` prints an UNSIGNED line beside the file it
+# wrote, and the package README says so. Nothing refuses to build.
+#
+# This key is yours for this engagement only. `taudit distribute` drops the
+# table when it builds a package for a DIFFERENT engagement, so no client's
+# key can reach another's package.
+#
+# What a signature here proves and does not: it shows the package was not
+# altered between this machine and your auditor. It cannot show anything about
+# what happened on this machine, because the key is on it.
+#
+# [signing]
+# private_key = "…"
+
+# ---------------------------------------------------------------------------
 # Inference identity
 # ---------------------------------------------------------------------------
 

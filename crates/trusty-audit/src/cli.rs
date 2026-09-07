@@ -1257,6 +1257,9 @@ mod cli_tests {
             total_bytes: 900 + 3 * 1024 * 1024,
             packaged_bytes: 1024 * 1024,
             excluded: Vec::new(),
+            signature: crate::package::SignatureOutcome::Signed {
+                key_fingerprint: "0badc0ffee001122".to_owned(),
+            },
         };
         let text = render(&Outcome::Package(package));
         assert!(text.contains("/work/audit-return-package.zip"), "{text}");
@@ -1320,6 +1323,7 @@ mod cli_tests {
             total_bytes: 0,
             packaged_bytes: 0,
             excluded,
+            signature: crate::package::SignatureOutcome::Unsigned,
         };
         assert_eq!(Outcome::Package(package(Vec::new())).exit_code(), 0);
 
@@ -1382,6 +1386,7 @@ mod cli_tests {
                 total_bytes: 0,
                 packaged_bytes: 0,
                 excluded: Vec::new(),
+                signature: crate::package::SignatureOutcome::Unsigned,
             },
             gaps: vec!["jira:ACME was not audited".to_owned()],
         };

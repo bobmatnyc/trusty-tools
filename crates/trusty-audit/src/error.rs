@@ -1185,6 +1185,24 @@ pub enum AuditError {
         /// The issue that lands it.
         issue: u32,
     },
+
+    /// Signing the return package, or checking a received one, failed (#5481).
+    ///
+    /// Why: a transparent wrapper rather than a flattened string, because the
+    /// three failures #5481 requires be told apart — a member altered after
+    /// signing, a signature removed, a signature made by another key — are
+    /// distinct variants of
+    /// [`SigningError`](crate::package::signing::SigningError), and a caller
+    /// that collapsed them would report "verification failed" for all three.
+    /// What: `#[from]`, so the packaging path's `?` carries the specific
+    /// variant up unchanged.
+    /// Test: `crate::package::signing::signing_tests`.
+    #[error(transparent)]
+    Signing {
+        /// What the signing or verification step refused, verbatim.
+        #[from]
+        source: crate::package::signing::SigningError,
+    },
 }
 
 /// Every searched directory on one line, for [`AuditError::NothingToRerender`].

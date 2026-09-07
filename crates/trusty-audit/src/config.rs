@@ -319,6 +319,40 @@ pub struct BoardCredentials {
     pub linear: Option<LinearCredentials>,
 }
 
+/// The key this engagement signs its return package with (#5481).
+///
+/// Why: the signing keypair is minted per engagement, and the PRIVATE half
+/// travels to the recipient so they sign locally with no call back to the
+/// auditor. That makes it engagement configuration, in the same file and with
+/// the same readability, rather than something the client fetches. The public
+/// half is retained by the auditor out of band and never appears here — a key
+/// that arrives with the thing it authenticates authenticates nothing.
+/// What: one optional hex seed under a `[signing]` table. Absent means this
+/// engagement signs nothing, which is a supported state: the package is still
+/// built and its manifest still written, without a `[signature]` table. Held as
+/// a [`SecretKey`] so it has no `Serialize`, redacts in `Debug`, and joins
+/// [`EngagementConfig::configured_secrets`] — which is what makes the outbound
+/// scan refuse a package member carrying it.
+///
+/// ```toml
+/// [signing]
+/// private_key = "0000000000000000000000000000000000000000000000000000000000000000"
+/// ```
+///
+/// The 64 zeros are a placeholder, not a usable key. Real key material never
+/// appears in this crate's production source — a credential scan over the
+/// source tree must not have to decide whether a quoted seed is live.
+///
+/// Test: `super::config_tests::a_signing_key_loads_and_joins_the_scanned_secrets`,
+/// `super::config_tests::a_config_with_no_signing_table_still_loads`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[non_exhaustive]
+pub struct SigningSettings {
+    /// The ed25519 private seed, 32 bytes of hex. Absent means unsigned.
+    #[serde(default)]
+    pub private_key: Option<SecretKey>,
+}
+
 /// What the engagement asks the investigation pass to read, per repository.
 ///
 /// Why (#6247): the investigation budget had no declaration point an operator
@@ -562,6 +596,10 @@ pub struct EngagementConfig {
     /// engagement registers no boards.
     #[serde(default)]
     pub boards: BoardCredentials,
+    /// The key this engagement signs its return package with (#5481). Absent
+    /// means the package ships unsigned rather than failing to build.
+    #[serde(default)]
+    pub signing: SigningSettings,
     /// What this engagement asks the investigation pass to read (#6247).
     ///
     /// Absent means the machine's environment overrides, then the compiled
@@ -774,7 +812,41 @@ impl EngagementConfig {
         if let Some(linear) = self.boards.linear.as_ref() {
             secrets.push(linear.api_key.expose());
         }
+        // #5481: the signing private key is the one secret that must not come
+        // BACK in the package it signed. It is a needle here for the same
+        // reason the board credentials are — the members are files other
+        // programs wrote, and no type governs those.
+        if let Some(key) = self.signing.private_key.as_ref() {
+            secrets.push(key.expose());
+        }
         secrets
+    }
+
+    /// The engagement's signing key, parsed, or `None` when none is configured.
+    ///
+    /// Why (#5481): the config carries the key as text and the packaging path
+    /// needs it as a key. Parsing it HERE rather than at the call site means a
+    /// malformed key is one error with one message, raised at the moment the
+    /// package is assembled and naming what is wrong with the field.
+    /// What: `None` for an absent or empty field — a template ships
+    /// `private_key = ""` the same way it ships `openrouter_key = ""`, and an
+    /// empty string is an unconfigured key, not a malformed one.
+    /// Test: `super::config_tests::a_signing_key_loads_and_joins_the_scanned_secrets`,
+    /// `super::config_tests::an_empty_signing_key_is_absent_not_malformed`.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::package::signing::SigningError::KeyMalformed`] when the field
+    /// is present and is not 32 bytes of hex.
+    pub fn signing_key(
+        &self,
+    ) -> Result<Option<crate::package::signing::EngagementKey>, AuditError> {
+        let Some(raw) = self.signing.private_key.as_ref().filter(|k| !k.is_empty()) else {
+            return Ok(None);
+        };
+        Ok(Some(crate::package::signing::EngagementKey::from_hex(
+            raw.expose(),
+        )?))
     }
 }
 
@@ -866,7 +938,13 @@ pub const BOARDS_FIELD: &str = "boards";
 /// registering a board with no credential is
 /// [`AuditError::BoardCredentialMissing`](crate::error::AuditError::BoardCredentialMissing),
 /// which names the field to set.
+/// #5481 puts a second credential in the same position: `[signing]`'s private
+/// key belongs to ONE engagement, and carrying a template's copy into another
+/// client's package would let that client sign as the first. It is dropped for
+/// the same reason and by the same rule — the in-place render keeps it, because
+/// there it is the recipient's own key.
 /// Test: `config_tests::a_generated_config_never_carries_the_templates_board_credentials`,
+/// `config_tests::a_generated_config_never_carries_another_engagements_signing_key`,
 /// `config_tests::an_in_place_render_keeps_the_recipients_own_board_credentials`.
 ///
 /// # Errors
@@ -878,9 +956,19 @@ pub fn generate_for_new_engagement(
     path: &Path,
 ) -> Result<(String, Vec<String>), AuditError> {
     let mut table = parse_template(template, path)?;
-    let dropped = drop_board_credentials(&mut table);
+    let mut dropped = drop_board_credentials(&mut table);
+    // #5481: one engagement's signing key must never reach another's package.
+    if table.remove(SIGNING_FIELD).is_some() {
+        dropped.push(SIGNING_FIELD.to_owned());
+    }
     Ok((render_with_key(table, key, path)?, dropped))
 }
+
+/// The TOML table holding this engagement's signing key (#5481).
+///
+/// Named once so [`generate_for_new_engagement`] and [`SigningSettings`] cannot
+/// drift apart.
+pub const SIGNING_FIELD: &str = "signing";
 
 /// The template as a TOML table.
 fn parse_template(template: &str, path: &Path) -> Result<toml::Table, AuditError> {
@@ -1612,6 +1700,86 @@ trusty-review = "0.15.1"
             EngagementConfig::from_toml(SAMPLE, Path::new("engagement.toml")).expect("parses");
         assert!(cfg.boards.jira.is_none());
         assert!(cfg.boards.linear.is_none());
+    }
+
+    /// #5481: an engagement written before `[signing]` existed still loads, and
+    /// loads as unsigned rather than as an error.
+    #[test]
+    fn a_config_with_no_signing_table_still_loads() {
+        let cfg =
+            EngagementConfig::from_toml(SAMPLE, Path::new("engagement.toml")).expect("parses");
+        assert!(cfg.signing.private_key.is_none());
+        assert!(cfg.signing_key().expect("no key is not an error").is_none());
+    }
+
+    /// 🔴 #5481: the signing key is a secret the RETURN package must refuse, so
+    /// it has to be one of the needles the outbound scan searches for.
+    #[test]
+    fn a_signing_key_loads_and_joins_the_scanned_secrets() {
+        let seed = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+        let cfg = EngagementConfig::from_toml(
+            &format!("{SAMPLE}\n[signing]\nprivate_key = \"{seed}\"\n"),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses");
+
+        assert!(
+            cfg.configured_secrets().contains(&seed),
+            "not a scan needle"
+        );
+        assert!(cfg.signing_key().expect("a valid key").is_some());
+        // The same posture `SecretKey` takes everywhere: the bytes never reach a
+        // log through an enclosing `Debug`.
+        assert!(!format!("{cfg:?}").contains(seed), "{cfg:?}");
+    }
+
+    /// A template ships `private_key = ""` the way it ships `openrouter_key =
+    /// ""`. That is an unconfigured key, not a malformed one — reading it as a
+    /// parse failure would refuse to package an engagement that simply does not
+    /// sign.
+    #[test]
+    fn an_empty_signing_key_is_absent_not_malformed() {
+        let cfg = EngagementConfig::from_toml(
+            &format!("{SAMPLE}\n[signing]\nprivate_key = \"\"\n"),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses");
+        assert!(cfg.signing_key().expect("empty is not an error").is_none());
+    }
+
+    /// 🔴 #5481, the #5861 hazard one field over: an auditor reusing a template
+    /// would otherwise ship engagement A's signing PRIVATE key inside client
+    /// B's package, letting B sign as A.
+    #[test]
+    fn a_generated_config_never_carries_another_engagements_signing_key() {
+        let path = Path::new("engagement.toml");
+        let seed = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+        let (text, dropped) = generate_for_new_engagement(
+            &format!("{SAMPLE}\n[signing]\nprivate_key = \"{seed}\"\n"),
+            &SecretKey::new("sk-or-v1-client-b"),
+            path,
+        )
+        .expect("generates");
+
+        assert!(!text.contains(seed), "{text}");
+        assert!(dropped.contains(&SIGNING_FIELD.to_owned()), "{dropped:?}");
+        let loaded = EngagementConfig::from_toml(&text, path).expect("loads");
+        assert!(loaded.signing.private_key.is_none());
+    }
+
+    /// The other direction, as for `[boards]`: the recipient's own key survives
+    /// an in-place re-render, or saving a newly-entered OpenRouter key would
+    /// silently unsign every package they build afterwards.
+    #[test]
+    fn an_in_place_render_keeps_the_recipients_own_signing_key() {
+        let seed = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+        let text = generate(
+            &format!("{SAMPLE}\n[signing]\nprivate_key = \"{seed}\"\n"),
+            &SecretKey::new("sk-or-v1-re-entered"),
+            Path::new("engagement.toml"),
+        )
+        .expect("generates");
+        assert!(text.contains(seed), "{text}");
     }
 
     /// 🔴 #6246: a key this version does not act on is CAPTURED, not discarded.

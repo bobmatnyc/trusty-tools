@@ -41,9 +41,9 @@
 //!
 //! ## What this milestone is not
 //!
-//! Content signing (#5481) and the GUI are later milestones on #5473/#5477's
-//! tree. [`package::assemble`] carries everything under `out/` verbatim, so
-//! #5481's signed manifest rides along with no change there. [`run::sweep`] reads
+//! The GUI is a later milestone on #5473/#5477's tree, and so is the `verify`
+//! CLI arm over #5481's signature (#5563) — [`package::signing::verify`] is the
+//! library call that arm will drive. [`run::sweep`] reads
 //! the selection those will write — see [`run::SELECTION_FILE`] for the exact
 //! file and shape. [`tools::install`] fetches the pinned triple, but it
 //! contains no download implementation — it calls `trusty-installer`'s pinned,
