@@ -658,6 +658,67 @@ mod tests {
         }
     }
 
+    /// Why (#7082): a strict `response_format` is validated as a schema document
+    /// before the model runs, and OpenRouter rejected every `tga profile` call
+    /// with `'additionalProperties' is required to be supplied and to be false`
+    /// because the nested `findings.items` object left it open. The body this
+    /// adapter builds is the last place that can be true for every caller, so
+    /// the assertion belongs on the body rather than on a schema builder.
+    /// What: sends a schema with a nested array-of-objects whose `required`
+    /// lists one of two keys, and asserts the wire body closes and completes
+    /// every object level. Fails on `origin/main`, which sent the schema
+    /// verbatim.
+    /// Test: this test.
+    #[test]
+    fn wire_body_normalizes_the_schema_for_strict_mode() {
+        let a = OpenAiCompatAdapter::new(config_for(
+            ProviderId::OpenRouter,
+            "https://openrouter.ai/api/v1",
+        ))
+        .expect("build");
+        let mut req = ChatRequest::new("openai/gpt-4o-mini", vec![ChatMessage::user("hi")]);
+        req.response_schema = Some(StructuredOutput::new(
+            "period_findings",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "findings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"type": "string"},
+                                "severity": {"type": "string"}
+                            },
+                            "required": ["kind"]
+                        }
+                    }
+                },
+                "required": ["findings"]
+            }),
+        ));
+
+        let body = a.wire_body(&req).expect("body");
+        let schema = &body["response_format"]["json_schema"]["schema"];
+        assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+        assert_eq!(
+            schema["additionalProperties"],
+            serde_json::json!(false),
+            "{body}"
+        );
+        let items = &schema["properties"]["findings"]["items"];
+        assert_eq!(
+            items["additionalProperties"],
+            serde_json::json!(false),
+            "{body}"
+        );
+        assert_eq!(
+            items["required"],
+            serde_json::json!(["kind", "severity"]),
+            "{body}"
+        );
+    }
+
     /// Why: a request with no schema must produce the pre-#5588 body exactly —
     /// an unconditional `response_format` would 422 on models whose strict
     /// support is partial.

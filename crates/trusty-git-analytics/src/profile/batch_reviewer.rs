@@ -60,7 +60,18 @@ pub const PERIOD_FINDINGS_SCHEMA_NAME: &str = "period_findings";
 /// prose answer.
 /// What: returns the bare schema value. The caller wraps it in whatever
 /// structured-output type its provider takes.
-/// Test: `period_findings_schema_has_findings_property`.
+///
+/// #7082: `suggestion`, `confidence`, `file` and `severity` carry nullable type
+/// unions because the strict-mode normalizer on the wire path
+/// (`trusty_common::inference::strict_json_schema`) rewrites `required` to list
+/// EVERY property. Before the unions, a model that had no severity to report
+/// could omit the key; after, it could not, and had to invent one — which the
+/// report then presents as an observation. `null` restores "I have nothing
+/// here" as a sayable answer, and [`PeriodFindingWire`] maps it back onto the
+/// same fallback an absent key already took.
+///
+/// Test: `period_findings_schema_has_findings_property`,
+/// `nullable_optionals_survive_strict_normalization`.
 pub fn period_findings_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -72,12 +83,16 @@ pub fn period_findings_schema() -> serde_json::Value {
                     "properties": {
                         "kind": {"type": "string"},
                         "description": {"type": "string"},
-                        "suggestion": {"type": "string"},
-                        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                        "file": {"type": "string"},
+                        "suggestion": {"type": ["string", "null"]},
+                        "confidence": {
+                            "type": ["number", "null"],
+                            "minimum": 0.0,
+                            "maximum": 1.0
+                        },
+                        "file": {"type": ["string", "null"]},
                         "severity": {
-                            "type": "string",
-                            "enum": ["low", "medium", "high", "critical"]
+                            "type": ["string", "null"],
+                            "enum": ["low", "medium", "high", "critical", null]
                         }
                     },
                     "required": ["kind", "description"]
@@ -108,10 +123,14 @@ Populate the structured response with a `findings` array.
 Each finding must include:
 - `kind`: short category label (e.g. error_handling, security, logic)
 - `description`: concise description of the issue observed
-- `suggestion`: concrete improvement suggestion
-- `confidence`: float in [0.0, 1.0]
-- `file`: most relevant file path; use "multiple" if the issue spans files
-- `severity`: one of low, medium, high, critical
+
+Each finding must also carry these four keys, but any of them may be `null` when
+the diffs do not support a real answer. Answer `null` rather than guessing —
+a guessed severity or confidence is read downstream as an observation:
+- `suggestion`: concrete improvement suggestion, or null
+- `confidence`: float in [0.0, 1.0], or null
+- `file`: most relevant file path; "multiple" if the issue spans files, or null
+- `severity`: one of low, medium, high, critical, or null
 
 `findings` may be an empty array if the sample looks clean."#
 }
@@ -555,6 +574,14 @@ struct PeriodFindingsBlock {
 }
 
 /// Wire shape of one finding in that body.
+///
+/// #7082: the four optional keys are `Option<T>`, not `#[serde(default)]`
+/// scalars. `#[serde(default)]` covers an ABSENT key only — a present
+/// `"severity": null` fails to deserialize a plain `String` and takes the whole
+/// period's findings down the parse-error path. Since
+/// [`period_findings_schema`] now invites `null` as the way to decline a value,
+/// the deserializer has to accept it; `None` and an absent key land on the same
+/// fallback in [`convert_period_block`].
 #[derive(Debug, Deserialize)]
 struct PeriodFindingWire {
     #[serde(default)]
@@ -562,13 +589,13 @@ struct PeriodFindingWire {
     #[serde(default)]
     description: String,
     #[serde(default)]
-    suggestion: String,
+    suggestion: Option<String>,
     #[serde(default)]
-    confidence: f32,
+    confidence: Option<f32>,
     #[serde(default)]
-    file: String,
+    file: Option<String>,
     #[serde(default)]
-    severity: String,
+    severity: Option<String>,
 }
 
 /// Parse a period-review response body into findings.
@@ -637,7 +664,12 @@ pub fn parse_period_findings(body: &str, period_label: &str) -> Vec<Longitudinal
 /// Convert wire findings into [`LongitudinalFinding`] values.
 ///
 /// An empty `file` or `kind` becomes a sentinel rather than an empty string, so
-/// the Markdown report never renders a blank table cell.
+/// the Markdown report never renders a blank table cell. #7082: a `null`
+/// optional is treated exactly as an absent one — `severity` falls to
+/// [`Effort::Low`] through [`severity_to_effort`], `file` to `"unknown"`,
+/// `confidence` to `0.0` and `suggestion` to the empty string.
+///
+/// Test: `batch_reviewer_parses_null_optionals_as_absent`.
 fn convert_period_block(
     block: PeriodFindingsBlock,
     period_label: &str,
@@ -646,11 +678,10 @@ fn convert_period_block(
         .findings
         .into_iter()
         .map(|f| {
-            let effort = severity_to_effort(&f.severity);
-            let file = if f.file.is_empty() {
-                "unknown".to_string()
-            } else {
-                f.file
+            let effort = severity_to_effort(f.severity.as_deref().unwrap_or_default());
+            let file = match f.file {
+                Some(file) if !file.is_empty() => file,
+                _ => "unknown".to_string(),
             };
             let kind = if f.kind.is_empty() {
                 "general".to_string()
@@ -663,8 +694,8 @@ fn convert_period_block(
                     file,
                     kind,
                     f.description,
-                    f.suggestion,
-                    f.confidence,
+                    f.suggestion.unwrap_or_default(),
+                    f.confidence.unwrap_or_default(),
                     effort,
                 ),
                 trend_tag: None,

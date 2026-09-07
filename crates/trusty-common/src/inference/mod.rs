@@ -121,5 +121,5 @@ pub use types::{
     AssistantMessage, CacheControl, ChatChoice, ChatMessage, ChatRequest, ChatResponse,
     FunctionCall, FunctionDefinition, PromptTokensDetails, RequestUsageConfig, SecretString,
     StopReason, StructuredOutput, ToolCall, ToolChoice, ToolDefinition, Usage, UsageBlock,
-    openai_tool_choice,
+    openai_tool_choice, strict_json_schema,
 };
