@@ -148,7 +148,7 @@ trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.11", defau
 # a row in scripts/semver-checks-crate-exclusions.tsv (#6300).
 # #6776: same drift as trusty-console, surfaced by the new gate — `^6.0.1`
 # cannot accept the crate's own 7.1.0.
-tga = { path = "crates/trusty-git-analytics", version = "7.1" }
+tga = { path = "crates/trusty-git-analytics", version = "8.0" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
 # daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
 # because it owns Tauri's build.rs and tauri.conf.json.

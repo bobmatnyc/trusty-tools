@@ -9,3 +9,8 @@ Fixed
   an array, and may return a page shorter than the requested `maxResults`
   while more pages remain — so both search walks now end on the absent token
   and never on page length (#6812).
+- **Breaking:** the public `collect::jira::paging` API paginates by token, which
+  is why this release is 8.0.0 and not a patch. `PageRequest.start_at: u64` is
+  replaced by `next_page_token: Option<String>`, and `KeysetPager::record_page`
+  takes the server's continuation token in place of the requested page size
+  (#6812).

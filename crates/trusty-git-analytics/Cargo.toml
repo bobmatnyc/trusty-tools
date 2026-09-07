@@ -59,7 +59,15 @@ name = "tga"
 # new config table; nothing existing is removed or changed. `src/**` changed
 # while 6.0.0 was already live on crates.io, so the `PR version bump vs
 # crates.io` gate (#4421) requires the bump.
-version = "7.1.2"
+# 7.1.2 -> 8.0.0 (#6812): MAJOR. Migrating the JIRA search off the retired
+# `/rest/api/3/search` moves `collect::jira::paging::PageRequest` from a
+# `startAt` offset to `/search/jql`'s continuation token, which
+# `cargo-semver-checks` reports as two breaks — `struct_pub_field_missing` on
+# `PageRequest.start_at` and `constructible_struct_adds_field` on
+# `PageRequest.next_page_token`. Post-1.0, a break sits in the MAJOR position.
+# Only trusty-analyze takes a Cargo edge on tga, and it pins by path with no
+# version requirement, so nothing in-workspace has to move with it.
+version = "8.0.0"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
