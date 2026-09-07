@@ -8,13 +8,17 @@
 //! What: [`build_inventory`] probes a checkout root for the supported ecosystems,
 //! parses each manifest's direct dependencies and (best-effort) its lockfile's
 //! resolved versions, and returns a capped [`DependencyInventory`].  All parsing
-//! is lenient: a malformed lockfile degrades to declared-only, never an error.
-//! Test: `deps_tests.rs` covers npm (+lock), Cargo (+lock), pyproject, and go.mod.
+//! is lenient: a malformed lockfile degrades to declared-only and names itself in
+//! [`DependencyInventory::lockfile_warnings`] (#6794), never an error.
+//! Test: `deps_tests.rs` covers npm (+lock), Cargo (+lock), pyproject
+//! (+poetry.lock / uv.lock / requirements.txt), and go.mod.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Serialize;
+
+#[path = "deps_lock.rs"]
+mod lock;
 
 /// The maximum number of dependency rows rendered before an "and N more" line.
 ///
@@ -26,12 +30,18 @@ pub const MAX_ROWS: usize = 30;
 ///
 /// Why: an acquirer wants both the declared constraint (what the project asks
 /// for) and the pinned reality (what a fresh install gets); carrying both makes
-/// drift and loose pinning visible.
+/// drift and loose pinning visible. #6794 adds the two facts a consumer needs
+/// to tell those apart mechanically — whether the version is a resolution and
+/// which file resolved it — because `serde = "1"` and `serde 1.0.210` reached
+/// trusty-audit's OSV stage indistinguishable, and a range is unscannable.
 /// What: `name` is the package; `ecosystem` names the manifest family; `spec` is
-/// the declared version constraint (empty when the manifest states none); `locked`
-/// is the resolved version from the lockfile, or `None` when unlocked/unparsed.
-/// Test: `deps_tests::npm_manifest_and_lock`.
+/// the declared version constraint (empty when the manifest states none);
+/// `locked` is the resolved version from the lockfile, or `None` when
+/// unlocked/unparsed; `resolved` is true only when `locked` is a single exact
+/// version; `source` names the file `locked` came from.
+/// Test: `deps_tests::{npm_manifest_and_lock, cargo_lock_records_its_source}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct Dependency {
     /// Package/crate/module name.
     pub name: String,
@@ -41,6 +51,49 @@ pub struct Dependency {
     pub spec: String,
     /// Resolved version from the lockfile, if available.
     pub locked: Option<String>,
+    /// True when `locked` is one exact version, not a range or a no-match note.
+    ///
+    /// #6794: a consumer matching this row against an advisory database needs a
+    /// version, and `^1.2` is not one. False is the safe default — an
+    /// unresolved row is unassessed, never clean.
+    pub resolved: bool,
+    /// The file `locked` was read from, e.g. `Cargo.lock` (#6794).
+    ///
+    /// `None` exactly when `locked` is `None`. Only the filename is kept: the
+    /// inventory must not grow by the size of the lockfile it read.
+    pub source: Option<String>,
+}
+
+impl Dependency {
+    /// A declared-only row: no lockfile answered for this package (#6794).
+    fn declared(name: String, ecosystem: &str, spec: String) -> Self {
+        Self {
+            name,
+            ecosystem: ecosystem.to_owned(),
+            spec,
+            locked: None,
+            resolved: false,
+            source: None,
+        }
+    }
+
+    /// Apply `index`'s resolution for this row, if it has one (#6794).
+    fn resolve_from(mut self, index: &lock::LockIndex) -> Self {
+        let key = if self.ecosystem == "pypi" {
+            lock::normalize(&self.name)
+        } else {
+            self.name.clone()
+        };
+        let Some(versions) = index.versions.get(&key) else {
+            return self;
+        };
+        if let Some(resolution) = lock::resolve(&self.spec, versions) {
+            self.resolved = resolution.exact;
+            self.locked = Some(resolution.version);
+            self.source = index.sources.get(&key).cloned();
+        }
+        self
+    }
 }
 
 /// The deterministic dependency inventory for one repository.
@@ -52,10 +105,12 @@ pub struct Dependency {
 /// the cap was applied before serialisation). Keeping the full inventory here
 /// and capping at render time serves both.
 /// What: `deps` holds EVERY discovered row in stable order; `total` is that
-/// same count; [`Self::rendered`] is the capped view the table draws.
+/// same count; [`Self::rendered`] is the capped view the table draws;
+/// `lockfile_warnings` names each lockfile that existed and did not parse.
 /// Test: `deps_tests::{inventory_keeps_every_row_past_the_render_cap,
-/// rendered_caps_at_max_rows}`.
+/// rendered_caps_at_max_rows, a_malformed_lockfile_warns_and_falls_back}`.
 #[derive(Debug, Clone, Default, Serialize)]
+#[non_exhaustive]
 pub struct DependencyInventory {
     /// Every dependency row discovered, stable-sorted and uncapped (#6788).
     pub deps: Vec<Dependency>,
@@ -71,6 +126,14 @@ pub struct DependencyInventory {
     /// gap instead of a false clean claim.
     /// Test: `deps_tests::records_the_manifests_it_examined`.
     pub manifests_examined: Vec<String>,
+    /// One line per lockfile that was present but could not be parsed (#6794).
+    ///
+    /// Why: a lockfile that fails to parse silently degrades every row in its
+    /// ecosystem to a declared range, and the page then shows those ranges with
+    /// nothing saying why. The sweep must not abort for it either — one bad
+    /// lockfile in one repository cannot cost the run.
+    /// Test: `deps_tests::a_malformed_lockfile_warns_and_falls_back`.
+    pub lockfile_warnings: Vec<String>,
 }
 
 impl DependencyInventory {
@@ -96,6 +159,16 @@ impl DependencyInventory {
     pub fn overflow(&self) -> usize {
         self.total.saturating_sub(self.rendered().len())
     }
+
+    /// How many rows carry an exact lockfile-resolved version (#6794).
+    ///
+    /// Why: "how much of this inventory is scannable" is the question the OSV
+    /// stage's coverage line answers, and it is a property of the inventory
+    /// rather than of any one consumer.
+    /// Test: `deps_tests::poetry_lock_resolves_pyproject_ranges`.
+    pub fn resolved_count(&self) -> usize {
+        self.deps.iter().filter(|d| d.resolved).count()
+    }
 }
 
 /// Build the dependency inventory by probing every supported ecosystem at `root`.
@@ -105,19 +178,21 @@ impl DependencyInventory {
 /// for a local checkout.
 /// What: collects direct dependencies from package.json, Cargo.toml, pyproject.toml,
 /// and go.mod, enriches each with a locked version from the matching lockfile when
-/// one parses, and sorts by (ecosystem, name). Every row is kept (#6788); the
-/// [`MAX_ROWS`] cap is applied by [`DependencyInventory::rendered`] at table-build
-/// time. Records which of those manifests existed in `manifests_examined` (#6137),
-/// so a zero total can be told apart from a root where nothing was read.
+/// one parses ([`lock`]), and sorts by (ecosystem, name). Every row is kept
+/// (#6788); the [`MAX_ROWS`] cap is applied by [`DependencyInventory::rendered`]
+/// at table-build time. Records which of those manifests existed in
+/// `manifests_examined` (#6137), so a zero total can be told apart from a root
+/// where nothing was read, and which lockfiles failed to parse in
+/// `lockfile_warnings` (#6794).
 /// Test: `deps_tests::{multi_ecosystem_inventory, records_the_manifests_it_examined,
-/// inventory_keeps_every_row_past_the_render_cap}`.
+/// inventory_keeps_every_row_past_the_render_cap, a_malformed_lockfile_warns_and_falls_back}`.
 pub fn build_inventory(root: &Path) -> DependencyInventory {
+    let mut warnings = Vec::new();
     let mut all: Vec<Dependency> = Vec::new();
-    all.extend(npm_deps(root));
-    all.extend(cargo_deps(root));
-    all.extend(pypi_deps(root));
+    all.extend(npm_deps(root, &mut warnings));
+    all.extend(cargo_deps(root, &mut warnings));
+    all.extend(pypi_deps(root, &mut warnings));
     all.extend(go_deps(root));
-
     all.sort_by(|a, b| {
         a.ecosystem
             .cmp(&b.ecosystem)
@@ -133,6 +208,7 @@ pub fn build_inventory(root: &Path) -> DependencyInventory {
             .filter(|name| root.join(name).is_file())
             .map(|name| (*name).to_string())
             .collect(),
+        lockfile_warnings: warnings,
     }
 }
 
@@ -151,56 +227,27 @@ fn read(root: &Path, name: &str) -> Option<String> {
 // ─── npm ─────────────────────────────────────────────────────────────────────
 
 /// Parse `package.json` direct deps and enrich with `package-lock.json` versions.
-fn npm_deps(root: &Path) -> Vec<Dependency> {
+fn npm_deps(root: &Path, warnings: &mut Vec<String>) -> Vec<Dependency> {
     let Some(text) = read(root, "package.json") else {
         return Vec::new();
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
         return Vec::new();
     };
-    let locked = npm_lock_versions(root);
+    let index = lock::npm(root);
+    warnings.extend(index.warnings.iter().cloned());
     let mut out = Vec::new();
     for key in ["dependencies", "devDependencies"] {
         if let Some(map) = value.get(key).and_then(|v| v.as_object()) {
             for (name, spec) in map {
-                out.push(Dependency {
-                    name: name.clone(),
-                    ecosystem: "npm".to_string(),
-                    spec: spec.as_str().unwrap_or_default().to_string(),
-                    locked: locked.get(name).cloned(),
-                });
-            }
-        }
-    }
-    out
-}
-
-/// Best-effort resolved versions from `package-lock.json` (v2/v3 `packages`, or
-/// v1 `dependencies`).  Returns an empty map when absent/unparseable.
-fn npm_lock_versions(root: &Path) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    let Some(text) = read(root, "package-lock.json") else {
-        return out;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return out;
-    };
-    // v2/v3: `packages` keyed by "node_modules/<name>" (root key is "").
-    if let Some(pkgs) = value.get("packages").and_then(|v| v.as_object()) {
-        for (path, meta) in pkgs {
-            if let Some(name) = path.strip_prefix("node_modules/")
-                && let Some(ver) = meta.get("version").and_then(|v| v.as_str())
-                && !name.contains("/node_modules/")
-            {
-                out.insert(name.to_string(), ver.to_string());
-            }
-        }
-    }
-    // v1: `dependencies` keyed by name.
-    if let Some(deps) = value.get("dependencies").and_then(|v| v.as_object()) {
-        for (name, meta) in deps {
-            if let Some(ver) = meta.get("version").and_then(|v| v.as_str()) {
-                out.entry(name.clone()).or_insert_with(|| ver.to_string());
+                out.push(
+                    Dependency::declared(
+                        name.clone(),
+                        "npm",
+                        spec.as_str().unwrap_or_default().to_string(),
+                    )
+                    .resolve_from(&index),
+                );
             }
         }
     }
@@ -215,14 +262,15 @@ fn npm_lock_versions(root: &Path) -> BTreeMap<String, String> {
 /// WORKSPACE root declares its shared dependencies only in the latter table, so
 /// reading `[dependencies]` alone reported zero for a 134-dependency workspace
 /// and the section rendered that as a clean result.
-fn cargo_deps(root: &Path) -> Vec<Dependency> {
+fn cargo_deps(root: &Path, warnings: &mut Vec<String>) -> Vec<Dependency> {
     let Some(text) = read(root, "Cargo.toml") else {
         return Vec::new();
     };
     let Ok(value) = toml::from_str::<toml::Value>(&text) else {
         return Vec::new();
     };
-    let locked = cargo_lock_versions(root);
+    let index = lock::cargo(root);
+    warnings.extend(index.warnings.iter().cloned());
     let mut tables: Vec<&toml::map::Map<String, toml::Value>> = Vec::new();
     if let Some(t) = value.get("dependencies").and_then(|v| v.as_table()) {
         tables.push(t);
@@ -238,108 +286,40 @@ fn cargo_deps(root: &Path) -> Vec<Dependency> {
         .into_iter()
         .flatten()
         .map(|(name, spec)| {
-            let spec_str = match spec {
-                toml::Value::String(s) => s.clone(),
-                toml::Value::Table(t) => t
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                _ => String::new(),
-            };
-            let locked = locked.get(name).map_or_else(Vec::new, |v| v.clone());
-            Dependency {
-                locked: resolve_locked(&spec_str, &locked),
-                name: name.clone(),
-                ecosystem: "cargo".to_string(),
-                spec: spec_str,
-            }
+            Dependency::declared(name.clone(), "cargo", toml_spec(spec)).resolve_from(&index)
         })
         .collect()
 }
 
-/// Every resolved version in `Cargo.lock`, per package name.
+/// The declared version constraint a TOML dependency value states.
 ///
-/// Why: a workspace lockfile routinely carries several versions of one crate —
-/// `base64` 0.13.1 alongside 0.22.1, `dashmap` 5.5.3 alongside 6.1.0 — because
-/// transitive dependents pin older majors. Keeping only the first entry
-/// reported the LOWEST of them (cargo writes `[[package]]` blocks sorted by
-/// name then version), so a manifest declaring `base64 = "0.22"` had `0.13.1`
-/// printed against it. The list is what [`resolve_locked`] needs to pick the
-/// version the declared requirement actually resolves to.
-/// What: `name → versions`, in lockfile order, duplicates preserved.
-/// Test: `deps_tests::{cargo_locked_version_satisfies_the_declared_req,
-/// cargo_locked_prefers_the_highest_satisfying_version}`.
-fn cargo_lock_versions(root: &Path) -> BTreeMap<String, Vec<String>> {
-    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let Some(text) = read(root, "Cargo.lock") else {
-        return out;
-    };
-    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
-        return out;
-    };
-    if let Some(pkgs) = value.get("package").and_then(|v| v.as_array()) {
-        for pkg in pkgs {
-            if let (Some(name), Some(ver)) = (
-                pkg.get("name").and_then(|v| v.as_str()),
-                pkg.get("version").and_then(|v| v.as_str()),
-            ) {
-                out.entry(name.to_string())
-                    .or_default()
-                    .push(ver.to_string());
-            }
-        }
+/// A bare string IS the constraint; a table states it under `version`; anything
+/// else (a bare path or git dependency) declares no version at all.
+fn toml_spec(spec: &toml::Value) -> String {
+    match spec {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Table(t) => t
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
     }
-    out
-}
-
-/// Pick the locked version a declared requirement resolves to.
-///
-/// Why: the Locked column answers "what is this build actually using for the
-/// version it asked for". With several versions in the lock, that is a semver
-/// question, not a first-wins one — and when NONE of them satisfies the
-/// declared requirement the honest answer is to say so rather than print an
-/// unrelated version as if it were the resolution.
-/// What: one locked version resolves to itself. With several, the highest that
-/// satisfies `spec` wins; with an empty or unparseable `spec` the highest
-/// overall wins; with none satisfying, the cell names every candidate and
-/// states that none matches. An unparseable version string is skipped for
-/// matching but still named in the no-match text.
-/// Test: `deps_tests::{cargo_locked_version_satisfies_the_declared_req,
-/// cargo_locked_prefers_the_highest_satisfying_version,
-/// cargo_locked_states_when_no_version_satisfies}`.
-fn resolve_locked(spec: &str, versions: &[String]) -> Option<String> {
-    match versions {
-        [] => return None,
-        [only] => return Some(only.clone()),
-        _ => {}
-    }
-    let parsed: Vec<(semver::Version, &String)> = versions
-        .iter()
-        .filter_map(|v| semver::Version::parse(v).ok().map(|p| (p, v)))
-        .collect();
-    let req = semver::VersionReq::parse(spec.trim()).ok();
-    let matching: Vec<&(semver::Version, &String)> = parsed
-        .iter()
-        .filter(|(v, _)| req.as_ref().is_none_or(|r| r.matches(v)))
-        .collect();
-    if let Some((_, raw)) = matching.iter().max_by(|a, b| a.0.cmp(&b.0)) {
-        return Some((*raw).clone());
-    }
-    Some(format!("{} (none satisfies {spec})", versions.join(", ")))
 }
 
 // ─── pypi ────────────────────────────────────────────────────────────────────
 
-/// Parse `pyproject.toml` project/poetry dependencies (declared-only; poetry.lock
-/// parsing is best-effort-skipped to avoid a heavy lock format dependency).
-fn pypi_deps(root: &Path) -> Vec<Dependency> {
+/// Parse `pyproject.toml` project/poetry dependencies and enrich them with the
+/// pins in `poetry.lock`, `uv.lock`, or `requirements.txt` (#6794).
+fn pypi_deps(root: &Path, warnings: &mut Vec<String>) -> Vec<Dependency> {
     let Some(text) = read(root, "pyproject.toml") else {
         return Vec::new();
     };
     let Ok(value) = toml::from_str::<toml::Value>(&text) else {
         return Vec::new();
     };
+    let index = lock::pypi(root);
+    warnings.extend(index.warnings.iter().cloned());
     let mut out = Vec::new();
     // PEP 621 `project.dependencies`: array of requirement strings.
     if let Some(arr) = value
@@ -349,12 +329,7 @@ fn pypi_deps(root: &Path) -> Vec<Dependency> {
     {
         for req in arr.iter().filter_map(|v| v.as_str()) {
             let (name, spec) = split_pep508(req);
-            out.push(Dependency {
-                name,
-                ecosystem: "pypi".to_string(),
-                spec,
-                locked: None,
-            });
+            out.push(Dependency::declared(name, "pypi", spec).resolve_from(&index));
         }
     }
     // Poetry `[tool.poetry.dependencies]`: table of name → constraint.
@@ -368,21 +343,9 @@ fn pypi_deps(root: &Path) -> Vec<Dependency> {
             if name.eq_ignore_ascii_case("python") {
                 continue;
             }
-            let spec_str = match spec {
-                toml::Value::String(s) => s.clone(),
-                toml::Value::Table(t) => t
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                _ => String::new(),
-            };
-            out.push(Dependency {
-                name: name.clone(),
-                ecosystem: "pypi".to_string(),
-                spec: spec_str,
-                locked: None,
-            });
+            out.push(
+                Dependency::declared(name.clone(), "pypi", toml_spec(spec)).resolve_from(&index),
+            );
         }
     }
     out
@@ -429,13 +392,15 @@ fn go_deps(root: &Path) -> Vec<Dependency> {
             let mut parts = d.split_whitespace();
             if let Some(name) = parts.next() {
                 let ver = parts.next().unwrap_or_default().to_string();
-                out.push(Dependency {
-                    name: name.to_string(),
-                    ecosystem: "go".to_string(),
-                    // go.mod pins exactly, so the declared spec IS the locked ver.
-                    spec: ver.clone(),
-                    locked: if ver.is_empty() { None } else { Some(ver) },
-                });
+                let mut dep = Dependency::declared(name.to_string(), "go", ver.clone());
+                // go.mod pins exactly, so the declared spec IS the locked ver
+                // and the manifest itself is the source (#6794).
+                if !ver.is_empty() {
+                    dep.locked = Some(ver);
+                    dep.resolved = true;
+                    dep.source = Some("go.mod".to_string());
+                }
+                out.push(dep);
             }
         }
     }

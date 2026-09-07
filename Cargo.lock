@@ -11493,7 +11493,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-audit"
-version = "0.14.3"
+version = "0.14.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -12012,7 +12012,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.35.1"
+version = "0.36.0"
 dependencies = [
  "anyhow",
  "async-trait",

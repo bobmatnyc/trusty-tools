@@ -300,4 +300,211 @@ fn cargo_locked_states_when_no_version_satisfies() {
     assert!(locked.contains("none satisfies 3"), "locked: {locked}");
     assert!(locked.contains("1.0.0"), "locked: {locked}");
     assert!(locked.contains("2.0.0"), "locked: {locked}");
+    // #6794: the cell holds prose, not a version, so the row is not resolved.
+    let foo = inv.deps.iter().find(|d| d.name == "foo").unwrap();
+    assert!(
+        !foo.resolved,
+        "a no-match note is not a resolution: {foo:?}"
+    );
+}
+
+/// One dependency row by name, for the #6794 assertions below.
+fn row<'a>(inv: &'a DependencyInventory, name: &str) -> &'a Dependency {
+    inv.deps
+        .iter()
+        .find(|d| d.name == name)
+        .unwrap_or_else(|| panic!("no `{name}` row in {:?}", inv.deps))
+}
+
+/// #6794: the graded case. A declared range plus a lockfile must record the
+/// resolved version and the file it came from; the same manifest with no
+/// lockfile must record the range and say it is unresolved.
+///
+/// Why: `serde = "1"` and `serde 1.0.210` reached trusty-audit's OSV stage
+/// indistinguishable, and a range is unscannable — 515 of 1230 rows in a
+/// 59-repository run.
+#[test]
+fn cargo_lock_records_its_source() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "Cargo.toml",
+        "[package]\nname = \"x\"\n[dependencies]\nserde = \"1\"\n",
+    );
+    write(
+        tmp.path(),
+        "Cargo.lock",
+        "[[package]]\nname = \"serde\"\nversion = \"1.0.210\"\n",
+    );
+    let serde = row(&build_inventory(tmp.path()), "serde").clone();
+    assert_eq!(serde.spec, "1");
+    assert_eq!(serde.locked.as_deref(), Some("1.0.210"));
+    assert!(serde.resolved, "{serde:?}");
+    assert_eq!(serde.source.as_deref(), Some("Cargo.lock"));
+
+    std::fs::remove_file(tmp.path().join("Cargo.lock")).unwrap();
+    let inv = build_inventory(tmp.path());
+    let serde = row(&inv, "serde");
+    assert_eq!(serde.spec, "1", "the declared range is still recorded");
+    assert_eq!(serde.locked, None);
+    assert!(!serde.resolved, "{serde:?}");
+    assert_eq!(serde.source, None);
+    assert_eq!(inv.resolved_count(), 0);
+}
+
+/// #6794: the same contract for the JS ecosystem — `package-lock.json` names
+/// itself as the source, and removing it drops the row back to its range.
+#[test]
+fn npm_lock_records_its_source() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "package.json",
+        r#"{"dependencies": {"react": "^18.0.0"}}"#,
+    );
+    write(
+        tmp.path(),
+        "package-lock.json",
+        r#"{"lockfileVersion": 3, "packages": {"": {}, "node_modules/react": {"version": "18.2.0"}}}"#,
+    );
+    let react = row(&build_inventory(tmp.path()), "react").clone();
+    assert_eq!(react.locked.as_deref(), Some("18.2.0"));
+    assert!(react.resolved, "{react:?}");
+    assert_eq!(react.source.as_deref(), Some("package-lock.json"));
+
+    std::fs::remove_file(tmp.path().join("package-lock.json")).unwrap();
+    let react = row(&build_inventory(tmp.path()), "react").clone();
+    assert_eq!(react.spec, "^18.0.0");
+    assert_eq!(react.locked, None);
+    assert!(!react.resolved, "{react:?}");
+}
+
+/// A pyproject declaring PEP 621 ranges, for the three pypi pin sources below.
+fn pyproject_with_ranges(root: &Path) {
+    write(
+        root,
+        "pyproject.toml",
+        "[project]\nname = \"x\"\ndependencies = [\"requests>=2\", \"PyYAML>=6\"]\n",
+    );
+}
+
+/// #6794: `pyproject.toml` states ranges only, so before this every python row
+/// was unresolved — the single largest share of the unscannable rows.
+#[test]
+fn poetry_lock_resolves_pyproject_ranges() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    pyproject_with_ranges(tmp.path());
+    write(
+        tmp.path(),
+        "poetry.lock",
+        "[[package]]\nname = \"requests\"\nversion = \"2.32.3\"\n\n\
+         [[package]]\nname = \"pyyaml\"\nversion = \"6.0.2\"\n",
+    );
+    let inv = build_inventory(tmp.path());
+    let requests = row(&inv, "requests");
+    assert_eq!(requests.locked.as_deref(), Some("2.32.3"));
+    assert!(requests.resolved, "{requests:?}");
+    assert_eq!(requests.source.as_deref(), Some("poetry.lock"));
+    // PyPI folds case and `-`/`_`/`.`, so `PyYAML` matches the lock's `pyyaml`.
+    assert_eq!(row(&inv, "PyYAML").locked.as_deref(), Some("6.0.2"));
+    assert_eq!(inv.resolved_count(), 2);
+}
+
+/// #6794: uv writes the same `[[package]]` shape under a different filename,
+/// and the source column must name the file actually read.
+#[test]
+fn uv_lock_resolves_pyproject_ranges() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    pyproject_with_ranges(tmp.path());
+    write(
+        tmp.path(),
+        "uv.lock",
+        "[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\n",
+    );
+    let requests = row(&build_inventory(tmp.path()), "requests").clone();
+    assert_eq!(requests.locked.as_deref(), Some("2.31.0"));
+    assert_eq!(requests.source.as_deref(), Some("uv.lock"));
+}
+
+/// #6794: a `requirements.txt` `==` pin is a resolution; every other line shape
+/// in it is a range or a flag and contributes nothing.
+#[test]
+fn requirements_pins_resolve_pyproject_ranges() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    pyproject_with_ranges(tmp.path());
+    write(
+        tmp.path(),
+        "requirements.txt",
+        "# comment\n-r other.txt\nrequests==2.32.3  # pinned\nPyYAML>=6\n",
+    );
+    let inv = build_inventory(tmp.path());
+    let requests = row(&inv, "requests");
+    assert_eq!(requests.locked.as_deref(), Some("2.32.3"));
+    assert_eq!(requests.source.as_deref(), Some("requirements.txt"));
+    let pyyaml = row(&inv, "PyYAML");
+    assert_eq!(pyyaml.locked, None, "a `>=` line is not a pin: {pyyaml:?}");
+    assert!(!pyyaml.resolved);
+}
+
+/// #6794: a lockfile that fails to parse must be NAMED and must not stop the
+/// pass — the rows fall back to their declared ranges and the run report says
+/// which file could not be read.
+#[test]
+fn a_malformed_lockfile_warns_and_falls_back() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "Cargo.toml",
+        "[package]\nname = \"x\"\n[dependencies]\nserde = \"1\"\n",
+    );
+    write(tmp.path(), "Cargo.lock", "[[package\nname = broken\n");
+    write(
+        tmp.path(),
+        "package.json",
+        r#"{"dependencies": {"react": "^18"}}"#,
+    );
+    write(tmp.path(), "package-lock.json", "{not json");
+
+    let inv = build_inventory(tmp.path());
+    assert_eq!(inv.total, 2, "the sweep completed: {:?}", inv.deps);
+    assert_eq!(row(&inv, "serde").spec, "1");
+    assert!(!row(&inv, "serde").resolved);
+    assert!(!row(&inv, "react").resolved);
+    assert_eq!(inv.resolved_count(), 0);
+
+    assert_eq!(
+        inv.lockfile_warnings.len(),
+        2,
+        "{:?}",
+        inv.lockfile_warnings
+    );
+    let joined = inv.lockfile_warnings.join("\n");
+    assert!(
+        joined.contains("Cargo.lock was found but could not be parsed"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("package-lock.json was found but could not be parsed"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("fall back to their declared ranges"),
+        "{joined}"
+    );
+}
+
+/// #6794: go.mod pins exactly, so its rows are resolved and name the manifest
+/// itself as the source — there is no separate lockfile to read.
+#[test]
+fn go_mod_rows_are_resolved_from_the_manifest() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "go.mod",
+        "module x\n\nrequire github.com/pkg/errors v0.9.1\n",
+    );
+    let inv = build_inventory(tmp.path());
+    let errors = row(&inv, "github.com/pkg/errors");
+    assert!(errors.resolved, "{errors:?}");
+    assert_eq!(errors.source.as_deref(), Some("go.mod"));
 }
