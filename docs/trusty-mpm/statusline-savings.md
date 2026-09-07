@@ -10,3 +10,6 @@ file read instead of the main context, plus the instruction text it compressed
 before the model ever saw it. It is an estimate rather than a measurement: the
 counterfactual session that read everything in full never ran, so the figure is
 what the diversion and compression avoided, priced at the model's own rate.
+
+The segment sits at the end of the statusline, after the context gauge, and
+reads `0` until the first diversion of the session lands.
