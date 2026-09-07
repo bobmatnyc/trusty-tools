@@ -97,10 +97,32 @@ saved nothing either. Both write **no row**. A fall-through — no worker on
 `PATH`, a worker error, an error reported inside the worker's JSON — writes no
 row either, because no diversion happened.
 
-The parent model is read from `ANTHROPIC_MODEL` when the harness exports it, and
-otherwise from the same resolution chain that produced the session's own
-`--model` flag. A model the price table does not recognise declines the row and
-logs a warning rather than pricing it at a guessed rate.
+#### Where the parent model comes from
+
+The price a `divert` row uses depends entirely on which model the parent session
+is running — a diverted Opus read is worth five times the same read on Sonnet —
+so the row records which of three sources named it, in `model_source`:
+
+| `model_source` | Source | When it answers |
+|---|---|---|
+| `env` | `ANTHROPIC_MODEL` | Only when you have pinned a model through that variable. It is an explicit override, so it outranks the rest. |
+| `statusline` | The id Claude Code sent on its `statusLine` hook payload | After the status bar has rendered at least once in the session. This is the model Claude Code is really running. |
+| `config-fallback` | The chain that produces a session's `--model` flag | When neither of the above answered — before the first render, or in a session with no status bar. |
+
+The middle rung is the one that makes the figure right. Claude Code exports no
+model variable to a hook child and sends no model on the `PreToolUse` payload, so
+the `statusLine` payload is the only place `tm` ever learns the session's real
+model. `tm statusline` writes it to
+`~/.trusty-mpm/usage/session-model/<session-id>` on the render that changes it,
+and `tm divert` — a separate process — reads it back from there.
+
+A row priced at `config-fallback` is a row priced at a guess: the config chain
+has a Sonnet default and always answers. Writing one also logs a warning naming
+the fallback. If you see `config-fallback` on rows from a session you know is
+running Opus, the status bar had not rendered yet.
+
+A model the price table does not recognise declines the row and logs a warning
+rather than pricing it at a guessed rate.
 
 ### Adding another producer
 
@@ -116,8 +138,15 @@ under whatever framework root your `--root` flag, `TRUSTY_MPM_ROOT`, or
 `[standalone] root` config key resolves to. One object per line:
 
 ```json
-{"ts":"2026-09-07T02:41:00Z","session_id":"trusty-tools-ec","technique":"instruction-compression","tokens_saved":5300,"cost_saved_usd":0.0159,"basis":"sources 47000 B - compiled 25800 B, at 4 B/token, priced at claude-sonnet-4-6 input $3/Mtok"}
+{"ts":"2026-09-07T02:41:00Z","session_id":"trusty-tools-ec","technique":"instruction-compression","tokens_saved":5300,"cost_saved_usd":0.0159,"basis":"sources 47000 B - compiled 25800 B, at 4 B/token, priced at claude-sonnet-4-6 input $3/Mtok","model_source":"launch-config"}
 ```
+
+`model_source` names where the model the row was priced at came from. For a
+`divert` row it is one of the three values in the table above; for an
+`instruction-compression` row it is always `launch-config`, because that producer
+runs at session launch, off the very chain that produced the session's `--model`
+flag. Rows written before this field existed read back with it empty and still
+count toward the total.
 
 Read it directly with anything that reads JSON Lines:
 
@@ -157,6 +186,8 @@ natural render, not the instant it happens.
 
 ## Configuration
 
-None. There is no environment variable and no config key: the ledger is written
-where the framework root already resolves, and the segment appears when there is
-something to show.
+None. The feature adds no environment variable and no config key: the ledger is
+written where the framework root already resolves, and the segment appears when
+there is something to show. The one variable it reads, `ANTHROPIC_MODEL`, is
+Claude Code's own — set it and `divert` rows price at that model instead of the
+one the status bar observed.

@@ -34,7 +34,7 @@ use crate::formatters::info_box::DaemonInfo;
 use account::{claude_account_segment_probe, claude_json_path};
 use branch::project_segment;
 use compaction::{ContextWindow, colorize_ctx_segment, compaction_segment};
-use savings::savings_segment_probe;
+use savings::{record_parent_model, savings_segment_probe};
 use usage::{RateLimits, usage_segment};
 
 /// Claude Code `statusLine` hook input (all fields optional via `#[serde(default)]`).
@@ -142,6 +142,10 @@ fn render_statusline_from(input: &StatusInput, account_config: Option<&Path>) ->
     // stdin payload, so it comes from Claude Code's own persisted config.
     let account = claude_account_segment_probe(account_config);
     let model = model_segment(&input.model);
+    // #6972: this payload is the only place the authoritative model id reaches
+    // `tm`, so remember it here for `tm divert` — a separate process — to price
+    // its savings rows at. Writes only when the id changed.
+    record_parent_model(&input.session_id, &input.model.id);
 
     // Compaction efficiency / live context fill; falls back to a bare
     // `ctx>200k` marker when no context-window payload was sent at all.

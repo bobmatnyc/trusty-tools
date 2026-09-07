@@ -77,6 +77,26 @@ fn instruction_compression_row_carries_the_named_technique() {
     assert_eq!(row.technique, "instruction-compression");
 }
 
+/// Why (#6972): this producer runs at session launch, off the very chain that
+/// produced the session's `--model` flag, so its config lookup is authoritative
+/// rather than the divert producer's last-resort guess. The row says which,
+/// so an operator reading the ledger does not have to know that.
+/// Test: itself.
+#[test]
+fn instruction_compression_row_names_its_model_source() {
+    let row = instruction_compression_row("sess-a", 60_000, 20_000, sonnet_price).expect("a row");
+    assert_eq!(
+        row.model_source,
+        crate::core::session_model::MODEL_SOURCE_LAUNCH_CONFIG
+    );
+    assert_eq!(row.model_source, "launch-config");
+    assert_ne!(
+        row.model_source,
+        crate::core::session_model::MODEL_SOURCE_CONFIG_FALLBACK,
+        "a launch-time config read must not be labelled a fallback"
+    );
+}
+
 /// Why (#6958): a model the shared price table does not know must decline the
 /// row, never substitute a guessed rate. A fabricated price is worse than no
 /// figure — it is a figure the operator would act on.

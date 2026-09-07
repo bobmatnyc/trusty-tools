@@ -26,7 +26,33 @@ fn row(session: &str, tokens: i64, usd: f64) -> SavingsRow {
         tokens_saved: tokens,
         cost_saved_usd: usd,
         basis: "sources 1000 B - compiled 400 B".to_string(),
+        model_source: crate::core::session_model::MODEL_SOURCE_LAUNCH_CONFIG.to_string(),
     }
+}
+
+/// Why (#6972): the ledger carries rows written before `model_source` existed,
+/// and the fold must keep counting them. A field without `#[serde(default)]`
+/// would have made every pre-#6972 line unparseable — silently zeroing the
+/// operator's running total on the first render after an upgrade.
+/// Test: itself.
+#[test]
+fn a_row_written_before_the_model_source_field_still_folds() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = ledger_with(
+        &dir,
+        &[
+            r#"{"ts":"2026-09-07T02:41:00Z","session_id":"sess-a","technique":"divert","tokens_saved":5300,"cost_saved_usd":0.0159,"basis":"files 5000 tok - summary 200 tok"}"#,
+        ],
+    );
+    let total = fold_session(&ledger, "sess-a");
+    assert_eq!(total.rows, 1, "a pre-#6972 row must still count");
+    assert_eq!(total.tokens_saved, 5300);
+    let parsed: SavingsRow =
+        serde_json::from_str(&std::fs::read_to_string(&ledger).expect("read")).expect("parse");
+    assert_eq!(
+        parsed.model_source, "",
+        "an absent model_source must read back as empty, not fail the parse"
+    );
 }
 
 /// Why: the ledger sits beside where #6873's `usage.redb` will land, and a
