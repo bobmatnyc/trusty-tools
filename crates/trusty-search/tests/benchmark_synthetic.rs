@@ -11,7 +11,7 @@
 //! What: reads `GROUND_TRUTH.json`, registers a fresh `synthetic-benchmark`
 //! index pointing at the corpus, drives a reindex, polls until every stage
 //! is `Ready`, then runs each ground-truth query in three modes (lexical
-//! only / full hybrid / KG-leading), records Hit@1 and Hit@5, prints a
+//! only / full hybrid / graph-forced), records Hit@1 and Hit@5, prints a
 //! per-(mode × query-category) comparison table, and deletes the index.
 //!
 //! `mode_hint` support (v0.2.0): each query in GROUND_TRUTH.json carries a
@@ -75,7 +75,7 @@ struct GroundTruthQuery {
 /// The three retrieval modes exercised per query.
 ///
 /// Why: running all three against every query reveals where each mode wins or
-/// loses and validates that hybrid/KG-leading is worth the overhead.
+/// loses and validates that hybrid/graph-forced is worth the overhead.
 /// What: enum with a label method for table output.
 /// Test: iterated in the main test body.
 #[derive(Debug, Clone, Copy)]
@@ -84,8 +84,8 @@ enum Mode {
     Lexical,
     /// No stage parameter — full hybrid (BM25 + vector + KG expansion + RRF).
     Hybrid,
-    /// `expand_graph=true, use_kg_first=true` — KG-leading retrieval.
-    KgLeading,
+    /// `stage=graph, expand_graph=true` — force KG expansion, as `search_kg` does.
+    GraphForced,
 }
 
 impl Mode {
@@ -93,7 +93,7 @@ impl Mode {
         match self {
             Mode::Lexical => "lexical",
             Mode::Hybrid => "hybrid",
-            Mode::KgLeading => "kg-leading",
+            Mode::GraphForced => "graph-forced",
         }
     }
 }
@@ -331,16 +331,14 @@ async fn cleanup_index(client: &Client) {
     }
 }
 
-/// Run one query in one retrieval mode and record the result.
+/// Build the HTTP request shared by the live benchmark and contract test.
 ///
-/// Why: all three modes must run the same search path so results are
-/// comparable; only the JSON body fields differ.
-/// What: POSTs to /indexes/:id/search with mode-appropriate parameters
-///   plus the query's `mode_hint` forwarded as `mode`. Records Hit@1 and
-///   Hit@5 against the ground_truth_files list.
-/// Test: transport failures panic; JSON parse failures panic with status code.
-async fn run_query(client: &Client, query: &GroundTruthQuery, mode: Mode) -> QueryResult {
-    let daemon_url = daemon_url();
+/// Why: `use_kg_first` is an internal classifier weight, not a SearchQuery
+/// field. The public graph-stage selector forces KG expansion for every query.
+/// What: preserve query text, mode hints, result count, and each retrieval lane.
+/// Test: `synthetic_requests_match_current_search_query_contract` deserializes
+/// every lane/mode-hint combination with the production request type.
+fn search_request(query: &GroundTruthQuery, mode: Mode) -> Value {
     let mut body = json!({
         "text": query.text,
         "top_k": 10,
@@ -356,11 +354,28 @@ async fn run_query(client: &Client, query: &GroundTruthQuery, mode: Mode) -> Que
         Mode::Hybrid => {
             // No stage override — full hybrid is the daemon default.
         }
-        Mode::KgLeading => {
+        Mode::GraphForced => {
             body["expand_graph"] = json!(true);
-            body["use_kg_first"] = json!(true);
+            // #138: the graph stage forces expansion independently of intent.
+            // This is the current search_kg MCP request contract.
+            body["stage"] = json!("graph");
         }
     }
+
+    body
+}
+
+/// Run one query in one retrieval mode and record the result.
+///
+/// Why: all three modes must run the same search path so results are
+/// comparable; only the JSON body fields differ.
+/// What: POSTs to /indexes/:id/search with mode-appropriate parameters
+///   plus the query's `mode_hint` forwarded as `mode`. Records Hit@1 and
+///   Hit@5 against the ground_truth_files list.
+/// Test: transport failures panic; JSON parse failures panic with status code.
+async fn run_query(client: &Client, query: &GroundTruthQuery, mode: Mode) -> QueryResult {
+    let daemon_url = daemon_url();
+    let body = search_request(query, mode);
 
     let t0 = Instant::now();
     let resp = client
@@ -519,7 +534,7 @@ fn print_category_breakdown_table(results: &[QueryResult]) {
         "", "", "", "", "", "", ""
     );
 
-    for mode in [Mode::Lexical, Mode::Hybrid, Mode::KgLeading] {
+    for mode in [Mode::Lexical, Mode::Hybrid, Mode::GraphForced] {
         let mode_results: Vec<&QueryResult> = results
             .iter()
             .filter(|r| std::mem::discriminant(&r.mode) == std::mem::discriminant(&mode))
@@ -581,7 +596,7 @@ fn print_aggregate_table(results: &[QueryResult]) {
         "|{:-<12}|{:-<12}|{:-<12}|{:-<15}|{:-<15}|",
         "", "", "", "", ""
     );
-    for mode in [Mode::Lexical, Mode::Hybrid, Mode::KgLeading] {
+    for mode in [Mode::Lexical, Mode::Hybrid, Mode::GraphForced] {
         let subset: Vec<&QueryResult> = results
             .iter()
             .filter(|r| std::mem::discriminant(&r.mode) == std::mem::discriminant(&mode))
@@ -670,7 +685,7 @@ async fn benchmark_synthetic_corpus_all_modes() {
     let stages: Value = status["stages"].clone();
 
     let mut all_results: Vec<QueryResult> = Vec::with_capacity(queries.len() * 3);
-    for mode in [Mode::Lexical, Mode::Hybrid, Mode::KgLeading] {
+    for mode in [Mode::Lexical, Mode::Hybrid, Mode::GraphForced] {
         println!("\n--- mode = {} ---", mode.label());
         for q in &queries {
             let result = run_query(&client, q, mode).await;
@@ -709,4 +724,36 @@ async fn benchmark_synthetic_corpus_all_modes() {
     );
 
     cleanup_index(&client).await;
+}
+
+/// Reject stale request fields and lane drift before invoking a live daemon.
+#[test]
+fn synthetic_requests_match_current_search_query_contract() {
+    use trusty_search::core::indexer::{SearchQuery, SearchStage};
+
+    for mode_hint in ["code", "text", "data"] {
+        let query = GroundTruthQuery {
+            id: "request-contract".into(),
+            text: "callers of target".into(),
+            category: "usage".into(),
+            mode_hint: mode_hint.into(),
+            ground_truth_files: vec!["caller.rs".into()],
+        };
+        for (mode, expected_stage) in [
+            (Mode::Lexical, Some(SearchStage::Lexical)),
+            (Mode::Hybrid, None),
+            (Mode::GraphForced, Some(SearchStage::Graph)),
+        ] {
+            let parsed: SearchQuery = serde_json::from_value(search_request(&query, mode))
+                .unwrap_or_else(|error| panic!("{} / {mode_hint}: {error}", mode.label()));
+            assert_eq!(parsed.text, query.text);
+            assert_eq!(parsed.top_k, 10);
+            assert!(!parsed.compact);
+            assert_eq!(serde_json::to_value(parsed.mode).unwrap(), json!(mode_hint));
+            assert_eq!(parsed.stage, expected_stage);
+            if expected_stage == Some(SearchStage::Graph) {
+                assert!(parsed.expand_graph, "graph lane must request KG expansion");
+            }
+        }
+    }
 }
