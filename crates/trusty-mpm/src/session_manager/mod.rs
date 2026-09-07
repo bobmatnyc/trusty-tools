@@ -79,6 +79,9 @@ mod worktree_protection;
 pub(crate) mod worktree_reclaim_sweep;
 pub(crate) mod worktree_reconcile;
 pub(crate) mod worktree_registry;
+// #7057: WHICH GitHub repository a directory's pull-request lookups belong to,
+// read from that directory's own `origin` rather than inferred by `gh`.
+pub(crate) mod worktree_repo_slug;
 pub mod worktree_safety;
 
 #[cfg(test)]

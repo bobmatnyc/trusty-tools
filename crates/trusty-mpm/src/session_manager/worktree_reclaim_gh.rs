@@ -148,6 +148,30 @@ pub(crate) fn gh_command(dir: &Path, gh_env: &GhEnv) -> Command {
         .to_std_command()
 }
 
+/// `gh pr list` for `dir`, PINNED to the repository `repo` names (#7057).
+///
+/// Why: [`gh_command`] sets the working directory, and until #7057 that WAS the
+/// repository selection — `gh` inferred the repository from whichever remote it
+/// picked there, from a `remote.<name>.gh-resolved` config key, or, in a
+/// directory git does not root a repository at, from an enclosing repository up
+/// the filesystem. A prune run for `1m-consulting/adaptive-crm` resolved
+/// against `hotstats/hotstats-product-poc` that way and reported "no pull
+/// request found" for branches whose pull requests had just merged. Nothing in
+/// the argv named a repository, so no output could disclose the substitution.
+/// Naming it explicitly removes the inference, and puts the slug where every
+/// error message and every argv assertion can read it.
+/// What: [`gh_command`] plus `pr list --repo <repo>`. Callers append their own
+/// filters (`--state`, `--head`, `--json`, `--limit`) after it. The slug comes
+/// from [`super::worktree_repo_slug::repo_slug_for`], which fails closed — a
+/// caller that cannot resolve one must refuse rather than call this.
+/// Test: `two_worktrees_with_different_origins_produce_different_repo_flags`,
+/// `gh_pr_list_command_names_the_repository_before_its_filters`.
+pub(crate) fn gh_pr_list_command(dir: &Path, gh_env: &GhEnv, repo: &str) -> Command {
+    let mut cmd = gh_command(dir, gh_env);
+    cmd.args(["pr", "list", "--repo", repo]);
+    cmd
+}
+
 /// Resolve the [`GhEnv`] to apply to a `gh` spawn rooted at `dir` — the
 /// production wiring every real call site in this module uses (#6623).
 ///

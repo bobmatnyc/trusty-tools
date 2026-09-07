@@ -18,7 +18,7 @@ use super::*;
 // #6867: the runner's own vocabulary — the failure type, and the keychain
 // predicate whose answer decides whether a poll can hang in `securityd`.
 use crate::session_manager::worktree_reclaim_gh::{
-    GhFailure, consults_the_keychain, keychain_warning,
+    GhFailure, consults_the_keychain, gh_command, keychain_warning,
 };
 
 use crate::session_manager::worktree_git_fixture::{GitWorktreeFixture, deny_all};

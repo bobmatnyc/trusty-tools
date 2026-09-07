@@ -264,7 +264,7 @@ mod tests {
         CHECK_CLEAN_TREE, CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER, CHECK_UNPUSHED_COMMITS,
         evaluate_removal_rechecks,
     };
-    use trusty_mpm::core::worktree_removal_facts::WorktreeRemovalProbe;
+    use trusty_mpm::core::worktree_removal_facts::{MergedPrLookup, WorktreeRemovalProbe};
 
     /// The subagent shape the #5791 deny still binds in full.
     fn engineer() -> DispatchIdentity<'static> {
@@ -312,8 +312,16 @@ mod tests {
         dirty: Result<usize, String>,
         unpushed: Result<usize, String>,
         branch: Result<String, String>,
-        merged: Result<usize, String>,
+        merged: Result<MergedPrLookup, String>,
     }
+
+    /// A merged-PR answer for the fixture repository (#7057).
+    fn lookup(count: usize) -> MergedPrLookup {
+        MergedPrLookup::new(count, FAKE_REPO)
+    }
+
+    /// The repository the fake probe reports having searched (#7057).
+    const FAKE_REPO: &str = "1m-consulting/adaptive-crm";
 
     impl FakeProbe {
         /// Clean, pushed, on a branch with one merged pull request.
@@ -322,7 +330,7 @@ mod tests {
                 dirty: Ok(0),
                 unpushed: Ok(0),
                 branch: Ok("feat/thing".to_string()),
-                merged: Ok(1),
+                merged: Ok(lookup(1)),
             }
         }
     }
@@ -337,7 +345,11 @@ mod tests {
         fn branch(&self, _dir: &Path) -> Result<String, String> {
             self.branch.clone()
         }
-        fn merged_pull_requests(&self, _dir: &Path, _branch: &str) -> Result<usize, String> {
+        fn merged_pull_requests(
+            &self,
+            _dir: &Path,
+            _branch: &str,
+        ) -> Result<MergedPrLookup, String> {
             self.merged.clone()
         }
     }
@@ -478,7 +490,7 @@ mod tests {
     #[test]
     fn denies_worktree_remove_from_version_control_when_no_merged_pr() {
         let probe = FakeProbe {
-            merged: Ok(0),
+            merged: Ok(lookup(0)),
             ..FakeProbe::reclaimable()
         };
         let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
