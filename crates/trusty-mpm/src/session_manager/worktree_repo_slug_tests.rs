@@ -273,3 +273,30 @@ fn gh_pr_list_command_names_the_repository_before_its_filters() {
         "callers append their own filters after this prefix"
     );
 }
+
+/// 🔴 Fail-closed end to end: a root whose repository cannot be established
+/// yields `LookupFailed` — never `NoPr`, never `Merged`, and never a lookup
+/// against some other repository.
+///
+/// Why: `LookupFailed` is what `classify` gate 5 blocks on, so this is the
+/// assertion that keeps an unresolvable origin from becoming a removal. Nothing
+/// here spawns `gh`: the refusal happens before the poll.
+#[test]
+fn an_unresolvable_repository_blocks_instead_of_answering() {
+    use crate::session_manager::worktree_reclaim::{BranchPrState, PrIndex, pr_state_for_branch};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = checkout_with_origin(tmp.path(), "local-remote", "/tmp/fixtures/remote.git");
+
+    let index = PrIndex::from_gh(&repo);
+    let BranchPrState::LookupFailed { reason } = index.state_for(Some("feat/anything")) else {
+        panic!("an unresolvable repository must block, not answer");
+    };
+    assert!(reason.contains("names no GitHub"), "{reason}");
+
+    let per_branch = pr_state_for_branch(&repo, "feat/anything");
+    let BranchPrState::LookupFailed { reason } = per_branch else {
+        panic!("the per-branch fallback must block too; got {per_branch:?}");
+    };
+    assert!(reason.contains("#7057"), "{reason}");
+}
