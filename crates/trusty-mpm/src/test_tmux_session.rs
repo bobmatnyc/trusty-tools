@@ -50,12 +50,54 @@
 //!   is unreachable. It reduces how long a leak lives; the daemon-side refusal
 //!   is what makes the leak harmless while it does.
 //!
+//! **Every tmux spawn here disclaims TCC responsibility (#7060).** They all go
+//! through [`tmux_output`], which calls the crate's disclaiming spawn primitive
+//! `core::spawn_disclaim::disclaimed_output` — the same one
+//! `core::tmux::run_tmux_with_bin` uses for every production spawn. Until
+//! #7060 this file spawned tmux itself, so the server it forked took its TCC
+//! responsible process from the signed parent rather than becoming its own, and
+//! macOS asked "tmux needs permission to access data from other apps" once per
+//! test run: tmux's default `exit-empty` tears the server down with the last
+//! session, so the next run forked a fresh, again-unrecognised one. The
+//! primitive arrives as `super::tmux_spawn`, a re-export each `test_support`
+//! supplies, because its own path is spelled `crate::…` in the lib and
+//! `trusty_mpm::…` in the bin — the same two-spelling problem that makes the
+//! tmux binary a parameter here.
+//!
 //! Test: [`tests`] below — a session that outlives a panicking closure is gone
-//! afterwards, a guard never touches a name it did not create, and the stale
-//! sweep selects by age and namespace.
+//! afterwards, a guard never touches a name it did not create, the stale sweep
+//! selects by age and namespace, and no raw process spawn survives in this
+//! file.
 
-use std::process::Command;
 use std::sync::Once;
+
+/// Run `tmux_bin` with `args` through the crate's TCC-disclaiming spawn
+/// primitive, capturing stdout and stderr (#7060).
+///
+/// Why: an undisclaimed tmux server inherits its TCC responsible process from
+/// the signed binary that forked it, so macOS attributes whatever the pane's
+/// login shell touches back to that binary and prompts the operator for it.
+/// Production has routed every tmux spawn through the disclaim since #2819;
+/// this fixture was the one path left out.
+/// What: delegates to [`tmux_output_owned`], the single call site of
+/// `super::tmux_spawn`.
+/// Test: [`tests::the_fixture_spawn_seam_captures_output`],
+/// [`tests::no_raw_process_spawn_survives_in_this_fixture`].
+fn tmux_output(tmux_bin: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    let argv: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
+    tmux_output_owned(tmux_bin, &argv)
+}
+
+/// [`tmux_output`] for an argv already built as owned strings.
+///
+/// `super::tmux_spawn` is each target's re-export of
+/// `core::spawn_disclaim::disclaimed_output`, whose documented contract is
+/// `.args(args).output()` — stdin from `/dev/null`, stdout and stderr captured
+/// — plus the macOS disclaim attribute. Everything this file observes about a
+/// tmux run is therefore unchanged by the routing.
+fn tmux_output_owned(tmux_bin: &str, args: &[String]) -> std::io::Result<std::process::Output> {
+    super::tmux_spawn(tmux_bin, args)
+}
 
 /// Age past which a reserved-namespace session is certainly leaked (#6116).
 ///
@@ -144,10 +186,10 @@ fn stale_reserved_names(listing: &str, now_epoch: i64, max_age_secs: i64) -> Vec
 /// Test: the selection half via [`stale_reserved_names`]; the kill half is the
 /// same `kill-session -t =<name>` call [`ScratchTmuxSession::drop`] makes.
 fn sweep_stale_reserved_sessions(tmux_bin: &str) {
-    let Ok(out) = Command::new(tmux_bin)
-        .args(["list-sessions", "-F", "#{session_created} #{session_name}"])
-        .output()
-    else {
+    let Ok(out) = tmux_output(
+        tmux_bin,
+        &["list-sessions", "-F", "#{session_created} #{session_name}"],
+    ) else {
         return;
     };
     if !out.status.success() {
@@ -162,9 +204,7 @@ fn sweep_stale_reserved_sessions(tmux_bin: &str) {
         STALE_SESSION_AGE_SECS,
     ) {
         eprintln!("test-support: killing leaked test tmux session '{name}' (#6116)");
-        let _ = Command::new(tmux_bin)
-            .args(["kill-session", "-t", &format!("={name}")])
-            .output();
+        let _ = tmux_output(tmux_bin, &["kill-session", "-t", &format!("={name}")]);
     }
 }
 
@@ -233,9 +273,9 @@ impl ScratchTmuxSession {
         // sent the real cause to the test binary's stderr, unattached to the
         // panic, so five simultaneous failures each read only `exit status: 1`
         // and got misattributed to nested tmux.
-        let out = Command::new(tmux_bin)
-            .args(&args)
-            .output()
+        // #7060: the disclaiming primitive, so the server this forks is its own
+        // TCC responsible process instead of the signed parent's.
+        let out = tmux_output_owned(tmux_bin, &args)
             .unwrap_or_else(|e| panic!("spawn `{tmux_bin} new-session -s {name}`: {e}"));
         assert!(
             out.status.success(),
@@ -260,9 +300,7 @@ impl ScratchTmuxSession {
     /// `=` pins tmux to an exact match; see the module docs for why the bare
     /// form is unsafe here.
     pub(crate) fn exists(tmux_bin: &str, name: &str) -> bool {
-        Command::new(tmux_bin)
-            .args(["has-session", "-t", &format!("={name}")])
-            .output()
+        tmux_output(tmux_bin, &["has-session", "-t", &format!("={name}")])
             .is_ok_and(|out| out.status.success())
     }
 
@@ -270,10 +308,7 @@ impl ScratchTmuxSession {
     /// where tmux is absent (the convention `core::process`'s ignored
     /// disclaim-wrapper test already follows).
     pub(crate) fn tmux_available(tmux_bin: &str) -> bool {
-        Command::new(tmux_bin)
-            .arg("-V")
-            .output()
-            .is_ok_and(|out| out.status.success())
+        tmux_output(tmux_bin, &["-V"]).is_ok_and(|out| out.status.success())
     }
 }
 
@@ -281,18 +316,16 @@ impl Drop for ScratchTmuxSession {
     fn drop(&mut self) {
         // Best-effort by construction: `Drop` runs during unwinding, where a
         // panic would abort the process and bury the original failure.
-        let _ = Command::new(&self.tmux_bin)
-            .args(["kill-session", "-t", &format!("={}", self.name)])
-            .output();
+        let _ = tmux_output(
+            &self.tmux_bin,
+            &["kill-session", "-t", &format!("={}", self.name)],
+        );
     }
 }
 
 /// Live session names, or an empty set when tmux will not answer.
 fn live_session_names(tmux_bin: &str) -> std::collections::BTreeSet<String> {
-    let Ok(out) = Command::new(tmux_bin)
-        .args(["list-sessions", "-F", "#{session_name}"])
-        .output()
-    else {
+    let Ok(out) = tmux_output(tmux_bin, &["list-sessions", "-F", "#{session_name}"]) else {
         return std::collections::BTreeSet::new();
     };
     if !out.status.success() {
@@ -318,15 +351,15 @@ fn sessions_with_pane_under(
     tmux_bin: &str,
     root: &std::path::Path,
 ) -> std::collections::BTreeSet<String> {
-    let Ok(out) = Command::new(tmux_bin)
-        .args([
+    let Ok(out) = tmux_output(
+        tmux_bin,
+        &[
             "list-panes",
             "-a",
             "-F",
             "#{session_name}\t#{pane_current_path}",
-        ])
-        .output()
-    else {
+        ],
+    ) else {
         return std::collections::BTreeSet::new();
     };
     if !out.status.success() {
@@ -400,9 +433,7 @@ impl Drop for FixtureTmuxSessions {
             eprintln!("test-support: killing fixture tmux session '{name}' (#6542)");
             // Best-effort: `Drop` runs during unwinding, where a panic would
             // abort the process and bury the original failure.
-            let _ = Command::new(&self.tmux_bin)
-                .args(["kill-session", "-t", &format!("={name}")])
-                .output();
+            let _ = tmux_output(&self.tmux_bin, &["kill-session", "-t", &format!("={name}")]);
         }
     }
 }
@@ -428,6 +459,47 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
         reserved_session_name(&format!("guard-{tag}-{nanos}"))
+    }
+
+    /// The spawn seam this file routes every tmux invocation through is a
+    /// working capture path, exercised end to end (#7060).
+    ///
+    /// What this does and does not prove: on macOS `super::tmux_spawn` is
+    /// `core::spawn_disclaim::disclaimed_output`, so this call really executes
+    /// the `posix_spawnp` + `responsibility_spawnattrs_setdisclaim` path. The
+    /// disclaim itself sets a spawn attribute with no effect on the child's
+    /// exit status or output, so no assertion here can observe it — that the
+    /// seam IS the primitive is fixed at compile time by each `test_support`'s
+    /// re-export, and the absence of any other spawn by
+    /// [`no_raw_process_spawn_survives_in_this_fixture`].
+    #[test]
+    fn the_fixture_spawn_seam_captures_output() {
+        let out = tmux_output("/bin/echo", &["disclaim-seam"]).expect("spawn /bin/echo");
+        assert!(out.status.success(), "echo exited {}", out.status);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "disclaim-seam",
+            "the seam must capture stdout the way `.output()` does"
+        );
+    }
+
+    /// #7060, inverted into an assertion: a hand-rolled process spawn anywhere
+    /// in this file forks an undisclaimed tmux server, which is the defect.
+    ///
+    /// Asserted against this file's own source because the property is "no
+    /// other spawn exists", which no runtime call can demonstrate. The needle
+    /// is split so this test is not itself a match.
+    #[test]
+    fn no_raw_process_spawn_survives_in_this_fixture() {
+        let src = include_str!("test_tmux_session.rs");
+        let needle = concat!("Command", "::new");
+        assert_eq!(
+            src.matches(needle).count(),
+            0,
+            "a raw process spawn is back in this fixture — the tmux server it forks takes \
+             its TCC responsible process from the signed parent and macOS prompts the \
+             operator once per test run (#7060). Route it through `tmux_output` instead."
+        );
     }
 
     /// The mint and the daemon's refusal read the same constant, so a fixture
