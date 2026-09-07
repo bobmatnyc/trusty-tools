@@ -13,11 +13,20 @@
 //! What: [`strict_json_schema`] returns a normalized copy of a JSON Schema —
 //! the caller's value is never mutated — with `additionalProperties: false` and
 //! a complete `required` list on every object node, recursing through
-//! `properties`, `items` (single schema or tuple), `$defs`, `definitions`,
-//! `anyOf`/`oneOf`/`allOf`, and an object-valued `additionalProperties`.
+//! `properties`, `items` and `prefixItems` (single schema or tuple), `$defs`,
+//! `definitions`, `anyOf`/`oneOf`/`allOf`, and an object-valued
+//! `additionalProperties`.
+//!
+//! #7082: the gate here is broader than trusty-review's `enforce_strict_mode`
+//! this replaced — that one closed a node only when it carried a `properties`
+//! map, so a bare `{"type": "object"}` was left open and still 400'd. A node
+//! declaring `"type": "object"` is now closed whether or not it lists
+//! properties.
+//!
 //! Test: inline `tests` — `sets_additional_properties_false_on_every_object`,
 //! `fills_required_with_every_property`, `normalizes_nested_defs_and_variants`,
-//! `leaves_a_map_style_object_open`, `is_idempotent_and_does_not_mutate_input`.
+//! `leaves_a_map_style_object_open`, `is_idempotent_and_does_not_mutate_input`,
+//! `recurses_into_prefix_items`.
 
 use serde_json::{Map, Value};
 
@@ -26,6 +35,13 @@ const SUBSCHEMA_MAPS: [&str; 3] = ["properties", "$defs", "definitions"];
 
 /// Keys whose value is a list of alternative sub-schemas.
 const SUBSCHEMA_LISTS: [&str; 3] = ["anyOf", "oneOf", "allOf"];
+
+/// Keys whose value is either one sub-schema or a positional tuple of them.
+///
+/// `prefixItems` is draft 2020-12's tuple keyword; `items` carries the tuple in
+/// the older drafts and the element schema in 2020-12. Both spellings are
+/// walked so an object nested under either cannot stay open (#7082).
+const SUBSCHEMA_ITEMS: [&str; 2] = ["items", "prefixItems"];
 
 /// Return a copy of `schema` that satisfies OpenAI strict-mode's schema rules.
 ///
@@ -41,11 +57,19 @@ const SUBSCHEMA_LISTS: [&str; 3] = ["anyOf", "oneOf", "allOf"];
 /// map-style object: its value shape is kept and recursed into rather than
 /// overwritten, because closing it would forbid the keys it exists to allow.
 /// Recursion covers `properties`, `$defs`, `definitions`, `anyOf`, `oneOf`,
-/// `allOf`, `items` in both the single-schema and tuple forms, and an
-/// object-valued `additionalProperties`. Idempotent.
+/// `allOf`, `items` and `prefixItems` in both the single-schema and tuple
+/// forms, and an object-valued `additionalProperties`. Idempotent.
+///
+/// A property this normalization forces into `required` can still be omitted in
+/// substance: give it a nullable type union (`["string", "null"]`) and the model
+/// may answer `null`. A schema builder whose optional fields are NOT nullable
+/// gets them made mandatory here, so it must declare the union itself — see
+/// trusty-git-analytics' `period_findings_schema` for a worked example.
+///
 /// Test: `sets_additional_properties_false_on_every_object`,
 /// `fills_required_with_every_property`, `normalizes_nested_defs_and_variants`,
-/// `leaves_a_map_style_object_open`, `is_idempotent_and_does_not_mutate_input`.
+/// `leaves_a_map_style_object_open`, `is_idempotent_and_does_not_mutate_input`,
+/// `recurses_into_prefix_items`, `keeps_a_nullable_type_union_intact`.
 pub fn strict_json_schema(schema: &Value) -> Value {
     let mut normalized = schema.clone();
     enforce(&mut normalized);
@@ -92,9 +116,11 @@ fn enforce(node: &mut Value) {
                     }
                 }
             }
-            // The `Value::Array` arm below covers the tuple form of `items`.
-            if let Some(items) = map.get_mut("items") {
-                enforce(items);
+            // The `Value::Array` arm below covers the tuple form of either key.
+            for key in SUBSCHEMA_ITEMS {
+                if let Some(items) = map.get_mut(key) {
+                    enforce(items);
+                }
             }
             if let Some(additional) = map.get_mut("additionalProperties")
                 && additional.is_object()
@@ -178,8 +204,10 @@ mod tests {
                         children.iter().for_each(assert_strict);
                     }
                 }
-                if let Some(items) = map.get("items") {
-                    assert_strict(items);
+                for key in SUBSCHEMA_ITEMS {
+                    if let Some(items) = map.get(key) {
+                        assert_strict(items);
+                    }
                 }
                 if let Some(additional) = map.get("additionalProperties")
                     && additional.is_object()
@@ -303,6 +331,69 @@ mod tests {
         let twice = strict_json_schema(&once);
         assert_eq!(once, twice, "normalization must be idempotent");
         assert_eq!(input, nested(), "the caller's schema must be untouched");
+    }
+
+    /// Why: `prefixItems` is how draft 2020-12 spells a tuple, and a schema that
+    /// uses it puts its object nodes out of reach of an `items`-only walk —
+    /// reproducing #7082 on a schema that reads as already handled.
+    /// Test: itself.
+    #[test]
+    fn recurses_into_prefix_items() {
+        let out = strict_json_schema(&json!({
+            "type": "object",
+            "properties": {
+                "pair": {
+                    "type": "array",
+                    "prefixItems": [
+                        {"type": "object", "properties": {"a": {"type": "string"}}},
+                        {"type": "object", "properties": {"b": {"type": "string"}}}
+                    ]
+                }
+            }
+        }));
+        let prefix = &out["properties"]["pair"]["prefixItems"];
+        assert_eq!(prefix[0]["additionalProperties"], json!(false), "{out}");
+        assert_eq!(prefix[1]["additionalProperties"], json!(false), "{out}");
+        assert_eq!(prefix[0]["required"], json!(["a"]));
+        assert_eq!(prefix[1]["required"], json!(["b"]));
+        assert_strict(&out);
+    }
+
+    /// Why (#7082 fix round): forcing every property into `required` is only
+    /// safe because a builder can still make one optional in substance with a
+    /// nullable type union. If normalization rewrote or dropped the `"null"`
+    /// alternative, the model would be compelled to invent a value.
+    /// What: normalizes a schema whose optional properties are `["string",
+    /// "null"]` / `["number", "null"]`, and asserts both that the unions survive
+    /// verbatim and that the keys are listed in `required`.
+    /// Test: itself.
+    #[test]
+    fn keeps_a_nullable_type_union_intact() {
+        let out = strict_json_schema(&json!({
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string"},
+                "severity": {"type": ["string", "null"], "enum": ["low", "high", null]},
+                "confidence": {"type": ["number", "null"]}
+            },
+            "required": ["kind"]
+        }));
+        assert_eq!(
+            out["properties"]["severity"]["type"],
+            json!(["string", "null"]),
+            "the null alternative must survive: {out}"
+        );
+        assert_eq!(
+            out["properties"]["severity"]["enum"],
+            json!(["low", "high", null]),
+            "a nullable enum must keep its null member: {out}"
+        );
+        assert_eq!(
+            out["properties"]["confidence"]["type"],
+            json!(["number", "null"])
+        );
+        assert_eq!(out["required"], json!(["confidence", "kind", "severity"]));
+        assert_strict(&out);
     }
 
     /// Why: a non-object schema has no object semantics to constrain — adding

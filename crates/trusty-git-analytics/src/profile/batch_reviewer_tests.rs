@@ -121,6 +121,41 @@ fn batch_reviewer_parses_direct_json() {
     assert_eq!(findings[0].period_label, "2026-Q1");
 }
 
+/// Why (#7082 fix round): strict mode forces every property into `required`, so
+/// the schema offers `null` as the way to decline a severity or a confidence
+/// rather than guess one. A `#[serde(default)]` plain `String` REJECTS an
+/// explicit `null` — the whole period would fall to the parse-error path and
+/// lose every finding in the answer, not just the null field.
+/// What: parses a body whose four optionals are all `null`, asserts the finding
+/// survives and each null lands on the same fallback an absent key takes —
+/// `severity` on [`Effort::Low`], `file` on `"unknown"`, `confidence` on 0.0,
+/// `suggestion` on the empty string.
+/// Test: this test itself.
+#[test]
+fn batch_reviewer_parses_null_optionals_as_absent() {
+    const NULL_OPTIONALS: &str = r#"{"findings":[{"kind":"logic","description":"Off-by-one in the window bound.","suggestion":null,"confidence":null,"file":null,"severity":null}]}"#;
+
+    let findings = parse_period_findings(NULL_OPTIONALS, "2026-Q1");
+    assert_eq!(
+        findings.len(),
+        1,
+        "an explicit null must not cost the finding"
+    );
+    let f = &findings[0].finding;
+    assert_eq!(f.kind, "logic");
+    assert_eq!(
+        f.file, "unknown",
+        "a null file takes the absent-key sentinel"
+    );
+    assert_eq!(f.suggestion, "");
+    assert_eq!(f.confidence, 0.0);
+    assert_eq!(
+        f.effort,
+        Effort::Low,
+        "a null severity must not inflate the finding's weight"
+    );
+}
+
 /// Why: an empty body must cost this period's findings, not the run.
 /// What: parses `""`, asserts an empty result and no panic.
 /// Test: this test itself.

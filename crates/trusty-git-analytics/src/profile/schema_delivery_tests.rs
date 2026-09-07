@@ -157,3 +157,67 @@ fn the_sent_schemas_are_openai_strict_compliant() {
         assert_strict(&sent["json_schema"]["schema"], name);
     }
 }
+
+/// Why (#7082 fix round): closing the schema also made every property
+/// mandatory, so `severity`, `confidence`, `file` and `suggestion` — which the
+/// builder had listed as optional — became keys the model MUST fill. A model
+/// with no severity to report then has to invent one, and the report presents
+/// the guess as an observation. The nullable type union is what keeps "I have
+/// nothing here" sayable, so it has to survive on the value that leaves the
+/// process, not merely in the builder.
+/// What: takes the real period-findings schema through the structured arm and
+/// asserts, on the rendered wire payload, that each optional keeps its `"null"`
+/// alternative (and `severity` its `null` enum member) while being listed in
+/// `required` alongside the two genuinely mandatory keys.
+/// Test: this test itself.
+#[test]
+fn nullable_optionals_survive_strict_normalization() {
+    let (_, directive) = deliver_schema(
+        "BASE",
+        crate::profile::batch_reviewer::PERIOD_FINDINGS_SCHEMA_NAME,
+        crate::profile::batch_reviewer::period_findings_schema(),
+        true,
+    );
+    let sent = directive
+        .expect("the structured arm yields a directive")
+        .openai_response_format();
+    let item = &sent["json_schema"]["schema"]["properties"]["findings"]["items"];
+
+    for key in ["suggestion", "file"] {
+        assert_eq!(
+            item["properties"][key]["type"],
+            json!(["string", "null"]),
+            "{key} must stay nullable on the wire: {item}"
+        );
+    }
+    assert_eq!(
+        item["properties"]["confidence"]["type"],
+        json!(["number", "null"]),
+        "{item}"
+    );
+    assert_eq!(
+        item["properties"]["severity"]["type"],
+        json!(["string", "null"]),
+        "{item}"
+    );
+    assert_eq!(
+        item["properties"]["severity"]["enum"],
+        json!(["low", "medium", "high", "critical", null]),
+        "a nullable enum must keep its null member, or null is rejected: {item}"
+    );
+
+    // Strict mode still requires every key — the union is what makes that
+    // survivable rather than a compulsion to guess.
+    assert_eq!(
+        item["required"],
+        json!([
+            "confidence",
+            "description",
+            "file",
+            "kind",
+            "severity",
+            "suggestion"
+        ]),
+        "{item}"
+    );
+}
