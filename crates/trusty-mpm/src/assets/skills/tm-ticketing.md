@@ -220,6 +220,11 @@ label, restyle one, name a different assignee, or point at its own
 `issue-state.yaml` (#6918). `tm issue seed-config` WRITES that block into
 `config.yaml` — it creates the file, or appends the block to an existing one,
 leaving every prior byte and an existing `agents.ticketing` untouched (#7067).
+One case it refuses: a file that already declares `agents:` without
+`ticketing:`, since a second top-level `agents:` key would make the whole file
+unparseable and cost the operator every other setting in it. There it writes
+nothing, prints the block, and **exits nonzero** — paste the block under the
+existing `agents:` key by hand, then re-run to confirm.
 Two things the block cannot change, and the command prints both: the PR
 issue-link keyword stays `Refs #N` (a one-off `Closes` is the deliberate
 `tm pr open --closes` flag), and `trusty-mpm` stays a component label, never a

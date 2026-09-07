@@ -15,8 +15,16 @@ Added
   It creates that file if it is absent, appends the block textually if the file
   exists without one (every prior byte and comment preserved), and leaves an
   existing `agents.ticketing` exactly as the operator wrote it; it prints the
-  path and which of the three happened. Every key in the written block is at
-  its built-in default, so seeding does not change the standard. The
+  path and which of the four outcomes happened. The fourth is a refusal: a file
+  that already declares `agents:` without `ticketing:` is left untouched, since
+  a second top-level `agents:` key would make it unparseable and discard every
+  other setting in it — the block is printed for a manual paste under the
+  existing key and the command exits nonzero, so a provisioning script cannot
+  read a seed that did not happen as one that did. Writes go through the
+  workspace's atomic config write (temp sibling, then rename), so an
+  interrupted seed can never leave a half-written config. Every key in the
+  written block is at its built-in default, so seeding does not change the
+  standard. The
   `tm-ticketing` skill reverses its old "leave the milestone unset by default"
   rule: every new issue carries exactly one milestone chosen by a stated rule
   (the parent's, else the crate's `Backlog · <crate>`, else the one

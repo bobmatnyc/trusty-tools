@@ -146,7 +146,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `ls` — List managed sessions (session-manager MVP). Auto-prunes dead records; pass `--no-prune` for a read that changes nothing
   - `managed-resume` — \[DEPRECATED\] Resume a stopped managed session — use `resume` instead
   - `managed-stop` — \[DEPRECATED\] Stop a managed session's runtime — use `stop` instead
-  - `new` — Spawn a new managed session from a repo + ref (session-manager MVP)
+  - `new` — Spawn a new managed session in an existing local checkout
   - `output` — Capture the current output of a session's tmux pane
   - `pause` — Pause a running session, saving state for later resume
   - `prune` — Prune managed sessions by state + compact tombstones (#1508)
@@ -180,7 +180,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `ls` — List managed sessions (session-manager MVP). Auto-prunes dead records; pass `--no-prune` for a read that changes nothing
   - `managed-resume` — \[DEPRECATED\] Resume a stopped managed session — use `resume` instead
   - `managed-stop` — \[DEPRECATED\] Stop a managed session's runtime — use `stop` instead
-  - `new` — Spawn a new managed session from a repo + ref (session-manager MVP)
+  - `new` — Spawn a new managed session in an existing local checkout
   - `output` — Capture the current output of a session's tmux pane
   - `pause` — Pause a running session, saving state for later resume
   - `prune` — Prune managed sessions by state + compact tombstones (#1508)

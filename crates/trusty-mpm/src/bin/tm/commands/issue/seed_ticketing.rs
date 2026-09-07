@@ -20,7 +20,9 @@
 //! `seed_leaves_an_existing_ticketing_block_untouched`,
 //! `seed_refuses_to_append_under_an_existing_agents_block`,
 //! `a_seeded_file_resolves_to_the_builtin_ticketing_defaults`,
-//! `the_seeded_path_is_the_one_the_loader_reads`.
+//! `the_seeded_path_is_the_one_the_loader_reads`,
+//! `seed_writes_atomically_and_never_in_place`,
+//! `only_the_refusal_outcome_exits_nonzero`.
 
 use std::path::{Path, PathBuf};
 
@@ -114,10 +116,49 @@ pub(crate) fn seed_ticketing_block(path: &Path) -> anyhow::Result<TicketingSeedO
     Ok(TicketingSeedOutcome::Appended)
 }
 
-/// Write `contents` to `path`, naming the path on failure.
+/// Write `contents` to `path` atomically, naming the path on failure.
+///
+/// Why: this is the operator's real config. A `std::fs::write` truncates the
+/// target and then fills it, so a kill or a full disk mid-write leaves a
+/// half-file where a working config was — the exact loss the whole
+/// never-clobber design above exists to prevent.
+/// What: delegates to the workspace's one atomic config write, which lands a
+/// sibling temp file and renames it over the target, so the target is never
+/// opened for writing and a failed write leaves it byte-identical.
+/// Test: `seed_writes_atomically_and_never_in_place`.
 fn write_config(path: &Path, contents: &str) -> anyhow::Result<()> {
-    std::fs::write(path, contents)
+    // #7067: temp-and-rename, never a truncating in-place write.
+    trusty_common::crate_config::save_raw_at(path, contents)
+        .map(|_| ())
         .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))
+}
+
+/// The process exit disposition for a [`TicketingSeedOutcome`].
+///
+/// Why: three of the four outcomes end with the block on disk; the fourth
+/// leaves the standard half-applied and needs the operator to paste it by
+/// hand. Returning `Ok(())` for all four made those cases indistinguishable to
+/// a script — a provisioning run that seeded nothing looked like one that
+/// seeded everything.
+/// What: `Created` / `Appended` / `AlreadyPresent` → `Ok`, so `tm issue
+/// seed-config` exits 0. `AgentsBlockPresent` → `Err`, so it exits nonzero,
+/// carrying the one-line reason. The printing is the caller's; this is only
+/// the disposition, so the two cannot disagree about which arm exits.
+/// Test: `only_the_refusal_outcome_exits_nonzero`.
+pub(crate) fn seed_outcome_result(
+    outcome: TicketingSeedOutcome,
+    path: &Path,
+) -> anyhow::Result<()> {
+    match outcome {
+        TicketingSeedOutcome::Created
+        | TicketingSeedOutcome::Appended
+        | TicketingSeedOutcome::AlreadyPresent => Ok(()),
+        TicketingSeedOutcome::AgentsBlockPresent => Err(anyhow::anyhow!(
+            "the agents.ticketing block was NOT written to {} — add the block above \
+             under the existing `agents:` key by hand",
+            path.display()
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -230,6 +271,86 @@ workspace_root_template: ~/work
             ResolvedTicketing::default(),
             "seeding must not change the standard"
         );
+    }
+
+    /// The write must never truncate the operator's config in place.
+    ///
+    /// Phase 1 pins the visible half: after a successful append the sibling
+    /// temp file is gone, so nothing is left for a directory reader to mistake
+    /// for a config. Phase 2 pins the half that matters: a read-only parent
+    /// directory blocks creating that sibling while leaving the existing file
+    /// writable via `write(2)`, so a truncating in-place write SUCCEEDS there
+    /// and an atomic one fails — the seed must fail and leave every byte.
+    /// Skipped when the process can create files in a read-only directory
+    /// anyway (running as root), since the failure cannot be provoked there.
+    #[cfg(unix)]
+    #[test]
+    fn seed_writes_atomically_and_never_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = config_at(&tmp);
+        let dir = path.parent().expect("has a parent").to_path_buf();
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(&path, OPERATOR_CONFIG).expect("seed file");
+
+        assert_eq!(
+            seed_ticketing_block(&path).expect("seeds"),
+            TicketingSeedOutcome::Appended
+        );
+        let siblings: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect("reads dir")
+            .map(|e| e.expect("entry").path())
+            .collect();
+        assert_eq!(siblings, vec![path.clone()], "a .tmp sibling survived");
+
+        // Phase 2: the same file, now with an `agents:`-free body the seed
+        // would append to again, under a directory that refuses new files.
+        std::fs::write(&path, OPERATOR_CONFIG).expect("reset");
+        let restore = std::fs::metadata(&dir).expect("stat").permissions();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        let root_can_still_write = std::fs::write(dir.join("probe"), b"x").is_ok();
+        let result = if root_can_still_write {
+            std::fs::remove_file(dir.join("probe")).ok();
+            None
+        } else {
+            Some(seed_ticketing_block(&path))
+        };
+        std::fs::set_permissions(&dir, restore).expect("restore");
+
+        let Some(result) = result else {
+            return; // running as root: the write cannot be made to fail here.
+        };
+        assert!(result.is_err(), "the write was expected to fail");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("reads back"),
+            OPERATOR_CONFIG,
+            "a failed write modified the operator's config in place"
+        );
+    }
+
+    /// The refusal outcome is the only one that exits nonzero, so a script can
+    /// tell "nothing was written" from "the block is on disk".
+    #[test]
+    fn only_the_refusal_outcome_exits_nonzero() {
+        let path = Path::new("/home/bob/.trusty-tools/trusty-mpm/config.yaml");
+
+        for ok in [
+            TicketingSeedOutcome::Created,
+            TicketingSeedOutcome::Appended,
+            TicketingSeedOutcome::AlreadyPresent,
+        ] {
+            assert!(
+                seed_outcome_result(ok, path).is_ok(),
+                "{ok:?} must exit 0 — the block is on disk"
+            );
+        }
+
+        let err = seed_outcome_result(TicketingSeedOutcome::AgentsBlockPresent, path)
+            .expect_err("the refusal must exit nonzero");
+        let msg = err.to_string();
+        assert!(msg.contains("NOT written"), "{msg}");
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
     }
 
     /// The whole point of #7067's fix: the file we write is the file the

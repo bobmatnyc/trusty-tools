@@ -36,7 +36,9 @@ use crate::commands::ticket::system::{
 };
 
 use config::{StateModel, load_model};
-use seed_ticketing::{TicketingSeedOutcome, seed_ticketing_block, ticketing_config_path};
+use seed_ticketing::{
+    TicketingSeedOutcome, seed_outcome_result, seed_ticketing_block, ticketing_config_path,
+};
 use trusty_mpm::core::trusty_tools_config::{
     TICKETING_BLOCK_TEMPLATE, TrustyToolsConfig, resolve_ticketing,
 };
@@ -189,9 +191,12 @@ fn print_states(model: &StateModel) {
 /// [`seed_ticketing_block`] (#7067), so the milestone and project half of the
 /// standard lands on disk rather than being printed for the operator to paste.
 /// That half is never overwritten: an existing `agents.ticketing` is left as
-/// the operator wrote it.
+/// the operator wrote it. One outcome exits NONZERO — an `agents:` key with no
+/// `ticketing:` cannot be appended to, so the block is printed for a manual
+/// paste and the command fails rather than reporting a seed it did not do.
 /// Test: side-effect-only (filesystem/stdout); the write itself is covered by
-/// the `seed_ticketing` tests, the template by
+/// the `seed_ticketing` tests, the exit split by
+/// `only_the_refusal_outcome_exits_nonzero`, the template by
 /// `the_seed_template_parses_to_the_builtin_defaults`.
 fn seed_config(force: bool) -> anyhow::Result<()> {
     let path: PathBuf = config::user_config_path()
@@ -216,7 +221,8 @@ fn seed_config(force: bool) -> anyhow::Result<()> {
     let config_yaml = ticketing_config_path()
         .ok_or_else(|| anyhow::anyhow!("could not resolve home directory for the user config"))?;
     let shown = config_yaml.display();
-    match seed_ticketing_block(&config_yaml)? {
+    let outcome = seed_ticketing_block(&config_yaml)?;
+    match outcome {
         TicketingSeedOutcome::Created => {
             println!("created {shown} with the agents.ticketing block");
         }
@@ -235,5 +241,7 @@ fn seed_config(force: bool) -> anyhow::Result<()> {
             print!("{TICKETING_BLOCK_TEMPLATE}");
         }
     }
-    Ok(())
+    // #7067: the refusal arm exits nonzero — the standard is half-applied and a
+    // script must not read that as a completed seed.
+    seed_outcome_result(outcome, &config_yaml)
 }
