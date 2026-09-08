@@ -94,6 +94,12 @@ toml_edit = { workspace = true }
 # at one repository means generating one. `serde_yaml` is the workspace-wide
 # standard for YAML (see the root Cargo.toml note).
 serde_yaml = { workspace = true }
+# #7133: comparing a collected artifact's recorded `trusty-audit` version
+# against the version assembling the package. Already the workspace's answer
+# for version comparison (`trusty-installer`, `trusty-mpm`, `trusty-review`
+# all reach for it), so this is the shared choice rather than a hand-rolled
+# major/minor/patch comparison.
+semver = { workspace = true }
 # Library error type.
 thiserror = { workspace = true }
 # #5868: first-run credential entry with echo disabled. Already the workspace's

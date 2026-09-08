@@ -780,6 +780,10 @@ async fn run_one(
         // repository's entries with. Read here, at the one point that knows
         // this repository is finished.
         finished_at: Some(crate::index_report::local_now()),
+        // #7133: THIS process's own version, read at the one point that knows
+        // collection for this repository just finished — not the version that
+        // will later run `trusty-audit package`.
+        collected_by_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         result,
     })
 }
@@ -1902,6 +1906,7 @@ exit 0
             resumed: false,
             duration_ms: None,
             finished_at: None,
+            collected_by_version: None,
             result: RepoResult::Succeeded,
         };
         let bad = RepoRun {

@@ -97,6 +97,25 @@ pub struct RepoRun {
     /// Test: `crate::package::package_tests::a_stage_failure_reaches_the_error_digest`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,
+    /// The `trusty-audit` version that collected this repository (#7133).
+    ///
+    /// Why: the package step stamps its OWN running version into
+    /// `generated_by` (`crate::package::generated`), which says nothing about
+    /// the version that actually ran `tga audit` for this repository — a
+    /// multi-day engagement can start collection on one installed version and
+    /// package on a later one that has since fixed a bug the already-collected
+    /// manifest still reflects, and nothing compared the two.
+    /// What: `crate::run::run_one`'s own `env!("CARGO_PKG_VERSION")`, recorded
+    /// at the one point that knows this repository's collection just finished.
+    /// Carried over verbatim by `super::checkpoint::plan`'s `..entry.clone()`
+    /// on a RESUMED repository, so the field keeps the version that actually
+    /// collected it rather than the version of the process that resumed it.
+    /// `None` for a checkpoint written before this field existed —
+    /// `crate::package::stale_artifacts` reports that as a legacy artifact
+    /// rather than as a version match.
+    /// Test: `crate::package::stale_artifacts::stale_artifacts_tests`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collected_by_version: Option<String>,
     /// How it ended.
     pub result: RepoResult,
 }
