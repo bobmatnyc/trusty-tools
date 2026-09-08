@@ -25,7 +25,7 @@ name = "trusty-mpm"
 # changes in the test suite under an already-published version.
 # 1.5.18 (refs #6892): patch — 1.5.17 is published and this PR edits `src/**`.
 # The edits are doc comments only, so no public item changed signature.
-version = "1.5.18"
+version = "1.5.19"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
