@@ -77,6 +77,15 @@ PREVIEW_MAX_BYTES=300000 bash scripts/render-console-saver-preview.sh
 Commit the regenerated PNG — the build copies it from the source tree, and a
 bundle without it is rejected before the compile starts.
 
+The gallery tile and the in-pane Preview are two separate mechanisms. System
+Settings builds the tile by reading `Contents/Resources/thumbnail.png` and
+`thumbnail@2x.png` by name; it never constructs the view, so the
+`isPreview: true` draw path reaches only the Preview pane. The build derives
+both thumbnails from the same `ConsolePreview.png` with `sips` — 90×58 and
+180×116, centre-cropped to the tile aspect, matching the pair Apple's
+`Random.saver` ships — so nothing extra is committed and the two can never
+disagree (#6839).
+
 ## Install
 
 ```bash

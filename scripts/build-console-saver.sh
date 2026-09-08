@@ -10,9 +10,10 @@
 # What: compiles crates/trusty-console/macos/saver/TrustyConsoleSaver.swift to a
 # dylib with swiftc, assembles target/console-saver/TrustyConsole.saver from it
 # plus the Info.plist template (injecting the trusty-console crate version) and
-# the static preview asset the gallery tile and the offline fallback draw
-# (#6839), lints the plist, codesigns the bundle, verifies the signature, and
-# zips the result with ditto.
+# the static preview asset the in-pane Preview and the offline fallback draw
+# (#6839), derives the two gallery-tile thumbnails from that same asset with
+# sips, lints the plist, codesigns the bundle, verifies the signature, and zips
+# the result with ditto.
 #
 # Signing: `CODESIGN_IDENTITY` set → Developer ID with `--options runtime
 # --timestamp` (Gatekeeper/notarization path). Unset → ad-hoc (`--sign -`), which
@@ -44,6 +45,12 @@ CARGO_TOML="$REPO_ROOT/crates/trusty-console/Cargo.toml"
 # draw. Regenerate with scripts/render-console-saver-preview.sh.
 PREVIEW_ASSET="$SRC_DIR/Resources/ConsolePreview.png"
 
+# #6839: gallery reads thumbnail.png/@2x by name; the isPreview draw never feeds
+# the tile. Sizes match Random.saver's pair, the only Apple saver on this host
+# that ships them and the only one that gets a real tile.
+THUMBNAIL_WIDTH=90
+THUMBNAIL_HEIGHT=58
+
 MODULE_NAME="TrustyConsoleSaver"
 DEPLOYMENT_TARGET="13.0"
 
@@ -58,7 +65,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
-for tool in swiftc codesign plutil ditto; do
+for tool in swiftc codesign plutil ditto sips; do
   command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: $tool not found on PATH." >&2; exit 1; }
 done
 
@@ -117,6 +124,38 @@ chmod 755 "$EXECUTABLE"
 # --- assemble --------------------------------------------------------------
 cp "$PREVIEW_ASSET" "$BUNDLE/Contents/Resources/ConsolePreview.png"
 echo "==> preview asset: $(wc -c < "$PREVIEW_ASSET" | tr -d ' ') bytes"
+
+# #6839: gallery reads thumbnail.png/@2x by name; the isPreview draw never feeds
+# the tile. Derived here from the same source render so the two never diverge.
+SRC_W="$(sips -g pixelWidth "$PREVIEW_ASSET" | awk '/pixelWidth/ { print $2 }')"
+SRC_H="$(sips -g pixelHeight "$PREVIEW_ASSET" | awk '/pixelHeight/ { print $2 }')"
+if [[ -z "$SRC_W" || -z "$SRC_H" ]]; then
+  echo "ERROR: sips could not read the pixel size of $PREVIEW_ASSET" >&2
+  exit 1
+fi
+
+# The largest box at the tile's aspect that fits inside the source. sips crops
+# on the centre, so this keeps the middle of the render and drops the overhang.
+read -r CROP_W CROP_H < <(
+  awk -v sw="$SRC_W" -v sh="$SRC_H" -v tw="$THUMBNAIL_WIDTH" -v th="$THUMBNAIL_HEIGHT" \
+    'BEGIN {
+       if (sw * th > sh * tw) { printf "%d %d\n", int(sh * tw / th), sh }
+       else                   { printf "%d %d\n", sw, int(sw * th / tw) }
+     }'
+)
+
+for scale in 1 2; do
+  if [[ "$scale" == 1 ]]; then
+    thumb="$BUNDLE/Contents/Resources/thumbnail.png"
+  else
+    thumb="$BUNDLE/Contents/Resources/thumbnail@2x.png"
+  fi
+  cp "$PREVIEW_ASSET" "$thumb"
+  sips --cropToHeightWidth "$CROP_H" "$CROP_W" "$thumb" >/dev/null
+  sips --resampleHeightWidth \
+    "$((THUMBNAIL_HEIGHT * scale))" "$((THUMBNAIL_WIDTH * scale))" "$thumb" >/dev/null
+  echo "==> thumbnail ${scale}x: $((THUMBNAIL_WIDTH * scale))x$((THUMBNAIL_HEIGHT * scale)) from ${CROP_W}x${CROP_H} crop of ${SRC_W}x${SRC_H}"
+done
 
 cp "$SRC_DIR/Info.plist" "$BUNDLE/Contents/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$VERSION" "$BUNDLE/Contents/Info.plist"
