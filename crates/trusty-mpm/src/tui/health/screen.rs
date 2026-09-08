@@ -422,6 +422,22 @@ pub fn health_tab_lines(screen: &HealthScreen) -> Vec<String> {
     ]
 }
 
+/// Render one count cell of the palace detail panel.
+///
+/// Why (#7125): the poller asks `memory.palaces_list` for `counts: false`, so
+/// a palace the daemon has not opened reports placeholder zeros with `cached:
+/// false`. `Vectors: 0` in the detail panel states a measurement nobody took —
+/// the same lie `--v` would tell in the Collections list, one screen deeper.
+/// What: `?` when the row's counts are unknown, else the comma-grouped number.
+/// Test: `palace_index_tab_lines_show_unknown_counts_as_unknown`.
+fn palace_count_cell(row: &CollectionRow, n: u64) -> String {
+    if row.counts_unknown {
+        "?".to_string()
+    } else {
+        format_with_commas(n)
+    }
+}
+
 /// Build the INDEX tab body lines for a memory-palace row (the detail panel).
 ///
 /// Why: the right detail panel needs palace-appropriate stats — vectors,
@@ -431,37 +447,45 @@ pub fn health_tab_lines(screen: &HealthScreen) -> Vec<String> {
 /// section (`Triples` / `Nodes` / `Edges` — the latter two are best-effort
 /// and read from the row's KG-side fields if present), and a freshness
 /// section (`Last write`). Numbers are comma-grouped for readability;
-/// missing data renders as `N/A`.
+/// missing data renders as `N/A`, and a row whose counts were never measured
+/// ([`CollectionRow::counts_unknown`], #7125) renders every count as `?` —
+/// `0` and `N/A` are both claims about the palace this panel cannot make.
 /// Test: `palace_index_tab_lines_shows_graph_section`,
-/// `palace_index_tab_lines_formats_last_write`.
+/// `palace_index_tab_lines_formats_last_write`,
+/// `palace_index_tab_lines_show_unknown_counts_as_unknown`.
 pub fn palace_index_tab_lines(row: &CollectionRow) -> Vec<String> {
     let mut lines = Vec::with_capacity(12);
 
     // Header: vector / drawer / room counts.
     lines.push(format!(
         "Vectors:    {:<12} Drawers: {}",
-        format_with_commas(row.count),
-        format_with_commas(row.drawer_count),
+        palace_count_cell(row, row.count),
+        palace_count_cell(row, row.drawer_count),
     ));
     // #4811: was "Wings:", rendered from a room count (ADR-0027 C3.4).
     lines.push(format!(
         "Rooms:      {}",
-        format_with_commas(row.room_count),
+        palace_count_cell(row, row.room_count),
     ));
     lines.push(String::new());
 
     // Graph section.
     lines.push("-- Knowledge Graph ------------------------------------".to_string());
-    lines.push(format!("Triples:    {}", format_with_commas(row.kg_count),));
-    let node_cell = if row.node_count == 0 {
+    lines.push(format!(
+        "Triples:    {}",
+        palace_count_cell(row, row.kg_count),
+    ));
+    // A counted zero here is `N/A` — the palace has no graph. An UNCOUNTED
+    // zero is `?`, and `palace_count_cell` draws that distinction.
+    let node_cell = if row.node_count == 0 && !row.counts_unknown {
         "N/A".to_string()
     } else {
-        format_with_commas(row.node_count)
+        palace_count_cell(row, row.node_count)
     };
-    let edge_cell = if row.edge_count == 0 {
+    let edge_cell = if row.edge_count == 0 && !row.counts_unknown {
         "N/A".to_string()
     } else {
-        format_with_commas(row.edge_count)
+        palace_count_cell(row, row.edge_count)
     };
     lines.push(format!(
         "Nodes:      {:<12} Edges: {}",

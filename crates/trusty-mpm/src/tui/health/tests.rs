@@ -1155,6 +1155,51 @@ fn project_palace_rows_falls_back_to_legacy_wing_count() {
     assert_eq!(rows[0].room_count, 4);
 }
 
+/// Why (#7125): the Collections list renders an uncounted palace as `?v ?g`,
+/// and selecting that row opens this panel. Reading `row.count` straight
+/// through printed `Vectors: 0`, `Drawers: 0`, `Rooms: 0`, `Triples: 0` — the
+/// same placeholder zeros, one screen deeper, presented as measurements. The
+/// poller change makes `cached: false` the common case, so this is the row the
+/// operator usually drills into.
+/// What: renders a row flagged `counts_unknown` and asserts every count cell
+/// reads `?`, with no bare `0` anywhere in the panel.
+/// Test: this IS the test.
+#[test]
+fn palace_index_tab_lines_show_unknown_counts_as_unknown() {
+    let row = CollectionRow {
+        id: "cold".into(),
+        count: 0,
+        kg_count: 0,
+        drawer_count: 0,
+        room_count: 0,
+        node_count: 0,
+        edge_count: 0,
+        ok: true,
+        counts_unknown: true,
+        ..Default::default()
+    };
+    let lines = palace_index_tab_lines(&row);
+    for label in ["Vectors:", "Drawers:", "Rooms:", "Triples:"] {
+        let line = lines
+            .iter()
+            .find(|l| l.contains(label))
+            .unwrap_or_else(|| panic!("the panel renders a `{label}` line: {lines:?}"));
+        assert!(
+            line.contains('?'),
+            "`{label}` must read `?` when nothing counted it: {line:?}"
+        );
+    }
+    assert!(
+        !lines.iter().any(|l| l.contains(": 0")),
+        "a placeholder zero must never render as a measurement: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("N/A")),
+        "`N/A` says the palace has no graph, which is also a measurement: \
+         {lines:?}"
+    );
+}
+
 #[test]
 fn palace_index_tab_lines_shows_graph_section() {
     let row = CollectionRow {
