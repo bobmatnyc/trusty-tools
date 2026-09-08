@@ -888,6 +888,47 @@ fn pm_guard_denies_destructive_delete_of_a_worktree_root() {
 }
 
 #[test]
+fn pm_guard_denies_secret_file_copy_into_a_worktree_from_native_subagent() {
+    // Issue #7122: a `local-ops` agent `cp`'d a live `terraform.tfvars` into
+    // its session worktree, and a subsequent directory-wide `terraform fmt`
+    // printed its credentials into the transcript. `agent_id` is present so
+    // this also proves the rule fires before Guard 4's subagent exemption,
+    // matching the sibling destructive-delete proof above.
+    for command in [
+        "cp /Users/agent/live/terraform.tfvars .claude/worktrees/agent-x/terraform.tfvars",
+        "cp /repo/.env /repo/.claude/worktrees/agent-x/.env",
+        "mv /tmp/id_rsa /repo/.claude/worktrees/agent-x/id_rsa",
+    ] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","agent_type":"local-ops","tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#
+        );
+        let stdout = run_pm_guard(&payload, &[]);
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("7122"),
+            "deny message must cite issue #7122: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_allows_secret_file_copy_outside_a_worktree_and_ordinary_copies_into_one() {
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        // Secret-shaped source, but the destination is not a worktree.
+        "cp .env /Users/agent/backup/.env",
+        // Worktree destination, but an ordinary, non-secret source.
+        "cp README.md .claude/worktrees/agent-x/README.md",
+    ] {
+        assert_eq!(
+            run_pm_guard(&bash_payload_at(command, &repo, ""), &[]).trim(),
+            "",
+            "expected allow for: {command}"
+        );
+    }
+}
+
+#[test]
 fn pm_guard_allows_ordinary_delete_cleanup() {
     // The other half of #4031's scope: none of these target a denylisted
     // root, so they must stay allowed — the same fixture used for the deny
