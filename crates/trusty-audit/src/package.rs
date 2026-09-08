@@ -137,6 +137,12 @@ pub mod signing;
 // parsing, not signing.
 mod zip_directory;
 
+// #7133: comparing each audited repository's recorded `RepoRun::collected_by_version`
+// against the version assembling this package. Its own file for the same reason
+// `credential_scan` and the others are — this file decides what goes into the
+// archive; that one decides which artifacts are stale.
+mod stale_artifacts;
+
 use generated::{
     Generated, exclusions, render_failures, render_index, render_metadata, render_readme,
 };
@@ -267,6 +273,14 @@ pub struct ReturnPackage {
     /// `unattempted` — a repository that never cloned reaches the sweep's
     /// records nowhere, so it can only arrive that way (#5824).
     pub excluded: Vec<String>,
+    /// One line per audited repository whose collection artifact is older
+    /// than (or does not name) the version assembling this package (#7133).
+    ///
+    /// Unlike `excluded`, a repository named here IS in the package — this is
+    /// a warning, not a refusal, so a bug already fixed in the running
+    /// version does not silently ship without saying so. See
+    /// `stale_artifacts::detect`.
+    pub stale_artifacts: Vec<String>,
     /// Whether this package carries a signature, and under which key (#5481).
     pub signature: SignatureOutcome,
 }
@@ -465,8 +479,22 @@ pub fn assemble(
     // #6781: one render, two members — the index and its machine-readable twin
     // come out of one `IndexReport`, so they share a timestamp and a roll-up.
     let (index, debt) = render_index(work, report, &collected);
+    // #7133: computed once, so the same lines reach both `package.toml` and the
+    // in-memory `ReturnPackage` the CLI prints — one derivation, not two.
+    let stale_lines: Vec<String> = stale_artifacts::detect(&audited)
+        .iter()
+        .map(stale_artifacts::StaleArtifact::line)
+        .collect();
     let generated = Generated {
-        metadata: render_metadata(work, config, report, &audited, unattempted, collector_gaps)?,
+        metadata: render_metadata(
+            work,
+            config,
+            report,
+            &audited,
+            unattempted,
+            collector_gaps,
+            &stale_lines,
+        )?,
         // #5481: the README states signed-or-not, and it is written before the
         // manifest exists — so it is told from the key, which is already known.
         readme: render_readme(config, &audited, &excluded, signing_key.is_some()),
@@ -497,6 +525,7 @@ pub fn assemble(
         generated,
         collected,
         excluded,
+        stale_lines,
         github_token,
         signing_key.as_ref(),
     )
@@ -726,12 +755,16 @@ fn collect_extract(
 /// The temporary file is what makes the two refusals meaningful: a credential
 /// found in the last member removes a `.part` file rather than leaving a
 /// finished-looking zip the recipient might send.
+// #7133: `stale_artifacts` is the eighth parameter — over clippy's default of
+// seven, same as `crate::run::run_one`'s reason for the same allow.
+#[allow(clippy::too_many_arguments)]
 fn write_archive(
     destination: &Path,
     config: &EngagementConfig,
     generated: Generated,
     collected: Vec<(String, PathBuf)>,
     excluded: Vec<String>,
+    stale_artifacts: Vec<String>,
     github_token: Option<&str>,
     signing_key: Option<&signing::EngagementKey>,
 ) -> Result<ReturnPackage, AuditError> {
@@ -779,6 +812,7 @@ fn write_archive(
         total_bytes,
         packaged_bytes,
         excluded,
+        stale_artifacts,
         signature: match signing_key {
             Some(key) => SignatureOutcome::Signed {
                 key_fingerprint: key.fingerprint(),
@@ -1034,6 +1068,65 @@ trusty-review = "0.15.1"
         );
     }
 
+    /// #7133 regression: a repository collected by an older `trusty-audit`,
+    /// and one whose record predates version tracking, are each named by
+    /// repository, collected version, and the version producing this
+    /// package — and all three repositories still packaged, never refused.
+    ///
+    /// Fails before the fix: neither `RepoRun::collected_by_version` nor
+    /// `ReturnPackage::stale_artifacts` exists, so this does not compile
+    /// against the pre-#7133 shape of either type.
+    #[test]
+    fn a_stale_collection_artifact_is_reported_but_still_packaged() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let running = env!("CARGO_PKG_VERSION");
+        let stale = collected_at(&work, "00-acme-legacy", "acme-legacy", Some("0.13.0"));
+        let untracked = collected_at(&work, "01-acme-untracked", "acme-untracked", None);
+        let current = collected_at(&work, "02-acme-current", "acme-current", Some(running));
+        let report = RunReport::of(vec![stale, untracked, current]);
+        let destination = default_destination(&work);
+
+        let package =
+            assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
+
+        assert_eq!(
+            package.stale_artifacts,
+            vec![
+                format!(
+                    "acme-legacy: collected by trusty-audit 0.13.0, this package is \
+                     trusty-audit {running} — re-collect to pick up any fixes since 0.13.0"
+                ),
+                format!(
+                    "acme-untracked: collected by a trusty-audit version this record does not \
+                     name (a legacy artifact, from before this client tracked one), this \
+                     package is trusty-audit {running} — re-collect to confirm it reflects the \
+                     current tool"
+                ),
+            ],
+            "{:?}",
+            package.stale_artifacts
+        );
+        // Stale does not mean excluded — all three repositories are packaged.
+        assert!(package.excluded.is_empty(), "{:?}", package.excluded);
+
+        let metadata = read_entry(&destination, METADATA_ENTRY);
+        let parsed: toml::Value = metadata.parse().expect("package.toml is TOML");
+        assert_eq!(
+            parsed["repositories_audited"].as_integer(),
+            Some(3),
+            "{metadata}"
+        );
+        assert_eq!(
+            parsed["stale_artifacts"]
+                .as_array()
+                .map(|a| a.iter().filter_map(toml::Value::as_str).count()),
+            Some(2),
+            "{metadata}"
+        );
+    }
+
     /// A repository that ran, with the report and database a real sweep leaves.
     fn audited(work: &WorkDir, stem: &str, name: &str) -> RepoRun {
         let output = work.path(Area::Output).join(stem);
@@ -1062,7 +1155,21 @@ trusty-review = "0.15.1"
             resumed: false,
             duration_ms: None,
             finished_at: None,
+            // #7133: matches the running version by default, so the 40-odd
+            // other tests built on this fixture see no stale artifact unless
+            // they ask for one via `collected_at`.
+            collected_by_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
             result: RepoResult::Succeeded,
+        }
+    }
+
+    /// [`audited`], with its `collected_by_version` overridden (#7133) —
+    /// `None` for a legacy artifact, `Some(v)` for a repository collected by
+    /// version `v`.
+    fn collected_at(work: &WorkDir, stem: &str, name: &str, version: Option<&str>) -> RepoRun {
+        RepoRun {
+            collected_by_version: version.map(str::to_owned),
+            ..audited(work, stem, name)
         }
     }
 
@@ -1084,6 +1191,7 @@ trusty-review = "0.15.1"
                 resumed: false,
                 duration_ms: None,
                 finished_at: None,
+                collected_by_version: None,
                 result: RepoResult::Succeeded,
             }
         }
@@ -1520,9 +1628,11 @@ trusty-review = "0.15.1"
                 "repositories",
                 "repositories_audited",
                 "repositories_excluded",
+                "stale_artifacts",
                 "tools",
             ],
-            "the manifest grew no key beyond collector_gaps (#7134)"
+            "the manifest grew no key beyond collector_gaps (#7134) and \
+             stale_artifacts (#7133)"
         );
     }
 

@@ -1202,6 +1202,7 @@ mod cli_tests {
             resumed: false,
             duration_ms: None,
             finished_at: None,
+            collected_by_version: None,
             result,
         };
         let ok = run(RepoResult::Succeeded);
@@ -1258,6 +1259,7 @@ mod cli_tests {
             resumed: false,
             duration_ms: None,
             finished_at: None,
+            collected_by_version: None,
             result: RepoResult::Succeeded,
         };
         let gap = "linear:a1b2c3d4 was not audited — re-register it (#5982)";
@@ -1291,6 +1293,7 @@ mod cli_tests {
             resumed,
             duration_ms: None,
             finished_at: None,
+            collected_by_version: None,
             result: RepoResult::Succeeded,
         };
         let outcome = Outcome::Run(RunReport::of(vec![
@@ -1333,6 +1336,7 @@ mod cli_tests {
             total_bytes: 900 + 3 * 1024 * 1024,
             packaged_bytes: 1024 * 1024,
             excluded: Vec::new(),
+            stale_artifacts: Vec::new(),
             signature: crate::package::SignatureOutcome::Signed {
                 key_fingerprint: "0badc0ffee001122".to_owned(),
             },
@@ -1399,6 +1403,7 @@ mod cli_tests {
             total_bytes: 0,
             packaged_bytes: 0,
             excluded,
+            stale_artifacts: Vec::new(),
             signature: crate::package::SignatureOutcome::Unsigned,
         };
         assert_eq!(Outcome::Package(package(Vec::new())).exit_code(), 0);
@@ -1454,6 +1459,7 @@ mod cli_tests {
                 resumed: false,
                 duration_ms: None,
                 finished_at: None,
+                collected_by_version: None,
                 result: RepoResult::Succeeded,
             }]),
             package: ReturnPackage {
@@ -1462,6 +1468,7 @@ mod cli_tests {
                 total_bytes: 0,
                 packaged_bytes: 0,
                 excluded: Vec::new(),
+                stale_artifacts: Vec::new(),
                 signature: crate::package::SignatureOutcome::Unsigned,
             },
             gaps: vec!["jira:ACME was not audited".to_owned()],

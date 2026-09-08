@@ -111,6 +111,14 @@ struct PackageMetadata {
     /// is a positive claim that every optional collector ran, where an absent
     /// key leaves the reader to interpret a silence.
     collector_gaps: Vec<String>,
+    /// One line per audited repository whose collection artifact is older
+    /// than, or does not name, the version producing this package (#7133).
+    /// Always emitted, for the same reason `not_attempted` is: an empty array
+    /// is a positive claim that every collected artifact matches the running
+    /// tool, where an absent key leaves the reader to interpret a silence.
+    /// Same strings as `ReturnPackage::stale_artifacts` — one derivation, not
+    /// two (`super::stale_artifacts::detect`).
+    stale_artifacts: Vec<String>,
     tools: Vec<ToolVersion>,
     repositories: Vec<PackagedRepo>,
 }
@@ -355,6 +363,7 @@ pub(super) fn render_metadata(
     audited: &[&RepoRun],
     unattempted: &[String],
     collector_gaps: &[String],
+    stale_artifacts: &[String],
 ) -> Result<String, AuditError> {
     let tools = tools::read_record(work)?
         .into_iter()
@@ -386,6 +395,7 @@ pub(super) fn render_metadata(
         not_attempted: unattempted.to_vec(),
         config_not_acted_on: config.unsupported_keys(),
         collector_gaps: collector_gaps.to_vec(),
+        stale_artifacts: stale_artifacts.to_vec(),
         tools,
         repositories,
     };

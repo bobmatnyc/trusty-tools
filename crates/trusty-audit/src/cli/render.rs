@@ -508,6 +508,11 @@ fn render_package(package: &crate::package::ReturnPackage) -> String {
                 .to_owned()
         }
     });
+    // #7133: a stale collection artifact is still IN the package — this is a
+    // warning the operator has to see before sending it, not an exclusion.
+    for line in &package.stale_artifacts {
+        out.push_str(&format!("  STALE: {line}\n"));
+    }
     for line in &package.excluded {
         out.push_str(&format!("Not included: {line}\n"));
     }

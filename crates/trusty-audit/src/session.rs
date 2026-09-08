@@ -1945,6 +1945,7 @@ trusty-review = "0.0.0-never-published"
             resumed: false,
             duration_ms: None,
             finished_at: None,
+            collected_by_version: None,
             result: RepoResult::Succeeded,
         }];
         run::checkpoint::write_progress(
@@ -2002,6 +2003,7 @@ trusty-review = "0.0.0-never-published"
                     resumed: false,
                     duration_ms: None,
                     finished_at: None,
+                    collected_by_version: None,
                     result: RepoResult::Succeeded,
                 }],
                 run::github_issues::GithubCredentialRecord::NoToken,
@@ -2059,6 +2061,7 @@ trusty-review = "0.0.0-never-published"
             resumed: false,
             duration_ms: None,
             finished_at: None,
+            collected_by_version: None,
             result: RepoResult::Succeeded,
         }]);
         write_finished_progress(session.work_dir(), &report);

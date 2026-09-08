@@ -780,6 +780,10 @@ async fn run_one(
         // repository's entries with. Read here, at the one point that knows
         // this repository is finished.
         finished_at: Some(crate::index_report::local_now()),
+        // #7133: THIS process's own version, read at the one point that knows
+        // collection for this repository just finished — not the version that
+        // will later run `trusty-audit package`.
+        collected_by_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         result,
     })
 }
@@ -1328,6 +1332,12 @@ exit 0
             .await
             .expect("the sweep completes");
         let measured = first.repos[0].duration_ms.expect("a measured duration");
+        // #7133: the collecting process's own version, recorded at the same
+        // point `duration_ms` is.
+        let collected_version = first.repos[0]
+            .collected_by_version
+            .clone()
+            .expect("collection records the version that ran it");
 
         let second = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
             .await
@@ -1337,6 +1347,15 @@ exit 0
             second.repos[0].duration_ms,
             Some(measured),
             "a carried-over entry must keep the duration of the run that earned it"
+        );
+        // #7133: a resumed entry must keep the version that actually collected
+        // it, not silently pick up the version of the process that resumed it
+        // — that is exactly the drift `package::stale_artifacts` compares
+        // against.
+        assert_eq!(
+            second.repos[0].collected_by_version,
+            Some(collected_version),
+            "a carried-over entry must keep the version that actually collected it"
         );
         assert!(
             index_of(&work).contains("carried over from an earlier run"),
@@ -1902,6 +1921,7 @@ exit 0
             resumed: false,
             duration_ms: None,
             finished_at: None,
+            collected_by_version: None,
             result: RepoResult::Succeeded,
         };
         let bad = RepoRun {
