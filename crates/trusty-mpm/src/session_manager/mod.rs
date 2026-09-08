@@ -82,6 +82,9 @@ mod worktree_protection;
 pub(crate) mod worktree_reclaim_sweep;
 pub(crate) mod worktree_reconcile;
 pub(crate) mod worktree_registry;
+// #7196: the machine an SSH config `Host` alias names, so an aliased origin
+// resolves to a real GitHub host before it becomes a `--repo` slug.
+pub(crate) mod ssh_host_alias;
 // #7057: WHICH GitHub repository a directory's pull-request lookups belong to,
 // read from that directory's own `origin` rather than inferred by `gh`.
 pub(crate) mod worktree_repo_slug;

@@ -9,6 +9,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::*;
+use crate::session_manager::ssh_host_alias::SshHostAliases;
+
+/// The alias table of a machine whose `~/.ssh/config` renames nothing.
+///
+/// Why: every test states its own table. Reading the operator's real config
+/// would make these tests answer differently on two machines, and the crate may
+/// not redirect `$HOME` to fake one (#7196).
+fn no_aliases() -> SshHostAliases {
+    SshHostAliases::empty()
+}
 
 /// Run `git -C <dir> <args>`, panicking with git's own stderr on failure.
 fn git_ok(dir: &Path, args: &[&str]) {
@@ -57,8 +67,8 @@ fn https_remote_yields_its_owner_and_repo() {
         "https://GitHub.com/1m-consulting/adaptive-crm.git",
     ] {
         assert_eq!(
-            parse_repo_slug(url).as_deref(),
-            Some("1m-consulting/adaptive-crm"),
+            parse_repo_slug(url, &no_aliases()).as_deref(),
+            Ok("1m-consulting/adaptive-crm"),
             "{url}"
         );
     }
@@ -89,7 +99,11 @@ fn a_non_default_host_survives_into_the_slug() {
         ("git://ghe.example/owner/repo.git", "ghe.example/owner/repo"),
         ("git@ghe.example:owner/repo.git", "ghe.example/owner/repo"),
     ] {
-        assert_eq!(parse_repo_slug(url).as_deref(), Some(want), "{url}");
+        assert_eq!(
+            parse_repo_slug(url, &no_aliases()).as_deref(),
+            Ok(want),
+            "{url}"
+        );
     }
 }
 
@@ -101,8 +115,8 @@ fn ssh_remote_yields_its_owner_and_repo() {
         "git://github.com/hotstats/hotstats-product-poc.git",
     ] {
         assert_eq!(
-            parse_repo_slug(url).as_deref(),
-            Some("hotstats/hotstats-product-poc"),
+            parse_repo_slug(url, &no_aliases()).as_deref(),
+            Ok("hotstats/hotstats-product-poc"),
             "{url}"
         );
     }
@@ -111,8 +125,8 @@ fn ssh_remote_yields_its_owner_and_repo() {
 #[test]
 fn scp_like_remote_yields_its_owner_and_repo() {
     assert_eq!(
-        parse_repo_slug("git@github.com:bobmatnyc/trusty-tools.git").as_deref(),
-        Some("bobmatnyc/trusty-tools")
+        parse_repo_slug("git@github.com:bobmatnyc/trusty-tools.git", &no_aliases()).as_deref(),
+        Ok("bobmatnyc/trusty-tools")
     );
 }
 
@@ -128,7 +142,11 @@ fn a_local_path_remote_names_no_repository() {
         "",
         "github.com",
     ] {
-        assert_eq!(parse_repo_slug(url), None, "{url}");
+        assert_eq!(
+            parse_repo_slug(url, &no_aliases()),
+            Err(SlugRefusal::NoRepository),
+            "{url}"
+        );
     }
 }
 
@@ -136,7 +154,10 @@ fn a_local_path_remote_names_no_repository() {
 fn a_file_url_remote_names_no_repository() {
     // `file://` reaches the scp-like branch, whose path is absolute — the guard
     // that keeps a local clone from resolving to a GitHub slug.
-    assert_eq!(parse_repo_slug("file:///tmp/fixtures/remote.git"), None);
+    assert_eq!(
+        parse_repo_slug("file:///tmp/fixtures/remote.git", &no_aliases()),
+        Err(SlugRefusal::NoRepository)
+    );
 }
 
 /// 🔴 #7057: the whole point. Two directories on ONE machine, two origins, two
@@ -224,6 +245,121 @@ fn an_unparseable_origin_refuses_and_quotes_the_url() {
     let reason = repo_slug_for(&repo).expect_err("a local-path origin must refuse");
     assert!(reason.contains("names no GitHub"), "{reason}");
     assert!(reason.contains("/tmp/fixtures/remote.git"), "{reason}");
+}
+
+// ---------------------------------------------------------------------------
+// SSH `Host` aliases (#7196)
+// ---------------------------------------------------------------------------
+
+/// The `~/.ssh/config` a multi-account operator writes, as a table.
+fn duetto_aliases() -> SshHostAliases {
+    SshHostAliases::parse(
+        "Host github-duetto\n  HostName github.com\n  User git\n\n\
+         Host ghe-work\n  HostName ghe.example\n",
+    )
+}
+
+/// 🔴 #7196: the alias in the remote is not the host. `github-duetto` is an
+/// `~/.ssh/config` name for `github.com`, and reading it as the host produced
+/// `gh --repo github-duetto/duettoresearch/APEX`, which fails with "error
+/// connecting to github-duetto" — so four worktrees whose pull requests had
+/// MERGED were refused at gate 5. Fails on 9b57099a5, where the slug carries
+/// the alias.
+#[test]
+fn an_ssh_alias_resolves_to_the_host_it_names() {
+    for url in [
+        "git@github-duetto:duettoresearch/APEX.git",
+        "ssh://git@github-duetto/duettoresearch/APEX.git",
+        "ssh://git@github-duetto:22/duettoresearch/APEX",
+    ] {
+        assert_eq!(
+            parse_repo_slug(url, &duetto_aliases()).as_deref(),
+            Ok("duettoresearch/APEX"),
+            "{url}"
+        );
+    }
+    // An alias for an ENTERPRISE host keeps that host — the resolution answers
+    // WHICH server, it does not collapse everything onto github.com.
+    assert_eq!(
+        parse_repo_slug("git@ghe-work:owner/repo.git", &duetto_aliases()).as_deref(),
+        Ok("ghe.example/owner/repo")
+    );
+}
+
+/// 🔴 Fail-closed: an alias the config does not declare is refused, and the
+/// refusal names the alias so the operator knows which `Host` block is missing.
+/// Guessing a server for it would be the wrong-repository substitution #7057
+/// closed, arriving by a different door.
+#[test]
+fn an_unresolvable_ssh_alias_refuses_and_names_the_alias() {
+    assert_eq!(
+        parse_repo_slug("git@gh-bob:bobmatnyc/trusty-tools.git", &no_aliases()),
+        Err(SlugRefusal::UnresolvedSshAlias("gh-bob".to_string()))
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = checkout_with_origin(
+        tmp.path(),
+        "aliased",
+        "git@gh-bob:bobmatnyc/trusty-tools.git",
+    );
+    let reason = repo_slug_with(&repo, &no_aliases()).expect_err("an undeclared alias must refuse");
+    assert!(reason.contains("gh-bob"), "{reason}");
+    assert!(reason.contains("#7196"), "{reason}");
+}
+
+/// An SSH host nothing renames but that carries a `.` is a machine name, and is
+/// taken at face value — this is what keeps the #7057 GitHub Enterprise case
+/// working for an operator who declares no alias for it.
+#[test]
+fn an_undeclared_dotted_ssh_host_is_taken_at_face_value() {
+    assert_eq!(
+        parse_repo_slug("git@ghe.example:owner/repo.git", &no_aliases()).as_deref(),
+        Ok("ghe.example/owner/repo")
+    );
+}
+
+/// The rewrite follows the transport git actually hands to `ssh`. An `https://`
+/// remote never reaches `ssh`, so its host must not be rewritten by a `Host`
+/// block that happens to share the name — that would change which SERVER is
+/// asked, on evidence that does not apply.
+#[test]
+fn an_https_remote_is_not_rewritten_by_an_ssh_alias() {
+    let aliases = SshHostAliases::parse("Host github-duetto\n  HostName github.com\n");
+    assert_eq!(
+        parse_repo_slug("https://github-duetto/duettoresearch/APEX.git", &aliases).as_deref(),
+        Ok("github-duetto/duettoresearch/APEX")
+    );
+}
+
+/// 🔴 #7196 end to end: the same worktree resolves against a test-controlled
+/// ssh config, and the argv `gh` is handed names `duettoresearch/APEX` on
+/// github.com rather than the unreachable `github-duetto/duettoresearch/APEX`.
+#[test]
+fn an_aliased_origin_resolves_through_the_given_ssh_config() {
+    use crate::core::gh_identity::GhEnv;
+    use crate::session_manager::worktree_reclaim_gh::gh_pr_list_command;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // A config FILE, not a literal — the production path reads one, and this is
+    // the only way to exercise that read without touching `~/.ssh/config`.
+    let config = tmp.path().join("ssh-config");
+    std::fs::write(&config, "Host github-duetto\n  HostName github.com\n")
+        .expect("fixture: write ssh config");
+    let aliases = SshHostAliases::load(&config);
+
+    let repo = checkout_with_origin(
+        tmp.path(),
+        "APEX",
+        "git@github-duetto:duettoresearch/APEX.git",
+    );
+    let slug = repo_slug_with(&repo, &aliases).expect("the aliased origin resolves");
+    assert_eq!(slug, "duettoresearch/APEX");
+    assert_eq!(
+        repo_flag(&gh_pr_list_command(&repo, &GhEnv::default(), &slug)).as_deref(),
+        Some("duettoresearch/APEX"),
+        "the alias must never reach `gh --repo` — that is the connection error in #7196"
+    );
 }
 
 // ---------------------------------------------------------------------------
