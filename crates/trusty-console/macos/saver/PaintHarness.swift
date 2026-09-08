@@ -7,7 +7,7 @@
 //   "whatever the view paints when there is no live page", and all three were
 //   reported as a black screen. Nothing measured them, because measuring them
 //   means reading pixels, not navigation callbacks.
-// What: four modes, each instantiating the bundle's principal class offscreen
+// What: six modes, each instantiating the bundle's principal class offscreen
 //   and reading its rendered bitmap through
 //   `bitmapImageRepForCachingDisplay` / `cacheDisplay`:
 //     offline — points the view at a closed port; asserts the frame is not black
@@ -28,6 +28,11 @@
 //               issue's 500 ms bar and that the listener sees no further
 //               connection, twice — once on an in-flight load and once from
 //               inside a render tick.
+//     suspend — #7112: the only mode with an endpoint that ANSWERS, so the view
+//               reaches `.live`. Asserts a re-entrant `startAnimation()` — what
+//               `WallpaperAgent` does every 20 s to 3.5 min — reloads nothing,
+//               and that a page which stops reporting itself visible is left,
+//               reloaded, and painted over rather than shown as a blank frame.
 //   Every mode takes the frame it runs at — `--frame WxH`, default 1280x800 —
 //   so the ultrawide geometry #6871 was reported on is reachable.
 // Test: it IS the test. README.md, "Paint harness", has the invocations;
@@ -133,6 +138,28 @@ let nearBlackLevel = 8
 /// so a timeout here downgrades that one check rather than failing the run.
 let resizeLiveWait: TimeInterval = 15
 
+// MARK: - Visibility-recovery thresholds (#7112)
+
+/// How long [`PageListener`] holds every request before answering. Two jobs: it
+/// keeps the page from going live inside the 0.5 s every mode measures its
+/// post-`startAnimation()` frame at, and it makes the view's `.suspended` state
+/// last long enough to photograph.
+let suspendResponseDelay: TimeInterval = 1.5
+/// How long `suspend` mode waits for the first load to reach `.live`. Nothing to
+/// assert until it does — both halves of #7112 are about a page already running.
+let suspendLiveWait: TimeInterval = 20
+/// How many times `suspend` mode re-issues `startAnimation()` over that live
+/// page. `WallpaperAgent` was observed doing this every 20 s to 3.5 min.
+let suspendReentrantCalls = 3
+/// How long to watch for the recovery reload. The view probes at 10 s and 20 s
+/// after `didFinish`; the first probe answers `visible` and the second `hidden`,
+/// so the reload lands around 20 s and this window holds it with slack.
+let suspendObservationSeconds: TimeInterval = 35
+/// How long to sample the frame once the recovery reload is seen. The reload is
+/// answered after [`suspendResponseDelay`], so the view sits in `.suspended` for
+/// about that long and every sample in the window must carry drawn content.
+let suspendSampleSeconds: TimeInterval = 3
+
 // MARK: - Arguments
 
 func note(_ message: String) {
@@ -193,8 +220,8 @@ let bundlePath = positional.count > 1
     ? positional[1]
     : NSHomeDirectory() + "/Library/Screen Savers/TrustyConsole.saver"
 
-guard ["offline", "slow", "preview", "resize", "stop"].contains(mode) else {
-    note("usage: paintharness <offline|slow|preview|resize|stop> [bundlePath]"
+guard ["offline", "slow", "preview", "resize", "stop", "suspend"].contains(mode) else {
+    note("usage: paintharness <offline|slow|preview|resize|stop|suspend> [bundlePath]"
         + " [--frame WxH] [--start WxH]")
     note("  --frame  the frame to run at (default 1280x800; env SAVER_HARNESS_FRAME)")
     note("  --start  resize mode only: the frame to construct at (default 320x200)")
@@ -315,6 +342,91 @@ final class SilentListener {
         lock.unlock()
         listener.cancel()
     }
+}
+
+/// A listener that actually ANSWERS, so the view reaches `.live` — the state
+/// both halves of #7112 happen in, and the one `SilentListener` cannot produce.
+///
+/// The page it serves reports `document.visibilityState === 'visible'` to the
+/// first read and `'hidden'` to every read after it. That is the transition
+/// WebKit performs when RunningBoard marks the WebContent process NotVisible and
+/// the layer trees are frozen, reproduced without needing the OS to do it: the
+/// saver's probe is the only reader, so the flip is deterministic rather than
+/// timed.
+///
+/// Every response is held for [`suspendResponseDelay`] — see that constant.
+/// Only requests for the console path are counted, so a favicon or any other
+/// incidental fetch cannot be mistaken for a reload.
+final class PageListener {
+    private let listener: NWListener
+    private let lock = NSLock()
+    private var count = 0
+
+    private(set) var port = 0
+
+    /// Requests the view has made for the console path.
+    var documentRequests: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    static let body = """
+    <!doctype html><html><head><meta charset="utf-8"><title>suspend harness</title>
+    <style>html,body{margin:0;height:100%;background:#201612;color:#f0e7d8;\
+    font:48px monospace;display:flex;align-items:center;justify-content:center}</style>
+    </head><body><div>suspend harness</div><script>
+    var probes = 0;
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: function () { probes += 1; return probes <= 1 ? 'visible' : 'hidden'; }
+    });
+    </script></body></html>
+    """
+
+    init?() {
+        guard let listener = try? NWListener(using: .tcp, on: .any) else { return nil }
+        self.listener = listener
+        let ready = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { if case .ready = $0 { ready.signal() } }
+        listener.newConnectionHandler = { [weak self] connection in
+            connection.start(queue: .global())
+            self?.serve(connection)
+        }
+        listener.start(queue: .global())
+        guard ready.wait(timeout: .now() + 5) == .success,
+              let bound = listener.port?.rawValue, bound > 0 else {
+            listener.cancel()
+            return nil
+        }
+        port = Int(bound)
+    }
+
+    /// One request, one response, one close. A loopback GET arrives in a single
+    /// segment, so this reads once rather than accumulating a full header block.
+    private func serve(_ connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, _, _ in
+            guard let self else { return }
+            let request = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            guard request.contains(" /ui/screensaver") else {
+                connection.cancel()
+                return
+            }
+            self.lock.lock()
+            self.count += 1
+            self.lock.unlock()
+
+            let payload = Data(Self.body.utf8)
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                + "Content-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
+            DispatchQueue.global().asyncAfter(deadline: .now() + suspendResponseDelay) {
+                connection.send(content: Data(head.utf8) + payload,
+                                completion: .contentProcessed { _ in connection.cancel() })
+            }
+        }
+    }
+
+    func stop() { listener.cancel() }
 }
 
 // MARK: - Pixel measurement
@@ -442,9 +554,19 @@ guard let principal = bundle.principalClass, let saverClass = principal as? Scre
 // MARK: - Endpoint setup
 
 var silent: SilentListener?
+var page: PageListener?
 switch mode {
 case "offline":
     pointView(atPort: closedPort())
+case "suspend":
+    // #7112 happens to a page that is already live, so this mode needs an
+    // endpoint that answers rather than one that stalls.
+    guard let listener = PageListener() else {
+        note("could not start the page listener")
+        finish(6)
+    }
+    page = listener
+    pointView(atPort: listener.port)
 case "slow", "stop":
     // #6900 wants the same endpoint `slow` uses: a load that is in flight and
     // stays there is the state the stop has to interrupt, and every connection
@@ -501,12 +623,14 @@ if initialFrameIsMeasurable {
     guard let firstRep = capture(view) else {
         note("FAIL — could not read the view's bitmap")
         silent?.stop()
+        page?.stop()
         finish(8)
     }
     let firstPaintElapsed = Date().timeIntervalSince(readyAt)
     guard let firstFrame = stats(of: firstRep) else {
         note("FAIL — could not decode the captured bitmap")
         silent?.stop()
+        page?.stop()
         finish(8)
     }
     note("first frame at \(String(format: "%.2f", firstPaintElapsed))s after init returned: \(firstFrame.summary)")
@@ -745,12 +869,104 @@ case "stop":
         failures.append("could not read the view's bitmap after the mid-render stop")
     }
 
+case "suspend":
+    guard let listener = page else { break }
+
+    /// The view's timers and WebKit's callbacks all land on the main run loop,
+    /// so a plain sleep would stop the machinery under test.
+    func pump(_ seconds: TimeInterval, until condition: () -> Bool = { false }) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline && !condition() {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+    }
+
+    func pageIsOnScreen() -> Bool {
+        view.subviews.compactMap { $0 as? WKWebView }.first.map { !$0.isHidden } ?? false
+    }
+
+    // --- the page must be live before either half of #7112 means anything ----
+    pump(suspendLiveWait, until: pageIsOnScreen)
+    guard pageIsOnScreen() else {
+        failures.append("the page never went live in \(Int(suspendLiveWait))s —"
+            + " \(listener.documentRequests) request(s) served")
+        break
+    }
+    let afterLive = listener.documentRequests
+    note("page live after \(afterLive) request(s)")
+
+    // --- 1: a re-entrant startAnimation() must reload nothing ---------------
+    // WallpaperAgent calls `startAnimation()` on an already-running view with no
+    // `stopAnimation()` between. Before #7112 each call reset the state and
+    // reloaded, which is the dashboard restarting from its first rotation frame.
+    for _ in 0..<suspendReentrantCalls {
+        view.startAnimation()
+        pump(1)
+    }
+    let afterReentry = listener.documentRequests
+    note("requests after \(suspendReentrantCalls) re-entrant startAnimation() call(s):"
+        + " \(afterReentry) (was \(afterLive))")
+    if afterReentry != afterLive {
+        failures.append("re-entrant startAnimation() reloaded the page —"
+            + " \(afterReentry - afterLive) extra request(s), expected 0")
+    }
+    if !pageIsOnScreen() {
+        failures.append("re-entrant startAnimation() took the live page off screen")
+    }
+
+    // --- 2: a page that stops reporting itself visible must be recovered ----
+    // The served page answers the saver's first visibility probe with `visible`
+    // and every one after it with `hidden` — the transition WebKit performs when
+    // the OS marks the WebContent process NotVisible and discards its layers,
+    // which fires no termination callback and so exited `.live` by no other path.
+    note("watching for the recovery reload for \(Int(suspendObservationSeconds))s")
+    pump(suspendObservationSeconds, until: { listener.documentRequests > afterReentry })
+    let afterRecovery = listener.documentRequests
+    note("requests after the observation window: \(afterRecovery)")
+    if afterRecovery <= afterReentry {
+        failures.append("the view never recovered: no reload in"
+            + " \(Int(suspendObservationSeconds))s after the page reported itself hidden")
+        break
+    }
+
+    // --- 3: and the screen must carry a real image while it recovers --------
+    // #7112's symptom is that `draw(_:)` no-ops over a discarded layer, so the
+    // frame during the recovery is the whole point. Only frames captured while
+    // the web view is OFF screen are measured: those are the ones the view is
+    // responsible for painting, and requiring at least one of them is also what
+    // proves the view left `.live` rather than reloading underneath a live page.
+    var lowestInk = Double.greatestFiniteMagnitude
+    var offScreenSamples = 0
+    let sampleUntil = Date().addingTimeInterval(suspendSampleSeconds)
+    while Date() < sampleUntil {
+        if !pageIsOnScreen(), let rep = capture(view), let frame = stats(of: rep) {
+            lowestInk = min(lowestInk, frame.inkRatio)
+            offScreenSamples += 1
+            if frame.nonBlackRatio < minNonBlackRatio {
+                failures.append(String(format: "frame went black during the recovery: nonBlack=%.4f",
+                                       frame.nonBlackRatio))
+                break
+            }
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    }
+    note(String(format: "recovery window: %d off-screen sample(s), lowest ink=%.4f",
+                offScreenSamples, lowestInk))
+    if offScreenSamples == 0 {
+        failures.append("the view reloaded without leaving the live state —"
+            + " nothing repainted over the discarded layer")
+    } else if lowestInk < minInkRatio {
+        failures.append(String(format: "nothing drawn during the recovery: ink=%.4f < %.4f",
+                               lowestInk, minInkRatio))
+    }
+
 default:
     break
 }
 
 view.stopAnimation()
 silent?.stop()
+page?.stop()
 
 if failures.isEmpty {
     note("PASS — \(mode)")
