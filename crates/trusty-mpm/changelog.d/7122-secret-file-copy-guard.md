@@ -1,0 +1,3 @@
+Fixed
+
+- `tm hook --pm-guard` now refuses a raw `cp`/`mv` whose source basename matches a secret-shaped filename pattern (`*.tfvars`, `*.tfstate`, `.env*`, `*.pem`, `*.key`, `id_*`, or a `credentials`/`secrets` name) when the destination resolves into a session worktree, for the PM and any dispatched subagent alike (#7122). A `local-ops` agent had `cp`'d a live `terraform.tfvars` into its worktree to run a plan, and a subsequent directory-wide `terraform fmt -check -diff` printed the file's credentials into the transcript; the sanctioned alternatives are referencing the file by absolute path (`-var-file`/`-state`, `--env-file`) or declaring it in the operator's `untracked_sync` allowlist, which copies through a gitignore-verified channel this guard does not touch.

@@ -33,7 +33,11 @@
 //! ahead of the subagent exemptions, alongside the worktree-add-tmp guard: a
 //! target-path denylist for `rm`/`rmdir`/`unlink`/`find … -delete` aimed at a
 //! filesystem root, a repository root, a `.git` directory, or a worktree
-//! entry (issue #4031). The sibling [`path_tokens`] module turns a path TOKEN
+//! entry (issue #4031). The sibling [`secret_file_copy`] module carries the
+//! same ahead-of-subagent-exemptions rule for `cp`/`mv`: a source-basename
+//! denylist (`*.tfvars`, `.env*`, `*.pem`, `*.key`, `id_*`,
+//! `credentials`/`secrets` names) refused when the destination resolves into
+//! a harness worktree (issue #7122). The sibling [`path_tokens`] module turns a path TOKEN
 //! a command wrote into the directory every one of those rules decides on, and
 //! reports what its expansion could not reach — the question a rule must ask
 //! before stating anything about the directory it got back (#7098, #7100).
@@ -46,6 +50,7 @@ mod heredoc;
 mod main_checkout;
 mod path_tokens;
 mod persistence;
+mod secret_file_copy;
 mod sed_awk;
 mod shell_lex;
 mod worktree_remove;
@@ -57,6 +62,7 @@ pub(crate) use main_checkout::{
     evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
 };
 pub(crate) use persistence::command_is_persistence_only;
+pub(crate) use secret_file_copy::evaluate_secret_file_copy_command;
 // #5791: worktree removal is PM-executed, so an agent's `git worktree remove`
 // denies. The sibling `worktree add` guard above is a different rule with a
 // different scope — that one is about WHERE a tree is provisioned, this one is

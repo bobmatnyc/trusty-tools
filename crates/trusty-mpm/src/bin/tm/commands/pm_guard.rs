@@ -211,9 +211,9 @@ use crate::commands::pm_guard_bash::{
     CommitVerdict, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
     docs_commit_deny_reason, evaluate_bash_command, evaluate_destructive_delete_command,
     evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
-    evaluate_removal_rechecks, evaluate_worktree_add_command, evaluate_worktree_remove_command,
-    extract_shell_edit_target, head_move_deny_reason, main_checkout_head_move,
-    unclassifiable_command,
+    evaluate_removal_rechecks, evaluate_secret_file_copy_command, evaluate_worktree_add_command,
+    evaluate_worktree_remove_command, extract_shell_edit_target, head_move_deny_reason,
+    main_checkout_head_move, unclassifiable_command,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_builder_cap;
@@ -432,6 +432,21 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         // cleanup, `cargo clean`, `git clean -fd`, and — untouched by this
         // rule entirely — `git worktree remove` and `git branch -D`).
         if let Some(reason) = evaluate_destructive_delete_command(command, &hook_cwd) {
+            audit_denied_tool(url, session_id, tool_name, reason).await;
+            println!("{}", build_pretooluse_deny_response(reason));
+            return Ok(());
+        }
+        // ABSOLUTE guard (issue #7122) — the same placement, and for the same
+        // structural reason, as the destructive-delete guard directly above:
+        // the reported incident was a dispatched `local-ops` agent, so a rule
+        // reachable only after Guard 1/4 would be a no-op for exactly the
+        // calling pattern it exists to catch. Denies EVERY caller — the PM
+        // included — because a raw shell `cp`/`mv` of a secret-shaped file
+        // into a worktree is never legitimate for anyone; see
+        // `pm_guard_bash::secret_file_copy` for the source-basename denylist
+        // and the sanctioned alternative (absolute-path reference, or the
+        // gitignore-verified `untracked_sync` channel).
+        if let Some(reason) = evaluate_secret_file_copy_command(command, &hook_cwd) {
             audit_denied_tool(url, session_id, tool_name, reason).await;
             println!("{}", build_pretooluse_deny_response(reason));
             return Ok(());

@@ -294,13 +294,21 @@ fn is_unsafe_dir_component(dir_part: &str) -> bool {
 /// Why: the allowlist's real-world patterns are exact names (`.env`), simple
 /// prefixes (`.env.*`), or simple suffixes (`*.env`); a hand-rolled matcher
 /// avoids pulling in a glob crate for a handful of trivial shapes while still
-/// handling an arbitrary number/position of `*` correctly.
+/// handling an arbitrary number/position of `*` correctly. `pub` (not
+/// `pub(crate)`) since #7122: `pm_guard_bash::secret_file_copy`'s `cp`/`mv`
+/// denylist reuses this exact matcher from the `tm` binary target, which
+/// depends on this library crate the same way any external consumer would —
+/// `pub(crate)` here would not reach across that crate boundary. One matcher
+/// serves both an ALLOWLIST (this module's sanctioned `.env*` sync) and a
+/// DENYLIST (the guard's raw-`cp`/`mv` refusal); the two never share a
+/// pattern LIST — see that module's doc for why reusing this list would be
+/// wrong — only the matching logic.
 /// What: `true` iff `pattern`, with each `*` treated as "zero or more
 /// characters", matches `name` in full. Case-sensitive (filesystem names on
 /// the platforms this runs on are case-sensitive or case-preserving).
 /// Test: `tests::glob_match_exact`, `tests::glob_match_prefix`,
 /// `tests::glob_match_suffix`, `tests::glob_match_no_match`.
-fn glob_match(pattern: &str, name: &str) -> bool {
+pub fn glob_match(pattern: &str, name: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let n: Vec<char> = name.chars().collect();
     glob_match_from(&p, &n)
