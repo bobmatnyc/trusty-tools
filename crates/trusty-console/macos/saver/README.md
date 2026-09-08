@@ -332,7 +332,11 @@ harness's weakest assertion.
 
 The in-host run cannot be scripted. One operator step remains:
 
-> System Settings → Screen Saver → select **TrustyConsole** → Preview.
+> System Settings → Screen Saver → select **Trusty Console** → Preview.
+>
+> <!-- #7128: the tile label is CFBundleDisplayName/CFBundleName, not the
+> `TrustyConsole.saver` filename, which is unchanged. -->
+
 
 Watch it decide, live:
 

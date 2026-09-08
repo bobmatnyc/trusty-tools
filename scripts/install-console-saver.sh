@@ -117,7 +117,7 @@ fi
 cat <<EOF
 
 MANUAL STEP — this cannot be scripted:
-  System Settings → Screen Saver → select "TrustyConsole", then Preview.
+  System Settings → Screen Saver → select "Trusty Console", then Preview.
 
   The console must be running and reachable at http://127.0.0.1:7788 (or the
   port set with: defaults -currentHost write $SAVER_IDENTIFIER ConsolePort <port>).

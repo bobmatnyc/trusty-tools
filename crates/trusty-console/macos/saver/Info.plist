@@ -25,8 +25,18 @@
 	<string>com.trusty.console.saver</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<!--
+	  #7128: Settings label reads "Trusty Console". System Settings > Screen
+	  Saver renders CFBundleDisplayName when present and CFBundleName otherwise,
+	  falling back to the `.saver` filename only when neither is set. Both carry
+	  the spaced form so the tile reads the same either way. The
+	  CFBundleIdentifier value above is unchanged — launchd, the `log` subsystem
+	  predicate and Settings' selected-saver state all key on it.
+	-->
+	<key>CFBundleDisplayName</key>
+	<string>Trusty Console</string>
 	<key>CFBundleName</key>
-	<string>TrustyConsole</string>
+	<string>Trusty Console</string>
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
 	<key>CFBundleShortVersionString</key>
