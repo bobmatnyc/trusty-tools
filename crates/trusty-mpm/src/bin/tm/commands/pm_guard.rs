@@ -447,8 +447,8 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         // and the sanctioned alternative (absolute-path reference, or the
         // gitignore-verified `untracked_sync` channel).
         if let Some(reason) = evaluate_secret_file_copy_command(command, &hook_cwd) {
-            audit_denied_tool(url, session_id, tool_name, reason).await;
-            println!("{}", build_pretooluse_deny_response(reason));
+            audit_denied_tool(url, session_id, tool_name, &reason).await;
+            println!("{}", build_pretooluse_deny_response(&reason));
             return Ok(());
         }
         // ABSOLUTE guard (ADR-0037) — the same placement, and for the same
