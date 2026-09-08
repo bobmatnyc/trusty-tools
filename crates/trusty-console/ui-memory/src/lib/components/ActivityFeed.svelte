@@ -16,15 +16,22 @@
    * drawer via MCP (`mcp__trusty-memory__memory_remember`) and confirm a
    * new row appears with the `mcp` badge. Scroll near the bottom and watch
    * the network tab for `/api/v1/activity?offset=…` requests.
+   *
+   * #6155: this component wrote reactive state once per SSE frame, which
+   * starved the whole SPA's main thread whenever the daemon was busy — see
+   * `../feed-buffer.js` for the measurements. Frames are batched there now,
+   * and the stream is dropped while the tab is hidden.
    */
   import { onMount, onDestroy } from 'svelte';
   import { api } from '../api.js';
   import { apiUrl } from '../base.js';
+  import {
+    MAX_EVENTS,
+    appendOlder,
+    createBatcher,
+    mergeLive
+  } from '../feed-buffer.js';
 
-  // Live in-memory buffer for SSE-pushed events. Caps prevent unbounded
-  // growth in long-running sessions; the persistent history endpoint
-  // owns the real archive.
-  const MAX_EVENTS = 500;
   const PAGE_SIZE = 50;
   // Exponential backoff: 1s, 2s, 4s, 8s, ..., capped at 30s.
   const BACKOFF_MIN_MS = 1000;
@@ -42,6 +49,9 @@
   let collapsed = $state(false);
   let source = null;
   let reconnectTimer = null;
+  // #6155: set on destroy so a reconnect already in flight cannot resurrect
+  // the stream after the component is gone.
+  let stopped = false;
 
   // Paging state for the persistent history.
   let historyOffset = $state(0);
@@ -102,20 +112,51 @@
   }
 
   /**
-   * Why: New events should appear at the top; old events fall off when we
-   * exceed the cap. Records palace id as "session-active" so the Active
-   * toggle has data to filter on.
+   * Why (#6155): a live frame needs a key that is stable for the life of the
+   * row but unique across rows. `Date.now()` collides at 200 frames/s and
+   * `Math.random()` was paying for entropy nothing needed; a counter is both
+   * cheaper and collision-free.
    */
-  function prependLive(evt) {
-    const stamped = { ...evt, _ts: Date.now(), _id: `live-${Date.now()}-${Math.random()}` };
-    events = [stamped, ...events].slice(0, MAX_EVENTS);
-    const pid = evt?.palace_id;
-    if (pid && !activeIds.has(pid)) {
-      const next = new Set(activeIds);
-      next.add(pid);
-      activeIds = next;
+  let liveSeq = 0;
+
+  /**
+   * Why (#6155): this ran per SSE frame and rebuilt a 500-element array plus
+   * every downstream derivation each time. It takes a whole batch now, so the
+   * work is paid once per 250 ms window rather than once per frame.
+   * What: stamps each frame, puts the batch on the head under the retention
+   * cap, and records the palaces it touched for the "Active only" toggle.
+   */
+  function ingestBatch(batch, dropped = 0) {
+    const now = Date.now();
+    const stamped = batch.map((evt) => ({
+      ...evt,
+      _ts: now,
+      _id: `live-${(liveSeq += 1)}`
+    }));
+    // #6155: a flush past the per-flush cap says so rather than losing rows
+    // silently — the same shape the daemon's own slow-consumer frame uses.
+    if (dropped > 0) {
+      stamped.unshift({
+        type: 'lag',
+        skipped: dropped,
+        _ts: now,
+        _id: `live-${(liveSeq += 1)}`
+      });
     }
+    events = mergeLive(events, stamped, MAX_EVENTS);
+    // One Set rebuild for the batch, not one per frame.
+    let next = null;
+    for (const evt of batch) {
+      const pid = evt?.palace_id;
+      if (pid && !activeIds.has(pid) && !next?.has(pid)) {
+        next = next || new Set(activeIds);
+        next.add(pid);
+      }
+    }
+    if (next) activeIds = next;
   }
+
+  const batcher = createBatcher({ sink: ingestBatch });
 
   /**
    * Why: Replace or append a batch of history rows. Used at mount for
@@ -128,17 +169,20 @@
       return;
     }
     const normalised = rows.map(normaliseHistoryRow);
-    events = [...events, ...normalised];
+    // #6155: capped. Paging used to append without one, so scrolling grew this
+    // list one 50-row page at a time against a 49,551-row archive.
+    events = appendOlder(events, normalised, MAX_EVENTS);
+    let next = null;
     for (const r of normalised) {
-      if (r.palace_id && !activeIds.has(r.palace_id)) {
-        const next = new Set(activeIds);
+      if (r.palace_id && !activeIds.has(r.palace_id) && !next?.has(r.palace_id)) {
+        next = next || new Set(activeIds);
         next.add(r.palace_id);
-        activeIds = next;
       }
       if (smallestSeenId === null || (typeof r.id === 'number' && r.id < smallestSeenId)) {
         smallestSeenId = r.id;
       }
     }
+    if (next) activeIds = next;
   }
 
   async function loadHistoryPage(offset = 0) {
@@ -174,7 +218,29 @@
     }
   }
 
-  function connect() {
+  /**
+   * Why (#6155): `EventSource` delivery is NOT throttled in a background tab,
+   * so a hidden feed kept paying full ingest cost for a panel nobody could
+   * see — and the SPA's own `/health` poll, which IS throttled, lost the race
+   * against it. Dropping the stream while hidden is what makes a backgrounded
+   * dashboard free rather than merely cheaper.
+   * What: true when the document reports itself hidden. Guarded for jsdom and
+   * for any environment without the Page Visibility API.
+   */
+  function pageHidden() {
+    return typeof document !== 'undefined' && document.hidden === true;
+  }
+
+  function disconnect() {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    // See #6155: dropping the queue loses at most one window of frames. The
+    // hidden-tab path forgoes the whole stream while hidden anyway, so
+    // flushing first would close the front of a far larger gap while paying
+    // the render this issue exists to avoid; `/api/v1/activity` is the archive.
+    batcher.stop();
     if (source) {
       try {
         source.close();
@@ -183,10 +249,17 @@
       }
       source = null;
     }
+    connected = false;
+  }
+
+  function connect() {
+    disconnect();
+    // Nothing to stream to: the tab is hidden, or the component is gone.
+    if (stopped || pageHidden()) return;
 
     try {
       source = new EventSource(apiUrl('/sse'));
-    } catch (e) {
+    } catch {
       scheduleReconnect();
       return;
     }
@@ -205,7 +278,8 @@
       }
       // Initial connect frame from the daemon — informational only.
       if (parsed?.type === 'connected') return;
-      prependLive(parsed);
+      // #6155: enqueue only. The reactive write happens once per batch window.
+      batcher.push(parsed);
     };
 
     source.onerror = () => {
@@ -221,12 +295,22 @@
   }
 
   function scheduleReconnect() {
-    if (reconnectTimer) return;
+    if (reconnectTimer || stopped) return;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       connect();
     }, backoffMs);
     backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX_MS);
+  }
+
+  /** Drop the stream when the tab hides; pick it up again when it returns. */
+  function onVisibilityChange() {
+    if (pageHidden()) {
+      disconnect();
+    } else if (!source) {
+      backoffMs = BACKOFF_MIN_MS;
+      connect();
+    }
   }
 
   /**
@@ -251,27 +335,24 @@
   }
 
   onMount(() => {
+    stopped = false;
     loadPalaceNames();
     // Kick off history hydration before connecting to SSE so the first
     // paint of the feed has rows. Live frames that arrive while the
     // history is loading will simply prepend on top.
     loadHistoryPage(0);
     connect();
+    document.addEventListener('visibilitychange', onVisibilityChange);
   });
 
+  // #6155: an unmounted feed holds no subscription — no EventSource, no
+  // pending batch window, no reconnect timer, no visibility listener.
+  // Test: `src/lib/feed-buffer.test.js` — `an unmounted feed has no live
+  // subscription`.
   onDestroy(() => {
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
-    if (source) {
-      try {
-        source.close();
-      } catch {
-        /* ignore */
-      }
-      source = null;
-    }
+    stopped = true;
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    disconnect();
   });
 
   /**
@@ -353,12 +434,31 @@
           description: `dropped ${evt.skipped ?? 0} events (slow consumer)`,
           link: null
         };
+      // #6155: `hook_fired` (trusty-memory `events.rs`) had no case, so it fell
+      // to the default below and rendered as a `JSON.stringify` of the whole
+      // frame — unreadable on screen, and one stringify per row per render on
+      // the type that dominates the stream (421 of the last 500 rows).
+      case 'hook_fired': {
+        const name = labelFor(evt);
+        const kind = evt.injection_kind ?? 'hook';
+        const where = name ? `${name} — ` : '';
+        return {
+          icon: '🪝',
+          label: 'hook',
+          description: `${where}${evt.hook_type ?? 'hook'} · ${kind} · ${evt.injection_length ?? 0}B in ${evt.duration_ms ?? 0}ms`,
+          link: evt?.palace_id ? `#/palaces/${evt.palace_id}` : null
+        };
+      }
+      // #6155: deliberately NOT `JSON.stringify(evt)`. The daemon can add an
+      // event type at any time, and whichever one it adds next would otherwise
+      // land here and pay a full serialisation per row per render — which is
+      // exactly how `hook_fired` above became the cost it was.
       default:
         return {
           icon: '·',
           label: evt.type ?? 'event',
-          description: JSON.stringify(evt).slice(0, 120),
-          link: null
+          description: labelFor(evt) || Object.keys(evt).slice(0, 6).join(', '),
+          link: evt?.palace_id ? `#/palaces/${evt.palace_id}` : null
         };
     }
   }
