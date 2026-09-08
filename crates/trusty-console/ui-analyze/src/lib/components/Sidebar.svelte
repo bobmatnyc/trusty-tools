@@ -4,21 +4,27 @@
    * operators jumping between tools get a consistent shell.
    * What: Five top-level routes — Dashboard, Indexes, Smells, Facts, Config —
    * backed by the hash router. Brand text reads "Trusty Analyzer".
+   * #6439: each route's nav glyph used to be a bespoke unicode character,
+   * one divergent set per dashboard (owner directive: "use the same
+   * iconography"). Now it names a glyph from the shared Foundry ActionIcon
+   * vocabulary (docs/design/UI/design-system/icons/README.md), vendored
+   * alongside this component.
    * Test: Click each nav item, confirm hash updates and `.active` moves.
    */
   import { getRoute, navigate } from '../router.svelte.js';
   import { getSelectedIndex } from '../state.svelte.js';
+  import ActionIcon from './ActionIcon.svelte';
 
   let route = $derived(getRoute());
   let selected = $derived(getSelectedIndex());
 
   const links = [
-    { path: '/', label: 'Dashboard', icon: '◇' },
-    { path: '/complexity', label: 'Complexity', icon: '▣' },
-    { path: '/smells', label: 'Smells', icon: '✦' },
-    { path: '/refactors', label: 'Refactors', icon: '⚒' },
-    { path: '/clusters', label: 'Clusters', icon: '◈' },
-    { path: '/facts', label: 'Facts', icon: '❖' }
+    { path: '/', label: 'Dashboard', icon: 'home' },
+    { path: '/complexity', label: 'Complexity', icon: 'workflow' },
+    { path: '/smells', label: 'Smells', icon: 'smells' },
+    { path: '/refactors', label: 'Refactors', icon: 'write_file' },
+    { path: '/clusters', label: 'Clusters', icon: 'clusters' },
+    { path: '/facts', label: 'Facts', icon: 'review' }
   ];
 
   function isActive(path) {
@@ -52,7 +58,7 @@
           navigate(link.path);
         }}
       >
-        <span class="icon">{link.icon}</span>
+        <span class="icon"><ActionIcon name={link.icon} size={16} /></span>
         <span>{link.label}</span>
       </a>
     {/each}
@@ -147,7 +153,10 @@
   }
   .icon {
     width: 16px;
-    text-align: center;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
   .footer {
     padding: 16px 20px;

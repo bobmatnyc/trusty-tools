@@ -4,13 +4,13 @@
    * markers throughout Foundry chat/console surfaces. A single component
    * keyed by name keeps stroke width / viewBox / line caps consistent across
    * the set and avoids importing a heavyweight icon library for a fixed
-   * vocabulary. This file is the CANONICAL source for the ActionIcon
-   * vocabulary — see ../icons/README.md. Crate copies (e.g.
-   * crates/trusty-agents/ui/src/lib/icons/ActionIcon.svelte,
-   * crates/trusty-console/ui-search/src/lib/components/ActionIcon.svelte and
-   * its ui-memory/ui-analyze siblings, added for #6439) must be kept in
-   * sync with this file until #3492 (`@trusty/foundry` package) replaces
-   * copy-paste distribution with a real import.
+   * vocabulary. VENDORED COPY (#6439) — the CANONICAL source is
+   * docs/design/UI/design-system/icons/ActionIcon.svelte (repo root); see
+   * that file's header and docs/design/UI/design-system/icons/README.md for
+   * the vendoring pattern and the full name → glyph vocabulary. Fix a bug or
+   * add a glyph in the canonical file first, then propagate here and to its
+   * ui-search/ui-analyze siblings until #3492 (`@trusty/foundry` package)
+   * replaces copy-paste distribution with a real import.
    * What: Renders one of a fixed set of 24x24 stroke-based SVG icons by
    * name. Falls back to an empty <svg> for unknown names so callers never
    * crash. Stroke color defaults to currentColor so icons inherit text color
