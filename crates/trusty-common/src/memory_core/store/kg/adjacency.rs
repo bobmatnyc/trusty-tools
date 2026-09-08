@@ -30,6 +30,20 @@ use crate::memory_core::store::kg_store::is_functional_predicate;
 pub(super) struct Adjacency {
     pub(super) graph: StableGraph<String, KgEdge>,
     pub(super) node_index: HashMap<String, NodeIndex<u32>>,
+    /// Monotonic write generation, bumped once per committed mutation (#7106).
+    ///
+    /// Why: `community_count` runs a full Louvain partition over this
+    /// adjacency, which the palace roster called once per palace on every
+    /// request — 94 partitions per `palaces_list`, recomputed from scratch each
+    /// time. Caching the answer needs a cheap, exact "has the graph changed
+    /// since I computed this" key. Node and edge counts are not one: a rewired
+    /// edge leaves both unchanged while changing the partition. A counter
+    /// bumped by the single mutation gate is.
+    /// What: `u64`, incremented by `KnowledgeGraph::sync_adjacency` after every
+    /// mutation it applies. Never decremented, never reset for a live handle;
+    /// a reopened palace starts at 0 with a cold cache, which is correct.
+    /// Test: `community_count_is_cached_until_the_graph_changes`.
+    pub(super) generation: u64,
 }
 
 impl Adjacency {

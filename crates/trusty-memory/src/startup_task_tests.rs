@@ -149,3 +149,78 @@ fn spawn_startup_tasks_populates_pin_map() {
         "pin_project_map entry must point to the project directory"
     );
 }
+
+/// Why (#7106): startup hydration opened every palace on disk with nothing
+/// bounding how many were open at once. Each open hydrates a drawer table, an
+/// HNSW graph and a KG adjacency (~90 MB) plus three redb page caches, so on the
+/// reporter's 94-palace install the peak was the whole estate. The bound is the
+/// fix, and nothing else in the run reports it — a bounded hydration and an
+/// unbounded one load the same palaces and log the same count.
+/// What: seeds eight palaces on disk, hydrates through an `AppState` whose gate
+/// is pinned to a limit of two, and asserts every palace loaded AND that the
+/// gate's high-water mark never exceeded the limit. Hydration itself is serial,
+/// so the mark it sets alone is 1 — the limit is the ceiling this job shares
+/// with the two BM25 sweeps, not a concurrency it introduces. Hydrating four at
+/// a time was measured at a 336 MB → 409 MB `phys_footprint_peak` regression
+/// over a 94-palace copy of the reporter's store, which is the resource #7106
+/// is about.
+/// Test: this test.
+#[test]
+fn hydration_never_exceeds_the_startup_open_limit() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvGuard::set("HOME", tmp.path());
+    let _enforcement = EnvGuard::set("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+    let _update = EnvGuard::set(trusty_common::update::NO_UPDATE_CHECK_ENV, "1");
+
+    let state_root = tmp.path().join("data");
+    fs::create_dir_all(&state_root).expect("create data dir");
+
+    const PALACES: usize = 8;
+    const LIMIT: usize = 2;
+    for i in 0..PALACES {
+        let id = format!("palace-{i}");
+        let palace = trusty_common::memory_core::palace::Palace {
+            id: trusty_common::memory_core::palace::PalaceId::new(id.clone()),
+            name: id.clone(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: state_root.join(&id),
+        };
+        trusty_common::memory_core::store::PalaceStore::save_palace(&palace)
+            .expect("seed palace metadata");
+    }
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("build test runtime");
+
+    let (loaded, peak, limit) = rt.block_on(async {
+        let mut state = AppState::new(state_root);
+        // Pin the budget rather than reading the ambient env, so the assertion
+        // is about the bound and not about the developer's shell.
+        state.startup_gate = trusty_memory::startup_budget::StartupOpenGate::with_limit(LIMIT);
+        let gate = state.startup_gate.clone();
+        let loaded = state
+            .load_palaces_from_disk()
+            .await
+            .expect("hydration must not fail");
+        (loaded, gate.peak_concurrent(), gate.limit())
+    });
+    rt.shutdown_timeout(Duration::ZERO);
+
+    assert_eq!(limit, LIMIT, "the pinned limit must survive into the gate");
+    assert_eq!(
+        loaded, PALACES,
+        "every seeded palace must still hydrate — the bound throttles, it does not skip"
+    );
+    assert!(
+        peak <= LIMIT,
+        "#7106: hydration held {peak} palaces open at once against a limit of {LIMIT}"
+    );
+    assert!(
+        peak > 0,
+        "every open must take a permit, or the ceiling governs nothing"
+    );
+}

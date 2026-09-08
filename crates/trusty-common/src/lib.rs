@@ -772,6 +772,20 @@ pub mod inference;
 #[cfg(feature = "redb-open")]
 pub mod redb_open;
 
+/// The one place a palace-scoped redb page-cache ceiling is chosen (#7106).
+///
+/// Why: `redb::Builder::default()` sets a 1 GiB `cache_size` per `Database` and
+/// grows into it. Three redb files per palace times 64 resident palaces is a
+/// 192 GiB ceiling nothing was bounding, which is how a 233 MB daemon reached
+/// 11–23 GB of heap. Gated behind the same light `redb-open` feature as the
+/// classifier so every store can route through it without paying for
+/// `memory-core`.
+/// What: [`redb_cache::create_palace_db`] and [`redb_cache::palace_db_builder`],
+/// plus the `TRUSTY_MEMORY_REDB_CACHE_MB` override and its fail-open warning.
+/// Test: `cargo test -p trusty-common --features redb-open -- redb_cache::`.
+#[cfg(feature = "redb-open")]
+pub mod redb_cache;
+
 // ─── Focused submodules (split from lib.rs in issue #1108) ────────────────
 
 /// TCP port auto-walking helper.

@@ -119,6 +119,16 @@ pub mod prompt_facts;
 pub mod prompt_log;
 pub mod service;
 pub mod session_store_cache;
+/// Bounds on how much of the palace estate startup work holds open (#7106).
+///
+/// Why: hydration and both BM25 sweeps each walk every palace and none of them
+/// bounded how many they held open at once; at ~90 MB of hydrated index plus
+/// three redb page caches per palace, a 94-palace estate is what turned a
+/// 233 MB daemon into a multi-GB one.
+/// What: [`startup_budget::StartupOpenGate`], the shared semaphore all three
+/// jobs draw on, and [`startup_budget::release_after_sweep`].
+/// Test: `cargo test -p trusty-memory -- startup_budget::`.
+pub mod startup_budget;
 pub mod startup_scan;
 // A real daemon on a temp socket, shared by every in-crate test that has to
 // prove a caller and the daemon agree (#6286). Never shipped.
@@ -522,6 +532,18 @@ pub struct AppState {
     /// Test: `palace_name_cache_populated_after_hydration` and
     /// `palace_name_cache_updates_on_create`.
     pub palace_names: Arc<dashmap::DashMap<String, String>>,
+    /// Shared bound on concurrent palace opens during startup work (#7106).
+    ///
+    /// Why: hydration, the BM25 backfill sweep and the BM25 repair sweep all
+    /// run at boot and all walk the whole estate. Three independent limits
+    /// multiply; one gate on the shared state is what makes "at most N palaces
+    /// open at once" true of the process. It also carries the high-water mark,
+    /// so the bound is observable rather than merely intended.
+    /// What: a [`startup_budget::StartupOpenGate`] sized by
+    /// `TRUSTY_MEMORY_STARTUP_OPEN_LIMIT` (default 4). Cloning shares the
+    /// semaphore and counters.
+    /// Test: `startup_task_tests::hydration_never_exceeds_the_startup_open_limit`.
+    pub startup_gate: crate::startup_budget::StartupOpenGate,
     /// Single-pass startup pin-file map: palace id → project root path (issue #470).
     ///
     /// Why: after daemon startup we have no record of which on-disk project
@@ -717,6 +739,8 @@ impl AppState {
             worker_liveness: Arc::new(worker_liveness::WorkerLiveness::new()),
             wedge_threshold: worker_liveness::wedge_threshold(),
             palace_names: Arc::new(dashmap::DashMap::new()),
+            // #7106: one shared budget for every startup job that opens palaces.
+            startup_gate: crate::startup_budget::StartupOpenGate::from_env(),
             pin_project_map: Arc::new(dashmap::DashMap::new()),
             bm25_index_tx,
             bm25_dirty,
@@ -913,15 +937,41 @@ impl AppState {
         // The directory walk and each `PalaceHandle::open` perform blocking
         // filesystem + redb/usearch I/O — run the whole hydration on the
         // blocking pool so it never parks an async worker thread.
-        let count = tokio::task::spawn_blocking(move || -> Result<usize> {
-            let palaces = PalaceRegistry::list_palaces(&registry_dir)?;
-            let total = palaces.len();
-            let mut loaded = 0usize;
-            let mut skipped = 0usize;
-            // #4911: hydrate under the registry's own intent, not the zero-arg
-            // `PalaceHandle::open` default (`ReadOnlyClient`).
-            let intent = registry.open_intent();
-            for palace in palaces {
+        let gate = self.startup_gate.clone();
+        // #7106: the directory walk is blocking I/O of its own, and it must
+        // finish before any open so the concurrency bound applies to the whole
+        // set rather than to whatever the walk happened to have produced.
+        let palaces =
+            tokio::task::spawn_blocking(move || PalaceRegistry::list_palaces(&registry_dir))
+                .await
+                .map_err(|e| anyhow::anyhow!("join list_palaces: {e}"))??;
+        let total = palaces.len();
+        // #4911: hydrate under the registry's own intent, not the zero-arg
+        // `PalaceHandle::open` default (`ReadOnlyClient`).
+        let intent = registry.open_intent();
+        // #7106: hydration opens one palace at a time and holds a gate permit
+        // while it does, so the whole startup fan-out — hydration plus both
+        // BM25 sweeps — can never have more than `gate.limit()` palaces open
+        // between them. Each open hydrates a drawer table, an HNSW graph and a
+        // KG adjacency (~90 MB) plus three redb page caches, so the peak is
+        // that cost times the number open at once.
+        //
+        // Deliberately serial, and measured: hydrating four at a time raised
+        // this daemon's `phys_footprint_peak` over a 94-palace copy of the
+        // reporter's store from 336 MB to 409 MB. The gate is a CEILING shared
+        // across concurrent jobs, never a licence to add concurrency to a job
+        // that had none — adding it here spends the exact resource #7106 is
+        // about to make hydration finish sooner, which nothing asked for.
+        let mut loaded = 0usize;
+        let mut skipped = 0usize;
+        for palace in palaces {
+            let permit = gate.acquire().await;
+            let registry = Arc::clone(&registry);
+            let palace_names = Arc::clone(&palace_names);
+            let opened = tokio::task::spawn_blocking(move || -> bool {
+                // Held for the whole open so the bound covers the hydration,
+                // not just the call that starts it.
+                let _permit = permit;
                 match trusty_common::memory_core::PalaceHandle::open_with_intent(&palace, intent) {
                     Ok(handle) => {
                         tracing::debug!(
@@ -936,7 +986,7 @@ impl AppState {
                         // point of truth for restart-time population.
                         palace_names.insert(palace.id.0.clone(), palace.name.clone());
                         registry.register_arc(handle);
-                        loaded += 1;
+                        true
                     }
                     Err(e) => {
                         // Why (issue #467): a single bad palace (corrupt kg.db,
@@ -960,18 +1010,29 @@ impl AppState {
                         // cache, so record it or it reads as never having
                         // existed. Cleared by `register_arc` if it later opens.
                         registry.record_unopenable(palace.id.clone(), format!("{e:#}"));
-                        skipped += 1;
+                        false
                     }
                 }
+            })
+            .await;
+            match opened {
+                Ok(true) => loaded += 1,
+                Ok(false) => skipped += 1,
+                // A join failure is a palace that did not hydrate. Counting it
+                // as skipped keeps the summary honest rather than inflating the
+                // loaded tally with an open nobody observed.
+                Err(e) => {
+                    tracing::warn!("palace hydration task failed: {e}");
+                    skipped += 1;
+                }
             }
-            tracing::info!(
-                "palace hydration summary: loaded {loaded}/{total} ({skipped} skipped due to errors)"
-            );
-            Ok(loaded)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("join load_palaces_from_disk: {e}"))??;
-        Ok(count)
+        }
+        tracing::info!(
+            open_limit = gate.limit(),
+            peak_concurrent_opens = gate.peak_concurrent(),
+            "palace hydration summary: loaded {loaded}/{total} ({skipped} skipped due to errors)"
+        );
+        Ok(loaded)
     }
 
     /// Builder-style: attach the daemon's shared `LogBuffer` so the

@@ -147,7 +147,9 @@ pub fn backup_incompatible_file(path: &Path) -> std::io::Result<PathBuf> {
 /// Test: `open_or_recreate_handles_garbage_file`,
 /// `open_or_recreate_passes_through_clean_open`.
 pub fn open_or_recreate(path: &Path) -> Result<Database, DatabaseError> {
-    match Database::create(path) {
+    // #7106: palace-scoped stores (payload, chat sessions, analytics, the
+    // trusty-memory activity log) all land here — bound the page cache.
+    match crate::redb_cache::create_palace_db(path) {
         Ok(db) => Ok(db),
         Err(e) if is_incompatible_format(&e) => {
             match backup_incompatible_file(path) {
@@ -174,7 +176,7 @@ pub fn open_or_recreate(path: &Path) -> Result<Database, DatabaseError> {
                     return Err(e);
                 }
             }
-            Database::create(path)
+            crate::redb_cache::create_palace_db(path)
         }
         Err(e) => Err(e),
     }

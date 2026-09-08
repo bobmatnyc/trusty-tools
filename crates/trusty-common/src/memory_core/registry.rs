@@ -803,6 +803,34 @@ impl PalaceRegistry {
         self.unopenable.insert(palace_id, reason);
     }
 
+    /// Drop one cached handle, but only when nothing else references it (#7106).
+    ///
+    /// Why: a startup sweep that walks the whole estate leaves every palace it
+    /// touched resident, so a background job nobody asked for pins the daemon
+    /// at the LRU cap. Handing back what the sweep brought in is what keeps the
+    /// sweep's cost transient. [`Self::remove`] cannot serve that: it drops the
+    /// handle unconditionally, which would race an in-flight recall or dream
+    /// cycle holding the same `Arc`. [`Self::evict_idle`] cannot either: it is
+    /// estate-wide and keyed on an idle clock the sweep's own open just reset.
+    /// What: pops the entry only when the cache holds the sole reference
+    /// (`Arc::strong_count == 1`), the same correctness anchor
+    /// [`Self::evict_idle`] uses. The victim drops OUTSIDE the lock so fd close
+    /// and RAM free never run under it. Returns whether a handle was released.
+    /// The next access transparently reopens from redb, the source of truth.
+    /// Test: `registry_tests::release_if_unreferenced_skips_a_referenced_handle`.
+    pub fn release_if_unreferenced(&self, palace_id: &PalaceId) -> bool {
+        let released = {
+            let mut cache = self.handles.lock();
+            match cache.peek(palace_id) {
+                // Measured against the cache's OWN reference, never a clone.
+                Some(h) if Arc::strong_count(h) == 1 => cache.pop(palace_id),
+                _ => None,
+            }
+        };
+        // The handle drops here, outside the lock.
+        released.is_some()
+    }
+
     /// Drop every idle, unreferenced palace handle — the "idle to disk" sweep.
     ///
     /// Why: even under the LRU cap the daemon keeps up to `max_open` palaces

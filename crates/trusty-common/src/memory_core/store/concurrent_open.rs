@@ -24,6 +24,7 @@
 //! by holding the first handle while opening the second — the second open
 //! falls back to a snapshot and read transactions still succeed.
 
+use crate::redb_cache::create_palace_db;
 use anyhow::{Context, Result};
 use redb::{Database, DatabaseError};
 use std::path::{Path, PathBuf};
@@ -290,7 +291,9 @@ pub fn try_open_or_snapshot(
     path: &Path,
     intent: OpenIntent,
 ) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
-    match Database::create(path) {
+    // #7106: every palace-scoped open goes through the bounded page-cache
+    // builder — a bare `Database::create` here takes redb's 1 GiB ceiling.
+    match create_palace_db(path) {
         Ok(db) => Ok((Arc::new(db), SnapshotGuard::noop(), OpenMode::ReadWrite)),
         // Issue #702: the file is in an incompatible / old redb format (redb
         // 2.x written by a pre-4.x binary). We hold no lock on it, so it is
@@ -338,7 +341,8 @@ fn recreate_incompatible_file(
             path.display()
         )
     })?;
-    let db = Database::create(path).with_context(|| {
+    // #7106: bounded page cache, same as every other palace-scoped open.
+    let db = create_palace_db(path).with_context(|| {
         format!(
             "create fresh redb after moving incompatible file aside at {}",
             path.display()
@@ -458,7 +462,8 @@ fn open_writer_with_handoff_retry(path: &Path) -> Result<(Arc<Database>, Snapsho
             let sleep_ms = WRITER_RETRY_SLEEP_MS[(attempt - 1) as usize];
             backoff_sleep_ms(sleep_ms);
         }
-        match Database::create(path) {
+        // #7106: bounded page cache, same as every other palace-scoped open.
+        match create_palace_db(path) {
             Ok(db) => {
                 if attempt > 0 {
                     tracing::info!(
@@ -520,7 +525,8 @@ fn open_read_only_snapshot(path: &Path) -> Result<(Arc<Database>, SnapshotGuard,
             snap.display()
         )
     })?;
-    let db = Database::create(&snap).with_context(|| {
+    // #7106: a snapshot is a palace-scoped database too.
+    let db = create_palace_db(&snap).with_context(|| {
         format!(
             "open redb snapshot at {} (fallback for locked {})",
             snap.display(),
@@ -598,7 +604,8 @@ impl ReadOnlyRedb {
         if !path.exists() {
             anyhow::bail!("no redb file at {}", path.display());
         }
-        match redb::ReadOnlyDatabase::open(path) {
+        // #7106: bounded page cache on the read-only measurement path too.
+        match crate::redb_cache::open_palace_db_read_only(path) {
             Ok(db) => Ok(Self::Live(db)),
             Err(DatabaseError::DatabaseAlreadyOpen) => {
                 let snap = snapshot_path_for(path);
@@ -609,7 +616,8 @@ impl ReadOnlyRedb {
                         snap.display()
                     )
                 })?;
-                let db = Database::create(&snap).with_context(|| {
+                // #7106: bounded page cache on the measurement snapshot too.
+                let db = create_palace_db(&snap).with_context(|| {
                     format!("open redb snapshot at {} read-only", snap.display())
                 })?;
                 Ok(Self::Snapshot {

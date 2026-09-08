@@ -515,6 +515,67 @@ async fn community_count_returns_partition_size() {
     assert!(kg.community_count() >= 1);
 }
 
+/// Why (#7106): `palaces_list` asks every resident palace for its community
+/// count on every poll and `kg_graph` asks again on every call. Before the
+/// memo each ask ran a full Louvain partition over the whole adjacency, so a
+/// 94-palace roster ran 94 partitions per poll with no write in between. The
+/// count alone cannot distinguish a cache hit from a recomputation, so this
+/// asserts on the partition counter instead.
+/// What: seeds a triangle, reads `community_count` three times and asserts the
+/// partition ran exactly once; then asserts one more triple and asserts the
+/// next read recomputes exactly once more and that repeat reads at the new
+/// generation are free again.
+/// Test: this test.
+#[tokio::test]
+async fn community_count_is_cached_until_the_graph_changes() {
+    let dir = tempdir().unwrap();
+    let kg = KnowledgeGraph::open(&dir.path().join("kg.db")).unwrap();
+
+    let triple = |s: &str, o: &str| Triple {
+        subject: s.into(),
+        predicate: "rel".into(),
+        object: o.into(),
+        valid_from: Utc::now(),
+        valid_to: None,
+        confidence: 1.0,
+        provenance: None,
+    };
+    for (s, o) in [("x", "y"), ("y", "z"), ("z", "x")] {
+        kg.assert(triple(s, o)).await.unwrap();
+    }
+
+    let before = kg.community_computations();
+    let first = kg.community_count();
+    assert_eq!(
+        kg.community_computations(),
+        before + 1,
+        "the first read at a new generation must compute once"
+    );
+    assert_eq!(kg.community_count(), first);
+    assert_eq!(kg.community_count(), first);
+    assert_eq!(
+        kg.community_computations(),
+        before + 1,
+        "#7106: repeat reads with no write between them must not re-partition"
+    );
+
+    // A KG write must invalidate the memo — a stale community count is worse
+    // than a slow one.
+    kg.assert(triple("w", "x")).await.unwrap();
+    let after_write = kg.community_count();
+    assert_eq!(
+        kg.community_computations(),
+        before + 2,
+        "a KG write must force exactly one recomputation"
+    );
+    assert_eq!(kg.community_count(), after_write);
+    assert_eq!(
+        kg.community_computations(),
+        before + 2,
+        "reads after the recomputation are free again"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #4670 — progressive exploration (seed + expand)
 // ---------------------------------------------------------------------------

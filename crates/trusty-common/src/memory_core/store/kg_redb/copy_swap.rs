@@ -207,7 +207,9 @@ pub fn prepare(
     };
     fire(hook, CompactStep::AfterBackup)?;
 
-    let replacement = Database::create(&tmp_path)
+    // #7106: the compaction target is a palace-scoped database — bound its page
+    // cache the same way the live file's is bounded.
+    let replacement = crate::redb_cache::create_palace_db(&tmp_path)
         .with_context(|| format!("create compaction target {}", tmp_path.display()))?;
 
     // Build the guard NOW, before anything that can fail. Every error below

@@ -115,7 +115,9 @@ pub(super) fn read(data_dir: &Path) -> Result<PalaceDiskStats, String> {
 /// What: maps redb's error onto an operator-facing string; a writer holding the
 /// file surfaces as `DatabaseAlreadyOpen`.
 fn open_read_only(path: &Path) -> Result<ReadOnlyDatabase, String> {
-    ReadOnlyDatabase::open(path).map_err(|e| {
+    // #7106: palace redb files, so the bounded page-cache ceiling applies here
+    // too — a disk survey must not hand the allocator a 1 GiB ceiling per file.
+    trusty_common::redb_cache::open_palace_db_read_only(path).map_err(|e| {
         format!(
             "{} is not readable: {e}",
             path.file_name().unwrap_or(path.as_os_str()).display()

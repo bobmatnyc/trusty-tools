@@ -209,6 +209,14 @@ name = "memory_palace"
 path = "tests/memory_palace.rs"
 required-features = ["memory-core", "embedder-test-support"]
 
+# #7106 ratchet: no palace-scoped redb open may bypass the bounded page-cache
+# builder. Scans the memory-core sources, so it needs that feature on to be
+# meaningful (and to match the tree it is asserting about).
+[[test]]
+name = "redb_cache_bounds"
+path = "tests/redb_cache_bounds.rs"
+required-features = ["memory-core"]
+
 # Inference-foundation integration suite (issue #2402). References
 # `trusty_common::inference::{InferenceAdapter, Configurator, …}`, which only
 # exist behind the `inference-client` feature, so — like `memory_palace` above —

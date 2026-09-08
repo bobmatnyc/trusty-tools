@@ -362,6 +362,34 @@ fn triple_count_or_zero(palace: &PalaceId, read: Result<usize>) -> usize {
     }
 }
 
+/// [`palace_info_from`] on the blocking pool (#7106).
+///
+/// Why: building a `PalaceInfo` reads the palace's drawer table, room and wing
+/// registries and — the expensive one — its Louvain community count. That last
+/// is memoised per KG write generation since #7106, but the first read after an
+/// open or a write still partitions the whole graph, and running that inline on
+/// an async worker parks the executor for its duration. Every async caller that
+/// enriches a single palace row goes through here so no surface can
+/// reintroduce the inline call.
+/// What: clones the `Palace` row, runs [`palace_info_from`] under
+/// `tokio::task::spawn_blocking`, and on a join failure degrades to the
+/// handle-less row (zeros) rather than failing the whole call — the same
+/// degrade rule the counts themselves use.
+/// Test: `palace_info_blocking_matches_the_inline_row`.
+pub(crate) async fn palace_info_blocking(
+    palace: &Palace,
+    handle: Option<Arc<PalaceHandle>>,
+) -> PalaceInfo {
+    let owned = palace.clone();
+    match tokio::task::spawn_blocking(move || palace_info_from(&owned, handle.as_ref())).await {
+        Ok(info) => info,
+        Err(e) => {
+            tracing::warn!(palace = %palace.id, "palace_info task failed: {e}");
+            palace_info_from(palace, None)
+        }
+    }
+}
+
 pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> PalaceInfo {
     let (
         drawer_count,
