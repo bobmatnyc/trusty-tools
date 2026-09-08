@@ -33,7 +33,10 @@
 //! ahead of the subagent exemptions, alongside the worktree-add-tmp guard: a
 //! target-path denylist for `rm`/`rmdir`/`unlink`/`find … -delete` aimed at a
 //! filesystem root, a repository root, a `.git` directory, or a worktree
-//! entry (issue #4031).
+//! entry (issue #4031). The sibling [`path_tokens`] module turns a path TOKEN
+//! a command wrote into the directory every one of those rules decides on, and
+//! reports what its expansion could not reach — the question a rule must ask
+//! before stating anything about the directory it got back (#7098, #7100).
 //! Test: `evaluate_bash_command_*`, `split_shell_segments_*`, and
 //! `has_file_write_redirection_*` in this module's `tests` submodule;
 //! `sed_awk::tests` for the sed/awk-specific safety analysis.
@@ -41,6 +44,7 @@
 mod destructive_delete;
 mod heredoc;
 mod main_checkout;
+mod path_tokens;
 mod persistence;
 mod sed_awk;
 mod shell_lex;
@@ -64,9 +68,13 @@ pub(crate) use worktree_remove::{
 };
 pub(crate) use worktree_remove_rechecks::evaluate_removal_rechecks;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::commands::hook_rewrite::{effective_tool_name, first_command_token};
+// Re-exported for the sibling rule modules, which reach these through
+// `super::…` — one definition of "which directory does this token name", and
+// one answer to "what did not expand" (#7098, #7100).
+use path_tokens::{PathEnv, resolve_target_path, unexpanded_shell_variable};
 use shell_lex::QuoteScan;
 
 /// Deny reason for editing files through a shell tool (sed/awk/patch/git apply/redirection).
@@ -844,43 +852,6 @@ pub(crate) fn evaluate_worktree_add_command(command: &str, cwd: &Path) -> Option
     evaluate_worktree_add_command_in(command, cwd, &PathEnv::from_process())
 }
 
-/// The environment values [`resolve_target_path`] expands `$TMPDIR`/`$TMP`/`~`
-/// from, captured as data instead of read from `std::env` at each use.
-///
-/// Why: the expansion rules can only be tested by controlling those variables,
-/// and the obvious way to do that — `std::env::set_var` in the test — mutates
-/// PROCESS-GLOBAL state that every other test in the `tm` test binary sees for
-/// as long as it is set. `cargo test` runs tests as threads in one process, so
-/// a restore-on-drop guard bounds the leak's lifetime but not its visibility:
-/// concurrent siblings still read the mutated value. That is not hypothetical —
-/// a `TMPDIR` pinned to a macOS-only scratch path reddened five
-/// `pm_guard_budget` tests on a Linux CI runner (PR #4914, run 31023632348)
-/// because `tempfile` honors `$TMPDIR` and the path does not exist there.
-/// Passing the values in removes the global mutation rather than scheduling
-/// around it.
-/// What: the three variables [`resolve_target_path`] expands, each `None` when
-/// unset. [`PathEnv::from_process`] is the one place that reads the real
-/// environment, so production behavior is unchanged — a `Bash` tool call
-/// inherits the guard process's environment, and the guard expands against it.
-/// Test: `evaluate_worktree_add_command_expands_tmpdir_and_home` builds one
-/// directly; every other caller goes through [`PathEnv::from_process`].
-struct PathEnv {
-    tmpdir: Option<String>,
-    tmp: Option<String>,
-    home: Option<String>,
-}
-
-impl PathEnv {
-    /// Read `$TMPDIR`, `$TMP`, and `$HOME` from the guard process.
-    fn from_process() -> Self {
-        Self {
-            tmpdir: std::env::var("TMPDIR").ok(),
-            tmp: std::env::var("TMP").ok(),
-            home: std::env::var("HOME").ok(),
-        }
-    }
-}
-
 /// [`evaluate_worktree_add_command`] against an explicit environment.
 ///
 /// Why: see [`PathEnv`] — this is the seam that lets the expansion rules be
@@ -985,91 +956,6 @@ fn worktree_add_target_token(tail: &[String]) -> Option<String> {
         return Some(tok.clone());
     }
     None
-}
-
-/// Expand a leading `~`, `$TMPDIR`/`${TMPDIR}`, `$TMP`/`${TMP}`,
-/// `$HOME`/`${HOME}`, and `$PWD`/`${PWD}` in a path token using `env`/`base`,
-/// then resolve it against `base` if still relative, then lexically
-/// normalize (collapse `.`/`..` components WITHOUT touching the filesystem).
-///
-/// Why: `shlex::split` does not perform shell variable expansion, so a target
-/// argument like `$TMPDIR/wt-foo`, `~/scratch/wt-foo`, a literal `$HOME`
-/// (issue #4031 — an agent typing `rm -rf $HOME` verbatim), or `$PWD` (issue
-/// #4031 review — `rm -rf $PWD` from inside a session's own worktree root
-/// reached this function unexpanded, so the guard saw a literal `"$PWD"`
-/// token that matched nothing) reaches this function as literal text; the
-/// guard must expand it itself to see where it really points. `$PWD` expands
-/// to `base` — the SAME cwd this function's own `.`/`..` resolution already
-/// treats as "here" — rather than a second read of the process environment's
-/// `PWD`, so a command composed with a preceding `cd` (which updates `base`
-/// via the caller's tracking, never the process env) still resolves `$PWD`
-/// against where the command actually stands. Filesystem-touching resolution
-/// (`fs::canonicalize`) is deliberately avoided — the worktree target usually
-/// does not exist yet, and a `PreToolUse` hook must stay fast and
-/// side-effect-free.
-/// What: string-replaces the env-var forms (`$PWD`/`${PWD}` against `base`,
-/// the rest against `env`), expands a `~`/`~/…` prefix via `$HOME`, joins onto
-/// `base` if the result is still relative, then normalizes. The env values
-/// arrive via [`PathEnv`] rather than being read here, so a test can pin them
-/// without mutating process-global state — see [`PathEnv`] for the CI failure
-/// that motivated the seam. In production [`PathEnv::from_process`] supplies
-/// the guard process's own environment, which a `Bash` tool call inherits
-/// unchanged.
-fn resolve_target_path(token: &str, base: &Path, env: &PathEnv) -> PathBuf {
-    let mut expanded = token.to_string();
-    if let Some(tmpdir) = env.tmpdir.as_deref() {
-        expanded = expanded
-            .replace("${TMPDIR}", tmpdir)
-            .replace("$TMPDIR", tmpdir);
-    }
-    if let Some(tmp) = env.tmp.as_deref() {
-        expanded = expanded.replace("${TMP}", tmp).replace("$TMP", tmp);
-    }
-    if let Some(home) = env.home.as_deref() {
-        expanded = expanded.replace("${HOME}", home).replace("$HOME", home);
-    }
-    let pwd = base.to_string_lossy();
-    expanded = expanded.replace("${PWD}", &pwd).replace("$PWD", &pwd);
-    if expanded == "~" {
-        if let Some(home) = env.home.as_deref() {
-            expanded = home.to_string();
-        }
-    } else if let Some(rest) = expanded.strip_prefix("~/")
-        && let Some(home) = env.home.as_deref()
-    {
-        expanded = format!("{home}/{rest}");
-    }
-    let path = Path::new(&expanded);
-    let joined = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        base.join(path)
-    };
-    normalize_lexically(&joined)
-}
-
-/// Collapse `.`/`..` path components without touching the filesystem.
-///
-/// Why: [`resolve_target_path`] must not call `fs::canonicalize` (the target
-/// usually doesn't exist yet), but a purely textual join like
-/// `/repo/../tmp/wt` must still be recognized as resolving under `/tmp`.
-/// What: walks `path`'s components, popping the accumulator on `..` and
-/// dropping `.`, otherwise appending. Does not consult the filesystem, so it
-/// cannot see through symlinks (see the residual-bypass note on
-/// [`evaluate_worktree_add_command`]).
-fn normalize_lexically(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
 }
 
 /// Whether `path` lexically starts with one of [`WORKTREE_TMP_DENYLIST_ROOTS`].

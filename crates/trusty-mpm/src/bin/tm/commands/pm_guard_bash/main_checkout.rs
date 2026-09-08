@@ -131,7 +131,10 @@ use std::path::{Path, PathBuf};
 use trusty_mpm::core::project_aliases::{is_main_checkout, main_checkout_root};
 use trusty_mpm::core::staged_paths::staged_paths;
 
-use super::{PathEnv, git_dash_c_override, resolve_target_path, split_shell_segments};
+use super::{
+    PathEnv, git_dash_c_override, resolve_target_path, split_shell_segments,
+    unexpanded_shell_variable,
+};
 use crate::commands::hook_rewrite::first_command_token;
 use crate::commands::pm_guard::is_source_code_path;
 use crate::commands::pm_guard_bash::shell_lex;
@@ -145,7 +148,20 @@ use crate::commands::pm_guard_bash::shell_lex;
 /// What: `Some(reason)` — naming the verb, the directory, and the remedy —
 /// when [`git_verb_target_dir`] finds a destructive verb whose target
 /// directory [`is_main_checkout`]; `None` (ALLOW) otherwise.
-/// Test: the two halves are covered separately (see the module doc); the
+///
+/// A `-C` or `cd` path the guard could not fully expand still denies, but with
+/// its OWN reason (#7100): `git -C $WT checkout -- <path>` resolved to
+/// `<repo>/$WT`, whose nearest `.git` ancestor is the checkout root, so the
+/// deny claimed a directory the agent never named was "a project's main
+/// checkout". The verdict cannot flip to ALLOW — an empty `$WT` runs the
+/// command in the checkout itself — so what changes is what the refusal says.
+/// A `-C` path that lexically names a harness worktree
+/// (`.claude/worktrees/…`, `.worktrees/…`) was and stays outside this rule:
+/// [`is_main_checkout`] answers `false` for it, whether or not the directory
+/// exists yet.
+/// Test: the two halves are covered separately (see the module doc);
+/// `destructive_deny_names_an_unresolved_variable_rather_than_the_checkout`,
+/// `destructive_allows_a_path_restoring_checkout_in_a_sibling_worktree`; the
 /// composition runs end to end in `tests/tm_hook_pm_guard.rs`.
 pub(crate) fn evaluate_main_checkout_destructive_command(
     command: &str,
@@ -157,7 +173,15 @@ pub(crate) fn evaluate_main_checkout_destructive_command(
         &PathEnv::from_process(),
         is_whole_tree_destructive,
     )?;
-    is_main_checkout(&target).then(|| deny_reason(&verb, &target))
+    if !is_main_checkout(&target) {
+        return None;
+    }
+    // #7100: an unexpanded variable in the path is not evidence about which
+    // tree this lands in, so the refusal must not read as if it were.
+    match unexpanded_shell_variable(&target) {
+        Some(variable) => Some(unresolved_directory_deny_reason(&verb, &target, &variable)),
+        None => Some(deny_reason(&verb, &target)),
+    }
 }
 
 /// What a `git commit` aimed at a main checkout is allowed to do (ADR-0049).
@@ -734,6 +758,34 @@ fn deny_reason(verb: &str, target: &Path) -> String {
     )
 }
 
+/// Build the deny message for a target directory the guard could not resolve
+/// (#7100).
+///
+/// Why: [`deny_reason`] asserts the directory IS a main checkout, and that
+/// assertion is what a `version-control` agent acted on when it abandoned
+/// `git -C "$WT" checkout -- <file>` and hand-edited the file instead. The
+/// guard reached the checkout root only by walking `<repo>/$WT` upwards, so the
+/// honest statement is that it does not know where `$WT` points — and the
+/// remedy is a different one from "do this work in a worktree", because the
+/// agent already was.
+/// What: the refusal, naming the verb, the path AS RESOLVED (variable still in
+/// it, so the reader can see which component failed), the variable itself, and
+/// the two forms that work.
+/// Test: `unresolved_directory_deny_reason_names_the_variable_and_the_remedy`.
+fn unresolved_directory_deny_reason(verb: &str, target: &Path, variable: &str) -> String {
+    format!(
+        "Destructive git command denied because its target directory is unresolvable (ADR-0037): \
+         `git {verb}` names {}, which still carries the unexpanded shell variable `{variable}`. \
+         The guard expands only `$TMPDIR`, `$TMP`, `$HOME` and `$PWD`, so it cannot tell whether \
+         this lands in a sibling worktree or in the main checkout it walked up to — and an empty \
+         `{variable}` would run the command in that checkout. Spell the directory out \
+         (`git -C /abs/path/.claude/worktrees/<name> {verb} …`) or `cd` into the worktree first. \
+         A `-C` path that names a harness worktree (`.claude/worktrees/`, `.worktrees/`) is not \
+         restricted by this rule, so the same command with the path written out is allowed.",
+        target.display()
+    )
+}
+
 /// The directory the first git segment matching `matches` would act on, with
 /// that segment's verb.
 ///
@@ -1170,6 +1222,65 @@ mod tests {
         assert!(
             evaluate_main_checkout_commit_command("git commit -m 'wip'", plain.path()).is_none()
         );
+    }
+
+    /// #7100: the `version-control` agent stands in the main checkout
+    /// (ADR-0056), so `git -C "$WT" checkout -- <file>` aimed at a sibling
+    /// worktree resolved to `<checkout>/$WT`, whose nearest `.git` ancestor is
+    /// the checkout itself. The refusal then told the agent it was destroying
+    /// the main checkout, which it was not, and the agent hand-edited the file
+    /// instead. It is still refused — an empty `$WT` really would run there —
+    /// but the refusal now names the variable and the two forms that work.
+    #[test]
+    fn destructive_deny_names_an_unresolved_variable_rather_than_the_checkout() {
+        let checkout = main_checkout_dir();
+        let reason = evaluate_main_checkout_destructive_command(
+            "git -C $WT checkout -- src/lib.rs",
+            checkout.path(),
+        )
+        .expect("an unresolvable target directory must still deny");
+        assert!(reason.contains("$WT"), "{reason}");
+        assert!(reason.contains("unresolvable"), "{reason}");
+        assert!(
+            !reason.contains("which is a project's main checkout"),
+            "the guard must not assert what it could not establish: {reason}"
+        );
+    }
+
+    /// The half of #7100 that must NOT change: a `-C` path spelled out to a
+    /// sibling harness worktree is outside this rule, whether or not the
+    /// directory exists yet, and the main checkout stays denied.
+    #[test]
+    fn destructive_allows_a_path_restoring_checkout_in_a_sibling_worktree() {
+        let checkout = main_checkout_dir();
+        let sibling = checkout.path().join(".claude/worktrees/agent-b");
+        for command in [
+            format!("git -C {} checkout -- src/lib.rs", sibling.display()),
+            "git -C .claude/worktrees/agent-b checkout -- src/lib.rs".to_string(),
+            "cd .claude/worktrees/agent-b && git restore src/lib.rs".to_string(),
+        ] {
+            assert!(
+                evaluate_main_checkout_destructive_command(&command, checkout.path()).is_none(),
+                "a sibling worktree is not the main checkout: {command}"
+            );
+        }
+        // The boundary this exception must not cross.
+        assert!(
+            evaluate_main_checkout_destructive_command(
+                "git checkout -- src/lib.rs",
+                checkout.path()
+            )
+            .is_some(),
+            "the main checkout itself stays denied"
+        );
+    }
+
+    #[test]
+    fn unresolved_directory_deny_reason_names_the_variable_and_the_remedy() {
+        let reason = unresolved_directory_deny_reason("checkout", Path::new("/repo/$WT"), "$WT");
+        assert!(reason.contains("/repo/$WT"), "{reason}");
+        assert!(reason.contains("$WT"), "{reason}");
+        assert!(reason.contains(".claude/worktrees/"), "{reason}");
     }
 
     #[test]
