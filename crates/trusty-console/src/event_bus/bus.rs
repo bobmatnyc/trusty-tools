@@ -34,7 +34,8 @@
 //! Test: `super::tests` — `a_subscriber_receives_ingested_events`,
 //! `duplicate_id_is_deduped`, `eviction_at_capacity_drops_the_oldest`,
 //! `ingest_assigns_sequential_console_seqs_starting_at_one`,
-//! `live_fanout_frames_are_never_marked_persisted`.
+//! `live_fanout_frames_are_never_marked_persisted`,
+//! `concurrent_producers_write_the_durable_log_in_seq_order`.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
@@ -195,14 +196,25 @@ impl EventBus {
     }
 
     /// Accept one frame: dedup by id, assign console's own `seq`, evict the
-    /// oldest if full, push, hand off to the durable log, fan out.
+    /// oldest if full, push, hand off to the durable log, fan out — all
+    /// while still holding the ring lock.
     ///
-    /// Why the lock is held across the whole ring decision and never across
-    /// the fan-out send: `broadcast::Sender::send` is synchronous and does
-    /// not await, so holding the lock across it costs nothing async-wise, but
-    /// the send is still issued after the lock is dropped — a subscriber
-    /// receiving an event must be able to immediately call back into
-    /// [`EventBus::snapshot`] without deadlocking on this same mutex.
+    /// Why the lock is held across the whole decision, INCLUDING the
+    /// durable-log hand-off and the fan-out send (#6848 — moved back under
+    /// the lock after a code-critic review found the gap): `DurableLog::
+    /// enqueue` is a non-blocking `try_send` and `broadcast::Sender::send` is
+    /// synchronous — neither `.await`s or invokes a subscriber's code
+    /// reentrantly, so holding the `std::sync::Mutex` across them costs
+    /// nothing async-wise. Without it, a real ordering bug follows:
+    /// `EventBus` is shared via `Arc` across one tokio task per producer
+    /// connection, and this crate's default multi-threaded runtime can run
+    /// those tasks on different OS threads. The mutex already orders two
+    /// threads' `seq` assignments (5, then 6); if `log.enqueue`/
+    /// `sender.send` ran after the lock was dropped, the OS scheduler would
+    /// be free to run thread B's `try_send(seq=6)` before thread A's
+    /// `try_send(seq=5)`, letting the durable log (and live subscribers)
+    /// observe seq 6 before seq 5 — breaking `replay_since`'s file-order-
+    /// equals-seq-order assumption (`super::log::replay`'s module docs).
     /// What: see module docs for the algorithm. A duplicate never consumes a
     /// `seq` value or reaches the log — only genuinely new events do, which
     /// is what keeps `seq` a compact, gapless (absent backpressure) sequence.
@@ -216,7 +228,8 @@ impl EventBus {
     /// `super::tests::duplicate_id_is_deduped`,
     /// `super::tests::eviction_at_capacity_drops_the_oldest`,
     /// `super::tests::ingest_assigns_sequential_console_seqs_starting_at_one`,
-    /// `super::tests::live_fanout_frames_are_never_marked_persisted`.
+    /// `super::tests::live_fanout_frames_are_never_marked_persisted`,
+    /// `super::tests::concurrent_producers_write_the_durable_log_in_seq_order`.
     pub(crate) fn ingest(&self, mut event: HarnessEvent) -> IngestOutcome {
         let id = event.id;
         let mut ring = self.lock_ring();
@@ -238,9 +251,11 @@ impl EventBus {
             self.counters.evicted.fetch_add(1, Ordering::Relaxed);
         }
         ring.events.push_back(event.clone());
-        drop(ring);
         self.counters.ingested.fetch_add(1, Ordering::Relaxed);
 
+        // #6848: still under `ring`'s lock — see this fn's doc comment for
+        // why that is required, not just harmless, for on-disk/fan-out seq
+        // order to match assignment order under concurrent producers.
         if let Some(log) = &self.log
             && !log.enqueue(event.clone())
         {
@@ -259,6 +274,7 @@ impl EventBus {
             event,
             persisted: false,
         });
+        drop(ring);
         IngestOutcome::Ingested
     }
 

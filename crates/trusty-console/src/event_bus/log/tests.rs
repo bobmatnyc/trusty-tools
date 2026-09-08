@@ -1,6 +1,8 @@
 //! Tests for the durable NDJSON event log (issue #6848 slice 3b).
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use chrono::{NaiveDate, Utc};
 use trusty_common::control_bus::{EventId, HarnessEvent, HarnessPayload, HarnessSource};
@@ -10,7 +12,7 @@ use super::format::{encode_line, read_events};
 use super::recovery::{earliest_seq, list_log_files, recover_next_seq};
 use super::replay::{ReplayItem, replay_since};
 use super::retention::{enforce_retention, files_to_delete};
-use super::writer::DurableLog;
+use super::writer::{DurableLog, rotate, write_line};
 
 fn date(y: i32, m: u32, d: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, d).expect("valid test date")
@@ -344,6 +346,56 @@ async fn replay_since_across_a_backpressure_drop_yields_an_interior_gap() {
     assert!(matches!(items[2], ReplayItem::Event(ref e) if e.seq == 3));
 }
 
+// #6848: regression for the CRITICAL gap-detection bug the code-critic
+// review found — `previous_seq` used to start at `None` and was only seeded
+// inside the leading-retention-gap branch, so a drop on the FIRST seq after
+// `since_seq` (the ordinary reconnect case, no retention gap involved) was
+// never checked against `since_seq` and produced no gap marker at all. Day
+// file holds seq [1, 2, 4, 5] — seq 3 was dropped under backpressure — and a
+// client reconnects from `since_seq = 2`, already inside the retained
+// window. This must fail before the `replay.rs` fix (no `Gap` before event
+// 4) and pass after it.
+#[tokio::test]
+async fn replay_since_a_drop_on_the_first_replayed_seq_yields_a_gap() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    seed_file(
+        tmp.path(),
+        date(2026, 9, 6),
+        &[event(1), event(2), event(4), event(5)],
+    )
+    .await;
+
+    let items = replay_since(tmp.path(), 2, Some(1)).await.expect("replay");
+    assert_eq!(
+        items.len(),
+        3,
+        "a gap for seq 3 immediately, then events 4 and 5"
+    );
+    match &items[0] {
+        ReplayItem::Gap {
+            after_seq,
+            before_seq,
+        } => {
+            assert_eq!(*after_seq, 2);
+            assert_eq!(*before_seq, 4);
+        }
+        ReplayItem::Event(_) => {
+            panic!("expected a gap marker for the seq dropped immediately after since_seq")
+        }
+    }
+    assert!(matches!(items[1], ReplayItem::Event(ref e) if e.seq == 4));
+    assert!(matches!(items[2], ReplayItem::Event(ref e) if e.seq == 5));
+}
+
+#[tokio::test]
+async fn replay_since_on_an_empty_log_returns_nothing() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let items = replay_since(tmp.path(), 0, None)
+        .await
+        .expect("replay an empty log");
+    assert!(items.is_empty(), "no files, no gap, no events");
+}
+
 // ─── DurableLog / writer task ────────────────────────────────────────────
 
 fn config(dir: &Path) -> LogConfig {
@@ -466,5 +518,54 @@ async fn rotation_opens_a_new_file_and_keeps_seq_continuity() {
         seqs,
         vec![1, 2, 3],
         "seq stays continuous across the file boundary"
+    );
+}
+
+// #6848: regression for the CRITICAL missing-fsync-at-rotation finding.
+// Drives `rotate` directly (rather than waiting for a real UTC day change)
+// so the outgoing day's file can be dropped WITHOUT the writer task's own
+// graceful-shutdown sync ever running — the exact "crash before shutdown"
+// scenario the fsync-at-rotation fix protects. Proves both that `rotate`
+// syncs the outgoing handle without erroring and that the seq high-water
+// mark recovers correctly across both files afterward.
+#[tokio::test]
+async fn rotation_fsyncs_the_outgoing_file_before_opening_the_next_one() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let day1 = date(2026, 1, 1);
+    let day2 = date(2026, 1, 2);
+    let earliest_retained_seq = Arc::new(AtomicU64::new(0));
+
+    let (mut file1, path1) = rotate(&config(tmp.path()), day1, &earliest_retained_seq, None)
+        .await
+        .expect("open day1's file");
+    write_line(&mut file1, &path1, &event(1))
+        .await
+        .expect("write seq 1 to day1");
+
+    // The rotation itself fsyncs `file1` before opening day2's file.
+    let (mut file2, path2) = rotate(
+        &config(tmp.path()),
+        day2,
+        &earliest_retained_seq,
+        Some(&mut file1),
+    )
+    .await
+    .expect("rotate to day2's file");
+    write_line(&mut file2, &path2, &event(2))
+        .await
+        .expect("write seq 2 to day2");
+
+    // Ungraceful drop — no writer-task shutdown sync runs. If rotation's own
+    // fsync did not happen, this is exactly the scenario that would lose
+    // day1's data on a real crash.
+    drop(file1);
+    drop(file2);
+
+    let recovered = recover_next_seq(&[(day1, path1), (day2, path2)])
+        .await
+        .expect("recover across both files");
+    assert_eq!(
+        recovered, 3,
+        "both seqs are readable back after an ungraceful drop post-rotation"
     );
 }

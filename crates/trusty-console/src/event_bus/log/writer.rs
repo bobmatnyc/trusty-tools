@@ -24,9 +24,10 @@
 //! Test: `super::tests::open_recovers_next_seq_from_an_existing_log`,
 //! `super::tests::backpressure_drops_are_counted_and_do_not_block_enqueue`,
 //! `super::tests::events_written_are_readable_back_in_order`,
-//! `super::tests::rotation_opens_a_new_file_and_keeps_seq_continuity`.
+//! `super::tests::rotation_opens_a_new_file_and_keeps_seq_continuity`,
+//! `super::tests::rotation_fsyncs_the_outgoing_file_before_opening_the_next_one`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -170,13 +171,15 @@ async fn run_writer(
 ) {
     let mut open_day: Option<NaiveDate> = None;
     let mut file: Option<tokio::fs::File> = None;
+    let mut current_path: Option<PathBuf> = None;
 
     while let Some(event) = rx.recv().await {
         let today = Utc::now().date_naive();
         if open_day != Some(today) {
-            match rotate(&config, today, &earliest_retained_seq).await {
-                Ok(f) => {
+            match rotate(&config, today, &earliest_retained_seq, file.as_mut()).await {
+                Ok((f, path)) => {
                     file = Some(f);
+                    current_path = Some(path);
                     open_day = Some(today);
                 }
                 Err(e) => {
@@ -190,8 +193,10 @@ async fn run_writer(
             }
         }
 
-        let Some(f) = file.as_mut() else { continue };
-        if let Err(e) = write_line(f, &event).await {
+        let (Some(f), Some(path)) = (file.as_mut(), current_path.as_deref()) else {
+            continue;
+        };
+        if let Err(e) = write_line(f, path, &event).await {
             tracing::error!(
                 error = %e,
                 seq = event.seq,
@@ -209,18 +214,43 @@ async fn run_writer(
 }
 
 /// Open (create/append) `today`'s file, apply retention, and refresh
-/// `earliest_retained_seq` from whatever survives.
-async fn rotate(
+/// `earliest_retained_seq` from whatever survives. `previous` is the
+/// currently-open handle being rotated away from, if any — fsync'd (flush,
+/// then `sync_data`) before the new file is opened, matching the durability
+/// contract this module's own doc comment states ("full fsync happens on
+/// rotation and on writer-task shutdown, not per line"). A sync failure is
+/// logged, not propagated: a rotation that cannot confirm the old file's
+/// durability should still proceed to today's file rather than stop
+/// persisting entirely (DOC-73 §4.1's non-blocking invariant).
+///
+/// Test: `super::tests::rotation_fsyncs_the_outgoing_file_before_opening_the_next_one`.
+pub(super) async fn rotate(
     config: &LogConfig,
     today: NaiveDate,
     earliest_retained_seq: &Arc<AtomicU64>,
-) -> Result<tokio::fs::File, LogError> {
+    previous: Option<&mut tokio::fs::File>,
+) -> Result<(tokio::fs::File, PathBuf), LogError> {
+    // #6848: previously only synced at writer-task shutdown, so a crash
+    // between two rotations could lose an arbitrary, un-fsynced tail of a
+    // whole PRIOR day's file — not just its last line.
+    if let Some(f) = previous {
+        let _ = tokio::io::AsyncWriteExt::flush(f).await;
+        if let Err(source) = f.sync_data().await {
+            tracing::error!(
+                error = %source,
+                "event log: fsync of the outgoing day file failed at rotation; \
+                 its un-synced tail may not survive a crash"
+            );
+        }
+    }
+
     let survivors = enforce_retention(&config.dir, today, config.retain_days).await?;
     let earliest = earliest_seq(&survivors).await?;
     earliest_retained_seq.store(earliest.unwrap_or(0), Ordering::Relaxed);
 
     let path = config.dir.join(day_file_name(today));
-    open_append_0600(&path).await
+    let file = open_append_0600(&path).await?;
+    Ok((file, path))
 }
 
 /// Open `path` for append, creating it at `0600` if absent — matching this
@@ -243,11 +273,23 @@ async fn open_append_0600(path: &std::path::Path) -> Result<tokio::fs::File, Log
             path: path.to_path_buf(),
             source,
         })?;
-    let _ = file
+    // #6848: log instead of discarding — a silent failure here means this
+    // defense-in-depth re-assertion of 0600 can fail with zero
+    // observability (the parent directory's own 0700 hardening still blocks
+    // cross-user access even when this fails, but an operator should still
+    // be able to see it happened).
+    if let Err(e) = file
         .set_permissions(std::fs::Permissions::from_mode(
             trusty_common::uds::SOCKET_MODE,
         ))
-        .await;
+        .await
+    {
+        tracing::warn!(
+            error = %e,
+            path = %path.display(),
+            "event log: could not re-assert 0600 permissions on an existing file"
+        );
+    }
     Ok(file)
 }
 
@@ -265,20 +307,30 @@ async fn open_append_0600(path: &std::path::Path) -> Result<tokio::fs::File, Log
         })
 }
 
-/// Serialize `event` and append it, flushing so a reader opening the file
-/// immediately after sees the line (full `fsync` happens on rotation and
-/// shutdown only — see the module docs' durability trade-off).
-async fn write_line(file: &mut tokio::fs::File, event: &HarnessEvent) -> Result<(), LogError> {
+/// Serialize `event` and append it to `path`'s open `file`, flushing so a
+/// reader opening the file immediately after sees the line (full `fsync`
+/// happens on rotation and shutdown only — see the module docs' durability
+/// trade-off).
+///
+/// `path` is threaded through purely for [`LogError::Io`]'s diagnostic
+/// value — #6848: an earlier version built these with an empty `PathBuf`,
+/// so a write/flush failure logged as `"write the event-log file at : …"`,
+/// dropping the one fact (which day file) an operator needs to act on it.
+pub(super) async fn write_line(
+    file: &mut tokio::fs::File,
+    path: &Path,
+    event: &HarnessEvent,
+) -> Result<(), LogError> {
     use tokio::io::AsyncWriteExt as _;
     let line = encode_line(event);
     file.write_all(&line).await.map_err(|source| LogError::Io {
         op: "write",
-        path: PathBuf::new(),
+        path: path.to_path_buf(),
         source,
     })?;
     file.flush().await.map_err(|source| LogError::Io {
         op: "flush",
-        path: PathBuf::new(),
+        path: path.to_path_buf(),
         source,
     })
 }

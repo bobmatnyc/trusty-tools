@@ -19,7 +19,9 @@
 //! `super::tests::replay_since_a_mid_seq_returns_only_the_remainder`,
 //! `super::tests::replay_since_before_retention_yields_a_leading_gap`,
 //! `super::tests::replay_since_across_a_backpressure_drop_yields_an_interior_gap`,
-//! `super::tests::replay_since_caught_up_returns_no_events_and_no_gap`.
+//! `super::tests::replay_since_a_drop_on_the_first_replayed_seq_yields_a_gap`,
+//! `super::tests::replay_since_caught_up_returns_no_events_and_no_gap`,
+//! `super::tests::replay_since_on_an_empty_log_returns_nothing`.
 
 use std::path::Path;
 
@@ -67,7 +69,16 @@ pub(crate) async fn replay_since(
 ) -> Result<Vec<ReplayItem>, LogError> {
     let files = list_log_files(dir).await?;
     let mut items = Vec::new();
-    let mut previous_seq: Option<u64> = None;
+    // #6848: seed from `since_seq` itself, not `None` — the caller already
+    // has everything up to and including `since_seq`, so a hole immediately
+    // after it (the FIRST event this call returns) must be checked exactly
+    // like every later hole is. Leaving this `None` until the leading-gap
+    // branch below set it meant the first returned event skipped the
+    // `prev + 1` check entirely whenever `since_seq` was already inside the
+    // retained window — the normal reconnect case — silently dropping the
+    // gap marker for a seq that was broadcast live but never durably
+    // written.
+    let mut previous_seq: Option<u64> = Some(since_seq);
 
     if let Some(earliest) = earliest_retained_seq
         && since_seq + 1 < earliest
