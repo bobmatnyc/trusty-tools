@@ -14,12 +14,14 @@
 
 use std::collections::HashSet;
 
+use chrono::{DateTime, Utc};
 use reqwest::Client;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use trusty_common::credentials::scrub_secrets;
 
 use crate::collect::errors::{CollectError, Result};
+use crate::collect::linear::sync;
 use crate::collect::ticket::is_non_ticket_identifier;
 use crate::core::config::LinearConfig;
 use crate::core::db::Database;
@@ -37,7 +39,7 @@ const LINEAR_GRAPHQL_URL: &str = "https://api.linear.app/graphql";
 const MAX_ERROR_BODY_CHARS: usize = 500;
 
 /// A Linear issue fetched from the API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinearIssue {
     /// Linear issue ID (e.g. "ENG-123").
     pub identifier: String,
@@ -53,6 +55,24 @@ pub struct LinearIssue {
     pub priority: u8,
     /// URL to the issue in Linear.
     pub url: String,
+    /// When the issue was created (issue #7139).
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+    /// When the issue was last updated. Drives the bulk sync's incremental
+    /// cursor — see [`crate::collect::linear::sync::next_cursor`].
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+    /// When the issue entered a "started" state, if it ever did.
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    /// When the issue was completed, if it was. Paired with `created_at`,
+    /// this is what makes lead-time-from-ticket computable for a
+    /// Linear-only engagement.
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
+    /// When the issue was canceled, if it was.
+    #[serde(default)]
+    pub canceled_at: Option<DateTime<Utc>>,
 }
 
 /// Async Linear GraphQL client.
@@ -130,7 +150,10 @@ impl LinearClient {
     /// only reachable through a server that answers non-2xx, and asserting it
     /// against the live API would need a revoked key in CI.
     #[cfg(test)]
-    fn with_endpoint(config: &LinearConfig, endpoint: impl Into<String>) -> Result<Self> {
+    pub(crate) fn with_endpoint(
+        config: &LinearConfig,
+        endpoint: impl Into<String>,
+    ) -> Result<Self> {
         Ok(Self {
             endpoint: endpoint.into(),
             ..Self::new(config)?
@@ -168,6 +191,11 @@ impl LinearClient {
                     assignee {{ displayName }}
                     priority
                     url
+                    createdAt
+                    updatedAt
+                    startedAt
+                    completedAt
+                    canceledAt
                 }}
             }}"#
         );
@@ -219,26 +247,7 @@ impl LinearClient {
             return Ok(None);
         }
 
-        Ok(Some(LinearIssue {
-            identifier: issue_val["identifier"]
-                .as_str()
-                .unwrap_or(identifier)
-                .to_string(),
-            title: issue_val["title"].as_str().unwrap_or("").to_string(),
-            state: issue_val["state"]["name"]
-                .as_str()
-                .unwrap_or("Unknown")
-                .to_string(),
-            team: issue_val["team"]["name"]
-                .as_str()
-                .unwrap_or("Unknown")
-                .to_string(),
-            assignee: issue_val["assignee"]["displayName"]
-                .as_str()
-                .map(String::from),
-            priority: issue_val["priority"].as_u64().unwrap_or(0) as u8,
-            url: issue_val["url"].as_str().unwrap_or("").to_string(),
-        }))
+        Ok(Some(parse_issue_node(identifier, issue_val)))
     }
 
     /// Extract Linear issue identifiers from a commit message.
@@ -358,6 +367,213 @@ impl LinearClient {
     ) -> crate::core::Result<usize> {
         store_linear_issues(db, issues)
     }
+
+    /// Fetch one page of a team's issues, ordered by `updatedAt` ascending.
+    ///
+    /// Why: `tga linear sync` needs a team's FULL issue set, not just the
+    /// ones referenced by a commit message — [`Self::fetch_referenced_issues`]
+    /// answers a different question. This is the primitive [`Self::sync_team`]
+    /// pages over.
+    /// What: issues [`sync::build_issues_filter`]'s variables against Linear's
+    /// `issues` connection with a fixed `first: {page_size}`, `after` cursor.
+    /// A non-2xx status or a GraphQL `errors` array is an
+    /// [`CollectError::LinearBulkApi`] — unlike [`Self::fetch_issue`]'s
+    /// `Ok(None)` for a single absent issue, a bulk page has no absent-vs-error
+    /// ambiguity to preserve, so both failure shapes are treated alike.
+    /// Test: `tests::fetch_team_issues_page_maps_timestamps`,
+    /// `tests::fetch_team_issues_page_handles_an_empty_team`,
+    /// `tests::fetch_team_issues_page_errors_on_non_2xx`.
+    ///
+    /// # Errors
+    ///
+    /// - [`CollectError::LinearBulkApi`] on a non-2xx response or a GraphQL
+    ///   `errors` array.
+    /// - [`CollectError::Http`] on transport failures or a non-JSON body.
+    pub async fn fetch_team_issues_page(
+        &self,
+        team_key: &str,
+        since: Option<DateTime<Utc>>,
+        after: Option<&str>,
+        page_size: usize,
+        page_number: usize,
+    ) -> Result<LinearIssuesPage> {
+        const QUERY: &str = r#"query($first: Int!, $after: String, $filter: IssueFilter, $orderBy: PaginationOrderBy) {
+            issues(first: $first, after: $after, filter: $filter, orderBy: $orderBy) {
+                nodes {
+                    identifier
+                    title
+                    state { name }
+                    team { name key }
+                    assignee { displayName }
+                    priority
+                    url
+                    createdAt
+                    updatedAt
+                    startedAt
+                    completedAt
+                    canceledAt
+                }
+                pageInfo { hasNextPage endCursor }
+            }
+        }"#;
+
+        let variables = serde_json::json!({
+            "first": page_size,
+            "after": after,
+            "filter": sync::build_issues_filter(team_key, since),
+            "orderBy": "updatedAt",
+        });
+        let body = serde_json::json!({ "query": QUERY, "variables": variables });
+
+        let resp = self
+            .client
+            .post(&self.endpoint)
+            .header("Authorization", &self.api_key)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(CollectError::Http)?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CollectError::LinearBulkApi {
+                status: status.as_u16(),
+                team_key: team_key.to_string(),
+                page: page_number,
+                message: redacted_body_excerpt(&body, &self.api_key),
+            });
+        }
+
+        let json: serde_json::Value = resp.json().await.map_err(CollectError::Http)?;
+
+        if let Some(errors) = json.get("errors") {
+            if errors.as_array().is_some_and(|a| !a.is_empty()) {
+                let detail = redacted_body_excerpt(&errors.to_string(), &self.api_key);
+                return Err(CollectError::LinearBulkApi {
+                    status: status.as_u16(),
+                    team_key: team_key.to_string(),
+                    page: page_number,
+                    message: detail,
+                });
+            }
+        }
+
+        let nodes = json["data"]["issues"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let issues = nodes
+            .iter()
+            .map(|node| parse_issue_node(node["identifier"].as_str().unwrap_or(""), node))
+            .collect();
+        let has_next_page = json["data"]["issues"]["pageInfo"]["hasNextPage"]
+            .as_bool()
+            .unwrap_or(false);
+        let end_cursor = json["data"]["issues"]["pageInfo"]["endCursor"]
+            .as_str()
+            .map(String::from);
+
+        Ok(LinearIssuesPage {
+            issues,
+            has_next_page,
+            end_cursor,
+        })
+    }
+
+    /// Walk every page of a team's issue set (bounded by `max_issues`),
+    /// ordered by `updatedAt` ascending.
+    ///
+    /// Why: the CLI-facing `tga linear sync` command needs the whole set
+    /// assembled and a truncation flag, not the raw per-page primitive.
+    /// What: calls [`Self::fetch_team_issues_page`] until `hasNextPage` is
+    /// `false` or `max_issues` is reached, returning the accumulated issues
+    /// and whether the walk stopped early because of the cap. Any page's
+    /// error aborts the walk and propagates — unlike JIRA's per-ticket
+    /// circuit breaker, a bulk page has no partial-success shape to isolate.
+    /// Test: `tests::fetch_team_issues_walks_every_page`,
+    /// `tests::fetch_team_issues_stops_at_max_issues`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the first page's error from [`Self::fetch_team_issues_page`].
+    pub async fn fetch_team_issues(
+        &self,
+        team_key: &str,
+        since: Option<DateTime<Utc>>,
+        max_issues: usize,
+    ) -> Result<(Vec<LinearIssue>, bool)> {
+        const PAGE_SIZE: usize = 50;
+        let mut issues = Vec::new();
+        let mut after: Option<String> = None;
+        let mut page_number = 0usize;
+        loop {
+            page_number += 1;
+            let page = self
+                .fetch_team_issues_page(team_key, since, after.as_deref(), PAGE_SIZE, page_number)
+                .await?;
+            issues.extend(page.issues);
+            if issues.len() >= max_issues {
+                issues.truncate(max_issues);
+                return Ok((issues, true));
+            }
+            if !page.has_next_page || page.end_cursor.is_none() {
+                return Ok((issues, false));
+            }
+            after = page.end_cursor;
+        }
+    }
+}
+
+/// One page of [`LinearClient::fetch_team_issues_page`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearIssuesPage {
+    /// Issues on this page.
+    pub issues: Vec<LinearIssue>,
+    /// Whether Linear reports another page after this one.
+    pub has_next_page: bool,
+    /// Opaque cursor for the next page's `after` argument, when
+    /// `has_next_page` is `true`.
+    pub end_cursor: Option<String>,
+}
+
+/// Parse one GraphQL issue node (from either [`LinearClient::fetch_issue`] or
+/// [`LinearClient::fetch_team_issues_page`]) into a [`LinearIssue`].
+///
+/// `identifier_fallback` is used only when the node itself carries no
+/// `identifier` field, which the single-issue query relies on since it
+/// addresses the node by identifier already.
+fn parse_issue_node(identifier_fallback: &str, node: &serde_json::Value) -> LinearIssue {
+    let parse_dt = |field: &str| -> Option<DateTime<Utc>> {
+        node[field]
+            .as_str()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&Utc))
+    };
+    LinearIssue {
+        identifier: node["identifier"]
+            .as_str()
+            .unwrap_or(identifier_fallback)
+            .to_string(),
+        title: node["title"].as_str().unwrap_or("").to_string(),
+        state: node["state"]["name"]
+            .as_str()
+            .unwrap_or("Unknown")
+            .to_string(),
+        team: node["team"]["name"]
+            .as_str()
+            .unwrap_or("Unknown")
+            .to_string(),
+        assignee: node["assignee"]["displayName"].as_str().map(String::from),
+        priority: node["priority"].as_u64().unwrap_or(0) as u8,
+        url: node["url"].as_str().unwrap_or("").to_string(),
+        created_at: parse_dt("createdAt"),
+        updated_at: parse_dt("updatedAt"),
+        started_at: parse_dt("startedAt"),
+        completed_at: parse_dt("completedAt"),
+        canceled_at: parse_dt("canceledAt"),
+    }
 }
 
 /// Persist Linear issues to the database (free function for reuse from tests
@@ -374,8 +590,9 @@ pub fn store_linear_issues(db: &Database, issues: &[LinearIssue]) -> crate::core
         let team_key = issue.identifier.split('-').next().unwrap_or("").to_string();
         conn.execute(
             "INSERT OR REPLACE INTO linear_issues \
-             (identifier, title, state, team, team_key, assignee, priority, url, fetched_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (identifier, title, state, team, team_key, assignee, priority, url, fetched_at, \
+              created_at, updated_at, started_at, completed_at, canceled_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 issue.identifier,
                 issue.title,
@@ -386,6 +603,11 @@ pub fn store_linear_issues(db: &Database, issues: &[LinearIssue]) -> crate::core
                 issue.priority as i64,
                 issue.url,
                 fetched_at,
+                issue.created_at.map(|d| d.to_rfc3339()),
+                issue.updated_at.map(|d| d.to_rfc3339()),
+                issue.started_at.map(|d| d.to_rfc3339()),
+                issue.completed_at.map(|d| d.to_rfc3339()),
+                issue.canceled_at.map(|d| d.to_rfc3339()),
             ],
         )?;
         count += 1;
@@ -672,6 +894,11 @@ mod tests {
             assignee: Some("Alice".to_string()),
             priority: 2,
             url: format!("https://linear.app/x/issue/{identifier}"),
+            created_at: None,
+            updated_at: None,
+            started_at: None,
+            completed_at: None,
+            canceled_at: None,
         }
     }
 
@@ -1129,5 +1356,203 @@ mod tests {
             "fetch must not error — a revoked key lands here: {result:?}"
         );
         println!("Result: {result:?}");
+    }
+
+    // #7139: `tga linear sync` bulk-page fetch. No real network anywhere
+    // below — every server is `wiremock::MockServer`, mirroring the JIRA
+    // `paged_http` fixtures in `collect::jira::client_tests`.
+    mod bulk_sync {
+        use super::*;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        fn node(identifier: &str, updated_at: &str) -> serde_json::Value {
+            serde_json::json!({
+                "identifier": identifier,
+                "title": format!("Title for {identifier}"),
+                "state": {"name": "In Progress"},
+                "team": {"name": "Engineering", "key": "ENG"},
+                "assignee": {"displayName": "Alice"},
+                "priority": 2,
+                "url": format!("https://linear.app/x/issue/{identifier}"),
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "updatedAt": updated_at,
+                "startedAt": "2026-01-02T00:00:00.000Z",
+                "completedAt": serde_json::Value::Null,
+                "canceledAt": serde_json::Value::Null,
+            })
+        }
+
+        fn page_response(
+            nodes: Vec<serde_json::Value>,
+            has_next: bool,
+            cursor: Option<&str>,
+        ) -> ResponseTemplate {
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "issues": {
+                        "nodes": nodes,
+                        "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+                    }
+                }
+            }))
+        }
+
+        /// Deliverable #7139.3: pagination — a two-page team walk assembles
+        /// every issue from both pages via `after`/`endCursor`.
+        #[tokio::test]
+        async fn fetch_team_issues_walks_every_page() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wiremock::matchers::body_string_contains("\"after\":null"))
+                .respond_with(page_response(
+                    vec![node("ENG-1", "2026-01-01T00:01:00.000Z")],
+                    true,
+                    Some("cursor-1"),
+                ))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(wiremock::matchers::body_string_contains("cursor-1"))
+                .respond_with(page_response(
+                    vec![node("ENG-2", "2026-01-01T00:02:00.000Z")],
+                    false,
+                    None,
+                ))
+                .mount(&server)
+                .await;
+
+            let client = mock_client(&server.uri());
+            let (issues, truncated) = client
+                .fetch_team_issues("ENG", None, 10_000)
+                .await
+                .expect("walk succeeds");
+
+            let ids: Vec<&str> = issues.iter().map(|i| i.identifier.as_str()).collect();
+            assert_eq!(ids, vec!["ENG-1", "ENG-2"]);
+            assert!(!truncated);
+        }
+
+        /// Deliverable #7139.3: the `--max-issues` cap truncates the walk
+        /// and reports it, mirroring JIRA's `walk.truncated`.
+        #[tokio::test]
+        async fn fetch_team_issues_stops_at_max_issues() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(page_response(
+                    vec![
+                        node("ENG-1", "2026-01-01T00:01:00.000Z"),
+                        node("ENG-2", "2026-01-01T00:02:00.000Z"),
+                        node("ENG-3", "2026-01-01T00:03:00.000Z"),
+                    ],
+                    true,
+                    Some("cursor-1"),
+                ))
+                .mount(&server)
+                .await;
+
+            let client = mock_client(&server.uri());
+            let (issues, truncated) = client
+                .fetch_team_issues("ENG", None, 2)
+                .await
+                .expect("walk succeeds");
+
+            assert_eq!(issues.len(), 2);
+            assert!(truncated);
+        }
+
+        /// Deliverable #7139.3: timestamp mapping — every lifecycle field
+        /// round-trips from the GraphQL node into `LinearIssue`.
+        #[tokio::test]
+        async fn fetch_team_issues_page_maps_timestamps() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(page_response(
+                    vec![node("ENG-1", "2026-01-01T00:01:00.000Z")],
+                    false,
+                    None,
+                ))
+                .mount(&server)
+                .await;
+
+            let page = mock_client(&server.uri())
+                .fetch_team_issues_page("ENG", None, None, 50, 1)
+                .await
+                .expect("page fetch succeeds");
+
+            let issue = &page.issues[0];
+            assert_eq!(
+                issue.created_at,
+                Some(
+                    DateTime::parse_from_rfc3339("2026-01-01T00:00:00.000Z")
+                        .unwrap()
+                        .with_timezone(&Utc)
+                )
+            );
+            assert_eq!(
+                issue.updated_at,
+                Some(
+                    DateTime::parse_from_rfc3339("2026-01-01T00:01:00.000Z")
+                        .unwrap()
+                        .with_timezone(&Utc)
+                )
+            );
+            assert!(issue.started_at.is_some());
+            assert_eq!(issue.completed_at, None);
+            assert_eq!(issue.canceled_at, None);
+        }
+
+        /// Deliverable #7139.3: empty team — a team with no issues yields an
+        /// empty, non-error result.
+        #[tokio::test]
+        async fn fetch_team_issues_page_handles_an_empty_team() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(page_response(vec![], false, None))
+                .mount(&server)
+                .await;
+
+            let page = mock_client(&server.uri())
+                .fetch_team_issues_page("ENG", None, None, 50, 1)
+                .await
+                .expect("empty page is not an error");
+
+            assert!(page.issues.is_empty());
+            assert!(!page.has_next_page);
+        }
+
+        /// Deliverable #7139.3: a non-2xx on a bulk page is a
+        /// `LinearBulkApi` error, not an absent-team result — the bulk-page
+        /// counterpart to `fetch_issue_errors_on_auth_failure`.
+        #[tokio::test]
+        async fn fetch_team_issues_page_errors_on_non_2xx() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(401).set_body_raw(
+                    r#"{"errors":[{"message":"Authentication required"}]}"#,
+                    "application/json",
+                ))
+                .mount(&server)
+                .await;
+
+            let err = mock_client(&server.uri())
+                .fetch_team_issues_page("ENG", None, None, 50, 1)
+                .await
+                .expect_err("a 401 must not read as an empty team");
+
+            match err {
+                CollectError::LinearBulkApi {
+                    status,
+                    team_key,
+                    page,
+                    ..
+                } => {
+                    assert_eq!(status, 401);
+                    assert_eq!(team_key, "ENG");
+                    assert_eq!(page, 1);
+                }
+                other => panic!("expected LinearBulkApi, got {other:?}"),
+            }
+        }
     }
 }

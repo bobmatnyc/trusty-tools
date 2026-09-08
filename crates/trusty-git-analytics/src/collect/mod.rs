@@ -41,7 +41,10 @@ mod github_pipeline;
 pub mod identity;
 pub mod jira;
 pub mod linear;
-mod linear_pipeline;
+// #7139: `pub(crate)` (not private) so `commands::linear::run_sync` can reuse
+// `persist_work_items` for backfilled issues, the same projection
+// `fetch_and_store_linear_issues` already applies to commit-referenced ones.
+pub(crate) mod linear_pipeline;
 mod notify;
 pub mod pm_adapter;
 // #5734: the concurrent PR fetch drain, split out of `collector` (frozen SLOC).

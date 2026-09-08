@@ -23,8 +23,8 @@ use tga::core::db::Database;
 use crate::commands::aliases::AliasesArgs;
 use crate::commands::args::{
     AnalyzeArgs, ClassifyArgs, CollectArgs, DeploymentsSubcommand, DeploymentsSubcommandArgs,
-    IncidentsSubcommand, IncidentsSubcommandArgs, JiraSubcommand, JiraSubcommandArgs, ReportArgs,
-    TuiArgs,
+    IncidentsSubcommand, IncidentsSubcommandArgs, JiraSubcommand, JiraSubcommandArgs,
+    LinearSubcommand, LinearSubcommandArgs, ReportArgs, TuiArgs,
 };
 use crate::commands::audit::AuditArgs;
 use crate::commands::author::AuthorArgs;
@@ -147,6 +147,8 @@ enum Commands {
     Dora(DoraArgs),
     /// JIRA status-transition and comment ingestion (issue #3966).
     Jira(JiraSubcommandArgs),
+    /// Linear bulk team issue-set sync and freshness (issue #7139).
+    Linear(LinearSubcommandArgs),
     /// Interactive terminal UI: repo picker, live progress, correlation results (#5197).
     Tui(TuiArgs),
     /// One-shot acquisition-diligence sweep over an org or configured repo set (#5235).
@@ -422,6 +424,10 @@ async fn run() -> anyhow::Result<()> {
         // #5237: the audit command owns orchestration; `tga::audit::run_full_sweep`
         // owns stage sequencing. Nothing here re-sequences the subcommands.
         Commands::Audit(args) => commands::audit::run(config, &mut db, args).await?,
+        Commands::Linear(args) => match args.subcommand {
+            LinearSubcommand::Sync(a) => commands::linear::run_sync(config, &mut db, a).await?,
+            LinearSubcommand::Freshness(a) => commands::linear::run_freshness(&config, &db, a)?,
+        },
         Commands::Jira(args) => match args.subcommand {
             JiraSubcommand::Sync(a) => commands::jira::run_sync(config, &mut db, a).await?,
             JiraSubcommand::Freshness(a) => commands::jira::run_freshness(&config, &db, a)?,

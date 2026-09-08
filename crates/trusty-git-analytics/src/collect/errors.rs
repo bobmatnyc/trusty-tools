@@ -216,6 +216,26 @@ pub enum CollectError {
         message: String,
     },
 
+    /// A Linear GraphQL `issues` bulk-page call returned a non-success
+    /// status, with its body kept (issue #7139).
+    ///
+    /// Distinguished from [`CollectError::LinearApi`] (single-issue lookup):
+    /// a bulk sync has no single identifier to name, and its caller — the
+    /// `tga linear sync` walk — needs the team key and page to diagnose which
+    /// part of the walk failed.
+    #[error("Linear API error (HTTP {status}) syncing team {team_key} (page {page}): {message}")]
+    LinearBulkApi {
+        /// HTTP status returned by Linear.
+        status: u16,
+        /// Team key the bulk sync was walking.
+        team_key: String,
+        /// 1-based page number within the walk.
+        page: usize,
+        /// Linear's response body, scrubbed of the client's API key and then
+        /// truncated — see `collect::linear::client::redacted_body_excerpt`.
+        message: String,
+    },
+
     /// The remote asked us to slow down (HTTP 429 / 503).
     ///
     /// Distinguished from [`CollectError::Http`] so retry logic can honour a

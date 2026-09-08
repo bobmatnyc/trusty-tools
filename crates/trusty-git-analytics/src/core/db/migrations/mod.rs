@@ -191,6 +191,14 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "commit_ai_detection_method",
         sql: include_str!("../sql/0029_commit_ai_detection_method.sql"),
     },
+    // #7139: lifecycle timestamps on `linear_issues` plus `linear_sync_cursor`
+    // bookkeeping for `tga linear sync`/`freshness` — the bulk-team-ingest
+    // counterpart to `jira_sync_cursor` (migration v23).
+    Migration {
+        version: 30,
+        name: "linear_ingestion",
+        sql: include_str!("../sql/0030_linear_ingestion.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

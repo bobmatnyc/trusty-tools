@@ -263,6 +263,11 @@ mod tests {
             assignee: Some("Alice".to_string()),
             priority: 2,
             url: format!("https://linear.app/x/issue/{identifier}"),
+            created_at: None,
+            updated_at: None,
+            started_at: None,
+            completed_at: None,
+            canceled_at: None,
         }
     }
 

@@ -5,5 +5,6 @@
 //! corresponding issue title, status, team, assignee, and priority.
 
 pub mod client;
+pub mod sync;
 
-pub use client::{store_linear_issues, LinearClient, LinearIssue};
+pub use client::{store_linear_issues, LinearClient, LinearIssue, LinearIssuesPage};
