@@ -43,6 +43,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::mcp_handle::McpHandleError;
 use crate::routes::sessions::{map_tool_result, mpm_handle};
 use crate::server::AppState;
 
@@ -112,13 +113,61 @@ pub async fn tree_handler(
     Query(query): Query<SurveyQuery>,
 ) -> axum::response::Response {
     let Some(handle) = mpm_handle(&state) else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return unreachable_daemon();
     };
-    map_tool_result(
+    map_survey_result(
         handle
             .call_tool_checked(DISK_SURVEY_TOOL, survey_args(&query))
             .await,
     )
+}
+
+/// The 503 both routes return when trusty-mpm has no MCP handle at all.
+///
+/// Why a body: the bare `StatusCode` this used to be serialized to
+/// `content-length: 0`, so the Disk view had nothing to render but the number
+/// and printed `HTTP 502` / `HTTP 503` at the operator. A status code is not a
+/// diagnosis (#6929).
+fn unreachable_daemon() -> axum::response::Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(json!({
+            "status": "unreachable",
+            "hint": "trusty-mpm is not reachable — the disk survey needs its MCP bridge",
+        })),
+    )
+        .into_response()
+}
+
+/// [`map_tool_result`], with a body on the transport-failure arm.
+///
+/// Why: `map_tool_result` answers a failed `tools/call` with a bare 502 and no
+/// body. That is the response the #6929 live check got — 30.1 s, then
+/// `HTTP/1.1 502` with `content-length: 0` — and it is why the Disk view could
+/// say nothing more useful than the number. The overrun itself is fixed in the
+/// survey; this is what an operator sees on the day something else goes wrong.
+/// What: `Ok` and every 503 arm are `map_tool_result`'s verbatim; a transport
+/// failure keeps its 502 and gains `{status, hint}` naming the survey and the
+/// transport's own 30-second bound. The error text is NOT forwarded — it can
+/// carry a path — so the hint is a fixed sentence.
+/// Test: `a_transport_failure_carries_a_body`, `an_absent_handle_carries_a_body`.
+fn map_survey_result(result: Result<Value, McpHandleError>) -> axum::response::Response {
+    match result {
+        Err(McpHandleError::Absent | McpHandleError::Backoff { .. }) => unreachable_daemon(),
+        Err(e @ McpHandleError::Other(_)) => {
+            tracing::warn!("disk route: the survey call failed: {e:#}");
+            (
+                StatusCode::BAD_GATEWAY,
+                axum::Json(json!({
+                    "status": "survey_failed",
+                    "hint": "trusty-mpm did not answer the disk survey — it is bounded by \
+                             the console's 30-second MCP call timeout; check the daemon's log",
+                })),
+            )
+                .into_response()
+        }
+        other => map_tool_result(other),
+    }
 }
 
 /// `GET /api/console/disk/worktrees/{id}` — one worktree out of the survey.
@@ -139,14 +188,14 @@ pub async fn worktree_handler(
     Query(query): Query<SurveyQuery>,
 ) -> axum::response::Response {
     let Some(handle) = mpm_handle(&state) else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return unreachable_daemon();
     };
     let survey = match handle
         .call_tool_checked(DISK_SURVEY_TOOL, survey_args(&query))
         .await
     {
         Ok(survey) => survey,
-        Err(e) => return map_tool_result(Err(e)),
+        Err(e) => return map_survey_result(Err(e)),
     };
     match select_worktree(&survey, &id) {
         Some(detail) => axum::Json(detail).into_response(),
@@ -287,6 +336,47 @@ mod tests {
     async fn state() -> AppState {
         let connectors: Vec<Box<dyn ServiceConnector>> = Vec::new();
         AppState::new(connectors)
+    }
+
+    /// Read a response's body as JSON, for the body assertions below.
+    async fn body(resp: axum::response::Response) -> Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    }
+
+    /// A failed survey says what failed, not just that something did (#6929).
+    ///
+    /// Why: the live check got `502` with `content-length: 0` after 30.1 s, so
+    /// the Disk view had nothing to show but `HTTP 502`. A status code alone is
+    /// not a diagnosis.
+    #[tokio::test]
+    async fn a_transport_failure_carries_a_body() {
+        let resp = map_survey_result(Err(McpHandleError::Other(anyhow::anyhow!(
+            "MCP request timed out after 30s"
+        ))));
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let json = body(resp).await;
+        assert_eq!(json["status"], json!("survey_failed"), "{json:#}");
+        assert!(
+            json["hint"]
+                .as_str()
+                .is_some_and(|h| h.contains("30-second")),
+            "{json:#}"
+        );
+        // The daemon's own error text can name a path; it stays in the log.
+        assert!(
+            !json.to_string().contains("MCP request timed out"),
+            "{json:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_absent_handle_carries_a_body() {
+        let resp = map_survey_result(Err(McpHandleError::Absent));
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body(resp).await["status"], json!("unreachable"));
     }
 
     #[tokio::test]

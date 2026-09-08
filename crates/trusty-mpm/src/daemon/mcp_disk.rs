@@ -31,8 +31,9 @@ use crate::disk::size_index::DirSize;
 use crate::disk::survey_run::{self, DiskProbes, run};
 use crate::session_manager::worktree_ownership::AgentWorktreeOwner;
 use crate::session_manager::worktree_reclaim::{
-    BranchPrState, LiveClaims, PrIndex, WorkspaceClaim, pr_state_for_branch,
+    BranchPrState, LiveClaims, PrIndex, WorkspaceClaim, pr_state_for_branch_within,
 };
+use crate::session_manager::worktree_reclaim_gh::GH_TIMEOUT;
 use crate::session_manager::worktree_registry::ScannedWorktree;
 use crate::session_manager::worktree_safety::inspect_dirt;
 
@@ -97,7 +98,12 @@ pub async fn disk_survey(
         // One `gh` index per repository, not one per worktree — the same
         // amortization `survey_with_index` applies, for the same reason.
         let indexes: RefCell<BTreeMap<PathBuf, PrIndex>> = RefCell::new(BTreeMap::new());
-        let pr_state = |scanned: &ScannedWorktree| -> BranchPrState { pr_for(&indexes, scanned) };
+        // #6929: the survey's remaining time is the ceiling on both `gh` calls
+        // this probe can make, so a worktree admitted late cannot spend twenty
+        // seconds of `GH_TIMEOUT` past the deadline the console is holding.
+        let pr_state = |scanned: &ScannedWorktree, left: Option<Duration>| -> BranchPrState {
+            pr_for(&indexes, scanned, left)
+        };
         // #6927 review: the lock spans ONE measurement, not the pass. Held
         // across `run` it would also cover every `git status` and `gh pr list`
         // that `classify` shells out to, so a second `disk_survey` — or the
@@ -139,14 +145,30 @@ pub async fn disk_survey(
 /// unresolved branch is retried with a targeted lookup, exactly as the reclaim
 /// survey does. Without it the view would render `review` for worktrees whose
 /// pull requests merged months ago.
+///
+/// What `left` does (#6929): it is the survey's remaining wall clock, and it
+/// bounds BOTH calls rather than each of them separately. `GH_TIMEOUT` is a
+/// fixed ten seconds, and this function can spend it twice, so a worktree the
+/// loop admitted with a millisecond left used to run twenty seconds past the
+/// survey's deadline — past the console's thirty-second transport too, which
+/// is why the Disk view answered 502 with no survey rather than a truncated
+/// one. The fallback is skipped outright when the first call consumed the
+/// budget: the bulk index's own answer (`Unknown` or `LookupFailed`) stands,
+/// and both block, so skipping it can only be conservative.
+/// Test: `a_budgeted_survey_answers_within_its_budget` covers the contract in
+/// `survey_run`; this wiring is exercised by `dispatch_disk_survey_tool`.
 fn pr_for(
     indexes: &RefCell<BTreeMap<PathBuf, PrIndex>>,
     scanned: &ScannedWorktree,
+    left: Option<Duration>,
 ) -> BranchPrState {
+    // A local deadline, so the SECOND call is bounded by what the first one
+    // left rather than by the same figure over again.
+    let until = left.map(|l| Instant::now() + l);
     let mut cache = indexes.borrow_mut();
     let index = cache
         .entry(scanned.registry_root.clone())
-        .or_insert_with(|| PrIndex::from_gh(&scanned.registry_root));
+        .or_insert_with(|| PrIndex::from_gh_within(&scanned.registry_root, gh_budget(until)));
     let pr = index.state_for(scanned.branch.as_deref());
     if matches!(
         pr,
@@ -154,7 +176,53 @@ fn pr_for(
     ) && !index.is_complete()
         && let Some(branch) = scanned.branch.as_deref()
     {
-        return pr_state_for_branch(&scanned.registry_root, branch);
+        let budget = gh_budget(until);
+        if !budget.is_zero() {
+            return pr_state_for_branch_within(&scanned.registry_root, branch, budget);
+        }
     }
     pr
+}
+
+/// How long a `gh` call may run, given the survey's own deadline.
+///
+/// What: the time left, capped at [`GH_TIMEOUT`]; [`GH_TIMEOUT`] when the
+/// survey has no deadline; and `Duration::ZERO` when it has none left, which
+/// the caller reads as "do not start this call".
+/// Test: `gh_budget_never_exceeds_the_fixed_ceiling`,
+/// `gh_budget_is_zero_once_the_survey_deadline_has_passed`.
+fn gh_budget(until: Option<Instant>) -> Duration {
+    match until {
+        None => GH_TIMEOUT,
+        Some(d) => d
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO)
+            .min(GH_TIMEOUT),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gh_budget_never_exceeds_the_fixed_ceiling() {
+        let generous = Instant::now() + GH_TIMEOUT * 10;
+        assert_eq!(gh_budget(Some(generous)), GH_TIMEOUT);
+        assert_eq!(gh_budget(None), GH_TIMEOUT);
+    }
+
+    #[test]
+    fn gh_budget_is_zero_once_the_survey_deadline_has_passed() {
+        let spent = Instant::now() - Duration::from_secs(1);
+        assert_eq!(gh_budget(Some(spent)), Duration::ZERO);
+    }
+
+    #[test]
+    fn gh_budget_hands_back_the_time_that_is_actually_left() {
+        let tight = Instant::now() + Duration::from_millis(200);
+        let budget = gh_budget(Some(tight));
+        assert!(!budget.is_zero(), "{budget:?}");
+        assert!(budget <= Duration::from_millis(200), "{budget:?}");
+    }
 }

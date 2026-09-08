@@ -478,6 +478,18 @@ pub(crate) struct DiskSurvey {
     /// When this survey ran, RFC 3339. Byte figures may be older; each row's
     /// `size.measured_at` says how much older.
     pub generated_at: String,
+    /// Whether the deadline stopped the pass before it finished (#6929).
+    ///
+    /// Why the console must render this: a truncated pass is still a 200 with
+    /// every worktree listed, which is the point — but the rows it ran out of
+    /// time on read `review` / `unknown-branch-state`, and a project or root it
+    /// ran out of time on reports no bytes at all. Without this flag those are
+    /// indistinguishable from a fleet that genuinely has nothing stale and
+    /// nothing measurable, and an operator would read a partial answer as the
+    /// whole one. `false` means every worktree was inspected and every
+    /// aggregate was offered to the index inside the budget.
+    /// Test: `a_survey_reports_whether_its_deadline_truncated_the_pass`.
+    pub partial: bool,
     /// The keep-list this survey applied.
     pub keep_list: KeepListReport,
     /// The scanned workspace root.

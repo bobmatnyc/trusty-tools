@@ -483,7 +483,7 @@ fn survey_fixture(
     deadline: Option<Instant>,
 ) -> super::DiskSurvey {
     let keep_list = KeepList::from_patterns(keep_patterns);
-    let pr_state = |_: &ScannedWorktree| fixed.pr.clone();
+    let pr_state = |_: &ScannedWorktree, _: Option<Duration>| fixed.pr.clone();
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
     let index = RefCell::new(test_index());
     let measure = |path: &Path, budget: Option<Duration>| {
@@ -729,7 +729,7 @@ fn a_deadline_that_crosses_mid_inspection_yields_a_not_inspected_row() {
     // first and send this row down the LOOP's not-inspected path instead.
     let deadline = Instant::now() + Duration::from_millis(1_500);
     let inspected: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
-    let pr_state = |scanned: &ScannedWorktree| {
+    let pr_state = |scanned: &ScannedWorktree, _: Option<Duration>| {
         if scanned.path == wt {
             inspected.borrow_mut().push(scanned.path.clone());
             std::thread::sleep(Duration::from_millis(2_000));
@@ -797,7 +797,7 @@ fn the_survey_hands_each_measurement_only_the_time_left() {
     let deadline = Instant::now() + window;
     let seen: RefCell<Vec<Option<Duration>>> = RefCell::new(Vec::new());
     let pr = BranchPrState::Merged { pr: 1 };
-    let pr_state = |_: &ScannedWorktree| pr.clone();
+    let pr_state = |_: &ScannedWorktree, _: Option<Duration>| pr.clone();
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
     let keep_list = no_keeps();
     let claims = LiveClaims::default();
@@ -903,7 +903,7 @@ fn an_unreadable_keep_list_is_reported_and_keeps_every_row() {
 
     let keep_list = KeepList::unreadable("config YAML error at /x/config.yaml: bad");
     let fixed = Fixed::new(BranchPrState::Merged { pr: 4 });
-    let pr_state = |_: &ScannedWorktree| fixed.pr.clone();
+    let pr_state = |_: &ScannedWorktree, _: Option<Duration>| fixed.pr.clone();
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
     let index = RefCell::new(test_index());
     let measure = |path: &Path, budget: Option<Duration>| {
@@ -947,7 +947,7 @@ fn a_project_filter_selects_only_that_project() {
 
     let keep_list = no_keeps();
     let pr = BranchPrState::Merged { pr: 1 };
-    let pr_state = |_: &ScannedWorktree| pr.clone();
+    let pr_state = |_: &ScannedWorktree, _: Option<Duration>| pr.clone();
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
     let claims = LiveClaims::default();
     let index = RefCell::new(test_index());
@@ -978,4 +978,197 @@ fn a_project_filter_selects_only_that_project() {
         Some("owner/repo"),
     );
     assert_eq!(hit.root.projects.len(), 1, "{:#?}", hit.root.projects);
+}
+
+/// A budgeted survey answers inside its budget, however slow the probes are
+/// (#6929).
+///
+/// Why this is the whole issue: the deadline used to gate ENTRY to an
+/// inspection and nothing more. The worktree the loop admitted with a
+/// millisecond left then paid `GH_TIMEOUT` — ten seconds, and twice over for a
+/// branch the bulk index cannot reach — so a 20-second budget produced a pass
+/// past 30. The console's stdio MCP transport cuts a call off at 30 seconds, so
+/// the Disk view rendered `HTTP 502` with no survey at all, where a truncated
+/// survey was available and correct. Live on this machine before the fix:
+/// `budget_seconds: 5` answered in 57.23 s, and `budget_seconds: 20` never
+/// answered inside the bridge's 60-second forwarding timeout at all.
+///
+/// What it pins: `run` returns inside `BUDGET + GRACE` when the probe honours
+/// the budget it is handed. The probe here stands in for the daemon's `gh`
+/// call exactly as `mcp_disk::pr_for` now behaves — it spends what it was
+/// given, never its own fixed ceiling. Reverting `inspect`'s `left` argument
+/// makes the probe fall back to `SLOW`, and the run then lands at ~3 s.
+#[test]
+fn a_budgeted_survey_answers_within_its_budget() {
+    /// What an unbudgeted probe costs — the stand-in for `GH_TIMEOUT`, which
+    /// is ten seconds and can be paid twice. Comfortably past `BUDGET + GRACE`
+    /// so the pre-fix failure is a verdict rather than a race: reverting the
+    /// fix lands this run at ~6 s against a 3 s ceiling.
+    const SLOW: Duration = Duration::from_millis(6_000);
+    /// The whole survey's classification budget.
+    const BUDGET: Duration = Duration::from_millis(1_000);
+    /// Room for the registry scan and one in-flight `git` probe.
+    const GRACE: Duration = Duration::from_millis(2_000);
+
+    let fx = GitWorktreeFixture::new();
+    for name in ["slow-a", "slow-b", "slow-c"] {
+        let wt = fx.add_worktree(name);
+        GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+    }
+
+    // The probe spends its budget and no more. A `None` budget is the pre-fix
+    // shape: no ceiling from the survey, so the probe's own one stands.
+    let pr_state = |_: &ScannedWorktree, left: Option<Duration>| {
+        std::thread::sleep(left.map_or(SLOW, |l| l.min(SLOW)));
+        BranchPrState::Merged { pr: 1 }
+    };
+    let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
+    let keep_list = no_keeps();
+    let claims = LiveClaims::default();
+    let index = RefCell::new(test_index());
+    let measure = |path: &Path, budget: Option<Duration>| {
+        survey_run::measure(&mut index.borrow_mut(), path, budget)
+    };
+    let probes = DiskProbes {
+        pr_state: &pr_state,
+        claims: &claims,
+        agent_state: &agent_state,
+        dirt: &inspect_dirt,
+        measure: &measure,
+    };
+
+    let started = Instant::now();
+    let survey = run(
+        &fx.repos_root,
+        &keep_list,
+        &probes,
+        Some(started + BUDGET),
+        None,
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < BUDGET + GRACE,
+        "a {BUDGET:?} survey took {elapsed:?} — the budget bounds ENTRY to a \
+         probe but not the probe itself, which is exactly what returned the \
+         console a 502 with no survey (#6929)"
+    );
+    // Truncated, not empty: every worktree is still listed, and the payload
+    // says the pass did not finish.
+    assert!(survey.partial, "{:#?}", survey.root.counts);
+    assert_eq!(rows(&survey).len(), 4, "3 worktrees + the checkout itself");
+}
+
+/// The survey hands each pull-request lookup only the time it has left (#6929).
+///
+/// Why: the wall-clock test above proves the OUTCOME; this proves the
+/// mechanism, so a future edit that reintroduces an unbounded probe fails here
+/// with a readable reason rather than as a timing flake. It is the same
+/// contract `the_survey_hands_each_measurement_only_the_time_left` pins for the
+/// byte walk — the lookup is simply the more expensive probe, and the one that
+/// reaches the network.
+#[test]
+fn the_survey_hands_each_pull_request_lookup_only_the_time_left() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("budgeted-lookup");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+
+    let window = Duration::from_secs(5);
+    let seen: RefCell<Vec<Option<Duration>>> = RefCell::new(Vec::new());
+    let pr_state = |_: &ScannedWorktree, left: Option<Duration>| {
+        seen.borrow_mut().push(left);
+        BranchPrState::Merged { pr: 1 }
+    };
+    let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
+    let keep_list = no_keeps();
+    let claims = LiveClaims::default();
+    let index = RefCell::new(test_index());
+    let measure = |path: &Path, budget: Option<Duration>| {
+        survey_run::measure(&mut index.borrow_mut(), path, budget)
+    };
+    let probes = DiskProbes {
+        pr_state: &pr_state,
+        claims: &claims,
+        agent_state: &agent_state,
+        dirt: &inspect_dirt,
+        measure: &measure,
+    };
+
+    run(
+        &fx.repos_root,
+        &keep_list,
+        &probes,
+        Some(Instant::now() + window),
+        None,
+    );
+    let budgets = seen.borrow().clone();
+    assert!(!budgets.is_empty(), "every worktree is looked up");
+    for budget in &budgets {
+        let budget = budget.expect("a deadlined survey budgets every lookup");
+        assert!(
+            budget <= window && !budget.is_zero(),
+            "a lookup may not be given more time than the survey has, and a \
+             spent deadline never starts one: {budget:?} against {window:?}"
+        );
+    }
+
+    seen.borrow_mut().clear();
+    run(&fx.repos_root, &keep_list, &probes, None, None);
+    assert!(
+        seen.borrow().iter().all(Option::is_none),
+        "an unbudgeted survey imposes no ceiling: {:?}",
+        seen.borrow()
+    );
+}
+
+/// A survey that finishes inside its budget does not claim to be partial, and
+/// one that does not finish says so (#6929).
+///
+/// Why: `partial` is what lets the console tell "nothing here is stale" apart
+/// from "we ran out of time before finding out". A flag that is always true is
+/// as useless as one that is always false, so both directions are pinned here.
+#[test]
+fn a_survey_reports_whether_its_deadline_truncated_the_pass() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("partiality");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+
+    let pr = BranchPrState::Merged { pr: 1 };
+    let pr_state = |_: &ScannedWorktree, _: Option<Duration>| pr.clone();
+    let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
+    let keep_list = no_keeps();
+    let claims = LiveClaims::default();
+    let index = RefCell::new(test_index());
+    let measure = |path: &Path, budget: Option<Duration>| {
+        survey_run::measure(&mut index.borrow_mut(), path, budget)
+    };
+    let probes = DiskProbes {
+        pr_state: &pr_state,
+        claims: &claims,
+        agent_state: &agent_state,
+        dirt: &inspect_dirt,
+        measure: &measure,
+    };
+
+    let whole = run(&fx.repos_root, &keep_list, &probes, None, None);
+    assert!(
+        !whole.partial,
+        "an unbudgeted pass inspects everything: {:#?}",
+        whole.root.counts
+    );
+
+    // A deadline already in the past: nothing is inspected, everything is
+    // listed, and the payload says so rather than reading as a clean fleet.
+    let spent = Instant::now() - Duration::from_secs(1);
+    let truncated = run(&fx.repos_root, &keep_list, &probes, Some(spent), None);
+    assert!(truncated.partial, "{:#?}", truncated.root.counts);
+    assert_eq!(
+        rows(&truncated).len(),
+        rows(&whole).len(),
+        "a truncated pass omits no worktree"
+    );
+    let json = serde_json::to_value(&truncated).expect("serialize");
+    assert_eq!(
+        json["partial"], true,
+        "the console reads this off the payload: {json:#}"
+    );
 }

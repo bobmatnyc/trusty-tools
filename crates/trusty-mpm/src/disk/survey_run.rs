@@ -18,7 +18,7 @@
 //! a test runs the whole survey over scratch git repositories in a tempdir with
 //! no `gh`, no daemon, and no reads of the operator's real workspace.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -53,7 +53,17 @@ use crate::session_manager::worktree_safety::DirtyWorktree;
 /// closure lets the caller hold the lock for the measurement alone.
 pub(crate) struct DiskProbes<'a> {
     /// The pull-request state of one scanned worktree's branch.
-    pub pr_state: &'a dyn Fn(&ScannedWorktree) -> BranchPrState,
+    ///
+    /// The second argument is the wall-clock budget this ONE lookup may spend
+    /// — the time left before the survey's deadline, or `None` when the survey
+    /// has no deadline. It exists for the reason [`measure`](Self::measure)'s
+    /// does, and it matters more: the daemon's implementation shells out to
+    /// `gh` with a fixed ten-second ceiling, twice for a branch the bulk index
+    /// cannot reach, so a worktree admitted with a millisecond left ran the
+    /// survey twenty seconds past its deadline. The console's stdio transport
+    /// cuts the call off at thirty, so the Disk view got a 502 carrying no
+    /// survey at all rather than a truncated one (#6929).
+    pub pr_state: &'a dyn Fn(&ScannedWorktree, Option<Duration>) -> BranchPrState,
     /// Every workspace claim live sessions hold, plus the caller's identity.
     pub claims: &'a LiveClaims,
     /// The delegation registry's answer for the agent a sentinel names.
@@ -86,6 +96,31 @@ enum Measured {
     Figure(Option<DirSize>),
     /// The deadline had already passed when the measurement was reached.
     DeadlineSpent,
+}
+
+/// What the survey's deadline has left, read at one instant.
+///
+/// Why: every gate in the pass — whether to inspect a worktree, how long its
+/// pull-request lookup may run, whether to walk a directory at all — is the
+/// same question about the same clock. Reading it in one place is what stops
+/// the entry gate and the work it admits from disagreeing (#6929).
+enum Budget {
+    /// Time remains. `None` inside means the survey has no deadline at all,
+    /// and each probe's own ceiling stands.
+    Left(Option<Duration>),
+    /// The deadline has passed; nothing further may be started.
+    Spent,
+}
+
+/// Read [`Budget`] off `deadline` now.
+fn budget_at(deadline: Option<Instant>) -> Budget {
+    match deadline {
+        None => Budget::Left(None),
+        Some(d) => match d.checked_duration_since(Instant::now()) {
+            Some(left) if !left.is_zero() => Budget::Left(Some(left)),
+            _ => Budget::Spent,
+        },
+    }
 }
 
 impl Measured {
@@ -143,22 +178,21 @@ pub(crate) fn run(
     deadline: Option<Instant>,
     project: Option<&str>,
 ) -> DiskSurvey {
-    // #6929: no measurement is attempted once the budget is spent, and one that
-    // IS attempted gets only the time actually left — a walk may not outlive
-    // the survey that asked for it.
-    let expired = || deadline.is_some_and(|d| Instant::now() >= d);
+    // #6929: nothing is STARTED once the budget is spent, and whatever is
+    // started gets only the time actually left — no probe and no walk may
+    // outlive the survey that asked for it.
+    let partial = Cell::new(false);
     let measure = |path: &Path| -> Measured {
         // ONE clock read decides both halves. Reading it twice — once to ask
         // whether to measure, once to work out the budget — is the same split
         // the review found between `inspect`'s two phases.
-        let left = match deadline {
-            None => None,
-            Some(d) => match d.checked_duration_since(Instant::now()) {
-                Some(left) if !left.is_zero() => Some(left),
-                _ => return Measured::DeadlineSpent,
-            },
-        };
-        Measured::Figure((probes.measure)(path, left))
+        match budget_at(deadline) {
+            Budget::Spent => {
+                partial.set(true);
+                Measured::DeadlineSpent
+            }
+            Budget::Left(left) => Measured::Figure((probes.measure)(path, left)),
+        }
     };
     let mut grouped: BTreeMap<PathBuf, Vec<DiskWorktree>> = BTreeMap::new();
     let cache: RefCell<HashMap<PathBuf, Option<DirtyWorktree>>> = RefCell::new(HashMap::new());
@@ -180,13 +214,18 @@ pub(crate) fn run(
         if !selected(&scanned, repos_root, project) {
             continue;
         }
-        let row = if expired() {
+        let row = match budget_at(deadline) {
             // Fail closed, exactly as the reclaim survey does: a worktree we
             // ran out of time to inspect is LISTED and never advertised as
             // clearable.
-            not_inspected(&scanned)
-        } else {
-            inspect(&scanned, keep_list, probes, &probe_dirt, &measure)
+            Budget::Spent => {
+                partial.set(true);
+                not_inspected(&scanned)
+            }
+            // A crossing DURING this inspection is recorded by `measure`
+            // itself, which is the only thing `inspect` can hit the deadline
+            // on — so there is nothing to set here.
+            Budget::Left(left) => inspect(&scanned, keep_list, probes, &probe_dirt, &measure, left),
         };
         grouped
             .entry(scanned.project.clone())
@@ -228,6 +267,9 @@ pub(crate) fn run(
     let root_size = measure(repos_root).figure();
     DiskSurvey {
         generated_at: Utc::now().to_rfc3339(),
+        // #6929: a truncated pass says so, so the console renders caution
+        // rather than presenting an incomplete fleet as the whole fleet.
+        partial: partial.get(),
         keep_list: KeepListReport {
             patterns: keep_list.patterns().to_vec(),
             invalid: keep_list.invalid().to_vec(),
@@ -266,8 +308,11 @@ fn inspect(
     probes: &DiskProbes<'_>,
     probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
     measure: &dyn Fn(&Path) -> Measured,
+    left: Option<Duration>,
 ) -> DiskWorktree {
-    let pr = (probes.pr_state)(scanned);
+    // #6929: the lookup is the expensive probe and the only one that reaches
+    // the network, so it is the one the remaining budget has to bound.
+    let pr = (probes.pr_state)(scanned, left);
     let claim = probes.claims.claim_state(&scanned.path);
     let verdict = classify(
         &scanned.path,
