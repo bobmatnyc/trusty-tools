@@ -269,6 +269,14 @@ pub struct DoraMetrics {
     pub mttr_hours: f64,
     /// Aggregate performance band: `"elite" | "high" | "medium" | "low"`.
     pub performance_level: String,
+    // #212: distinguishes a measured `fact_deployments` reading from the
+    // PR-merge proxy so a report reader can tell which source produced
+    // `deployment_frequency` / `lead_time_hours`.
+    /// Data source for `deployment_frequency` / `lead_time_hours`:
+    /// `"fact_deployments"` when the table had rows for the report period,
+    /// `"pr_merge_proxy"` when it was empty and merged-PR count/cycle-time
+    /// stood in for it.
+    pub deployment_frequency_source: String,
 }
 
 /// Period-level velocity summary.

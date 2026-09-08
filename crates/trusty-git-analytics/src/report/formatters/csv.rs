@@ -375,6 +375,7 @@ pub fn write_weekly_dora_csv(data: &ReportData, output_dir: &Path) -> Result<Pat
         "change_failure_rate",
         "mttr_hours",
         "performance_level",
+        "deployment_frequency_source",
     ])?;
     if let Some(d) = &data.dora {
         w.write_record([
@@ -383,6 +384,7 @@ pub fn write_weekly_dora_csv(data: &ReportData, output_dir: &Path) -> Result<Pat
             &format!("{:.4}", d.change_failure_rate),
             &format!("{:.2}", d.mttr_hours),
             d.performance_level.as_str(),
+            d.deployment_frequency_source.as_str(),
         ])?;
     }
     w.flush()?;

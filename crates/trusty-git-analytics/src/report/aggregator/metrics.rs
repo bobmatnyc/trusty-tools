@@ -23,7 +23,7 @@ use crate::report::models::{
 };
 
 use super::accumulate::{iso_week_label, RowFlags, WeekTotal};
-use super::{CommitRow, PrRow};
+use super::{CommitRow, DeploymentRow, PrRow};
 
 /// Outputs of [`compute_velocity_inputs`].
 pub(super) struct VelocityInputs {
@@ -122,25 +122,41 @@ pub(super) fn build_weekly_velocity(
 /// Why: DORA metrics are the standard rubric stakeholders use to score
 /// engineering performance; computing them in one place keeps the four
 /// values consistent with each other.
-/// What: derives deployment frequency from merged PRs, change-failure-rate
-/// from bugfix totals (clamped by revert count), and MTTR from the spacing
-/// between consecutive bugfix/revert commits; classifies the team via
-/// [`dora_level`].
-/// Test: covered by `aggregator_computes_summary_and_dora_and_quality`
-/// (asserts a well-formed `performance_level` is set).
+/// What: derives deployment frequency and lead time from `fact_deployments`
+/// (issue #212) when the table has rows for the report period, falling back
+/// to the merged-PR-count / cycle-time proxy only when it does not; derives
+/// change-failure-rate from bugfix totals (clamped by revert count), and
+/// MTTR from the spacing between consecutive bugfix/revert commits;
+/// classifies the team via [`dora_level`].
+/// Test: `aggregator_computes_summary_and_dora_and_quality` (well-formed
+/// `performance_level`); `dora_reads_fact_deployments_when_populated`,
+/// `dora_falls_back_to_pr_proxy_when_fact_deployments_empty`,
+/// `dora_ignores_fact_deployments_rows_outside_the_period`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn compute_dora(
     rows: &[CommitRow],
     flags: &RowFlags,
     category_total: &HashMap<String, usize>,
     prs: &[PrRow],
+    deployments: &[DeploymentRow],
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
     cycle_time_avg: f64,
     total_weeks: usize,
     revert_count: usize,
 ) -> DoraMetrics {
     let total_weeks_f = total_weeks.max(1) as f64;
     let total_commits = rows.len();
-    let deploys = prs.iter().filter(|p| p.merged_at.is_some()).count();
-    let deployment_frequency = deploys as f64 / total_weeks_f;
+    let (deployment_frequency, lead_time_hours, deployment_frequency_source) =
+        deployment_frequency_and_lead_time(
+            rows,
+            prs,
+            deployments,
+            period_start,
+            period_end,
+            cycle_time_avg,
+            total_weeks_f,
+        );
     let bugfix_total = category_total
         .get("bugfix")
         .copied()
@@ -175,17 +191,97 @@ pub(super) fn compute_dora(
     };
     let performance_level = dora_level(
         deployment_frequency,
-        cycle_time_avg,
+        lead_time_hours,
         change_failure_rate,
         mttr_hours,
     );
     DoraMetrics {
         deployment_frequency,
-        lead_time_hours: cycle_time_avg,
+        lead_time_hours,
         change_failure_rate,
         mttr_hours,
         performance_level,
+        deployment_frequency_source,
     }
+}
+
+// #212: compute_dora previously derived `deploys` from `prs` unconditionally
+// and never read `fact_deployments`, so a repo with real production deploy
+// history reported `deployment_frequency: 0.0` identically to an empty one.
+/// Resolve deployment frequency and lead time, preferring the measured
+/// `fact_deployments` signal over the merged-PR-count proxy.
+///
+/// Why: isolating the source-selection logic keeps [`compute_dora`]'s
+/// change-failure-rate / MTTR arithmetic (unaffected by this issue)
+/// unentangled from the deploy-frequency fix.
+/// What: filters `deployments` to `[period_start, period_end]` by
+/// `triggered_at`. Empty after filtering → the pre-#212 proxy (merged-PR
+/// count / `cycle_time_avg`), tagged `"pr_merge_proxy"`. Non-empty → count
+/// as `deployment_frequency`, tagged `"fact_deployments"`; lead time
+/// averages `deploy_time - commit_time` over deploys whose `git_sha` matches
+/// a commit in `rows` (deploys with no resolvable link are excluded from
+/// that average, not treated as zero), falling back to `cycle_time_avg` when
+/// no deploy links resolve at all.
+/// Test: `dora_reads_fact_deployments_when_populated`,
+/// `dora_falls_back_to_pr_proxy_when_fact_deployments_empty`,
+/// `dora_ignores_fact_deployments_rows_outside_the_period`.
+fn deployment_frequency_and_lead_time(
+    rows: &[CommitRow],
+    prs: &[PrRow],
+    deployments: &[DeploymentRow],
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    cycle_time_avg: f64,
+    total_weeks_f: f64,
+) -> (f64, f64, String) {
+    let period_deploys: Vec<&DeploymentRow> = deployments
+        .iter()
+        .filter(|d| {
+            d.triggered_at
+                .is_some_and(|t| t >= period_start && t <= period_end)
+        })
+        .collect();
+
+    if period_deploys.is_empty() {
+        let deploys = prs.iter().filter(|p| p.merged_at.is_some()).count();
+        return (
+            deploys as f64 / total_weeks_f,
+            cycle_time_avg,
+            "pr_merge_proxy".to_string(),
+        );
+    }
+
+    let deployment_frequency = period_deploys.len() as f64 / total_weeks_f;
+
+    let commit_ts: HashMap<&str, DateTime<Utc>> =
+        rows.iter().map(|r| (r.sha.as_str(), r.timestamp)).collect();
+    let mut leads: Vec<f64> = Vec::new();
+    for d in &period_deploys {
+        let Some(sha) = d.git_sha.as_deref() else {
+            continue;
+        };
+        let Some(commit_time) = commit_ts.get(sha) else {
+            continue;
+        };
+        let Some(deploy_time) = d.triggered_at.or(d.completed_at) else {
+            continue;
+        };
+        let hours = (deploy_time - *commit_time).num_seconds() as f64 / 3600.0;
+        if hours >= 0.0 {
+            leads.push(hours);
+        }
+    }
+    let lead_time_hours = if leads.is_empty() {
+        cycle_time_avg
+    } else {
+        leads.iter().sum::<f64>() / leads.len() as f64
+    };
+
+    (
+        deployment_frequency,
+        lead_time_hours,
+        "fact_deployments".to_string(),
+    )
 }
 
 /// Why: a single 0.0–1.0 quality score lets stakeholders compare teams /

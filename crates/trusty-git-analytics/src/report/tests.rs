@@ -1343,3 +1343,85 @@ fn persist_weekly_engineer_upserts_rows() {
     assert_eq!(total, 2, "re-persisting must not duplicate the grain key");
     assert_eq!(row("dana@example.com"), (6, 2, 1, pct));
 }
+
+// #212: `compute_dora` computed `deploys` from merged PRs and never queried
+// `fact_deployments`, so a repo with real production deploy history reported
+// `deployment_frequency: 0.0` — identically to a repo with none.
+
+/// Insert one `fact_deployments` row (`environment='production',
+/// status='success'`, repo `"repo-a"` to match [`baseline_config`]).
+fn seed_deployment(db: &Database, deploy_id: &str, triggered_at: &str) {
+    db.connection()
+        .execute(
+            "INSERT INTO fact_deployments \
+                 (deploy_id, repo, environment, triggered_at, status) \
+             VALUES (?1, 'repo-a', 'production', ?2, 'success')",
+            rusqlite::params![deploy_id, triggered_at],
+        )
+        .expect("insert fact_deployments row");
+}
+
+#[test]
+fn dora_reads_fact_deployments_when_populated() {
+    // `seed_db()` seeds two commits a week apart (2024-01-15 .. 2024-01-22),
+    // so the report period spans exactly those two ISO weeks and
+    // `pull_requests` has zero rows — the pre-#212 proxy has nothing to count.
+    let db = seed_db();
+    for i in 0..70 {
+        seed_deployment(&db, &format!("deploy-{i}"), "2024-01-18T00:00:00+00:00");
+    }
+
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    let dora = data.dora.as_ref().expect("dora present");
+
+    assert!(
+        dora.deployment_frequency > 0.0,
+        "70 production deploys in-period must not read as zero"
+    );
+    assert_eq!(dora.deployment_frequency_source, "fact_deployments");
+    assert_ne!(
+        dora.performance_level, "low",
+        "70 deploys / 2 weeks must not classify the way the zero-deploy \
+         proxy would"
+    );
+}
+
+#[test]
+fn dora_falls_back_to_pr_proxy_when_fact_deployments_empty() {
+    // No `fact_deployments` rows and no `pull_requests` rows: the same
+    // zero-signal proxy path the pre-#212 code always used.
+    let db = seed_db();
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    let dora = data.dora.as_ref().expect("dora present");
+
+    assert_eq!(dora.deployment_frequency, 0.0);
+    assert_eq!(dora.deployment_frequency_source, "pr_merge_proxy");
+}
+
+#[test]
+fn dora_ignores_fact_deployments_rows_outside_the_period() {
+    // Report period is 2024-01-15 .. 2024-01-22 (two ISO weeks, from
+    // `seed_db()`'s two commits). Five deploys land inside it; three land
+    // months outside it and must not be counted.
+    let db = seed_db();
+    for i in 0..5 {
+        seed_deployment(&db, &format!("in-period-{i}"), "2024-01-18T00:00:00+00:00");
+    }
+    for i in 0..3 {
+        seed_deployment(
+            &db,
+            &format!("out-of-period-{i}"),
+            "2023-06-01T00:00:00+00:00",
+        );
+    }
+
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    let dora = data.dora.as_ref().expect("dora present");
+
+    assert!(
+        (dora.deployment_frequency - 2.5).abs() < 1e-9,
+        "expected 5 in-period deploys / 2 weeks = 2.5, got {}",
+        dora.deployment_frequency
+    );
+    assert_eq!(dora.deployment_frequency_source, "fact_deployments");
+}
