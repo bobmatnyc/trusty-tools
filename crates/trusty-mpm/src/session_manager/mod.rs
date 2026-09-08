@@ -38,6 +38,7 @@ pub(crate) mod resume_workdir;
 pub mod retention;
 pub mod search_gc;
 pub mod session_guard;
+pub mod setters;
 pub mod slots;
 pub mod snapshot;
 // #6194: `stop` / `stop_with_cause`, split out of `manager.rs` at its SLOC cap.
