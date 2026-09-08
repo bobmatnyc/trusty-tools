@@ -13,6 +13,8 @@
 //!
 //! [`GitBackend`]: crate::provisioner::GitBackend
 //! [`FakeGitBackend`]: crate::provisioner::FakeGitBackend
+//! [`RealGitBackend`]: crate::provisioner::RealGitBackend
+//! [`ProvisionError`]: crate::provisioner::ProvisionError
 
 mod clone_progress;
 pub mod workspace;

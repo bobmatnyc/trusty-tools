@@ -31,7 +31,7 @@
 //! watching a grandparent has no reparent signal to fall back on, so a pid the
 //! OS recycles onto some unrelated process would read as "parent still alive"
 //! forever — the exact permanent orphan this module exists to prevent.
-//! [`ParentIdentity`] pairs the pid with a process start time, and a changed
+//! `ParentIdentity` pairs the pid with a process start time, and a changed
 //! start time is death. macOS reads it with
 //! `proc_pidinfo(PROC_PIDTASKALLINFO)`, Linux from `/proc/<pid>/stat` field 22;
 //! a platform where neither works degrades to the liveness probe alone rather
@@ -54,8 +54,8 @@
 //! default disposition would kill the process outright, skipping the socket
 //! unlink and the index flush that make the exit graceful — most visibly when
 //! the parent is already dead at arm and the watchdog fires on its first tick.
-//! [`wait_for_term_handler`] holds the raise until SIGTERM is no longer on
-//! `SIG_DFL`, bounded by [`HANDLER_WAIT`].
+//! `wait_for_term_handler` holds the raise until SIGTERM is no longer on
+//! `SIG_DFL`, bounded by `HANDLER_WAIT`.
 //!
 //! Opt-in by construction: nothing arms unless [`ENV_EXIT_WITH_PARENT`] is set,
 //! and arming always announces itself on stderr, so a daemon that self-exits is
@@ -70,6 +70,11 @@
 //! `start_time_is_readable_for_this_process`,
 //! `an_installed_sigterm_handler_is_distinguishable_from_the_default`,
 //! `watch_parent_returns_once_parent_dies`.
+//!
+//! [`exit_with_parent`]: crate::parent_death::exit_with_parent
+//! [`ENV_EXIT_WITH_PARENT`]: crate::parent_death::ENV_EXIT_WITH_PARENT
+//! [`arm_from_env`]: crate::parent_death::arm_from_env
+//! [`arm_for_named_parent`]: crate::parent_death::arm_for_named_parent
 
 use std::process::Command;
 use std::time::Duration;

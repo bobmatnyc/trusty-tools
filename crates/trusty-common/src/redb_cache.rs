@@ -27,6 +27,13 @@
 //! Test: `parse_cache_mb_warns_and_keeps_the_bounded_default_on_garbage`,
 //! `parse_cache_mb_accepts_a_valid_override`,
 //! `builder_uses_the_bounded_ceiling`.
+//!
+//! [`DEFAULT_PALACE_REDB_CACHE_MB`]: crate::redb_cache::DEFAULT_PALACE_REDB_CACHE_MB
+//! [`PALACE_REDB_CACHE_MB_ENV`]: crate::redb_cache::PALACE_REDB_CACHE_MB_ENV
+//! [`palace_db_builder`]: crate::redb_cache::palace_db_builder
+//! [`create_palace_db`]: crate::redb_cache::create_palace_db
+//! [`parse_cache_mb`]: crate::redb_cache::parse_cache_mb
+//! [`palace_redb_cache_bytes`]: crate::redb_cache::palace_redb_cache_bytes
 
 use redb::{Database, DatabaseError};
 use std::path::Path;
