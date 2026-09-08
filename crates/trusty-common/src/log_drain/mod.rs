@@ -399,6 +399,111 @@ pub async fn run_once(
     Ok(report)
 }
 
+/// What one [`prune_confirmed`] pass did (#6536, `prune_after_upload`).
+///
+/// Why: a destructive pass and an upload pass need the same "nothing changed
+/// vs. everything failed" distinction [`DrainReport`] gives uploads.
+/// What: a count of objects actually removed, plus per-key failures that never
+/// abort the batch — the same shape [`DrainReport::errors`] uses.
+/// Test: `tests::prune_confirmed_deletes_object_and_manifest_entry`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PruneOutcome {
+    /// Objects deleted from the destination this pass, with their manifest
+    /// entry dropped in the same save.
+    pub pruned: usize,
+    /// Per-key failures, as `(key, message)`. Never aborts the batch.
+    pub errors: Vec<(String, String)>,
+}
+
+/// Manifest-confirmed object keys at least `retention` old, as of now.
+///
+/// Why: `prune_after_upload` (#6536) must never touch an object the manifest
+/// does not itself vouch for — a failed or partial upload never gets an
+/// entry, so it can never appear here. Read-only: nothing is deleted or
+/// re-saved by this call. The caller (the trusty-mpm log-drain scheduler)
+/// puts the result through its own two-tick `RetentionDebounce` before ever
+/// calling [`prune_confirmed`] with it — the destructive decision is
+/// deliberately made one layer up, in the crate that owns that debounce.
+/// What: loads the manifest exactly as [`run_once`] does (remote
+/// authoritative, local cache as fallback) and delegates the age decision to
+/// [`DrainManifest::prunable`].
+/// Test: `tests::prunable_candidates_never_names_a_file_that_failed_to_upload`.
+///
+/// # Errors
+/// [`DrainError::Transport`] when the manifest itself could not be read.
+pub async fn prunable_candidates(
+    dest: &dyn LogDestination,
+    target: &DrainTarget,
+    state_dir: &std::path::Path,
+    retention: std::time::Duration,
+) -> Result<Vec<String>, DrainError> {
+    let manifest =
+        DrainManifest::load(dest, state_dir, &target.manifest_key(), &target.cache_key()).await?;
+    Ok(manifest.prunable(chrono::Utc::now(), retention))
+}
+
+/// Delete the destination object and drop the manifest entry for every key in
+/// `confirm`, then persist the manifest once (#6536, `prune_after_upload`).
+///
+/// Why: `confirm` is exactly what survived the caller's `RetentionDebounce` —
+/// this function trusts it completely and re-derives nothing about the
+/// retention window itself.
+/// What: loads a fresh copy of the manifest, so a key another process already
+/// pruned (or a fresh upload just re-confirmed) is re-checked immediately
+/// before acting rather than trusted from whenever `confirm` was computed. A
+/// key no longer listed is silently skipped — never an error, because "already
+/// gone" is exactly the state pruning wants. A delete failure is recorded in
+/// [`PruneOutcome::errors`] and its entry is KEPT, so the manifest never claims
+/// an object is gone when the destination still has it; [`LogDestination::delete`]
+/// itself treats "already gone" as success, so that case still drops the
+/// entry. The manifest is saved once at the end, only if something changed.
+///
+/// Test: `tests::prune_confirmed_deletes_object_and_manifest_entry`,
+/// `tests::prune_confirmed_ignores_a_key_the_manifest_no_longer_lists`.
+///
+/// # Errors
+/// [`DrainError::Transport`] only when the manifest itself could not be
+/// loaded or saved — a per-key delete failure is collected, not raised.
+pub async fn prune_confirmed(
+    dest: &dyn LogDestination,
+    target: &DrainTarget,
+    state_dir: &std::path::Path,
+    confirm: &[String],
+) -> Result<PruneOutcome, DrainError> {
+    let manifest_key = target.manifest_key();
+    let cache_key = target.cache_key();
+    let mut manifest = DrainManifest::load(dest, state_dir, &manifest_key, &cache_key).await?;
+
+    let mut outcome = PruneOutcome::default();
+    let mut dirty = false;
+    for relative_file in confirm {
+        if !manifest
+            .entries
+            .iter()
+            .any(|e| &e.relative_file == relative_file)
+        {
+            continue;
+        }
+        let key = target.object_key(relative_file);
+        match dest.delete(&key).await {
+            Ok(()) => {
+                manifest.remove_entry(relative_file);
+                outcome.pruned += 1;
+                dirty = true;
+            }
+            Err(e) => outcome.errors.push((key, e.to_string())),
+        }
+    }
+
+    if dirty {
+        manifest
+            .save(dest, state_dir, &manifest_key, &cache_key)
+            .await?;
+    }
+    Ok(outcome)
+}
+
 /// Build the manifest entry recording one collected file.
 fn entry_for(file: &CollectedFile, uploaded_at: &str) -> ManifestEntry {
     ManifestEntry {

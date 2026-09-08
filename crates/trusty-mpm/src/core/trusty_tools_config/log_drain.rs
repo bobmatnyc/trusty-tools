@@ -54,6 +54,13 @@ pub const DEFAULT_INTERVAL_SECS: u64 = 900;
 /// last-run status the doctor row reads.
 pub const STATE_SUBDIR: &str = "log-drain";
 
+/// Default `prune_after_upload` retention, in days (#6536).
+///
+/// Owner ruling 2026-09-01: once cloud logging is enabled, pruning defaults ON
+/// with a one-month window — a manifest-confirmed object is deleted from the
+/// destination once it has sat there at least this long.
+pub const DEFAULT_PRUNE_RETENTION_DAYS: u64 = 30;
+
 /// Directory the trusty-mpm daemon's own rotating file log is written to,
 /// relative to `~/.trusty-mpm/` (`bin/tm/main.rs` creates it at startup).
 const DAEMON_LOG_SUBDIR: &str = "logs";
@@ -127,6 +134,23 @@ pub struct LogDrainConfig {
     /// Directories to collect. Empty → the built-in daemon log source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<LogDrainSourceConfig>,
+
+    /// Delete a manifest-confirmed-uploaded object from the destination once
+    /// it has aged past [`LogDrainConfig::prune_retention_days`] (#6536).
+    ///
+    /// `None` → `true` whenever the section itself is `enabled` — the owner
+    /// ruling 2026-09-01 default. Set `false` to keep uploading forever with
+    /// no destination-side cleanup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prune_after_upload: Option<bool>,
+
+    /// How long a manifest-confirmed object survives before
+    /// `prune_after_upload` deletes it. `None` →
+    /// [`DEFAULT_PRUNE_RETENTION_DAYS`]. Zero is an error, never "prune
+    /// immediately" — a retention window someone can misread as "keep
+    /// forever" would silently mean "always aged out".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prune_retention_days: Option<u64>,
 }
 
 /// One `log_drain.sources[]` entry.
@@ -215,7 +239,8 @@ pub enum LogDrainConfigError {
     /// A numeric knob was set to zero.
     #[error("log_drain.{field} must be greater than zero")]
     NonPositive {
-        /// `interval_secs`, `max_file_bytes`, or `max_wire_bytes`.
+        /// `interval_secs`, `max_file_bytes`, `max_wire_bytes`, or
+        /// `prune_retention_days`.
         field: &'static str,
     },
 
@@ -341,6 +366,11 @@ pub struct ResolvedLogDrain {
     pub max_wire_bytes: u64,
     /// Extra literal secrets to scrub.
     pub secrets: Vec<String>,
+    /// Whether the scheduler prunes manifest-confirmed objects after they age
+    /// out (#6536).
+    pub prune_after_upload: bool,
+    /// How old a manifest-confirmed object must be before it is pruned.
+    pub prune_retention: Duration,
 }
 
 /// What the config says the drain should do.
@@ -447,6 +477,18 @@ pub fn resolve_log_drain(
             field: "max_wire_bytes",
         });
     }
+    // #6536: validated even while disabled, same stance as the three bounds
+    // above — a zero retention would silently mean "always aged out" rather
+    // than the "keep forever" an operator probably meant.
+    let prune_retention_days = section
+        .prune_retention_days
+        .unwrap_or(DEFAULT_PRUNE_RETENTION_DAYS);
+    if prune_retention_days == 0 {
+        return Err(LogDrainConfigError::NonPositive {
+            field: "prune_retention_days",
+        });
+    }
+    let prune_after_upload = section.prune_after_upload.unwrap_or(true);
 
     let prepared = resolve_sources(&section.sources, home)?;
 
@@ -470,6 +512,8 @@ pub fn resolve_log_drain(
         max_file_bytes,
         max_wire_bytes,
         secrets: section.secrets.clone(),
+        prune_after_upload,
+        prune_retention: Duration::from_secs(prune_retention_days * 86_400),
     })))
 }
 

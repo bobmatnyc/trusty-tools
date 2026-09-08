@@ -63,6 +63,8 @@ use crate::core::trusty_tools_config::{
     TrustyToolsConfig, resolve_log_drain,
 };
 
+mod log_drain_prune;
+
 /// Filename of the last-run record inside the drain state directory.
 const STATUS_FILENAME: &str = "status.json";
 
@@ -112,6 +114,11 @@ pub struct LogDrainDestinationStatus {
     pub uploaded: usize,
     /// Files the manifest proved this destination already had.
     pub skipped_unchanged: usize,
+    /// Manifest-confirmed objects deleted from this destination this pass,
+    /// past `prune_retention` (#6536). `#[serde(default)]` for the same
+    /// backward-decode reason as `project`.
+    #[serde(default)]
+    pub pruned: usize,
     /// One line an operator can act on, for this destination alone.
     pub detail: String,
 }
@@ -142,6 +149,11 @@ pub struct LogDrainStatus {
     pub uploaded: usize,
     /// Files the manifests proved were already uploaded, across every destination.
     pub skipped_unchanged: usize,
+    /// Manifest-confirmed objects pruned this pass, across every destination
+    /// (#6536). `#[serde(default)]` for the same backward-decode reason as
+    /// `destinations`.
+    #[serde(default)]
+    pub pruned: usize,
     /// One line an operator can act on.
     pub detail: String,
 }
@@ -155,6 +167,7 @@ impl LogDrainStatus {
             destinations: Vec::new(),
             uploaded: 0,
             skipped_unchanged: 0,
+            pruned: 0,
             detail: detail.into(),
         }
     }
@@ -171,6 +184,7 @@ impl LogDrainStatus {
             destinations: Vec::new(),
             uploaded: 0,
             skipped_unchanged: 0,
+            pruned: 0,
             detail: format!("config error: {reason}"),
         }
     }
@@ -188,6 +202,7 @@ impl LogDrainStatus {
             .any(|d| d.outcome == DrainOutcome::Failed);
         let uploaded = destinations.iter().map(|d| d.uploaded).sum();
         let skipped_unchanged = destinations.iter().map(|d| d.skipped_unchanged).sum();
+        let pruned = destinations.iter().map(|d| d.pruned).sum();
         // With one destination the tick's detail IS that destination's, so a
         // single-destination host reads exactly as it did before #6657.
         let detail = match destinations.as_slice() {
@@ -214,6 +229,7 @@ impl LogDrainStatus {
             destinations,
             uploaded,
             skipped_unchanged,
+            pruned,
             detail,
         }
     }
@@ -229,6 +245,7 @@ impl LogDrainDestinationStatus {
             outcome: DrainOutcome::Failed,
             uploaded: 0,
             skipped_unchanged: 0,
+            pruned: 0,
             detail: detail.into(),
         }
     }
@@ -270,7 +287,37 @@ impl LogDrainDestinationStatus {
             },
             uploaded: report.uploaded,
             skipped_unchanged: report.skipped_unchanged,
+            pruned: 0,
             detail,
+        }
+    }
+
+    /// Fold one prune pass's outcome into an already-built status.
+    ///
+    /// Why: pruning runs as a second phase, after every destination's upload
+    /// pass has already produced a status (see [`log_drain_prune::apply`]) —
+    /// merging in place is simpler than threading the outcome through
+    /// `from_report`, which does not know about pruning at all.
+    /// What: adds the pruned count, and a delete failure marks the whole
+    /// destination [`DrainOutcome::Failed`] even when the upload half
+    /// succeeded — a prune error is exactly as visible as an upload error.
+    /// Test: `log_drain_prune::tests::prune_after_upload_deletes_only_on_the_second_confirming_tick`.
+    fn apply_prune_outcome(&mut self, pruned: usize, errors: &[(String, String)]) {
+        if pruned == 0 && errors.is_empty() {
+            return;
+        }
+        self.pruned += pruned;
+        if !errors.is_empty() {
+            self.outcome = DrainOutcome::Failed;
+            let (key, message) = &errors[0];
+            self.detail = format!(
+                "{}; prune: {} pruned, {} error(s) — first: {key}: {message}",
+                self.detail,
+                pruned,
+                errors.len()
+            );
+        } else {
+            self.detail = format!("{}; {} pruned", self.detail, pruned);
         }
     }
 }
@@ -327,14 +374,26 @@ pub fn save_status(state_dir: &Path, status: &LogDrainStatus) {
 /// concurrent: the single-flight guarantee this module provides is "one pass at
 /// a time", and running two destinations at once would double the drain's peak
 /// memory for no operator-visible gain at a 15-minute cadence.
+/// `prune_debounce` gates `prune_after_upload` (#6536): the caller owns it
+/// across ticks, exactly like `orphan_gc_loop`'s own two-observation gates —
+/// see [`log_drain_prune::apply`] for why the whole plan shares ONE debounce
+/// instance rather than one per destination.
 /// Test: `tests::a_successful_tick_uploads_and_records_success`,
 /// `tests::a_second_tick_dedupes`, `tests::a_failing_destination_records_failed`,
 /// `tests::two_destinations_each_get_their_own_pass`,
-/// `tests::a_tick_over_only_disabled_sources_names_the_empty_plan`.
-pub async fn run_tick(plan: &ResolvedLogDrain, state_dir: &Path) -> LogDrainStatus {
+/// `tests::a_tick_over_only_disabled_sources_names_the_empty_plan`,
+/// `tests::prune_after_upload_deletes_only_on_the_second_confirming_tick`.
+pub async fn run_tick(
+    plan: &ResolvedLogDrain,
+    state_dir: &Path,
+    prune_debounce: &mut crate::session_manager::RetentionDebounce<log_drain_prune::PruneCandidate>,
+) -> LogDrainStatus {
     let mut per_destination = Vec::with_capacity(plan.destinations.len());
     for group in &plan.destinations {
         per_destination.push(run_destination_pass(plan, group, state_dir).await);
+    }
+    if plan.prune_after_upload {
+        log_drain_prune::apply(plan, state_dir, &mut per_destination, prune_debounce).await;
     }
     LogDrainStatus::from_destinations(per_destination)
 }
@@ -390,6 +449,26 @@ pub async fn drain_once(
     framework_root: &Path,
     home: &Path,
 ) -> LogDrainStatus {
+    // A debounce local to one call never survives to a second tick, so
+    // `prune_after_upload` never fires from `drain_once` alone — only
+    // `log_drain_loop`'s persisted instance can confirm a candidate twice.
+    // Tests that need pruning to fire pass their own debounce into `run_tick`
+    // directly across two calls; see its doc.
+    let mut prune_debounce = crate::session_manager::RetentionDebounce::new();
+    drain_once_with(config, framework_root, home, &mut prune_debounce).await
+}
+
+/// [`drain_once`], with the prune debounce supplied by the caller.
+///
+/// Why: split out so [`log_drain_loop`] can carry one instance across ticks
+/// while [`drain_once`] stays the simple, self-contained entry point the
+/// doctor row and one-shot callers use.
+async fn drain_once_with(
+    config: &TrustyToolsConfig,
+    framework_root: &Path,
+    home: &Path,
+    prune_debounce: &mut crate::session_manager::RetentionDebounce<log_drain_prune::PruneCandidate>,
+) -> LogDrainStatus {
     let dir = state_dir(framework_root);
     let status = match resolve_log_drain(config, home) {
         // A malformed section is a hard error, so it reports FAILED rather than
@@ -398,7 +477,7 @@ pub async fn drain_once(
         Ok(LogDrainSetting::Disabled) => {
             LogDrainStatus::disabled("log_drain is disabled in config")
         }
-        Ok(LogDrainSetting::Enabled(plan)) => run_tick(&plan, &dir).await,
+        Ok(LogDrainSetting::Enabled(plan)) => run_tick(&plan, &dir, prune_debounce).await,
     };
     save_status(&dir, &status);
     status
@@ -419,10 +498,15 @@ pub async fn drain_once(
 /// edit takes effect without a restart, at the cost of one tick at the old
 /// cadence. A drain switched OFF mid-run keeps ticking rather than exiting, so
 /// switching it back on needs no restart either.
+///
+/// Owns the `prune_after_upload` debounce (#6536) across every tick, exactly
+/// like `orphan_gc_loop`'s own two-observation gates — a fresh debounce per
+/// tick could never confirm a candidate twice, so pruning would never fire.
 /// Test: `tests::the_loop_exits_on_cancel`.
 pub async fn log_drain_loop(framework_root: PathBuf, home: PathBuf, cancel: CancellationToken) {
     let mut interval_secs = current_interval_secs(&home);
     let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
+    let mut prune_debounce = crate::session_manager::RetentionDebounce::new();
     loop {
         // Checked BEFORE the select rather than only inside it: the first
         // `tick()` is ready immediately, so a `select!` between two ready
@@ -438,7 +522,13 @@ pub async fn log_drain_loop(framework_root: PathBuf, home: PathBuf, cancel: Canc
                 return;
             }
             _ = tick.tick() => {
-                let status = drain_once(&TrustyToolsConfig::load(), &framework_root, &home).await;
+                let status = drain_once_with(
+                    &TrustyToolsConfig::load(),
+                    &framework_root,
+                    &home,
+                    &mut prune_debounce,
+                )
+                .await;
                 match status.outcome {
                     DrainOutcome::Success | DrainOutcome::SkippedDisabled => {
                         info!("log_drain: {}", status.detail);

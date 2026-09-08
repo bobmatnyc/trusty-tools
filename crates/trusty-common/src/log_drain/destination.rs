@@ -147,6 +147,14 @@ pub trait LogDestination: Send + Sync + fmt::Debug {
     /// List objects under `prefix`, capped at [`LIST_LIMIT`] entries.
     async fn list(&self, prefix: &str) -> Result<Vec<ObjectMeta>, DrainError>;
 
+    /// Delete the object at `key` (#6536, `prune_after_upload`).
+    ///
+    /// Idempotent: a key that does not exist is `Ok(())`, not an error — the
+    /// state pruning wants ("the destination no longer has this object") is
+    /// exactly what a `NotFound` describes, so treating it as a failure would
+    /// make a retry after a partial prune report red forever.
+    async fn delete(&self, key: &str) -> Result<(), DrainError>;
+
     /// Stable, filesystem-safe identity of this destination for local state.
     ///
     /// Why: a skip decision recorded against one destination says nothing about
@@ -414,6 +422,21 @@ impl LogDestination for ObjectStoreDestination {
             }
         }
         Ok(out)
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), DrainError> {
+        let absolute = self.absolute(key);
+        let path = StorePath::from(absolute.as_str());
+        match self.store.delete(&path).await {
+            Ok(()) => Ok(()),
+            // Already gone is the outcome pruning wanted — see the trait docs.
+            Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(source) => Err(DrainError::Transport {
+                op: "delete",
+                key: absolute,
+                source,
+            }),
+        }
     }
 
     fn cache_namespace(&self) -> &str {

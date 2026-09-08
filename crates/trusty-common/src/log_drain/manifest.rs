@@ -27,6 +27,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
 
 use serde::{Deserialize, Serialize};
 
@@ -277,6 +280,47 @@ impl DrainManifest {
         }
         self.entries
             .sort_by(|a, b| a.relative_file.cmp(&b.relative_file));
+    }
+
+    /// `relative_file` identities of every entry uploaded at least `retention`
+    /// ago, as of `now` (#6536, `prune_after_upload`).
+    ///
+    /// Why: an object is only ever a prune candidate because the manifest
+    /// itself says it was successfully uploaded — this reads no other signal,
+    /// so a file that failed or partially uploaded (no entry was ever
+    /// recorded for it) can never appear here.
+    /// What: pure and read-only — nothing is deleted or re-saved. An entry
+    /// whose `uploaded_at` does not parse as RFC 3339 is never returned: fail
+    /// closed, the same stance [`Self::decide`] takes toward stat data it
+    /// cannot use. The caller (the trusty-mpm log-drain scheduler) puts this
+    /// list through its own two-tick debounce before ever calling
+    /// [`super::prune_confirmed`] — see #6536.
+    /// Test: `super::tests::manifest_prunable_selects_only_entries_past_retention`,
+    /// `super::tests::manifest_prunable_ignores_an_unparsable_timestamp`.
+    pub fn prunable(&self, now: DateTime<Utc>, retention: Duration) -> Vec<String> {
+        let retention = chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::zero());
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let uploaded_at = DateTime::parse_from_rfc3339(&entry.uploaded_at)
+                    .ok()?
+                    .with_timezone(&Utc);
+                (now.signed_duration_since(uploaded_at) >= retention)
+                    .then(|| entry.relative_file.clone())
+            })
+            .collect()
+    }
+
+    /// Drop the entry for `relative_file`; `true` when one was there.
+    ///
+    /// Why: [`super::prune_confirmed`] deletes the destination object first,
+    /// then calls this so the manifest never claims an object exists that the
+    /// destination just dropped — the exact lie #6548's spot-check watches for.
+    /// Test: `super::tests::manifest_remove_entry_drops_it`.
+    pub fn remove_entry(&mut self, relative_file: &str) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|e| e.relative_file != relative_file);
+        self.entries.len() != before
     }
 
     /// Load the manifest for a target, preferring the remote copy.

@@ -1237,6 +1237,163 @@ async fn run_once_counts_oversize_without_uploading() {
     );
 }
 
+// ── #6536: prune_after_upload ────────────────────────────────────────────────
+
+fn entry_uploaded_ago(relative_file: &str, ago: chrono::Duration) -> ManifestEntry {
+    ManifestEntry {
+        relative_file: relative_file.to_string(),
+        size: 10,
+        mtime_unix: 0,
+        sha256: "deadbeef".to_string(),
+        uploaded_at: (chrono::Utc::now() - ago).to_rfc3339(),
+    }
+}
+
+#[test]
+fn manifest_prunable_selects_only_entries_past_retention() {
+    let mut manifest = DrainManifest::default();
+    manifest.record(entry_uploaded_ago(
+        "trusty-mpm/old.log",
+        chrono::Duration::days(40),
+    ));
+    manifest.record(entry_uploaded_ago(
+        "trusty-mpm/new.log",
+        chrono::Duration::days(1),
+    ));
+
+    let prunable = manifest.prunable(
+        chrono::Utc::now(),
+        std::time::Duration::from_secs(30 * 86400),
+    );
+
+    assert_eq!(
+        prunable,
+        vec!["trusty-mpm/old.log".to_string()],
+        "only the entry past the 30-day retention window is a candidate"
+    );
+}
+
+#[test]
+fn manifest_prunable_ignores_an_unparsable_timestamp() {
+    let mut manifest = DrainManifest::default();
+    manifest.record(ManifestEntry {
+        relative_file: "trusty-mpm/weird.log".to_string(),
+        size: 10,
+        mtime_unix: 0,
+        sha256: "deadbeef".to_string(),
+        uploaded_at: "not-a-timestamp".to_string(),
+    });
+
+    let prunable = manifest.prunable(chrono::Utc::now(), std::time::Duration::from_secs(0));
+
+    assert!(
+        prunable.is_empty(),
+        "an unparsable uploaded_at is never a prune candidate — fail closed"
+    );
+}
+
+#[test]
+fn manifest_remove_entry_drops_it() {
+    let mut manifest = DrainManifest::default();
+    manifest.record(entry_uploaded_ago(
+        "trusty-mpm/a.log",
+        chrono::Duration::zero(),
+    ));
+
+    assert!(manifest.remove_entry("trusty-mpm/a.log"));
+    assert!(manifest.entries.is_empty());
+    assert!(
+        !manifest.remove_entry("trusty-mpm/a.log"),
+        "removing an already-absent entry reports false"
+    );
+}
+
+#[tokio::test]
+async fn prune_confirmed_deletes_object_and_manifest_entry() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    write(&logs.path().join("a.log"), "line one\n");
+
+    let dest = file_dest(dest_root.path()).await;
+    let cfg = DrainConfig::new(state.path());
+    let t = target();
+    run_once(&cfg, &dest, &t, &[source(logs.path(), None)])
+        .await
+        .expect("run_once uploads a.log");
+
+    let key = "trusty-mpm/a.log".to_string();
+    let outcome = prune_confirmed(&dest, &t, state.path(), std::slice::from_ref(&key))
+        .await
+        .expect("prune_confirmed");
+
+    assert_eq!(outcome.pruned, 1);
+    assert!(outcome.errors.is_empty());
+    assert!(
+        dest.head(&t.object_key(&key))
+            .await
+            .expect("head")
+            .is_none(),
+        "the destination object is gone"
+    );
+    let manifest = remote_manifest(&dest, &t).await;
+    assert!(
+        manifest.entries.is_empty(),
+        "the manifest entry is dropped in the same pass — #6548's spot-check must never see it"
+    );
+}
+
+#[tokio::test]
+async fn prune_confirmed_ignores_a_key_the_manifest_no_longer_lists() {
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    let dest = file_dest(dest_root.path()).await;
+    let t = target();
+
+    let outcome = prune_confirmed(
+        &dest,
+        &t,
+        state.path(),
+        &["trusty-mpm/never-uploaded.log".to_string()],
+    )
+    .await
+    .expect("prune_confirmed");
+
+    assert_eq!(outcome.pruned, 0);
+    assert!(outcome.errors.is_empty());
+}
+
+#[tokio::test]
+async fn prunable_candidates_never_names_a_file_that_failed_to_upload() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    write(&logs.path().join("a.log"), "healthy\n");
+    write(&logs.path().join("b.log"), "unhealthy\n");
+
+    let dest = FailingDestination {
+        inner: file_dest(dest_root.path()).await,
+        fail_on: "trusty-mpm/b.log".to_string(),
+    };
+    let cfg = DrainConfig::new(state.path());
+    let t = target();
+    let report = run_once(&cfg, &dest, &t, &[source(logs.path(), None)])
+        .await
+        .expect("a per-file failure must not fail the run");
+    assert_eq!(report.uploaded, 1, "a.log uploaded; b.log failed");
+
+    let candidates =
+        prunable_candidates(&dest, &t, state.path(), std::time::Duration::from_secs(0))
+            .await
+            .expect("prunable_candidates");
+
+    assert_eq!(
+        candidates,
+        vec!["trusty-mpm/a.log".to_string()],
+        "the failed upload never got a manifest entry, so it is never a prune candidate"
+    );
+}
+
 // ── #6547: streaming, and skip decisions made once ──────────────────────────
 
 /// Read the destination's own manifest object.
@@ -1608,6 +1765,10 @@ impl LogDestination for FailingDestination {
 
     async fn list(&self, prefix: &str) -> Result<Vec<ObjectMeta>, DrainError> {
         self.inner.list(prefix).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), DrainError> {
+        self.inner.delete(key).await
     }
 
     fn cache_namespace(&self) -> &str {

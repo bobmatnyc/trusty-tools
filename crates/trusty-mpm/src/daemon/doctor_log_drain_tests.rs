@@ -52,6 +52,8 @@ fn plan_with_disabled(
             max_file_bytes: 1024,
             max_wire_bytes: 1024,
             secrets: Vec::new(),
+            prune_after_upload: true,
+            prune_retention: Duration::from_secs(30 * 86_400),
         },
     ))
 }
@@ -70,6 +72,7 @@ fn recorded(path: &str, outcome: DrainOutcome, detail: &str) -> LogDrainDestinat
         outcome,
         uploaded: 3,
         skipped_unchanged: 1,
+        pruned: 0,
         detail: detail.to_string(),
     }
 }
@@ -95,6 +98,7 @@ fn status_over(
         destinations,
         uploaded: 3,
         skipped_unchanged: 1,
+        pruned: 0,
         detail: detail.to_string(),
     }
 }
