@@ -8,7 +8,7 @@
  * Test target: `src/lib/graph/layoutRunner.js`
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { defaultScheduleFrame, runLayout } from './layoutRunner.js';
+import { defaultScheduleFrame, defaultWorkerFactory, runLayout } from './layoutRunner.js';
 
 /**
  * A manual frame scheduler. Nothing runs until `flush()` is called, so a test
@@ -194,6 +194,41 @@ describe('defaultScheduleFrame', () => {
     expect(raf).not.toHaveBeenCalled();
     vi.advanceTimersByTime(50);
     expect(cb).toHaveBeenCalled();
+  });
+});
+
+describe('defaultWorkerFactory', () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+
+  afterEach(() => {
+    if (original) Object.defineProperty(globalThis, 'Worker', original);
+    else delete globalThis.Worker;
+  });
+
+  it('returns null where Worker does not exist', () => {
+    delete globalThis.Worker;
+    expect(defaultWorkerFactory()).toBeNull();
+  });
+
+  it('returns null when the Worker constructor throws', () => {
+    // #7116: a CSP or packaging failure must degrade to the local loop, not
+    // propagate out of `runLayout` and leave the graph blank.
+    globalThis.Worker = function ThrowingWorker() {
+      throw new Error('Refused to create a worker (CSP)');
+    };
+    expect(defaultWorkerFactory()).toBeNull();
+  });
+
+  it('returns the constructed worker when the environment allows one', () => {
+    const made = [];
+    globalThis.Worker = function OkWorker(url, opts) {
+      made.push({ url: String(url), opts });
+    };
+    const w = defaultWorkerFactory();
+    expect(w).toBeInstanceOf(globalThis.Worker);
+    expect(made).toHaveLength(1);
+    expect(made[0].url).toContain('layoutWorker.js');
+    expect(made[0].opts).toEqual({ type: 'module' });
   });
 });
 

@@ -30,8 +30,9 @@
    * counter, so a new frame no longer invalidates `links`/`shownDegree`; and
    * above `EDGE_PATH_THRESHOLD` edges collapse into one `<path>` instead of
    * one `<line>` each.
-   * Test: `src/lib/graph/forceLayout.test.js` and
-   * `src/lib/graph/layoutRunner.test.js`. In the browser: open
+   * Test: `src/lib/graph/forceLayout.test.js`,
+   * `src/lib/graph/layoutRunner.test.js` and
+   * `src/lib/graph/mergeSubgraph.test.js`. In the browser: open
    * `#/palace/<id>/graph`, confirm the header reads "N of M nodes shown",
    * click a node and confirm new nodes appear around it while existing ones do
    * not move, then use "load everything" and confirm the progress bar advances
@@ -42,6 +43,7 @@
   import { getRoute, navigate } from '../router.svelte.js';
   import { EXPAND_STEPS, MAX_STEPS, stepBudgetFor } from '../graph/forceLayout.js';
   import { runLayout } from '../graph/layoutRunner.js';
+  import { mergeSubgraph as mergeIntoGraph } from '../graph/mergeSubgraph.js';
 
   // Selected palace + payload.
   let palaceId = $state('');
@@ -323,125 +325,27 @@
   // Merge
   // -------------------------------------------------------------------------
 
-  const tripleKey = (t) => `${t.subject} ${t.predicate} ${t.object}`;
-
   /*
-   * Why: expansion results overlap what is already drawn; adding a node or an
-   * edge twice would double-render it and corrupt the layout's link forces.
-   * What: dedups nodes by `id` and triples by (subject,predicate,object).
-   * Already-known nodes get their `degree` refreshed (the server always
-   * reports graph-wide degree) but keep their x/y so the layout is stable.
-   * New nodes are seeded on a small ring around `originId` when there is one,
-   * so an expansion visibly grows out of the node that was clicked.
+   * Why: the merge is the one code path every load shares, and #7116 was a bug
+   * in its dedup predicate — it tested membership against a snapshot taken
+   * before the loop, so a repeated id got through. It lives in
+   * `graph/mergeSubgraph.js` as a pure function over an explicit state object
+   * so that predicate can be tested without mounting the component.
+   * What: this wrapper binds the component's locals to it and republishes the
+   * coordinate arrays the merge may have grown.
+   * Test: `src/lib/graph/mergeSubgraph.test.js`.
    */
   function mergeSubgraph(payload, originId) {
-    const byId = new Map();
-    for (const n of nodes) byId.set(n.id, n);
-    const originIdx = originId != null ? nodeIndex.get(originId) : undefined;
-    const incoming = payload?.nodes ?? [];
-    // #7116: DISTINCT new ids. Full-load's derived list repeats an id once per
-    // incident edge, and a count including repeats both over-allocates and
-    // squashes the ring placement below.
-    const freshIds = new Set();
-    for (const n of incoming) if (n?.id && !nodeIds.has(n.id)) freshIds.add(n.id);
-    const fresh = freshIds.size;
-
-    // #7116: grow the coordinate arrays once for the whole batch rather than
-    // reallocating per node.
-    growPositions(nodes.length + fresh);
-
-    const ox = originIdx != null ? positions[2 * originIdx] : 0;
-    const oy = originIdx != null ? positions[2 * originIdx + 1] : 0;
-    let placed = 0;
-
-    for (const n of incoming) {
-      if (!n?.id) continue;
-      /*
-       * #7116: test against `nodeIds`, which grows INSIDE this loop, not
-       * against the `byId` snapshot taken before it. Full-load derives its node
-       * list from triple endpoints, so the same id arrives once per incident
-       * edge — 10,000 entries for 1,242 distinct nodes. Checking the snapshot
-       * let every repeat through and the keyed `{#each}` then threw
-       * `each_key_duplicate`, which is why "load everything" rendered nothing
-       * even once it stopped freezing.
-       */
-      if (nodeIds.has(n.id)) {
-        const existing = byId.get(n.id);
-        if (existing && typeof n.degree === 'number') existing.degree = n.degree;
-        continue;
-      }
-      nodeIds.add(n.id);
-      const idx = nodes.length;
-      nodeIndex.set(n.id, idx);
-      nodes.push({
-        id: n.id,
-        label: n.id,
-        kind: classify(n.id),
-        community: Math.abs(hashStr(n.id)) % Math.max(1, counts.community_count || 8),
-        degree: typeof n.degree === 'number' ? n.degree : 0,
-        expanded: false,
-        isNew: true
-      });
-      if (originIdx != null) {
-        // Ring placement around the expansion origin. Radius scales with the
-        // batch size so a 40-neighbour hub does not stack them on top of
-        // each other.
-        const angle = (placed / Math.max(1, fresh)) * Math.PI * 2;
-        const radius = LINK_DISTANCE * (0.9 + fresh / 40);
-        positions[2 * idx] = ox + Math.cos(angle) * radius;
-        positions[2 * idx + 1] = oy + Math.sin(angle) * radius;
-      } else {
-        positions[2 * idx] = width / 2 + (Math.random() - 0.5) * 240;
-        positions[2 * idx + 1] = height / 2 + (Math.random() - 0.5) * 240;
-      }
-      pinned[idx] = 0;
-      placed++;
-    }
-
-    for (const t of payload?.triples ?? []) {
-      const key = tripleKey(t);
-      if (tripleKeys.has(key)) continue;
-      tripleKeys.add(key);
-      triples.push(t);
-    }
+    const state = { nodes, triples, nodeIds, tripleKeys, nodeIndex, positions, pinned };
+    mergeIntoGraph(state, payload, originId, {
+      communityCount: counts.community_count,
+      width,
+      height,
+      linkDistance: LINK_DISTANCE
+    });
+    positions = state.positions;
+    pinned = state.pinned;
     posVersion++;
-  }
-
-  /**
-   * Resize `positions`/`pinned` to hold at least `count` nodes, preserving
-   * what is already there. Grows in place; never shrinks (a mode switch calls
-   * `resetGraph` instead).
-   */
-  function growPositions(count) {
-    if (positions.length >= count * 2) return;
-    const next = new Float64Array(count * 2);
-    next.set(positions);
-    positions = next;
-    const nextPinned = new Uint8Array(count);
-    nextPinned.set(pinned);
-    pinned = nextPinned;
-  }
-
-  function classify(label) {
-    if (typeof label !== 'string') return 'other';
-    if (label.startsWith('drawer:')) return 'drawer';
-    if (label.startsWith('tag:')) return 'tag';
-    if (label.startsWith('topic:')) return 'topic';
-    if (label.startsWith('room:')) return 'room';
-    return 'other';
-  }
-
-  /*
-   * Why: Tiny deterministic hash so node colors stay stable across reloads
-   * without pulling in an external dep.
-   * What: 32-bit djb2 variant returning a signed integer.
-   */
-  function hashStr(s) {
-    let h = 5381;
-    for (let i = 0; i < s.length; i++) {
-      h = ((h << 5) + h) ^ s.charCodeAt(i);
-    }
-    return h | 0;
   }
 
   // -------------------------------------------------------------------------
