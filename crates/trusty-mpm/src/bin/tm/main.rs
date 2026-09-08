@@ -110,6 +110,12 @@ mod tests_behavior_reset_agents;
 #[path = "tests_behavior_skill_tiers_tests.rs"]
 mod tests_behavior_skill_tiers;
 
+// #7102: `install_then_deploy_deploys_skills`, split out so
+// `tests_behavior_a.rs` stays under the 500-SLOC cap.
+#[cfg(test)]
+#[path = "tests_behavior_install_skills_tests.rs"]
+mod tests_behavior_install_skills;
+
 #[cfg(test)]
 #[path = "tests_behavior_2890_skills_tests.rs"]
 mod tests_behavior_2890_skills;

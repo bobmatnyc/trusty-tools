@@ -111,9 +111,14 @@ pub const PROJECT_TIER_STAMP_FILE: &str = ".trusty-mpm-project-tier-stamp";
 /// `co_deploy_skills` override is dropped at the project-tier call sites rather
 /// than routed around this predicate.
 ///
-/// What: a named function rather than an inline `|_| false` at three call sites,
+/// What: a named function rather than an inline `|_| false` at the call sites,
 /// so the ruling lives in one place and a reader who finds it at a deploy site
-/// gets the reasoning. Only the BUNDLED tier is declined —
+/// gets the reasoning. #7102 added a fourth caller —
+/// [`crate::core::skill_install_tiers::deploy_install_skill_tiers`], for the
+/// operator's own `~/.claude/skills`. The predicate is named for the project
+/// tier because that is where the ruling was written, but what it encodes is
+/// wider: a destination that is not [`FrameworkPaths::skill_deploy_dir`] never
+/// receives a bundled skill. Only the BUNDLED tier is declined —
 /// `deploy_all_skill_tiers` applies `select` to the bundled stem set alone, so
 /// user-custom skills still deploy here and project-custom skills are still
 /// never overwritten.
