@@ -15,7 +15,8 @@
 //! that call `FastEmbedder::init_options` directly.
 
 use super::types::{
-    DEFAULT_CACHE_CAPACITY, EMBED_DIM, ExecutionProvider, OrtThreadingOptions, is_zero_vector,
+    DEFAULT_CACHE_CAPACITY, EMBED_DIM, ExecutionProvider, OrtThreadingOptions,
+    embed_in_bounded_batches, is_zero_vector, resolve_embed_onnx_batch,
     resolve_fastembed_cache_dir, resolve_ort_threading_options,
 };
 use anyhow::{Context, Result};
@@ -745,6 +746,26 @@ impl FastEmbedder {
 
 #[async_trait]
 impl super::types::Embedder for FastEmbedder {
+    /// Embed `texts`, serving what the LRU cache already holds and running the
+    /// rest through ONNX in bounded batches.
+    ///
+    /// Why (#7106): the whole daemon reaches ONNX through this one method, so
+    /// it is where the inference batch — and therefore the memory peak — has to
+    /// be bounded. It used to hand fastembed the entire cache-miss list with
+    /// `None`, taking fastembed's default of 256 at 512 tokens; see
+    /// [`DEFAULT_EMBED_ONNX_BATCH`](super::types::DEFAULT_EMBED_ONNX_BATCH) for
+    /// what that costs in bytes.
+    /// What: reads the cache under its lock, collecting misses with their input
+    /// slots; embeds only the misses, in
+    /// [`resolve_embed_onnx_batch`]-sized batches, on a blocking thread holding
+    /// the model mutex; then caches each vector and reassembles the result in
+    /// INPUT order, cache hits and freshly computed vectors interleaved. An
+    /// all-zero vector from any batch fails the whole call, as does an error or
+    /// a wrong-length result from any single batch.
+    /// Test: `bounded_batches_never_exceed_the_ceiling` and its siblings in
+    /// `batching_tests.rs` cover the batching contract without a model;
+    /// `fastembed_returns_correct_dim` and `fastembed_cache_hit_is_idempotent`
+    /// (`#[ignore]`, real ONNX) cover the end-to-end path.
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
@@ -766,11 +787,16 @@ impl super::types::Embedder for FastEmbedder {
         if !to_compute.is_empty() {
             let model = Arc::clone(&self.model);
             let owned: Vec<String> = to_compute.iter().map(|(_, s)| s.clone()).collect();
+            // #7106: bound the ONNX batch here, not in each caller — this is the
+            // one call every embedder consumer funnels through.
+            let ceiling = resolve_embed_onnx_batch();
             let computed = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>> {
                 let mut guard = model.lock();
-                guard
-                    .embed(owned, None)
-                    .context("fastembed embed call failed")
+                embed_in_bounded_batches(&owned, ceiling, |chunk, size| {
+                    guard
+                        .embed(chunk, Some(size))
+                        .context("fastembed embed call failed")
+                })
             })
             .await
             .context("spawn_blocking joined with error during embed")??;

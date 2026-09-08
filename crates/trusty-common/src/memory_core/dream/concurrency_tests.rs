@@ -499,8 +499,11 @@ async fn a_dream_loop_waits_its_stagger_before_the_first_cycle() {
 /// Why: the dedup pass embedded a palace's whole corpus in one call, so the
 /// transient scaled with palace size and nothing capped it.
 /// What: seeds 600 drawers, runs the pass with a generous budget, and asserts
-/// the recorded batch sizes are exactly `[256, 256, 88]` — three calls, none
-/// larger than [`DREAM_EMBED_CHUNK`]. Pre-fix there is one call of 600.
+/// the recorded batch sizes are exactly the [`DREAM_EMBED_CHUNK`]-sized
+/// partition of 600 — every call bounded, none dropped, none merged. The
+/// expectation is derived from the constant rather than written out, so
+/// retuning the chunk size (256 → 16 in #7106) cannot quietly weaken the test
+/// into "no call is too large". Pre-fix there is one call of 600.
 /// Test: itself.
 #[tokio::test]
 async fn dedup_embeds_in_bounded_chunks() {
@@ -520,18 +523,22 @@ async fn dedup_embeds_in_bounded_chunks() {
     .expect("dedup pass");
 
     let batches = embedder.recorded();
+    let mut expected = vec![DREAM_EMBED_CHUNK; 600 / DREAM_EMBED_CHUNK];
+    if 600 % DREAM_EMBED_CHUNK > 0 {
+        expected.push(600 % DREAM_EMBED_CHUNK);
+    }
     assert_eq!(
-        batches,
-        vec![
-            DREAM_EMBED_CHUNK,
-            DREAM_EMBED_CHUNK,
-            600 - 2 * DREAM_EMBED_CHUNK
-        ],
+        batches, expected,
         "600 drawers must embed as bounded chunks, not one whole-corpus call"
     );
     assert!(
         batches.iter().all(|n| *n <= DREAM_EMBED_CHUNK),
         "no batch may exceed the chunk size: {batches:?}"
+    );
+    assert_eq!(
+        batches.iter().sum::<usize>(),
+        600,
+        "chunking must not drop or duplicate a drawer"
     );
 }
 

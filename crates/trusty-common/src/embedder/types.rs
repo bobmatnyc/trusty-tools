@@ -6,8 +6,12 @@
 //! What: `EMBED_DIM`, `DEFAULT_CACHE_CAPACITY`, `DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES`,
 //! `CudaOptions`, `ExecutionProvider`, `Embedder` trait, `embed_one`,
 //! `resolve_fastembed_cache_dir`, `resolve_cuda_options`,
-//! `resolve_expected_provider`, and `is_zero_vector`.
-//! Test: tests in `mod.rs` cover all exported symbols from this file.
+//! `resolve_expected_provider`, `is_zero_vector`, and — since #7106 — the
+//! per-inference batch ceiling (`DEFAULT_EMBED_ONNX_BATCH`,
+//! `resolve_embed_onnx_batch`, `embed_in_bounded_batches`) that every
+//! `FastEmbedder::embed_batch` caller is funnelled through.
+//! Test: tests in `mod.rs` cover all exported symbols from this file; the
+//! #7106 batching primitives are covered by `batching_tests.rs`.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -508,4 +512,98 @@ pub fn resolve_fastembed_cache_dir() -> std::path::PathBuf {
 /// directly, so the guard cannot be deleted without a test failure.
 pub(crate) fn is_zero_vector(vector: &[f32]) -> bool {
     vector.iter().all(|&v| v == 0.0)
+}
+
+/// Texts handed to ONNX in ONE inference call, unless overridden (#7106).
+///
+/// Why: transformer attention is quadratic in sequence length and linear in
+/// batch size, and all-MiniLM-L6-v2 pads a batch to its longest member, up to
+/// 512 tokens. One attention-score tensor is therefore
+/// `B × heads(12) × 512² × 4 B = B × 12.6 MB`, and ORT keeps roughly three of
+/// them live per layer, so fastembed's default `B = 256` reaches ~9.7 GB before
+/// hidden states, QKV projections and the FFN are counted. That is how one
+/// dream cycle took the daemon to 21.3 GB RSS. The peak is set by the BATCH,
+/// not by the corpus — which is why a 141-drawer palace spiked as hard as a
+/// 365-drawer one — so bounding `B` bounds it for every caller and every palace.
+/// What: `16`, putting that same tensor at ~600 MB while keeping the per-call
+/// tokenizer pass, `spawn_blocking` hop and session run amortised. Used when
+/// `TRUSTY_EMBED_ONNX_BATCH` is unset or unusable.
+/// Test: `embed_onnx_batch_defaults_when_unset`.
+pub(crate) const DEFAULT_EMBED_ONNX_BATCH: usize = 16;
+
+/// Resolve the per-inference ONNX batch bound from the process environment.
+///
+/// Why: how much transient memory a host can spare is host-specific — a large
+/// workstation may want the throughput of a bigger batch, a small VM a smaller
+/// one — so the #7106 ceiling has to be tunable without a rebuild.
+/// What: reads `TRUSTY_EMBED_ONNX_BATCH` as a positive integer. Unset resolves
+/// silently to [`DEFAULT_EMBED_ONNX_BATCH`]; a malformed or zero value resolves
+/// to the same default and warns, because a knob the operator set deliberately
+/// and got wrong must not fail silently.
+/// Test: `embed_onnx_batch_defaults_when_unset`, `embed_onnx_batch_reads_env`,
+/// `embed_onnx_batch_defaults_on_garbage`, `embed_onnx_batch_defaults_on_zero`.
+pub(crate) fn resolve_embed_onnx_batch() -> usize {
+    let Ok(raw) = std::env::var("TRUSTY_EMBED_ONNX_BATCH") else {
+        return DEFAULT_EMBED_ONNX_BATCH;
+    };
+    match raw.trim().parse::<usize>() {
+        Ok(n) if n > 0 => n,
+        _ => {
+            tracing::warn!(
+                "trusty-embedder: TRUSTY_EMBED_ONNX_BATCH={raw:?} is not a positive \
+                 integer; falling back to {DEFAULT_EMBED_ONNX_BATCH}"
+            );
+            DEFAULT_EMBED_ONNX_BATCH
+        }
+    }
+}
+
+/// Feed `inputs` to `embed_chunk` in slices of at most `batch`, concatenating
+/// the results in input order.
+///
+/// Why (#7106): this is the choke point that bounds the ONNX peak for EVERY
+/// caller. Bounding it in each caller instead leaves the next caller to
+/// rediscover the problem, and does not help where a caller cannot know the
+/// model's padding behaviour. Doing our own chunking rather than relying on
+/// fastembed's `batch_size` argument alone matters for a second reason:
+/// `TextEmbedding::transform` collects every internal batch's raw ORT output
+/// before exporting any of it, so its own chunking bounds the attention tensor
+/// but still accumulates one hidden-state tensor per chunk across the whole
+/// call. Chunking here keeps only the finished 384-float vectors between calls.
+/// What: walks `inputs.chunks(batch)`, hands each slice and the ceiling itself
+/// to `embed_chunk`, and appends what comes back. The ceiling travels alongside
+/// the slice because fastembed needs it as an explicit `Some(batch_size)`;
+/// passing the ceiling rather than the slice length keeps it `>= texts.len()`,
+/// which is what stops a dynamically-quantised model
+/// (`TRUSTY_EMBEDDER_MODEL=int8`) from rejecting a batched call outright. A
+/// chunk that errors, or returns the wrong number of vectors, fails the whole
+/// call — a partial result would be silently mis-aligned with its inputs. A
+/// `batch` of `0` is clamped to `1` so a bad caller cannot loop forever.
+/// Test: `bounded_batches_never_exceed_the_ceiling`,
+/// `bounded_batches_preserve_input_order_and_count`,
+/// `a_short_input_still_makes_one_call`, `an_empty_input_makes_no_call`,
+/// `a_mid_batch_error_fails_the_whole_call`,
+/// `a_short_chunk_result_fails_the_whole_call`.
+pub(crate) fn embed_in_bounded_batches<F>(
+    inputs: &[String],
+    batch: usize,
+    mut embed_chunk: F,
+) -> Result<Vec<Vec<f32>>>
+where
+    F: FnMut(&[String], usize) -> Result<Vec<Vec<f32>>>,
+{
+    let batch = batch.max(1);
+    let mut out: Vec<Vec<f32>> = Vec::with_capacity(inputs.len());
+    for chunk in inputs.chunks(batch) {
+        let vectors = embed_chunk(chunk, batch)?;
+        if vectors.len() != chunk.len() {
+            anyhow::bail!(
+                "embed call returned {} vectors for a batch of {}",
+                vectors.len(),
+                chunk.len()
+            );
+        }
+        out.extend(vectors);
+    }
+    Ok(out)
 }

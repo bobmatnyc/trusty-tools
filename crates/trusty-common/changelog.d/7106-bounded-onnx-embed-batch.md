@@ -1,0 +1,5 @@
+Fixed
+
+- `FastEmbedder::embed_batch` now runs ONNX in bounded batches instead of handing fastembed its whole cache-miss list (#7106). It passed `None`, taking fastembed's default of 256 inputs at up to 512 tokens; one attention tensor at that batch is `256 × 12 heads × 512² × 4 B ≈ 9.7 GB` before hidden states and the FFN, which is how one dream cycle took the daemon to 21.3 GB RSS. The peak was set by the batch and not by the corpus, so it was the same size for a 141-drawer palace as for a 365-drawer one. Bounding it here bounds it for every caller — the dream dedup pass, the deferred-embed lane, the write pipeline, `share::import` — rather than one caller at a time.
+- `TRUSTY_EMBED_ONNX_BATCH` sets that bound; default 16 (#7106). A malformed or zero value logs a `warn` naming the rejected value and keeps the default, so a typo can never restore an unbounded batch.
+- The dream dedup pass chunks at 16 drawers rather than 256, matching the embedder's own ceiling (#7106). The pass checks its `max_cycle_ms` budget between chunks, so a chunk larger than one inference would hide several ONNX runs inside one uninterruptible step.

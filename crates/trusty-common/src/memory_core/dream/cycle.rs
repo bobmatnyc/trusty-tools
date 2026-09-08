@@ -33,12 +33,16 @@ use uuid::Uuid;
 /// six copies of the corpus at peak — multiplied by however many cycles ran at
 /// once. Chunking bounds every one of those copies to this many drawers,
 /// regardless of palace size.
-/// What: 256 drawers per call. Large enough that the per-call overhead
-/// (a `spawn_blocking` hop and one ONNX mutex acquisition) stays amortised,
-/// small enough that the transient is a few megabytes rather than a few
-/// gigabytes.
+/// What: 16 drawers per call — the same figure the embedder now enforces on
+/// every ONNX inference (`DEFAULT_EMBED_ONNX_BATCH`). The two must match: this
+/// pass checks its wall-clock budget BETWEEN calls, so a chunk larger than the
+/// embedder's own batch would hide several inferences inside one uninterruptible
+/// step, and a smaller one would only add `spawn_blocking` hops. 256 was this
+/// constant's first value; it bounded how much of the corpus the pass held, but
+/// not the inference underneath, which is the allocation that actually reached
+/// 21.3 GB.
 /// Test: `concurrency_tests::dedup_embeds_in_bounded_chunks`.
-pub(super) const DREAM_EMBED_CHUNK: usize = 256;
+pub(super) const DREAM_EMBED_CHUNK: usize = 16;
 
 /// Drop drawers whose content is recognisably noise.
 ///
