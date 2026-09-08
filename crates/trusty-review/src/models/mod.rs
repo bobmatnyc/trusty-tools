@@ -314,7 +314,8 @@ pub enum FindingCategory {
     MethodConformance,
     /// An unmet test-plan / acceptance-criteria item: the diff lacks evidence of
     /// test coverage for an AC item from the linked ticket or PR test-plan section
-    /// (#1418).  Informational — never drives BLOCK or REQUEST_CHANGES alone.
+    /// (#1418).  Informational — see [`FindingCategory::is_informational`]; it
+    /// never drives BLOCK or REQUEST_CHANGES alone (#7036).
     TestCoverage,
     /// A style / preference / taste nit: naming, formatting, idiom choice, or an
     /// "I would have written it differently" observation with no correctness,
@@ -333,14 +334,19 @@ impl FindingCategory {
     /// `grade::derive_verdict_with` (the verdict ceiling) and
     /// `github::inline::render_finding_comment` (the reader-facing label) from
     /// disagreeing about which categories are advisory.
-    /// What: returns `true` for [`FindingCategory::Style`] only.  `TestCoverage`
-    /// is deliberately NOT included: its floor treatment predates #3474 and
-    /// changing it is a separate calibration decision, not this one.
-    /// Test: `style_category_is_informational`,
-    /// `only_style_findings_never_block`.
+    /// What: returns `true` for [`FindingCategory::Style`] and
+    /// [`FindingCategory::TestCoverage`].  #7036 added `TestCoverage`: its own
+    /// doc comment had claimed since #1418 that a coverage gap never drives
+    /// BLOCK or REQUEST_CHANGES alone, but `grade::severity_floor` ran it
+    /// through the uncapped correctness floor, so the code contradicted the
+    /// contract.  A missing test is a request for more evidence, not evidence of
+    /// a defect — it belongs beside `Style` on the advisory side.
+    /// Test: `advisory_categories_are_informational`,
+    /// `only_style_findings_never_block`, `only_test_coverage_findings_never_block`.
     #[must_use]
     pub fn is_informational(self) -> bool {
-        matches!(self, FindingCategory::Style)
+        // #7036: TestCoverage joins Style — the doc contract already said it is advisory.
+        matches!(self, FindingCategory::Style | FindingCategory::TestCoverage)
     }
 }
 

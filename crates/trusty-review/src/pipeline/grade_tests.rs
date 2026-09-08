@@ -2027,3 +2027,116 @@ fn style_ceiling_holds_through_derive_verdict_with_grade() {
         "an F grade implies BLOCK — it must be reconciled down alongside the verdict"
     );
 }
+
+// ── #7036: the coverage-gap floor ────────────────────────────────────────────
+
+/// A `TestCoverage` finding, otherwise identical to [`finding`] (#7036).
+fn test_coverage_finding(effort: Effort, confidence: f32) -> Finding {
+    finding(effort, confidence).with_category(FindingCategory::TestCoverage)
+}
+
+/// A batch of nothing but coverage gaps can never block or request changes,
+/// however severe the model or the findings claim to be (#7036).
+///
+/// Why: `FindingCategory::TestCoverage` has documented since #1418 that a
+/// coverage gap "never drives BLOCK or REQUEST_CHANGES alone", but
+/// `severity_floor` partitioned only `MethodConformance` out of the correctness
+/// bucket — so a High-effort, diff-provable coverage finding ran
+/// `correctness_floor` Tier 1 and floored to BLOCK exactly like a real bug.
+/// This test fails on the pre-#7036 code.
+/// What: two coverage findings at 0.95 confidence with the model proposing
+/// BLOCK → APPROVE, then a single High-effort one against every non-UNKNOWN
+/// model proposal.
+#[test]
+fn only_test_coverage_findings_never_block() {
+    let findings = vec![
+        test_coverage_finding(Effort::High, 0.95),
+        test_coverage_finding(Effort::Medium, 0.95),
+    ];
+    assert_eq!(
+        derive_verdict(Verdict::Block, &findings),
+        Verdict::Approve,
+        "a batch whose only substantive findings are coverage gaps must grade \
+         APPROVE — never BLOCK (#7036)"
+    );
+
+    let solo = vec![test_coverage_finding(Effort::High, 0.99)];
+    for proposed in [
+        Verdict::Approve,
+        Verdict::ApproveWithReservations,
+        Verdict::RequestChanges,
+        Verdict::Block,
+    ] {
+        assert_eq!(
+            derive_verdict(proposed.clone(), &solo),
+            Verdict::Approve,
+            "coverage-only batch with model proposal {proposed} must grade APPROVE (#7036)"
+        );
+    }
+}
+
+/// A coverage gap alongside a real blocker still blocks (#7036).
+///
+/// Why: the ceiling must lift the moment ONE non-advisory substantive finding is
+/// present, or attaching a coverage note to a review would launder a genuine
+/// critical bug into an APPROVE.
+/// What: one High-effort escalation-eligible correctness finding plus a coverage
+/// gap → BLOCK, exactly as the correctness finding alone would.
+#[test]
+fn test_coverage_finding_alongside_blocker_still_blocks() {
+    let findings = vec![
+        test_coverage_finding(Effort::High, 0.95),
+        finding(Effort::High, 0.9),
+    ];
+    assert_eq!(
+        derive_verdict(Verdict::Approve, &findings),
+        Verdict::Block,
+        "a coverage gap must not disarm a co-occurring correctness blocker (#7036)"
+    );
+}
+
+/// A coverage gap contributes nothing to the floor when the ceiling has lifted.
+///
+/// Why: dropping coverage findings from the floor set is a separate rule from
+/// the ceiling, and only this shape distinguishes them.  A High-effort,
+/// diff-provable coverage finding paired with a merely Low-effort correctness
+/// finding would reach `correctness_floor` Tier 1 and BLOCK if it were still
+/// counted — the ceiling does not fire here, because a correctness finding is
+/// present.
+/// What: one Low-effort correctness finding plus a High-effort coverage gap →
+/// no BLOCK.
+#[test]
+fn test_coverage_finding_does_not_drive_the_floor() {
+    let findings = vec![
+        finding(Effort::Low, 0.9),
+        test_coverage_finding(Effort::High, 0.95),
+    ];
+    assert_ne!(
+        derive_verdict(Verdict::Approve, &findings),
+        Verdict::Block,
+        "a High-effort coverage gap must never reach the BLOCK floor (#7036)"
+    );
+}
+
+/// The coverage ceiling routes through `derive_verdict_with_grade` too (#7036).
+///
+/// Why: the production entry point folds the model's letter grade into an
+/// `effective_model` proposal BEFORE the floor, so a grade of "F" is a second,
+/// independent way a coverage-only review could have blocked.
+/// What: grade F + model BLOCK over a coverage-only batch → APPROVE, with a
+/// grade no longer implying a blocking verdict.
+#[test]
+fn test_coverage_ceiling_holds_through_derive_verdict_with_grade() {
+    let findings = vec![test_coverage_finding(Effort::High, 0.95)];
+    let (verdict, grade) = derive_verdict_with_grade(Verdict::Block, Grade::F, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::Approve,
+        "the coverage ceiling must survive the grade-aware entry point (#7036)"
+    );
+    assert_ne!(
+        grade,
+        Some(Grade::F),
+        "an F grade implies BLOCK — it must be reconciled down alongside the verdict"
+    );
+}

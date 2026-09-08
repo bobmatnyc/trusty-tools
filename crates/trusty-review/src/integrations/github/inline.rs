@@ -30,7 +30,7 @@
 
 use std::collections::HashSet;
 
-use crate::models::{Effort, Finding, VerifyOutcome};
+use crate::models::{Effort, Finding, FindingCategory, VerifyOutcome};
 
 // ─── Tuning constants ─────────────────────────────────────────────────────────
 
@@ -50,11 +50,23 @@ const VERIFICATION_CAVEAT_PREFIX: &str = "> **Verification:**";
 /// verdict, but a reader meeting the comment on the diff cannot see that. Saying
 /// it on the comment itself is what stops an author treating a taste note as a
 /// change request.
-/// What: prefixes the lead line of any finding whose category reports
-/// [`crate::models::FindingCategory::is_informational`].
+/// What: prefixes the lead line of a [`crate::models::FindingCategory::Style`]
+/// finding.
 /// Test: `render_marks_style_finding_informational`,
 /// `render_leaves_correctness_finding_unlabelled`.
 const INFORMATIONAL_PREFIX: &str = "> **Informational (style / preference) — does not block.**";
+
+/// Lead-in marking a coverage-gap finding as informational (#7036).
+///
+/// Why: `TestCoverage` became advisory in #7036, so it now earns the same
+/// reader-facing label — but calling a missing test a "style / preference" nit
+/// would misdescribe it, and the author would discount a note they should still
+/// act on.  A distinct parenthetical keeps the "does not block" promise honest
+/// without flattening why.
+/// What: prefixes the lead line of a
+/// [`crate::models::FindingCategory::TestCoverage`] finding.
+/// Test: `render_marks_test_coverage_finding_informational`.
+const COVERAGE_INFORMATIONAL_PREFIX: &str = "> **Informational (test coverage) — does not block.**";
 
 /// Confidence below which a finding is hedged rather than asserted (#1416).
 ///
@@ -374,14 +386,21 @@ pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -
 /// `render_marks_refuted_finding`, `render_marks_error_refuted_as_unverified`,
 /// `render_leaves_confirmed_and_unjudged_findings_unmarked`,
 /// `render_marks_style_finding_informational` (#3474),
+/// `render_marks_test_coverage_finding_informational` (#7036),
 /// `render_leaves_correctness_finding_unlabelled` (#3474).
 pub fn render_finding_comment(finding: &Finding) -> String {
     let mut out = String::with_capacity(256);
 
-    // #3474: say up front that a style nit is advisory, so the reader is never
-    // left inferring severity from a comment the verdict already discounted.
+    // #3474: say up front that an advisory finding is advisory, so the reader is
+    // never left inferring severity from a comment the verdict already
+    // discounted.  #7036: name WHICH kind of advisory, so a coverage gap is not
+    // mislabelled a taste note.
     if finding.category.is_informational() {
-        out.push_str(INFORMATIONAL_PREFIX);
+        out.push_str(if finding.category == FindingCategory::TestCoverage {
+            COVERAGE_INFORMATIONAL_PREFIX
+        } else {
+            INFORMATIONAL_PREFIX
+        });
         out.push_str("\n\n");
     }
 
