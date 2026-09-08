@@ -3,7 +3,7 @@ name = "trusty-code-gui"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
-description = "Tauri desktop shell for trusty-code (tcode) — thin client over the tcode daemon HTTP API"
+description = "Tauri desktop shell for trusty-code (tcode) — HTTP+SSE bridge onto the daemon's Unix socket"
 publish = false
 license.workspace = true
 
@@ -25,21 +25,26 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
-# #5439: `daemon-token` supplies `credential_for` — the shared loopback gate,
-# override precedence, and `0600` file read that the shell (the only side that
-# can read that file) hands to its webview. `axum-server` is deliberately NOT
-# enabled: the gate lives in `daemon_token` precisely so a client-only consumer
-# needs no router. The earlier version of this dependency did take it, for
-# `server::origin_is_loopback` — an `Origin`-HEADER parser that read
-# `http://127.0.0.1:7882@attacker.example` as loopback and leaked the token.
-trusty-common = { workspace = true, features = ["daemon-token"] }
+chrono = { workspace = true }
+tracing = { workspace = true }
+# #6637: the shell serves the webview's HTTP itself now, so it needs a router.
+axum = { workspace = true }
+# #6637: `uds` supplies the socket client (`send_framed_request`, the stream
+# reader, `daemon_socket_path`); `axum-server` supplies the guard stack the
+# daemon's own listener carried plus `uds::sse`, the SSE rendering hoisted out of
+# trusty-console in PR 2a; `daemon-token` supplies `mint_token` and the
+# `DaemonAuth` bearer/ticket guard the webview's `EventSource` needs.
+trusty-common = { workspace = true, features = ["daemon-token", "axum-server", "uds"] }
 
 [dev-dependencies]
-# serial_test: `commands::tests` mutate `TCODE_DAEMON_TOKEN`, which is shared
-# across the threads `cargo test` runs a target's tests on.
-serial_test = { workspace = true }
-# Test-only: pins `DEFAULT_DAEMON_URL` (state.rs) against trusty-code's own
-# `serve::DEFAULT_HTTP_PORT` so the two compiled-in defaults cannot drift
-# apart silently the way they did in #3364 — see
-# `default_daemon_url_matches_tcode_default_http_port` in `src/state.rs`.
+tempfile = { workspace = true }
+tokio = { workspace = true }
+# Drives the real bridge router without binding a port, the same way
+# trusty-console's `tests/search_uds_bridge.rs` drives its own.
+tower = { workspace = true }
+http-body-util = { workspace = true }
+# Test-only: pins this crate's copies of the daemon's socket name, its two
+# stream method names, and its JSON-RPC-to-HTTP status table against the
+# originals, so the copies cannot drift in the window before #6637's PR 2c
+# deletes them — see `src/bridge/mod.rs`'s tests.
 trusty-code = { workspace = true }
