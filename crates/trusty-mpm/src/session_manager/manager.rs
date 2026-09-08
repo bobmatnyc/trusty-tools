@@ -9,22 +9,27 @@
 //! `mark_runtime_exited_stopped` (non-destructive counterpart to `stop`,
 //! #2023 A), `resume`, and `decommission`.
 //! `mark_reactivated` (the in-place counterpart to `resume`, #2023 C) lives in
-//! the sibling `reactivate.rs`, and `reconcile_on_boot` lives in the sibling
-//! `reconcile.rs` (#2379) — both extracted to keep this file under the
-//! 500-SLOC cap.
+//! the sibling `reactivate.rs`, `reconcile_on_boot` lives in the sibling
+//! `reconcile.rs` (#2379), and the post-creation field setters
+//! (`mark_errored`, `set_workspace`, `set_pending_decision`, `set_source_id`,
+//! `set_deliverable_id`, `clear_pending_decision`) live in the sibling
+//! `setters.rs` (#7087) — all extracted to keep this file under the 500-SLOC
+//! cap.
 //! [`ReconcileReport`] describes what the reconciliation pass found.
 //! [`ManagedError`] is the module's error type.
 //! Test: `manager_create_record`, `manager_stop_keeps_workspace`,
 //! `manager_resume_respawns`, `manager_decommission_removes_workspace`,
 //! `manager_reconcile_gone_tmux_yields_stopped` in tests.rs.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use chrono::Utc;
 use thiserror::Error;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::core::names::SessionNameError;
 use crate::core::sm::control::Submit;
@@ -33,6 +38,10 @@ use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::resume_workdir;
 use super::slots::SlotRegistry;
 use super::store::{SessionStore, StoreError};
+
+/// One session's cached `(root, palace_id, index_ids)` residency derivation.
+/// See `residency_state.rs`.
+type ResidencyCacheEntry = (PathBuf, Option<String>, Vec<String>);
 
 /// Errors produced by the session manager.
 ///
@@ -247,6 +256,18 @@ pub struct SessionManager {
     pub(crate) resume_breaker: RwLock<super::resume_breaker::ResumeBreakerStore>,
     /// #6568: the breaker's window/threshold, read once at construction.
     pub(crate) resume_breaker_cfg: super::resume_breaker::ResumeBreakerConfig,
+    /// #7087: monotonic residency-set version. In-memory only, like `slots` —
+    /// a fresh daemon process has nothing to compare a first pull against, so
+    /// there is nothing to persist. Bumped by `create`/`stop`/`adopt`/
+    /// `decommission`; read (never bumped) by `mpm.residency.active`. See
+    /// `residency_state.rs`.
+    pub(crate) residency_generation: AtomicU64,
+    /// #7087: per-session `(root, palace_id, index_ids)` derivation cache the
+    /// residency route reuses across polls, avoiding a repeat
+    /// `resolve_palace_slug`/`derive_project_index_id` (both filesystem/`git`
+    /// touching) for a session whose root has not changed. In-memory only,
+    /// like `slots` and `residency_generation` above. See `residency_state.rs`.
+    pub(crate) residency_cache: RwLock<HashMap<ManagedSessionId, ResidencyCacheEntry>>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -286,6 +307,8 @@ impl SessionManager {
                 super::resume_breaker::ResumeBreakerStore::load(data_dir).await,
             ),
             resume_breaker_cfg: super::resume_breaker::ResumeBreakerConfig::from_env(),
+            residency_generation: AtomicU64::new(0),
+            residency_cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -688,7 +711,10 @@ impl SessionManager {
     /// `stop_runtime_exited_does_not_kill_pane` (same module) asserts
     /// `kill_session` is never invoked on the fake driver;
     /// `mark_runtime_exited_stopped_rejects_concurrently_decommissioned`
-    /// (this module's tests) asserts the CAS guard below.
+    /// (this module's tests) asserts the CAS guard below;
+    /// `generation_increments_across_mark_runtime_exited_stopped` in
+    /// `daemon::managed_routes::residency`'s route tests asserts the #7087
+    /// residency bump.
     ///
     /// CAS guard (#2453 review finding 3): the pre-fix implementation read
     /// the record via [`Self::get`] (which acquires and releases the store's
@@ -770,6 +796,9 @@ impl SessionManager {
         record.stop_cause = Some(self.runtime_exit_stop_cause(id, &record.tmux_name).await);
         guard.upsert(record.clone()).await?;
         drop(guard);
+        // #7087: Active -> Stopped leaves the active-project set, exactly as
+        // `stop` does — the reaper reaches it without going through `stop`.
+        self.bump_residency_generation();
         info!(
             id = %id,
             name = %record.tmux_name,
@@ -853,7 +882,9 @@ impl SessionManager {
     /// through to a session-scoped reuse or a session-wide kill/recreate;
     /// `liveness_tests.rs`'s `resume_refuses_when_the_tmux_probe_fails` —
     /// asserts an unobservable probe refuses instead of killing the pane
-    /// (#5859).
+    /// (#5859); `generation_increments_across_resume` in
+    /// `daemon::managed_routes::residency`'s route tests — asserts the #7087
+    /// residency bump.
     ///
     /// #6568: this is the OPERATOR entry point. It forgives the auto-resume flap
     /// streak, because a person resuming a session by hand is saying the cause
@@ -963,6 +994,8 @@ impl SessionManager {
         // this resume followed a deliberate stop.
         record.stop_cause = None;
         self.store.write().await.upsert(record.clone()).await?;
+        // #7087: Stopped/Errored -> Active re-enters the active-project set.
+        self.bump_residency_generation();
         Ok(record)
     }
 
@@ -1145,190 +1178,5 @@ impl SessionManager {
             None => self.tmux.capture(tmux_name, lines).ok()?,
         };
         (!text.is_empty()).then_some(text)
-    }
-
-    /// Mark a session as errored with a message.
-    ///
-    /// Why: when provisioning or spawning fails the session must not remain in
-    /// `Provisioning`; marking it errored surfaces the failure to `tm session ls`.
-    /// What: transitions the record to `ManagedSessionState::Errored` and appends
-    /// the error message to the task field for observability, then persists.
-    /// Test: covered by handler_spawn_wires_provision_and_spawn error path.
-    pub async fn mark_errored(
-        &self,
-        id: &ManagedSessionId,
-        error_msg: &str,
-    ) -> Result<(), ManagedError> {
-        let mut record = self.get(id).await?;
-        record.state = ManagedSessionState::Errored;
-        record.task = format!("{} [error: {}]", record.task, error_msg);
-        self.store.write().await.upsert(record).await?;
-        Ok(())
-    }
-
-    /// Update a session's workspace path and transition to a new state.
-    ///
-    /// Why: after the workspace path is resolved
-    /// must be persisted so `tm session ls` shows it and `activity` can infer
-    /// context.
-    /// What: looks up the record, sets `workspace_path` and `state`, and persists.
-    /// Test: covered by handler_spawn_wires_provision_and_spawn.
-    pub async fn set_workspace(
-        &self,
-        id: &ManagedSessionId,
-        workspace_path: std::path::PathBuf,
-        new_state: ManagedSessionState,
-    ) -> Result<(), ManagedError> {
-        let mut record = self.get(id).await?;
-        record.workspace_path = Some(workspace_path);
-        record.state = new_state;
-        self.store.write().await.upsert(record).await?;
-        Ok(())
-    }
-
-    /// Record a pending decision (an escalation) on a session, awaiting a human.
-    ///
-    /// Why: the intent-conformance FRONT gate (#1360) escalates *before* the
-    /// runtime is spawned. It must surface the divergence reason + the conformant
-    /// default through the SAME channel the harness uses (`pending_decision` /
-    /// `proposed_default`), so it appears in `GET …/activity`, MCP
-    /// `session_status`, the supervisor, and the `tm` CLI with zero new UI. The
-    /// session is left NOT `Active` (the runtime never started) so it reads as
-    /// awaiting approval until a human resolves it via `POST …/answer`.
-    /// What: looks up the record, sets `pending_decision`/`proposed_default`,
-    /// leaves the lifecycle state untouched (it stays `Provisioning` — the
-    /// runtime was withheld), and persists. No tmux input is sent (unlike
-    /// `answer_decision`): the pane has no running harness to receive it yet.
-    /// Test: `front_gate_escalation_sets_pending_decision` in
-    /// tests/session_manager_mvp.rs.
-    pub async fn set_pending_decision(
-        &self,
-        id: &ManagedSessionId,
-        decision: &str,
-        proposed_default: Option<&str>,
-    ) -> Result<(), ManagedError> {
-        let mut record = self.get(id).await?;
-        record.pending_decision = Some(decision.to_string());
-        record.proposed_default = proposed_default.map(str::to_string);
-        record.last_activity_at = Some(Utc::now());
-        self.store.write().await.upsert(record).await?;
-        Ok(())
-    }
-
-    /// Record a source project identity on a session, with a bounded retry
-    /// (#2157 item 5, the #2154 remedy).
-    ///
-    /// Why: the in-project spawn path (#1706) associates a session with a
-    /// specific `owner/repo` so callers can later filter sessions by project
-    /// and reconnect instead of spawning duplicates. Setting it post-creation
-    /// (rather than via `create_with_id`) keeps the manager's SINGLE generic
-    /// create path clean of in-project concerns. Previously a single transient
-    /// `get`/`upsert` failure here was `warn!`-and-continue at the call site —
-    /// leaving `source_id: None` on the record PERMANENTLY, which makes the
-    /// session invisible to every `?source_id=` filtered listing (the guided
-    /// picker, `tm session ls --project`) forever, since nothing else ever
-    /// retries the write.
-    /// What: retries the read-modify-write up to `MAX_SET_SOURCE_ID_ATTEMPTS`
-    /// times with a short linear backoff between attempts, returning `Ok(())`
-    /// on the first success. If every attempt fails, logs a `tracing::error!`
-    /// (loud, not `warn!`) carrying `id` and `source_id` so a future
-    /// reconcile/doctor pass can self-heal a `source_id: None` record from its
-    /// `repo_url`/`workspace_path`, then returns the last error.
-    /// Test: `set_source_id_succeeds_first_try`,
-    /// `set_source_id_returns_err_after_retries_for_missing_session` in
-    /// `tests.rs`.
-    pub async fn set_source_id(
-        &self,
-        id: &ManagedSessionId,
-        source_id: &str,
-    ) -> Result<(), ManagedError> {
-        const MAX_SET_SOURCE_ID_ATTEMPTS: u8 = 3;
-        let mut last_err: Option<ManagedError> = None;
-        for attempt in 1..=MAX_SET_SOURCE_ID_ATTEMPTS {
-            let result: Result<(), ManagedError> = async {
-                let mut record = self.get(id).await?;
-                record.source_id = Some(source_id.to_string());
-                self.store.write().await.upsert(record).await?;
-                Ok(())
-            }
-            .await;
-            match result {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    warn!(
-                        id = %id,
-                        attempt,
-                        max_attempts = MAX_SET_SOURCE_ID_ATTEMPTS,
-                        "set_source_id: attempt failed: {e}"
-                    );
-                    last_err = Some(e);
-                    if attempt < MAX_SET_SOURCE_ID_ATTEMPTS {
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            50 * u64::from(attempt),
-                        ))
-                        .await;
-                    }
-                }
-            }
-        }
-        error!(
-            id = %id,
-            source_id = %source_id,
-            attempts = MAX_SET_SOURCE_ID_ATTEMPTS,
-            "set_source_id: exhausted all attempts — session will be invisible to \
-             project-filtered listing (source_id: None) until a reconcile/doctor pass \
-             repairs it from repo_url/workspace_path"
-        );
-        Err(last_err.unwrap_or_else(|| ManagedError::SessionNotFound(id.to_string())))
-    }
-
-    /// Record which Deliverable a session is working on (DOC-35 §10.6, #2379).
-    ///
-    /// Why: `tm sessions new --deliverable <id>` binds a fresh session to a
-    /// Deliverable AFTER the session record already exists (mirroring
-    /// [`Self::set_source_id`]'s post-creation setter shape, which keeps
-    /// [`Self::create_with_id`]'s already-long parameter list from growing
-    /// further). The caller (the daemon spawn path,
-    /// `daemon::managed_routes::lifecycle`) validates the Deliverable exists
-    /// and belongs to the session's project via `DeliverableManager` BEFORE
-    /// calling this — this setter trusts that validation and does no lookup of
-    /// its own. Per §11, this is a PURE POINTER write: it never mutates the
-    /// Deliverable record itself (no auto-transition of its status).
-    /// What: a plain read-modify-write — look up the record, set
-    /// `deliverable_id`, persist. No retry loop (unlike `set_source_id`):
-    /// losing this link on a rare transient store error is a stale pointer,
-    /// not a session made invisible to a whole filtered listing, so the
-    /// simpler shape matches `set_workspace`/`set_pending_decision`.
-    /// Test: `set_deliverable_id_persists`,
-    /// `set_deliverable_id_missing_session_errors` in `set_deliverable_id_tests.rs`.
-    pub async fn set_deliverable_id(
-        &self,
-        id: &ManagedSessionId,
-        deliverable_id: crate::deliverable::DeliverableId,
-    ) -> Result<(), ManagedError> {
-        let mut record = self.get(id).await?;
-        record.deliverable_id = Some(deliverable_id);
-        self.store.write().await.upsert(record).await?;
-        Ok(())
-    }
-
-    /// Clear a pending decision WITHOUT injecting any text into the pane.
-    ///
-    /// Why: a FRONT-gate (#1360) escalation is resolved *before* a harness exists
-    /// — the session is still `Provisioning` with no runtime in the pane. Unlike
-    /// [`answer_decision`](Self::answer_decision) (which sends the answer to a
-    /// LIVE harness), the FRONT-gate answer path must clear the decision and then
-    /// LAUNCH the withheld runtime; sending the answer to a bare shell would be
-    /// meaningless. This method does the clear half only.
-    /// What: looks up the record, clears `pending_decision`/`proposed_default`,
-    /// updates `last_activity_at`, and persists. No tmux I/O.
-    /// Test: `front_gate_answer_unblocks_spawn` in tests/session_manager_mvp.rs.
-    pub async fn clear_pending_decision(&self, id: &ManagedSessionId) -> Result<(), ManagedError> {
-        let mut record = self.get(id).await?;
-        record.pending_decision = None;
-        record.proposed_default = None;
-        record.last_activity_at = Some(Utc::now());
-        self.store.write().await.upsert(record).await?;
-        Ok(())
     }
 }

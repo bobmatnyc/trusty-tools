@@ -257,7 +257,13 @@ impl SessionManager {
                      a leaked test session is not a session to keep, resume or relaunch; its \
                      pane goes back to the orphan-GC"
                 );
+                let swept_id = record.id;
                 guard.upsert(record).await?;
+                // #7087: the record may have been Active a moment ago, so the
+                // tombstone leaves the active-project set; `Deleted` is
+                // terminal, so its derivation entry is dead weight.
+                self.bump_residency_generation();
+                self.residency_cache_evict(&swept_id).await;
                 continue;
             }
 

@@ -65,7 +65,10 @@ impl SessionManager {
     /// `delete_record_force_bypasses_running_guard`,
     /// `delete_record_never_touches_workspace_dir`,
     /// `delete_record_stale_active_deletable_when_tmux_dead` (#2022) in
-    /// `super::delete_tests`.
+    /// `super::delete_tests`; the #7087 residency bump and cache eviction by
+    /// `generation_increments_across_forced_delete` and
+    /// `forced_delete_evicts_the_residency_cache_entry` in
+    /// `daemon::managed_routes::residency`'s route tests.
     pub async fn delete_record(
         &self,
         id: &ManagedSessionId,
@@ -101,6 +104,13 @@ impl SessionManager {
         updated.pending_decision = None;
         updated.proposed_default = None;
         self.store.write().await.upsert(updated).await?;
+        // #7087: a soft-delete leaves the active-project set — `--force`
+        // reaches `Deleted` straight from `Active`/`Provisioning`, without
+        // passing through `stop`, so this is the only bump on that path.
+        self.bump_residency_generation();
+        // #7087: `Deleted` is terminal, so nothing will ask the residency
+        // route about this session again — drop its derivation entry.
+        self.residency_cache_evict(id).await;
         Ok(record)
     }
 }

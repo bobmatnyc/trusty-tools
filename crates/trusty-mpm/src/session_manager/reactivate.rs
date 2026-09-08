@@ -75,7 +75,9 @@ impl SessionManager {
     /// `mark_reactivated_flips_decommissioned_to_active`,
     /// `mark_reactivated_rejects_non_stopped`,
     /// `mark_reactivated_refuses_when_workspace_removed_by_decommission`,
-    /// `mark_reactivated_clears_stale_claude_session_id`.
+    /// `mark_reactivated_clears_stale_claude_session_id`; the #7087 residency
+    /// bump by `generation_increments_across_mark_reactivated` in
+    /// `daemon::managed_routes::residency`'s route tests.
     pub async fn mark_reactivated(
         &self,
         id: &ManagedSessionId,
@@ -133,6 +135,10 @@ impl SessionManager {
         // ever being compared against a later, unrelated report.
         record.claude_session_id = None;
         self.store.write().await.upsert(record.clone()).await?;
+        // #7087: Stopped/Decommissioned -> Active re-enters the active-project
+        // set — a revived tombstone in particular is a project that was gone
+        // from the set entirely one call ago.
+        self.bump_residency_generation();
         info!(
             id = %id,
             name = %record.tmux_name,
