@@ -17,16 +17,17 @@ use crate::core::progress::{ProgressBus, Stage};
 /// report renders what everything else wrote. #5405 puts correlate immediately
 /// after collect, which is where every production writer of `work_items` runs.
 ///
-/// #5306: DOC-67 §5 "Executed stage order" lists these same nine stages. This
-/// array is what stops the two from drifting apart — a change to either that is
-/// not made to the other fails
-/// `sweep_runs_every_stage_in_order_and_survives_failures` or leaves the spec
-/// describing a sweep that does not run.
-const EXPECTED_ORDER: [SweepStage; 9] = [
+/// #5306: DOC-67 §5 "Executed stage order" lists these same ten stages
+/// (#7139 added `LinearSync`, next to `JiraSync`). This array is what stops
+/// the two from drifting apart — a change to either that is not made to the
+/// other fails `sweep_runs_every_stage_in_order_and_survives_failures` or
+/// leaves the spec describing a sweep that does not run.
+const EXPECTED_ORDER: [SweepStage; 10] = [
     SweepStage::Collect,
     SweepStage::Correlate,
     SweepStage::Classify,
     SweepStage::JiraSync,
+    SweepStage::LinearSync,
     SweepStage::Deployments,
     SweepStage::Incidents,
     SweepStage::Dora,
@@ -106,6 +107,7 @@ fn summary_counts_successes_and_failures() {
 #[test]
 fn stage_names_match_their_subcommands() {
     assert_eq!(SweepStage::JiraSync.as_str(), "jira sync");
+    assert_eq!(SweepStage::LinearSync.as_str(), "linear sync");
     assert_eq!(SweepStage::PrMetrics.to_string(), "pr-metrics");
     assert_eq!(SweepStage::Deployments.as_str(), "deployments collect");
 }
@@ -114,9 +116,10 @@ fn stage_names_match_their_subcommands() {
 // run_full_sweep — sequencing over a real (empty) database
 // ---------------------------------------------------------------------------
 
-/// An empty config has no repositories, no JIRA, and no DORA sources, so no
-/// stage touches the network. Stages that need configuration that is absent
-/// fail — which is the point: the sweep must record them and keep going.
+/// An empty config has no repositories, no JIRA, no Linear, and no DORA
+/// sources, so no stage touches the network. Stages that need configuration
+/// that is absent fail — which is the point: the sweep must record them and
+/// keep going.
 #[tokio::test]
 async fn sweep_runs_every_stage_in_order_and_survives_failures() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -132,19 +135,26 @@ async fn sweep_runs_every_stage_in_order_and_survives_failures() {
 
     let stages: Vec<_> = stats.outcomes.iter().map(|o| o.stage).collect();
     assert_eq!(stages, EXPECTED_ORDER.to_vec());
-    // The "stage N of 9" denominator in the progress start events is this
+    // The "stage N of 10" denominator in the progress start events is this
     // constant; a stage added without updating it would lie to the operator.
     assert_eq!(stages.len(), super::sweep::TOTAL_STAGES);
 
-    // JIRA is unconfigured here, so that stage must have failed — and the
-    // seven stages after it must still have run.
+    // JIRA and Linear are both unconfigured here, so both stages must have
+    // failed — and the stages after each must still have run.
     assert!(
         stats.any_failed(),
-        "an unconfigured JIRA sync should have been recorded as a failure"
+        "an unconfigured JIRA/Linear sync should have been recorded as a failure"
     );
     assert!(
         stats.failures().any(|o| o.stage == SweepStage::JiraSync),
         "expected the jira sync stage among the failures, got {:?}",
+        stats.failures().map(|o| o.stage).collect::<Vec<_>>()
+    );
+    // #7139: the Linear counterpart, next to JiraSync — same closure
+    // condition (an unconfigured board fails its own stage, not the sweep).
+    assert!(
+        stats.failures().any(|o| o.stage == SweepStage::LinearSync),
+        "expected the linear sync stage among the failures, got {:?}",
         stats.failures().map(|o| o.stage).collect::<Vec<_>>()
     );
     let jira_index = stages
@@ -155,6 +165,20 @@ async fn sweep_runs_every_stage_in_order_and_survives_failures() {
         &stages[jira_index + 1..],
         &EXPECTED_ORDER[jira_index + 1..],
         "stages after the failing jira-sync stage should still have run, but were missing"
+    );
+    let linear_index = stages
+        .iter()
+        .position(|s| *s == SweepStage::LinearSync)
+        .expect("linear stage present");
+    assert_eq!(
+        linear_index,
+        jira_index + 1,
+        "linear sync must sit immediately after jira sync"
+    );
+    assert_eq!(
+        &stages[linear_index + 1..],
+        &EXPECTED_ORDER[linear_index + 1..],
+        "stages after the failing linear-sync stage should still have run, but were missing"
     );
 }
 

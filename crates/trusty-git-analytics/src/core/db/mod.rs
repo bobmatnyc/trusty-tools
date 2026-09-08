@@ -40,6 +40,7 @@ pub mod azdo_iterations;
 pub mod collection_runs;
 pub mod correlation;
 pub mod jira_facts;
+pub mod linear_facts;
 pub mod migrations;
 pub mod pm_effort;
 pub mod pm_work;
@@ -54,6 +55,10 @@ pub use jira_facts::{
     check_freshness, get_cursor, list_cursor_projects, set_cursor, upsert_comment_detail,
     upsert_ticket_transition, CommentDetailRow, FreshnessStatus, JiraSyncCursor,
     TicketTransitionRow,
+};
+// #7139: Linear bulk-sync cursor bookkeeping.
+pub use linear_facts::{
+    get_linear_cursor, list_linear_cursor_teams, set_linear_cursor, LinearSyncCursor,
 };
 // #3915: PM effort tier.
 pub use pm_effort::{

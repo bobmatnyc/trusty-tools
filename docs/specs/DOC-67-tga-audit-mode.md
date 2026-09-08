@@ -146,8 +146,9 @@ dimension does not carry the same depth-mismatch risk as security.
 
 **In scope for v1:**
 - One `tga audit` orchestrator command driving the full existing tga data
-  pipeline (collect, classify, report, pr-metrics, jira sync, dora,
-  deployments, incidents) across a discovered or configured repo set (§6).
+  pipeline (collect, classify, report, pr-metrics, jira sync, linear sync,
+  dora, deployments, incidents) across a discovered or configured repo set
+  (§6).
 - A tga→trusty-review DD-manifest adapter (§6) that hands the discovered repo
   set to trusty-review's existing, unmodified pipeline.
 - Rendering through the existing `report-technical-dd.md` template (§8):
@@ -238,7 +239,7 @@ This spec's new orchestrator code calls into that machinery once it exists;
 it does not restate it (§7).
 
 **Executed stage order.** `tga::audit::run_full_sweep`
-(`crates/trusty-git-analytics/src/audit/sweep.rs`) runs nine stages, in this
+(`crates/trusty-git-analytics/src/audit/sweep.rs`) runs ten stages, in this
 order:
 
 1. `collect` — walk the configured repositories into `commits`.
@@ -248,11 +249,13 @@ order:
    so this is the earliest point at which the join sees a complete board.
 3. `classify` — the four-tier classification cascade.
 4. `jira sync` — ingest JIRA transitions and comments.
-5. `deployments collect` — populate `fact_deployments`.
-6. `incidents collect` — populate `fact_incidents`.
-7. `dora` — reduce those two fact tables to the four DORA keys.
-8. `pr-metrics` — aggregate pull-request metrics per engineer.
-9. `report` — render the CSV / JSON / Markdown reports.
+5. `linear sync` — bulk-ingest a Linear team's issue set, next to `jira sync`
+   for the same reason ([#7139](https://github.com/bobmatnyc/trusty-tools/issues/7139)).
+6. `deployments collect` — populate `fact_deployments`.
+7. `incidents collect` — populate `fact_incidents`.
+8. `dora` — reduce those two fact tables to the four DORA keys.
+9. `pr-metrics` — aggregate pull-request metrics per engineer.
+10. `report` — render the CSV / JSON / Markdown reports.
 
 This is data-flow order, and it deliberately replaces the order this section
 carried until
@@ -263,7 +266,7 @@ cannot execute as written: `dora` reduces the two tables `deployments` and
 following it produce.
 
 The order is asserted, not only described. `EXPECTED_ORDER` in
-`crates/trusty-git-analytics/src/audit/tests.rs` holds the same nine stages, and
+`crates/trusty-git-analytics/src/audit/tests.rs` holds the same ten stages, and
 `audit::tests::sweep_runs_every_stage_in_order_and_survives_failures` fails if
 `run_full_sweep`'s body departs from it — so this list and the code cannot drift
 apart silently.

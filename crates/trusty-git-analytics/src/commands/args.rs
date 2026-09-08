@@ -14,6 +14,7 @@ use clap::{Args, Subcommand};
 use crate::commands::deployments::DeploymentsCollectArgs;
 use crate::commands::incidents::IncidentsCollectArgs;
 use crate::commands::jira::{JiraFreshnessArgs, JiraSyncArgs};
+use crate::commands::linear::{LinearFreshnessArgs, LinearSyncArgs};
 
 /// Args wrapper for the `tga deployments` subcommand tree.
 #[derive(Args, Debug)]
@@ -62,6 +63,24 @@ pub enum JiraSubcommand {
     /// Check freshness of the JIRA-derived fact tables (fails loudly if
     /// stale/empty).
     Freshness(JiraFreshnessArgs),
+}
+
+/// Args wrapper for the `tga linear` subcommand tree.
+#[derive(Args, Debug)]
+pub struct LinearSubcommandArgs {
+    /// `tga linear` operation.
+    #[command(subcommand)]
+    pub subcommand: LinearSubcommand,
+}
+
+/// `tga linear` subcommand variants (issue #7139).
+#[derive(Subcommand, Debug)]
+pub enum LinearSubcommand {
+    /// Bulk-sync a team's full issue set into `linear_issues` / `work_items`.
+    Sync(LinearSyncArgs),
+    /// Check freshness of the Linear bulk-sync cursor (fails loudly if
+    /// stale/never run).
+    Freshness(LinearFreshnessArgs),
 }
 
 /// Arguments for `tga analyze`.

@@ -39,6 +39,16 @@ pub enum SweepStage {
     Classify,
     /// `tga jira sync` — ingest JIRA transitions and comments.
     JiraSync,
+    /// `tga linear sync` — bulk-ingest a Linear team's issue set (#7139).
+    ///
+    /// Sits next to [`Self::JiraSync`]: both populate ticket data ahead of
+    /// [`Self::Dora`]/[`Self::PrMetrics`]/[`Self::Report`], and neither
+    /// constrains [`Self::Correlate`]'s position — like `jira sync`, this
+    /// stage writes ticket-lifecycle facts (`linear_issues`), not
+    /// `work_items` directly consumed by the join (though it does also
+    /// upsert `work_items`, the same table [`Self::Collect`]'s Linear leg
+    /// already writes).
+    LinearSync,
     /// `tga deployments collect` — ingest deploy events into `fact_deployments`.
     Deployments,
     /// `tga incidents collect` — ingest incidents into `fact_incidents`.
@@ -59,6 +69,7 @@ impl SweepStage {
             Self::Correlate => "correlate",
             Self::Classify => "classify",
             Self::JiraSync => "jira sync",
+            Self::LinearSync => "linear sync",
             Self::Deployments => "deployments collect",
             Self::Incidents => "incidents collect",
             Self::Dora => "dora",

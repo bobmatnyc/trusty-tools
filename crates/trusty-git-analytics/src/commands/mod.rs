@@ -23,6 +23,7 @@ pub mod install;
 pub(crate) mod install_flags;
 pub mod install_plan;
 pub mod jira;
+pub mod linear;
 pub mod override_cmd;
 pub mod pr_metrics;
 pub mod profile;

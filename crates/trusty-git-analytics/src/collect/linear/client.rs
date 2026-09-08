@@ -14,12 +14,17 @@
 
 use std::collections::HashSet;
 
+use chrono::{DateTime, Utc};
 use reqwest::Client;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use trusty_common::credentials::scrub_secrets;
 
 use crate::collect::errors::{CollectError, Result};
+// #7139: shared with JIRA — see the `retry`/`budget` field doc on
+// `LinearClient` for why this is reuse, not a JIRA-specific dependency.
+use crate::collect::jira::retry::{with_retry, RetryBudget, RetryPolicy};
+use crate::collect::linear::sync;
 use crate::collect::ticket::is_non_ticket_identifier;
 use crate::core::config::LinearConfig;
 use crate::core::db::Database;
@@ -30,6 +35,13 @@ const USER_AGENT_VALUE: &str = "trusty-git-analytics/0.1";
 /// Linear GraphQL endpoint.
 const LINEAR_GRAPHQL_URL: &str = "https://api.linear.app/graphql";
 
+/// Extra pages [`LinearClient::fetch_team_issues`] will follow beyond the
+/// ideal page count before declaring the server's cursor runaway (issue
+/// #7139, mirroring `collect::jira::client::SEARCH_PAGE_BUDGET_SLACK`,
+/// #6812). A server that hands out a continuation token with every page —
+/// even an empty one — would otherwise loop without end.
+const LINEAR_PAGE_BUDGET_SLACK: usize = 8;
+
 /// Characters of a Linear-authored payload carried into operator-visible text.
 ///
 /// Linear's auth rejection is under 300 bytes; the cap only stops a large
@@ -37,7 +49,7 @@ const LINEAR_GRAPHQL_URL: &str = "https://api.linear.app/graphql";
 const MAX_ERROR_BODY_CHARS: usize = 500;
 
 /// A Linear issue fetched from the API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinearIssue {
     /// Linear issue ID (e.g. "ENG-123").
     pub identifier: String,
@@ -53,6 +65,24 @@ pub struct LinearIssue {
     pub priority: u8,
     /// URL to the issue in Linear.
     pub url: String,
+    /// When the issue was created (issue #7139).
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+    /// When the issue was last updated. Drives the bulk sync's incremental
+    /// cursor — see [`crate::collect::linear::sync::next_cursor`].
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+    /// When the issue entered a "started" state, if it ever did.
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    /// When the issue was completed, if it was. Paired with `created_at`,
+    /// this is what makes lead-time-from-ticket computable for a
+    /// Linear-only engagement.
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
+    /// When the issue was canceled, if it was.
+    #[serde(default)]
+    pub canceled_at: Option<DateTime<Utc>>,
 }
 
 /// Async Linear GraphQL client.
@@ -67,6 +97,15 @@ pub struct LinearClient {
     /// [`LinearClient::with_endpoint`] so a mock server can answer, which is
     /// what makes the #5665 auth-failure arm assertable without a live key.
     endpoint: String,
+    /// Retry schedule applied to bulk-page reads (issue #7139, review
+    /// finding: a 429/503 on page N of a large backfill used to discard the
+    /// whole walk). Shares [`crate::collect::jira::retry`] — its types are
+    /// generic over [`CollectError`], not JIRA-specific, so this is the same
+    /// implementation JIRA uses, not a copy of it.
+    retry: RetryPolicy,
+    /// Whole-run backoff allowance shared by every bulk-page request this
+    /// client makes. See [`crate::collect::jira::retry::RetryBudget`].
+    budget: RetryBudget,
 }
 
 /// What [`LinearClient`]'s `Debug` prints in place of the API key.
@@ -117,11 +156,27 @@ impl LinearClient {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(CollectError::Http)?;
+        let retry = RetryPolicy::default();
+        let budget = RetryBudget::new(&retry);
         Ok(Self {
             client,
             api_key,
             endpoint: LINEAR_GRAPHQL_URL.to_string(),
+            retry,
+            budget,
         })
+    }
+
+    /// Override the retry schedule used by bulk-page reads.
+    ///
+    /// Mirrors [`crate::collect::jira::client::JiraClient::with_retry_policy`]:
+    /// the default is tuned for an unattended cron backfill, which is the
+    /// wrong trade-off for tests, which must not spend real seconds asleep.
+    #[must_use]
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.budget = RetryBudget::new(&policy);
+        self.retry = policy;
+        self
     }
 
     /// Build a client that talks to `endpoint` instead of Linear itself.
@@ -130,7 +185,10 @@ impl LinearClient {
     /// only reachable through a server that answers non-2xx, and asserting it
     /// against the live API would need a revoked key in CI.
     #[cfg(test)]
-    fn with_endpoint(config: &LinearConfig, endpoint: impl Into<String>) -> Result<Self> {
+    pub(crate) fn with_endpoint(
+        config: &LinearConfig,
+        endpoint: impl Into<String>,
+    ) -> Result<Self> {
         Ok(Self {
             endpoint: endpoint.into(),
             ..Self::new(config)?
@@ -168,6 +226,11 @@ impl LinearClient {
                     assignee {{ displayName }}
                     priority
                     url
+                    createdAt
+                    updatedAt
+                    startedAt
+                    completedAt
+                    canceledAt
                 }}
             }}"#
         );
@@ -219,26 +282,7 @@ impl LinearClient {
             return Ok(None);
         }
 
-        Ok(Some(LinearIssue {
-            identifier: issue_val["identifier"]
-                .as_str()
-                .unwrap_or(identifier)
-                .to_string(),
-            title: issue_val["title"].as_str().unwrap_or("").to_string(),
-            state: issue_val["state"]["name"]
-                .as_str()
-                .unwrap_or("Unknown")
-                .to_string(),
-            team: issue_val["team"]["name"]
-                .as_str()
-                .unwrap_or("Unknown")
-                .to_string(),
-            assignee: issue_val["assignee"]["displayName"]
-                .as_str()
-                .map(String::from),
-            priority: issue_val["priority"].as_u64().unwrap_or(0) as u8,
-            url: issue_val["url"].as_str().unwrap_or("").to_string(),
-        }))
+        Ok(Some(parse_issue_node(identifier, issue_val)))
     }
 
     /// Extract Linear issue identifiers from a commit message.
@@ -358,6 +402,271 @@ impl LinearClient {
     ) -> crate::core::Result<usize> {
         store_linear_issues(db, issues)
     }
+
+    /// Fetch one page of a team's issues, ordered by `updatedAt` ascending,
+    /// retrying a 429/503 with backoff.
+    ///
+    /// Why: `tga linear sync` needs a team's FULL issue set, not just the
+    /// ones referenced by a commit message — [`Self::fetch_referenced_issues`]
+    /// answers a different question. This is the primitive [`Self::fetch_team_issues`]
+    /// pages over. A first-time backfill can walk hundreds of pages, and
+    /// without a retry a single rate-limit response on page 150 discarded
+    /// the whole in-memory walk (review finding, #7139) — [`Self::send_team_issues_page`]
+    /// classifies 429/503 as [`CollectError::Throttled`], the same variant
+    /// [`crate::collect::jira::retry::is_retryable`] already knows to retry,
+    /// so this reuses [`crate::collect::jira::retry::with_retry`] rather than
+    /// inventing a Linear-specific retry loop.
+    /// What: wraps [`Self::send_team_issues_page`] in `with_retry`.
+    /// Test: `tests::fetch_team_issues_page_maps_timestamps`,
+    /// `tests::fetch_team_issues_page_handles_an_empty_team`,
+    /// `tests::fetch_team_issues_page_errors_on_non_2xx`,
+    /// `tests::fetch_team_issues_page_retries_a_429_then_succeeds`.
+    ///
+    /// # Errors
+    ///
+    /// - [`CollectError::LinearBulkApi`] on a non-2xx response (other than
+    ///   429/503) or a GraphQL `errors` array, once the retry budget for a
+    ///   429/503 is exhausted.
+    /// - [`CollectError::Http`] on transport failures or a non-JSON body.
+    pub async fn fetch_team_issues_page(
+        &self,
+        team_key: &str,
+        since: Option<DateTime<Utc>>,
+        after: Option<&str>,
+        page_size: usize,
+        page_number: usize,
+    ) -> Result<LinearIssuesPage> {
+        with_retry("linear issues page", &self.retry, &self.budget, || {
+            self.send_team_issues_page(team_key, since, after, page_size, page_number)
+        })
+        .await
+    }
+
+    /// One un-retried attempt at [`Self::fetch_team_issues_page`]. Factored
+    /// out because `with_retry` re-runs the whole request/decode round-trip
+    /// on each attempt, and a `reqwest::RequestBuilder` is single-use.
+    async fn send_team_issues_page(
+        &self,
+        team_key: &str,
+        since: Option<DateTime<Utc>>,
+        after: Option<&str>,
+        page_size: usize,
+        page_number: usize,
+    ) -> Result<LinearIssuesPage> {
+        const QUERY: &str = r#"query($first: Int!, $after: String, $filter: IssueFilter, $orderBy: PaginationOrderBy) {
+            issues(first: $first, after: $after, filter: $filter, orderBy: $orderBy) {
+                nodes {
+                    identifier
+                    title
+                    state { name }
+                    team { name key }
+                    assignee { displayName }
+                    priority
+                    url
+                    createdAt
+                    updatedAt
+                    startedAt
+                    completedAt
+                    canceledAt
+                }
+                pageInfo { hasNextPage endCursor }
+            }
+        }"#;
+
+        let variables = serde_json::json!({
+            "first": page_size,
+            "after": after,
+            "filter": sync::build_issues_filter(team_key, since),
+            "orderBy": "updatedAt",
+        });
+        let body = serde_json::json!({ "query": QUERY, "variables": variables });
+
+        let resp = self
+            .client
+            .post(&self.endpoint)
+            .header("Authorization", &self.api_key)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(CollectError::Http)?;
+
+        let status = resp.status();
+        // #7139: 429/503 are classified as `Throttled` — the same variant
+        // `collect::jira::http::decode` uses — so `with_retry`'s
+        // `is_retryable` backs off and resumes instead of discarding the
+        // walk. Every other non-2xx is a hard, non-retried failure.
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        {
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(std::time::Duration::from_secs);
+            return Err(CollectError::Throttled {
+                status: status.as_u16(),
+                retry_after,
+            });
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CollectError::LinearBulkApi {
+                status: status.as_u16(),
+                team_key: team_key.to_string(),
+                page: page_number,
+                message: redacted_body_excerpt(&body, &self.api_key),
+            });
+        }
+
+        let json: serde_json::Value = resp.json().await.map_err(CollectError::Http)?;
+
+        if let Some(errors) = json.get("errors") {
+            if errors.as_array().is_some_and(|a| !a.is_empty()) {
+                let detail = redacted_body_excerpt(&errors.to_string(), &self.api_key);
+                return Err(CollectError::LinearBulkApi {
+                    status: status.as_u16(),
+                    team_key: team_key.to_string(),
+                    page: page_number,
+                    message: detail,
+                });
+            }
+        }
+
+        let nodes = json["data"]["issues"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let issues = nodes
+            .iter()
+            .map(|node| parse_issue_node(node["identifier"].as_str().unwrap_or(""), node))
+            .collect();
+        let has_next_page = json["data"]["issues"]["pageInfo"]["hasNextPage"]
+            .as_bool()
+            .unwrap_or(false);
+        let end_cursor = json["data"]["issues"]["pageInfo"]["endCursor"]
+            .as_str()
+            .map(String::from);
+
+        Ok(LinearIssuesPage {
+            issues,
+            has_next_page,
+            end_cursor,
+        })
+    }
+
+    /// Walk every page of a team's issue set (bounded by `max_issues`),
+    /// ordered by `updatedAt` ascending.
+    ///
+    /// Why: the CLI-facing `tga linear sync` command needs the whole set
+    /// assembled and a truncation flag, not the raw per-page primitive.
+    /// A misbehaving (or malicious) server that keeps answering
+    /// `hasNextPage: true` with an `endCursor` but zero `nodes` would
+    /// otherwise loop forever — security review finding, #7139 — so the walk
+    /// is bounded the same way [`crate::collect::jira::client::JiraClient::search_issues`]
+    /// bounds its own page budget (#6812): `max_pages` derived from
+    /// `max_issues.div_ceil(PAGE_SIZE)` plus [`LINEAR_PAGE_BUDGET_SLACK`],
+    /// erroring with [`CollectError::PagingBudgetExceeded`] rather than
+    /// spinning.
+    /// What: calls [`Self::fetch_team_issues_page`] until `hasNextPage` is
+    /// `false`, `max_issues` is reached, or the page budget is exhausted.
+    /// Any page's error (after its own retries) aborts the walk and
+    /// propagates — unlike JIRA's per-ticket circuit breaker, a bulk page has
+    /// no partial-success shape to isolate.
+    /// Test: `tests::fetch_team_issues_walks_every_page`,
+    /// `tests::fetch_team_issues_stops_at_max_issues`,
+    /// `tests::fetch_team_issues_errors_when_the_page_budget_is_exhausted`.
+    ///
+    /// # Errors
+    ///
+    /// - Propagates the first page's error from [`Self::fetch_team_issues_page`].
+    /// - [`CollectError::PagingBudgetExceeded`] when the walk does not
+    ///   terminate within its page budget.
+    pub async fn fetch_team_issues(
+        &self,
+        team_key: &str,
+        since: Option<DateTime<Utc>>,
+        max_issues: usize,
+    ) -> Result<(Vec<LinearIssue>, bool)> {
+        const PAGE_SIZE: usize = 50;
+        let max_pages = max_issues.div_ceil(PAGE_SIZE) + LINEAR_PAGE_BUDGET_SLACK;
+        let mut issues = Vec::new();
+        let mut after: Option<String> = None;
+        let mut page_number = 0usize;
+        loop {
+            page_number += 1;
+            let page = self
+                .fetch_team_issues_page(team_key, since, after.as_deref(), PAGE_SIZE, page_number)
+                .await?;
+            issues.extend(page.issues);
+            if issues.len() >= max_issues {
+                issues.truncate(max_issues);
+                return Ok((issues, true));
+            }
+            if !page.has_next_page || page.end_cursor.is_none() {
+                return Ok((issues, false));
+            }
+            if page_number >= max_pages {
+                return Err(CollectError::PagingBudgetExceeded {
+                    endpoint: "linear/issues",
+                    key: team_key.to_string(),
+                    pages: page_number,
+                });
+            }
+            after = page.end_cursor;
+        }
+    }
+}
+
+/// One page of [`LinearClient::fetch_team_issues_page`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearIssuesPage {
+    /// Issues on this page.
+    pub issues: Vec<LinearIssue>,
+    /// Whether Linear reports another page after this one.
+    pub has_next_page: bool,
+    /// Opaque cursor for the next page's `after` argument, when
+    /// `has_next_page` is `true`.
+    pub end_cursor: Option<String>,
+}
+
+/// Parse one GraphQL issue node (from either [`LinearClient::fetch_issue`] or
+/// [`LinearClient::fetch_team_issues_page`]) into a [`LinearIssue`].
+///
+/// `identifier_fallback` is used only when the node itself carries no
+/// `identifier` field, which the single-issue query relies on since it
+/// addresses the node by identifier already.
+fn parse_issue_node(identifier_fallback: &str, node: &serde_json::Value) -> LinearIssue {
+    let parse_dt = |field: &str| -> Option<DateTime<Utc>> {
+        node[field]
+            .as_str()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&Utc))
+    };
+    LinearIssue {
+        identifier: node["identifier"]
+            .as_str()
+            .unwrap_or(identifier_fallback)
+            .to_string(),
+        title: node["title"].as_str().unwrap_or("").to_string(),
+        state: node["state"]["name"]
+            .as_str()
+            .unwrap_or("Unknown")
+            .to_string(),
+        team: node["team"]["name"]
+            .as_str()
+            .unwrap_or("Unknown")
+            .to_string(),
+        assignee: node["assignee"]["displayName"].as_str().map(String::from),
+        priority: node["priority"].as_u64().unwrap_or(0) as u8,
+        url: node["url"].as_str().unwrap_or("").to_string(),
+        created_at: parse_dt("createdAt"),
+        updated_at: parse_dt("updatedAt"),
+        started_at: parse_dt("startedAt"),
+        completed_at: parse_dt("completedAt"),
+        canceled_at: parse_dt("canceledAt"),
+    }
 }
 
 /// Persist Linear issues to the database (free function for reuse from tests
@@ -366,16 +675,35 @@ impl LinearClient {
 /// # Errors
 ///
 /// Propagates [`crate::core::TgaError::DbError`] on SQL failures.
+/// Why one transaction: before #7139's review, each issue was a separate
+/// autocommit `INSERT OR REPLACE` — fine for the old per-commit-reference
+/// callers (a handful of issues), but the new bulk sync can hand this
+/// hundreds or thousands of rows in one call, turning a first-time backfill
+/// into that many individual fsync'd commits. [`unchecked_transaction`] (not
+/// [`Connection::transaction`]) is used because this function's signature
+/// takes `&Database`, not `&mut Database` — widening it would ripple into
+/// every caller (`linear_pipeline`, `commands::linear`, and both modules'
+/// tests) for no behavioral gain: `tga` is single-process and nothing else
+/// holds this connection concurrently, the same precondition
+/// `unchecked_transaction`'s own contract requires.
+///
+/// # Errors
+///
+/// Propagates [`crate::core::TgaError::DbError`] on SQL failures; the
+/// transaction rolls back on drop if it never reaches `commit()`, so a
+/// mid-batch failure leaves no partial write.
 pub fn store_linear_issues(db: &Database, issues: &[LinearIssue]) -> crate::core::Result<usize> {
     let conn = db.connection();
+    let tx = conn.unchecked_transaction()?;
     let fetched_at = chrono::Utc::now().to_rfc3339();
     let mut count = 0usize;
     for issue in issues {
         let team_key = issue.identifier.split('-').next().unwrap_or("").to_string();
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO linear_issues \
-             (identifier, title, state, team, team_key, assignee, priority, url, fetched_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (identifier, title, state, team, team_key, assignee, priority, url, fetched_at, \
+              created_at, updated_at, started_at, completed_at, canceled_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 issue.identifier,
                 issue.title,
@@ -386,10 +714,16 @@ pub fn store_linear_issues(db: &Database, issues: &[LinearIssue]) -> crate::core
                 issue.priority as i64,
                 issue.url,
                 fetched_at,
+                issue.created_at.map(|d| d.to_rfc3339()),
+                issue.updated_at.map(|d| d.to_rfc3339()),
+                issue.started_at.map(|d| d.to_rfc3339()),
+                issue.completed_at.map(|d| d.to_rfc3339()),
+                issue.canceled_at.map(|d| d.to_rfc3339()),
             ],
         )?;
         count += 1;
     }
+    tx.commit()?;
     Ok(count)
 }
 
@@ -672,6 +1006,11 @@ mod tests {
             assignee: Some("Alice".to_string()),
             priority: 2,
             url: format!("https://linear.app/x/issue/{identifier}"),
+            created_at: None,
+            updated_at: None,
+            started_at: None,
+            completed_at: None,
+            canceled_at: None,
         }
     }
 
@@ -810,10 +1149,14 @@ mod tests {
     /// why the empty case is otherwise unreachable, and `Debug` lives on the
     /// type rather than on the constructor.
     fn client_holding(key: &str) -> LinearClient {
+        let retry = RetryPolicy::default();
+        let budget = RetryBudget::new(&retry);
         LinearClient {
             client: Client::new(),
             api_key: key.to_string(),
             endpoint: PROBE_ENDPOINT.to_string(),
+            retry,
+            budget,
         }
     }
 
@@ -1129,5 +1472,300 @@ mod tests {
             "fetch must not error — a revoked key lands here: {result:?}"
         );
         println!("Result: {result:?}");
+    }
+
+    // #7139: `tga linear sync` bulk-page fetch. No real network anywhere
+    // below — every server is `wiremock::MockServer`, mirroring the JIRA
+    // `paged_http` fixtures in `collect::jira::client_tests`.
+    mod bulk_sync {
+        use super::*;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        fn node(identifier: &str, updated_at: &str) -> serde_json::Value {
+            serde_json::json!({
+                "identifier": identifier,
+                "title": format!("Title for {identifier}"),
+                "state": {"name": "In Progress"},
+                "team": {"name": "Engineering", "key": "ENG"},
+                "assignee": {"displayName": "Alice"},
+                "priority": 2,
+                "url": format!("https://linear.app/x/issue/{identifier}"),
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "updatedAt": updated_at,
+                "startedAt": "2026-01-02T00:00:00.000Z",
+                "completedAt": serde_json::Value::Null,
+                "canceledAt": serde_json::Value::Null,
+            })
+        }
+
+        fn page_response(
+            nodes: Vec<serde_json::Value>,
+            has_next: bool,
+            cursor: Option<&str>,
+        ) -> ResponseTemplate {
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "issues": {
+                        "nodes": nodes,
+                        "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+                    }
+                }
+            }))
+        }
+
+        /// Deliverable #7139.3: pagination — a two-page team walk assembles
+        /// every issue from both pages via `after`/`endCursor`.
+        #[tokio::test]
+        async fn fetch_team_issues_walks_every_page() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wiremock::matchers::body_string_contains("\"after\":null"))
+                .respond_with(page_response(
+                    vec![node("ENG-1", "2026-01-01T00:01:00.000Z")],
+                    true,
+                    Some("cursor-1"),
+                ))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(wiremock::matchers::body_string_contains("cursor-1"))
+                .respond_with(page_response(
+                    vec![node("ENG-2", "2026-01-01T00:02:00.000Z")],
+                    false,
+                    None,
+                ))
+                .mount(&server)
+                .await;
+
+            let client = mock_client(&server.uri());
+            let (issues, truncated) = client
+                .fetch_team_issues("ENG", None, 10_000)
+                .await
+                .expect("walk succeeds");
+
+            let ids: Vec<&str> = issues.iter().map(|i| i.identifier.as_str()).collect();
+            assert_eq!(ids, vec!["ENG-1", "ENG-2"]);
+            assert!(!truncated);
+        }
+
+        /// Deliverable #7139.3: the `--max-issues` cap truncates the walk
+        /// and reports it, mirroring JIRA's `walk.truncated`.
+        #[tokio::test]
+        async fn fetch_team_issues_stops_at_max_issues() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(page_response(
+                    vec![
+                        node("ENG-1", "2026-01-01T00:01:00.000Z"),
+                        node("ENG-2", "2026-01-01T00:02:00.000Z"),
+                        node("ENG-3", "2026-01-01T00:03:00.000Z"),
+                    ],
+                    true,
+                    Some("cursor-1"),
+                ))
+                .mount(&server)
+                .await;
+
+            let client = mock_client(&server.uri());
+            let (issues, truncated) = client
+                .fetch_team_issues("ENG", None, 2)
+                .await
+                .expect("walk succeeds");
+
+            assert_eq!(issues.len(), 2);
+            assert!(truncated);
+        }
+
+        /// Deliverable #7139.3: timestamp mapping — every lifecycle field
+        /// round-trips from the GraphQL node into `LinearIssue`.
+        #[tokio::test]
+        async fn fetch_team_issues_page_maps_timestamps() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(page_response(
+                    vec![node("ENG-1", "2026-01-01T00:01:00.000Z")],
+                    false,
+                    None,
+                ))
+                .mount(&server)
+                .await;
+
+            let page = mock_client(&server.uri())
+                .fetch_team_issues_page("ENG", None, None, 50, 1)
+                .await
+                .expect("page fetch succeeds");
+
+            let issue = &page.issues[0];
+            assert_eq!(
+                issue.created_at,
+                Some(
+                    DateTime::parse_from_rfc3339("2026-01-01T00:00:00.000Z")
+                        .unwrap()
+                        .with_timezone(&Utc)
+                )
+            );
+            assert_eq!(
+                issue.updated_at,
+                Some(
+                    DateTime::parse_from_rfc3339("2026-01-01T00:01:00.000Z")
+                        .unwrap()
+                        .with_timezone(&Utc)
+                )
+            );
+            assert!(issue.started_at.is_some());
+            assert_eq!(issue.completed_at, None);
+            assert_eq!(issue.canceled_at, None);
+        }
+
+        /// Deliverable #7139.3: empty team — a team with no issues yields an
+        /// empty, non-error result.
+        #[tokio::test]
+        async fn fetch_team_issues_page_handles_an_empty_team() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(page_response(vec![], false, None))
+                .mount(&server)
+                .await;
+
+            let page = mock_client(&server.uri())
+                .fetch_team_issues_page("ENG", None, None, 50, 1)
+                .await
+                .expect("empty page is not an error");
+
+            assert!(page.issues.is_empty());
+            assert!(!page.has_next_page);
+        }
+
+        /// Deliverable #7139.3: a non-2xx on a bulk page is a
+        /// `LinearBulkApi` error, not an absent-team result — the bulk-page
+        /// counterpart to `fetch_issue_errors_on_auth_failure`.
+        #[tokio::test]
+        async fn fetch_team_issues_page_errors_on_non_2xx() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(401).set_body_raw(
+                    r#"{"errors":[{"message":"Authentication required"}]}"#,
+                    "application/json",
+                ))
+                .mount(&server)
+                .await;
+
+            let err = mock_client(&server.uri())
+                .fetch_team_issues_page("ENG", None, None, 50, 1)
+                .await
+                .expect_err("a 401 must not read as an empty team");
+
+            match err {
+                CollectError::LinearBulkApi {
+                    status,
+                    team_key,
+                    page,
+                    ..
+                } => {
+                    assert_eq!(status, 401);
+                    assert_eq!(team_key, "ENG");
+                    assert_eq!(page, 1);
+                }
+                other => panic!("expected LinearBulkApi, got {other:?}"),
+            }
+        }
+
+        /// A retry policy with near-zero delays, so
+        /// `fetch_team_issues_page_retries_a_429_then_succeeds` does not
+        /// spend real seconds asleep. Mirrors
+        /// `collect::jira::client_tests::paged_http::fast_retry`.
+        fn fast_policy() -> RetryPolicy {
+            RetryPolicy {
+                max_attempts: 3,
+                base_delay: std::time::Duration::from_millis(1),
+                max_delay: std::time::Duration::from_millis(1),
+                max_total_delay: std::time::Duration::from_millis(100),
+            }
+        }
+
+        /// Deliverable #7139 fix-round item 2 (critic HIGH): a 429 on one
+        /// page must back off and resume, not discard the walk. Uses a
+        /// stateful responder — the first request gets a 429, every
+        /// subsequent one gets a normal page — asserting the retry actually
+        /// ran (not that the mock happened to be lenient).
+        #[tokio::test]
+        async fn fetch_team_issues_page_retries_a_429_then_succeeds() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::sync::Arc;
+            use wiremock::{Request, Respond};
+
+            struct OnceThrottled {
+                calls: Arc<AtomicUsize>,
+            }
+            impl Respond for OnceThrottled {
+                fn respond(&self, _request: &Request) -> ResponseTemplate {
+                    if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        ResponseTemplate::new(429)
+                            .insert_header("Retry-After", "0")
+                            .set_body_raw(
+                                r#"{"errors":[{"message":"rate limited"}]}"#,
+                                "application/json",
+                            )
+                    } else {
+                        page_response(vec![node("ENG-1", "2026-01-01T00:01:00.000Z")], false, None)
+                    }
+                }
+            }
+
+            let server = MockServer::start().await;
+            let calls = Arc::new(AtomicUsize::new(0));
+            Mock::given(method("POST"))
+                .respond_with(OnceThrottled {
+                    calls: Arc::clone(&calls),
+                })
+                .mount(&server)
+                .await;
+
+            let client = mock_client(&server.uri()).with_retry_policy(fast_policy());
+            let page = client
+                .fetch_team_issues_page("ENG", None, None, 50, 1)
+                .await
+                .expect("the 429 is retried, not surfaced");
+
+            assert_eq!(page.issues.len(), 1);
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                2,
+                "expected exactly one retry (429 then 200)"
+            );
+        }
+
+        /// Deliverable #7139 fix-round item 1 (security): a server that keeps
+        /// answering `hasNextPage: true` with zero nodes must error via the
+        /// page budget, not loop forever. Before the fix `fetch_team_issues`
+        /// had no bound at all on the walk's page count.
+        #[tokio::test]
+        async fn fetch_team_issues_errors_when_the_page_budget_is_exhausted() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(page_response(vec![], true, Some("always-more")))
+                .mount(&server)
+                .await;
+
+            let client = mock_client(&server.uri());
+            let err = client
+                .fetch_team_issues("ENG", None, 10)
+                .await
+                .expect_err("an endless hasNextPage:true must not loop forever");
+
+            match err {
+                CollectError::PagingBudgetExceeded {
+                    endpoint,
+                    key,
+                    pages,
+                } => {
+                    assert_eq!(endpoint, "linear/issues");
+                    assert_eq!(key, "ENG");
+                    assert!(pages > 0);
+                }
+                other => panic!("expected PagingBudgetExceeded, got {other:?}"),
+            }
+        }
     }
 }

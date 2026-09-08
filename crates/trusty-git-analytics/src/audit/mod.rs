@@ -3,7 +3,7 @@
 //! Why: acquisition due diligence points one command at an org and reads the
 //! result once, under time pressure. DOC-67 §2 makes that literal — nothing in
 //! this module prompts, waits for input, or needs a terminal.
-//! What: [`run_full_sweep`], the library entry point that drives tga's eight
+//! What: [`run_full_sweep`], the library entry point that drives tga's nine
 //! data-collection subcommands end to end — plus the commit ↔ board-item
 //! correlation pass (#5405) — and the per-stage outcome types it returns. The `tga audit` command (`crate::commands::audit`) owns
 //! orchestration and reporting; this module owns stage sequencing and nothing
@@ -12,11 +12,11 @@
 //!
 //! ## Stage order
 //!
-//! Data-flow order: collect → correlate → classify → jira sync → deployments →
-//! incidents → dora → pr-metrics → report. See [`SweepStage`] for what each
-//! stage does and [`run_full_sweep`] for the body that runs them.
+//! Data-flow order: collect → correlate → classify → jira sync → linear sync →
+//! deployments → incidents → dora → pr-metrics → report. See [`SweepStage`]
+//! for what each stage does and [`run_full_sweep`] for the body that runs them.
 //!
-//! DOC-67 §5 "Executed stage order" lists the same nine stages and is the
+//! DOC-67 §5 "Executed stage order" lists the same ten stages and is the
 //! spec-side statement of this contract (#5306). It used to list
 //! "collect → classify → report → pr-metrics → jira → dora → deployments →
 //! incidents", which cannot execute: `dora` reduces `fact_deployments` /
