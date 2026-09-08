@@ -20,9 +20,11 @@
 //   fires; `PaintHarness.swift` reads the rendered bitmap in the offline,
 //   slow-daemon and preview states, tracks the web view's frame across a late
 //   host resize in the `resize` state, in the `stop` state asserts the host's
-//   stop request is honoured at once (#6900), and in the `suspend` state asserts
-//   a re-entrant `startAnimation()` reloads nothing and a page that reports
-//   itself not visible is reloaded (#7112). The in-host run is manual — see
+//   stop request is honoured at once (#6900), and in the `suspend` and
+//   `suspend-cold` states asserts a re-entrant `startAnimation()` reloads
+//   nothing, a page that goes from visible to hidden is reloaded, and a page
+//   hidden from its first answer under an unoccluded window is reloaded too —
+//   without either reloading a healthy page (#7112). The in-host run is manual — see
 //   README.md, "Manual verification".
 //
 // Two constraints below are load-tested spike findings, not preference:
@@ -161,6 +163,11 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     /// the page permanently non-visible would otherwise reload the console every
     /// probe interval; one reload a minute is the ceiling.
     private static let recoveryCooldown: TimeInterval = 60
+    /// #7112: how long the view may go on reading an unhealthy page before it
+    /// recovers anyway, whatever the other guards say. Without it the "page has
+    /// never reported visible" branch is unbounded and [`reloadInterval`] is the
+    /// only exit — an hour of the black screen this issue is about.
+    private static let forcedRecoveryDeadline: TimeInterval = 60
 
     private var webView: WKWebView?
     private var retryTimer: Timer?
@@ -187,6 +194,16 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     private var sawVisiblePage = false
     /// #7112: when the last visibility recovery started, for [`recoveryCooldown`].
     private var lastRecoveryAt: Date?
+    /// #7112: when the current run of unhealthy probe answers began, for
+    /// [`forcedRecoveryDeadline`]. Cleared by a healthy answer and by `didFinish`.
+    private var unhealthySince: Date?
+    /// #7112: whether this view's window last reported itself occluded. An
+    /// unoccluded window means the saver IS on screen, so a page answering
+    /// `hidden` there is unambiguous and needs no prior-visible history to
+    /// interpret. Defaults to false — a view with no window yet is treated as on
+    /// screen, because the cost of recovering wrongly is one reload and the cost
+    /// of not recovering is a black display.
+    private var windowIsOccluded = false
     /// #7112: the window-occlusion observer, kept so it can be removed. Its only
     /// jobs are to log the transition an operator needs to correlate against
     /// RunningBoard's own rows, and to re-probe the instant the window comes back.
@@ -294,6 +311,14 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
                    log: saverLog, type: .default)
             return
         }
+        // #7112: a recovery reload is already in flight, with its own watchdog
+        // behind it. Restarting would flash the OFFLINE banner over a reachable
+        // console and clear `lastRecoveryAt`, which is what caps the reload rate.
+        if state == .suspended {
+            os_log("re-entrant startAnimation ignored — recovery already in flight",
+                   log: saverLog, type: .default)
+            return
+        }
         // #6900: leaving `.stopped` is this method's job alone. A host that
         // stops the saver and re-arms it — a wake that does not unlock — has to
         // get a loading view back, and the navigation delegate `stopAnimation()`
@@ -301,6 +326,7 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         state = .offline
         sawVisiblePage = false
         lastRecoveryAt = nil
+        unhealthySince = nil
         webView?.navigationDelegate = self
         loadConsole()
         scheduleReloadTimer()
@@ -377,6 +403,7 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         cancelVisibilityProbe()
         sawVisiblePage = false
         lastRecoveryAt = nil
+        unhealthySince = nil
         if let occlusionObserver {
             NotificationCenter.default.removeObserver(occlusionObserver)
             self.occlusionObserver = nil
@@ -435,6 +462,11 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         // #6900: no load is started after the host's stop, whichever timer or
         // callback got here.
         guard let webView, state != .stopped else { return }
+        // #7112: the page about to be replaced is not the page to probe. Without
+        // this the hourly reload of a `.live` page leaves a probe in flight, its
+        // `evaluateJavaScript` fails on the navigation, and that failure reads as
+        // a suspension and issues a second, redundant reload. `didFinish` re-arms.
+        cancelVisibilityProbe()
         os_log("loading %{public}@", log: saverLog, type: .info, config.url.absoluteString)
         var request = URLRequest(url: config.url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -576,6 +608,7 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
             self.probeDeadlineTimer = nil
             if let answer = value as? String, answer == "visible" {
                 self.sawVisiblePage = true
+                self.unhealthySince = nil
                 return
             }
             let answer = (value as? String)
@@ -585,19 +618,45 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         }
     }
 
-    /// The trigger's name is in the log line so `log show` can tell this apart
-    /// from the re-entrant-`startAnimation` path and from an ordinary outage.
+    /// Why: an unhealthy probe alone does not say the page is broken — a saver
+    ///   whose window really is behind something SHOULD have a hidden page.
+    ///   Deciding on `sawVisiblePage` alone failed open: that flag resets on
+    ///   every `didFinish`, so a page suspended inside its first probe interval
+    ///   answered `hidden` with no history, only logged, and stayed `.live` with
+    ///   the web view on screen — which the re-entrant guard then read as
+    ///   healthy, leaving [`reloadInterval`] as the only exit. An hour of #7112.
+    /// What: recovers on any ONE of four grounds, and every path out is bounded:
+    ///   the saver's own window is not occluded, so a hidden page contradicts
+    ///   what is on screen; a visible-then-hidden transition was observed; the
+    ///   page stopped answering at all; or the page has been unhealthy for
+    ///   [`forcedRecoveryDeadline`]. [`recoveryCooldown`] caps the reload rate.
+    ///   The trigger's name is in the log line so `log show` can tell this apart
+    ///   from the re-entrant-`startAnimation` path and from an ordinary outage.
+    /// Test: `PaintHarness.swift`'s `suspend` mode drives the transition ground,
+    ///   `suspend-cold` the unoccluded-window one.
     private func recoverVisibility(_ reason: String, requiresPriorVisible: Bool) {
         guard state == .live else { return }
-        if requiresPriorVisible && !sawVisiblePage {
-            // A page that has never reported itself visible was not on screen to
-            // start with, so a reload would land in the same place. Say so at
-            // `.default` — this line is the evidence that separates a host that
-            // suspends a working page from one that never showed it at all.
-            os_log("visibility lost, NOT recovering — page has never reported visible (%{public}@)",
+        if unhealthySince == nil { unhealthySince = Date() }
+        let unhealthyFor = unhealthySince.map { Date().timeIntervalSince($0) } ?? 0
+
+        let ground: String
+        if !requiresPriorVisible {
+            ground = "no answer"
+        } else if !windowIsOccluded {
+            ground = "window not occluded"
+        } else if sawVisiblePage {
+            ground = "was visible"
+        } else if unhealthyFor >= Self.forcedRecoveryDeadline {
+            ground = "unhealthy for \(Int(unhealthyFor))s"
+        } else {
+            // The one branch that waits: an occluded window whose page has never
+            // reported visible is a page that was plausibly never on screen.
+            // Bounded by the deadline above, so this cannot outlive a minute.
+            os_log("visibility lost, waiting — occluded window, page never reported visible (%{public}@)",
                    log: saverLog, type: .default, reason)
             return
         }
+
         if let lastRecoveryAt, Date().timeIntervalSince(lastRecoveryAt) < Self.recoveryCooldown {
             os_log("visibility lost, inside the recovery cooldown — %{public}@",
                    log: saverLog, type: .info, reason)
@@ -605,12 +664,12 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         }
         lastRecoveryAt = Date()
         state = .suspended
-        cancelVisibilityProbe()
         // The dimmed preview goes up NOW rather than after the reload answers,
         // so the discarded layer is never what the screen is showing.
         webView?.isHidden = true
         needsDisplay = true
-        os_log("visibility lost, recovering — %{public}@", log: saverLog, type: .default, reason)
+        os_log("visibility lost, recovering — %{public}@ (%{public}@)",
+               log: saverLog, type: .default, reason, ground)
         loadConsole()
     }
 
@@ -624,6 +683,11 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     /// Test: manual — README.md, "Manual verification".
     private func observeOcclusion() {
         guard occlusionObserver == nil else { return }
+        // Seed from the window this view is in right now; the notification only
+        // reports CHANGES, and a view that never sees one must not be left
+        // guessing. No window yet means treated as on screen — see
+        // [`windowIsOccluded`].
+        windowIsOccluded = window.map { !$0.occlusionState.contains(.visible) } ?? false
         occlusionObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didChangeOcclusionStateNotification,
             object: nil,
@@ -633,6 +697,7 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
                   let changed = notification.object as? NSWindow,
                   changed === self.window else { return }
             let visible = changed.occlusionState.contains(.visible)
+            self.windowIsOccluded = !visible
             os_log("window occlusion changed — visible=%{public}@",
                    log: saverLog, type: .default, visible ? "true" : "false")
             if visible { self.probeVisibility() }
@@ -778,6 +843,7 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         // #7112: this page instance has not answered a probe yet, and nothing
         // else exits `.live` when the OS discards its layers without killing it.
         sawVisiblePage = false
+        unhealthySince = nil
         armVisibilityProbe()
         os_log("didFinish url=%{public}@ title=%{public}@",
                log: saverLog, type: .info,

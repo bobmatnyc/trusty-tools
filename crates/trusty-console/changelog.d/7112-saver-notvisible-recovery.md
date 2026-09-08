@@ -14,9 +14,13 @@ Fixed
   a compositor with nothing left to composite. A re-entrant `startAnimation()`
   over a live page now reloads nothing, and while live the view asks the page
   every 10 s what `document.visibilityState` says; anything but `visible`, or no
-  answer inside 3 s, puts the dimmed preview up and reloads. A `hidden` reading
-  acts only on a page that has previously answered `visible`, and no two
-  recoveries run inside 60 s, so a host that never shows the page cannot turn the
-  recovery into a reload treadmill. Both attempted recoveries name their trigger
-  in the `com.trusty.console.saver` log. `PaintHarness.swift` gains a `suspend`
-  mode covering both.
+  answer inside 3 s, puts the dimmed preview up and reloads. It reloads on any of
+  four grounds — the saver's own window is not occluded, a visible-then-hidden
+  transition was seen, the page stopped answering, or the page has been unhealthy
+  for 60 s — so no page can sit suspended behind a live-looking state until the
+  hourly reload, and no two recoveries run inside 60 s, so none of the four can
+  become a reload treadmill. Every decision names its trigger and its ground in
+  the `com.trusty.console.saver` log. `PaintHarness.swift` gains `suspend` and
+  `suspend-cold` modes: the first also asserts a page reporting itself visible is
+  left alone for 35 s, the second that a page hidden from its first answer still
+  recovers.

@@ -7,7 +7,7 @@
 //   "whatever the view paints when there is no live page", and all three were
 //   reported as a black screen. Nothing measured them, because measuring them
 //   means reading pixels, not navigation callbacks.
-// What: six modes, each instantiating the bundle's principal class offscreen
+// What: seven modes, each instantiating the bundle's principal class offscreen
 //   and reading its rendered bitmap through
 //   `bitmapImageRepForCachingDisplay` / `cacheDisplay`:
 //     offline — points the view at a closed port; asserts the frame is not black
@@ -28,11 +28,15 @@
 //               issue's 500 ms bar and that the listener sees no further
 //               connection, twice — once on an in-flight load and once from
 //               inside a render tick.
-//     suspend — #7112: the only mode with an endpoint that ANSWERS, so the view
-//               reaches `.live`. Asserts a re-entrant `startAnimation()` — what
-//               `WallpaperAgent` does every 20 s to 3.5 min — reloads nothing,
-//               and that a page which stops reporting itself visible is left,
-//               reloaded, and painted over rather than shown as a blank frame.
+//     suspend — #7112: the only modes with an endpoint that ANSWERS, so the view
+//     suspend-  reaches `.live`. Both assert a re-entrant `startAnimation()` —
+//     cold      what `WallpaperAgent` does every 20 s to 3.5 min — reloads
+//               nothing, and that the recovery repaints rather than leaving a
+//               blank frame. `suspend` serves a page that answers three probes
+//               `visible` before flipping, so it also asserts a HEALTHY page is
+//               never reloaded — which is what fails a view that reloads on
+//               every probe tick. `suspend-cold` serves one hidden from its
+//               first answer, and measures the bounded forced-recovery deadline.
 //   Every mode takes the frame it runs at — `--frame WxH`, default 1280x800 —
 //   so the ultrawide geometry #6871 was reported on is reachable.
 // Test: it IS the test. README.md, "Paint harness", has the invocations;
@@ -151,10 +155,32 @@ let suspendLiveWait: TimeInterval = 20
 /// How many times `suspend` mode re-issues `startAnimation()` over that live
 /// page. `WallpaperAgent` was observed doing this every 20 s to 3.5 min.
 let suspendReentrantCalls = 3
-/// How long to watch for the recovery reload. The view probes at 10 s and 20 s
-/// after `didFinish`; the first probe answers `visible` and the second `hidden`,
-/// so the reload lands around 20 s and this window holds it with slack.
+/// How many probes `suspend` mode's page answers `visible` before it flips. The
+/// stretch this buys is what separates a view that recovers on real evidence
+/// from one that reloads on every probe tick — the latter fails
+/// [`suspendHealthySeconds`] below.
+let suspendVisibleReads = 3
+/// How long a HEALTHY page must go untouched. The view probes at 10 s, 20 s and
+/// 30 s after `didFinish` and gets `visible` each time, so any reload inside
+/// this window is a reload the page gave no reason for. Sits below the 40 s mark
+/// where the fourth probe answers `hidden`.
+let suspendHealthySeconds: TimeInterval = 35
+/// How long to watch for the recovery reload after that. The fourth probe lands
+/// at 40 s and answers `hidden`, so this window holds it with slack.
 let suspendObservationSeconds: TimeInterval = 35
+/// How long `suspend-cold` waits for its recovery. Its page answers `hidden` to
+/// its first probe at 10 s and has no prior-visible history, so this measures the
+/// view's bounded forced-recovery deadline: the escape hatch that stops a page
+/// suspended inside its first probe interval from sitting in `.live` until the
+/// hourly reload. Measured at 69 s on the reference host — a 10 s probe cadence
+/// crossing a 60 s deadline — so 90 s holds it and 3600 s could never pass.
+///
+/// The view's OTHER ground for the same case — its own window not being
+/// occluded — is not reachable here. AppKit reports no `.visible` for a window
+/// parked off every display, and neither `alphaValue = 0` nor `0.01` on screen
+/// changes that, so the only way to produce an unoccluded window is to put a
+/// real one in front of the operator. See README.md, "Visibility recovery".
+let suspendColdObservationSeconds: TimeInterval = 90
 /// How long to sample the frame once the recovery reload is seen. The reload is
 /// answered after [`suspendResponseDelay`], so the view sits in `.suspended` for
 /// about that long and every sample in the window must carry drawn content.
@@ -220,8 +246,8 @@ let bundlePath = positional.count > 1
     ? positional[1]
     : NSHomeDirectory() + "/Library/Screen Savers/TrustyConsole.saver"
 
-guard ["offline", "slow", "preview", "resize", "stop", "suspend"].contains(mode) else {
-    note("usage: paintharness <offline|slow|preview|resize|stop|suspend> [bundlePath]"
+guard ["offline", "slow", "preview", "resize", "stop", "suspend", "suspend-cold"].contains(mode) else {
+    note("usage: paintharness <offline|slow|preview|resize|stop|suspend|suspend-cold> [bundlePath]"
         + " [--frame WxH] [--start WxH]")
     note("  --frame  the frame to run at (default 1280x800; env SAVER_HARNESS_FRAME)")
     note("  --start  resize mode only: the frame to construct at (default 320x200)")
@@ -347,12 +373,17 @@ final class SilentListener {
 /// A listener that actually ANSWERS, so the view reaches `.live` — the state
 /// both halves of #7112 happen in, and the one `SilentListener` cannot produce.
 ///
-/// The page it serves reports `document.visibilityState === 'visible'` to the
-/// first read and `'hidden'` to every read after it. That is the transition
-/// WebKit performs when RunningBoard marks the WebContent process NotVisible and
-/// the layer trees are frozen, reproduced without needing the OS to do it: the
-/// saver's probe is the only reader, so the flip is deterministic rather than
-/// timed.
+/// The page it serves reports `document.visibilityState === 'visible'` to its
+/// first `visibleReads` reads and `'hidden'` to every read after them. That is
+/// the transition WebKit performs when RunningBoard marks the WebContent process
+/// NotVisible and the layer trees are frozen, reproduced without needing the OS
+/// to do it: the saver's probe is the only reader, so the flip is deterministic
+/// rather than timed, and counting reads is what lets the harness demand the
+/// view leave a HEALTHY page alone for a stretch first.
+///
+/// `visibleReads: 0` serves a page that is hidden from its very first answer —
+/// the case with no visible-then-hidden history to reason from, which the view
+/// must still recover because its own window is not occluded.
 ///
 /// Every response is held for [`suspendResponseDelay`] — see that constant.
 /// Only requests for the console path are counted, so a favicon or any other
@@ -371,22 +402,30 @@ final class PageListener {
         return count
     }
 
-    static let body = """
-    <!doctype html><html><head><meta charset="utf-8"><title>suspend harness</title>
-    <style>html,body{margin:0;height:100%;background:#201612;color:#f0e7d8;\
-    font:48px monospace;display:flex;align-items:center;justify-content:center}</style>
-    </head><body><div>suspend harness</div><script>
-    var probes = 0;
-    Object.defineProperty(document, 'visibilityState', {
-      configurable: true,
-      get: function () { probes += 1; return probes <= 1 ? 'visible' : 'hidden'; }
-    });
-    </script></body></html>
-    """
+    private let body: String
 
-    init?() {
+    static func page(visibleReads: Int) -> String {
+        """
+        <!doctype html><html><head><meta charset="utf-8"><title>suspend harness</title>
+        <style>html,body{margin:0;height:100%;background:#201612;color:#f0e7d8;\
+        font:48px monospace;display:flex;align-items:center;justify-content:center}</style>
+        </head><body><div>suspend harness</div><script>
+        var probes = 0;
+        Object.defineProperty(document, 'visibilityState', {
+          configurable: true,
+          get: function () {
+            probes += 1;
+            return probes <= \(visibleReads) ? 'visible' : 'hidden';
+          }
+        });
+        </script></body></html>
+        """
+    }
+
+    init?(visibleReads: Int) {
         guard let listener = try? NWListener(using: .tcp, on: .any) else { return nil }
         self.listener = listener
+        self.body = Self.page(visibleReads: visibleReads)
         let ready = DispatchSemaphore(value: 0)
         listener.stateUpdateHandler = { if case .ready = $0 { ready.signal() } }
         listener.newConnectionHandler = { [weak self] connection in
@@ -416,7 +455,7 @@ final class PageListener {
             self.count += 1
             self.lock.unlock()
 
-            let payload = Data(Self.body.utf8)
+            let payload = Data(self.body.utf8)
             let head = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
                 + "Content-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
             DispatchQueue.global().asyncAfter(deadline: .now() + suspendResponseDelay) {
@@ -558,10 +597,12 @@ var page: PageListener?
 switch mode {
 case "offline":
     pointView(atPort: closedPort())
-case "suspend":
-    // #7112 happens to a page that is already live, so this mode needs an
-    // endpoint that answers rather than one that stalls.
-    guard let listener = PageListener() else {
+case "suspend", "suspend-cold":
+    // #7112 happens to a page that is already live, so these modes need an
+    // endpoint that answers rather than one that stalls. `suspend-cold` serves a
+    // page that is hidden from its first answer; `suspend` one that is healthy
+    // for three probes first.
+    guard let listener = PageListener(visibleReads: mode == "suspend" ? suspendVisibleReads : 0) else {
         note("could not start the page listener")
         finish(6)
     }
@@ -869,8 +910,9 @@ case "stop":
         failures.append("could not read the view's bitmap after the mid-render stop")
     }
 
-case "suspend":
+case "suspend", "suspend-cold":
     guard let listener = page else { break }
+    let isCold = mode == "suspend-cold"
 
     /// The view's timers and WebKit's callbacks all land on the main run loop,
     /// so a plain sleep would stop the machinery under test.
@@ -914,22 +956,45 @@ case "suspend":
         failures.append("re-entrant startAnimation() took the live page off screen")
     }
 
-    // --- 2: a page that stops reporting itself visible must be recovered ----
-    // The served page answers the saver's first visibility probe with `visible`
-    // and every one after it with `hidden` — the transition WebKit performs when
-    // the OS marks the WebContent process NotVisible and discards its layers,
-    // which fires no termination callback and so exited `.live` by no other path.
-    note("watching for the recovery reload for \(Int(suspendObservationSeconds))s")
-    pump(suspendObservationSeconds, until: { listener.documentRequests > afterReentry })
+    // --- 2: a HEALTHY page must be left alone -------------------------------
+    // `suspend`'s page answers three probes `visible` before it flips. A view
+    // that reloaded on every probe tick would satisfy the recovery assertion
+    // below just as well as a correct one, so this is what tells them apart:
+    // for as long as the page reports itself visible, nothing may reload it.
+    if !isCold {
+        note("watching a healthy page for \(Int(suspendHealthySeconds))s of quiet")
+        pump(suspendHealthySeconds)
+        let afterHealthy = listener.documentRequests
+        note("requests while the page reported visible: \(afterHealthy) (was \(afterReentry))")
+        if afterHealthy != afterReentry {
+            failures.append("reloaded a page that was reporting itself visible —"
+                + " \(afterHealthy - afterReentry) request(s) before any reason to")
+        }
+        if !pageIsOnScreen() {
+            failures.append("took a healthy page off screen")
+        }
+    }
+
+    // --- 3: and a page that reports itself hidden must be recovered ---------
+    // `suspend` gets there by transition. `suspend-cold`'s page is hidden from
+    // its first answer, which has no history to reason from, so it measures the
+    // bounded forced-recovery deadline — the escape hatch that stops a page
+    // suspended inside its first probe interval from wedging the view in `.live`
+    // until the hourly reload. See [`suspendColdObservationSeconds`] for the
+    // ground this harness cannot reach.
+    let recoveryWindow = isCold ? suspendColdObservationSeconds : suspendObservationSeconds
+    note("watching for the recovery reload for \(Int(recoveryWindow))s")
+    let beforeRecovery = listener.documentRequests
+    pump(recoveryWindow, until: { listener.documentRequests > beforeRecovery })
     let afterRecovery = listener.documentRequests
     note("requests after the observation window: \(afterRecovery)")
-    if afterRecovery <= afterReentry {
+    if afterRecovery <= beforeRecovery {
         failures.append("the view never recovered: no reload in"
-            + " \(Int(suspendObservationSeconds))s after the page reported itself hidden")
+            + " \(Int(recoveryWindow))s after the page reported itself hidden")
         break
     }
 
-    // --- 3: and the screen must carry a real image while it recovers --------
+    // --- 4: and the screen must carry a real image while it recovers --------
     // #7112's symptom is that `draw(_:)` no-ops over a discarded layer, so the
     // frame during the recovery is the whole point. Only frames captured while
     // the web view is OFF screen are measured: those are the ones the view is
