@@ -249,7 +249,9 @@ async fn dreamer_shutdown_terminates_loop() {
         ..dedup_only_config()
     }));
     let (tx, rx) = tokio::sync::watch::channel(false);
-    let join = dreamer.clone().start_with_shutdown(registry, id, rx);
+    let join = dreamer
+        .clone()
+        .start_with_shutdown(registry, id, Duration::ZERO, rx);
 
     // Yield once so the task is scheduled.
     tokio::task::yield_now().await;
@@ -293,7 +295,7 @@ async fn dream_loop_does_not_pin_palace_handle() {
         ..dedup_only_config()
     }));
     let (_tx, rx) = tokio::sync::watch::channel(false);
-    let _join = dreamer.start_with_shutdown(registry.clone(), id.clone(), rx);
+    let _join = dreamer.start_with_shutdown(registry.clone(), id.clone(), Duration::ZERO, rx);
     // Let the task reach its sleep.
     tokio::task::yield_now().await;
 
@@ -1108,7 +1110,7 @@ fn dream_cycle_semantic_consolidation_disabled_by_default_builds_nothing() {
     let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
 
     assert!(
-        super::cycle::build_consolidator_from_config(&DreamConfig::default())
+        super::semantic::build_consolidator_from_config(&DreamConfig::default())
             .expect("a disabled semantic phase is not an error")
             .is_none(),
         "an unconfigured daemon must build no inference backend at all"
@@ -1904,7 +1906,7 @@ async fn consolidate_scoped_non_positive_age_is_noop() {
 /// Test: this function.
 #[tokio::test]
 async fn apply_consolidation_result_keeps_original_when_kg_write_fails() {
-    use super::cycle::record_provenance_and_collect_superseded;
+    use super::semantic::record_provenance_and_collect_superseded;
     use crate::memory_core::store::kg::KnowledgeGraph;
     use crate::memory_core::store::kg_redb::KgStoreRedb;
     use crate::memory_core::store::vector::UsearchStore;
@@ -1974,7 +1976,7 @@ fn dedup_only_config_ignores_an_ambient_openrouter_key() {
     let _guard = EnvVarGuard::set("OPENROUTER_API_KEY", "sk-or-v1-fixture-not-a-real-key");
 
     assert!(
-        super::cycle::build_consolidator_from_config(&dedup_only_config())
+        super::semantic::build_consolidator_from_config(&dedup_only_config())
             .expect("a disabled semantic phase is not an error")
             .is_none(),
         "dedup-only config must build no inference backend, so the ambient \
@@ -1989,7 +1991,7 @@ fn dedup_only_config_ignores_an_ambient_openrouter_key() {
         ..DreamConfig::default()
     };
     assert!(
-        super::cycle::build_consolidator_from_config(&semantic_on)
+        super::semantic::build_consolidator_from_config(&semantic_on)
             .expect("a resolvable cloud key passes model validation")
             .is_some(),
         "an enabled semantic phase turns an ambient OPENROUTER_API_KEY into a \

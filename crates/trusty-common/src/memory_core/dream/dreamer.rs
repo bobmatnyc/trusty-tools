@@ -4,19 +4,18 @@
 //! (#607). The Dreamer owns the idle clock, the optional injected
 //! SemanticConsolidator, and the background loop logic.
 //! What: `Dreamer` struct with `new`, `with_consolidator`, `touch`,
-//! `is_idle`, `start`, `start_with_shutdown`, and `dream_cycle`.
+//! `is_idle`, `start_with_shutdown`, and `dream_cycle`.
 //! Test: `dreamer_touch_resets_idle`, `dreamer_shutdown_terminates_loop`,
 //! `dream_cycle_merges_duplicates`, etc.
 
+use super::concurrency::{DreamCycleGauge, acquire_dream_permit};
 use super::config::{DreamConfig, DreamStats};
-use super::cycle::{
-    compact_pass, content_prune_pass, dedup_pass, prune_pass, refresh_closets,
-    semantic_consolidation_pass,
-};
+use super::cycle::{compact_pass, content_prune_pass, dedup_pass, prune_pass, refresh_closets};
 use super::fading::detect_fading;
 use super::guard::CompactionGuard;
 use super::kg_compact::kg_compact_pass;
 use super::recall_benchmark::run_benchmark;
+use super::semantic::semantic_consolidation_pass;
 use crate::memory_core::palace::PalaceId;
 use crate::memory_core::registry::PalaceRegistry;
 use crate::memory_core::retrieval::PalaceHandle;
@@ -112,45 +111,6 @@ impl Dreamer {
         self.semantic_consolidation_disabled.load(Ordering::Relaxed)
     }
 
-    /// Spawn the background dream loop.
-    ///
-    /// Why: A long-lived daemon needs a per-palace task that wakes periodically,
-    /// checks the idle clock, and runs one cycle when appropriate. It must NOT
-    /// pin the palace handle for the process lifetime: the loop takes the
-    /// `registry` + `palace_id` and re-resolves the handle each cycle via
-    /// `peek` (no MRU promote, no reopen). Between cycles it holds no
-    /// `Arc<PalaceHandle>`, so the LRU and the idle-to-disk sweep can freely
-    /// evict a palace nobody is querying — the previous design captured the
-    /// `Arc` forever and defeated eviction.
-    /// What: Spawns a tokio task that sleeps `idle_secs`, resolves the handle
-    /// (skipping the cycle when the palace has been evicted to disk — dreaming
-    /// must never rehydrate a cold palace), calls `dream_cycle` when `is_idle`,
-    /// and logs the resulting stats. Runs forever; cancel by dropping the task.
-    /// Test: Behavioral coverage via direct `dream_cycle` calls;
-    /// `dream::tests::dream_loop_does_not_pin_palace_handle` covers unpinning.
-    pub fn start(
-        self: Arc<Self>,
-        registry: PalaceRegistry,
-        palace_id: PalaceId,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let interval = Duration::from_secs(self.config.idle_secs.max(1));
-            loop {
-                tokio::time::sleep(interval).await;
-                if !self.is_idle() {
-                    continue;
-                }
-                // Resolve WITHOUT reopening: a palace idle-evicted to disk is
-                // skipped rather than rehydrated (which would defeat the sweep).
-                let Some(handle) = registry.peek(&palace_id) else {
-                    continue;
-                };
-                log_cycle_outcome(&palace_id, self.dream_cycle(&handle).await);
-                // `handle` drops here — nothing pins the palace between cycles.
-            }
-        })
-    }
-
     /// Spawn the background dream loop with a cooperative shutdown signal.
     ///
     /// Why: A long-running daemon needs to stop its background workers cleanly
@@ -162,19 +122,32 @@ impl Dreamer {
     /// shutdown signal. When `shutdown` flips to `true`, the loop logs and
     /// exits cleanly. When the shutdown sender is dropped, the loop also
     /// exits (treated as a cancel).
+    ///
+    /// `first_tick_stagger` is added to the FIRST sleep only; every sleep after
+    /// it is the plain `idle_secs` interval. Why (#7106): without it every
+    /// palace's loop starts its clock at the same daemon-startup instant, so
+    /// `idle_secs` later all of them fire in the same second — 61 loops on the
+    /// reference host, each holding its palace's corpus. Callers get the value
+    /// from [`super::concurrency::stagger_offset`]; `Duration::ZERO` reproduces
+    /// the pre-#7106 timing.
     /// Test: `dreamer_shutdown_terminates_loop` — spawn the loop, flip the
-    /// shutdown flag, await the join handle.
+    /// shutdown flag, await the join handle. Stagger:
+    /// `concurrency_tests::a_dream_loop_waits_its_stagger_before_the_first_cycle`.
     pub fn start_with_shutdown(
         self: Arc<Self>,
         registry: PalaceRegistry,
         palace_id: PalaceId,
+        first_tick_stagger: Duration,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let interval = Duration::from_secs(self.config.idle_secs.max(1));
+            // #7106: the first wait carries the palace's phase offset; every
+            // later one is the bare interval, so the offset persists forever.
+            let mut wait = interval + first_tick_stagger;
             loop {
                 tokio::select! {
-                    _ = tokio::time::sleep(interval) => {}
+                    _ = tokio::time::sleep(wait) => { wait = interval; }
                     res = shutdown.changed() => {
                         // Sender closed (`Err`) or value changed to true: shut down.
                         if res.is_err() || *shutdown.borrow() {
@@ -226,8 +199,17 @@ impl Dreamer {
     ///
     /// Test: `dream_cycle_merges_duplicates`, `dream_cycle_prunes_low_importance`,
     /// `closet_refresh_builds_index`, `dream_cycle_semantic_consolidation_with_mock`,
-    /// `dream_cycle_semantic_consolidation_no_inference`.
+    /// `dream_cycle_semantic_consolidation_no_inference`,
+    /// `concurrency_tests::ten_palaces_never_exceed_the_concurrency_cap`.
     pub async fn dream_cycle(&self, handle: &Arc<PalaceHandle>) -> Result<DreamStats> {
+        // #7106: wait for a slot in the process-wide bound before doing any
+        // work. The daemon runs one loop per resident palace and they all woke
+        // together, so the peak footprint was one cycle's working set times
+        // however many palaces were resident. The permit releases on drop, so
+        // every `?` and early return below returns it.
+        let _permit = acquire_dream_permit().await;
+        // Counted independently of the permit on purpose — see `DreamCycleGauge`.
+        let _in_flight = DreamCycleGauge::enter();
         let started = std::time::Instant::now();
         let budget = Duration::from_millis(self.config.max_cycle_ms);
         // Mark the palace as compacting for the entirety of this cycle so the
