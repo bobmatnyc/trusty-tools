@@ -374,6 +374,65 @@ async fn connections_beyond_the_limit_wait_for_a_free_slot() {
     wait_until(Duration::from_secs(2), || bus.contains(event_id)).await;
 }
 
+#[tokio::test]
+async fn shutdown_is_observed_while_the_connection_pool_is_saturated() {
+    // #6848 fix round 2, HIGH finding: the permit acquire in
+    // `serve_ingest_with_limit` used to sit *outside* the `tokio::select!`
+    // that races `shutdown` against `accept_sized`, as a plain
+    // `.acquire_owned().await` after the select returned. With every permit
+    // held, that acquire never resolves, so the loop never got back around to
+    // re-polling `shutdown` — a shutdown signal sent in that state was never
+    // observed and the serve loop ran forever. Saturate the capacity-1 pool
+    // the same way `connections_beyond_the_limit_wait_for_a_free_slot` does,
+    // so a second connection is stuck on the acquire, then fire a real
+    // shutdown and prove the loop still returns.
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = tmp.path().join("sockets").join("trusty-console.sock");
+    let listener = bind_ingest(&socket).await.expect("bind ingest socket");
+    let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    let served_bus = Arc::clone(&bus);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+    let serve_handle = tokio::spawn(async move {
+        super::ingest::serve_ingest_with_limit(listener, served_bus, 1, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await;
+    });
+
+    // Occupy the only slot: connect and never send a line, so its handler
+    // never returns and the permit is never released.
+    let occupant = dial(&socket).await;
+
+    // A second connection is accepted at the kernel level, but with the sole
+    // slot held, the serve loop is now stuck on `acquire_owned` for it — the
+    // exact state where the round-2 bug loses `shutdown`. Confirm it stays
+    // un-ingested for a bounded window (which also gives the accept loop
+    // time to actually reach that stuck acquire) before firing shutdown.
+    let event = make_event(None);
+    let event_id = event.id;
+    let mut line = serde_json::to_vec(&event).expect("serialize event");
+    line.push(b'\n');
+    let mut second = dial(&socket).await;
+    second.write_all(&line).await.expect("write frame");
+    second.shutdown().await.expect("half-close");
+    assert_stays_false(Duration::from_millis(300), || bus.contains(event_id)).await;
+
+    shutdown_tx
+        .send(())
+        .expect("serve loop is still awaiting shutdown");
+
+    tokio::time::timeout(Duration::from_secs(2), serve_handle)
+        .await
+        .expect(
+            "serve_ingest_with_limit must return once shutdown resolves, even with \
+             every permit held and a connection stuck on acquire",
+        )
+        .expect("the serve task must not panic");
+
+    drop(occupant);
+}
+
 /// Poll `predicate` until it is true or `budget` elapses.
 ///
 /// Why: ingest happens on a spawned task, so a test writing to the socket

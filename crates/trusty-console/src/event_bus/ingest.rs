@@ -37,7 +37,8 @@
 //! `unterminated_line_never_grows_past_the_line_cap`,
 //! `stale_socket_file_is_reclaimed_on_bind`,
 //! `idle_connection_is_dropped_after_the_read_timeout`,
-//! `connections_beyond_the_limit_wait_for_a_free_slot`.
+//! `connections_beyond_the_limit_wait_for_a_free_slot`,
+//! `shutdown_is_observed_while_the_connection_pool_is_saturated`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -161,7 +162,8 @@ pub(crate) async fn bind_ingest(socket: &Path) -> Result<UnixListener, IngestErr
 /// Test: `super::tests::ingest_over_uds_socket_reaches_the_bus`,
 /// `super::tests::malformed_line_does_not_kill_the_listener`,
 /// `super::tests::oversized_line_ends_only_its_own_connection`,
-/// `super::tests::connections_beyond_the_limit_wait_for_a_free_slot`.
+/// `super::tests::connections_beyond_the_limit_wait_for_a_free_slot`,
+/// `super::tests::shutdown_is_observed_while_the_connection_pool_is_saturated`.
 pub(crate) async fn serve_ingest(
     listener: UnixListener,
     bus: Arc<EventBus>,
@@ -174,7 +176,8 @@ pub(crate) async fn serve_ingest(
 /// read from [`MAX_CONCURRENT_CONNECTIONS`], so a test can prove the gating
 /// behavior against a limit of 1 instead of opening 257 real connections.
 ///
-/// Test: `super::tests::connections_beyond_the_limit_wait_for_a_free_slot`.
+/// Test: `super::tests::connections_beyond_the_limit_wait_for_a_free_slot`,
+/// `super::tests::shutdown_is_observed_while_the_connection_pool_is_saturated`.
 pub(crate) async fn serve_ingest_with_limit(
     listener: UnixListener,
     bus: Arc<EventBus>,
@@ -204,10 +207,20 @@ pub(crate) async fn serve_ingest_with_limit(
         // beyond the cap waits for a slot rather than each getting its own
         // task and `BufReader` immediately. `expect` is safe: the semaphore
         // is never `close`d, so `acquire_owned` only errors on a closed one.
-        let permit = Arc::clone(&semaphore)
-            .acquire_owned()
-            .await
-            .expect("event-bus ingest semaphore is never closed");
+        //
+        // #6848 fix round 2: the acquire is raced against `shutdown` too —
+        // with every permit held (all `max_connections` connections
+        // saturated), an acquire with nothing to race it against blocks the
+        // loop forever, so `shutdown` resolving is never observed until a
+        // slot frees up on its own. `biased` keeps shutdown checked first on
+        // every poll, same as the accept race above.
+        let permit = tokio::select! {
+            biased;
+            () = &mut shutdown => return,
+            permit = Arc::clone(&semaphore).acquire_owned() => {
+                permit.expect("event-bus ingest semaphore is never closed")
+            }
+        };
         let bus = Arc::clone(&bus);
         tokio::spawn(async move {
             handle_connection(stream, bus).await;
