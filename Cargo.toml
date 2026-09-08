@@ -251,7 +251,10 @@ jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 # v5 (ADR-0027): room ids are minted as name-based UUIDv5 over a canonical
 # key so they are reproducible across processes without coordination and carry
 # a full SHA-1 digest rather than the colliding 16-byte fold they replace.
-uuid = { version = "1", features = ["v4", "v5", "serde"] }
+# v7 (#6847): `control_bus::EventId` is a UUIDv7 minted by the emitting
+# process (DOC-73 §3.1) — time-ordered, so ids sort close to `seq`/`at` order
+# even before the console-side bus assigns a total order.
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 # url: WHATWG URL parsing. #5439 needs it to answer "does this URL target
 # loopback" the way the HTTP client that will dial it answers — an Origin-header
 # parser splits the authority at the first `:` and reads

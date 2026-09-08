@@ -11,10 +11,11 @@
 //! What: A thin facade over two sources. `bus` (local) owns the process-global
 //!       broadcast channel, the stderr relay prefix, and the lagged-receiver
 //!       helper. The types those move — the `HarnessEvent`/`HarnessPayload`
-//!       envelope, the `HarnessSource` + `LifecycleEvent` taxonomy, and the
-//!       subscriber-side `Filter` — now live in `trusty_common::control_bus`
-//!       and are re-exported here, so this module's public surface is
-//!       unchanged for existing consumers.
+//!       envelope, its `EventId` id/parent-id type (issue #6847), the
+//!       `HarnessSource` + `LifecycleEvent` taxonomy, and the subscriber-side
+//!       `Filter` — now live in `trusty_common::control_bus` and are
+//!       re-exported here, so this module's public surface is unchanged for
+//!       existing consumers.
 //! Test: `tests` (below) is the comprehensive suite for this foundation type;
 //!       submodules document which test exercises each item.
 
@@ -31,7 +32,7 @@ pub use bus::{
 // `trusty_agents_common::events::*` import — and this module's own tests —
 // compiling unchanged.
 pub use trusty_common::control_bus::{
-    Filter, HarnessEvent, HarnessPayload, HarnessSource, LifecycleEvent,
+    EventId, Filter, HarnessEvent, HarnessPayload, HarnessSource, LifecycleEvent,
 };
 
 #[cfg(test)]
@@ -54,6 +55,8 @@ mod tests {
             seq: 0,
             at: chrono::Utc::now(),
             payload,
+            id: EventId::new(),
+            parent_id: None,
         }
     }
 

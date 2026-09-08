@@ -28,6 +28,8 @@ fn envelope(payload: HarnessPayload, session: Option<&str>) -> HarnessEvent {
         seq: 0,
         at: chrono::Utc::now(),
         payload,
+        id: EventId::new(),
+        parent_id: None,
     }
 }
 
@@ -138,8 +140,10 @@ fn harness_event_round_trips() {
     let s = serde_json::to_string(&ev).expect("serialize");
     assert!(s.contains("\"source\":\"agents\""), "{s}");
     assert!(s.contains("\"session\":\"sess-1\""), "{s}");
+    assert!(s.contains("\"id\":\""), "id should be present: {s}");
     let back: HarnessEvent = serde_json::from_str(&s).expect("deserialize");
     assert_eq!(back, ev);
+    assert_eq!(back.id, ev.id);
 }
 
 #[test]
@@ -147,6 +151,144 @@ fn harness_event_omits_none_session() {
     let ev = envelope(HarnessPayload::Ping, None);
     let s = serde_json::to_string(&ev).expect("serialize");
     assert!(!s.contains("session"), "session should be omitted: {s}");
+}
+
+#[test]
+fn harness_event_omits_none_parent_id() {
+    let ev = envelope(HarnessPayload::Ping, None);
+    let s = serde_json::to_string(&ev).expect("serialize");
+    assert!(
+        !s.contains("parent_id"),
+        "parent_id should be omitted when None: {s}"
+    );
+}
+
+/// Two independently constructed envelopes never collide on `id`.
+///
+/// Why: `id` replaces `seq` as the cross-process identity precisely because
+///      `seq` collides across producers (DOC-73 §3.1) — the new field has to
+///      actually avoid the failure mode it exists to fix.
+/// What: Builds two envelopes via the shared `envelope()` helper (which calls
+///       `EventId::new()` per call) and asserts their ids differ.
+/// Test: this test itself.
+#[test]
+fn harness_event_id_is_unique_per_event() {
+    let a = envelope(HarnessPayload::Ping, None);
+    let b = envelope(HarnessPayload::Ping, None);
+    assert_ne!(a.id, b.id);
+}
+
+/// `parent_id` carries the causal edge from a child event back to the event
+/// that spawned it, and that edge survives a serde round trip.
+///
+/// Why: The tree view (DOC-73 §5.2) assembles a forest purely from
+///      `parent_id` — the wire representation has to preserve the exact
+///      referenced `id`, not just "some" id.
+/// What: Builds a root event, then a child whose `parent_id` is the root's
+///       `id`; asserts the JSON carries the root's id under `parent_id` and
+///       that deserializing restores the same link.
+/// Test: this test itself.
+#[test]
+fn harness_event_parent_id_links_to_the_causing_event() {
+    let root = envelope(HarnessPayload::Ping, Some("s1"));
+    let mut child = envelope(HarnessPayload::Ping, Some("s1"));
+    child.parent_id = Some(root.id);
+
+    let s = serde_json::to_string(&child).expect("serialize");
+    assert!(s.contains(&format!("\"parent_id\":\"{}\"", root.id)), "{s}");
+
+    let back: HarnessEvent = serde_json::from_str(&s).expect("deserialize");
+    assert_eq!(back.parent_id, Some(root.id));
+    assert_ne!(
+        back.parent_id,
+        Some(child.id),
+        "child is not its own parent"
+    );
+}
+
+/// A `HarnessEvent` serialized before issue #6847 added `id`/`parent_id`
+/// still deserializes.
+///
+/// Why: Back-compat is the whole point of `#[serde(default)]` on both
+///      fields — a rolling upgrade (an old producer, a new consumer, or a
+///      durable log written by yesterday's binary) must not start failing to
+///      parse the moment this PR merges.
+/// What: Serializes a normal envelope to a `serde_json::Value`, deletes the
+///       `id` and `parent_id` keys to simulate the legacy wire shape, then
+///       deserializes the result and asserts it succeeds with `parent_id`
+///       defaulting to `None`.
+/// Test: this test itself.
+#[test]
+fn harness_event_back_compat_missing_fields_deserializes() {
+    let ev = envelope(HarnessPayload::Ping, Some("legacy"));
+    let mut value = serde_json::to_value(&ev).expect("serialize to value");
+    let obj = value
+        .as_object_mut()
+        .expect("envelope serializes as an object");
+    obj.remove("id");
+    obj.remove("parent_id");
+    let json = serde_json::to_string(&value).expect("serialize legacy shape");
+
+    let back: HarnessEvent =
+        serde_json::from_str(&json).expect("legacy payload without id/parent_id should parse");
+    assert_eq!(back.source, ev.source);
+    assert_eq!(back.session, ev.session);
+    assert_eq!(back.seq, ev.seq);
+    assert!(back.parent_id.is_none());
+}
+
+/// A missing `id` mints a fresh one on every deserialize, rather than a fixed
+/// sentinel — proving the `#[serde(default)]` path actually calls
+/// `EventId::new()` and not a constant placeholder.
+///
+/// Why: A nil/constant fallback would let two distinct legacy events collide
+///      on `id` the moment they both hit a consumer that indexes by it (the
+///      tree view does). Minting fresh keeps that invariant even for events
+///      that predate this field.
+/// What: Deserializes the same id-less JSON twice and asserts the two
+///       results carry different ids.
+/// Test: this test itself.
+#[test]
+fn harness_event_missing_id_mints_a_fresh_id_each_deserialize() {
+    let ev = envelope(HarnessPayload::Ping, None);
+    let mut value = serde_json::to_value(&ev).expect("serialize to value");
+    value
+        .as_object_mut()
+        .expect("envelope serializes as an object")
+        .remove("id");
+    let json = serde_json::to_string(&value).expect("serialize legacy shape");
+
+    let a: HarnessEvent = serde_json::from_str(&json).expect("first deserialize");
+    let b: HarnessEvent = serde_json::from_str(&json).expect("second deserialize");
+    assert_ne!(a.id, b.id);
+}
+
+// ---- EventId ----
+
+#[test]
+fn event_id_round_trips() {
+    let id = EventId::new();
+    let s = serde_json::to_string(&id).expect("serialize");
+    let back: EventId = serde_json::from_str(&s).expect("deserialize");
+    assert_eq!(back, id);
+}
+
+#[test]
+fn event_id_new_mints_distinct_ids() {
+    let a = EventId::new();
+    let b = EventId::new();
+    assert_ne!(a, b);
+}
+
+#[test]
+fn event_id_display_matches_serialized_string() {
+    let id = EventId::new();
+    let json = serde_json::to_string(&id).expect("serialize");
+    // `#[serde(transparent)]` writes the inner `Uuid`'s string form as a JSON
+    // string; `Display` forwards to the same `Uuid::fmt`, so the two must
+    // agree once the JSON quoting is stripped.
+    let quoted = format!("\"{id}\"");
+    assert_eq!(json, quoted);
 }
 
 // ---- Filter matrix ----
@@ -231,6 +373,7 @@ const MODULE_SOURCES: &[(&str, &str)] = &[
     ("control_bus/mod.rs", include_str!("mod.rs")),
     ("control_bus/lifecycle.rs", include_str!("lifecycle.rs")),
     ("control_bus/envelope.rs", include_str!("envelope.rs")),
+    ("control_bus/event_id.rs", include_str!("event_id.rs")),
     ("control_bus/filter.rs", include_str!("filter.rs")),
     ("control_bus/tests.rs", include_str!("tests.rs")),
 ];

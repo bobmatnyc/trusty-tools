@@ -9,23 +9,29 @@
 //!      is a sibling producer, not a shared library. Hoisting the types here
 //!      gives all four crates one definition and no producer-to-producer edge.
 //! What: Re-exports `HarnessSource` and `LifecycleEvent` (the taxonomy),
-//!       `HarnessPayload` and `HarnessEvent` (the envelope), and `Filter` (the
+//!       `HarnessPayload` and `HarnessEvent` (the envelope), `EventId` (the
+//!       envelope's `id`/`parent_id` type, issue #6847), and `Filter` (the
 //!       subscriber-side predicate). Nothing here transports an event: no
 //!       channel, no process-global sender, no sequence counter. A producer
-//!       stamps `seq` and `at` itself and hands the envelope to whatever moves
-//!       it; the bus that owns delivery is trusty-console's.
+//!       stamps `seq`, `at`, and `id` itself and hands the envelope to
+//!       whatever moves it; the bus that owns delivery is trusty-console's.
 //! Test: `tests` below covers serde round-trips and the filter matrix, and
 //!       `tests::control_bus_declares_no_transport` reads this module's own
 //!       sources to keep the types-only boundary from eroding.
 
 // #6846: hoisted out of `trusty_agents_common::events`, which keeps its
 // in-process channel and stderr relay until slice 9 (#6854) removes them.
+// #6847: `event_id` added — `uuid` became a mandatory dependency of this
+// crate (previously optional, gated behind `rpc`/`daemon-token`/etc.) because
+// `HarnessEvent` is ungated and now always carries an `EventId`.
 
 mod envelope;
+mod event_id;
 mod filter;
 mod lifecycle;
 
 pub use envelope::{HarnessEvent, HarnessPayload};
+pub use event_id::EventId;
 pub use filter::Filter;
 pub use lifecycle::{HarnessSource, LifecycleEvent};
 
