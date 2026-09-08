@@ -1,5 +1,7 @@
 /target
 **/target/
+# #7177: worktree build output isolation
+**/target-worktree/
 **/*.rs.bk
 .env
 .env.local

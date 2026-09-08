@@ -113,3 +113,9 @@ partway through leaves that session's uncommitted work exactly where it was.
 The old form of this recipe stashed the dirty checkout instead, which meant an
 interrupted run left the work in a stash entry someone had to find and restore
 by hand (#4730).
+
+## Git Staging in Worktrees
+
+When staging changes in a worktree, always name files explicitly: `git add <file>` or `git add -p`.
+Never use `git add -A` in a worktree, as it stages untracked build directories.
+The ignored directory name is `target-worktree/`, verified with `git check-ignore -v target-worktree/` from the worktree root.
