@@ -51,7 +51,9 @@
 //! `denies_worktree_remove_from_version_control_when_no_merged_pr`,
 //! `denies_worktree_remove_from_version_control_when_another_agent_holds_lock`,
 //! `denies_worktree_remove_from_version_control_when_the_owner_query_fails`,
-//! `denies_worktree_remove_when_agent_type_claims_version_control_without_agent_id`
+//! `denies_worktree_remove_when_agent_type_claims_version_control_without_agent_id`,
+//! `denies_a_removal_whose_path_carries_an_unexpanded_variable`,
+//! `denies_a_removal_whose_dash_c_carries_an_unexpanded_variable`
 //! below; `pm_guard_denies_worktree_remove_from_native_subagent` and
 //! `pm_guard_allows_worktree_remove_from_pm` run the binary end to end in
 //! `tests/tm_hook_pm_guard.rs`.
@@ -65,7 +67,7 @@ use super::main_checkout::git_verb_target_dir_with_tail;
 use super::worktree_remove_rechecks::{
     CHECK_DISPATCH_IDENTITY, CHECK_WORKTREE_SCOPE, recheck_deny,
 };
-use super::{PathEnv, resolve_target_path};
+use super::{PathEnv, resolve_target_path, unexpanded_shell_variable};
 
 /// Deny reason for an agent-side `git worktree remove` (#5791, ADR-0057).
 ///
@@ -199,7 +201,7 @@ pub(crate) fn evaluate_worktree_remove_command(
     }
     // Re-check `e`, run here because it is lexical: an out-of-scope target
     // must not cost a daemon round trip or a `gh` call to refuse.
-    let Some(target) = removal_target_path(&tail, &target_dir) else {
+    let Some((token, target)) = removal_target_path(&tail, &target_dir) else {
         return WorktreeRemoveVerdict::Deny(recheck_deny(
             CHECK_WORKTREE_SCOPE,
             &target_dir,
@@ -207,6 +209,23 @@ pub(crate) fn evaluate_worktree_remove_command(
              what would be deleted.",
         ));
     };
+    // #7098: an unexpanded `$MAIN` survives `resolve_target_path` as a literal
+    // path component and is joined once per token, so `git -C $MAIN worktree
+    // remove $MAIN/…` probed `<repo>/$MAIN/$MAIN/…` and the failure surfaced as
+    // a `clean-tree` deny quoting a directory the command never named. Refuse
+    // here instead, against the token as written.
+    if let Some(variable) = unexpanded_shell_variable(&target) {
+        return WorktreeRemoveVerdict::Deny(recheck_deny(
+            CHECK_WORKTREE_SCOPE,
+            Path::new(&token),
+            &format!(
+                "the path still carries the unexpanded shell variable `{variable}` — the guard \
+                 expands only `$TMPDIR`, `$TMP`, `$HOME` and `$PWD`, so it cannot establish which \
+                 directory would be deleted, and every later re-check would probe a path that \
+                 does not exist. Re-run the removal with the worktree path written out in full."
+            ),
+        ));
+    }
     if !is_worktree_path(&target) {
         return WorktreeRemoveVerdict::Deny(recheck_deny(
             CHECK_WORKTREE_SCOPE,
@@ -244,17 +263,23 @@ fn worktree_remove_segment(command: &str, cwd: &Path) -> Option<(PathBuf, Vec<St
 ///
 /// Why: the re-checks all key on the directory that would be deleted, and it
 /// is the one thing the command says that the guard cannot infer.
-/// What: the first tail token after `remove` that is not a flag, resolved
-/// against `base` through the shared [`resolve_target_path`]. `git worktree
-/// remove` takes no option that consumes a value, so skipping every `-`-led
-/// token cannot swallow the path.
-/// Test: `resolves_the_removal_target_against_a_dash_c_directory`.
-fn removal_target_path(tail: &[String], base: &Path) -> Option<PathBuf> {
+/// What: the first tail token after `remove` that is not a flag, returned both
+/// AS WRITTEN and resolved against `base` through the shared
+/// [`resolve_target_path`]. `git worktree remove` takes no option that consumes
+/// a value, so skipping every `-`-led token cannot swallow the path. The raw
+/// token is kept because a refusal about an unresolvable path must quote what
+/// the command said, not the path the guard synthesized from it (#7098).
+/// Test: `resolves_the_removal_target_against_a_dash_c_directory`,
+/// `denies_a_removal_whose_path_carries_an_unexpanded_variable`.
+fn removal_target_path(tail: &[String], base: &Path) -> Option<(String, PathBuf)> {
     let arg = tail
         .iter()
         .skip(1)
         .find(|t| !t.starts_with('-') && !t.is_empty())?;
-    Some(resolve_target_path(arg, base, &PathEnv::from_process()))
+    Some((
+        arg.clone(),
+        resolve_target_path(arg, base, &PathEnv::from_process()),
+    ))
 }
 
 #[cfg(test)]
@@ -439,6 +464,60 @@ mod tests {
             true,
             version_control(),
             Path::new("/elsewhere"),
+        ));
+        assert_eq!(target, PathBuf::from(WT));
+    }
+
+    /// #7098: `git -C $MAIN worktree remove $MAIN/…` used to reach the
+    /// re-checks with `$MAIN` joined twice, so the refusal read as a
+    /// `clean-tree` failure for `<repo>/$MAIN/$MAIN/.claude/worktrees/agent-x`
+    /// — a directory the command never named and that cannot exist. The
+    /// removal is still refused; the refusal now names the variable and quotes
+    /// the token as written.
+    #[test]
+    fn denies_a_removal_whose_path_carries_an_unexpanded_variable() {
+        let reason = deny_reason(evaluate_worktree_remove_command(
+            "git -C $MAIN worktree remove $MAIN/.claude/worktrees/agent-x",
+            true,
+            version_control(),
+            Path::new("/repo"),
+        ));
+        assert!(reason.contains(CHECK_WORKTREE_SCOPE), "{reason}");
+        assert!(reason.contains("$MAIN"), "{reason}");
+        assert!(reason.contains("unexpanded shell variable"), "{reason}");
+        assert!(
+            !reason.contains("$MAIN/$MAIN"),
+            "the doubled join must never reach the message: {reason}"
+        );
+        assert!(
+            !reason.contains(CHECK_CLEAN_TREE),
+            "an unresolvable path is not a dirty tree: {reason}"
+        );
+    }
+
+    /// The variable can sit in the `-C` half alone: the removal path is then
+    /// absolute and clean, but the guard still probed nothing real (#7098).
+    #[test]
+    fn denies_a_removal_whose_dash_c_carries_an_unexpanded_variable() {
+        let reason = deny_reason(evaluate_worktree_remove_command(
+            "git -C ${MAIN}/sub worktree remove ../.claude/worktrees/agent-x",
+            true,
+            version_control(),
+            Path::new("/repo"),
+        ));
+        assert!(reason.contains(CHECK_WORKTREE_SCOPE), "{reason}");
+        assert!(reason.contains("${MAIN}"), "{reason}");
+    }
+
+    /// The expansions `resolve_target_path` DOES perform must not trip the new
+    /// refusal — `$PWD` resolves against the tracked base.
+    #[test]
+    fn allows_a_removal_whose_path_uses_an_expanded_variable() {
+        let target = recheck_target(evaluate_worktree_remove_command(
+            "git worktree remove --force $PWD/.claude/worktrees/agent-x",
+            true,
+            version_control(),
+            Path::new("/repo"),
         ));
         assert_eq!(target, PathBuf::from(WT));
     }

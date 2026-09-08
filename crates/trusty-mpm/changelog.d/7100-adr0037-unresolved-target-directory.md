@@ -1,0 +1,3 @@
+Fixed
+
+- The ADR-0037 destructive-git guard no longer calls a directory a main checkout when it could not resolve that directory (#7100). `git -C $WT checkout -- <file>`, issued by a `version-control` agent standing in a main checkout, resolved to `<checkout>/$WT`, whose nearest `.git` ancestor is the checkout itself, so the refusal told the agent it was destroying the shared tree and the agent hand-edited the file instead. The command is still refused — an empty `$WT` would run it in that checkout — but the refusal now names the variable and the two forms that work. A `-C` path spelled out to a sibling harness worktree (`.claude/worktrees/…`, `.worktrees/…`) was and stays outside this rule.

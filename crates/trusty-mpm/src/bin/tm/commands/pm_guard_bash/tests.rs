@@ -1656,3 +1656,114 @@ fn wrappers_around_benign_commands_still_allow() {
         );
     }
 }
+
+/// Why (#6982): two rust-engineers in isolation worktrees reported a `for` loop
+/// over `crates/trusty-git-analytics/**` and a `python3 - <<'PY'` scratch
+/// script being refused for "naming git". Nothing in THIS classifier matches
+/// `git` as a substring — `shell_lex::git_subcommand` compares the program's
+/// basename as a token — and these cases pin that, so a later rule cannot
+/// introduce the substring match the report describes. See #6982 for where the
+/// reported refusals actually come from.
+/// Test: itself.
+#[test]
+fn git_inside_a_path_or_a_word_is_not_a_git_command() {
+    for command in [
+        // AC (a): the only `git` is a directory name.
+        "for f in crates/trusty-git-analytics/src/collect/jira/*.rs; do printf '%s' \"$f\"; done",
+        "ls crates/trusty-git-analytics/src",
+        "rg --files crates/trusty-git-analytics | head",
+        // `git` as a substring of another word, and inside a flag name.
+        "echo digit legit gitignore",
+        "grep -n legit crates/trusty-git-analytics/README.md",
+        "cargo run -- --git-dir /tmp/x",
+        "./scripts/check_line_cap.sh",
+    ] {
+        assert_eq!(
+            evaluate_bash_command(command),
+            None,
+            "expected allow, the only `git` here is not in command position: {command}"
+        );
+    }
+}
+
+/// AC (c): a here-document body is DATA. [`split_shell_segments_raw`] frames it
+/// (#6946), so a scratch script that merely mentions a git command is not one.
+/// Test: itself.
+#[test]
+fn git_inside_a_heredoc_body_is_not_a_git_command() {
+    for command in [
+        "python3 - <<'PY'\nprint('git apply patch.diff')\nPY",
+        "cat <<'EOF'\ngit apply patch.diff\nsed -i s/a/b/ f\nEOF",
+        "python3 - <<'PY'\nif a > b:\n    print('git apply x')\nPY",
+    ] {
+        assert_eq!(
+            evaluate_bash_command(command),
+            None,
+            "a here-document body is data, not syntax: {command}"
+        );
+    }
+}
+
+/// AC (b): the other direction. A real `git apply` in command position after
+/// any composition operator still denies, so the token-position rule above is
+/// not an escape hatch.
+/// Test: itself.
+#[test]
+fn git_in_command_position_after_a_separator_still_denies() {
+    for command in [
+        "echo hi && git apply p.diff",
+        "echo hi; git apply p.diff",
+        "cat p.diff | git apply -",
+        "echo hi || git apply p.diff",
+        "true & git apply p.diff",
+        "ls crates/trusty-git-analytics && git apply p.diff",
+        "git -C crates/trusty-git-analytics apply p.diff",
+    ] {
+        assert_eq!(
+            evaluate_bash_command(command),
+            Some(SHELL_EDIT_REASON),
+            "expected shell-edit deny for: {command}"
+        );
+    }
+}
+
+/// The expansion set [`resolve_target_path`] performs is what makes a leftover
+/// `$NAME` meaningful, so the detector is pinned on both spellings (#7098,
+/// #7100).
+/// Test: itself.
+#[test]
+fn unexpanded_shell_variable_finds_both_spellings() {
+    for (path, expected) in [
+        ("/repo/$MAIN/.claude/worktrees/a", "$MAIN"),
+        ("/repo/${MAIN}/wt", "${MAIN}"),
+        ("$WT", "$WT"),
+        ("/repo/a/${WORKTREE_ROOT}", "${WORKTREE_ROOT}"),
+        ("/repo/$1/wt", "$1"),
+    ] {
+        assert_eq!(
+            unexpanded_shell_variable(Path::new(path)).as_deref(),
+            Some(expected),
+            "path: {path}"
+        );
+    }
+}
+
+/// A path with nothing left to expand — including a directory literally called
+/// `$` — must not read as carrying a variable.
+/// Test: itself.
+#[test]
+fn unexpanded_shell_variable_is_none_for_ordinary_paths() {
+    for path in [
+        "/repo/.claude/worktrees/agent-x",
+        "relative/path",
+        "/repo/$",
+        "/repo/$/wt",
+        "/repo/${}/wt",
+    ] {
+        assert_eq!(
+            unexpanded_shell_variable(Path::new(path)),
+            None,
+            "path: {path}"
+        );
+    }
+}
