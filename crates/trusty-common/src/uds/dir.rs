@@ -130,6 +130,13 @@ pub(crate) fn classify_existing_dir(
 
 /// Create `dir` at [`SOCKET_DIR_MODE`], or verify and repair it if it exists.
 ///
+/// See #7158: `private_dir::ensure_private_dir` generalizes this atomic
+/// create/lstat/narrow pattern for callers outside the `uds`-feature-gated
+/// module (`log_drain`, `webhook_relay`). Left as its own implementation here
+/// deliberately, not rewritten onto that one — the owner-uid check below has
+/// no equivalent there, and that is a real difference for a socket path
+/// reachable by multiple local processes, not an oversight.
+///
 /// Why: this is what closes the bind-then-chmod window. Binding a Unix socket
 /// creates the file, so a `chmod` after `bind` leaves an interval in which the
 /// socket exists at the umask-derived mode. A caller cannot shrink that
