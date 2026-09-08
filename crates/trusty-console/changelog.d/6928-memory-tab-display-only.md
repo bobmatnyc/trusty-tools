@@ -1,0 +1,2 @@
+Changed
+- The console's Memory tab is display-only: it shows the palace store's disk usage and the daemon's physical footprint with its heap / file-backed / compressed split, and every palace row links to that palace on the memory dashboard. Compact and delete moved to `/tools/memory`, where the dashboard's hero row also gained aggregate RAM and Disk tiles beside Palaces, Drawers, Vectors, Rooms and KG Triples.

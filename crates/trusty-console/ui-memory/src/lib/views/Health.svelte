@@ -1,34 +1,45 @@
 <script>
   /*
-   * Why: Operators need an at-a-glance view of daemon resource usage (RSS,
-   * disk, uptime) plus the dream-cycle health — a stalled background dream
-   * loop is invisible without surfacing its last-run timestamp.
-   * What: Auto-refreshing (5s) stat cards backed by `GET /health`,
-   * `GET /api/v1/status`, and `GET /api/v1/dream/status`, with an
-   * online/offline badge.
-   * Test: open #/health, confirm the cards populate and the badge turns
-   * green once /health responds.
+   * Why: Operators need an at-a-glance view of the store and the daemon's
+   * resource usage plus the dream-cycle health — a stalled background dream
+   * loop is invisible without surfacing its last-run timestamp. #6928: the
+   * owner's ruling put RAM and Disk in the hero row beside the four store
+   * totals and the room count, as aggregate figures in byte units.
+   * What: Auto-refreshing (5s) stat cards. The hero row comes from
+   * `GET /api/console/metrics/memory`; CPU and uptime from `GET /health`; the
+   * dream card from `GET /api/v1/dream/status`.
+   * Test: `heroTiles.test.js` pins the row's shape; open #/health and confirm
+   * the cards populate and the badge turns green once /health responds.
    */
   import { onMount, onDestroy } from 'svelte';
   import { api } from '../api.js';
+  // #6928: the hero row's seven figures come from the console's cached
+  // metrics report, not `memory.status` — that payload has no room count and
+  // counts only cache-resident palaces, so on a host with 94 palaces and 2
+  // resident it reports two palaces' worth of drawers.
+  import { consoleMetrics } from '../consoleApi.js';
+  import { heroTiles } from '../heroTiles.js';
 
   let health = $state(null);
   let status = $state(null);
   let dream = $state(null);
+  let metrics = $state(null);
   let error = $state(null);
   let lastUpdated = $state(null);
   let timer = null;
 
   async function refresh() {
     try {
-      const [h, s, d] = await Promise.all([
+      const [h, s, d, m] = await Promise.all([
         api.health(),
         api.status().catch(() => null),
-        api.dreamStatus().catch(() => null)
+        api.dreamStatus().catch(() => null),
+        consoleMetrics().catch(() => null)
       ]);
       health = h;
       status = s;
       dream = d;
+      metrics = m?.metrics ?? null;
       error = null;
       lastUpdated = new Date();
     } catch (e) {
@@ -36,6 +47,10 @@
       health = null;
     }
   }
+
+  // #6928: seven tiles, always — a payload the console has not cached yet
+  // renders them as unknown rather than shrinking the row.
+  let tiles = $derived(heroTiles(metrics));
 
   onMount(() => {
     refresh();
@@ -58,21 +73,6 @@
     const h = Math.floor(m / 60);
     if (h < 24) return `${h}h`;
     return `${Math.floor(h / 24)}d`;
-  }
-
-  /**
-   * Why: disk_bytes is a raw byte count; operators want MB/GB.
-   * What: human-readable byte size.
-   * Test: humanBytes(1048576) === "1.0 MB".
-   */
-  function humanBytes(bytes) {
-    if (typeof bytes !== 'number' || bytes < 0) return '—';
-    if (bytes < 1024) return `${bytes} B`;
-    const kb = bytes / 1024;
-    if (kb < 1024) return `${kb.toFixed(1)} KB`;
-    const mb = kb / 1024;
-    if (mb < 1024) return `${mb.toFixed(1)} MB`;
-    return `${(mb / 1024).toFixed(2)} GB`;
   }
 
   /**
@@ -111,17 +111,19 @@
   </div>
 {/if}
 
-<div class="stat-grid">
-  <div class="stat">
-    <div class="stat-label">RSS Memory</div>
-    <div class="stat-value">{(health?.rss_mb ?? 0).toLocaleString()} MB</div>
-    <div class="stat-meta">resident set size</div>
-  </div>
-  <div class="stat">
-    <div class="stat-label">Disk</div>
-    <div class="stat-value">{humanBytes(health?.disk_bytes)}</div>
-    <div class="stat-meta">data root footprint</div>
-  </div>
+<!-- #6928: the hero row. Seven tiles, RAM and Disk among them, both in byte
+     units. `hero-row` is what `heroTiles.test.js` names in its assertions. -->
+<div class="stat-grid hero-row" data-testid="hero-row">
+  {#each tiles as tile (tile.id)}
+    <div class="stat" data-tile={tile.id}>
+      <div class="stat-label">{tile.label}</div>
+      <div class="stat-value">{tile.value}</div>
+      {#if tile.sub}<div class="stat-meta">{tile.sub}</div>{/if}
+    </div>
+  {/each}
+</div>
+
+<div class="stat-grid mt-4">
   <div class="stat">
     <div class="stat-label">CPU</div>
     <div class="stat-value">{(health?.cpu_pct ?? 0).toFixed(1)}%</div>
@@ -168,30 +170,20 @@
   </div>
 </div>
 
+<!-- #6928: the four totals this card carried are hero tiles now, and the row
+     above them counts every palace on disk rather than only the resident ones
+     (#6372). What is left is the one fact the hero row cannot state: where the
+     store that Disk tile measured actually lives. -->
 <div class="card mt-4">
-  <div class="card-header">Store totals</div>
+  <div class="card-header">Store</div>
   <div class="card-body" style="padding: 0">
     <table class="table">
       <tbody>
         <tr>
-          <th style="width: 240px">Palaces</th>
-          <td>{(status?.palace_count ?? 0).toLocaleString()}</td>
-        </tr>
-        <tr>
-          <th>Drawers</th>
-          <td>{(status?.total_drawers ?? 0).toLocaleString()}</td>
-        </tr>
-        <tr>
-          <th>Vectors</th>
-          <td>{(status?.total_vectors ?? 0).toLocaleString()}</td>
-        </tr>
-        <tr>
-          <th>KG triples</th>
-          <td>{(status?.total_kg_triples ?? 0).toLocaleString()}</td>
-        </tr>
-        <tr>
-          <th>Data root</th>
-          <td class="text-mono text-xs text-muted">{status?.data_root ?? '—'}</td>
+          <th style="width: 240px">Data root</th>
+          <td class="text-mono text-xs text-muted">
+            {metrics?.data_root ?? status?.data_root ?? '—'}
+          </td>
         </tr>
       </tbody>
     </table>

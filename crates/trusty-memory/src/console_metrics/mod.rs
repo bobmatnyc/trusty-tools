@@ -11,11 +11,15 @@
 //! room / KG-triple counts for every one of them: from the registry's LRU
 //! cache when a palace is already resident, and otherwise straight off the
 //! palace's redb files via [`disk_stats`], which never opens the palace
-//! (issue #1924 stands — nothing here enters the cache).
+//! (issue #1924 stands — nothing here enters the cache). #6928: the report
+//! also carries this daemon's own RAM footprint and the palace store's disk
+//! size, from [`usage`] — the two figures the console's memory tab exists to
+//! display.
 //! Test: `cargo test -p trusty-memory -- console_metrics` exercises the
 //! descriptor shape and handler via the existing `dispatch_tool` harness.
 
 mod disk_stats;
+mod usage;
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -55,8 +59,14 @@ pub fn descriptor() -> Value {
             `stats_source` (`cache`, `disk`, or `unavailable`); an unavailable entry \
             carries `stats_error` and null counts. Each entry also carries \
             `last_used_unix` — when a recall, remember or note last touched that \
-            palace, or null when none has since the stamp shipped. Used by the \
-            trusty-console dashboard metrics poller.",
+            palace, or null when none has since the stamp shipped, and `disk_bytes` \
+            — that palace directory's allocated size. Schema 5 (#6928) adds this \
+            daemon's own usage: `ram_bytes` (physical footprint, null where the OS \
+            has no such counter), `disk_bytes` (allocated size of the whole palace \
+            store, the figure `du -s` reports), `data_root`, and — present only where \
+            the OS supplies them — the `ram_heap_bytes` / `ram_file_backed_bytes` / \
+            `ram_compressed_bytes` split. Used by the trusty-console dashboard \
+            metrics poller.",
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -153,12 +163,20 @@ pub async fn handle_console_metrics(state: &AppState, _args: Value) -> Result<Va
     // #6372: the uncached arm reads redb files, so the whole aggregation moves
     // to the blocking pool. The cached arm is still just `peek` — a
     // `parking_lot::Mutex` lock plus an `Arc` clone with no I/O.
+    // #6928: the size walks are filesystem I/O too, so they ride the same hop
+    // rather than adding a second one.
     let registry = state.registry.clone();
-    let stats = tokio::task::spawn_blocking(move || collect_palace_stats(&registry, &palace_infos))
-        .await
-        .map_err(|e| anyhow::anyhow!("join collect_palace_stats: {e}"))?;
+    let data_root = state.data_root.clone();
+    let (stats, usage) = tokio::task::spawn_blocking(move || {
+        (
+            collect_palace_stats(&registry, &palace_infos),
+            usage::sample(&data_root),
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("join collect_palace_stats: {e}"))?;
 
-    let metrics = json!({
+    let mut metrics = json!({
         "palace_count": stats.palace_count,
         "counted_palace_count": stats.counted_palace_count,
         "cached_palace_count": stats.cached_palace_count,
@@ -166,8 +184,18 @@ pub async fn handle_console_metrics(state: &AppState, _args: Value) -> Result<Va
         "total_vectors": stats.total_vectors,
         "total_rooms": stats.total_rooms,
         "total_kg_triples": stats.total_kg_triples,
+        // #6928: the tab's two headline figures. `disk_bytes` is always a
+        // number — a walk that reads nothing is a real zero. `ram_bytes` is
+        // `null` where the OS has no footprint counter.
+        "ram_bytes": usage.ram_bytes,
+        "disk_bytes": usage.disk_bytes,
+        "data_root": state.data_root.display().to_string(),
         "palaces": stats.palace_entries,
     });
+    // #6928: the heap / file-backed / compressed split is OMITTED rather than
+    // nulled where the OS does not supply it, so a console can tell "this
+    // build reports no breakdown" from "the breakdown is zero".
+    insert_ram_breakdown(&mut metrics, &usage);
 
     let report = make_report(
         "trusty-memory",
@@ -181,10 +209,38 @@ pub async fn handle_console_metrics(state: &AppState, _args: Value) -> Result<Va
         // only the cache-resident ones.
         // 3 -> 4 (#6424): added per-palace `last_used_unix`. Additive only —
         // a console built against schema 3 reads unchanged.
-        4,
+        // 4 -> 5 (#6928): added `ram_bytes`, `disk_bytes`, `data_root`, the
+        // optional `ram_heap_bytes` / `ram_file_backed_bytes` /
+        // `ram_compressed_bytes` split, and per-palace `disk_bytes`. Additive
+        // only, for the same reason.
+        5,
     );
 
     Ok(serde_json::to_value(&report)?)
+}
+
+/// Add the RAM breakdown fields, or leave them out entirely.
+///
+/// Why a helper rather than three `null`s in the `json!` literal: an omitted
+/// key and a `null` key are different answers to the console. `null` would say
+/// "this daemon measured the heap and it is unknown", which is not a state
+/// that exists — either the OS supplies all three ledgers or it supplies none.
+/// What: inserts the three keys when the split is available; otherwise leaves
+/// `metrics` untouched.
+/// Test: `console_metrics_reports_ram_and_disk_usage`.
+fn insert_ram_breakdown(metrics: &mut Value, usage: &usage::DaemonUsage) {
+    let Some(map) = metrics.as_object_mut() else {
+        return;
+    };
+    if let Some(heap) = usage.ram_heap_bytes {
+        map.insert("ram_heap_bytes".into(), json!(heap));
+    }
+    if let Some(external) = usage.ram_file_backed_bytes {
+        map.insert("ram_file_backed_bytes".into(), json!(external));
+    }
+    if let Some(compressed) = usage.ram_compressed_bytes {
+        map.insert("ram_compressed_bytes".into(), json!(compressed));
+    }
 }
 
 /// Count one palace, preferring the open handle and falling back to its files.
@@ -392,6 +448,10 @@ fn palace_entry(info: &trusty_common::memory_core::Palace, counts: &PalaceCounts
     // counts. Null for a palace never used since the stamp shipped — the tab
     // renders that as "never" and sorts it last.
     let last_used_unix = crate::palace_last_used::read(&info.data_dir);
+    // #6928: the per-palace half of the tab's disk figure. Measured off the
+    // directory, so a palace whose redb counts are unreadable still reports a
+    // size — the two failures are unrelated.
+    let disk_bytes = usage::palace_disk_bytes(&info.data_dir);
     match counts {
         PalaceCounts::Counted {
             cached,
@@ -409,6 +469,7 @@ fn palace_entry(info: &trusty_common::memory_core::Palace, counts: &PalaceCounts
             "cached": cached,
             "stats_source": if *cached { "cache" } else { "disk" },
             "last_used_unix": last_used_unix,
+            "disk_bytes": disk_bytes,
         }),
         PalaceCounts::Unavailable(reason) => json!({
             "id": id,
@@ -422,8 +483,10 @@ fn palace_entry(info: &trusty_common::memory_core::Palace, counts: &PalaceCounts
             "stats_error": reason,
             // #6424: the stamp is a separate file from the redb corpus, so a
             // palace whose counts are unreadable can still report when it was
-            // last used.
+            // last used. #6928: the directory's size is readable for the same
+            // reason.
             "last_used_unix": last_used_unix,
+            "disk_bytes": disk_bytes,
         }),
     }
 }
@@ -468,7 +531,8 @@ mod tests {
         assert!(result["version"].is_string());
         assert!(result["status"].is_string());
         // #6424: 3 -> 4 for the additive per-palace `last_used_unix`.
-        assert_eq!(result["metrics_schema_version"], 4);
+        // #6928: 4 -> 5 for the additive RAM and disk usage fields.
+        assert_eq!(result["metrics_schema_version"], 5);
         assert!(result["collected_at_unix"].is_number());
         assert_eq!(result["metrics"]["palace_count"], 0);
         assert_eq!(result["metrics"]["counted_palace_count"], 0);
@@ -479,6 +543,91 @@ mod tests {
         assert_eq!(result["metrics"]["total_kg_triples"], 0);
         assert!(result["metrics"]["palaces"].is_array());
         assert_eq!(result["metrics"]["palaces"].as_array().unwrap().len(), 0);
+    }
+
+    /// Why (#6928): the console memory tab renders disk and RAM usage and
+    /// nothing else, so a payload missing either field leaves the tab with
+    /// nothing to show. The breakdown is asserted as present-or-absent rather
+    /// than present, because it is an OS capability — but on macOS, where the
+    /// tab actually runs, it must be there.
+    /// Test: this is the test.
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn console_metrics_reports_ram_and_disk_usage() {
+        // SAFETY: `#[serial]` ensures no other test thread reads or writes
+        // TRUSTY_SKIP_PALACE_ENFORCEMENT concurrently with this test.
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // A file in the data root so `disk_bytes` has something real to count.
+        std::fs::write(tmp.path().join("ballast.bin"), vec![0u8; 64_000]).expect("write");
+        let state = crate::AppState::new(tmp.path().to_path_buf());
+
+        let result = handle_console_metrics(&state, serde_json::json!({}))
+            .await
+            .expect("console_metrics must not return Err");
+        let metrics = &result["metrics"];
+
+        let disk = metrics["disk_bytes"]
+            .as_u64()
+            .expect("disk_bytes is always a number");
+        assert!(
+            disk >= 64_000,
+            "disk_bytes must cover the data root's contents, got {disk}"
+        );
+        assert_eq!(
+            metrics["data_root"].as_str(),
+            Some(tmp.path().display().to_string().as_str()),
+            "the payload names the directory disk_bytes measured"
+        );
+
+        #[cfg(target_os = "macos")]
+        {
+            let ram = metrics["ram_bytes"]
+                .as_u64()
+                .expect("macOS reports a physical footprint");
+            assert!(ram > 1024 * 1024, "a live daemon holds more than 1 MB");
+            for field in [
+                "ram_heap_bytes",
+                "ram_file_backed_bytes",
+                "ram_compressed_bytes",
+            ] {
+                assert!(
+                    metrics[field].is_u64(),
+                    "macOS supplies {field}; a single aggregate figure is not enough (#7084)"
+                );
+            }
+        }
+    }
+
+    /// Why (#6928): an omitted breakdown key and a `null` one mean different
+    /// things to the console — "this OS has no such counter" versus "measured,
+    /// and unknown". Only the first is a state that exists.
+    /// Test: this is the test.
+    #[test]
+    fn an_unavailable_ram_breakdown_omits_its_keys_rather_than_nulling_them() {
+        let mut metrics = json!({"ram_bytes": 10_u64});
+        insert_ram_breakdown(&mut metrics, &usage::DaemonUsage::default());
+        assert_eq!(
+            metrics.as_object().expect("object").len(),
+            1,
+            "no breakdown key may appear when the OS supplies none: {metrics}"
+        );
+
+        let mut metrics = json!({"ram_bytes": 10_u64});
+        insert_ram_breakdown(
+            &mut metrics,
+            &usage::DaemonUsage {
+                ram_heap_bytes: Some(1),
+                ram_file_backed_bytes: Some(2),
+                ram_compressed_bytes: Some(3),
+                ..usage::DaemonUsage::default()
+            },
+        );
+        assert_eq!(metrics["ram_heap_bytes"], json!(1));
+        assert_eq!(metrics["ram_file_backed_bytes"], json!(2));
+        assert_eq!(metrics["ram_compressed_bytes"], json!(3));
     }
 
     /// Why (issue #1924 regression guard): `console_metrics` must never
@@ -646,6 +795,21 @@ mod tests {
         assert_eq!(
             result["metrics"]["cached_palace_count"], 0,
             "residency is still reported honestly"
+        );
+        // #6928: the per-palace disk figure the tab drills into.
+        let palace_disk = entry["disk_bytes"]
+            .as_u64()
+            .expect("every palace row carries disk_bytes");
+        assert!(
+            palace_disk > 0,
+            "a palace with redb files on disk cannot measure zero bytes"
+        );
+        assert!(
+            palace_disk
+                <= result["metrics"]["disk_bytes"]
+                    .as_u64()
+                    .expect("aggregate disk_bytes"),
+            "one palace cannot exceed the whole store it sits in"
         );
     }
 

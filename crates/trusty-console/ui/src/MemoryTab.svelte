@@ -1,12 +1,26 @@
 <script>
+  /*
+   * Why (#6928): the owner's ruling makes this tab display-only — "memory
+   * console should show disk and ram usage, actions should be moved to the
+   * dashboard". It used to carry an inline compact and delete per palace
+   * (#6371, #6360); both now live on `/tools/memory`, and a row opens that
+   * palace's view there instead. Same shape #6923 gave the Search tab.
+   * What: two usage panels — the palace store's disk footprint and the
+   * daemon's physical footprint with its heap / file-backed / compressed split
+   * (#7084) — over a roster whose rows are links, each carrying that palace's
+   * own disk size.
+   * Test: `memoryTabDisplayOnly.test.js` pins the absence of every mutating
+   * surface; `memoryUsage.test.js` and `palaceNav.test.js` cover what it shows.
+   */
   import { onMount, onDestroy } from 'svelte';
   import RefreshHeader from './RefreshHeader.svelte';
-  // #6360: the palace roster grew a delete action; the control itself is shared
-  // with the Search tab so both confirm and report failures identically.
-  import DeleteAction from './DeleteAction.svelte';
-  // #6371: the non-destructive half of the roster's actions — reclaim a
-  // palace's orphaned vectors without touching a drawer.
-  import CompactAction from './CompactAction.svelte';
+  // #6928: the two figures this tab exists to display, and where a row goes.
+  import { diskUsage, palaceDiskCell, ramUsage } from './memoryUsage.js';
+  import {
+    palaceDashboardHref,
+    palaceRowAriaLabel,
+    palaceRowHint,
+  } from './palaceNav.js';
   // #6372: which of the three ways a row's counts were obtained decides how it
   // renders. The decision is a tested pure function, not template logic.
   import { countCell, sourceBadge, statsSource } from './palaceRows.js';
@@ -63,26 +77,6 @@
     }
   }
 
-  /**
-   * Re-read the palace roster from the daemon after a confirmed delete (#6360).
-   *
-   * Why not `fetchMetrics(true)`: that call drops itself when a background tick
-   * is already in flight, and a dropped refresh right after a delete leaves the
-   * deleted palace on screen until the next tick — which reads as a delete that
-   * did not happen. This one always issues the request. The row is never
-   * removed locally: what the daemon reports is what the table shows.
-   */
-  async function reloadRoster() {
-    try {
-      const resp = await fetch('/api/console/metrics/memory');
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      report = await resp.json();
-      error = null;
-    } catch (e) {
-      error = e.message;
-    }
-  }
-
   /** Auto-refresh interval handle — cleared on component destroy to prevent leaks. */
   let refreshInterval;
 
@@ -103,6 +97,9 @@
     : 'var(--trusty-danger)'
   );
 
+  let ram = $derived(ramUsage(report?.metrics));
+  let disk = $derived(diskUsage(report?.metrics));
+
   // #6424: `null` is the daemon's own order — the only way back once a sort has
   // been applied, which is why the header cycles through it.
   let lastUsedSort = $state(null);
@@ -116,6 +113,13 @@
 <div class="tab-content">
   <RefreshHeader title="Trusty Memory" onRefresh={() => fetchMetrics(true)} {refreshing} />
 
+  <!-- #6928: every action this tab used to carry — and dream, stop, compact,
+       re-embed and delete besides — is on the dashboard. This link is how an
+       operator reaches all of them. -->
+  <p class="dashboard-link">
+    <a href="/tools/memory/">Open the Trusty Memory dashboard &rarr;</a>
+  </p>
+
   {#if loading}
     <div class="placeholder">Loading memory metrics…</div>
   {:else if error}
@@ -128,6 +132,40 @@
         {report.status}
       </span>
       <span class="version">v{report.version}</span>
+    </div>
+
+    <!-- #6928: the two usage panels. Disk first — it is the figure that grows
+         without anyone watching; RAM second, with the split that says whether a
+         large footprint is a heap or a mapped store. -->
+    <div class="usage-row">
+      <section class="usage-card">
+        <h3 class="usage-title">Disk</h3>
+        <p class="usage-figure">{disk.text}</p>
+        <p class="usage-meta">
+          on-disk size of the palace store
+          {#if disk.dataRoot}
+            <br /><code class="path">{disk.dataRoot}</code>
+          {/if}
+        </p>
+      </section>
+
+      <section class="usage-card">
+        <h3 class="usage-title">RAM</h3>
+        <p class="usage-figure">{ram.footprint}</p>
+        <p class="usage-meta">physical footprint of the daemon process</p>
+        {#if ram.reported}
+          <dl class="breakdown">
+            {#each ram.components as c (c.label)}
+              <div class="breakdown-row">
+                <dt>{c.label}</dt>
+                <dd>{c.text}</dd>
+              </div>
+            {/each}
+          </dl>
+        {:else}
+          <p class="usage-note">{ram.note}</p>
+        {/if}
+      </section>
     </div>
 
     <!-- Aggregate stats -->
@@ -165,58 +203,80 @@
       </div>
     </div>
 
-    <!-- Per-palace table -->
+    <!-- #6928: the roster is a grid list, not a `<table>`, for the reason
+         `SearchTab.svelte` and `ServicesList.svelte` both give: a row that
+         navigates must BE the link, and a link cannot wrap a `<tr>`. The
+         Actions column is gone with the inline compact and delete — the row
+         itself is now the one control it carries. -->
     {#if report.metrics?.palaces?.length > 0}
       <h3 class="sub-title">Palaces (top {report.metrics.palaces.length})</h3>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Name</th>
-              <th>Drawers</th>
-              <th>Vectors</th>
-              <th>Rooms</th>
-              <th>KG Triples</th>
-              <!-- #6424: click to cycle newest-first, oldest-first, daemon order. -->
-              <th class="num sortable">
-                <button
-                  type="button"
-                  class="sort-btn"
-                  aria-label="Sort by last used"
-                  onclick={() => (lastUsedSort = nextSortDirection(lastUsedSort))}
-                >
-                  Last Used <span class="sort-arrow">{sortIndicator(lastUsedSort)}</span>
-                </button>
-              </th>
-              <th class="actions-head">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each sortedPalaces as p (p.id)}
-              <tr class:row-uncached={statsSource(p) === 'unavailable'}>
-                <td><code>{p.id}</code></td>
-                <td>
-                  {p.name}
-                  {#if sourceBadge(p)}
-                    <span class="uncached-badge" title={sourceBadge(p).title}>{sourceBadge(p).label}</span>
-                  {/if}
-                </td>
-                <td class="num">{countCell(p, 'drawer_count')}</td>
-                <td class="num">{countCell(p, 'vector_count')}</td>
-                <td class="num">{countCell(p, 'room_count')}</td>
-                <td class="num">{countCell(p, 'kg_triple_count')}</td>
-                <td class="num" title={lastUsedTitle(p)}>{formatLastUsed(p)}</td>
-                <td class="actions">
-                  <div class="row-actions">
-                    <CompactAction id={p.id} onCompacted={reloadRoster} />
-                    <DeleteAction kind="palace" id={p.id} onDeleted={reloadRoster} />
-                  </div>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+      <div class="list">
+        <div class="row head">
+          <span aria-hidden="true">ID</span>
+          <span aria-hidden="true">Name</span>
+          <span class="num" aria-hidden="true">Drawers</span>
+          <span class="num" aria-hidden="true">Vectors</span>
+          <span class="num" aria-hidden="true">Rooms</span>
+          <span class="num" aria-hidden="true">KG</span>
+          <span class="num" aria-hidden="true">Disk</span>
+          <!-- #6424: click to cycle newest-first, oldest-first, daemon order. -->
+          <span class="num sortable">
+            <button
+              type="button"
+              class="sort-btn"
+              aria-label="Sort by last used"
+              onclick={() => (lastUsedSort = nextSortDirection(lastUsedSort))}
+            >
+              Last Used <span class="sort-arrow">{sortIndicator(lastUsedSort)}</span>
+            </button>
+          </span>
+        </div>
+
+        {#snippet palaceCells(p, inertHint)}
+          <span class="mono">
+            {p.id ?? '—'}
+            {#if inertHint}<span class="sr-only">— {inertHint}</span>{/if}
+          </span>
+          <span class="name">
+            {p.name}
+            {#if sourceBadge(p)}
+              <span class="uncached-badge" title={sourceBadge(p).title}>{sourceBadge(p).label}</span>
+            {/if}
+          </span>
+          <span class="num">{countCell(p, 'drawer_count')}</span>
+          <span class="num">{countCell(p, 'vector_count')}</span>
+          <span class="num">{countCell(p, 'room_count')}</span>
+          <span class="num">{countCell(p, 'kg_triple_count')}</span>
+          <span class="num">{palaceDiskCell(p)}</span>
+          <span class="num" title={lastUsedTitle(p)}>{formatLastUsed(p)}</span>
+        {/snippet}
+
+        {#each sortedPalaces as p (p.id)}
+          {#if p.id}
+            <a
+              class="row link"
+              class:row-uncached={statsSource(p) === 'unavailable'}
+              href={palaceDashboardHref(p.id)}
+              aria-label={palaceRowAriaLabel({
+                name: p.name ?? 'unnamed',
+                id: p.id,
+                drawers: countCell(p, 'drawer_count'),
+                disk: palaceDiskCell(p),
+                lastUsed: formatLastUsed(p),
+              })}
+            >
+              {@render palaceCells(p, null)}
+            </a>
+          {:else}
+            <!-- A palace with no id has no management view to open, so the row
+                 is inert and says why — on `title` for a pointer AND in a
+                 visually hidden span for a screen reader, the shape an
+                 undashboarded service row uses in `ServicesList.svelte`. -->
+            <div class="row inert" title={palaceRowHint(p)}>
+              {@render palaceCells(p, palaceRowHint(p))}
+            </div>
+          {/if}
+        {/each}
       </div>
     {:else}
       <p class="empty-hint">No palaces found.</p>
@@ -231,6 +291,10 @@
     padding: 1.25rem; color: var(--trusty-text-secondary); font-size: 0.9rem;
   }
   .not-available { color: var(--trusty-warning); }
+
+  .dashboard-link { margin: 0 0 1rem; font-size: 0.9rem; }
+  .dashboard-link a { color: var(--trusty-accent); text-decoration: none; }
+  .dashboard-link a:hover { text-decoration: underline; }
 
   .meta-row {
     display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem;
@@ -250,6 +314,45 @@
   .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--_s); }
   .version { color: var(--trusty-text-secondary); font-size: 0.85rem; }
 
+  /* #6928: the two usage panels. Same card tokens as .stat-card, wider so the
+     RAM breakdown has room for three labelled rows. */
+  .usage-row {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 0.75rem; margin-bottom: 1.5rem;
+  }
+  .usage-card {
+    background: var(--trusty-card-bg); border: 1px solid var(--trusty-border);
+    border-radius: 0.5rem; padding: 1rem;
+  }
+  .usage-title {
+    margin: 0 0 0.35rem; font-size: 0.75rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--trusty-text-secondary);
+  }
+  .usage-figure {
+    margin: 0; font-size: 1.8rem; font-weight: 700;
+    color: var(--trusty-text-primary); font-variant-numeric: tabular-nums;
+  }
+  .usage-meta {
+    margin: 0.25rem 0 0; font-size: 0.78rem; color: var(--trusty-text-secondary);
+  }
+  .usage-note {
+    margin: 0.6rem 0 0; font-size: 0.78rem; color: var(--trusty-text-secondary);
+    font-style: italic;
+  }
+  .path { font-size: 0.72rem; word-break: break-all; }
+  .breakdown { margin: 0.7rem 0 0; }
+  .breakdown-row {
+    display: flex; justify-content: space-between; gap: 1rem;
+    font-size: 0.82rem; padding: 0.2rem 0;
+    border-top: 1px solid var(--trusty-border);
+  }
+  .breakdown-row dt { color: var(--trusty-text-secondary); }
+  .breakdown-row dd {
+    margin: 0; color: var(--trusty-text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
   .stat-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
     gap: 0.75rem; margin-bottom: 1.5rem;
@@ -260,53 +363,79 @@
   }
   .stat-value { font-size: 1.6rem; font-weight: 700; color: var(--trusty-text-primary); }
   .stat-value-of { font-size: 1rem; font-weight: 500; color: var(--trusty-text-secondary); }
-  .stat-label { font-size: 0.75rem; color: var(--trusty-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat-label {
+    font-size: 0.75rem; color: var(--trusty-text-secondary);
+    text-transform: uppercase; letter-spacing: 0.05em; text-align: center;
+  }
 
   .sub-title { font-size: 1rem; font-weight: 600; color: var(--trusty-text-secondary); margin: 0 0 0.75rem; }
-  .table-wrap { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  th {
-    text-align: left; padding: 0.5rem 0.75rem;
-    background: var(--trusty-card-bg); color: var(--trusty-text-secondary); font-weight: 600;
-    border-bottom: 1px solid var(--trusty-border);
+
+  /* #6928: the roster list, built the way `SearchTab.svelte` builds its own —
+     one grid row per palace, the row itself the link. Same tokens, same
+     borders, same hover and focus treatment. */
+  .list {
+    background: var(--trusty-card-bg);
+    border: 1.5px solid var(--trusty-border);
+    border-radius: var(--trusty-radius, 0.5rem);
+    overflow-x: auto;
   }
-  td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--trusty-card-bg); color: var(--trusty-text-primary); }
-  tr:last-child td { border-bottom: none; }
-  tr:hover td { background: var(--trusty-card-bg); }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  /* #6360: the delete column. Right-aligned and vertically top-anchored so the
-     expanded confirm panel grows downward without shifting the row's numbers. */
+  .row {
+    display: grid;
+    grid-template-columns:
+      minmax(6rem, 1fr) minmax(8rem, 1.4fr)
+      5rem 5rem 4.5rem 5rem 6rem 7rem;
+    align-items: center;
+    gap: 0.75rem;
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.85rem;
+    border-bottom: 1px solid var(--trusty-border);
+    color: var(--trusty-text-primary);
+    text-decoration: none;
+    box-sizing: border-box;
+  }
+  .row:last-child { border-bottom: none; }
+  .row.head {
+    background: var(--trusty-surface-raised, var(--trusty-card-bg));
+    color: var(--trusty-text-secondary);
+    font-weight: 600;
+  }
+  .row.link:hover { background: var(--trusty-surface-raised, var(--trusty-card-bg)); }
+  .row.link:focus-visible { outline: 2px solid var(--trusty-accent); outline-offset: -2px; }
+  .row.inert { color: var(--trusty-text-secondary); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .mono {
+    font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* #6424: the sortable header is a real button so it is keyboard-reachable;
      it inherits the header's type so only the arrow marks it as interactive. */
-  th.sortable { padding: 0; }
+  .sortable { padding: 0; }
   .sort-btn {
     width: 100%; background: none; border: none; cursor: pointer;
-    font: inherit; color: inherit; text-align: right;
-    padding: 0.5rem 0.75rem;
+    font: inherit; color: inherit; text-align: right; padding: 0;
   }
   .sort-btn:hover { color: var(--trusty-text-primary); }
   .sort-arrow { opacity: 0.6; margin-left: 0.2rem; }
 
-  th.actions-head, td.actions { text-align: right; }
-  td.actions { vertical-align: top; }
-  /* #6371: compact sits beside delete. They wrap rather than force the table
-     wider, and each keeps its own confirm panel. */
-  .row-actions { display: flex; gap: 0.35rem; justify-content: flex-end; flex-wrap: wrap; }
-  code {
-    font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;
-    background: var(--trusty-surface-raised); padding: 0.1rem 0.35rem; border-radius: 0.25rem;
-  }
   .empty-hint { color: var(--trusty-text-secondary); font-size: 0.85rem; }
 
   /* #6372: only a row whose counts could not be READ is greyed out. A palace
      that is merely closed carries real numbers now, so greying it would say
      the opposite of what it means. */
-  tr.row-uncached td { color: var(--trusty-text-secondary); font-style: italic; }
+  .row-uncached { color: var(--trusty-text-secondary); font-style: italic; }
   .uncached-badge {
     margin-left: 0.4rem; font-size: 0.68rem; font-style: normal; font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.04em;
     color: var(--trusty-text-secondary);
     background: var(--trusty-surface-raised);
     border-radius: 9999px; padding: 0.1rem 0.45rem;
+  }
+
+  /* Visually hidden but read aloud — the shape `ServicesList.svelte` uses. */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
   }
 </style>

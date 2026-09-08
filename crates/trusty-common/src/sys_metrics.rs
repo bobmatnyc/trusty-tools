@@ -17,6 +17,10 @@
 //! [`SysMetrics`]: crate::sys_metrics::SysMetrics
 //! [`SysMetrics::sample`]: crate::sys_metrics::SysMetrics::sample
 
+pub mod mem_breakdown;
+
+pub use mem_breakdown::{MemoryBreakdown, self_memory_breakdown};
+
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 /// True physical memory footprint of a process, in megabytes (macOS only).
@@ -523,20 +527,81 @@ const WALK_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 ///      hypothesis from #4764 made executable), `dir_size_depth_cap_boundary_is_exact`.
 #[must_use]
 pub fn dir_size_bytes(dir: &std::path::Path) -> u64 {
+    walk_summing(dir, "dir_size_bytes", apparent_len)
+}
+
+/// Bytes actually ALLOCATED on disk by every regular file under `dir`.
+///
+/// Why (#6928): the console memory tab reports the palace store's disk usage,
+/// and its acceptance criterion is agreement with `du -s` to within 5%.
+/// [`dir_size_bytes`] cannot meet that: it sums `metadata().len()`, the file's
+/// LOGICAL length, and redb preallocates sparse files. On the reference host
+/// the same tree measured 2,441,207,523 apparent bytes against 1,755,036 KB
+/// from `du -sk` — 36% over, seven times the tolerance. `st_blocks` is the
+/// counter `du` itself reads, so summing it agrees exactly.
+/// What: the same bounded, panic-contained walk as [`dir_size_bytes`], summing
+/// `blocks() * 512` per regular file instead of `len()`. 512 is the fixed unit
+/// POSIX defines for `st_blocks`, independent of the filesystem's block size.
+/// Off unix there is no such counter, so this falls back to the apparent
+/// length and is therefore an over-estimate on a sparse file.
+/// Test: `dir_allocated_bytes_matches_a_walked_fixture`,
+/// `dir_allocated_bytes_reads_block_allocation_not_file_length`,
+/// `dir_allocated_missing_dir_is_zero`.
+#[must_use]
+pub fn dir_allocated_bytes(dir: &std::path::Path) -> u64 {
+    walk_summing(dir, "dir_allocated_bytes", allocated_len)
+}
+
+/// One file's LOGICAL length — what [`dir_size_bytes`] counts.
+fn apparent_len(meta: &std::fs::Metadata) -> u64 {
+    meta.len()
+}
+
+/// One file's ALLOCATED length — what [`dir_allocated_bytes`] counts.
+///
+/// `st_blocks` is in fixed 512-byte units per POSIX, which is also the unit
+/// `du` divides down from, so the two agree without consulting the
+/// filesystem's own block size.
+fn allocated_len(meta: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        meta.blocks().saturating_mul(512)
+    }
+    #[cfg(not(unix))]
+    {
+        meta.len()
+    }
+}
+
+/// Run one bounded walk under a panic guard and return the accumulated total.
+///
+/// Why: [`dir_size_bytes`] and [`dir_allocated_bytes`] differ only in which
+/// counter they read off a file's metadata. Everything around that — the
+/// accumulator that must outlive the unwind boundary, the `catch_unwind` that
+/// contains a `closedir` panic (#4764), the log line that ties a partial total
+/// to its walk — is identical, and a second copy is how one of them would
+/// stop being abort-safe.
+/// What: `measure` is applied to each regular file's metadata; `label` names
+/// the caller in the panic log.
+/// Test: covered through both public entry points.
+fn walk_summing(dir: &std::path::Path, label: &str, measure: fn(&std::fs::Metadata) -> u64) -> u64 {
     // #4764: keep the accumulator outside the unwind boundary so a panic
     // degrades the metric to a partial total rather than a spurious 0.
     let total = std::cell::Cell::new(0u64);
     // `AssertUnwindSafe` is sound here: the only state crossing the boundary
     // is a `Cell<u64>` counter, which has no invariant a partial walk breaks.
-    let outcome =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| walk_bounded(dir, &total)));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        walk_bounded(dir, &total, measure);
+    }));
     if outcome.is_err() {
         // The payload itself is logged by `crate::panic_hook`; this line ties
         // it to the walk that produced it.
         tracing::error!(
             dir = %dir.display(),
-            "dir_size_bytes: directory walk panicked (see preceding PANIC log \
-             for the payload); reporting the partial total"
+            walk = label,
+            "directory walk panicked (see preceding PANIC log for the \
+             payload); reporting the partial total"
         );
     }
     total.get()
@@ -554,7 +619,11 @@ pub fn dir_size_bytes(dir: &std::path::Path) -> u64 {
 /// body — before any child is opened. Bails out on [`WALK_BUDGET`]; refuses to
 /// descend past [`MAX_WALK_DEPTH`].
 /// Test: `dir_size_survives_concurrent_mutation`, `dir_size_depth_cap_boundary_is_exact`.
-fn walk_bounded(root: &std::path::Path, total: &std::cell::Cell<u64>) {
+fn walk_bounded(
+    root: &std::path::Path,
+    total: &std::cell::Cell<u64>,
+    measure: fn(&std::fs::Metadata) -> u64,
+) {
     let started = std::time::Instant::now();
     let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
 
@@ -563,7 +632,7 @@ fn walk_bounded(root: &std::path::Path, total: &std::cell::Cell<u64>) {
             tracing::warn!(
                 root = %root.display(),
                 pending = stack.len() + 1,
-                "dir_size_bytes: walk exceeded its {WALK_BUDGET:?} budget; \
+                "directory walk exceeded its {WALK_BUDGET:?} budget; \
                  reporting the partial total"
             );
             return;
@@ -592,7 +661,7 @@ fn walk_bounded(root: &std::path::Path, total: &std::cell::Cell<u64>) {
                 continue;
             }
             if let Ok(meta) = entry.metadata() {
-                total.set(total.get().saturating_add(meta.len()));
+                total.set(total.get().saturating_add(measure(&meta)));
             }
         }
     }
@@ -830,6 +899,95 @@ mod tests {
     fn dir_size_missing_dir_is_zero() {
         let missing = std::path::Path::new("/nonexistent/trusty/path/xyz");
         assert_eq!(dir_size_bytes(missing), 0);
+    }
+
+    /// Why (#6928): the console's Disk figure must agree with `du -s` to within
+    /// 5%, and `du` sums `st_blocks`. Walking the same fixture by hand and
+    /// summing the same counter is the deterministic form of that comparison —
+    /// it needs no `du` on the test host and cannot drift with the filesystem's
+    /// block size, because both sides read the identical per-file field.
+    /// Test: this is the test.
+    #[test]
+    fn dir_allocated_bytes_matches_a_walked_fixture() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("a.bin"), vec![7u8; 100]).unwrap();
+        std::fs::write(tmp.path().join("b.bin"), vec![7u8; 40_000]).unwrap();
+        let sub = tmp.path().join("sub").join("deeper");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("c.bin"), vec![7u8; 9_000]).unwrap();
+
+        let walked = walk_fixture_allocated(tmp.path());
+        assert!(walked > 0, "the fixture must allocate something");
+        assert_eq!(dir_allocated_bytes(tmp.path()), walked);
+    }
+
+    /// Sum `st_blocks * 512` over the fixture, recursively and independently of
+    /// the implementation under test.
+    #[cfg(unix)]
+    fn walk_fixture_allocated(dir: &std::path::Path) -> u64 {
+        use std::os::unix::fs::MetadataExt as _;
+        let mut total = 0u64;
+        for entry in std::fs::read_dir(dir).expect("read_dir").flatten() {
+            let meta = entry.metadata().expect("metadata");
+            if meta.is_dir() {
+                total += walk_fixture_allocated(&entry.path());
+            } else if meta.is_file() {
+                total += meta.blocks() * 512;
+            }
+        }
+        total
+    }
+
+    /// Off unix there is no `st_blocks`, so the fixture walk mirrors the
+    /// implementation's own fallback to the apparent length.
+    #[cfg(not(unix))]
+    fn walk_fixture_allocated(dir: &std::path::Path) -> u64 {
+        let mut total = 0u64;
+        for entry in std::fs::read_dir(dir).expect("read_dir").flatten() {
+            let meta = entry.metadata().expect("metadata");
+            if meta.is_dir() {
+                total += walk_fixture_allocated(&entry.path());
+            } else if meta.is_file() {
+                total += meta.len();
+            }
+        }
+        total
+    }
+
+    /// Why (#6928): the two walks must read DIFFERENT counters, and a fixture
+    /// where they happen to agree would let a copy-paste that summed `len()`
+    /// twice pass. Block rounding forces them apart deterministically: many
+    /// one-byte files have a trivial logical length and a full block of
+    /// allocation each. (The divergence that motivated this — redb's sparse
+    /// preallocation reading 36% above `du -s` — cannot be reproduced as a
+    /// fixture, because APFS declines to leave a hole for a small seek-write.)
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[test]
+    fn dir_allocated_bytes_reads_block_allocation_not_file_length() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for i in 0..16 {
+            std::fs::write(tmp.path().join(format!("{i}.bin")), b"x").unwrap();
+        }
+        let apparent = dir_size_bytes(tmp.path());
+        let allocated = dir_allocated_bytes(tmp.path());
+        assert_eq!(
+            apparent, 16,
+            "sixteen one-byte files are sixteen bytes long"
+        );
+        assert!(
+            allocated > apparent,
+            "block-rounded allocation must exceed the logical length: \
+             {allocated} vs {apparent}"
+        );
+    }
+
+    /// An absent path measures zero, never a panic — same contract as
+    /// [`dir_size_bytes`].
+    #[test]
+    fn dir_allocated_missing_dir_is_zero() {
+        let missing = std::path::Path::new("/nonexistent/trusty/path/xyz");
+        assert_eq!(dir_allocated_bytes(missing), 0);
     }
 
     /// The walk must survive the tree being mutated underneath it.
