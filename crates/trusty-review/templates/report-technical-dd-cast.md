@@ -103,7 +103,7 @@ in the coverage data provided — and name it specifically.
 | Field | Value |
 |---|---|
 | Source document | {{source_document_reference}} |
-| Vendor / methodology | CAST (CAST Software) — CAST Highlight + CAST Imaging |
+| Vendor / methodology | {{vendor_methodology}} |
 | Report date / version | {{report_date}} / {{report_version}} |
 | Inference models | {{inference_models}} |
 | Target / deal codename | {{target_codename}} |
@@ -143,7 +143,7 @@ expected >3.40; 2–5yr >3.20; 5–10yr >3.00; >10yr >2.70.
 | AMBER threshold (normalized) | 33–66 (native 2.00–2.99) |
 | GREEN threshold (normalized) | > 66 (native >= 3.00) |
 | Health factors aggregated | Application-level grades aggregate from technical criteria and rules directly (not from module-level grades); application and module grades can diverge |
-| Peer-benchmark population | All technologies (size TBD from analysis corpus; historical CAST reference: ~3,467 apps), plus technology-specific peer sets (HTML5, .NET, Java, Python, Go, etc.) |
+| Peer-benchmark population | All technologies (population drawn from this reporter's own analysis corpus, not CAST's proprietary corpus — see Peer Benchmark Position), plus technology-specific peer sets (HTML5, .NET, Java, Python, Go, etc.) |
 
 ## 4. Per-Application Scorecard
 

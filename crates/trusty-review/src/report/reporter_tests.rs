@@ -390,6 +390,61 @@ fn cast_template_instruct_override_never_renders() {
     assert!(md.contains("Acme Due Diligence"), "report still renders");
 }
 
+/// Why (#7136): the CAST template's Report Metadata table used to hardcode
+/// `CAST (CAST Software) — CAST Highlight + CAST Imaging` as the Vendor /
+/// methodology value — a static string with no provenance marker, unlike
+/// every other row in the same table, that a reader could mistake for a
+/// factual claim that CAST Software's platform produced the analysis. No
+/// CAST product is invoked; trusty-analyze/trusty-search did the analysis.
+/// Closure condition 2 (same issue): the `## 3. CAST Scoring Model &
+/// Normalization` section's "Peer-benchmark population" row cited a
+/// historical CAST benchmark figure ("~3,467 apps") as fact, unmarked, even
+/// though this reporter never had access to CAST's proprietary corpus — the
+/// per-application Peer Benchmark Position table right below already says so
+/// via a `code_only:non_code` boundary. The fabricated count is gone; the row
+/// now names the reporter's own analysis-corpus population instead of
+/// borrowing CAST's number.
+/// What: renders the bundled CAST template and asserts (1) the Vendor /
+/// methodology row now carries the same self-known, provenance-tagged
+/// `vendor_methodology` value the generic template already renders — never
+/// the literal "CAST Software" vendor claim — and (2) the CAST Scoring Model
+/// table no longer states the unmeasured "~3,467 apps" figure, instead
+/// pointing at this reporter's own analysis corpus.
+/// Test: this test itself.
+#[test]
+fn cast_template_vendor_methodology_carries_provenance_not_cast_vendor_claim() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd-cast")
+        .expect("bundled cast template");
+    let reporter = Reporter::new(tmp.path());
+    let md = reporter.render(&model, &template);
+
+    assert!(
+        !md.contains("CAST (CAST Software)"),
+        "must not hardcode a vendor attribution: {md}"
+    );
+    let expected_row = format!(
+        "| Vendor / methodology | {}{} |",
+        model.vendor_methodology,
+        crate::report::provenance::MEASURED_TAG
+    );
+    assert!(
+        md.contains(&expected_row),
+        "expected self-known, tagged vendor/methodology row {expected_row:?} in: {md}"
+    );
+
+    assert!(
+        !md.contains("3,467"),
+        "must not cite the unmeasured historical CAST benchmark figure: {md}"
+    );
+    assert!(
+        md.contains("population drawn from this reporter's own analysis corpus"),
+        "expected the peer-benchmark population row to name its own corpus, not CAST's: {md}"
+    );
+}
+
 /// Why: the model must assemble deterministically from the manifest.
 /// What: asserts repository count, metrics presence, and no git info for a
 /// non-existent local path.
