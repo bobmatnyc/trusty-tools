@@ -5,7 +5,10 @@ name = "trusty-agents"
 # `MemoryBackend::auto_detect_with_url` take a socket path rather than a base
 # URL, and the workstream helpers thread a `&Path`. Cargo's 0.x rule puts a
 # breaking change in the MINOR position.
-version = "0.39.0"
+# 0.39.1: patch bump for a reinstall carrying #6537/#7158 for live verification
+# (owner ruling 2026-09-08 — every reinstall carries a patch bump so
+# `--version` identifies the build); no public API change.
+version = "0.39.1"
 edition = "2024"
 description = "Trusty Agents: Rust-native agentic harness with multi-model routing, tool execution, and subprocess delegation."
 license.workspace = true
