@@ -367,6 +367,7 @@ pub fn from_checkpoint(
     work: &WorkDir,
     config: &EngagementConfig,
     unattempted: &[String],
+    collector_gaps: &[String],
     destination: &Path,
     github_access: &GithubAccess,
 ) -> Result<ReturnPackage, AuditError> {
@@ -399,6 +400,7 @@ pub fn from_checkpoint(
         config,
         &progress.report(),
         &excluded_extra,
+        collector_gaps,
         destination,
         github_access.raw_token(),
     )
@@ -409,6 +411,7 @@ pub fn assemble(
     config: &EngagementConfig,
     report: &RunReport,
     unattempted: &[String],
+    collector_gaps: &[String],
     destination: &Path,
     github_token: Option<&str>,
 ) -> Result<ReturnPackage, AuditError> {
@@ -463,7 +466,7 @@ pub fn assemble(
     // come out of one `IndexReport`, so they share a timestamp and a roll-up.
     let (index, debt) = render_index(work, report, &collected);
     let generated = Generated {
-        metadata: render_metadata(work, config, report, &audited, unattempted)?,
+        metadata: render_metadata(work, config, report, &audited, unattempted, collector_gaps)?,
         // #5481: the README states signed-or-not, and it is written before the
         // manifest exists — so it is told from the key, which is already known.
         readme: render_readme(config, &audited, &excluded, signing_key.is_some()),
@@ -985,7 +988,7 @@ trusty-review = "0.15.1"
         let destination = default_destination(&work);
 
         let package =
-            assemble(&work, &asking, &report, &[], &destination, None).expect("assembles");
+            assemble(&work, &asking, &report, &[], &[], &destination, None).expect("assembles");
 
         let declared = package
             .excluded
@@ -1020,7 +1023,7 @@ trusty-review = "0.15.1"
         let destination = default_destination(&work);
 
         let package =
-            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+            assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
         assert!(package.excluded.is_empty(), "{:?}", package.excluded);
         let metadata = read_entry(&destination, METADATA_ENTRY);
         let parsed: toml::Value = metadata.parse().expect("package.toml is TOML");
@@ -1142,6 +1145,7 @@ trusty-review = "0.15.1"
             &signing_config(&key),
             &report,
             &[],
+            &[],
             &destination,
             None,
         )
@@ -1191,7 +1195,7 @@ trusty-review = "0.15.1"
         let destination = default_destination(&work);
 
         let package =
-            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+            assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
 
         assert_eq!(package.signature, SignatureOutcome::Unsigned);
         let names = entries(&destination);
@@ -1233,6 +1237,7 @@ trusty-review = "0.15.1"
             &signing_config(&key),
             &report,
             &[],
+            &[],
             &destination,
             None,
         )
@@ -1268,7 +1273,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
 
-        let refused = assemble(&work, &broken, &report, &[], &destination, None);
+        let refused = assemble(&work, &broken, &report, &[], &[], &destination, None);
 
         assert!(
             matches!(refused, Err(AuditError::Signing { .. })),
@@ -1288,7 +1293,7 @@ trusty-review = "0.15.1"
         let destination = default_destination(&work);
 
         let package =
-            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+            assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
 
         assert_eq!(package.path, destination);
         assert!(destination.is_file(), "the zip was not written");
@@ -1345,7 +1350,7 @@ trusty-review = "0.15.1"
         let destination = default_destination(&work);
 
         let package =
-            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+            assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
 
         assert!(
             entries(&destination).contains(&DIGEST_ENTRY.to_owned()),
@@ -1397,7 +1402,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![degraded, broken]);
         let destination = default_destination(&work);
 
-        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
 
         let rows = digest_rows(&destination);
         assert!(
@@ -1448,7 +1453,7 @@ trusty-review = "0.15.1"
             .stating(vec![format!("jira rejected the key {key}")]);
         let destination = default_destination(&work);
 
-        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
 
         let text = read_entry(&destination, DIGEST_ENTRY);
         assert!(!text.contains(&key), "the key reached the digest: {text}");
@@ -1472,7 +1477,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
 
-        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
 
         let mut names = entries(&destination);
         names.retain(|n| n != DIGEST_ENTRY);
@@ -1507,6 +1512,7 @@ trusty-review = "0.15.1"
             keys,
             vec![
                 "client",
+                "collector_gaps",
                 "config_not_acted_on",
                 "generated_by",
                 "instructions",
@@ -1516,7 +1522,51 @@ trusty-review = "0.15.1"
                 "repositories_excluded",
                 "tools",
             ],
-            "the manifest grew no key"
+            "the manifest grew no key beyond collector_gaps (#7134)"
+        );
+    }
+
+    /// #7134 fix-round item 3: a missing optional collector reaches the
+    /// ASSEMBLED package's `package.toml`, not only this process's own
+    /// console report — the recipient who only opens the zip must be able to
+    /// see it too.
+    #[test]
+    fn a_missing_collector_reaches_package_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+        let collector_gaps = vec![
+            "cve-scan: `cargo-audit` is not installed, so known dependency CVEs will go \
+             unassessed for every repository in this sweep (install it with `cargo install \
+             cargo-audit`)"
+                .to_owned(),
+        ];
+
+        assemble(
+            &work,
+            &config(),
+            &report,
+            &[],
+            &collector_gaps,
+            &destination,
+            None,
+        )
+        .expect("assembles");
+
+        let metadata: toml::Value = read_entry(&destination, METADATA_ENTRY)
+            .parse()
+            .expect("package.toml is TOML");
+        let rows: Vec<String> = metadata["collector_gaps"]
+            .as_array()
+            .expect("collector_gaps is an array")
+            .iter()
+            .map(|v| v.as_str().expect("each row is a string").to_owned())
+            .collect();
+        assert_eq!(
+            rows, collector_gaps,
+            "the exact warning row must reach the package"
         );
     }
 
@@ -1538,7 +1588,7 @@ trusty-review = "0.15.1"
         let destination = default_destination(&work);
 
         let package =
-            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+            assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
 
         assert!(
             entries(&destination).contains(&INDEX_ENTRY.to_owned()),
@@ -1594,7 +1644,7 @@ trusty-review = "0.15.1"
         let destination = default_destination(&work);
 
         let package =
-            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+            assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
         assert!(
             package.files.iter().any(|f| f.entry == DEBT_ENTRY),
             "the roll-up must be reported as a member: {:?}",
@@ -1638,7 +1688,7 @@ trusty-review = "0.15.1"
         install_record(&work);
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
-        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
 
         let index = read_entry(&destination, INDEX_ENTRY);
         let members = entries(&destination);
@@ -1704,7 +1754,7 @@ trusty-review = "0.15.1"
             failed(&work, "01-acme-web", "acme-web"),
         ]);
         let destination = default_destination(&work);
-        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
 
         let index = read_entry(&destination, INDEX_ENTRY);
         assert!(index.contains("Reports: 1 of 2 repositories"), "{index}");
@@ -1729,7 +1779,7 @@ trusty-review = "0.15.1"
         install_record(&work);
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
-        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
 
         // `by_index` succeeding with no password IS the unencrypted property:
         // the zip crate returns `UnsupportedArchive` for an encrypted entry.
@@ -1768,7 +1818,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination, None)
+        let err = assemble(&work, &config(), &report, &[], &[], &destination, None)
             .expect_err("a package carrying the key must not be produced");
         assert!(
             matches!(err, AuditError::CredentialInPackage { .. }),
@@ -1835,6 +1885,7 @@ api_key = "lin_api_do-not-package-me"
             work,
             config,
             &report,
+            &[],
             &[],
             &default_destination(work),
             github_token,
@@ -1940,7 +1991,7 @@ api_key = "lin_api_do-not-package-me"
 
         let package_time = GithubAccess::with_token("ghp_package_time_account_B_token");
         let destination = default_destination(&work);
-        let err = from_checkpoint(&work, &config(), &[], &destination, &package_time)
+        let err = from_checkpoint(&work, &config(), &[], &[], &destination, &package_time)
             .expect_err("a mismatched GitHub credential must refuse packaging");
         assert!(
             matches!(err, AuditError::GithubCredentialChanged),
@@ -1974,7 +2025,7 @@ api_key = "lin_api_do-not-package-me"
 
         let destination = default_destination(&work);
         let same_access = GithubAccess::with_token("ghp_same_account_both_times");
-        from_checkpoint(&work, &config(), &[], &destination, &same_access)
+        from_checkpoint(&work, &config(), &[], &[], &destination, &same_access)
             .expect("a matching credential must not refuse packaging");
         assert!(destination.exists(), "the package must be written");
     }
@@ -1995,6 +2046,7 @@ api_key = "lin_api_do-not-package-me"
         let package = from_checkpoint(
             &work,
             &config(),
+            &[],
             &[],
             &destination,
             &GithubAccess::default(),
@@ -2112,7 +2164,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination, None)
+        let err = assemble(&work, &config(), &report, &[], &[], &destination, None)
             .expect_err("a symlink must not be followed into the package");
         assert!(
             matches!(err, AuditError::UnsafePackageEntry { .. }),
@@ -2137,7 +2189,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination, None)
+        let err = assemble(&work, &config(), &report, &[], &[], &destination, None)
             .expect_err("a hardlink must not carry outside content into the package");
         let AuditError::UnsafePackageEntry { kind, .. } = &err else {
             panic!("expected UnsafePackageEntry, got {err:?}");
@@ -2169,7 +2221,7 @@ api_key = "lin_api_do-not-package-me"
         .expect("hard link");
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination, None)
+        let err = assemble(&work, &config(), &report, &[], &[], &destination, None)
             .expect_err("a hardlink under extract/ must be refused too");
         let AuditError::UnsafePackageEntry { kind, .. } = &err else {
             panic!("expected UnsafePackageEntry, got {err:?}");
@@ -2205,6 +2257,7 @@ api_key = "lin_api_do-not-package-me"
             &config(),
             &report,
             &[],
+            &[],
             &default_destination(&work),
             None,
         )
@@ -2220,7 +2273,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![failed(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination, None)
+        let err = assemble(&work, &config(), &report, &[], &[], &destination, None)
             .expect_err("no audited repository means no package");
         assert!(
             matches!(err, AuditError::NothingToPackage { .. }),
@@ -2243,7 +2296,7 @@ api_key = "lin_api_do-not-package-me"
         let destination = default_destination(&work);
 
         let package =
-            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+            assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
         assert_eq!(package.excluded.len(), 1);
         assert!(
             package.excluded[0].contains("acme-web"),
@@ -2291,7 +2344,7 @@ api_key = "lin_api_do-not-package-me"
         .expect("the child left a log");
         let destination = default_destination(&work);
 
-        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
 
         let log = read_entry(&destination, "failures/01-acme-web.log");
         assert!(log.contains("fatal: could not read"), "{log}");
@@ -2316,7 +2369,7 @@ api_key = "lin_api_do-not-package-me"
         ]);
         let destination = default_destination(&work);
 
-        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
         let record = read_entry(&destination, FAILURES_ENTRY);
         assert!(record.contains("no log survived"), "{record}");
         assert!(
@@ -2335,7 +2388,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
 
-        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
         assert!(
             !entries(&destination)
                 .iter()
@@ -2363,7 +2416,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api"), leaking]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination, None)
+        let err = assemble(&work, &config(), &report, &[], &[], &destination, None)
             .expect_err("a generated member carrying the key is refused");
         assert!(
             matches!(err, AuditError::CredentialInPackage { .. }),
@@ -2396,7 +2449,7 @@ api_key = "lin_api_do-not-package-me"
         let destination = tmp.path().join("Desktop/return.zip");
 
         let package =
-            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+            assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
         assert_eq!(package.path, destination);
         assert!(destination.is_file());
         assert!(!destination.starts_with(work.root()));
@@ -2419,7 +2472,7 @@ api_key = "lin_api_do-not-package-me"
         std::fs::write(work.path(Area::Extract).join("09-other.db"), b"other").expect("write");
         let destination = default_destination(&work);
 
-        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
         let names = entries(&destination);
         assert!(
             names.contains(&"extract/00-acme-api.db".to_owned()),
@@ -2450,7 +2503,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination, None)
+        let err = assemble(&work, &config(), &report, &[], &[], &destination, None)
             .expect_err("a report with no database must not be packaged");
         let AuditError::MissingExtractDatabase { repo, expected } = &err else {
             panic!("expected MissingExtractDatabase, got {err:?}");
@@ -2481,7 +2534,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination, None)
+        let err = assemble(&work, &config(), &report, &[], &[], &destination, None)
             .expect_err("a missing extract/ directory must not be packaged");
         assert!(
             matches!(err, AuditError::MissingExtractDatabase { .. }),
@@ -2570,6 +2623,7 @@ api_key = "lin_api_do-not-package-me"
             &config_with_excerpts(),
             &report,
             &[],
+            &[],
             &destination,
             None,
         )
@@ -2616,6 +2670,7 @@ api_key = "lin_api_do-not-package-me"
             &config_with_excerpts(),
             &report,
             &[],
+            &[],
             &destination,
             None,
         )
@@ -2653,6 +2708,7 @@ api_key = "lin_api_do-not-package-me"
             &work,
             &config_with_excerpts(),
             &report,
+            &[],
             &[],
             &destination,
             None,
@@ -2700,6 +2756,7 @@ api_key = "lin_api_do-not-package-me"
             &work,
             &config_with_excerpts(),
             &report,
+            &[],
             &[],
             &destination,
             None,
@@ -2763,6 +2820,7 @@ api_key = "lin_api_do-not-package-me"
             &config_with_excerpts(),
             &report,
             &[],
+            &[],
             &destination,
             None,
         )
@@ -2813,6 +2871,7 @@ api_key = "lin_api_do-not-package-me"
             &work,
             &config_with_excerpts(),
             &report,
+            &[],
             &[],
             &destination,
             None,
@@ -2879,6 +2938,7 @@ api_key = "lin_api_do-not-package-me"
             &config_with_excerpts(),
             &report,
             &[],
+            &[],
             &destination,
             None,
         )
@@ -2920,6 +2980,7 @@ api_key = "lin_api_do-not-package-me"
             &config_with_excerpts(),
             &report,
             &[],
+            &[],
             &destination,
             None,
         )
@@ -2959,6 +3020,7 @@ api_key = "lin_api_do-not-package-me"
             &work,
             &config_with_excerpts(),
             &report,
+            &[],
             &[],
             &destination,
             None,
@@ -3002,6 +3064,7 @@ api_key = "lin_api_do-not-package-me"
             &config_with_excerpts(),
             &report,
             &[],
+            &[],
             &destination,
             None,
         )
@@ -3030,7 +3093,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
 
         let off = work.root().join("off.zip");
-        assemble(&work, &config(), &report, &[], &off, None).expect("assembles");
+        assemble(&work, &config(), &report, &[], &[], &off, None).expect("assembles");
         assert!(
             !entries(&off).contains(&EXCERPTS_ENTRY.to_owned()),
             "{:?}",
@@ -3038,7 +3101,7 @@ api_key = "lin_api_do-not-package-me"
         );
 
         let on = work.root().join("on.zip");
-        assemble(&work, &config_with_excerpts(), &report, &[], &on, None).expect("assembles");
+        assemble(&work, &config_with_excerpts(), &report, &[], &[], &on, None).expect("assembles");
         assert!(
             entries(&on).contains(&EXCERPTS_ENTRY.to_owned()),
             "{:?}",
@@ -3061,6 +3124,7 @@ api_key = "lin_api_do-not-package-me"
             &work,
             &config_with_excerpts(),
             &report,
+            &[],
             &[],
             &destination,
             None,
@@ -3110,7 +3174,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
 
-        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
 
         let readme = read_entry(&destination, README_ENTRY);
         assert!(readme.contains("No code excerpts"), "{readme}");

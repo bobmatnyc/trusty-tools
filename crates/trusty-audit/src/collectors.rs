@@ -13,11 +13,13 @@
 //! through [`trusty_common::bin_resolve::resolve_binary`] — the same
 //! resolver each collector already calls at collection time (see each
 //! module's `BINARY` constant), so this reports exactly what will go dark,
-//! never a second opinion on where a binary lives — and [`check`], which
-//! turns that list into a warning by default (the sweep still runs; each
-//! repository's own `[report].gaps` line is unchanged) or a refusal under
-//! `--strict-collectors`, run in [`crate::chain::Phase::Preflight`] before
-//! [`crate::clone::clone_all`] clones anything.
+//! never a second opinion on where a binary lives — and [`decide`], the pure
+//! warn-or-refuse judgement [`crate::chain::Phase::Preflight`] applies to
+//! that list. `check` composes both for a caller that wants one call.
+//! [`crate::chain::audit`] is the one production caller; it also reports each
+//! missing collector through [`crate::progress::Progress`] as
+//! `Operation::Preflight` before Phase 2 clones anything — see
+//! `crate::chain::audit_with_preflight`.
 //!
 //! Test: `collectors_tests`.
 
@@ -29,7 +31,11 @@ use crate::grounding::{cve, license, secrets};
 /// One optional collector a sweep can run, and what goes dark without it.
 ///
 /// Why: a shared row shape rather than three ad hoc checks, so a fourth
-/// fail-open collector is one entry in [`ALL`] and nothing else changes.
+/// fail-open collector is one entry in [`ALL`] and nothing else changes. It
+/// also carries the same three facts (collector, dimension, install hint)
+/// into BOTH the warn-and-continue row and the `--strict-collectors` refusal
+/// (`AuditError::MissingOptionalCollectors`) — one struct, so the two cannot
+/// drift apart the way a bare binary name once did (#7134 review).
 /// What: the collector's report name, the binary it resolves on `PATH`, the
 /// evidence dimension that is not covered without it, and how to install it.
 /// Test: `collectors_tests::all_names_every_fail_open_collector`.
@@ -82,7 +88,8 @@ pub const ALL: [OptionalCollector; 3] = [
 /// that lookup rather than adding a second one, so a preflight pass and a
 /// mid-sweep pass can never disagree about what is installed.
 /// Test: `collectors_tests::missing_finds_a_binary_absent_from_a_fake_resolver`,
-/// `collectors_tests::missing_is_empty_when_every_binary_resolves`.
+/// `collectors_tests::missing_is_empty_when_every_binary_resolves`,
+/// `collectors_tests::missing_and_check_go_through_the_real_resolve_binary`.
 pub fn missing() -> Vec<OptionalCollector> {
     missing_resolved_by(trusty_common::bin_resolve::resolve_binary)
 }
@@ -91,13 +98,20 @@ pub fn missing() -> Vec<OptionalCollector> {
 ///
 /// Why: split out purely for testability, the same reason
 /// [`trusty_common::bin_resolve`] itself parameterizes its fallback
-/// directory list — a test that mutated the real, process-global `PATH`/
+/// directory list — a test that REPLACED the real, process-global `PATH`/
 /// `HOME` to prove "missing" would race every OTHER test in this binary that
 /// also resolves a binary (`crate::run::pins`, `crate::git`, …), since
 /// `#[serial_test::serial]` only orders tests against EACH OTHER, never
-/// against a plain `#[test]` that never opted in. Production has exactly one
-/// caller ([`missing`], passing the real resolver); tests pass a closure over
-/// a fixed set of names instead, so nothing here ever touches real env.
+/// against a plain `#[test]` that never opted in — confirmed the hard way:
+/// an earlier version of this module's tests did exactly that and
+/// intermittently broke `clone::clone_tests::two_paths_with_one_basename_are_refused_together`
+/// with `"git is on PATH for this suite" … NotFound`. Production has exactly
+/// one caller ([`missing`], passing the real resolver); most tests pass a
+/// closure over a fixed set of names instead, so nothing here touches real
+/// env — the one exception,
+/// `collectors_tests::missing_and_check_go_through_the_real_resolve_binary`,
+/// only PREPENDS to the live `PATH` and never removes an entry, so it cannot
+/// hide a binary a concurrent test needs.
 fn missing_resolved_by(resolve: impl Fn(&str) -> Option<PathBuf>) -> Vec<OptionalCollector> {
     ALL.into_iter()
         .filter(|c| resolve(c.binary).is_none())
@@ -106,7 +120,12 @@ fn missing_resolved_by(resolve: impl Fn(&str) -> Option<PathBuf>) -> Vec<Optiona
 
 /// One warning row for a missing collector: what it is, what goes dark, and
 /// how to fix it.
-fn warning_row(c: &OptionalCollector) -> String {
+///
+/// `pub(crate)`: also the exact text [`crate::chain::audit`] narrates through
+/// `Operation::Preflight` for each missing collector, so the row a warning
+/// prints and the row in [`crate::chain::ChainReport::collector_gaps`] can
+/// never disagree.
+pub(crate) fn warning_row(c: &OptionalCollector) -> String {
     format!(
         "{}: `{}` is not installed, so {} will go unassessed for every repository in this \
          sweep (install it with `{}`)",
@@ -114,44 +133,50 @@ fn warning_row(c: &OptionalCollector) -> String {
     )
 }
 
-/// The preflight itself: warn-and-continue by default, refuse under
-/// `--strict-collectors`.
+/// The warn-or-refuse judgement over an already-resolved `missing` list.
+///
+/// Why: pure and resolver-free, unlike [`missing`] — split out so
+/// [`crate::chain::audit_with_preflight`] can take the missing list as a
+/// parameter (for progress reporting) and reuse this one decision rather than
+/// re-deriving it, and so a test can drive every branch (empty, some missing,
+/// strict) with a literal list and no PATH/env involved at all.
 ///
 /// # Postconditions
-/// On `Ok`, one warning row per missing collector (empty when every optional
-/// collector is present), and the caller is free to proceed — this never
-/// blocks by itself. `strict` is the only thing that turns a non-empty
-/// [`missing`] into a refusal.
-///
-/// What: calls [`missing`] once and either returns its rows as warnings or,
-/// when `strict` is set and the list is non-empty, refuses.
-/// Test: `collectors_tests::default_warns_and_returns_rows_for_every_gap`,
-/// `collectors_tests::strict_refuses_on_a_missing_collector`,
-/// `collectors_tests::all_present_produces_no_rows_either_way`.
+/// On `Ok`, one warning row per entry in `missing` (empty when `missing` is
+/// empty), and the caller is free to proceed — this never blocks by itself.
+/// `strict` is the only thing that turns a non-empty `missing` into a
+/// refusal.
+/// Test: `collectors_tests::decide_warns_and_returns_rows_for_every_gap`,
+/// `collectors_tests::decide_strict_refuses_on_a_missing_collector`,
+/// `collectors_tests::decide_on_an_empty_list_produces_no_rows_either_way`.
 ///
 /// # Errors
-/// [`AuditError::MissingOptionalCollectors`] when `strict` is true and at
-/// least one optional collector's binary is missing.
-pub fn check(strict: bool) -> Result<Vec<String>, AuditError> {
-    check_resolved_by(strict, trusty_common::bin_resolve::resolve_binary)
-}
-
-/// [`check`] with the resolver supplied by the caller — see
-/// [`missing_resolved_by`] for why this seam exists.
-fn check_resolved_by(
-    strict: bool,
-    resolve: impl Fn(&str) -> Option<PathBuf>,
-) -> Result<Vec<String>, AuditError> {
-    let missing = missing_resolved_by(resolve);
+/// [`AuditError::MissingOptionalCollectors`] when `strict` is true and
+/// `missing` is non-empty.
+pub fn decide(strict: bool, missing: &[OptionalCollector]) -> Result<Vec<String>, AuditError> {
     if missing.is_empty() {
         return Ok(Vec::new());
     }
     if strict {
         return Err(AuditError::MissingOptionalCollectors {
-            missing: missing.iter().map(|c| c.binary).collect(),
+            missing: missing.to_vec(),
         });
     }
     Ok(missing.iter().map(warning_row).collect())
+}
+
+/// [`missing`] then [`decide`] — the preflight in one call, for a caller with
+/// no progress sink to report through.
+///
+/// [`crate::chain::audit`] does not use this: it needs the missing list
+/// itself (to narrate each gap through `Operation::Preflight` before it
+/// decides), so it calls [`missing`] and [`decide`] separately.
+/// Test: `collectors_tests::check_composes_missing_and_decide`.
+///
+/// # Errors
+/// See [`decide`].
+pub fn check(strict: bool) -> Result<Vec<String>, AuditError> {
+    decide(strict, &missing())
 }
 
 #[cfg(test)]
@@ -164,6 +189,18 @@ mod collectors_tests {
     /// `#[serial]` coordination with the rest of the crate's test binary.
     fn fake_resolver(present: &'static [&'static str]) -> impl Fn(&str) -> Option<PathBuf> {
         move |name| present.contains(&name).then(|| PathBuf::from(name))
+    }
+
+    /// Creates an executable file `dir/name` (`chmod +x` on Unix).
+    fn touch_executable(dir: &std::path::Path, name: &str) {
+        let path = dir.join(name);
+        std::fs::write(&path, "#!/bin/sh\n").expect("write fake binary");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod +x");
+        }
     }
 
     #[test]
@@ -189,9 +226,10 @@ mod collectors_tests {
     }
 
     #[test]
-    fn default_warns_and_returns_rows_for_every_gap() {
-        let rows =
-            check_resolved_by(false, fake_resolver(&["gitleaks"])).expect("warns, does not refuse");
+    fn decide_warns_and_returns_rows_for_every_gap() {
+        let missing = missing_resolved_by(fake_resolver(&["gitleaks"]));
+
+        let rows = decide(false, &missing).expect("warns, does not refuse");
 
         assert_eq!(rows.len(), 2);
         let cargo_audit_row = rows
@@ -204,30 +242,94 @@ mod collectors_tests {
     }
 
     #[test]
-    fn strict_refuses_on_a_missing_collector() {
-        let err = check_resolved_by(true, fake_resolver(&["gitleaks", "cargo-deny"]))
-            .expect_err("strict refuses");
+    fn decide_strict_refuses_on_a_missing_collector() {
+        let missing = missing_resolved_by(fake_resolver(&["gitleaks", "cargo-deny"]));
+
+        let err = decide(true, &missing).expect_err("strict refuses");
 
         match err {
             AuditError::MissingOptionalCollectors { missing } => {
-                assert_eq!(missing, vec!["cargo-audit"]);
+                assert_eq!(missing.len(), 1);
+                assert_eq!(missing[0].binary, "cargo-audit");
+                assert_eq!(missing[0].collector, "cve-scan");
+                assert_eq!(missing[0].dimension, "known dependency CVEs");
+                assert_eq!(missing[0].install_hint, "cargo install cargo-audit");
             }
             other => panic!("expected MissingOptionalCollectors, got {other:?}"),
         }
     }
 
     #[test]
-    fn all_present_produces_no_rows_either_way() {
-        let all_present = fake_resolver(&["gitleaks", "cargo-audit", "cargo-deny"]);
-
+    fn decide_on_an_empty_list_produces_no_rows_either_way() {
         assert!(
-            check_resolved_by(false, &all_present)
+            decide(false, &[])
                 .expect("nothing to warn about")
                 .is_empty()
         );
+        assert!(decide(true, &[]).expect("nothing to refuse").is_empty());
+    }
+
+    #[test]
+    fn check_composes_missing_and_decide() {
+        // `check` calls the REAL `missing()`, so this only proves the
+        // composition compiles and returns `Ok` either way — which of the
+        // three real collectors are installed on the machine running this
+        // test is not something this suite controls or asserts on; see
+        // `missing_and_check_go_through_the_real_resolve_binary` below for
+        // the real-resolver proof, and `decide_*` above for the warn/refuse
+        // logic itself.
+        assert!(check(false).is_ok());
+    }
+
+    /// #7134 fix-round item 4: at least one test must exercise the REAL
+    /// `trusty_common::bin_resolve::resolve_binary` — not only the
+    /// resolver-injected seam above — so a change to that resolver's own
+    /// search order is caught here too.
+    ///
+    /// Why this is safe against the race documented on
+    /// [`missing_resolved_by`]: `resolve_binary` checks the live `PATH`
+    /// FIRST, so this PREPENDS a directory holding stand-ins for all three
+    /// collectors to whatever `PATH` already is, restores it exactly
+    /// afterward, and never REMOVES an entry — a concurrent test resolving
+    /// `git`/`gh`/anything else still finds it via the untouched remainder of
+    /// `PATH`. `#[serial_test::serial]` guards only the read-modify-write of
+    /// the env var itself, not against a real change in outcome.
+    #[test]
+    #[serial_test::serial]
+    fn missing_and_check_go_through_the_real_resolve_binary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for c in ALL {
+            touch_executable(dir.path(), c.binary);
+        }
+        let previous = std::env::var_os("PATH");
+        let mut dirs = vec![dir.path().to_path_buf()];
+        if let Some(p) = &previous {
+            dirs.extend(std::env::split_paths(p));
+        }
+        let prepended = std::env::join_paths(dirs).expect("join_paths");
+        // SAFETY (test-only): restored immediately below. `#[serial_test::serial]`
+        // rules out a concurrent read/write of `PATH` in this binary; the change
+        // itself is additive, so even an interleaving cannot hide a binary
+        // another test needs — see the doc comment above.
+        unsafe {
+            std::env::set_var("PATH", &prepended);
+        }
+        let found = missing();
+        let checked = check(false);
+        unsafe {
+            match &previous {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+
         assert!(
-            check_resolved_by(true, &all_present)
-                .expect("nothing to refuse")
+            found.is_empty(),
+            "the real resolve_binary must find every stand-in on PATH: {found:?}"
+        );
+        assert!(
+            checked
+                .expect("nothing missing, so check does not refuse")
                 .is_empty()
         );
     }

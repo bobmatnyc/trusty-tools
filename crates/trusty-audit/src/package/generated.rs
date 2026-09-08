@@ -103,6 +103,14 @@ struct PackageMetadata {
     /// that requested three extra export families got output byte-identical to
     /// one that requested none, and nothing in either bundle said which.
     config_not_acted_on: Vec<String>,
+    /// #7134: one row per OPTIONAL collector binary (`gitleaks`, `cargo-audit`,
+    /// `cargo-deny`) that was missing at `Phase::Preflight`, in the same words
+    /// the console warning used — so a recipient reading the archive alone
+    /// sees exactly what this run's operator saw before the sweep started.
+    /// Always emitted, for the same reason `not_attempted` is: an empty array
+    /// is a positive claim that every optional collector ran, where an absent
+    /// key leaves the reader to interpret a silence.
+    collector_gaps: Vec<String>,
     tools: Vec<ToolVersion>,
     repositories: Vec<PackagedRepo>,
 }
@@ -342,6 +350,7 @@ pub(super) fn render_metadata(
     report: &RunReport,
     audited: &[&RepoRun],
     unattempted: &[String],
+    collector_gaps: &[String],
 ) -> Result<String, AuditError> {
     let tools = tools::read_record(work)?
         .into_iter()
@@ -372,6 +381,7 @@ pub(super) fn render_metadata(
         repositories_excluded: report.repos.len() - audited.len(),
         not_attempted: unattempted.to_vec(),
         config_not_acted_on: config.unsupported_keys(),
+        collector_gaps: collector_gaps.to_vec(),
         tools,
         repositories,
     };

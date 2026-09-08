@@ -392,21 +392,30 @@ pub enum AuditError {
     /// disclosed correctly per repository (each collector fails open and
     /// names itself in that repository's `[report].gaps`), but only after an
     /// hours-long sweep had already cloned and collected everything. By
-    /// default [`crate::collectors::check`] still warns and lets the sweep
+    /// default [`crate::collectors::decide`] still warns and lets the sweep
     /// run — this variant is only reached when the operator opted into a
     /// refusal instead, and it fires in [`crate::chain::Phase::Preflight`],
     /// before [`crate::clone::clone_all`] runs.
-    /// What: names every missing collector's binary.
-    /// Test: `crate::collectors::collectors_tests::strict_refuses_on_a_missing_collector`,
+    /// What: names every missing collector — its report name, binary,
+    /// evidence dimension and install hint — the same four facts a
+    /// warn-and-continue row carries (#7134 review: a bare binary name told
+    /// the operator WHAT was missing but not what it cost or how to fix it).
+    /// Test: `crate::collectors::collectors_tests::decide_strict_refuses_on_a_missing_collector`,
     /// `crate::chain::chain_tests::strict_collectors_refuses_before_any_repo_is_cloned`.
     #[error(
-        "--strict-collectors refused: these optional collector binaries are not installed: \
-         {}; install them, or drop --strict-collectors to warn and continue instead",
-        missing.join(", ")
+        "--strict-collectors refused: {}; drop --strict-collectors to warn and continue instead",
+        missing
+            .iter()
+            .map(|c| format!(
+                "{} needs `{}` for {} (install with `{}`)",
+                c.collector, c.binary, c.dimension, c.install_hint
+            ))
+            .collect::<Vec<_>>()
+            .join("; ")
     )]
     MissingOptionalCollectors {
-        /// The missing collectors' binary names, e.g. `gitleaks`.
-        missing: Vec<&'static str>,
+        /// The missing collectors, in [`crate::collectors::ALL`] order.
+        missing: Vec<crate::collectors::OptionalCollector>,
     },
 
     /// A pinned tool is present at the pinned version but cannot be executed.
