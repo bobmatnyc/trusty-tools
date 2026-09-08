@@ -638,7 +638,6 @@ async fn tui_auto_spawns_a_daemon_that_outlives_it() {
     let output = support::tcode_command()
         .arg("tui")
         .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
-        .env_remove("TCODE_DAEMON_URL")
         .stdin(std::process::Stdio::null())
         .output()
         .expect("spawn tcode tui");
@@ -708,62 +707,52 @@ async fn tui_auto_spawns_a_daemon_that_outlives_it() {
 }
 
 /// A daemon bound to a DIFFERENT project must be refused, not attached to:
-/// auto-attach picks daemons up off a well-known address, so without this
-/// check a TUI launched in project B drives project A's daemon and every
-/// session lands in the wrong repository (#4512).
+/// auto-attach picks daemons up off a well-known path, so without this check a
+/// TUI launched in project B drives project A's daemon and every session lands
+/// in the wrong repository (#4512).
 ///
 /// Driven end-to-end against the REAL binary on both sides — a genuine
-/// `tcode serve --http --project A` daemon on an OS-assigned port, and a real
-/// `tcode tui --project B` pointed at it.
+/// `tcode serve --project A` daemon and a real `tcode tui --project B` — with
+/// ONE shared data directory, because that is what makes both processes
+/// resolve the same socket. #6637 removed `TCODE_DAEMON_URL`, so pointing the
+/// TUI at a specific daemon is no longer possible or needed; the token dance
+/// this test used to perform went with it, since a UDS peer is authenticated
+/// by its uid rather than by a bearer credential.
 #[tokio::test]
 async fn tui_refuses_a_daemon_bound_to_a_different_project() {
     use std::io::BufRead;
 
     let their_project = tempfile::tempdir().expect("their project");
     let our_project = tempfile::tempdir().expect("our project");
-    let daemon_data = tempfile::tempdir().expect("daemon data dir");
-    let tui_data = tempfile::tempdir().expect("tui data dir");
+    let shared_data = tempfile::tempdir().expect("shared data dir");
 
     let mut daemon = support::tcode_command()
         .args(["serve", "--http", "--port", "0", "--project"])
         .arg(their_project.path())
-        .env("TRUSTY_DATA_DIR_OVERRIDE", daemon_data.path())
+        .env("TRUSTY_DATA_DIR_OVERRIDE", shared_data.path())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("spawn tcode serve --http");
+        .expect("spawn tcode serve");
 
-    // `run_http` prints `listening on http://127.0.0.1:<port>` to stderr as
-    // soon as it binds — the only place the OS-assigned port is reported.
+    // The socket is bound FIRST and announced on stderr before anything else
+    // (#6637), so this line is the daemon's readiness signal.
     let mut reader = std::io::BufReader::new(daemon.stderr.take().expect("daemon stderr"));
-    let url = loop {
+    loop {
         let mut line = String::new();
         if reader.read_line(&mut line).expect("read daemon stderr") == 0 {
-            panic!("daemon exited before reporting its address");
+            panic!("daemon exited before reporting its socket");
         }
-        if let Some(idx) = line.find("http://") {
-            break line[idx..].trim().to_string();
+        if line.contains("tcode serve: listening on") {
+            break;
         }
-    };
-
-    // #5439: this test deliberately gives the two processes SEPARATE data
-    // directories so the TUI cannot find a discovery file. That also puts the
-    // daemon's credential out of the TUI's reach, so the binding check would
-    // read `<unreported>` instead of the mismatch it exists to catch. The
-    // client-only `TCODE_DAEMON_TOKEN` override is exactly the case of a
-    // client that cannot read the daemon's data directory.
-    let token = std::fs::read_to_string(daemon_data.path().join("trusty-code/auth_token"))
-        .expect("the daemon must write its credential before it binds")
-        .trim()
-        .to_string();
+    }
 
     let output = support::tcode_command()
         .arg("tui")
         .arg("--project")
         .arg(our_project.path())
-        .env("TRUSTY_DATA_DIR_OVERRIDE", tui_data.path())
-        .env("TCODE_DAEMON_URL", &url)
-        .env("TCODE_DAEMON_TOKEN", &token)
+        .env("TRUSTY_DATA_DIR_OVERRIDE", shared_data.path())
         .stdin(std::process::Stdio::null())
         .output()
         .expect("spawn tcode tui");
@@ -789,46 +778,11 @@ async fn tui_refuses_a_daemon_bound_to_a_different_project() {
         "error must name BOTH projects: {stderr}"
     );
     assert!(
-        !tui_data
+        !shared_data
             .path()
             .join("trusty-code/tui-spawned-daemon.log")
             .exists(),
         "must not start a competing daemon: {stderr}"
-    );
-}
-
-/// An explicitly-set `TCODE_DAEMON_URL` that nothing answers must fail with
-/// an actionable message and a nonzero exit — never hang, never enter the
-/// alternate screen, and never auto-spawn a daemon at a DIFFERENT address,
-/// which would silently ignore the operator's explicit instruction (#4512).
-#[test]
-fn tui_refuses_to_spawn_for_an_unreachable_explicit_daemon_url() {
-    let data_dir = tempfile::tempdir().expect("data dir tempdir");
-    let output = support::tcode_command()
-        .arg("tui")
-        .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
-        .env("TCODE_DAEMON_URL", "http://127.0.0.1:1")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("spawn tcode tui");
-
-    assert!(
-        !output.status.success(),
-        "must exit nonzero for an unreachable explicit URL: {output:?}"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("tcode tui:")
-            && stderr.contains("TCODE_DAEMON_URL")
-            && stderr.contains("http://127.0.0.1:1"),
-        "error must name the command, the env var, and the dead URL: {stderr}"
-    );
-    assert!(
-        !data_dir
-            .path()
-            .join("trusty-code/tui-spawned-daemon.log")
-            .exists(),
-        "must not have spawned a daemon: {stderr}"
     );
 }
 

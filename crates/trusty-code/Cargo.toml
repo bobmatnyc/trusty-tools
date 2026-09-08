@@ -137,7 +137,12 @@ trusty-mcp = { workspace = true }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
 # ObjectStoreDestination, DestinationUri, DrainTarget, LogSource, Level}` — the
 # drain CORE `tcode serve`'s own scheduler (`crate::log_drain`) calls rather
 # than reimplementing collection/upload/manifest logic.
-trusty-common = { workspace = true, features = ["catchup", "stdio-mcp-client", "axum-server", "daemon-token", "inference-client", "config-cli", "bedrock-client", "search-index", "crate-config", "log-drain"] }
+# `uds` (#6637): `trusty_common::uds::{server, rpc, stream_client, probe,
+# bind_singleton_hardened}` — the hardened socket `tcode serve` binds and
+# `tcode tui` dials. Named explicitly rather than left to arrive transitively
+# through `catchup` -> `memory-rpc` -> `uds`, so dropping `catchup` later
+# cannot silently take the daemon's own transport with it.
+trusty-common = { workspace = true, features = ["catchup", "stdio-mcp-client", "axum-server", "daemon-token", "inference-client", "config-cli", "bedrock-client", "search-index", "crate-config", "log-drain", "uds"] }
 
 # `tui_client::CodeEngine` (#3415, DOC-50 §3.3/§3.4, epic #3411 Slice 3): the
 # shared engine-adapter trait + event vocabulary (`TuiEngine`/`ReplEvent`)

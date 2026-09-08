@@ -437,7 +437,10 @@ fn sse_event_for(envelope: &crate::events::SessionEventEnvelope) -> SseEvent {
 /// signal); [`build_axum_router`]'s tests cover the routing/dispatch logic
 /// this serves.
 pub async fn run_http(
-    router: Router,
+    // #6637: `Arc<Router>`, not `Router` — `crate::serve::uds::run_daemon_on`
+    // builds the router ONCE and serves it over both transports, so a session
+    // created over the socket is the same session an HTTP call sees.
+    router: Arc<Router>,
     sessions: Arc<SessionRegistry>,
     workstreams: SharedWorkstreamStore,
     port: u16,
@@ -466,10 +469,11 @@ pub async fn run_http(
     info!("tcode serve --http: listening on http://{bound}");
     eprintln!("tcode serve --http: listening on http://{bound}");
 
-    // Issue #3415 (DOC-50 §3.4): write the discovery file `CodeEngine` reads
-    // to find this daemon without a hardcoded port. Best-effort — a write
-    // failure only means discovery degrades to the `TCODE_DAEMON_URL` env
-    // var; it must never block the daemon from serving.
+    // Issue #3415 (DOC-50 §3.4): write the discovery file a client reads to
+    // find this listener without a hardcoded port. #6637 left
+    // `trusty-code-gui`'s webview as its only reader. Best-effort — a write
+    // failure leaves that client with no pointer, and must never block the
+    // daemon from serving, which every other client reaches over the socket.
     let discovery_path = crate::serve::discovery::http_addr_path();
     if let Some(path) = &discovery_path
         && let Err(e) = crate::serve::discovery::write_http_addr_file(path, &bound)
@@ -481,7 +485,7 @@ pub async fn run_http(
         );
     }
 
-    let app = build_axum_router(Arc::new(router), sessions, workstreams, binding, auth);
+    let app = build_axum_router(router, sessions, workstreams, binding, auth);
     axum::serve(listener, app)
         .with_graceful_shutdown(trusty_common::shutdown_signal())
         .await

@@ -1,19 +1,24 @@
-//! The long-lived `GET /workstreams/{id}/events` background subscription
-//! `TuiEngine::subscribe_workstream_events` spawns (issue #3415, DOC-48
-//! §5.3).
+//! The long-lived `workstream.events` background subscription
+//! `TuiEngine::subscribe_workstream_events` spawns (issue #3415, DOC-48 §5.3;
+//! moved off the `GET /workstreams/{id}/events` SSE route in #6637).
 //!
 //! Why: split out of `engine.rs` (issue #610's 500-SLOC production-file
 //! cap) — this is the one self-contained loop with its own wire-parsing
 //! helper, so it earns its own file rather than staying inline alongside
 //! `EngineState`.
-//! What: [`WireWorkstreamEnvelope`]/[`parse_workstream_envelope`] (the
-//! AC-7.2 wire shape this client deserialises SSE payloads into) and
-//! [`run_workstream_subscription`] (the reconnect loop itself, spawned via
-//! `tokio::spawn` by `engine.rs`'s `TuiEngine::subscribe_workstream_events`).
+//! What: [`WireWorkstreamEnvelope`] (the AC-7.2 wire shape this client
+//! deserialises stream frames into) and [`run_workstream_subscription`] (the
+//! reconnect loop itself, spawned via `tokio::spawn` by `engine.rs`'s
+//! `TuiEngine::subscribe_workstream_events`).
+//!
+//! **The reconnect is bare, with no cursor.** `workstream.events` has no
+//! `after_seq` and cannot have one — see
+//! `crate::workstreams::events_stream`'s module docs for why a workstream has
+//! no ordering of its own to resume from.
 //! Test: `engine_tests::parse_workstream_envelope_round_trips_activation_changed`
 //! (in the sibling `engine_tests.rs`, included from `engine.rs`); the full
 //! reconnect-to-a-new-workstream behaviour is covered end-to-end against a
-//! mock daemon in `tests/tui_client_engine.rs`.
+//! real daemon socket in `tests/tui_client_engine.rs`.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -23,12 +28,11 @@ use trusty_code_tui::ReplEvent;
 
 use crate::events::Event;
 
-use super::engine::{RECONNECT_BACKOFF, SSE_IDLE_TIMEOUT};
+use super::engine::RECONNECT_BACKOFF;
 use super::engine_state::EngineState;
-use super::sse::SseLines;
 
 /// The AC-7.2 wire envelope this client deserialises off
-/// `GET /workstreams/{id}/events` — mirrors
+/// `workstream.events` — mirrors
 /// `crate::workstreams::sse::WorkstreamEventEnvelope`
 /// (`trusty_agents_common::transport::EventEnvelope<Event>`) exactly, but
 /// with `Deserialize` (the shared type only derives `Serialize` — it's
@@ -44,15 +48,22 @@ pub(super) struct WireWorkstreamEnvelope {
     pub(super) payload: Event,
 }
 
+/// Parse one AC-7.2 envelope from its JSON text.
+///
+/// Test-only since #6637: the stream reader decodes frames into
+/// [`WireWorkstreamEnvelope`] directly, so nothing in production parses a
+/// string. `engine_tests::parse_workstream_envelope_round_trips_activation_changed`
+/// still pins the wire field names against DOC-48 §5.3, which is what this
+/// keeps it alive for.
+#[cfg(test)]
 pub(super) fn parse_workstream_envelope(payload_json: &str) -> Option<WireWorkstreamEnvelope> {
     serde_json::from_str(payload_json).ok()
 }
 
 /// Long-lived background loop for `subscribe_workstream_events`: holds one
-/// SSE connection to `GET /workstreams/{current_id}/events` at a time,
-/// reconnecting (to a possibly-NEW workstream id, per DOC-48 §5.3 point 5)
-/// on activation changes, transport errors, or idle timeouts, until
-/// `state.shutting_down` is set.
+/// `workstream.events` stream on `current_id` at a time, reconnecting (to a
+/// possibly-NEW workstream id, per DOC-48 §5.3 point 5) on activation changes,
+/// stream errors, or an early end, until `state.shutting_down` is set.
 pub(super) async fn run_workstream_subscription(
     state: Arc<EngineState>,
     mut current_id: String,
@@ -62,14 +73,19 @@ pub(super) async fn run_workstream_subscription(
         if state.shutting_down.load(Ordering::SeqCst) {
             return;
         }
-        let url = format!("{}/workstreams/{current_id}/events", state.rpc.base_url());
-        // #5439: guarded like every other route — send the same credential.
-        let resp = match state.rpc.authorize(state.rpc.http().get(&url)).send().await {
-            Ok(r) if r.status().is_success() => r,
-            _ => {
+        let mut stream = match state
+            .rpc
+            .open_stream::<WireWorkstreamEnvelope>(
+                "workstream.events",
+                serde_json::json!({"workstream_id": current_id}),
+            )
+            .await
+        {
+            Ok(stream) => stream,
+            Err(_) => {
                 let _ = tx.send(ReplEvent::ConnectionLost {
                     reason: format!(
-                        "could not reach workstream events endpoint for {current_id}; retrying…"
+                        "could not open the workstream event stream for {current_id}; retrying…"
                     ),
                 });
                 tokio::time::sleep(RECONNECT_BACKOFF).await;
@@ -77,16 +93,18 @@ pub(super) async fn run_workstream_subscription(
             }
         };
 
-        let mut lines = SseLines::new(resp);
         loop {
+            // Checked between frames rather than on a timer: `next_frame` is
+            // not cancel-safe (a cancelled read loses whatever it had
+            // buffered), so this loop cannot race it against a poll. A TUI
+            // that quits while the stream is silent leaves this task parked
+            // until the process exits, which is where a detached task ends
+            // anyway.
             if state.shutting_down.load(Ordering::SeqCst) {
                 return;
             }
-            match tokio::time::timeout(SSE_IDLE_TIMEOUT, lines.next_data()).await {
-                Ok(Ok(Some(payload))) => {
-                    let Some(env) = parse_workstream_envelope(&payload) else {
-                        continue;
-                    };
+            match stream.next_frame().await {
+                Some(Ok(env)) => {
                     if let Event::WorkstreamActivationChanged {
                         new_active_id,
                         prior_id,
@@ -171,14 +189,14 @@ pub(super) async fn run_workstream_subscription(
                         }
                     }
                 }
-                Ok(Ok(None)) => {
+                None => {
                     let _ = tx.send(ReplEvent::ConnectionLost {
                         reason: "workstream event stream closed; reconnecting…".to_string(),
                     });
                     tokio::time::sleep(RECONNECT_BACKOFF).await;
                     break;
                 }
-                Ok(Err(_)) | Err(_) => {
+                Some(Err(_)) => {
                     let _ = tx.send(ReplEvent::ConnectionLost {
                         reason: "workstream event stream error; reconnecting…".to_string(),
                     });

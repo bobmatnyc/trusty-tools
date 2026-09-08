@@ -1,8 +1,11 @@
 //! `tcode serve --http` daemon discovery file (issue #3415, DOC-50 §3.4).
 //!
-//! Why: `tcode tui` (`crate::tui_client::CodeEngine`) needs to find a running
-//! `tcode serve --http` daemon without the operator copying a port number by
-//! hand. DOC-50 §3.4's prose sketched a NEW, tcode-specific JSON file
+//! Why: a client needs to find the daemon's TCP listener without the operator
+//! copying a port number by hand. Since #6637 that client is
+//! `trusty-code-gui`'s webview alone — `tcode tui` dials the daemon's Unix
+//! socket, whose path is derived rather than discovered — so this file and
+//! the listener it points at retire together in PR 2.
+//! DOC-50 §3.4's prose sketched a NEW, tcode-specific JSON file
 //! (`~/.trusty-code/daemon.json`, `{daemon_url, pid, started_at}`) for this —
 //! but this crate's siblings already solve the identical problem, and their
 //! convention is different: `trusty-memory` (which wrote one until #6286 retired both the file and its listener)
@@ -12,22 +15,22 @@
 //! rename) so a reader never observes a half-written value. This module
 //! follows THAT established convention for tcode instead of inventing a
 //! second, JSON-shaped one: `pid`/`started_at` have no consumer anywhere in
-//! this codebase yet, and a plain-text `host:port` is exactly what
-//! `discover_daemon_url` (`crate::tui_client::discovery`) needs to build
-//! `http://{addr}`.
+//! this codebase yet, and a plain-text `host:port` is exactly what a client
+//! needs to build `http://{addr}`.
 //! What: [`http_addr_path`] resolves `{resolve_data_dir("trusty-code")}/http_addr`
 //! (server AND client side share this one path-resolution function so they
 //! can never drift onto two different locations); [`write_http_addr_file`]
 //! (called from `crate::serve::http::run_http` after binding) atomically
 //! writes the bound address; [`remove_http_addr_file`] (called on graceful
 //! shutdown) clears it so a stopped daemon doesn't leave a stale pointer for
-//! the next reader; [`read_http_addr_file`] (called from
-//! `crate::tui_client::discovery`) reads and trims it back. Every operation
-//! is best-effort: a write/remove failure only degrades discovery to the
-//! `TCODE_DAEMON_URL` env var; a read failure (file absent, stale content,
-//! unreadable) means "no candidate from this source," not a hard error — the
-//! caller's overall discovery still fails with a clear, actionable message
-//! when no source yields a live daemon.
+//! the next reader; `read_http_addr_file` (test-only since #6637; its one
+//! production caller went with `tui_client::discovery`) reads and trims it
+//! back. Every operation is best-effort: a write or remove failure leaves a
+//! client with no pointer to the TCP listener, which it reports as no daemon
+//! rather than as a crash, and never stops the daemon serving — the socket is
+//! bound first and is what every other client uses. A read failure (file
+//! absent, stale content, unreadable) means "no candidate from this source,"
+//! not a hard error.
 //! Test: `discovery_tests::*`.
 
 use std::io;
@@ -100,8 +103,15 @@ pub(crate) fn remove_http_addr_file(path: &Path) {
 /// not `Result`) since "no file" and "unreadable file" are both just "no
 /// candidate from this source" to the caller, not distinct error states
 /// worth surfacing.
+///
+/// Test-only since #6637: its one production caller was
+/// `tui_client::discovery`, which went with the HTTP client. The file is still
+/// WRITTEN, because `trusty-code-gui` finds the transient TCP listener through
+/// it; both the file and the listener retire together in PR 2. This stays so
+/// the round-trip test keeps pinning the format the writer produces.
 /// Test: `discovery_tests::write_then_read_round_trips_bound_addr`,
 /// `discovery_tests::read_missing_file_returns_none`.
+#[cfg(test)]
 pub(crate) fn read_http_addr_file(path: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(path).ok()?;
     let trimmed = raw.trim();

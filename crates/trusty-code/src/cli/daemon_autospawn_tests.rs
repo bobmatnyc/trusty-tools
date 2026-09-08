@@ -1,58 +1,51 @@
 //! Tests for [`super`] — `tcode tui`'s attach-or-spawn daemon policy
-//! (#4512).
+//! (#4512; retransported onto the daemon's Unix socket in #6637).
 //!
 //! Why a sibling file: `daemon_autospawn.rs` is a production file under the
 //! 500-SLOC cap (issue #610); the same `#[cfg(test)] #[path = ...]` split
 //! `tui_client/engine.rs` uses keeps these cases in a test-capped file.
 //! What: every branch of [`super::ensure_daemon_with`] is exercised against
-//! REAL child processes and a real `wiremock` health endpoint — no mocked
+//! REAL child processes and a REAL socket answering `health` — no mocked
 //! internals — so the spawn, the readiness gate, and the binding check are
 //! all genuinely executed. Stub children stand in for the daemon: a `sh`
 //! script that records its pid and argv then sleeps (a daemon that stays
 //! up), one that exits immediately (a daemon that fails to bind), and one
 //! that touches a marker file (to prove a branch never spawned anything).
 //!
-//! Because readiness here comes from `wiremock` rather than from the stub,
-//! `ensure_daemon_with` can return before the stub child has run a single
+//! Because readiness comes from the stub SOCKET rather than from the stub
+//! child, `ensure_daemon_with` can return before the child has run a single
 //! line. Nothing a stub writes may therefore be read directly — go through
 //! [`SleepingStub::argv`] / [`SleepingStub::pid`], which poll (#6231, #5073).
+//!
+//! The `TCODE_DAEMON_URL` isolation the old `EnvGuard` needed is gone with the
+//! env var itself. `TRUSTY_DATA_DIR_OVERRIDE` is still set, for the
+//! spawned-daemon log path alone.
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
 
 use super::*;
 
 /// Serializes every case here, since they all mutate the process-global
-/// environment `lookup_daemon` reads. Mirrors the `ENV_LOCK` convention
-/// already used by `tui_client::discovery`'s tests and `crate::task::mock_llm`.
+/// `TRUSTY_DATA_DIR_OVERRIDE`. Mirrors `crate::task::mock_llm`'s convention.
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// RAII guard isolating BOTH discovery sources for one test, and restoring
-/// the environment on drop even if the test panics.
-///
-/// `TRUSTY_DATA_DIR_OVERRIDE` (trusty-common's documented test escape hatch)
-/// repoints `resolve_data_dir("trusty-code")` at a fresh temp directory, so
-/// the `http_addr` discovery file and the spawned-daemon log belong to this
-/// test alone — a real daemon running on the developer's machine can never
-/// make a "no daemon running" case attach to it instead.
+/// RAII guard repointing `resolve_data_dir("trusty-code")` at a fresh temp
+/// directory, so the spawned-daemon log belongs to this test alone.
 struct EnvGuard {
     _data_dir: tempfile::TempDir,
 }
 
 impl EnvGuard {
-    /// `daemon_url = None` means "TCODE_DAEMON_URL unset", i.e. discovery
-    /// falls through to the (now empty) discovery file.
-    fn isolated(daemon_url: Option<&str>) -> Self {
+    fn isolated() -> Self {
         let data_dir = tempfile::tempdir().expect("data dir");
         // SAFETY: test-only env mutation, serialized by `ENV_LOCK`.
         unsafe {
             std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, data_dir.path());
-            match daemon_url {
-                Some(url) => std::env::set_var(DAEMON_URL_ENV, url),
-                None => std::env::remove_var(DAEMON_URL_ENV),
-            }
         }
         Self {
             _data_dir: data_dir,
@@ -64,43 +57,65 @@ impl Drop for EnvGuard {
     fn drop(&mut self) {
         // SAFETY: test-only env mutation, serialized by `ENV_LOCK`.
         unsafe {
-            std::env::remove_var(DAEMON_URL_ENV);
             std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
         }
     }
 }
 
-/// A `wiremock` server whose `GET /health` reports `binding` — i.e. a daemon
-/// that looks alive to `lookup_daemon` and to `spin_until_ready`, and that
-/// answers the #4512 binding question the way a real daemon would.
-async fn healthy_daemon(root: Option<&Path>) -> MockServer {
-    let binding = trusty_code::binding::ProjectBinding::resolve(root.map(Path::to_path_buf))
-        .expect("must bind");
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/health"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "server": "tcode",
-            "status": "ok",
-            "binding": binding.to_json(),
-        })))
-        .mount(&server)
-        .await;
-    server
+/// A stub daemon answering `health` on a real hardened socket.
+///
+/// Why hand-rolled rather than the real daemon: these tests are about the
+/// attach/spawn DECISION, and a real daemon would drag a router, a workstream
+/// store and a log-drain scheduler in behind it. One method and one frame is
+/// the whole surface `ensure_daemon_with` consults.
+fn stub_daemon_socket(dir: &Path, binding: Option<serde_json::Value>) -> PathBuf {
+    let socket = dir.join("tcode.sock");
+    // `connect_hardened` refuses a socket whose containing directory is wider
+    // than `0700`, and `tempfile` creates one at the process umask.
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .expect("harden the stub socket directory");
+    let listener = UnixListener::bind(&socket).expect("bind the stub socket");
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
+        .expect("harden the stub socket");
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let binding = binding.clone();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    // A bare connect-and-close is `socket_is_serving`'s probe.
+                    return;
+                }
+                let request: serde_json::Value = match serde_json::from_str(&line) {
+                    Ok(request) => request,
+                    Err(_) => return,
+                };
+                let mut result = serde_json::json!({"server": "tcode", "status": "ok"});
+                if let Some(binding) = binding {
+                    result["binding"] = binding;
+                }
+                let body = format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"].clone(),
+                        "result": result,
+                    })
+                );
+                let _ = reader.get_mut().write_all(body.as_bytes()).await;
+                let _ = reader.get_mut().flush().await;
+            });
+        }
+    });
+    socket
 }
 
-/// A daemon from before #4512: healthy, but reporting no binding at all.
-async fn daemon_without_a_binding_field() -> MockServer {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/health"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"server": "tcode", "status": "ok"})),
-        )
-        .mount(&server)
-        .await;
-    server
+/// The `binding` payload a daemon bound to `root` publishes.
+fn binding_json(root: Option<&Path>) -> serde_json::Value {
+    trusty_code::binding::ProjectBinding::resolve(root.map(Path::to_path_buf))
+        .expect("must bind")
+        .to_json()
 }
 
 /// Write an executable `sh` stub to `dir` and return its path. The stub
@@ -108,12 +123,7 @@ async fn daemon_without_a_binding_field() -> MockServer {
 fn stub_binary(dir: &Path, name: &str, body: &str) -> PathBuf {
     let script = dir.join(name);
     std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write stub");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod stub");
-    }
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
     script
 }
 
@@ -121,18 +131,12 @@ fn stub_binary(dir: &Path, name: &str, body: &str) -> PathBuf {
 /// sleeps — the "daemon that comes up and stays up" case.
 ///
 /// The pid is written to disk rather than read off a `Child` handle because
-/// `ensure_daemon_with` no longer RETURNS one: it drops the handle without
+/// `ensure_daemon_with` does not RETURN one: it drops the handle without
 /// signalling, which is exactly the behaviour
 /// [`the_tui_never_signals_the_daemon_on_exit`] has to observe from outside.
-///
-/// Why a struct rather than a bare path: the stub's two records are written
-/// by a real `sh` child AFTER `spawn` returns, and readiness in these tests
-/// comes from a `wiremock` endpoint that is already healthy — so
-/// `ensure_daemon_with` returns without the child having run a single line.
-/// Reading either record straight afterwards raced the write and failed with
-/// `NotFound` under parallel load (#6231, #5073). [`SleepingStub::argv`] and
-/// [`SleepingStub::pid`] are the only supported readers, and both poll.
-/// [`Drop`] then reaps the `sleep 300` even when an assertion panicked first.
+/// Reading either record straight after the call raced the write and failed
+/// with `NotFound` under parallel load (#6231, #5073), so [`SleepingStub::argv`]
+/// and [`SleepingStub::pid`] are the only supported readers and both poll.
 struct SleepingStub {
     /// The executable `sh` script `ensure_daemon_with` is pointed at.
     path: PathBuf,
@@ -173,9 +177,7 @@ impl SleepingStub {
     /// creates the file before `echo` writes into it, so an existence-only
     /// wait can still read `""` — which would make
     /// [`spawns_projectless_when_the_tui_is_projectless`]'s
-    /// `!argv.contains("--project")` assertion pass vacuously. Every spawn
-    /// under test passes at least `serve --http`, so a non-empty read is a
-    /// complete one.
+    /// `!argv.contains("--project")` assertion pass vacuously.
     async fn argv(&self) -> String {
         wait_for_record(&self.argv_log, "argv").await
     }
@@ -196,9 +198,8 @@ impl Drop for SleepingStub {
     /// Why: `ensure_daemon_with` deliberately never signals a daemon it
     /// spawned, so nothing else will. A panicking assertion used to strand
     /// one five-minute sleeper per failed test, and a flake investigation
-    /// re-runs the suite ~10× — the strays pile up and starve the very run
-    /// meant to prove stability. Best-effort by design: a test whose stub was
-    /// never spawned leaves no pid file, and that is not an error.
+    /// re-runs the suite ~10× — the strays pile up. Best-effort by design: a
+    /// test whose stub was never spawned leaves no pid file.
     fn drop(&mut self) {
         if let Ok(raw) = std::fs::read_to_string(&self.pid_log)
             && let Ok(pid) = raw.trim().parse::<u32>()
@@ -210,10 +211,9 @@ impl Drop for SleepingStub {
 
 /// Poll `path` until it holds a non-empty record, then return it.
 ///
-/// The budget is 2s (200 × 10ms), unchanged from the pid wait this replaces:
-/// long enough to absorb a `fork`/`exec` delayed by a saturated machine,
-/// short enough that a stub which genuinely never ran fails the test rather
-/// than hanging it. `label` names the record in the panic message.
+/// The budget is 2s (200 × 10ms): long enough to absorb a `fork`/`exec`
+/// delayed by a saturated machine, short enough that a stub which genuinely
+/// never ran fails the test rather than hanging it.
 async fn wait_for_record(path: &Path, label: &str) -> String {
     for _ in 0..200 {
         if let Ok(raw) = std::fs::read_to_string(path)
@@ -221,7 +221,7 @@ async fn wait_for_record(path: &Path, label: &str) -> String {
         {
             return raw;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("the spawned stub never recorded its {label} at {path:?}");
 }
@@ -235,14 +235,12 @@ fn marker_stub(dir: &Path, marker: &Path) -> PathBuf {
     )
 }
 
-#[cfg(unix)]
 fn is_alive(pid: u32) -> bool {
     // SAFETY: signal 0 performs permission/existence checks only and never
     // delivers a signal; it has no memory-safety effects.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-#[cfg(unix)]
 fn kill(pid: u32) {
     // SAFETY: `pid` names a stub process this test spawned; `kill` has no
     // memory-safety effects.
@@ -256,25 +254,21 @@ fn kill(pid: u32) {
 #[tokio::test]
 async fn attaches_to_a_live_daemon_without_spawning() {
     let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
     let project = tempfile::tempdir().expect("project");
     let canonical = project.path().canonicalize().expect("canonicalize");
-    let server = healthy_daemon(Some(&canonical)).await;
-    let _env = EnvGuard::isolated(Some(&server.uri()));
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let socket = stub_daemon_socket(sock_dir.path(), Some(binding_json(Some(&canonical))));
 
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("spawned");
     let stub = marker_stub(dir.path(), &marker);
 
-    let url = ensure_daemon_with(
-        &reqwest::Client::new(),
-        Some(&canonical),
-        &stub,
-        "http://unused.invalid",
-    )
-    .await
-    .expect("must attach to the live daemon");
+    let resolved = ensure_daemon_with(Some(&canonical), &stub, &socket)
+        .await
+        .expect("must attach to the live daemon");
 
-    assert_eq!(url, server.uri().trim_end_matches('/'));
+    assert_eq!(resolved, socket);
     assert!(
         !marker.exists(),
         "must not have spawned anything: {marker:?}"
@@ -286,44 +280,41 @@ async fn attaches_to_a_live_daemon_without_spawning() {
 #[tokio::test]
 async fn attaches_to_a_projectless_daemon_when_projectless() {
     let _lock = ENV_LOCK.lock().await;
-    let server = healthy_daemon(None).await;
-    let _env = EnvGuard::isolated(Some(&server.uri()));
+    let _env = EnvGuard::isolated();
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let socket = stub_daemon_socket(sock_dir.path(), Some(binding_json(None)));
 
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("spawned");
     let stub = marker_stub(dir.path(), &marker);
 
-    let url = ensure_daemon_with(
-        &reqwest::Client::new(),
-        None,
-        &stub,
-        "http://unused.invalid",
-    )
-    .await
-    .expect("a projectless TUI must attach to a projectless daemon");
-    assert_eq!(url, server.uri().trim_end_matches('/'));
+    let resolved = ensure_daemon_with(None, &stub, &socket)
+        .await
+        .expect("a projectless TUI must attach to a projectless daemon");
+    assert_eq!(resolved, socket);
     assert!(!marker.exists(), "must not have spawned anything");
 }
 
-/// The daemon on the well-known port may be serving a DIFFERENT project.
+/// The daemon on the well-known socket may be serving a DIFFERENT project.
 /// Attaching would run every session against the wrong repository, so it
 /// must be refused — and refused WITHOUT starting a competing daemon on a
-/// port that is already taken (#4512).
+/// socket that is already bound (#4512).
 #[tokio::test]
 async fn refuses_a_daemon_bound_to_another_project() {
     let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
     let their_project = tempfile::tempdir().expect("their project");
     let our_project = tempfile::tempdir().expect("our project");
     let theirs = their_project.path().canonicalize().expect("canonicalize");
     let ours = our_project.path().canonicalize().expect("canonicalize");
-    let server = healthy_daemon(Some(&theirs)).await;
-    let _env = EnvGuard::isolated(Some(&server.uri()));
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let socket = stub_daemon_socket(sock_dir.path(), Some(binding_json(Some(&theirs))));
 
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("spawned");
     let stub = marker_stub(dir.path(), &marker);
 
-    let err = ensure_daemon_with(&reqwest::Client::new(), Some(&ours), &stub, &server.uri())
+    let err = ensure_daemon_with(Some(&ours), &stub, &socket)
         .await
         .expect_err("a daemon on another project must not be attached to");
 
@@ -338,7 +329,7 @@ async fn refuses_a_daemon_bound_to_another_project() {
     );
     assert!(
         !marker.exists(),
-        "must not start a competing daemon on a port already in use: {rendered}"
+        "must not start a competing daemon on a socket already bound: {rendered}"
     );
 }
 
@@ -349,17 +340,18 @@ async fn refuses_a_daemon_bound_to_another_project() {
 #[tokio::test]
 async fn refuses_a_project_bound_client_against_a_projectless_daemon() {
     let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
     let project = tempfile::tempdir().expect("project");
     let ours = project.path().canonicalize().expect("canonicalize");
 
     // Bound client, projectless daemon.
     {
-        let server = healthy_daemon(None).await;
-        let _env = EnvGuard::isolated(Some(&server.uri()));
+        let sock_dir = tempfile::tempdir().expect("socket dir");
+        let socket = stub_daemon_socket(sock_dir.path(), Some(binding_json(None)));
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join("spawned");
         let stub = marker_stub(dir.path(), &marker);
-        let err = ensure_daemon_with(&reqwest::Client::new(), Some(&ours), &stub, &server.uri())
+        let err = ensure_daemon_with(Some(&ours), &stub, &socket)
             .await
             .expect_err("a bound TUI must not attach to a projectless daemon");
         let rendered = format!("{err:#}");
@@ -369,12 +361,12 @@ async fn refuses_a_project_bound_client_against_a_projectless_daemon() {
 
     // Projectless client, bound daemon.
     {
-        let server = healthy_daemon(Some(&ours)).await;
-        let _env = EnvGuard::isolated(Some(&server.uri()));
+        let sock_dir = tempfile::tempdir().expect("socket dir");
+        let socket = stub_daemon_socket(sock_dir.path(), Some(binding_json(Some(&ours))));
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join("spawned");
         let stub = marker_stub(dir.path(), &marker);
-        let err = ensure_daemon_with(&reqwest::Client::new(), None, &stub, &server.uri())
+        let err = ensure_daemon_with(None, &stub, &socket)
             .await
             .expect_err("a projectless TUI must not inherit a daemon's project");
         let rendered = format!("{err:#}");
@@ -390,14 +382,15 @@ async fn refuses_a_project_bound_client_against_a_projectless_daemon() {
 #[tokio::test]
 async fn refuses_a_daemon_that_cannot_report_its_binding() {
     let _lock = ENV_LOCK.lock().await;
-    let server = daemon_without_a_binding_field().await;
-    let _env = EnvGuard::isolated(Some(&server.uri()));
+    let _env = EnvGuard::isolated();
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let socket = stub_daemon_socket(sock_dir.path(), None);
 
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("spawned");
     let stub = marker_stub(dir.path(), &marker);
 
-    let err = ensure_daemon_with(&reqwest::Client::new(), None, &stub, &server.uri())
+    let err = ensure_daemon_with(None, &stub, &socket)
         .await
         .expect_err("an unverifiable daemon must not be attached to");
 
@@ -409,30 +402,76 @@ async fn refuses_a_daemon_that_cannot_report_its_binding() {
     assert!(!marker.exists(), "must not spawn a competing daemon");
 }
 
-/// No candidate daemon at all: a daemon must be SPAWNED and waited for, with
-/// `--project` forwarded through to it so its binding matches the TUI's.
+/// `ReportedBinding` must read every shape `health` can answer with, and
+/// never guess.
+#[test]
+fn reported_binding_parses_every_health_shape() {
+    let project = tempfile::tempdir().expect("project");
+    let canonical = project.path().canonicalize().expect("canonicalize");
+    assert_eq!(
+        ReportedBinding::from_health(&serde_json::json!({"binding": binding_json(None)})),
+        ReportedBinding::Projectless
+    );
+    assert_eq!(
+        ReportedBinding::from_health(
+            &serde_json::json!({"binding": binding_json(Some(&canonical))})
+        ),
+        ReportedBinding::Bound(canonical)
+    );
+    assert_eq!(
+        ReportedBinding::from_health(&serde_json::json!({"status": "ok"})),
+        ReportedBinding::Unreported
+    );
+    assert_eq!(
+        ReportedBinding::from_health(&serde_json::json!({"binding": "nonsense"})),
+        ReportedBinding::Unreported
+    );
+}
+
+/// Each state has to name itself in a way an operator can act on.
+#[test]
+fn reported_binding_describes_each_state() {
+    assert_eq!(ReportedBinding::Projectless.describe(), "<projectless>");
+    assert_eq!(
+        ReportedBinding::Bound(PathBuf::from("/tmp/x")).describe(),
+        "/tmp/x"
+    );
+    assert!(
+        ReportedBinding::Unreported
+            .describe()
+            .contains("unreported")
+    );
+}
+
+/// No daemon at all: one must be SPAWNED and waited for, with `--project`
+/// forwarded through so its binding matches the TUI's.
 #[tokio::test]
 async fn spawns_a_daemon_when_none_is_running() {
     let _lock = ENV_LOCK.lock().await;
-    let _env = EnvGuard::isolated(None);
+    let _env = EnvGuard::isolated();
     let project = tempfile::tempdir().expect("project");
     let canonical = project.path().canonicalize().expect("canonicalize");
-    let server = healthy_daemon(Some(&canonical)).await;
+
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let socket = sock_dir.path().join("tcode.sock");
+    // Bound shortly AFTER the call starts, so the attach branch cannot win
+    // and the readiness wait is genuinely exercised.
+    let late = sock_dir.path().to_path_buf();
+    let binding = binding_json(Some(&canonical));
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        stub_daemon_socket(&late, Some(binding));
+    });
 
     let dir = tempfile::tempdir().expect("tempdir");
     let stub = SleepingStub::new(dir.path());
 
-    let url = ensure_daemon_with(
-        &reqwest::Client::new(),
-        Some(&canonical),
-        &stub.path,
-        &server.uri(),
-    )
-    .await
-    .expect("must spawn a daemon");
-    assert_eq!(url, server.uri());
+    let resolved = ensure_daemon_with(Some(&canonical), &stub.path, &socket)
+        .await
+        .expect("must spawn a daemon");
+    assert_eq!(resolved, socket);
 
-    // #6231: the stub is a real child, and readiness came from `wiremock`
+    // #6231: the stub is a real child, and readiness came from the socket
     // rather than from it — so its argv has to be waited for, not assumed.
     let argv = stub.argv().await;
     assert!(
@@ -450,25 +489,79 @@ async fn spawns_a_daemon_when_none_is_running() {
 #[tokio::test]
 async fn spawns_projectless_when_the_tui_is_projectless() {
     let _lock = ENV_LOCK.lock().await;
-    let _env = EnvGuard::isolated(None);
-    let server = healthy_daemon(None).await;
+    let _env = EnvGuard::isolated();
+
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let socket = sock_dir.path().join("tcode.sock");
+    let late = sock_dir.path().to_path_buf();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        stub_daemon_socket(&late, Some(binding_json(None)));
+    });
 
     let dir = tempfile::tempdir().expect("tempdir");
     let stub = SleepingStub::new(dir.path());
 
-    ensure_daemon_with(&reqwest::Client::new(), None, &stub.path, &server.uri())
+    ensure_daemon_with(None, &stub.path, &socket)
         .await
         .expect("must spawn a daemon");
 
-    // #5073: reading here without waiting failed with `NotFound` under a
-    // parallel suite. An existence-only wait would be worse than the race —
-    // an empty argv passes the negative assertion below for the wrong
-    // reason — so `argv()` waits for a non-empty record.
+    // #5073: an existence-only wait would be worse than the race — an empty
+    // argv passes the negative assertion below for the wrong reason.
     let argv = stub.argv().await;
     assert!(
         !argv.contains("--project"),
         "a projectless TUI must not bind the daemon to a project: {argv}"
     );
+}
+
+/// **The readiness gate is the SOCKET, not `GET /health`.**
+///
+/// A daemon whose HTTP listener answers but whose socket is unbound is a
+/// daemon `tcode tui` cannot drive at all — every client call goes over the
+/// socket. This spawns a child that stays up, stands a healthy HTTP endpoint
+/// beside it, and asserts the wait is still pending; binding the socket is
+/// what completes it.
+#[tokio::test]
+async fn daemon_autospawn_waits_on_socket_not_http() {
+    let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
+
+    // A healthy HTTP daemon, which must not satisfy the gate.
+    let http = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/health"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({"server": "tcode", "status": "ok", "binding": binding_json(None)}),
+        ))
+        .mount(&http)
+        .await;
+
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let socket = sock_dir.path().join("tcode.sock");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stub = SleepingStub::new(dir.path());
+
+    let spawn_socket = socket.clone();
+    let spawn_stub = stub.path.clone();
+    let waiting =
+        tokio::spawn(async move { ensure_daemon_with(None, &spawn_stub, &spawn_socket).await });
+
+    // The child is up and HTTP is healthy; readiness must NOT be reached.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(
+        !waiting.is_finished(),
+        "a healthy HTTP listener must not satisfy the socket readiness gate"
+    );
+
+    // Binding the socket is what completes it.
+    stub_daemon_socket(sock_dir.path(), Some(binding_json(None)));
+    let resolved = tokio::time::timeout(Duration::from_secs(10), waiting)
+        .await
+        .expect("the wait must complete once the socket answers")
+        .expect("the wait task must not panic")
+        .expect("readiness must be reported");
+    assert_eq!(resolved, socket);
 }
 
 /// **The rule this module exists to guarantee.** The TUI NEVER signals the
@@ -489,17 +582,21 @@ async fn the_tui_never_signals_the_daemon_on_exit() {
     // 1. A daemon we spawned ourselves. The stub lives at FUNCTION scope on
     // purpose: its `Drop` reaps the child, and reaping it inside the block
     // below would kill the very process the `is_alive` assertion is about.
-    // `dir` is declared first so it outlives the stub that reads out of it.
     let dir = tempfile::tempdir().expect("tempdir");
     let stub = SleepingStub::new(dir.path());
+    let sock_dir = tempfile::tempdir().expect("socket dir");
     let our_pid = {
-        let _env = EnvGuard::isolated(None);
-        let server = healthy_daemon(None).await;
-
-        let url = ensure_daemon_with(&reqwest::Client::new(), None, &stub.path, &server.uri())
+        let _env = EnvGuard::isolated();
+        let socket = sock_dir.path().join("tcode.sock");
+        let late = sock_dir.path().to_path_buf();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            stub_daemon_socket(&late, Some(binding_json(None)));
+        });
+        let resolved = ensure_daemon_with(None, &stub.path, &socket)
             .await
             .expect("must spawn a daemon");
-        assert_eq!(url, server.uri());
+        assert_eq!(resolved, socket);
         stub.pid().await
         // Everything `ensure_daemon_with` produced is dropped here.
     };
@@ -509,8 +606,9 @@ async fn the_tui_never_signals_the_daemon_on_exit() {
     );
 
     // 2. Somebody else's daemon, started outside `ensure_daemon_with`.
-    let server = healthy_daemon(None).await;
-    let _env = EnvGuard::isolated(Some(&server.uri()));
+    let _env = EnvGuard::isolated();
+    let foreign_sock_dir = tempfile::tempdir().expect("socket dir");
+    let foreign_socket = stub_daemon_socket(foreign_sock_dir.path(), Some(binding_json(None)));
     let foreign_dir = tempfile::tempdir().expect("tempdir");
     let foreign_stub = SleepingStub::new(foreign_dir.path());
     let mut foreign = tokio::process::Command::new(&foreign_stub.path)
@@ -520,14 +618,9 @@ async fn the_tui_never_signals_the_daemon_on_exit() {
         .expect("spawn foreign daemon");
     let foreign_pid = foreign.id().expect("foreign pid");
 
-    ensure_daemon_with(
-        &reqwest::Client::new(),
-        None,
-        &foreign_stub.path,
-        "http://unused.invalid",
-    )
-    .await
-    .expect("must attach");
+    ensure_daemon_with(None, &foreign_stub.path, &foreign_socket)
+        .await
+        .expect("must attach");
 
     assert!(
         is_alive(foreign_pid),
@@ -536,19 +629,21 @@ async fn the_tui_never_signals_the_daemon_on_exit() {
     foreign.kill().await.expect("clean up foreign daemon");
 }
 
-/// A spawned daemon that dies immediately (the port-already-taken case)
+/// A spawned daemon that dies immediately (the socket-already-bound case)
 /// must be reported straight away, not spun out to the startup timeout.
 #[tokio::test]
 async fn reports_a_daemon_that_dies_on_startup() {
     let _lock = ENV_LOCK.lock().await;
-    let _env = EnvGuard::isolated(None);
+    let _env = EnvGuard::isolated();
 
     let dir = tempfile::tempdir().expect("tempdir");
     let stub = stub_binary(dir.path(), "tcode-dies", "exit 3");
+    let sock_dir = tempfile::tempdir().expect("socket dir");
     // Nothing is bound here, so readiness can only ever come from the child
     // — which exits at once.
+    let socket = sock_dir.path().join("tcode.sock");
     let started = std::time::Instant::now();
-    let err = ensure_daemon_with(&reqwest::Client::new(), None, &stub, "http://127.0.0.1:1")
+    let err = ensure_daemon_with(None, &stub, &socket)
         .await
         .expect_err("a daemon that exits must surface an error");
 
@@ -559,39 +654,6 @@ async fn reports_a_daemon_that_dies_on_startup() {
     let rendered = format!("{err:#}");
     assert!(
         rendered.contains("exited during startup"),
-        "error must say the daemon died: {rendered}"
-    );
-}
-
-/// An explicitly-set-but-unreachable `TCODE_DAEMON_URL` must FAIL, never
-/// silently start a daemon somewhere else — the operator named an address
-/// and we obey it.
-#[tokio::test]
-async fn refuses_to_spawn_for_an_unreachable_explicit_url() {
-    let _lock = ENV_LOCK.lock().await;
-    // Port 1 is reserved and unbound: reachable-looking, never answering.
-    let _env = EnvGuard::isolated(Some("http://127.0.0.1:1"));
-    let server = healthy_daemon(None).await;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let marker = dir.path().join("spawned");
-    let stub = marker_stub(dir.path(), &marker);
-
-    let err = ensure_daemon_with(&reqwest::Client::new(), None, &stub, &server.uri())
-        .await
-        .expect_err("an unreachable explicit URL must be an error");
-
-    assert!(
-        !marker.exists(),
-        "must not spawn a daemon when {DAEMON_URL_ENV} names one explicitly"
-    );
-    let rendered = format!("{err:#}");
-    assert!(
-        rendered.contains("http://127.0.0.1:1"),
-        "error must name the unreachable URL: {rendered}"
-    );
-    assert!(
-        rendered.contains(DAEMON_URL_ENV),
-        "error must name the env var responsible: {rendered}"
+        "error must name the early exit: {rendered}"
     );
 }

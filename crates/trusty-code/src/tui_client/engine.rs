@@ -1,10 +1,11 @@
 //! [`CodeEngine`]: the `trusty_code_tui::TuiEngine` adapter driving a long-lived
-//! `tcode serve --http` daemon (issue #3415, DOC-50 §3.3/§3.4).
+//! `tcode serve` daemon over its Unix socket (issue #3415, DOC-50 §3.3/§3.4;
+//! retransported in #6637).
 //!
 //! Why: see `crate::tui_client`'s module docs for the ephemeral-`--stdio`
-//! vs. long-lived-`--http` client distinction. This module is the `TuiEngine`
-//! impl itself — everything else in `tui_client` (`discovery`, `rpc`, `sse`)
-//! exists to support it. Split across sibling files (issue #610's 500-SLOC
+//! vs. long-lived-daemon client distinction. This module is the `TuiEngine`
+//! impl itself — `uds_rpc` exists to support it. Split across sibling files
+//! (issue #610's 500-SLOC
 //! production-file cap): `engine_state.rs` holds [`super::engine_state::EngineState`]
 //! (the actual session/cache/streaming logic), `session_events.rs` holds
 //! the pure `Event` -> `ReplEvent` mapping, `workstream_subscription.rs`
@@ -24,9 +25,8 @@
 //! calling path).
 //! Test: `engine_tests::*` (in the sibling `engine_tests.rs`, included
 //! below) for the pure event-mapping/parsing helpers this module's siblings
-//! define; the full discover -> setup -> stream -> cancel ->
-//! workstream-activation flow against a mock HTTP daemon lives in
-//! `tests/tui_client_engine.rs`.
+//! define; the full setup -> stream -> cancel -> workstream-activation flow
+//! against a real daemon socket lives in `tests/tui_client_engine.rs`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,47 +37,17 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use trusty_code_tui::{CommandDescriptor, CommandRouting, PickerRequest, ReplEvent, TuiEngine};
 
-use super::discovery::discover_daemon_url;
 use super::engine_state::EngineState;
 use super::error::EngineError;
-use super::rpc::RpcHttpClient;
+use super::uds_rpc::UdsRpcClient;
 use super::workstream_subscription::run_workstream_subscription;
 
-/// How long a session-event / workstream-event SSE read may sit idle (no
-/// bytes, not even a keep-alive comment) before this client treats the
-/// connection as dead and reconnects. Axum's default `KeepAlive` sends a
-/// comment roughly every 15s (`crate::serve::http::session_events_sse`'s
-/// `KeepAlive::default()`), so three missed beats is a generous margin
-/// before declaring the daemon unreachable. Shared with `engine_state.rs`
-/// and `workstream_subscription.rs`.
-pub(super) const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long [`CodeEngine::connect`] waits for the socket to accept a
+/// connection before reporting no daemon. Short and fixed: this runs once, at
+/// REPL startup, against a local inode.
+const DAEMON_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Bound on the initial `GET /sessions/{id}/events` request — from
-/// connecting through receiving response headers — before
-/// `EngineState::pump_session_events` treats it as a failed attempt (issue
-/// #3494).
-///
-/// Why: `build_http_client()` sets a `connect_timeout(5s)` at the
-/// `reqwest::Client` level, which only bounds the TCP handshake. A daemon
-/// that accepts the connection but then never sends response headers (e.g.
-/// wedged, deadlocked, or slow-lorising) leaves `.send().await` pending
-/// forever — hanging `pump_session_events` indefinitely and completely
-/// bypassing `SESSION_STREAM_MAX_RECONNECTS`, since that reconnect budget
-/// only starts counting once `.send().await` actually resolves. A
-/// request-level `.timeout(CONNECT_TIMEOUT)` (applied only to THIS request,
-/// not the whole client) closes that gap: reqwest's per-request timeout
-/// bounds the connect-through-headers future `.send()` awaits (the same
-/// future `Response` resolves from) — it does NOT extend to the
-/// already-established `resp.bytes_stream()` body read afterward, which
-/// stays governed by [`SSE_IDLE_TIMEOUT`] via the existing
-/// `tokio::time::timeout(SSE_IDLE_TIMEOUT, lines.next_data())` below. A
-/// timed-out connect surfaces as a `reqwest::Error` from `.send()`, so it
-/// falls into the SAME retryable `Err(source)` branch as any other
-/// transport failure — counted against `SESSION_STREAM_MAX_RECONNECTS`
-/// like every other failure mode, not a new silent-hang path.
-pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Fixed backoff between SSE reconnect attempts. Not exponential — MVP
+/// Fixed backoff between stream reconnect attempts. Not exponential — MVP
 /// scope (DOC-50 §5 Slice 3); a persistently-down daemon retries at a
 /// steady, human-visible cadence rather than hot-looping. Shared with
 /// `engine_state.rs` and `workstream_subscription.rs`.
@@ -112,57 +82,47 @@ fn workstream_subcommand(line: &str) -> Option<&str> {
     None
 }
 
-/// The pooled `reqwest::Client` every `CodeEngine` call (discovery ping,
-/// `POST /rpc`, SSE) shares.
-///
-/// Why: `pub` since #4512 so `tcode tui`'s auto-spawn path — which resolves
-/// the daemon URL itself, then hands it to [`CodeEngine::with_daemon_url`] —
-/// builds its liveness-probe client with the SAME pool settings the engine
-/// would have used, rather than a second, divergent client.
-pub fn build_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .pool_idle_timeout(Duration::from_secs(90))
-        .connect_timeout(Duration::from_secs(5))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
-}
-
 /// The `trusty_code_tui::TuiEngine` adapter for `tcode tui` — see module docs.
 pub struct CodeEngine {
     state: Arc<EngineState>,
 }
 
 impl CodeEngine {
-    /// Discover a running `tcode serve --http` daemon (per
-    /// `crate::tui_client::discovery`'s priority) and build a `CodeEngine`
-    /// targeting it. `project_path` is forwarded to `session.create` in
-    /// `setup()` (mirrors `session::protocol::create`'s `project` param —
-    /// `None` is a fully valid, projectless session).
-    pub async fn discover(project_path: Option<PathBuf>) -> Result<Self, EngineError> {
-        let http = build_http_client();
-        let base_url = discover_daemon_url(&http).await?;
-        Ok(Self::with_daemon_url(http, base_url, project_path))
+    /// Build a `CodeEngine` dialling the daemon's well-known socket
+    /// ([`crate::serve::uds::socket_path`]).
+    ///
+    /// Why (#6637): this replaces `discover`, which raced a `TCODE_DAEMON_URL`
+    /// against an `http_addr` file and liveness-pinged whichever it found. The
+    /// socket path is derived from the data directory, so there is one answer
+    /// and nothing to choose between. `project_path` is forwarded to
+    /// `session.create` in `setup()` (mirrors `session::protocol::create`'s
+    /// `project` param — `None` is a fully valid, projectless session).
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::NoDaemon`] when nothing is answering on the socket. This
+    /// client does not start one — `tcode tui`'s auto-spawn owns that decision.
+    pub async fn connect(project_path: Option<PathBuf>) -> Result<Self, EngineError> {
+        let socket = crate::serve::uds::socket_path()
+            .map_err(|e| EngineError::Malformed(format!("resolve the daemon socket: {e:#}")))?;
+        if !trusty_common::uds::socket_is_serving(&socket, DAEMON_PROBE_TIMEOUT).await {
+            return Err(EngineError::NoDaemon { socket });
+        }
+        Ok(Self::with_socket(socket, project_path))
     }
 
-    /// Build a `CodeEngine` targeting an explicit daemon URL, bypassing
-    /// discovery — the constructor every test in `tests/tui_client_engine.rs`
-    /// uses (against a `wiremock`-mocked daemon).
-    pub fn with_daemon_url(
-        http: reqwest::Client,
-        base_url: impl Into<String>,
-        project_path: Option<PathBuf>,
-    ) -> Self {
+    /// Build a `CodeEngine` dialling an explicit socket — the constructor
+    /// `tcode tui`'s auto-spawn path and every test in
+    /// `tests/tui_client_engine.rs` use.
+    pub fn with_socket(socket: impl Into<PathBuf>, project_path: Option<PathBuf>) -> Self {
         Self {
-            state: Arc::new(EngineState::new(
-                RpcHttpClient::new(http, base_url.into()),
-                project_path,
-            )),
+            state: Arc::new(EngineState::new(UdsRpcClient::new(socket), project_path)),
         }
     }
 
-    /// The daemon URL this engine targets (test/debug convenience).
-    pub fn daemon_url(&self) -> &str {
-        self.state.rpc.base_url()
+    /// The socket this engine dials (test/debug convenience).
+    pub fn daemon_socket(&self) -> &std::path::Path {
+        self.state.rpc.socket()
     }
 }
 
@@ -231,7 +191,7 @@ impl TuiEngine for CodeEngine {
 
         let _ = tx.send(ReplEvent::StatusMessage(format!(
             "connected to tcode daemon at {} (session {session_id})",
-            self.state.rpc.base_url(),
+            self.state.rpc.socket().display(),
         )));
         Ok(())
     }

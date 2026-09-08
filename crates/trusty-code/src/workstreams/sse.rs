@@ -189,7 +189,10 @@ fn sse_event_for(envelope: &WorkstreamEventEnvelope) -> SseEvent {
 /// Map a [`StoreError`] onto the JSON-RPC error taxonomy (mirrors
 /// `crate::workstreams::protocol::map_store_err`, kept separate since that
 /// function is private to `protocol`).
-fn map_store_err(err: StoreError) -> RpcError {
+///
+/// `pub(super)` since #6637: `crate::workstreams::events_stream` answers the
+/// same two refusals over the socket transport and must report the same codes.
+pub(super) fn map_store_err(err: StoreError) -> RpcError {
     match err {
         StoreError::NotFound(id) => RpcError::not_found(format!("workstream not found: {id}")),
         StoreError::Io(_) | StoreError::Serialize(_) => RpcError::internal(err.to_string()),

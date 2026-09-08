@@ -1,13 +1,14 @@
-//! Translating one `GET /sessions/{id}/events` [`SessionEventEnvelope`] into
-//! [`ReplEvent`]s, and classifying which HTTP statuses are worth an SSE
-//! reconnect (issue #3415).
+//! Translating one `session.events` [`SessionEventEnvelope`] into
+//! [`ReplEvent`]s (issue #3415).
 //!
 //! Why: split out of `engine.rs` (issue #610's 500-SLOC production-file cap)
 //! — this is the one piece of `EngineState::pump_session_events`
 //! (`engine_state.rs`) that is pure and directly unit-testable without an
 //! HTTP round trip, so it earns its own file rather than staying inline.
-//! What: [`forward_session_event`] (the `Event` -> `ReplEvent` mapping) and
-//! [`is_retryable_status`] (502/503 -> reconnect, everything else -> fail).
+//! What: [`forward_session_event`] (the `Event` -> `ReplEvent` mapping).
+//! `is_retryable_status` went with the HTTP transport in #6637 — a framed
+//! JSON-RPC stream has no status code to classify, and every failure it can
+//! report is worth the same bounded reconnect.
 //! Test: `engine_tests::*` (in the sibling `engine_tests.rs`, included from
 //! `engine.rs`).
 
@@ -16,12 +17,6 @@ use tokio::sync::mpsc::UnboundedSender;
 use trusty_code_tui::ReplEvent;
 
 use crate::events::{Event, SessionEventEnvelope};
-
-/// `true` for HTTP statuses worth retrying (daemon restarting) rather than
-/// failing immediately.
-pub(super) fn is_retryable_status(status: reqwest::StatusCode) -> bool {
-    status == reqwest::StatusCode::BAD_GATEWAY || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
-}
 
 /// Build the terminal, VISIBLE-in-the-TUI event `pump_session_events` sends
 /// when it gives up reconnecting (`SESSION_STREAM_MAX_RECONNECTS` exhausted)

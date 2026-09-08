@@ -116,20 +116,19 @@ enum Command {
         port: Option<u16>,
     },
 
-    /// Launch the interactive TUI REPL, starting a `tcode serve --http`
-    /// daemon if one isn't already running (#4424; auto-spawn #4512).
+    /// Launch the interactive TUI REPL, starting a `tcode serve` daemon if
+    /// one isn't already running (#4424; auto-spawn #4512).
     ///
-    /// The daemon is located by `TCODE_DAEMON_URL`, else the `http_addr`
-    /// discovery file, and is liveness-pinged before use. When nothing
-    /// answers, one is STARTED automatically (#4512, reversing DOC-50 §4.1's
-    /// deferral) — and LEFT RUNNING when the REPL exits, since the daemon
-    /// owns PM lifecycle and agent dispatch and this TUI is only one of its
-    /// attached clients. A `TCODE_DAEMON_URL` that is set but unreachable is
-    /// an error rather than a spawn, so an explicit address is never quietly
-    /// replaced with a different one, and a daemon bound to a DIFFERENT
-    /// project than `--project` is refused rather than attached to. See
-    /// `crate::cli::tui` for the wiring and `crate::cli::daemon_autospawn`
-    /// for the policy.
+    /// The daemon answers on its Unix socket under the trusty-code data
+    /// directory — one derived path, nothing to discover and no address to
+    /// name (#6637). When nothing answers there, a daemon is STARTED
+    /// automatically (#4512, reversing DOC-50 §4.1's deferral) and LEFT
+    /// RUNNING when the REPL exits, since the daemon owns PM lifecycle and
+    /// agent dispatch and this TUI is only one of its attached clients. A
+    /// daemon bound to a DIFFERENT project than `--project` is refused rather
+    /// than attached to, because every session would otherwise run against
+    /// the wrong repository. See `crate::cli::tui` for the wiring and
+    /// `crate::cli::daemon_autospawn` for the policy.
     Tui {
         /// Path to the project root the REPL's session binds to.
         ///

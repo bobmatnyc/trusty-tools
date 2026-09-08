@@ -199,6 +199,23 @@ impl std::fmt::Display for RpcError {
 
 impl std::error::Error for RpcError {}
 
+/// Carry this crate's error onto the UDS transport's error type (#6637).
+///
+/// Why: `crate::serve::uds` answers over `trusty_common::uds::server`, whose
+/// frames carry that crate's `RpcError`. Converting here — once, beside the
+/// codes it converts — keeps the socket transport from inventing a second
+/// mapping, and keeps the code the caller reads identical to the one the same
+/// method reports over STDIO or HTTP.
+/// What: widens `code` to `i64` and keeps `message` verbatim. `data` is
+/// dropped, because the transport's error has no field to carry it — the same
+/// loss `crate::serve::rest::respond` already accepts on the REST envelope.
+/// Test: `rpc_error_converts_onto_the_uds_transport_error`.
+impl From<RpcError> for trusty_common::uds::server::RpcError {
+    fn from(err: RpcError) -> Self {
+        Self::new(i64::from(err.code), err.message)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +322,18 @@ mod tests {
         assert_eq!(e.code, -32009);
         assert_ne!(e.code, RpcError::active_conflict("x").code);
         assert_eq!(e.data, Some(json!({"error_type": "already_exists"})));
+    }
+
+    /// #6637: the socket transport must report the SAME code and message a
+    /// caller would have read over STDIO or HTTP.
+    #[test]
+    fn rpc_error_converts_onto_the_uds_transport_error() {
+        let converted: trusty_common::uds::server::RpcError =
+            RpcError::session_not_found("sess-1").into();
+        assert_eq!(
+            converted.code,
+            i64::from(RpcError::session_not_found("sess-1").code)
+        );
+        assert!(converted.message.contains("sess-1"));
     }
 }

@@ -3,78 +3,86 @@
 //! Why: `CodeEngine`'s `TuiEngine` methods return `anyhow::Result` (the
 //! trait's signature, `crates/trusty-code-tui/src/engine.rs`), but the engine's
 //! own internal helpers need a concrete, matchable error type — both so
-//! tests can assert on WHICH failure occurred (discovery vs. transport vs.
-//! an RPC error envelope) and so `?` composes cleanly across the
-//! discovery/rpc/sse submodules before the outer `TuiEngine` method converts
+//! tests can assert on WHICH failure occurred and so `?` composes cleanly
+//! across the client's submodules before the outer `TuiEngine` method converts
 //! the final error into `anyhow::Error` (automatic via `anyhow`'s blanket
 //! `From<E: std::error::Error>` impl).
-//! What: one variant per failure class this client can observe: daemon
-//! discovery failure, an HTTP-transport-level failure (DNS/connect/decode),
-//! a non-2xx HTTP status without a JSON-RPC error envelope (e.g. `502`), a
-//! JSON-RPC error envelope from the daemon, and "no active session" (a
-//! caller-usage error, not a transport one — `handle_input` before `setup`
+//! What: one variant per failure class this client can observe over the
+//! daemon's Unix socket (#6637): a transport-level failure, a JSON-RPC error
+//! envelope, a response whose shape this client did not expect, an event
+//! stream that ended without a terminal session event, and "no active session"
+//! (a caller-usage error, not a transport one — `handle_input` before `setup`
 //! completed).
+//!
+//! The HTTP-shaped variants are gone with the transport. `Discovery` went with
+//! `TCODE_DAEMON_URL` and the `http_addr` file — the socket path is derived,
+//! not discovered. `Status` went with HTTP status codes, which a framed
+//! JSON-RPC response does not have: every daemon-side refusal now arrives as
+//! [`EngineError::Rpc`] carrying a code, and every transport failure as
+//! [`EngineError::Transport`].
+//!
 //! Test: exercised indirectly through every `tui_client` submodule's own
 //! tests and `tests/tui_client_engine.rs`.
 
-use serde_json::Value;
+use std::path::PathBuf;
 
-use super::discovery::DiscoveryError;
+use serde_json::Value;
+use trusty_common::uds::UdsRpcError;
 
 /// See module docs.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    /// No live daemon could be found (see [`DiscoveryError`] for the
-    /// specific reason — no candidate source, or a candidate that didn't
-    /// answer the liveness ping).
-    #[error(transparent)]
-    Discovery(#[from] DiscoveryError),
-
-    /// A `reqwest`-level failure: DNS/connect/TLS, a request timeout, or a
-    /// response-body decode failure. Carries the URL for context.
-    #[error("request to {url} failed: {source}")]
+    /// The socket could not be dialled, written to, or read from — including
+    /// the hardening checks `connect_hardened` runs before a byte is written.
+    ///
+    /// `Box`ed because [`UdsRpcError`] carries a `PathBuf` and a boxed
+    /// response of its own, and clippy's `result_large_err` reads the unboxed
+    /// enum as too large to return by value.
+    #[error("rpc over {} failed: {source}", socket.display())]
     Transport {
-        url: String,
+        /// Socket that failed.
+        socket: PathBuf,
+        /// Why it failed.
         #[source]
-        source: reqwest::Error,
+        source: Box<UdsRpcError>,
     },
 
-    /// The daemon answered with a non-2xx HTTP status that carries no
-    /// JSON-RPC error envelope to parse (the SSE routes return a bare HTTP
-    /// status on failure, unlike `POST /rpc`, which always returns `200`
-    /// with the error carried in the envelope — see
-    /// `crate::serve::http::rpc_handler`'s docs).
-    #[error("request to {url} returned HTTP {status}")]
-    Status {
-        url: String,
-        status: reqwest::StatusCode,
+    /// No daemon is answering on the socket, and this client will not start
+    /// one — the caller (`tcode tui`'s auto-spawn) decides that.
+    #[error("no tcode daemon is answering on {}", socket.display())]
+    NoDaemon {
+        /// Socket nothing answered on.
+        socket: PathBuf,
     },
 
-    /// The daemon closed an SSE stream cleanly (no transport error, no
-    /// non-2xx status) before this client observed a terminal event
-    /// (`SessionDone`/`SessionCancelled`) — and every reconnect attempt
-    /// (bounded by `SESSION_STREAM_MAX_RECONNECTS`) hit the same premature
-    /// close. Distinct from [`Self::Status`]/[`Self::Transport`]: nothing
-    /// about the individual HTTP request failed, only the STREAM never
-    /// reached a terminal state.
-    #[error("event stream for {url} closed repeatedly with no terminal session event observed")]
-    StreamClosed { url: String },
+    /// The daemon closed an event stream before this client observed a
+    /// terminal event (`SessionDone`/`SessionCancelled`) — and every reconnect
+    /// attempt (bounded by `SESSION_STREAM_MAX_RECONNECTS`) hit the same
+    /// premature close. Distinct from [`Self::Transport`]: nothing about the
+    /// individual dial failed, only the STREAM never reached a terminal state.
+    #[error("event stream on {} closed repeatedly with no terminal session event observed", socket.display())]
+    StreamClosed {
+        /// Socket whose stream kept ending early.
+        socket: PathBuf,
+    },
 
-    /// The daemon's `POST /rpc` response body didn't have the shape this
-    /// client expected (e.g. `session.create`'s result missing an `id`
-    /// field) — a daemon/client version-skew symptom, not a transport
-    /// failure.
+    /// The daemon's response body didn't have the shape this client expected
+    /// (e.g. `session.create`'s result missing an `id` field) — a
+    /// daemon/client version-skew symptom, not a transport failure.
     #[error("malformed response from daemon: {0}")]
     Malformed(String),
 
-    /// The daemon's JSON-RPC error envelope for a `POST /rpc` call
-    /// (verbatim: code + message + optional `data`).
+    /// The daemon's JSON-RPC error envelope (verbatim: code + message +
+    /// optional `data`).
     #[error("daemon returned an error ({code}): {message}")]
     Rpc {
+        /// JSON-RPC error code.
         code: i32,
+        /// The daemon's own message.
         message: String,
         #[allow(dead_code)]
         // surfaced for callers that want to inspect it; not read internally yet
+        /// The error's optional structured payload.
         data: Option<Value>,
     },
 

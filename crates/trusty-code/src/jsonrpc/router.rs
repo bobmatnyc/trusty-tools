@@ -132,6 +132,23 @@ impl Router {
         self
     }
 
+    /// Every registered method name, sorted.
+    ///
+    /// Why (#6637): `crate::serve::uds::JsonRpcFallback` mounts this whole
+    /// table behind one catch-all rather than re-registering each name, so
+    /// nothing else could say what that catch-all actually covers.
+    /// `uds_tests::fallback_dispatches_every_jsonrpc_router_method` reads the
+    /// list from here and calls each name over a real socket, which is what
+    /// turns "the fallback is mounted" into something a test can check.
+    /// What: the keys of the handler map, sorted so a failure names the same
+    /// method on every run.
+    /// Test: `uds_tests::fallback_dispatches_every_jsonrpc_router_method`.
+    pub fn method_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.handlers.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
+    }
+
     /// Dispatch a parsed JSON-RPC request, returning the response to write
     /// back on the wire (or a suppressed response for notifications).
     ///

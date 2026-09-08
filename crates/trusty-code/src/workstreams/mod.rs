@@ -68,6 +68,9 @@
 //! [`store::WorkstreamStore`]: crate::workstreams::store::WorkstreamStore
 
 pub mod activation;
+/// (#6637) `workstream.events`: the socket transport's live fan-out, a bridge
+/// onto the same `sse::aggregate_live` combinator the HTTP route uses.
+pub mod events_stream;
 pub mod model;
 mod path;
 pub mod protocol;
