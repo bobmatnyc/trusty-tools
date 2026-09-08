@@ -170,6 +170,14 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Warns when the project's clone carries no trusty-mpm cross-branch `pre-push` guard, or an older revision of it — the guard installs itself only on the clone path, so a base provisioned before it shipped is silently unprotected and a worktree tracking a foreign branch can force-push over that branch's reviewed lineage. Names the `tm repair push-guard` retrofit; doctor never writes into a repository (issue #2867).",
     ),
     (
+        "maintenance_config",
+        "Warns when a registered base clone carries more than 3 worktrees without `maintenance.auto=false` pinned in its own local git config — operator-run git in any of those worktrees can still trigger a `git maintenance run --auto` repack against the shared object store. Names the exposed base clone(s) and the `git config --local` fix. Read-only (issue #7171).",
+    ),
+    (
+        "maintenance_processes",
+        "Warns when more than one `git maintenance run` process is live on the host at once — the storm pattern from the originating incident (41 concurrent repacks against one shared object store). Read-only: `ps -A -o command=`, never a signal or a kill (issue #7171).",
+    ),
+    (
         "binary_provenance",
         "Where the RUNNING binary came from and whether that source still exists: reads cargo's own `$CARGO_HOME/.crates2.json` install ledger and compares it against the running executable. Fails when the same binary is provided by more than one install, when the running binary is OLDER than the ledger's record for that same file or the two cannot be ordered as semver, or when a `cargo install --path` source directory has been reaped (no provenance, no upgrade path). Warns for a live path/git install, which is invisible to registry update detection. Reports UNKNOWN — never `Ok` — when the ledger is unreadable, does not cover the binary (a prebuilt-installer or package-manager install), or records a version OLDER than what is running, which means the ledger no longer describes the file on disk (issue #4964). Read-only; never installs, moves, or deletes (issue #4033, ADR-0021).",
     ),

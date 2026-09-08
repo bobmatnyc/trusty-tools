@@ -175,6 +175,13 @@ use doctor_scaffold_tracking::check_scaffold_tracking;
 mod doctor_push_guard;
 use doctor_push_guard::check_push_guard;
 
+// Split out to keep this file under the 500-SLOC production cap (issue #7171 —
+// the git-maintenance-storm detection probes: an un-pinned base clone above
+// the worktree threshold, and more than one live `git maintenance run`).
+#[path = "doctor_maintenance_storm.rs"]
+mod doctor_maintenance_storm;
+use doctor_maintenance_storm::{check_live_maintenance_processes, check_maintenance_config};
+
 // Split out to keep this file under the 500-SLOC production cap (issue #2919 —
 // the worktree disk-consumption / merged-PR reclaimability probe, the
 // early-warning half of the 1.1 TiB leak post-mortem).
@@ -355,7 +362,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_forty_checks`,
+/// Test: `run_doctor_produces_forty_two_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -486,6 +493,12 @@ pub async fn run_doctor(
     // clone that predates it is silently unprotected. Warn-only, naming the
     // `tm repair push-guard` retrofit; doctor never writes into a repository.
     checks.push(check_push_guard(project_dir));
+    // Issue #7171: an un-pinned base clone above the worktree threshold, and
+    // more than one live `git maintenance run` process — the detection half
+    // of the maintenance-storm fix (`trusty_common::git` and
+    // `core::git_maintenance` are the prevention half). Both read-only.
+    checks.push(check_maintenance_config(repos_root));
+    checks.push(check_live_maintenance_processes());
     // Issue #4033: where the RUNNING binary came from, and whether that source
     // still exists. Reports UNKNOWN — never Ok — when provenance cannot be
     // determined. Read-only; never installs, moves, or deletes.

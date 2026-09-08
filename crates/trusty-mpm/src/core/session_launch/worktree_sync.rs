@@ -35,7 +35,6 @@
 //! `self_heal_claude_md_noop_when_absent`.
 
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 /// Upper bound on how long [`resume_self_heal`] will wait for the git
@@ -271,9 +270,10 @@ async fn sync_worktree_with_upstream_bounded(workspace: &Path) -> SyncOutcome {
 /// Run `git -C <workspace> <args>`, returning trimmed stdout on success or
 /// `None` on any failure (missing binary, non-zero exit, empty output).
 fn git_stdout(workspace: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(workspace)
+    // #7171: through the shared entry point — this runs on every resume of
+    // every session worktree, so it must not be able to trigger a background
+    // `git maintenance run --auto` against the shared object store.
+    let out = trusty_common::git::command_in(workspace)
         .args(args)
         .output()
         .ok()?;
@@ -287,9 +287,7 @@ fn git_stdout(workspace: &Path, args: &[&str]) -> Option<String> {
 /// Run `git -C <workspace> <args>`, returning `Ok(())` on success or
 /// `Err(stderr)` (trimmed) on any failure.
 fn git_run(workspace: &Path, args: &[&str]) -> Result<(), String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(workspace)
+    let out = trusty_common::git::command_in(workspace)
         .args(args)
         .output()
         .map_err(|e| format!("git exec failed: {e}"))?;
@@ -302,6 +300,8 @@ fn git_run(workspace: &Path, args: &[&str]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
     use tempfile::TempDir;
 

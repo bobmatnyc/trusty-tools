@@ -59,7 +59,9 @@ pub(crate) fn probe_recent_commits(workdir: &str) -> Vec<CommitLine> {
 /// non-zero exit or parse failure returns `None`.
 /// Test: indirect — covered by `probe_recent_commits` tests.
 fn run_git_log(workdir: &str) -> Option<Vec<CommitLine>> {
-    let mut cmd = std::process::Command::new("git");
+    // #7171: through the shared entry point so a per-worktree info-box render
+    // cannot trigger a background `git maintenance run --auto`.
+    let mut cmd = trusty_common::git::command();
     cmd.arg("-C")
         .arg(workdir)
         .args(["log", "--oneline", "-5", "--format=%h|%cr|%s"]);

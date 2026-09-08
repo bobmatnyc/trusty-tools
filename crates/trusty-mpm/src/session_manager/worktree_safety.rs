@@ -1003,11 +1003,17 @@ pub(crate) fn git_stdout(dir: &Path, args: &[&str]) -> Result<String, String> {
 /// what makes "every git call" true rather than aspirational; a future call
 /// site cannot forget.
 /// What: `git <pinned globals> -C <dir> <args>`, with the redirect variables
-/// removed from the child environment.
+/// removed from the child environment. Built on
+/// [`trusty_common::git::command`] (#7171) so every call through this
+/// function — the crate's single hardened git entry point — also carries
+/// `-c maintenance.auto=false -c gc.auto=0`; this module's callers run per
+/// worktree, repeatedly, across every worktree in the fleet, which is exactly
+/// the pattern that turned into 41 detached `git maintenance run --auto`
+/// repacks in one incident.
 /// Test: `git_command_strips_repository_redirecting_env`,
 /// `git_command_pins_untracked_and_excludes_config`.
 pub(crate) fn git_command(dir: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = trusty_common::git::command();
     cmd.args(GIT_PINNED_GLOBAL_ARGS)
         .arg("-C")
         .arg(dir)

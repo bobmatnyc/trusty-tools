@@ -359,6 +359,48 @@ async fn parity_projects_register_agrees_across_transports() {
     );
 }
 
+/// #7171: `register_project_op` is the "operator points trusty-mpm at an
+/// existing repo" provisioning hook — it must disable git's own background
+/// maintenance/gc on that repo, the same way `ensure_base_clone` does for a
+/// fresh clone.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn register_project_op_disables_git_auto_maintenance() {
+    let (state, dir) = hermetic();
+    let repo = dir.path().join("existing-repo");
+    std::fs::create_dir_all(&repo).expect("mkdir");
+    let init_ok = trusty_common::git::command_in(&repo)
+        .args(["init", "-q", "."])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !init_ok {
+        return; // no git on this runner
+    }
+
+    super::projects::register_project_op(&state, repo.clone());
+
+    let get = |key: &str| {
+        trusty_common::git::command_in(&repo)
+            .args(["config", "--get", key])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    assert_eq!(
+        get("maintenance.auto").as_deref(),
+        Some("false"),
+        "register_project_op must disable maintenance.auto on the repo it registers"
+    );
+    assert_eq!(
+        get("gc.auto").as_deref(),
+        Some("0"),
+        "register_project_op must disable gc.auto on the repo it registers"
+    );
+}
+
 /// Test: this function IS the test.
 #[tokio::test]
 async fn parity_projects_current_agrees_across_transports() {

@@ -1298,6 +1298,21 @@ pub mod tmux;
 #[cfg(feature = "gh-cli")]
 pub mod gh;
 
+/// The workspace's single entry point for constructing a `git` subprocess (#7171).
+///
+/// Why: ~90 production `Command::new("git")` sites across trusty-common and
+/// trusty-mpm each ran with git's own background-maintenance heuristics live,
+/// so a fleet of worktrees running ordinary git commands independently
+/// triggered independent `git maintenance run --auto` repacks against the ONE
+/// shared object store they all point at — 41 detached repacks from ~25
+/// worktrees in one incident, load 141.
+/// What: [`git::command`] / [`git::command_in`] (sync) and
+/// [`git::tokio_command`] / [`git::tokio_command_in`] (async) — every one
+/// carries [`git::MAINTENANCE_DISABLE_ARGS`] as argv, which outranks every
+/// config file.
+/// Test: `cargo test -p trusty-common --features unconditional-only -- git::`.
+pub mod git;
+
 // ─── Re-exports preserving the pre-split public API ───────────────────────
 
 pub use chat::{

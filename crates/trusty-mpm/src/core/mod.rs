@@ -173,6 +173,11 @@ pub mod project_trust;
 pub mod protected_dirs;
 pub mod provisioning_stage;
 pub mod push_guard;
+// #7171: idempotently disables git's own background maintenance/gc on a
+// managed checkout, so an OPERATOR running git directly inside one of its
+// worktrees (outside anything that routes through `trusty_common::git`)
+// still gets the quieted repo.
+pub mod git_maintenance;
 // `tm reinstall`: the two-hop asset redeploy across every deploy destination,
 // and the install-provenance route its `--binary` flag takes.
 pub mod binary_reinstall;

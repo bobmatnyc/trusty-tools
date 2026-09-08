@@ -510,7 +510,7 @@ fn classify_rev_parse_failure(dest_worktree: &Path, stderr: &str) -> ExcludeTarg
 /// Test: `tests::copied_files_are_added_to_shared_worktree_exclude`,
 /// `tests::tracked_secret_is_not_overwritten_in_worktree`.
 fn is_path_git_ignored(dest_worktree: &Path, relative_path: &str) -> bool {
-    std::process::Command::new("git")
+    trusty_common::git::command()
         .arg("-C")
         .arg(dest_worktree)
         .args(["check-ignore", "-q", "--", relative_path])

@@ -138,7 +138,10 @@ impl RealGitBackend {
     /// Test: `git_identity_env_applied_to_command`,
     /// `git_identity_commit_args_applied_to_command`.
     fn command(&self) -> std::process::Command {
-        let mut cmd = std::process::Command::new("git");
+        // #7171: through the shared entry point so the catalog-sync clone/
+        // fetch this backend runs cannot trigger a background
+        // `git maintenance run --auto` against the shared object store.
+        let mut cmd = trusty_common::git::command();
         cmd.args(self.identity.commit_config_args());
         // #6668: clear the inherited identity before applying the bound one —
         // a credential helper reads GH_TOKEN ahead of GH_CONFIG_DIR.
