@@ -725,3 +725,20 @@ fn resolve_account_blank_flag_is_treated_as_absent() {
         Some("bobmatnyc".to_string())
     );
 }
+
+/// #7166 review follow-up (parity with the `<login>@owner/repo` shorthand's
+/// `login` segment, which already runs through `is_name_segment`): a
+/// `--account` value with a space or shell metacharacter is refused HERE,
+/// with an actionable message, rather than reaching `gh auth token -u
+/// <value>` unvalidated and failing with a confusing `gh` error.
+#[test]
+fn resolve_account_rejects_a_malformed_flag_value() {
+    let err = super::resolve_account(Some("not a login"), None).unwrap_err();
+    assert!(err.to_string().contains("not a login"), "{err}");
+
+    let err = super::resolve_account(Some("bob;rm -rf"), None).unwrap_err();
+    assert!(
+        err.to_string().contains("not a plausible gh login"),
+        "{err}"
+    );
+}

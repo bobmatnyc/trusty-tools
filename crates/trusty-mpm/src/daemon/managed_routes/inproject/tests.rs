@@ -1727,74 +1727,8 @@ fn worktrees_exclude_entry_protects_against_double_force_clean() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// #7166: account-selected clone credentials.
-// ---------------------------------------------------------------------------
-
-/// A resolved token becomes `GH_TOKEN`/`GH_USER` on the child, with every
-/// inherited identity var removed FIRST — an ambient `GH_TOKEN` belonging to
-/// a different account can never win over the explicit selection.
-#[test]
-fn account_clone_env_shadows_inherited_identity_and_sets_gh_token() {
-    let env = account_clone_env_with("bob-duetto", |account| {
-        assert_eq!(account, "bob-duetto");
-        Ok("minted-token".to_string())
-    })
-    .expect("resolver succeeded");
-
-    assert_eq!(
-        env.remove,
-        crate::core::gh_identity::GH_INHERITED_IDENTITY_ENV.to_vec(),
-        "must shadow the exact same inherited-identity set gh_identity::resolve_gh_env removes"
-    );
-    assert_eq!(
-        env.set,
-        vec![
-            ("GH_TOKEN", "minted-token".to_string()),
-            ("GH_USER", "bob-duetto".to_string()),
-        ]
-    );
-
-    // Applied to a real Command: removal precedes the set, and the token
-    // reaches the child ONLY via env — never as an argument.
-    let mut cmd = std::process::Command::new("git");
-    cmd.env("GH_TOKEN", "someone-elses-ambient-token");
-    cmd.env("GITHUB_TOKEN", "another-ambient-token");
-    env.apply(&mut cmd);
-
-    let envs: Vec<_> = cmd.get_envs().collect();
-    assert!(
-        envs.contains(&(
-            std::ffi::OsStr::new("GH_TOKEN"),
-            Some(std::ffi::OsStr::new("minted-token"))
-        )),
-        "GH_TOKEN must be the minted token, not the ambient one: {envs:?}"
-    );
-    assert!(
-        envs.contains(&(std::ffi::OsStr::new("GITHUB_TOKEN"), None)),
-        "the ambient GITHUB_TOKEN must be shadowed (removed): {envs:?}"
-    );
-    assert!(
-        cmd.get_args().all(|a| a != "minted-token"),
-        "the token must never appear in argv"
-    );
-}
-
-/// A resolver failure (e.g. the account is not logged into `gh`) propagates
-/// verbatim, naming the account — the "fail loud before cloning" contract.
-#[test]
-fn account_clone_env_propagates_a_resolver_failure_naming_the_account() {
-    let err = account_clone_env_with("not-logged-in", |account| {
-        Err(format!(
-            "`gh auth token -u {account}` failed: not logged in"
-        ))
-    })
-    .expect_err("a resolver failure must propagate");
-    assert!(err.contains("not-logged-in"), "{err}");
-}
-
 /// `Option::None` (no `--account` selected) leaves `ensure_base_clone`'s
-/// child env untouched — no [`AccountCloneEnv`] is even constructed. Proven
+/// child env untouched — no `account_clone::AccountCloneEnv` is even constructed. Proven
 /// at the call-site level: `ensure_base_clone` only calls
 /// `account_clone_env` inside its `if let Some(account) = account` arm, so
 /// this is a compile-time/structural guarantee rather than a runtime one;

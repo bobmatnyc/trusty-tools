@@ -40,6 +40,10 @@ use tracing::{info, warn};
 
 pub mod untracked_sync;
 
+// #7166 review follow-up: split out to keep this file under the 500-SLOC cap.
+mod account_clone;
+use account_clone::account_clone_env;
+
 /// Environment variable that overrides the managed repos root.
 ///
 /// Why: operators need an escape hatch (tests, non-standard layouts) that wins
@@ -392,76 +396,6 @@ pub fn ensure_base_clone(
     // "not reachable".
     crate::core::push_guard::install_and_log(base_path);
     Ok(())
-}
-
-/// The env overrides an account-selected clone applies to the `git` child (#7166).
-///
-/// Why: split out of [`ensure_base_clone`] so the shadow-then-set shape can
-/// be asserted directly against a plain `std::process::Command`, without
-/// spawning a real `git clone` — mirrors how [`crate::core::gh_identity::
-/// GhEnv::apply_to`] is unit-tested at the pure-value layer.
-/// What: `remove` — every [`crate::core::gh_identity::
-/// GH_INHERITED_IDENTITY_ENV`] entry, so an exported `GH_TOKEN`/`GITHUB_TOKEN`
-/// (or a `GH_HOST`/`GH_CONFIG_DIR` naming a different host/identity) cannot
-/// outrank the selection; `set` — `GH_TOKEN=<minted token>` then
-/// `GH_USER=<account>` (informational only; git/gh never read it).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AccountCloneEnv {
-    remove: Vec<&'static str>,
-    set: Vec<(&'static str, String)>,
-}
-
-impl AccountCloneEnv {
-    /// Apply `remove` then `set` to `cmd` — removal MUST precede the set, the
-    /// same ordering [`crate::core::gh_identity::GhEnv::apply_to`] requires.
-    fn apply(&self, cmd: &mut std::process::Command) {
-        for key in &self.remove {
-            cmd.env_remove(key);
-        }
-        for (key, value) in &self.set {
-            cmd.env(key, value);
-        }
-    }
-}
-
-/// Resolve the [`AccountCloneEnv`] for `account`, minting its token via
-/// `gh auth token -u <account>` (#7166).
-///
-/// Why: the one place this module decides HOW an explicit account selection
-/// becomes credentials for a raw `git clone` subprocess — as opposed to a
-/// `gh` subcommand, which [`trusty_common::gh::GhCommand`] already handles.
-/// `git clone` never goes through `gh`, so the token has to land where
-/// `git`'s own already-configured credential resolution (this workspace's
-/// convention: `credential.helper = !gh auth git-credential`) will find
-/// it — the environment, never argv or the URL.
-/// What: propagates [`crate::core::gh_account::gh_token_via_cli`]'s error
-/// verbatim on failure (already names the account and points at `gh auth
-/// login` — see that function's doc); on success returns the shadow-then-set
-/// pair described on [`AccountCloneEnv`].
-/// Test: `account_clone_env_shadows_inherited_identity_and_sets_gh_token`,
-/// `account_clone_env_propagates_a_resolver_failure_naming_the_account`.
-fn account_clone_env(account: &str) -> Result<AccountCloneEnv, String> {
-    account_clone_env_with(account, crate::core::gh_account::gh_token_via_cli)
-}
-
-/// [`account_clone_env`] with an injectable token resolver.
-///
-/// Why: an injectable closure — this codebase's established seam for `gh` I/O
-/// that cannot run hermetically in CI (see `gh_account::resolve_gh_account_env_with`,
-/// which this mirrors) — lets both the shadow-then-set shape AND the
-/// not-logged-in refusal be asserted with no real `gh` process, no PATH
-/// mutation, and no network.
-/// Test: `account_clone_env_shadows_inherited_identity_and_sets_gh_token`,
-/// `account_clone_env_propagates_a_resolver_failure_naming_the_account`.
-fn account_clone_env_with(
-    account: &str,
-    resolve_token: impl FnOnce(&str) -> Result<String, String>,
-) -> Result<AccountCloneEnv, String> {
-    let token = resolve_token(account)?;
-    Ok(AccountCloneEnv {
-        remove: crate::core::gh_identity::GH_INHERITED_IDENTITY_ENV.to_vec(),
-        set: vec![("GH_TOKEN", token), ("GH_USER", account.to_string())],
-    })
 }
 
 /// Compute the per-session worktree directory for `worktree_name` under `base_path`.

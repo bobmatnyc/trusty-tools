@@ -22,4 +22,12 @@ Added
     record (`gh_account`), the same field `tm projects register
     --gh-account` and `tm projects show`/`status` already read and display,
     so later spawns, fetches, pushes, and `gh` calls made from inside the
-    session reuse it automatically.
+    session reuse it automatically. Overwriting a project's PREVIOUSLY
+    pinned `gh_account` with a different one now logs one `info!` line
+    naming the old and new login — silent before this change, since
+    `register` was already an unqualified upsert.
+  - Because `gh auth token -u <account>` does not discriminate between
+    logged-in accounts on a keyring-backed `gh` install (macOS's default),
+    the minted token is verified against `gh api user --jq .login` before
+    it is ever used to clone; a mismatch refuses loud, naming both the
+    requested and the actual account.

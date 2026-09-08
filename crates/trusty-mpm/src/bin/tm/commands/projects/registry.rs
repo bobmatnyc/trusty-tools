@@ -67,11 +67,34 @@ pub(crate) async fn list(
 }
 
 /// `tm projects register <name> --repo-url ...` — idempotent upsert.
+///
+/// Why: `register` is an UNQUALIFIED upsert — every call, including the
+/// automatic ones `run_managed`/`tm register --account` now make on a bare
+/// `tm --account <login> <url>` (#7166), replaces the persisted record
+/// wholesale. Silently rebinding a project's `gh_account` this way — later
+/// spawns, fetches, pushes, and `gh` calls all follow it — deserves a visible
+/// trail even when the call itself succeeds, not just a warning on failure.
+/// What: reads the project's CURRENT `gh_account` (best-effort — a fetch
+/// failure, e.g. because the project does not exist yet, is treated as "no
+/// prior value" rather than aborting the register) BEFORE the upsert; after
+/// a successful upsert, delegates the "is this a loggable change" decision to
+/// the pure [`account_change_log_line`].
+/// Test: `account_change_log_line_*` (pure-function coverage of the decision;
+/// the HTTP fetch-then-upsert sequencing itself has no hermetic test in this
+/// file — see that function's doc).
 pub(crate) async fn register(
     client: &reqwest::Client,
     url: &str,
     input: RegisterInput,
 ) -> anyhow::Result<()> {
+    let previous_gh_account = daemon(client, url)
+        .registry_get_project(&input.name)
+        .await
+        .ok()
+        .and_then(|p| p.gh_account);
+    let new_gh_account = input.gh_account.clone();
+    let name_for_log = input.name.clone();
+
     let args = RegisterProjectArgs {
         name: input.name,
         repo_url: input.repo_url,
@@ -98,7 +121,41 @@ pub(crate) async fn register(
         "registered project '{}' ({} @ {})",
         project.name, project.repo_url, project.default_branch
     );
+    // #7166 review follow-up: a successful upsert that REPLACES a previously
+    // pinned account is a fact worth a visible trail, not just a failure warning.
+    if let Some(line) = account_change_log_line(
+        &name_for_log,
+        previous_gh_account.as_deref(),
+        new_gh_account.as_deref(),
+    ) {
+        tracing::info!("{line}");
+    }
     Ok(())
+}
+
+/// Decide whether a `register` call's `gh_account` change is loggable, and
+/// render the line if so (#7166 review follow-up).
+///
+/// Why: split out of [`register`] so the decision — old and new both `Some`
+/// AND different — is asserted without an HTTP round trip.
+/// What: `None` unless BOTH `previous` and `new` are `Some` and unequal — a
+/// brand-new project (`previous: None`) or one moving from unset to set is
+/// not a "change" worth flagging, only a REPLACEMENT is.
+/// Test: `account_change_log_line_logs_a_real_change`,
+/// `account_change_log_line_silent_when_unchanged`,
+/// `account_change_log_line_silent_when_previously_unset`,
+/// `account_change_log_line_silent_when_new_is_unset`.
+fn account_change_log_line(
+    name: &str,
+    previous: Option<&str>,
+    new: Option<&str>,
+) -> Option<String> {
+    match (previous, new) {
+        (Some(old), Some(new)) if old != new => Some(format!(
+            "tm: project '{name}' gh_account changed: '{old}' -> '{new}'"
+        )),
+        _ => None,
+    }
 }
 
 /// `tm projects show <name> [--json]` — config + read-only nested sessions.
@@ -545,5 +602,43 @@ mod tests {
         let lines = render_status(&s);
         assert!(lines[2].contains("never"));
         assert!(lines[3].contains("gh_user unset"));
+    }
+
+    // -----------------------------------------------------------------------
+    // #7166 review follow-up: `account_change_log_line`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn account_change_log_line_logs_a_real_change() {
+        let line = account_change_log_line("widget", Some("bobmatnyc"), Some("bob-duetto"))
+            .expect("a real change must log");
+        assert!(line.contains("widget"), "{line}");
+        assert!(line.contains("'bobmatnyc' -> 'bob-duetto'"), "{line}");
+    }
+
+    #[test]
+    fn account_change_log_line_silent_when_unchanged() {
+        assert_eq!(
+            account_change_log_line("widget", Some("bobmatnyc"), Some("bobmatnyc")),
+            None
+        );
+    }
+
+    #[test]
+    fn account_change_log_line_silent_when_previously_unset() {
+        // A brand-new project (or one that never had an account pinned) is
+        // not a REPLACEMENT — nothing to warn about losing.
+        assert_eq!(
+            account_change_log_line("widget", None, Some("bobmatnyc")),
+            None
+        );
+    }
+
+    #[test]
+    fn account_change_log_line_silent_when_new_is_unset() {
+        assert_eq!(
+            account_change_log_line("widget", Some("bobmatnyc"), None),
+            None
+        );
     }
 }

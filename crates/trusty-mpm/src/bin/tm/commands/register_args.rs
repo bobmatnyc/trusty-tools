@@ -274,14 +274,29 @@ pub(crate) fn embedded_account(s: &str) -> Option<&str> {
 /// module — e.g. [`is_name_segment`] — is byte-exact, and a caller relying on
 /// case-folding here would silently diverge from `gh`'s own canonicalisation
 /// in [`crate::core::gh_account::GhAccountStatus::canonical_logged_in_login`]).
+/// A non-empty `flag` is validated with the SAME [`is_name_segment`] predicate
+/// the `<login>@owner/repo` shorthand's `login` segment already goes through
+/// (#7166 review follow-up — parity: a malformed `--account` value used to
+/// reach `gh auth token -u <value>` unvalidated, where a shell metacharacter
+/// or a space would have failed with a confusing `gh` error instead of this
+/// module's own, actionable one).
 /// Test: `resolve_account_flag_only`, `resolve_account_embedded_only`,
 /// `resolve_account_agreeing_flag_and_embedded`,
-/// `resolve_account_conflicting_flag_and_embedded_errors`.
+/// `resolve_account_conflicting_flag_and_embedded_errors`,
+/// `resolve_account_rejects_a_malformed_flag_value`.
 pub(crate) fn resolve_account(
     flag: Option<&str>,
     embedded: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
     let flag = flag.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(flag) = flag
+        && !is_name_segment(flag)
+    {
+        return Err(anyhow::anyhow!(
+            "'--account {flag}' is not a plausible gh login (letters, digits, `.`, `_`, `-` \
+             only)."
+        ));
+    }
     match (flag, embedded) {
         (Some(flag), Some(embedded)) if flag != embedded => Err(anyhow::anyhow!(
             "conflicting account selection: --account '{flag}' vs. the embedded \
