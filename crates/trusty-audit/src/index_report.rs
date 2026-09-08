@@ -1340,6 +1340,32 @@ mod index_tests {
         assert!(!text.contains("| endpoint | api (`"), "{text}");
     }
 
+    /// #6144 review — a manifest's `[inference]` section can declare a
+    /// provider without declaring `endpoint_class` (written before that key
+    /// existed) or without declaring a provider at all (hand-written, or a
+    /// role-only section). [`InferenceRecord::declared`] must state "not
+    /// declared" for the second case rather than deriving a class from
+    /// nothing — falling through to [`crate::inference::endpoint_class`] on a
+    /// blank string would silently render `"api"`.
+    /// Test: this test itself.
+    #[test]
+    fn a_declared_section_with_no_provider_states_endpoint_class_not_declared() {
+        let section = crate::manifest::InferenceSection {
+            provider: None,
+            endpoint_class: None,
+            reviewer: Some("anthropic/claude-opus-4.8".to_owned()),
+            verifier: None,
+            summarizer: None,
+        };
+        let record = InferenceRecord::declared(&section);
+        assert_eq!(
+            record.endpoint_class,
+            "not declared — resolved by the renderer"
+        );
+        assert_eq!(record.endpoint_host, None);
+        assert_eq!(record.provider, "not declared — resolved by the renderer");
+    }
+
     /// #6144: the binary's git revision, when this build captured one,
     /// replaces the blanket "not recorded" the versions table used to state
     /// unconditionally. `option_env!` is a compile-time constant, so this test
