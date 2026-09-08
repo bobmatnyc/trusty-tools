@@ -1,5 +1,5 @@
 //! `tcode tui` — launch the interactive TUI REPL against a running
-//! `tcode serve --http` daemon (issue #4424; DOC-50 §4.1, AC-2.4).
+//! `tcode serve` daemon (issue #4424; DOC-50 §4.1, AC-2.4).
 //!
 //! Why: every DOC-50 MVP slice landed — the shared `trusty-code-tui` framework
 //! (event loop, generalized `ReplApp`, widgets) and
@@ -9,27 +9,25 @@
 //! point and nothing more: it owns no REPL behaviour, no rendering, and no
 //! daemon logic, matching `crate::cli`'s "translate CLI args into a call,
 //! decisions belong elsewhere" contract.
-//! What: [`run`] resolves the optional project path, obtains a daemon URL to
-//! drive from `super::daemon_autospawn`, and hands a `CodeEngine` pointed at
-//! it to `trusty_code_tui::run::run` together with the shared `ReplApp` model,
+//! What: [`run`] resolves the optional project path, obtains the daemon
+//! socket to drive from `super::daemon_autospawn`, and hands a `CodeEngine`
+//! pointed at it to `trusty_code_tui::run::run` together with the shared
+//! `ReplApp` model,
 //! its reducer (`trusty_code_tui::app::apply`), and its renderer
 //! (`trusty_code_tui::layout::draw`).
 //!
 //! `tcode tui` AUTO-SPAWNS its daemon (#4512, reversing DOC-50 §4.1's
-//! deferral): discovery is unchanged (`TCODE_DAEMON_URL` -> the `http_addr`
-//! discovery file -> a `GET /health` liveness ping), but a missing or stale
-//! discovery file now starts `tcode serve --http` instead of exiting with an
-//! actionable message.
+//! deferral): the daemon answers on one derived socket path under the
+//! trusty-code data directory (#6637), and nothing answering there starts
+//! `tcode serve` instead of exiting with an actionable message.
 //!
 //! **Quitting the TUI never stops the daemon** — not even one this command
 //! started. The daemon owns PM lifecycle, agent dispatch, and agent
 //! communication, and a TUI is one attached client among possibly several,
 //! so a client exit must not end live work (owner directive, 2026-08-01).
-//! There is correspondingly NO teardown step here. An
-//! explicitly-set-but-unreachable `TCODE_DAEMON_URL` still errors rather
-//! than spawning, since starting a daemon at a different address would
-//! ignore that instruction, and a daemon bound to a DIFFERENT project than
-//! this TUI is refused rather than attached to. See
+//! There is correspondingly NO teardown step here. A daemon bound to a
+//! DIFFERENT project than this TUI is refused rather than attached to, since
+//! every session would otherwise run against the wrong repository. See
 //! `super::daemon_autospawn` for the whole policy — none of it lives here.
 //!
 //! Daemon resolution deliberately runs BEFORE `trusty_code_tui::run::run` enters
