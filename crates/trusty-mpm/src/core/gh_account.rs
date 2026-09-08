@@ -405,7 +405,7 @@ pub fn probe_gh_auth(timeout: Duration) -> GhAuthProbe {
 /// Why: like [`GH_DOCTOR_TIMEOUT`], these calls are explicit, occasional
 /// pre-flights — generous enough for a keyring-backed or network-validated `gh`
 /// to respond without hanging the caller indefinitely.
-const GH_ENFORCE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const GH_ENFORCE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[path = "gh_account_enforce.rs"]
 mod enforce;

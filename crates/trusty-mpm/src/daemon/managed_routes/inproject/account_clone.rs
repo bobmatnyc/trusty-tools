@@ -201,28 +201,65 @@ fn clone_env_removal_set() -> Vec<&'static str> {
 /// on a keyring-backed host (`gh_account.rs`'s own documented caveat) — this
 /// is the check that turns "silently wrong identity" into a loud, named
 /// refusal, by asking GitHub itself who the token belongs to.
-/// What: runs `gh api user --jq .login` with EVERY inherited identity var
-/// removed and `token` set as `GH_TOKEN` — so the answer reflects `token`
-/// alone, never an ambient credential — and returns the trimmed login on a
+/// What: runs `gh api user --jq .login`, bounded by
+/// [`crate::core::gh_account::GH_ENFORCE_TIMEOUT`] (see
+/// [`verify_token_login_with`]), with EVERY inherited identity var removed
+/// and `token` set as `GH_TOKEN` — so the answer reflects `token` alone,
+/// never an ambient credential — and returns the trimmed login on a
 /// non-empty, zero-exit response.
-/// Test: exercised indirectly via `account_clone_env_with`'s injected
-/// `verify_login` closure in this module's tests; this thin subprocess
-/// wrapper (a real, deliberate network call) has no pure branch left to unit
-/// test hermetically.
+/// Test: the `gh`-invoking closure itself (a real, deliberate network call)
+/// has no pure branch left to unit test hermetically; the timeout wrapper it
+/// delegates to is covered directly — see [`verify_token_login_with`].
 fn verify_token_login(token: &str) -> Result<String, String> {
-    let mut cmd = trusty_common::gh::GhCommand::new(["api", "user", "--jq", ".login"]);
-    // Includes `GH_HOST` — see `clone_env_removal_set`'s doc — so a stale
-    // ambient GHE host cannot make this verify against the wrong host while
-    // the clone itself still targets `github.com`.
-    for key in clone_env_removal_set() {
-        cmd = cmd.env_remove(key);
-    }
-    // `.env_remove(k)` then `.env(k, v)` on the SAME key leaves it SET — see
-    // `GhCommand::env`'s "later call wins" doc — so `GH_TOKEN` above is
-    // shadowed by this `token` regardless of removal order.
-    cmd = cmd.env("GH_TOKEN", token);
-    cmd.nonempty_stdout_blocking()
-        .map_err(|e| format!("`gh api user` failed: {e}"))
+    let token = token.to_string();
+    verify_token_login_with(crate::core::gh_account::GH_ENFORCE_TIMEOUT, move || {
+        let mut cmd = trusty_common::gh::GhCommand::new(["api", "user", "--jq", ".login"]);
+        // Includes `GH_HOST` — see `clone_env_removal_set`'s doc — so a stale
+        // ambient GHE host cannot make this verify against the wrong host
+        // while the clone itself still targets `github.com`.
+        for key in clone_env_removal_set() {
+            cmd = cmd.env_remove(key);
+        }
+        // `.env_remove(k)` then `.env(k, v)` on the SAME key leaves it SET —
+        // see `GhCommand::env`'s "later call wins" doc — so `GH_TOKEN` here
+        // is shadowed by `token` regardless of removal order.
+        cmd = cmd.env("GH_TOKEN", &token);
+        cmd.nonempty_stdout_blocking()
+            .map_err(|e| format!("`gh api user` failed: {e}"))
+    })
+}
+
+/// [`verify_token_login`] with an explicit, injectable timeout and runner
+/// (#7166 review follow-up HIGH).
+///
+/// Why: the FIRST version of this function called
+/// `GhCommand::nonempty_stdout_blocking()` with no bound at all — a network
+/// stall (or a hung `gh`) blocked the whole clone indefinitely, unlike every
+/// other `gh`-subprocess call this crate makes for account selection
+/// ([`crate::core::gh_account::gh_token_via_cli`], `gh_account_enforce`'s
+/// `api_login_scoped`), which all run under
+/// [`crate::core::gh_account::GH_ENFORCE_TIMEOUT`] via
+/// [`crate::core::gh_account::run_bounded`]. Splitting the timeout wrapper
+/// from the `gh`-invoking closure — the SAME seam
+/// [`crate::core::gh_account::probe_gh_auth_with`] uses for its own
+/// hermetically-tested timeout arm — lets the timeout branch be asserted
+/// with a `std::thread::sleep`, no live `gh`, no network, no PATH mutation.
+/// What: runs `run` on `run_bounded`'s detached thread; a stall past
+/// `timeout` returns `Err` naming the timeout explicitly (distinct from a
+/// `run` failure, which propagates verbatim) — [`account_clone_env_with`]
+/// wraps whichever `Err` reaches it with the account name, so either shape
+/// still names the account by the time it surfaces.
+/// Test: `verify_token_login_with_times_out_and_names_the_bound`,
+/// `verify_token_login_with_returns_the_inner_result_when_fast`.
+fn verify_token_login_with<F>(timeout: std::time::Duration, run: F) -> Result<String, String>
+where
+    F: FnOnce() -> Result<String, String> + Send + 'static,
+{
+    crate::core::gh_account::run_bounded(timeout, move || Some(run())).unwrap_or_else(|| {
+        Err(format!(
+            "`gh api user` verification timed out after {timeout:?}"
+        ))
+    })
 }
 
 #[cfg(test)]

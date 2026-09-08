@@ -173,3 +173,43 @@ fn account_clone_env_accepts_a_token_that_matches() {
         ]
     );
 }
+
+// -----------------------------------------------------------------------
+// #7166 review follow-up HIGH: `verify_token_login_with`'s bounded timeout.
+// -----------------------------------------------------------------------
+
+/// A `run` closure that outruns `timeout` produces a distinct, named
+/// "timed out" error — never a silent hang, and never mistaken for `run`'s
+/// own failure shape.
+#[test]
+fn verify_token_login_with_times_out_and_names_the_bound() {
+    let err = verify_token_login_with(std::time::Duration::from_millis(20), || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        Ok("someone".to_string())
+    })
+    .expect_err("a stalled run must time out");
+    assert!(err.contains("timed out"), "{err}");
+}
+
+/// A `run` closure that finishes well inside `timeout` returns its result
+/// unmodified — the bound is a ceiling, not a delay.
+#[test]
+fn verify_token_login_with_returns_the_inner_result_when_fast() {
+    let login = verify_token_login_with(std::time::Duration::from_secs(5), || {
+        Ok("bobmatnyc".to_string())
+    })
+    .expect("a fast run must succeed");
+    assert_eq!(login, "bobmatnyc");
+}
+
+/// A `run` closure that fails (fast) propagates ITS error, not a timeout —
+/// the two failure shapes must stay distinguishable.
+#[test]
+fn verify_token_login_with_propagates_a_fast_failure_untouched() {
+    let err = verify_token_login_with(std::time::Duration::from_secs(5), || {
+        Err("gh api user failed: 401".to_string())
+    })
+    .expect_err("a fast failure must propagate");
+    assert!(err.contains("401"), "{err}");
+    assert!(!err.contains("timed out"), "{err}");
+}
