@@ -267,12 +267,13 @@ pub struct IndexEntry {
     /// same promotion applied to the whole list rather than one marker.
     /// What: a straight copy of the unit's recorded gaps, in the order they were
     /// recorded. Rendered by this module's own `gaps_section` as one bullet list
-    /// per unit that has any, and silent for a unit that has none. This crate
-    /// does not reword
-    /// or redact a gap's text here — it renders exactly the string the collector
-    /// wrote. // See #7137
+    /// per unit that has any, and silent for a unit that has none. The stored
+    /// value is a straight copy — nothing is reworded here. The one change
+    /// `gaps_section` makes on the way out is [`crate::redact::home_paths`],
+    /// which collapses the operator's home directory to `~` (#7137).
     /// Test: `index_tests::the_gaps_section_lists_only_units_that_recorded_one`,
-    /// `index_tests::a_clean_run_renders_no_gaps_section`.
+    /// `index_tests::a_clean_run_renders_no_gaps_section`,
+    /// `index_tests::a_gap_naming_the_operators_home_renders_it_redacted`.
     pub gaps: Vec<String>,
 }
 
@@ -630,11 +631,12 @@ fn reports(report: &IndexReport, dir: &Path, out: &mut String) {
 /// section is the same treatment applied to every OTHER collector's gaps.
 /// What: silent — no heading, no line — when no unit recorded a gap, so a clean
 /// run's index states nothing extra. Otherwise one `## Gaps` section, a summary
-/// line, and one bullet list per unit that recorded at least one, each gap
-/// rendered verbatim (never reworded, never redacted — see the wording note on
-/// [`IndexEntry::gaps`], // See #7137).
+/// line, and one bullet list per unit that recorded at least one, each gap in
+/// the collector's own words with only the operator's home directory collapsed
+/// to `~` by [`crate::redact::home_paths`] (#7137).
 /// Test: `index_tests::the_gaps_section_lists_only_units_that_recorded_one`,
-/// `index_tests::a_clean_run_renders_no_gaps_section`.
+/// `index_tests::a_clean_run_renders_no_gaps_section`,
+/// `index_tests::a_gap_naming_the_operators_home_renders_it_redacted`.
 fn gaps_section(report: &IndexReport, out: &mut String) {
     let with_gaps: Vec<&IndexEntry> = report
         .entries
@@ -655,7 +657,10 @@ fn gaps_section(report: &IndexReport, out: &mut String) {
     for entry in with_gaps {
         out.push_str(&format!("- **{}**\n", entry.name));
         for gap in &entry.gaps {
-            out.push_str(&format!("  - {gap}\n"));
+            // #7137: the gap's own words, with the operator's home directory
+            // collapsed to `~` — the one thing in a collector's path that names
+            // the machine rather than the finding.
+            out.push_str(&format!("  - {}\n", crate::redact::home_paths(gap)));
         }
     }
     out.push('\n');
@@ -1232,6 +1237,47 @@ mod index_tests {
         assert!(
             !text.contains("acme/web**"),
             "the clean repository picked up a Gaps bullet of its own:\n{text}"
+        );
+    }
+
+    /// Regression for #7137: the operator's home path inside a gap line reaches
+    /// the client-facing `reports/index.md` verbatim.
+    ///
+    /// Why this is worth a test: every gap a collector writes about this crate's
+    /// own working area names `<home>/.trusty-tools/trusty-audit/work/...`, and
+    /// the recipient of the package has no use for that path beyond learning the
+    /// operator's local account name.
+    /// What: a gap line built from the running home directory — read, never
+    /// written, so no other test in this binary is disturbed — and the assertion
+    /// that the rendered index states `~` and never the home prefix.
+    ///
+    /// Fails before the fix: `gaps_section` rendered each gap verbatim, so the
+    /// home prefix appeared in the output.
+    /// Test: this is the test.
+    #[test]
+    fn a_gap_naming_the_operators_home_renders_it_redacted() {
+        let Some(home) = dirs::home_dir().and_then(|h| h.to_str().map(str::to_owned)) else {
+            return;
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("01-acme");
+        std::fs::create_dir_all(&dir).expect("create dir");
+
+        let mut degraded = entry("acme/api", dir);
+        degraded.gaps = vec![format!(
+            "secrets-scan: trusty-search could not index \
+             {home}/.trusty-tools/trusty-audit/work/repos/acme-api"
+        )];
+
+        let text = render(&report(Producer::Package, vec![degraded]), tmp.path());
+
+        assert!(
+            !text.contains(&home),
+            "the index leaks the operator's home path:\n{text}"
+        );
+        assert!(
+            text.contains("~/.trusty-tools/trusty-audit/work/repos/acme-api"),
+            "the redacted path did not render:\n{text}"
         );
     }
 

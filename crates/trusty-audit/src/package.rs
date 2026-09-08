@@ -861,17 +861,7 @@ fn fill_archive(
         (EXCERPTS_ENTRY, generated.excerpts),
     ];
     for (entry, text) in members.into_iter().filter_map(|(e, t)| t.map(|t| (e, t))) {
-        // #6245: this member quotes the reason strings recorded for each failed
-        // repository, and a reason can carry text a child produced. Generated or
-        // not, it is scanned before it is written — the same bar every collected
-        // member meets.
-        credential_scan::refuse_if_credential(&text, entry, config, github_token)?;
-        start(&mut zip, entry, text.len() as u64, temporary)?;
-        zip.write_all(text.as_bytes())
-            .map_err(|source| AuditError::Package {
-                path: temporary.to_path_buf(),
-                source,
-            })?;
+        write_text_member(&mut zip, entry, &text, config, github_token, temporary)?;
         manifest.push(signing::ManifestFile {
             entry: entry.to_owned(),
             sha256: hex_digest(sha2::Sha256::digest(text.as_bytes())),
@@ -885,6 +875,23 @@ fn fill_archive(
     }
 
     for (entry, source) in collected {
+        // #7137: a manifest names the operator's own checkout path, so the
+        // recipient's copy is rewritten with `~` in place of the home
+        // directory rather than streamed through byte for byte.
+        if let Some(text) = crate::redact::packaged_manifest(&entry, &source)? {
+            write_text_member(&mut zip, &entry, &text, config, github_token, temporary)?;
+            manifest.push(signing::ManifestFile {
+                entry: entry.clone(),
+                sha256: hex_digest(sha2::Sha256::digest(text.as_bytes())),
+                bytes: text.len() as u64,
+            });
+            files.push(PackagedFile {
+                entry,
+                source: Some(source),
+                bytes: text.len() as u64,
+            });
+            continue;
+        }
         // #5481: hashed in the same pass that scans and copies, so the digest
         // is over the bytes that actually reached the archive.
         let mut digest = sha2::Sha256::new();
@@ -938,6 +945,34 @@ fn fill_archive(
         source: std::io::Error::other(e),
     })?;
     Ok(files)
+}
+
+/// Write one text member into the archive, refusing it if it carries a
+/// credential.
+///
+/// The generated members and the redacted `manifest.toml` (#7137) both arrive
+/// as text this process holds, so both go through one writer — the scan cannot
+/// then apply to one and not the other. Bytes another program wrote still take
+/// [`credential_scan::copy_member`], which streams rather than buffering.
+/// Test: `package_tests::no_packaged_member_names_the_operators_home`.
+fn write_text_member(
+    zip: &mut Archive,
+    entry: &str,
+    text: &str,
+    config: &EngagementConfig,
+    github_token: Option<&str>,
+    temporary: &Path,
+) -> Result<(), AuditError> {
+    // #6245: a generated member quotes reason strings a child produced.
+    // Generated or not, it is scanned before it is written — the same bar every
+    // collected member meets.
+    credential_scan::refuse_if_credential(text, entry, config, github_token)?;
+    start(zip, entry, text.len() as u64, temporary)?;
+    zip.write_all(text.as_bytes())
+        .map_err(|source| AuditError::Package {
+            path: temporary.to_path_buf(),
+            source,
+        })
 }
 
 /// A SHA-256 digest as lower-case hex — the form the manifest records.
@@ -1417,6 +1452,64 @@ trusty-review = "0.15.1"
         }
         assert!(package.total_bytes > 0);
         assert!(package.excluded.is_empty());
+    }
+
+    /// 🔴 #7137 closure condition 1, over the REAL assembler: no member of a
+    /// finished package names the operator's home directory.
+    ///
+    /// Why this is worth a test: the leak was reproduced across three members at
+    /// once — `package.toml`'s per-repository `gaps`, the same gaps in
+    /// `reports/index.md`, and each `manifest.toml`'s `[[repositories]] path` —
+    /// so a test that reads only one of them would pass while the package still
+    /// shipped the operator's account name 59 times.
+    /// What: a repository whose recorded gap and whose manifest path both sit
+    /// under the running home directory (read, never written), assembled by
+    /// `assemble`, then each of the three members checked for the prefix and for
+    /// the `~` that replaced it.
+    ///
+    /// Fails before the fix: all three members carry the home prefix verbatim.
+    /// Test: this is the test.
+    #[test]
+    fn no_packaged_member_names_the_operators_home() {
+        let Some(home) = dirs::home_dir().and_then(|h| h.to_str().map(str::to_owned)) else {
+            return;
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let mut run = audited(&work, "00-acme-api", "acme-api");
+        let checkout = format!("{home}/.trusty-tools/trusty-audit/work/repos/acme-api");
+        std::fs::write(
+            run.output.join("manifest.toml"),
+            format!(
+                "[report]\ntitle = \"Acme\"\n\n[[repositories]]\nname = \"acme\"\n\
+                 path = \"{checkout}\"\n"
+            ),
+        )
+        .expect("write manifest");
+        run.gaps = vec![format!(
+            "secrets-scan: trusty-search could not index {checkout}"
+        )];
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        assemble(&work, &config(), &report, &[], &[], &destination, None).expect("assembles");
+
+        for entry in [
+            METADATA_ENTRY,
+            INDEX_ENTRY,
+            "reports/00-acme-api/manifest.toml",
+        ] {
+            let text = read_entry(&destination, entry);
+            assert!(
+                !text.contains(&home),
+                "{entry} leaks the operator's home path:\n{text}"
+            );
+            assert!(
+                text.contains("~/.trusty-tools/trusty-audit/work/repos/acme-api"),
+                "{entry} did not carry the redacted path:\n{text}"
+            );
+        }
     }
 
     /// The digest document, parsed out of the finished zip.

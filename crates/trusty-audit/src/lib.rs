@@ -114,6 +114,9 @@ pub mod package;
 // #5823: the seam a front end renders live progress through, and the pump that
 // reads a spawned child's stages back out of its output.
 pub mod progress;
+// #7137: the one place this crate collapses the operator's home path out of
+// text a client receives.
+pub mod redact;
 pub mod registry;
 mod relay;
 // #6080: the render step of the sweep, run on its own by whoever RECEIVED the
