@@ -1,0 +1,3 @@
+Fixed
+
+- The bare `[`ensure_private_dir`]` link in `private_dir`'s inner doc comment and the bare `[`command`]`/`[`command_in`]`/`[`tokio_command`]`/`[`tokio_command_in`]`/`[`MAINTENANCE_DISABLE_ARGS`]` links in `git`'s now resolve. A module declared as `pub mod x;` merges the declaration site's outer doc with the module's own inner `//!` doc onto one rustdoc page, but a bare link written inside the inner doc resolves against the DECLARING scope (crate root), not `x`'s own — the same failure mode #7162 fixed elsewhere in this crate, missed here because both modules landed after that pass. Fixed with `[`name`]: crate::module::name` link-reference definitions; trusty-common now reports 0 broken intra-doc links (#7157).
