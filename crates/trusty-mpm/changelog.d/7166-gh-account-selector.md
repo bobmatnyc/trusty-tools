@@ -39,3 +39,15 @@ Added
     the same directory, before it is ever used to clone; a mismatch (e.g. a
     stale, hand-edited account directory) refuses loud, naming both the
     requested and the actual account.
+  - The auto-persist upsert `tm run --account`/`tm register --account`
+    perform on every invocation now threads that same per-account config
+    directory onto the project's registry-B record (`github.config_dir`),
+    so LATER session spawns — not just the first clone — take the
+    discriminating `GH_CONFIG_DIR` path too, and preserves the project's
+    existing `default_branch` instead of silently resetting it to `main` on
+    every `--account` run.
+  - The per-account config directory now rejects a `login` of `.`, `..`,
+    empty, or containing `/`/`\` before it becomes a path segment; refuses a
+    pre-planted symlink at the directory or at `hosts.yml`; and is created
+    `0700` with its `hosts.yml`/`config.yml` written `0600`, matching `gh`'s
+    own convention.
