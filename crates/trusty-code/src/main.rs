@@ -470,11 +470,23 @@ enum SessionCommand {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
     // Initialise tracing to stderr (never stdout — stdout is the API transport,
     // and `--json` mode requires stdout to carry only the JSON report).
-    trusty_code::logging::init_tracing();
-
-    let cli = Cli::parse();
+    //
+    // #6537: `tcode serve` additionally gets a durable file log
+    // (`logging::file_log_dir`) — it is the one long-running mode that
+    // accumulates enough log volume to be worth draining, and the one this
+    // process spawns `log_drain::spawn` from (`serve::build_router`). The
+    // guard must outlive `main`: dropping it early silently discards
+    // buffered log records.
+    let _log_guard = if matches!(cli.command, Command::Serve { .. }) {
+        trusty_code::logging::init_tracing_with_file_log()
+    } else {
+        trusty_code::logging::init_tracing();
+        None
+    };
 
     match cli.command {
         Command::Serve {

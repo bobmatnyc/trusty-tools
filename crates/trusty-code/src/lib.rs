@@ -271,6 +271,18 @@ pub mod identity;
 /// Test: `logging::tests::*`.
 pub mod logging;
 
+/// `tcode serve`'s adoption of `trusty_common::log_drain::run_once` (#6537).
+///
+/// Why: `tcode serve` writes a durable file log (`logging::file_log_dir`)
+/// nothing collects. This is the single-project drain scheduler, the same
+/// shape as trusty-mpm's own Phase 3 wiring, scoped down to what one project's
+/// daemon needs.
+/// What: `LogDrainConfig` (`~/.trusty-code/log_drain.yaml`), `resolve_log_drain`,
+/// `spawn`.
+/// Test: `log_drain::config::tests`, `log_drain::resolve::tests`,
+/// `log_drain::scheduler::tests`.
+pub mod log_drain;
+
 /// Provider abstraction and per-agent model routing.
 ///
 /// Why: Each agent routes to its own model, possibly behind a different backend

@@ -163,6 +163,14 @@ pub const DEFAULT_HTTP_PORT: u16 = 7882;
 pub async fn build_router(
     binding: ProjectBinding,
 ) -> Result<(Router, Arc<SessionRegistry>, SharedWorkstreamStore)> {
+    // #6537: start the log-drain scheduler once, at the daemon's one
+    // production entry point (tests go through `build_router_at` directly and
+    // never spawn it). `binding.root()` is read before `build_router_at`
+    // consumes `binding`.
+    crate::log_drain::spawn(
+        binding.root().map(std::path::Path::to_path_buf),
+        crate::logging::file_log_dir(),
+    );
     build_router_at(binding, &crate::workstreams::default_data_dir()).await
 }
 

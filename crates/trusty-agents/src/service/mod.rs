@@ -170,7 +170,10 @@ pub async fn is_service_running(port: u16) -> bool {
 /// What: `dirs::home_dir()` (falling back to `.` if unresolvable, matching
 /// the fallback already used elsewhere in this crate, e.g.
 /// `runtime::startup`'s REPL log path) joined with `Library/Logs/trusty-agents`.
-fn log_dir() -> PathBuf {
+// #6537: `pub(crate)` (was private) so `crate::log_drain`'s scheduler can
+// point its `LogSource::root` at the same directory this module writes to,
+// rather than a second independent computation of it.
+pub(crate) fn log_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Library")

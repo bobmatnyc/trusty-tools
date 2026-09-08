@@ -45,7 +45,12 @@
 //! same underlying fact, but one must never substitute for the other — an
 //! event emission does not excuse a silent decision point from also logging.
 
+use std::path::PathBuf;
+
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 /// Build the tracing filter, falling back to [`DEFAULT_LOG_LEVEL`].
 ///
@@ -95,6 +100,77 @@ pub fn init_tracing_for_test() {
 /// Test: `tests/logging_e2e.rs` covers unset and invalid `RUST_LOG` values.
 pub const DEFAULT_LOG_LEVEL: &str = "info";
 
+/// Basename `tracing_appender::rolling::daily` rotates:
+/// `tcode.log.YYYY-MM-DD` (#6537).
+pub const FILE_LOG_BASENAME: &str = "tcode.log";
+
+/// Directory tcode's own rotating file log is written to: `~/.trusty-code/logs`.
+///
+/// Why (#6537): before this, `init_tracing` wrote to stderr only, which
+/// nothing durable ever collects — the epic's whole point (cloud log drain,
+/// #6533) needs a file to drain. This mirrors trusty-mpm's own
+/// `~/.trusty-mpm/logs` layout, under the private-state directory
+/// [`crate::paths::private_state`] already established rather than a new
+/// root.
+/// What: `crate::paths::private_state::private_state_dir().join("logs")`.
+/// Test: `tests::file_log_dir_is_under_private_state`.
+pub fn file_log_dir() -> PathBuf {
+    crate::paths::private_state::private_state_dir().join("logs")
+}
+
+/// Initialise tracing for `tcode serve`: stderr (unchanged, MCP-framing-safe)
+/// PLUS a daily-rotating file layer under [`file_log_dir`] (#6537).
+///
+/// Why: only the long-running `serve` daemon accumulates enough log volume to
+/// be worth draining — mirrors trusty-mpm's own daemon/CLI split
+/// (`bin/tm/tracing_setup.rs`), where a short-lived CLI invocation gets the
+/// lighter [`init_tracing`] instead. A file-directory creation failure (a
+/// read-only home, a full disk) degrades to stderr-only rather than failing
+/// daemon startup.
+/// What: builds a `tracing_subscriber::registry()` with a stderr `fmt` layer
+/// and, when the log directory is creatable, a non-blocking daily file `fmt`
+/// layer (`with_ansi(false)`, since a rotated file is read by tooling, not a
+/// terminal). Returns the file layer's `WorkerGuard` — the caller MUST hold
+/// it for the process lifetime; dropping it early silently discards buffered
+/// log records.
+/// Test: `tests::file_log_dir_is_under_private_state` covers the path
+/// computation this function depends on; installing a second GLOBAL
+/// subscriber in-process (this function's own behavior) cannot itself run in
+/// the shared `--lib` test binary alongside `begin_capture`'s `try_init` — see
+/// that test's own doc comment.
+pub fn init_tracing_with_file_log() -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(env_filter());
+
+    let log_dir = file_log_dir();
+    let (file_layer, guard) = match std::fs::create_dir_all(&log_dir) {
+        Ok(()) => {
+            let appender = tracing_appender::rolling::daily(&log_dir, FILE_LOG_BASENAME);
+            let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+            let layer = tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
+                .with_ansi(false)
+                .with_filter(env_filter());
+            (Some(layer), Some(guard))
+        }
+        Err(e) => {
+            eprintln!(
+                "tcode: cannot create log directory {}: {e} (stderr-only for this run)",
+                log_dir.display()
+            );
+            (None, None)
+        }
+    };
+
+    tracing_subscriber::registry()
+        .with(stderr_layer)
+        .with(file_layer)
+        .init();
+
+    guard
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -129,5 +205,24 @@ mod tests {
     #[test]
     fn default_log_level_is_non_empty() {
         assert!(!DEFAULT_LOG_LEVEL.is_empty());
+    }
+
+    /// `file_log_dir` sits under the crate's own private-state directory,
+    /// never a bespoke root (#6537).
+    ///
+    /// Why: `init_tracing_with_file_log` installs a GLOBAL subscriber, so it
+    /// cannot itself be called from this shared test binary without racing
+    /// `begin_capture`'s own `try_init` — this test covers the path
+    /// computation, which is what the log-drain source (`crate::log_drain`)
+    /// actually depends on.
+    #[test]
+    fn file_log_dir_is_under_private_state() {
+        let dir = file_log_dir();
+        assert!(dir.ends_with("logs"), "{}", dir.display());
+        assert!(
+            dir.to_string_lossy().contains(".trusty-code"),
+            "{}",
+            dir.display()
+        );
     }
 }
