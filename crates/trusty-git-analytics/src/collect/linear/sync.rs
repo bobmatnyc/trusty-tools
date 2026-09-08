@@ -7,8 +7,9 @@
 //! DB writes) lives in `commands::linear::run_sync`.
 //! What: [`SyncScope`], [`resolve_scope`], [`next_cursor`],
 //! [`validate_team_key`], and [`build_issues_filter`] — the Linear
-//! GraphQL-filter counterpart to JIRA's JQL-string [`build_jql`]
-//! (`collect::jira::sync::build_jql`).
+//! GraphQL-filter counterpart to JIRA's JQL-string [`build_jql`].
+//!
+//! [`build_jql`]: crate::collect::jira::sync::build_jql
 
 use chrono::{DateTime, Utc};
 

@@ -60,7 +60,7 @@ pub struct OptionalCollector {
 /// [`trusty_common::bin_resolve::resolve_binary`] and fails open with a
 /// named gap line when it is missing. `git`, `tga`, `trusty-search`,
 /// `trusty-analyze` and `trusty-review` are REQUIRED tools with their own
-/// fail-CLOSED preflight ([`crate::run::pins`]) and do not belong here — a
+/// fail-CLOSED preflight (`crate::run::pins`) and do not belong here — a
 /// missing required tool already refuses the run before this module would
 /// ever run.
 pub const ALL: [OptionalCollector; 3] = [
@@ -142,7 +142,7 @@ pub(crate) fn warning_row(c: &OptionalCollector) -> String {
 /// The warn-or-refuse judgement over an already-resolved `missing` list.
 ///
 /// Why: pure and resolver-free, unlike [`missing`] — split out so
-/// [`crate::chain::audit_with_preflight`] can take the missing list as a
+/// `crate::chain::audit_with_preflight` can take the missing list as a
 /// parameter (for progress reporting) and reuse this one decision rather than
 /// re-deriving it, and so a test can drive every branch (empty, some missing,
 /// strict) with a literal list and no PATH/env involved at all.
