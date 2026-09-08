@@ -25,7 +25,10 @@
 //! `no-milestone: <reason>` comment is the standard's own escape hatch and
 //! renders as SKIP with the reason quoted, never as a pass — a reader must be
 //! able to tell "no milestone was needed, here is why" from "a milestone is
-//! present". Relationships are always INFO: a standalone issue legitimately has
+//! present". `no-component-label: <reason>` is the same hatch for the component
+//! row (#7198): when no Cargo crate owns the changed path — a `website/` or
+//! CI-only issue — applying no component label is policy-correct.
+//! Relationships are always INFO: a standalone issue legitimately has
 //! no parent, no blocker, and no sub-issues, so their absence is a fact to
 //! report and never a violation.
 //!
@@ -51,6 +54,15 @@ pub const AUDIT_JSON_FIELDS: &str =
 
 /// The comment prefix that excuses an unset milestone (#7067's escape hatch).
 pub const NO_MILESTONE_PREFIX: &str = "no-milestone:";
+
+/// The comment prefix that excuses an absent component label (#7198).
+///
+/// Why: when no Cargo crate owns the changed path — a `website/` or CI-only
+/// issue — `tm-ticketing` policy is that applying no component label is
+/// correct, so the audit needs the same recorded-waiver escape hatch the
+/// milestone row already has.
+/// Test: `a_missing_component_label_with_a_reason_comment_is_a_skip`.
+pub const NO_COMPONENT_LABEL_PREFIX: &str = "no-component-label:";
 
 /// A `{"title": …}` node — a milestone or a project item.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -340,23 +352,42 @@ fn milestone_row(facts: &IssueFacts, ticketing: &ResolvedTicketing) -> AuditRow 
 
 /// The reason from the first `no-milestone: <reason>` comment, if any.
 ///
-/// Why: the standard's escape hatch is a comment, so the audit has to read
-/// comment bodies rather than infer intent from an absent field.
-/// What: matches the prefix case-insensitively at the start of any LINE of any
-/// comment (an agent posting the note inside a longer comment still counts),
-/// and returns the trimmed remainder. An empty remainder still counts as
-/// recorded — the standard asks for a reason, and reporting an empty one is
-/// more useful than silently treating the comment as absent.
 /// Test: `an_unset_milestone_with_a_reason_comment_is_a_skip`,
 /// `the_no_milestone_comment_is_matched_case_insensitively`,
 /// `a_no_milestone_note_inside_a_longer_comment_counts`.
 fn no_milestone_reason(comments: &[CommentRef]) -> Option<String> {
+    waiver_reason(comments, NO_MILESTONE_PREFIX)
+}
+
+/// The reason from the first `no-component-label: <reason>` comment, if any.
+///
+/// Test: `a_missing_component_label_with_a_reason_comment_is_a_skip`,
+/// `the_no_component_label_comment_is_matched_case_insensitively`.
+// #7198: mirrors `no_milestone_reason` over the component-label prefix.
+fn no_component_label_reason(comments: &[CommentRef]) -> Option<String> {
+    waiver_reason(comments, NO_COMPONENT_LABEL_PREFIX)
+}
+
+/// The reason from the first `<prefix> <reason>` comment line, if any.
+///
+/// Why: the standard's escape hatches are comments, so the audit has to read
+/// comment bodies rather than infer intent from an absent field. #7198 added a
+/// second prefix, and one matcher is what keeps the two hatches behaving
+/// identically.
+/// What: matches `prefix` case-insensitively at the start of any LINE of any
+/// comment (an agent posting the note inside a longer comment still counts),
+/// and returns the trimmed remainder. An empty remainder still counts as
+/// recorded — the standard asks for a reason, and reporting an empty one is
+/// more useful than silently treating the comment as absent.
+/// Test: `a_no_milestone_note_inside_a_longer_comment_counts`,
+/// `the_no_component_label_comment_is_matched_case_insensitively`.
+fn waiver_reason(comments: &[CommentRef], prefix: &str) -> Option<String> {
     comments.iter().find_map(|c| {
         c.body.lines().find_map(|line| {
             let line = line.trim();
-            let head = line.get(..NO_MILESTONE_PREFIX.len())?;
-            head.eq_ignore_ascii_case(NO_MILESTONE_PREFIX)
-                .then(|| line[NO_MILESTONE_PREFIX.len()..].trim().to_string())
+            let head = line.get(..prefix.len())?;
+            head.eq_ignore_ascii_case(prefix)
+                .then(|| line[prefix.len()..].trim().to_string())
         })
     })
 }
@@ -368,9 +399,15 @@ fn no_milestone_reason(comments: &[CommentRef]) -> Option<String> {
 /// correctly labelled with the crate that owns it failed. The accepted set is
 /// now [`ComponentLabels`]'s, and the FAIL line names every label in it so the
 /// fix is a label the reader can copy rather than a guess.
+/// A `no-component-label: <reason>` comment renders SKIP with the reason
+/// quoted, never PASS — the website/CI shape where no crate owns the changed
+/// path is policy-correct, and a reader must still be able to tell a waived
+/// row from a labelled one (#7198).
 /// Test: `a_missing_component_label_fails`,
 /// `a_non_mpm_crate_component_label_passes`,
-/// `trusty_audit_alone_passes_the_component_label_check`.
+/// `trusty_audit_alone_passes_the_component_label_check`,
+/// `a_missing_component_label_with_a_reason_comment_is_a_skip`,
+/// `a_present_component_label_wins_over_a_waiver_comment`.
 fn component_row(facts: &IssueFacts, components: &ComponentLabels) -> AuditRow {
     let present: Vec<&str> = facts
         .labels
@@ -379,10 +416,20 @@ fn component_row(facts: &IssueFacts, components: &ComponentLabels) -> AuditRow {
         .filter(|name| components.accepts(name))
         .collect();
     let (verdict, detail) = if present.is_empty() {
+        // #7198: a recorded waiver downgrades the miss to SKIP, mirroring
+        // `milestone`'s `no-milestone:` hatch.
+        if let Some(reason) = no_component_label_reason(&facts.comments) {
+            return AuditRow {
+                requirement: REQ_COMPONENT,
+                verdict: Verdict::Skip,
+                detail: format!("({reason})"),
+            };
+        }
         (
             Verdict::Fail,
             format!(
-                "none of [{}] present (labels: {})",
+                "none of [{}] present and no `no-component-label: <reason>` \
+                 comment (labels: {})",
                 components.names().join(", "),
                 if facts.labels.is_empty() {
                     "none".to_string()
