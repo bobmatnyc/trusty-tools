@@ -24,6 +24,10 @@ fn row(session: &str, tokens: i64, usd: f64) -> SavingsRow {
         session_id: session.to_string(),
         technique: TECHNIQUE_INSTRUCTION_COMPRESSION.to_string(),
         tokens_saved: tokens,
+        // Twice the saved figure — a plausible "before" for a row this test
+        // helper builds. Callers that need a specific before/saved ratio for a
+        // percent assertion build their own `SavingsRow` instead.
+        tokens_before: tokens.max(0) as u64 * 2,
         cost_saved_usd: usd,
         basis: "sources 1000 B - compiled 400 B".to_string(),
         model_source: crate::core::session_model::MODEL_SOURCE_LAUNCH_CONFIG.to_string(),
@@ -52,6 +56,34 @@ fn a_row_written_before_the_model_source_field_still_folds() {
     assert_eq!(
         parsed.model_source, "",
         "an absent model_source must read back as empty, not fail the parse"
+    );
+}
+
+/// Why (#7179): the ledger carries rows written before `tokens_before`
+/// existed. A field without `#[serde(default)]` would make every such line
+/// unparseable — zeroing the operator's fold, not just the percent, on the
+/// first render after the upgrade.
+/// Test: itself.
+#[test]
+fn a_row_written_before_tokens_before_existed_still_folds() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = ledger_with(
+        &dir,
+        &[
+            r#"{"ts":"2026-09-07T02:41:00Z","session_id":"sess-a","technique":"divert","tokens_saved":5300,"cost_saved_usd":0.0159,"basis":"files 5000 tok - summary 200 tok"}"#,
+        ],
+    );
+    let total = fold_session(&ledger, "sess-a");
+    assert_eq!(total.rows, 1, "a pre-#7179 row must still count");
+    assert_eq!(total.tokens_saved, 5300);
+    assert_eq!(
+        total.tokens_before, 0,
+        "an absent tokens_before must read back as 0, not fail the parse"
+    );
+    assert_eq!(
+        total.percent_saved(),
+        None,
+        "a fold with no tokens_before has no percent to report"
     );
 }
 
@@ -131,6 +163,7 @@ fn zero_fold_is_zero() {
     assert!(
         SavingsTotal {
             tokens_saved: 0,
+            tokens_before: 0,
             cost_saved_usd: 0.0,
             rows: 4,
         }
@@ -139,10 +172,86 @@ fn zero_fold_is_zero() {
     assert!(
         !SavingsTotal {
             tokens_saved: 1,
+            tokens_before: 2,
             cost_saved_usd: 0.0,
             rows: 1,
         }
         .is_zero()
+    );
+}
+
+/// Why (#7179): the percent is what the `💸` segment renders, so its rounding
+/// rule is pinned directly against hand-built totals rather than inferred from
+/// the ledger round trip.
+/// Test: itself.
+#[test]
+fn percent_saved_rounds_to_nearest_whole_number() {
+    // 1/3 rounds to the nearest whole percent, not truncates.
+    assert_eq!(
+        SavingsTotal {
+            tokens_saved: 1,
+            tokens_before: 3,
+            cost_saved_usd: 0.01,
+            rows: 1,
+        }
+        .percent_saved(),
+        Some(33)
+    );
+    assert_eq!(
+        SavingsTotal {
+            tokens_saved: 5_000,
+            tokens_before: 20_000,
+            cost_saved_usd: 0.05,
+            rows: 1,
+        }
+        .percent_saved(),
+        Some(25)
+    );
+}
+
+/// Why (#7179): a zero fold has nothing to divide, and `None` — not `Some(0)`
+/// — is what tells the render layer to omit the segment rather than print a
+/// false `0%`.
+/// Test: itself.
+#[test]
+fn percent_saved_is_none_on_a_zero_fold() {
+    assert_eq!(SavingsTotal::default().percent_saved(), None);
+}
+
+/// Why (#7179): the one output this method may never produce while it accepted
+/// at least one row — a naive `round()` with no floor lets a sub-0.5% ratio
+/// print `0%`, which reads as "the harness saved nothing" and states a
+/// measurement that was never made.
+/// Test: itself.
+#[test]
+fn percent_saved_never_rounds_down_to_zero() {
+    assert_eq!(
+        SavingsTotal {
+            tokens_saved: 1,
+            tokens_before: 10_000,
+            cost_saved_usd: 0.000_01,
+            rows: 1,
+        }
+        .percent_saved(),
+        Some(1)
+    );
+}
+
+/// Why (#7179): a ledger with only pre-#7179 rows (no `tokens_before`) folds
+/// `tokens_saved > 0` beside `tokens_before == 0` — nothing to divide by, so
+/// the segment must omit the percent rather than report a fabricated one.
+/// Test: itself.
+#[test]
+fn percent_saved_clamps_a_legacy_mixed_fold() {
+    assert_eq!(
+        SavingsTotal {
+            tokens_saved: 4_000,
+            tokens_before: 0,
+            cost_saved_usd: 0.01,
+            rows: 1,
+        }
+        .percent_saved(),
+        None
     );
 }
 

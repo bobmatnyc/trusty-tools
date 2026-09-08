@@ -1,53 +1,61 @@
-# Statusline cost savings
+# Statusline token savings
 
-## Cost savings
+## Token savings
 
 trusty-mpm spends real effort *not* sending tokens: it folds several instruction
 sources into one compiled prompt, it diverts a bulk file read to a cheap worker
 and brings back a summary, and it compresses gate output before an agent reads
-it. The `💸` segment on the `tm` statusline is an estimate of what all of that
-adds up to for the session you are looking at.
+it. The `💸` segment on the `tm` statusline shows what percentage of tokens
+that would otherwise have been sent, this session avoided sending.
 
 ```
-TM 1.5.18 ● | trusty-tools ⎇ main | @bobmatnyc | ✻you@example.com | Opus | ctx 41% | $12.40 | ⏳24% 📅41% | 💸~$0.36
+TM 1.5.18 ● | trusty-tools ⎇ main | @bobmatnyc | ✻you@example.com | Opus | ctx 41% | $12.40 | ⏳24% 📅41% | 💸34%
 ```
 
-It has two forms and one absence:
+It has one form and one absence:
 
 | Folded total | Segment |
 |---|---|
-| At or above one cent | `💸~$0.36` |
-| Above zero, below one cent | `💸~5k tok` |
-| Nothing recorded for this session | *the segment is not rendered at all* |
+| At least one accepted row, with a percent to report | `💸34%` |
+| Nothing recorded for this session, or every accepted row predates #7179 | *the segment is not rendered at all* |
 
-The leading `~` is the estimate marker. It is there to keep this figure visually
-apart from the `$12.40` cost segment two positions earlier, which is Claude
-Code's own billed total for the session.
+### How the percent is computed
 
-### The two numbers are not subtractable
+Every ledger row already knows two figures: `tokens_saved` (what it avoided
+sending) and `tokens_before` (what it would have sent without the technique).
+The segment sums both across every row this session wrote, then reports
+`round(100 × tokens_saved / tokens_before)`.
 
-The cost segment counts dollars actually spent. The savings segment counts
-dollars *not* spent on tokens that were never sent. Netting one against the
-other produces a number that means nothing: the counterfactual session — the one
-that read every file in full and carried every instruction source verbatim —
-never ran. Read the savings figure as "this is roughly what the harness avoided",
-not as a discount on the bill.
+This denominator was chosen over the session's live context-window fill (the
+`total_input_tokens` figure behind the `ctx 41%` segment) deliberately: that
+figure resets on every auto-compaction, which would make the percent jump for
+reasons that have nothing to do with anything the harness saved, and it counts
+tokens no savings technique here ever touches. The ledger-only percent stays
+scoped to exactly what `instruction-compression` and `divert` measure, and it
+only grows as more of those write rows.
 
-Two further reasons it is an estimate, both stated so you can discount it
-yourself:
+It is still an estimate, for the same two reasons as before:
 
 - **Bytes are converted to tokens at four bytes per token.** That is the
   conventional English-prose approximation, not a tokenizer run.
 - **Cache reads are not distinguished from fresh input.** Some of the tokens a
   technique avoided would have been cache reads, which bill at a tenth of the
-  input rate. On a cache-heavy session the figure overstates.
+  input rate — irrelevant to the *percent of tokens avoided*, but relevant if
+  you convert the figure to a dollar estimate yourself.
 
-### `$0.00` is never rendered
+### `0%` is never rendered
 
-A rendered `$0.00` cannot be told apart from "nothing was saved", and it states
-a measurement that was never made. So a sub-cent total falls back to the token
-form, and a session with no recorded savings omits the segment entirely. If you
-do not see a `💸`, no producer has written anything for that session.
+A rendered `0%` cannot be told apart from "nothing was saved", and it states a
+measurement that was never made. So a fold with `tokens_saved > 0` always
+reports at least `1%` — even a true sub-0.5% ratio rounds up rather than down
+— and a session with no recorded savings omits the segment entirely. If you do
+not see a `💸`, no producer has written anything for that session.
+
+Dollar figures have not gone away — they still live in the ledger's
+`cost_saved_usd` field and in `tm`'s own reporting commands. The statusline
+just no longer surfaces one, because a percentage reads at a glance in a way a
+bare dollar amount does not: it needs no context about the session's spend to
+interpret.
 
 ## The techniques, and what each one measures
 
@@ -138,7 +146,7 @@ under whatever framework root your `--root` flag, `TRUSTY_MPM_ROOT`, or
 `[standalone] root` config key resolves to. One object per line:
 
 ```json
-{"ts":"2026-09-07T02:41:00Z","session_id":"trusty-tools-ec","technique":"instruction-compression","tokens_saved":5300,"cost_saved_usd":0.0159,"basis":"sources 47000 B - compiled 25800 B, at 4 B/token, priced at claude-sonnet-4-6 input $3/Mtok","model_source":"launch-config"}
+{"ts":"2026-09-07T02:41:00Z","session_id":"trusty-tools-ec","technique":"instruction-compression","tokens_saved":5300,"tokens_before":11750,"cost_saved_usd":0.0159,"basis":"sources 47000 B - compiled 25800 B, at 4 B/token, priced at claude-sonnet-4-6 input $3/Mtok","model_source":"launch-config"}
 ```
 
 `model_source` names where the model the row was priced at came from. For a

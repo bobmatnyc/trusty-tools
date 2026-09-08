@@ -1,43 +1,39 @@
-//! The `💸` estimated-savings segment for `tm statusline` (#6958).
+//! The `💸` estimated-savings segment for `tm statusline` (#6958, percent
+//! form since #7179).
 //!
 //! Why: the owner asked to see what the harness saves by not sending tokens —
 //! instruction folding today, diverted file reads and compressed gate output as
 //! those producers land. The status bar is where the operator already looks for
-//! the session's cost, so the saving belongs beside it.
+//! the session's cost, so the saving belongs beside it. #7179 (owner ruling
+//! 2026-09-08) replaced the dollar/token figure with a percentage: "how much of
+//! what would have been sent did we avoid" reads at a glance in a way a dollar
+//! amount — which needs the session's spend as context to interpret — does not.
 //!
 //! What: folds `~/.trusty-mpm/usage/savings.jsonl` for the current session at
-//! render time and renders one segment. Two forms, one absence:
+//! render time and renders one segment:
 //!
 //! | Fold | Renders |
 //! |---|---|
-//! | `>= $0.01` | `💸~$0.42` |
-//! | `> $0` but `< $0.01` | `💸~5k tok` |
-//! | no ledger, unreadable, or zero | nothing at all |
+//! | `tokens_saved > 0` and a percent denominator exists | `💸34%` |
+//! | zero fold, or no denominator (every row predates #7179) | nothing at all |
 //!
-//! The leading `~` is the estimate marker. It is what keeps this segment
-//! visually distinct from the exact `<cost>` segment two positions earlier,
-//! which carries Claude Code's own billed total. The two are NOT subtractable —
-//! a saving is measured against tokens never sent, not against the session's
-//! bill — and the docs page says so.
+//! The percent is [`SavingsTotal::percent_saved`] — `tokens_saved / (this
+//! session's ledger rows' own pre-saving token count)`, folded across every
+//! accepted row, rounded to the nearest whole number. See that method's doc and
+//! the `savings` module header for why this denominator was chosen over the
+//! session's live context-window fill.
 //!
-//! **`$0.00` is unreachable by construction.** A rendered `$0.00` is
-//! indistinguishable from "no savings" and states a measurement that was never
-//! made, so a sub-cent fold falls back to the token form and an empty fold
-//! omits the segment entirely.
+//! **`0%` is unreachable by construction**, the same way `$0.00` was before
+//! #7179: [`SavingsTotal::is_zero`] gates the whole segment, so a fold with
+//! nothing to show renders nothing rather than a false `0%`.
 //!
-//! Test: `savings_segment_renders_dollars_above_a_cent`,
-//! `savings_segment_renders_tokens_below_a_cent`,
+//! Test: `savings_segment_renders_a_percent`,
 //! `savings_segment_is_absent_on_a_zero_fold`,
-//! `savings_segment_never_renders_zero_dollars`.
+//! `savings_segment_never_renders_zero_percent`.
 
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::core::savings::{SavingsTotal, fold_session, savings_log_in};
-
-/// The floor below which the dollar form would round to `$0.00`.
-///
-/// Test: `savings_segment_never_renders_zero_dollars`.
-const CENT: f64 = 0.01;
 
 /// Fold the ledger for `session_id` and render the segment, or omit it.
 ///
@@ -118,31 +114,19 @@ fn savings_root() -> Option<PathBuf> {
 
 /// Render a folded total as the segment text, or `None` to omit it.
 ///
-/// Why: this is the rule the whole segment exists to get right — never `$0.00`,
-/// never a fabricated figure, and a visible estimate marker on everything it
-/// does show.
-/// What: `💸~$X.XX` at or above one cent; `💸~<N>k tok` / `💸~<N> tok` for a
-/// positive sub-cent fold; `None` when [`SavingsTotal::is_zero`].
-/// Test: `savings_segment_renders_dollars_above_a_cent`,
-/// `savings_segment_renders_tokens_below_a_cent`,
+/// Why: this is the rule the whole segment exists to get right — never a false
+/// `0%`, never a fabricated figure.
+/// What: `💸<N>%` from [`SavingsTotal::percent_saved`]; `None` on
+/// [`SavingsTotal::is_zero`] or when that method itself returns `None` (no
+/// percent denominator — every accepted row predates #7179's `tokens_before`).
+/// Test: `savings_segment_renders_a_percent`,
 /// `savings_segment_is_absent_on_a_zero_fold`,
-/// `savings_segment_never_renders_zero_dollars`.
+/// `savings_segment_never_renders_zero_percent`.
 pub(crate) fn render_savings_segment(total: &SavingsTotal) -> Option<String> {
     if total.is_zero() {
         return None;
     }
-    if total.cost_saved_usd >= CENT {
-        return Some(format!("\u{1f4b8}~${:.2}", total.cost_saved_usd));
-    }
-    let tokens = total.tokens_saved;
-    if tokens == 0 {
-        return None;
-    }
-    Some(if tokens >= 1_000 {
-        format!("\u{1f4b8}~{}k tok", tokens / 1_000)
-    } else {
-        format!("\u{1f4b8}~{tokens} tok")
-    })
+    total.percent_saved().map(|pct| format!("\u{1f4b8}{pct}%"))
 }
 
 #[cfg(test)]
@@ -150,42 +134,28 @@ mod tests {
     use super::*;
     use trusty_mpm::core::savings::{SavingsRow, append_row, now_ts};
 
-    fn total(tokens: u64, usd: f64) -> SavingsTotal {
+    fn total(tokens_saved: u64, tokens_before: u64) -> SavingsTotal {
         SavingsTotal {
-            tokens_saved: tokens,
-            cost_saved_usd: usd,
+            tokens_saved,
+            tokens_before,
+            cost_saved_usd: 0.01,
             rows: 1,
         }
     }
 
-    /// Why: the dollar form is the primary reading, and two decimals with the
-    /// `~` estimate marker is the exact shape the docs page describes.
+    /// Why (#7179): the percent is the primary — now only — reading, and
+    /// rounding to the nearest whole number is the exact shape the docs page
+    /// describes.
     /// Test: itself.
     #[test]
-    fn savings_segment_renders_dollars_above_a_cent() {
+    fn savings_segment_renders_a_percent() {
         assert_eq!(
-            render_savings_segment(&total(140_000, 0.42)).as_deref(),
-            Some("\u{1f4b8}~$0.42")
+            render_savings_segment(&total(1, 3)).as_deref(),
+            Some("\u{1f4b8}33%")
         );
         assert_eq!(
-            render_savings_segment(&total(4_000_000, 12.005)).as_deref(),
-            Some("\u{1f4b8}~$12.01")
-        );
-    }
-
-    /// Why (#6958): a sub-cent fold rendered as dollars is `$0.00`, which reads
-    /// as "we saved nothing" — the opposite of what the row says. The token
-    /// form is approximate but true.
-    /// Test: itself.
-    #[test]
-    fn savings_segment_renders_tokens_below_a_cent() {
-        assert_eq!(
-            render_savings_segment(&total(5_400, 0.0009)).as_deref(),
-            Some("\u{1f4b8}~5k tok")
-        );
-        assert_eq!(
-            render_savings_segment(&total(320, 0.0004)).as_deref(),
-            Some("\u{1f4b8}~320 tok")
+            render_savings_segment(&total(5_000, 20_000)).as_deref(),
+            Some("\u{1f4b8}25%")
         );
     }
 
@@ -198,6 +168,7 @@ mod tests {
         assert_eq!(
             render_savings_segment(&SavingsTotal {
                 tokens_saved: 0,
+                tokens_before: 0,
                 cost_saved_usd: 0.0,
                 rows: 3,
             }),
@@ -205,24 +176,38 @@ mod tests {
         );
     }
 
-    /// Why (#6958): the one output this segment may never produce, asserted
-    /// directly rather than inferred from the two format tests. A naive
-    /// implementation that formatted every fold as `${:.2}` passes both of
-    /// those and fails this.
+    /// Why (#7179): a fold with `tokens_saved > 0` but no percent denominator
+    /// (every accepted row predates #7179) must omit the segment, not fabricate
+    /// a percent against nothing.
     /// Test: itself.
     #[test]
-    fn savings_segment_never_renders_zero_dollars() {
-        for (tokens, usd) in [
-            (500_u64, 0.0),
-            (500, 0.000_001),
-            (1, 0.004_9),
-            (0, 0.0),
-            (12_000, 0.009_9),
-        ] {
-            let rendered = render_savings_segment(&total(tokens, usd)).unwrap_or_default();
-            assert!(
-                !rendered.contains("$0.00"),
-                "the segment must never render $0.00 (tokens={tokens}, usd={usd}): {rendered:?}"
+    fn savings_segment_is_absent_without_a_percent_denominator() {
+        assert_eq!(
+            render_savings_segment(&SavingsTotal {
+                tokens_saved: 4_000,
+                tokens_before: 0,
+                cost_saved_usd: 0.01,
+                rows: 1,
+            }),
+            None
+        );
+    }
+
+    /// Why (#7179): the one output this segment may never produce, asserted
+    /// directly rather than inferred from the format test. A naive
+    /// implementation that let the ratio exceed 1.0 (a mixed old/new ledger,
+    /// see [`SavingsTotal::percent_saved`]) would print `💸0%` on the wrong
+    /// side or a percent above 100 without the clamp this pins.
+    /// Test: itself.
+    #[test]
+    fn savings_segment_never_renders_zero_percent() {
+        for (tokens_saved, tokens_before) in [(1_u64, 200), (12_000, 12_000_100), (5, 1_000)] {
+            let rendered =
+                render_savings_segment(&total(tokens_saved, tokens_before)).unwrap_or_default();
+            assert_ne!(
+                rendered, "\u{1f4b8}0%",
+                "the segment must never render 0% while tokens_saved > 0 \
+                 (tokens_saved={tokens_saved}, tokens_before={tokens_before})"
             );
         }
     }
@@ -251,6 +236,7 @@ mod tests {
                 session_id: "sess-1".to_string(),
                 technique: "instruction-compression".to_string(),
                 tokens_saved: 12_000,
+                tokens_before: 60_000,
                 cost_saved_usd: 0.18,
                 basis: "sources 60000 B - compiled 12000 B".to_string(),
                 model_source: "launch-config".to_string(),
@@ -259,7 +245,7 @@ mod tests {
         .expect("append");
         assert_eq!(
             savings_segment_at(&ledger, "sess-1").as_deref(),
-            Some("\u{1f4b8}~$0.18")
+            Some("\u{1f4b8}20%")
         );
         // A different session's bar reads nothing from the same file.
         assert_eq!(savings_segment_at(&ledger, "sess-2"), None);

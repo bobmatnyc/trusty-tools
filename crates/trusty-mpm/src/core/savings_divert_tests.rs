@@ -54,6 +54,9 @@ fn a_hand_computed_delta_matches_the_row() {
     let row = divert_row("sess-a", 400_000, 4_000, 0.02, sonnet_price).expect("a row");
     assert_eq!(row.session_id, "sess-a");
     assert_eq!(row.tokens_saved, 99_000);
+    // #7179: the percent denominator is the diverted files' own token count —
+    // 400,000 bytes at four bytes per token is 100,000 tokens.
+    assert_eq!(row.tokens_before, 100_000);
     assert!(
         (row.cost_saved_usd - 0.277).abs() < 1e-9,
         "cost was {}",

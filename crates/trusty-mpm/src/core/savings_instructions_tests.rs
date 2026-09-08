@@ -48,6 +48,9 @@ fn a_folded_source_set_produces_a_row() {
     let row = instruction_compression_row("sess-a", 60_000, 20_000, sonnet_price).expect("a row");
     assert_eq!(row.session_id, "sess-a");
     assert_eq!(row.tokens_saved, 10_000);
+    // #7179: the percent denominator is the folded source set's own token
+    // count — 60,000 bytes at four bytes per token is 15,000 tokens.
+    assert_eq!(row.tokens_before, 15_000);
     assert!((row.cost_saved_usd - 0.03).abs() < 1e-9);
     assert!(
         row.basis.contains("60000") && row.basis.contains("20000"),

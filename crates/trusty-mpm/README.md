@@ -153,15 +153,15 @@ tm tui
 tm telegram pair
 ```
 
-### Cost savings on the statusline
+### Token savings on the statusline
 
-The `tm statusline` bar ends with a 💸 segment estimating what the harness
-saved this session by not sending tokens. Two producers write to it: instruction
-sources folded into one compiled prompt, and bulk reads diverted to a cheap
-worker. A `divert` row is the diverted files' token count minus the returned
-summary's, priced at the parent session's input rate, less what the worker
-itself billed. It reads `💸~$0.36`, or `💸~5k tok` below a cent, and is absent
-entirely when nothing has been recorded. It never renders `$0.00`.
+The `tm statusline` bar ends with a 💸 segment showing the whole-number percent
+of tokens this session avoided sending. Two producers write to the ledger it
+folds: instruction sources folded into one compiled prompt, and bulk reads
+diverted to a cheap worker. A `divert` row's tokens are the diverted files'
+count minus the returned summary's; each row also carries its own pre-saving
+token count, which is what the percent is measured against. It reads `💸34%`,
+and is absent entirely when nothing has been recorded. It never renders `0%`.
 
 Rows live in `~/.trusty-mpm/usage/savings.jsonl` and are folded at read time.
 The figure is an estimate, and it is NOT subtractable from the cost segment
