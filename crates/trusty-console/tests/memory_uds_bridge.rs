@@ -502,11 +502,12 @@ fn silent_stub_daemon(dir: &Path, quiet: std::time::Duration) -> PathBuf {
 /// Why: the peek's expiry commits to `200` before the daemon has said anything,
 /// so a refusal that arrives AFTER it can no longer become an HTTP status. The
 /// `STREAM_FIRST_FRAME_PEEK` doc claims that refusal still reaches the operator,
-/// as the `{"type":"error"}` event `uds_sse` writes for a terminal frame — and
-/// nothing asserted it. Every other stream case here answers immediately, leads
-/// with an item, or answers nothing at all; this is the one that crosses the
-/// window with a refusal behind it. Without the commit-on-expiry arm the request
-/// fails outright and the browser sees no stream and no event.
+/// as the `{"type":"error"}` event `trusty_common::uds::sse` writes for a
+/// terminal frame — and nothing asserted it. Every other stream case here
+/// answers immediately, leads with an item, or answers nothing at all; this is
+/// the one that crosses the window with a refusal behind it. Without the
+/// commit-on-expiry arm the request fails outright and the browser sees no
+/// stream and no event.
 /// What: a daemon that accepts the subscription, stays silent past the peek
 /// window, then sends one terminal error frame and closes. The head must be a
 /// `200` event stream and the body must carry the daemon's refusal.

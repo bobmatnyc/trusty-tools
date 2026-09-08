@@ -154,8 +154,9 @@ pub(crate) const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(60);
 /// `200` with no leading item rather than failing. A refusal is produced by the
 /// handler before any event and arrives at once, so this window separates the
 /// two cases that actually occur. A refusal slower than this window is not lost:
-/// it arrives on the open stream as the `{"type":"error"}` event `uds_sse`
-/// writes for a terminal frame, which the feed renders rather than swallowing.
+/// it arrives on the open stream as the `{"type":"error"}` event
+/// `trusty_common::uds::sse` writes for a terminal frame, which the feed renders
+/// rather than swallowing.
 /// Test: `an_idle_stream_still_gets_its_response_head`.
 pub(crate) const STREAM_FIRST_FRAME_PEEK: Duration = Duration::from_secs(2);
 

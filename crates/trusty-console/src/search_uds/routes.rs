@@ -13,9 +13,9 @@
 //! ## The SSE bridge, frame for frame
 //!
 //! `trusty_search::service::rpc::streams` states the contract this side has to
-//! honour, and [`crate::uds_sse`] is where honouring it lives — the `data:`
-//! encoding, the 20-second keep-alive comment, and the terminal error event that
-//! keeps a broken reindex from reading as a finished one
+//! honour, and [`trusty_common::uds::sse`] is where honouring it lives — the
+//! `data:` encoding, the 20-second keep-alive comment, and the terminal error
+//! event that keeps a broken reindex from reading as a finished one
 //! (`crates/trusty-console/ui-search/src/lib/views/Indexes.svelte` treats a closed
 //! stream as a completed reindex). #6155 moved that plumbing there so the
 //! trusty-memory bridge shares it rather than carrying a second copy.
@@ -48,7 +48,7 @@ use super::{
     open_stream,
 };
 use crate::server::AppState;
-use crate::uds_sse::sse_response;
+use trusty_common::uds::sse::sse_response;
 
 /// `ANY /api/search/{*path}` — reach trusty-search over its socket.
 ///

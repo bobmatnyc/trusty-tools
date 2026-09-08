@@ -8,9 +8,10 @@
 //! What: one handler. It maps the request through [`super::map::map_request`],
 //! dials the socket, and answers the daemon's JSON body.
 //!
-//! What is NOT here: an SSE arm. `crate::uds_sse` exists for exactly that and
-//! both other bridges use it, but trusty-analyze registers no streaming method
-//! (`map`'s module docs record why), so there is nothing to hand it.
+//! What is NOT here: an SSE arm. `trusty_common::uds::sse` exists for exactly
+//! that and both other bridges use it, but trusty-analyze registers no
+//! streaming method (`map`'s module docs record why), so there is nothing to
+//! hand it.
 //!
 //! Test: `tests/analyze_uds_bridge.rs` drives the whole router against a stub
 //! daemon socket.
