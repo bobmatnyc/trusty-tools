@@ -118,7 +118,7 @@ fn existing_checkout_on_a_different_remote_fails_loud() {
     let base = tmp.path().join("base");
     clone_to(&origin, &base);
 
-    let err = ensure_managed_checkout_at(&base, "https://github.com/someone/else.git")
+    let err = ensure_managed_checkout_at(&base, "https://github.com/someone/else.git", None)
         .expect_err("a different remote must be refused");
 
     assert!(
@@ -146,7 +146,7 @@ fn existing_checkout_without_an_origin_fails_loud() {
     let tmp = tempfile::TempDir::new().expect("temp dir");
     let base = init_origin(&tmp.path().join("base")).to_path_buf();
 
-    let err = ensure_managed_checkout_at(&base, "https://github.com/acme/widget.git")
+    let err = ensure_managed_checkout_at(&base, "https://github.com/acme/widget.git", None)
         .expect_err("a checkout with no origin must be refused");
     assert!(
         matches!(err, ColdStartError::NoOrigin { .. }),
@@ -170,7 +170,7 @@ fn existing_checkout_with_an_unreadable_remote_fails_loud() {
     let base = init_origin(&tmp.path().join("base")).to_path_buf();
     std::fs::write(base.join(".git/config"), "[remote \"origin\"\n").expect("corrupt config");
 
-    let err = ensure_managed_checkout_at(&base, "https://github.com/acme/widget.git")
+    let err = ensure_managed_checkout_at(&base, "https://github.com/acme/widget.git", None)
         .expect_err("an unreadable remote must be refused");
     assert!(
         matches!(err, ColdStartError::OriginUnreadable { .. }),
@@ -218,8 +218,8 @@ fn dirty_existing_checkout_warns_and_proceeds() {
     std::fs::write(base.join("file.txt"), "MY UNCOMMITTED EDIT\n").expect("write");
 
     let url = origin.to_string_lossy().into_owned();
-    let checkout =
-        ensure_managed_checkout_at(&base, &url).expect("a dirty checkout must NOT be refused");
+    let checkout = ensure_managed_checkout_at(&base, &url, None)
+        .expect("a dirty checkout must NOT be refused");
 
     assert!(checkout.reused);
     let reason = checkout
@@ -276,7 +276,7 @@ fn clean_matching_checkout_is_reused_and_refreshed() {
     git(&origin, &["commit", "-q", "-m", "moved forward"]);
 
     let url = origin.to_string_lossy().into_owned();
-    let checkout = ensure_managed_checkout_at(&base, &url).expect("clean reuse succeeds");
+    let checkout = ensure_managed_checkout_at(&base, &url, None).expect("clean reuse succeeds");
 
     assert!(checkout.reused, "an existing checkout must report reused");
     assert_eq!(checkout.base_path, base);
@@ -303,7 +303,7 @@ fn absent_path_is_cloned_and_reports_not_reused() {
     let base = tmp.path().join("owner").join("repo");
 
     let url = origin.to_string_lossy().into_owned();
-    let checkout = ensure_managed_checkout_at(&base, &url).expect("fresh clone succeeds");
+    let checkout = ensure_managed_checkout_at(&base, &url, None).expect("fresh clone succeeds");
 
     assert!(!checkout.reused, "a fresh clone must not report reused");
     assert!(base.join(".git").exists(), "clone produced a git checkout");

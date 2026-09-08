@@ -1041,6 +1041,32 @@ fn cli_url_flag_equal_to_default_is_still_some() {
     );
 }
 
+/// `--account` is a `global = true` flag (#7166), so it parses before ANY
+/// subcommand — the shape `tm --account <login> <owner>/<repo>` needs.
+#[test]
+fn cli_parses_account_flag_global() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "--account", "bob-duetto", "status"]).unwrap();
+    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+}
+
+/// A global flag also parses AFTER the subcommand — `tm run --account
+/// <login> <owner>/<repo>` and `tm register --account <login> <owner>/<repo>`
+/// both need this, and neither `Command::Run` nor `Command::Register` declares
+/// its own `--account` field.
+#[test]
+fn cli_account_flag_after_subcommand() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "run",
+        "--account",
+        "bob-duetto",
+        "bobmatnyc/trusty-tools",
+    ])
+    .unwrap();
+    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+    assert!(matches!(cli.command, Some(Command::Run { .. })));
+}
+
 #[test]
 fn cli_bare_invocation_uses_guided_default() {
     // Since #1708, a bare `tm` invocation is valid: clap parses it with

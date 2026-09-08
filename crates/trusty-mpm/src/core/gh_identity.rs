@@ -113,7 +113,7 @@ const ENV_GH_HOST: &str = "GH_HOST";
 /// Test: `binding_removes_the_inherited_identity_vars`,
 /// `token_env_binding_removes_the_config_dir`,
 /// `absent_config_and_host_only_binding_remove_nothing`.
-const GH_INHERITED_IDENTITY_ENV: &[&str] = &[
+pub(crate) const GH_INHERITED_IDENTITY_ENV: &[&str] = &[
     ENV_GH_TOKEN,
     "GITHUB_TOKEN",
     "GH_ENTERPRISE_TOKEN",

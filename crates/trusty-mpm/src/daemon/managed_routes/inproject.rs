@@ -40,6 +40,39 @@ use tracing::{info, warn};
 
 pub mod untracked_sync;
 
+// #7166 review follow-up: split out to keep this file under the 500-SLOC cap.
+mod account_clone;
+use account_clone::account_clone_env;
+// #7166 owner ruling ("do B"): per-account gh config dir bootstrap, used by
+// `account_clone` — a sibling module (not nested under it) so both this file
+// and `account_clone` can reach it via `super`/direct path without an extra
+// re-export hop.
+mod account_config_dir;
+
+/// Resolve (building if necessary) the per-account `gh` config directory for
+/// `login`, for callers outside this module that need to persist it (#7166
+/// review follow-up CRITICAL).
+///
+/// Why: [`ensure_base_clone`] only builds this directory on a genuine first
+/// clone — an already-`.git`-containing `base_path` returns early without
+/// ever calling [`account_clone_env`]/the bootstrap. The CLI
+/// (`bin/tm/commands/run_target.rs`'s `run_managed`, `main.rs`'s `Register`
+/// handler) needs the SAME directory on every `--account` invocation,
+/// including a reused-checkout run, so it can persist
+/// `Project.github.config_dir` and keep every LATER session spawn (fetches,
+/// pushes, `gh` calls) on the discriminating `GH_CONFIG_DIR` path instead of
+/// the demoted `gh auth token -u` fallback.
+/// What: delegates to
+/// [`account_config_dir::ensure_account_config_dir_default`] — idempotent:
+/// builds once from the operator's own logged-in `hosts.yml`, reused
+/// untouched on every later call.
+/// Test: covered indirectly via `account_config_dir::tests`, which exercise
+/// the bootstrap this thin wrapper delegates to; this function adds no logic
+/// of its own to test hermetically.
+pub fn account_config_dir_for(login: &str) -> Result<PathBuf, String> {
+    account_config_dir::ensure_account_config_dir_default(login)
+}
+
 /// Environment variable that overrides the managed repos root.
 ///
 /// Why: operators need an escape hatch (tests, non-standard layouts) that wins
@@ -275,9 +308,47 @@ fn migrate_old_layout_aside(base_path: &Path) -> Result<Option<PathBuf>, String>
 /// `git clone --no-local <origin_url> <base_path>` and calls
 /// `ensure_worktrees_gitignored`. A clone failure returns `Err` with the
 /// command's stderr.
-/// Test: idempotent path covered by unit tests; migration path by
-/// `ensure_base_clone_migrates_old_layout_dir_aside`; clone path by integration tests.
-pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), String> {
+///
+/// `account` (#7166) selects which logged-in `gh` identity the clone
+/// authenticates as: `None` is unchanged ambient behaviour (whatever `git`'s
+/// own credential resolution — `GH_TOKEN`, SSH agent, credential helper —
+/// finds); `Some(login)` resolves that account's credentials via
+/// [`account_clone::account_clone_env`] BEFORE cloning, which (1) mints a
+/// token through [`crate::core::gh_account::resolve_gh_account_env_with`]
+/// (config_dir-first, `gh auth token -u <login>` as the fallback — the SAME
+/// precedence the session's own spawn-time `GH_TOKEN` uses), (2) VERIFIES
+/// that token actually belongs to `login` via a bounded `gh api user --jq
+/// .login` call before it is ever applied — `gh auth token -u` does not
+/// discriminate between logged-in accounts on a keyring-backed host, so
+/// without this step the clone could silently authenticate as a DIFFERENT
+/// account than the one requested (#7166 critic BLOCK; a mismatch, a
+/// not-logged-in account, or a verification timeout all fail loud here,
+/// naming the account, rather than reaching `git clone` and failing with
+/// GitHub's generic "Repository not found" or succeeding under the wrong
+/// identity), and (3) runs the clone with the resolved env set and every
+/// [`crate::core::gh_identity::GH_INHERITED_IDENTITY_ENV`] var PLUS
+/// `GH_HOST` removed from the child first, so an exported credential
+/// belonging to a different account/host can never win over the explicit
+/// selection. The token is never written to argv or into `origin_url`: it
+/// reaches `git`'s already-configured `!gh auth git-credential` helper
+/// exclusively through the child's environment.
+///
+/// 🟡 Known limit: `config_dir` is always `None` at this call site (this
+/// cold-start clone has no already-registered project to read a pinned
+/// `github.config_dir` from), so on a keyring-backed host the requested
+/// account must ALSO be `gh`'s machine-global active account — otherwise the
+/// verification step above refuses, correctly, rather than cloning under the
+/// wrong identity. Pinning a `github.config_dir` (via `tm projects register
+/// --gh-account <login> --gh-config-dir <dir>`) is the operator-facing
+/// workaround today; wiring a config_dir-aware caller into this cold-start
+/// path is the follow-up.
+/// Test: see [`account_clone`]'s and `ensure_base_clone_with_no_account_is_the_pre_7166_shape`'s
+/// (`inproject/tests.rs`) own doc comments for the exact test names.
+pub fn ensure_base_clone(
+    origin_url: &str,
+    base_path: &Path,
+    account: Option<&str>,
+) -> Result<(), String> {
     if base_path.join(".git").exists() {
         info!(
             path = %base_path.display(),
@@ -324,10 +395,18 @@ pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), Strin
     // inherited cwd cannot cause git to fail at startup with "fatal: Unable to
     // read current working directory" (exit 128) → HTTP 500 on managed-spawn.
     let cwd = base_path.parent().unwrap_or(std::path::Path::new("/"));
-    let out = trusty_common::git::command()
-        .args(["clone", "--no-local", origin_url])
+    // #7182: built via the shared entry point (maintenance/gc disabled on
+    // this one invocation) rather than a bare `Command::new("git")`.
+    let mut cmd = trusty_common::git::command();
+    cmd.args(["clone", "--no-local", origin_url])
         .arg(base_path)
-        .current_dir(cwd)
+        .current_dir(cwd);
+    if let Some(account) = account {
+        let env = account_clone_env(account)
+            .map_err(|e| format!("inproject: cannot clone as {account}: {e}"))?;
+        env.apply(&mut cmd);
+    }
+    let out = cmd
         .output()
         .map_err(|e| format!("inproject: git clone failed to spawn: {e}"))?;
 
@@ -931,7 +1010,11 @@ pub fn try_inproject_spawn(path: &Path) -> Result<Option<(PathBuf, String, Strin
     };
 
     let base = base_clone_path(&gh.owner, &gh.repo);
-    ensure_base_clone(&origin_url, &base)?;
+    // #7166: an already-on-disk operator checkout has no account SELECTOR to
+    // apply — this path only ever REUSES an existing base clone (or clones
+    // from an `origin` the operator's own ambient identity already reads),
+    // never a cold start from a bare `owner/repo`.
+    ensure_base_clone(&origin_url, &base, None)?;
 
     info!(
         owner = %gh.owner,

@@ -151,7 +151,9 @@ async fn provision(
         return Ok(ManagedWorkspace::MainCheckout(main_checkout.to_path_buf()));
     }
 
-    inproject::ensure_base_clone(origin_url, base_path)?;
+    // #7166: no `--account` selector on this CLI-side provisioning path today
+    // — it operates on a repo the operator already named a checkout for.
+    inproject::ensure_base_clone(origin_url, base_path, None)?;
     // NOTE (#2032): the CLI flows have no `SessionManager` to resolve a
     // semantic tmux name from, so they keep the pre-#2032 UUID-named
     // worktree; only the daemon's `spawn_managed_inproject` uses the

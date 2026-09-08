@@ -387,6 +387,10 @@ async fn main() -> anyhow::Result<()> {
     // `explicit` up front and errors — translated to exit 75 below — instead
     // of silently auto-starting/reconnecting to a different daemon.
     let url = trusty_mpm::core::resolve_daemon_url_via_gateway(&client, cli.url.as_deref()).await;
+    // #7166: captured before `cli.command` is moved into the match below —
+    // `--account` is a `global = true` flag (see `cli::Cli::account`'s doc),
+    // so it binds regardless of where in the invocation it appeared.
+    let account = cli.account.clone();
     // Why: handlers return `anyhow::Result`; we capture the dispatch result here
     // so the top-level boundary can translate the typed `PruneError::SmUnavailable`
     // (issue #1313) into the documented exit code 75. Doing the `process::exit`
@@ -555,13 +559,46 @@ async fn main() -> anyhow::Result<()> {
         // #4912: positionals are `<url> [alias]`, with the legacy `<alias> <url>`
         // order still accepted — the handler detects which one is the URL.
         Some(Command::Register {
-            url,
+            url: repo_spec,
             alias,
             force,
             root,
         }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
-            commands::standalone::register_cmd(&paths, &url, alias.as_deref(), force)
+            commands::standalone::register_cmd(&paths, &repo_spec, alias.as_deref(), force)?;
+            // #7166: `tm register` accepts the same `--account`/embedded
+            // `<login>@owner/repo` selector `tm run` does. The DOC-24
+            // standalone registry this command writes to (`registry.json`)
+            // has no account concept, so the selection — when present — is
+            // ALSO persisted onto the daemon's registry-B project record
+            // (the same idempotent upsert `run_managed`/`tm projects
+            // register --gh-account` use), which is what
+            // `resolve_gh_account_env_for_registry` actually reads at
+            // spawn/relaunch time. Best-effort: the standalone registration
+            // above already succeeded, so a daemon-registry hiccup here is
+            // reported but never fails an otherwise-successful `tm register`.
+            let resolved_account = commands::register_args::resolve_account(
+                account.as_deref(),
+                commands::register_args::embedded_account(&repo_spec),
+            )?;
+            if let Some(resolved_account) = resolved_account {
+                let repo_url = commands::register_args::resolved_url(&repo_spec)?;
+                let name = trusty_mpm::project::derive_name_from_url(&repo_url)
+                    .or_else(|| alias.clone())
+                    .unwrap_or_else(|| repo_url.clone());
+                // #7166 review follow-up CRITICAL/HIGH: shared with
+                // `run_managed`'s post-clone step — see that call site's doc.
+                commands::projects::registry::auto_persist_account_selection(
+                    &client,
+                    &url,
+                    name,
+                    repo_url,
+                    &resolved_account,
+                    "registered",
+                )
+                .await;
+            }
+            Ok(())
         }
         Some(Command::Ls {
             terms,
@@ -605,13 +642,13 @@ async fn main() -> anyhow::Result<()> {
         // a registry alias keeps the unchanged DOC-24 standalone behaviour. The
         // routing decision lives in `run_target` so it is unit-testable.
         Some(Command::Run { target, task, root }) => {
-            commands::run_target::run(&client, &url, &target, task, root).await
+            commands::run_target::run(&client, &url, &target, task, root, account).await
         }
         // #6441: a leading token that matched no subcommand. A repo shape runs
         // the same cold start as `tm run`; anything else is a typo and gets
         // clap's usage error back.
         Some(Command::External(ref tokens)) => {
-            commands::run_target::run_external(&client, &url, tokens, &argv, &HELP).await
+            commands::run_target::run_external(&client, &url, tokens, &argv, &HELP, account).await
         }
         Some(Command::Path { alias, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;

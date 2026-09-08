@@ -107,6 +107,38 @@ pub(crate) struct Cli {
     #[arg(long, env = "TRUSTY_MPM_URL", global = true)]
     pub(crate) url: Option<String>,
 
+    /// Select which logged-in `gh` account clones/runs a managed repo (#7166).
+    ///
+    /// Why: `tm <url>` fails on a private repo when every credential path on
+    /// the machine resolves to one identity (an exported `GH_TOKEN`, git's
+    /// global `!gh auth git-credential` helper, a fixed SSH key) — the
+    /// account with visibility into the repo is simply never tried. This flag
+    /// names it explicitly. It is a clap `global = true` flag, so it parses
+    /// anywhere in the invocation: `tm --account bob-duetto <url>`, `tm run
+    /// --account bob-duetto <owner>/<repo>`, and `tm register --account
+    /// bob-duetto <owner>/<repo>` all bind the same field. The
+    /// `<account>@<owner>/<repo>` shorthand
+    /// (`commands::register_args::classify`) is the terser
+    /// equivalent for the bare/`run` managed-repo forms; passing both is only
+    /// an error when they NAME DIFFERENT accounts
+    /// ([`crate::commands::register_args::resolve_account`]).
+    /// What: `Some(login)` selects that account's `gh`-minted token for the
+    /// daemon's `inproject` base clone
+    /// ([`trusty_mpm::daemon::managed_routes::inproject::ensure_base_clone`])
+    /// and is persisted onto the project's registry-B record
+    /// (`gh_account`) so later spawns, fetches, and `gh` calls reuse it.
+    /// `None` (the default) is unchanged ambient behaviour.
+    ///
+    /// Prerequisite: `login` must already be logged into `gh` on this host —
+    /// run `gh auth login` (or `gh auth login --hostname github.com` for a
+    /// second account) ONCE per account before its first `--account` use. `tm`
+    /// then builds and reuses its own isolated `gh` config dir for that login
+    /// automatically (#7166); it never runs `gh auth switch`, so a
+    /// concurrently-running session under a different account is unaffected.
+    /// Test: `cli_parses_account_flag_global`, `cli_account_flag_after_subcommand`.
+    #[arg(long, global = true)]
+    pub(crate) account: Option<String>,
+
     /// Subcommand to run. When absent, the guided default fires (#1708).
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
@@ -1385,7 +1417,7 @@ pub(crate) enum Command {
     /// except this variant. Adding a plain top-level positional instead would
     /// make every subcommand name ambiguous with it.
     /// What: clap collects the unrecognized token and everything after it.
-    /// [`crate::commands::run_target::classify_bare`] then decides which of two
+    /// `commands::run_target::classify_bare_with_account` then decides which of two
     /// outcomes it gets, and the gate is deliberately narrow: only a token
     /// [`crate::commands::register_args::looks_like_repo`] accepts becomes a
     /// managed run. Everything else — a typo like `tm statuss` — falls back to

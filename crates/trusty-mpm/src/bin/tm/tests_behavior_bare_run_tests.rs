@@ -49,6 +49,7 @@ fn cli_parses_bare_github_url() {
             owner: "bobmatnyc".into(),
             repo: "mcp-a-protocol".into(),
             clone_url: "https://github.com/bobmatnyc/mcp-a-protocol".into(),
+            account: None,
         }
     );
 }
@@ -71,6 +72,7 @@ fn cli_parses_bare_owner_repo() {
             owner: "bobmatnyc".into(),
             repo: "mcp-a-protocol".into(),
             clone_url: "https://github.com/bobmatnyc/mcp-a-protocol".into(),
+            account: None,
         }
     );
 }

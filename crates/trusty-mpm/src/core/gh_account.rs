@@ -126,7 +126,7 @@ impl GhAccountStatus {
 /// `XDG_CONFIG_HOME/gh`, else `~/.config/gh`.
 /// Test: exercised via `gh_hosts_yml_path` behaviour; env-dependent so not
 /// asserted directly.
-fn gh_config_dir() -> Option<PathBuf> {
+pub(crate) fn gh_config_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("GH_CONFIG_DIR") {
         let dir = dir.trim();
         if !dir.is_empty() {
@@ -405,7 +405,7 @@ pub fn probe_gh_auth(timeout: Duration) -> GhAuthProbe {
 /// Why: like [`GH_DOCTOR_TIMEOUT`], these calls are explicit, occasional
 /// pre-flights — generous enough for a keyring-backed or network-validated `gh`
 /// to respond without hanging the caller indefinitely.
-const GH_ENFORCE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const GH_ENFORCE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[path = "gh_account_enforce.rs"]
 mod enforce;
@@ -413,6 +413,10 @@ pub use enforce::{
     AccountTarget, GH_CONFIG_DIR_ENV, configured_account_pair, ensure_gh_account_for_project,
     ensure_gh_account_in_dir,
 };
+// #7166: `pub(crate)`, not `pub` — `api_login_scoped` is an internal
+// implementation detail (`inproject::account_clone` reuses it), not part of
+// this crate's public API.
+pub(crate) use enforce::api_login_scoped;
 
 // ── Spawn-time gh identity selection for a project (#3025, #5851) ──────────
 //

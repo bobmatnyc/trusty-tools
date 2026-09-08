@@ -65,8 +65,14 @@ const NON_REPO_SEGMENTS: &[&str] = &[
 enum Positional<'a> {
     /// A full clone URL, or an absolute/home-relative local repo path.
     Url(&'a str),
-    /// GitHub `owner/repo` shorthand — the primary form (#4912).
-    Shorthand { owner: &'a str, repo: &'a str },
+    /// GitHub `owner/repo` shorthand — the primary form (#4912). `account` is
+    /// `Some(login)` for the `<login>@<owner>/<repo>` selector shorthand
+    /// (#7166), `None` for plain `owner/repo`.
+    Shorthand {
+        account: Option<&'a str>,
+        owner: &'a str,
+        repo: &'a str,
+    },
     /// Anything starting with `.` (`./x`, `../x`, `.hidden/x`) — a path, and
     /// explicitly NOT shorthand.
     RelativePath,
@@ -105,6 +111,23 @@ fn classify(s: &str) -> Positional<'_> {
         return Positional::Url(s);
     }
 
+    // #7166: `<login>@<owner>/<repo>` — the account-selector shorthand. Tried
+    // BEFORE the plain host-shape test below so a login containing no dot
+    // cannot be mistaken for one; tried only for a `rest` that itself
+    // classifies as plain shorthand, so `git@github.com:o/r.git` (already
+    // returned above) and any other `name@<url>` shape are never touched —
+    // the selector exists only for the two-segment `owner/repo` form.
+    if let Some((login, rest)) = s.split_once('@')
+        && is_name_segment(login)
+        && let Positional::Shorthand { owner, repo, .. } = classify(rest)
+    {
+        return Positional::Shorthand {
+            account: Some(login),
+            owner,
+            repo,
+        };
+    }
+
     let Some((first, rest)) = s.split_once(['/', ':']) else {
         return Positional::Other;
     };
@@ -121,9 +144,11 @@ fn classify(s: &str) -> Positional<'_> {
         return Positional::Other;
     }
     match s.split('/').collect::<Vec<_>>().as_slice() {
-        [owner, repo] if is_name_segment(owner) && is_name_segment(repo) => {
-            Positional::Shorthand { owner, repo }
-        }
+        [owner, repo] if is_name_segment(owner) && is_name_segment(repo) => Positional::Shorthand {
+            account: None,
+            owner,
+            repo,
+        },
         _ => Positional::Other,
     }
 }
@@ -220,6 +245,69 @@ pub(crate) fn is_relative_path(s: &str) -> bool {
     matches!(classify(s.trim()), Positional::RelativePath)
 }
 
+/// The `<login>` embedded in a `<login>@<owner>/<repo>` positional, if any (#7166).
+///
+/// Why: [`resolve_account`] needs the embedded selector on its own, separate
+/// from the `--account`/`--gh-account` flag, so it can detect a conflict
+/// between the two rather than silently letting one win.
+/// What: `Some(login)` only for [`Positional::Shorthand`] with an `account`;
+/// `None` for a plain `owner/repo`, a full URL, or anything else.
+/// Test: `account_shorthand_classifies_and_looks_like_repo`,
+/// `embedded_account_none_for_plain_shorthand_and_urls`.
+pub(crate) fn embedded_account(s: &str) -> Option<&str> {
+    match classify(s.trim()) {
+        Positional::Shorthand { account, .. } => account,
+        _ => None,
+    }
+}
+
+/// Reconcile the `--account` flag with a `<login>@<owner>/<repo>` positional (#7166).
+///
+/// Why: both spellings bind the same field, and a caller who passes BOTH is
+/// far more likely to have a stale flag left over from a previous invocation
+/// than to genuinely mean two different accounts — refusing to guess which
+/// one wins is the same posture [`resolve_register_args`] takes for two
+/// repo-shaped positionals.
+/// What: `flag` wins when `embedded` is absent; the two must be
+/// case-sensitively equal when both are present (GitHub logins are
+/// case-insensitive in practice, but every other identity comparison in this
+/// module — e.g. [`is_name_segment`] — is byte-exact, and a caller relying on
+/// case-folding here would silently diverge from `gh`'s own canonicalisation
+/// in `trusty_mpm::core::gh_account::GhAccountStatus::canonical_logged_in_login`).
+/// A non-empty `flag` is validated with the SAME [`is_name_segment`] predicate
+/// the `<login>@owner/repo` shorthand's `login` segment already goes through
+/// (#7166 review follow-up — parity: a malformed `--account` value used to
+/// reach `gh auth token -u <value>` unvalidated, where a shell metacharacter
+/// or a space would have failed with a confusing `gh` error instead of this
+/// module's own, actionable one).
+/// Test: `resolve_account_flag_only`, `resolve_account_embedded_only`,
+/// `resolve_account_agreeing_flag_and_embedded`,
+/// `resolve_account_conflicting_flag_and_embedded_errors`,
+/// `resolve_account_rejects_a_malformed_flag_value`.
+pub(crate) fn resolve_account(
+    flag: Option<&str>,
+    embedded: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let flag = flag.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(flag) = flag
+        && !is_name_segment(flag)
+    {
+        return Err(anyhow::anyhow!(
+            "'--account {flag}' is not a plausible gh login (letters, digits, `.`, `_`, `-` \
+             only)."
+        ));
+    }
+    match (flag, embedded) {
+        (Some(flag), Some(embedded)) if flag != embedded => Err(anyhow::anyhow!(
+            "conflicting account selection: --account '{flag}' vs. the embedded \
+             '{embedded}@…' selector. Pass just one."
+        )),
+        (Some(flag), _) => Ok(Some(flag.to_string())),
+        (None, Some(embedded)) => Ok(Some(embedded.to_string())),
+        (None, None) => Ok(None),
+    }
+}
+
 /// Build the error for a positional that does not name a repository.
 ///
 /// Why: the message is the remedy. A relative path and a bare word fail for
@@ -266,7 +354,7 @@ pub(crate) fn resolved_url(s: &str) -> anyhow::Result<String> {
     let url: String = match classify(s) {
         // #4912: GitHub is assumed for shorthand; the stored value must be
         // clone-able, so the host goes on here rather than at clone time.
-        Positional::Shorthand { owner, repo } => {
+        Positional::Shorthand { owner, repo, .. } => {
             return Ok(format!("https://{GITHUB_HOST}/{owner}/{repo}"));
         }
         // #4912: `clone_repo` (`core::standalone::load`) runs `git` with no

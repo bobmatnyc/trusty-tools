@@ -185,9 +185,10 @@ pub fn ensure_managed_checkout(
     owner: &str,
     repo: &str,
     clone_url: &str,
+    account: Option<&str>,
 ) -> Result<ManagedCheckout, ColdStartError> {
     let base_path = inproject::base_clone_path(owner, repo);
-    ensure_managed_checkout_at(&base_path, clone_url)
+    ensure_managed_checkout_at(&base_path, clone_url, account)
 }
 
 /// Ensure a managed base clone exists at an explicit `base_path`.
@@ -215,6 +216,7 @@ pub fn ensure_managed_checkout(
 pub fn ensure_managed_checkout_at(
     base_path: &Path,
     clone_url: &str,
+    account: Option<&str>,
 ) -> Result<ManagedCheckout, ColdStartError> {
     let reused = base_path.join(".git").exists();
     let mut refresh_skipped = None;
@@ -248,7 +250,8 @@ pub fn ensure_managed_checkout_at(
         inproject_hygiene::run_hygiene_for_base(base_path).map_err(ColdStartError::Provision)?;
     }
 
-    inproject::ensure_base_clone(clone_url, base_path).map_err(ColdStartError::Provision)?;
+    inproject::ensure_base_clone(clone_url, base_path, account)
+        .map_err(ColdStartError::Provision)?;
 
     Ok(ManagedCheckout {
         base_path: base_path.to_path_buf(),
