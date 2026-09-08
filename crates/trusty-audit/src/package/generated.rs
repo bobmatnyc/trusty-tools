@@ -382,7 +382,11 @@ pub(super) fn render_metadata(
                 crate::run::RepoResult::Failed { reason } => Some(reason.clone()),
                 crate::run::RepoResult::Succeeded => None,
             },
-            gaps: run.gaps.clone(),
+            // #7137: the recipient's copy of the gap list, with the operator's
+            // home directory collapsed to `~` — the same redaction
+            // `crate::index_report` applies to the copy in `reports/index.md`,
+            // so the two members still cannot disagree.
+            gaps: crate::redact::home_paths_in(&run.gaps),
         })
         .collect();
     let metadata = PackageMetadata {
