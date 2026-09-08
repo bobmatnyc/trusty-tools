@@ -9,7 +9,14 @@ name = "trusty-code"
 # 0.5.1 (#6657): patch — `fs_browse::mpm_registry::parse_owner_repo` (a
 # private fn) now delegates to `trusty_common::github_path::parse_remote_url`
 # instead of its own split logic; no public item changed shape.
-version = "0.5.2"
+# 0.6.0: minor bump. Triggered by a reinstall carrying #6537/#7158 for live
+# verification (owner ruling 2026-09-08 — every reinstall carries a version
+# bump so `--version` identifies the build), but `check_semver.sh` found a
+# real break versus the 0.5.1 baseline live on crates.io: `Session` (a
+# publicly-constructible struct) gained a new pub field `result`
+# (src/session/model.rs:180), which is `constructible_struct_adds_field` —
+# breaking under Cargo's 0.x rule, so this lands in MINOR rather than PATCH.
+version = "0.6.0"
 edition = "2024"
 rust-version.workspace = true
 # license.workspace resolves to "MIT"; LICENSE is kept in-crate for correctness.

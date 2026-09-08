@@ -27,7 +27,10 @@ name = "trusty-agents-common"
 # src/assets/agents/version-control.md (prose only — no item signature changed),
 # which scripts/check-pr-version-bump.sh requires be bumped in the same PR
 # (#4421).
-version = "0.7.1"
+# 0.7.2: patch bump for the trusty-code/trusty-agents reinstall carrying
+# #6537/#7158 for live verification (owner ruling 2026-09-08); src has moved
+# since 0.7.1 but no public item signature changed.
+version = "0.7.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

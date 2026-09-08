@@ -1,6 +1,9 @@
 [package]
 name = "trusty-agents-local"
-version = "0.1.3"
+# 0.1.4: patch bump for the trusty-code/trusty-agents reinstall carrying
+# #6537/#7158 for live verification (owner ruling 2026-09-08); src (main.rs)
+# has moved since 0.1.3. publish = false — internal only, no semver gate.
+version = "0.1.4"
 edition = "2024"
 publish = false
 description = "Private launcher: thin pass-through to trusty-agents::run()"
