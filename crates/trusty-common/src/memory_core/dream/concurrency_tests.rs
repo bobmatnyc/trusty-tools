@@ -15,6 +15,7 @@ use super::concurrency::{
 use super::config::DreamConfig;
 use super::cycle::{DREAM_EMBED_CHUNK, dedup_pass_with_embedder};
 use super::dreamer::Dreamer;
+use super::semantic::consolidate_scoped_within;
 use crate::embedder::MockEmbedder;
 use crate::memory_core::embed::{EMBED_DIM, Embedder};
 use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
@@ -23,6 +24,7 @@ use crate::memory_core::semantic_consolidation::SemanticConsolidationConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
+use serial_test::serial;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -235,8 +237,12 @@ async fn ten_palaces_never_exceed_the_concurrency_cap() {
 /// What: holds every permit, starts one `dream_cycle`, asserts it has not
 /// finished after 300 ms, then releases the permits and asserts it completes.
 /// Pre-fix the cycle ignores the permits and finishes immediately.
+/// `#[serial(dream_permits)]` for the same reason as
+/// `an_interactive_dream_errors_when_the_dreamer_is_busy`: two tests each
+/// wanting EVERY permit would take one each and neither could finish.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(dream_permits)]
 async fn a_dream_cycle_waits_when_every_permit_is_held() {
     let handle = open_handle("permit-wait").await;
     let cap = dream_max_concurrent();
@@ -268,6 +274,97 @@ async fn a_dream_cycle_waits_when_every_permit_is_held() {
         .expect("cycle finished once a permit freed up")
         .expect("cycle task");
     assert_eq!(done.load(Ordering::SeqCst), 1);
+}
+
+/// Why: the interactive `palace_dream` / `dream_consolidate_room` path now
+/// shares the bound with the idle loops. Before #7106 it had no shared gate at
+/// all, so an unbounded wait here would turn a working user-invoked call into a
+/// silent hang behind cycles the caller cannot see.
+/// What: holds every permit, then calls the interactive path with a 500 ms
+/// wait. Asserts it returns the busy error inside a 10 s outer bound — on the
+/// pre-fix code that outer bound expires instead, because the call waits
+/// forever. `#[serial(dream_permits)]` because a second test that also wants
+/// EVERY permit would otherwise take one each and neither could finish.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(dream_permits)]
+async fn an_interactive_dream_errors_when_the_dreamer_is_busy() {
+    let handle = open_handle("interactive-busy").await;
+    let cap = dream_max_concurrent();
+
+    let mut held = Vec::new();
+    for _ in 0..cap {
+        held.push(acquire_dream_permit().await);
+    }
+
+    let started = Instant::now();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        consolidate_scoped_within(
+            &handle,
+            &quiet_config(),
+            None,
+            7,
+            None,
+            Duration::from_millis(500),
+        ),
+    )
+    .await
+    .expect("an interactive dream must not wait indefinitely for a permit");
+    let elapsed = started.elapsed();
+
+    let err = outcome.expect_err("a busy dreamer must be an error, not a silent no-op");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("dreamer busy"),
+        "the error must name the condition the caller can act on; got: {text}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the wait must be bounded by the caller's ceiling; took {elapsed:?}"
+    );
+
+    drop(held);
+}
+
+/// Why: a wedged embedder holding a dream permit indefinitely is exactly the
+/// blocking the permit exists to bound, and every other `embed_batch` caller in
+/// this crate already wraps the call in the shared ceiling
+/// (`retrieval::deferred_embed`, `retrieval::write_pipeline`, `share::import`).
+/// What: gives the recording embedder a 3 s delay against a 200 ms ceiling and
+/// asserts the pass fails naming the timeout, well inside the delay. The
+/// ceiling is a parameter rather than `TRUSTY_EMBED_BATCH_TIMEOUT_SECS` so this
+/// test mutates no process environment. Pre-fix the pass waits the delay out
+/// and succeeds.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wedged_embedder_ends_the_dedup_pass_with_an_error() {
+    let handle = open_handle("wedged-embedder").await;
+    seed_drawers(&handle, 4);
+
+    let embedder = RecordingEmbedder::new(Duration::from_secs(3));
+    let started = Instant::now();
+    let err = dedup_pass_with_embedder(
+        &handle,
+        Instant::now(),
+        Duration::from_secs(60),
+        0.95,
+        &embedder,
+        Duration::from_millis(200),
+    )
+    .await
+    .expect_err("a chunk that outlives the embed ceiling must fail the pass");
+
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("timed out"),
+        "the error must name the timeout; got: {text}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the pass must give up at the ceiling, not wait the embedder out: {:?}",
+        started.elapsed()
+    );
 }
 
 /// Why: the parse decides which spellings disable the bound, and an accidental
@@ -417,6 +514,7 @@ async fn dedup_embeds_in_bounded_chunks() {
         Duration::from_secs(60),
         0.95,
         &embedder,
+        Duration::from_secs(60),
     )
     .await
     .expect("dedup pass");
@@ -456,6 +554,7 @@ async fn the_cycle_budget_stops_dedup_between_chunks() {
         Duration::from_millis(50),
         0.95,
         &embedder,
+        Duration::from_secs(60),
     )
     .await
     .expect("dedup pass");
@@ -496,6 +595,7 @@ async fn chunking_preserves_dedup_behaviour() {
         Duration::from_secs(60),
         0.95,
         &embedder,
+        Duration::from_secs(60),
     )
     .await
     .expect("dedup pass");

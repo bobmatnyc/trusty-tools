@@ -10,7 +10,9 @@
 //! that peak, because the peak is `per-cycle working set x concurrency`.
 //! What: a process-wide `tokio::sync::Semaphore` sized from
 //! [`DREAM_MAX_CONCURRENT_ENV`] (default [`DEFAULT_DREAM_MAX_CONCURRENT`]) that
-//! every dream cycle acquires before it runs and releases on drop; an
+//! every dream cycle acquires before it runs and releases on drop — the idle
+//! loops wait indefinitely, an interactive caller waits a bounded time and gets
+//! [`DreamBusy`] instead of a silent hang; an
 //! independent in-flight gauge so an operator (and the regression test) can see
 //! how many cycles are actually running; and [`stagger_offset`], the
 //! deterministic phase spread that keeps a cold start from firing every palace
@@ -162,6 +164,52 @@ pub async fn acquire_dream_permit() -> DreamPermit {
     DreamPermit { _permit: permit }
 }
 
+/// Every dream slot was busy for the whole of an interactive caller's wait.
+///
+/// Why (#7106): the on-demand `palace_dream` / `dream_consolidate_room` tools
+/// share the bound with the idle loops, and a semantic-consolidation call alone
+/// is bounded at 120 s per palace, so a caller can sit behind minutes of work
+/// it cannot see. An error naming the cap and the live count is something the
+/// caller can retry on or report; an unbounded await is not.
+/// What: carries the cap, the cycles in flight when the wait expired, and how
+/// long the caller waited.
+/// Test: `an_interactive_dream_errors_when_the_dreamer_is_busy`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "dreamer busy: {in_flight} dream cycle(s) in flight against a cap of {cap}; \
+     no slot freed within {waited_secs}s — retry, or raise TRUSTY_DREAM_MAX_CONCURRENT"
+)]
+pub struct DreamBusy {
+    /// Concurrent cycles this process allows.
+    pub cap: usize,
+    /// Cycles running when the wait expired.
+    pub in_flight: usize,
+    /// How long the caller waited, in seconds.
+    pub waited_secs: f64,
+}
+
+/// Wait at most `wait` for a slot in the process-wide dream bound.
+///
+/// Why (#7106): [`acquire_dream_permit`] is right for the idle loop, which
+/// nothing is waiting on and which may queue indefinitely. It is wrong for a
+/// user-invoked dream: before this bound existed that path had no shared gate
+/// at all, so an unbounded wait here would turn a working interactive call into
+/// a silent hang behind two slow idle cycles.
+/// What: races the acquire against `wait`; returns [`DreamBusy`] naming the cap
+/// and the live count when the wait expires. The permit, when granted, releases
+/// on drop exactly as [`acquire_dream_permit`]'s does.
+/// Test: `an_interactive_dream_errors_when_the_dreamer_is_busy`.
+pub async fn acquire_dream_permit_within(wait: Duration) -> Result<DreamPermit, DreamBusy> {
+    match tokio::time::timeout(wait, acquire_dream_permit()).await {
+        Ok(permit) => Ok(permit),
+        Err(_) => Err(DreamBusy {
+            cap: dream_max_concurrent(),
+            in_flight: dream_cycles_in_flight(),
+            waited_secs: wait.as_secs_f64(),
+        }),
+    }
+}
+
 /// The process-wide dream semaphore.
 ///
 /// Why: exposed so a caller that needs to hold several slots, or to observe the
@@ -211,7 +259,9 @@ impl Drop for DreamCycleGauge {
 /// `interval + interval * k / n` before its first cycle and `interval` between
 /// every cycle after that. Deterministic (no RNG, so a restart reproduces the
 /// same schedule) and `Duration::ZERO` for a single palace or an out-of-range
-/// index.
+/// index. Which palace gets which slot is the caller's `index`, and the
+/// scheduler's comes from `PalaceRegistry::list()` — LRU-recency order, not a
+/// stable one. That only decides who goes first; the spread is the point.
 /// Test: `stagger_offsets_spread_first_ticks_across_the_interval`.
 pub fn stagger_offset(index: usize, total: usize, interval: Duration) -> Duration {
     if total <= 1 || index >= total {

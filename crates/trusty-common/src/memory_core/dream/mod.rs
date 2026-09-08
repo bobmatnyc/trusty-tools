@@ -30,9 +30,9 @@ mod tests;
 // ── Public re-exports ────────────────────────────────────────────────────────
 
 pub use concurrency::{
-    DEFAULT_DREAM_MAX_CONCURRENT, DREAM_MAX_CONCURRENT_ENV, DreamCycleGauge, DreamPermit,
-    acquire_dream_permit, dream_cycles_in_flight, dream_cycles_peak_in_flight,
-    dream_max_concurrent, dream_semaphore, stagger_offset,
+    DEFAULT_DREAM_MAX_CONCURRENT, DREAM_MAX_CONCURRENT_ENV, DreamBusy, DreamCycleGauge,
+    DreamPermit, acquire_dream_permit, acquire_dream_permit_within, dream_cycles_in_flight,
+    dream_cycles_peak_in_flight, dream_max_concurrent, dream_semaphore, stagger_offset,
 };
 pub use config::{COMPACT_MIN_RECLAIM_PERCENT, MIN_PRUNE_HISTORY_DAYS};
 pub use config::{DreamConfig, DreamStats, PersistedDreamStats};

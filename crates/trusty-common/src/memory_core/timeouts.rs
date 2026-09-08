@@ -40,6 +40,15 @@ const DEFAULT_EMBEDDER_INIT_SECS: u64 = 180;
 /// should complete well under 10 s. 30 s gives a 100x safety margin.
 const DEFAULT_EMBED_BATCH_SECS: u64 = 30;
 
+/// Default ceiling for an interactive caller's wait on a dream permit (#7106).
+///
+/// Why: the idle dream loop may wait forever — nothing is watching it. A user
+/// who invoked `palace_dream` is watching, and one semantic-consolidation call
+/// alone is bounded at 120 s per palace, so two of them ahead in the queue can
+/// hold every slot for minutes. 30 s is long enough to absorb a cycle that is
+/// nearly finished and short enough that the caller gets an answer.
+const DEFAULT_DREAM_PERMIT_WAIT_SECS: u64 = 30;
+
 /// Default ceiling for per-palace write-mutex acquisition.
 ///
 /// Why: The mutex is held only during the embed+upsert+persist pipeline
@@ -155,6 +164,25 @@ pub fn embedder_init_timeout() -> Duration {
 /// Test: `embed_batch_timeout_default`.
 pub fn embed_batch_timeout() -> Duration {
     parse_secs_env("TRUSTY_EMBED_BATCH_TIMEOUT_SECS", DEFAULT_EMBED_BATCH_SECS)
+}
+
+/// Return how long an interactive dream call waits for a concurrency permit.
+///
+/// Why (#7106): the process-wide dream bound makes the on-demand
+/// `palace_dream` / `dream_consolidate_room` tools queue behind the idle
+/// loops. An unbounded wait there turns a user-invoked call into a silent hang
+/// for as long as the cycles ahead of it take. This is the ceiling that turns
+/// that hang into an error the caller can act on. The idle loop does NOT use
+/// it — nothing is waiting on the idle loop, so it queues indefinitely.
+/// What: reads `TRUSTY_DREAM_PERMIT_WAIT_SECS`, falling back to
+/// [`DEFAULT_DREAM_PERMIT_WAIT_SECS`] (30) when absent or malformed.
+/// Test: `dream_permit_wait_timeout_default`,
+/// `dream::concurrency_tests::an_interactive_dream_errors_when_the_dreamer_is_busy`.
+pub fn dream_permit_wait_timeout() -> Duration {
+    parse_secs_env(
+        "TRUSTY_DREAM_PERMIT_WAIT_SECS",
+        DEFAULT_DREAM_PERMIT_WAIT_SECS,
+    )
 }
 
 /// Return the per-palace write-lock acquisition timeout.
@@ -496,6 +524,24 @@ mod tests {
         unsafe { std::env::remove_var("TRUSTY_EMBED_BATCH_TIMEOUT_SECS") };
         let t = embed_batch_timeout();
         assert_eq!(t, Duration::from_secs(DEFAULT_EMBED_BATCH_SECS));
+    }
+
+    /// Why: Guard that the default is 30 s when the env var is absent — an
+    /// interactive dream call must never inherit an unbounded wait (#7106).
+    /// What: Exercises `parse_secs_with` with an injected lookup rather than
+    /// mutating the process environment, because a dream test in this same
+    /// binary SETS `TRUSTY_DREAM_PERMIT_WAIT_SECS` under its own lock; a
+    /// remove-then-read here would race it.
+    /// Test: itself.
+    #[test]
+    fn dream_permit_wait_timeout_default() {
+        let t = parse_secs_with(
+            |_| None,
+            "TRUSTY_DREAM_PERMIT_WAIT_SECS",
+            DEFAULT_DREAM_PERMIT_WAIT_SECS,
+        );
+        assert_eq!(t, Duration::from_secs(DEFAULT_DREAM_PERMIT_WAIT_SECS));
+        assert_eq!(DEFAULT_DREAM_PERMIT_WAIT_SECS, 30);
     }
 
     /// Why: Guard that the default is 60 s when the env var is absent.

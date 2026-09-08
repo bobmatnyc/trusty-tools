@@ -15,7 +15,7 @@
 //! `dream::tests::dream_cycle_semantic_consolidation_with_mock`,
 //! `dream::tests::apply_consolidation_result_keeps_original_when_kg_write_fails`.
 
-use super::concurrency::acquire_dream_permit;
+use super::concurrency::acquire_dream_permit_within;
 use super::config::DreamConfig;
 use super::helpers::char_safe_prefix;
 use crate::memory_core::palace::{Drawer, RoomType};
@@ -23,6 +23,7 @@ use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::semantic_consolidation::{
     SemanticConsolidator, resolve_consolidation_provider, validate_ollama_model,
 };
+use crate::memory_core::timeouts;
 use anyhow::Result;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -378,17 +379,54 @@ pub(super) async fn semantic_consolidation_pass(
 /// is an on-demand, user-triggered call (not the recurring background dream
 /// loop), so a misconfigured model/provider combination (issue #2593) is
 /// surfaced as `Err` to the caller immediately rather than silently no-op'd.
+///
+/// #7106: the call takes a slot in the process-wide dream bound, and waits at
+/// most [`timeouts::dream_permit_wait_timeout`] for one. When every slot stays
+/// busy for that long it returns [`super::concurrency::DreamBusy`] rather than
+/// waiting behind idle cycles the caller cannot see. The idle loop's own wait
+/// stays unbounded.
 /// Test: `consolidate_scoped_filters_by_room`,
 /// `consolidate_scoped_skips_task_drawers`,
 /// `consolidate_scoped_no_inference_is_noop`,
 /// `consolidate_scoped_non_positive_age_is_noop`,
-/// `consolidate_scoped_invalid_model_returns_err` in `dream::tests`.
+/// `consolidate_scoped_invalid_model_returns_err` in `dream::tests`;
+/// `dream::concurrency_tests::an_interactive_dream_errors_when_the_dreamer_is_busy`.
 pub async fn consolidate_scoped(
     handle: &Arc<PalaceHandle>,
     config: &DreamConfig,
     room: Option<RoomType>,
     max_age_days: i64,
     injected: Option<Arc<SemanticConsolidator>>,
+) -> Result<RoomConsolidationStats> {
+    consolidate_scoped_within(
+        handle,
+        config,
+        room,
+        max_age_days,
+        injected,
+        timeouts::dream_permit_wait_timeout(),
+    )
+    .await
+}
+
+/// [`consolidate_scoped`] with the permit wait supplied by the caller.
+///
+/// Why: the #7106 contract this path gained is that the wait is BOUNDED — that
+/// a busy dreamer produces [`super::concurrency::DreamBusy`] rather than a
+/// hang. Proving it through the env-backed default would mean a 30 s test, and
+/// overriding that env var mid-run would race every other test in the binary
+/// that reads a timeout. Taking the wait as a parameter gives the contract a
+/// direct, fast, env-free test seam.
+/// What: identical to [`consolidate_scoped`]; `permit_wait` replaces
+/// `timeouts::dream_permit_wait_timeout()`.
+/// Test: `dream::concurrency_tests::an_interactive_dream_errors_when_the_dreamer_is_busy`.
+pub(super) async fn consolidate_scoped_within(
+    handle: &Arc<PalaceHandle>,
+    config: &DreamConfig,
+    room: Option<RoomType>,
+    max_age_days: i64,
+    injected: Option<Arc<SemanticConsolidator>>,
+    permit_wait: std::time::Duration,
 ) -> Result<RoomConsolidationStats> {
     // Guard value: a non-positive window means "consolidate nothing" rather than
     // "consolidate everything". Return before building the consolidator so the
@@ -405,9 +443,17 @@ pub async fn consolidate_scoped(
     // #7106: an on-demand consolidation costs the same working set as an idle
     // cycle, so it queues behind the same process-wide bound. Without this the
     // cap would be advisory — a burst of `palace_dream` calls could reproduce
-    // the herd the scheduler no longer creates. The permit releases on drop, so
-    // every `?`, `return`, and panic below returns it.
-    let _permit = acquire_dream_permit().await;
+    // the herd the scheduler no longer creates. The wait is BOUNDED, unlike the
+    // idle loop's: a user is watching this call, and one semantic-consolidation
+    // request alone is bounded at 120 s per palace, so two slow cycles ahead in
+    // the queue could hold every slot for minutes. The permit releases on drop,
+    // so every `?`, `return`, and panic below returns it.
+    let _permit = acquire_dream_permit_within(permit_wait)
+        .await
+        .map_err(|busy| {
+            tracing::warn!(palace = %handle.id, "dream_consolidate_room: {busy}");
+            busy
+        })?;
 
     let consolidator: Arc<SemanticConsolidator> = match injected {
         Some(c) => c,

@@ -107,7 +107,10 @@ pub fn spawn_dream_scheduler(
         let idle_secs = config.idle_secs;
         // #7106: palace k of n waits `interval * k / n` past its first
         // interval, so a cold start spreads the first tick across the whole
-        // idle window instead of firing every palace in the same second.
+        // idle window instead of firing every palace in the same second. The
+        // index follows `registry.list()`, which walks the LRU in recency
+        // order — that decides only which palace draws which slot, and this is
+        // a one-shot startup call, so the assignment never shifts afterwards.
         let stagger = stagger_offset(index, total, interval);
         let dreamer = Arc::new(Dreamer::new(config));
         // Unpin (idle-to-disk): the loop takes the registry + id and resolves

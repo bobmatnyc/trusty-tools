@@ -214,7 +214,15 @@ pub(super) async fn dedup_pass(
     let embedder = shared_embedder()
         .await
         .map_err(|e| e.context("acquire shared embedder for dream dedup"))?;
-    dedup_pass_with_embedder(handle, started, budget, dedup_threshold, embedder.as_ref()).await
+    dedup_pass_with_embedder(
+        handle,
+        started,
+        budget,
+        dedup_threshold,
+        embedder.as_ref(),
+        timeouts::embed_batch_timeout(),
+    )
+    .await
 }
 
 /// [`dedup_pass`] against a caller-supplied embedder.
@@ -225,15 +233,22 @@ pub(super) async fn dedup_pass(
 /// `shared_embedder` singleton, which a test cannot re-seed per case. Taking
 /// the embedder as a parameter gives that contract a direct test seam without
 /// putting a test-only hook on the production path.
-/// What: identical to [`dedup_pass`] with the embedder already resolved.
+/// What: identical to [`dedup_pass`] with the embedder and its per-call ceiling
+/// already resolved. `embed_timeout` bounds each chunk; a chunk that exceeds it
+/// ends the pass with an error rather than holding the cycle's concurrency
+/// permit on a wedged embedder. Production passes
+/// `timeouts::embed_batch_timeout()`; taking it as a parameter is what lets the
+/// timeout be tested without mutating the process environment.
 /// Test: `concurrency_tests::dedup_embeds_in_bounded_chunks`,
-/// `concurrency_tests::the_cycle_budget_stops_dedup_between_chunks`.
+/// `concurrency_tests::the_cycle_budget_stops_dedup_between_chunks`,
+/// `concurrency_tests::a_wedged_embedder_ends_the_dedup_pass_with_an_error`.
 pub(super) async fn dedup_pass_with_embedder(
     handle: &Arc<PalaceHandle>,
     started: std::time::Instant,
     budget: Duration,
     dedup_threshold: f32,
     embedder: &(dyn Embedder + Send + Sync),
+    embed_timeout: Duration,
 ) -> Result<usize> {
     let snapshot: Vec<Drawer> = handle.drawers.read().clone();
     if snapshot.len() < 2 {
@@ -251,9 +266,21 @@ pub(super) async fn dedup_pass_with_embedder(
             break;
         }
         let contents: Vec<String> = chunk.iter().map(|d| d.content().to_string()).collect();
-        let vectors = embedder
-            .embed_batch(&contents)
+        // #7106: every other `embed_batch` caller in this crate wraps the call
+        // in the shared ceiling (`deferred_embed`, `write_pipeline`,
+        // `share::import`). An unwrapped one here would let a wedged embedder
+        // hold a dream permit indefinitely, which is exactly the blocking the
+        // permit exists to bound. A timed-out chunk ends the pass with an
+        // error, so the cycle writes no partial stats and drops its permit.
+        let vectors = tokio::time::timeout(embed_timeout, embedder.embed_batch(&contents))
             .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "embed_batch of {} drawers timed out after {embed_timeout:?} \
+                     during dream dedup",
+                    contents.len()
+                )
+            })?
             .map_err(|e| e.context("batch embed drawers for dream dedup"))?;
         drop(contents);
 
