@@ -21,6 +21,7 @@ use trusty_common::memory_core::retrieval::{
 use uuid::Uuid;
 
 use super::wing_ops::resolve_wing_arg;
+use crate::service::recall_stream::recall_streamed;
 
 use super::bm25::{
     bm25_delete_document, bm25_hits_to_recall_results, bm25_search_optional, fuse_bm25_into_recall,
@@ -681,27 +682,37 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
     let deep = args.get("deep").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    // List every palace on disk and open a handle for each. Palaces
+    // List every palace on disk, then search them a batch at a time. Palaces
     // that fail to open are skipped with a warning so a single bad
     // namespace cannot fail the whole fan-out.
     let palaces = crate::service::helpers::list_palaces_blocking(state).await?;
 
-    // #4637: open_palace (not peek) is deliberate — recall must see every
-    // palace; the shared helper keeps the blocking opens off the async executor.
-    let handles =
-        crate::service::helpers::open_palaces_blocking(state, &palaces, "memory_recall_all").await;
-
+    // #7125: `recall_streamed` still opens every palace — a cache-only answer
+    // would silently drop most of the corpus — but holds only one batch at a
+    // time and hands back everything the query itself brought in.
     // Issue #1970: BM25 + L0/L1 fallback across every palace while warming.
     // #4836: gated on the embedder's real state, as the per-palace paths are.
     let results = if !vector_lane_available(state) {
-        recall_all_without_embedder(state, &handles, query, top_k).await
+        recall_streamed(
+            state,
+            &palaces,
+            "memory_recall_all",
+            top_k,
+            |handles| async move {
+                Ok(recall_all_without_embedder(state, &handles, query, top_k).await)
+            },
+        )
+        .await?
     } else {
         // #4836: `embedder()` now yields the type-erased shared embedder
         // directly, so the local re-erasure this used to need is gone.
         let embedder = state.embedder().await?;
-        recall_across_palaces(&handles, &embedder, query, top_k, deep)
-            .await
-            .context("recall_across_palaces")?
+        recall_streamed(state, &palaces, "memory_recall_all", top_k, |handles| {
+            let embedder = embedder.clone();
+            async move { recall_across_palaces(&handles, &embedder, query, top_k, deep).await }
+        })
+        .await
+        .context("recall_across_palaces")?
     };
 
     let payload: Vec<Value> = results

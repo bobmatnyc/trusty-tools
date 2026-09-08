@@ -10,7 +10,8 @@
 //! `execute_tool_dispatches_known_tools` in `tools_tests.rs`.
 
 use crate::kg_write::CachePolicy;
-use crate::service::helpers::{collect_palace_stats, list_palaces_blocking, open_palaces_blocking};
+use crate::service::helpers::{collect_palace_stats, list_palaces_blocking};
+use crate::service::recall_stream::recall_streamed;
 use crate::service::{load_user_config, palace_info_from, DreamStatusPayload};
 use crate::AppState;
 use serde::Deserialize;
@@ -348,11 +349,16 @@ async fn execute_recall(state: &AppState, palace_id: &str, query: &str, top_k: u
 /// Why: Both the MCP `memory_recall_all` tool and the `GET /api/v1/recall`
 /// HTTP route share the same wiring — list palaces, open handles, fan out via
 /// `recall_across_palaces_with_default_embedder`, and serialize.
-/// What: Lists every palace on disk, opens each (skipping any that fail with
-/// a `tracing::warn!`), and delegates to the core fan-out. On success returns
-/// a JSON array; on listing failure returns `{ "error": "..." }`.
+/// What: Lists every palace on disk, then streams them through
+/// `recall_streamed` in bounded batches, delegating each batch to the core
+/// fan-out. On success returns a JSON array; on listing failure returns
+/// `{ "error": "..." }`.
+/// Why (#7125): opening every palace at once made peak residency and the
+/// post-call LRU residue scale with the palace count. Batching bounds both;
+/// palaces the registry already held are left resident.
 /// Test: Indirectly via `recall_across_palaces_merges_results` (core merge
-/// logic) and the HTTP/MCP integration paths.
+/// logic) and the HTTP/MCP integration paths;
+/// `recall_all_returns_open_palaces_to_baseline` pins the residency bound.
 pub(crate) async fn execute_recall_all(
     state: &AppState,
     query: &str,
@@ -363,13 +369,18 @@ pub(crate) async fn execute_recall_all(
         Ok(v) => v,
         Err(e) => return json!({ "error": format!("{e:#}") }),
     };
-    // #4637: open_palace (not peek) is deliberate — recall must see every
-    // palace; the spawn_blocking hop keeps it off the async executor.
-    let handles = open_palaces_blocking(state, &palaces, "execute_recall_all").await;
-    if handles.is_empty() {
-        return json!([]);
-    }
-    match recall_across_palaces_with_default_embedder(&handles, query, top_k, deep).await {
+    // #7125: stream the estate in batches instead of opening all of it.
+    let streamed = recall_streamed(
+        state,
+        &palaces,
+        "execute_recall_all",
+        top_k,
+        |handles| async move {
+            recall_across_palaces_with_default_embedder(&handles, query, top_k, deep).await
+        },
+    )
+    .await;
+    match streamed {
         Ok(results) => json!(results
             .into_iter()
             .map(|r| json!({
