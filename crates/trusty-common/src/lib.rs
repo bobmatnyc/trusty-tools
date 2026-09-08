@@ -383,6 +383,52 @@ pub mod server;
 #[cfg(feature = "memory-rpc")]
 pub mod memory_rpc;
 
+/// The active-project residency contract shared by every producer and
+/// consumer daemon (#7087 slice 1a).
+///
+/// Why: trusty-mpm knows which projects are live (a managed session with
+/// persisted state in `{Active, Provisioning}` whose tmux name is still
+/// enumerable); trusty-memory and trusty-search each independently decide what
+/// to keep resident from a recency-only LRU that has no notion of "still
+/// open". A shared wire contract plus one snapshot type is what lets both
+/// consumers pin the same active set without each re-deriving trusty-mpm's
+/// definition of "active".
+/// What: [`crate::residency::ActiveProjectSet`] /
+/// [`crate::residency::ActiveProject`] (the wire types, versioned by
+/// [`crate::residency::ACTIVE_PROJECT_SET_SCHEMA`]),
+/// [`crate::residency::ResidencySnapshot`] (the injected-clock freshness
+/// state machine every consumer wraps its pulled set in), and the four
+/// `TRUSTY_RESIDENCY_*` env parsers. Unconditional — `mpm_rpc` re-exports the
+/// wire types from here rather than duplicating them, because a consumer
+/// that only needs [`crate::residency::ResidencySnapshot`] should not have to
+/// compile in the `uds` transport.
+/// Test: `cargo test -p trusty-common --features unconditional-only residency`.
+pub mod residency;
+
+/// The one client for the trusty-mpm daemon's `mpm.residency.active` method
+/// (#7087 slice 1a).
+///
+/// Why: the shape every UDS request/response client in this workspace already
+/// takes — mirrors `memory_rpc` and `trusty-mpm`'s own `search_rpc`
+/// (`crates/trusty-mpm/src/daemon/search_rpc.rs`) rather than adding a fourth
+/// bespoke socket client.
+/// What: [`crate::mpm_rpc::mpm_socket`] resolves the daemon's socket the same
+/// fail-open way `memory_rpc::resolve_memory_socket_or_unreachable` does — a
+/// caller that cannot reach the data directory gets a path nothing serves
+/// rather than an error to handle, so
+/// [`crate::mpm_rpc::fetch_active_projects`] can report unreachability as an
+/// ordinary [`crate::uds::UdsRpcError::Dial`].
+/// [`crate::mpm_rpc::fetch_active_projects`] /
+/// [`crate::mpm_rpc::fetch_active_projects_at`] send one
+/// `mpm.residency.active` frame over [`crate::uds::send_framed_request`] and
+/// decode the daemon's `result` into [`crate::residency::ActiveProjectSet`].
+/// Gated behind the `uds` feature directly (not a new `mpm-rpc` feature) —
+/// issue #7087's slice 1a calls for it and there is, as yet, only one
+/// consumer of this module inside `trusty-common` itself (its own tests).
+/// Test: `cargo test -p trusty-common --features uds mpm_rpc`.
+#[cfg(feature = "uds")]
+pub mod mpm_rpc;
+
 /// General-purpose JSON-RPC client + transports (formerly the library half
 /// of the `trusty-rpc` crate).
 ///
