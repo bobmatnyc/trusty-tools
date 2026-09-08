@@ -146,11 +146,22 @@ pub(crate) async fn correlate_session_start(
             }
         }
         n => {
-            tracing::warn!(
+            // #3764: escalated from `warn!` to `error!` — this collision was
+            // the observed precursor state hours before the #3715 worktree
+            // corruption incident, and at `warn!` it passed almost silently.
+            // ERROR-level events are what `list_recent_errors`/`tm doctor`
+            // surface to an operator; a silent `warn!` here meant the exact
+            // shape that preceded real data loss had no operator-visible
+            // signal at all. This does not change the SKIP behavior below —
+            // attribution is still refused to avoid mis-assignment — only the
+            // log level, which is now proportionate to what this state has
+            // already once preceded.
+            tracing::error!(
                 cwd = %cwd_str,
                 n,
                 "SessionStart: {n} Active managed sessions share the same cwd — \
-                 skipping claude_session_id attribution to avoid mis-assignment (#1744)"
+                 skipping claude_session_id attribution to avoid mis-assignment; this is a \
+                 known precursor to cross-session worktree corruption (#3764, #1744, #3715)"
             );
         }
     }

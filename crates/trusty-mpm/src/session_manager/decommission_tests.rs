@@ -474,3 +474,193 @@ async fn decommission_clears_pending_decision() {
     assert!(stored.pending_decision.is_none());
     assert!(stored.proposed_default.is_none());
 }
+
+// ── #3764: foreign-active-workspace-claim guard ─────────────────────────────
+
+/// Build an [`owned_record`]-style record that additionally names
+/// `workspace_path` — the #3764 tests key on the collision, not on
+/// `worktree_owner`.
+fn record_claiming(
+    id: ManagedSessionId,
+    state: ManagedSessionState,
+    workspace_path: std::path::PathBuf,
+) -> SessionRecord {
+    let mut record = owned_record(id, state);
+    record.workspace_path = Some(workspace_path);
+    record.worktree_owner = None;
+    record
+}
+
+/// Two `Active` records naming the same `workspace_path` — the #1744
+/// precursor shape — refuse decommission of either.
+#[tokio::test]
+async fn decommission_refuses_a_foreign_active_workspace_collision() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let mgr = SessionManager::new(
+        dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+
+    let shared = std::path::PathBuf::from("/tmp/shared-collision-workspace");
+    let session_a = ManagedSessionId::new();
+    let session_b = ManagedSessionId::new();
+    mgr.store
+        .write()
+        .await
+        .upsert(record_claiming(
+            session_a,
+            ManagedSessionState::Active,
+            shared.clone(),
+        ))
+        .await
+        .expect("upsert A");
+    mgr.store
+        .write()
+        .await
+        .upsert(record_claiming(
+            session_b,
+            ManagedSessionState::Active,
+            shared,
+        ))
+        .await
+        .expect("upsert B");
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let err = mgr
+        .decommission_with_root(&session_b, managed_root.path(), None)
+        .await
+        .expect_err("a second Active record naming the same workspace_path must refuse");
+    match err {
+        ManagedError::ForeignActiveWorkspaceClaim(target, other) => {
+            assert_eq!(target, session_b);
+            assert_eq!(other, session_a);
+        }
+        other => panic!("expected ForeignActiveWorkspaceClaim, got {other:?}"),
+    }
+
+    // Nothing must have been mutated — the record stays Active.
+    let record = mgr.get(&session_b).await.expect("get B");
+    assert_eq!(record.state, ManagedSessionState::Active);
+}
+
+/// The same collision keyed on `cwd` rather than `workspace_path` also
+/// refuses — the field #1744 was actually keyed on.
+#[tokio::test]
+async fn decommission_refuses_a_foreign_active_cwd_collision() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let mgr = SessionManager::new(
+        dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+
+    let shared = std::path::PathBuf::from("/tmp/shared-collision-cwd");
+    let session_a = ManagedSessionId::new();
+    let session_b = ManagedSessionId::new();
+    let mut record_a = owned_record(session_a, ManagedSessionState::Active);
+    record_a.cwd = shared.clone();
+    mgr.store
+        .write()
+        .await
+        .upsert(record_a)
+        .await
+        .expect("upsert A");
+    mgr.store
+        .write()
+        .await
+        .upsert(record_claiming(
+            session_b,
+            ManagedSessionState::Active,
+            shared,
+        ))
+        .await
+        .expect("upsert B");
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let err = mgr
+        .decommission_with_root(&session_b, managed_root.path(), None)
+        .await
+        .expect_err("a sibling's cwd matching this workspace_path must refuse");
+    assert!(matches!(
+        err,
+        ManagedError::ForeignActiveWorkspaceClaim(_, _)
+    ));
+}
+
+/// A sibling record in a TERMINAL state sharing the same path never blocks —
+/// only `Active` is a live claim.
+#[tokio::test]
+async fn decommission_allows_a_terminal_sibling_sharing_the_path() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let mgr = SessionManager::new(
+        dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+
+    let shared = std::path::PathBuf::from("/tmp/shared-terminal-path");
+    let session_a = ManagedSessionId::new();
+    let session_b = ManagedSessionId::new();
+    mgr.store
+        .write()
+        .await
+        .upsert(record_claiming(
+            session_a,
+            ManagedSessionState::Decommissioned,
+            shared.clone(),
+        ))
+        .await
+        .expect("upsert A");
+    mgr.store
+        .write()
+        .await
+        .upsert(record_claiming(
+            session_b,
+            ManagedSessionState::Active,
+            shared,
+        ))
+        .await
+        .expect("upsert B");
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let (record, _workspace_removed) = mgr
+        .decommission_with_root(&session_b, managed_root.path(), None)
+        .await
+        .expect("a terminal sibling's stale claim must never block decommission");
+    assert_eq!(record.state, ManagedSessionState::Decommissioned);
+}
+
+/// No sibling at all claims the path — the ordinary, uncontested case.
+#[tokio::test]
+async fn decommission_allows_an_uncontested_workspace() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let mgr = SessionManager::new(
+        dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+
+    let session_id = ManagedSessionId::new();
+    mgr.store
+        .write()
+        .await
+        .upsert(record_claiming(
+            session_id,
+            ManagedSessionState::Active,
+            std::path::PathBuf::from("/tmp/nobody-else-here"),
+        ))
+        .await
+        .expect("upsert");
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let (record, _workspace_removed) = mgr
+        .decommission_with_root(&session_id, managed_root.path(), None)
+        .await
+        .expect("an uncontested workspace must decommission normally");
+    assert_eq!(record.state, ManagedSessionState::Decommissioned);
+}

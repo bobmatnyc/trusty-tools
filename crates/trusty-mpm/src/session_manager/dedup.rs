@@ -238,7 +238,13 @@ impl SessionManager {
                 );
                 continue;
             }
-            match self.decommission(id, None).await {
+            // #3764: dedup's whole job is collapsing two records that name
+            // the SAME workspace_path, which the ordinary #3764 guard cannot
+            // tell apart from the #1744 cross-session collision it exists to
+            // refuse. The tmux-liveness and workspace_owned rechecks above
+            // are the stronger signal dedup already applied — see
+            // `decommission_dedup_loser`'s doc.
+            match self.decommission_dedup_loser(id).await {
                 Ok((rec, _removed)) => {
                     info!(
                         id = %id,

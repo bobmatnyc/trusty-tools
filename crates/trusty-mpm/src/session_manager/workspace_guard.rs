@@ -1,19 +1,96 @@
-//! Path-containment guard for workspace deletion (#1511).
+//! Path-containment AND session-identity guards for workspace deletion (#1511,
+//! #3764).
 //!
 //! Why: `SessionManager::decommission` previously `remove_dir_all`'d
 //! `workspace_path` unconditionally, which deleted a live user repo when the
 //! #1502 local-path spawn set `workspace_path` to a real on-disk directory.
 //! This module provides the belt-and-suspenders containment guard that prevents
 //! any path OUTSIDE the SM's managed workspace root from being deleted —
-//! regardless of the `workspace_owned` flag.
+//! regardless of the `workspace_owned` flag. #3764 widens the module's
+//! question from "is this path safe to touch at all" to "does anyone ELSE
+//! also claim it": the #3715 incident's precursor was a 3-way cwd collision
+//! (#1744) — three `Active` session records canonicalizing to one worktree
+//! path — hours before that path was destroyed. Path containment alone never
+//! sees that; it only ever asks about ONE path and ONE managed root.
 //! What: [`is_safe_to_remove`] canonicalizes both paths and verifies that the
 //! workspace is strictly INSIDE the managed root, rejecting: path == root, path
 //! outside root, paths with too few components, and `$HOME`.
-//! Test: `is_safe_to_remove_*` unit tests below.
+//! [`foreign_active_claim`] answers the session-identity question: does any
+//! `Active` record OTHER than the one being acted on also canonicalize to the
+//! same directory?
+//! Test: `is_safe_to_remove_*` and `foreign_active_claim_*` unit tests below.
 
 use std::path::Path;
 
 use tracing::warn;
+
+use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+
+/// Canonicalize `path`, falling back to the raw form on failure.
+///
+/// Why: shared by both directions of the comparison
+/// [`foreign_active_claim`] makes — the candidate path AND every other
+/// record's `workspace_path`/`cwd` — so a canonicalize failure on either side
+/// degrades to a raw-string comparison instead of silently excusing the
+/// comparison entirely. A path that no longer exists on disk (already
+/// destroyed) must still be comparABLE by its last-known spelling.
+fn canon_or_raw(path: &Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Does any `Active` session record OTHER than `self_id` also claim
+/// `workspace_path` (#3764)?
+///
+/// Why: `is_safe_to_remove` answers "is this path inside the managed root",
+/// never "does a SIBLING session also believe this is theirs". The #3715
+/// incident's own precursor state (#1744: three `Active` records sharing one
+/// cwd) is invisible to path containment by construction — it is a
+/// same-path, cross-RECORD question, not a path-vs-root one. This check
+/// closes that hole at the one place every daemon-routed removal already
+/// passes through: before `SessionManager::decommission_with_root` mutates
+/// disk, it now asks this question first, unconditionally — unlike
+/// [`super::manager::ManagedError::WorktreeOwnerMismatch`]'s gate, which only
+/// fires when a caller identifies itself, this runs regardless of caller,
+/// because the hazard is a store inconsistency (two `Active` records naming
+/// one directory), not a caller impersonating an owner.
+///
+/// What: canonicalizes `workspace_path` (falling back to the raw path on a
+/// canonicalize failure — a destroyed directory must still compare) and scans
+/// `records` for the first `Active` record whose id is not `self_id` and
+/// whose `workspace_path` OR `cwd` canonicalizes (or, on failure, compares
+/// raw) to the same path. Returns that record's id.
+///
+/// A record in any state other than `Active` is never a conflict — a
+/// `Stopped`/`Errored`/terminal record's directory is exactly what the
+/// caller's own worktree-reclaim machinery ([`super::worktree_reclaim`]'s
+/// gate 2) already expects to reclaim, and treating it as a live claim here
+/// would refuse ordinary, safe cleanup.
+/// Test: `foreign_active_claim_finds_a_colliding_workspace_path`,
+/// `foreign_active_claim_finds_a_colliding_cwd`,
+/// `foreign_active_claim_ignores_a_non_active_record`,
+/// `foreign_active_claim_ignores_the_records_own_id`,
+/// `foreign_active_claim_returns_none_when_unclaimed`.
+pub(crate) fn foreign_active_claim(
+    workspace_path: &Path,
+    self_id: &ManagedSessionId,
+    records: &[SessionRecord],
+) -> Option<ManagedSessionId> {
+    let canon_target = canon_or_raw(workspace_path);
+    records
+        .iter()
+        .find(|r| {
+            if r.id == *self_id || r.state != ManagedSessionState::Active {
+                return false;
+            }
+            let ws_matches = r
+                .workspace_path
+                .as_deref()
+                .is_some_and(|p| canon_or_raw(p) == canon_target || p == workspace_path);
+            let cwd_matches = canon_or_raw(&r.cwd) == canon_target || r.cwd == workspace_path;
+            ws_matches || cwd_matches
+        })
+        .map(|r| r.id)
+}
 
 /// Decide whether `workspace_path` is safe to `remove_dir_all` (#1511).
 ///
@@ -104,7 +181,174 @@ pub(crate) fn is_safe_to_remove(workspace_path: &Path, managed_root: &Path) -> b
 mod tests {
     use std::path::PathBuf;
 
-    use super::is_safe_to_remove;
+    use super::{
+        ManagedSessionId, ManagedSessionState, SessionRecord, foreign_active_claim,
+        is_safe_to_remove,
+    };
+
+    /// Build a bare [`SessionRecord`] naming `workspace_path` and `state`, for
+    /// the [`foreign_active_claim`] tests below. Mirrors the field list
+    /// `decommission_tests::owned_record` uses for the same purpose.
+    fn record_at(
+        id: ManagedSessionId,
+        state: ManagedSessionState,
+        workspace_path: PathBuf,
+    ) -> SessionRecord {
+        SessionRecord {
+            id,
+            tmux_name: format!("tm-foreign-claim-{id}"),
+            cwd: PathBuf::from("/tmp/unrelated-cwd"),
+            task: "task".into(),
+            state,
+            created_at: chrono::Utc::now(),
+            last_activity_at: None,
+            workspace_path: Some(workspace_path),
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+            ephemeral: false,
+            workspace_owned: false,
+            source_id: None,
+            claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
+            deliverable_id: None,
+            pane_id: None,
+            injection_status: Default::default(),
+            worktree_owner: None,
+            terminal_at: None,
+            stop_cause: None,
+        }
+    }
+
+    // ── foreign_active_claim unit tests (#3764) ─────────────────────────────
+
+    /// Another `Active` record whose `workspace_path` matches the candidate is
+    /// a conflict.
+    ///
+    /// Why: this is the #1744 precursor shape — two `Active` records naming
+    /// one directory.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_finds_a_colliding_workspace_path() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let shared = root.path().join("shared-worktree");
+        std::fs::create_dir_all(&shared).unwrap();
+
+        let self_id = ManagedSessionId::new();
+        let other_id = ManagedSessionId::new();
+        let records = vec![record_at(
+            other_id,
+            ManagedSessionState::Active,
+            shared.clone(),
+        )];
+
+        assert_eq!(
+            foreign_active_claim(&shared, &self_id, &records),
+            Some(other_id),
+            "an Active sibling record naming the same path must be reported"
+        );
+    }
+
+    /// A collision on `cwd` (not `workspace_path`) is also caught.
+    ///
+    /// Why: the #1744 collision this guards against was keyed on `cwd`, not
+    /// `workspace_path` — a record can claim a directory as its `cwd` before a
+    /// `workspace_path` is ever recorded for it.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_finds_a_colliding_cwd() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let shared = root.path().join("shared-cwd");
+        std::fs::create_dir_all(&shared).unwrap();
+
+        let self_id = ManagedSessionId::new();
+        let other_id = ManagedSessionId::new();
+        let mut other = record_at(
+            other_id,
+            ManagedSessionState::Active,
+            root.path().join("elsewhere"),
+        );
+        other.cwd = shared.clone();
+        let records = vec![other];
+
+        assert_eq!(
+            foreign_active_claim(&shared, &self_id, &records),
+            Some(other_id),
+            "an Active sibling record whose cwd matches must be reported"
+        );
+    }
+
+    /// A record in any non-`Active` state is never a conflict.
+    ///
+    /// Why: a `Stopped`/`Decommissioned` record's directory is exactly what
+    /// ordinary reclaim is FOR — treating a terminal record as a live claim
+    /// would refuse safe cleanup, not just unsafe cleanup.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_ignores_a_non_active_record() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let shared = root.path().join("shared-terminal");
+        std::fs::create_dir_all(&shared).unwrap();
+
+        let self_id = ManagedSessionId::new();
+        let other_id = ManagedSessionId::new();
+        let records = vec![record_at(
+            other_id,
+            ManagedSessionState::Decommissioned,
+            shared.clone(),
+        )];
+
+        assert_eq!(
+            foreign_active_claim(&shared, &self_id, &records),
+            None,
+            "a terminal-state record must never block removal"
+        );
+    }
+
+    /// The record's own id is never reported as a conflict with itself.
+    ///
+    /// Why: `records` passed to this function typically includes the record
+    /// being decommissioned itself; excluding `self_id` is what makes an
+    /// ordinary, uncontested decommission possible at all.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_ignores_the_records_own_id() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let shared = root.path().join("own-workspace");
+        std::fs::create_dir_all(&shared).unwrap();
+
+        let self_id = ManagedSessionId::new();
+        let records = vec![record_at(
+            self_id,
+            ManagedSessionState::Active,
+            shared.clone(),
+        )];
+
+        assert_eq!(
+            foreign_active_claim(&shared, &self_id, &records),
+            None,
+            "a record must never conflict with itself"
+        );
+    }
+
+    /// No record at all claiming the path returns `None`.
+    ///
+    /// Why: this is the ordinary, uncontested case that must stay fast and
+    /// silent — most decommissions have no sibling collision.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_returns_none_when_unclaimed() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let unclaimed = root.path().join("nobody-here");
+        std::fs::create_dir_all(&unclaimed).unwrap();
+
+        let self_id = ManagedSessionId::new();
+        assert_eq!(foreign_active_claim(&unclaimed, &self_id, &[]), None);
+    }
 
     // ── is_safe_to_remove unit tests (#1511) ────────────────────────────────
 

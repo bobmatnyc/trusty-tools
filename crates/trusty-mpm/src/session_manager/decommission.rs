@@ -23,7 +23,7 @@ use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::search_gc;
-use super::workspace_guard::is_safe_to_remove;
+use super::workspace_guard::{foreign_active_claim, is_safe_to_remove};
 use super::worktree_protection;
 use super::worktree_registry;
 use super::worktree_safety::{DirtyWorktree, inspect_dirt, worktree_remove_command};
@@ -626,6 +626,13 @@ impl SessionManager {
     /// a local-path/adopt record does NOT delete the directory.
     /// `decommission_owner_gate_refuses_foreign_caller`,
     /// `decommission_owner_gate_allows_terminal_owner` (#3649).
+    ///
+    /// #3764: BEFORE any of the above, and regardless of `caller`, this also
+    /// refuses when a session OTHER than `id` is `Active` with a workspace or
+    /// cwd that resolves to the same directory as `id`'s own `workspace_path`
+    /// — see [`check_no_foreign_active_claim`](Self::check_no_foreign_active_claim)
+    /// and [`ManagedError::ForeignActiveWorkspaceClaim`]. Test:
+    /// `decommission_refuses_a_foreign_active_workspace_collision`.
     pub async fn decommission(
         &self,
         id: &ManagedSessionId,
@@ -736,6 +743,50 @@ impl SessionManager {
         Ok(())
     }
 
+    /// The #3764 session-identity guard: refuse when a session OTHER than
+    /// `record` is `Active` with a workspace/cwd that resolves to the same
+    /// directory as `record.workspace_path`.
+    ///
+    /// Why: `check_worktree_owner` above only fires when a caller identifies
+    /// itself — every production call site except the bulk age-based reaper
+    /// passes `caller: None`, which makes that gate a no-op in practice for
+    /// most decommissions. This gate closes the gap: it consults the store
+    /// directly and runs on EVERY decommission, because the collision it
+    /// detects (#1744: two `Active` records naming one directory) is not
+    /// something a caller's own identity has any bearing on — see
+    /// `workspace_guard::foreign_active_claim`, which does the actual
+    /// comparison.
+    /// What: a no-op when `record.workspace_path` is `None` (nothing to
+    /// collide on). Otherwise lists every managed session and asks
+    /// `foreign_active_claim`; a hit refuses with
+    /// [`ManagedError::ForeignActiveWorkspaceClaim`] BEFORE any disk mutation
+    /// — this runs ahead of `graceful_terminate_runtime` and every removal
+    /// branch below.
+    /// Test: `decommission_refuses_a_foreign_active_workspace_collision`,
+    /// `decommission_refuses_a_foreign_active_cwd_collision`,
+    /// `decommission_allows_a_terminal_sibling_sharing_the_path`,
+    /// `decommission_allows_an_uncontested_workspace`.
+    async fn check_no_foreign_active_claim(
+        &self,
+        record: &SessionRecord,
+    ) -> Result<(), ManagedError> {
+        let Some(ws) = record.workspace_path.as_deref() else {
+            return Ok(());
+        };
+        let records = self.list().await;
+        if let Some(other) = foreign_active_claim(ws, &record.id, &records) {
+            warn!(
+                id = %record.id,
+                other = %other,
+                workspace = %ws.display(),
+                "decommission: refusing — an Active sibling session also claims this \
+                 workspace/cwd (#3764, #1744)"
+            );
+            return Err(ManagedError::ForeignActiveWorkspaceClaim(record.id, other));
+        }
+        Ok(())
+    }
+
     /// Internal: decommission with an explicit managed root (test seam).
     ///
     /// Why: tests need to inject a temp directory as the managed root to keep the
@@ -779,12 +830,72 @@ impl SessionManager {
         managed_root: &Path,
         caller: Option<ManagedSessionId>,
     ) -> Result<(SessionRecord, bool), ManagedError> {
+        self.decommission_with_root_checked(id, managed_root, caller, true)
+            .await
+    }
+
+    /// Decommission a known DUPLICATE-workspace loser, EXEMPT from the #3764
+    /// foreign-active-claim guard (#3764 review fix).
+    ///
+    /// Why: `dedup_stale_duplicates`'s whole job is to collapse two records
+    /// that name the SAME `workspace_path` — one kept, one removed — which is
+    /// indistinguishable, by path alone, from the #1744 cross-session
+    /// collision `check_no_foreign_active_claim` refuses. Unlike that guard
+    /// (which reads only the STORE's `state` field), dedup has already asked
+    /// the OS directly: it re-verifies immediately before this call that the
+    /// LOSER's own tmux session is not live and that it is not SM-owned (see
+    /// the call site in `dedup.rs`), which is a stronger and more accurate
+    /// liveness signal than a record's persisted `state`. Routing dedup's
+    /// call through the ordinary [`decommission`](Self::decommission) broke
+    /// `dedup_collapses_the_dead_sibling_when_tmux_answers` and
+    /// `reconcile_dedup_collapses_exact_workspace_duplicate_of_live_record` —
+    /// the guard is correct to refuse an UNVERIFIED same-path collision, and
+    /// wrong to refuse one dedup has already resolved.
+    /// What: same teardown as `decommission`, with the foreign-active-claim
+    /// check (only) skipped. The #3649 owner gate still runs (`caller: None`
+    /// preserves its existing no-op behavior here, matching every other
+    /// dedup/reap call site).
+    /// Test: `dedup_collapses_the_dead_sibling_when_tmux_answers`,
+    /// `reconcile_dedup_collapses_exact_workspace_duplicate_of_live_record`.
+    pub(crate) async fn decommission_dedup_loser(
+        &self,
+        id: &ManagedSessionId,
+    ) -> Result<(SessionRecord, bool), ManagedError> {
+        let config = TrustyToolsConfig::load();
+        let managed_root = workspace_root(&config);
+        self.decommission_with_root_checked(id, &managed_root, None, false)
+            .await
+    }
+
+    /// The shared body behind [`decommission_with_root`](Self::decommission_with_root)
+    /// and [`decommission_dedup_loser`](Self::decommission_dedup_loser).
+    ///
+    /// `check_foreign_claim` gates ONLY `check_no_foreign_active_claim`
+    /// (#3764) — every other guard (the #3649 owner gate, containment, dirty
+    /// checks) still runs regardless.
+    async fn decommission_with_root_checked(
+        &self,
+        id: &ManagedSessionId,
+        managed_root: &Path,
+        caller: Option<ManagedSessionId>,
+        check_foreign_claim: bool,
+    ) -> Result<(SessionRecord, bool), ManagedError> {
         let mut record = self.get(id).await?;
 
         // #3649 owner gate: only applies when a SESSION identifies itself as
         // the caller. `None` (operator/daemon-internal) preserves full
         // pre-#3649 authority unconditionally — see the doc above.
         self.check_worktree_owner(&record, caller, id).await?;
+
+        // #3764: unlike the owner gate above, this runs UNCONDITIONALLY for
+        // every caller EXCEPT `decommission_dedup_loser` — it does not depend
+        // on any caller identifying itself, because the hazard is a STORE
+        // inconsistency (two `Active` records naming the same directory,
+        // #1744), not a caller impersonating an owner. See
+        // `check_no_foreign_active_claim`.
+        if check_foreign_claim {
+            self.check_no_foreign_active_claim(&record).await?;
+        }
 
         // #2033: derive the trusty-search index id for a disposable workspace
         // (SM-owned clone or in-project worktree — see
