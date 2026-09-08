@@ -52,16 +52,19 @@ use super::registry::ManagedRegistry;
 /// returns false immediately and an inherited `CLAUDE_CODE_CHILD_SESSION` always
 /// wins.
 ///
-/// Issue #6495: also provisions the classic-renderer default via
-/// [`crate::core::alt_screen::apply_default_to_command`] — `tm run` is an
-/// interactive session and the fullscreen renderer costs it terminal
-/// scrollback. Nothing is set when the launching shell already exports a value.
+/// Issues #6495/#7160: also provisions the classic-renderer and mouse-capture
+/// defaults via [`crate::core::alt_screen::apply_default_to_command`] —
+/// `tm run` is an interactive session, the fullscreen renderer costs it
+/// terminal scrollback, and Claude Code sets tmux's per-pane `mouse_any_flag`
+/// even under the classic renderer. Nothing is set for a variable the
+/// launching shell already exports; the two are decided independently.
 /// Test: `test_build_launch_command_sets_env_and_cwd`,
 /// `test_build_launch_command_adds_bare_with_api_key`,
 /// `test_build_launch_command_no_bare_without_api_key`,
 /// `test_build_launch_command_includes_bypass_permissions`,
 /// `test_build_launch_command_scrubs_inherited_session_markers`,
-/// `test_build_launch_command_defaults_the_alternate_screen_off`.
+/// `test_build_launch_command_defaults_the_alternate_screen_off`,
+/// `test_build_launch_command_defaults_the_mouse_capture_off`.
 pub fn build_launch_command(
     repo_path: &Path,
     claude_config_dir: &Path,
@@ -443,6 +446,26 @@ mod tests {
         assert_eq!(
             provisioned, !carried_by_the_launch,
             "tm run must provision {ALT_SCREEN_ENV_VAR}={ALT_SCREEN_DEFAULT} when the \
+             launch carries no value, and leave an operator value untouched when it does"
+        );
+    }
+
+    /// #7160: the mouse-capture counterpart of
+    /// `test_build_launch_command_defaults_the_alternate_screen_off`.
+    #[test]
+    fn test_build_launch_command_defaults_the_mouse_capture_off() {
+        use crate::core::alt_screen::{MOUSE_DEFAULT, MOUSE_ENV_VAR};
+
+        let tmp = TempDir::new().unwrap();
+        let cmd = build_launch_command(&tmp.path().join("repo"), &tmp.path().join("cfg"), None);
+
+        let carried_by_the_launch = std::env::var_os(MOUSE_ENV_VAR).is_some();
+        let provisioned = cmd.get_envs().any(|(k, v)| {
+            k == MOUSE_ENV_VAR && v.is_some_and(|v| v == std::ffi::OsStr::new(MOUSE_DEFAULT))
+        });
+        assert_eq!(
+            provisioned, !carried_by_the_launch,
+            "tm run must provision {MOUSE_ENV_VAR}={MOUSE_DEFAULT} when the \
              launch carries no value, and leave an operator value untouched when it does"
         );
     }
