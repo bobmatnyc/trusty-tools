@@ -311,6 +311,52 @@ mod tests {
         }
     }
 
+    /// Why: `#[serde(default)]` on every field is the forward-compat contract
+    /// — a producer publishing schema 1 today must still be readable by a
+    /// consumer built against a future, wider schema, and the degenerate case
+    /// of that contract is an empty object decoding to every-field-default
+    /// rather than a decode failure.
+    /// Test: itself.
+    #[test]
+    fn active_project_set_deserializes_from_an_empty_object() {
+        let set: ActiveProjectSet = serde_json::from_value(serde_json::json!({}))
+            .expect("every field is #[serde(default)]");
+        assert_eq!(set, ActiveProjectSet::default());
+
+        let project: ActiveProject = serde_json::from_value(serde_json::json!({}))
+            .expect("every field is #[serde(default)]");
+        assert_eq!(project, ActiveProject::default());
+    }
+
+    /// Why: the other half of the forward-compat contract — a FUTURE
+    /// producer publishing a field this crate does not know about yet must
+    /// not break an older consumer. `#[non_exhaustive]` covers the Rust-side
+    /// construction half; this covers the wire-side decode half.
+    /// Test: itself.
+    #[test]
+    fn active_project_set_deserializes_a_payload_with_an_unknown_field() {
+        let set: ActiveProjectSet = serde_json::from_value(serde_json::json!({
+            "schema": ACTIVE_PROJECT_SET_SCHEMA,
+            "generation": 3,
+            "published_at_unix": 1_700_000_000_u64,
+            "projects": [],
+            "future_field": "the producer is newer than this crate",
+        }))
+        .expect("an unknown field must not fail decode");
+        assert_eq!(set.generation, 3);
+
+        let project: ActiveProject = serde_json::from_value(serde_json::json!({
+            "root": "/repo",
+            "palace_id": "palace-1",
+            "index_ids": [],
+            "session_ids": [],
+            "last_activity_unix": null,
+            "future_field": 42,
+        }))
+        .expect("an unknown field must not fail decode");
+        assert_eq!(project.palace_id.as_deref(), Some("palace-1"));
+    }
+
     /// Why: "stale" and "never fetched" are deliberately the same answer —
     /// see the module doc — and this is the base case nothing else builds on.
     /// Test: itself.
@@ -376,6 +422,34 @@ mod tests {
         snapshot.observe(restored.clone(), t2);
 
         assert_eq!(snapshot.pinned(t2), Some(&restored));
+    }
+
+    /// Why: [`ResidencySnapshot::pinned`] is documented as a LIVE computation
+    /// from [`ResidencySnapshot::is_fresh`], not a flag
+    /// [`ResidencySnapshot::on_pull_failure`] sets — a caller that only ever
+    /// calls [`ResidencySnapshot::observe`] and later queries `pinned` on a
+    /// ticker of its own must still get the correct answer with no
+    /// intervening `on_pull_failure`/`observe` call. A regression to a stored
+    /// boolean flag (set once at pull time and never re-evaluated) would pass
+    /// the `t0 + stale_secs - 1` assertion below but fail the
+    /// `t0 + stale_secs + 1` one, because nothing would have re-run the
+    /// staleness check between the two calls.
+    /// Test: itself.
+    #[test]
+    fn pinned_recomputes_staleness_live_with_no_intervening_call() {
+        let stale_after = Duration::from_secs(600);
+        let mut snapshot = ResidencySnapshot::new(stale_after);
+        let t0 = Instant::now();
+        let set = sample_set(1);
+        snapshot.observe(set.clone(), t0);
+
+        // No on_pull_failure/observe between these two reads — pinned() alone
+        // must reflect elapsed time against t0.
+        let still_within_window = t0 + stale_after - Duration::from_secs(1);
+        assert_eq!(snapshot.pinned(still_within_window), Some(&set));
+
+        let past_the_window = t0 + stale_after + Duration::from_secs(1);
+        assert_eq!(snapshot.pinned(past_the_window), None);
     }
 
     #[test]
