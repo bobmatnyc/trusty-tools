@@ -75,9 +75,21 @@ pub(crate) struct DiskProbes<'a> {
 /// What: scans git's own registry (ADR-0023: git decides existence, never a
 /// directory walk), classifies each worktree, measures bytes through `index`
 /// (never a second walker — see #6926), and groups rows under their managed
-/// project. `deadline`, when set, stops CLASSIFICATION: remaining worktrees are
-/// still listed, as `review` with an `unknown-branch-state` reason, never
-/// omitted and never `stale`.
+/// project. `deadline`, when set, stops the WHOLE pass — classification and
+/// byte measurement both. Remaining worktrees are still listed, as `review`
+/// with an `unknown-branch-state` reason, never omitted and never `stale`; a
+/// project or root the budget was reached before reports `bytes: null`, which
+/// the console renders as unmeasured.
+///
+/// Measurement is deadline-gated because it is the expensive half, not the
+/// cheap one (#6929). The workspace root used to be walked FIRST, to warm the
+/// index's directory cache — but a cold root walk saturates the index's own
+/// 30 s walk budget by itself, and the console's stdio MCP transport cuts the
+/// whole call off at 30 s. Every `disk_survey` the console issued came back a
+/// 502 with no survey at all, a call scoped to one project included, because
+/// the root walk ran before the filter could narrow anything. Worktrees are
+/// measured first now, then projects, then the root, so a budget-limited pass
+/// spends what it has on the rows the view actually colours.
 /// `project` filters to one managed project by name or by path prefix.
 /// Test: `a_survey_groups_worktrees_under_their_project_and_measures_bytes`,
 /// `a_survey_past_its_deadline_still_lists_every_worktree`,
@@ -89,10 +101,16 @@ pub(crate) fn run(
     deadline: Option<Instant>,
     project: Option<&str>,
 ) -> DiskSurvey {
-    // Measured first so the root walk populates the directory cache every
-    // project and worktree measurement below then revalidates at one stat per
-    // directory instead of re-walking.
-    let root_size = (probes.measure)(repos_root);
+    // #6929: no measurement is attempted once the budget is spent, and the one
+    // walk that can still be in flight when the clock crosses is a worktree's,
+    // never the whole workspace root's.
+    let expired = || deadline.is_some_and(|d| Instant::now() >= d);
+    let measure = |path: &Path| -> Option<DirSize> {
+        if expired() {
+            return None;
+        }
+        (probes.measure)(path)
+    };
     let mut grouped: BTreeMap<PathBuf, Vec<DiskWorktree>> = BTreeMap::new();
     let cache: RefCell<HashMap<PathBuf, Option<DirtyWorktree>>> = RefCell::new(HashMap::new());
     // One dirt probe per worktree, shared by the reclaim classifier and the
@@ -113,13 +131,13 @@ pub(crate) fn run(
         if !selected(&scanned, repos_root, project) {
             continue;
         }
-        let row = if deadline.is_some_and(|d| Instant::now() >= d) {
+        let row = if expired() {
             // Fail closed, exactly as the reclaim survey does: a worktree we
             // ran out of time to inspect is LISTED and never advertised as
             // clearable.
             not_inspected(&scanned)
         } else {
-            inspect(&scanned, keep_list, probes, &probe_dirt)
+            inspect(&scanned, keep_list, probes, &probe_dirt, &measure)
         };
         grouped
             .entry(scanned.project.clone())
@@ -146,7 +164,7 @@ pub(crate) fn run(
                 WorktreeTier::Missing => counts.missing += 1,
             }
         }
-        let size = (probes.measure)(&path);
+        let size = measure(&path);
         projects.push(DiskProject {
             name: project_name(&path, repos_root),
             bytes: size.as_ref().map(|s| s.bytes),
@@ -156,6 +174,9 @@ pub(crate) fn run(
         });
     }
 
+    // Measured LAST: the root walk is the most expensive in the pass and the
+    // least informative, so it gets whatever budget the worktrees left.
+    let root_size = measure(repos_root);
     DiskSurvey {
         generated_at: Utc::now().to_rfc3339(),
         keep_list: KeepListReport {
@@ -185,6 +206,7 @@ fn inspect(
     keep_list: &KeepList,
     probes: &DiskProbes<'_>,
     probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
+    measure: &dyn Fn(&Path) -> Option<DirSize>,
 ) -> DiskWorktree {
     let pr = (probes.pr_state)(scanned);
     let claim = probes.claims.claim_state(&scanned.path);
@@ -211,7 +233,7 @@ fn inspect(
     let size = if classification.tier == WorktreeTier::Missing {
         None
     } else {
-        (probes.measure)(&scanned.path)
+        measure(&scanned.path)
     };
     row(scanned, classification, &verdict, &pr, &claim, size)
 }

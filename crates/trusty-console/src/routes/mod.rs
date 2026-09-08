@@ -20,6 +20,9 @@
 pub mod cleanup;
 pub mod config;
 pub mod deletes;
+// #6929: the two READ-ONLY Disk-view routes (DOC-73 §16.5) — `disk/tree` and
+// `disk/worktrees/{id}`, both proxying trusty-mpm's `disk_survey` MCP tool.
+pub mod disk;
 // #6641: the bounded sample window + per-service transition log, as JSON and as
 // a live event stream.
 pub mod machine_history;

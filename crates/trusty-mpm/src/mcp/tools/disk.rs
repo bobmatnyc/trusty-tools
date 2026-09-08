@@ -22,7 +22,8 @@ use super::tool;
 /// the sunburst renders all four at once.
 /// What: `disk_survey`, with two optional arguments and a closed schema.
 /// `project` scopes the survey to one managed project; `budget_seconds` bounds
-/// classification, which costs git and `gh` subprocesses per worktree.
+/// the whole pass — git and `gh` subprocesses per worktree, and the byte walks,
+/// which are the expensive half (#6929).
 /// Test: `super::tests::disk_tools_present`,
 /// `super::tests::disk_survey_schema_round_trips`.
 pub(super) fn disk_tools() -> Vec<Value> {
@@ -40,8 +41,12 @@ pub(super) fn disk_tools() -> Vec<Value> {
          or unpushed work, claimed by a live session, owned by a dispatched \
          agent, or named by the operator's `disk.keep_list` config is never \
          reported `stale`. EXPENSIVE: classification runs git and `gh` \
-         subprocesses per worktree, so bound it with `budget_seconds` when \
-         polling — worktrees past the budget are still listed, as `review`.",
+         subprocesses per worktree AND a byte walk per project and per \
+         workspace root, so bound it with `budget_seconds` when polling — the \
+         budget stops both halves, worktrees past it are still listed as \
+         `review`, and a project or root past it reports `bytes: null`. \
+         Worktrees are measured before projects and the root, so a \
+         budget-limited pass spends what it has on the rows a view colours.",
         json!({
             "type": "object",
             "properties": {
@@ -52,7 +57,7 @@ pub(super) fn disk_tools() -> Vec<Value> {
                 "budget_seconds": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Stop classifying after this many seconds; remaining worktrees are listed as `review` with an `unknown-branch-state` reason, never as `stale`. Omit for an unbounded survey."
+                    "description": "Stop after this many seconds — classification AND byte measurement both (#6929). Remaining worktrees are listed as `review` with an `unknown-branch-state` reason, never as `stale`; a project or root the budget was reached before reports `bytes: null`. Omit for an unbounded survey, which on a large fleet outruns any caller with a request timeout."
                 }
             },
             "additionalProperties": false

@@ -48,8 +48,9 @@ use crate::session_manager::worktree_safety::inspect_dirt;
 /// SHARED [`crate::disk::size_index::DirSizeIndex`] — never a second index, so
 /// a poll every few seconds costs cache hits rather than walks, and the mutex
 /// is held for each measurement alone rather than for the whole pass.
-/// `budget_seconds` bounds classification; worktrees past it are listed as
-/// `review`, never omitted and never `stale`.
+/// `budget_seconds` bounds the whole pass, byte walks included (#6929);
+/// worktrees past it are listed as `review`, never omitted and never `stale`,
+/// and a project or root past it reports no byte figure.
 /// Test: `crate::disk::survey_tests`, and `dispatch_disk_survey_tool` for the
 /// dispatch wiring.
 pub async fn disk_survey(

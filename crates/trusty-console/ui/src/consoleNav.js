@@ -24,6 +24,9 @@ const OVERVIEW = 'overview';
 /** The one view no Services row reaches — the header action opens it. */
 const CONFIG = 'config';
 
+/** #6929: the Disk view has no service of its own either — same arrangement. */
+const DISK = 'disk';
+
 /** Every view the panel renders, keyed by the id `App.svelte` holds in state. */
 export const VIEW_LABELS = {
   [OVERVIEW]: 'Overview',
@@ -33,6 +36,7 @@ export const VIEW_LABELS = {
   review: 'Review',
   sessions: 'MPM Sessions', // #6370: UI label only — the id stays 'sessions'
   console: 'Console', // #6908: the console's own details pane
+  [DISK]: 'Disk', // #6929: projects and worktrees by size and staleness
   [CONFIG]: 'Config',
 };
 

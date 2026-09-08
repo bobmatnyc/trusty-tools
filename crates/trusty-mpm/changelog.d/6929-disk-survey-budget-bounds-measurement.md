@@ -1,0 +1,3 @@
+Fixed
+
+- `disk_survey`'s `budget_seconds` now bounds the whole pass rather than classification alone (#6929). The survey walked the workspace root FIRST, to warm the size index's directory cache, and a cold root walk saturates that index's own 30-second walk budget by itself — so every call from the console came back as a transport timeout with no survey at all, a call scoped to one project included, because the root walk ran before the project filter could narrow anything. Worktrees are measured first now, then projects, then the root, and no measurement is attempted once the budget is spent: a project or root the budget was reached before reports `bytes: null` instead of holding the whole call open. Worktrees past the budget are still listed as `review`, unchanged.
