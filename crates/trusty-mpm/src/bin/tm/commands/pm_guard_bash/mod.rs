@@ -77,10 +77,13 @@ pub(crate) use worktree_remove_rechecks::evaluate_removal_rechecks;
 use std::path::Path;
 
 use crate::commands::hook_rewrite::{effective_tool_name, first_command_token};
-// Re-exported for the sibling rule modules, which reach these through
-// `super::…` — one definition of "which directory does this token name", and
-// one answer to "what did not expand" (#7098, #7100).
-use path_tokens::{PathEnv, resolve_target_path, unexpanded_shell_variable};
+// Reached by the sibling rule modules through `super::…` — one answer to "what
+// did not expand" (#7098, #7100).
+use path_tokens::unexpanded_shell_variable;
+// One definition of "which directory does this token name", crate-visible since
+// #7172: the `EnterWorktree` rule is no Bash rule but asks the same question, so
+// it reaches this resolver instead of growing a second normalizer.
+pub(crate) use path_tokens::{PathEnv, resolve_target_path};
 use shell_lex::QuoteScan;
 
 /// Deny reason for editing files through a shell tool (sed/awk/patch/git apply/redirection).

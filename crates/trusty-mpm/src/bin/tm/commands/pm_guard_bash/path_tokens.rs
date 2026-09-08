@@ -44,15 +44,15 @@ use std::path::{Path, PathBuf};
 /// inherits the guard process's environment, and the guard expands against it.
 /// Test: `evaluate_worktree_add_command_expands_tmpdir_and_home` builds one
 /// directly; every other caller goes through [`PathEnv::from_process`].
-pub(super) struct PathEnv {
-    pub(super) tmpdir: Option<String>,
-    pub(super) tmp: Option<String>,
-    pub(super) home: Option<String>,
+pub(crate) struct PathEnv {
+    pub(crate) tmpdir: Option<String>,
+    pub(crate) tmp: Option<String>,
+    pub(crate) home: Option<String>,
 }
 
 impl PathEnv {
     /// Read `$TMPDIR`, `$TMP`, and `$HOME` from the guard process.
-    pub(super) fn from_process() -> Self {
+    pub(crate) fn from_process() -> Self {
         Self {
             tmpdir: std::env::var("TMPDIR").ok(),
             tmp: std::env::var("TMP").ok(),
@@ -90,7 +90,7 @@ impl PathEnv {
 /// the guard process's own environment, which a `Bash` tool call inherits
 /// unchanged. Anything it could NOT expand survives as a literal path
 /// component; [`unexpanded_shell_variable`] is how a caller finds out.
-pub(super) fn resolve_target_path(token: &str, base: &Path, env: &PathEnv) -> PathBuf {
+pub(crate) fn resolve_target_path(token: &str, base: &Path, env: &PathEnv) -> PathBuf {
     let mut expanded = token.to_string();
     if let Some(tmpdir) = env.tmpdir.as_deref() {
         expanded = expanded
