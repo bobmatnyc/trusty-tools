@@ -12,9 +12,7 @@ use tokio::sync::mpsc::unbounded_channel;
 
 use super::*;
 use crate::events::{Event, SessionEventEnvelope};
-use crate::tui_client::session_events::{
-    forward_session_event, is_retryable_status, terminal_stream_failure_event,
-};
+use crate::tui_client::session_events::{forward_session_event, terminal_stream_failure_event};
 use crate::tui_client::workstream_subscription::parse_workstream_envelope;
 use trusty_code_tui::{StatuslineSegment, WorkstreamSummary};
 
@@ -336,21 +334,12 @@ fn terminal_stream_failure_event_is_a_done_error_output() {
     );
 }
 
-#[test]
-fn is_retryable_status_covers_502_and_503_only() {
-    assert!(is_retryable_status(reqwest::StatusCode::BAD_GATEWAY));
-    assert!(is_retryable_status(
-        reqwest::StatusCode::SERVICE_UNAVAILABLE
-    ));
-    assert!(!is_retryable_status(reqwest::StatusCode::NOT_FOUND));
-}
-
 /// The caches must start empty before `setup()` populates them —
 /// `TuiEngine::commands()`/`picker()` must degrade to "nothing yet," never
 /// panic, when queried before `setup()` runs.
 #[test]
 fn caches_are_empty_before_setup() {
-    let engine = CodeEngine::with_daemon_url(reqwest::Client::new(), "http://127.0.0.1:1", None);
+    let engine = CodeEngine::with_socket("/nonexistent/tcode.sock", None);
     assert!(engine.commands().is_empty());
     assert!(engine.picker("workstream").is_none());
 }
@@ -371,7 +360,7 @@ fn workstream_picker_dispatch_command_round_trips_through_workstream_subcommand(
 /// this engine has exactly one picker.
 #[test]
 fn picker_unknown_name_is_none() {
-    let engine = CodeEngine::with_daemon_url(reqwest::Client::new(), "http://127.0.0.1:1", None);
+    let engine = CodeEngine::with_socket("/nonexistent/tcode.sock", None);
     assert!(engine.picker("model").is_none());
 }
 
@@ -385,10 +374,7 @@ fn picker_unknown_name_is_none() {
 /// workstream, clearing on deactivation rather than showing stale text.
 #[test]
 fn statusline_segments_reflect_active_workstream_and_clear_on_none() {
-    let state = EngineState::new(
-        RpcHttpClient::new(reqwest::Client::new(), "http://127.0.0.1:1".to_string()),
-        None,
-    );
+    let state = EngineState::new(UdsRpcClient::new("/nonexistent/tcode.sock"), None);
     assert!(
         state.statusline_segments().is_empty(),
         "no active workstream observed yet -> no segments"
@@ -411,98 +397,4 @@ fn statusline_segments_reflect_active_workstream_and_clear_on_none() {
         state.statusline_segments().is_empty(),
         "deactivation must clear the segment, not leave a stale one"
     );
-}
-
-/// Regression test for issue #3494: a daemon that accepts the TCP
-/// connection but never sends response headers must not hang
-/// `pump_session_events`'s initial `GET /sessions/{id}/events` forever —
-/// before this fix, `.send().await` had no per-request bound and would wait
-/// indefinitely, completely bypassing `SESSION_STREAM_MAX_RECONNECTS`.
-///
-/// Uses a raw `TcpListener` that accepts every connection and then holds it
-/// open without ever writing a byte — the exact "TCP accepted, headers
-/// never sent" trigger the issue describes (a `wiremock` mock always
-/// completes the HTTP handshake, so it can't reproduce this). If
-/// `CONNECT_TIMEOUT` were removed, `.send().await` would still be pending
-/// when the outer bound below elapses, and no `ConnectionLost` would ever
-/// arrive — this test would fail deterministically on a timeout rather than
-/// hang the test binary, same rationale as
-/// `tests/tui_client_engine.rs`'s exhausted-reconnects test.
-///
-/// Deliberately does NOT wait for `pump_session_events` to exhaust all
-/// `SESSION_STREAM_MAX_RECONNECTS` (every attempt would hang the same way,
-/// ~1 minute total) — observing the FIRST `ConnectionLost` is sufficient
-/// proof the connect attempt is bounded by `CONNECT_TIMEOUT`, not infinite.
-///
-/// The `CONNECT_TIMEOUT` wait itself runs on Tokio's virtual clock, but only
-/// after the accept is confirmed on the real one — see the `tokio::time::pause()`
-/// call below for why the ordering is load-bearing and a blanket
-/// `start_paused = true` is not a valid substitute here.
-#[tokio::test]
-async fn events_connect_hang_is_bounded_by_connect_timeout_not_infinite() {
-    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    std_listener.set_nonblocking(true).expect("set_nonblocking");
-    let listener = tokio::net::TcpListener::from_std(std_listener).expect("tokio listener");
-    let addr = listener.local_addr().expect("local_addr");
-
-    let (accepted_tx, mut accepted_rx) = unbounded_channel();
-    // Accept connections forever, never writing/closing — `mem::forget`
-    // keeps each accepted socket's fd open (dropping it would close the
-    // connection, which reqwest would see as a fast, distinct failure mode,
-    // not the hang this test targets).
-    let accept_task = tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let _ = accepted_tx.send(());
-            std::mem::forget(stream);
-        }
-    });
-
-    let state = EngineState::new(
-        RpcHttpClient::new(reqwest::Client::new(), format!("http://{addr}")),
-        None,
-    );
-    let (tx, mut rx) = unbounded_channel();
-
-    let pump_task = tokio::spawn(async move { state.pump_session_events("s-1", &tx).await });
-
-    // Wait — on the REAL clock — until the listener has actually accepted the
-    // connection. This is what makes the pause below safe: the "TCP accepted,
-    // headers never sent" precondition is established for real, not assumed.
-    // A blind `#[tokio::test(start_paused = true)]` here is NOT equivalent —
-    // measured, it lost the accept on 6 of 10 runs (Tokio auto-advances the
-    // clock while the handshake is still in flight), silently downgrading
-    // this from the #3494 shape to a plain connect timeout while still
-    // passing, since both produce a "connection failed" reason.
-    accepted_rx
-        .recv()
-        .await
-        .expect("listener must accept the pump's connection");
-
-    // Only now switch to the virtual clock: the connection is up and the
-    // daemon will never send headers, so the runtime goes idle and Tokio
-    // auto-advances straight to `CONNECT_TIMEOUT` at no wall-clock cost
-    // (this test was 10.0s of pure waiting).
-    tokio::time::pause();
-
-    // CONNECT_TIMEOUT (10s) plus slack — comfortably short of the ~1 minute
-    // a full 5-reconnect exhaustion would take, but generous enough that
-    // this never flakes on a loaded CI box.
-    match tokio::time::timeout(CONNECT_TIMEOUT + Duration::from_secs(10), rx.recv()).await {
-        Ok(Some(ReplEvent::ConnectionLost { reason })) => {
-            assert!(
-                reason.contains("connection failed"),
-                "expected a transport-error ConnectionLost from the timed-out connect, got: \
-                 {reason}"
-            );
-        }
-        Ok(Some(other)) => panic!("expected ConnectionLost, got {other:?}"),
-        Ok(None) => panic!("channel closed with no event — pump_session_events exited silently"),
-        Err(_) => panic!(
-            "no ConnectionLost observed within CONNECT_TIMEOUT + slack — the initial connect \
-             attempt hung past CONNECT_TIMEOUT (issue #3494 regression)"
-        ),
-    }
-
-    pump_task.abort();
-    accept_task.abort();
 }

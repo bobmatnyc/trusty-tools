@@ -437,7 +437,10 @@ fn sse_event_for(envelope: &crate::events::SessionEventEnvelope) -> SseEvent {
 /// signal); [`build_axum_router`]'s tests cover the routing/dispatch logic
 /// this serves.
 pub async fn run_http(
-    router: Router,
+    // #6637: `Arc<Router>`, not `Router` — `crate::serve::uds::run_daemon_on`
+    // builds the router ONCE and serves it over both transports, so a session
+    // created over the socket is the same session an HTTP call sees.
+    router: Arc<Router>,
     sessions: Arc<SessionRegistry>,
     workstreams: SharedWorkstreamStore,
     port: u16,
@@ -481,7 +484,7 @@ pub async fn run_http(
         );
     }
 
-    let app = build_axum_router(Arc::new(router), sessions, workstreams, binding, auth);
+    let app = build_axum_router(router, sessions, workstreams, binding, auth);
     axum::serve(listener, app)
         .with_graceful_shutdown(trusty_common::shutdown_signal())
         .await

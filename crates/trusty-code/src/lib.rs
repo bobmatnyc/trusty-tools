@@ -554,28 +554,38 @@ pub mod task;
 pub mod cli_client;
 
 /// `CodeEngine` — the `trusty-code-tui` engine adapter driving a long-lived
-/// `tcode serve --http` daemon for the interactive `tcode tui` (#3415,
-/// DOC-50 §3.3/§3.4, epic #3411 Slice 3).
+/// `tcode serve` daemon for the interactive `tcode tui` (#3415, DOC-50
+/// §3.3/§3.4, epic #3411 Slice 3; retransported onto the daemon's Unix socket
+/// in #6637).
 ///
 /// Why: `cli_client` (above) spawns an EPHEMERAL `--stdio` child per CLI
 /// invocation — the right shape for one-shot commands, wrong for an
 /// interactive REPL that needs to hold a session open, stream responses
 /// live, and observe workstream activation pushed from OTHER clients. This
-/// module is the HTTP counterpart: a thin `trusty_code_tui::TuiEngine`
-/// implementation that discovers an already-running daemon and drives it
-/// over pooled HTTP + SSE, translating daemon responses into
-/// `trusty_code_tui::ReplEvent`s — no business logic of its own (DOC-39 §2.1
-/// thin-client axiom).
-/// What: `tui_client::discovery` (daemon lookup: `TCODE_DAEMON_URL` env var
-/// -> `serve::discovery`'s `http_addr` file -> liveness ping), `tui_client::rpc`
-/// (pooled `POST /rpc` client, reusing `trusty_mcp::{Request,Response}`
-/// exactly like `cli_client::stdio` does over STDIO), `tui_client::sse` (a
-/// minimal SSE line pump over `reqwest`'s byte stream), and
-/// `tui_client::engine::CodeEngine` (the `TuiEngine` impl itself).
+/// module is the daemon counterpart: a thin `trusty_code_tui::TuiEngine`
+/// implementation that dials the daemon's socket and translates its responses
+/// into `trusty_code_tui::ReplEvent`s — no business logic of its own (DOC-39
+/// §2.1 thin-client axiom).
+/// What: `tui_client::uds_rpc` (the framed JSON-RPC client, unary calls and
+/// streams) and `tui_client::engine::CodeEngine` (the `TuiEngine` impl
+/// itself). The `discovery`/`rpc`/`sse` trio went with the HTTP transport —
+/// the socket path is derived rather than discovered, and the two SSE routes
+/// are now the `session.events` and `workstream.events` stream methods.
 /// Test: `tui_client::*::tests` for the pure helpers; the full
-/// discover/setup/stream/cancel/workstream-activation flow against a mock
-/// HTTP daemon in `tests/tui_client_engine.rs`.
+/// setup/stream/cancel/workstream-activation flow against a real daemon socket
+/// in `tests/tui_client_engine.rs`.
 pub mod tui_client;
+
+/// The client-side credential for the daemon's transient HTTP listener
+/// (#5439, relocated in #6637).
+///
+/// Why its own module: it used to sit in `tui_client::discovery`, which #6637
+/// deleted along with the rest of the HTTP client. `session::connector`'s
+/// `TcodeConnector` still speaks HTTP until PR 2 moves the webview bridge into
+/// `trusty-code-gui`, so the credential half outlives the discovery half.
+/// What: `TCODE_DAEMON_TOKEN` and the loopback-gated resolver.
+/// Test: `http_credential::http_credential_tests`.
+pub mod http_credential;
 
 // ── Package-level re-exports ──
 

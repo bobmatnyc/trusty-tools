@@ -71,12 +71,12 @@ const PRODUCT_LABEL: &str = "tcode";
 /// and checked against a pre-existing daemon's reported binding.
 pub async fn run(project: Option<PathBuf>) -> Result<()> {
     let project = resolve_project(project)?;
-    let http = trusty_code::tui_client::build_http_client();
     // #4512: attach to a running daemon serving this project, or start one —
     // replaces #4424's "exit and tell the user to start one". Nothing is
     // torn down afterwards: the daemon outlives every client (module docs).
-    let daemon_url = daemon_autospawn::ensure_daemon(&http, project.as_deref()).await?;
-    let engine = CodeEngine::with_daemon_url(http, daemon_url, project);
+    // #6637: the daemon is reached on its Unix socket, not a loopback port.
+    let socket = daemon_autospawn::ensure_daemon(project.as_deref()).await?;
+    let engine = CodeEngine::with_socket(socket, project);
     let app = ReplApp::new(PRODUCT_LABEL, user_label());
 
     trusty_code_tui::run::run(

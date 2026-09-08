@@ -81,7 +81,7 @@ impl TcodeConnector {
     /// sites below cannot individually forget it. The header is marked
     /// sensitive so `reqwest`'s own `Debug` output redacts it. The
     /// never-off-loopback rule lives in
-    /// `crate::tui_client::discovery::daemon_credential_for`, not here.
+    /// `crate::http_credential::daemon_credential_for`, not here.
     pub fn with_daemon_url(daemon_url: impl Into<String>) -> Self {
         let daemon_url = daemon_url.into();
         Self {
@@ -116,8 +116,8 @@ impl TcodeConnector {
 ///
 /// Why: #5439 put every route behind a credential, so a connector built on a
 /// bare client sees `401` on every call. Resolution is delegated to
-/// `crate::tui_client::discovery::daemon_credential_for` so the "never send
-/// the local token off loopback" rule has exactly one implementation.
+/// `crate::http_credential::daemon_credential_for` so the "never send the
+/// local token off loopback" rule has exactly one implementation.
 /// What: falls back to a plain client when there is no credential to present
 /// or the target is not loopback — the caller then reads the daemon's `401`
 /// as an ordinary `ConnectorError`, which is a clearer failure than a client
@@ -126,9 +126,9 @@ impl TcodeConnector {
 /// `list_sessions_empty_fleet_returns_empty_vec` (both in
 /// `tests/connector_e2e.rs`) exercise the credentialed path against a live
 /// daemon; the loopback gate is covered by
-/// `credential_is_withheld_from_a_non_loopback_url` in `tui_client::discovery`.
+/// `credential_is_withheld_from_a_non_loopback_url` in `crate::http_credential`.
 fn credentialed_client(daemon_url: &str) -> reqwest::Client {
-    match crate::tui_client::discovery::daemon_credential_for(daemon_url) {
+    match crate::http_credential::daemon_credential_for(daemon_url) {
         Some(token) => client_presenting(&token),
         None => reqwest::Client::new(),
     }

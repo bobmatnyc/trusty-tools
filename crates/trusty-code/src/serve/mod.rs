@@ -45,6 +45,10 @@ pub mod http;
 pub mod methods;
 pub mod rest;
 pub mod transport;
+// #6637: the daemon's native transport. `run_http` below is now a thin naming
+// of `uds::run_daemon` — the socket binds first and fatally, HTTP is additive
+// on top only until `trusty-code-gui` serves its own webview (PR 2).
+pub mod uds;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -271,35 +275,17 @@ pub async fn run_stdio(binding: ProjectBinding) -> Result<()> {
 ///
 /// Why: the top-level entry point `main.rs` calls for the `serve --http`
 /// subcommand.
-/// What: builds the router + session registry, logs start/stop to stderr,
-/// and enters [`http::run_http`] bound to `port` (`0` = OS-assigned
-/// ephemeral port), returning when it returns (SIGTERM/SIGINT). On return,
-/// calls `SessionRegistry::shutdown_executions` (bounded by
-/// [`SHUTDOWN_GRACE`]) — see [`run_stdio`]'s docs for why.
-/// Test: `run_stdio_router_recognises_proof_of_life_methods` covers the
-/// shared router assembly; `http::tests` cover the routing/dispatch logic.
+/// What (#6637): the persistent daemon binds its Unix socket FIRST and
+/// fatally, then adds the HTTP listener on `port` (`0` = OS-assigned
+/// ephemeral port) on top of the SAME router and session registry — see
+/// [`uds::run_daemon`], which owns the whole body including the bounded
+/// `SessionRegistry::shutdown_executions` drain. `--http` no longer selects a
+/// transport; it selects whether the transient TCP listener
+/// `trusty-code-gui`'s webview still needs is bound alongside the socket.
+/// Test: `uds::uds_tests::*` cover the bind, the method surface and the
+/// streams; `http::tests` cover the routing/dispatch logic on the HTTP half.
 pub async fn run_http(binding: ProjectBinding, port: u16) -> Result<()> {
-    info!(
-        binding = binding.state(),
-        project = binding.label().unwrap_or_else(|| "<projectless>".into()),
-        port,
-        "tcode serve --http: starting"
-    );
-    // #4512: `GET /health` reports this binding, so keep a handle before
-    // `build_router` consumes it.
-    let published_binding = Arc::new(binding.clone());
-    let (router, sessions, workstreams) = build_router(binding).await?;
-    http::run_http(
-        router,
-        sessions.clone(),
-        workstreams,
-        port,
-        published_binding,
-    )
-    .await?;
-    sessions.shutdown_executions(SHUTDOWN_GRACE).await;
-    info!("tcode serve --http: stopped");
-    Ok(())
+    uds::run_daemon(binding, Some(port)).await
 }
 
 #[cfg(test)]

@@ -33,6 +33,10 @@
 //! [`protocol::register`]: crate::session::protocol::register
 
 pub mod connector;
+/// (#6637) `session.events`: the socket transport's live tail of one session,
+/// standing in for the notification channel `session.attach` cannot have over
+/// a one-frame-in, one-frame-out connection.
+pub mod events_stream;
 /// (#2425) Bounded logical-order fold for durable-memory turn outcomes.
 /// Private: `registry::SessionEntry` owns one per session and is the only
 /// thing that drives it.

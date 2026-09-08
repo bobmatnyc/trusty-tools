@@ -21,7 +21,7 @@
 //! (called from `crate::serve::http::run_http` after binding) atomically
 //! writes the bound address; [`remove_http_addr_file`] (called on graceful
 //! shutdown) clears it so a stopped daemon doesn't leave a stale pointer for
-//! the next reader; [`read_http_addr_file`] (called from
+//! the next reader; `read_http_addr_file` (test-only since #6637; was called from
 //! `crate::tui_client::discovery`) reads and trims it back. Every operation
 //! is best-effort: a write/remove failure only degrades discovery to the
 //! `TCODE_DAEMON_URL` env var; a read failure (file absent, stale content,
@@ -100,8 +100,15 @@ pub(crate) fn remove_http_addr_file(path: &Path) {
 /// not `Result`) since "no file" and "unreadable file" are both just "no
 /// candidate from this source" to the caller, not distinct error states
 /// worth surfacing.
+///
+/// Test-only since #6637: its one production caller was
+/// `tui_client::discovery`, which went with the HTTP client. The file is still
+/// WRITTEN, because `trusty-code-gui` finds the transient TCP listener through
+/// it; both the file and the listener retire together in PR 2. This stays so
+/// the round-trip test keeps pinning the format the writer produces.
 /// Test: `discovery_tests::write_then_read_round_trips_bound_addr`,
 /// `discovery_tests::read_missing_file_returns_none`.
+#[cfg(test)]
 pub(crate) fn read_http_addr_file(path: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(path).ok()?;
     let trimmed = raw.trim();

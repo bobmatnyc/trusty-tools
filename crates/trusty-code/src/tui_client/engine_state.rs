@@ -13,13 +13,15 @@
 //! docs for why these caches use `std::sync::Mutex`, not
 //! `tokio::sync::Mutex`), `refresh_workstream_cache` (re-fetches
 //! `workstream.list`), `handle_workstream_command` (`/workstream`/`/ws`
-//! subcommand routing), `run_chat_turn` + `pump_session_events` (the
-//! `task.run` -> `GET /sessions/{id}/events` streaming path).
+//! subcommand routing), `run_chat_turn` + `pump_session_events` (the `task.run` ->
+//! `session.events` streaming path; #6637 moved the second half off HTTP's
+//! SSE route onto the daemon's socket).
 //! Test: `engine_tests::*` (in the sibling `engine_tests.rs`, included from
 //! `engine.rs`) for the pure helpers this module calls into
 //! (`session_events::forward_session_event`); the full
-//! setup/stream/cancel/workstream flow against a mock HTTP daemon lives in
-//! `tests/tui_client_engine.rs`.
+//! setup/stream/cancel/workstream flow against a real daemon socket lives in
+//! `tests/tui_client_engine.rs`, and the reconnect-on-truncation behaviour in
+//! `session_events_tests`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -34,19 +36,14 @@ use trusty_code_tui::{
 
 use crate::events::SessionEventEnvelope;
 
-use super::engine::{
-    CONNECT_TIMEOUT, RECONNECT_BACKOFF, SESSION_STREAM_MAX_RECONNECTS, SSE_IDLE_TIMEOUT,
-};
+use super::engine::{RECONNECT_BACKOFF, SESSION_STREAM_MAX_RECONNECTS};
 use super::error::EngineError;
-use super::rpc::RpcHttpClient;
-use super::session_events::{
-    forward_session_event, is_retryable_status, terminal_stream_failure_event,
-};
-use super::sse::SseLines;
+use super::session_events::{forward_session_event, terminal_stream_failure_event};
+use super::uds_rpc::UdsRpcClient;
 
 /// See module docs.
 pub(super) struct EngineState {
-    pub(super) rpc: RpcHttpClient,
+    pub(super) rpc: UdsRpcClient,
     /// Project root to bind the session to, if any (mirrors `session.create`'s
     /// `project` param — see `crate::session::protocol::create`'s docs).
     pub(super) project_path: Option<PathBuf>,
@@ -68,7 +65,7 @@ pub(super) struct EngineState {
 }
 
 impl EngineState {
-    pub(super) fn new(rpc: RpcHttpClient, project_path: Option<PathBuf>) -> Self {
+    pub(super) fn new(rpc: UdsRpcClient, project_path: Option<PathBuf>) -> Self {
         Self {
             rpc,
             project_path,
@@ -297,63 +294,45 @@ impl EngineState {
         self.pump_session_events(&session_id, tx).await
     }
 
-    /// Stream `GET /sessions/{session_id}/events` until a terminal event
-    /// (`SessionDone`/`SessionCancelled`) is observed, translating every
-    /// event into `ReplEvent`s along the way. Reconnects (bounded by
-    /// [`SESSION_STREAM_MAX_RECONNECTS`]) on a `502`/`503` status, a
-    /// transport error, an idle timeout, or a clean-but-premature stream
-    /// close — surfacing each as `ReplEvent::ConnectionLost` first.
+    /// Tail `session.events` until a terminal event (`SessionDone`/
+    /// `SessionCancelled`) is observed, translating every event into
+    /// `ReplEvent`s along the way.
+    ///
+    /// Why the reconnect keeps a cursor (#6637): `trusty_common::uds`'s stream
+    /// contract says a stream ends on a terminal FRAME and never on EOF, so
+    /// every `Err` from `next_frame` — `NoResponse` for a truncated tail
+    /// included — means the tail is incomplete, not finished. Re-requesting
+    /// with `after_seq` set to the last `seq` this client actually forwarded is
+    /// what makes that reconnect lossless: the daemon replays from above the
+    /// cursor rather than repeating the whole ring buffer. The SSE route had no
+    /// equivalent, so the old reader could only reconnect and re-read.
     ///
     /// Giving up (every exhaustion path below, not just the ones that return
     /// `Err`) ALSO sends [`terminal_stream_failure_event`] before returning —
     /// epic #3411's deferred Slice 3 review item: a `ConnectionLost` alone
-    /// during the retries is visible, but never clears `ReplApp::busy`, and
-    /// nothing downstream of this function yet turns an `Err` return into a
-    /// rendered event (that wiring is Slice 5's `process_event`, #3417, not
-    /// yet landed). Sending the terminal event here — rather than depending
-    /// on that future caller — is what actually rules out the "TUI looks
-    /// alive with a stuck spinner and no error text" silent-stall outcome the
-    /// review flagged.
+    /// during the retries is visible, but never clears `ReplApp::busy`, so
+    /// without it the TUI looks alive with a stuck spinner and no error text.
+    ///
+    /// `attempts` resets only on genuine progress — a forwarded frame — never
+    /// on a merely-successful reconnect. Resetting on the dial let a daemon
+    /// that accepts and immediately closes loop forever (HIGH finding, #3411).
     pub(super) async fn pump_session_events(
         &self,
         session_id: &str,
         tx: &UnboundedSender<ReplEvent>,
     ) -> Result<(), EngineError> {
-        let url = format!("{}/sessions/{session_id}/events", self.rpc.base_url());
         let mut attempts = 0u32;
+        let mut after_seq: Option<u64> = None;
         'reconnect: loop {
-            // `.timeout(CONNECT_TIMEOUT)` bounds connect-through-headers only
-            // (issue #3494) — see that const's doc comment for why this
-            // can't silently extend to the `resp.bytes_stream()` body read
-            // governed by `SSE_IDLE_TIMEOUT` below.
-            // #5439: the SSE routes are guarded like every other route, so this
-            // stream carries the same credential `POST /rpc` does. A native
-            // client sends the header directly — the `/auth/sse-ticket`
-            // exchange exists only for browser `EventSource`, which cannot.
-            let resp = match self
+            let mut stream = match self
                 .rpc
-                .authorize(self.rpc.http().get(&url))
-                .timeout(CONNECT_TIMEOUT)
-                .send()
+                .open_stream::<SessionEventEnvelope>(
+                    "session.events",
+                    json!({"session_id": session_id, "after_seq": after_seq}),
+                )
                 .await
             {
-                Ok(r) if r.status().is_success() => r,
-                Ok(r) => {
-                    let status = r.status();
-                    if is_retryable_status(status) && attempts < SESSION_STREAM_MAX_RECONNECTS {
-                        attempts += 1;
-                        let _ = tx.send(ReplEvent::ConnectionLost {
-                            reason: format!("daemon returned {status}; reconnecting…"),
-                        });
-                        tokio::time::sleep(RECONNECT_BACKOFF).await;
-                        continue 'reconnect;
-                    }
-                    let _ = tx.send(terminal_stream_failure_event(format!(
-                        "daemon returned {status} after {SESSION_STREAM_MAX_RECONNECTS} \
-                         reconnect attempts; giving up"
-                    )));
-                    return Err(EngineError::Status { url, status });
-                }
+                Ok(stream) => stream,
                 Err(source) => {
                     if attempts < SESSION_STREAM_MAX_RECONNECTS {
                         attempts += 1;
@@ -367,61 +346,20 @@ impl EngineState {
                         "connection failed after {SESSION_STREAM_MAX_RECONNECTS} reconnect \
                          attempts: {source}; giving up"
                     )));
-                    return Err(EngineError::Transport { url, source });
+                    return Err(source);
                 }
             };
-            // NOT reset to 0 here (a prior revision did — HIGH finding: that
-            // reset `attempts` on every merely-successful TRANSPORT-level
-            // reconnect, before the inner loop ever got a chance to observe
-            // whether the STREAM itself made any progress. Against a daemon
-            // that accepts the connection but closes the stream immediately
-            // with no data every time — exactly `Ok(Ok(None))` below,
-            // exhausted — that made `attempts` count up to 1 and then get
-            // wiped back to 0 on every single reconnect, so
-            // `attempts < SESSION_STREAM_MAX_RECONNECTS` was permanently
-            // true and this function looped FOREVER, never reaching any
-            // exhaustion branch (`handle_input` never returning at all —
-            // strictly worse than the "silent `Ok(())`" stall epic #3411's
-            // review flagged, an unresponsive REPL rather than a merely
-            // quiet one). `attempts` now only resets on genuine progress:
-            // actually receiving a data payload, in the `Some(payload)` arm
-            // below.
-            let mut lines = SseLines::new(resp);
+
             loop {
-                match tokio::time::timeout(SSE_IDLE_TIMEOUT, lines.next_data()).await {
-                    Ok(Ok(Some(payload))) => {
+                match stream.next_frame().await {
+                    Some(Ok(envelope)) => {
                         attempts = 0;
-                        let Ok(envelope) = serde_json::from_str::<SessionEventEnvelope>(&payload)
-                        else {
-                            continue;
-                        };
+                        after_seq = Some(envelope.seq);
                         if forward_session_event(envelope, tx) {
                             return Ok(());
                         }
                     }
-                    Ok(Ok(None)) => {
-                        if attempts < SESSION_STREAM_MAX_RECONNECTS {
-                            attempts += 1;
-                            let _ = tx.send(ReplEvent::ConnectionLost {
-                                reason: "daemon closed the event stream; reconnecting…".to_string(),
-                            });
-                            tokio::time::sleep(RECONNECT_BACKOFF).await;
-                            continue 'reconnect;
-                        }
-                        // Was `return Ok(())` — indistinguishable from a
-                        // genuinely successful turn, the exact silent-stall
-                        // bug epic #3411's deferred review item warned about:
-                        // the stream closed prematurely (no SessionDone/
-                        // SessionCancelled ever observed) on EVERY reconnect
-                        // attempt, yet the caller saw no error at all.
-                        let _ = tx.send(terminal_stream_failure_event(format!(
-                            "daemon closed the event stream after \
-                             {SESSION_STREAM_MAX_RECONNECTS} reconnect attempts without a \
-                             terminal session event; giving up"
-                        )));
-                        return Err(EngineError::StreamClosed { url });
-                    }
-                    Ok(Err(source)) => {
+                    Some(Err(source)) => {
                         if attempts < SESSION_STREAM_MAX_RECONNECTS {
                             attempts += 1;
                             let _ = tx.send(ReplEvent::ConnectionLost {
@@ -434,26 +372,30 @@ impl EngineState {
                             "stream error after {SESSION_STREAM_MAX_RECONNECTS} reconnect \
                              attempts: {source}; giving up"
                         )));
-                        return Err(EngineError::Transport { url, source });
+                        return Err(EngineError::Transport {
+                            socket: self.rpc.socket().to_path_buf(),
+                            source: Box::new(source),
+                        });
                     }
-                    Err(_elapsed) => {
+                    None => {
+                        // The daemon wrote a terminal `end` frame without this
+                        // client ever seeing a terminal SESSION event — the
+                        // stream finished early, which is not a finished turn.
                         if attempts < SESSION_STREAM_MAX_RECONNECTS {
                             attempts += 1;
                             let _ = tx.send(ReplEvent::ConnectionLost {
-                                reason: "no data from daemon within the idle timeout; \
-                                         reconnecting…"
-                                    .to_string(),
+                                reason: "daemon ended the event stream; reconnecting…".to_string(),
                             });
                             tokio::time::sleep(RECONNECT_BACKOFF).await;
                             continue 'reconnect;
                         }
                         let _ = tx.send(terminal_stream_failure_event(format!(
-                            "no data from daemon within the idle timeout after \
-                             {SESSION_STREAM_MAX_RECONNECTS} reconnect attempts; giving up"
+                            "daemon ended the event stream after \
+                             {SESSION_STREAM_MAX_RECONNECTS} reconnect attempts without a \
+                             terminal session event; giving up"
                         )));
-                        return Err(EngineError::Status {
-                            url,
-                            status: reqwest::StatusCode::REQUEST_TIMEOUT,
+                        return Err(EngineError::StreamClosed {
+                            socket: self.rpc.socket().to_path_buf(),
                         });
                     }
                 }
@@ -461,3 +403,7 @@ impl EngineState {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "session_events_tests.rs"]
+mod session_events_tests;
