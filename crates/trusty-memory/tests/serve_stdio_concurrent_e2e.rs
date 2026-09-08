@@ -110,6 +110,9 @@ async fn spawn_raw_bridge(data_path: &std::path::Path) -> RawChild {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    // #7085: a SIGKILL of this test binary runs no destructor, so the bridge
+    // watches us instead.
+    trusty_common::parent_death::exit_with_parent_tokio(&mut cmd);
     let mut child = cmd.spawn().expect("spawn bridge child");
     let stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
@@ -137,17 +140,21 @@ async fn spawn_raw_bridge(data_path: &std::path::Path) -> RawChild {
 /// assertion here or in the caller cannot orphan it (#5188).
 /// Test: used by `stdio_serve_concurrent_two_bridges_both_work`.
 fn spawn_daemon(data_path: &std::path::Path) -> DaemonGuard {
-    let child = std::process::Command::new(binary())
-        .arg("serve")
-        .arg("--foreground")
-        .env("TRUSTY_DATA_DIR_OVERRIDE", data_path)
-        .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
-        .env("RUST_LOG", "warn")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn daemon");
+    // #7085: `DaemonGuard` only reaps in `Drop`, which a SIGKILL of this test
+    // binary skips — the stamp makes the daemon watch us and self-exit instead.
+    let child = trusty_common::parent_death::exit_with_parent(
+        std::process::Command::new(binary())
+            .arg("serve")
+            .arg("--foreground")
+            .env("TRUSTY_DATA_DIR_OVERRIDE", data_path)
+            .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
+            .env("RUST_LOG", "warn")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit()),
+    )
+    .spawn()
+    .expect("spawn daemon");
     // #5188: own the child BEFORE the readiness poll — that poll asserts, and
     // an unguarded child would outlive the panic.
     let guard = DaemonGuard::new(child);
@@ -374,6 +381,8 @@ async fn stdio_bridge_exits_when_no_daemon() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null()); // suppress error output in test runs
+                                // #7085: see `spawn_raw_bridge`.
+    trusty_common::parent_death::exit_with_parent_tokio(&mut cmd);
 
     let mut child = cmd.spawn().expect("spawn bridge");
     // Close stdin immediately — the bridge should fail before entering the loop.

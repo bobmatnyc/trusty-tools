@@ -34,14 +34,20 @@ fn bin() -> std::path::PathBuf {
 /// assert against.
 /// What: returns `(stdout, stderr)` after a bounded wait.
 fn run_piped(args: &[&str], data_dir: &std::path::Path) -> (String, String) {
-    let mut child = Command::new(bin())
-        .args(args)
-        .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn trusty-memory");
+    // #7085: bare `serve` auto-starts a DETACHED daemon, which outlives this
+    // child by design. Stamping here reaches that grandchild through the
+    // inherited environment, so it dies with this test rather than with the
+    // bridge.
+    let mut child = trusty_common::parent_death::exit_with_parent(
+        Command::new(bin())
+            .args(args)
+            .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .spawn()
+    .expect("spawn trusty-memory");
 
     // Close stdin so the stdio loop sees EOF.
     drop(child.stdin.take());
@@ -219,14 +225,17 @@ fn bare_serve_notice_present_when_stdin_is_a_tty() {
 
     // Safety: `slave` is a fresh fd from openpty and is not used elsewhere.
     let child_stdin = unsafe { Stdio::from_raw_fd(slave) };
-    let mut child = Command::new(bin())
-        .arg("serve")
-        .env("TRUSTY_DATA_DIR_OVERRIDE", tmp.path())
-        .stdin(child_stdin)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn trusty-memory on a pty");
+    // #7085: see `run_piped` — bare `serve` auto-starts a detached daemon.
+    let mut child = trusty_common::parent_death::exit_with_parent(
+        Command::new(bin())
+            .arg("serve")
+            .env("TRUSTY_DATA_DIR_OVERRIDE", tmp.path())
+            .stdin(child_stdin)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .spawn()
+    .expect("spawn trusty-memory on a pty");
 
     // Ctrl-D: canonical-mode EOF, so the stdio loop terminates.
     // Safety: `master` is a valid open fd owned by this test.

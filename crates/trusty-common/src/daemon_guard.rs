@@ -373,20 +373,70 @@ pub async fn probe_once(health_url: &str) -> bool {
 /// Test: `spawn_detached_reports_a_missing_program`; the live path is exercised
 /// by `tga::audit`'s guard tests, which spawn a stub executable.
 pub fn spawn_detached(program: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Result<u32> {
-    let program = program.as_ref();
-    let child = std::process::Command::new(program)
-        .args(args)
+    spawn_built(detached_command(program, args, None))
+}
+
+/// [`spawn_detached`], but the child keeps this process's parent-death stamp.
+///
+/// Why (#7085): a detached daemon started ON BEHALF of a stamped process must
+/// die with that process, not with the short-lived CLI that forked it — a stdio
+/// bridge auto-starting a daemon is exactly that shape, and it produced six
+/// orphans per full `trusty-memory` test run. Forwarding is a separate entry
+/// point rather than the default so the linkage is a decision a call site makes
+/// and a reader can grep for, and so a stray `TRUSTY_EXIT_WITH_PARENT` in an
+/// operator's environment can never arm a daemon nobody asked to link.
+/// What: identical to [`spawn_detached`] except that
+/// [`crate::parent_death::ENV_EXIT_WITH_PARENT`] is copied from this process
+/// when it is set, rather than scrubbed. No stamp here means no stamp on the
+/// child, which is every production invocation.
+///
+/// # Errors
+///
+/// As [`spawn_detached`].
+///
+/// Test: `detached_command_forwards_an_explicit_parent_stamp`.
+pub fn spawn_detached_forwarding_parent_link(
+    program: impl AsRef<std::ffi::OsStr>,
+    args: &[&str],
+) -> Result<u32> {
+    let stamp = crate::parent_death::inherited_stamp();
+    spawn_built(detached_command(program, args, stamp.as_deref()))
+}
+
+/// Build the detached `Command` both entry points spawn.
+///
+/// Why it is separate: the env decision is the whole of #7085's review finding,
+/// and a `Command` can be inspected in a unit test where a spawned daemon
+/// cannot.
+/// What: null stdio, plus [`crate::parent_death::ENV_EXIT_WITH_PARENT`] either
+/// removed (`stamp` is `None`, the default) or set to `stamp`.
+/// Test: `detached_command_scrubs_the_parent_stamp`,
+/// `detached_command_forwards_an_explicit_parent_stamp`.
+fn detached_command(
+    program: impl AsRef<std::ffi::OsStr>,
+    args: &[&str],
+    stamp: Option<&str>,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // #7085: scrub by default so an inherited stamp cannot silently arm a
+    // daemon; a caller that wants the link asks for it by name.
+    match stamp {
+        Some(value) => cmd.env(crate::parent_death::ENV_EXIT_WITH_PARENT, value),
+        None => cmd.env_remove(crate::parent_death::ENV_EXIT_WITH_PARENT),
+    };
+    cmd
+}
+
+/// Spawn a prepared detached command, rendering a failure with what was tried.
+fn spawn_built(mut cmd: std::process::Command) -> Result<u32> {
+    let rendered = format!("{cmd:?}");
+    let child = cmd
         .spawn()
-        .map_err(|e| {
-            anyhow!(
-                "could not spawn `{} {}`: {e}",
-                program.to_string_lossy(),
-                args.join(" "),
-            )
-        })?;
+        .map_err(|e| anyhow!("could not spawn `{rendered}`: {e}"))?;
     Ok(child.id())
 }
 
@@ -398,12 +448,31 @@ pub fn spawn_detached(program: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Re
 /// terminal / shell and does not pollute the user's output. Using
 /// `current_exe()` ensures a `cargo run` session boots its own debug daemon
 /// and a production install boots the production binary.
-/// What: resolves `current_exe()` and hands it to [`spawn_detached`].
+/// What: resolves `current_exe()` and hands it to [`spawn_detached`], so the
+/// child carries no parent-death stamp.
 /// Test: compile-only (spawning a real process in unit tests risks port/FS
 /// side-effects; the live path is exercised by integration tests).
 pub fn spawn_current_exe(args: &[&str]) -> Result<u32> {
     let exe = std::env::current_exe().map_err(|e| anyhow!("could not resolve current_exe: {e}"))?;
     spawn_detached(&exe, args)
+}
+
+/// [`spawn_current_exe`], forwarding this process's parent-death stamp (#7085).
+///
+/// Why: the daemon a stdio bridge auto-starts must die with whoever started the
+/// bridge. See [`spawn_detached_forwarding_parent_link`] for why forwarding is
+/// opt-in rather than the default.
+///
+/// # Errors
+///
+/// As [`spawn_current_exe`].
+///
+/// Test: `detached_command_forwards_an_explicit_parent_stamp` covers the env
+/// decision; `crates/trusty-memory/tests/orphan_reap_7085.rs` covers the live
+/// grandchild path.
+pub fn spawn_current_exe_forwarding_parent_link(args: &[&str]) -> Result<u32> {
+    let exe = std::env::current_exe().map_err(|e| anyhow!("could not resolve current_exe: {e}"))?;
+    spawn_detached_forwarding_parent_link(&exe, args)
 }
 
 /// Poll `config.health_url` until the daemon is ready, printing a spinner to
@@ -771,6 +840,43 @@ mod tests {
             msg.contains("/nonexistent/trusty-nothing-here") && msg.contains("serve"),
             "the error must name the program and its arguments; got: {msg}"
         );
+    }
+
+    /// Why (#7085 review): a detached daemon inherits the whole environment, so
+    /// a `TRUSTY_EXIT_WITH_PARENT` that happened to be set would silently arm a
+    /// watchdog in a daemon nobody asked to link. The default spawn must clear
+    /// it, and `env_remove` surfaces in `get_envs` as an explicit `None`.
+    /// What: builds the default detached command and asserts the variable is
+    /// scheduled for removal rather than merely absent from the override list.
+    /// Test: this test.
+    #[test]
+    fn detached_command_scrubs_the_parent_stamp() {
+        let cmd = detached_command("/bin/true", &["serve"], None);
+        let entry = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(crate::parent_death::ENV_EXIT_WITH_PARENT));
+        assert_eq!(
+            entry.map(|(_, v)| v),
+            Some(None),
+            "the default detached spawn must REMOVE the parent-death stamp"
+        );
+    }
+
+    /// Why: the forwarding entry point is what keeps a test-started daemon
+    /// linked through an intermediate CLI; if it did not carry the value the six
+    /// orphans per suite run would come back.
+    /// What: builds the forwarding command with an explicit stamp and asserts it
+    /// is set to that value.
+    /// Test: this test.
+    #[test]
+    fn detached_command_forwards_an_explicit_parent_stamp() {
+        let cmd = detached_command("/bin/true", &["serve"], Some("4242"));
+        let value = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(crate::parent_death::ENV_EXIT_WITH_PARENT))
+            .and_then(|(_, v)| v)
+            .expect("the forwarding spawn must set the parent-death stamp");
+        assert_eq!(value, std::ffi::OsStr::new("4242"));
     }
 
     /// Why: a malformed URL must not panic — reqwest converts it to an error and

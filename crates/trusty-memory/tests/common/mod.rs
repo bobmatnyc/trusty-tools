@@ -23,6 +23,14 @@ use std::process::Child;
 /// What: kills and reaps in `Drop`. Both results are discarded — the child may
 /// already have exited, and a teardown error must not mask the test's own
 /// failure.
+///
+/// #7085: `Drop` is not enough on its own. SIGKILL this test binary — a `cargo
+/// test` timeout, an interrupted run, a torn-down process tree — and no
+/// destructor runs at all, which is how 102 orphaned daemons accumulated. Every
+/// spawn site therefore also stamps the child with
+/// `trusty_common::parent_death::exit_with_parent`, so the daemon watches this
+/// process and self-exits on its own. The two are complementary: `Drop` is the
+/// immediate reap on the ordinary path, the stamp is the backstop.
 /// Test: `stdio_serve_concurrent_two_bridges_both_work` and the other daemon
 /// tests; the guarantee itself is structural.
 pub struct DaemonGuard {

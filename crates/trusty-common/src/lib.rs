@@ -330,6 +330,23 @@ pub mod supervision;
 /// Test: `cargo test -p trusty-common --features unconditional-only spawn_retry`.
 pub mod spawn_retry;
 
+/// Parent-death linkage for spawned processes (#7085, #3734).
+///
+/// Why: a `Child` handle reaps only in `Drop`, which a SIGKILL of the parent
+/// skips entirely — 102 orphaned `trusty-memory serve --foreground` daemons
+/// holding 12.6 GB accumulated that way. `trusty-agents` already carried a
+/// private copy of the same watchdog for its `--api` sidecar; this is the one
+/// implementation both use.
+/// What: [`parent_death::exit_with_parent`] stamps
+/// [`parent_death::ENV_EXIT_WITH_PARENT`] on a `Command`;
+/// [`parent_death::arm_from_env`] is the child half, and
+/// [`parent_death::arm_for_named_parent`] the `--parent-pid` variant. Ungated —
+/// `libc` is already an unconditional `cfg(unix)` dependency and the watchdog
+/// runs on a plain OS thread, so it adds nothing to the dependency graph.
+/// Test: `cargo test -p trusty-common --features unconditional-only
+/// parent_death`.
+pub mod parent_death;
+
 /// Shared event types for the control bus (issue #6846, DOC-73).
 ///
 /// Why: trusty-console hosts the one event bus (owner ruling 2026-09-05), and
