@@ -16,15 +16,34 @@
    * instead of reshuffling. Full-graph load stays available as an explicit,
    * size-warned opt-in. The header always states what is rendered vs. what
    * exists.
-   * Test: no JS test harness exists in this crate's `ui/` (no vitest, no test
-   * script) — verified manually: open `#/palace/<id>/graph`, confirm the
-   * header reads "N of M nodes shown", click a node and confirm new nodes
-   * appear around it while existing ones do not move, then use "Load
-   * everything" and confirm the truncation warning appears.
+   *
+   * #7116 changed how it RENDERS. The simulation used to run on
+   * `setInterval(tick, 16)` and reassign the reactive `nodes` array at the end
+   * of every tick, so all 200 steps of a full re-layout each repainted the
+   * whole SVG. On the live trusty-tools palace "load everything" draws 1,242
+   * nodes and 5,000 edges, so that was ~6,300 SVG elements repainted 200 times
+   * and a tab frozen for minutes. The steps cost 3.15 ms each (0.6 s for all
+   * 200) — the paints were the whole cost. Three changes fix it: the
+   * simulation moved into a Web Worker and commits at most one snapshot per
+   * animation frame (`graph/layoutRunner.js`); coordinates moved out of the
+   * reactive `nodes` array into a plain `Float64Array` plus a `posVersion`
+   * counter, so a new frame no longer invalidates `links`/`shownDegree`; and
+   * above `EDGE_PATH_THRESHOLD` edges collapse into one `<path>` instead of
+   * one `<line>` each.
+   * Test: `src/lib/graph/forceLayout.test.js`,
+   * `src/lib/graph/layoutRunner.test.js` and
+   * `src/lib/graph/mergeSubgraph.test.js`. In the browser: open
+   * `#/palace/<id>/graph`, confirm the header reads "N of M nodes shown",
+   * click a node and confirm new nodes appear around it while existing ones do
+   * not move, then use "load everything" and confirm the progress bar advances
+   * while the page still scrolls and the cancel button still responds.
    */
   import { onDestroy, onMount } from 'svelte';
   import { api } from '../api.js';
   import { getRoute, navigate } from '../router.svelte.js';
+  import { EXPAND_STEPS, MAX_STEPS, stepBudgetFor } from '../graph/forceLayout.js';
+  import { runLayout } from '../graph/layoutRunner.js';
+  import { mergeSubgraph as mergeIntoGraph } from '../graph/mergeSubgraph.js';
 
   // Selected palace + payload.
   let palaceId = $state('');
@@ -42,30 +61,53 @@
   /** True when the daemon told us the full-graph payload was capped. */
   let serverTruncated = $state(false);
 
-  // Layout state — mutated in-place by the simulation tick.
-  let nodes = $state([]); // {id,label,x,y,vx,vy,fx,fy,kind,community,degree,expanded}
+  /*
+   * #7116: `nodes` carries IDENTITY only — no coordinates. Coordinates live in
+   * the plain `positions` array below, and a frame commit bumps `posVersion`
+   * instead of reassigning `nodes`. That is what stops each of the ~20 frames
+   * of a full layout from re-deriving `links` (a 5,000-triple scan) and
+   * `shownDegree` (a 5,000-link scan), which the pre-fix code did 200 times.
+   */
+  let nodes = $state([]); // {id,label,kind,community,degree,expanded}
   let selectedId = $state(null);
   let hoverId = $state(null);
+
+  /** Interleaved [x0,y0,x1,y1,…], indexed by position in `nodes`. */
+  let positions = new Float64Array(0);
+  /** 1 = held in place (dragged, or pinned during an expansion re-layout). */
+  let pinned = new Uint8Array(0);
+  /** Bumped on every committed frame; the only reactive coordinate signal. */
+  let posVersion = $state(0);
+  /** Live layout progress, or null when nothing is running. */
+  let layoutProgress = $state(null);
+  /** Set when `stepBudgetFor` clipped the step count for this graph's size. */
+  let budgetNotice = $state(null);
 
   // Dedup keys. Kept outside $state — they are bookkeeping, not view data.
   let nodeIds = new Set();
   let tripleKeys = new Set();
+  /** id -> index into `nodes` / `positions`. Nodes only ever append. */
+  let nodeIndex = new Map();
 
   // Viewport sizing — recalculated on mount + window resize.
   let width = $state(900);
   let height = $state(600);
   let svgEl = $state(null);
+  /** Handle for the running layout, or null. `.cancel()` stops it. */
   let simHandle = null;
-  let simDone = null;
 
-  // Force simulation knobs.
+  /** Seed placement radius. Must match `forceLayout.js`'s `linkDistance`. */
   const LINK_DISTANCE = 90;
-  const REPULSION = 1200;
-  const CENTER_STRENGTH = 0.04;
-  const DAMPING = 0.85;
-  const MAX_STEPS = 200; // full re-layout
-  const EXPAND_STEPS = 70; // settling newly-added nodes only
-  const TICK_MS = 16; // ~60fps target
+
+  /*
+   * #7116: above this many rendered edges, draw them as ONE `<path>` rather
+   * than one `<line>` each. At 5,000 edges the per-line form costs 5,000
+   * elements and 20,000 coordinate attribute writes per frame; the merged path
+   * costs one element and one attribute. Below the threshold the per-line form
+   * stays, because it keeps the arrow markers that make direction readable —
+   * and at 328 edges (the seed view) its cost is irrelevant.
+   */
+  const EDGE_PATH_THRESHOLD = 400;
 
   /*
    * Why: the client-side force sim is O(n²) per tick. 75 nodes is ~2.8K pair
@@ -132,9 +174,15 @@
     triples = [];
     nodeIds = new Set();
     tripleKeys = new Set();
+    nodeIndex = new Map();
+    positions = new Float64Array(0);
+    pinned = new Uint8Array(0);
+    posVersion++;
     selectedId = null;
     serverTruncated = false;
     notice = null;
+    budgetNotice = null;
+    layoutProgress = null;
   }
 
   /*
@@ -156,7 +204,6 @@
         community_count: payload?.community_count ?? 0
       };
       mergeSubgraph(payload, null);
-      scatterUnplaced();
       relayout({ pinExisting: false, steps: MAX_STEPS });
       await autoExpandIfEdgeless();
     } catch (e) {
@@ -195,13 +242,16 @@
    * still not everything, and we say so rather than implying completeness.
    */
   async function loadFull() {
+    // #7116: the old text promised a freeze, which was accurate then and is
+    // wrong now. It states the size and the server cap instead.
     if (
       counts.node_count > FULL_LOAD_WARN_NODES &&
       !window.confirm(
         `This palace has ${counts.node_count.toLocaleString()} nodes and ` +
-          `${counts.edge_count.toLocaleString()} edges. Rendering all of them ` +
-          `runs an O(n²) layout in your browser and may take a long time or ` +
-          `freeze the tab. Continue?`
+          `${counts.edge_count.toLocaleString()} edges. The daemon caps this ` +
+          `request, so you will get a large subset rather than all of it, and ` +
+          `laying it out takes a few seconds. The page stays usable while it ` +
+          `runs and you can cancel it. Continue?`
       )
     ) {
       return;
@@ -232,7 +282,6 @@
         derived.push({ id: t.subject }, { id: t.object });
       }
       mergeSubgraph({ nodes: derived, triples: payload?.triples ?? [] }, null);
-      scatterUnplaced();
       relayout({ pinExisting: false, steps: MAX_STEPS });
     } catch (e) {
       error = e.message || String(e);
@@ -276,99 +325,27 @@
   // Merge
   // -------------------------------------------------------------------------
 
-  const tripleKey = (t) => `${t.subject} ${t.predicate} ${t.object}`;
-
   /*
-   * Why: expansion results overlap what is already drawn; adding a node or an
-   * edge twice would double-render it and corrupt the layout's link forces.
-   * What: dedups nodes by `id` and triples by (subject,predicate,object).
-   * Already-known nodes get their `degree` refreshed (the server always
-   * reports graph-wide degree) but keep their x/y so the layout is stable.
-   * New nodes are seeded on a small ring around `originId` when there is one,
-   * so an expansion visibly grows out of the node that was clicked.
+   * Why: the merge is the one code path every load shares, and #7116 was a bug
+   * in its dedup predicate — it tested membership against a snapshot taken
+   * before the loop, so a repeated id got through. It lives in
+   * `graph/mergeSubgraph.js` as a pure function over an explicit state object
+   * so that predicate can be tested without mounting the component.
+   * What: this wrapper binds the component's locals to it and republishes the
+   * coordinate arrays the merge may have grown.
+   * Test: `src/lib/graph/mergeSubgraph.test.js`.
    */
   function mergeSubgraph(payload, originId) {
-    // Snapshot the id->node map once. Reading the `nodeById` derived inside
-    // the loop would re-materialise it after every push (O(n²) on a big
-    // expansion) for no benefit — nothing else mutates `nodes` here.
-    const byId = new Map();
-    for (const n of nodes) byId.set(n.id, n);
-    const origin = originId ? byId.get(originId) : null;
-    const incoming = payload?.nodes ?? [];
-    let placed = 0;
-    const fresh = incoming.filter((n) => n?.id && !nodeIds.has(n.id)).length;
-    for (const n of incoming) {
-      if (!n?.id) continue;
-      const existing = byId.get(n.id);
-      if (existing) {
-        if (typeof n.degree === 'number') existing.degree = n.degree;
-        continue;
-      }
-      nodeIds.add(n.id);
-      let x = null;
-      let y = null;
-      if (origin) {
-        // Ring placement around the expansion origin. Radius scales with the
-        // batch size so a 40-neighbour hub does not stack them on top of
-        // each other.
-        const angle = (placed / Math.max(1, fresh)) * Math.PI * 2;
-        const radius = LINK_DISTANCE * (0.9 + fresh / 40);
-        x = origin.x + Math.cos(angle) * radius;
-        y = origin.y + Math.sin(angle) * radius;
-      }
-      nodes.push({
-        id: n.id,
-        label: n.id,
-        kind: classify(n.id),
-        community: Math.abs(hashStr(n.id)) % Math.max(1, counts.community_count || 8),
-        degree: typeof n.degree === 'number' ? n.degree : 0,
-        expanded: false,
-        isNew: true,
-        x,
-        y,
-        vx: 0,
-        vy: 0,
-        fx: null,
-        fy: null
-      });
-      placed++;
-    }
-    for (const t of payload?.triples ?? []) {
-      const key = tripleKey(t);
-      if (tripleKeys.has(key)) continue;
-      tripleKeys.add(key);
-      triples.push(t);
-    }
-  }
-
-  /** Give any node without a position a random one near the canvas centre. */
-  function scatterUnplaced() {
-    for (const n of nodes) {
-      if (n.x == null) n.x = width / 2 + (Math.random() - 0.5) * 240;
-      if (n.y == null) n.y = height / 2 + (Math.random() - 0.5) * 240;
-    }
-  }
-
-  function classify(label) {
-    if (typeof label !== 'string') return 'other';
-    if (label.startsWith('drawer:')) return 'drawer';
-    if (label.startsWith('tag:')) return 'tag';
-    if (label.startsWith('topic:')) return 'topic';
-    if (label.startsWith('room:')) return 'room';
-    return 'other';
-  }
-
-  /*
-   * Why: Tiny deterministic hash so node colors stay stable across reloads
-   * without pulling in an external dep.
-   * What: 32-bit djb2 variant returning a signed integer.
-   */
-  function hashStr(s) {
-    let h = 5381;
-    for (let i = 0; i < s.length; i++) {
-      h = ((h << 5) + h) ^ s.charCodeAt(i);
-    }
-    return h | 0;
+    const state = { nodes, triples, nodeIds, tripleKeys, nodeIndex, positions, pinned };
+    mergeIntoGraph(state, payload, originId, {
+      communityCount: counts.community_count,
+      width,
+      height,
+      linkDistance: LINK_DISTANCE
+    });
+    positions = state.positions;
+    pinned = state.pinned;
+    posVersion++;
   }
 
   // -------------------------------------------------------------------------
@@ -381,120 +358,97 @@
    * nodes that were already on screen means the existing layout is literally
    * frozen and only the new arrivals settle, so expansion reads as "the graph
    * grew here" rather than "the graph was replaced".
-   * What: pins every non-new node (fx/fy = current position), runs the sim for
-   * `steps` ticks, then releases the pins. Pin/pin pairs are skipped in the
+   * Why (#7116): the run itself now happens in a Web Worker and lands here one
+   * committed frame at a time, so a 1,242-node re-layout costs ~20 paints
+   * instead of 200 and never occupies the main thread between them.
+   * What: pins every non-new node, hands the whole graph to `runLayout`, and
+   * releases the pins when it finishes. Pin/pin pairs are skipped in the
    * repulsion loop since neither can move — that also keeps the O(n²) pass
    * proportional to the number of NEW nodes, not the total.
    */
   function relayout({ pinExisting, steps }) {
     stopSimulation();
-    scatterUnplaced();
-    if (pinExisting) {
-      for (const n of nodes) {
-        if (!n.isNew) {
-          n.fx = n.x;
-          n.fy = n.y;
-        }
-      }
-    }
-    const release = () => {
-      for (const n of nodes) {
-        if (pinExisting && !n.isNew) {
-          n.fx = null;
-          n.fy = null;
-        }
-        n.isNew = false;
-      }
-      nodes = nodes;
-    };
-    runLayout(steps, release);
-  }
-
-  function runLayout(steps, onDone) {
     if (nodes.length === 0) {
-      onDone?.();
+      layoutProgress = null;
       return;
     }
-    let step = 0;
-    simDone = onDone;
-    simHandle = setInterval(() => {
-      tick();
-      step++;
-      if (step >= steps) stopSimulation();
-    }, TICK_MS);
+
+    for (let i = 0; i < nodes.length; i++) {
+      pinned[i] = pinExisting && !nodes[i].isNew ? 1 : 0;
+    }
+
+    // #7116: clip the step count so a bigger palace cannot multiply the
+    // runtime quadratically, and say so rather than quietly doing less work.
+    const budget = stepBudgetFor(nodes.length, steps);
+    budgetNotice =
+      budget < steps
+        ? `Layout ran ${budget} of ${steps} settling passes because this graph ` +
+          `has ${nodes.length.toLocaleString()} nodes. Clusters are placed; ` +
+          `fine positioning is not converged.`
+        : null;
+
+    const { source, target } = linkIndices();
+    layoutProgress = { step: 0, total: budget };
+
+    simHandle = runLayout({
+      spec: {
+        count: nodes.length,
+        // The worker gets its own copy; `positions` stays ours to render from.
+        positions: positions.slice(0, nodes.length * 2),
+        linkSource: source,
+        linkTarget: target,
+        pinned: pinned.slice(0, nodes.length),
+        width,
+        height
+      },
+      steps: budget,
+      onFrame: commitFrame,
+      onDone: () => {
+        for (const n of nodes) n.isNew = false;
+        pinned.fill(0, 0, nodes.length);
+        layoutProgress = null;
+        simHandle = null;
+        loadElapsedMs = Math.round(performance.now() - loadStartedAt);
+      }
+    });
+  }
+
+  /*
+   * Why (#7116): THE fix. A committed frame writes coordinates into the plain
+   * `positions` array and bumps one counter. It does not touch `nodes`, so
+   * `links` and `shownDegree` — each a 5,000-element scan — are not re-derived,
+   * and the template updates only what actually moved.
+   */
+  function commitFrame(next, info) {
+    positions.set(next.subarray(0, Math.min(next.length, positions.length)));
+    posVersion++;
+    if (layoutProgress) layoutProgress = { step: info.step, total: info.total };
+  }
+
+  /** Rendered links as index pairs, which is what the simulation consumes. */
+  function linkIndices() {
+    const ls = links;
+    const source = new Int32Array(ls.length);
+    const target = new Int32Array(ls.length);
+    for (let i = 0; i < ls.length; i++) {
+      source[i] = ls[i].si;
+      target[i] = ls[i].ti;
+    }
+    return { source, target };
   }
 
   function stopSimulation() {
-    if (simHandle != null) {
-      clearInterval(simHandle);
-      simHandle = null;
-    }
-    const done = simDone;
-    simDone = null;
-    done?.();
+    simHandle?.cancel();
+    simHandle = null;
+    layoutProgress = null;
   }
 
-  function tick() {
-    if (nodes.length === 0) return;
-    const nodeIndex = new Map();
-    for (let i = 0; i < nodes.length; i++) nodeIndex.set(nodes[i].id, i);
-
-    // Repulsion — O(n²) pairwise, but pinned/pinned pairs are skipped because
-    // neither endpoint can move. During an expansion that reduces the real
-    // cost to (new × all), which is what keeps click-to-expand responsive.
-    for (let i = 0; i < nodes.length; i++) {
-      const ni = nodes[i];
-      for (let j = i + 1; j < nodes.length; j++) {
-        const nj = nodes[j];
-        if (ni.fx != null && nj.fx != null) continue;
-        const dx = nj.x - ni.x;
-        const dy = nj.y - ni.y;
-        let dist2 = dx * dx + dy * dy;
-        if (dist2 < 1) dist2 = 1;
-        const force = REPULSION / dist2;
-        const dist = Math.sqrt(dist2);
-        const fx = (dx / dist) * force;
-        const fy = (dy / dist) * force;
-        ni.vx -= fx;
-        ni.vy -= fy;
-        nj.vx += fx;
-        nj.vy += fy;
-      }
-    }
-
-    // Link spring — pull connected nodes toward LINK_DISTANCE apart.
-    for (const lk of links) {
-      const si = nodeIndex.get(lk.source);
-      const ti = nodeIndex.get(lk.target);
-      if (si == null || ti == null) continue;
-      const a = nodes[si];
-      const b = nodes[ti];
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const diff = (dist - LINK_DISTANCE) * 0.05;
-      const fx = (dx / dist) * diff;
-      const fy = (dy / dist) * diff;
-      a.vx += fx;
-      a.vy += fy;
-      b.vx -= fx;
-      b.vy -= fy;
-    }
-
-    // Centering — pull everything toward the canvas center so the layout
-    // doesn't drift off-screen.
-    const cx = width / 2;
-    const cy = height / 2;
-    for (const n of nodes) {
-      n.vx += (cx - n.x) * CENTER_STRENGTH;
-      n.vy += (cy - n.y) * CENTER_STRENGTH;
-      if (n.fx == null) n.x += n.vx;
-      if (n.fy == null) n.y += n.vy;
-      n.vx *= DAMPING;
-      n.vy *= DAMPING;
-    }
-
-    nodes = nodes;
+  /** Operator-facing cancel — keeps whatever positions were last committed. */
+  function cancelLayout() {
+    stopSimulation();
+    for (const n of nodes) n.isNew = false;
+    pinned.fill(0, 0, nodes.length);
+    loadElapsedMs = Math.round(performance.now() - loadStartedAt);
   }
 
   // -------------------------------------------------------------------------
@@ -517,11 +471,9 @@
     dragMoved = false;
     dragStart = { x: ev.clientX, y: ev.clientY };
     selectedId = id;
-    const node = nodeById.get(id);
-    if (node) {
-      node.fx = node.x;
-      node.fy = node.y;
-    }
+    // #7116: pin/position by index — coordinates no longer live on the node.
+    const idx = nodeIndex.get(id);
+    if (idx != null) pinned[idx] = 1;
     ev.stopPropagation();
   }
   function onSvgMove(ev) {
@@ -533,23 +485,18 @@
       dragMoved = true;
     }
     const pt = clientToSvg(ev.clientX, ev.clientY);
-    const node = nodeById.get(dragId);
-    if (node) {
-      node.fx = pt.x;
-      node.fy = pt.y;
-      node.x = pt.x;
-      node.y = pt.y;
-      nodes = nodes;
+    const idx = nodeIndex.get(dragId);
+    if (idx != null) {
+      positions[2 * idx] = pt.x;
+      positions[2 * idx + 1] = pt.y;
+      posVersion++;
     }
   }
   function onSvgUp() {
     if (dragId == null) return;
     const id = dragId;
-    const node = nodeById.get(id);
-    if (node) {
-      node.fx = null;
-      node.fy = null;
-    }
+    const idx = nodeIndex.get(id);
+    if (idx != null) pinned[idx] = 0;
     dragId = null;
     dragStart = null;
     if (!dragMoved) expandNode(id);
@@ -565,14 +512,25 @@
   // Derived views
   // -------------------------------------------------------------------------
 
-  /** id -> node, so link rendering and hit-testing are O(1) not O(n). */
+  /*
+   * #7116: everything in this block depends on `nodes` and `triples` — graph
+   * MEMBERSHIP — and on nothing positional. A committed layout frame bumps
+   * `posVersion` and leaves all of it alone, which is why ~20 frames of a
+   * 1,242-node layout no longer re-run a 5,000-element scan apiece.
+   */
+
+  /** id -> node, so hit-testing and the side panel are O(1) not O(n). */
   let nodeById = $derived.by(() => {
     const m = new Map();
     for (const n of nodes) m.set(n.id, n);
     return m;
   });
 
-  /** Rendered edges. Triples touching a node we have not loaded are dropped. */
+  /*
+   * Rendered edges, as INDEX pairs. Triples touching a node we have not loaded
+   * are dropped. Indices rather than ids because both the simulation and the
+   * edge-path builder look coordinates up by index.
+   */
   let links = $derived.by(() => {
     const out = [];
     // Gate on `nodeById` (reactive) rather than the plain `nodeIds` Set, so a
@@ -581,7 +539,10 @@
     for (const t of triples) {
       if (t.subject === t.object) continue;
       if (!present.has(t.subject) || !present.has(t.object)) continue;
-      out.push({ source: t.subject, target: t.object, predicate: t.predicate });
+      const si = nodeIndex.get(t.subject);
+      const ti = nodeIndex.get(t.object);
+      if (si == null || ti == null) continue;
+      out.push({ si, ti, source: t.subject, target: t.object, predicate: t.predicate });
     }
     return out;
   });
@@ -594,6 +555,38 @@
       m.set(l.target, (m.get(l.target) ?? 0) + 1);
     }
     return m;
+  });
+
+  /*
+   * The one reactive coordinate read. Reading `posVersion` here registers the
+   * dependency, so any template expression that goes through `frame` re-runs on
+   * a committed layout frame and nothing else does.
+   */
+  let frame = $derived.by(() => {
+    posVersion;
+    return positions;
+  });
+
+  /** True when edges render as one merged `<path>` rather than one per line. */
+  let mergedEdges = $derived(links.length > EDGE_PATH_THRESHOLD);
+
+  /*
+   * #7116: the merged form. One `d` attribute replaces 5,000 elements and the
+   * 20,000 coordinate writes that updating them cost. Arrow markers are the
+   * trade — at this density they were unreadable overlap anyway, and below the
+   * threshold the per-line renderer still draws them.
+   */
+  let edgePath = $derived.by(() => {
+    if (!mergedEdges) return '';
+    const p = frame;
+    const parts = [];
+    for (const l of links) {
+      parts.push(
+        `M${p[2 * l.si].toFixed(1)} ${p[2 * l.si + 1].toFixed(1)}` +
+          `L${p[2 * l.ti].toFixed(1)} ${p[2 * l.ti + 1].toFixed(1)}`
+      );
+    }
+    return parts.join('');
   });
 
   // Side-panel derived view: triples incident on the selected node that we
@@ -706,6 +699,35 @@
     <div class="state state-warn">{notice}</div>
   {/if}
 
+  <!--
+    #7116: the layout no longer blocks, so it needs to say it is running and
+    offer a way out. Cancel keeps whatever positions were last committed.
+  -->
+  {#if layoutProgress}
+    <div class="layout-progress">
+      <div class="layout-progress-row">
+        <span>
+          Laying out {nodes.length.toLocaleString()} nodes and
+          {links.length.toLocaleString()} edges — pass {layoutProgress.step} of
+          {layoutProgress.total}
+        </span>
+        <button type="button" class="back-link" onclick={cancelLayout}>cancel</button>
+      </div>
+      <div class="layout-progress-track">
+        <div
+          class="layout-progress-fill"
+          style={`width:${Math.round(
+            (layoutProgress.step / Math.max(1, layoutProgress.total)) * 100
+          )}%`}>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if budgetNotice}
+    <div class="state state-warn">{budgetNotice}</div>
+  {/if}
+
   {#if loading}
     <div class="state">Loading graph…</div>
   {:else if error}
@@ -740,24 +762,35 @@
               <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8" />
             </marker>
           </defs>
-          {#each links as l (l.source + '|' + l.predicate + '|' + l.target)}
-            {@const a = nodeById.get(l.source)}
-            {@const b = nodeById.get(l.target)}
-            {#if a && b}
+          <!--
+            #7116: two edge renderers. Above EDGE_PATH_THRESHOLD every edge is
+            one segment of a single `<path>`, so a layout frame writes one
+            attribute instead of updating 5,000 elements. Below it, one `<line>`
+            each, which keeps the direction arrows.
+          -->
+          {#if mergedEdges}
+            <path
+              d={edgePath}
+              fill="none"
+              stroke="#94a3b8"
+              stroke-width="1"
+              stroke-opacity="0.35" />
+          {:else}
+            {#each links as l (l.source + '|' + l.predicate + '|' + l.target)}
               <line
-                x1={a.x}
-                y1={a.y}
-                x2={b.x}
-                y2={b.y}
+                x1={frame[2 * l.si]}
+                y1={frame[2 * l.si + 1]}
+                x2={frame[2 * l.ti]}
+                y2={frame[2 * l.ti + 1]}
                 stroke="#94a3b8"
                 stroke-width="1"
                 stroke-opacity="0.55"
                 marker-end="url(#arrow)" />
-            {/if}
-          {/each}
-          {#each nodes as n (n.id)}
+            {/each}
+          {/if}
+          {#each nodes as n, i (n.id)}
             <g
-              transform={`translate(${n.x},${n.y})`}
+              transform={`translate(${frame[2 * i]},${frame[2 * i + 1]})`}
               onmousedown={(ev) => onNodeDown(ev, n.id)}
               onmouseenter={() => (hoverId = n.id)}
               onmouseleave={() => (hoverId = null)}
@@ -937,6 +970,34 @@
   .state-warn {
     color: var(--trusty-warn, #b45309);
     background: var(--trusty-warn-soft, #fffbeb);
+  }
+  /* #7116: layout-run progress. Foundry tokens only — no new palette. */
+  .layout-progress {
+    padding: var(--trusty-space-3) var(--trusty-space-4);
+    background: var(--trusty-surface-raised);
+    border: 1px solid var(--trusty-border);
+    border-radius: var(--trusty-radius);
+    margin-bottom: var(--trusty-space-3);
+  }
+  .layout-progress-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--trusty-space-3);
+    font-size: var(--trusty-fs-xs);
+    color: var(--trusty-text-secondary);
+    margin-bottom: var(--trusty-space-2);
+  }
+  .layout-progress-track {
+    height: var(--trusty-space-1);
+    background: var(--trusty-border);
+    border-radius: var(--trusty-radius-sm);
+    overflow: hidden;
+  }
+  .layout-progress-fill {
+    height: 100%;
+    background: var(--trusty-accent);
+    transition: width 120ms linear;
   }
   .layout {
     display: grid;
