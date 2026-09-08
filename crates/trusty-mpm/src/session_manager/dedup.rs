@@ -237,13 +237,48 @@ impl SessionManager {
                      resolves to an existing directory; refusing to decommission (#2306)"
                 );
                 continue;
+            } else {
+                // #3764 recheck (parity with the #3396 branch above):
+                // `plan_dedup`'s own live-group guard already refuses to
+                // select a loser out of a group where ANY member's
+                // `tmux_name` is in the `live_names` SNAPSHOT taken at the
+                // top of this function — but that snapshot can go stale in
+                // the time between the planning pass and this call (a
+                // resumed/reattached session, or a rename). Re-probe tmux
+                // directly, right here, immediately before the destructive
+                // call — never reuse the stale top-of-function snapshot for
+                // this check, or it could never catch the race it exists
+                // for. An unobservable tmux is refused the same way
+                // `observed_live_managed_names` refuses everywhere else: no
+                // record is decommissioned without positive evidence its
+                // session is gone.
+                let live_names = match self.observed_live_managed_names() {
+                    Ok(names) => names,
+                    Err(e) => {
+                        warn!(
+                            id = %id,
+                            "dedup: could not re-probe tmux liveness before decommission \
+                             ({e}); refusing to decommission without positive evidence (#3764)"
+                        );
+                        continue;
+                    }
+                };
+                if live_names.contains(&current.tmux_name) {
+                    warn!(
+                        id = %id,
+                        name = %current.tmux_name,
+                        "dedup: belt-and-suspenders skip — loser's tmux session is now live; \
+                         refusing to decommission an active session (#3764)"
+                    );
+                    continue;
+                }
             }
             // #3764: dedup's whole job is collapsing two records that name
             // the SAME workspace_path, which the ordinary #3764 guard cannot
             // tell apart from the #1744 cross-session collision it exists to
             // refuse. The tmux-liveness and workspace_owned rechecks above
-            // are the stronger signal dedup already applied — see
-            // `decommission_dedup_loser`'s doc.
+            // (both branches, now) are the stronger signal dedup already
+            // applied — see `decommission_dedup_loser`'s doc.
             match self.decommission_dedup_loser(id).await {
                 Ok((rec, _removed)) => {
                     info!(

@@ -20,22 +20,97 @@
 //! same directory?
 //! Test: `is_safe_to_remove_*` and `foreign_active_claim_*` unit tests below.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use tracing::warn;
 
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 
-/// Canonicalize `path`, falling back to the raw form on failure.
+/// Canonicalize `path`, resolving through the nearest EXISTING ancestor and
+/// lexically normalizing the remainder when the full path itself does not
+/// exist (#3764 review fix).
 ///
 /// Why: shared by both directions of the comparison
 /// [`foreign_active_claim`] makes — the candidate path AND every other
 /// record's `workspace_path`/`cwd` — so a canonicalize failure on either side
-/// degrades to a raw-string comparison instead of silently excusing the
-/// comparison entirely. A path that no longer exists on disk (already
-/// destroyed) must still be comparABLE by its last-known spelling.
-fn canon_or_raw(path: &Path) -> std::path::PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+/// must still produce a comparable value. A path that no longer exists on
+/// disk (already destroyed) must still be comparABLE by its last-known
+/// spelling. The original fallback (`path.to_path_buf()` verbatim) only
+/// achieved that for BYTE-IDENTICAL spellings: a phantom `Active` record
+/// naming the same directory via a `..` segment, or via a symlinked alias of
+/// a real ancestor directory, compared unequal to a cleanly-spelled candidate
+/// and silently slipped past the guard — fail-open in a check whose entire
+/// job is catching same-directory collisions the store does not enforce.
+/// What: if `path` exists, delegates to `fs::canonicalize` directly (resolves
+/// symlinks and normalizes `.`/`..` via the OS). If it does not, walks
+/// [`Path::ancestors`] to find the nearest ancestor that DOES exist,
+/// canonicalizes THAT ancestor (resolving any symlink in it), and re-appends
+/// the non-existent remainder — so a symlinked parent is still resolved even
+/// though the leaf under it is gone. Either way, lexically normalizes
+/// ([`normalize_lexically`]) the result to collapse `.` segments, `..`
+/// segments, duplicate separators, and a trailing separator — covering the
+/// case where no ancestor at all exists on this host (a fully phantom path),
+/// which has nothing to canonicalize against.
+/// Test: `foreign_active_claim_catches_a_nonexistent_path_spelled_with_a_trailing_slash`,
+/// `foreign_active_claim_catches_a_nonexistent_path_with_dot_dot_segments`,
+/// `foreign_active_claim_catches_a_nonexistent_path_through_a_symlinked_parent`.
+fn canon_or_raw(path: &Path) -> PathBuf {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return canon;
+    }
+    // `ancestors()` yields `path` itself first (already tried above and
+    // failed), then each parent up to the root — skip(1) starts at the
+    // nearest candidate PARENT.
+    for ancestor in path.ancestors().skip(1) {
+        if let (Ok(canon_ancestor), Ok(remainder)) =
+            (std::fs::canonicalize(ancestor), path.strip_prefix(ancestor))
+        {
+            return normalize_lexically(&canon_ancestor.join(remainder));
+        }
+    }
+    // Nothing on disk to canonicalize against at all — lexical normalization
+    // is the only comparison basis left.
+    normalize_lexically(path)
+}
+
+/// Lexically collapse `.` segments, `..` segments, and duplicate/trailing
+/// separators — WITHOUT touching the filesystem.
+///
+/// Why: [`canon_or_raw`] needs this both as its last-resort fallback (nothing
+/// on disk to canonicalize against) and to normalize the remainder re-appended
+/// after a partial (ancestor-only) canonicalization, which has not itself been
+/// through any `..`-collapsing.
+/// What: rebuilds `path` component-by-component: a `CurDir` (`.`) is dropped;
+/// a `ParentDir` (`..`) pops the previously-pushed component (mirroring the
+/// well-known cargo `normalize_path` lexical algorithm — never touches disk,
+/// so it can't tell a real directory from a dangling one, but that's exactly
+/// what makes it safe to run on a path that doesn't exist); every other
+/// component is pushed verbatim. Rebuilding via `Path::components()` already
+/// collapses duplicate and trailing separators, since that iterator never
+/// yields an empty segment.
+/// Test: exercised indirectly through `canon_or_raw`'s callers — a private
+/// helper with no externally-observable contract of its own.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut components = path.components().peekable();
+    let mut out = if let Some(prefix @ Component::Prefix(_)) = components.peek().copied() {
+        components.next();
+        PathBuf::from(prefix.as_os_str())
+    } else {
+        PathBuf::new()
+    };
+
+    for component in components {
+        match component {
+            Component::Prefix(_) => unreachable!("a Prefix can only ever be the first component"),
+            Component::RootDir => out.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(segment) => out.push(segment),
+        }
+    }
+    out
 }
 
 /// Does any `Active` session record OTHER than `self_id` also claim
@@ -348,6 +423,137 @@ mod tests {
 
         let self_id = ManagedSessionId::new();
         assert_eq!(foreign_active_claim(&unclaimed, &self_id, &[]), None);
+    }
+
+    // ── `canon_or_raw` fail-open regression coverage (#3764 review fix) ─────
+    //
+    // Every test below points the CANDIDATE (the path `foreign_active_claim`
+    // is asked about) at a leaf that never exists on disk — mirroring
+    // production, where `check_no_foreign_active_claim` is asked about the
+    // very record being decommissioned, whose `workspace_path` may already be
+    // gone. The old `canon_or_raw` fell back to the raw, un-normalized
+    // `PathBuf` on a canonicalize failure, so it only ever matched a phantom
+    // sibling record spelled BYTE-IDENTICALLY. Each test spells the sibling's
+    // `workspace_path` differently — a `..` segment, a trailing separator (via
+    // a symlinked alias so the difference survives `PathBuf`'s own trailing-
+    // slash normalization), and a symlinked-alias ancestor with no other
+    // spelling quirk — and asserts the collision is still caught.
+
+    /// A phantom sibling spelled with a trailing separator, reached through a
+    /// symlinked alias of the candidate's real ancestor, is still caught.
+    ///
+    /// Why: `PathBuf`'s own `Eq` already normalizes a bare trailing slash
+    /// away, so a trailing slash alone never distinguished old from new code.
+    /// Routing the trailing-slash spelling through a symlinked alias (built
+    /// the same way as
+    /// `foreign_active_claim_catches_a_nonexistent_path_through_a_symlinked_parent`)
+    /// keeps the two RAW strings genuinely different — `.../parent-alias/
+    /// workspace/` vs `.../parent-real/workspace` — so the old raw fallback
+    /// provably fails this case while the fix's ancestor canonicalization
+    /// (which resolves the symlink before comparing) provably catches it.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_catches_a_nonexistent_path_spelled_with_a_trailing_slash() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let parent_real = root.path().join("parent-real");
+        std::fs::create_dir_all(&parent_real).unwrap();
+        let parent_alias = root.path().join("parent-alias");
+        std::os::unix::fs::symlink(&parent_real, &parent_alias).unwrap();
+
+        // Neither leaf ever exists — both sides fall back to `canon_or_raw`'s
+        // failure branch.
+        let candidate = parent_real.join("workspace");
+        let phantom_spelling =
+            PathBuf::from(format!("{}/", parent_alias.join("workspace").display()));
+
+        let self_id = ManagedSessionId::new();
+        let other_id = ManagedSessionId::new();
+        let records = vec![record_at(
+            other_id,
+            ManagedSessionState::Active,
+            phantom_spelling,
+        )];
+
+        assert_eq!(
+            foreign_active_claim(&candidate, &self_id, &records),
+            Some(other_id),
+            "a phantom record reached via a symlinked alias, spelled with a \
+             trailing slash, must still be caught as the same directory"
+        );
+    }
+
+    /// A phantom sibling spelled with a `..` segment is still caught.
+    ///
+    /// Why: unlike a trailing slash, `PathBuf`'s own `Eq` never collapses a
+    /// literal `..` component — `/a/b/../c` and `/a/c` compare unequal even
+    /// though they name the same location. The old raw fallback therefore
+    /// missed this collision outright, with no symlink needed to prove it:
+    /// `sub` need not even exist for the phantom record's stored path to be
+    /// spelled through it.
+    /// What: `root` is the nearest EXISTING ancestor for both the candidate
+    /// (`root/target`) and the phantom (`root/sub/../target`, where `sub`
+    /// never exists) — the fix canonicalizes `root` for both and lexically
+    /// collapses the phantom's `..` segment, landing on the same value.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_catches_a_nonexistent_path_with_dot_dot_segments() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let candidate = root.path().join("target");
+        let phantom_spelling = root.path().join("sub").join("..").join("target");
+
+        let self_id = ManagedSessionId::new();
+        let other_id = ManagedSessionId::new();
+        let records = vec![record_at(
+            other_id,
+            ManagedSessionState::Active,
+            phantom_spelling,
+        )];
+
+        assert_eq!(
+            foreign_active_claim(&candidate, &self_id, &records),
+            Some(other_id),
+            "a phantom record spelled with a `..` segment must still be \
+             caught as the same directory"
+        );
+    }
+
+    /// A phantom sibling reached through a symlinked PARENT directory — no
+    /// spelling quirk beyond the alias itself — is still caught.
+    ///
+    /// Why: this isolates the ancestor-canonicalization half of the fix from
+    /// the lexical-normalization half the two tests above exercise. The
+    /// candidate's own ancestor, `parent-real`, is a real directory; the
+    /// phantom record names the SAME directory via `parent-alias`, a symlink
+    /// to `parent-real`, then a workspace leaf that never exists under
+    /// either name. Byte-for-byte, `.../parent-real/workspace` and
+    /// `.../parent-alias/workspace` are different strings — the old raw
+    /// fallback could not tell they name one physical directory.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_catches_a_nonexistent_path_through_a_symlinked_parent() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let parent_real = root.path().join("parent-real");
+        std::fs::create_dir_all(&parent_real).unwrap();
+        let parent_alias = root.path().join("parent-alias");
+        std::os::unix::fs::symlink(&parent_real, &parent_alias).unwrap();
+
+        let candidate = parent_real.join("workspace");
+        let phantom_spelling = parent_alias.join("workspace");
+
+        let self_id = ManagedSessionId::new();
+        let other_id = ManagedSessionId::new();
+        let records = vec![record_at(
+            other_id,
+            ManagedSessionState::Active,
+            phantom_spelling,
+        )];
+
+        assert_eq!(
+            foreign_active_claim(&candidate, &self_id, &records),
+            Some(other_id),
+            "a phantom record reached via a symlinked parent directory must \
+             still be caught as the same directory"
+        );
     }
 
     // ── is_safe_to_remove unit tests (#1511) ────────────────────────────────

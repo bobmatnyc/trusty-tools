@@ -842,12 +842,15 @@ impl SessionManager {
     /// indistinguishable, by path alone, from the #1744 cross-session
     /// collision `check_no_foreign_active_claim` refuses. Unlike that guard
     /// (which reads only the STORE's `state` field), dedup has already asked
-    /// the OS directly: it re-verifies immediately before this call that the
-    /// LOSER's own tmux session is not live and that it is not SM-owned (see
-    /// the call site in `dedup.rs`), which is a stronger and more accurate
-    /// liveness signal than a record's persisted `state`. Routing dedup's
-    /// call through the ordinary [`decommission`](Self::decommission) broke
-    /// `dedup_collapses_the_dead_sibling_when_tmux_answers` and
+    /// the OS directly: for BOTH the shapes it collapses, it re-verifies
+    /// immediately before this call — via a fresh tmux-liveness probe, not a
+    /// snapshot taken earlier in the pass (#3764 review fix, both call
+    /// sites in `dedup.rs`) — that the LOSER's own tmux session is not live;
+    /// the exact-workspace-duplicate (`#3396`) shape additionally rechecks
+    /// that the loser is not SM-owned. Either recheck is a stronger and more
+    /// accurate liveness signal than a record's persisted `state`. Routing
+    /// dedup's call through the ordinary [`decommission`](Self::decommission)
+    /// broke `dedup_collapses_the_dead_sibling_when_tmux_answers` and
     /// `reconcile_dedup_collapses_exact_workspace_duplicate_of_live_record` —
     /// the guard is correct to refuse an UNVERIFIED same-path collision, and
     /// wrong to refuse one dedup has already resolved.
@@ -856,7 +859,8 @@ impl SessionManager {
     /// preserves its existing no-op behavior here, matching every other
     /// dedup/reap call site).
     /// Test: `dedup_collapses_the_dead_sibling_when_tmux_answers`,
-    /// `reconcile_dedup_collapses_exact_workspace_duplicate_of_live_record`.
+    /// `reconcile_dedup_collapses_exact_workspace_duplicate_of_live_record`,
+    /// `dedup_skips_a_plan_dedup_loser_whose_tmux_went_live_before_act`.
     pub(crate) async fn decommission_dedup_loser(
         &self,
         id: &ManagedSessionId,

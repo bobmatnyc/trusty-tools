@@ -21,11 +21,13 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use chrono::{Duration, Utc};
 use tempfile::TempDir;
 
 use super::dedup::{is_resolved_existing, plan_dedup, plan_workspace_duplicates};
+use super::manager::{ManagedError, ManagedTmuxDriver};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::tests::FakeTmuxDriver;
 use crate::session_manager::SessionManager;
@@ -1151,6 +1153,117 @@ async fn dedup_collapses_the_dead_sibling_when_tmux_answers() {
     assert!(
         *fake.ensure_server_up_calls.lock().unwrap() >= 1,
         "the liveness query must run the server-up guard before listing"
+    );
+}
+
+/// A driver whose `list_sessions` answers DEAD on the first call, then LIVE
+/// from the second call onward.
+///
+/// Why: `plan_dedup`'s own live-group guard already refuses to select a
+/// loser out of any group where a member's `tmux_name` is in the SAME
+/// `live_names` snapshot used to plan — so proving the #3764 fresh re-probe
+/// actually fires needs a driver whose answer CHANGES between
+/// `dedup_stale_duplicates`'s one-time planning snapshot (call 1) and the
+/// per-loser recheck the fix adds (call 2), not a driver simply seeded live
+/// throughout.
+/// What: `list_sessions` returns `[]` once, then `[live_name]` for every
+/// subsequent call. `ensure_server_up` uses the trait default (`Ok(())`).
+/// Test: `dedup_skips_a_plan_dedup_loser_whose_tmux_went_live_before_act`.
+struct LateArrivalTmuxDriver {
+    calls: Mutex<u32>,
+    live_name: String,
+}
+
+impl ManagedTmuxDriver for LateArrivalTmuxDriver {
+    fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+
+    fn kill_session(&self, _name: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+
+    fn send_line(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+
+    fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+        Ok(String::new())
+    }
+
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        if *calls == 1 {
+            Ok(Vec::new())
+        } else {
+            Ok(vec![self.live_name.clone()])
+        }
+    }
+}
+
+/// A `plan_dedup` loser whose tmux session goes live between the planning
+/// snapshot and the act-time recheck is NOT decommissioned (#3764).
+///
+/// Why: pins the fix in `dedup_stale_duplicates`'s `plan_dedup` branch —
+/// before this fix that branch reached `decommission_dedup_loser` (which
+/// kills by live tmux name unconditionally) with no tmux-liveness recheck at
+/// all, unlike the sibling `#3396` (`workspace_dup_losers`) branch.
+/// What: two `/unknown`-only records share one `source_id`; `tm-old` is
+/// older so `plan_dedup` selects it as the loser and `tm-new` as the
+/// survivor — both read DEAD on `LateArrivalTmuxDriver`'s first
+/// `list_sessions` call, the one `dedup_stale_duplicates` uses to plan. Its
+/// second call (the fresh per-loser recheck this fix adds) reports `tm-old`
+/// live, so the loser must be skipped, not decommissioned.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn dedup_skips_a_plan_dedup_loser_whose_tmux_went_live_before_act() {
+    let dir = TempDir::new().unwrap();
+    let fake = std::sync::Arc::new(LateArrivalTmuxDriver {
+        calls: Mutex::new(0),
+        live_name: "tm-old".to_string(),
+    });
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    let old = rec(
+        "tm-old",
+        Some("proj"),
+        None,
+        ManagedSessionState::Stopped,
+        1,
+    );
+    let new = rec(
+        "tm-new",
+        Some("proj"),
+        None,
+        ManagedSessionState::Stopped,
+        50,
+    );
+    let old_id = old.id;
+    let new_id = new.id;
+    {
+        let mut store = mgr.store.write().await;
+        store.upsert(old).await.unwrap();
+        store.upsert(new).await.unwrap();
+    }
+
+    let mut to_resume = Vec::new();
+    let decommissioned = mgr.dedup_stale_duplicates(&mut to_resume).await.unwrap();
+
+    assert!(
+        decommissioned.is_empty(),
+        "the loser's tmux session went live before the destructive call and must be \
+         skipped: {decommissioned:?}"
+    );
+    assert_ne!(
+        mgr.get(&old_id).await.unwrap().state,
+        ManagedSessionState::Decommissioned,
+        "a loser whose tmux session is live at act time must survive"
+    );
+    assert_ne!(
+        mgr.get(&new_id).await.unwrap().state,
+        ManagedSessionState::Decommissioned,
+        "the survivor was never a loser"
     );
 }
 
