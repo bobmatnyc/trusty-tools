@@ -310,13 +310,15 @@ describe('production build', () => {
 	 * Why: the six markdown-driven flagship pages (#6960) can fail in a way no
 	 * other assertion here sees — the shell prerenders, the hero fills from the
 	 * tool record, and the BODY comes out empty because the markdown was not
-	 * read. The Cost savings section is asserted by name on top of that,
-	 * because it arrives through the include directive from a `docs/` file the
-	 * page's own markdown does not otherwise quote: it is the one piece of copy
-	 * that proves the include ran.
+	 * read. The Token savings section (renamed from "Cost savings" by #7179)
+	 * is asserted by name on top of that, because it arrives through the
+	 * include directive from a `docs/` file the page's own markdown does not
+	 * otherwise quote: it is the one piece of copy that proves the include ran.
 	 * What: for each markdown-driven slug, the rendered body's own prose read
 	 * off the built artifact; then the included section, and the same source
-	 * serving its `/docs` page too.
+	 * serving its `/docs` page too. The expected heading text is read from the
+	 * source doc itself rather than hardcoded a second time, so a future
+	 * rename only needs to happen once.
 	 */
 	it('renders each markdown-driven flagship body from its own source', () => {
 		const opening: Record<string, string> = {
@@ -334,21 +336,28 @@ describe('production build', () => {
 		}
 	});
 
-	it('renders the Cost savings section on /tools/trusty-mpm and at /docs', () => {
+	it('renders the Token savings section on /tools/trusty-mpm and at /docs', () => {
 		const source = 'docs/trusty-mpm/statusline-savings.md';
-		expect(existsSync(path.join(REPO_ROOT, source)), source).toBe(true);
+		const sourcePath = path.join(REPO_ROOT, source);
+		expect(existsSync(sourcePath), source).toBe(true);
+
+		// Read the expected heading text off the doc itself — the single source
+		// of truth for this section's title (renamed "Cost savings" -> "Token
+		// savings" by #7179) — rather than hardcoding it a second time here.
+		const heading = readFileSync(sourcePath, 'utf8').match(/^##\s+(.+)$/m)?.[1];
+		expect(heading, `${source} has no level-2 heading`).toBeDefined();
 
 		const tool = readFileSync(path.join(STATIC, 'tools/trusty-mpm.html'), 'utf8');
-		expect(tool, 'no Cost savings heading on the tool page').toContain('>Cost savings</h2>');
+		expect(tool, `no ${heading} heading on the tool page`).toContain(`>${heading}</h2>`);
 		expect(visibleText(tool), 'the section rendered as a bare heading').toContain(
-			'statusline is an estimate'
+			'still an estimate'
 		);
 		// One <h1> per page: the hero's. An included file's own title is dropped.
 		expect(tool.match(/<h1\b/g) ?? [], 'more than one h1').toHaveLength(1);
 
 		const docs = path.join(STATIC, 'docs/tools/trusty-mpm/statusline-savings.html');
 		expect(existsSync(docs), 'the same source has no /docs page').toBe(true);
-		expect(visibleText(readFileSync(docs, 'utf8'))).toContain('Cost savings');
+		expect(visibleText(readFileSync(docs, 'utf8'))).toContain(heading);
 	});
 
 	// Why: the failure mode a nested route actually has is a dead link — the

@@ -2,9 +2,10 @@
  * Why: the flagship pages are data now, so the failures worth pinning are the
  * ones a build could otherwise ship silently — a page rendering as an empty
  * frame, an include directive that resolved to nothing, or a link into a route
- * that stopped existing. The Cost savings case is asserted by name because it
- * is the whole point of the include mechanism: one `docs/` file publishing at
- * `/docs` and inside `/tools/trusty-mpm` at once.
+ * that stopped existing. The Token savings case (renamed from "Cost savings"
+ * by #7179) is asserted by name because it is the whole point of the include
+ * mechanism: one `docs/` file publishing at `/docs` and inside
+ * `/tools/trusty-mpm` at once.
  *
  * What: one pass over the real corpus in this repository, then a temp-repo
  * fixture per gate — the same shape `../docs/site.test.ts` uses, including its
@@ -19,6 +20,7 @@ import path from 'node:path';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { DocBuildError } from '../docs/errors';
+import { findRepoRoot, readRepoFile } from '../docs/repo';
 import { clearDocSiteCache } from '../docs/site';
 import { TOOLS } from '../tools';
 import { buildFlagshipContent, CONTENT_DIR, clearFlagshipContentCache } from './content';
@@ -107,12 +109,18 @@ describe('the real flagship corpus', () => {
 	/**
 	 * The include mechanism, end to end: the heading comes from a `docs/` file
 	 * this page never names in its own prose, and that file is published at
-	 * `/docs` in its own right.
+	 * `/docs` in its own right. The expected heading text is read from that
+	 * source doc itself (renamed "Cost savings" -> "Token savings" by #7179)
+	 * rather than hardcoded a second time here.
 	 */
-	it('carries the Cost savings section into the trusty-mpm page from docs/', () => {
+	it('carries the Token savings section into the trusty-mpm page from docs/', () => {
+		const source = 'docs/trusty-mpm/statusline-savings.md';
+		const heading = readRepoFile(findRepoRoot(), source).match(/^##\s+(.+)$/m)?.[1];
+		expect(heading, `${source} has no level-2 heading`).toBeDefined();
+
 		const mpm = built.get('trusty-mpm');
-		expect(mpm?.sources).toContain('docs/trusty-mpm/statusline-savings.md');
-		expect(mpm?.html).toContain('>Cost savings</h2>');
+		expect(mpm?.sources).toContain(source);
+		expect(mpm?.html).toContain(`>${heading}</h2>`);
 	});
 
 	/** The included file's own `/docs` page title must not survive the include. */
