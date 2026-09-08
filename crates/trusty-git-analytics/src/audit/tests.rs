@@ -852,6 +852,81 @@ async fn a_declared_absent_leg_is_named_in_the_gap_lines() {
     );
 }
 
+/// Issue #7132: a DD audit against 59 real GitHub repos shipped `pull_requests`
+/// empty in every one, with nothing on the report page saying PR collection
+/// was never attempted — `github.fetch_prs` defaults to `false`, and unlike
+/// the GitHub work-items leg above, the PR leg had no [`DeclaredSkip`].
+///
+/// Against the pre-fix code this fails at the last assertion: the `collect`
+/// stage reports `Succeeded` with an empty `pull_requests` table and the Gaps
+/// section says nothing about it — indistinguishable from an org with no PR
+/// history.
+#[tokio::test]
+async fn a_disabled_github_pr_leg_against_github_repos_is_named_in_the_gap_lines() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_path = dir.path().join("acme-service");
+    // `sshx://` is not a real transport, so this fails at git2's transport
+    // lookup with no network I/O — deterministic, same technique as
+    // `init_repo_with_dead_origin` above. It still names a `github.com` host,
+    // which is all `has_github_like_repos` inspects.
+    init_repo_with_dead_origin(&repo_path, "sshx://git@github.com/acme/acme-service.git");
+
+    // No `github:` block at all — the shape the issue's engagement used:
+    // repos cloned from GitHub, but no API config to fetch PRs with.
+    let mut config = Config::default();
+    config
+        .repositories
+        .push(crate::core::config::RepositoryConfig {
+            name: Some("acme-service".to_string()),
+            path: repo_path,
+            branch: None,
+            since_date: None,
+            until_date: None,
+            org: None,
+            head_only: false,
+            fetch_timeout_secs: None,
+        });
+
+    let mut db = Database::open(&dir.path().join("tga.db")).expect("open db");
+    let options = SweepOptions {
+        output: Some(dir.path().join("out")),
+        weeks: Some(1),
+    };
+    let stats = run_full_sweep(&config, &mut db, &options, None)
+        .await
+        .expect("sweep");
+
+    let collect = stats
+        .outcomes
+        .iter()
+        .find(|o| o.stage == SweepStage::Collect)
+        .expect("collect stage ran");
+    assert_eq!(
+        collect.status,
+        StageStatus::Succeeded,
+        "an unattempted PR leg must not fail the collect stage: {:?}",
+        collect.status
+    );
+
+    let lines = crate::audit::sweep_gap_lines(&stats, NO_SECRETS);
+    let declared = lines
+        .iter()
+        .find(|l| l.contains("GitHub pull requests"))
+        .unwrap_or_else(|| panic!("no Gaps line names the unattempted PR leg: {lines:#?}"));
+    assert!(
+        declared.contains("was not attempted"),
+        "the line must say the leg never ran: {declared}"
+    );
+    assert!(
+        declared.contains("fetch_prs"),
+        "the line must point at the config knob: {declared}"
+    );
+    assert!(
+        declared.contains("unassessed"),
+        "the line must mark the affected sections unassessed: {declared}"
+    );
+}
+
 /// A declared reason is text this process did not author — it is a config
 /// value, so it travels the same redaction path a stage message does. Also
 /// pins the ordering: failed stages, then stale repositories, then declared

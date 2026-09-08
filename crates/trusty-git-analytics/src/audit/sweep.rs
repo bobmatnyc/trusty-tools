@@ -234,10 +234,11 @@ pub async fn run_full_sweep(
 /// its stage `Succeeded` with empty tables, which reads on the page exactly
 /// like a leg that ran and found nothing. This is the recorded-skip half of
 /// #5620's split; the blind half is what the declaration replaces.
-/// What: one [`DeclaredSkip`] per declaring section. Only GitHub work items
-/// today — the other providers have no declarer, so adding one is a matching
-/// arm here rather than a redesign.
-/// Test: `super::tests::a_declared_absent_leg_is_named_in_the_gap_lines`.
+/// What: one [`DeclaredSkip`] per declaring section — GitHub work items (an
+/// operator-authored reason), plus GitHub pull requests (#7132, inferred: the
+/// leg is off by config default rather than by an explicit reason string).
+/// Test: `super::tests::a_declared_absent_leg_is_named_in_the_gap_lines`,
+/// `super::tests::a_disabled_github_pr_leg_against_github_repos_is_named_in_the_gap_lines`.
 fn record_declared_skips(stats: &mut AuditSweepStats, config: &Config) {
     if let Some(reason) = config
         .github
@@ -247,6 +248,22 @@ fn record_declared_skips(stats: &mut AuditSweepStats, config: &Config) {
         stats.record_declared_skip(DeclaredSkip {
             leg: "GitHub work items".to_owned(),
             reason: reason.to_owned(),
+        });
+    }
+
+    // #7132: `github.fetch_prs` defaults to `false`, so a config that never
+    // turns it on leaves `pull_requests` empty with the `collect` stage
+    // reporting `Succeeded` — indistinguishable, on the page, from an org
+    // with no PR history at all. Fire only against repos that actually look
+    // GitHub-hosted, so a GitLab/Bitbucket-only config stays silent.
+    let fetch_prs_on = config.github.as_ref().is_some_and(|gh| gh.fetch_prs);
+    if !fetch_prs_on && crate::collect::collector::has_github_like_repos(&config.repositories) {
+        stats.record_declared_skip(DeclaredSkip {
+            leg: "GitHub pull requests".to_owned(),
+            reason: "`github.fetch_prs` is not enabled (add a `github:` block with \
+                     `fetch_prs: true` and a token) even though a configured \
+                     repository's `origin` remote is a GitHub URL"
+                .to_owned(),
         });
     }
 }

@@ -1203,7 +1203,14 @@ impl CollectionPipeline {
 /// Test: covered indirectly — exercised by `tga collect` runs against
 /// real clones; pure-string parsing is covered by
 /// `crate::collect::github::client::extract_owner_repo_from_url`.
-fn has_github_like_repos(repositories: &[crate::core::config::RepositoryConfig]) -> bool {
+///
+/// `pub(crate)` since #7132: `audit::sweep::record_declared_skips` reuses this
+/// same detection to declare the "GitHub pull requests" leg absent when
+/// `github.fetch_prs` is off against GitHub-hosted repos, so the report names
+/// the gap instead of shipping an empty `pull_requests` table silently.
+pub(crate) fn has_github_like_repos(
+    repositories: &[crate::core::config::RepositoryConfig],
+) -> bool {
     for repo_cfg in repositories {
         let Ok(repo) = git2::Repository::open(&repo_cfg.path) else {
             continue;
