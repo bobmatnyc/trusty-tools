@@ -57,9 +57,11 @@ let _healthFailures = 0;
  * What: replaces the snapshot with the daemon's. A failure records its message
  * immediately but keeps the last good snapshot until
  * [`UNREACHABLE_AFTER_FAILURES`] consecutive failures have accrued; a success
- * resets the count.
- * Test: `src/lib/state.test.js` — `a failing status leaves health alone`,
- * `one failed poll does not flip the badge offline`.
+ * resets the count. Before the first success there is no snapshot to keep, so
+ * `_health` stays `null` and the topbar shows `connecting…`.
+ * Test: `src/lib/state.test.js` — `one failed poll does not flip the badge
+ * offline`, `a cold start below the threshold stays connecting, not offline`,
+ * `a cold start reaching the threshold reports unreachable`.
  */
 export async function refreshHealth() {
   try {
@@ -69,7 +71,10 @@ export async function refreshHealth() {
   } catch (e) {
     _healthFailures += 1;
     _healthError = e.message || String(e);
-    if (_healthFailures >= UNREACHABLE_AFTER_FAILURES || _health === null) {
+    // See #6155: the threshold is the only way in. A `_health === null`
+    // bypass here would flip the badge to `offline` on the first poll after
+    // mount, which is the false-offline report this issue exists to stop.
+    if (_healthFailures >= UNREACHABLE_AFTER_FAILURES) {
       _health = { status: 'unreachable', version: '' };
     }
   }

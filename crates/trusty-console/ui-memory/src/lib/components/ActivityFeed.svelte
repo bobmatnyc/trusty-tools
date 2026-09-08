@@ -236,6 +236,10 @@
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
+    // See #6155: dropping the queue loses at most one window of frames. The
+    // hidden-tab path forgoes the whole stream while hidden anyway, so
+    // flushing first would close the front of a far larger gap while paying
+    // the render this issue exists to avoid; `/api/v1/activity` is the archive.
     batcher.stop();
     if (source) {
       try {
