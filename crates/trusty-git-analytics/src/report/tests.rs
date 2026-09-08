@@ -1347,18 +1347,35 @@ fn persist_weekly_engineer_upserts_rows() {
 // #212: `compute_dora` computed `deploys` from merged PRs and never queried
 // `fact_deployments`, so a repo with real production deploy history reported
 // `deployment_frequency: 0.0` — identically to a repo with none.
+// #212 review round 2: a deploy can be measured while its lead time is not
+// (an unmatched `git_sha`) — `lead_time_hours: 0.0` must never be presented
+// as `"measured"` when it is really absent-or-proxied data.
 
-/// Insert one `fact_deployments` row (`environment='production',
-/// status='success'`, repo `"repo-a"` to match [`baseline_config`]).
-fn seed_deployment(db: &Database, deploy_id: &str, triggered_at: &str) {
+/// Insert one `fact_deployments` row for repo `"repo-a"` (matches
+/// [`baseline_config`]), with full control over `environment`/`status`/
+/// `git_sha` so tests can exercise the WHERE-clause filter and the lead-time
+/// commit link independently.
+fn seed_deployment_full(
+    db: &Database,
+    deploy_id: &str,
+    triggered_at: &str,
+    environment: &str,
+    status: &str,
+    git_sha: Option<&str>,
+) {
     db.connection()
         .execute(
             "INSERT INTO fact_deployments \
-                 (deploy_id, repo, environment, triggered_at, status) \
-             VALUES (?1, 'repo-a', 'production', ?2, 'success')",
-            rusqlite::params![deploy_id, triggered_at],
+                 (deploy_id, repo, environment, triggered_at, status, git_sha) \
+             VALUES (?1, 'repo-a', ?2, ?3, ?4, ?5)",
+            rusqlite::params![deploy_id, environment, triggered_at, status, git_sha],
         )
         .expect("insert fact_deployments row");
+}
+
+/// Insert a `production`/`success` row with no `git_sha` link.
+fn seed_deployment(db: &Database, deploy_id: &str, triggered_at: &str) {
+    seed_deployment_full(db, deploy_id, triggered_at, "production", "success", None);
 }
 
 #[test]
@@ -1366,8 +1383,19 @@ fn dora_reads_fact_deployments_when_populated() {
     // `seed_db()` seeds two commits a week apart (2024-01-15 .. 2024-01-22),
     // so the report period spans exactly those two ISO weeks and
     // `pull_requests` has zero rows — the pre-#212 proxy has nothing to count.
+    // One deploy links to commit `aaa111` (2h after it) so the classifier
+    // has a genuine measured lead time and isn't forced to `"low"` purely
+    // because the other 69 have no resolvable link.
     let db = seed_db();
-    for i in 0..70 {
+    seed_deployment_full(
+        &db,
+        "deploy-linked",
+        "2024-01-15T12:00:00+00:00",
+        "production",
+        "success",
+        Some("aaa111"),
+    );
+    for i in 0..69 {
         seed_deployment(&db, &format!("deploy-{i}"), "2024-01-18T00:00:00+00:00");
     }
 
@@ -1379,10 +1407,12 @@ fn dora_reads_fact_deployments_when_populated() {
         "70 production deploys in-period must not read as zero"
     );
     assert_eq!(dora.deployment_frequency_source, "fact_deployments");
+    assert_eq!(dora.lead_time_source, "measured");
+    assert_eq!(dora.lead_time_hours, Some(2.0));
     assert_ne!(
         dora.performance_level, "low",
-        "70 deploys / 2 weeks must not classify the way the zero-deploy \
-         proxy would"
+        "70 deploys / 2 weeks with a measured 2h lead must not classify the \
+         way the zero-deploy proxy would"
     );
 }
 
@@ -1396,6 +1426,8 @@ fn dora_falls_back_to_pr_proxy_when_fact_deployments_empty() {
 
     assert_eq!(dora.deployment_frequency, 0.0);
     assert_eq!(dora.deployment_frequency_source, "pr_merge_proxy");
+    assert_eq!(dora.lead_time_hours, None);
+    assert_eq!(dora.lead_time_source, "unmeasurable");
 }
 
 #[test]
@@ -1424,4 +1456,133 @@ fn dora_ignores_fact_deployments_rows_outside_the_period() {
         dora.deployment_frequency
     );
     assert_eq!(dora.deployment_frequency_source, "fact_deployments");
+}
+
+#[test]
+fn dora_falls_back_to_pr_proxy_when_all_fact_deployments_rows_are_outside_period() {
+    // Distinct from `dora_falls_back_to_pr_proxy_when_fact_deployments_empty`:
+    // the table is NOT empty, every row is simply outside the report period,
+    // which must resolve to the same proxy path as a genuinely empty table.
+    let db = seed_db();
+    for i in 0..4 {
+        seed_deployment(&db, &format!("out-{i}"), "2023-06-01T00:00:00+00:00");
+    }
+
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    let dora = data.dora.as_ref().expect("dora present");
+
+    assert_eq!(dora.deployment_frequency, 0.0);
+    assert_eq!(dora.deployment_frequency_source, "pr_merge_proxy");
+}
+
+#[test]
+fn dora_excludes_non_production_or_failed_deployment_rows() {
+    let db = seed_db();
+    // In-period, but excluded by `environment='production' AND
+    // status='success'`.
+    seed_deployment_full(
+        &db,
+        "staging-1",
+        "2024-01-18T00:00:00+00:00",
+        "staging",
+        "success",
+        None,
+    );
+    seed_deployment_full(
+        &db,
+        "failed-1",
+        "2024-01-18T01:00:00+00:00",
+        "production",
+        "failure",
+        None,
+    );
+    // The one row that should count.
+    seed_deployment(&db, "prod-success-1", "2024-01-18T02:00:00+00:00");
+
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    let dora = data.dora.as_ref().expect("dora present");
+
+    assert_eq!(dora.deployment_frequency_source, "fact_deployments");
+    assert!(
+        (dora.deployment_frequency - 0.5).abs() < 1e-9,
+        "only the production/success row should count: 1 deploy / 2 weeks = 0.5, got {}",
+        dora.deployment_frequency
+    );
+}
+
+#[test]
+fn dora_lead_time_falls_back_to_proxy_when_deploy_git_sha_is_unmatched() {
+    // Deploys are measured (frequency source stays `"fact_deployments"`),
+    // but every `git_sha` names a commit that doesn't exist. With merged-PR
+    // data available, lead time falls back to the PR proxy — never a bare
+    // `cycle_time_avg` mislabeled `"measured"`.
+    let db = seed_db();
+    seed_deployment_full(
+        &db,
+        "deploy-unmatched",
+        "2024-01-18T00:00:00+00:00",
+        "production",
+        "success",
+        Some("deadbeef"),
+    );
+    db.connection()
+        .execute(
+            "INSERT INTO pull_requests \
+                 (pr_number, title, author, state, created_at, merged_at) \
+             VALUES (1, 'pr', 'alice', 'merged', '2024-01-15T08:00:00+00:00', \
+                 '2024-01-15T10:00:00+00:00')",
+            [],
+        )
+        .expect("insert merged pr");
+
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    let dora = data.dora.as_ref().expect("dora present");
+
+    assert_eq!(dora.deployment_frequency_source, "fact_deployments");
+    assert_eq!(dora.lead_time_source, "proxy");
+    assert_eq!(dora.lead_time_hours, Some(2.0));
+}
+
+#[test]
+fn dora_lead_time_is_unmeasurable_when_no_deploy_link_and_no_prs() {
+    // This is the exact HIGH-severity repro from the round-1 review: deploys
+    // measured, zero PRs, no deploy names a resolvable commit — lead time
+    // must be `None`/`"unmeasurable"`, never `Some(0.0)` mislabeled
+    // `"measured"`.
+    let db = seed_db();
+    seed_deployment_full(
+        &db,
+        "deploy-unmatched",
+        "2024-01-18T00:00:00+00:00",
+        "production",
+        "success",
+        Some("deadbeef"),
+    );
+
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    let dora = data.dora.as_ref().expect("dora present");
+
+    assert_eq!(dora.deployment_frequency_source, "fact_deployments");
+    assert!(dora.deployment_frequency > 0.0);
+    assert_eq!(dora.lead_time_hours, None);
+    assert_eq!(dora.lead_time_source, "unmeasurable");
+}
+
+#[test]
+fn dora_marks_proxy_source_distinctly_when_fact_deployments_query_fails() {
+    // Simulates a pre-migration / corrupt DB missing `fact_deployments`
+    // entirely — distinct from a table that exists but has zero rows.
+    let db = seed_db();
+    db.connection()
+        .execute("DROP TABLE fact_deployments", [])
+        .expect("drop fact_deployments to simulate a missing/corrupt table");
+
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    let dora = data.dora.as_ref().expect("dora present");
+
+    assert_eq!(dora.deployment_frequency, 0.0);
+    assert_eq!(
+        dora.deployment_frequency_source,
+        "pr_merge_proxy_query_failed"
+    );
 }
