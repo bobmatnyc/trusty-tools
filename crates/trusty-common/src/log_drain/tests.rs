@@ -1237,6 +1237,294 @@ async fn run_once_counts_oversize_without_uploading() {
     );
 }
 
+// ── #6536: prune_after_upload ────────────────────────────────────────────────
+
+fn entry_uploaded_ago(relative_file: &str, ago: chrono::Duration) -> ManifestEntry {
+    ManifestEntry {
+        relative_file: relative_file.to_string(),
+        size: 10,
+        mtime_unix: 0,
+        sha256: "deadbeef".to_string(),
+        uploaded_at: (chrono::Utc::now() - ago).to_rfc3339(),
+    }
+}
+
+#[test]
+fn manifest_prunable_selects_only_entries_past_retention() {
+    let mut manifest = DrainManifest::default();
+    manifest.record(entry_uploaded_ago(
+        "trusty-mpm/old.log",
+        chrono::Duration::days(40),
+    ));
+    manifest.record(entry_uploaded_ago(
+        "trusty-mpm/new.log",
+        chrono::Duration::days(1),
+    ));
+
+    let prunable = manifest.prunable(
+        chrono::Utc::now(),
+        std::time::Duration::from_secs(30 * 86400),
+    );
+
+    assert_eq!(
+        prunable,
+        vec!["trusty-mpm/old.log".to_string()],
+        "only the entry past the 30-day retention window is a candidate"
+    );
+}
+
+#[test]
+fn manifest_prunable_ignores_an_unparsable_timestamp() {
+    let mut manifest = DrainManifest::default();
+    manifest.record(ManifestEntry {
+        relative_file: "trusty-mpm/weird.log".to_string(),
+        size: 10,
+        mtime_unix: 0,
+        sha256: "deadbeef".to_string(),
+        uploaded_at: "not-a-timestamp".to_string(),
+    });
+
+    let prunable = manifest.prunable(chrono::Utc::now(), std::time::Duration::from_secs(0));
+
+    assert!(
+        prunable.is_empty(),
+        "an unparsable uploaded_at is never a prune candidate — fail closed"
+    );
+}
+
+#[test]
+fn manifest_remove_entry_drops_it() {
+    let mut manifest = DrainManifest::default();
+    manifest.record(entry_uploaded_ago(
+        "trusty-mpm/a.log",
+        chrono::Duration::zero(),
+    ));
+
+    assert!(manifest.remove_entry("trusty-mpm/a.log"));
+    assert!(manifest.entries.is_empty());
+    assert!(
+        !manifest.remove_entry("trusty-mpm/a.log"),
+        "removing an already-absent entry reports false"
+    );
+}
+
+#[tokio::test]
+async fn prune_confirmed_deletes_object_and_manifest_entry() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    write(&logs.path().join("a.log"), "line one\n");
+
+    let dest = file_dest(dest_root.path()).await;
+    let cfg = DrainConfig::new(state.path());
+    let t = target();
+    run_once(&cfg, &dest, &t, &[source(logs.path(), None)])
+        .await
+        .expect("run_once uploads a.log");
+
+    let key = "trusty-mpm/a.log".to_string();
+    let outcome = prune_confirmed(&dest, &t, state.path(), std::slice::from_ref(&key))
+        .await
+        .expect("prune_confirmed");
+
+    assert_eq!(outcome.pruned, 1);
+    assert!(outcome.errors.is_empty());
+    assert!(
+        dest.head(&t.object_key(&key))
+            .await
+            .expect("head")
+            .is_none(),
+        "the destination object is gone"
+    );
+    let manifest = remote_manifest(&dest, &t).await;
+    assert!(
+        manifest.entries.is_empty(),
+        "the manifest entry is dropped in the same pass — #6548's spot-check must never see it"
+    );
+}
+
+#[tokio::test]
+async fn prune_confirmed_ignores_a_key_the_manifest_no_longer_lists() {
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    let dest = file_dest(dest_root.path()).await;
+    let t = target();
+
+    let outcome = prune_confirmed(
+        &dest,
+        &t,
+        state.path(),
+        &["trusty-mpm/never-uploaded.log".to_string()],
+    )
+    .await
+    .expect("prune_confirmed");
+
+    assert_eq!(outcome.pruned, 0);
+    assert!(outcome.errors.is_empty());
+}
+
+// ── #7154: the per-tick sanity cap on a confirmed prune batch ──────────────
+
+/// Write a manifest with `n` synthetic entries directly to `dest`, bypassing
+/// real uploads — `prune_confirmed` only ever reads the manifest and deletes
+/// by key, so a synthetic entry is exactly as good a fixture as a real one.
+/// The cache key passed to `save` is arbitrary: [`DrainManifest::load`] always
+/// tries the remote copy first, so nothing here depends on it matching
+/// `DrainTarget::cache_key`'s real value.
+async fn synthetic_manifest(
+    dest: &dyn LogDestination,
+    state_dir: &Path,
+    t: &DrainTarget,
+    n: usize,
+) -> Vec<String> {
+    let mut manifest = DrainManifest::default();
+    let confirm: Vec<String> = (0..n).map(|i| format!("trusty-mpm/{i}.log")).collect();
+    for relative_file in &confirm {
+        manifest.record(ManifestEntry {
+            relative_file: relative_file.clone(),
+            size: 1,
+            mtime_unix: 0,
+            sha256: "deadbeef".to_string(),
+            uploaded_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+    manifest
+        .save(dest, state_dir, &t.manifest_key(), "synthetic-cache-key")
+        .await
+        .expect("synthetic manifest saves");
+    confirm
+}
+
+#[tokio::test]
+async fn prune_confirmed_refuses_a_batch_over_the_count_ceiling() {
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    let dest = file_dest(dest_root.path()).await;
+    let t = target();
+
+    // Well under the 50% fraction ceiling, so only the count ceiling can fire.
+    let confirm = synthetic_manifest(&dest, state.path(), &t, PRUNE_BATCH_COUNT_CEILING + 1).await;
+
+    let outcome = prune_confirmed(&dest, &t, state.path(), &confirm)
+        .await
+        .expect("prune_confirmed");
+
+    assert_eq!(outcome.pruned, 0, "a refused batch deletes nothing");
+    assert!(outcome.errors.is_empty());
+    let refusal = outcome
+        .refused
+        .expect("a batch over the count ceiling must be refused");
+    assert_eq!(refusal.reason, PruneRefusalReason::CountCeiling);
+    assert_eq!(refusal.batch_len, confirm.len());
+    assert_eq!(refusal.manifest_len, confirm.len());
+}
+
+#[tokio::test]
+async fn prune_confirmed_refuses_a_batch_over_the_fraction_ceiling() {
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    let dest = file_dest(dest_root.path()).await;
+    let t = target();
+
+    // 100 entries, well under the count ceiling; confirming 51 of them (51%)
+    // trips the fraction ceiling alone.
+    let all = synthetic_manifest(&dest, state.path(), &t, 100).await;
+    let confirm = all[..51].to_vec();
+
+    let outcome = prune_confirmed(&dest, &t, state.path(), &confirm)
+        .await
+        .expect("prune_confirmed");
+
+    assert_eq!(outcome.pruned, 0, "a refused batch deletes nothing");
+    assert!(outcome.errors.is_empty());
+    let refusal = outcome
+        .refused
+        .expect("a batch over half the manifest must be refused");
+    assert_eq!(refusal.reason, PruneRefusalReason::FractionCeiling);
+    assert_eq!(refusal.batch_len, 51);
+    assert_eq!(refusal.manifest_len, 100);
+}
+
+#[tokio::test]
+async fn prune_confirmed_prunes_a_batch_under_both_ceilings() {
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    let dest = file_dest(dest_root.path()).await;
+    let t = target();
+
+    let all = synthetic_manifest(&dest, state.path(), &t, 100).await;
+    let confirm = all[..40].to_vec();
+
+    let outcome = prune_confirmed(&dest, &t, state.path(), &confirm)
+        .await
+        .expect("prune_confirmed");
+
+    assert!(
+        outcome.refused.is_none(),
+        "40% of the manifest, well under 500 entries, must proceed"
+    );
+    assert_eq!(outcome.pruned, 40);
+    assert!(outcome.errors.is_empty());
+}
+
+#[test]
+fn prune_batch_refusal_over_the_count_ceiling() {
+    let refusal = prune_batch_refusal(PRUNE_BATCH_COUNT_CEILING + 1, 10_000)
+        .expect("a batch over the count ceiling is refused");
+    assert_eq!(refusal.reason, PruneRefusalReason::CountCeiling);
+}
+
+#[test]
+fn prune_batch_refusal_over_the_fraction_ceiling() {
+    let refusal =
+        prune_batch_refusal(51, 100).expect("a batch over half a large manifest is refused");
+    assert_eq!(refusal.reason, PruneRefusalReason::FractionCeiling);
+}
+
+#[test]
+fn prune_batch_refusal_allows_a_small_manifest_at_any_fraction() {
+    assert!(
+        prune_batch_refusal(PRUNE_FRACTION_FLOOR, PRUNE_FRACTION_FLOOR).is_none(),
+        "a manifest at the floor is exempt from the fraction ceiling even at 100%"
+    );
+}
+
+#[test]
+fn prune_batch_refusal_allows_a_batch_under_both_ceilings() {
+    assert!(prune_batch_refusal(40, 100).is_none());
+}
+
+#[tokio::test]
+async fn prunable_candidates_never_names_a_file_that_failed_to_upload() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    write(&logs.path().join("a.log"), "healthy\n");
+    write(&logs.path().join("b.log"), "unhealthy\n");
+
+    let dest = FailingDestination {
+        inner: file_dest(dest_root.path()).await,
+        fail_on: "trusty-mpm/b.log".to_string(),
+    };
+    let cfg = DrainConfig::new(state.path());
+    let t = target();
+    let report = run_once(&cfg, &dest, &t, &[source(logs.path(), None)])
+        .await
+        .expect("a per-file failure must not fail the run");
+    assert_eq!(report.uploaded, 1, "a.log uploaded; b.log failed");
+
+    let candidates =
+        prunable_candidates(&dest, &t, state.path(), std::time::Duration::from_secs(0))
+            .await
+            .expect("prunable_candidates");
+
+    assert_eq!(
+        candidates,
+        vec!["trusty-mpm/a.log".to_string()],
+        "the failed upload never got a manifest entry, so it is never a prune candidate"
+    );
+}
+
 // ── #6547: streaming, and skip decisions made once ──────────────────────────
 
 /// Read the destination's own manifest object.
@@ -1576,10 +1864,13 @@ async fn run_once_collects_per_file_errors_without_aborting() {
     assert!(report.errors[0].0.ends_with("trusty-mpm/a.log"));
 }
 
-/// A destination that fails `put` for one key and delegates everything else.
+/// A destination that fails `put` and `delete` for one key and delegates
+/// everything else.
 ///
 /// Proves [`run_once`] collects a per-file error and CONTINUES the batch —
-/// the behaviour that stops one unreadable file stranding every other log.
+/// the behaviour that stops one unreadable file stranding every other log —
+/// and, via the `delete` injection (#7154), that [`prune_confirmed`] keeps a
+/// manifest entry whose object it could not actually remove.
 #[derive(Debug)]
 struct FailingDestination {
     inner: ObjectStoreDestination,
@@ -1610,9 +1901,72 @@ impl LogDestination for FailingDestination {
         self.inner.list(prefix).await
     }
 
+    async fn delete(&self, key: &str) -> Result<(), DrainError> {
+        if key.ends_with(&self.fail_on) {
+            return Err(DrainError::Manifest {
+                key: key.to_string(),
+                reason: "injected failure".to_string(),
+            });
+        }
+        self.inner.delete(key).await
+    }
+
     fn cache_namespace(&self) -> &str {
         self.inner.cache_namespace()
     }
+}
+
+/// A delete failure keeps both the object and its manifest entry (#7154):
+/// [`prune_confirmed`] must never let the manifest claim an object is gone
+/// when the destination still has it.
+#[tokio::test]
+async fn prune_confirmed_keeps_the_entry_when_delete_fails() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    write(&logs.path().join("a.log"), "line one\n");
+
+    let inner = file_dest(dest_root.path()).await;
+    let cfg = DrainConfig::new(state.path());
+    let t = target();
+    run_once(&cfg, &inner, &t, &[source(logs.path(), None)])
+        .await
+        .expect("run_once uploads a.log");
+
+    let key = "trusty-mpm/a.log".to_string();
+    let dest = FailingDestination {
+        inner,
+        fail_on: key.clone(),
+    };
+
+    let outcome = prune_confirmed(&dest, &t, state.path(), std::slice::from_ref(&key))
+        .await
+        .expect("prune_confirmed");
+
+    assert_eq!(
+        outcome.pruned, 0,
+        "a delete failure must never be counted as pruned"
+    );
+    assert_eq!(
+        outcome.errors.len(),
+        1,
+        "the delete failure is recorded, not raised"
+    );
+    assert!(outcome.errors[0].0.ends_with(&key));
+
+    assert!(
+        dest.head(&t.object_key(&key))
+            .await
+            .expect("head")
+            .is_some(),
+        "the object a failed delete could not remove is still at the destination"
+    );
+    let manifest = remote_manifest(&dest, &t).await;
+    assert_eq!(
+        manifest.entries.len(),
+        1,
+        "the manifest entry survives a failed delete — the destination still has the object"
+    );
 }
 
 // ── gated real-S3 smoke ─────────────────────────────────────────────────────

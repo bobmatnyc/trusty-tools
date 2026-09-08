@@ -13,6 +13,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::core::trusty_tools_config::LogDrainConfig;
+use crate::session_manager::RetentionDebounce;
 
 /// The `<owner>/<project>` every fixture config drains under.
 ///
@@ -139,7 +140,7 @@ async fn a_successful_tick_uploads_and_records_success() {
 
     let config = enabled_config(&dest, &logs);
     let plan = plan_of(&config, tmp.path());
-    let status = run_tick(&plan, &state).await;
+    let status = run_tick(&plan, &state, &mut RetentionDebounce::new()).await;
 
     assert_eq!(status.outcome, DrainOutcome::Success, "{}", status.detail);
     assert_eq!(status.uploaded, 1, "{}", status.detail);
@@ -171,10 +172,10 @@ async fn a_second_tick_dedupes() {
 
     let config = enabled_config(&dest, &logs);
     let plan = plan_of(&config, tmp.path());
-    let first = run_tick(&plan, &state).await;
+    let first = run_tick(&plan, &state, &mut RetentionDebounce::new()).await;
     assert_eq!(first.uploaded, 1, "{}", first.detail);
 
-    let second = run_tick(&plan, &state).await;
+    let second = run_tick(&plan, &state, &mut RetentionDebounce::new()).await;
     assert_eq!(second.outcome, DrainOutcome::Success, "{}", second.detail);
     assert_eq!(second.uploaded, 0, "{}", second.detail);
     assert_eq!(second.skipped_unchanged, 1, "{}", second.detail);
@@ -198,7 +199,7 @@ async fn a_ceiling_skip_is_decided_once_across_ticks() {
         .expect("fixture section")
         .max_file_bytes = Some(1024);
     let plan = plan_of(&config, tmp.path());
-    let first = run_tick(&plan, &state).await;
+    let first = run_tick(&plan, &state, &mut RetentionDebounce::new()).await;
     assert_eq!(first.outcome, DrainOutcome::Success, "{}", first.detail);
     assert_eq!(first.uploaded, 0, "{}", first.detail);
     assert!(
@@ -209,7 +210,7 @@ async fn a_ceiling_skip_is_decided_once_across_ticks() {
         first.detail
     );
 
-    let second = run_tick(&plan, &state).await;
+    let second = run_tick(&plan, &state, &mut RetentionDebounce::new()).await;
     assert!(
         second
             .detail
@@ -237,7 +238,7 @@ async fn the_wire_ceiling_reaches_the_drain_config() {
     let plan = plan_of(&config, tmp.path());
     assert_eq!(plan.max_wire_bytes, 8);
 
-    let status = run_tick(&plan, &state).await;
+    let status = run_tick(&plan, &state, &mut RetentionDebounce::new()).await;
     assert_eq!(status.uploaded, 0, "{}", status.detail);
     assert!(
         status
@@ -269,7 +270,7 @@ async fn two_destinations_each_get_their_own_pass() {
         "two groups, one per destination"
     );
 
-    let status = run_tick(&plan, &state).await;
+    let status = run_tick(&plan, &state, &mut RetentionDebounce::new()).await;
     assert_eq!(status.outcome, DrainOutcome::Success, "{}", status.detail);
     assert_eq!(status.uploaded, 2, "{}", status.detail);
     assert_eq!(status.destinations.len(), 2);
@@ -310,7 +311,7 @@ async fn one_failing_destination_does_not_stop_the_others() {
 
     let config = two_destination_config(&dest_a, &logs_a, &dest_b, &logs_b);
     let plan = plan_of(&config, tmp.path());
-    let status = run_tick(&plan, &state).await;
+    let status = run_tick(&plan, &state, &mut RetentionDebounce::new()).await;
 
     // The tick as a whole failed, but the reachable destination still drained.
     assert_eq!(status.outcome, DrainOutcome::Failed, "{}", status.detail);
@@ -347,7 +348,7 @@ async fn a_failing_destination_records_failed() {
 
     let config = enabled_config(&dest, &logs);
     let plan = plan_of(&config, tmp.path());
-    let status = run_tick(&plan, &state).await;
+    let status = run_tick(&plan, &state, &mut RetentionDebounce::new()).await;
 
     // The fail-open guard: a destination that cannot be reached must never
     // record a drained pass.
@@ -411,7 +412,7 @@ async fn a_tick_over_only_disabled_sources_names_the_empty_plan() {
     );
     assert_eq!(plan.disabled.len(), 1);
 
-    let status = run_tick(&plan, &state).await;
+    let status = run_tick(&plan, &state, &mut RetentionDebounce::new()).await;
     assert_eq!(status.outcome, DrainOutcome::Success, "{}", status.detail);
     assert_eq!(status.detail, "no destination had any source configured");
     assert!(status.destinations.is_empty());
@@ -518,7 +519,7 @@ async fn a_disabled_source_uploads_nothing_and_is_still_reported() {
     assert_eq!(plan.disabled.len(), 1);
     assert_eq!(plan.disabled[0].crate_name, "trusty-code");
 
-    let status = run_tick(&plan, &state).await;
+    let status = run_tick(&plan, &state, &mut RetentionDebounce::new()).await;
     assert_eq!(status.outcome, DrainOutcome::Success, "{}", status.detail);
     assert_eq!(status.uploaded, 1, "{}", status.detail);
     assert!(drained_path(&dest, "trusty-mpm", "alpha.log").exists());
@@ -580,7 +581,7 @@ async fn the_object_key_comes_from_the_source_root_s_git_origin() {
         "duettoresearch/pricing"
     );
 
-    let status = run_tick(&plan, &state).await;
+    let status = run_tick(&plan, &state, &mut RetentionDebounce::new()).await;
     assert_eq!(status.outcome, DrainOutcome::Success, "{}", status.detail);
     assert_eq!(status.uploaded, 1, "{}", status.detail);
 

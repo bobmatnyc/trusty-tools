@@ -273,7 +273,7 @@ pub(super) fn workspace_needs_protection(
         || probe(&p.join(super::decommission::WORKTREE_SENTINEL_FILE)).unwrap_or(true)
 }
 
-/// Two-observation gate before a record may be evicted.
+/// Two-observation gate before a candidate may be acted on destructively.
 ///
 /// Why: the sibling destructive sweeps in the same orphan-GC tick
 /// (`orphan_gc::OrphanGc`, `core::pid_registry::PidOrphanGc`) each require a
@@ -287,32 +287,50 @@ pub(super) fn workspace_needs_protection(
 /// against a 24-hour window and rules that case out. #5327 kept it unchanged
 /// and unrelaxed: shortening the window makes this sweep act sooner, which
 /// raises what a single stale observation costs rather than lowering it.
+///
+/// Generic since #6536: the log-drain scheduler's `prune_after_upload` gates a
+/// remote object delete on the same two-tick shape, keyed by a candidate that
+/// is a manifest identity rather than a [`ManagedSessionId`] — genericising
+/// over `T` let it reuse this exact gate instead of a second implementation of
+/// the same contract (this project's common-entry-point rule).
 /// What: [`Self::confirm`] returns the candidates that were ALSO candidates on
-/// the previous call, then re-arms with the current set — so a record that
-/// stops being a candidate (reactivated, workspace remounted) disarms itself.
-/// Owned by the caller across ticks, exactly like its two siblings.
+/// the previous call, then re-arms with the current set — so a candidate that
+/// stops qualifying (reactivated, workspace remounted, re-uploaded) disarms
+/// itself. Owned by the caller across ticks, exactly like its two siblings.
 /// Test: `debounce_requires_two_consecutive_observations`,
 /// `debounce_disarms_a_candidate_that_lapses`,
 /// `sweep_spares_a_record_whose_worktree_appears_between_sweeps`.
-#[derive(Debug, Default)]
-pub struct RetentionDebounce {
-    armed: std::collections::HashSet<ManagedSessionId>,
+#[derive(Debug)]
+pub struct RetentionDebounce<T> {
+    armed: std::collections::HashSet<T>,
 }
 
-impl RetentionDebounce {
-    /// A gate with nothing armed — nothing can be evicted on the first tick.
+impl<T> Default for RetentionDebounce<T> {
+    fn default() -> Self {
+        Self {
+            armed: std::collections::HashSet::new(),
+        }
+    }
+}
+
+impl<T> RetentionDebounce<T>
+where
+    T: Eq + std::hash::Hash + Clone,
+{
+    /// A gate with nothing armed — nothing can be acted on during the first
+    /// tick that offers it as a candidate.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Return the candidates seen on the previous call too, and re-arm.
-    pub fn confirm(&mut self, candidates: &[ManagedSessionId]) -> Vec<ManagedSessionId> {
-        let confirmed: Vec<ManagedSessionId> = candidates
+    pub fn confirm(&mut self, candidates: &[T]) -> Vec<T> {
+        let confirmed: Vec<T> = candidates
             .iter()
             .filter(|id| self.armed.contains(id))
-            .copied()
+            .cloned()
             .collect();
-        self.armed = candidates.iter().copied().collect();
+        self.armed = candidates.iter().cloned().collect();
         confirmed
     }
 }
@@ -363,7 +381,7 @@ impl SessionManager {
         &self,
         now: DateTime<Utc>,
         retention: Duration,
-        debounce: &mut RetentionDebounce,
+        debounce: &mut RetentionDebounce<ManagedSessionId>,
     ) -> Result<RetentionOutcome, ManagedError> {
         // Phase 1 — snapshot. Reload under a brief write lock, then snapshot via
         // the I/O-free `cached_all()` under a read lock (`reap_aged_ephemeral`'s
@@ -497,7 +515,7 @@ impl SessionManager {
     /// Test: covered through `sweep_terminal_records`'s own tests.
     pub async fn sweep_default_retention(
         &self,
-        debounce: &mut RetentionDebounce,
+        debounce: &mut RetentionDebounce<ManagedSessionId>,
     ) -> Result<RetentionOutcome, ManagedError> {
         let window = Duration::days(TERMINAL_RECORD_RETENTION_DAYS);
         self.sweep_terminal_records(Utc::now(), window, debounce)
