@@ -38,17 +38,28 @@ use crate::core::doctor::{CheckStatus, DoctorCheck};
 /// exists, naming what was found and the one-line remediation; `Ok` when
 /// neither is present. `home` is the base to resolve both paths under (the real
 /// home in production, a temp dir in tests).
+///
+/// #7102: the remediation it prints must be one that actually clears it. It
+/// used to offer `tm install`, whose skill step wrote this same directory, so
+/// following the advice reproduced the warning; the installer now deploys
+/// bundled skills to the managed tier only
+/// ([`crate::core::skill_install_tiers::deploy_install_skill_tiers`]) and the
+/// text says to delete the copies.
 /// Test: `legacy_sources_ok_when_absent`, `legacy_sources_warns_on_tm_skills`,
-/// `legacy_sources_warns_on_claude_config`.
+/// `legacy_sources_warns_on_claude_config`,
+/// `legacy_sources_ok_after_the_install_deploy`.
 pub(super) fn check_legacy_instruction_sources(home: &Path) -> DoctorCheck {
     let mut findings: Vec<String> = Vec::new();
 
     let tm_skill_count = count_legacy_tm_skills(&home.join(".claude").join("skills"));
     if tm_skill_count > 0 {
+        // #7102: the old text said "remove them or run `tm install` to refresh",
+        // and `tm install` wrote this very directory — so the remediation
+        // reproduced the finding. Removal is now the whole fix.
         findings.push(format!(
             "{tm_skill_count} `tm-*` skill copy(ies) in ~/.claude/skills (legacy global \
-             deploy — remove them or run `tm install` to refresh; project-local \
-             .claude/skills is now authoritative)"
+             deploy — delete them; bundled skills deploy only to the tm-managed \
+             CLAUDE_CONFIG_DIR since #6586, and `tm install` no longer writes them here)"
         ));
     }
 
@@ -142,5 +153,40 @@ mod tests {
         let check = check_legacy_instruction_sources(tmp.path());
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("claude-config"));
+    }
+
+    #[test]
+    fn legacy_sources_ok_after_the_install_deploy() {
+        // #7102: `tm install`'s skill step wrote every bundled `tm-*` skill into
+        // `~/.claude/skills`, the directory this check flags — so the check's
+        // own remediation ("run `tm install`") put the flagged copies back and
+        // the warning never cleared. Drive the installer's real deploy against a
+        // temp home, then read this check's verdict on that same home: the two
+        // must agree.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = crate::core::paths::FrameworkPaths::under(tmp.path());
+        let source = paths.skill_source_dir();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("tm-workflow.md"), "bundled body").unwrap();
+
+        crate::core::skill_install_tiers::deploy_install_skill_tiers(&paths).unwrap();
+
+        let check = check_legacy_instruction_sources(tmp.path());
+        assert_eq!(
+            check.status,
+            CheckStatus::Ok,
+            "the installer's own deploy target must not trip legacy_sources: {}",
+            check.message
+        );
+        // …and the deploy must actually have happened, or the assertion above
+        // passes vacuously on a no-op.
+        assert!(
+            paths
+                .skill_deploy_dir()
+                .join("tm-workflow")
+                .join("SKILL.md")
+                .is_file(),
+            "the bundled skill must be on disk in the managed tier"
+        );
     }
 }

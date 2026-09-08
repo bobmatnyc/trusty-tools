@@ -16,8 +16,7 @@ use crate::cli::{
     Cli, CliCompressionLevel, Command, OptimizerAction, OverseerAction, SessionAction,
 };
 use crate::commands::install::{
-    deploy_report_lines, install_to, mpm_hook_additions, skill_report_lines,
-    write_project_hooks_for_dir,
+    deploy_report_lines, install_to, mpm_hook_additions, write_project_hooks_for_dir,
 };
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, hook};
 use crate::commands::project::scaffold_project_dir;
@@ -319,109 +318,6 @@ fn install_then_deploy_composes_agents() {
         lines
             .iter()
             .any(|l| l.contains("engineer.md") && l.contains("composed:")),
-        "lines = {lines:?}"
-    );
-}
-
-#[test]
-fn install_then_deploy_deploys_skills() {
-    // Regression for #386: a fresh install must populate `.claude/skills/`
-    // from the bundled skill sources, not leave it empty. Calls the SAME
-    // multi-tier orchestrator `install()`'s skill step actually calls (PR
-    // #2818 review, round 3) rather than the raw single-tier
-    // `deploy_skills` — with no user-tier source present, the two are
-    // equivalent, but this keeps the test aligned with the real call site.
-    let dir = tempfile::tempdir().unwrap();
-    let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
-    install_to(&paths, false).unwrap();
-    let result = trusty_mpm::core::skill_tiers::deploy_all_skill_tiers(
-        &paths.skill_source_dir(),
-        &paths.user_skill_source_dir(),
-        &paths.claude_skills_dir(),
-        |_| true,
-    )
-    .unwrap()
-    .stats;
-    // The full /tm- skill portfolio deploys on first install: 21 skills total
-    // — 19 /tm- portfolio skills (tm-circuit-breaker, tm-verification-protocols,
-    // tm-tool-usage-guide, tm-git-file-tracking, tm-adr, tm-workflow,
-    // tm-agent-architecture, tm-postmortem, tm-bug-reporting,
-    // tm-teaching-templates, tm-ticketing,
-    // tm-delegation-patterns, tm-session-management, tm-session-pause,
-    // tm-session-resume, tm-init, tm-issues-prune, tm-cli-operations,
-    // tm-slack) + tm-doctor + the tm overview skill
-    // (tm-skills-portfolio epic: the `example-skill.md` placeholder and the
-    // 11 mpm-* guidance skills no longer ship; the previously-orphaned
-    // tm-doctor.md is now wired in; issue #2185 added tm-issues-prune; issue
-    // #2321 added tm-cli-operations; issue #4447 added
-    // tm-slack-canvas-delivery, replaced 1-for-1 by tm-slack, issue #4761) + 2 (issue
-    // #2890: code-review-standards, contract-driven-testing — code-critic's
-    // declared `skills:` dependencies; see
-    // `tests_behavior_2890_skills_tests.rs` for the dedicated deep assertions
-    // on those two, kept out of this file to stay under the 500-SLOC
-    // production cap — this file, unlike its `_tests.rs`-suffixed siblings,
-    // is NOT classified as a test file by the SLOC gate) + 93 (issue #2903,
-    // skill-port batch 1: 25 upstream universal/ skill entry points + 68
-    // references/*.md files carried alongside multi-file skills; see
-    // `tests_behavior_2903_skills_tests.rs` for the dedicated deep
-    // assertions, kept out of this file for the same SLOC-cap reason) + 7
-    // (issue #2911: the `documentation-style` bundled skill — entry SKILL.md
-    // plus 6 references/*.md files; see
-    // `tests_behavior_2911_documentation_style_tests.rs` for the dedicated
-    // deep assertions, kept out of this file for the same SLOC-cap reason)
-    // + 7 (issue #2913: the `tm-capabilities` auto-generated harness catalog
-    // — entry SKILL.md plus 5 generated + 1 hand-authored references/*.md
-    // files; see `tests_behavior_generate_tests.rs` for the generator's own
-    // coverage, kept out of this file for the same SLOC-cap reason) + 1
-    // (rust-build-performance, per Bob directive 2026-07-17: a single
-    // flat-file bundled skill declared by rust-engineer and tauri-engineer;
-    // see `tests_behavior_rust_build_performance_tests.rs` for the dedicated
-    // deploy-reachability assertion).
-    // Issue #5202 retired tm-pr-workflow into tm-workflow: 22 - 1 = 21.
-    // 21 + 2 + 93 + 7 + 7 + 1 = 131. See `bundle_tm_skills.rs`/
-    // `bundle_tm_capabilities.rs`/`bundle.rs`
-    // (CODE_REVIEW_STANDARDS, CONTRACT_DRIVEN_TESTING)/`bundle_all.rs::ALL`
-    // for the authoritative list.
-    // Stats report stems (no .md suffix) because each skill lands as
-    // <dest>/<name>/SKILL.md to match Claude Code's native discovery format.
-    for expected in [
-        "tm-circuit-breaker",
-        "tm-doctor",
-        "tm-issues-prune",
-        "tm-cli-operations",
-        "tm-capabilities",
-        "documentation-style",
-    ] {
-        assert!(
-            result.deployed.contains(&expected.to_string()),
-            "{expected} must be deployed; got {:?}",
-            result.deployed
-        );
-    }
-    assert_eq!(
-        result.deployed.len(),
-        132,
-        "expected 132 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview \
-         + code-review-standards + contract-driven-testing + 93 skill-port batch-1 entries \
-         + 7 documentation-style entries + 8 tm-capabilities entries (#4946 added \
-         references/framework.md) + 1 rust-build-performance entry); got {:?}",
-        result.deployed
-    );
-    assert!(result.skipped.is_empty());
-    assert!(result.unchanged.is_empty());
-    // Each skill must be deployed as a directory with SKILL.md inside.
-    let deployed = paths
-        .claude_skills_dir()
-        .join("tm-circuit-breaker")
-        .join("SKILL.md");
-    assert!(
-        deployed.is_file(),
-        "expected skill at {}",
-        deployed.display()
-    );
-    let lines = skill_report_lines(&result);
-    assert!(
-        lines.iter().any(|l| l.contains("tm-circuit-breaker")),
         "lines = {lines:?}"
     );
 }

@@ -193,6 +193,7 @@ pub mod session_store;
 pub mod skill_deploy_tiers;
 pub mod skill_deployer;
 pub mod skill_drift;
+pub mod skill_install_tiers;
 pub mod skill_manifest;
 pub mod skill_reconcile;
 pub mod skill_repair;
