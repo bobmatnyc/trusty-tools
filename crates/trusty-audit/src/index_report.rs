@@ -124,13 +124,23 @@ impl ToolVersion {
 /// report states its own on the page and in its JSON twin.
 /// What: the provider, the three role model ids, and the layer they came from —
 /// a manifest that declares its own outranks anything the run would inject, so
-/// `source` is what tells a reader which of the two they are looking at.
+/// `source` is what tells a reader which of the two they are looking at. Since
+/// #6144 it also carries the endpoint class (`api` vs `local`) and, when the
+/// provider has one fixed host, that host — never a live lookup, see
+/// [`crate::inference::endpoint_class`].
 /// Test: `super::index_tests::the_index_states_which_models_rendered`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct InferenceRecord {
     /// Provider id — `openrouter` unless the engagement pinned another.
     pub provider: String,
+    /// Whether `provider` is a hosted API or stays on the operator's machine
+    /// (#6144) — `"api"`, `"local"`, or the manifest's own "not declared" text
+    /// when [`Self::declared`] found no provider to derive it from.
+    pub endpoint_class: String,
+    /// The provider's fixed API host, when it has one (#6144) — `None` for a
+    /// regional provider (Bedrock), a local endpoint, or an unrecognised name.
+    pub endpoint_host: Option<String>,
     /// Reviewer role model id.
     pub reviewer: String,
     /// Verifier role model id.
@@ -147,6 +157,8 @@ impl InferenceRecord {
     pub fn of(selection: &crate::inference::Selection) -> Self {
         Self {
             provider: selection.provider.clone(),
+            endpoint_class: crate::inference::endpoint_class(&selection.provider).to_owned(),
+            endpoint_host: crate::inference::known_host(&selection.provider).map(str::to_owned),
             reviewer: selection.reviewer.clone(),
             verifier: selection.verifier.clone(),
             summarizer: selection.summarizer.clone(),
@@ -158,15 +170,31 @@ impl InferenceRecord {
     ///
     /// A partially-declared section is reported as far as it goes: the
     /// undeclared roles resolve through `trusty-review`'s own layers, and
-    /// "not declared" is the honest cell for them.
+    /// "not declared" is the honest cell for them. The endpoint class prefers
+    /// the manifest's own `endpoint_class` key (#6144) and falls back to
+    /// deriving one from `provider` for a manifest written before that key
+    /// existed — never the placeholder text, which would derive to nonsense.
     #[must_use]
     pub fn declared(section: &crate::manifest::InferenceSection) -> Self {
-        let or_absent = |v: &Option<String>| {
-            v.clone()
-                .unwrap_or_else(|| "not declared — resolved by the renderer".to_owned())
-        };
+        let not_declared = || "not declared — resolved by the renderer".to_owned();
+        let or_absent = |v: &Option<String>| v.clone().unwrap_or_else(not_declared);
+        let endpoint_class = section.endpoint_class.clone().unwrap_or_else(|| {
+            section
+                .provider
+                .as_deref()
+                .map(crate::inference::endpoint_class)
+                .map(str::to_owned)
+                .unwrap_or_else(not_declared)
+        });
+        let endpoint_host = section
+            .provider
+            .as_deref()
+            .and_then(crate::inference::known_host)
+            .map(str::to_owned);
         Self {
             provider: or_absent(&section.provider),
+            endpoint_class,
+            endpoint_host,
             reviewer: or_absent(&section.reviewer),
             verifier: or_absent(&section.verifier),
             summarizer: or_absent(&section.summarizer),
@@ -229,6 +257,23 @@ pub struct IndexEntry {
     /// line the report itself leads with — one fact with one source, rather than
     /// a flag that can disagree with the prose beside it.
     pub search_evidence: bool,
+    /// Every gap this unit's `package.toml`/manifest recorded, verbatim (#7135).
+    ///
+    /// Why: [`Self::stale`] already promotes ONE kind of gap (a stale fetch) into
+    /// the index because a caveat buried in a report's own Gaps section is read
+    /// too late, if at all — but every other kind (a skipped secrets scan, a
+    /// JIRA sync that never ran) stayed exactly there, buried, with nothing
+    /// naming it in the file the README calls "start here". This field is the
+    /// same promotion applied to the whole list rather than one marker.
+    /// What: a straight copy of the unit's recorded gaps, in the order they were
+    /// recorded. Rendered by this module's own `gaps_section` as one bullet list
+    /// per unit that has any, and silent for a unit that has none. This crate
+    /// does not reword
+    /// or redact a gap's text here — it renders exactly the string the collector
+    /// wrote. // See #7137
+    /// Test: `index_tests::the_gaps_section_lists_only_units_that_recorded_one`,
+    /// `index_tests::a_clean_run_renders_no_gaps_section`.
+    pub gaps: Vec<String>,
 }
 
 /// Everything the index states, before it is rendered against a directory.
@@ -399,6 +444,9 @@ pub fn render(report: &IndexReport, dir: &Path) -> String {
     out.push_str(&crate::grounding::coverage_rollup::index_section(
         report.coverage.as_ref(),
     ));
+    // #7135: same placement as the two roll-ups above and for the same reason —
+    // a finding about the run, before the description of the directory.
+    gaps_section(report, &mut out);
     contents(report.producer, &mut out);
     out
 }
@@ -464,10 +512,22 @@ fn versions(report: &IndexReport, out: &mut String) {
             tool.source
         ));
     }
-    out.push_str(
-        "\n`trusty-audit` bakes no build-time git metadata, so its git revision is \
-         **not recorded** — the version above is what it was compiled at.\n\n",
-    );
+    // #6144: `build.rs` bakes the git revision in at compile time when the
+    // build ran inside a git checkout; `option_env!` reads it back as a
+    // compile-time constant, so this branches on whichever this BUILD of
+    // `trusty-audit` actually captured, never a per-run value.
+    match option_env!("TRUSTY_AUDIT_GIT_REVISION") {
+        Some(revision) if !revision.is_empty() => out.push_str(&format!(
+            "\n`trusty-audit` was built from git revision `{revision}` — the version above is \
+             what it was compiled at.\n\n"
+        )),
+        _ => out.push_str(
+            "\n`trusty-audit`'s git revision is **not recorded** for this build — it was not \
+             built inside a git checkout (for example, from a published crate source), so \
+             there was nothing for the build script to read. The version above is what it was \
+             compiled at.\n\n",
+        ),
+    }
 }
 
 /// Which models judged the code in this directory (#6135).
@@ -482,6 +542,13 @@ fn inference(report: &IndexReport, out: &mut String) {
     };
     out.push_str("| role | model |\n| --- | --- |\n");
     out.push_str(&format!("| provider | `{}` |\n", record.provider));
+    // #6144: the endpoint class travels beside the provider it was derived
+    // from, with the host appended when the provider has one fixed host.
+    let endpoint = match &record.endpoint_host {
+        Some(host) => format!("{} (`{host}`)", record.endpoint_class),
+        None => record.endpoint_class.clone(),
+    };
+    out.push_str(&format!("| endpoint | {endpoint} |\n"));
     out.push_str(&format!("| reviewer | `{}` |\n", record.reviewer));
     out.push_str(&format!("| verifier | `{}` |\n", record.verifier));
     out.push_str(&format!("| summarizer | `{}` |\n", record.summarizer));
@@ -549,6 +616,49 @@ fn reports(report: &IndexReport, dir: &Path, out: &mut String) {
     if report.entries.is_empty() {
         out.push_str("This run produced no reports.\n\n");
     }
+}
+
+/// A roll-up of every unit's recorded gaps, one bullet list per unit (#7135).
+///
+/// Why: `## Reports` already states each unit's gaps in its own `### <name>`
+/// subsection, but a reader following the "start here" path reads this file
+/// top to bottom and stops well before the 59th subsection — which is exactly
+/// how a run can lose search evidence for 57 of 59 repositories, secrets
+/// scanning for all 59, and JIRA data for all 59, with nothing surfaced before
+/// the reader has already opened most of them one at a time. The OSV and
+/// coverage roll-ups above already give their own findings this treatment; this
+/// section is the same treatment applied to every OTHER collector's gaps.
+/// What: silent — no heading, no line — when no unit recorded a gap, so a clean
+/// run's index states nothing extra. Otherwise one `## Gaps` section, a summary
+/// line, and one bullet list per unit that recorded at least one, each gap
+/// rendered verbatim (never reworded, never redacted — see the wording note on
+/// [`IndexEntry::gaps`], // See #7137).
+/// Test: `index_tests::the_gaps_section_lists_only_units_that_recorded_one`,
+/// `index_tests::a_clean_run_renders_no_gaps_section`.
+fn gaps_section(report: &IndexReport, out: &mut String) {
+    let with_gaps: Vec<&IndexEntry> = report
+        .entries
+        .iter()
+        .filter(|entry| !entry.gaps.is_empty())
+        .collect();
+    if with_gaps.is_empty() {
+        return;
+    }
+    out.push_str("## Gaps\n\n");
+    out.push_str(&format!(
+        "{} of {} {} recorded at least one gap in its `package.toml`; each is stated \
+         verbatim below.\n\n",
+        with_gaps.len(),
+        report.entries.len(),
+        report.producer.unit(report.entries.len())
+    ));
+    for entry in with_gaps {
+        out.push_str(&format!("- **{}**\n", entry.name));
+        for gap in &entry.gaps {
+            out.push_str(&format!("  - {gap}\n"));
+        }
+    }
+    out.push('\n');
 }
 
 /// What each file and directory here is.
@@ -883,6 +993,9 @@ pub fn write_sweep(
             // #6783: read off the gaps this repository actually stated, which a
             // resumed entry carries forward with the rest of its record.
             search_evidence: !crate::grounding::search_tier_degraded(&run.gaps),
+            // #7135: the full list this repository's manifest recorded, not only
+            // the stale-fetch subset promoted above.
+            gaps: run.gaps.clone(),
         })
         .collect();
     // #6781: one read of each repository's manifest, feeding both the index's
@@ -978,6 +1091,8 @@ pub fn write_render(
             // #6783: a re-render indexes any checkout present on this machine,
             // so it loses the tier the same way a sweep does and says so here.
             search_evidence: !crate::grounding::search_tier_degraded(&rendered.gaps),
+            // #7135: the full list the source manifest recorded.
+            gaps: rendered.gaps.clone(),
         })
         .collect();
     // #6781: read from the manifest each report was rendered FROM — the
@@ -1039,6 +1154,7 @@ mod index_tests {
             carried_over: false,
             duration: Some(Duration::from_millis(1_500)),
             search_evidence: true,
+            gaps: Vec::new(),
         }
     }
 
@@ -1072,6 +1188,70 @@ mod index_tests {
             text.matches("git history is stale").count(),
             1,
             "the clean repository picked up a stale line:\n{text}"
+        );
+    }
+
+    /// Regression for #7135: against the pre-fix code this fails, because
+    /// `render` never read a unit's gaps at all — `grep -c` over its output for
+    /// any of "secrets-scan", "jira sync" or "## Gaps" was always zero,
+    /// regardless of what a repository's manifest recorded.
+    ///
+    /// Why this is worth a test: two collector gaps recorded against ONE
+    /// repository must both render, in the order they were recorded, and a
+    /// SECOND repository with an empty gap list must not add a bullet of its
+    /// own — the section is opt-in per unit, not a blanket list of every unit.
+    /// What: exact section text, not a substring check on one gap line, so a
+    /// stray heading level, missing bullet or wrong count regresses this test
+    /// rather than passing unnoticed.
+    /// Test: this is the test.
+    #[test]
+    fn the_gaps_section_lists_only_units_that_recorded_one() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("01-acme");
+        std::fs::create_dir_all(&dir).expect("create dir");
+
+        let mut degraded = entry("acme/api", dir.clone());
+        degraded.gaps = vec![
+            "secrets-scan: gitleaks binary not found".to_owned(),
+            "jira sync skipped: no project configured for acme/api".to_owned(),
+        ];
+        let clean = entry("acme/web", dir);
+
+        let text = render(&report(Producer::Sweep, vec![degraded, clean]), tmp.path());
+
+        let expected = "## Gaps\n\n\
+             1 of 2 repositories recorded at least one gap in its `package.toml`; each is \
+             stated verbatim below.\n\n\
+             - **acme/api**\n\
+             \x20\x20- secrets-scan: gitleaks binary not found\n\
+             \x20\x20- jira sync skipped: no project configured for acme/api\n\n";
+        assert!(
+            text.contains(expected),
+            "the Gaps section did not render as expected:\n{text}"
+        );
+        assert!(
+            !text.contains("acme/web**"),
+            "the clean repository picked up a Gaps bullet of its own:\n{text}"
+        );
+    }
+
+    /// The counterpart to the test above: a run where every unit's gap list is
+    /// empty renders no `## Gaps` heading at all, rather than an empty one — the
+    /// same silent-when-clean shape `osv_rollup::index_section` and
+    /// `coverage_rollup::index_section` already give their own findings.
+    /// Test: this is the test.
+    #[test]
+    fn a_clean_run_renders_no_gaps_section() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("01-acme");
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let clean = entry("acme/web", dir);
+
+        let text = render(&report(Producer::Sweep, vec![clean]), tmp.path());
+
+        assert!(
+            !text.contains("## Gaps"),
+            "a run with no recorded gaps rendered a Gaps section:\n{text}"
         );
     }
 
@@ -1242,6 +1422,8 @@ mod index_tests {
         let mut index = report(Producer::Sweep, Vec::new());
         index.inference = Some(InferenceRecord {
             provider: "openrouter".to_owned(),
+            endpoint_class: "api".to_owned(),
+            endpoint_host: Some("openrouter.ai".to_owned()),
             reviewer: "anthropic/claude-opus-4.8".to_owned(),
             verifier: "anthropic/claude-haiku-4.5".to_owned(),
             summarizer: "anthropic/claude-haiku-4.5".to_owned(),
@@ -1251,6 +1433,12 @@ mod index_tests {
         assert!(text.contains("## Inference"), "{text}");
         assert!(
             text.contains("| reviewer | `anthropic/claude-opus-4.8` |"),
+            "{text}"
+        );
+        // #6144: the endpoint class and its known host render beside the
+        // provider, never a bare provider name with nothing else said about it.
+        assert!(
+            text.contains("| endpoint | api (`openrouter.ai`) |"),
             "{text}"
         );
         assert!(
@@ -1263,6 +1451,73 @@ mod index_tests {
             none.contains("## Inference") && none.contains("Not recorded"),
             "an absent selection is stated, not omitted: {none}"
         );
+    }
+
+    /// #6144: a provider with no fixed host (Bedrock) states its endpoint
+    /// class with no host — never a fabricated one, and never a blank cell.
+    /// Test: this test itself.
+    #[test]
+    fn a_provider_with_no_fixed_host_states_the_class_alone() {
+        let mut index = report(Producer::Sweep, Vec::new());
+        index.inference = Some(InferenceRecord {
+            provider: "bedrock".to_owned(),
+            endpoint_class: "api".to_owned(),
+            endpoint_host: None,
+            reviewer: "us.anthropic.claude-opus-4-8".to_owned(),
+            verifier: "us.anthropic.claude-haiku-4-5".to_owned(),
+            summarizer: "us.anthropic.claude-haiku-4-5".to_owned(),
+            source: "the operator's environment".to_owned(),
+        });
+        let text = render(&index, Path::new("out"));
+        assert!(text.contains("| endpoint | api |"), "{text}");
+        assert!(!text.contains("| endpoint | api (`"), "{text}");
+    }
+
+    /// #6144 review — a manifest's `[inference]` section can declare a
+    /// provider without declaring `endpoint_class` (written before that key
+    /// existed) or without declaring a provider at all (hand-written, or a
+    /// role-only section). [`InferenceRecord::declared`] must state "not
+    /// declared" for the second case rather than deriving a class from
+    /// nothing — falling through to [`crate::inference::endpoint_class`] on a
+    /// blank string would silently render `"api"`.
+    /// Test: this test itself.
+    #[test]
+    fn a_declared_section_with_no_provider_states_endpoint_class_not_declared() {
+        let section = crate::manifest::InferenceSection {
+            provider: None,
+            endpoint_class: None,
+            reviewer: Some("anthropic/claude-opus-4.8".to_owned()),
+            verifier: None,
+            summarizer: None,
+        };
+        let record = InferenceRecord::declared(&section);
+        assert_eq!(
+            record.endpoint_class,
+            "not declared — resolved by the renderer"
+        );
+        assert_eq!(record.endpoint_host, None);
+        assert_eq!(record.provider, "not declared — resolved by the renderer");
+    }
+
+    /// #6144: the binary's git revision, when this build captured one,
+    /// replaces the blanket "not recorded" the versions table used to state
+    /// unconditionally. `option_env!` is a compile-time constant, so this test
+    /// can only assert the branch this build actually took — it runs inside
+    /// the workspace's own git checkout, so a `git` on `PATH` resolves one.
+    /// Test: this test itself.
+    #[test]
+    fn the_git_revision_the_build_captured_is_stated() {
+        let text = render(&report(Producer::Sweep, Vec::new()), Path::new("out"));
+        match option_env!("TRUSTY_AUDIT_GIT_REVISION") {
+            Some(revision) if !revision.is_empty() => assert!(
+                text.contains(&format!("built from git revision `{revision}`")),
+                "{text}"
+            ),
+            _ => assert!(
+                text.contains("git revision is **not recorded** for this build"),
+                "{text}"
+            ),
+        }
     }
 
     /// Every version the run knows is stated, and every one it does not is

@@ -206,6 +206,10 @@ pub(super) fn render_index(
                 // #6783: the recipient's copy of the coverage count, read off
                 // the same gaps the sweep's own index reads.
                 search_evidence: !crate::grounding::search_tier_degraded(&run.gaps),
+                // #7135: the recipient's copy of the full gap list — the same
+                // rows `package.toml`'s own `repositories[].gaps` carries for
+                // this repository, so the two members cannot disagree.
+                gaps: run.gaps.clone(),
             }
         })
         .collect::<Vec<_>>();
