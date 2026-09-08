@@ -42,7 +42,11 @@ const DEFAULT_ACTIVITY_LINES: u32 = 60;
 /// `Result<_, Response>` avoids carrying a large axum `Response` in the error
 /// variant (`clippy::result_large_err`).
 /// Test: indirectly via the route tests (handle is always registered in tests).
-fn mpm_handle(state: &AppState) -> Option<Arc<McpServiceHandle>> {
+///
+/// `pub(crate)` since #6929: the Disk routes reach the same daemon through the
+/// same handle, and a second lookup would be a second place for the service id
+/// to drift.
+pub(crate) fn mpm_handle(state: &AppState) -> Option<Arc<McpServiceHandle>> {
     let handle = state.mcp_handles().get("trusty-mpm").cloned();
     if handle.is_none() {
         tracing::error!("sessions route: no MCP handle registered for trusty-mpm");

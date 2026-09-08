@@ -489,3 +489,105 @@ fn a_file_path_is_not_a_directory() {
         Err(SizeIndexError::NotADirectory { .. })
     ));
 }
+
+/// A caller's own budget bounds ONE walk, below the policy ceiling (#6929).
+///
+/// Why: the ceiling is a fixed 30 seconds, so a cold refresh starting late in a
+/// 30-second Disk survey ran past the survey, and the console's stdio transport
+/// returned a 502 with no survey at all. A caller with 200 ms left must be able
+/// to say so and get an answer inside it.
+#[test]
+fn a_caller_budget_bounds_the_walk_below_the_policy_ceiling() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    known_tree(tmp.path());
+
+    // The policy still says 30 seconds; the caller says none is left.
+    let mut index = DirSizeIndex::with_policy(always_refresh());
+    assert_eq!(index.policy().walk_budget, DEFAULT_WALK_BUDGET);
+
+    let started = Instant::now();
+    let size = index
+        .measure_within(tmp.path(), Some(Duration::ZERO))
+        .expect("measure_within");
+
+    assert!(
+        size.truncated,
+        "a walk the budget stopped must say so, not report a short total as a \
+         complete one: {size:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the caller's budget, not the 30-second ceiling, bounded the walk: {:?}",
+        started.elapsed()
+    );
+}
+
+/// The per-call budget can only tighten the bound, never loosen it.
+#[test]
+fn the_policy_ceiling_still_caps_a_generous_caller_budget() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    known_tree(tmp.path());
+
+    let mut policy = always_refresh();
+    policy.walk_budget = Duration::ZERO;
+    let mut index = DirSizeIndex::with_policy(policy);
+
+    let size = index
+        .measure_within(tmp.path(), Some(Duration::from_secs(600)))
+        .expect("measure_within");
+
+    assert!(
+        size.truncated,
+        "a caller asking for ten minutes still gets the policy's zero: {size:?}"
+    );
+}
+
+/// A budget-exhausted partial is returned but never installed as the root
+/// total (#6929).
+///
+/// Why: a walk the clock stopped covered whatever fraction the clock allowed.
+/// Caching that as the root total would serve an arbitrary slice of the tree
+/// for a whole `max_age` window, to a later reader that arrived with a full
+/// budget included. A DEPTH-capped total is still cached — see
+/// `a_cached_read_still_reports_truncation` — because it is deterministic, so
+/// re-walking reproduces it exactly.
+#[test]
+fn a_budget_exhausted_partial_is_never_cached_as_the_root_total() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    known_tree(tmp.path());
+
+    // A real cadence, so a cached record WOULD be served if one were stored.
+    let mut index = DirSizeIndex::with_policy(test_policy(DEFAULT_MAX_AGE, DEFAULT_NODE_MAX_AGE));
+
+    let partial = index
+        .measure_within(tmp.path(), Some(Duration::ZERO))
+        .expect("budgeted measure");
+    assert!(partial.truncated, "{partial:?}");
+
+    let full = index.measure(tmp.path()).expect("unbudgeted measure");
+    assert!(
+        !full.from_cache,
+        "the partial must not have been cached, or this read would serve it: {full:?}"
+    );
+    assert_eq!(
+        full.bytes, 100,
+        "the full walk still reaches the whole tree"
+    );
+    assert!(!full.truncated, "{full:?}");
+    assert_eq!(index.stats().cache_hits, 0);
+}
+
+/// `measure` is `measure_within(_, None)`, and an unbudgeted call is unchanged.
+#[test]
+fn no_caller_budget_leaves_the_policy_ceiling_standing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    known_tree(tmp.path());
+
+    let mut index = DirSizeIndex::with_policy(always_refresh());
+    let size = index
+        .measure_within(tmp.path(), None)
+        .expect("measure_within");
+
+    assert_eq!(size.bytes, 100);
+    assert!(!size.truncated, "{size:?}");
+}

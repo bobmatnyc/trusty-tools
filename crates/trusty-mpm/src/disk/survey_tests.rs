@@ -486,7 +486,9 @@ fn survey_fixture(
     let pr_state = |_: &ScannedWorktree| fixed.pr.clone();
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
     let index = RefCell::new(test_index());
-    let measure = |path: &Path| survey_run::measure(&mut index.borrow_mut(), path);
+    let measure = |path: &Path, budget: Option<Duration>| {
+        survey_run::measure(&mut index.borrow_mut(), path, budget)
+    };
     let probes = DiskProbes {
         pr_state: &pr_state,
         claims: &fixed.claims,
@@ -702,6 +704,144 @@ fn a_survey_past_its_deadline_still_lists_every_worktree() {
     assert!(!row.reclaimable);
 }
 
+/// A deadline that crosses DURING one inspection invalidates that row's tier,
+/// not just its byte figure (#6929 review).
+///
+/// Why: `classify` and `classify_tier` shell out to `git` and `gh`, so the
+/// clock can cross after the loop admitted this worktree and before the
+/// measurement. The row that produced kept the tier those subprocesses
+/// established — `stale`, `reclaimable: true` — with `bytes: null`, which the
+/// console renders as a clearable worktree of unknown size. The loop's own
+/// check produces `not_inspected` when the clock crosses one instant earlier,
+/// and this row must be indistinguishable from that one.
+#[test]
+fn a_deadline_that_crosses_mid_inspection_yields_a_not_inspected_row() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("mid-inspection");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+    GitWorktreeFixture::commit_all_and_push(&wt, "pushed");
+
+    // Live when the loop checks THIS worktree, spent by the time `inspect`
+    // reaches the measurement: the injected pull-request probe stands in for
+    // the `gh` call the daemon makes, and sleeps past the deadline. The sleep
+    // is scoped to this one worktree so the fixture's other registration — the
+    // `<repos_root>/owner/repo` checkout itself — cannot burn the deadline
+    // first and send this row down the LOOP's not-inspected path instead.
+    let deadline = Instant::now() + Duration::from_millis(1_500);
+    let inspected: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+    let pr_state = |scanned: &ScannedWorktree| {
+        if scanned.path == wt {
+            inspected.borrow_mut().push(scanned.path.clone());
+            std::thread::sleep(Duration::from_millis(2_000));
+        }
+        BranchPrState::Merged { pr: 7 }
+    };
+    let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
+    let keep_list = no_keeps();
+    let claims = LiveClaims::default();
+    let index = RefCell::new(test_index());
+    let measure = |path: &Path, budget: Option<Duration>| {
+        survey_run::measure(&mut index.borrow_mut(), path, budget)
+    };
+    let probes = DiskProbes {
+        pr_state: &pr_state,
+        claims: &claims,
+        agent_state: &agent_state,
+        dirt: &inspect_dirt,
+        measure: &measure,
+    };
+    let survey = run(&fx.repos_root, &keep_list, &probes, Some(deadline), None);
+
+    assert_eq!(
+        inspected.borrow().as_slice(),
+        std::slice::from_ref(&wt),
+        "the loop's own deadline check must have PASSED for THIS worktree and \
+         `inspect` must have run on it, or this proves nothing about a crossing \
+         INSIDE one inspection"
+    );
+    let row = row_for(&survey, &wt);
+    assert_eq!(
+        row.tier,
+        WorktreeTier::Review,
+        "a merged, clean worktree classifies as stale — but the deadline crossed \
+         before it could be measured, so the tier goes with the bytes: {row:#?}"
+    );
+    assert_eq!(row.gate, Some(ReclaimGate::Deadline), "{row:#?}");
+    assert!(
+        !row.reclaimable,
+        "a row the survey ran out of time on is never advertised as clearable: {row:#?}"
+    );
+    assert_eq!(row.bytes, None, "{row:#?}");
+    assert_eq!(
+        row.reasons[0].code,
+        ReasonCode::UnknownBranchState,
+        "{row:#?}"
+    );
+}
+
+/// No single measurement may outlive the survey that asked for it (#6929).
+///
+/// Why: the index's own walk budget is a fixed 30 seconds, so a cold refresh
+/// starting at 24 seconds into a 30-second survey ran to ~50 and the console's
+/// stdio transport returned a 502 with no survey at all. The fix is that the
+/// survey hands each measurement the time it actually has left, which is what
+/// this pins — a budget bounded by the deadline on every call, and `None` only
+/// when the survey has no deadline to bound it with.
+#[test]
+fn the_survey_hands_each_measurement_only_the_time_left() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("budgeted");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+
+    let window = Duration::from_secs(5);
+    let deadline = Instant::now() + window;
+    let seen: RefCell<Vec<Option<Duration>>> = RefCell::new(Vec::new());
+    let pr = BranchPrState::Merged { pr: 1 };
+    let pr_state = |_: &ScannedWorktree| pr.clone();
+    let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
+    let keep_list = no_keeps();
+    let claims = LiveClaims::default();
+    let index = RefCell::new(test_index());
+    let measure = |path: &Path, budget: Option<Duration>| {
+        seen.borrow_mut().push(budget);
+        survey_run::measure(&mut index.borrow_mut(), path, budget)
+    };
+    let probes = DiskProbes {
+        pr_state: &pr_state,
+        claims: &claims,
+        agent_state: &agent_state,
+        dirt: &inspect_dirt,
+        measure: &measure,
+    };
+
+    run(&fx.repos_root, &keep_list, &probes, Some(deadline), None);
+    let budgets = seen.borrow().clone();
+    assert!(
+        budgets.len() >= 3,
+        "the worktree, its project and the root are each measured: {budgets:?}"
+    );
+    for budget in &budgets {
+        let budget = budget.expect("a deadlined survey budgets every measurement");
+        assert!(
+            budget <= window,
+            "a walk may not be given more time than the survey has: {budget:?} > {window:?}"
+        );
+        assert!(
+            !budget.is_zero(),
+            "a spent deadline skips the walk entirely"
+        );
+    }
+
+    seen.borrow_mut().clear();
+    run(&fx.repos_root, &keep_list, &probes, None, None);
+    let unbounded = seen.borrow().clone();
+    assert!(!unbounded.is_empty());
+    assert!(
+        unbounded.iter().all(Option::is_none),
+        "with no deadline the index's own ceiling stands: {unbounded:?}"
+    );
+}
+
 /// The §16.5 payload shape, pinned so a rename cannot silently break the
 /// console's renderer.
 #[test]
@@ -766,7 +906,9 @@ fn an_unreadable_keep_list_is_reported_and_keeps_every_row() {
     let pr_state = |_: &ScannedWorktree| fixed.pr.clone();
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
     let index = RefCell::new(test_index());
-    let measure = |path: &Path| survey_run::measure(&mut index.borrow_mut(), path);
+    let measure = |path: &Path, budget: Option<Duration>| {
+        survey_run::measure(&mut index.borrow_mut(), path, budget)
+    };
     let probes = DiskProbes {
         pr_state: &pr_state,
         claims: &fixed.claims,
@@ -809,7 +951,9 @@ fn a_project_filter_selects_only_that_project() {
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
     let claims = LiveClaims::default();
     let index = RefCell::new(test_index());
-    let measure = |path: &Path| survey_run::measure(&mut index.borrow_mut(), path);
+    let measure = |path: &Path, budget: Option<Duration>| {
+        survey_run::measure(&mut index.borrow_mut(), path, budget)
+    };
     let probes = DiskProbes {
         pr_state: &pr_state,
         claims: &claims,

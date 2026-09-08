@@ -21,7 +21,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
@@ -64,7 +64,43 @@ pub(crate) struct DiskProbes<'a> {
     ///
     /// See the struct docs for why this is a probe. [`measure`] is the
     /// implementation every caller wraps.
-    pub measure: &'a dyn Fn(&Path) -> Option<DirSize>,
+    ///
+    /// The second argument is the wall-clock budget this ONE measurement may
+    /// spend: the time left before the survey's deadline, or `None` when the
+    /// survey has no deadline and the index's own policy ceiling stands. It
+    /// exists because the index's ceiling is fixed at 30 seconds, so a cold
+    /// walk started late in a 30-second survey overran the survey and the
+    /// console's stdio transport returned a 502 with no survey at all (#6929).
+    pub measure: &'a dyn Fn(&Path, Option<Duration>) -> Option<DirSize>,
+}
+
+/// What one deadline-gated measurement produced.
+///
+/// Why this is not just `Option<DirSize>`: an absent figure has two causes that
+/// must not be confused. The index having no number to give is ordinary and
+/// leaves the row otherwise intact; the survey deadline having passed means the
+/// row's tier was computed from facts we can no longer pair a byte figure with,
+/// and the row must fall back to [`not_inspected`] whole (#6929).
+enum Measured {
+    /// The index answered — with a figure, or with `None` for no figure.
+    Figure(Option<DirSize>),
+    /// The deadline had already passed when the measurement was reached.
+    DeadlineSpent,
+}
+
+impl Measured {
+    /// The figure, for a caller that has no tier to invalidate.
+    ///
+    /// Projects and the root are aggregates, not classified rows: an unmeasured
+    /// one reports `bytes: null` and says nothing that a byte figure could
+    /// contradict, so a spent deadline and no-figure collapse to the same
+    /// thing here.
+    fn figure(self) -> Option<DirSize> {
+        match self {
+            Self::Figure(size) => size,
+            Self::DeadlineSpent => None,
+        }
+    }
 }
 
 /// Survey every worktree under `repos_root` for the Disk dashboard (#6927).
@@ -75,12 +111,30 @@ pub(crate) struct DiskProbes<'a> {
 /// What: scans git's own registry (ADR-0023: git decides existence, never a
 /// directory walk), classifies each worktree, measures bytes through `index`
 /// (never a second walker — see #6926), and groups rows under their managed
-/// project. `deadline`, when set, stops CLASSIFICATION: remaining worktrees are
-/// still listed, as `review` with an `unknown-branch-state` reason, never
-/// omitted and never `stale`.
+/// project. `deadline`, when set, stops the WHOLE pass — classification and
+/// byte measurement both. Remaining worktrees are still listed, as `review`
+/// with an `unknown-branch-state` reason, never omitted and never `stale`; a
+/// project or root the budget was reached before reports `bytes: null`, which
+/// the console renders as unmeasured.
+///
+/// Measurement is deadline-gated because it is the expensive half, not the
+/// cheap one (#6929). The workspace root used to be walked FIRST, to warm the
+/// index's directory cache — but a cold root walk saturates the index's own
+/// 30 s walk budget by itself, and the console's stdio MCP transport cuts the
+/// whole call off at 30 s. Every `disk_survey` the console issued came back a
+/// 502 with no survey at all, a call scoped to one project included, because
+/// the root walk ran before the filter could narrow anything. Worktrees are
+/// measured first now, then projects, then the root, so a budget-limited pass
+/// spends what it has on the rows the view actually colours.
+///
+/// The deadline bounds each measurement as well as gating it: a walk is handed
+/// the time actually left, never the index's fixed 30-second ceiling, so no one
+/// measurement can outlive the survey (#6929).
 /// `project` filters to one managed project by name or by path prefix.
 /// Test: `a_survey_groups_worktrees_under_their_project_and_measures_bytes`,
 /// `a_survey_past_its_deadline_still_lists_every_worktree`,
+/// `a_deadline_that_crosses_mid_inspection_yields_a_not_inspected_row`,
+/// `the_survey_hands_each_measurement_only_the_time_left`,
 /// `a_survey_serializes_the_documented_shape`.
 pub(crate) fn run(
     repos_root: &Path,
@@ -89,10 +143,23 @@ pub(crate) fn run(
     deadline: Option<Instant>,
     project: Option<&str>,
 ) -> DiskSurvey {
-    // Measured first so the root walk populates the directory cache every
-    // project and worktree measurement below then revalidates at one stat per
-    // directory instead of re-walking.
-    let root_size = (probes.measure)(repos_root);
+    // #6929: no measurement is attempted once the budget is spent, and one that
+    // IS attempted gets only the time actually left — a walk may not outlive
+    // the survey that asked for it.
+    let expired = || deadline.is_some_and(|d| Instant::now() >= d);
+    let measure = |path: &Path| -> Measured {
+        // ONE clock read decides both halves. Reading it twice — once to ask
+        // whether to measure, once to work out the budget — is the same split
+        // the review found between `inspect`'s two phases.
+        let left = match deadline {
+            None => None,
+            Some(d) => match d.checked_duration_since(Instant::now()) {
+                Some(left) if !left.is_zero() => Some(left),
+                _ => return Measured::DeadlineSpent,
+            },
+        };
+        Measured::Figure((probes.measure)(path, left))
+    };
     let mut grouped: BTreeMap<PathBuf, Vec<DiskWorktree>> = BTreeMap::new();
     let cache: RefCell<HashMap<PathBuf, Option<DirtyWorktree>>> = RefCell::new(HashMap::new());
     // One dirt probe per worktree, shared by the reclaim classifier and the
@@ -113,13 +180,13 @@ pub(crate) fn run(
         if !selected(&scanned, repos_root, project) {
             continue;
         }
-        let row = if deadline.is_some_and(|d| Instant::now() >= d) {
+        let row = if expired() {
             // Fail closed, exactly as the reclaim survey does: a worktree we
             // ran out of time to inspect is LISTED and never advertised as
             // clearable.
             not_inspected(&scanned)
         } else {
-            inspect(&scanned, keep_list, probes, &probe_dirt)
+            inspect(&scanned, keep_list, probes, &probe_dirt, &measure)
         };
         grouped
             .entry(scanned.project.clone())
@@ -146,7 +213,7 @@ pub(crate) fn run(
                 WorktreeTier::Missing => counts.missing += 1,
             }
         }
-        let size = (probes.measure)(&path);
+        let size = measure(&path).figure();
         projects.push(DiskProject {
             name: project_name(&path, repos_root),
             bytes: size.as_ref().map(|s| s.bytes),
@@ -156,6 +223,9 @@ pub(crate) fn run(
         });
     }
 
+    // Measured LAST: the root walk is the most expensive in the pass and the
+    // least informative, so it gets whatever budget the worktrees left.
+    let root_size = measure(repos_root).figure();
     DiskSurvey {
         generated_at: Utc::now().to_rfc3339(),
         keep_list: KeepListReport {
@@ -180,11 +250,22 @@ pub(crate) fn run(
 /// Why: the two classifiers run over the SAME facts — one dirt probe, one claim
 /// state, one pull-request answer — so the verdict the row reports and the tier
 /// it renders can never have been computed from different observations.
+///
+/// Tier and bytes are atomic for the same reason (#6929 review). `classify` and
+/// `classify_tier` shell out to `git` and `gh`, so the deadline can cross while
+/// they run — after the loop admitted this worktree and before the measurement.
+/// The row that produced was a full tier, `stale` and `reclaimable: true`
+/// included, carrying `bytes: null`: the console would offer a clearable
+/// worktree of unknown size, on the strength of a pass that had already run out
+/// of time. A crossing found at the measurement therefore discards the tier too
+/// and returns [`not_inspected`], which is what the loop's own check produces
+/// when the clock crosses one instant earlier.
 fn inspect(
     scanned: &ScannedWorktree,
     keep_list: &KeepList,
     probes: &DiskProbes<'_>,
     probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
+    measure: &dyn Fn(&Path) -> Measured,
 ) -> DiskWorktree {
     let pr = (probes.pr_state)(scanned);
     let claim = probes.claims.claim_state(&scanned.path);
@@ -208,10 +289,15 @@ fn inspect(
     let classification = classify_tier(&facts, keep_list, probe_dirt);
     // A registration whose directory is gone has no bytes to measure, and
     // asking the index for one would only produce a `NotADirectory` refusal.
+    // `missing` says that on its own, so it is not a deadline artifact and
+    // keeps its tier.
     let size = if classification.tier == WorktreeTier::Missing {
         None
     } else {
-        (probes.measure)(&scanned.path)
+        match measure(&scanned.path) {
+            Measured::Figure(size) => size,
+            Measured::DeadlineSpent => return not_inspected(scanned),
+        }
     };
     row(scanned, classification, &verdict, &pr, &claim, size)
 }
@@ -290,10 +376,17 @@ fn claiming_session(
 /// somewhere the index will not walk can find out why.
 /// What: the body every [`DiskProbes::measure`] implementation wraps. A caller
 /// holding a shared index locks it around THIS call and nothing else — see the
-/// [`DiskProbes`] docs for why the lock may not span the survey.
-/// Test: `a_survey_groups_worktrees_under_their_project_and_measures_bytes`.
-pub(crate) fn measure(index: &mut DirSizeIndex, path: &Path) -> Option<DirSize> {
-    match index.measure(path) {
+/// [`DiskProbes`] docs for why the lock may not span the survey. `budget` is
+/// the survey's remaining time, passed straight through so this one walk cannot
+/// outlive the survey (#6929); `None` leaves the index's own ceiling standing.
+/// Test: `a_survey_groups_worktrees_under_their_project_and_measures_bytes`,
+/// `the_survey_hands_each_measurement_only_the_time_left`.
+pub(crate) fn measure(
+    index: &mut DirSizeIndex,
+    path: &Path,
+    budget: Option<Duration>,
+) -> Option<DirSize> {
+    match index.measure_within(path, budget) {
         Ok(size) => Some(size),
         Err(e) => {
             tracing::debug!(path = %path.display(), error = %e, "disk-survey: no byte figure (#6927)");

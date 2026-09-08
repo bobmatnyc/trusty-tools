@@ -48,8 +48,9 @@ use crate::session_manager::worktree_safety::inspect_dirt;
 /// SHARED [`crate::disk::size_index::DirSizeIndex`] — never a second index, so
 /// a poll every few seconds costs cache hits rather than walks, and the mutex
 /// is held for each measurement alone rather than for the whole pass.
-/// `budget_seconds` bounds classification; worktrees past it are listed as
-/// `review`, never omitted and never `stale`.
+/// `budget_seconds` bounds the whole pass, byte walks included (#6929);
+/// worktrees past it are listed as `review`, never omitted and never `stale`,
+/// and a project or root past it reports no byte figure.
 /// Test: `crate::disk::survey_tests`, and `dispatch_disk_survey_tool` for the
 /// dispatch wiring.
 pub async fn disk_survey(
@@ -102,9 +103,13 @@ pub async fn disk_survey(
         // that `classify` shells out to, so a second `disk_survey` — or the
         // #6926 background refresher — would queue behind minutes of network
         // work for an index it only wanted to read.
-        let measure = |path: &Path| -> Option<DirSize> {
+        // #6929: `budget` is whatever the survey deadline has left. Passing it
+        // through is what stops one cold walk from spending the index's fixed
+        // 30-second ceiling and overrunning the survey the console is waiting
+        // on.
+        let measure = |path: &Path, budget: Option<Duration>| -> Option<DirSize> {
             let mut index = index.lock();
-            survey_run::measure(&mut index, path)
+            survey_run::measure(&mut index, path, budget)
         };
         let probes = DiskProbes {
             pr_state: &pr_state,

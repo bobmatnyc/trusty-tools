@@ -178,6 +178,22 @@ fn build_router_inner(
             "/api/console/sessions/{id}/resume",
             axum::routing::post(crate::routes::sessions::resume_handler),
         )
+        // ── the Disk view's two READ-ONLY routes (#6929, DOC-73 §16.5) ──
+        // Both proxy trusty-mpm's `disk_survey` MCP tool through the same
+        // stdio bridge the session routes use, and both always send a
+        // classification budget under the transport's 30 s call timeout —
+        // see `routes::disk`. Nothing here clears a worktree; that is #6930.
+        //
+        // `disk/worktrees/{id}` cannot shadow `disk/tree`: they differ at the
+        // segment after `disk`, both literals.
+        .route(
+            "/api/console/disk/tree",
+            get(crate::routes::disk::tree_handler),
+        )
+        .route(
+            "/api/console/disk/worktrees/{id}",
+            get(crate::routes::disk::worktree_handler),
+        )
         // #1220 Config tab: read/write the `~/.trusty-tools/trusty-mpm/config.yaml`
         // convention via the trusty-mpm `config_read` / `config_write` MCP tools.
         // The POST is a state-changing write; the router-wide origin guard

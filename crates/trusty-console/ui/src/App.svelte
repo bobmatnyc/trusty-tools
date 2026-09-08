@@ -12,6 +12,9 @@
   import ReviewTab from './ReviewTab.svelte';
   import SessionsTab from './SessionsTab.svelte';
   import ConfigTab from './ConfigTab.svelte';
+  // #6929: the Disk view — projects and worktrees by size and staleness.
+  // Display-only (DOC-73 §13); the clear action is #6930.
+  import DiskTab from './DiskTab.svelte';
   // #6908: the console's own row opens a details pane for the console itself.
   import ConsoleTab from './ConsoleTab.svelte';
   import ThemeSelector from './ThemeSelector.svelte';
@@ -173,6 +176,17 @@
     <div class="header-right">
       <!-- #6909: Config is the one former tab with no Services row, so it keeps
            a single header action rather than a re-created tab strip. -->
+      <!-- #6929: the Disk view has no Services row either, so it takes the
+           same header action Config does. -->
+      <button
+        type="button"
+        class="header-action"
+        class:active={view === 'disk'}
+        aria-current={view === 'disk' ? 'page' : undefined}
+        onclick={() => (view = 'disk')}
+      >
+        Disk
+      </button>
       <button
         type="button"
         class="header-action"
@@ -222,6 +236,8 @@
         version={consoleVersion}
         uptimeSecs={consoleUptimeSecs}
       />
+    {:else if view === 'disk'}
+      <DiskTab />
     {:else if view === 'config'}
       <ConfigTab />
     {/if}
