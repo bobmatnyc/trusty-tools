@@ -231,16 +231,16 @@ pub fn mark_processed(
     now_unix_ms: u64,
 ) -> Result<PathBuf, InboxError> {
     let dir = processed_dir(inbox_root);
-    std::fs::create_dir_all(&dir).map_err(|source| InboxError::PrepareDir {
-        path: dir.clone(),
-        source,
-    })?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(INBOX_DIR_MODE)).map_err(
-        |source| InboxError::PrepareDir {
+    // #7158 round 2: was a raw `create_dir_all` + `set_permissions` (umask
+    // mode briefly observable, no symlink defense) under the same
+    // `inbox_root` tree the manifest cache dir and `Inbox::open` already
+    // route through `private_dir::ensure_private_dir` for.
+    crate::private_dir::ensure_private_dir(&dir, INBOX_DIR_MODE).map_err(|source| {
+        InboxError::PrepareDir {
             path: dir.clone(),
-            source,
-        },
-    )?;
+            source: source.into(),
+        }
+    })?;
 
     let marker = processed_marker_path(inbox_root, entry);
     let record = serde_json::json!({
@@ -304,16 +304,13 @@ pub fn prune_processed(inbox_root: &Path, retention: std::time::Duration) {
 /// `quarantine_is_idempotent_after_an_interrupted_move`.
 pub fn quarantine(inbox_root: &Path, entry: &Path) -> Result<PathBuf, InboxError> {
     let dir = quarantine_dir(inbox_root);
-    std::fs::create_dir_all(&dir).map_err(|source| InboxError::PrepareDir {
-        path: dir.clone(),
-        source,
-    })?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(INBOX_DIR_MODE)).map_err(
-        |source| InboxError::PrepareDir {
+    // #7158 round 2: see the matching comment in `mark_processed` above.
+    crate::private_dir::ensure_private_dir(&dir, INBOX_DIR_MODE).map_err(|source| {
+        InboxError::PrepareDir {
             path: dir.clone(),
-            source,
-        },
-    )?;
+            source: source.into(),
+        }
+    })?;
 
     let name = entry
         .file_name()

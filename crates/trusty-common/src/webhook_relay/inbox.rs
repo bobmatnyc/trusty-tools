@@ -206,10 +206,13 @@ impl Inbox {
     /// Test: `inbox_open_creates_an_owner_only_directory`.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, InboxError> {
         let root = root.into();
+        // #7158 round 2: `.into()` uses `From<PrivateDirError> for io::Error`,
+        // which forwards the original `ErrorKind` instead of flattening it to
+        // `Other` the way `io::Error::other(..)` would.
         crate::private_dir::ensure_private_dir(&root, INBOX_DIR_MODE).map_err(|source| {
             InboxError::PrepareDir {
                 path: root.clone(),
-                source: std::io::Error::other(source),
+                source: source.into(),
             }
         })?;
         Ok(Self { root })

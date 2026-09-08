@@ -142,6 +142,33 @@ impl std::error::Error for PrivateDirError {
     }
 }
 
+/// Why: a caller whose own error type only has room for `std::io::Error` (e.g.
+/// `InboxError::PrepareDir { source: std::io::Error, .. }`) still needs to
+/// forward this error, and #7158 round 2 flagged wrapping it via
+/// `io::Error::other(..)` — that flattens every case, including a genuine OS
+/// `PermissionDenied`/`NotFound` from `Create`/`Stat`/`Harden`, to
+/// `ErrorKind::Other`, which a caller matching on `.kind()` one hop down can no
+/// longer see.
+/// What: `Create`/`Stat`/`Harden` carry a real `io::Error` already — reuse ITS
+/// `.kind()` verbatim. `Symlink`/`NotADirectory` have no OS error underneath
+/// (the refusal is ours, not the kernel's); `AlreadyExists` is the closest
+/// std kind for "something is already at this path and it is not what was
+/// wanted".
+/// Test: `tests::private_dir_error_into_io_error_preserves_kind`.
+impl From<PrivateDirError> for std::io::Error {
+    fn from(err: PrivateDirError) -> Self {
+        let kind = match &err {
+            PrivateDirError::Create { source, .. }
+            | PrivateDirError::Stat { source, .. }
+            | PrivateDirError::Harden { source, .. } => source.kind(),
+            PrivateDirError::Symlink { .. } | PrivateDirError::NotADirectory { .. } => {
+                std::io::ErrorKind::AlreadyExists
+            }
+        };
+        std::io::Error::new(kind, err.to_string())
+    }
+}
+
 /// Create `dir` (and any missing ancestors) and hold it at `mode`, refusing a
 /// pre-existing symlink or non-directory rather than following it.
 ///
@@ -334,6 +361,34 @@ mod tests {
         assert!(
             matches!(err, PrivateDirError::NotADirectory { .. }),
             "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn private_dir_error_into_io_error_preserves_kind() {
+        // A leaf under a path whose parent is a regular file, not a
+        // directory: `lstat` on the leaf fails `ENOTDIR` before any create
+        // call runs (`PrivateDirError::Stat`), a real OS error with its own
+        // `ErrorKind` — proving `From<PrivateDirError> for io::Error` forwards
+        // it rather than flattening every case to `Other`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let blocking_file = tmp.path().join("blocker");
+        std::fs::write(&blocking_file, b"x").expect("write blocker");
+        let unreachable = blocking_file.join("cannot_have_a_child").join("leaf");
+
+        let err = ensure_private_dir(&unreachable, PRIVATE_DIR_MODE).expect_err("must fail");
+        assert!(
+            matches!(
+                err,
+                PrivateDirError::Stat { .. } | PrivateDirError::Create { .. }
+            ),
+            "got {err:?}"
+        );
+        let io_err: std::io::Error = err.into();
+        assert_ne!(
+            io_err.kind(),
+            std::io::ErrorKind::Other,
+            "the original OS error kind must survive the conversion, got {io_err:?}"
         );
     }
 }

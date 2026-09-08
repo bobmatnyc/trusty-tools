@@ -14,6 +14,7 @@
 //! would pass over a drain that deletes on error.
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -1004,4 +1005,45 @@ fn attempt_sidecar_sits_beside_its_entry() {
         retry::attempt_path(entry),
         PathBuf::from("/inbox/d-1-0011223344556677.attempt")
     );
+}
+
+// #7158 round 2: `mark_processed` and `quarantine` used to create their
+// directory with a raw `create_dir_all` + unconditional `set_permissions` —
+// the prior implementation's final mode was already 0700, so this assertion
+// does not distinguish old from new. What it proves is that both sites now
+// go through `private_dir::ensure_private_dir` at all (the changelog claim),
+// whose own atomic-creation and symlink-refusal properties are covered by
+// `private_dir::tests`.
+
+#[test]
+fn mark_processed_creates_the_ledger_dir_at_0700() {
+    let (_tmp, inbox) = inbox_with(&["d-1"]);
+    let path = entry_of(&inbox, "d-1");
+
+    retry::mark_processed(inbox.root(), &path, "d-1", 1_000).expect("mark");
+
+    let mode = std::fs::metadata(retry::processed_dir(inbox.root()))
+        .expect("stat ledger dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o700,
+        "processed-ledger dir must be 0700, got {mode:o}"
+    );
+}
+
+#[test]
+fn quarantine_creates_the_quarantine_dir_at_0700() {
+    let (_tmp, inbox) = inbox_with(&["d-1"]);
+    let path = entry_of(&inbox, "d-1");
+
+    retry::quarantine(inbox.root(), &path).expect("quarantine");
+
+    let mode = std::fs::metadata(retry::quarantine_dir(inbox.root()))
+        .expect("stat quarantine dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, "quarantine dir must be 0700, got {mode:o}");
 }
