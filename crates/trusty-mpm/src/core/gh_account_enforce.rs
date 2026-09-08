@@ -257,7 +257,12 @@ pub fn ensure_gh_account_in_dir(
 /// Test: `ensure_gh_account_in_dir_fails_closed_when_the_api_probe_fails` and
 /// `ensure_gh_account_in_dir_rejects_a_transcript_the_api_contradicts` drive
 /// it through a fake `gh` on `PATH`.
-fn api_login_scoped(config_dir: &str, host: &str) -> Result<String, String> {
+///
+/// `pub(crate)` since #7166: `inproject::account_clone` reuses this exact
+/// scoped-verification call for its own config_dir-based clone credential
+/// (rather than a second, drifting implementation) — the "one implementation
+/// per shared capability" rule.
+pub(crate) fn api_login_scoped(config_dir: &str, host: &str) -> Result<String, String> {
     let dir = config_dir.to_string();
     let host = host.to_string();
     run_bounded(GH_ENFORCE_TIMEOUT, move || {

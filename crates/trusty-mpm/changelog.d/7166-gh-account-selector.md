@@ -28,6 +28,14 @@ Added
     `register` was already an unqualified upsert.
   - Because `gh auth token -u <account>` does not discriminate between
     logged-in accounts on a keyring-backed `gh` install (macOS's default),
-    the minted token is verified against `gh api user --jq .login` before
-    it is ever used to clone; a mismatch refuses loud, naming both the
+    `tm` now builds and reuses an isolated `gh` config directory per
+    account (`~/.trusty-mpm/gh-accounts/<login>/`) on first use, built from
+    the operator's own already-logged-in `hosts.yml` — no token is ever
+    copied, and `gh auth switch` is never called. The clone authenticates
+    via that scoped `GH_CONFIG_DIR`, which DOES discriminate reliably.
+    Selecting a login that is not logged into `gh` refuses, naming the
+    `gh auth login` remedy, before any directory is created. The resolved
+    identity is still verified against `gh api user --jq .login`, scoped to
+    the same directory, before it is ever used to clone; a mismatch (e.g. a
+    stale, hand-edited account directory) refuses loud, naming both the
     requested and the actual account.

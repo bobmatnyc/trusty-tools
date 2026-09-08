@@ -63,90 +63,117 @@ impl AccountCloneEnv {
 /// happened to be globally active, not the one requested. Two changes close
 /// that:
 ///
-/// 1. Token resolution now runs through
-///    [`crate::core::gh_account::resolve_gh_account_env`] — the SAME
-///    config_dir-first, `-u`-fallback precedence
-///    [`crate::daemon::managed_routes::lifecycle::resolve_gh_env`] already
-///    uses for the session's own spawn-time `GH_TOKEN`, rather than a second,
-///    weaker call path. This cold-start clone has no already-registered
-///    project to read a pinned `github.config_dir` from (the project does
-///    not exist in the registry yet), so `config_dir` is always `None` here
-///    today — the `-u` fallback is what actually runs — but routing through
-///    the shared resolver rather than calling the demoted selector directly
-///    means a future config_dir-aware caller costs nothing to add, and this
-///    call can never independently drift from the other two `gh_token_via_cli`
-///    call sites' precedence.
-/// 2. [`verify_token_login`] is run against the resolved token BEFORE it is ever
-///    handed to `git`, and a mismatch is a loud, named refusal — this is what
-///    actually closes the vulnerability for the always-taken `-u` arm above.
-///    The config_dir arm is skipped: it selects by an isolated `gh` config
-///    home, which discriminates by construction (`gh_account.rs`'s own
-///    rationale for demoting `-u`), so there is no bare token to verify.
+/// 1. A per-account `gh` config dir is ensured FIRST (#7166 owner ruling
+///    "do B") via [`super::account_config_dir::ensure_account_config_dir_default`]
+///    — built once from the operator's own logged-in `hosts.yml` on first
+///    use of `account`, reused untouched afterward. Token resolution then
+///    runs through [`crate::core::gh_account::resolve_gh_account_env_with`]
+///    WITH that dir as `config_dir`, which always takes the config_dir arm
+///    (`GH_CONFIG_DIR=<dir>`, no bare token) — the SAME selector that
+///    genuinely discriminates between logged-in accounts on a keyring-backed
+///    host, never the demoted `gh auth token -u` fallback. `gh auth switch`
+///    is never called anywhere in this path: the isolation comes from a
+///    SEPARATE config dir, not from mutating the shared one's active
+///    pointer.
+/// 2. The resolved identity is still VERIFIED before it is ever handed to
+///    `git` — scoped to the SAME `GH_CONFIG_DIR`, via
+///    [`crate::core::gh_account::api_login_scoped`] (reused rather than a
+///    third implementation of "ask GitHub who a scoped credential belongs
+///    to" — `gh_account_enforce` already has one for its own config_dir
+///    verification). A mismatch (e.g. a stale, hand-edited account dir) is a
+///    loud, named refusal.
 ///
-/// What: `Err` on an unresolvable/failed identity (already names the account;
-/// see [`crate::core::gh_account::gh_token_via_cli`]'s doc) or on a
+/// What: `Err` on an unresolvable/failed identity, an unbuildable account
+/// dir (already names the account and the `gh auth login` remedy — see
+/// [`super::account_config_dir::ensure_account_config_dir`]'s doc), or a
 /// login mismatch (names BOTH the requested and the actual login). `Ok`
 /// returns the shadow-then-set pair described on [`AccountCloneEnv`].
 /// Test: `account_clone_env_shadows_inherited_identity_and_sets_gh_token`,
 /// `account_clone_env_propagates_a_resolver_failure_naming_the_account`,
 /// `account_clone_env_refuses_a_token_minted_for_a_different_account`,
 /// `account_clone_env_propagates_a_verification_failure`,
-/// `account_clone_env_accepts_a_token_that_matches`.
+/// `account_clone_env_accepts_a_token_that_matches`,
+/// `account_clone_env_uses_a_config_dir_and_verifies_it_scoped`,
+/// `account_clone_env_refuses_a_config_dir_scoped_to_a_different_login`.
+/// The account-dir bootstrap refusal itself (an unknown login, dir never
+/// created) is covered at its own layer by
+/// `super::account_config_dir::tests::ensure_account_config_dir_refuses_an_unknown_login`
+/// — [`ensure_account_config_dir_default`](super::account_config_dir::ensure_account_config_dir_default)
+/// reads the real `$HOME`, so this function's OWN propagation of that `Err`
+/// (a plain `?`, right below) has no separate hermetic test of its own.
 pub(super) fn account_clone_env(account: &str) -> Result<AccountCloneEnv, String> {
+    let dir = super::account_config_dir::ensure_account_config_dir_default(account)?;
     account_clone_env_with(
         account,
+        Some(&dir),
         crate::core::gh_account::gh_token_via_cli,
         verify_token_login,
+        crate::core::gh_account::api_login_scoped,
     )
 }
 
-/// [`account_clone_env`] with injectable token-resolution and
-/// identity-verification steps.
+/// [`account_clone_env`] with injectable identity-resolution and
+/// -verification steps.
 ///
-/// Why: two closures — this codebase's established seam for `gh` I/O that
-/// cannot run hermetically in CI (see `gh_account::resolve_gh_account_env_with`,
-/// which `resolve_token` mirrors) — let the shadow-then-set shape, the
-/// not-logged-in refusal, AND the mismatch refusal all be asserted with no
-/// real `gh` process, no PATH mutation, and no network.
+/// Why: this codebase's established seam for `gh` I/O that cannot run
+/// hermetically in CI (see `gh_account::resolve_gh_account_env_with`, which
+/// `resolve_token` mirrors) — lets the shadow-then-set shape, the
+/// not-logged-in refusal, AND both verification mismatch refusals be
+/// asserted with no real `gh` process, no PATH mutation, and no network.
+/// `config_dir` stays a parameter (rather than always-`Some`, which is what
+/// [`account_clone_env`] always passes today) so the pre-#7166-owner-ruling
+/// `-u`-fallback shape stays directly testable too — a caller with no
+/// buildable account dir would otherwise have no arm to fall back to.
 /// What: delegates identity SELECTION to
-/// [`crate::core::gh_account::resolve_gh_account_env_with`] (`config_dir:
-/// None` — see [`account_clone_env`]'s doc for why); when the resolved
-/// [`crate::core::gh_account::GhSpawnEnv::vars`] carries a `GH_TOKEN` (the
-/// `-u`-fallback arm — the config_dir arm never sets one), `verify_login` is
-/// called with that token and its result compared, case-insensitively
-/// (GitHub logins are case-insensitive; matches
+/// [`crate::core::gh_account::resolve_gh_account_env_with`]; when the
+/// resolved [`crate::core::gh_account::GhSpawnEnv::vars`] carries a
+/// `GH_CONFIG_DIR` (the arm [`account_clone_env`] always takes now),
+/// `verify_scoped_login` is called with `(dir, host)`; when it carries a bare
+/// `GH_TOKEN` instead (the `-u`-fallback arm, reachable only when a caller
+/// passes `config_dir: None`), `verify_login` is called with the token. Either
+/// result is compared, case-insensitively (GitHub logins are
+/// case-insensitive; matches
 /// [`crate::core::gh_account::GhAccountStatus::canonical_logged_in_login`]'s
 /// convention), against `account`. A `resolve_gh_account_env_with` `warning`
-/// (a pinned-but-credential-less `config_dir`) is logged, not swallowed.
-/// Test: `account_clone_env_shadows_inherited_identity_and_sets_gh_token`,
-/// `account_clone_env_propagates_a_resolver_failure_naming_the_account`,
-/// `account_clone_env_refuses_a_token_minted_for_a_different_account`,
-/// `account_clone_env_propagates_a_verification_failure`,
-/// `account_clone_env_accepts_a_token_that_matches`.
+/// is logged, not swallowed.
+/// Test: see [`account_clone_env`]'s `Test:` list — every case fires
+/// through this function.
 fn account_clone_env_with(
     account: &str,
+    config_dir: Option<&std::path::Path>,
     resolve_token: impl FnOnce(&str) -> Result<String, String>,
     verify_login: impl FnOnce(&str) -> Result<String, String>,
+    verify_scoped_login: impl FnOnce(&str, &str) -> Result<String, String>,
 ) -> Result<AccountCloneEnv, String> {
-    // `config_dir: None` — see the doc above for why this call site never has
-    // one to offer yet. `account` is always `Some`, so `resolve_gh_account_env_with`
-    // never returns its `None` ("nothing to inject") outcome here.
-    let spawn_env =
-        crate::core::gh_account::resolve_gh_account_env_with(Some(account), None, resolve_token)
-            .ok_or_else(|| {
-            format!(
-                "internal error: resolve_gh_account_env_with returned None for account '{account}'"
-            )
-        })??;
+    // `account` is always `Some`, so `resolve_gh_account_env_with` never
+    // returns its `None` ("nothing to inject") outcome here.
+    let spawn_env = crate::core::gh_account::resolve_gh_account_env_with(
+        Some(account),
+        config_dir,
+        resolve_token,
+    )
+    .ok_or_else(|| {
+        format!("internal error: resolve_gh_account_env_with returned None for account '{account}'")
+    })??;
 
     if let Some(warning) = &spawn_env.warning {
         tracing::warn!("{warning}");
     }
 
-    // #7166 critic BLOCK: only the `-u`-fallback arm sets a bare `GH_TOKEN` —
-    // the config_dir arm discriminates by construction and carries none, so
-    // there is nothing to verify there.
-    if let Some((_, token)) = spawn_env.vars.iter().find(|(k, _)| k == "GH_TOKEN") {
+    if let Some((_, dir)) = spawn_env.vars.iter().find(|(k, _)| k == "GH_CONFIG_DIR") {
+        let actual_login =
+            verify_scoped_login(dir, crate::core::trusty_tools_config::DEFAULT_GITHUB_HOST)
+                .map_err(|e| {
+                    format!("could not verify the account-scoped identity for '{account}': {e}")
+                })?;
+        if !actual_login.eq_ignore_ascii_case(account) {
+            return Err(format!(
+                "the gh config dir scoped to '{account}' resolves to a DIFFERENT identity \
+                 ('{actual_login}') — its hosts.yml may be stale or hand-edited. Remove \
+                 {dir} and retry so it is rebuilt from your current `gh auth login` state."
+            ));
+        }
+    } else if let Some((_, token)) = spawn_env.vars.iter().find(|(k, _)| k == "GH_TOKEN") {
         let actual_login = verify_login(token).map_err(|e| {
             format!("could not verify the minted token for account '{account}': {e}")
         })?;

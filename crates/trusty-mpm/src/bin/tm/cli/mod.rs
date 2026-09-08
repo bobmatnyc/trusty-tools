@@ -118,7 +118,7 @@ pub(crate) struct Cli {
     /// --account bob-duetto <owner>/<repo>`, and `tm register --account
     /// bob-duetto <owner>/<repo>` all bind the same field. The
     /// `<account>@<owner>/<repo>` shorthand
-    /// ([`crate::commands::register_args::classify`]) is the terser
+    /// (`commands::register_args::classify`) is the terser
     /// equivalent for the bare/`run` managed-repo forms; passing both is only
     /// an error when they NAME DIFFERENT accounts
     /// ([`crate::commands::register_args::resolve_account`]).
@@ -128,6 +128,13 @@ pub(crate) struct Cli {
     /// and is persisted onto the project's registry-B record
     /// (`gh_account`) so later spawns, fetches, and `gh` calls reuse it.
     /// `None` (the default) is unchanged ambient behaviour.
+    ///
+    /// Prerequisite: `login` must already be logged into `gh` on this host —
+    /// run `gh auth login` (or `gh auth login --hostname github.com` for a
+    /// second account) ONCE per account before its first `--account` use. `tm`
+    /// then builds and reuses its own isolated `gh` config dir for that login
+    /// automatically (#7166); it never runs `gh auth switch`, so a
+    /// concurrently-running session under a different account is unaffected.
     /// Test: `cli_parses_account_flag_global`, `cli_account_flag_after_subcommand`.
     #[arg(long, global = true)]
     pub(crate) account: Option<String>,
@@ -1410,7 +1417,7 @@ pub(crate) enum Command {
     /// except this variant. Adding a plain top-level positional instead would
     /// make every subcommand name ambiguous with it.
     /// What: clap collects the unrecognized token and everything after it.
-    /// [`crate::commands::run_target::classify_bare`] then decides which of two
+    /// `commands::run_target::classify_bare_with_account` then decides which of two
     /// outcomes it gets, and the gate is deliberately narrow: only a token
     /// [`crate::commands::register_args::looks_like_repo`] accepts becomes a
     /// managed run. Everything else — a typo like `tm statuss` — falls back to

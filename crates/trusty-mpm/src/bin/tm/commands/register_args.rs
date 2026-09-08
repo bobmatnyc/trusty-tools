@@ -273,7 +273,7 @@ pub(crate) fn embedded_account(s: &str) -> Option<&str> {
 /// case-insensitive in practice, but every other identity comparison in this
 /// module — e.g. [`is_name_segment`] — is byte-exact, and a caller relying on
 /// case-folding here would silently diverge from `gh`'s own canonicalisation
-/// in [`crate::core::gh_account::GhAccountStatus::canonical_logged_in_login`]).
+/// in `trusty_mpm::core::gh_account::GhAccountStatus::canonical_logged_in_login`).
 /// A non-empty `flag` is validated with the SAME [`is_name_segment`] predicate
 /// the `<login>@owner/repo` shorthand's `login` segment already goes through
 /// (#7166 review follow-up — parity: a malformed `--account` value used to

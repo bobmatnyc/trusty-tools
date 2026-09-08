@@ -10,7 +10,7 @@
 //! `remote.origin.url`. `tm run <owner>/<repo>` is the cold start: clone or
 //! verify the managed checkout, then hand off to the daemon-managed launch.
 //!
-//! What: [`classify_run_target`] sorts the positional using the SAME predicate
+//! What: `classify_run_target` sorts the positional using the SAME predicate
 //! `tm register` uses ([`super::register_args::looks_like_repo`]) so the two
 //! commands cannot disagree about what a string means; [`run`] dispatches an
 //! alias to the unchanged standalone driver and a repo to [`run_managed`],
@@ -75,14 +75,14 @@ pub(crate) fn classify_run_target(spec: &str) -> anyhow::Result<RunTarget> {
     classify_run_target_with_account(spec, None)
 }
 
-/// [`classify_run_target`], reconciling the `--account` flag (#7166).
+/// `classify_run_target`, reconciling the `--account` flag (#7166).
 ///
 /// Why: the global `--account` flag ([`crate::cli::Cli::account`]) and the
 /// embedded `<login>@owner/repo` shorthand bind the SAME field, so the two
 /// must be reconciled in one place rather than at each of the three callers
-/// ([`run`], [`classify_bare`], and `tm register`'s own resolution) —
+/// ([`run`], `classify_bare`, and `tm register`'s own resolution) —
 /// see [`super::register_args::resolve_account`].
-/// What: identical to [`classify_run_target`] otherwise; the resolved
+/// What: identical to `classify_run_target` otherwise; the resolved
 /// account (flag wins, embedded is the fallback, a conflict between the two
 /// is refused) is attached to a resulting [`RunTarget::Repo`] and ignored for
 /// [`RunTarget::Alias`] — the standalone driver has no account concept.
@@ -206,7 +206,7 @@ pub(crate) async fn run(
 /// keep getting clap's usage error and the "did you mean?" hint, never a
 /// managed run and never an alias lookup reporting "alias 'statuss' not found".
 /// Only a token [`super::register_args::looks_like_repo`] accepts — the SAME
-/// predicate `tm register` and [`classify_run_target`] use — is a repo.
+/// predicate `tm register` and `classify_run_target` use — is a repo.
 /// What: `None` means "not a repo, hand it back to the usage-error path".
 /// `Some(Ok(..))` is always [`RunTarget::Repo`]; `Some(Err(..))` is a
 /// repo-shaped token that [`super::register_args::resolved_url`] refuses (a
@@ -227,7 +227,7 @@ pub(crate) fn classify_bare(token: &str) -> Option<anyhow::Result<RunTarget>> {
     classify_bare_with_account(token, None)
 }
 
-/// [`classify_bare`], reconciling the `--account` flag (#7166).
+/// `classify_bare`, reconciling the `--account` flag (#7166).
 ///
 /// Why: `tm --account bob <owner>/<repo>` and `tm bob@<owner>/<repo>` both
 /// reach the `External` catch-all (the global `--account` flag parses before
@@ -259,7 +259,7 @@ pub(crate) fn classify_bare_with_account(
 /// invocation produced before [`crate::cli::Command::External`] existed.
 /// Trailing tokens are refused rather than silently dropped: `tm <url> extra`
 /// means something the CLI cannot honour.
-/// Test: the repo half is [`classify_bare`]'s coverage plus `tm run`'s existing
+/// Test: the repo half is `classify_bare`'s coverage plus `tm run`'s existing
 /// managed-checkout tests; the usage-error half exits the process and is
 /// covered at the parse layer by `cli_bare_unknown_subcommand_is_not_a_repo`,
 /// `cli_bare_ambiguous_prefix_is_not_a_repo`, and

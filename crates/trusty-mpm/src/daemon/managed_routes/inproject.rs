@@ -43,6 +43,11 @@ pub mod untracked_sync;
 // #7166 review follow-up: split out to keep this file under the 500-SLOC cap.
 mod account_clone;
 use account_clone::account_clone_env;
+// #7166 owner ruling ("do B"): per-account gh config dir bootstrap, used by
+// `account_clone` — a sibling module (not nested under it) so both this file
+// and `account_clone` can reach it via `super`/direct path without an extra
+// re-export hop.
+mod account_config_dir;
 
 /// Environment variable that overrides the managed repos root.
 ///
