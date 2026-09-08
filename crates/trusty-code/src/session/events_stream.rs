@@ -10,10 +10,13 @@
 //! [`trusty_common::uds::server::RpcRouter::typed_stream`] so the answer is a
 //! sequence of frames instead of one.
 //!
-//! What: [`open`] snapshots the session's ring buffer, then forwards the
+//! What: [`open`](crate::session::events_stream::open) snapshots the session's
+//! ring buffer, then forwards the
 //! daemon-global event bus filtered to that session, into the
 //! [`trusty_common::uds::server::RpcStreamItems`] channel the router writes
-//! frames from. [`SessionEventsParams::after_seq`] is what HTTP has no
+//! frames from.
+//! [`SessionEventsParams::after_seq`](crate::session::events_stream::SessionEventsParams::after_seq)
+//! is what HTTP has no
 //! equivalent of: a client whose connection was cut names the last `seq` it
 //! confirmed, and the replay resumes above it instead of repeating the whole
 //! ring. The subscribe happens BEFORE the replay snapshot so an event

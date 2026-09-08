@@ -9,7 +9,8 @@
 //! stays the single definition of which events belong to a workstream, and
 //! this module is the bridge from its `Stream` onto the router's channel.
 //!
-//! What: [`open`] validates the id and the workstream's existence exactly as
+//! What: [`open`](crate::workstreams::events_stream::open) validates the id
+//! and the workstream's existence exactly as
 //! `workstream_events_sse` does, then forwards
 //! [`crate::workstreams::WorkstreamEventEnvelope`]s until the client
 //! disconnects.

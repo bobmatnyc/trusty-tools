@@ -11,7 +11,9 @@
 //! **This retires with the TCP listener in PR 2** — `trusty-code-gui` serves
 //! its own webview then, and no client in this crate dials HTTP.
 //!
-//! What: [`DAEMON_TOKEN_ENV`] and [`daemon_credential_for`], unchanged.
+//! What: [`DAEMON_TOKEN_ENV`](crate::http_credential::DAEMON_TOKEN_ENV) and
+//! [`daemon_credential_for`](crate::http_credential::daemon_credential_for),
+//! unchanged.
 //!
 //! Test: `http_credential_tests`.
 
