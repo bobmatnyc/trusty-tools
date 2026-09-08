@@ -10,12 +10,13 @@
 //! only mechanism that closes the whole class has to live INSIDE the child.
 //!
 //! What: [`exit_with_parent`] stamps [`ENV_EXIT_WITH_PARENT`] onto a `Command`
-//! with the spawner's own pid; the spawned program calls [`arm_from_env`] early
-//! in its startup and self-exits once that parent is gone.
-//! [`arm_for_named_parent`] is the variant for a parent named out of band — a
-//! `--parent-pid` flag rather than the environment — where the named pid need
-//! not be the direct spawner. Both arming entry points are unix-only and compile
-//! to no-ops elsewhere; stamping the environment is portable and harmless.
+//! with the spawner's own IDENTITY — its pid and its process start time; the
+//! spawned program calls [`arm_from_env`] early in its startup and self-exits
+//! once that parent is gone. [`arm_for_named_parent`] is the variant for a
+//! parent named out of band — a `--parent-pid` flag rather than the
+//! environment — where the named pid need not be the direct spawner. Both
+//! arming entry points are unix-only and compile to no-ops elsewhere; stamping
+//! the environment is portable and harmless.
 //!
 //! Mechanism: a polled `getppid()` comparison, a `kill(pid, 0)` liveness probe,
 //! and the parent's process START TIME, on a dedicated OS thread.
@@ -30,19 +31,44 @@
 //! watching a grandparent has no reparent signal to fall back on, so a pid the
 //! OS recycles onto some unrelated process would read as "parent still alive"
 //! forever — the exact permanent orphan this module exists to prevent.
-//! [`ParentIdentity`] pairs the pid with the process start time read at arm
-//! time, and a changed start time is death. macOS reads it with
+//! [`ParentIdentity`] pairs the pid with a process start time, and a changed
+//! start time is death. macOS reads it with
 //! `proc_pidinfo(PROC_PIDTASKALLINFO)`, Linux from `/proc/<pid>/stat` field 22;
 //! a platform where neither works degrades to the liveness probe alone rather
 //! than to a false "gone".
+//!
+//! Why the SPAWNER reads that start time (#7085 round-2 review): reading it in
+//! the child, at arm time, is a TOCTOU. Between `Command::spawn()` and the
+//! child reaching `arm_from_env` the spawner can die and the OS can hand its
+//! pid to something unrelated; the child would then record the IMPOSTOR's start
+//! time and watch a process nobody asked it to watch — firing only when that
+//! process happens to exit, which may be never. A process cannot be recycled
+//! while it is running, so the spawner reading its OWN start time has no such
+//! window. The stamp therefore carries the pair, `<pid>:<start>`, and the child
+//! only ever parses it. A stamped start time that does not match the live pid's
+//! means the spawner is already gone and the child exits at arm.
+//!
+//! Why the watchdog waits for a SIGTERM handler (#7085 round-2 review): the
+//! graceful path is `raise(SIGTERM)` into the daemon's own handler, and
+//! `arm_from_env` runs before that handler is installed. Raising into the
+//! default disposition would kill the process outright, skipping the socket
+//! unlink and the index flush that make the exit graceful — most visibly when
+//! the parent is already dead at arm and the watchdog fires on its first tick.
+//! [`wait_for_term_handler`] holds the raise until SIGTERM is no longer on
+//! `SIG_DFL`, bounded by [`HANDLER_WAIT`].
 //!
 //! Opt-in by construction: nothing arms unless [`ENV_EXIT_WITH_PARENT`] is set,
 //! and arming always announces itself on stderr, so a daemon that self-exits is
 //! never doing so silently.
 //!
-//! Test: `stamps_this_process_pid`, `parent_is_gone_on_reparent`,
+//! Test: `the_stamp_round_trips_this_process_identity`,
+//! `a_stamped_start_time_that_does_not_match_the_live_pid_reads_as_gone`,
+//! `a_stamp_without_a_start_time_degrades_to_liveness`,
+//! `an_unwatchable_stamp_arms_nothing`, `parent_is_gone_on_reparent`,
 //! `parent_is_gone_when_named_parent_exits`, `grandchild_ignores_its_own_reparent`,
-//! `recycled_pid_reads_as_gone`, `start_time_is_readable_for_this_process`,
+//! `recycled_pid_reads_as_gone`, `an_unreadable_start_time_favours_alive`,
+//! `start_time_is_readable_for_this_process`,
+//! `an_installed_sigterm_handler_is_distinguishable_from_the_default`,
 //! `watch_parent_returns_once_parent_dies`.
 
 use std::process::Command;
@@ -52,11 +78,21 @@ use std::time::Duration;
 ///
 /// Why: the value has to cross an `exec`, and the environment is the one channel
 /// that reaches a program whose argument vector the spawner does not own.
-/// What: the exact env-var name; the value is the spawner's pid in decimal. Set
-/// it through [`exit_with_parent`] rather than by hand, so the pid and the name
-/// are written in one place.
-/// Test: `stamps_this_process_pid`.
+/// What: the exact env-var name. The value is `<pid>:<start>` — the spawner's
+/// pid in decimal and the spawner's own process start time, which is what makes
+/// a recycled pid distinguishable from the real parent. A bare `<pid>` is
+/// accepted and degrades to a liveness-only watch; that is what a spawner on a
+/// platform with no start-time source writes. Set it through
+/// [`exit_with_parent`] rather than by hand, so the name and both halves of the
+/// value are written in one place.
+/// Test: `the_stamp_round_trips_this_process_identity`.
 pub const ENV_EXIT_WITH_PARENT: &str = "TRUSTY_EXIT_WITH_PARENT";
+
+/// Separates the pid from the start time inside [`ENV_EXIT_WITH_PARENT`].
+///
+/// Why a colon: neither half can contain one, so the split is unambiguous
+/// without escaping, and the value stays readable in a `ps -E` dump.
+const STAMP_SEPARATOR: char = ':';
 
 /// How often the watchdog re-checks its parent.
 ///
@@ -73,6 +109,17 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// while keeping the worst-case orphan lifetime in single-digit seconds.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
+/// How long the watchdog waits for the process to install a SIGTERM handler
+/// before giving up on a graceful exit.
+///
+/// Why: `arm_from_env` is called at the top of a daemon's serve path, and the
+/// handler goes in much later — after the config loads, the store opens, and
+/// the socket binds. A parent that is already dead at arm makes the watchdog
+/// fire on its first tick, well inside that window. 10 s covers a cold
+/// trusty-memory boot on a loaded box; past it, waiting longer only extends the
+/// orphan's life, so the watchdog exits by itself instead.
+const HANDLER_WAIT: Duration = Duration::from_secs(10);
+
 /// Exit status a self-exiting watchdog reports when it had to force the exit.
 ///
 /// Why: an operator reading a crash log has to be able to tell "my parent died
@@ -85,14 +132,39 @@ pub const EXIT_CODE_PARENT_DIED_UNGRACEFUL: i32 = 87;
 
 /// Stamp `cmd` so the process it spawns exits when THIS process dies.
 ///
-/// Why: the spawner is the only one that knows its own pid, and it must record
-/// it before the fork — after a SIGKILL there is nobody left to tell the child
-/// anything. Callers pair this with [`arm_from_env`] in the spawned program.
-/// What: sets [`ENV_EXIT_WITH_PARENT`] to `std::process::id()`. Portable: the
-/// stamp is inert in a program that never arms, and on a non-unix target.
-/// Test: `stamps_this_process_pid`.
+/// Why: the spawner is the only one that knows its own identity, and it must
+/// record it before the fork — after a SIGKILL there is nobody left to tell the
+/// child anything. Reading its own start time here rather than letting the
+/// child read one from the pid is what closes the recycled-pid window described
+/// in the module doc. Callers pair this with [`arm_from_env`] in the spawned
+/// program.
+/// What: sets [`ENV_EXIT_WITH_PARENT`] to [`own_stamp`]. Portable: the stamp is
+/// inert in a program that never arms, and on a non-unix target.
+/// Test: `the_stamp_round_trips_this_process_identity`.
 pub fn exit_with_parent(cmd: &mut Command) -> &mut Command {
-    cmd.env(ENV_EXIT_WITH_PARENT, std::process::id().to_string())
+    cmd.env(ENV_EXIT_WITH_PARENT, own_stamp())
+}
+
+/// This process's own stamp value: `<pid>:<start>`, or `<pid>` alone where the
+/// platform reports no start time.
+///
+/// Why it is safe to read here and not in the child: this process holds the pid
+/// it is asking about, so nothing can recycle it out from under the read.
+/// What: pid and start time joined by [`STAMP_SEPARATOR`].
+/// Test: `the_stamp_round_trips_this_process_identity`.
+#[cfg(unix)]
+fn own_stamp() -> String {
+    let me = identify(std::process::id());
+    match me.start {
+        Some(start) => format!("{}{STAMP_SEPARATOR}{start}", me.pid),
+        None => me.pid.to_string(),
+    }
+}
+
+/// Non-unix stub: no start-time source, so the stamp is the pid alone.
+#[cfg(not(unix))]
+fn own_stamp() -> String {
+    std::process::id().to_string()
 }
 
 /// Tokio counterpart of [`exit_with_parent`], for an async spawn site.
@@ -101,10 +173,10 @@ pub fn exit_with_parent(cmd: &mut Command) -> &mut Command {
 /// that spawns a bridge asynchronously owes its child the same linkage. Both
 /// entry points write the same name and the same value, so a caller never has to
 /// know which one the other used.
-/// What: sets [`ENV_EXIT_WITH_PARENT`] to `std::process::id()`.
-/// Test: `stamps_this_process_pid` pins the value both share.
+/// What: sets [`ENV_EXIT_WITH_PARENT`] to [`own_stamp`].
+/// Test: `the_stamp_round_trips_this_process_identity` pins the value both share.
 pub fn exit_with_parent_tokio(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
-    cmd.env(ENV_EXIT_WITH_PARENT, std::process::id().to_string())
+    cmd.env(ENV_EXIT_WITH_PARENT, own_stamp())
 }
 
 /// This process's own parent-death stamp, if it carries one.
@@ -141,10 +213,17 @@ struct ParentIdentity {
 /// SIGKILL of the parent cannot skip. Call it once, early, on the long-running
 /// path of a program a test may spawn.
 /// What: reads the env var. Absent → returns `None` and arms nothing, which is
-/// every production invocation. Present and naming a pid above 1 → records that
-/// pid's identity, spawns the watchdog thread, announces the arming on stderr,
-/// and returns the pid. Unparseable or `<= 1` → warns on stderr and arms
-/// nothing; a typo must not silently disable the linkage.
+/// every production invocation. Present and naming a pid above 1 → takes the
+/// identity STRAIGHT FROM THE STAMP, spawns the watchdog thread, announces the
+/// arming on stderr, and returns the pid. Unparseable or `<= 1` → warns on
+/// stderr and arms nothing; a typo must not silently disable the linkage.
+///
+/// The start time is never re-derived from the stamped pid here. Deriving it
+/// would read whatever process holds that pid NOW, which after a recycle is an
+/// impostor the watchdog would then wait on forever — see the module doc. A
+/// stamped start time that disagrees with the live pid's therefore means the
+/// spawner is already gone, and the watchdog's first tick takes the graceful
+/// exit path immediately.
 ///
 /// The reparent prong is armed only when the stamped pid IS this process's
 /// direct parent. A daemon started detached by an intermediate CLI is a
@@ -152,13 +231,40 @@ struct ParentIdentity {
 /// about whether the stamped process is still alive, and watching for it would
 /// kill the daemon seconds after it started. Such a daemon watches the stamped
 /// process's identity — pid plus start time — instead.
-/// Test: `stamps_this_process_pid` pins the contract's spawner half;
+/// Test: `a_stamped_start_time_that_does_not_match_the_live_pid_reads_as_gone`,
+/// `an_unwatchable_stamp_arms_nothing`;
 /// `crates/trusty-memory/tests/orphan_reap_7085.rs` proves both the direct-child
 /// and the detached-grandchild loops against a real SIGKILLed spawner.
 #[cfg(unix)]
 pub fn arm_from_env(tag: &str) -> Option<u32> {
     let raw = std::env::var(ENV_EXIT_WITH_PARENT).ok()?;
-    let parent = match raw.trim().parse::<u32>() {
+    let parent = parent_from_stamp(&raw, tag)?;
+    // SAFETY: `getppid` takes no arguments and cannot fail.
+    let ppid = unsafe { libc::getppid() } as u32;
+    arm(parent, (ppid == parent.pid).then_some(ppid), tag);
+    Some(parent.pid)
+}
+
+/// Parse an [`ENV_EXIT_WITH_PARENT`] value into the identity to watch.
+///
+/// Why it is a separate function: this is the half of #7085's round-2 finding
+/// that can be proven without spawning a daemon or signalling the test runner.
+/// What: accepts `<pid>` or `<pid>:<start>`. A pid of 0 or 1, or one that does
+/// not parse, warns and yields `None` — nothing arms. A start time that does not
+/// parse warns and degrades the identity to liveness-only rather than reporting
+/// a false "gone", which would kill a healthy daemon on a malformed stamp.
+/// Test: `the_stamp_round_trips_this_process_identity`,
+/// `a_stamped_start_time_that_does_not_match_the_live_pid_reads_as_gone`,
+/// `a_stamp_without_a_start_time_degrades_to_liveness`,
+/// `an_unwatchable_stamp_arms_nothing`.
+#[cfg(unix)]
+fn parent_from_stamp(raw: &str, tag: &str) -> Option<ParentIdentity> {
+    let trimmed = raw.trim();
+    let (pid_text, start_text) = match trimmed.split_once(STAMP_SEPARATOR) {
+        Some((pid, start)) => (pid, Some(start)),
+        None => (trimmed, None),
+    };
+    let pid = match pid_text.parse::<u32>() {
         Ok(pid) if pid > 1 => pid,
         _ => {
             eprintln!(
@@ -168,10 +274,20 @@ pub fn arm_from_env(tag: &str) -> Option<u32> {
             return None;
         }
     };
-    // SAFETY: `getppid` takes no arguments and cannot fail.
-    let ppid = unsafe { libc::getppid() } as u32;
-    arm(identify(parent), (ppid == parent).then_some(ppid), tag);
-    Some(parent)
+    let start = match start_text {
+        None => None,
+        Some(text) => match text.parse::<u64>() {
+            Ok(start) => Some(start),
+            Err(_) => {
+                eprintln!(
+                    "[{tag}] {ENV_EXIT_WITH_PARENT}={raw:?} carries no readable start \
+                     time; watching pid {pid} by liveness alone"
+                );
+                None
+            }
+        },
+    };
+    Some(ParentIdentity { pid, start })
 }
 
 /// Non-unix stub: the watchdog needs `getppid`/`kill`, so arming is a no-op.
@@ -187,6 +303,15 @@ pub fn arm_from_env(_tag: &str) -> Option<u32> {
 /// spawner. Anchoring the reparent check to `getppid()` AT ARM TIME rather than
 /// to `parent_pid` keeps the check correct in that case, while the identity
 /// probe on `parent_pid` covers the parent this process was told about.
+///
+/// Where the start time comes from, and why it differs from [`arm_from_env`]:
+/// a `--parent-pid` flag carries a pid and nothing else, so there is no stamped
+/// start time to parse and [`identify`] reads one from the live pid here. That
+/// leaves the narrow recycle window `arm_from_env` closes — but it is covered
+/// from the other side: this entry point always arms the reparent prong, and
+/// `getppid()` moving is immune to pid reuse. A GUI that wants the stronger
+/// guarantee stamps [`ENV_EXIT_WITH_PARENT`] with [`exit_with_parent`] instead
+/// of passing a flag.
 /// What: reads `getppid()` as the expected ppid, then arms as [`arm_from_env`]
 /// does. A `parent_pid` of 0 or 1 is not watchable and arms nothing.
 /// Test: `parent_is_gone_when_named_parent_exits` covers the identity prong this
@@ -229,10 +354,19 @@ fn identify(pid: u32) -> ParentIdentity {
 /// tested path instead of a second, weaker one. A daemon that ignores SIGTERM,
 /// or is wedged, must still not outlive its parent, so the graceful window is
 /// bounded by [`SHUTDOWN_GRACE`] and then forced.
-/// What: blocks in [`watch_parent`], announces the reason on stderr, raises
-/// SIGTERM on this process, and waits up to [`SHUTDOWN_GRACE`]. If the process
-/// is still running when that expires it exits
-/// [`EXIT_CODE_PARENT_DIED_UNGRACEFUL`], which distinguishes this from a crash.
+///
+/// Why it waits before raising (#7085 round-2 review): arming happens before the
+/// daemon installs its SIGTERM handler, so a parent that is already dead at arm
+/// would otherwise have the first tick raise SIGTERM into the DEFAULT
+/// disposition — which kills the process outright and skips the socket unlink
+/// and index flush that make the exit graceful. [`wait_for_term_handler`] holds
+/// the raise until a handler exists.
+/// What: blocks in [`watch_parent`], announces the reason on stderr, waits up to
+/// [`HANDLER_WAIT`] for a SIGTERM handler, raises SIGTERM on this process, and
+/// waits up to [`SHUTDOWN_GRACE`]. If the process is still running when that
+/// expires — or no handler ever appeared, so the raise was never worth making —
+/// it exits [`EXIT_CODE_PARENT_DIED_UNGRACEFUL`], which distinguishes this from
+/// a crash.
 #[cfg(unix)]
 fn arm(parent: ParentIdentity, armed_ppid: Option<u32>, tag: &str) {
     let owned_tag = tag.to_string();
@@ -254,13 +388,22 @@ fn arm(parent: ParentIdentity, armed_ppid: Option<u32>, tag: &str) {
                  becoming an orphan",
                 parent.pid
             );
-            // SAFETY: `raise` delivers to this process and takes a signal number.
-            unsafe { libc::raise(libc::SIGTERM) };
-            std::thread::sleep(SHUTDOWN_GRACE);
-            eprintln!(
-                "[{owned_tag}] graceful shutdown did not complete within \
-                 {SHUTDOWN_GRACE:?}; forcing exit {EXIT_CODE_PARENT_DIED_UNGRACEFUL}"
-            );
+            if wait_for_term_handler(HANDLER_WAIT) {
+                // SAFETY: `raise` delivers to this process and takes a signal number.
+                unsafe { libc::raise(libc::SIGTERM) };
+                std::thread::sleep(SHUTDOWN_GRACE);
+                eprintln!(
+                    "[{owned_tag}] graceful shutdown did not complete within \
+                     {SHUTDOWN_GRACE:?}; forcing exit {EXIT_CODE_PARENT_DIED_UNGRACEFUL}"
+                );
+            } else {
+                eprintln!(
+                    "[{owned_tag}] no SIGTERM handler was installed within \
+                     {HANDLER_WAIT:?}, so raising it would kill this process on the \
+                     default disposition; exiting {EXIT_CODE_PARENT_DIED_UNGRACEFUL} \
+                     instead"
+                );
+            }
             std::process::exit(EXIT_CODE_PARENT_DIED_UNGRACEFUL);
         });
     if let Err(e) = spawned {
@@ -278,6 +421,49 @@ fn watch_parent(parent: ParentIdentity, armed_ppid: Option<u32>, interval: Durat
     while !parent_is_gone(parent, armed_ppid) {
         std::thread::sleep(interval);
     }
+}
+
+/// Block until this process has a SIGTERM handler, or `budget` expires.
+///
+/// What: polls [`term_handler_installed`] every [`POLL_INTERVAL`]. Returns
+/// whether a handler appeared — `false` means the caller must not raise SIGTERM,
+/// because the default disposition would kill the process outright instead of
+/// running its shutdown path.
+/// Test: `an_installed_sigterm_handler_is_distinguishable_from_the_default`.
+#[cfg(unix)]
+fn wait_for_term_handler(budget: Duration) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    while !term_handler_installed() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    true
+}
+
+/// Has anything replaced SIGTERM's default disposition?
+///
+/// Why this and not a flag the daemon sets: the disposition is the thing that
+/// actually decides whether a raise is graceful, and asking the kernel needs no
+/// cooperation from — and no process-global state shared with — the daemon.
+/// tokio's signal driver installs a real handler function, so a daemon awaiting
+/// [`crate::shutdown_signal`] answers `true` once that future is first polled.
+/// What: queries `sigaction` with a null new-action, which only reads. `true`
+/// when the current handler is anything other than `SIG_DFL`; a failed query
+/// reads as `false`, the conservative answer.
+/// Test: `an_installed_sigterm_handler_is_distinguishable_from_the_default`.
+#[cfg(unix)]
+fn term_handler_installed() -> bool {
+    let mut current = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
+    // SAFETY: a null `act` makes this a query; `current` is a correctly sized,
+    // zeroed buffer of exactly the type the kernel fills.
+    let rc = unsafe { libc::sigaction(libc::SIGTERM, std::ptr::null(), current.as_mut_ptr()) };
+    if rc != 0 {
+        return false;
+    }
+    // SAFETY: a zero return means the kernel initialised the struct.
+    unsafe { current.assume_init() }.sa_sigaction != libc::SIG_DFL
 }
 
 /// Has the parent gone, by any of the three signals?
@@ -391,20 +577,134 @@ fn process_start_secs(_pid: u32) -> Option<u64> {
 mod tests {
     use super::*;
 
-    /// The spawner half of the contract: the stamp must carry THIS process's
-    /// pid under the documented name, because that pid is what the child polls.
-    #[test]
-    fn stamps_this_process_pid() {
-        let mut cmd = Command::new("true");
-        exit_with_parent(&mut cmd);
-        let stamped = cmd
-            .get_envs()
+    /// Read the stamp `exit_with_parent` put on a `Command`.
+    fn stamped_value(cmd: &Command) -> String {
+        cmd.get_envs()
             .find(|(k, _)| *k == std::ffi::OsStr::new(ENV_EXIT_WITH_PARENT))
             .and_then(|(_, v)| v)
-            .expect("exit_with_parent must set the env var");
+            .expect("exit_with_parent must set the env var")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// The spawner half of the contract: the stamp must carry THIS process's
+    /// full identity under the documented name, and the child's parser must
+    /// recover exactly that — pid and start time both.
+    #[cfg(unix)]
+    #[test]
+    fn the_stamp_round_trips_this_process_identity() {
+        let mut cmd = Command::new("true");
+        exit_with_parent(&mut cmd);
+        let parsed = parent_from_stamp(&stamped_value(&cmd), "test")
+            .expect("the stamp this crate writes must parse");
         assert_eq!(
-            stamped,
-            std::ffi::OsStr::new(&std::process::id().to_string())
+            parsed,
+            identify(std::process::id()),
+            "the stamp must name this process's pid and start time"
+        );
+    }
+
+    /// The round-2 finding (#7085): the child must trust the STAMPED start time
+    /// and never re-derive one from the pid. A stamp whose start time disagrees
+    /// with the process now holding that pid is exactly what a recycle leaves
+    /// behind between `Command::spawn()` and the child reaching `arm_from_env`,
+    /// and the child must read it as "parent already gone" at arm — not adopt
+    /// the impostor and wait for it to exit.
+    ///
+    /// This test is red against the pre-fix `arm_from_env`, which called
+    /// `identify(parent)` in the child: re-deriving always agrees with itself,
+    /// so the impostor reads as alive.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_stamped_start_time_that_does_not_match_the_live_pid_reads_as_gone() {
+        let me = std::process::id();
+        let real = process_start_secs(me).expect("this platform must report a start time");
+        let impostor = format!("{me}{STAMP_SEPARATOR}{}", real.wrapping_add(1));
+
+        let parsed = parent_from_stamp(&impostor, "test").expect("a well-formed stamp must parse");
+        assert_eq!(parsed.pid, me, "the pid half must survive parsing");
+        assert_eq!(
+            parsed.start,
+            Some(real.wrapping_add(1)),
+            "the STAMPED start time must be kept verbatim, not re-read from the pid"
+        );
+        assert!(
+            parent_is_gone(parsed, None),
+            "a live pid whose stamped start time does not match it is a RECYCLED \
+             pid; arming on it would watch a process nobody asked for and might \
+             never fire"
+        );
+    }
+
+    /// A stamp with no start time — what a spawner on a platform with no
+    /// start-time source writes, and what the pre-#7085 stamp format looked
+    /// like — must still arm, watching by liveness alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_stamp_without_a_start_time_degrades_to_liveness() {
+        let parsed = parent_from_stamp("4242", "test").expect("a bare pid must parse");
+        assert_eq!(
+            parsed,
+            ParentIdentity {
+                pid: 4242,
+                start: None
+            }
+        );
+        let malformed = parent_from_stamp("4242:not-a-time", "test")
+            .expect("a malformed start time must degrade, not refuse");
+        assert_eq!(
+            malformed.start, None,
+            "an unparseable start time must never be treated as a mismatch"
+        );
+    }
+
+    /// A stamp that names nothing watchable must arm nothing rather than watch
+    /// pid 0 or pid 1 — pid 1 never exits, so arming on it is a watchdog that
+    /// can never fire.
+    #[cfg(unix)]
+    #[test]
+    fn an_unwatchable_stamp_arms_nothing() {
+        for raw in ["0", "1", "", "not-a-pid", ":123"] {
+            assert!(
+                parent_from_stamp(raw, "test").is_none(),
+                "{raw:?} must not arm a watchdog"
+            );
+        }
+    }
+
+    /// The graceful path depends on telling an installed SIGTERM handler from
+    /// the default disposition; if that query could not, the watchdog would
+    /// either raise into a hard kill or never raise at all.
+    #[cfg(unix)]
+    #[test]
+    fn an_installed_sigterm_handler_is_distinguishable_from_the_default() {
+        // SAFETY: a null `act` queries the current disposition; `saved` is a
+        // correctly sized, zeroed buffer of the type the kernel fills.
+        let mut saved = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
+        assert_eq!(
+            unsafe { libc::sigaction(libc::SIGTERM, std::ptr::null(), saved.as_mut_ptr()) },
+            0,
+            "querying SIGTERM's disposition must succeed"
+        );
+        // SAFETY: the query returned 0, so the struct is initialised.
+        let saved = unsafe { saved.assume_init() };
+
+        // SAFETY: `libc::signal` sets SIGTERM's disposition for this process;
+        // the original is captured above and restored below, and no test in this
+        // binary sends itself SIGTERM.
+        unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) };
+        let with_handler = term_handler_installed();
+        // SAFETY: restores exactly the sigaction read above.
+        unsafe { libc::sigaction(libc::SIGTERM, &saved, std::ptr::null_mut()) };
+
+        assert!(
+            with_handler,
+            "a disposition other than SIG_DFL must read as an installed handler"
+        );
+        assert_eq!(
+            term_handler_installed(),
+            saved.sa_sigaction != libc::SIG_DFL,
+            "the restored disposition must read back as whatever it was"
         );
     }
 
@@ -511,6 +811,31 @@ mod tests {
             "a live pid whose start time moved is a DIFFERENT process and must \
              read as gone; without this a recycled pid keeps a grandchild alive \
              forever"
+        );
+    }
+
+    /// The other side of `recycled_pid_reads_as_gone`: when either start-time
+    /// reading is missing, the comparison must abstain and let liveness decide.
+    /// Reporting "gone" on a missing reading would make the watchdog kill a
+    /// perfectly healthy daemon on any platform it cannot see into.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_start_time_favours_alive() {
+        let unreadable = ParentIdentity {
+            pid: std::process::id(),
+            start: None,
+        };
+        assert!(
+            !parent_is_gone(unreadable, None),
+            "a live pid with no armed start time must read as present, not gone"
+        );
+        let dead = ParentIdentity {
+            pid: u32::MAX - 1,
+            start: None,
+        };
+        assert!(
+            parent_is_gone(dead, None),
+            "abstaining on the start time must not also suppress the liveness probe"
         );
     }
 

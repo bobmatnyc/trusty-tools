@@ -15,9 +15,16 @@
 //! `trusty_common::parent_death::exit_with_parent` helper, records its pid, and
 //! then blocks forever. [`foreground_daemon_exits_when_its_spawner_is_sigkilled`]
 //! runs that helper as a child, waits for the daemon to bind its socket, SIGKILLs
-//! the helper outright, and asserts the daemon's pid disappears. Re-entry rather
-//! than a shell one-liner is what keeps the spawner half of the contract — the
-//! Rust helper — under test rather than a hand-copied env assignment.
+//! the helper outright, and asserts the daemon's pid disappears AND that it
+//! unlinked its socket on the way out. Re-entry rather than a shell one-liner is
+//! what keeps the spawner half of the contract — the Rust helper — under test
+//! rather than a hand-copied env assignment.
+//!
+//! Why the socket assertion (#7085 review): a vanished pid says only that the
+//! process ended. Replacing the watchdog's body with a bare `process::exit`
+//! would satisfy it. Only `serve_with_shutdown` removes the socket file, and it
+//! reaches that line only by running the daemon's real SIGTERM path, so the
+//! file's absence is what separates a graceful exit from any other death.
 //!
 //! Not `#[serial_test::file_serial]`: every path here is inside a fresh
 //! tempdir, the daemon binds only that dir's socket, and the liveness assertion
@@ -86,6 +93,34 @@ fn hard_kill(pid: u32) {
 fn wait_for_path(path: &Path, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while !path.exists() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(POLL);
+    }
+    true
+}
+
+/// The parent pid of `pid`, via `ps`.
+///
+/// Why `ps` rather than a `proc_pidinfo` call: this is one assertion in one
+/// test, and the platform-specific struct plumbing would be a second copy of
+/// what `trusty_common::parent_death` already owns.
+fn ppid_of(pid: u32) -> Option<u32> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8(out.stdout).ok()?.trim().parse().ok()
+}
+
+/// Block until `pid` is reparented to init, returning `false` on timeout.
+///
+/// Why the poll: the bridge writes the daemon's pid and only THEN exits, so
+/// there is a short window in which the daemon's ppid is still the bridge.
+fn wait_for_reparent_to_init(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while ppid_of(pid) != Some(1) {
         if Instant::now() >= deadline {
             return false;
         }
@@ -293,6 +328,19 @@ fn assert_daemon_dies_with_its_spawner(via_bridge: bool) {
         );
     }
 
+    // #7085 review: in the bridge shape the daemon must ALREADY be an orphan by
+    // parentage before the spawner dies. If it were still a descendant of the
+    // spawner, the reparent prong would carry this test and the identity prong —
+    // the only thing a real detached daemon has — would go unproven.
+    if via_bridge {
+        let ppid = ppid_of(daemon_pid);
+        assert!(
+            wait_for_reparent_to_init(daemon_pid, BOOT_TIMEOUT),
+            "daemon {daemon_pid} was still parented to {ppid:?} rather than init, so this \
+             scenario would not exercise the detached-grandchild path"
+        );
+    }
+
     // The whole point: kill the spawner outright. No `Drop`, no unwind, no
     // teardown of any kind runs in that process.
     spawner.kill().expect("SIGKILL the helper");
@@ -310,4 +358,18 @@ fn assert_daemon_dies_with_its_spawner(via_bridge: bool) {
         }
         std::thread::sleep(POLL);
     }
+
+    // #7085 review: the pid disappearing proves only that the process ended,
+    // which a bare `process::exit` inside the watchdog would satisfy just as
+    // well. `serve_with_shutdown` unlinks the socket on its way out and nothing
+    // else does, so the file being gone is the assertion only a shutdown that
+    // ran the daemon's own SIGTERM path can pass. The unlink happens before the
+    // process exits, so no further wait is needed here.
+    assert!(
+        !socket.exists(),
+        "daemon {daemon_pid} exited but left {} behind — the watchdog must route \
+         through the daemon's SIGTERM handler so the socket is unlinked and the \
+         indexes flushed, not exit the process outright",
+        socket.display()
+    );
 }
