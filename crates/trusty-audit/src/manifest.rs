@@ -53,7 +53,8 @@ pub struct AuditManifest {
 /// `trusty-review` resolves from it (#6135). This crate reads it back for one
 /// purpose — stating in `index.md` which models a re-render will actually use,
 /// since the manifest outranks anything the re-render itself would inject.
-/// What: four identity strings, never a credential.
+/// What: four identity strings plus, since #6144, a derived `endpoint_class`
+/// (`"api"` or `"local"`) — never a credential.
 /// Test: `super::manifest_tests::reads_the_inference_section`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[non_exhaustive]
@@ -61,6 +62,14 @@ pub struct InferenceSection {
     /// Provider id.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Whether `provider` names a hosted API or a local endpoint (#6144).
+    ///
+    /// Absent in every manifest written before this key existed — a manifest
+    /// written after the key existed but naming a provider this crate did not
+    /// yet classify still round-trips: `crate::index_report::InferenceRecord`
+    /// derives one from `provider` when this is `None`.
+    #[serde(default)]
+    pub endpoint_class: Option<String>,
     /// Reviewer role model id.
     #[serde(default)]
     pub reviewer: Option<String>,
@@ -200,7 +209,7 @@ path = "/work/repos/acme-web"
     #[test]
     fn reads_the_inference_section() {
         let text = format!(
-            "{SAMPLE}\n[inference]\nprovider = \"openrouter\"\n\
+            "{SAMPLE}\n[inference]\nprovider = \"openrouter\"\nendpoint_class = \"api\"\n\
              reviewer = \"anthropic/claude-opus-4.8\"\n\
              verifier = \"anthropic/claude-haiku-4.5\"\n\
              summarizer = \"anthropic/claude-haiku-4.5\"\n"
@@ -208,6 +217,7 @@ path = "/work/repos/acme-web"
         let manifest = AuditManifest::from_toml(&text, Path::new("manifest.toml")).expect("parses");
         let inference = manifest.inference.expect("declared");
         assert_eq!(inference.provider.as_deref(), Some("openrouter"));
+        assert_eq!(inference.endpoint_class.as_deref(), Some("api"));
         assert_eq!(
             inference.reviewer.as_deref(),
             Some("anthropic/claude-opus-4.8")
@@ -218,6 +228,24 @@ path = "/work/repos/acme-web"
             older.inference.is_none(),
             "a manifest written before the key existed still loads"
         );
+    }
+
+    /// #6144: `endpoint_class` is itself optional so a manifest written between
+    /// #6135 (provider/model only) and #6144 (endpoint class added) still
+    /// loads — the field is `None` rather than a parse failure.
+    /// Test: this test itself.
+    #[test]
+    fn a_manifest_without_endpoint_class_still_loads() {
+        let text = format!(
+            "{SAMPLE}\n[inference]\nprovider = \"openrouter\"\n\
+             reviewer = \"anthropic/claude-opus-4.8\"\n\
+             verifier = \"anthropic/claude-haiku-4.5\"\n\
+             summarizer = \"anthropic/claude-haiku-4.5\"\n"
+        );
+        let manifest = AuditManifest::from_toml(&text, Path::new("manifest.toml")).expect("parses");
+        let inference = manifest.inference.expect("declared");
+        assert_eq!(inference.provider.as_deref(), Some("openrouter"));
+        assert_eq!(inference.endpoint_class, None);
     }
 
     #[test]
