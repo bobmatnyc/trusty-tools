@@ -194,6 +194,17 @@ pub enum Verb {
         /// Where to write the return package (default: <work-dir>/audit-return-package.zip).
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
+        /// Refuse before cloning anything if an OPTIONAL collector binary —
+        /// `gitleaks`, `cargo-audit`, `cargo-deny` — is not installed.
+        ///
+        /// The default is to warn and run anyway: each of those collectors
+        /// already fails open per repository, naming itself in that
+        /// repository's own `[report].gaps` line, so an hours-long sweep is
+        /// not lost over one dark evidence dimension. Reach for this flag
+        /// when the missing coverage is not acceptable for this engagement —
+        /// it stops before the first repository is cloned, not after.
+        #[arg(long)]
+        strict_collectors: bool,
     },
     /// Assemble the unencrypted deliverable zip to send back.
     Package {
@@ -403,9 +414,14 @@ impl Cli {
             // #5824: the same two knobs the phases it chains already take, and
             // no third one — anything else the chain needs it reads from the
             // registry, which is where the operator put it.
-            Some(Verb::Audit { fresh, out }) => Command::Audit(ChainOptions {
+            Some(Verb::Audit {
+                fresh,
+                out,
+                strict_collectors,
+            }) => Command::Audit(ChainOptions {
                 fresh: *fresh,
                 destination: out.clone(),
+                strict_collectors: *strict_collectors,
             }),
             // #5825: the inbound package. A separate variant from `Package`
             // because the two travel opposite ways — see `crate::distribute`.
@@ -605,8 +621,26 @@ mod cli_tests {
             Command::Audit(ChainOptions {
                 fresh: true,
                 destination: Some(PathBuf::from("/tmp/p.zip")),
+                strict_collectors: false,
             })
         );
+    }
+
+    /// #7134: `--strict-collectors` is opt-in — absent, it stays `false`.
+    #[test]
+    fn strict_collectors_is_opt_in() {
+        let plain = Cli::try_parse_from(["taudit", "audit"]).expect("audit parses");
+        let Command::Audit(options) = plain.to_command() else {
+            panic!("expected Command::Audit");
+        };
+        assert!(!options.strict_collectors);
+
+        let strict =
+            Cli::try_parse_from(["taudit", "audit", "--strict-collectors"]).expect("flag parses");
+        let Command::Audit(options) = strict.to_command() else {
+            panic!("expected Command::Audit");
+        };
+        assert!(options.strict_collectors);
     }
 
     /// #6080: the recipient reads two things off this — the files to open, and
@@ -1431,6 +1465,14 @@ mod cli_tests {
                 signature: crate::package::SignatureOutcome::Unsigned,
             },
             gaps: vec!["jira:ACME was not audited".to_owned()],
+            // #7134: rendered separately from `gaps` above — see
+            // `crate::chain::ChainReport::collector_gaps`.
+            collector_gaps: vec![
+                "cve-scan: `cargo-audit` is not installed, so known dependency CVEs will go \
+                 unassessed for every repository in this sweep (install it with `cargo install \
+                 cargo-audit`)"
+                    .to_owned(),
+            ],
         };
 
         let text = render(&Outcome::Audit(report));
@@ -1441,6 +1483,10 @@ mod cli_tests {
         );
         assert!(text.contains("ok      acme-api"), "{text}");
         assert!(text.contains("Not audited: jira:ACME"), "{text}");
+        assert!(
+            text.contains("Collector gap: cve-scan: `cargo-audit` is not installed"),
+            "{text}"
+        );
         assert!(text.contains("Send this file back"), "{text}");
     }
 

@@ -432,6 +432,16 @@ fn render_install_package(package: &InstallPackage) -> String {
 /// Test: `super::cli_tests::a_chained_run_names_every_phase`.
 fn render_chain(report: &ChainReport) -> String {
     let mut out = String::new();
+    // #7134: printed first — an operator decides whether the missing coverage
+    // matters for this engagement before reading anything the sweep produced.
+    // Informational only: it does not appear in `report.gaps` and does not
+    // change the exit status.
+    for gap in &report.collector_gaps {
+        out.push_str(&format!("Collector gap: {gap}\n"));
+    }
+    if !report.collector_gaps.is_empty() {
+        out.push('\n');
+    }
     if let Some(placed) = &report.installed {
         out.push_str(&format!(
             "Installed {}: {}\n\n",

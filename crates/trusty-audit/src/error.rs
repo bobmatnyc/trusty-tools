@@ -384,6 +384,40 @@ pub enum AuditError {
         missing: Vec<&'static str>,
     },
 
+    /// `--strict-collectors` refused because an OPTIONAL collector binary is
+    /// missing.
+    ///
+    /// Why (#7134): a 59-repository engagement ran with zero secrets-scan
+    /// coverage because `gitleaks` was not on the operator's machine —
+    /// disclosed correctly per repository (each collector fails open and
+    /// names itself in that repository's `[report].gaps`), but only after an
+    /// hours-long sweep had already cloned and collected everything. By
+    /// default [`crate::collectors::decide`] still warns and lets the sweep
+    /// run — this variant is only reached when the operator opted into a
+    /// refusal instead, and it fires in [`crate::chain::Phase::Preflight`],
+    /// before [`crate::clone::clone_all`] runs.
+    /// What: names every missing collector — its report name, binary,
+    /// evidence dimension and install hint — the same four facts a
+    /// warn-and-continue row carries (#7134 review: a bare binary name told
+    /// the operator WHAT was missing but not what it cost or how to fix it).
+    /// Test: `crate::collectors::collectors_tests::decide_strict_refuses_on_a_missing_collector`,
+    /// `crate::chain::chain_tests::strict_collectors_refuses_before_any_repo_is_cloned`.
+    #[error(
+        "--strict-collectors refused: {}; drop --strict-collectors to warn and continue instead",
+        missing
+            .iter()
+            .map(|c| format!(
+                "{} needs `{}` for {} (install with `{}`)",
+                c.collector, c.binary, c.dimension, c.install_hint
+            ))
+            .collect::<Vec<_>>()
+            .join("; ")
+    )]
+    MissingOptionalCollectors {
+        /// The missing collectors, in [`crate::collectors::ALL`] order.
+        missing: Vec<crate::collectors::OptionalCollector>,
+    },
+
     /// A pinned tool is present at the pinned version but cannot be executed.
     ///
     /// Why: #6139 — the three pin conditions prove WHICH binary would run, not

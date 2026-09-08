@@ -198,6 +198,7 @@ fn verb(operation: Operation) -> &'static str {
         Operation::Sweep => "auditing",
         Operation::Package | Operation::Distribute => "packaging",
         Operation::Rerender => "re-rendering",
+        Operation::Preflight => "checking",
     }
 }
 
@@ -209,6 +210,7 @@ fn done(operation: Operation) -> &'static str {
         Operation::Sweep => "audited",
         Operation::Package | Operation::Distribute => "packaged",
         Operation::Rerender => "re-rendered",
+        Operation::Preflight => "checked",
     }
 }
 

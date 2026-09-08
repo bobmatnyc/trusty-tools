@@ -57,6 +57,9 @@ pub enum Operation {
     Distribute,
     /// Re-rendering a delivered audit's reports from what shipped with it (#6080).
     Rerender,
+    /// #7134: checking which OPTIONAL collector binaries are on this machine,
+    /// before anything is cloned — see [`crate::chain::Phase::Preflight`].
+    Preflight,
 }
 
 impl Operation {
@@ -69,6 +72,7 @@ impl Operation {
             Self::Package => "assembling the return package",
             Self::Distribute => "assembling the install package",
             Self::Rerender => "re-rendering reports",
+            Self::Preflight => "checking optional collectors",
         }
     }
 
@@ -80,6 +84,7 @@ impl Operation {
             Self::Package => "archive",
             Self::Distribute => "file",
             Self::Rerender => "report",
+            Self::Preflight => "collector",
         }
     }
 
@@ -94,6 +99,7 @@ impl Operation {
             Self::Package => "archives",
             Self::Distribute => "files",
             Self::Rerender => "reports",
+            Self::Preflight => "collectors",
         }
     }
 }

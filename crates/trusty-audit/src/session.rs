@@ -982,7 +982,7 @@ impl Session {
         let github_access = run::github_issues::resolve_github_access().await;
         // No unattempted targets: the standalone verb packages whatever the last
         // sweep recorded and knows nothing about a registry (#5824).
-        package::from_checkpoint(&self.work, &config, &[], &destination, &github_access)
+        package::from_checkpoint(&self.work, &config, &[], &[], &destination, &github_access)
     }
 
     /// Drive the whole engagement in one call (#5824).
