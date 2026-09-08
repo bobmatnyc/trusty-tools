@@ -95,13 +95,14 @@ thiserror          = { workspace = true }
 # Spool entries hold the raw webhook body byte-exact; base64 keeps the JSON
 # container from corrupting bytes the HMAC was computed over.
 base64             = { workspace = true }
+# #6848 slice 3b: the durable event-log writer rotates day files on the UTC
+# calendar day (`chrono::Utc::now().date_naive()`) and formats/parses day
+# filenames (`chrono::NaiveDate`) — production code, not just test fixtures,
+# so this moved out of dev-dependencies.
+chrono             = { workspace = true }
 
 [dev-dependencies]
 tempfile       = { workspace = true }
 tokio          = { workspace = true }
 tower          = { workspace = true }
 http-body-util = { workspace = true }
-# #6848: constructing a `HarnessEvent` fixture in the event-bus tests needs
-# `chrono::Utc::now()` for its `at` field; trusty-common re-exports the type
-# but not the constructor.
-chrono         = { workspace = true }

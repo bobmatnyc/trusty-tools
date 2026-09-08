@@ -515,9 +515,46 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
                     socket = %socket.display(),
                     "console event-bus ingest ready"
                 );
-                let bus = Arc::new(event_bus::EventBus::new(
-                    event_bus::EventBusConfig::default(),
-                ));
+                // #6848 slice 3b: open the durable NDJSON log before the bus
+                // itself, so seq numbering resumes from the log's recovered
+                // high-water mark rather than restarting at 1 on every
+                // console restart (DOC-73 §4.3). Failing to open it degrades
+                // to `EventBus::new` (no durability, seq restarts at 1) per
+                // the same non-blocking invariant the ingest-bind failure
+                // above already follows — a console that cannot open its
+                // event log still serves everything else.
+                let bus = match event_bus::LogConfig::resolve_default() {
+                    Ok(log_config) => match event_bus::DurableLog::open(log_config).await {
+                        Ok((log, recovered)) => {
+                            info!(
+                                next_seq = recovered.next_seq,
+                                "console event-bus durable log ready"
+                            );
+                            event_bus::EventBus::with_log(
+                                event_bus::EventBusConfig::default(),
+                                Some(log),
+                                recovered.next_seq,
+                            )
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "could not open the console event-bus durable log; \
+                                 events this run will not survive a restart"
+                            );
+                            event_bus::EventBus::new(event_bus::EventBusConfig::default())
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "could not resolve the console event-bus durable log directory; \
+                             events this run will not survive a restart"
+                        );
+                        event_bus::EventBus::new(event_bus::EventBusConfig::default())
+                    }
+                };
+                let bus = Arc::new(bus);
                 tokio::spawn(async move {
                     event_bus::serve_ingest(listener, bus, shutdown_signal()).await;
                 });

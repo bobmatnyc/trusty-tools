@@ -92,7 +92,54 @@ async fn a_subscriber_receives_ingested_events() {
         .await
         .expect("recv did not time out")
         .expect("channel still open");
-    assert_eq!(received.id, sent_id);
+    assert_eq!(received.event.id, sent_id);
+}
+
+#[tokio::test]
+async fn ingest_assigns_sequential_console_seqs_starting_at_one() {
+    let bus = EventBus::new(EventBusConfig { capacity: 8 });
+    let mut rx = bus.subscribe();
+
+    bus.ingest(make_event(None));
+    bus.ingest(make_event(None));
+
+    let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("recv 1")
+        .expect("open");
+    let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("recv 2")
+        .expect("open");
+
+    assert_eq!(
+        first.event.seq, 1,
+        "a fresh bus with no recovered log starts at seq 1"
+    );
+    assert_eq!(
+        second.event.seq, 2,
+        "seq is console-assigned and monotonic, overwriting the producer's own \
+         (always 0 from `make_event`)"
+    );
+}
+
+#[tokio::test]
+async fn live_fanout_frames_are_never_marked_persisted() {
+    // The write is always still in flight (or was just dropped) at the
+    // moment of fan-out — see `bus`'s module docs for the full contract.
+    let bus = EventBus::new(EventBusConfig { capacity: 8 });
+    let mut rx = bus.subscribe();
+
+    bus.ingest(make_event(None));
+
+    let received = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("recv did not time out")
+        .expect("channel still open");
+    assert!(
+        !received.persisted,
+        "a bus with no durable log configured must never claim persistence"
+    );
 }
 
 // ─── the UDS ingest listener, over a real socket ───────────────────────────
