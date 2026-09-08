@@ -86,7 +86,13 @@ bash scripts/install-console-saver.sh --dry-run          # print every step, tou
 bash scripts/install-console-saver.sh --uninstall
 ```
 
-It installs to `~/Library/Screen Savers/TrustyConsole.saver` with `cp -R`.
+It installs to `~/Library/Screen Savers/TrustyConsole.saver` with `cp -R`, then
+restarts System Settings, `legacyScreenSaver` and `WallpaperAgent` — all three
+cache the saver bundle's display-name metadata (`CFBundleName`/
+`CFBundleDisplayName`), so a renamed bundle keeps showing the old name in the
+Screen Saver tile across a reinstall until they are restarted (#7128).
+`--uninstall` does not restart them; see the #7128 comment in the script for
+why.
 
 **Why `cp` here and not `cargo install`.** CLAUDE.md bans `cp` for installing
 release *binaries* on macOS: a `cp` over an on-`PATH` executable leaves a stale
@@ -332,10 +338,14 @@ harness's weakest assertion.
 
 The in-host run cannot be scripted. One operator step remains:
 
-> System Settings → Screen Saver → select **Trusty Console** → Preview.
+> System Settings → Wallpaper → "Screen Saver…" → select **Trusty Console** →
+> Preview.
 >
 > <!-- #7128: the tile label is CFBundleDisplayName/CFBundleName, not the
-> `TrustyConsole.saver` filename, which is unchanged. -->
+> `TrustyConsole.saver` filename, which is unchanged. On this macOS build the
+> Screen Saver pane lives under Wallpaper, not its own top-level item, and the
+> x-apple.systempreferences:com.apple.ScreenSaver-Settings.extension URL lands
+> on General instead. -->
 
 
 Watch it decide, live:
