@@ -376,6 +376,11 @@ pub fn spawn_detached(program: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Re
     let program = program.as_ref();
     let child = std::process::Command::new(program)
         .args(args)
+        // #7085: the parent-death stamp is deliberately INHERITED here. This
+        // daemon outlives its immediate spawner by design, but when that spawner
+        // was itself started by a test the daemon must still die with the test —
+        // `parent_death::arm_from_env` recognises the grandchild shape and
+        // watches the stamped pid's liveness rather than its own reparent.
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

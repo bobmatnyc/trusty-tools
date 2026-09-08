@@ -143,20 +143,24 @@ fn wait_for_file(path: &Path) -> bool {
 /// the readiness file does not appear within the timeout.
 fn boot_isolated(override_base: &Path) {
     let bin = locate_binary();
-    let mut child = Command::new(&bin)
-        .arg("serve")
-        .arg("--foreground")
-        .env("TRUSTY_DATA_DIR_OVERRIDE", override_base)
-        // Suppress the startup pin-scan eprintln! so test output is clean.
-        .env("RUST_LOG", "error")
-        // Needed to prevent palace-slug enforcement from requiring a real
-        // project root.
-        .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn trusty-memory binary");
+    // #7085: the kill below is skipped entirely if this test binary is itself
+    // SIGKILLed — the stamp makes the daemon watch us and self-exit instead.
+    let mut child = trusty_common::parent_death::exit_with_parent(
+        Command::new(&bin)
+            .arg("serve")
+            .arg("--foreground")
+            .env("TRUSTY_DATA_DIR_OVERRIDE", override_base)
+            // Suppress the startup pin-scan eprintln! so test output is clean.
+            .env("RUST_LOG", "error")
+            // Needed to prevent palace-slug enforcement from requiring a real
+            // project root.
+            .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .spawn()
+    .expect("spawn trusty-memory binary");
 
     // Poll for the readiness file rather than sleeping a fixed duration.
     // The daemon binds `<override_base>/trusty-memory/trusty-memory.sock` at

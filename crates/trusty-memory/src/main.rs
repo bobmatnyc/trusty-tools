@@ -982,6 +982,13 @@ async fn run_serve(
         return trusty_memory::commands::start::handle_start().await;
     }
 
+    // #7085: opt-in parent-death linkage, armed before anything can fail or
+    // block. A test spawns this daemon with `parent_death::exit_with_parent`;
+    // SIGKILL that test and no `Drop` runs, so without a watchdog inside the
+    // daemon the child runs forever against a deleted temp dir. Absent the env
+    // var — every launchd and hand-run invocation — this arms nothing.
+    trusty_common::parent_death::arm_from_env("trusty-memory");
+
     // #6286: an address passed to `--http` is discarded. Warning rather than
     // failing is what keeps a pre-ADR-0032 launchd plist starting the daemon
     // instead of crash-looping on a flag that no longer means anything.

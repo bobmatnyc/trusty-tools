@@ -104,17 +104,21 @@ impl StdioChild {
         let data_dir = tempfile::tempdir().expect("tempdir");
 
         // Step 1: provision the HTTP daemon.
-        let daemon = std::process::Command::new(binary())
-            .arg("serve")
-            .arg("--foreground")
-            .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
-            .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
-            .env("RUST_LOG", "warn")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("spawn daemon");
+        // #7085: `DaemonGuard` only reaps in `Drop`, which a SIGKILL of this
+        // test binary skips — the stamp makes the daemon watch us instead.
+        let daemon = trusty_common::parent_death::exit_with_parent(
+            std::process::Command::new(binary())
+                .arg("serve")
+                .arg("--foreground")
+                .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
+                .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
+                .env("RUST_LOG", "warn")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit()),
+        )
+        .spawn()
+        .expect("spawn daemon");
         // #5188: own the child BEFORE the readiness poll — that poll asserts,
         // and an unguarded child would outlive the panic.
         let daemon = DaemonGuard::new(daemon);
@@ -152,6 +156,9 @@ impl StdioChild {
             // Forward stderr to the test's stderr so we see tracing output on
             // failure without letting it contaminate stdout.
             .stderr(Stdio::inherit());
+        // #7085: a SIGKILL of this test binary runs no destructor, so the bridge
+        // watches us instead.
+        trusty_common::parent_death::exit_with_parent_tokio(&mut cmd);
 
         if let Some(p) = palace {
             cmd.arg("--palace").arg(p);

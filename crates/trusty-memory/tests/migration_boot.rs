@@ -96,17 +96,21 @@ fn locate_binary() -> PathBuf {
 /// via `Child::kill`. Reaps via `wait`.
 fn boot_briefly(data_dir: &Path) {
     let bin = locate_binary();
-    let mut child = Command::new(&bin)
-        .arg("serve")
-        .arg("--foreground")
-        .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir)
-        // Quiet the daemon — we don't read its output here.
-        .env("RUST_LOG", "warn")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn trusty-memory binary");
+    // #7085: the kill below is skipped entirely if this test binary is itself
+    // SIGKILLed — the stamp makes the daemon watch us and self-exit instead.
+    let mut child = trusty_common::parent_death::exit_with_parent(
+        Command::new(&bin)
+            .arg("serve")
+            .arg("--foreground")
+            .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir)
+            // Quiet the daemon — we don't read its output here.
+            .env("RUST_LOG", "warn")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .spawn()
+    .expect("spawn trusty-memory binary");
     std::thread::sleep(BOOT_WAIT);
     let _ = child.kill();
     let _ = child.wait();

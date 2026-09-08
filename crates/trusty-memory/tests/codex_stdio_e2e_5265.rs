@@ -76,16 +76,20 @@ impl CodexSession {
     async fn spawn() -> Self {
         let data_dir = tempfile::tempdir().expect("tempdir");
 
-        let daemon = std::process::Command::new(binary())
-            .args(["serve", "--foreground"])
-            .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
-            .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
-            .env("RUST_LOG", "warn")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("spawn daemon");
+        // #7085: `DaemonGuard` only reaps in `Drop`, which a SIGKILL of this
+        // test binary skips — the stamp makes the daemon watch us instead.
+        let daemon = trusty_common::parent_death::exit_with_parent(
+            std::process::Command::new(binary())
+                .args(["serve", "--foreground"])
+                .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
+                .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
+                .env("RUST_LOG", "warn")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit()),
+        )
+        .spawn()
+        .expect("spawn daemon");
         // #5188: own the child BEFORE the readiness poll — that poll asserts,
         // and an unguarded child would outlive the panic.
         let daemon = DaemonGuard::new(daemon);
@@ -104,16 +108,20 @@ impl CodexSession {
             std::thread::sleep(POLL_INTERVAL);
         }
 
-        let mut child = tokio::process::Command::new(binary())
-            .args(REGISTERED_ARGS)
-            .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
-            .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
-            .env("RUST_LOG", "warn")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("spawn `trusty-memory serve`");
+        // #7085: a SIGKILL of this test binary runs no destructor, so the
+        // bridge watches us instead.
+        let mut child = trusty_common::parent_death::exit_with_parent_tokio(
+            tokio::process::Command::new(binary())
+                .args(REGISTERED_ARGS)
+                .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
+                .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
+                .env("RUST_LOG", "warn")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit()),
+        )
+        .spawn()
+        .expect("spawn `trusty-memory serve`");
 
         let stdin = child.stdin.take().expect("stdin pipe");
         let stdout = child.stdout.take().expect("stdout pipe");

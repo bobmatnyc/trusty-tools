@@ -1,0 +1,3 @@
+Added
+
+- `parent_death` links a spawned process to its spawner's lifetime: `exit_with_parent` stamps `TRUSTY_EXIT_WITH_PARENT` on a `Command`, and `arm_from_env` inside the spawned program starts a watchdog thread that self-exits once that parent is gone. `Drop` on a `Child` handle only reaps while the parent is still executing, so a SIGKILL of the parent leaves the child running forever — the mechanism has to live inside the child. `arm_for_named_parent` is the `--parent-pid` variant `trusty-agents` had carried as a private copy, now the same implementation. `daemon_guard::spawn_detached` clears the stamp so a deliberately detached daemon never inherits it (#7085).
