@@ -714,6 +714,9 @@ impl SessionManager {
         self.store.write().await.upsert(record.clone()).await?;
         // #7087: a record-only tombstone leaves the active-project set.
         self.bump_residency_generation();
+        // #7087: and a tombstone is terminal — drop its derivation entry so the
+        // cache tracks live records, not every session the daemon has served.
+        self.residency_cache_evict(id).await;
         info!(id = %id, name = %record.tmux_name, "managed session record tombstoned (record-only)");
         Ok((record, false))
     }
@@ -1124,6 +1127,9 @@ impl SessionManager {
         self.store.write().await.upsert(record.clone()).await?;
         // #7087: a full teardown leaves the active-project set.
         self.bump_residency_generation();
+        // #7087: and a tombstone is terminal — drop its derivation entry so the
+        // cache tracks live records, not every session the daemon has served.
+        self.residency_cache_evict(id).await;
         info!(id = %id, name = %record.tmux_name, "managed session decommissioned");
         Ok((record, workspace_removed))
     }

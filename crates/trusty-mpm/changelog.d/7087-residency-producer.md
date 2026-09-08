@@ -7,3 +7,11 @@ Added
   `trusty_common::residency::ActiveProjectSet`. A `tmux` probe failure fails
   closed — every persisted `Active`/`Provisioning` record is served rather
   than the set collapsing to empty.
+- The residency generation now moves on every transition that changes which
+  sessions `mpm.residency.active` serves — `resume`, `mark_reactivated`, the
+  runtime-exit reaper's `Stopped` transition, a forced record delete, and the
+  boot reconcile's leaked-test-adoption sweep — so a consumer polling the set
+  can no longer be handed a stale generation across any of them (#7087). A
+  session reaching a terminal state also drops its cached palace/index
+  derivation, bounding that cache by live records rather than by every session
+  the daemon has served.

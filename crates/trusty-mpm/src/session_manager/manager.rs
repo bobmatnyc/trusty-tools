@@ -711,7 +711,10 @@ impl SessionManager {
     /// `stop_runtime_exited_does_not_kill_pane` (same module) asserts
     /// `kill_session` is never invoked on the fake driver;
     /// `mark_runtime_exited_stopped_rejects_concurrently_decommissioned`
-    /// (this module's tests) asserts the CAS guard below.
+    /// (this module's tests) asserts the CAS guard below;
+    /// `generation_increments_across_mark_runtime_exited_stopped` in
+    /// `daemon::managed_routes::residency`'s route tests asserts the #7087
+    /// residency bump.
     ///
     /// CAS guard (#2453 review finding 3): the pre-fix implementation read
     /// the record via [`Self::get`] (which acquires and releases the store's
@@ -793,6 +796,9 @@ impl SessionManager {
         record.stop_cause = Some(self.runtime_exit_stop_cause(id, &record.tmux_name).await);
         guard.upsert(record.clone()).await?;
         drop(guard);
+        // #7087: Active -> Stopped leaves the active-project set, exactly as
+        // `stop` does — the reaper reaches it without going through `stop`.
+        self.bump_residency_generation();
         info!(
             id = %id,
             name = %record.tmux_name,
@@ -876,7 +882,9 @@ impl SessionManager {
     /// through to a session-scoped reuse or a session-wide kill/recreate;
     /// `liveness_tests.rs`'s `resume_refuses_when_the_tmux_probe_fails` —
     /// asserts an unobservable probe refuses instead of killing the pane
-    /// (#5859).
+    /// (#5859); `generation_increments_across_resume` in
+    /// `daemon::managed_routes::residency`'s route tests — asserts the #7087
+    /// residency bump.
     ///
     /// #6568: this is the OPERATOR entry point. It forgives the auto-resume flap
     /// streak, because a person resuming a session by hand is saying the cause
@@ -986,6 +994,8 @@ impl SessionManager {
         // this resume followed a deliberate stop.
         record.stop_cause = None;
         self.store.write().await.upsert(record.clone()).await?;
+        // #7087: Stopped/Errored -> Active re-enters the active-project set.
+        self.bump_residency_generation();
         Ok(record)
     }
 

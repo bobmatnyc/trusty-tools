@@ -286,3 +286,212 @@ async fn generation_increments_across_create_and_stop() {
         "stop must bump the generation: after_create={after_create} after_stop={after_stop}"
     );
 }
+
+/// (f) `resume` takes `Stopped` -> `Active`, which is exactly the persisted
+/// state this route filters on, so the served set changes and the generation
+/// must move with it. It did not before this test existed.
+#[tokio::test]
+async fn generation_increments_across_resume() {
+    let (state, driver, dir) = test_state().await;
+    let mgr = state.session_manager().await;
+
+    let mut record = make_record(None);
+    record.tmux_name = "tm-resume-gen".into();
+    record.state = ManagedSessionState::Stopped;
+    // `resume` resolves and existence-checks its workdir, so this must be a
+    // real directory.
+    record.cwd = dir.path().to_path_buf();
+    let id = record.id;
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("upsert stopped session");
+    driver.set_live(&["tm-resume-gen"]);
+
+    let before = decode(&active_projects_core(&state).await).generation;
+    assert_eq!(
+        decode(&active_projects_core(&state).await).projects.len(),
+        0,
+        "a Stopped session is not in the served set"
+    );
+
+    mgr.resume(&id).await.expect("resume");
+
+    let after = decode(&active_projects_core(&state).await);
+    assert_eq!(
+        after.projects.len(),
+        1,
+        "resume put the session back in the served set: {:?}",
+        after.projects
+    );
+    assert!(
+        after.generation > before,
+        "resume must bump the generation: before={before} after={}",
+        after.generation
+    );
+}
+
+/// (g) `mark_reactivated` takes `Stopped` OR `Decommissioned` -> `Active`.
+/// The tombstone case is the sharper one: the project was absent from the set
+/// entirely one call earlier.
+#[tokio::test]
+async fn generation_increments_across_mark_reactivated() {
+    let (state, driver, dir) = test_state().await;
+    let mgr = state.session_manager().await;
+
+    let mut record = make_record(None);
+    record.tmux_name = "tm-reactivate-gen".into();
+    record.state = ManagedSessionState::Decommissioned;
+    // `mark_reactivated` refuses when the resolved workspace is gone.
+    record.cwd = dir.path().to_path_buf();
+    let id = record.id;
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("upsert tombstone");
+    driver.set_live(&["tm-reactivate-gen"]);
+
+    let before = decode(&active_projects_core(&state).await).generation;
+
+    mgr.mark_reactivated(&id).await.expect("mark_reactivated");
+
+    let after = decode(&active_projects_core(&state).await);
+    assert_eq!(
+        after.projects.len(),
+        1,
+        "the revived tombstone rejoins the served set: {:?}",
+        after.projects
+    );
+    assert!(
+        after.generation > before,
+        "mark_reactivated must bump the generation: before={before} after={}",
+        after.generation
+    );
+}
+
+/// (h) `mark_runtime_exited_stopped` takes `Active` -> `Stopped` from the
+/// periodic runtime-exit reaper and the `SessionEnd` reconcile — neither of
+/// which routes through `stop`, so this is the only place that path can bump.
+#[tokio::test]
+async fn generation_increments_across_mark_runtime_exited_stopped() {
+    let (state, driver, _dir) = test_state().await;
+    let mgr = state.session_manager().await;
+
+    let mut record = make_record(None);
+    record.tmux_name = "tm-reap-gen".into();
+    record.state = ManagedSessionState::Active;
+    record.workspace_path = Some(PathBuf::from("/repo/reaped"));
+    let id = record.id;
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("upsert active session");
+    driver.set_live(&["tm-reap-gen"]);
+
+    let before = decode(&active_projects_core(&state).await).generation;
+
+    mgr.mark_runtime_exited_stopped(&id)
+        .await
+        .expect("mark_runtime_exited_stopped");
+
+    let after = decode(&active_projects_core(&state).await);
+    assert_eq!(
+        after.projects.len(),
+        0,
+        "a runtime-exited session leaves the served set: {:?}",
+        after.projects
+    );
+    assert!(
+        after.generation > before,
+        "mark_runtime_exited_stopped must bump the generation: \
+         before={before} after={}",
+        after.generation
+    );
+}
+
+/// (i) `delete_record(force = true)` reaches `Deleted` straight from `Active`
+/// without passing through `stop`, so nothing else on that path can bump.
+#[tokio::test]
+async fn generation_increments_across_forced_delete() {
+    let (state, driver, _dir) = test_state().await;
+    let mgr = state.session_manager().await;
+
+    let mut record = make_record(None);
+    record.tmux_name = "tm-force-delete-gen".into();
+    record.state = ManagedSessionState::Active;
+    record.workspace_path = Some(PathBuf::from("/repo/force-deleted"));
+    let id = record.id;
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("upsert active session");
+    // Live in tmux — the un-forced probe would refuse, so this only reaches
+    // `Deleted` because `force` is true.
+    driver.set_live(&["tm-force-delete-gen"]);
+
+    let before = decode(&active_projects_core(&state).await).generation;
+
+    mgr.delete_record(&id, true).await.expect("force delete");
+
+    let after = decode(&active_projects_core(&state).await);
+    assert_eq!(
+        after.projects.len(),
+        0,
+        "a deleted session leaves the served set: {:?}",
+        after.projects
+    );
+    assert!(
+        after.generation > before,
+        "a forced delete must bump the generation: before={before} after={}",
+        after.generation
+    );
+}
+
+/// (j) A terminal transition also drops the session's derivation-cache entry,
+/// so the map is bounded by live records rather than by every session the
+/// daemon has ever served.
+#[tokio::test]
+async fn forced_delete_evicts_the_residency_cache_entry() {
+    let (state, driver, _dir) = test_state().await;
+    let mgr = state.session_manager().await;
+
+    let root = PathBuf::from("/repo/evicted");
+    let mut record = make_record(None);
+    record.tmux_name = "tm-evict-cache".into();
+    record.state = ManagedSessionState::Active;
+    record.workspace_path = Some(root.clone());
+    let id = record.id;
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("upsert active session");
+    driver.set_live(&["tm-evict-cache"]);
+
+    // One poll derives and caches this session's (palace_id, index_ids).
+    assert_eq!(
+        decode(&active_projects_core(&state).await).projects.len(),
+        1
+    );
+    assert!(
+        mgr.residency_cache_lookup(&id, &root).await.is_some(),
+        "the route must cache the derivation it just made"
+    );
+
+    mgr.delete_record(&id, true).await.expect("force delete");
+
+    assert_eq!(
+        mgr.residency_cache_lookup(&id, &root).await,
+        None,
+        "a deleted session's cache entry must not outlive its record"
+    );
+}
