@@ -1921,6 +1921,69 @@ fn cli_parses_issue_seed_config_force() {
 }
 
 #[test]
+fn cli_parses_issue_audit_single_and_window() {
+    // #7097: the three shapes a script drives — one issue, a recent window, a
+    // dated window — plus the conflict that keeps a number and a window from
+    // being asked for at once.
+    use crate::cli::IssueCmd;
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "issue", "audit", "7093"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Issue {
+            cmd: IssueCmd::Audit {
+                issue: Some(7093),
+                recent: None,
+                since: None
+            },
+            ..
+        }
+    ));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "issue", "audit", "--recent", "20"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Issue {
+            cmd: IssueCmd::Audit {
+                issue: None,
+                recent: Some(20),
+                since: None
+            },
+            ..
+        }
+    ));
+
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "issue", "audit", "--since", "2026-09-01"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Issue {
+            cmd: IssueCmd::Audit { since, .. },
+            ..
+        } => assert_eq!(since.as_deref(), Some("2026-09-01")),
+        other => panic!("expected issue audit --since, got {other:?}"),
+    }
+
+    // A number AND a window would leave the verb guessing which one was meant.
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "issue", "audit", "7093", "--recent", "5"]).is_err(),
+        "an issue number and --recent must conflict"
+    );
+    assert!(
+        Cli::try_parse_from([
+            "trusty-mpm",
+            "issue",
+            "audit",
+            "--recent",
+            "5",
+            "--since",
+            "2026-09-01"
+        ])
+        .is_err(),
+        "--recent and --since must conflict"
+    );
+}
+
+#[test]
 fn cli_parses_watch_poll_minimal() {
     // Why: the minimal `tm watch poll <project>` must parse with safety defaults
     // (dry-run off but execute also off → dry-run behaviour) and claude-code.

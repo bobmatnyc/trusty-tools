@@ -294,6 +294,10 @@ gh issue view 7067 --json milestone,projectItems
 A `null` milestone with no `no-milestone` comment, or an empty `projectItems`,
 is the violation to fix — on the issue you just filed, before reporting it done.
 
+Run `tm issue audit <N>` after filing and paste its output into your report — it
+checks the project, the milestone and the component label mechanically and exits
+1 on a violation, so the filing is proved rather than asserted (#7097).
+
 **If `tm issue standard` prints `milestones: unavailable (…)`,** the fetch
 failed; the requirement did not lift. Resolve the `gh` error, or file and say in
 your report that the milestone is unset because the list could not be read.
