@@ -26,6 +26,7 @@
 //! Test: `run_compress_shrinks_repetitive_cargo_test_output`,
 //! `log_compression_stats_pct_reduction_is_zero_for_empty_input`,
 //! `log_compression_stats_pct_reduction_can_be_negative_when_output_expands`,
+//! `native_fallback_elision_reports_a_matching_non_zero_reduction`,
 //! `run_compress_passes_through_short_output_unchanged`,
 //! `append_compression_record_creates_file`,
 //! `append_compression_record_appends` below; the full stdin→stdout process
@@ -88,7 +89,7 @@ pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let (compressed, path) = compress_tool_output_async_with_path(tool, &input).await;
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    log_compression_stats(tool, input.len(), compressed.len(), path.as_str());
+    let _pct = log_compression_stats(tool, input.len(), compressed.len(), path.as_str());
     // #3870: durable sink, awaited (not spawned) because `tm compress` is a
     // short-lived pipe filter — see `append_compression_record`'s doc
     // comment for why a detached `tokio::spawn` would race process exit.
@@ -156,10 +157,23 @@ fn init_stats_log_subscriber() {
 /// #1968) that we resolve by documentation rather than by clamping, since
 /// clamping would hide the one signal ("compression made this worse") a
 /// downstream meta-harness aggregation effort would most want to see.
+///
+/// #7180: the percentage is also RETURNED, not only logged, so a test can
+/// assert the number the stats line carries. The two edge-case tests below
+/// previously proved only that logging did not panic, which left a claim of
+/// `pct_reduction=0.0` on an eliding path unfalsifiable.
 /// Test: `log_compression_stats_pct_reduction_is_zero_for_empty_input`,
 /// `log_compression_stats_pct_reduction_can_be_negative_when_output_expands`,
+/// `native_fallback_elision_reports_a_matching_non_zero_reduction`,
 /// exercised end-to-end via `run_compress_*` tests below.
-fn log_compression_stats(tool_name: &str, bytes_before: usize, bytes_after: usize, path: &str) {
+fn log_compression_stats(
+    tool_name: &str,
+    bytes_before: usize,
+    bytes_after: usize,
+    path: &str,
+) -> f64 {
+    // #7180: the emitted percentage is also RETURNED so a test can assert the
+    // number itself, not merely that logging did not panic.
     let pct_reduction = if bytes_before > 0 {
         (1.0 - bytes_after as f64 / bytes_before as f64) * 100.0
     } else {
@@ -173,6 +187,7 @@ fn log_compression_stats(tool_name: &str, bytes_before: usize, bytes_after: usiz
         compression_path = %path,
         "tool output compressed"
     );
+    pct_reduction
 }
 
 /// One row of `tm compress`'s durable compression-effectiveness log.
@@ -338,7 +353,39 @@ mod tests {
     fn log_compression_stats_pct_reduction_is_zero_for_empty_input() {
         // Guards the division-by-zero edge case: an empty tool output must
         // report 0.0% reduction, not NaN/panic.
-        log_compression_stats("bash", 0, 0, "native_fallback");
+        assert_eq!(log_compression_stats("bash", 0, 0, "native_fallback"), 0.0);
+    }
+
+    #[tokio::test]
+    async fn native_fallback_elision_reports_a_matching_non_zero_reduction() {
+        // #7180: the `native_fallback` path was reported as eliding lines
+        // while announcing `pct_reduction=0.0`. Before this test nothing
+        // asserted the emitted number at all — the two sibling
+        // `log_compression_stats_*` tests only proved it did not panic — so a
+        // stale or zeroed metric on an eliding path was unfalsifiable. This
+        // pins the whole chain: an eliding compression, the path it took, and
+        // the percentage the stats line carries.
+        let mut input = String::new();
+        for i in 0..90 {
+            input.push_str(&format!(
+                "crates/x/src/lib.rs:{i}: fn candidate_{i}() -> bool\n"
+            ));
+        }
+        let (compressed, path) = compress_tool_output_async_with_path("grep -n", &input).await;
+        assert_eq!(path.as_str(), "native_fallback");
+        assert!(
+            compressed.contains("lines omitted"),
+            "expected the line-list cap to elide: {compressed}"
+        );
+        assert!(compressed.len() < input.len(), "expected fewer bytes out");
+
+        let pct = log_compression_stats("grep -n", input.len(), compressed.len(), path.as_str());
+        let expected = (1.0 - compressed.len() as f64 / input.len() as f64) * 100.0;
+        assert!(
+            (pct - expected).abs() < f64::EPSILON,
+            "reported {pct} does not match the byte delta {expected}"
+        );
+        assert!(pct > 0.0, "an eliding compression must not report 0.0");
     }
 
     #[test]
@@ -349,7 +396,10 @@ mod tests {
         // clamp away (trusty-review finding, PR #1968; see this function's
         // doc comment for why we don't clamp). This test only proves no
         // panic/NaN occurs for `bytes_after > bytes_before`.
-        log_compression_stats("bash", 10, 20, "native_fallback");
+        assert_eq!(
+            log_compression_stats("bash", 10, 20, "native_fallback"),
+            -100.0
+        );
     }
 
     #[tokio::test]
