@@ -156,11 +156,15 @@ tm telegram pair
 ### Token savings on the statusline
 
 The `tm statusline` bar ends with a 💸 segment showing the whole-number percent
-of tokens this session avoided sending. Two producers write to the ledger it
-folds: instruction sources folded into one compiled prompt, and bulk reads
+of tokens this session avoided sending, as a **session share**: `tokens_saved /
+(session_actual_tokens + tokens_saved)`. Two producers write the saved side to
+a ledger: instruction sources folded into one compiled prompt, and bulk reads
 diverted to a cheap worker. A `divert` row's tokens are the diverted files'
-count minus the returned summary's; each row also carries its own pre-saving
-token count, which is what the percent is measured against. It reads `💸34%`,
+count minus the returned summary's. `session_actual_tokens` is a cumulative
+counter the statusline's compaction tracker keeps per session — it survives
+`total_input_tokens` resetting on every auto-compaction, unlike a raw read of
+that figure would. Before a session's first `statusLine` tick, the percent
+falls back to each row's own pre-saving token count instead. It reads `💸34%`,
 and is absent entirely when nothing has been recorded. It never renders `0%`.
 
 Rows live in `~/.trusty-mpm/usage/savings.jsonl` and are folded at read time.

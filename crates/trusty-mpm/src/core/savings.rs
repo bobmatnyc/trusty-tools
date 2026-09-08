@@ -25,20 +25,24 @@
 //!   A producer bug that undercounts its baseline therefore shows as a missing
 //!   contribution, never as a negative or inflated displayed figure.
 //!
-//! **`tokens_before` and [`SavingsTotal::percent_saved`] (owner ruling
-//! 2026-09-08, #7179).** The `💸` segment shows a whole-number percent of
-//! tokens avoided, not a dollar figure. The percent's denominator is each
-//! row's own pre-saving token count — `tokens_before = tokens_saved + tokens
-//! actually sent` — folded the same way `tokens_saved` is. This was chosen
-//! over pricing the percent against the session's live context-window fill
-//! (`total_input_tokens` from the `statusLine` hook, the only other per-session
-//! token counter available): that figure resets on every auto-compaction, which
-//! would make the percent jump non-monotonically for reasons unrelated to
-//! anything the harness saved, and it counts tokens no savings technique here
-//! ever touched. A ledger-only percent stays stable and scoped to what this
-//! feature actually measures. `#[serde(default)]` so a pre-#7179 row folds
-//! with `tokens_before = 0` and is excluded from the denominator, rather than
-//! failing to parse.
+//! **[`SavingsTotal::percent_saved`] denominator (owner ruling 2026-09-08,
+//! #7179).** The `💸` segment shows a whole-number percent of tokens avoided,
+//! not a dollar figure: `saved / (session actual tokens + saved)` — the
+//! *session share* the owner asked for. "Session actual tokens" is a
+//! cumulative counter `crate::commands::statusline::compaction` (the `tm`
+//! binary) folds across every auto-compaction reset of the `statusLine`
+//! hook's `total_input_tokens`, since that raw figure resets on every
+//! compaction and would otherwise make the percent jump non-monotonically for
+//! reasons unrelated to anything the harness saved. This module has no access
+//! to that counter (it lives in the `tm` binary crate, keyed by session id in
+//! `~/.trusty-mpm/statusline/<session_id>.json`), so `percent_saved` takes it
+//! as an `Option<u64>` argument the statusline binary supplies at render time.
+//! `None` — no compaction tick has landed yet for this session — falls back to
+//! the pre-#7179 formula, `tokens_saved / tokens_before` (each row's own
+//! pre-saving token count, folded the same way `tokens_saved` is).
+//! `#[serde(default)]` on `tokens_before` so a pre-#7179 row folds with
+//! `tokens_before = 0` and is excluded from that fallback denominator, rather
+//! than failing to parse.
 //!
 //! Everything here fails soft: a missing, unreadable, or truncated ledger folds
 //! to zero rather than erroring, because the consumer is a status bar on
@@ -100,14 +104,15 @@ pub struct SavingsRow {
     /// Estimated pre-saving token count for this row — `tokens_saved` plus the
     /// tokens actually sent instead (#7179).
     ///
-    /// Why: [`SavingsTotal::percent_saved`] needs a denominator, and the only
-    /// one that stays stable and scoped to what this feature measures is the
-    /// ledger's own before-figure, folded across every row alongside
-    /// `tokens_saved` — see the module header for why the live context-window
-    /// fill was rejected instead.
+    /// Why: [`SavingsTotal::percent_saved`]'s primary denominator is the
+    /// session's actual-token counter (see the module header), but that value
+    /// is only available once a `statusLine` tick has landed for this session.
+    /// This field folds into the *fallback* denominator used when it has not —
+    /// the ledger's own before-figure, folded across every row alongside
+    /// `tokens_saved`.
     /// What: `u64` (a plain count, never negative by construction).
     /// `#[serde(default)]` so a row written before this field existed folds as
-    /// `0` — excluded from the percent denominator rather than failing to
+    /// `0` — excluded from the fallback denominator rather than failing to
     /// parse. Producers that cannot state a before-figure simply omit it.
     /// Test: `percent_saved_rounds_to_nearest_whole_number`,
     /// `a_row_written_before_tokens_before_existed_still_folds`.
@@ -170,32 +175,61 @@ impl SavingsTotal {
         self.rows == 0 || (self.tokens_saved == 0 && self.cost_saved_usd <= 0.0)
     }
 
-    /// Whole-number percent of tokens the harness avoided sending, folded
-    /// across every accepted row (#7179).
+    /// Whole-number percent of tokens the harness avoided sending, as a share
+    /// of the session (owner ruling 2026-09-08, #7179).
     ///
-    /// Why: the `💸` statusline segment renders one percentage, and the fold is
-    /// the only place `tokens_saved` and `tokens_before` are summed together —
-    /// computing the ratio here, rather than at the render site, means a future
-    /// console consumer gets the identical number from the identical division.
-    /// What: `round(100 * tokens_saved / tokens_before)`, clamped to `[1, 100]`
-    /// whenever the fold accepted at least one row — the lower clamp mirrors
-    /// the pre-#7179 dollar segment's "never render a false zero" rule: a
-    /// sub-0.5% ratio would otherwise round down to a literal `0%`, which reads
-    /// as "we saved nothing" and states a measurement that was never made. The
-    /// upper clamp covers a mixed old/new ledger, where rows written before
-    /// `tokens_before` existed fold their share of the denominator as `0` (see
-    /// the module header) and can otherwise push the raw ratio above 100.
-    /// `None` when there is nothing to divide: [`Self::is_zero`], or a
-    /// `tokens_before` sum of `0` (every accepted row predates #7179).
-    /// Test: `percent_saved_rounds_to_nearest_whole_number`,
+    /// Why: the `💸` statusline segment renders one percentage — how much of
+    /// what this session actually spent plus what it avoided did the harness
+    /// avoid. `session_actual_tokens` is the caller-supplied cumulative token
+    /// count from `crate::commands::statusline::compaction` (see the module
+    /// header for why that counter, rather than a raw `total_input_tokens`
+    /// read, is what survives an auto-compaction). This method has no
+    /// filesystem access of its own — it is a pure function of the fold plus
+    /// whatever the caller already read — which is what keeps it unit-testable
+    /// against hand-built totals with no I/O.
+    /// What: primary path, `session_actual_tokens = Some(actual)`:
+    /// `round(100 * tokens_saved / (actual + tokens_saved))`. Fallback path,
+    /// `None` — no compaction tick has landed yet for this session:
+    /// `round(100 * tokens_saved / tokens_before)`, the pre-#7179 formula.
+    /// This fallback is never distinguished in the rendered string — both
+    /// paths produce the identical `💸<N>%` shape; only this doc comment
+    /// records which formula ran. Either path clamps to `[1, 100]` whenever
+    /// the fold accepted at least one row and the denominator is nonzero — the
+    /// lower clamp mirrors the pre-#7179 dollar segment's "never render a
+    /// false zero" rule: a sub-0.5% ratio would otherwise round down to a
+    /// literal `0%`, which reads as "we saved nothing" and states a
+    /// measurement that was never made. The upper clamp covers a mixed
+    /// old/new ledger on the fallback path, where rows written before
+    /// `tokens_before` existed fold their share of that denominator as `0`
+    /// (see the module header) and can otherwise push the raw ratio above 100.
+    /// `None` when there is nothing to divide: [`Self::is_zero`], or (on the
+    /// fallback path only) a `tokens_before` sum of `0` — every accepted row
+    /// predates #7179 and no compaction tick has landed either.
+    /// Test: `percent_saved_uses_the_session_actual_denominator_when_given`,
+    /// `percent_saved_falls_back_to_tokens_before_when_actual_is_unknown`,
+    /// `percent_saved_rounds_to_nearest_whole_number`,
     /// `percent_saved_is_none_on_a_zero_fold`,
     /// `percent_saved_clamps_a_legacy_mixed_fold`,
     /// `percent_saved_never_rounds_down_to_zero`.
-    pub fn percent_saved(&self) -> Option<u32> {
-        if self.is_zero() || self.tokens_before == 0 {
+    pub fn percent_saved(&self, session_actual_tokens: Option<u64>) -> Option<u32> {
+        if self.is_zero() {
             return None;
         }
-        let ratio = self.tokens_saved as f64 / self.tokens_before as f64;
+        let ratio = match session_actual_tokens {
+            Some(actual) => {
+                let denominator = actual + self.tokens_saved;
+                if denominator == 0 {
+                    return None;
+                }
+                self.tokens_saved as f64 / denominator as f64
+            }
+            None => {
+                if self.tokens_before == 0 {
+                    return None;
+                }
+                self.tokens_saved as f64 / self.tokens_before as f64
+            }
+        };
         let pct = (ratio * 100.0).round();
         // A true zero is already excluded by the checks above, so any ratio
         // reaching here is a real (if tiny) measurement — round it up to the

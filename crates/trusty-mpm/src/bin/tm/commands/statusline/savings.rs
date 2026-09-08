@@ -1,39 +1,48 @@
 //! The `💸` estimated-savings segment for `tm statusline` (#6958, percent
-//! form since #7179).
+//! form since #7179, session-share denominator since #7179's owner ruling
+//! 2026-09-08).
 //!
 //! Why: the owner asked to see what the harness saves by not sending tokens —
 //! instruction folding today, diverted file reads and compressed gate output as
 //! those producers land. The status bar is where the operator already looks for
-//! the session's cost, so the saving belongs beside it. #7179 (owner ruling
-//! 2026-09-08) replaced the dollar/token figure with a percentage: "how much of
-//! what would have been sent did we avoid" reads at a glance in a way a dollar
-//! amount — which needs the session's spend as context to interpret — does not.
+//! the session's cost, so the saving belongs beside it. #7179 replaced the
+//! dollar/token figure with a percentage, then the owner ruled the percentage
+//! itself must be a *session share* — `saved / (session actual tokens +
+//! saved)` — rather than a ratio scoped only to the ledger's own rows: "how
+//! much of everything this session sent did we avoid" is the number that
+//! actually answers "how much are we saving", where a ledger-only ratio only
+//! answers it for the subset of tokens a savings technique happened to touch.
 //!
-//! What: folds `~/.trusty-mpm/usage/savings.jsonl` for the current session at
-//! render time and renders one segment:
+//! What: folds `~/.trusty-mpm/usage/savings.jsonl` for the current session,
+//! reads that session's cumulative actual-token count from
+//! [`compaction::session_actual_tokens_for`] (the same per-session store
+//! `compaction.rs` already keys by `session_id` — no third store), and renders
+//! one segment:
 //!
 //! | Fold | Renders |
 //! |---|---|
 //! | `tokens_saved > 0` and a percent denominator exists | `💸34%` |
-//! | zero fold, or no denominator (every row predates #7179) | nothing at all |
+//! | zero fold, or no denominator at all (every row predates #7179 and no compaction tick has landed) | nothing at all |
 //!
-//! The percent is [`SavingsTotal::percent_saved`] — `tokens_saved / (this
-//! session's ledger rows' own pre-saving token count)`, folded across every
-//! accepted row, rounded to the nearest whole number. See that method's doc and
-//! the `savings` module header for why this denominator was chosen over the
-//! session's live context-window fill.
+//! The percent is [`SavingsTotal::percent_saved`]: `saved / (actual + saved)`
+//! when a compaction tick has landed for this session, else the pre-ruling
+//! `saved / tokens_before` fallback — see that method's doc for why the
+//! fallback is never distinguished in the rendered string.
 //!
 //! **`0%` is unreachable by construction**, the same way `$0.00` was before
 //! #7179: [`SavingsTotal::is_zero`] gates the whole segment, so a fold with
 //! nothing to show renders nothing rather than a false `0%`.
 //!
 //! Test: `savings_segment_renders_a_percent`,
+//! `savings_segment_uses_the_session_actual_denominator_when_available`,
 //! `savings_segment_is_absent_on_a_zero_fold`,
 //! `savings_segment_never_renders_zero_percent`.
 
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::core::savings::{SavingsTotal, fold_session, savings_log_in};
+
+use super::compaction;
 
 /// Fold the ledger for `session_id` and render the segment, or omit it.
 ///
@@ -42,9 +51,10 @@ use trusty_mpm::core::savings::{SavingsTotal, fold_session, savings_log_in};
 /// and no resolved framework root.
 /// What: resolves the ledger under the operator's framework root — the same
 /// `--root` / `TRUSTY_MPM_ROOT` / XDG-config / `~/.trusty-mpm` chain every other
-/// `tm` command honours — folds it for this session, and renders. An empty
-/// `session_id` (Claude Code sends one only once the session has an id) omits
-/// the segment without touching the disk.
+/// `tm` command honours — folds it for this session, reads this session's
+/// cumulative actual-token count from [`compaction::session_actual_tokens_for`]
+/// (#7179), and renders. An empty `session_id` (Claude Code sends one only
+/// once the session has an id) omits the segment without touching the disk.
 /// Test: `savings_segment_probe_is_absent_without_a_session_id`,
 /// `savings_segment_reads_the_ledger_under_an_explicit_root`.
 pub(crate) fn savings_segment_probe(session_id: &str) -> Option<String> {
@@ -52,18 +62,28 @@ pub(crate) fn savings_segment_probe(session_id: &str) -> Option<String> {
         return None;
     }
     let root = savings_root()?;
-    savings_segment_at(&savings_log_in(&root), session_id)
+    let actual_tokens = compaction::session_actual_tokens_for(session_id);
+    savings_segment_at(&savings_log_in(&root), session_id, actual_tokens)
 }
 
 /// [`savings_segment_probe`] against an explicit ledger path.
 ///
 /// Why: makes the missing-ledger and populated-ledger branches assertable end
-/// to end from a temp directory, with no environment mutation.
-/// What: folds `ledger` for `session_id` and renders the result.
+/// to end from a temp directory, with no environment mutation. Taking
+/// `session_actual_tokens` as a parameter (rather than reading the compaction
+/// state file itself) keeps this function's own I/O to the one ledger path its
+/// tests already control.
+/// What: folds `ledger` for `session_id` and renders the result against
+/// `session_actual_tokens` — the session's cumulative actual-token count, or
+/// `None` when no compaction tick has landed yet (#7179).
 /// Test: `savings_segment_is_absent_when_the_ledger_is_missing`,
 /// `savings_segment_reads_the_ledger_under_an_explicit_root`.
-pub(crate) fn savings_segment_at(ledger: &Path, session_id: &str) -> Option<String> {
-    render_savings_segment(&fold_session(ledger, session_id))
+pub(crate) fn savings_segment_at(
+    ledger: &Path,
+    session_id: &str,
+    session_actual_tokens: Option<u64>,
+) -> Option<String> {
+    render_savings_segment(&fold_session(ledger, session_id), session_actual_tokens)
 }
 
 /// Remember which model this session runs, for the divert producer to price at.
@@ -116,17 +136,25 @@ fn savings_root() -> Option<PathBuf> {
 ///
 /// Why: this is the rule the whole segment exists to get right — never a false
 /// `0%`, never a fabricated figure.
-/// What: `💸<N>%` from [`SavingsTotal::percent_saved`]; `None` on
+/// What: `💸<N>%` from [`SavingsTotal::percent_saved`] against
+/// `session_actual_tokens` (#7179's session-share denominator, or its
+/// pre-ruling `tokens_before` fallback on `None`); `None` on
 /// [`SavingsTotal::is_zero`] or when that method itself returns `None` (no
-/// percent denominator — every accepted row predates #7179's `tokens_before`).
+/// denominator on either path).
 /// Test: `savings_segment_renders_a_percent`,
+/// `savings_segment_uses_the_session_actual_denominator_when_available`,
 /// `savings_segment_is_absent_on_a_zero_fold`,
 /// `savings_segment_never_renders_zero_percent`.
-pub(crate) fn render_savings_segment(total: &SavingsTotal) -> Option<String> {
+pub(crate) fn render_savings_segment(
+    total: &SavingsTotal,
+    session_actual_tokens: Option<u64>,
+) -> Option<String> {
     if total.is_zero() {
         return None;
     }
-    total.percent_saved().map(|pct| format!("\u{1f4b8}{pct}%"))
+    total
+        .percent_saved(session_actual_tokens)
+        .map(|pct| format!("\u{1f4b8}{pct}%"))
 }
 
 #[cfg(test)]
@@ -143,19 +171,32 @@ mod tests {
         }
     }
 
-    /// Why (#7179): the percent is the primary — now only — reading, and
-    /// rounding to the nearest whole number is the exact shape the docs page
-    /// describes.
+    /// Why (#7179): with no actual-tokens reading supplied, the segment falls
+    /// back to the pre-ruling ledger-only formula — pinned here so a
+    /// regression in the fallback path is caught independently of the
+    /// session-share path below.
     /// Test: itself.
     #[test]
     fn savings_segment_renders_a_percent() {
         assert_eq!(
-            render_savings_segment(&total(1, 3)).as_deref(),
+            render_savings_segment(&total(1, 3), None).as_deref(),
             Some("\u{1f4b8}33%")
         );
         assert_eq!(
-            render_savings_segment(&total(5_000, 20_000)).as_deref(),
+            render_savings_segment(&total(5_000, 20_000), None).as_deref(),
             Some("\u{1f4b8}25%")
+        );
+    }
+
+    /// Why (#7179, owner ruling): once a compaction tick has landed for this
+    /// session, the segment must use the session-share denominator —
+    /// `saved / (actual + saved)` — even when `tokens_before` disagrees.
+    /// Test: itself.
+    #[test]
+    fn savings_segment_uses_the_session_actual_denominator_when_available() {
+        assert_eq!(
+            render_savings_segment(&total(40_000, 999_999), Some(160_000)).as_deref(),
+            Some("\u{1f4b8}20%")
         );
     }
 
@@ -164,31 +205,38 @@ mod tests {
     /// Test: itself.
     #[test]
     fn savings_segment_is_absent_on_a_zero_fold() {
-        assert_eq!(render_savings_segment(&SavingsTotal::default()), None);
+        assert_eq!(render_savings_segment(&SavingsTotal::default(), None), None);
         assert_eq!(
-            render_savings_segment(&SavingsTotal {
-                tokens_saved: 0,
-                tokens_before: 0,
-                cost_saved_usd: 0.0,
-                rows: 3,
-            }),
+            render_savings_segment(
+                &SavingsTotal {
+                    tokens_saved: 0,
+                    tokens_before: 0,
+                    cost_saved_usd: 0.0,
+                    rows: 3,
+                },
+                None
+            ),
             None
         );
     }
 
-    /// Why (#7179): a fold with `tokens_saved > 0` but no percent denominator
-    /// (every accepted row predates #7179) must omit the segment, not fabricate
-    /// a percent against nothing.
+    /// Why (#7179): a fold with `tokens_saved > 0` but no denominator on
+    /// either path (no actual-tokens reading, and every accepted row predates
+    /// #7179's `tokens_before`) must omit the segment, not fabricate a percent
+    /// against nothing.
     /// Test: itself.
     #[test]
     fn savings_segment_is_absent_without_a_percent_denominator() {
         assert_eq!(
-            render_savings_segment(&SavingsTotal {
-                tokens_saved: 4_000,
-                tokens_before: 0,
-                cost_saved_usd: 0.01,
-                rows: 1,
-            }),
+            render_savings_segment(
+                &SavingsTotal {
+                    tokens_saved: 4_000,
+                    tokens_before: 0,
+                    cost_saved_usd: 0.01,
+                    rows: 1,
+                },
+                None
+            ),
             None
         );
     }
@@ -202,8 +250,8 @@ mod tests {
     #[test]
     fn savings_segment_never_renders_zero_percent() {
         for (tokens_saved, tokens_before) in [(1_u64, 200), (12_000, 12_000_100), (5, 1_000)] {
-            let rendered =
-                render_savings_segment(&total(tokens_saved, tokens_before)).unwrap_or_default();
+            let rendered = render_savings_segment(&total(tokens_saved, tokens_before), None)
+                .unwrap_or_default();
             assert_ne!(
                 rendered, "\u{1f4b8}0%",
                 "the segment must never render 0% while tokens_saved > 0 \
@@ -219,7 +267,7 @@ mod tests {
     fn savings_segment_is_absent_when_the_ledger_is_missing() {
         let dir = tempfile::tempdir().expect("temp dir");
         let ledger = dir.path().join("usage").join("savings.jsonl");
-        assert_eq!(savings_segment_at(&ledger, "sess-1"), None);
+        assert_eq!(savings_segment_at(&ledger, "sess-1", None), None);
     }
 
     /// Why: proves the whole path — append a row, fold it back for that session
@@ -244,11 +292,11 @@ mod tests {
         )
         .expect("append");
         assert_eq!(
-            savings_segment_at(&ledger, "sess-1").as_deref(),
+            savings_segment_at(&ledger, "sess-1", None).as_deref(),
             Some("\u{1f4b8}20%")
         );
         // A different session's bar reads nothing from the same file.
-        assert_eq!(savings_segment_at(&ledger, "sess-2"), None);
+        assert_eq!(savings_segment_at(&ledger, "sess-2", None), None);
     }
 
     /// Why: before Claude Code assigns a session id there is nothing to fold,
