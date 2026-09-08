@@ -181,6 +181,54 @@ test('the collapse threshold is the spec’s 2°, and it is what decides the fol
   );
 });
 
+test('a row sitting exactly ON the threshold keeps its own arc', () => {
+  // `apportion` folds on `share < minDegrees`, so 2.0° itself is KEPT. The test
+  // above pins 5.4° and 5.4°-under-a-10°-floor — both comfortably off the
+  // boundary, so either comparison passes them and neither would catch a
+  // `>` written where the code says `>=`. This is the case that does.
+  const bulk = 179 * GB;
+  const edge = 1 * GB;
+  // The one arithmetic the module performs: (weight / total) × span.
+  assert.equal(
+    (edge / (bulk + edge)) * 360,
+    MIN_ARC_DEGREES,
+    'the fixture must land ON the boundary, not near it',
+  );
+
+  const boundary = {
+    root: {
+      path: '/w',
+      projects: [
+        {
+          name: 'p',
+          path: '/w/p',
+          bytes: bulk + edge,
+          worktrees: [wt('bulk', 'stale', bulk), wt('edge', 'keep', edge)],
+        },
+      ],
+    },
+  };
+  const rings = sunburstRings(boundary);
+
+  assert.equal(
+    rings.worktrees.filter((a) => a.kind === 'other').length,
+    0,
+    'nothing is below the floor, so there is no wedge to fold into',
+  );
+  const drawn = rings.worktrees.filter((a) => a.kind === 'worktree').map((a) => a.id);
+  assert.deepEqual(drawn.sort(), ['bulk', 'edge'], 'the 2.0° row draws its own arc');
+
+  // One byte less is below the floor, which is what proves the assertion above
+  // is testing the boundary rather than a row that could never fold.
+  boundary.root.projects[0].worktrees[1].bytes = edge - 1;
+  const under = sunburstRings(boundary).worktrees.find((a) => a.kind === 'other');
+  assert.ok(under, 'a hair under 2.0° must fold');
+  assert.deepEqual(
+    under.members.map((m) => m.id),
+    ['edge'],
+  );
+});
+
 test('the ring-2 arcs of one project stay inside that project’s ring-1 span', () => {
   // Regression guard on the apportioning: a rescale that forgot to reserve the
   // wedge's sweep would push the last arc past its project's sector.

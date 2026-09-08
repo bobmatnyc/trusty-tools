@@ -103,9 +103,13 @@ pub async fn disk_survey(
         // that `classify` shells out to, so a second `disk_survey` — or the
         // #6926 background refresher — would queue behind minutes of network
         // work for an index it only wanted to read.
-        let measure = |path: &Path| -> Option<DirSize> {
+        // #6929: `budget` is whatever the survey deadline has left. Passing it
+        // through is what stops one cold walk from spending the index's fixed
+        // 30-second ceiling and overrunning the survey the console is waiting
+        // on.
+        let measure = |path: &Path, budget: Option<Duration>| -> Option<DirSize> {
             let mut index = index.lock();
-            survey_run::measure(&mut index, path)
+            survey_run::measure(&mut index, path, budget)
         };
         let probes = DiskProbes {
             pr_state: &pr_state,

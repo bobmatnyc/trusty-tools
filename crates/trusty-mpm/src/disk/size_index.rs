@@ -58,7 +58,10 @@
 //!   can neither inflate the figure nor loop.
 //! - [`IndexPolicy::max_depth`] caps descent; [`IndexPolicy::walk_budget`] caps
 //!   wall time. Either bound sets [`DirSize::truncated`] and returns the
-//!   partial total rather than failing.
+//!   partial total rather than failing. A caller with a deadline of its own
+//!   tightens the wall-time bound for one call through
+//!   [`DirSizeIndex::measure_within`] (#6929); the policy ceiling still applies,
+//!   so the per-call budget can only ever shorten the walk.
 //! - A directory the OS refuses is recorded in [`DirSize::unreadable`] and the
 //!   walk continues. It is never cached, so the next refresh retries it.
 //!
@@ -96,15 +99,29 @@ pub const DEFAULT_NODE_MAX_AGE: Duration = Duration::from_secs(900);
 /// already pathological.
 pub const DEFAULT_MAX_DEPTH: usize = 64;
 
-/// Wall-clock ceiling on one refresh.
+/// Wall-clock CEILING on one refresh.
 ///
 /// A refresh that has run this long is contending with build churn rather than
 /// measuring it; the partial total plus [`DirSize::truncated`] is strictly more
 /// useful than holding the thread.
+///
+/// This is a ceiling, not a quota: a caller under its own deadline asks for
+/// less through [`DirSizeIndex::measure_within`], and the walk runs under
+/// whichever of the two is shorter (#6929).
 pub const DEFAULT_WALK_BUDGET: Duration = Duration::from_secs(30);
 
 /// Directories opened between two clock reads during a refresh.
 const BUDGET_CHECK_INTERVAL: usize = 256;
+
+/// Below this budget the refresh reads the clock at EVERY directory.
+///
+/// Why: 256 directories is a cheap sampling interval against a 30-second
+/// ceiling and a useless one against the sub-second budget a nearly-spent
+/// survey deadline hands down — the walk would overshoot by however long those
+/// 256 `read_dir` calls take (#6929). A caller that asked for 200 ms must get
+/// an answer in about 200 ms, so under a second the walk pays for one
+/// `Instant::now` per directory, which is nanoseconds against a syscall.
+const CLOCK_EVERY_DIRECTORY_BELOW: Duration = Duration::from_secs(1);
 
 /// The bounds and cadences one [`DirSizeIndex`] runs under.
 ///
@@ -124,6 +141,9 @@ pub struct IndexPolicy {
     /// Deepest level to open, root counted as 0.
     pub max_depth: usize,
     /// Wall-clock ceiling on one refresh.
+    ///
+    /// A ceiling, never a floor: [`DirSizeIndex::measure_within`] takes the
+    /// shorter of this and the caller's own remaining budget (#6929).
     pub walk_budget: Duration,
     /// Paths that may never be indexed, nor may any ancestor of them be.
     pub forbidden_roots: Vec<PathBuf>,
@@ -258,6 +278,16 @@ struct RootRecord {
     read_at: Instant,
     truncated: bool,
     unreadable: Vec<PathBuf>,
+    /// Whether the WALK BUDGET, rather than the depth cap, cut this walk short.
+    ///
+    /// Why the two are told apart even though both set
+    /// [`DirSize::truncated`]: a depth-capped total is deterministic — the same
+    /// tree measured again returns the same number — so caching it is right. A
+    /// budget-exhausted total is whatever fraction the clock allowed, so
+    /// caching it would serve an arbitrary slice of the tree as the root total
+    /// for a whole [`IndexPolicy::max_age`] window, to readers that arrived
+    /// with a full budget included (#6929).
+    budget_exhausted: bool,
 }
 
 /// A path → bytes-with-timestamp cache whose refresh is incremental.
@@ -363,6 +393,37 @@ impl DirSizeIndex {
     /// `bytes_sum_the_files_in_a_known_tree`,
     /// `a_forbidden_root_is_refused_before_any_walk`.
     pub fn measure(&mut self, root: &Path) -> Result<DirSize, SizeIndexError> {
+        self.measure_within(root, None)
+    }
+
+    /// [`measure`](Self::measure), under at most `budget` of wall clock.
+    ///
+    /// Why: [`measure`](Self::measure) alone can only promise the index's own
+    /// [`IndexPolicy::walk_budget`], so a caller under a deadline of its own had
+    /// no way to bound one walk. The Disk survey is that caller: a cold refresh
+    /// starting at 24 seconds into a 30-second survey ran its full 30-second
+    /// ceiling, and the console's stdio transport cut the call off at 30 with no
+    /// survey at all (#6929).
+    /// What: the walk runs for the SHORTER of `budget` and the policy ceiling,
+    /// so this can only ever tighten the bound, never loosen it. `None` means
+    /// the caller has no deadline and the policy ceiling stands. A walk the
+    /// budget stops returns the partial total with [`DirSize::truncated`] set —
+    /// it never blocks and never fails — and that partial is NOT installed as
+    /// the cached root total; see [`RootRecord::budget_exhausted`].
+    ///
+    /// # Errors
+    ///
+    /// The same two refusals [`measure`](Self::measure) documents, both decided
+    /// before any walk begins.
+    ///
+    /// Test: `a_caller_budget_bounds_the_walk_below_the_policy_ceiling`,
+    /// `the_policy_ceiling_still_caps_a_generous_caller_budget`,
+    /// `a_budget_exhausted_partial_is_never_cached_as_the_root_total`.
+    pub fn measure_within(
+        &mut self,
+        root: &Path,
+        budget: Option<Duration>,
+    ) -> Result<DirSize, SizeIndexError> {
         self.guard_root(root)?;
         let root = root.to_path_buf();
 
@@ -373,9 +434,12 @@ impl DirSizeIndex {
             return Ok(record.to_dir_size(root, true));
         }
 
-        let record = self.refresh(&root);
+        let ceiling = self.policy.walk_budget;
+        let record = self.refresh(&root, budget.map_or(ceiling, |asked| asked.min(ceiling)));
         let size = record.to_dir_size(root.clone(), false);
-        self.roots.insert(root, record);
+        if !record.budget_exhausted {
+            self.roots.insert(root, record);
+        }
         Ok(size)
     }
 
@@ -431,24 +495,32 @@ impl DirSizeIndex {
     /// bytes and children, one stat) or re-read (`read_dir`). Totals are then
     /// summed bottom-up over the visit order, which is a DFS pre-order, so
     /// reversing it guarantees every child is folded in before its parent.
+    /// `budget` is already the tighter of the caller's and the policy's — see
+    /// [`measure_within`](Self::measure_within), which is the only caller.
     /// Test: `a_changed_subtree_is_the_only_one_re_read`,
-    /// `a_deleted_subtree_drops_out_of_the_total`.
-    fn refresh(&mut self, root: &Path) -> RootRecord {
+    /// `a_deleted_subtree_drops_out_of_the_total`,
+    /// `a_caller_budget_bounds_the_walk_below_the_policy_ceiling`.
+    fn refresh(&mut self, root: &Path, budget: Duration) -> RootRecord {
         self.stats.refreshes += 1;
         let started = Instant::now();
         let mut truncated = false;
+        let mut budget_exhausted = false;
         let mut unreadable: Vec<PathBuf> = Vec::new();
         let mut visited: Vec<PathBuf> = Vec::new();
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
         let mut opened = 0usize;
+        let check_every = if budget < CLOCK_EVERY_DIRECTORY_BELOW {
+            1
+        } else {
+            BUDGET_CHECK_INTERVAL
+        };
 
         while let Some((dir, depth)) = stack.pop() {
             opened += 1;
-            if opened.is_multiple_of(BUDGET_CHECK_INTERVAL)
-                && started.elapsed() >= self.policy.walk_budget
-            {
+            if opened.is_multiple_of(check_every) && started.elapsed() >= budget {
                 truncated = true;
+                budget_exhausted = true;
                 break;
             }
             if !seen.insert(dir.clone()) {
@@ -501,6 +573,7 @@ impl DirSizeIndex {
             read_at: Instant::now(),
             truncated,
             unreadable,
+            budget_exhausted,
         }
     }
 
