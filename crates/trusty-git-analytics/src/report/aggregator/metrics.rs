@@ -23,7 +23,7 @@ use crate::report::models::{
 };
 
 use super::accumulate::{iso_week_label, RowFlags, WeekTotal};
-use super::{CommitRow, PrRow};
+use super::{CommitRow, DeploymentRow, PrRow};
 
 /// Outputs of [`compute_velocity_inputs`].
 pub(super) struct VelocityInputs {
@@ -119,33 +119,58 @@ pub(super) fn build_weekly_velocity(
         .collect()
 }
 
+// #212 review round 2: the positional argument list kept growing across the
+// fact_deployments fix; a call site reordering two `DateTime<Utc>` or two
+// `usize` args silently compiles, so the inputs move into one named struct.
+/// Grouped inputs for [`compute_dora`].
+pub(super) struct DoraInputs<'a> {
+    pub(super) rows: &'a [CommitRow],
+    pub(super) flags: &'a RowFlags,
+    pub(super) category_total: &'a HashMap<String, usize>,
+    pub(super) prs: &'a [PrRow],
+    pub(super) deployments: &'a [DeploymentRow],
+    /// `true` when the `fact_deployments` query itself errored (e.g. a
+    /// pre-migration DB missing the table) rather than simply returning no
+    /// rows — [`compute_dora`] tags the proxy fallback distinctly in that
+    /// case so a broken table isn't silently read as an empty one.
+    pub(super) deployments_query_failed: bool,
+    pub(super) period_start: DateTime<Utc>,
+    pub(super) period_end: DateTime<Utc>,
+    pub(super) cycle_time_avg: f64,
+    // #212 review round 3: `cycle_time_avg` is 0.0 both when it's a genuine
+    // average AND when zero PRs survived `compute_velocity_inputs`' 0.5-720h
+    // outlier filter — `has_merged_prs` (any raw `merged_at`) missed the case
+    // where merges exist but every one was filtered out, so the proxy still
+    // reported a fabricated `Some(0.0)` "measured" lead time. This is the
+    // post-filter count `compute_velocity_inputs` actually averaged over.
+    pub(super) pr_cycle_time_count: usize,
+    pub(super) total_weeks: usize,
+    pub(super) revert_count: usize,
+}
+
 /// Why: DORA metrics are the standard rubric stakeholders use to score
 /// engineering performance; computing them in one place keeps the four
 /// values consistent with each other.
-/// What: derives deployment frequency from merged PRs, change-failure-rate
-/// from bugfix totals (clamped by revert count), and MTTR from the spacing
-/// between consecutive bugfix/revert commits; classifies the team via
-/// [`dora_level`].
-/// Test: covered by `aggregator_computes_summary_and_dora_and_quality`
-/// (asserts a well-formed `performance_level` is set).
-pub(super) fn compute_dora(
-    rows: &[CommitRow],
-    flags: &RowFlags,
-    category_total: &HashMap<String, usize>,
-    prs: &[PrRow],
-    cycle_time_avg: f64,
-    total_weeks: usize,
-    revert_count: usize,
-) -> DoraMetrics {
-    let total_weeks_f = total_weeks.max(1) as f64;
-    let total_commits = rows.len();
-    let deploys = prs.iter().filter(|p| p.merged_at.is_some()).count();
-    let deployment_frequency = deploys as f64 / total_weeks_f;
-    let bugfix_total = category_total
+/// What: derives deployment frequency and lead time from `fact_deployments`
+/// (issue #212) when the table has rows for the report period, falling back
+/// to the merged-PR-count / cycle-time proxy only when it does not; derives
+/// change-failure-rate from bugfix totals (clamped by revert count), and
+/// MTTR from the spacing between consecutive bugfix/revert commits;
+/// classifies the team via [`dora_level`].
+/// Test: `aggregator_computes_summary_and_dora_and_quality` (well-formed
+/// `performance_level`); the `dora_*` cases in `report::tests` covering the
+/// measured/proxy/unmeasurable/query-failed provenance split.
+pub(super) fn compute_dora(inputs: DoraInputs<'_>) -> DoraMetrics {
+    let total_weeks_f = inputs.total_weeks.max(1) as f64;
+    let total_commits = inputs.rows.len();
+    let (deployment_frequency, deployment_frequency_source, lead_time_hours, lead_time_source) =
+        deployment_frequency_and_lead_time(&inputs, total_weeks_f);
+    let bugfix_total = inputs
+        .category_total
         .get("bugfix")
         .copied()
         .unwrap_or(0)
-        .max(revert_count);
+        .max(inputs.revert_count);
     let change_failure_rate = if total_commits == 0 {
         0.0
     } else {
@@ -156,9 +181,10 @@ pub(super) fn compute_dora(
     // (assumed bug introduction) to the revert itself. Without a richer
     // mapping we approximate via the gap between consecutive bugfix
     // commits, capped by available data.
-    let mut bugfix_ts: Vec<DateTime<Utc>> = rows
+    let mut bugfix_ts: Vec<DateTime<Utc>> = inputs
+        .rows
         .iter()
-        .zip(flags.is_revert.iter())
+        .zip(inputs.flags.is_revert.iter())
         .filter(|(r, is_rev)| **is_rev || r.category.as_deref() == Some("bugfix"))
         .map(|(r, _)| r.timestamp)
         .collect();
@@ -173,19 +199,132 @@ pub(super) fn compute_dora(
         }
         gaps.iter().sum::<f64>() / gaps.len() as f64
     };
+    // An unmeasurable lead time cannot support any tier that requires a
+    // lead-time bound; treat it as unbounded (fails every tier's `lead_h`
+    // check) rather than the pre-round-2 bug of silently passing as 0.0.
+    let lead_h_for_level = lead_time_hours.unwrap_or(f64::INFINITY);
     let performance_level = dora_level(
         deployment_frequency,
-        cycle_time_avg,
+        lead_h_for_level,
         change_failure_rate,
         mttr_hours,
     );
     DoraMetrics {
         deployment_frequency,
-        lead_time_hours: cycle_time_avg,
+        lead_time_hours,
         change_failure_rate,
         mttr_hours,
         performance_level,
+        deployment_frequency_source,
+        lead_time_source,
     }
+}
+
+// #212: compute_dora previously derived `deploys` from `prs` unconditionally
+// and never read `fact_deployments`, so a repo with real production deploy
+// history reported `deployment_frequency: 0.0` identically to an empty one.
+// #212 review round 2: a deploy can be measured while its lead time is not
+// (an unmatched `git_sha`) — `deployment_frequency_source` and
+// `lead_time_source` are resolved independently so the latter case can never
+// mislabel a proxy/absent lead time as `"measured"`.
+/// Resolve deployment frequency and lead time, preferring the measured
+/// `fact_deployments` signal over the merged-PR-count proxy.
+///
+/// Why: isolating the source-selection logic keeps [`compute_dora`]'s
+/// change-failure-rate / MTTR arithmetic (unaffected by this issue)
+/// unentangled from the deploy-frequency fix.
+/// What: filters `deployments` to `[period_start, period_end]` by
+/// `triggered_at`. Empty after filtering → the pre-#212 proxy (merged-PR
+/// count), tagged `"pr_merge_proxy"` (or `"pr_merge_proxy_query_failed"`
+/// when `deployments_query_failed`). Non-empty → count as
+/// `deployment_frequency`, tagged `"fact_deployments"`. Lead time is
+/// resolved separately: the average `deploy_time - commit_time` over deploys
+/// whose `git_sha` matches a commit (`"measured"`) when any resolve; else the
+/// PR cycle-time proxy (`"proxy"`) when `pr_cycle_time_count > 0` — at least
+/// one merged PR survived `compute_velocity_inputs`' outlier filter; else
+/// `None` (`"unmeasurable"`) — never a bare `0.0` standing in for "no data".
+/// Test: the `dora_*` cases in `report::tests`.
+fn deployment_frequency_and_lead_time(
+    inputs: &DoraInputs<'_>,
+    total_weeks_f: f64,
+) -> (f64, String, Option<f64>, String) {
+    let period_deploys: Vec<&DeploymentRow> = inputs
+        .deployments
+        .iter()
+        .filter(|d| {
+            d.triggered_at
+                .is_some_and(|t| t >= inputs.period_start && t <= inputs.period_end)
+        })
+        .collect();
+    // #212 review round 3: gate on the POST-outlier-filter count, not "any
+    // raw merged_at" — a PR set that exists but was entirely filtered out by
+    // `compute_velocity_inputs`' 0.5-720h window must not proxy a fabricated
+    // `Some(0.0)` lead time.
+    let proxy_lead = || {
+        if inputs.pr_cycle_time_count > 0 {
+            (Some(inputs.cycle_time_avg), "proxy".to_string())
+        } else {
+            (None, "unmeasurable".to_string())
+        }
+    };
+
+    if period_deploys.is_empty() {
+        let deploys = inputs.prs.iter().filter(|p| p.merged_at.is_some()).count();
+        let freq_source = if inputs.deployments_query_failed {
+            "pr_merge_proxy_query_failed"
+        } else {
+            "pr_merge_proxy"
+        };
+        let (lead, lead_source) = proxy_lead();
+        return (
+            deploys as f64 / total_weeks_f,
+            freq_source.to_string(),
+            lead,
+            lead_source,
+        );
+    }
+
+    let deployment_frequency = period_deploys.len() as f64 / total_weeks_f;
+
+    let commit_ts: HashMap<&str, DateTime<Utc>> = inputs
+        .rows
+        .iter()
+        .map(|r| (r.sha.as_str(), r.timestamp))
+        .collect();
+    let mut leads: Vec<f64> = Vec::new();
+    for d in &period_deploys {
+        let Some(sha) = d.git_sha.as_deref() else {
+            continue;
+        };
+        let Some(commit_time) = commit_ts.get(sha) else {
+            continue;
+        };
+        let Some(deploy_time) = d.triggered_at.or(d.completed_at) else {
+            continue;
+        };
+        let hours = (deploy_time - *commit_time).num_seconds() as f64 / 3600.0;
+        // A deploy that precedes its own linked commit is a data error, not
+        // a legitimate zero/negative lead time; drop it rather than skew the
+        // average negative.
+        if hours >= 0.0 {
+            leads.push(hours);
+        }
+    }
+    let (lead_time_hours, lead_time_source) = if !leads.is_empty() {
+        (
+            Some(leads.iter().sum::<f64>() / leads.len() as f64),
+            "measured".to_string(),
+        )
+    } else {
+        proxy_lead()
+    };
+
+    (
+        deployment_frequency,
+        "fact_deployments".to_string(),
+        lead_time_hours,
+        lead_time_source,
+    )
 }
 
 /// Why: a single 0.0–1.0 quality score lets stakeholders compare teams /

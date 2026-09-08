@@ -260,15 +260,41 @@ pub struct WeeklyVelocity {
 pub struct DoraMetrics {
     /// Deployment frequency in deploys per week.
     pub deployment_frequency: f64,
-    /// Average lead time (PR open → merge) in hours. Zero if no PR data.
-    pub lead_time_hours: f64,
+    // #212 review round 2: `0.0` used to double as both "measured zero" and
+    // "no data at all" — a deploy that named a `git_sha` with no matching
+    // commit and zero `pull_requests` rows silently rendered as a measured
+    // `0.0`. `None` now means genuinely unmeasurable; see
+    // `lead_time_source` for which case produced the value.
+    /// Average lead time in hours: measured (`fact_deployments` row →
+    /// linked commit) when available, else the PR open→merge proxy, else
+    /// `None`.
+    pub lead_time_hours: Option<f64>,
     /// Change failure rate: bugfix commits / total commits.
     pub change_failure_rate: f64,
     /// MTTR approximation: average hours between a bug-introducing commit and
     /// its bugfix commit. Zero if no commit-pairs found.
     pub mttr_hours: f64,
     /// Aggregate performance band: `"elite" | "high" | "medium" | "low"`.
+    /// An unmeasurable lead time (see [`Self::lead_time_source`]) fails every
+    /// tier's lead-time bound, so it never classifies above `"low"`.
     pub performance_level: String,
+    // #212: distinguishes a measured `fact_deployments` reading from the
+    // PR-merge proxy so a report reader can tell which source produced
+    // `deployment_frequency`.
+    /// Data source for `deployment_frequency`: `"fact_deployments"` when the
+    /// table had in-period `environment='production' AND status='success'`
+    /// rows, `"pr_merge_proxy"` when it did not, `"pr_merge_proxy_query_failed"`
+    /// when the query itself errored (e.g. a pre-migration DB missing the
+    /// table) — distinct from a genuinely empty table.
+    pub deployment_frequency_source: String,
+    // #212 review round 2: split from `deployment_frequency_source` because
+    // a deploy can be measured while its lead time is not (unmatched
+    // `git_sha`).
+    /// Data source for `lead_time_hours`: `"measured"` (deploy→commit link
+    /// resolved), `"proxy"` (PR open→merge cycle time stood in), or
+    /// `"unmeasurable"` (neither signal was available — `lead_time_hours` is
+    /// `None`).
+    pub lead_time_source: String,
 }
 
 /// Period-level velocity summary.

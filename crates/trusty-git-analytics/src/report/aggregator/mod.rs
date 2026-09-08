@@ -71,6 +71,23 @@ pub(super) struct PrRow {
     pub(super) merged_at: Option<DateTime<Utc>>,
 }
 
+// #212: canonical deploy-event row for DORA deployment-frequency / lead-time.
+/// Minimal `fact_deployments` row used by [`metrics::compute_dora`].
+///
+/// Why: `compute_dora` previously derived deployment frequency from a
+/// merged-PR-count proxy and never read the `fact_deployments` table the
+/// schema (issue #212) added — a repo with real production deploy history
+/// reported `deployment_frequency: 0.0` identically to one with none.
+/// What: the subset of `fact_deployments` columns needed to count
+/// production deploys in-period and, when a row names a commit SHA, join it
+/// back to that commit's timestamp for a measured lead time.
+/// Test: `report::tests::dora_reads_fact_deployments_when_populated`.
+pub(super) struct DeploymentRow {
+    pub(super) triggered_at: Option<DateTime<Utc>>,
+    pub(super) completed_at: Option<DateTime<Utc>>,
+    pub(super) git_sha: Option<String>,
+}
+
 /// Default regex patterns identifying machine-generated commits.
 ///
 /// Why: keep boilerplate (lock-file bumps, version bumps, merge commits, …)
@@ -180,6 +197,24 @@ impl Aggregator {
 
         let rows = Self::load_rows_filtered(db, canonical_email.as_deref())?;
         let prs = Self::load_prs(db).unwrap_or_default();
+        // #212: non-fatal, same pattern as `load_prs` — a query failure (e.g.
+        // a pre-migration DB missing `fact_deployments`) falls back to the
+        // empty-table path in `compute_dora` rather than aborting report
+        // generation. #212 review round 2: the failure is still logged and
+        // threaded through as `deployments_query_failed` so `compute_dora`
+        // can tag the fallback `"pr_merge_proxy_query_failed"` — a broken
+        // table must not read identically to a genuinely empty one.
+        let (deployments, deployments_query_failed) = match Self::load_deployments(db) {
+            Ok(rows) => (rows, false),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "fact_deployments query failed; DORA deployment frequency \
+                     falls back to the PR-merge proxy"
+                );
+                (Vec::new(), true)
+            }
+        };
         let unresolved_db = if canonical_email.is_none() {
             Self::count_unresolved_author_commits(db).unwrap_or(0)
         } else {
@@ -187,7 +222,7 @@ impl Aggregator {
             // meaningful for the per-author view — suppress it.
             0
         };
-        let mut data = Self::aggregate(rows, prs);
+        let mut data = Self::aggregate(rows, prs, deployments, deployments_query_failed);
 
         // Issue #68 / #67: surface coverage and unresolved-identity counts
         // so consumers know the scope of the report. `repository_coverage`
@@ -326,6 +361,53 @@ impl Aggregator {
                 state,
                 created_at,
                 merged_at,
+            });
+        }
+        Ok(out)
+    }
+
+    // #212: compute_dora previously never read this table.
+    /// Load production-deploy rows for DORA deployment-frequency / lead-time.
+    ///
+    /// Why: `fact_deployments` (issue #212) is the canonical deploy-event
+    /// hub every DORA query should join through; a repo with real deploy
+    /// history was reporting `deployment_frequency: 0.0` because nothing
+    /// queried it.
+    /// What: returns `environment='production' AND status='success'` rows
+    /// with a parseable `triggered_at`; other rows are silently dropped,
+    /// matching [`Self::load_prs`]'s handling of an un-parseable timestamp.
+    /// Test: `report::tests::dora_reads_fact_deployments_when_populated`.
+    fn load_deployments(db: &Database) -> Result<Vec<DeploymentRow>> {
+        let conn = db.connection();
+        let mut stmt = conn
+            .prepare(
+                "SELECT triggered_at, completed_at, git_sha FROM fact_deployments \
+                 WHERE environment = 'production' AND status = 'success'",
+            )
+            .map_err(crate::core::TgaError::from)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let triggered: Option<String> = row.get(0)?;
+                let completed: Option<String> = row.get(1)?;
+                let git_sha: Option<String> = row.get(2)?;
+                Ok((triggered, completed, git_sha))
+            })
+            .map_err(crate::core::TgaError::from)?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (triggered_s, completed_s, git_sha) = r.map_err(crate::core::TgaError::from)?;
+            let triggered_at = triggered_s
+                .as_deref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
+            let completed_at = completed_s
+                .as_deref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
+            out.push(DeploymentRow {
+                triggered_at,
+                completed_at,
+                git_sha,
             });
         }
         Ok(out)
@@ -497,7 +579,12 @@ impl Aggregator {
     /// Test: indirectly via `Aggregator::build` tests; behaviour is a
     /// pure refactor — every output field is produced by a named helper
     /// below.
-    fn aggregate(rows: Vec<CommitRow>, prs: Vec<PrRow>) -> ReportData {
+    fn aggregate(
+        rows: Vec<CommitRow>,
+        prs: Vec<PrRow>,
+        deployments: Vec<DeploymentRow>,
+        deployments_query_failed: bool,
+    ) -> ReportData {
         let generated_at = Utc::now().to_rfc3339();
         let mut data = ReportData::empty(generated_at);
 
@@ -550,15 +637,20 @@ impl Aggregator {
             velocity_inputs.cycle_time_avg,
         );
 
-        let dora = Some(compute_dora(
-            &rows,
-            &row_flags,
-            &acc.category_total,
-            &prs,
-            velocity_inputs.cycle_time_avg,
+        let dora = Some(compute_dora(DoraInputs {
+            rows: &rows,
+            flags: &row_flags,
+            category_total: &acc.category_total,
+            prs: &prs,
+            deployments: &deployments,
+            deployments_query_failed,
+            period_start: acc.min_ts,
+            period_end: acc.max_ts,
+            cycle_time_avg: velocity_inputs.cycle_time_avg,
+            pr_cycle_time_count: velocity_inputs.pr_count,
             total_weeks,
-            acc.revert_count,
-        ));
+            revert_count: acc.revert_count,
+        }));
 
         let quality = Some(compute_quality(
             total_commits,
@@ -642,5 +734,5 @@ use accumulate::{
 };
 use metrics::{
     build_summary, build_weekly_velocity, check_weekly_coverage_drift, compute_developer_activity,
-    compute_dora, compute_quality, compute_velocity_inputs, configured_alias_emails,
+    compute_dora, compute_quality, compute_velocity_inputs, configured_alias_emails, DoraInputs,
 };

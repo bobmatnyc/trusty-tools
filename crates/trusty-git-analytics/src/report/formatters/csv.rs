@@ -375,14 +375,25 @@ pub fn write_weekly_dora_csv(data: &ReportData, output_dir: &Path) -> Result<Pat
         "change_failure_rate",
         "mttr_hours",
         "performance_level",
+        "deployment_frequency_source",
+        "lead_time_source",
     ])?;
     if let Some(d) = &data.dora {
+        // #212 review round 2: `lead_time_hours` is `None` when genuinely
+        // unmeasurable — an empty cell, never a `0.0` that would misread as
+        // a measured zero.
+        let lead_time_cell = d
+            .lead_time_hours
+            .map(|h| format!("{h:.2}"))
+            .unwrap_or_default();
         w.write_record([
             &format!("{:.4}", d.deployment_frequency),
-            &format!("{:.2}", d.lead_time_hours),
+            &lead_time_cell,
             &format!("{:.4}", d.change_failure_rate),
             &format!("{:.2}", d.mttr_hours),
             d.performance_level.as_str(),
+            d.deployment_frequency_source.as_str(),
+            d.lead_time_source.as_str(),
         ])?;
     }
     w.flush()?;
