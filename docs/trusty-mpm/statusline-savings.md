@@ -21,18 +21,30 @@ It has one form and one absence:
 
 ### How the percent is computed
 
-Every ledger row already knows two figures: `tokens_saved` (what it avoided
-sending) and `tokens_before` (what it would have sent without the technique).
-The segment sums both across every row this session wrote, then reports
-`round(100 × tokens_saved / tokens_before)`.
+The percent is a **session share**: how much of everything this session sent —
+what it actually spent, plus what the harness avoided — did the harness avoid.
 
-This denominator was chosen over the session's live context-window fill (the
-`total_input_tokens` figure behind the `ctx 41%` segment) deliberately: that
-figure resets on every auto-compaction, which would make the percent jump for
-reasons that have nothing to do with anything the harness saved, and it counts
-tokens no savings technique here ever touches. The ledger-only percent stays
-scoped to exactly what `instruction-compression` and `divert` measure, and it
-only grows as more of those write rows.
+```
+percent = tokens_saved / (session_actual_tokens + tokens_saved)
+```
+
+`tokens_saved` is every accepted ledger row's `tokens_saved`, summed across the
+session. `session_actual_tokens` is a cumulative counter the `tm statusline`
+compaction tracker keeps per session, alongside the `ctx 41%` segment's own
+state, in `~/.trusty-mpm/statusline/<session_id>.json`. It exists because the
+`statusLine` hook's raw `total_input_tokens` figure resets to a small number on
+every auto-compaction — reading it directly would understate the session and
+make the percent swing for reasons that have nothing to do with anything the
+harness saved. The tracker instead folds each pre-reset reading into a running
+base the moment it detects a drop, so `session_actual_tokens` only grows,
+across any number of compactions in the session.
+
+Before the first `statusLine` tick lands for a session — no compaction tracker
+state yet — the segment falls back to the ledger-only ratio this feature
+originally shipped with: `round(100 × tokens_saved / tokens_before)`, where
+`tokens_before` is each row's own pre-saving token count. That fallback
+produces the identical `💸<N>%` shape; nothing in the rendered segment
+distinguishes which formula ran.
 
 It is still an estimate, for the same two reasons as before:
 

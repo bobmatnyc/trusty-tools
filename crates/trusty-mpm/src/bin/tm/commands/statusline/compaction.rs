@@ -3,13 +3,19 @@
 //! Why: Claude Code fires the `statusLine` hook on every render cycle with no
 //! persistent state; this module maintains a tiny JSON file in
 //! `~/.trusty-mpm/statusline/<session_id>.json` so the statusline can show how
-//! much the last auto-compaction shrank the context window.
-//! What: persists a `CompactionState` (running peak + last compaction record)
-//! keyed by `session_id`. All filesystem I/O runs in a detached thread bounded
-//! by a 100 ms wall-clock timeout so it can never stall the render path. Saves
-//! are skipped on no-op ticks. Atomic writes use `NamedTempFile::persist`.
+//! much the last auto-compaction shrank the context window. The same file
+//! also backs the `💸` savings segment's session-share denominator (#7179):
+//! `total_input_tokens` resets on every auto-compaction, so a cumulative
+//! counter has to live somewhere that survives the reset — this store already
+//! does, keyed the same way.
+//! What: persists a `CompactionState` (running peak, last compaction record,
+//! and the cumulative session-actual-tokens base) keyed by `session_id`. All
+//! filesystem I/O runs in a detached thread bounded by a 100 ms wall-clock
+//! timeout so it can never stall the render path. Saves are skipped on no-op
+//! ticks. Atomic writes use `NamedTempFile::persist`.
 //! Test: `humanize_tokens_examples`, `compaction_detection_sequence`,
-//! `state_round_trip`, `rejects_path_traversal_session_id` in inline tests.
+//! `state_round_trip`, `rejects_path_traversal_session_id`,
+//! `session_actual_tokens_accumulate_across_two_compactions` in inline tests.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -47,16 +53,30 @@ pub(crate) struct ContextWindow {
 ///
 /// Why: the statusline binary is invoked fresh on every render tick; this state
 /// file bridges invocations so the segment can show a compaction that happened
-/// several ticks ago.
-/// What: tracks the highest `total_input_tokens` seen (`peak_input_tokens`)
-/// and the most recent compaction record.
-/// Test: `state_round_trip`.
+/// several ticks ago, and (#7179) so the savings segment can read a
+/// session-total token count that survives any number of resets.
+/// What: tracks the highest `total_input_tokens` seen in the current epoch
+/// (`peak_input_tokens`), the most recent compaction record, and the
+/// cumulative-actual-tokens pair (`session_actual_tokens_base`,
+/// `last_seen_input_tokens`) — see [`update_session_actual_tokens`].
+/// Test: `state_round_trip`,
+/// `session_actual_tokens_accumulate_across_two_compactions`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct CompactionState {
     #[serde(default)]
     pub peak_input_tokens: u64,
     #[serde(default)]
     pub last_compaction: Option<CompactionRecord>,
+    /// #7179: running base of every completed context-window epoch, folded in
+    /// by [`update_session_actual_tokens`] each time `total_input_tokens` is
+    /// observed to drop below the previous tick's reading.
+    #[serde(default)]
+    pub session_actual_tokens_base: u64,
+    /// #7179: the last `total_input_tokens` reading observed. Used only to
+    /// detect the next drop — on its own it is not the session's total; add
+    /// `session_actual_tokens_base` (or call [`session_actual_tokens`]).
+    #[serde(default)]
+    pub last_seen_input_tokens: u64,
 }
 
 /// Record of a detected context-compaction event.
@@ -202,6 +222,92 @@ pub(crate) fn update_state(state: &mut CompactionState, cur: u64) -> bool {
     false
 }
 
+/// Fold one `total_input_tokens` reading into the session's cumulative
+/// actual-token counter; returns `true` when the state changed and a save is
+/// warranted.
+///
+/// Why (#7179, owner ruling 2026-09-08): the `💸` segment's percent needs how
+/// many tokens THIS session actually spent, but `total_input_tokens` resets to
+/// a small number on every auto-compaction — reading it raw after a reset
+/// would understate the session and make the percent swing for reasons
+/// unrelated to anything the harness saved. Folding the pre-reset reading into
+/// a running base makes the session total monotonically non-decreasing across
+/// any number of resets. This drop test is deliberately simpler than
+/// [`update_state`]'s 60%/10k compaction-*display* heuristic: a missed reset
+/// here would silently drop real spend from the denominator (inflating the
+/// percent), while a false positive only folds in a value the next tick would
+/// have superseded anyway — so "any drop" is the safer rule for a running sum.
+/// What: no-op when `cur == 0` (nothing to record, returns `false`).
+/// Otherwise, when `last_seen_input_tokens > 0` and `cur` has dropped below
+/// it, adds `last_seen_input_tokens` to `session_actual_tokens_base` (one
+/// epoch completed). Always then sets `last_seen_input_tokens = cur` when it
+/// changed. Returns `true` whenever `last_seen_input_tokens` changed — that
+/// must persist for the next tick's drop comparison even on a tick that folded
+/// nothing.
+/// Test: `session_actual_tokens_accumulate_across_two_compactions`,
+/// `session_actual_tokens_no_fold_while_rising`,
+/// `session_actual_tokens_ignores_a_zero_reading`,
+/// `session_actual_tokens_unchanged_reading_returns_false`.
+pub(crate) fn update_session_actual_tokens(state: &mut CompactionState, cur: u64) -> bool {
+    if cur == 0 {
+        return false;
+    }
+    if state.last_seen_input_tokens > 0 && cur < state.last_seen_input_tokens {
+        state.session_actual_tokens_base += state.last_seen_input_tokens;
+    }
+    if state.last_seen_input_tokens == cur {
+        return false;
+    }
+    state.last_seen_input_tokens = cur;
+    true
+}
+
+/// The session's cumulative actual-token count: every completed epoch's
+/// folded reading, plus the current epoch's last-seen reading.
+///
+/// Why (#7179): this is the one figure
+/// [`trusty_mpm::core::savings::SavingsTotal::percent_saved`]'s session-share
+/// denominator needs. `None` (rather than `0`) distinguishes "no tick has
+/// landed yet for this session" from a real, if tiny, reading — the caller
+/// falls back to the ledger's own before-total formula on `None` rather than
+/// dividing by a fabricated zero.
+/// What: `None` when no tick has ever been recorded
+/// (`last_seen_input_tokens == 0`); otherwise
+/// `session_actual_tokens_base + last_seen_input_tokens`.
+/// Test: `session_actual_tokens_accumulate_across_two_compactions`,
+/// `session_actual_tokens_is_none_before_the_first_tick`.
+pub(crate) fn session_actual_tokens(state: &CompactionState) -> Option<u64> {
+    if state.last_seen_input_tokens == 0 {
+        return None;
+    }
+    Some(state.session_actual_tokens_base + state.last_seen_input_tokens)
+}
+
+/// Read this session's cumulative actual-token count from its persisted
+/// compaction state, or `None` when the session id is invalid, the state file
+/// is unreadable, or no tick has landed yet.
+///
+/// Why (#7179): the savings segment (`savings.rs`) needs this figure at render
+/// time but must not add a third per-session store — this reuses the exact
+/// file [`compaction_segment`] already keys by `session_id`.
+/// What: validates `session_id`, loads state (`Default` on any I/O error —
+/// see [`load_state_from`]), and returns [`session_actual_tokens`]. A plain
+/// synchronous read, not wrapped in `compaction_segment`'s bounded-thread
+/// timeout: the file is a few dozen bytes, and this runs after
+/// `compaction_segment` has already written the latest tick in the same
+/// render cycle, so it matches the synchronous-read pattern the savings
+/// ledger fold already uses.
+/// Test: covered through [`session_actual_tokens`] and
+/// [`update_session_actual_tokens`], plus `state_file_path`'s and
+/// `load_state_from`'s own tests — this function is their composition.
+pub(crate) fn session_actual_tokens_for(session_id: &str) -> Option<u64> {
+    if !is_valid_session_id(session_id) {
+        return None;
+    }
+    let path = state_file_path(session_id)?;
+    session_actual_tokens(&load_state_from(&path))
+}
+
 /// Return `true` when `s` is a safe session identifier: non-empty and composed
 /// entirely of ASCII alphanumeric characters, underscores, or hyphens.
 ///
@@ -305,8 +411,12 @@ pub(crate) fn compaction_segment(
     std::thread::spawn(move || {
         let mut state = load_state_from(&path);
         if cur > 0 {
-            // update_state returns true only when state actually changed.
-            if update_state(&mut state, cur) {
+            // Both calls run unconditionally (not `||`-short-circuited) so the
+            // #7179 cumulative counter still advances on a tick that the
+            // compaction-display heuristic itself treats as a no-op.
+            let compaction_changed = update_state(&mut state, cur);
+            let actual_changed = update_session_actual_tokens(&mut state, cur);
+            if compaction_changed || actual_changed {
                 save_state_to(&path, &state);
             }
         }
@@ -470,6 +580,85 @@ mod tests {
         assert!(!changed2, "small drop must return false");
     }
 
+    // ── session-actual-tokens (#7179) ─────────────────────────────────────────
+
+    /// Why (#7179): the exact scenario the issue names — a session that grows
+    /// to 100k, gets compacted down to 20k, then grows to 60k — must report an
+    /// actual-tokens figure that adds the pre-compaction reading to the
+    /// current one (100k + 60k = 160k), not the post-compaction reading alone.
+    /// Test: itself.
+    #[test]
+    fn session_actual_tokens_accumulate_across_two_compactions() {
+        let mut state = CompactionState::default();
+
+        assert!(update_session_actual_tokens(&mut state, 100_000));
+        assert_eq!(session_actual_tokens(&state), Some(100_000));
+
+        // First compaction: 100k → 20k.
+        assert!(update_session_actual_tokens(&mut state, 20_000));
+        assert_eq!(state.session_actual_tokens_base, 100_000);
+        assert_eq!(session_actual_tokens(&state), Some(120_000));
+
+        // Grows again, no fold yet.
+        assert!(update_session_actual_tokens(&mut state, 60_000));
+        assert_eq!(state.session_actual_tokens_base, 100_000);
+        assert_eq!(
+            session_actual_tokens(&state),
+            Some(160_000),
+            "100k folded base + 60k current epoch = 160k actual"
+        );
+
+        // Second compaction: 60k → 15k must fold the 60k in too.
+        assert!(update_session_actual_tokens(&mut state, 15_000));
+        assert_eq!(state.session_actual_tokens_base, 160_000);
+        assert_eq!(session_actual_tokens(&state), Some(175_000));
+    }
+
+    /// Why (#7179): a session that only ever rises must never fold anything —
+    /// the base stays zero and the actual figure is just the latest reading.
+    /// Test: itself.
+    #[test]
+    fn session_actual_tokens_no_fold_while_rising() {
+        let mut state = CompactionState::default();
+        update_session_actual_tokens(&mut state, 10_000);
+        update_session_actual_tokens(&mut state, 20_000);
+        update_session_actual_tokens(&mut state, 30_000);
+        assert_eq!(
+            state.session_actual_tokens_base, 0,
+            "no drop was ever observed"
+        );
+        assert_eq!(session_actual_tokens(&state), Some(30_000));
+    }
+
+    /// Why (#7179): `cur == 0` (Claude Code sent no context-window payload)
+    /// must record nothing and must not itself count as a "drop".
+    /// Test: itself.
+    #[test]
+    fn session_actual_tokens_ignores_a_zero_reading() {
+        let mut state = CompactionState::default();
+        assert!(!update_session_actual_tokens(&mut state, 0));
+        assert_eq!(session_actual_tokens(&state), None);
+    }
+
+    /// Why (#7179): before any tick has landed there is nothing to report —
+    /// `None`, not a fabricated `Some(0)`.
+    /// Test: itself.
+    #[test]
+    fn session_actual_tokens_is_none_before_the_first_tick() {
+        assert_eq!(session_actual_tokens(&CompactionState::default()), None);
+    }
+
+    /// Why (#7179): a no-op tick (identical reading) must return `false` so
+    /// `compaction_segment` skips the save, matching `update_state`'s existing
+    /// no-op-tick contract.
+    /// Test: itself.
+    #[test]
+    fn session_actual_tokens_unchanged_reading_returns_false() {
+        let mut state = CompactionState::default();
+        update_session_actual_tokens(&mut state, 50_000);
+        assert!(!update_session_actual_tokens(&mut state, 50_000));
+    }
+
     // ── session_id validation ─────────────────────────────────────────────────
 
     #[test]
@@ -531,6 +720,7 @@ mod tests {
                 after: 58_000,
                 reclaimed_pct: 68.13,
             }),
+            ..Default::default()
         };
         save_state_to(&path, &state);
 
@@ -563,6 +753,7 @@ mod tests {
                 after: 58_000,
                 reclaimed_pct: 68.13,
             }),
+            ..Default::default()
         };
         let cw = ContextWindow {
             total_input_tokens: 60_000,

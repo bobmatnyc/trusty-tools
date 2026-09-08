@@ -81,7 +81,7 @@ fn a_row_written_before_tokens_before_existed_still_folds() {
         "an absent tokens_before must read back as 0, not fail the parse"
     );
     assert_eq!(
-        total.percent_saved(),
+        total.percent_saved(None),
         None,
         "a fold with no tokens_before has no percent to report"
     );
@@ -194,7 +194,7 @@ fn percent_saved_rounds_to_nearest_whole_number() {
             cost_saved_usd: 0.01,
             rows: 1,
         }
-        .percent_saved(),
+        .percent_saved(None),
         Some(33)
     );
     assert_eq!(
@@ -204,7 +204,7 @@ fn percent_saved_rounds_to_nearest_whole_number() {
             cost_saved_usd: 0.05,
             rows: 1,
         }
-        .percent_saved(),
+        .percent_saved(None),
         Some(25)
     );
 }
@@ -215,7 +215,7 @@ fn percent_saved_rounds_to_nearest_whole_number() {
 /// Test: itself.
 #[test]
 fn percent_saved_is_none_on_a_zero_fold() {
-    assert_eq!(SavingsTotal::default().percent_saved(), None);
+    assert_eq!(SavingsTotal::default().percent_saved(None), None);
 }
 
 /// Why (#7179): the one output this method may never produce while it accepted
@@ -232,7 +232,7 @@ fn percent_saved_never_rounds_down_to_zero() {
             cost_saved_usd: 0.000_01,
             rows: 1,
         }
-        .percent_saved(),
+        .percent_saved(None),
         Some(1)
     );
 }
@@ -250,9 +250,42 @@ fn percent_saved_clamps_a_legacy_mixed_fold() {
             cost_saved_usd: 0.01,
             rows: 1,
         }
-        .percent_saved(),
+        .percent_saved(None),
         None
     );
+}
+
+/// Why (#7179, owner ruling): the session-share denominator is the primary
+/// reading now — `actual + saved`, not the ledger's own before-figure — and
+/// this pins the exact division against the scenario the issue named: 40 000
+/// tokens saved of a session that actually spent 160 000.
+/// Test: itself.
+#[test]
+fn percent_saved_uses_the_session_actual_denominator_when_given() {
+    let total = SavingsTotal {
+        tokens_saved: 40_000,
+        // Deliberately different from the actual-tokens path so the test
+        // fails if the fallback formula runs instead.
+        tokens_before: 999_999,
+        cost_saved_usd: 0.5,
+        rows: 3,
+    };
+    assert_eq!(total.percent_saved(Some(160_000)), Some(20));
+}
+
+/// Why (#7179): a brand-new session (or a state file that could not be read)
+/// has no compaction tick yet — the percent must still render, falling back
+/// to the ledger's own before-total rather than omitting the segment.
+/// Test: itself.
+#[test]
+fn percent_saved_falls_back_to_tokens_before_when_actual_is_unknown() {
+    let total = SavingsTotal {
+        tokens_saved: 5_000,
+        tokens_before: 20_000,
+        cost_saved_usd: 0.05,
+        rows: 1,
+    };
+    assert_eq!(total.percent_saved(None), Some(25));
 }
 
 /// Why (#6958, required acceptance): a producer that crashes mid-write, or a
