@@ -659,16 +659,19 @@ pub(crate) async fn run_inplace_relaunch(
 /// The scrub runs BEFORE the deliberate assignments below so it can never
 /// clobber `CLAUDE_CONFIG_DIR` (#4455) even if the marker list grew wrongly.
 ///
-/// Issue #6495: the same reasoning applies to the classic-renderer default —
-/// the `env NAME=VALUE` operand the tmux-pane paths carry cannot reach an exec,
-/// so [`trusty_mpm::core::alt_screen::apply_default_to_command`] sets it here.
-/// It runs last and sets nothing when this pane already exports a value.
+/// Issues #6495/#7160: the same reasoning applies to the classic-renderer and
+/// mouse-capture defaults — the `env NAME=VALUE` operands the tmux-pane paths
+/// carry cannot reach an exec, so
+/// [`trusty_mpm::core::alt_screen::apply_default_to_command`] sets both here.
+/// It runs last and, for each variable independently, sets nothing when this
+/// pane already exports a value.
 /// Test: `inplace_exec_command_forwards_every_arg_in_order`,
 /// `inplace_exec_command_scrubs_api_key_and_sets_auth_env`,
 /// `inplace_exec_command_scrubs_inherited_session_markers`,
 /// `inplace_exec_command_carries_a_non_empty_mcp_env`,
 /// `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`,
-/// `inplace_exec_command_defaults_the_alternate_screen_off`.
+/// `inplace_exec_command_defaults_the_alternate_screen_off`,
+/// `inplace_exec_command_defaults_the_mouse_capture_off`.
 pub(crate) fn build_inplace_exec_command(
     resume: &trusty_mpm::runtime::InPlaceResumeCommand,
     cwd: &std::path::Path,

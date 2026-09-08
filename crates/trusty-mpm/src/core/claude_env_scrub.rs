@@ -230,8 +230,9 @@ pub fn scrub_command(cmd: &mut std::process::Command) {
 /// [`crate::core::model_inject::build_inplace_session_command`] and
 /// `build_client_session_command`, which were assignment-free until then — the
 /// unconditional
-/// [`crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT`] operand, so the
-/// assignment stop now fires on all of them. `daemon::spawn_command`'s
+/// [`crate::core::alt_screen::managed_shell_assignments`] operand text (#7160
+/// added a second variable to it), so the assignment stop now fires on all of
+/// them. `daemon::spawn_command`'s
 /// `relaunch_command` is the one that stays assignment-free, which is what keeps
 /// the COMMAND stop reachable.
 /// Test: `parse_env_unset_vars_reads_the_real_spawn_prefix`,

@@ -349,20 +349,22 @@ fn spawn_command_without_token_pins_the_exact_command() {
         &[],
     );
     let scrub = crate::core::claude_env_scrub::env_unset_flags();
-    // #6495 added the alternate-screen operand; interpolated for the same reason
-    // the scrub segment is — this pins its POSITION, while its literal text is
-    // pinned in `core::alt_screen`'s `shell_assignment_pins_the_defaulting_form`.
-    let alt = crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT;
+    // #6495/#7160 added the alt-screen and mouse-capture operands; interpolated
+    // for the same reason the scrub segment is — this pins their POSITION,
+    // while their literal text is pinned in `core::alt_screen`'s
+    // `shell_assignment_pins_the_defaulting_form` /
+    // `mouse_shell_assignment_pins_the_defaulting_form`.
+    let managed = crate::core::alt_screen::managed_shell_assignments();
     // #6766 replaced the unconditional `; echo '<hint>'` with a status/elapsed
     // branch, and added the launch clock that feeds it. Both are interpolated
-    // from production code for the same reason the scrub and alt-screen
+    // from production code for the same reason the scrub and managed-defaults
     // segments are — this test pins their POSITION; their literal text is
     // pinned by `claude_code_exit_hint`'s own executing tests.
     let clock = super::claude_code_exit_hint::launch_clock_prefix();
     let dispatch = super::claude_code_exit_hint::exit_dispatch_suffix();
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
-             {clock}env -u ANTHROPIC_API_KEY{scrub} {alt} claude \
+             {clock}env -u ANTHROPIC_API_KEY{scrub} {managed} claude \
              --setting-sources project,local --dangerously-skip-permissions{dispatch}; }}"
     );
     assert_eq!(cmd, expected, "no-token command shape must stay pinned");
@@ -620,13 +622,13 @@ fn resume_command_without_token_pins_the_exact_command() {
         &[],
     );
     let scrub = crate::core::claude_env_scrub::env_unset_flags();
-    let alt = crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT;
+    let managed = crate::core::alt_screen::managed_shell_assignments();
     // #6766: see the spawn-path pin above for why these two are interpolated.
     let clock = super::claude_code_exit_hint::launch_clock_prefix();
     let dispatch = super::claude_code_exit_hint::exit_dispatch_suffix();
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
-             {clock}env -u ANTHROPIC_API_KEY{scrub} {alt} claude \
+             {clock}env -u ANTHROPIC_API_KEY{scrub} {managed} claude \
              --setting-sources project,local --dangerously-skip-permissions --resume abc-123\
              {dispatch}; }}"
     );
@@ -681,6 +683,46 @@ fn spawn_command_defaults_the_alternate_screen_off() {
     }
 }
 
+/// #7160: the mouse-capture counterpart of
+/// `spawn_command_defaults_the_alternate_screen_off` — same launch lines,
+/// same operand-form assertion, the other variable.
+#[test]
+fn spawn_command_defaults_the_mouse_capture_off() {
+    let operand = crate::core::alt_screen::MOUSE_SHELL_ASSIGNMENT;
+    let dir = Path::new("/tm/claude-config");
+    for cmd in [
+        spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            TEST_SESSION_ID,
+            None,
+            None,
+            None,
+            &[],
+        ),
+        spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            Some(dir),
+            TEST_SESSION_ID,
+            None,
+            Some("tok"),
+            None,
+            &[],
+        ),
+    ] {
+        let at = cmd
+            .find(operand)
+            .unwrap_or_else(|| panic!("the spawn line must default mouse capture off: {cmd}"));
+        let last_unset = cmd.rfind("-u ").expect("the line carries scrub flags");
+        assert!(
+            last_unset < at,
+            "the operand must follow every -u flag: {cmd}"
+        );
+    }
+}
+
 /// #6495, resume-path counterpart: a resumed session gets the same default as a
 /// fresh one, or the fix would evaporate on the first reconnect.
 #[test]
@@ -699,6 +741,28 @@ fn resume_command_defaults_the_alternate_screen_off() {
     assert!(
         cmd.contains(crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT),
         "the resume line must default the alternate screen off: {cmd}"
+    );
+}
+
+/// #7160, resume-path counterpart: a resumed session gets the same mouse-
+/// capture default as a fresh one, or the fix would evaporate on the first
+/// reconnect.
+#[test]
+fn resume_command_defaults_the_mouse_capture_off() {
+    let cmd = resume_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        Some("abc-123"),
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+    );
+    assert!(
+        cmd.contains(crate::core::alt_screen::MOUSE_SHELL_ASSIGNMENT),
+        "the resume line must default mouse capture off: {cmd}"
     );
 }
 

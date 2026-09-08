@@ -302,13 +302,13 @@ pub fn build_claude_command(
 /// bypasses the Keychain entirely. `runtime::claude_code::env_bin_prefix` closes
 /// the same hole the same way for the daemon path; this is that mechanism, not a
 /// second one.
-/// #6495: the line also carries
-/// [`crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT`] unconditionally, so
+/// #6495/#7160: the line also carries
+/// [`crate::core::alt_screen::managed_shell_assignments`] unconditionally, so
 /// a `tm launch` / `tm connect` pane starts on Claude Code's classic renderer
-/// and keeps its scrollback. Its `${NAME-1}` expansion yields to a value the
-/// pane already exports.
+/// with its own mouse capture off and keeps its scrollback. Each `${NAME-1}`
+/// expansion yields independently to a value the pane already exports.
 /// What: composes `env`, the [`crate::core::claude_env_scrub::env_unset_flags`]
-/// `-u` operands, the alternate-screen operand, then the optional
+/// `-u` operands, the alt-screen/mouse operands, then the optional
 /// `CLAUDE_CONFIG_DIR` and
 /// [`crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR`] assignments (both
 /// single-quoted via [`crate::core::spawn_disclaim::pane::shell_single_quote`],
@@ -321,7 +321,8 @@ pub fn build_claude_command(
 /// `claude_command_relocated_isolates_by_relocation_not_exclusion`,
 /// `claude_command_carries_a_non_empty_mcp_env`,
 /// `claude_command_scrubs_inherited_session_markers` (the non-relocated shape),
-/// `claude_command_defaults_the_alternate_screen_off`.
+/// `claude_command_defaults_the_alternate_screen_off`,
+/// `claude_command_defaults_the_mouse_capture_off`.
 pub fn build_claude_command_with(
     model: Option<&str>,
     prompt_file: Option<&Path>,
@@ -335,10 +336,11 @@ pub fn build_claude_command_with(
     // `tm connect` / delegations keep native --resume/--continue/rewind. These
     // `-u` flags MUST precede every assignment below (POSIX `env` grammar).
     let mut cmd = format!("env{}", crate::core::claude_env_scrub::env_unset_flags());
-    // #6495: start on the classic renderer so the pane keeps native and tmux
-    // scrollback; `${NAME-1}` yields to a value the pane already exports.
+    // #6495/#7160: start on the classic renderer with mouse capture off, so
+    // the pane keeps native and tmux scrollback; each `${NAME-1}` yields
+    // independently to a value the pane already exports.
     cmd.push(' ');
-    cmd.push_str(crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT);
+    cmd.push_str(&crate::core::alt_screen::managed_shell_assignments());
     if let Some(dir) = config_dir {
         // #4181: point the session at the tm-owned config home so the `user`
         // settings tier resolves there instead of the operator's `~/.claude`.
@@ -399,24 +401,28 @@ pub fn build_claude_command_with(
 /// tier is the operator's own `~/.claude` — dropping it would change which
 /// settings and agents an in-place session loads. This fix scrubs the markers
 /// and changes nothing else.
-/// What: `env <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN="${…-1}" claude
-/// --dangerously-skip-permissions`. The scrub flags lead the line and the one
-/// `NAME=VALUE` assignment follows them, as POSIX `env` grammar requires.
+/// What: `env <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN="${…-1}"
+/// CLAUDE_CODE_DISABLE_MOUSE="${…-1}" claude --dangerously-skip-permissions`.
+/// The scrub flags lead the line and the two `NAME=VALUE` assignments follow
+/// them, as POSIX `env` grammar requires.
 ///
-/// #6495 added that assignment. It does not disturb the settings-tier reasoning
-/// above: it is an environment default, not a `--setting-sources` flag, so this
-/// path still loads the operator's own `user` tier.
+/// #6495 added the alt-screen assignment; #7160 added the mouse-capture one.
+/// Neither disturbs the settings-tier reasoning above: both are environment
+/// defaults, not `--setting-sources` flags, so this path still loads the
+/// operator's own `user` tier.
 /// Test: `inplace_session_command_scrubs_inherited_session_markers`,
 /// `inplace_session_command_keeps_the_permission_flag_and_nothing_else`,
-/// `inplace_session_command_defaults_the_alternate_screen_off`.
+/// `inplace_session_command_defaults_the_alternate_screen_off`,
+/// `inplace_session_command_defaults_the_mouse_capture_off`.
 pub fn build_inplace_session_command() -> String {
     // #4467: same shared scrub every other launch line uses — never a second
     // mechanism.
     format!(
         "env{} {} claude {}",
         crate::core::claude_env_scrub::env_unset_flags(),
-        // #6495: classic renderer by default, yielding to the pane's own value.
-        crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT,
+        // #6495/#7160: classic renderer + mouse capture off by default, each
+        // yielding independently to the pane's own value.
+        crate::core::alt_screen::managed_shell_assignments(),
         PERMISSION_MODE_FLAG
     )
 }
@@ -436,22 +442,26 @@ pub fn build_inplace_session_command() -> String {
 /// as [`build_inplace_session_command`]: that would add [`SETTING_SOURCES_FLAG`]
 /// and drop the `user` settings tier on a path that does not relocate
 /// `CLAUDE_CONFIG_DIR`. This scrubs the markers and changes nothing else.
-/// What: `env <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN="${…-1}" claude`
-/// plus `--append-system-prompt-file <path>` when `prompt_file` is `Some`. The
+/// What: `env <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN="${…-1}"
+/// CLAUDE_CODE_DISABLE_MOUSE="${…-1}" claude` plus
+/// `--append-system-prompt-file <path>` when `prompt_file` is `Some`. The
 /// caller falls back to `None` when writing the prompt file failed, which is why
-/// the argument is optional. #6495 added the assignment so a `/connect` pane
-/// starts on the classic renderer and keeps its scrollback.
+/// the argument is optional. #6495 added the alt-screen assignment so a
+/// `/connect` pane starts on the classic renderer and keeps its scrollback;
+/// #7160 added the mouse-capture one.
 /// Test: `client_session_command_scrubs_inherited_session_markers`,
 /// `client_session_command_appends_the_prompt_file`,
-/// `client_session_command_defaults_the_alternate_screen_off`.
+/// `client_session_command_defaults_the_alternate_screen_off`,
+/// `client_session_command_defaults_the_mouse_capture_off`.
 pub fn build_client_session_command(prompt_file: Option<&Path>) -> String {
     // #4467: same shared scrub every other launch line uses — never a second
     // mechanism.
     let mut cmd = format!(
         "env{} {} claude",
         crate::core::claude_env_scrub::env_unset_flags(),
-        // #6495: classic renderer by default, yielding to the pane's own value.
-        crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT
+        // #6495/#7160: classic renderer + mouse capture off by default, each
+        // yielding independently to the pane's own value.
+        crate::core::alt_screen::managed_shell_assignments()
     );
     if let Some(p) = prompt_file {
         cmd.push_str(" --append-system-prompt-file ");
@@ -497,19 +507,20 @@ mod tests {
     /// The isolation + unattended suffix every command now carries (#1269).
     const FLAGS: &str = "--setting-sources project,local --dangerously-skip-permissions";
 
-    /// The `env <-u marker…> <alt-screen operand> claude` head every command now
-    /// carries (#4467, #6495).
+    /// The `env <-u marker…> <alt-screen operand> <mouse operand> claude` head
+    /// every command now carries (#4467, #6495, #7160).
     ///
     /// Interpolated from production so these pins assert each segment's
     /// POSITION; the marker CONTENT is pinned by literal name in
     /// `core::claude_env_scrub`'s `every_marker_is_pinned_by_literal_name`, and
-    /// the alternate-screen operand's literal text in `core::alt_screen`'s
-    /// `shell_assignment_pins_the_defaulting_form`.
+    /// each operand's literal text in `core::alt_screen`'s
+    /// `shell_assignment_pins_the_defaulting_form` /
+    /// `mouse_shell_assignment_pins_the_defaulting_form`.
     fn head() -> String {
         format!(
             "env{} {} claude",
             crate::core::claude_env_scrub::env_unset_flags(),
-            crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT
+            crate::core::alt_screen::managed_shell_assignments()
         )
     }
 
@@ -603,7 +614,7 @@ mod tests {
                  CLAUDE_CODE_OAUTH_TOKEN='tok-abc' claude \
                  --setting-sources user,project,local --dangerously-skip-permissions",
                 crate::core::claude_env_scrub::env_unset_flags(),
-                crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT
+                crate::core::alt_screen::managed_shell_assignments()
             )
         );
         // POSIX `env` stops parsing options at the first NAME=VALUE, so a
@@ -769,8 +780,8 @@ mod tests {
     /// `CLAUDE_CONFIG_DIR`, so that tier is the operator's own `~/.claude`.
     /// Pinned as a full string so a flag cannot creep in.
     ///
-    /// #6495 changed the expected string by adding an `env` operand
-    /// (`ALT_SCREEN_SHELL_ASSIGNMENT`) ahead of `claude`. That is deliberate and
+    /// #6495/#7160 changed the expected string by adding `env` operands
+    /// (`managed_shell_assignments()`) ahead of `claude`. That is deliberate and
     /// does not weaken what this test asserts: the guard is about which SETTINGS
     /// TIERS the line loads, an environment default changes none of them, and
     /// `--dangerously-skip-permissions` is still the only flag. The
@@ -782,7 +793,7 @@ mod tests {
             format!(
                 "env{} {} claude {PERMISSION_MODE_FLAG}",
                 crate::core::claude_env_scrub::env_unset_flags(),
-                crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT
+                crate::core::alt_screen::managed_shell_assignments()
             )
         );
         assert!(
@@ -844,6 +855,36 @@ mod tests {
         }
     }
 
+    /// #7160: the mouse-capture counterpart of
+    /// `claude_command_defaults_the_alternate_screen_off` — same launch lines,
+    /// same operand-form assertion, the other variable.
+    #[test]
+    fn claude_command_defaults_the_mouse_capture_off() {
+        let operand = crate::core::alt_screen::MOUSE_SHELL_ASSIGNMENT;
+        for cmd in [
+            build_claude_command(None, None, None, &[]),
+            build_claude_command(Some("claude-opus-4-5"), None, None, &[]),
+            build_claude_command_with(
+                None,
+                None,
+                Some(Path::new("/tm/claude-config")),
+                Some("tok"),
+                &[],
+            ),
+        ] {
+            assert!(
+                cmd.contains(operand),
+                "the launch line must default mouse capture off: {cmd}"
+            );
+            let first_assignment = cmd.find('=').expect("the line carries an assignment");
+            let last_unset = cmd.rfind("-u ").expect("the line carries scrub flags");
+            assert!(
+                last_unset < first_assignment,
+                "the operand must follow every -u flag: {cmd}"
+            );
+        }
+    }
+
     /// #6495: the two builders that were assignment-free until now. Kept
     /// separate from the pins above so a regression names the path it broke.
     #[test]
@@ -855,9 +896,32 @@ mod tests {
         );
     }
 
+    /// #7160: the mouse-capture counterpart of
+    /// `inplace_session_command_defaults_the_alternate_screen_off`.
+    #[test]
+    fn inplace_session_command_defaults_the_mouse_capture_off() {
+        let cmd = build_inplace_session_command();
+        assert!(
+            cmd.contains(crate::core::alt_screen::MOUSE_SHELL_ASSIGNMENT),
+            "the in-place session line must default mouse capture off: {cmd}"
+        );
+    }
+
     #[test]
     fn client_session_command_defaults_the_alternate_screen_off() {
         let operand = crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT;
+        assert!(build_client_session_command(None).contains(operand));
+        assert!(
+            build_client_session_command(Some(Path::new("/tmp/p.txt"))).contains(operand),
+            "the prompt-file shape must carry it too"
+        );
+    }
+
+    /// #7160: the mouse-capture counterpart of
+    /// `client_session_command_defaults_the_alternate_screen_off`.
+    #[test]
+    fn client_session_command_defaults_the_mouse_capture_off() {
+        let operand = crate::core::alt_screen::MOUSE_SHELL_ASSIGNMENT;
         assert!(build_client_session_command(None).contains(operand));
         assert!(
             build_client_session_command(Some(Path::new("/tmp/p.txt"))).contains(operand),

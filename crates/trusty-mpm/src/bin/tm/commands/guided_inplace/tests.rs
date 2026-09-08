@@ -928,6 +928,26 @@ fn inplace_exec_command_defaults_the_alternate_screen_off() {
     );
 }
 
+/// #7160: the mouse-capture counterpart of
+/// `inplace_exec_command_defaults_the_alternate_screen_off`.
+#[test]
+fn inplace_exec_command_defaults_the_mouse_capture_off() {
+    use trusty_mpm::core::alt_screen::{MOUSE_DEFAULT, MOUSE_ENV_VAR};
+
+    let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
+    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"));
+
+    let carried_by_the_launch = std::env::var_os(MOUSE_ENV_VAR).is_some();
+    let provisioned = cmd.get_envs().any(|(k, v)| {
+        k == MOUSE_ENV_VAR && v.is_some_and(|v| v == std::ffi::OsStr::new(MOUSE_DEFAULT))
+    });
+    assert_eq!(
+        provisioned, !carried_by_the_launch,
+        "tm must provision {MOUSE_ENV_VAR}={MOUSE_DEFAULT} when the launch \
+         carries no value, and leave an operator value untouched when it does"
+    );
+}
+
 #[serial_test::serial]
 #[test]
 fn inplace_exec_command_carries_isolation_flags_and_persona_end_to_end() {
