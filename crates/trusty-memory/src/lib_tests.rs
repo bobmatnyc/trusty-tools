@@ -447,6 +447,73 @@ async fn load_palaces_from_disk_rehydrates_registry() {
     assert!(ids.contains(&"beta".to_string()));
 }
 
+/// Why (#7087): a restart hydrates every persisted palace through
+/// `load_palaces_from_disk`, which consumes each freshly-opened handle
+/// straight into `register_arc` with no lingering caller-side clone — so
+/// `Arc::strong_count == 1` for every one of them the moment hydration
+/// finishes. Before the fix, `PalaceHandle::open_with_intent` stamped
+/// `last_accessed` to the open time, so this whole burst read as a burst of
+/// fresh recalls and `evict_idle` left every handle resident regardless of
+/// whether anything queried them afterward — reintroducing the #6836
+/// restart-burst memory blowup even through the idle-evict fallback path.
+/// What: persists four palaces to disk (no registry access afterward, so
+/// nothing is ever touched), drops the writer registry, hydrates a fresh
+/// `AppState` via `load_palaces_from_disk`, then runs `evict_idle` with a
+/// 300 s threshold and asserts every hydrated handle was reclaimed — an
+/// opened-but-never-accessed handle must read as idle since open.
+/// Test: this test itself.
+#[tokio::test]
+async fn restart_burst_hydration_is_immediately_idle_evictable() {
+    use trusty_common::memory_core::{Palace, PalaceId, PalaceRegistry};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+
+    // Phase 1: persist four palaces to disk, simulating a prior daemon run.
+    // No `remember`/`recall`/`forget` is ever called on any of them, so none
+    // has a genuine access to record.
+    {
+        let writer = PalaceRegistry::new();
+        for id in ["alpha", "beta", "gamma", "delta"] {
+            let palace = Palace {
+                id: PalaceId::new(id),
+                name: id.to_string(),
+                description: None,
+                created_at: chrono::Utc::now(),
+                data_dir: root.join(id),
+            };
+            writer
+                .create_palace(&root, palace)
+                .expect("persist palace to disk");
+        }
+    }
+
+    // Phase 2: a fresh AppState (a restarted daemon) hydrates all four.
+    let state = AppState::new(root);
+    let count = state
+        .load_palaces_from_disk()
+        .await
+        .expect("load_palaces_from_disk");
+    assert_eq!(count, 4, "all four persisted palaces should be loaded");
+    assert_eq!(state.registry.len(), 4, "registry should hold all four");
+
+    // The idle-evict sweep must reclaim every one of them: none was ever
+    // genuinely accessed, so all must read as idle since open.
+    let evicted = state
+        .registry
+        .evict_idle(std::time::Duration::from_secs(300));
+    assert_eq!(
+        evicted, 4,
+        "an opened-but-never-accessed handle must be evictable on the very \
+         first idle sweep after a restart"
+    );
+    assert_eq!(
+        state.registry.len(),
+        0,
+        "no hydrated-but-untouched handle should remain resident"
+    );
+}
+
 /// Why (issue #1487): the HTTP daemon must open palace redb files as a
 /// writer so a second instance fails loud instead of silently degrading to
 /// read-only snapshot mode. `AppState::with_writer_intent()` is the builder

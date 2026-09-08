@@ -32,6 +32,19 @@ use uuid::Uuid;
 
 const RECALL_LOG_FILENAME: &str = "recall.db";
 
+/// Sentinel `last_accessed` value meaning "never genuinely accessed".
+///
+/// Why (#7087): a disk open is bookkeeping, not use. Stamping "now" at open
+/// made a restart burst (`load_palaces_from_disk` opening every persisted
+/// palace) look like a burst of fresh recalls to `evict_idle`, so the idle
+/// sweep left every handle resident regardless of whether anything queried
+/// them afterward.
+/// What: the unix epoch (0). `idle_secs()` then reports the full time since
+/// boot, so an opened-but-never-touched handle reads as idle immediately —
+/// eligible for `evict_idle` on its very first sweep once unreferenced.
+/// Test: `registry_tests::open_does_not_reset_idle_clock`.
+const NEVER_ACCESSED: u64 = 0;
+
 /// Current unix time in whole seconds, saturating to 0 before the epoch.
 ///
 /// Why: `last_accessed` idle tracking (issue: idle-to-disk eviction) needs a
@@ -189,11 +202,18 @@ pub struct PalaceHandle {
     /// all heavy fields) for palaces idle past `TRUSTY_MEMORY_IDLE_EVICT_SECS`;
     /// the durable redb store is the source of truth and the next access
     /// transparently re-opens from disk (`PalaceRegistry::open_palace`).
-    /// What: `Arc<AtomicU64>` initialised to "now" at open so a freshly-opened
-    /// palace is never immediately evicted. Updated by [`PalaceHandle::touch`]
-    /// on every user recall/remember/forget; suppressed during dream cycles
-    /// (see `touch`) so internal consolidation never resets the idle clock.
-    /// Test: `registry_tests::evict_idle_drops_idle_unreferenced_handle`.
+    /// What: `Arc<AtomicU64>`. [`PalaceHandle::new`] (in-memory / test handles
+    /// with no disk-open step) still initialises it to "now". [`Self::open`] /
+    /// [`Self::open_with_intent`] (the disk-hydration path every real daemon
+    /// restart takes) initialise it to `NEVER_ACCESSED` instead (#7087): an
+    /// open is bookkeeping, not use, so a hydrated-but-never-queried handle
+    /// must read as idle since open rather than as freshly touched. Updated by
+    /// [`PalaceHandle::touch`] on every user recall/remember/forget;
+    /// suppressed during dream cycles (see `touch`) so internal consolidation
+    /// never resets the idle clock.
+    /// Test: `registry_tests::evict_idle_drops_idle_unreferenced_handle`,
+    /// `registry_tests::open_does_not_reset_idle_clock`,
+    /// `registry_tests::touch_after_open_makes_handle_recent`.
     pub last_accessed: Arc<AtomicU64>,
 }
 
@@ -357,8 +377,12 @@ impl PalaceHandle {
     /// `KnowledgeGraph::open_with_intent`. When `Writer` and a second live
     /// daemon already holds the lock, this returns `Err` (no handle), so the
     /// daemon process fails to start rather than serving in a broken state.
-    /// Test: `registry_create_and_open` (default read-only path) and
-    /// `writer_intent_open_fails_loud_on_locked_*` in the store tests.
+    /// The returned handle's `last_accessed` starts at `NEVER_ACCESSED`, not
+    /// "now" (#7087) — see the field doc — so a restart's hydration burst
+    /// doesn't read as a burst of fresh use to `evict_idle`.
+    /// Test: `registry_create_and_open` (default read-only path),
+    /// `writer_intent_open_fails_loud_on_locked_*` in the store tests, and
+    /// `registry_tests::open_does_not_reset_idle_clock`.
     pub fn open_with_intent(palace: &Palace, intent: OpenIntent) -> Result<Arc<PalaceHandle>> {
         let data_dir = &palace.data_dir;
         std::fs::create_dir_all(data_dir)
@@ -499,7 +523,8 @@ impl PalaceHandle {
             is_compacting: Arc::new(AtomicBool::new(false)),
             write_mutex: Arc::new(tokio::sync::Mutex::new(())),
             commit_mutex: Arc::new(tokio::sync::Mutex::new(())),
-            last_accessed: Arc::new(AtomicU64::new(now_epoch_secs())),
+            // #7087: an on-disk open is not an access — see the field doc.
+            last_accessed: Arc::new(AtomicU64::new(NEVER_ACCESSED)),
         };
         Ok(Arc::new(handle))
     }
