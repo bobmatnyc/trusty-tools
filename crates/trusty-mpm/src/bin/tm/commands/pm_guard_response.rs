@@ -22,7 +22,7 @@
 /// `{"hookSpecificOutput":{"hookEventName":"PreToolUse",
 /// "permissionDecision":"deny","permissionDecisionReason":"…"}}`, and the
 /// documented ALLOW form is simply exit 0 with no JSON — which is why
-/// [`pm_guard`] prints nothing on ALLOW rather than emitting a
+/// [`crate::commands::pm_guard::pm_guard`] prints nothing on ALLOW rather than emitting a
 /// `permissionDecision:"allow"` object. Mirrors
 /// `hook_rewrite::build_pretooluse_rewrite_response` (same `hookSpecificOutput`
 /// envelope, different decision payload).
