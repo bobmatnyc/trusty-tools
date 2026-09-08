@@ -1780,6 +1780,119 @@ async fn session_start_hook_correlates_claude_id() {
     );
 }
 
+/// #3764: the #1744 ambiguous-cwd skip is now an ERROR-level alarm, not a
+/// silent `warn!` — this collision was the precursor state observed hours
+/// before the #3715 worktree-corruption incident.
+///
+/// Why: `correlate_session_start`'s `n => { .. }` arm used to log at `warn!`,
+/// which passed almost silently. Captures the SAME
+/// [`trusty_common::log_buffer::LogBufferLayer`] entry point
+/// `dedup_tests::reconcile_warns_that_a_terminal_record_has_a_live_tmux_session`
+/// already uses, so this asserts the actual emitted level rather than merely
+/// that the SKIP behavior (no attribution) still holds.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn session_start_hook_escalates_ambiguous_cwd_to_error() {
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    crate::test_support::enable_event_capture();
+
+    use crate::session_manager::{ManagedSessionState, SessionManager};
+
+    // Inline minimal fake driver, mirroring `make_state_with_active_managed`
+    // above — needed here too because two records must share one manager.
+    struct MinFake {
+        sessions: std::sync::Mutex<Vec<String>>,
+    }
+    impl crate::session_manager::ManagedTmuxDriver for MinFake {
+        fn create_session(
+            &self,
+            name: &str,
+            _: &str,
+        ) -> Result<(), crate::session_manager::ManagedError> {
+            self.sessions.lock().unwrap().push(name.to_owned());
+            Ok(())
+        }
+        fn kill_session(&self, name: &str) -> Result<(), crate::session_manager::ManagedError> {
+            self.sessions.lock().unwrap().retain(|n| n != name);
+            Ok(())
+        }
+        fn send_line(&self, _: &str, _: &str) -> Result<(), crate::session_manager::ManagedError> {
+            Ok(())
+        }
+        fn capture(
+            &self,
+            _: &str,
+            _: usize,
+        ) -> Result<String, crate::session_manager::ManagedError> {
+            Ok(String::new())
+        }
+        fn list_sessions(&self) -> Result<Vec<String>, crate::session_manager::ManagedError> {
+            Ok(self.sessions.lock().unwrap().clone())
+        }
+    }
+
+    let ws = std::path::PathBuf::from("/tmp/test-ws-ambiguous-cwd-3764");
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fake: Arc<dyn crate::session_manager::ManagedTmuxDriver> = Arc::new(MinFake {
+        sessions: std::sync::Mutex::new(Vec::new()),
+    });
+    let mgr = SessionManager::new(tmp.path(), fake).await.unwrap();
+
+    // Two independent managed sessions, both promoted to Active with the
+    // SAME workspace path — the exact #1744 precursor shape.
+    for _ in 0..2 {
+        let record = mgr
+            .create(
+                "task".into(),
+                Some(ws.clone()),
+                None,
+                Some(ws.clone()),
+                None,
+                None,
+            )
+            .await
+            .expect("create managed session");
+        mgr.set_workspace(&record.id, ws.clone(), ManagedSessionState::Active)
+            .await
+            .expect("set Active");
+    }
+
+    let mgr_arc = Arc::new(mgr);
+    let state = Arc::new(DaemonState::with_session_manager(mgr_arc));
+    std::mem::forget(tmp);
+
+    let claude_id = "550e8400-e29b-41d4-a716-446655440099";
+    let post = HookPost {
+        session_id: claude_id.to_string(),
+        event: HookEvent::SessionStart,
+        payload: serde_json::json!({ "cwd": ws.to_str().unwrap() }),
+    };
+
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let _ = ingest_hook(State(std::sync::Arc::clone(&state)), Json(post))
+        .with_subscriber(subscriber)
+        .await
+        .expect("ingest_hook must still succeed — the collision is reported, not fatal");
+
+    let lines = buffer.tail(64);
+    let line = lines
+        .iter()
+        .find(|l| l.contains("Active managed sessions share the same cwd"))
+        .unwrap_or_else(|| {
+            panic!("the #1744 ambiguous-cwd collision must be reported. Captured lines: {lines:#?}")
+        });
+    assert!(
+        line.contains("ERROR"),
+        "a 2+-Active-session cwd collision must log at ERROR, not a lower level (#3764): {line}"
+    );
+}
+
 // `session_start_hook_does_not_overwrite_with_different_id` (the original
 // #4337 fix's test) is superseded by `session_start_hook_still_refuses_a_live_subagent_id`
 // below, which additionally seeds a real transcript fixture so the id is

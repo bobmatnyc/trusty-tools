@@ -147,6 +147,24 @@ pub enum ManagedError {
     /// caller (#3649). `(caller, owner, target)`.
     #[error("session {0} refused to decommission {2}'s worktree — owned by session {1}")]
     WorktreeOwnerMismatch(ManagedSessionId, ManagedSessionId, ManagedSessionId),
+
+    /// Decommission refused because an `Active` session OTHER than the target
+    /// also claims the target's workspace directory (#3764). `(target,
+    /// foreign_active_session)`.
+    ///
+    /// Why: the #3715 incident's precursor was exactly this — two `Active`
+    /// records canonicalizing to one worktree path (#1744) — with no caller
+    /// needing to identify itself at all, which is why this check runs
+    /// unconditionally rather than only when `caller` is `Some(..)` like
+    /// [`WorktreeOwnerMismatch`](Self::WorktreeOwnerMismatch). Removing the
+    /// directory while a sibling record still reads it as `Active` would
+    /// silently destroy that sibling's live work.
+    #[error(
+        "refusing to remove session {0}'s workspace — session {1} is also Active with a \
+         workspace or cwd that resolves to the same directory (#3764); stop or decommission \
+         session {1} first"
+    )]
+    ForeignActiveWorkspaceClaim(ManagedSessionId, ManagedSessionId),
 }
 
 // [`ManagedTmuxDriver`] lives in `driver.rs` (issue #1955 SLOC split — the

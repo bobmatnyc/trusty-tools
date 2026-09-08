@@ -1,19 +1,171 @@
-//! Path-containment guard for workspace deletion (#1511).
+//! Path-containment AND session-identity guards for workspace deletion (#1511,
+//! #3764).
 //!
 //! Why: `SessionManager::decommission` previously `remove_dir_all`'d
 //! `workspace_path` unconditionally, which deleted a live user repo when the
 //! #1502 local-path spawn set `workspace_path` to a real on-disk directory.
 //! This module provides the belt-and-suspenders containment guard that prevents
 //! any path OUTSIDE the SM's managed workspace root from being deleted —
-//! regardless of the `workspace_owned` flag.
+//! regardless of the `workspace_owned` flag. #3764 widens the module's
+//! question from "is this path safe to touch at all" to "does anyone ELSE
+//! also claim it": the #3715 incident's precursor was a 3-way cwd collision
+//! (#1744) — three `Active` session records canonicalizing to one worktree
+//! path — hours before that path was destroyed. Path containment alone never
+//! sees that; it only ever asks about ONE path and ONE managed root.
 //! What: [`is_safe_to_remove`] canonicalizes both paths and verifies that the
 //! workspace is strictly INSIDE the managed root, rejecting: path == root, path
 //! outside root, paths with too few components, and `$HOME`.
-//! Test: `is_safe_to_remove_*` unit tests below.
+//! [`foreign_active_claim`] answers the session-identity question: does any
+//! `Active` record OTHER than the one being acted on also canonicalize to the
+//! same directory?
+//! Test: `is_safe_to_remove_*` and `foreign_active_claim_*` unit tests below.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use tracing::warn;
+
+use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+
+/// Canonicalize `path`, resolving through the nearest EXISTING ancestor and
+/// lexically normalizing the remainder when the full path itself does not
+/// exist (#3764 review fix).
+///
+/// Why: shared by both directions of the comparison
+/// [`foreign_active_claim`] makes — the candidate path AND every other
+/// record's `workspace_path`/`cwd` — so a canonicalize failure on either side
+/// must still produce a comparable value. A path that no longer exists on
+/// disk (already destroyed) must still be comparABLE by its last-known
+/// spelling. The original fallback (`path.to_path_buf()` verbatim) only
+/// achieved that for BYTE-IDENTICAL spellings: a phantom `Active` record
+/// naming the same directory via a `..` segment, or via a symlinked alias of
+/// a real ancestor directory, compared unequal to a cleanly-spelled candidate
+/// and silently slipped past the guard — fail-open in a check whose entire
+/// job is catching same-directory collisions the store does not enforce.
+/// What: if `path` exists, delegates to `fs::canonicalize` directly (resolves
+/// symlinks and normalizes `.`/`..` via the OS). If it does not, walks
+/// [`Path::ancestors`] to find the nearest ancestor that DOES exist,
+/// canonicalizes THAT ancestor (resolving any symlink in it), and re-appends
+/// the non-existent remainder — so a symlinked parent is still resolved even
+/// though the leaf under it is gone. Either way, lexically normalizes
+/// ([`normalize_lexically`]) the result to collapse `.` segments, `..`
+/// segments, duplicate separators, and a trailing separator — covering the
+/// case where no ancestor at all exists on this host (a fully phantom path),
+/// which has nothing to canonicalize against.
+/// Test: `foreign_active_claim_catches_a_nonexistent_path_spelled_with_a_trailing_slash`,
+/// `foreign_active_claim_catches_a_nonexistent_path_with_dot_dot_segments`,
+/// `foreign_active_claim_catches_a_nonexistent_path_through_a_symlinked_parent`.
+fn canon_or_raw(path: &Path) -> PathBuf {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return canon;
+    }
+    // `ancestors()` yields `path` itself first (already tried above and
+    // failed), then each parent up to the root — skip(1) starts at the
+    // nearest candidate PARENT.
+    for ancestor in path.ancestors().skip(1) {
+        if let (Ok(canon_ancestor), Ok(remainder)) =
+            (std::fs::canonicalize(ancestor), path.strip_prefix(ancestor))
+        {
+            return normalize_lexically(&canon_ancestor.join(remainder));
+        }
+    }
+    // Nothing on disk to canonicalize against at all — lexical normalization
+    // is the only comparison basis left.
+    normalize_lexically(path)
+}
+
+/// Lexically collapse `.` segments, `..` segments, and duplicate/trailing
+/// separators — WITHOUT touching the filesystem.
+///
+/// Why: [`canon_or_raw`] needs this both as its last-resort fallback (nothing
+/// on disk to canonicalize against) and to normalize the remainder re-appended
+/// after a partial (ancestor-only) canonicalization, which has not itself been
+/// through any `..`-collapsing.
+/// What: rebuilds `path` component-by-component: a `CurDir` (`.`) is dropped;
+/// a `ParentDir` (`..`) pops the previously-pushed component (mirroring the
+/// well-known cargo `normalize_path` lexical algorithm — never touches disk,
+/// so it can't tell a real directory from a dangling one, but that's exactly
+/// what makes it safe to run on a path that doesn't exist); every other
+/// component is pushed verbatim. Rebuilding via `Path::components()` already
+/// collapses duplicate and trailing separators, since that iterator never
+/// yields an empty segment.
+/// Test: exercised indirectly through `canon_or_raw`'s callers — a private
+/// helper with no externally-observable contract of its own.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut components = path.components().peekable();
+    let mut out = if let Some(prefix @ Component::Prefix(_)) = components.peek().copied() {
+        components.next();
+        PathBuf::from(prefix.as_os_str())
+    } else {
+        PathBuf::new()
+    };
+
+    for component in components {
+        match component {
+            Component::Prefix(_) => unreachable!("a Prefix can only ever be the first component"),
+            Component::RootDir => out.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(segment) => out.push(segment),
+        }
+    }
+    out
+}
+
+/// Does any `Active` session record OTHER than `self_id` also claim
+/// `workspace_path` (#3764)?
+///
+/// Why: `is_safe_to_remove` answers "is this path inside the managed root",
+/// never "does a SIBLING session also believe this is theirs". The #3715
+/// incident's own precursor state (#1744: three `Active` records sharing one
+/// cwd) is invisible to path containment by construction — it is a
+/// same-path, cross-RECORD question, not a path-vs-root one. This check
+/// closes that hole at the one place every daemon-routed removal already
+/// passes through: before `SessionManager::decommission_with_root` mutates
+/// disk, it now asks this question first, unconditionally — unlike
+/// [`super::manager::ManagedError::WorktreeOwnerMismatch`]'s gate, which only
+/// fires when a caller identifies itself, this runs regardless of caller,
+/// because the hazard is a store inconsistency (two `Active` records naming
+/// one directory), not a caller impersonating an owner.
+///
+/// What: canonicalizes `workspace_path` (falling back to the raw path on a
+/// canonicalize failure — a destroyed directory must still compare) and scans
+/// `records` for the first `Active` record whose id is not `self_id` and
+/// whose `workspace_path` OR `cwd` canonicalizes (or, on failure, compares
+/// raw) to the same path. Returns that record's id.
+///
+/// A record in any state other than `Active` is never a conflict — a
+/// `Stopped`/`Errored`/terminal record's directory is exactly what the
+/// caller's own worktree-reclaim machinery ([`super::worktree_reclaim`]'s
+/// gate 2) already expects to reclaim, and treating it as a live claim here
+/// would refuse ordinary, safe cleanup.
+/// Test: `foreign_active_claim_finds_a_colliding_workspace_path`,
+/// `foreign_active_claim_finds_a_colliding_cwd`,
+/// `foreign_active_claim_ignores_a_non_active_record`,
+/// `foreign_active_claim_ignores_the_records_own_id`,
+/// `foreign_active_claim_returns_none_when_unclaimed`.
+pub(crate) fn foreign_active_claim(
+    workspace_path: &Path,
+    self_id: &ManagedSessionId,
+    records: &[SessionRecord],
+) -> Option<ManagedSessionId> {
+    let canon_target = canon_or_raw(workspace_path);
+    records
+        .iter()
+        .find(|r| {
+            if r.id == *self_id || r.state != ManagedSessionState::Active {
+                return false;
+            }
+            let ws_matches = r
+                .workspace_path
+                .as_deref()
+                .is_some_and(|p| canon_or_raw(p) == canon_target || p == workspace_path);
+            let cwd_matches = canon_or_raw(&r.cwd) == canon_target || r.cwd == workspace_path;
+            ws_matches || cwd_matches
+        })
+        .map(|r| r.id)
+}
 
 /// Decide whether `workspace_path` is safe to `remove_dir_all` (#1511).
 ///
@@ -104,7 +256,305 @@ pub(crate) fn is_safe_to_remove(workspace_path: &Path, managed_root: &Path) -> b
 mod tests {
     use std::path::PathBuf;
 
-    use super::is_safe_to_remove;
+    use super::{
+        ManagedSessionId, ManagedSessionState, SessionRecord, foreign_active_claim,
+        is_safe_to_remove,
+    };
+
+    /// Build a bare [`SessionRecord`] naming `workspace_path` and `state`, for
+    /// the [`foreign_active_claim`] tests below. Mirrors the field list
+    /// `decommission_tests::owned_record` uses for the same purpose.
+    fn record_at(
+        id: ManagedSessionId,
+        state: ManagedSessionState,
+        workspace_path: PathBuf,
+    ) -> SessionRecord {
+        SessionRecord {
+            id,
+            tmux_name: format!("tm-foreign-claim-{id}"),
+            cwd: PathBuf::from("/tmp/unrelated-cwd"),
+            task: "task".into(),
+            state,
+            created_at: chrono::Utc::now(),
+            last_activity_at: None,
+            workspace_path: Some(workspace_path),
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+            ephemeral: false,
+            workspace_owned: false,
+            source_id: None,
+            claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
+            deliverable_id: None,
+            pane_id: None,
+            injection_status: Default::default(),
+            worktree_owner: None,
+            terminal_at: None,
+            stop_cause: None,
+        }
+    }
+
+    // ── foreign_active_claim unit tests (#3764) ─────────────────────────────
+
+    /// Another `Active` record whose `workspace_path` matches the candidate is
+    /// a conflict.
+    ///
+    /// Why: this is the #1744 precursor shape — two `Active` records naming
+    /// one directory.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_finds_a_colliding_workspace_path() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let shared = root.path().join("shared-worktree");
+        std::fs::create_dir_all(&shared).unwrap();
+
+        let self_id = ManagedSessionId::new();
+        let other_id = ManagedSessionId::new();
+        let records = vec![record_at(
+            other_id,
+            ManagedSessionState::Active,
+            shared.clone(),
+        )];
+
+        assert_eq!(
+            foreign_active_claim(&shared, &self_id, &records),
+            Some(other_id),
+            "an Active sibling record naming the same path must be reported"
+        );
+    }
+
+    /// A collision on `cwd` (not `workspace_path`) is also caught.
+    ///
+    /// Why: the #1744 collision this guards against was keyed on `cwd`, not
+    /// `workspace_path` — a record can claim a directory as its `cwd` before a
+    /// `workspace_path` is ever recorded for it.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_finds_a_colliding_cwd() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let shared = root.path().join("shared-cwd");
+        std::fs::create_dir_all(&shared).unwrap();
+
+        let self_id = ManagedSessionId::new();
+        let other_id = ManagedSessionId::new();
+        let mut other = record_at(
+            other_id,
+            ManagedSessionState::Active,
+            root.path().join("elsewhere"),
+        );
+        other.cwd = shared.clone();
+        let records = vec![other];
+
+        assert_eq!(
+            foreign_active_claim(&shared, &self_id, &records),
+            Some(other_id),
+            "an Active sibling record whose cwd matches must be reported"
+        );
+    }
+
+    /// A record in any non-`Active` state is never a conflict.
+    ///
+    /// Why: a `Stopped`/`Decommissioned` record's directory is exactly what
+    /// ordinary reclaim is FOR — treating a terminal record as a live claim
+    /// would refuse safe cleanup, not just unsafe cleanup.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_ignores_a_non_active_record() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let shared = root.path().join("shared-terminal");
+        std::fs::create_dir_all(&shared).unwrap();
+
+        let self_id = ManagedSessionId::new();
+        let other_id = ManagedSessionId::new();
+        let records = vec![record_at(
+            other_id,
+            ManagedSessionState::Decommissioned,
+            shared.clone(),
+        )];
+
+        assert_eq!(
+            foreign_active_claim(&shared, &self_id, &records),
+            None,
+            "a terminal-state record must never block removal"
+        );
+    }
+
+    /// The record's own id is never reported as a conflict with itself.
+    ///
+    /// Why: `records` passed to this function typically includes the record
+    /// being decommissioned itself; excluding `self_id` is what makes an
+    /// ordinary, uncontested decommission possible at all.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_ignores_the_records_own_id() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let shared = root.path().join("own-workspace");
+        std::fs::create_dir_all(&shared).unwrap();
+
+        let self_id = ManagedSessionId::new();
+        let records = vec![record_at(
+            self_id,
+            ManagedSessionState::Active,
+            shared.clone(),
+        )];
+
+        assert_eq!(
+            foreign_active_claim(&shared, &self_id, &records),
+            None,
+            "a record must never conflict with itself"
+        );
+    }
+
+    /// No record at all claiming the path returns `None`.
+    ///
+    /// Why: this is the ordinary, uncontested case that must stay fast and
+    /// silent — most decommissions have no sibling collision.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_returns_none_when_unclaimed() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let unclaimed = root.path().join("nobody-here");
+        std::fs::create_dir_all(&unclaimed).unwrap();
+
+        let self_id = ManagedSessionId::new();
+        assert_eq!(foreign_active_claim(&unclaimed, &self_id, &[]), None);
+    }
+
+    // ── `canon_or_raw` fail-open regression coverage (#3764 review fix) ─────
+    //
+    // Every test below points the CANDIDATE (the path `foreign_active_claim`
+    // is asked about) at a leaf that never exists on disk — mirroring
+    // production, where `check_no_foreign_active_claim` is asked about the
+    // very record being decommissioned, whose `workspace_path` may already be
+    // gone. The old `canon_or_raw` fell back to the raw, un-normalized
+    // `PathBuf` on a canonicalize failure, so it only ever matched a phantom
+    // sibling record spelled BYTE-IDENTICALLY. Each test spells the sibling's
+    // `workspace_path` differently — a `..` segment, a trailing separator (via
+    // a symlinked alias so the difference survives `PathBuf`'s own trailing-
+    // slash normalization), and a symlinked-alias ancestor with no other
+    // spelling quirk — and asserts the collision is still caught.
+
+    /// A phantom sibling spelled with a trailing separator, reached through a
+    /// symlinked alias of the candidate's real ancestor, is still caught.
+    ///
+    /// Why: `PathBuf`'s own `Eq` already normalizes a bare trailing slash
+    /// away, so a trailing slash alone never distinguished old from new code.
+    /// Routing the trailing-slash spelling through a symlinked alias (built
+    /// the same way as
+    /// `foreign_active_claim_catches_a_nonexistent_path_through_a_symlinked_parent`)
+    /// keeps the two RAW strings genuinely different — `.../parent-alias/
+    /// workspace/` vs `.../parent-real/workspace` — so the old raw fallback
+    /// provably fails this case while the fix's ancestor canonicalization
+    /// (which resolves the symlink before comparing) provably catches it.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_catches_a_nonexistent_path_spelled_with_a_trailing_slash() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let parent_real = root.path().join("parent-real");
+        std::fs::create_dir_all(&parent_real).unwrap();
+        let parent_alias = root.path().join("parent-alias");
+        std::os::unix::fs::symlink(&parent_real, &parent_alias).unwrap();
+
+        // Neither leaf ever exists — both sides fall back to `canon_or_raw`'s
+        // failure branch.
+        let candidate = parent_real.join("workspace");
+        let phantom_spelling =
+            PathBuf::from(format!("{}/", parent_alias.join("workspace").display()));
+
+        let self_id = ManagedSessionId::new();
+        let other_id = ManagedSessionId::new();
+        let records = vec![record_at(
+            other_id,
+            ManagedSessionState::Active,
+            phantom_spelling,
+        )];
+
+        assert_eq!(
+            foreign_active_claim(&candidate, &self_id, &records),
+            Some(other_id),
+            "a phantom record reached via a symlinked alias, spelled with a \
+             trailing slash, must still be caught as the same directory"
+        );
+    }
+
+    /// A phantom sibling spelled with a `..` segment is still caught.
+    ///
+    /// Why: unlike a trailing slash, `PathBuf`'s own `Eq` never collapses a
+    /// literal `..` component — `/a/b/../c` and `/a/c` compare unequal even
+    /// though they name the same location. The old raw fallback therefore
+    /// missed this collision outright, with no symlink needed to prove it:
+    /// `sub` need not even exist for the phantom record's stored path to be
+    /// spelled through it.
+    /// What: `root` is the nearest EXISTING ancestor for both the candidate
+    /// (`root/target`) and the phantom (`root/sub/../target`, where `sub`
+    /// never exists) — the fix canonicalizes `root` for both and lexically
+    /// collapses the phantom's `..` segment, landing on the same value.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_catches_a_nonexistent_path_with_dot_dot_segments() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let candidate = root.path().join("target");
+        let phantom_spelling = root.path().join("sub").join("..").join("target");
+
+        let self_id = ManagedSessionId::new();
+        let other_id = ManagedSessionId::new();
+        let records = vec![record_at(
+            other_id,
+            ManagedSessionState::Active,
+            phantom_spelling,
+        )];
+
+        assert_eq!(
+            foreign_active_claim(&candidate, &self_id, &records),
+            Some(other_id),
+            "a phantom record spelled with a `..` segment must still be \
+             caught as the same directory"
+        );
+    }
+
+    /// A phantom sibling reached through a symlinked PARENT directory — no
+    /// spelling quirk beyond the alias itself — is still caught.
+    ///
+    /// Why: this isolates the ancestor-canonicalization half of the fix from
+    /// the lexical-normalization half the two tests above exercise. The
+    /// candidate's own ancestor, `parent-real`, is a real directory; the
+    /// phantom record names the SAME directory via `parent-alias`, a symlink
+    /// to `parent-real`, then a workspace leaf that never exists under
+    /// either name. Byte-for-byte, `.../parent-real/workspace` and
+    /// `.../parent-alias/workspace` are different strings — the old raw
+    /// fallback could not tell they name one physical directory.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_active_claim_catches_a_nonexistent_path_through_a_symlinked_parent() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let parent_real = root.path().join("parent-real");
+        std::fs::create_dir_all(&parent_real).unwrap();
+        let parent_alias = root.path().join("parent-alias");
+        std::os::unix::fs::symlink(&parent_real, &parent_alias).unwrap();
+
+        let candidate = parent_real.join("workspace");
+        let phantom_spelling = parent_alias.join("workspace");
+
+        let self_id = ManagedSessionId::new();
+        let other_id = ManagedSessionId::new();
+        let records = vec![record_at(
+            other_id,
+            ManagedSessionState::Active,
+            phantom_spelling,
+        )];
+
+        assert_eq!(
+            foreign_active_claim(&candidate, &self_id, &records),
+            Some(other_id),
+            "a phantom record reached via a symlinked parent directory must \
+             still be caught as the same directory"
+        );
+    }
 
     // ── is_safe_to_remove unit tests (#1511) ────────────────────────────────
 
