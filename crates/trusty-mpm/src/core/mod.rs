@@ -74,6 +74,10 @@ pub mod claude_mpm_session;
 // the memory-tier default table, and the one host-root resolution site.
 pub mod builders;
 
+// #7123: the component labels an issue audit ACCEPTS — the seed table plus the
+// repository's own crate labels. Distinct from `policy_labels`, which answers
+// which labels the harness CREATES.
+pub mod component_labels;
 pub mod compress;
 pub mod config;
 /// Unrecognised-key reporting for the host-level config files (#5207).

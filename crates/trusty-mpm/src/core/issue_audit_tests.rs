@@ -12,6 +12,18 @@ fn standard() -> ResolvedTicketing {
     resolve_ticketing(&TrustyToolsConfig::default()).expect("the defaults resolve")
 }
 
+/// The accepted component labels this workspace's crates yield (#7123), named
+/// literally so no test here reads a Cargo manifest — `ComponentLabels`'s own
+/// tests cover the derivation.
+fn components() -> ComponentLabels {
+    ComponentLabels::from_names(
+        ["trusty-mpm", "trusty-audit", "trusty-console", "tga"]
+            .into_iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+    )
+}
+
 /// A real `gh issue view 7093 --json <AUDIT_JSON_FIELDS>` payload, captured
 /// live on 2026-09-08. A compliant issue: milestone, project, component label.
 const COMPLIANT: &str = r#"{
@@ -86,7 +98,7 @@ fn json_fields_cover_every_audited_requirement() {
 
 #[test]
 fn a_compliant_issue_passes_every_requirement() {
-    let audit = audit_issue(&parse(COMPLIANT), &standard());
+    let audit = audit_issue(&parse(COMPLIANT), &standard(), &components());
     assert!(!audit.failed(), "{:?}", audit.rows);
     assert_eq!(row(&audit, "project").verdict, Verdict::Pass);
     assert_eq!(row(&audit, "milestone").verdict, Verdict::Pass);
@@ -97,7 +109,7 @@ fn a_compliant_issue_passes_every_requirement() {
 #[test]
 fn a_missing_project_fails() {
     let json = COMPLIANT.replace(r#"[{"title": "trusty-mpm"}]"#, "[]");
-    let audit = audit_issue(&parse(&json), &standard());
+    let audit = audit_issue(&parse(&json), &standard(), &components());
     assert!(audit.failed());
     assert_eq!(audit.failing_requirements(), vec!["project"]);
     assert!(
@@ -110,7 +122,7 @@ fn a_missing_project_fails() {
 #[test]
 fn an_unset_milestone_without_a_comment_fails() {
     let json = COMPLIANT.replace(r#"{"title": "Backlog · mpm/core"}"#, "null");
-    let audit = audit_issue(&parse(&json), &standard());
+    let audit = audit_issue(&parse(&json), &standard(), &components());
     assert_eq!(row(&audit, "milestone").verdict, Verdict::Fail);
     assert!(
         row(&audit, "milestone").detail.contains("no-milestone:"),
@@ -129,7 +141,7 @@ fn an_unset_milestone_with_a_reason_comment_is_a_skip() {
             r#""comments": []"#,
             r#""comments": [{"body": "no-milestone: spike, retired before the next release"}]"#,
         );
-    let audit = audit_issue(&parse(&json), &standard());
+    let audit = audit_issue(&parse(&json), &standard(), &components());
     let milestone = row(&audit, "milestone");
     assert_eq!(milestone.verdict, Verdict::Skip);
     assert!(
@@ -163,7 +175,7 @@ fn the_no_milestone_comment_is_matched_case_insensitively() {
             r#""comments": []"#,
             r#""comments": [{"body": "No-Milestone: tracked upstream"}]"#,
         );
-    let audit = audit_issue(&parse(&json), &standard());
+    let audit = audit_issue(&parse(&json), &standard(), &components());
     assert_eq!(row(&audit, "milestone").verdict, Verdict::Skip);
 }
 
@@ -178,7 +190,7 @@ fn a_no_milestone_note_inside_a_longer_comment_counts() {
             r#""comments": []"#,
             r#""comments": [{"body": "Filed per the standard.\nno-milestone: no release owns this yet\n"}]"#,
         );
-    let audit = audit_issue(&parse(&json), &standard());
+    let audit = audit_issue(&parse(&json), &standard(), &components());
     let milestone = row(&audit, "milestone");
     assert_eq!(milestone.verdict, Verdict::Skip);
     assert!(
@@ -203,7 +215,7 @@ fn an_unrequired_milestone_is_informational() {
     let json = COMPLIANT
         .replace(r#"{"title": "Backlog · mpm/core"}"#, "null")
         .replace(r#"[{"title": "trusty-mpm"}]"#, "[]");
-    let audit = audit_issue(&parse(&json), &relaxed);
+    let audit = audit_issue(&parse(&json), &relaxed, &components());
     assert_eq!(row(&audit, "milestone").verdict, Verdict::Info);
     assert_eq!(row(&audit, "project").verdict, Verdict::Info);
     assert!(!audit.failed());
@@ -216,7 +228,7 @@ fn a_missing_component_label_fails() {
         r#"[{"name": "enhancement"}, {"name": "trusty-mpm"}]"#,
         r#"[{"name": "enhancement"}]"#,
     );
-    let audit = audit_issue(&parse(&json), &standard());
+    let audit = audit_issue(&parse(&json), &standard(), &components());
     let component = row(&audit, "component label");
     assert_eq!(component.verdict, Verdict::Fail);
     assert!(
@@ -224,6 +236,79 @@ fn a_missing_component_label_fails() {
         "the failure names both the accepted set and what was found: {}",
         component.detail
     );
+}
+
+/// A throwaway workspace whose crate labels are the ones #7139 carries.
+///
+/// Why: the two #7123 regressions below have to run the real derivation — a
+/// hand-written label list would still pass if `ComponentLabels::resolve`
+/// stopped reading the workspace, which is the exact defect they guard.
+fn workspace_fixture() -> tempfile::TempDir {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        tmp.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/*\"]\n",
+    )
+    .unwrap();
+    for (dir, package) in [
+        ("trusty-mpm", "trusty-mpm"),
+        ("trusty-audit", "trusty-audit"),
+        ("trusty-git-analytics", "tga"),
+    ] {
+        let path = tmp.path().join("crates").join(dir);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("Cargo.toml"),
+            format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\n"),
+        )
+        .unwrap();
+    }
+    tmp
+}
+
+#[test]
+fn a_non_mpm_crate_component_label_passes() {
+    // #7123: #7139's real labels — `tga` and `trusty-audit`, no `trusty-mpm`.
+    // Before the fix the accepted set was the seed table alone, so this audited
+    // `FAIL none of [trusty-mpm] present`.
+    let tmp = workspace_fixture();
+    let resolved = ComponentLabels::resolve(&standard(), Some(tmp.path()));
+    let json = COMPLIANT.replace(
+        r#"[{"name": "enhancement"}, {"name": "trusty-mpm"}]"#,
+        r#"[{"name": "enhancement"}, {"name": "P2"}, {"name": "tga"}, {"name": "trusty-audit"}]"#,
+    );
+    let audit = audit_issue(&parse(&json), &standard(), &resolved);
+    let component = row(&audit, "component label");
+    assert_eq!(
+        component.verdict,
+        Verdict::Pass,
+        "detail was: {}",
+        component.detail
+    );
+    assert_eq!(component.detail, "tga, trusty-audit");
+    assert!(!audit.failed());
+}
+
+#[test]
+fn an_issue_with_no_crate_label_still_fails_against_the_widened_set() {
+    // #7123 widened the accepted set; it did not weaken the rule to "any label
+    // present". An issue carrying only a type and a priority still FAILs, and
+    // the failure names the accepted set so the fix is a label to copy.
+    let tmp = workspace_fixture();
+    let resolved = ComponentLabels::resolve(&standard(), Some(tmp.path()));
+    let json = COMPLIANT.replace(
+        r#"[{"name": "enhancement"}, {"name": "trusty-mpm"}]"#,
+        r#"[{"name": "enhancement"}, {"name": "P2"}]"#,
+    );
+    let audit = audit_issue(&parse(&json), &standard(), &resolved);
+    let component = row(&audit, "component label");
+    assert_eq!(component.verdict, Verdict::Fail);
+    assert!(
+        component.detail.contains("tga") && component.detail.contains("trusty-audit"),
+        "the failure names the accepted set: {}",
+        component.detail
+    );
+    assert!(audit.failed());
 }
 
 #[test]
@@ -234,7 +319,7 @@ fn a_workstream_label_never_satisfies_the_component_rule() {
         r#"[{"name": "enhancement"}, {"name": "trusty-mpm"}]"#,
         r#"[{"name": "ws/trusty-tools-ec"}]"#,
     );
-    let audit = audit_issue(&parse(&json), &standard());
+    let audit = audit_issue(&parse(&json), &standard(), &components());
     assert_eq!(row(&audit, "component label").verdict, Verdict::Fail);
 }
 
@@ -242,7 +327,7 @@ fn a_workstream_label_never_satisfies_the_component_rule() {
 fn relationships_are_never_a_failure() {
     // A standalone issue legitimately has none, so their absence is reported
     // and never gates.
-    let audit = audit_issue(&parse(COMPLIANT), &standard());
+    let audit = audit_issue(&parse(COMPLIANT), &standard(), &components());
     let rel = row(&audit, "relationships");
     assert_eq!(rel.verdict, Verdict::Info);
     assert!(rel.detail.contains("no parent"), "{}", rel.detail);
@@ -262,7 +347,7 @@ fn relationships_report_what_is_set() {
             r#""subIssues": {"nodes": [], "totalCount": 0}"#,
             r#""subIssues": {"nodes": [], "totalCount": 3}"#,
         );
-    let audit = audit_issue(&parse(&json), &standard());
+    let audit = audit_issue(&parse(&json), &standard(), &components());
     let rel = row(&audit, "relationships");
     assert_eq!(rel.verdict, Verdict::Info);
     assert!(rel.detail.contains("parent #6918"), "{}", rel.detail);
@@ -273,7 +358,7 @@ fn relationships_report_what_is_set() {
 
 #[test]
 fn render_audit_prints_one_line_per_requirement() {
-    let text = render_audit(&audit_issue(&parse(COMPLIANT), &standard()));
+    let text = render_audit(&audit_issue(&parse(COMPLIANT), &standard(), &components()));
     assert!(text.starts_with("#7093\n"), "{text}");
     for requirement in ["project", "milestone", "component label", "relationships"] {
         assert!(
@@ -287,10 +372,11 @@ fn render_audit_prints_one_line_per_requirement() {
 
 #[test]
 fn render_summary_tabulates_every_issue() {
-    let compliant = audit_issue(&parse(COMPLIANT), &standard());
+    let compliant = audit_issue(&parse(COMPLIANT), &standard(), &components());
     let broken = audit_issue(
         &parse(&COMPLIANT.replace(r#"[{"title": "trusty-mpm"}]"#, "[]")),
         &standard(),
+        &components(),
     );
     let text = render_summary(&[compliant, broken]);
     assert!(text.contains("issue"), "{text}");
@@ -300,7 +386,7 @@ fn render_summary_tabulates_every_issue() {
 
 #[test]
 fn render_summary_counts_only_failures() {
-    let audits = vec![audit_issue(&parse(COMPLIANT), &standard())];
+    let audits = vec![audit_issue(&parse(COMPLIANT), &standard(), &components())];
     let text = render_summary(&audits);
     assert!(text.contains("1 issue(s) audited, 0 with a FAIL"), "{text}");
 }

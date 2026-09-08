@@ -20,6 +20,7 @@
 //! `an_empty_window_is_not_a_failure`, and `cli_parses_issue_audit_*` in
 //! `tests.rs`.
 
+use trusty_mpm::core::component_labels::ComponentLabels;
 use trusty_mpm::core::gh_identity::GhEnv;
 use trusty_mpm::core::issue_audit::{IssueAudit, audit_issue, render_audit, render_summary};
 use trusty_mpm::core::issue_audit_gh::{AuditWindow, list_open_issues, view_issue};
@@ -33,7 +34,8 @@ use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
 /// report. With `recent` or `since` set, lists the matching OPEN issues and
 /// prints the summary table. With none of the three, errors rather than
 /// guessing a default window. `gh` runs in the current directory, which is what
-/// selects the repository.
+/// selects the repository — and, since #7123, also what selects the crate
+/// labels that satisfy the owning-component rule.
 /// Test: see the module doc; the pure halves are unit-tested in the library.
 pub(crate) fn run(
     ticketing: &ResolvedTicketing,
@@ -42,13 +44,21 @@ pub(crate) fn run(
     recent: Option<usize>,
     since: Option<String>,
 ) -> anyhow::Result<()> {
+    // #7123: the accepted component labels are the audited repository's own
+    // crate labels, not just the ones the harness seeds.
+    let cwd = std::env::current_dir().ok();
+    let components = ComponentLabels::resolve(ticketing, cwd.as_deref());
     let audits = match (issue, recent, since) {
         (Some(number), _, _) => {
             let facts = view_issue(number, None, gh_env)?;
-            vec![audit_issue(&facts, ticketing)]
+            vec![audit_issue(&facts, ticketing, &components)]
         }
-        (None, Some(n), _) => audit_window(&AuditWindow::Recent(n), ticketing, gh_env)?,
-        (None, None, Some(date)) => audit_window(&AuditWindow::Since(date), ticketing, gh_env)?,
+        (None, Some(n), _) => {
+            audit_window(&AuditWindow::Recent(n), ticketing, &components, gh_env)?
+        }
+        (None, None, Some(date)) => {
+            audit_window(&AuditWindow::Since(date), ticketing, &components, gh_env)?
+        }
         (None, None, None) => anyhow::bail!(
             "name an issue number, or pass --recent <n> / --since <YYYY-MM-DD> to audit a window"
         ),
@@ -61,11 +71,12 @@ pub(crate) fn run(
 fn audit_window(
     window: &AuditWindow,
     ticketing: &ResolvedTicketing,
+    components: &ComponentLabels,
     gh_env: &GhEnv,
 ) -> anyhow::Result<Vec<IssueAudit>> {
     Ok(list_open_issues(window, None, gh_env)?
         .iter()
-        .map(|f| audit_issue(f, ticketing))
+        .map(|f| audit_issue(f, ticketing, components))
         .collect())
 }
 
@@ -118,6 +129,13 @@ mod tests {
         serde_json::from_str(json).expect("the fixture parses")
     }
 
+    /// The accepted component labels, named literally (#7123) — these cases
+    /// exercise rendering and the exit rule, not the derivation, which
+    /// `ComponentLabels`'s own tests cover.
+    fn components() -> ComponentLabels {
+        ComponentLabels::from_names([String::from("trusty-mpm")])
+    }
+
     const COMPLIANT: &str = r#"{
       "number": 7093,
       "milestone": {"title": "Backlog · mpm/core"},
@@ -146,7 +164,7 @@ mod tests {
 
     #[test]
     fn single_issue_output_is_the_per_requirement_report() {
-        let audits = vec![audit_issue(&facts(COMPLIANT), &standard())];
+        let audits = vec![audit_issue(&facts(COMPLIANT), &standard(), &components())];
         let text = render_report(&audits);
         assert!(text.starts_with("#7093\n"), "{text}");
         assert!(text.contains("milestone"), "{text}");
@@ -156,8 +174,8 @@ mod tests {
     #[test]
     fn a_window_prints_the_summary_table() {
         let audits = vec![
-            audit_issue(&facts(COMPLIANT), &standard()),
-            audit_issue(&facts(NO_PROJECT), &standard()),
+            audit_issue(&facts(COMPLIANT), &standard(), &components()),
+            audit_issue(&facts(NO_PROJECT), &standard(), &components()),
         ];
         let text = render_report(&audits);
         assert!(text.contains("verdict"), "the table header renders: {text}");
@@ -167,14 +185,14 @@ mod tests {
 
     #[test]
     fn a_failing_audit_exits_nonzero() {
-        let audits = vec![audit_issue(&facts(NO_PROJECT), &standard())];
+        let audits = vec![audit_issue(&facts(NO_PROJECT), &standard(), &components())];
         let err = exit_result(&audits).expect_err("a violation must exit 1");
         assert!(err.to_string().contains("#7104"), "{err}");
     }
 
     #[test]
     fn a_passing_audit_exits_zero() {
-        let audits = vec![audit_issue(&facts(COMPLIANT), &standard())];
+        let audits = vec![audit_issue(&facts(COMPLIANT), &standard(), &components())];
         assert!(exit_result(&audits).is_ok());
     }
 

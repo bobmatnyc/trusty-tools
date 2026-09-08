@@ -26,6 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::component_labels::ComponentLabels;
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::gh_identity::GhEnv;
 use crate::core::issue_audit::{IssueAudit, audit_issue};
@@ -70,22 +71,30 @@ pub(super) async fn check_issue_audit_recent(project_dir: Option<&Path>) -> Doct
 ///
 /// Why: the whole blocking half in one place, so the async wrapper above holds
 /// no logic of its own.
-/// What: resolves the operator's `agents.ticketing` standard, computes the
-/// window's start date in UTC, lists the matching open issues with an ambient
-/// `gh` identity, and audits each. Every failure — a malformed config block, a
-/// missing `gh`, a parse error — becomes an `Err(String)`, which the fold turns
-/// into UNDETERMINED rather than a pass.
+/// What: resolves the operator's `agents.ticketing` standard, resolves the
+/// accepted component labels from the same directory `gh` runs in (#7123),
+/// computes the window's start date in UTC, lists the matching open issues with
+/// an ambient `gh` identity, and audits each. Every failure — a malformed
+/// config block, a missing `gh`, a parse error — becomes an `Err(String)`,
+/// which the fold turns into UNDETERMINED rather than a pass.
 /// Test: exercised live; the fold's branches are unit-tested.
 fn audit_recent_window(project_dir: Option<&Path>) -> Result<Vec<IssueAudit>, String> {
     let ticketing = resolve_ticketing(&TrustyToolsConfig::load())
         .map_err(|e| format!("the agents.ticketing block did not resolve: {e}"))?;
+    // #7123: the audited repository's own crate labels satisfy the
+    // owning-component rule, so the accepted set comes from the same directory
+    // `gh` reads the issues from.
+    let components = ComponentLabels::resolve(&ticketing, project_dir);
     let since = (chrono::Utc::now() - chrono::Duration::days(AUDIT_WINDOW_DAYS))
         .format("%Y-%m-%d")
         .to_string();
     let window = AuditWindow::Since(since);
     let facts =
         list_open_issues(&window, project_dir, &GhEnv::default()).map_err(|e| e.to_string())?;
-    Ok(facts.iter().map(|f| audit_issue(f, &ticketing)).collect())
+    Ok(facts
+        .iter()
+        .map(|f| audit_issue(f, &ticketing, &components))
+        .collect())
 }
 
 /// Fold an audit outcome into a [`DoctorCheck`] (pure).
