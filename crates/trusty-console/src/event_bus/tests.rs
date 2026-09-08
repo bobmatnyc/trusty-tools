@@ -92,7 +92,134 @@ async fn a_subscriber_receives_ingested_events() {
         .await
         .expect("recv did not time out")
         .expect("channel still open");
-    assert_eq!(received.id, sent_id);
+    assert_eq!(received.event.id, sent_id);
+}
+
+#[tokio::test]
+async fn ingest_assigns_sequential_console_seqs_starting_at_one() {
+    let bus = EventBus::new(EventBusConfig { capacity: 8 });
+    let mut rx = bus.subscribe();
+
+    bus.ingest(make_event(None));
+    bus.ingest(make_event(None));
+
+    let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("recv 1")
+        .expect("open");
+    let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("recv 2")
+        .expect("open");
+
+    assert_eq!(
+        first.event.seq, 1,
+        "a fresh bus with no recovered log starts at seq 1"
+    );
+    assert_eq!(
+        second.event.seq, 2,
+        "seq is console-assigned and monotonic, overwriting the producer's own \
+         (always 0 from `make_event`)"
+    );
+}
+
+#[tokio::test]
+async fn live_fanout_frames_are_never_marked_persisted() {
+    // The write is always still in flight (or was just dropped) at the
+    // moment of fan-out — see `bus`'s module docs for the full contract.
+    let bus = EventBus::new(EventBusConfig { capacity: 8 });
+    let mut rx = bus.subscribe();
+
+    bus.ingest(make_event(None));
+
+    let received = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("recv did not time out")
+        .expect("channel still open");
+    assert!(
+        !received.persisted,
+        "a bus with no durable log configured must never claim persistence"
+    );
+}
+
+// #6848: regression for the HIGH finding that `seq` assignment and the
+// durable-log/broadcast hand-off were not atomic under one lock. Real OS
+// threads (not just tokio tasks) race `EventBus::ingest` — a plain sync
+// call, so `std::thread::spawn` exercises genuine concurrent execution
+// independent of the test runtime's own flavor, matching the review's
+// diagnosed scenario of two producer tasks landing on different OS threads.
+// Before the `bus.rs` fix, `log.enqueue`/`sender.send` ran after the ring
+// lock was dropped, so the OS scheduler could interleave two threads'
+// `try_send` calls out of `seq` order; this asserts the durable log's
+// on-disk order is exactly the assigned order, with no gaps or duplicates.
+#[tokio::test]
+async fn concurrent_producers_write_the_durable_log_in_seq_order() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (log, recovered) = super::log::DurableLog::open(super::log::LogConfig {
+        dir: tmp.path().to_path_buf(),
+        retain_days: 7,
+    })
+    .await
+    .expect("open a fresh durable log");
+
+    let bus = Arc::new(EventBus::with_log(
+        EventBusConfig { capacity: 256 },
+        Some(log),
+        recovered.next_seq,
+    ));
+
+    const PRODUCERS: usize = 8;
+    let handles: Vec<_> = (0..PRODUCERS)
+        .map(|_| {
+            let bus = Arc::clone(&bus);
+            std::thread::spawn(move || {
+                bus.ingest(make_event(None));
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().expect("producer thread panicked");
+    }
+
+    // Drive the writer task forward until every event is durably written,
+    // then read the on-disk order back.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let seqs = loop {
+        let items = bus
+            .replay_since(0)
+            .await
+            .expect("bus has a durable log")
+            .expect("replay succeeds");
+        let seqs: Vec<u64> = items
+            .into_iter()
+            .map(|i| match i {
+                super::log::ReplayItem::Event(e) => e.seq,
+                super::log::ReplayItem::Gap { .. } => {
+                    panic!("no backpressure expected at this capacity")
+                }
+            })
+            .collect();
+        if seqs.len() == PRODUCERS {
+            break seqs;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "writer did not durably write all {PRODUCERS} events within budget"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    let mut sorted = seqs.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        seqs, sorted,
+        "on-disk seq order must match assignment order under concurrent producers"
+    );
+    assert_eq!(
+        seqs,
+        (1..=PRODUCERS as u64).collect::<Vec<_>>(),
+        "no gaps and no duplicates across the concurrent producers"
+    );
 }
 
 // ─── the UDS ingest listener, over a real socket ───────────────────────────
