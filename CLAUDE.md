@@ -459,6 +459,9 @@ independently reviewable PR outcome, subagent confinement, cleanup — lives in
   from a checkout with an empty `git status --porcelain` at a known commit —
   check it, don't assume it. A fresh worktree off `origin/main` satisfies that by
   construction and stays the default.
+  When staging worktree changes with git, always name files explicitly: `git add <file>` or `git add -p`.
+  Never use `git add -A` in a worktree, as it stages untracked build directories like `target-worktree/`.
+  Verify the ignored name with `git check-ignore -v target-worktree/` from the worktree root.
 - The main checkout is not automatically disqualified: the write boundary
   restricts SOURCE writes only, so docs and configuration (`.md` included) stay
   writable and committable there
