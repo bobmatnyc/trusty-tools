@@ -151,10 +151,13 @@ impl std::error::Error for PrivateDirError {
 /// longer see.
 /// What: `Create`/`Stat`/`Harden` carry a real `io::Error` already — reuse ITS
 /// `.kind()` verbatim. `Symlink`/`NotADirectory` have no OS error underneath
-/// (the refusal is ours, not the kernel's); `AlreadyExists` is the closest
-/// std kind for "something is already at this path and it is not what was
-/// wanted".
-/// Test: `tests::private_dir_error_into_io_error_preserves_kind`.
+/// (the refusal is ours, not the kernel's); `NotADirectory` (#7158 round 3,
+/// stable at this crate's MSRV 1.94) rather than `AlreadyExists` — a symlink
+/// refusal must never read as the idempotent "already there and fine" that
+/// `webhook_relay`'s two sibling `AlreadyExists` branches (`hard_link`'s
+/// `EEXIST` in `retry::quarantine`, the completed-earlier-move case) mean.
+/// Test: `tests::private_dir_error_into_io_error_preserves_kind`,
+/// `tests::private_dir_error_symlink_into_io_error_is_not_already_exists`.
 impl From<PrivateDirError> for std::io::Error {
     fn from(err: PrivateDirError) -> Self {
         let kind = match &err {
@@ -162,7 +165,7 @@ impl From<PrivateDirError> for std::io::Error {
             | PrivateDirError::Stat { source, .. }
             | PrivateDirError::Harden { source, .. } => source.kind(),
             PrivateDirError::Symlink { .. } | PrivateDirError::NotADirectory { .. } => {
-                std::io::ErrorKind::AlreadyExists
+                std::io::ErrorKind::NotADirectory
             }
         };
         std::io::Error::new(kind, err.to_string())
@@ -389,6 +392,33 @@ mod tests {
             io_err.kind(),
             std::io::ErrorKind::Other,
             "the original OS error kind must survive the conversion, got {io_err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_dir_error_symlink_into_io_error_is_not_already_exists() {
+        // #7158 round 3: a symlink refusal must never map to `AlreadyExists` —
+        // `webhook_relay::retry::quarantine` reads that kind as an idempotent
+        // completed-earlier-move (a `hard_link` `EEXIST`), so a caller matching
+        // on `.kind()` alone would treat "an attacker planted a symlink here"
+        // as "nothing to do".
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real_target = tmp.path().join("real");
+        std::fs::create_dir_all(&real_target).expect("mkdir real");
+        let leaf = tmp.path().join("leaf");
+        std::os::unix::fs::symlink(&real_target, &leaf).expect("symlink");
+
+        let err = ensure_private_dir(&leaf, PRIVATE_DIR_MODE).expect_err("must refuse a symlink");
+        assert!(
+            matches!(err, PrivateDirError::Symlink { .. }),
+            "got {err:?}"
+        );
+        let io_err: std::io::Error = err.into();
+        assert_eq!(
+            io_err.kind(),
+            std::io::ErrorKind::NotADirectory,
+            "a symlink refusal must not read as AlreadyExists, got {io_err:?}"
         );
     }
 }
