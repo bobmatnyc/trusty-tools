@@ -159,6 +159,9 @@ fn instruction_compression_row(
         session_id: session_id.to_string(),
         technique: TECHNIQUE_INSTRUCTION_COMPRESSION.to_string(),
         tokens_saved,
+        // #7179: the percent segment's denominator — the folded source set's
+        // own token count. Floor of a non-negative byte count: never negative.
+        tokens_before: (source_bytes as f64 / BYTES_PER_TOKEN).floor() as u64,
         cost_saved_usd,
         basis: format!(
             "sources {source_bytes} B - compiled {compiled_bytes} B, \

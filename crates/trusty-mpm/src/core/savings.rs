@@ -9,10 +9,10 @@
 //! later, the console) renders.
 //!
 //! What: `~/.trusty-mpm/usage/savings.jsonl` — one JSON object per line,
-//! `{ts, session_id, technique, tokens_saved, cost_saved_usd, basis}`.
-//! [`append_row`] is the single writer, [`fold_session`] and [`fold_all`] the
-//! single readers. `technique` is an open string, so a new producer needs no
-//! schema change here.
+//! `{ts, session_id, technique, tokens_saved, tokens_before, cost_saved_usd,
+//! basis}`. [`append_row`] is the single writer, [`fold_session`] and
+//! [`fold_all`] the single readers. `technique` is an open string, so a new
+//! producer needs no schema change here.
 //!
 //! Two properties the rest of the feature depends on:
 //!
@@ -25,6 +25,21 @@
 //!   A producer bug that undercounts its baseline therefore shows as a missing
 //!   contribution, never as a negative or inflated displayed figure.
 //!
+//! **`tokens_before` and [`SavingsTotal::percent_saved`] (owner ruling
+//! 2026-09-08, #7179).** The `💸` segment shows a whole-number percent of
+//! tokens avoided, not a dollar figure. The percent's denominator is each
+//! row's own pre-saving token count — `tokens_before = tokens_saved + tokens
+//! actually sent` — folded the same way `tokens_saved` is. This was chosen
+//! over pricing the percent against the session's live context-window fill
+//! (`total_input_tokens` from the `statusLine` hook, the only other per-session
+//! token counter available): that figure resets on every auto-compaction, which
+//! would make the percent jump non-monotonically for reasons unrelated to
+//! anything the harness saved, and it counts tokens no savings technique here
+//! ever touched. A ledger-only percent stays stable and scoped to what this
+//! feature actually measures. `#[serde(default)]` so a pre-#7179 row folds
+//! with `tokens_before = 0` and is excluded from the denominator, rather than
+//! failing to parse.
+//!
 //! Everything here fails soft: a missing, unreadable, or truncated ledger folds
 //! to zero rather than erroring, because the consumer is a status bar on
 //! Claude Code's hot render path.
@@ -32,7 +47,7 @@
 //! Test: the inline suite in `savings_tests.rs` — `append_then_fold_round_trips`,
 //! `fold_skips_a_malformed_line_and_keeps_the_valid_total`,
 //! `a_negative_row_cannot_raise_the_total`, `fold_ignores_other_sessions`,
-//! `fold_of_a_missing_ledger_is_zero`.
+//! `fold_of_a_missing_ledger_is_zero`, `percent_saved_rounds_to_nearest_whole_number`.
 
 use std::path::{Path, PathBuf};
 
@@ -82,6 +97,22 @@ pub struct SavingsRow {
     pub technique: String,
     /// Estimated tokens not sent. Rows at or below zero are skipped.
     pub tokens_saved: i64,
+    /// Estimated pre-saving token count for this row — `tokens_saved` plus the
+    /// tokens actually sent instead (#7179).
+    ///
+    /// Why: [`SavingsTotal::percent_saved`] needs a denominator, and the only
+    /// one that stays stable and scoped to what this feature measures is the
+    /// ledger's own before-figure, folded across every row alongside
+    /// `tokens_saved` — see the module header for why the live context-window
+    /// fill was rejected instead.
+    /// What: `u64` (a plain count, never negative by construction).
+    /// `#[serde(default)]` so a row written before this field existed folds as
+    /// `0` — excluded from the percent denominator rather than failing to
+    /// parse. Producers that cannot state a before-figure simply omit it.
+    /// Test: `percent_saved_rounds_to_nearest_whole_number`,
+    /// `a_row_written_before_tokens_before_existed_still_folds`.
+    #[serde(default)]
+    pub tokens_before: u64,
     /// Estimated USD not spent. Rows at or below zero are skipped.
     pub cost_saved_usd: f64,
     /// Free text stating how the two figures above were arrived at.
@@ -107,16 +138,19 @@ pub struct SavingsRow {
 
 /// The folded total of every accepted row in one read.
 ///
-/// Why: the statusline needs both figures — it renders dollars above a cent and
-/// tokens below it — and `rows` is what lets a caller distinguish "the ledger
-/// held nothing" from "every row was rejected", which read very differently in
-/// a bug report.
+/// Why: the statusline needs `tokens_saved` and `tokens_before` together to
+/// compute a percent, and `cost_saved_usd` for `tm`'s own dollar-denominated
+/// reporting commands (the ledger stays the one source both surfaces read).
+/// `rows` is what lets a caller distinguish "the ledger held nothing" from
+/// "every row was rejected", which read very differently in a bug report.
 /// What: sums of the accepted rows only; skipped rows contribute nothing.
 /// Test: `fold_skips_a_malformed_line_and_keeps_the_valid_total`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SavingsTotal {
     /// Sum of `tokens_saved` across accepted rows.
     pub tokens_saved: u64,
+    /// Sum of `tokens_before` across accepted rows — the percent denominator.
+    pub tokens_before: u64,
     /// Sum of `cost_saved_usd` across accepted rows.
     pub cost_saved_usd: f64,
     /// How many rows were accepted.
@@ -134,6 +168,40 @@ impl SavingsTotal {
     /// Test: `zero_fold_is_zero`, `savings_segment_is_absent_on_a_zero_fold`.
     pub fn is_zero(&self) -> bool {
         self.rows == 0 || (self.tokens_saved == 0 && self.cost_saved_usd <= 0.0)
+    }
+
+    /// Whole-number percent of tokens the harness avoided sending, folded
+    /// across every accepted row (#7179).
+    ///
+    /// Why: the `💸` statusline segment renders one percentage, and the fold is
+    /// the only place `tokens_saved` and `tokens_before` are summed together —
+    /// computing the ratio here, rather than at the render site, means a future
+    /// console consumer gets the identical number from the identical division.
+    /// What: `round(100 * tokens_saved / tokens_before)`, clamped to `[1, 100]`
+    /// whenever the fold accepted at least one row — the lower clamp mirrors
+    /// the pre-#7179 dollar segment's "never render a false zero" rule: a
+    /// sub-0.5% ratio would otherwise round down to a literal `0%`, which reads
+    /// as "we saved nothing" and states a measurement that was never made. The
+    /// upper clamp covers a mixed old/new ledger, where rows written before
+    /// `tokens_before` existed fold their share of the denominator as `0` (see
+    /// the module header) and can otherwise push the raw ratio above 100.
+    /// `None` when there is nothing to divide: [`Self::is_zero`], or a
+    /// `tokens_before` sum of `0` (every accepted row predates #7179).
+    /// Test: `percent_saved_rounds_to_nearest_whole_number`,
+    /// `percent_saved_is_none_on_a_zero_fold`,
+    /// `percent_saved_clamps_a_legacy_mixed_fold`,
+    /// `percent_saved_never_rounds_down_to_zero`.
+    pub fn percent_saved(&self) -> Option<u32> {
+        if self.is_zero() || self.tokens_before == 0 {
+            return None;
+        }
+        let ratio = self.tokens_saved as f64 / self.tokens_before as f64;
+        let pct = (ratio * 100.0).round();
+        // A true zero is already excluded by the checks above, so any ratio
+        // reaching here is a real (if tiny) measurement — round it up to the
+        // smallest displayable percent rather than down to a false zero.
+        let pct = if pct < 1.0 { 1.0 } else { pct };
+        Some(pct.clamp(1.0, 100.0) as u32)
     }
 }
 
@@ -269,6 +337,7 @@ fn fold(ledger: &Path, session_id: Option<&str>) -> SavingsTotal {
             continue;
         }
         total.tokens_saved += row.tokens_saved as u64;
+        total.tokens_before += row.tokens_before;
         total.cost_saved_usd += row.cost_saved_usd;
         total.rows += 1;
     }

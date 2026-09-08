@@ -233,6 +233,10 @@ fn divert_row(
         session_id: session_id.to_string(),
         technique: TECHNIQUE_DIVERT.to_string(),
         tokens_saved,
+        // #7179: the percent segment's denominator — the diverted files'
+        // token count before the worker ever ran. `file_tokens` is a floor of
+        // a non-negative byte count, so it is never negative.
+        tokens_before: file_tokens as u64,
         cost_saved_usd,
         basis: format!(
             "files {file_tokens} tok - summary {summary_tokens} tok, \
