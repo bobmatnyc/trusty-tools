@@ -21,7 +21,10 @@
 //! `Operation::Preflight` before Phase 2 clones anything — see
 //! `crate::chain::audit_with_preflight`.
 //!
-//! Test: `collectors_tests`.
+//! Test: `collectors_tests`, plus
+//! `collectors_real_resolve::missing_and_check_go_through_the_real_resolve_binary`
+//! (a separate integration test process — see [`missing_resolved_by`] for why
+//! the real-resolver proof cannot live in this file's own test module).
 
 use std::path::PathBuf;
 
@@ -89,7 +92,7 @@ pub const ALL: [OptionalCollector; 3] = [
 /// mid-sweep pass can never disagree about what is installed.
 /// Test: `collectors_tests::missing_finds_a_binary_absent_from_a_fake_resolver`,
 /// `collectors_tests::missing_is_empty_when_every_binary_resolves`,
-/// `collectors_tests::missing_and_check_go_through_the_real_resolve_binary`.
+/// `collectors_real_resolve::missing_and_check_go_through_the_real_resolve_binary`.
 pub fn missing() -> Vec<OptionalCollector> {
     missing_resolved_by(trusty_common::bin_resolve::resolve_binary)
 }
@@ -106,12 +109,15 @@ pub fn missing() -> Vec<OptionalCollector> {
 /// an earlier version of this module's tests did exactly that and
 /// intermittently broke `clone::clone_tests::two_paths_with_one_basename_are_refused_together`
 /// with `"git is on PATH for this suite" … NotFound`. Production has exactly
-/// one caller ([`missing`], passing the real resolver); most tests pass a
-/// closure over a fixed set of names instead, so nothing here touches real
-/// env — the one exception,
-/// `collectors_tests::missing_and_check_go_through_the_real_resolve_binary`,
-/// only PREPENDS to the live `PATH` and never removes an entry, so it cannot
-/// hide a binary a concurrent test needs.
+/// one caller ([`missing`], passing the real resolver); every test in THIS
+/// module (this file's `#[cfg(test)]` block, part of the crate's shared
+/// `--lib` test binary) passes a closure over a fixed set of names instead,
+/// so nothing here touches real env at all. The one test that must exercise
+/// the real resolver — `collectors_real_resolve::missing_and_check_go_through_the_real_resolve_binary`
+/// — lives in its own `tests/collectors_real_resolve.rs` integration file
+/// instead, which Cargo always builds as its own OS process; being the only
+/// `#[test]` in that process is what makes touching `PATH` there safe with no
+/// `#[serial]` needed, not merely the fact that its own change is additive.
 fn missing_resolved_by(resolve: impl Fn(&str) -> Option<PathBuf>) -> Vec<OptionalCollector> {
     ALL.into_iter()
         .filter(|c| resolve(c.binary).is_none())
@@ -191,18 +197,6 @@ mod collectors_tests {
         move |name| present.contains(&name).then(|| PathBuf::from(name))
     }
 
-    /// Creates an executable file `dir/name` (`chmod +x` on Unix).
-    fn touch_executable(dir: &std::path::Path, name: &str) {
-        let path = dir.join(name);
-        std::fs::write(&path, "#!/bin/sh\n").expect("write fake binary");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod +x");
-        }
-    }
-
     #[test]
     fn all_names_every_fail_open_collector() {
         let binaries: Vec<&str> = ALL.iter().map(|c| c.binary).collect();
@@ -275,62 +269,10 @@ mod collectors_tests {
         // composition compiles and returns `Ok` either way — which of the
         // three real collectors are installed on the machine running this
         // test is not something this suite controls or asserts on; see
-        // `missing_and_check_go_through_the_real_resolve_binary` below for
-        // the real-resolver proof, and `decide_*` above for the warn/refuse
-        // logic itself.
+        // `tests/collectors_real_resolve.rs` for the real-resolver proof
+        // (its own process, so it cannot race this binary's other tests —
+        // see `missing_resolved_by`'s doc comment) and `decide_*` above for
+        // the warn/refuse logic itself.
         assert!(check(false).is_ok());
-    }
-
-    /// #7134 fix-round item 4: at least one test must exercise the REAL
-    /// `trusty_common::bin_resolve::resolve_binary` — not only the
-    /// resolver-injected seam above — so a change to that resolver's own
-    /// search order is caught here too.
-    ///
-    /// Why this is safe against the race documented on
-    /// [`missing_resolved_by`]: `resolve_binary` checks the live `PATH`
-    /// FIRST, so this PREPENDS a directory holding stand-ins for all three
-    /// collectors to whatever `PATH` already is, restores it exactly
-    /// afterward, and never REMOVES an entry — a concurrent test resolving
-    /// `git`/`gh`/anything else still finds it via the untouched remainder of
-    /// `PATH`. `#[serial_test::serial]` guards only the read-modify-write of
-    /// the env var itself, not against a real change in outcome.
-    #[test]
-    #[serial_test::serial]
-    fn missing_and_check_go_through_the_real_resolve_binary() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        for c in ALL {
-            touch_executable(dir.path(), c.binary);
-        }
-        let previous = std::env::var_os("PATH");
-        let mut dirs = vec![dir.path().to_path_buf()];
-        if let Some(p) = &previous {
-            dirs.extend(std::env::split_paths(p));
-        }
-        let prepended = std::env::join_paths(dirs).expect("join_paths");
-        // SAFETY (test-only): restored immediately below. `#[serial_test::serial]`
-        // rules out a concurrent read/write of `PATH` in this binary; the change
-        // itself is additive, so even an interleaving cannot hide a binary
-        // another test needs — see the doc comment above.
-        unsafe {
-            std::env::set_var("PATH", &prepended);
-        }
-        let found = missing();
-        let checked = check(false);
-        unsafe {
-            match &previous {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
-
-        assert!(
-            found.is_empty(),
-            "the real resolve_binary must find every stand-in on PATH: {found:?}"
-        );
-        assert!(
-            checked
-                .expect("nothing missing, so check does not refuse")
-                .is_empty()
-        );
     }
 }
