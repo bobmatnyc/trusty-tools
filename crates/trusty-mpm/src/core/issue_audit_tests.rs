@@ -290,6 +290,30 @@ fn a_non_mpm_crate_component_label_passes() {
 }
 
 #[test]
+fn trusty_audit_alone_passes_the_component_label_check() {
+    // #7182: the recurrence of #7123 — `a_non_mpm_crate_component_label_passes`
+    // above carries `tga` AND `trusty-audit` together, so it passed via `tga`
+    // and never isolated `trusty-audit` as the deciding label (the exact gap
+    // the recurrence comment named). This fixture carries `trusty-audit` alone.
+    let tmp = workspace_fixture();
+    let resolved = ComponentLabels::resolve(&standard(), Some(tmp.path()));
+    let json = COMPLIANT.replace(
+        r#"[{"name": "enhancement"}, {"name": "trusty-mpm"}]"#,
+        r#"[{"name": "enhancement"}, {"name": "trusty-audit"}]"#,
+    );
+    let audit = audit_issue(&parse(&json), &standard(), &resolved);
+    let component = row(&audit, "component label");
+    assert_eq!(
+        component.verdict,
+        Verdict::Pass,
+        "detail was: {}",
+        component.detail
+    );
+    assert_eq!(component.detail, "trusty-audit");
+    assert!(!audit.failed());
+}
+
+#[test]
 fn an_issue_with_no_crate_label_still_fails_against_the_widened_set() {
     // #7123 widened the accepted set; it did not weaken the rule to "any label
     // present". An issue carrying only a type and a priority still FAILs, and
