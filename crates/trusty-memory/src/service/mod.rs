@@ -18,6 +18,8 @@
 pub mod core;
 pub mod core_kg;
 pub mod helpers;
+// #7125: the bounded batch fan-out the recall-all family runs on.
+pub mod recall_stream;
 pub mod types;
 pub mod user_config;
 
@@ -32,6 +34,11 @@ mod core_tests;
 #[cfg(test)]
 #[path = "helpers_tests.rs"]
 mod helpers_tests;
+// #7125: the bounded fan-out's failure path has no route in from outside the
+// crate, so its coverage lives here rather than in tests/.
+#[cfg(test)]
+#[path = "recall_stream_tests.rs"]
+mod recall_stream_tests;
 
 // Re-export the full public surface so external call sites
 // (`crate::service::X`) keep resolving exactly as they did against the former

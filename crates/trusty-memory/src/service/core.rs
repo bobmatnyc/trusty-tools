@@ -26,9 +26,9 @@ use uuid::Uuid;
 
 use super::helpers::{
     collect_palace_stats, drawer_content_preview, drawer_snippet, is_reserved_system_palace,
-    list_palaces_blocking, open_palaces_blocking, palace_info_blocking, palace_info_from,
-    recall_entry_json,
+    list_palaces_blocking, palace_info_blocking, palace_info_from, recall_entry_json,
 };
+use super::recall_stream::recall_streamed;
 use super::types::{
     CreateDrawerBody, CreatePalaceBody, ListDrawersQuery, PalaceInfo, ServiceError, ServiceResult,
     StatusPayload,
@@ -802,33 +802,42 @@ impl MemoryService {
     /// Why: shared between `/api/v1/recall` and the `memory_recall_all` chat
     /// tool. Encapsulating the open-everything-fanout-merge dance avoids
     /// drift.
-    /// What: lists every palace, opens handles (skipping failures with a
-    /// `tracing::warn!`), delegates to
+    /// What: lists every palace, then streams them through `recall_streamed`
+    /// in bounded batches, delegating each batch to
     /// `recall_across_palaces_with_default_embedder`. Returns a JSON array.
     /// Why (issue #4637): unlike `list_palaces`/`status`, this route is NOT
     /// converted to `peek()`. A cross-palace recall that answered from
     /// cache-resident palaces only would silently omit ~98.9% of the corpus —
     /// a wrong answer that looks like a right one, which is strictly worse
-    /// than a slow correct one. The open loop keeps opening every palace; it
-    /// just no longer does so inline on a tokio worker thread. Making this
-    /// route actually fast needs a different design (a shared cross-palace
-    /// index, or an explicit palace-scoped query), not a cache-only read.
+    /// than a slow correct one. Every palace is still opened and still
+    /// searched; what changed is when.
+    /// Why (issue #7125): opening all of them AT ONCE made peak residency and
+    /// the post-call LRU residue both scale with the palace count. The batch
+    /// walk bounds the peak at `RECALL_PALACE_BATCH` and hands back everything
+    /// the query itself brought in, so the daemon's steady state after a
+    /// recall-all matches its steady state before one.
     /// Test: indirectly via `recall_across_palaces_merges_results` and the
     /// MCP `memory_recall_all` integration paths;
     /// `open_palaces_blocking_opens_every_palace` pins that uncached palaces
-    /// are still searched.
+    /// are still searched; `recall_all_returns_open_palaces_to_baseline` pins
+    /// the residency bound.
     pub async fn recall_all(&self, query: &str, top_k: usize, deep: bool) -> Value {
         let palaces = match list_palaces_blocking(&self.state).await {
             Ok(v) => v,
             Err(e) => return json!({ "error": format!("{e:#}") }),
         };
-        // #4637: open_palace (not peek) is deliberate — recall must see every
-        // palace; the spawn_blocking hop keeps it off the async executor.
-        let handles = open_palaces_blocking(&self.state, &palaces, "recall_all").await;
-        if handles.is_empty() {
-            return json!([]);
-        }
-        match recall_across_palaces_with_default_embedder(&handles, query, top_k, deep).await {
+        // #7125: stream the estate in batches instead of opening all of it.
+        let streamed = recall_streamed(
+            &self.state,
+            &palaces,
+            "recall_all",
+            top_k,
+            |handles| async move {
+                recall_across_palaces_with_default_embedder(&handles, query, top_k, deep).await
+            },
+        )
+        .await;
+        match streamed {
             Ok(results) => json!(results
                 .into_iter()
                 .map(|r| json!({
