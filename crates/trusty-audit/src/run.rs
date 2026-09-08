@@ -1332,6 +1332,12 @@ exit 0
             .await
             .expect("the sweep completes");
         let measured = first.repos[0].duration_ms.expect("a measured duration");
+        // #7133: the collecting process's own version, recorded at the same
+        // point `duration_ms` is.
+        let collected_version = first.repos[0]
+            .collected_by_version
+            .clone()
+            .expect("collection records the version that ran it");
 
         let second = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
             .await
@@ -1341,6 +1347,15 @@ exit 0
             second.repos[0].duration_ms,
             Some(measured),
             "a carried-over entry must keep the duration of the run that earned it"
+        );
+        // #7133: a resumed entry must keep the version that actually collected
+        // it, not silently pick up the version of the process that resumed it
+        // — that is exactly the drift `package::stale_artifacts` compares
+        // against.
+        assert_eq!(
+            second.repos[0].collected_by_version,
+            Some(collected_version),
+            "a carried-over entry must keep the version that actually collected it"
         );
         assert!(
             index_of(&work).contains("carried over from an earlier run"),
