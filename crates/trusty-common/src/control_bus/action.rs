@@ -154,6 +154,9 @@ pub struct ObjectRef {
     #[serde(rename = "type")]
     pub object_type: ObjectType,
     pub id: String,
+    /// Security: rendered verbatim by the object viewer (§6) — a producer
+    /// MUST pass any user- or file-derived text through
+    /// `crate::credentials::scrub_secrets` before setting this field.
     pub label: String,
 }
 
@@ -165,10 +168,17 @@ pub struct ObjectRef {
 ///      same reason `ObjectRef` never inlines content.
 /// What: `path` is repo-relative; `diff_ref` is opaque to the view and absent
 ///       for every phase but `Written`.
+///
+/// Security: both fields are rendered verbatim by the object viewer (§6). A
+/// producer MUST pass any user- or file-derived free text through
+/// `crate::credentials::scrub_secrets` before setting either one.
 /// Test: `super::tests::action_event_round_trips_all_six_kinds`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PathRef {
     pub path: String,
+    /// Security: see the struct-level doc — scrub before setting, same as
+    /// `path`. This is the field `ActionEvent::File`'s `Written` phase
+    /// populates with a reference into the diff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_ref: Option<String>,
 }
