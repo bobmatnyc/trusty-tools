@@ -16,3 +16,10 @@ Fixed
   warn when a registered base clone carries more than 3 worktrees without
   `maintenance.auto` pinned off, and when more than one `git maintenance
   run` process is live on the host at once (#7171).
+- `maintenance_processes` now reports `Unknown`, not `Ok`, when the `ps`
+  spawn itself fails — a sandboxed host no longer reads as "0 processes,
+  healthy" during an actual storm (#7171).
+- Migrated `session_manager::decommission`'s two `git worktree prune`
+  sites (session teardown, one of the storm-trigger commands) and
+  `core::session_launch::workstream_label`'s origin-URL read onto
+  `trusty_common::git` (#7171).

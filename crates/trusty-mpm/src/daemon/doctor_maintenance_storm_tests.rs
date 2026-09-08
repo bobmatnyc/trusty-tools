@@ -109,3 +109,32 @@ fn live_maintenance_processes_probe_does_not_panic() {
     let check = check_live_maintenance_processes();
     assert!(matches!(check.status, CheckStatus::Ok | CheckStatus::Warn));
 }
+
+/// #4005 / critic HIGH-1: a `ps` spawn failure must report `Unknown`, never
+/// degrade to `Ok` — a sandboxed host with no `ps` must not read as "0
+/// processes, no storm" during an actual one.
+#[test]
+fn check_live_maintenance_processes_reports_unknown_when_ps_is_unavailable() {
+    let check = check_live_maintenance_processes_with(|| {
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    });
+    assert_eq!(check.status, CheckStatus::Unknown);
+    assert!(
+        check.message.contains("could not enumerate host processes"),
+        "message must name the failure: {}",
+        check.message
+    );
+}
+
+/// A successful spawn with zero matching lines still reports `Ok`, not
+/// `Unknown` — only the SPAWN failing is unknown; an empty process table is a
+/// known, healthy answer.
+#[test]
+fn check_live_maintenance_processes_reports_ok_when_ps_succeeds_with_no_matches() {
+    let check = check_live_maintenance_processes_with(|| {
+        Ok(std::process::Command::new("true")
+            .output()
+            .expect("spawn `true`"))
+    });
+    assert_eq!(check.status, CheckStatus::Ok);
+}

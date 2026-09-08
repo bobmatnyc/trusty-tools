@@ -163,20 +163,42 @@ pub(super) fn count_maintenance_processes(ps_output: &str) -> usize {
 /// `tm doctor`'s `maintenance_processes` probe (#7171).
 ///
 /// Why/What: see the module doc's second bullet. Read-only: `ps -A -o
-/// command=`, never a signal or a kill.
+/// command=`, never a signal or a kill. A failed `ps` spawn reports
+/// [`CheckStatus::Unknown`], never `Ok` — issue #4005 established that a
+/// probe which could not determine state must say so rather than degrade to
+/// healthy, because a sandboxed host with no `ps` would otherwise read as "0
+/// processes, no storm" during an actual one. `binary_provenance` and
+/// `memory` follow the same convention for their own unreadable-state cases.
 /// Test: `count_maintenance_processes_*` cover the pure counter directly;
 /// `live_maintenance_processes_probe_does_not_panic` covers the real `ps`
-/// call.
+/// call; `check_live_maintenance_processes_reports_unknown_when_ps_is_unavailable`
+/// covers the spawn-failure branch.
 pub(super) fn check_live_maintenance_processes() -> DoctorCheck {
-    let output = std::process::Command::new("ps")
-        .args(["-A", "-o", "command="])
-        .output();
-    let Ok(output) = output else {
-        return DoctorCheck::new(
-            "maintenance_processes",
-            CheckStatus::Ok,
-            "could not enumerate host processes (`ps` unavailable) — maintenance-process scan skipped",
-        );
+    check_live_maintenance_processes_with(|| {
+        std::process::Command::new("ps")
+            .args(["-A", "-o", "command="])
+            .output()
+    })
+}
+
+/// [`check_live_maintenance_processes`], parameterised over the `ps` spawn so
+/// the spawn-failure branch is a normal, hermetic unit test rather than
+/// something that can only be exercised by removing `ps` from `PATH`.
+fn check_live_maintenance_processes_with(
+    spawn_ps: impl FnOnce() -> std::io::Result<std::process::Output>,
+) -> DoctorCheck {
+    let output = match spawn_ps() {
+        Ok(output) => output,
+        Err(e) => {
+            return DoctorCheck::new(
+                "maintenance_processes",
+                CheckStatus::Unknown,
+                format!(
+                    "could not enumerate host processes: {e} — maintenance-process state is \
+                     unknown, not confirmed healthy"
+                ),
+            );
+        }
     };
     let text = String::from_utf8_lossy(&output.stdout);
     let count = count_maintenance_processes(&text);
