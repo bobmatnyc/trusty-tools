@@ -19,6 +19,7 @@
   // resident it reports two palaces' worth of drawers.
   import { consoleMetrics } from '../consoleApi.js';
   import { heroTiles } from '../heroTiles.js';
+  import { UNREACHABLE_AFTER_FAILURES } from '../state.svelte.js';
 
   let health = $state(null);
   let status = $state(null);
@@ -27,6 +28,8 @@
   let error = $state(null);
   let lastUpdated = $state(null);
   let timer = null;
+  // #6155: one starved poll is not an outage — see `state.svelte.js`.
+  let consecutiveFailures = 0;
 
   async function refresh() {
     try {
@@ -41,10 +44,15 @@
       dream = d;
       metrics = m?.metrics ?? null;
       error = null;
+      consecutiveFailures = 0;
       lastUpdated = new Date();
     } catch (e) {
+      consecutiveFailures += 1;
       error = e.message || String(e);
-      health = null;
+      // Hold the last good snapshot until a second poll agrees. The error text
+      // shows immediately either way, so a real outage is still visible at
+      // once — what waits is discarding the numbers on screen.
+      if (consecutiveFailures >= UNREACHABLE_AFTER_FAILURES) health = null;
     }
   }
 

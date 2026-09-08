@@ -49,6 +49,44 @@ describe('refreshHealth / refreshStatus — separate signals (issue #6155)', () 
     expect(getStatusError()).toContain('502');
   });
 
+  it('one failed poll does not flip the badge offline', async () => {
+    // #6155: at 200 events/s on the activity stream the main thread completed
+    // 1 of ~69 one-per-second polls; the rest hit `api.js`'s 35 s abort. A
+    // daemon answering curl in 1.5 ms was reported offline by a client that
+    // never got to read the answer.
+    vi.spyOn(api, 'health').mockResolvedValue({ status: 'ok', version: '0.26.0' });
+    await refreshHealth();
+
+    vi.spyOn(api, 'health').mockRejectedValue(new Error('timed out after 35s: /health'));
+    await refreshHealth();
+
+    // The error is visible at once; the snapshot is not discarded yet.
+    expect(getError()).toContain('timed out');
+    expect(getHealth()).toEqual({ status: 'ok', version: '0.26.0' });
+
+    await refreshHealth();
+
+    // A second poll agrees, so now it is an outage.
+    expect(getHealth().status).toBe('unreachable');
+  });
+
+  it('a recovered poll resets the failure count', async () => {
+    vi.spyOn(api, 'health').mockResolvedValue({ status: 'ok', version: '0.26.0' });
+    await refreshHealth();
+
+    vi.spyOn(api, 'health').mockRejectedValue(new Error('boom'));
+    await refreshHealth();
+
+    vi.spyOn(api, 'health').mockResolvedValue({ status: 'ok', version: '0.26.0' });
+    await refreshHealth();
+
+    // One more failure after a success must not flip it — the count restarted.
+    vi.spyOn(api, 'health').mockRejectedValue(new Error('boom'));
+    await refreshHealth();
+
+    expect(getHealth()).toEqual({ status: 'ok', version: '0.26.0' });
+  });
+
   it('clears the status error once status answers again', async () => {
     vi.spyOn(api, 'status').mockRejectedValue(new Error('boom'));
     await refreshStatus();
