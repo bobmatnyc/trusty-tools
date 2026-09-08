@@ -16,7 +16,10 @@
    */
   import { onMount } from 'svelte';
   import { api } from '../api.js';
-  import { navigate } from '../router.svelte.js';
+  import { getRoute, navigate } from '../router.svelte.js';
+  // #6928: compact and delete live here now — the console's Memory tab is
+  // display-only and links each of its rows to this view.
+  import PalaceActions from '../components/PalaceActions.svelte';
 
   /*
    * Why: Issue #97 — clicking the "graph →" badge on a palace row should
@@ -75,6 +78,27 @@
     } finally {
       loading = false;
     }
+    openRoutedPalace();
+  }
+
+  /**
+   * Expand the palace a `#/palace/<id>` link names, if the roster carries it.
+   *
+   * Why (#6928): the console's Memory tab is display-only and every one of its
+   * rows now links here. Before this, `#/palace/<id>` rendered the roster with
+   * nothing selected, so an operator who clicked a row landed on 94 rows and
+   * had to find theirs again — which is not "the row opens that palace's
+   * management view".
+   * What: reads the route once per load and expands the matching row, which
+   * also fetches its drawers and refreshes its counts. An id the roster does
+   * not carry expands nothing, rather than inventing a row for it.
+   */
+  function openRoutedPalace() {
+    const segs = getRoute().segments;
+    if (segs[0] !== 'palace' || !segs[1] || segs[2] === 'graph') return;
+    const id = decodeURIComponent(segs[1]);
+    if (!palaces.some((p) => p.id === id) || expanded[id]) return;
+    togglePalace(id);
   }
 
   /**
@@ -514,6 +538,9 @@
         }}>
         graph →
       </button>
+      <!-- #6928: compact and delete, moved off the console's Memory tab. Also
+           a sibling of the row button, for the same nesting reason. -->
+      <PalaceActions id={p.id} onChanged={loadPalaces} />
     </div>
     {#if p.description}
       <div class="palace-desc">{p.description}</div>
