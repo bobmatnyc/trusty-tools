@@ -101,3 +101,7 @@ tempfile       = { workspace = true }
 tokio          = { workspace = true }
 tower          = { workspace = true }
 http-body-util = { workspace = true }
+# #6848: constructing a `HarnessEvent` fixture in the event-bus tests needs
+# `chrono::Utc::now()` for its `at` field; trusty-common re-exports the type
+# but not the constructor.
+chrono         = { workspace = true }
