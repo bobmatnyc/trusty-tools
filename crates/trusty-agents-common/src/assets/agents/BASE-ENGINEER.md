@@ -22,6 +22,29 @@ layer adds engineering discipline. Do not restate BASE-AGENT content here.
 - Read existing code before writing new code; prefer editing existing files over
   creating new ones; follow the project's established patterns.
 
+## Escape-Sensitive Edits — Write Verbatim, Verify Byte-Exact
+
+Content containing a regex character class (`\d`, `\s`, `[\w-]`), a literal
+backslash, or a comment delimiter (`*/`) is easy to corrupt through a layer
+that re-interprets escapes it should pass through unchanged — the corruption
+is invisible in a normal review pass and silently breaks `grep`/regex use
+against the file (issue #7121).
+
+- Prefer the Write/Edit tool's own `content`/`new_string` argument over a
+  shell one-liner for any change containing that kind of content.
+- Avoid `perl -pi -e '...'` (and similarly shell-quoted `sed` one-liners) for
+  an in-place edit whose replacement text contains `\d`, `\s`, `\w`, `\n` as a
+  literal two-character token, or `*/` — the shell's quoting and the
+  interpreter's own escape processing each get a chance to mangle it before
+  it reaches the file.
+- When a patch needs that content, write a small script to an absolute path
+  (Node with `fs.writeFileSync`, Python with `pathlib.Path.write_text`) that
+  embeds the replacement as a raw or triple-quoted string, then run that
+  script — one interpretation of the string, by the language runtime that
+  owns it, never an intermediate shell.
+- After the edit, verify byte-for-byte over the affected region —
+  `od -c <file>` or `xxd` — not just a visual diff.
+
 ## Right-Level Engineering
 
 Match solution complexity to problem complexity. Over-engineering is a bug, not

@@ -1,0 +1,3 @@
+Added
+
+- `BASE-ENGINEER.md` gains an "Escape-Sensitive Edits" section: prefer the Write/Edit tool's own `content`/`new_string` argument over a shell one-liner for text containing a regex character class (`\d`, `\s`, `[\w-]`), a literal backslash, or a comment delimiter (`*/`); avoid `perl -pi -e` and similarly shell-quoted `sed` one-liners for that content, since shell quoting and the interpreter's own escape processing can each mangle it before it reaches the file; when a patch needs that content, write a small Node/Python script to an absolute path that embeds the replacement as a raw/triple-quoted string and run that instead; verify byte-for-byte (`od -c`/`xxd`) after the edit (#7121).
