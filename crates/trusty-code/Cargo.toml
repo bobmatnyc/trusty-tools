@@ -39,6 +39,9 @@ tracing = { workspace = true }
 # Serialization (events, ipc, perf, build_info, tools, agents)
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `~/.trusty-code/log_drain.yaml` (#6537) — same format trusty-mpm's own
+# `log_drain:` config section uses.
+serde_yaml = { workspace = true }
 
 # Timestamp support (perf, build_info)
 chrono = { workspace = true }
@@ -49,6 +52,9 @@ uuid = { workspace = true }
 # CLI entry point (tcode binary)
 clap = { workspace = true }
 tracing-subscriber = { workspace = true }
+# `tcode serve`'s own daily-rotating file log (#6537) — mirrors trusty-mpm's
+# `~/.trusty-mpm/logs` appender (`bin/tm/tracing_setup.rs`).
+tracing-appender = { workspace = true }
 
 # Phase 2: async trait dispatch for ToolExecutor, AgentRunner, SearchProvider
 async-trait = { workspace = true }
@@ -120,7 +126,11 @@ trusty-mcp = { workspace = true }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
 # `0600` token file (`serve::http::run_http` writes it, `tui_client` reads it)
 # and — because `axum-server` is on here too — `server::bearer_auth`, the
 # router-wide guard.
-trusty-common = { workspace = true, features = ["catchup", "stdio-mcp-client", "axum-server", "daemon-token", "inference-client", "config-cli", "bedrock-client", "search-index", "crate-config"] }
+# `log-drain` (#6537): `trusty_common::log_drain::{run_once, DrainConfig,
+# ObjectStoreDestination, DestinationUri, DrainTarget, LogSource, Level}` — the
+# drain CORE `tcode serve`'s own scheduler (`crate::log_drain`) calls rather
+# than reimplementing collection/upload/manifest logic.
+trusty-common = { workspace = true, features = ["catchup", "stdio-mcp-client", "axum-server", "daemon-token", "inference-client", "config-cli", "bedrock-client", "search-index", "crate-config", "log-drain"] }
 
 # `tui_client::CodeEngine` (#3415, DOC-50 §3.3/§3.4, epic #3411 Slice 3): the
 # shared engine-adapter trait + event vocabulary (`TuiEngine`/`ReplEvent`)

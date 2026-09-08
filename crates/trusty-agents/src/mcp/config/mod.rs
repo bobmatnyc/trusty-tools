@@ -141,6 +141,20 @@ pub struct GlobalConfig {
     /// `listeners_section_round_trips`.
     #[serde(default)]
     pub listeners: Vec<crate::listeners::config::ListenerConfig>,
+
+    /// `[log_drain]` section (#6537) — periodic upload of this daemon's own
+    /// log directory to object storage, mirroring trusty-mpm's `log_drain:`
+    /// section.
+    ///
+    /// Why: modelled here, not parsed independently, for the same reason
+    /// `[providers]` is above — `save()` re-serializes only fields this
+    /// struct declares, so an unmodelled `[log_drain]` table would be
+    /// silently dropped by any unrelated `mcp_*`-tool write.
+    /// What: absent or `enabled = false` (the default) means the scheduler
+    /// this daemon spawns (`crate::log_drain::spawn`) never uploads anything.
+    /// Test: `crate::log_drain::resolve::tests::toml_round_trips_every_field`.
+    #[serde(default)]
+    pub log_drain: crate::log_drain::LogDrainConfig,
 }
 
 impl GlobalConfig {

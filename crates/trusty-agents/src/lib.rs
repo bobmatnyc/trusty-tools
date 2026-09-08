@@ -105,6 +105,11 @@ pub mod ipc;
 pub mod listeners;
 pub mod llm;
 pub mod local_inference;
+/// `--api`/`--serve`'s adoption of `trusty_common::log_drain::run_once`
+/// (#6537) — mirrors trusty-mpm's own Phase 3 scheduler, scoped to the one
+/// project a `trusty-agents` daemon drains: its own rotating daemon log
+/// (`service::daemon_log_path`).
+pub mod log_drain;
 pub mod logging;
 pub mod mcp;
 /// A stand-in trusty-memory daemon on a temp Unix socket, for tests (#6286).
