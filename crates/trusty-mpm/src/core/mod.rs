@@ -109,6 +109,12 @@ pub mod instruction_pipeline;
 // Epic #4183: committed snapshots of the fully composed PM prompt. The
 // delivered-prompt diff a content change produces is the review artifact.
 pub mod ipc;
+// #7097: `tm issue audit` — the mechanical read-back of the #7067 ticketing
+// standard. `issue_audit` is the pure evaluation, `issue_audit_gh` the `gh`
+// reads that feed it; both live here rather than in `bin/tm` because the
+// `issue_audit_recent` doctor check runs from the library.
+pub mod issue_audit;
+pub mod issue_audit_gh;
 pub mod llm_overseer;
 // ADR-0055 / #6000: the local-path `repo_url` rule and its typed refusal,
 // shared by every `session_new` entry point.

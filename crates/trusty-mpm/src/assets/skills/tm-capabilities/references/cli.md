@@ -44,6 +44,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `install` — Install the bundled framework artifacts to `~/.trusty-mpm/framework/`
 - `internal-spawn-disclaimed` — \[INTERNAL\] Spawn a program with macOS TCC responsibility disclaimed (issue #2997) — not for direct use
 - `issue` — YAML-configurable issue state-management (labels/transitions/assignee)
+  - `audit` — Verify a filed issue carries a project, a milestone, and a component label (#7097)
   - `current` — Report an issue's current state, derived from its labels
   - `repair` — Resolve a mid-transition issue carrying multiple state labels
   - `seed-config` — Write the default lifecycle model and the `agents.ticketing` block to the user config path
