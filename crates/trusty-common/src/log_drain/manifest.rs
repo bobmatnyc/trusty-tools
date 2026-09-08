@@ -522,7 +522,11 @@ fn read_cache(path: &Path) -> Option<DrainManifest> {
 /// upload.
 fn write_cache(path: &Path, manifest: &DrainManifest) {
     let Some(parent) = path.parent() else { return };
-    if let Err(e) = std::fs::create_dir_all(parent) {
+    // #7158: was a raw `create_dir_all`, left at the umask-derived mode. The
+    // manifest cache records filenames and hashes of what has already left the
+    // machine, so it gets the same 0700 tightening the sibling log directories
+    // already got in #6537 (PR #7155).
+    if let Err(e) = ensure_private_dir(parent) {
         tracing::warn!(path = %parent.display(), error = %e, "log-drain cache dir unwritable");
         return;
     }
@@ -534,4 +538,31 @@ fn write_cache(path: &Path, manifest: &DrainManifest) {
         }
         Err(e) => tracing::warn!(error = %e, "log-drain cache serialisation failed"),
     }
+}
+
+/// Create `dir` (and its ancestors) and tighten it to owner-only.
+///
+/// Why: `trusty-common` cannot depend on `trusty-code` or `trusty-agents`, so
+/// it cannot call their `paths::private_state::ensure_private_state_dir` /
+/// `ensure_dir` directly — but the manifest cache under `<state_dir>/log-drain/`
+/// holds the same class of sensitive data (#7158) their private-state
+/// directories do, and deserves the same 0700 bar `~/.ssh` sets.
+/// What: `create_dir_all` then, on Unix, `chmod 0700` whenever any group/other
+/// bit is set — including on a directory that already existed permissively.
+/// Non-Unix targets have no mode bits to tighten and rely on the platform's
+/// per-user ACLs, matching `trusty-code`'s `private_state::ensure_dir`.
+/// Test: `super::tests::write_cache_creates_the_manifest_dir_at_0700`.
+fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        const PRIVATE_DIR_MODE: u32 = 0o700;
+        const NON_OWNER_BITS: u32 = 0o077;
+        let mode = std::fs::metadata(dir)?.permissions().mode();
+        if mode & NON_OWNER_BITS != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))?;
+        }
+    }
+    Ok(())
 }

@@ -848,6 +848,41 @@ async fn manifest_remote_wins_over_local_cache() {
     );
 }
 
+// #7158: the manifest cache directory (`<state_dir>/log-drain/...`) used to be
+// created with a raw `create_dir_all`, left at the umask-derived mode. It now
+// routes through the crate-local `ensure_private_dir` and must land at 0700,
+// the same bar the sibling log-drain consumers' log directories hold since
+// #6537 (PR #7155).
+#[tokio::test]
+async fn write_cache_creates_the_manifest_dir_at_0700() {
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    let dest = file_dest(dest_root.path()).await;
+
+    DrainManifest::default()
+        .save(&dest, state.path(), "k/manifest.json", "bob/sess")
+        .await
+        .expect("save");
+
+    let cache_path = DrainManifest::cache_path(state.path(), &dest, "bob/sess");
+    let cache_dir = cache_path.parent().expect("cache dir");
+    assert!(
+        cache_dir.is_dir(),
+        "manifest cache dir must exist after save"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(cache_dir)
+            .expect("stat cache dir")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "manifest cache dir must be 0700, got {mode:o}");
+    }
+}
+
 #[tokio::test]
 async fn manifest_corrupt_remote_falls_back_to_cache() {
     let dest_root = tempfile::tempdir().expect("tempdir");
