@@ -113,6 +113,7 @@ fn cold_start_produces_a_checkout_the_managed_spawn_path_accepts() {
         "bobmatnyc",
         "trusty-tools",
         source.to_str().expect("utf8 path"),
+        None,
     )
     .expect("cold start clones");
 
@@ -160,10 +161,11 @@ fn wrong_remote_reuse_is_refused_without_touching_the_checkout() {
     let source = init_source(&tmp.path().join("source"));
     let base = tmp.path().join("base");
 
-    ensure_managed_checkout_at(&base, source.to_str().expect("utf8 path")).expect("first clone");
+    ensure_managed_checkout_at(&base, source.to_str().expect("utf8 path"), None)
+        .expect("first clone");
     let head_before = git(&base, &["rev-parse", "HEAD"]);
 
-    let err = ensure_managed_checkout_at(&base, "https://github.com/someone/else.git")
+    let err = ensure_managed_checkout_at(&base, "https://github.com/someone/else.git", None)
         .expect_err("a different remote must be refused");
     assert!(
         err.to_string().contains("someone/else"),

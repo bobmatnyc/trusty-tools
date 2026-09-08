@@ -41,6 +41,10 @@ pub(crate) enum RunTarget {
         repo: String,
         /// Fully-resolved clone URL.
         clone_url: String,
+        /// Selected `gh` account (#7166), from `--account` or the embedded
+        /// `<login>@owner/repo` shorthand — see
+        /// [`super::register_args::resolve_account`].
+        account: Option<String>,
     },
 }
 
@@ -62,7 +66,32 @@ pub(crate) enum RunTarget {
 /// Test: `classify_sorts_alias_from_repo`, `classify_resolves_shorthand`,
 /// `classify_resolves_full_urls`, `classify_rejects_browser_pastes_and_paths`,
 /// `shorthand_identity_agrees_with_url_identity`.
+// #7166: every production caller now goes through `classify_run_target_with_account`
+// (`run`'s `--account`-aware dispatch always supplies one, even when `None`);
+// this account-less convenience form is kept only because the bulk of this
+// module's own tests still exercise the pre-#7166 shape directly.
+#[cfg(test)]
 pub(crate) fn classify_run_target(spec: &str) -> anyhow::Result<RunTarget> {
+    classify_run_target_with_account(spec, None)
+}
+
+/// [`classify_run_target`], reconciling the `--account` flag (#7166).
+///
+/// Why: the global `--account` flag ([`crate::cli::Cli::account`]) and the
+/// embedded `<login>@owner/repo` shorthand bind the SAME field, so the two
+/// must be reconciled in one place rather than at each of the three callers
+/// ([`run`], [`classify_bare`], and `tm register`'s own resolution) —
+/// see [`super::register_args::resolve_account`].
+/// What: identical to [`classify_run_target`] otherwise; the resolved
+/// account (flag wins, embedded is the fallback, a conflict between the two
+/// is refused) is attached to a resulting [`RunTarget::Repo`] and ignored for
+/// [`RunTarget::Alias`] — the standalone driver has no account concept.
+/// Test: `classify_resolves_account_flag`, `classify_resolves_embedded_account`,
+/// `classify_rejects_conflicting_account`.
+pub(crate) fn classify_run_target_with_account(
+    spec: &str,
+    account_flag: Option<&str>,
+) -> anyhow::Result<RunTarget> {
     let spec = spec.trim();
     if spec.is_empty() {
         anyhow::bail!(
@@ -93,11 +122,16 @@ pub(crate) fn classify_run_target(spec: &str) -> anyhow::Result<RunTarget> {
                  Pass <owner>/<repo>, or a full repository URL."
             )
         })?;
+    let account = super::register_args::resolve_account(
+        account_flag,
+        super::register_args::embedded_account(spec),
+    )?;
 
     Ok(RunTarget::Repo {
         owner: gh.owner,
         repo: gh.repo,
         clone_url,
+        account,
     })
 }
 
@@ -126,6 +160,7 @@ pub(crate) async fn run(
     target: &str,
     task: Option<String>,
     root: Option<String>,
+    account: Option<String>,
 ) -> anyhow::Result<()> {
     // `--task` is not implemented on either arm. Per DOC-24 autonomous/task
     // dispatch is the session-manager layer's concern; warn rather than drop
@@ -137,7 +172,7 @@ pub(crate) async fn run(
         );
     }
 
-    match classify_run_target(target)? {
+    match classify_run_target_with_account(target, account.as_deref())? {
         RunTarget::Alias(alias) => {
             let paths = super::managed_root::resolve_managed_paths(root.as_deref())?;
             super::standalone::run_cmd(&paths, &alias)
@@ -146,6 +181,7 @@ pub(crate) async fn run(
             owner,
             repo,
             clone_url,
+            account,
         } => {
             if let Some(r) = &root {
                 eprintln!(
@@ -154,7 +190,7 @@ pub(crate) async fn run(
                      location comes from TRUSTY_MPM_REPOS_ROOT / TRUSTY_MPM_WORKSPACE_ROOT."
                 );
             }
-            run_managed(client, url, &owner, &repo, &clone_url).await
+            run_managed(client, url, &owner, &repo, &clone_url, account.as_deref()).await
         }
     }
 }
@@ -183,12 +219,31 @@ pub(crate) async fn run(
 /// Test: `classify_bare_accepts_repo_shapes`,
 /// `classify_bare_declines_subcommand_typos`,
 /// `classify_bare_surfaces_resolved_url_errors`.
+// #7166: `run_external` now always calls `classify_bare_with_account` (with
+// `Some`/`None` depending on `--account`); this account-less form is kept
+// only for this module's and the CLI parse layer's pre-#7166 tests.
+#[cfg(test)]
 pub(crate) fn classify_bare(token: &str) -> Option<anyhow::Result<RunTarget>> {
+    classify_bare_with_account(token, None)
+}
+
+/// [`classify_bare`], reconciling the `--account` flag (#7166).
+///
+/// Why: `tm --account bob <owner>/<repo>` and `tm bob@<owner>/<repo>` both
+/// reach the `External` catch-all (the global `--account` flag parses before
+/// the unrecognized token; see [`crate::cli::Cli::account`]'s doc), so
+/// [`run_external`] needs the flag-aware classifier the same way [`run`] does.
+/// Test: `classify_bare_accepts_account_flag_and_shorthand`,
+/// `classify_bare_with_no_account_is_unchanged`.
+pub(crate) fn classify_bare_with_account(
+    token: &str,
+    account_flag: Option<&str>,
+) -> Option<anyhow::Result<RunTarget>> {
     let token = token.trim();
     if !super::register_args::looks_like_repo(token) {
         return None;
     }
-    Some(classify_run_target(token))
+    Some(classify_run_target_with_account(token, account_flag))
 }
 
 /// `tm <token>` where `<token>` matched no subcommand (#6441).
@@ -215,9 +270,10 @@ pub(crate) async fn run_external(
     tokens: &[String],
     argv: &[String],
     help: &trusty_common::help::HelpConfig,
+    account: Option<String>,
 ) -> anyhow::Result<()> {
     let token = tokens.first().map(String::as_str).unwrap_or_default();
-    let Some(classified) = classify_bare(token) else {
+    let Some(classified) = classify_bare_with_account(token, account.as_deref()) else {
         reject_unknown_subcommand(argv, help);
     };
 
@@ -234,7 +290,8 @@ pub(crate) async fn run_external(
             owner,
             repo,
             clone_url,
-        } => run_managed(client, url, &owner, &repo, &clone_url).await,
+            account,
+        } => run_managed(client, url, &owner, &repo, &clone_url, account.as_deref()).await,
         // `classify_bare` returns `None` rather than an alias, so this is
         // unreachable; routing it to the same cold start keeps the arm total.
         RunTarget::Alias(alias) => Err(super::register_args::rejection(&alias)),
@@ -341,12 +398,59 @@ async fn run_managed(
     owner: &str,
     repo: &str,
     clone_url: &str,
+    account: Option<&str>,
 ) -> anyhow::Result<()> {
     let checkout =
         trusty_mpm::daemon::managed_routes::inproject_cold_start::ensure_managed_checkout(
-            owner, repo, clone_url,
+            owner, repo, clone_url, account,
         )
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // #7166: persist the selected account onto the project's registry-B
+    // record — the SAME idempotent upsert `tm projects register --gh-account`
+    // performs — so later spawns, fetches, pushes, and `gh` calls made from
+    // inside the session reuse it (`resolve_gh_account_env_for_registry`
+    // already reads `Project::gh_account` at every spawn/relaunch; this is
+    // the one new write path, not a new read path). Best-effort: the
+    // checkout itself already succeeded, so a registry hiccup here is
+    // reported but never turns a working clone into a failed command.
+    if let Some(account) = account {
+        // #7166: the SAME derivation the daemon's own implicit
+        // auto-registration uses (`ProjectRegistry::register_from_session` →
+        // `derive_name_from_url`) — NOT `register_args`' hyphenated
+        // `owner-repo` alias scheme, which is a different registry
+        // (`~/.trusty-mpm/registry.json`) with a different naming
+        // convention. Landing on the same key means the auto-registration
+        // that fires when `launch()` below creates the session sees this
+        // project ALREADY registered and skips — this entry, gh_account and
+        // all, stays authoritative rather than sitting beside a duplicate.
+        let name = trusty_mpm::project::derive_name_from_url(clone_url)
+            .unwrap_or_else(|| format!("{owner}-{repo}"));
+        if let Err(e) = super::projects::registry::register(
+            client,
+            url,
+            super::projects::registry::RegisterInput {
+                name,
+                repo_url: clone_url.to_string(),
+                default_branch: None,
+                description: None,
+                tags: Vec::new(),
+                stack_hint: None,
+                gh_user: None,
+                gh_account: Some(account.to_string()),
+                gh_config_dir: None,
+            },
+        )
+        .await
+        {
+            eprintln!(
+                "warning: cloned as {account}, but could not persist that account on the \
+                 project registration: {e}. Later spawns for this project will not \
+                 automatically reuse it — pin it by hand with \
+                 `tm projects register --gh-account {account} …`."
+            );
+        }
+    }
 
     if checkout.reused {
         eprintln!(

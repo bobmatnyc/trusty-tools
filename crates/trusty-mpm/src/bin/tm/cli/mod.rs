@@ -107,6 +107,31 @@ pub(crate) struct Cli {
     #[arg(long, env = "TRUSTY_MPM_URL", global = true)]
     pub(crate) url: Option<String>,
 
+    /// Select which logged-in `gh` account clones/runs a managed repo (#7166).
+    ///
+    /// Why: `tm <url>` fails on a private repo when every credential path on
+    /// the machine resolves to one identity (an exported `GH_TOKEN`, git's
+    /// global `!gh auth git-credential` helper, a fixed SSH key) — the
+    /// account with visibility into the repo is simply never tried. This flag
+    /// names it explicitly. It is a clap `global = true` flag, so it parses
+    /// anywhere in the invocation: `tm --account bob-duetto <url>`, `tm run
+    /// --account bob-duetto <owner>/<repo>`, and `tm register --account
+    /// bob-duetto <owner>/<repo>` all bind the same field. The
+    /// `<account>@<owner>/<repo>` shorthand
+    /// ([`crate::commands::register_args::classify`]) is the terser
+    /// equivalent for the bare/`run` managed-repo forms; passing both is only
+    /// an error when they NAME DIFFERENT accounts
+    /// ([`crate::commands::register_args::resolve_account`]).
+    /// What: `Some(login)` selects that account's `gh`-minted token for the
+    /// daemon's `inproject` base clone
+    /// ([`trusty_mpm::daemon::managed_routes::inproject::ensure_base_clone`])
+    /// and is persisted onto the project's registry-B record
+    /// (`gh_account`) so later spawns, fetches, and `gh` calls reuse it.
+    /// `None` (the default) is unchanged ambient behaviour.
+    /// Test: `cli_parses_account_flag_global`, `cli_account_flag_after_subcommand`.
+    #[arg(long, global = true)]
+    pub(crate) account: Option<String>,
+
     /// Subcommand to run. When absent, the guided default fires (#1708).
     #[command(subcommand)]
     pub(crate) command: Option<Command>,

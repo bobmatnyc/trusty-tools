@@ -44,6 +44,7 @@ fn classify_sorts_every_shape() {
     assert_eq!(
         classify("bobmatnyc/trusty-tools"),
         Positional::Shorthand {
+            account: None,
             owner: "bobmatnyc",
             repo: "trusty-tools"
         }
@@ -51,6 +52,7 @@ fn classify_sorts_every_shape() {
     assert_eq!(
         classify("123/repo"),
         Positional::Shorthand {
+            account: None,
             owner: "123",
             repo: "repo"
         }
@@ -60,6 +62,7 @@ fn classify_sorts_every_shape() {
     assert_eq!(
         classify("owner/repo.js"),
         Positional::Shorthand {
+            account: None,
             owner: "owner",
             repo: "repo.js"
         }
@@ -593,4 +596,132 @@ fn same_url_reregistration_is_idempotent() {
     let entries = registry.list();
     assert_eq!(entries.len(), 1, "shorthand and full URL are one repo");
     assert_eq!(entries[0].alias, "owner-repo");
+}
+
+// ---------------------------------------------------------------------------
+// #7166: `<login>@<owner>/<repo>` account-selector shorthand.
+// ---------------------------------------------------------------------------
+
+/// `<login>@<owner>/<repo>` classifies as shorthand carrying the account, and
+/// `looks_like_repo` still accepts it — the same predicate `tm register`,
+/// `tm run`, and the `tm <token>` bare form all share.
+#[test]
+fn account_shorthand_classifies_and_looks_like_repo() {
+    assert_eq!(
+        classify("bob-duetto@duettoresearch/poc-hotel-supply"),
+        Positional::Shorthand {
+            account: Some("bob-duetto"),
+            owner: "duettoresearch",
+            repo: "poc-hotel-supply",
+        }
+    );
+    assert!(looks_like_repo(
+        "bob-duetto@duettoresearch/poc-hotel-supply"
+    ));
+    assert_eq!(
+        super::embedded_account("bob-duetto@duettoresearch/poc-hotel-supply"),
+        Some("bob-duetto")
+    );
+}
+
+/// `git@github.com:owner/repo.git` (the SSH clone-URL form) is untouched by
+/// the new `@`-splitting: `git@` is matched as a literal URL prefix before
+/// the account-shorthand branch ever runs, so a login literally named `git`
+/// pointed at an actual SSH remote never gets misread as a selector.
+#[test]
+fn ssh_url_is_not_mistaken_for_account_shorthand() {
+    assert_eq!(
+        classify("git@github.com:owner/repo.git"),
+        Positional::Url("git@github.com:owner/repo.git")
+    );
+    assert_eq!(
+        super::embedded_account("git@github.com:owner/repo.git"),
+        None
+    );
+}
+
+/// A `name@<url>` shape — not `name@owner/repo` — is left alone: the
+/// selector only applies to the two-segment shorthand form. A `://` anywhere
+/// in the string is matched as a `Url` by the FIRST check `classify` makes
+/// (pre-#7166, unchanged), before the account-prefix branch ever runs, so
+/// the whole string — `login@` included — is treated as (a probably
+/// malformed) URL rather than misread as carrying an embedded account.
+#[test]
+fn account_prefix_before_a_full_url_is_not_shorthand() {
+    assert_eq!(
+        classify("bob@https://github.com/owner/repo"),
+        Positional::Url("bob@https://github.com/owner/repo")
+    );
+    assert_eq!(
+        super::embedded_account("bob@https://github.com/owner/repo"),
+        None
+    );
+}
+
+/// The resolved clone URL never carries the account — it is GitHub-assumed
+/// `owner/repo` shorthand, identically to the unprefixed form.
+#[test]
+fn account_shorthand_resolves_to_the_same_url_as_plain_shorthand() {
+    assert_eq!(
+        super::resolved_url("bob-duetto@duettoresearch/poc-hotel-supply").unwrap(),
+        "https://github.com/duettoresearch/poc-hotel-supply"
+    );
+}
+
+/// Plain shorthand and a full URL both carry no embedded account.
+#[test]
+fn embedded_account_none_for_plain_shorthand_and_urls() {
+    assert_eq!(super::embedded_account("owner/repo"), None);
+    assert_eq!(
+        super::embedded_account("https://github.com/owner/repo"),
+        None
+    );
+}
+
+/// [`super::resolve_account`] — the `--account` flag / embedded-selector
+/// reconciliation.
+#[test]
+fn resolve_account_flag_only() {
+    assert_eq!(
+        super::resolve_account(Some("bobmatnyc"), None).unwrap(),
+        Some("bobmatnyc".to_string())
+    );
+}
+
+#[test]
+fn resolve_account_embedded_only() {
+    assert_eq!(
+        super::resolve_account(None, Some("bobmatnyc")).unwrap(),
+        Some("bobmatnyc".to_string())
+    );
+}
+
+#[test]
+fn resolve_account_agreeing_flag_and_embedded() {
+    assert_eq!(
+        super::resolve_account(Some("bobmatnyc"), Some("bobmatnyc")).unwrap(),
+        Some("bobmatnyc".to_string())
+    );
+}
+
+#[test]
+fn resolve_account_conflicting_flag_and_embedded_errors() {
+    let err = super::resolve_account(Some("bobmatnyc"), Some("bob-duetto")).unwrap_err();
+    assert!(
+        err.to_string().contains("conflicting account selection"),
+        "{err}"
+    );
+}
+
+#[test]
+fn resolve_account_neither_is_none() {
+    assert_eq!(super::resolve_account(None, None).unwrap(), None);
+}
+
+#[test]
+fn resolve_account_blank_flag_is_treated_as_absent() {
+    assert_eq!(
+        super::resolve_account(Some("   "), Some("bobmatnyc")).unwrap(),
+        Some("bobmatnyc".to_string())
+    );
 }

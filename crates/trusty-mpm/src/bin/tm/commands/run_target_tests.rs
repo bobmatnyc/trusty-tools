@@ -50,6 +50,7 @@ fn classify_resolves_shorthand() {
             owner: "bobmatnyc".into(),
             repo: "trusty-tools".into(),
             clone_url: "https://github.com/bobmatnyc/trusty-tools".into(),
+            account: None,
         }
     );
 }
@@ -68,6 +69,7 @@ fn classify_resolves_full_urls() {
             owner: "bobmatnyc".into(),
             repo: "trusty-tools".into(),
             clone_url: "git@github.com:bobmatnyc/trusty-tools.git".into(),
+            account: None,
         }
     );
 
@@ -78,6 +80,7 @@ fn classify_resolves_full_urls() {
             owner: "acme".into(),
             repo: "widget".into(),
             clone_url: "https://gitlab.com/acme/widget.git".into(),
+            account: None,
         }
     );
 }
@@ -102,6 +105,7 @@ fn absolute_path_derives_identity_from_the_last_two_segments() {
             owner: "code".into(),
             repo: "app".into(),
             clone_url: "/Users/me/code/app".into(),
+            account: None,
         }
     );
 }
@@ -261,4 +265,107 @@ fn classify_rejects_empty_target() {
             "message must name the remedy: {err}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// #7166: `--account` flag / `<login>@owner/repo` shorthand.
+// ---------------------------------------------------------------------------
+
+/// `--account` alone selects the account for a plain `owner/repo` target.
+#[test]
+fn classify_resolves_account_flag() {
+    let target =
+        classify_run_target_with_account("bobmatnyc/trusty-tools", Some("bob-duetto")).unwrap();
+    assert_eq!(
+        target,
+        RunTarget::Repo {
+            owner: "bobmatnyc".into(),
+            repo: "trusty-tools".into(),
+            clone_url: "https://github.com/bobmatnyc/trusty-tools".into(),
+            account: Some("bob-duetto".into()),
+        }
+    );
+}
+
+/// The embedded `<login>@owner/repo` shorthand selects the account with no
+/// `--account` flag at all.
+#[test]
+fn classify_resolves_embedded_account() {
+    let target =
+        classify_run_target_with_account("bob-duetto@duettoresearch/poc-hotel-supply", None)
+            .unwrap();
+    assert_eq!(
+        target,
+        RunTarget::Repo {
+            owner: "duettoresearch".into(),
+            repo: "poc-hotel-supply".into(),
+            clone_url: "https://github.com/duettoresearch/poc-hotel-supply".into(),
+            account: Some("bob-duetto".into()),
+        }
+    );
+}
+
+/// `--account` and a DIFFERENT embedded selector on the same invocation is
+/// refused rather than silently picking one.
+#[test]
+fn classify_rejects_conflicting_account() {
+    let err = classify_run_target_with_account(
+        "bob-duetto@duettoresearch/poc-hotel-supply",
+        Some("bobmatnyc"),
+    )
+    .expect_err("conflicting accounts must be refused");
+    assert!(
+        err.to_string().contains("conflicting account selection"),
+        "{err}"
+    );
+}
+
+/// `--account` agreeing with the embedded selector is accepted (not an
+/// error just because both spellings were used).
+#[test]
+fn classify_accepts_agreeing_account_flag_and_shorthand() {
+    let target = classify_run_target_with_account(
+        "bob-duetto@duettoresearch/poc-hotel-supply",
+        Some("bob-duetto"),
+    )
+    .unwrap();
+    assert_eq!(
+        target,
+        RunTarget::Repo {
+            owner: "duettoresearch".into(),
+            repo: "poc-hotel-supply".into(),
+            clone_url: "https://github.com/duettoresearch/poc-hotel-supply".into(),
+            account: Some("bob-duetto".into()),
+        }
+    );
+}
+
+/// `classify_bare_with_account` (the `tm <token>` catch-all path, #6441)
+/// threads the account through identically to the explicit `tm run` form.
+#[test]
+fn classify_bare_accepts_account_flag_and_shorthand() {
+    let via_flag =
+        classify_bare_with_account("bobmatnyc/trusty-tools", Some("bob-duetto")).unwrap();
+    assert_eq!(
+        via_flag.unwrap(),
+        classify_run_target_with_account("bobmatnyc/trusty-tools", Some("bob-duetto")).unwrap()
+    );
+
+    let via_shorthand =
+        classify_bare_with_account("bob-duetto@duettoresearch/poc-hotel-supply", None).unwrap();
+    assert!(matches!(
+        via_shorthand.unwrap(),
+        RunTarget::Repo {
+            account: Some(a),
+            ..
+        } if a == "bob-duetto"
+    ));
+}
+
+/// A bare token with no `@` and no `--account` still resolves with no account
+/// selected — the pre-#7166 shape, unregressed.
+#[test]
+fn classify_bare_with_no_account_is_unchanged() {
+    let bare = classify_bare("bobmatnyc/trusty-tools").unwrap().unwrap();
+    assert!(matches!(bare, RunTarget::Repo { account: None, .. }));
 }

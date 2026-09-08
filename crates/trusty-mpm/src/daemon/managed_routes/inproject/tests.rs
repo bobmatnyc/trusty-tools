@@ -123,7 +123,7 @@ fn ensure_base_clone_migrates_old_layout_dir_aside() {
 
     // 3. ensure_base_clone must migrate the old dir aside and clone fresh.
     let url = src_path.to_str().expect("src url utf8");
-    ensure_base_clone(url, &base).expect("ensure_base_clone must migrate + clone");
+    ensure_base_clone(url, &base, None).expect("ensure_base_clone must migrate + clone");
 
     // 4. The base now holds a FRESH clone (top-level `.git` present).
     assert!(
@@ -1035,7 +1035,7 @@ async fn ensure_base_clone_emits_cloning_repo_only_on_fresh_clone() {
     let base_for_clone = base.clone();
     let url_for_clone = url.clone();
     scoped(emitter1, async move {
-        ensure_base_clone(&url_for_clone, &base_for_clone)
+        ensure_base_clone(&url_for_clone, &base_for_clone, None)
             .expect("first ensure_base_clone must succeed (fresh clone)");
     })
     .await;
@@ -1054,7 +1054,8 @@ async fn ensure_base_clone_emits_cloning_repo_only_on_fresh_clone() {
     let (tx2, mut rx2) = tokio::sync::broadcast::channel(8);
     let emitter2 = StageEmitter::new("s-2", "https://example.com/owner/repo", tx2);
     scoped(emitter2, async move {
-        ensure_base_clone(&url, &base).expect("second ensure_base_clone must succeed (reuse)");
+        ensure_base_clone(&url, &base, None)
+            .expect("second ensure_base_clone must succeed (reuse)");
     })
     .await;
 
@@ -1684,7 +1685,7 @@ fn worktrees_exclude_entry_protects_against_double_force_clean() {
 
     let base = scratch.path().join("owner").join("repo");
     let url = format!("file://{}", origin.display());
-    ensure_base_clone(&url, &base).expect("ensure_base_clone must succeed");
+    ensure_base_clone(&url, &base, None).expect("ensure_base_clone must succeed");
 
     let worktree = create_session_worktree(
         &base,
@@ -1724,4 +1725,131 @@ fn worktrees_exclude_entry_protects_against_double_force_clean() {
         !said.contains(&want),
         "`clean -ffd` must not touch the worktrees directory at all, got: {said}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #7166: account-selected clone credentials.
+// ---------------------------------------------------------------------------
+
+/// A resolved token becomes `GH_TOKEN`/`GH_USER` on the child, with every
+/// inherited identity var removed FIRST — an ambient `GH_TOKEN` belonging to
+/// a different account can never win over the explicit selection.
+#[test]
+fn account_clone_env_shadows_inherited_identity_and_sets_gh_token() {
+    let env = account_clone_env_with("bob-duetto", |account| {
+        assert_eq!(account, "bob-duetto");
+        Ok("minted-token".to_string())
+    })
+    .expect("resolver succeeded");
+
+    assert_eq!(
+        env.remove,
+        crate::core::gh_identity::GH_INHERITED_IDENTITY_ENV.to_vec(),
+        "must shadow the exact same inherited-identity set gh_identity::resolve_gh_env removes"
+    );
+    assert_eq!(
+        env.set,
+        vec![
+            ("GH_TOKEN", "minted-token".to_string()),
+            ("GH_USER", "bob-duetto".to_string()),
+        ]
+    );
+
+    // Applied to a real Command: removal precedes the set, and the token
+    // reaches the child ONLY via env — never as an argument.
+    let mut cmd = std::process::Command::new("git");
+    cmd.env("GH_TOKEN", "someone-elses-ambient-token");
+    cmd.env("GITHUB_TOKEN", "another-ambient-token");
+    env.apply(&mut cmd);
+
+    let envs: Vec<_> = cmd.get_envs().collect();
+    assert!(
+        envs.contains(&(
+            std::ffi::OsStr::new("GH_TOKEN"),
+            Some(std::ffi::OsStr::new("minted-token"))
+        )),
+        "GH_TOKEN must be the minted token, not the ambient one: {envs:?}"
+    );
+    assert!(
+        envs.contains(&(std::ffi::OsStr::new("GITHUB_TOKEN"), None)),
+        "the ambient GITHUB_TOKEN must be shadowed (removed): {envs:?}"
+    );
+    assert!(
+        cmd.get_args().all(|a| a != "minted-token"),
+        "the token must never appear in argv"
+    );
+}
+
+/// A resolver failure (e.g. the account is not logged into `gh`) propagates
+/// verbatim, naming the account — the "fail loud before cloning" contract.
+#[test]
+fn account_clone_env_propagates_a_resolver_failure_naming_the_account() {
+    let err = account_clone_env_with("not-logged-in", |account| {
+        Err(format!(
+            "`gh auth token -u {account}` failed: not logged in"
+        ))
+    })
+    .expect_err("a resolver failure must propagate");
+    assert!(err.contains("not-logged-in"), "{err}");
+}
+
+/// `Option::None` (no `--account` selected) leaves `ensure_base_clone`'s
+/// child env untouched — no [`AccountCloneEnv`] is even constructed. Proven
+/// at the call-site level: `ensure_base_clone` only calls
+/// `account_clone_env` inside its `if let Some(account) = account` arm, so
+/// this is a compile-time/structural guarantee rather than a runtime one;
+/// this test pins the ambient (unchanged) clone path still succeeds when
+/// `account` is absent, matching every pre-#7166 `ensure_base_clone` call.
+#[test]
+fn ensure_base_clone_with_no_account_is_the_pre_7166_shape() {
+    let src = crate::test_support::hermetic_temp_dir();
+    let src_path = src.path();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", src_path.to_str().expect("src utf8")])
+            .status()
+            .expect("git init src")
+            .success(),
+        "git init src failed"
+    );
+    for (k, v) in [("user.email", "t@example.com"), ("user.name", "T")] {
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", src_path.to_str().expect("utf8"), "config", k, v])
+                .status()
+                .expect("git config")
+                .success(),
+            "git config {k} failed"
+        );
+    }
+    std::fs::write(src_path.join("README"), b"src").expect("write README");
+    assert!(
+        std::process::Command::new("git")
+            .args(["-C", src_path.to_str().expect("utf8"), "add", "."])
+            .status()
+            .expect("git add")
+            .success(),
+        "git add failed"
+    );
+    assert!(
+        std::process::Command::new("git")
+            .args([
+                "-C",
+                src_path.to_str().expect("utf8"),
+                "commit",
+                "-m",
+                "init",
+            ])
+            .status()
+            .expect("git commit")
+            .success(),
+        "git commit failed"
+    );
+
+    let parent = crate::test_support::hermetic_temp_dir();
+    let base = parent.path().join("owner").join("repo");
+
+    ensure_base_clone(src_path.to_str().expect("utf8"), &base, None)
+        .expect("an unselected account must not change ambient clone behaviour");
+    assert!(base.join(".git").exists());
 }

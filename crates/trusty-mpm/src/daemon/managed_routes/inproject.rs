@@ -275,9 +275,33 @@ fn migrate_old_layout_aside(base_path: &Path) -> Result<Option<PathBuf>, String>
 /// `git clone --no-local <origin_url> <base_path>` and calls
 /// `ensure_worktrees_gitignored`. A clone failure returns `Err` with the
 /// command's stderr.
-/// Test: idempotent path covered by unit tests; migration path by
-/// `ensure_base_clone_migrates_old_layout_dir_aside`; clone path by integration tests.
-pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), String> {
+///
+/// `account` (#7166) selects which logged-in `gh` identity the clone
+/// authenticates as: `None` is unchanged ambient behaviour (whatever `git`'s
+/// own credential resolution — `GH_TOKEN`, SSH agent, credential helper —
+/// finds); `Some(login)` mints that account's token via
+/// [`crate::core::gh_account::gh_token_via_cli`] (`gh auth token -u
+/// <login>`) BEFORE cloning — so a not-logged-in account fails loud here,
+/// naming the account, rather than reaching `git clone` and failing with
+/// GitHub's generic "Repository not found" — and runs the clone with
+/// `GH_TOKEN=<token>` set and every [`crate::core::gh_identity::
+/// GH_INHERITED_IDENTITY_ENV`] var (an ambient `GH_TOKEN`/`GITHUB_TOKEN`
+/// included) removed from the child first, so an exported token belonging to
+/// a DIFFERENT account can never win over the explicit selection (#6668's
+/// shadowing fix, applied to this THIRD `gh`-credentialed call site — see
+/// `gh_token_via_cli` and `gh_identity::resolve_gh_env`, the two it was
+/// already applied to). The token is never written to argv or into
+/// `origin_url`: it reaches `git`'s already-configured `!gh auth
+/// git-credential` helper exclusively through the child's environment.
+/// Test: `account_clone_env_shadows_inherited_identity_and_sets_gh_token`,
+/// `account_clone_env_propagates_a_resolver_failure_naming_the_account`,
+/// `ensure_base_clone_with_no_account_is_the_pre_7166_shape` (all in
+/// `inproject/tests.rs`).
+pub fn ensure_base_clone(
+    origin_url: &str,
+    base_path: &Path,
+    account: Option<&str>,
+) -> Result<(), String> {
     if base_path.join(".git").exists() {
         info!(
             path = %base_path.display(),
@@ -324,10 +348,18 @@ pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), Strin
     // inherited cwd cannot cause git to fail at startup with "fatal: Unable to
     // read current working directory" (exit 128) → HTTP 500 on managed-spawn.
     let cwd = base_path.parent().unwrap_or(std::path::Path::new("/"));
-    let out = trusty_common::git::command()
-        .args(["clone", "--no-local", origin_url])
+    // #7182: built via the shared entry point (maintenance/gc disabled on
+    // this one invocation) rather than a bare `Command::new("git")`.
+    let mut cmd = trusty_common::git::command();
+    cmd.args(["clone", "--no-local", origin_url])
         .arg(base_path)
-        .current_dir(cwd)
+        .current_dir(cwd);
+    if let Some(account) = account {
+        let env = account_clone_env(account)
+            .map_err(|e| format!("inproject: cannot clone as {account}: {e}"))?;
+        env.apply(&mut cmd);
+    }
+    let out = cmd
         .output()
         .map_err(|e| format!("inproject: git clone failed to spawn: {e}"))?;
 
@@ -360,6 +392,76 @@ pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), Strin
     // "not reachable".
     crate::core::push_guard::install_and_log(base_path);
     Ok(())
+}
+
+/// The env overrides an account-selected clone applies to the `git` child (#7166).
+///
+/// Why: split out of [`ensure_base_clone`] so the shadow-then-set shape can
+/// be asserted directly against a plain `std::process::Command`, without
+/// spawning a real `git clone` — mirrors how [`crate::core::gh_identity::
+/// GhEnv::apply_to`] is unit-tested at the pure-value layer.
+/// What: `remove` — every [`crate::core::gh_identity::
+/// GH_INHERITED_IDENTITY_ENV`] entry, so an exported `GH_TOKEN`/`GITHUB_TOKEN`
+/// (or a `GH_HOST`/`GH_CONFIG_DIR` naming a different host/identity) cannot
+/// outrank the selection; `set` — `GH_TOKEN=<minted token>` then
+/// `GH_USER=<account>` (informational only; git/gh never read it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AccountCloneEnv {
+    remove: Vec<&'static str>,
+    set: Vec<(&'static str, String)>,
+}
+
+impl AccountCloneEnv {
+    /// Apply `remove` then `set` to `cmd` — removal MUST precede the set, the
+    /// same ordering [`crate::core::gh_identity::GhEnv::apply_to`] requires.
+    fn apply(&self, cmd: &mut std::process::Command) {
+        for key in &self.remove {
+            cmd.env_remove(key);
+        }
+        for (key, value) in &self.set {
+            cmd.env(key, value);
+        }
+    }
+}
+
+/// Resolve the [`AccountCloneEnv`] for `account`, minting its token via
+/// `gh auth token -u <account>` (#7166).
+///
+/// Why: the one place this module decides HOW an explicit account selection
+/// becomes credentials for a raw `git clone` subprocess — as opposed to a
+/// `gh` subcommand, which [`trusty_common::gh::GhCommand`] already handles.
+/// `git clone` never goes through `gh`, so the token has to land where
+/// `git`'s own already-configured credential resolution (this workspace's
+/// convention: `credential.helper = !gh auth git-credential`) will find
+/// it — the environment, never argv or the URL.
+/// What: propagates [`crate::core::gh_account::gh_token_via_cli`]'s error
+/// verbatim on failure (already names the account and points at `gh auth
+/// login` — see that function's doc); on success returns the shadow-then-set
+/// pair described on [`AccountCloneEnv`].
+/// Test: `account_clone_env_shadows_inherited_identity_and_sets_gh_token`,
+/// `account_clone_env_propagates_a_resolver_failure_naming_the_account`.
+fn account_clone_env(account: &str) -> Result<AccountCloneEnv, String> {
+    account_clone_env_with(account, crate::core::gh_account::gh_token_via_cli)
+}
+
+/// [`account_clone_env`] with an injectable token resolver.
+///
+/// Why: an injectable closure — this codebase's established seam for `gh` I/O
+/// that cannot run hermetically in CI (see `gh_account::resolve_gh_account_env_with`,
+/// which this mirrors) — lets both the shadow-then-set shape AND the
+/// not-logged-in refusal be asserted with no real `gh` process, no PATH
+/// mutation, and no network.
+/// Test: `account_clone_env_shadows_inherited_identity_and_sets_gh_token`,
+/// `account_clone_env_propagates_a_resolver_failure_naming_the_account`.
+fn account_clone_env_with(
+    account: &str,
+    resolve_token: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<AccountCloneEnv, String> {
+    let token = resolve_token(account)?;
+    Ok(AccountCloneEnv {
+        remove: crate::core::gh_identity::GH_INHERITED_IDENTITY_ENV.to_vec(),
+        set: vec![("GH_TOKEN", token), ("GH_USER", account.to_string())],
+    })
 }
 
 /// Compute the per-session worktree directory for `worktree_name` under `base_path`.
@@ -931,7 +1033,11 @@ pub fn try_inproject_spawn(path: &Path) -> Result<Option<(PathBuf, String, Strin
     };
 
     let base = base_clone_path(&gh.owner, &gh.repo);
-    ensure_base_clone(&origin_url, &base)?;
+    // #7166: an already-on-disk operator checkout has no account SELECTOR to
+    // apply — this path only ever REUSES an existing base clone (or clones
+    // from an `origin` the operator's own ambient identity already reads),
+    // never a cold start from a bare `owner/repo`.
+    ensure_base_clone(&origin_url, &base, None)?;
 
     info!(
         owner = %gh.owner,
