@@ -49,6 +49,30 @@ use account_clone::account_clone_env;
 // re-export hop.
 mod account_config_dir;
 
+/// Resolve (building if necessary) the per-account `gh` config directory for
+/// `login`, for callers outside this module that need to persist it (#7166
+/// review follow-up CRITICAL).
+///
+/// Why: [`ensure_base_clone`] only builds this directory on a genuine first
+/// clone — an already-`.git`-containing `base_path` returns early without
+/// ever calling [`account_clone_env`]/the bootstrap. The CLI
+/// (`bin/tm/commands/run_target.rs`'s `run_managed`, `main.rs`'s `Register`
+/// handler) needs the SAME directory on every `--account` invocation,
+/// including a reused-checkout run, so it can persist
+/// `Project.github.config_dir` and keep every LATER session spawn (fetches,
+/// pushes, `gh` calls) on the discriminating `GH_CONFIG_DIR` path instead of
+/// the demoted `gh auth token -u` fallback.
+/// What: delegates to
+/// [`account_config_dir::ensure_account_config_dir_default`] — idempotent:
+/// builds once from the operator's own logged-in `hosts.yml`, reused
+/// untouched on every later call.
+/// Test: covered indirectly via `account_config_dir::tests`, which exercise
+/// the bootstrap this thin wrapper delegates to; this function adds no logic
+/// of its own to test hermetically.
+pub fn account_config_dir_for(login: &str) -> Result<PathBuf, String> {
+    account_config_dir::ensure_account_config_dir_default(login)
+}
+
 /// Environment variable that overrides the managed repos root.
 ///
 /// Why: operators need an escape hatch (tests, non-standard layouts) that wins

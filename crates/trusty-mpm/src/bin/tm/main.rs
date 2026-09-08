@@ -586,29 +586,17 @@ async fn main() -> anyhow::Result<()> {
                 let name = trusty_mpm::project::derive_name_from_url(&repo_url)
                     .or_else(|| alias.clone())
                     .unwrap_or_else(|| repo_url.clone());
-                if let Err(e) = commands::projects::registry::register(
+                // #7166 review follow-up CRITICAL/HIGH: shared with
+                // `run_managed`'s post-clone step — see that call site's doc.
+                commands::projects::registry::auto_persist_account_selection(
                     &client,
                     &url,
-                    commands::projects::registry::RegisterInput {
-                        name,
-                        repo_url,
-                        default_branch: None,
-                        description: None,
-                        tags: Vec::new(),
-                        stack_hint: None,
-                        gh_user: None,
-                        gh_account: Some(resolved_account.clone()),
-                        gh_config_dir: None,
-                    },
+                    name,
+                    repo_url,
+                    &resolved_account,
+                    "registered",
                 )
-                .await
-                {
-                    eprintln!(
-                        "warning: registered, but could not persist account \
-                         '{resolved_account}' on the daemon project registration: {e}. Pin it \
-                         by hand with `tm projects register --gh-account {resolved_account} …`."
-                    );
-                }
+                .await;
             }
             Ok(())
         }

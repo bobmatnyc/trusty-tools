@@ -426,30 +426,19 @@ async fn run_managed(
         // all, stays authoritative rather than sitting beside a duplicate.
         let name = trusty_mpm::project::derive_name_from_url(clone_url)
             .unwrap_or_else(|| format!("{owner}-{repo}"));
-        if let Err(e) = super::projects::registry::register(
+        // #7166 review follow-up CRITICAL/HIGH: shared with `tm register
+        // --account`'s handler — builds/reuses the per-account gh config dir
+        // and preserves the project's current default_branch, rather than
+        // discarding both on every auto-persist call.
+        super::projects::registry::auto_persist_account_selection(
             client,
             url,
-            super::projects::registry::RegisterInput {
-                name,
-                repo_url: clone_url.to_string(),
-                default_branch: None,
-                description: None,
-                tags: Vec::new(),
-                stack_hint: None,
-                gh_user: None,
-                gh_account: Some(account.to_string()),
-                gh_config_dir: None,
-            },
+            name,
+            clone_url.to_string(),
+            account,
+            &format!("cloned as {account}"),
         )
-        .await
-        {
-            eprintln!(
-                "warning: cloned as {account}, but could not persist that account on the \
-                 project registration: {e}. Later spawns for this project will not \
-                 automatically reuse it — pin it by hand with \
-                 `tm projects register --gh-account {account} …`."
-            );
-        }
+        .await;
     }
 
     if checkout.reused {

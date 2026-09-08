@@ -158,6 +158,136 @@ fn account_change_log_line(
     }
 }
 
+/// Best-effort persist of an account selection onto the daemon's registry-B
+/// project record, shared by `run_managed`'s post-clone step and `tm register
+/// --account`'s handler (#7166 review follow-up CRITICAL/HIGH).
+///
+/// Why: both callers need the IDENTICAL two fixes — thread the per-account gh
+/// config dir into `RegisterInput.gh_config_dir` (instead of the old
+/// unconditional `None`, which left every session spawn AFTER this one on the
+/// demoted `gh auth token -u` selector) and preserve the project's current
+/// `default_branch` (instead of resetting it to `"main"` on every
+/// `--account` run) — a single call site is how a divergence between two
+/// hand-duplicated copies is prevented, not just how it is fixed once.
+/// `warning_context` (e.g. `"cloned as {account}"`, `"registered"`) makes the
+/// two callers' user-facing warnings read naturally without duplicating the
+/// three-step body.
+/// What: resolves `gh_config_dir` via
+/// [`trusty_mpm::daemon::managed_routes::inproject::account_config_dir_for`]
+/// through [`resolve_account_gh_config_dir`], `default_branch` via
+/// [`current_default_branch`], then calls [`register`] with both — printing a
+/// `warning:` line (never aborting; the clone/registration this follows
+/// already succeeded) on either the config-dir build or the final upsert
+/// failing.
+/// Test: the two decisions this delegates to —
+/// [`resolve_account_gh_config_dir`] and [`default_branch_to_preserve`] (via
+/// [`current_default_branch`]) — are tested directly below; this function is
+/// thin call-site wiring with no branch logic of its own to test
+/// hermetically.
+pub(crate) async fn auto_persist_account_selection(
+    client: &reqwest::Client,
+    url: &str,
+    name: String,
+    repo_url: String,
+    account: &str,
+    warning_context: &str,
+) {
+    let (gh_config_dir, config_dir_warning) = resolve_account_gh_config_dir(
+        trusty_mpm::daemon::managed_routes::inproject::account_config_dir_for(account),
+    );
+    if let Some(w) = config_dir_warning {
+        eprintln!(
+            "warning: {warning_context}, but could not build its per-account gh config \
+             directory to persist on the project registration: {w}. Later spawns for this \
+             project will fall back to the less reliable `gh auth token -u` selector."
+        );
+    }
+
+    let default_branch = current_default_branch(client, url, &name).await;
+
+    if let Err(e) = register(
+        client,
+        url,
+        RegisterInput {
+            name,
+            repo_url,
+            default_branch,
+            description: None,
+            tags: Vec::new(),
+            stack_hint: None,
+            gh_user: None,
+            gh_account: Some(account.to_string()),
+            gh_config_dir,
+        },
+    )
+    .await
+    {
+        eprintln!(
+            "warning: {warning_context}, but could not persist that account on the project \
+             registration: {e}. Later spawns for this project will not automatically reuse it \
+             — pin it by hand with `tm projects register --gh-account {account} …`."
+        );
+    }
+}
+
+/// Decide whether an account-selected auto-[`register`] call should persist a
+/// `gh_config_dir`, from the per-account config dir bootstrap's own result
+/// (#7166 review follow-up CRITICAL).
+///
+/// Why: `run_managed`/`tm register --account`'s auto-persist call used to pass
+/// `gh_config_dir: None` unconditionally, discarding the discriminating
+/// per-account directory
+/// [`trusty_mpm::daemon::managed_routes::inproject::account_config_dir_for`]
+/// just built or reused. Every session spawn AFTER the first clone then fell
+/// back to `resolve_gh_account_env_for_registry`'s demoted `gh auth token -u
+/// <account>` arm — the exact "does not discriminate between logged-in
+/// accounts on a keyring-backed host" defect #7166 exists to close.
+/// What: `Ok(dir)` → `(Some(dir), None)`, the dir to persist; `Err(message)`
+/// → `(None, Some(message))`, so the caller can warn without aborting an
+/// already-succeeded clone/registration (matches [`register`]'s own
+/// best-effort failure handling).
+/// Test: `resolve_account_gh_config_dir_persists_a_built_dir`,
+/// `resolve_account_gh_config_dir_warns_and_omits_on_failure`.
+fn resolve_account_gh_config_dir(
+    build_result: Result<std::path::PathBuf, String>,
+) -> (Option<std::path::PathBuf>, Option<String>) {
+    match build_result {
+        Ok(dir) => (Some(dir), None),
+        Err(message) => (None, Some(message)),
+    }
+}
+
+/// Best-effort lookup of an already-registered project's CURRENT
+/// `default_branch`, for an auto-persist [`register`] caller with no explicit
+/// value of its own (#7166 review follow-up HIGH).
+///
+/// Why: the daemon's `register_project_registry_op` preserves every OTHER
+/// optional field across a re-register (`.or_else(|| existing...)`), but
+/// `default_branch` is not one of them — a bare `None` resolves to `"main"`
+/// unconditionally. `run_managed`/`tm register --account`'s auto-persist call
+/// fires on EVERY `--account` invocation, including a reused checkout, so
+/// without this lookup a project with a customized default branch (e.g.
+/// `develop`) was silently reset to `main` on every one of them.
+/// What: a best-effort `registry_get_project` fetch, then
+/// [`default_branch_to_preserve`] — a lookup failure (including "project does
+/// not exist yet") is treated as "no prior value" rather than aborting,
+/// mirroring [`register`]'s own `previous_gh_account` fetch.
+/// Test: exercised via `run_target`/`main.rs`'s call sites; the decision
+/// itself is [`default_branch_to_preserve`], tested directly below.
+async fn current_default_branch(client: &reqwest::Client, url: &str, name: &str) -> Option<String> {
+    let existing = daemon(client, url).registry_get_project(name).await.ok();
+    default_branch_to_preserve(existing.as_ref())
+}
+
+/// Pure decision behind [`current_default_branch`]: pass through an existing
+/// project's `default_branch`, or `None` for a genuinely new one (which the
+/// daemon then defaults to `"main"`).
+/// Test: `default_branch_to_preserve_keeps_existing`,
+/// `default_branch_to_preserve_is_none_for_a_new_project`.
+fn default_branch_to_preserve(existing: Option<&Project>) -> Option<String> {
+    existing.map(|p| p.default_branch.clone())
+}
+
 /// `tm projects show <name> [--json]` — config + read-only nested sessions.
 pub(crate) async fn show(
     client: &reqwest::Client,
@@ -640,5 +770,40 @@ mod tests {
             account_change_log_line("widget", Some("bobmatnyc"), None),
             None
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // #7166 review follow-up: config-dir persistence and default_branch
+    // preservation for the account-selected auto-`register()` call sites.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_account_gh_config_dir_persists_a_built_dir() {
+        let dir = std::path::PathBuf::from("/home/bob/.trusty-mpm/gh-accounts/bob-duetto");
+        let (persisted, warning) = resolve_account_gh_config_dir(Ok(dir.clone()));
+        assert_eq!(persisted, Some(dir));
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn resolve_account_gh_config_dir_warns_and_omits_on_failure() {
+        let (persisted, warning) = resolve_account_gh_config_dir(Err("not logged in".to_string()));
+        assert!(persisted.is_none());
+        assert_eq!(warning.as_deref(), Some("not logged in"));
+    }
+
+    #[test]
+    fn default_branch_to_preserve_keeps_existing() {
+        let mut p = project();
+        p.default_branch = "develop".into();
+        assert_eq!(
+            default_branch_to_preserve(Some(&p)),
+            Some("develop".to_string())
+        );
+    }
+
+    #[test]
+    fn default_branch_to_preserve_is_none_for_a_new_project() {
+        assert_eq!(default_branch_to_preserve(None), None);
     }
 }
