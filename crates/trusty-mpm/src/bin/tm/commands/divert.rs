@@ -186,28 +186,22 @@ fn log_diversion(files: usize, reply: &WorkerReply) {
     eprintln!("{}", diversion_line(count, files, reply));
 }
 
-/// The environment variable carrying the PARENT session's id.
+/// The parent session's id, when the harness supplied one.
 ///
 /// Why (#6959): `tm divert` runs as a plain child of the session, so the
 /// harness's own session id arrives here unmodified — the scrub in
-/// [`crate::commands::divert_worker::NESTED_SESSION_ENV`] strips this variable
-/// from the WORKER this command spawns, never from this process. That is what
-/// lets a savings row be attributed to the session the statusline folds for.
-/// What: `CLAUDE_CODE_SESSION_ID`.
-/// Test: `parent_session_id_env_is_scrubbed_from_the_worker_only`.
-pub(crate) const PARENT_SESSION_ID_ENV: &str = "CLAUDE_CODE_SESSION_ID";
-
-/// The parent session's id, when the harness supplied one.
-///
-/// Why: the diversion ledger line tolerates an unknown session (it is a counter,
-/// and an uncounted diversion is worse than a mislabelled one), but a savings row
-/// under no id is unattributable and must be declined instead.
-/// What: [`PARENT_SESSION_ID_ENV`], `None` when absent or blank.
+/// [`crate::commands::divert_worker::NESTED_SESSION_ENV`] strips
+/// [`trusty_mpm::core::savings::CLAUDE_CODE_SESSION_ID_ENV`] from the WORKER
+/// this command spawns, never from this process. That is what lets a savings
+/// row be attributed to the session the statusline folds for. The diversion
+/// ledger line tolerates an unknown session (it is a counter, and an uncounted
+/// diversion is worse than a mislabelled one), but a savings row under no id is
+/// unattributable and must be declined instead.
+/// What: [`trusty_mpm::core::savings::claude_code_session_id`] — the one read of
+/// that variable both savings producers share since #7209.
 /// Test: `parent_session_id_env_is_scrubbed_from_the_worker_only`.
 fn parent_session_id() -> Option<String> {
-    std::env::var(PARENT_SESSION_ID_ENV)
-        .ok()
-        .filter(|s| !s.trim().is_empty())
+    trusty_mpm::core::savings::claude_code_session_id()
 }
 
 /// Total bytes of file content this diversion kept out of the session.
