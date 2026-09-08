@@ -59,6 +59,12 @@ mod test_env;
 #[cfg(test)]
 mod provider_tests;
 
+// #7106: the per-inference ONNX batch ceiling. Its own file for the same
+// line-cap reason as `provider_tests`, and a sibling of `test_env` so the
+// env-knob cases share the ONE `ENV_LOCK`.
+#[cfg(test)]
+mod batching_tests;
+
 pub use fast_embedder::FastEmbedder;
 pub use types::{
     CudaOptions, DEFAULT_CACHE_CAPACITY, DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES,
