@@ -455,6 +455,48 @@ async fn generation_increments_across_forced_delete() {
     );
 }
 
+/// (k) `mark_errored` takes `Active`/`Provisioning` -> `Errored`, which is
+/// outside the set this route serves. Six production callers reach it — a
+/// failed spawn, a failed resume, a failed launch verification and a parked
+/// auto-resume — and none of them passes through `stop`.
+#[tokio::test]
+async fn generation_increments_across_mark_errored() {
+    let (state, driver, _dir) = test_state().await;
+    let mgr = state.session_manager().await;
+
+    let mut record = make_record(None);
+    record.tmux_name = "tm-errored-gen".into();
+    record.state = ManagedSessionState::Active;
+    record.workspace_path = Some(PathBuf::from("/repo/errored"));
+    let id = record.id;
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("upsert active session");
+    driver.set_live(&["tm-errored-gen"]);
+
+    let before = decode(&active_projects_core(&state).await).generation;
+
+    mgr.mark_errored(&id, "spawn failed")
+        .await
+        .expect("mark_errored");
+
+    let after = decode(&active_projects_core(&state).await);
+    assert_eq!(
+        after.projects.len(),
+        0,
+        "an errored session leaves the served set: {:?}",
+        after.projects
+    );
+    assert!(
+        after.generation > before,
+        "mark_errored must bump the generation: before={before} after={}",
+        after.generation
+    );
+}
+
 /// (j) A terminal transition also drops the session's derivation-cache entry,
 /// so the map is bounded by live records rather than by every session the
 /// daemon has ever served.

@@ -37,7 +37,9 @@ impl SessionManager {
     /// `Provisioning`; marking it errored surfaces the failure to `tm session ls`.
     /// What: transitions the record to `ManagedSessionState::Errored` and appends
     /// the error message to the task field for observability, then persists.
-    /// Test: covered by handler_spawn_wires_provision_and_spawn error path.
+    /// Test: covered by handler_spawn_wires_provision_and_spawn error path;
+    /// the #7087 residency bump by `generation_increments_across_mark_errored`
+    /// in `daemon::managed_routes::residency`'s route tests.
     pub async fn mark_errored(
         &self,
         id: &ManagedSessionId,
@@ -47,6 +49,10 @@ impl SessionManager {
         record.state = ManagedSessionState::Errored;
         record.task = format!("{} [error: {}]", record.task, error_msg);
         self.store.write().await.upsert(record).await?;
+        // #7087: `Errored` is not `Active`/`Provisioning`, so a failed spawn,
+        // a failed resume or a parked auto-resume drops the session out of the
+        // set `mpm.residency.active` serves.
+        self.bump_residency_generation();
         Ok(())
     }
 
@@ -56,6 +62,15 @@ impl SessionManager {
     /// must be persisted so `tm session ls` shows it and `activity` can infer
     /// context.
     /// What: looks up the record, sets `workspace_path` and `state`, and persists.
+    ///
+    /// #7087: `new_state` is arbitrary, and this method does NOT bump the
+    /// residency generation. Every caller today passes `Active` onto a
+    /// `Provisioning` record, which stays inside the set
+    /// `mpm.residency.active` serves, so no bump is owed. A caller that passes
+    /// a state OUTSIDE `Active`/`Provisioning` crosses that boundary and must
+    /// call [`SessionManager::bump_residency_generation`] itself — or route
+    /// through the verb that owns that transition (`stop`, `mark_errored`,
+    /// `decommission`, `delete_record`), which is the better answer.
     /// Test: covered by handler_spawn_wires_provision_and_spawn.
     pub async fn set_workspace(
         &self,

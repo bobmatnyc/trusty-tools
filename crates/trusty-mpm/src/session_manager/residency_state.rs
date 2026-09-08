@@ -30,9 +30,12 @@
 //! `generation_increments_across_resume`,
 //! `generation_increments_across_mark_reactivated`,
 //! `generation_increments_across_mark_runtime_exited_stopped`,
+//! `generation_increments_across_mark_errored`,
 //! `generation_increments_across_forced_delete` and
 //! `forced_delete_evicts_the_residency_cache_entry` in
-//! `daemon::managed_routes::residency`'s route tests.
+//! `daemon::managed_routes::residency`'s route tests, and — for the boot
+//! sweep — `reconcile_tombstones_an_adopted_reserved_record_whose_tmux_is_gone`
+//! in `naming_tests.rs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -50,10 +53,21 @@ impl SessionManager {
     /// must be able to notice. Entering: `create`, `adopt_existing`, `resume`
     /// (`Stopped`/`Errored -> Active`) and `mark_reactivated`
     /// (`Stopped`/`Decommissioned -> Active`). Leaving: `stop`/
-    /// `stop_with_cause`, `mark_runtime_exited_stopped`, both decommission
-    /// paths (record-only and full teardown), `delete_record` (`--force`
-    /// reaches it straight from `Active`/`Provisioning`), and
+    /// `stop_with_cause`, `mark_runtime_exited_stopped`, `mark_errored`, both
+    /// decommission paths (record-only and full teardown), `delete_record`
+    /// (`--force` reaches it straight from `Active`/`Provisioning`), and
     /// `reconcile_on_boot`'s leaked-test-adoption sweep (#6116).
+    ///
+    /// `set_workspace` is deliberately absent: every caller passes `Active`
+    /// onto a `Provisioning` record, which does not cross the boundary. See
+    /// its doc for what a future caller owes.
+    ///
+    /// `reconcile_on_boot`'s live/gone arms are deliberately absent too. They
+    /// run once, before any consumer has pulled from this process, and the
+    /// counter starts at zero on every daemon start — so there is no earlier
+    /// generation for that pass to invalidate. The sweep above bumps because
+    /// it also evicts, and the two belong together. A transition added to the
+    /// boot loop that a LATER pull could disagree with does owe a bump.
     ///
     /// The generation is advisory-monotonic, never a set hash: bumping when
     /// the set happens to be unchanged only costs a consumer one redundant

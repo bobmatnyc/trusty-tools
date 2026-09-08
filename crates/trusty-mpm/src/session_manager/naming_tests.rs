@@ -1148,7 +1148,28 @@ async fn reconcile_tombstones_an_adopted_reserved_record_whose_tmux_is_gone() {
         store.upsert(created.clone()).await.unwrap();
     }
 
+    // #7087: the sweep drops the record out of the set `mpm.residency.active`
+    // serves, so seed a cache entry the sweep must evict and capture the
+    // generation the sweep must move. The gone arm the other two records take
+    // does not bump, so only the sweep can satisfy the assertion below.
+    let leak_root = std::path::PathBuf::from("/tmp/leak-ws");
+    mgr.residency_cache_store(leaked.id, leak_root.clone(), None, Vec::new())
+        .await;
+    let generation_before = mgr.residency_generation();
+
     let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert!(
+        mgr.residency_generation() > generation_before,
+        "the sweep leaves the active-project set, so it must bump the \
+         residency generation: before={generation_before} after={}",
+        mgr.residency_generation()
+    );
+    assert_eq!(
+        mgr.residency_cache_lookup(&leaked.id, &leak_root).await,
+        None,
+        "a swept record is terminal — its derivation cache entry must go with it"
+    );
 
     let after = mgr.get(&leaked.id).await.unwrap();
     assert_eq!(
