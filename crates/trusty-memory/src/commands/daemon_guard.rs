@@ -136,8 +136,14 @@ pub async fn probe(socket: &Path) -> bool {
 /// passed, and there is nothing for it to mean since #6286. Stdio is null-ed so
 /// the daemon survives a terminal close.
 fn spawn_daemon() -> Result<u32> {
-    trusty_common::daemon_guard::spawn_current_exe(&["serve", "--foreground"])
-        .map_err(|e| anyhow!("trusty-memory daemon spawn failed: {e}"))
+    // #7085: forward this process's parent-death stamp. A bridge auto-starting
+    // the daemon on behalf of a test must not leave a daemon that outlives that
+    // test; in production nothing is stamped and this is a plain detached spawn.
+    trusty_common::daemon_guard::spawn_current_exe_forwarding_parent_link(&[
+        "serve",
+        "--foreground",
+    ])
+    .map_err(|e| anyhow!("trusty-memory daemon spawn failed: {e}"))
 }
 
 /// Ensure something is serving `socket`, starting the daemon at most once

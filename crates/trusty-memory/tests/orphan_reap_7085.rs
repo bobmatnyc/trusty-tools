@@ -36,6 +36,13 @@ const ENV_PIDFILE: &str = "TRUSTY_7085_PIDFILE";
 /// The isolated data root [`spawner_child_mode`] hands the daemon.
 const ENV_DATA_DIR: &str = "TRUSTY_7085_DATA_DIR";
 
+/// Set on the spawner to make it reach the daemon through a bridge level, which
+/// is what makes the daemon a detached grandchild rather than a direct child.
+const ENV_VIA_BRIDGE: &str = "TRUSTY_7085_VIA_BRIDGE";
+
+/// Where [`bridge_child_mode`] writes the detached daemon's pid.
+const ENV_BRIDGE_PIDFILE: &str = "TRUSTY_7085_BRIDGE_PIDFILE";
+
 /// How long the daemon gets to boot far enough to bind its socket.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -96,15 +103,22 @@ fn wait_for_path(path: &Path, timeout: Duration) -> bool {
 /// `--include-ignored` run cannot block on it. With the var set, spawns
 /// `serve --foreground` through
 /// [`trusty_common::parent_death::exit_with_parent`], writes the child pid to
-/// the named file, and then sleeps until killed.
-/// Test: driven by `foreground_daemon_exits_when_its_spawner_is_sigkilled`.
+/// the named file, and then blocks until killed. With [`ENV_VIA_BRIDGE`] also
+/// set it inserts one more level first — see [`bridge_child_mode`].
+/// Test: driven by `foreground_daemon_exits_when_its_spawner_is_sigkilled` and
+/// `detached_grandchild_daemon_exits_when_its_spawner_is_sigkilled`.
 #[test]
-#[ignore = "re-entry helper, run as a child by foreground_daemon_exits_when_its_spawner_is_sigkilled"]
+#[ignore = "re-entry helper, run as a child by the two orphan-reap tests"]
 fn spawner_child_mode() {
     let Ok(pidfile) = std::env::var(ENV_PIDFILE) else {
         return;
     };
     let data_dir = std::env::var(ENV_DATA_DIR).expect("spawner mode needs a data dir");
+
+    if std::env::var(ENV_VIA_BRIDGE).is_ok() {
+        run_via_bridge(&pidfile, &data_dir);
+        return;
+    }
 
     let mut child = trusty_common::parent_death::exit_with_parent(
         std::process::Command::new(binary())
@@ -128,6 +142,71 @@ fn spawner_child_mode() {
     let _ = child.wait();
 }
 
+/// Spawner-mode variant that puts a short-lived bridge between it and the daemon.
+///
+/// Why: the production shape that produced most of the orphans is not a direct
+/// child. A stdio bridge auto-starts the daemon DETACHED and then exits, so the
+/// daemon's parent is gone within milliseconds and only the stamped pid's
+/// identity can speak for whether the run that wanted it is still alive.
+/// What: stamps a re-entry into [`bridge_child_mode`] with THIS process's pid,
+/// waits for that bridge to exit (as a real bridge does at EOF), then blocks.
+/// The daemon it left behind is a grandchild whose ppid is 1.
+fn run_via_bridge(pidfile: &str, data_dir: &str) {
+    let status = trusty_common::parent_death::exit_with_parent(
+        std::process::Command::new(std::env::current_exe().expect("locate this test binary"))
+            .args([
+                "--exact",
+                "bridge_child_mode",
+                "--ignored",
+                "--test-threads",
+                "1",
+            ])
+            .env(ENV_BRIDGE_PIDFILE, pidfile)
+            .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir)
+            .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
+            .env("RUST_LOG", "warn")
+            .env_remove(ENV_PIDFILE)
+            .env_remove(ENV_VIA_BRIDGE)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .status()
+    .expect("run the bridge helper");
+    assert!(status.success(), "the bridge helper must exit cleanly");
+
+    // The bridge is gone and the daemon is reparented to pid 1. Block until our
+    // own caller SIGKILLs us.
+    loop {
+        std::thread::sleep(Duration::from_secs(60));
+    }
+}
+
+/// Re-entry helper standing in for a stdio bridge: start the daemon DETACHED and
+/// exit immediately.
+///
+/// Why: this is the call that produced six orphans per full suite run — the
+/// bridge starts the daemon on behalf of whoever started the bridge, and then
+/// leaves. It goes through the real
+/// [`trusty_common::daemon_guard::spawn_detached_forwarding_parent_link`], so the
+/// test covers the forwarding decision rather than a hand-copied env assignment.
+/// What: does nothing unless [`ENV_BRIDGE_PIDFILE`] is set. With it, spawns
+/// `serve --foreground` detached, records the pid, and returns.
+/// Test: driven by `detached_grandchild_daemon_exits_when_its_spawner_is_sigkilled`.
+#[test]
+#[ignore = "re-entry helper, run as a child by detached_grandchild_daemon_exits_when_its_spawner_is_sigkilled"]
+fn bridge_child_mode() {
+    let Ok(pidfile) = std::env::var(ENV_BRIDGE_PIDFILE) else {
+        return;
+    };
+    let pid = trusty_common::daemon_guard::spawn_detached_forwarding_parent_link(
+        binary(),
+        &["serve", "--foreground"],
+    )
+    .expect("detached daemon spawn");
+    std::fs::write(&pidfile, pid.to_string()).expect("record daemon pid");
+}
+
 /// SIGKILL the process that spawned the daemon and assert the daemon follows.
 ///
 /// Why (#7085): this is the exact shape that produced 102 orphans — the spawner
@@ -141,25 +220,53 @@ fn spawner_child_mode() {
 /// leave behind the very orphan it is about.
 #[test]
 fn foreground_daemon_exits_when_its_spawner_is_sigkilled() {
+    assert_daemon_dies_with_its_spawner(false);
+}
+
+/// The same proof for the DETACHED grandchild, which is where most of the
+/// orphans actually came from.
+///
+/// Why (#7085 review): the direct-child case is caught by the reparent prong,
+/// which a grandchild does not have. Six daemons per full `trusty-memory` suite
+/// run were started by a stdio bridge that exits immediately, leaving a daemon
+/// whose ppid is 1 from the first moment. Only the stamped process's identity —
+/// pid plus start time — can say whether that daemon is still wanted, so it
+/// needs its own end-to-end proof.
+/// What: as the test above, except the helper inserts a bridge level that starts
+/// the daemon through `spawn_detached_forwarding_parent_link` and exits.
+#[test]
+fn detached_grandchild_daemon_exits_when_its_spawner_is_sigkilled() {
+    assert_daemon_dies_with_its_spawner(true);
+}
+
+/// Drive one scenario end to end: start a killable spawner, let it produce a
+/// daemon, SIGKILL it, and require the daemon to be gone inside [`REAP_TIMEOUT`].
+///
+/// `via_bridge` selects the shape: `false` spawns the daemon as the spawner's
+/// direct child, `true` routes it through a short-lived bridge so the daemon is
+/// a detached grandchild.
+fn assert_daemon_dies_with_its_spawner(via_bridge: bool) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let pidfile = tmp.path().join("daemon.pid");
 
-    let mut spawner =
-        std::process::Command::new(std::env::current_exe().expect("locate this test binary"))
-            .args([
-                "--exact",
-                "spawner_child_mode",
-                "--ignored",
-                "--test-threads",
-                "1",
-            ])
-            .env(ENV_PIDFILE, &pidfile)
-            .env(ENV_DATA_DIR, tmp.path())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn the re-entry helper");
+    let mut cmd =
+        std::process::Command::new(std::env::current_exe().expect("locate this test binary"));
+    cmd.args([
+        "--exact",
+        "spawner_child_mode",
+        "--ignored",
+        "--test-threads",
+        "1",
+    ])
+    .env(ENV_PIDFILE, &pidfile)
+    .env(ENV_DATA_DIR, tmp.path())
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null());
+    if via_bridge {
+        cmd.env(ENV_VIA_BRIDGE, "1");
+    }
+    let mut spawner = cmd.spawn().expect("spawn the re-entry helper");
 
     assert!(
         wait_for_path(&pidfile, BOOT_TIMEOUT),

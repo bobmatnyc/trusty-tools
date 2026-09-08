@@ -17,23 +17,36 @@
 //! not be the direct spawner. Both arming entry points are unix-only and compile
 //! to no-ops elsewhere; stamping the environment is portable and harmless.
 //!
-//! Mechanism: a polled `getppid()` comparison plus a `kill(pid, 0)` liveness
-//! probe, on a dedicated OS thread. `prctl(PR_SET_PDEATHSIG)` is Linux-only and
-//! this workspace's daemons run on macOS first. A pipe held open by the parent
-//! would report EOF, but only while no other process holds the write end — every
-//! grandchild inherits it, so a daemon that spawns anything at all defeats the
-//! signal. `getppid()` is reparent-detection, which no descendant can hold open,
-//! and it behaves identically on macOS and Linux.
+//! Mechanism: a polled `getppid()` comparison, a `kill(pid, 0)` liveness probe,
+//! and the parent's process START TIME, on a dedicated OS thread.
+//! `prctl(PR_SET_PDEATHSIG)` is Linux-only and this workspace's daemons run on
+//! macOS first. A pipe held open by the parent would report EOF, but only while
+//! no other process holds the write end — every grandchild inherits it, so a
+//! daemon that spawns anything at all defeats the signal. `getppid()` is
+//! reparent-detection, which no descendant can hold open, and it behaves
+//! identically on macOS and Linux.
+//!
+//! Why the start time (#7085 review): a pid alone is not an identity. A daemon
+//! watching a grandparent has no reparent signal to fall back on, so a pid the
+//! OS recycles onto some unrelated process would read as "parent still alive"
+//! forever — the exact permanent orphan this module exists to prevent.
+//! [`ParentIdentity`] pairs the pid with the process start time read at arm
+//! time, and a changed start time is death. macOS reads it with
+//! `proc_pidinfo(PROC_PIDTASKALLINFO)`, Linux from `/proc/<pid>/stat` field 22;
+//! a platform where neither works degrades to the liveness probe alone rather
+//! than to a false "gone".
 //!
 //! Opt-in by construction: nothing arms unless [`ENV_EXIT_WITH_PARENT`] is set,
-//! so a launchd-supervised daemon (which launchd starts with the plist's
-//! environment, never a test's) is untouched.
+//! and arming always announces itself on stderr, so a daemon that self-exits is
+//! never doing so silently.
 //!
 //! Test: `stamps_this_process_pid`, `parent_is_gone_on_reparent`,
 //! `parent_is_gone_when_named_parent_exits`, `grandchild_ignores_its_own_reparent`,
+//! `recycled_pid_reads_as_gone`, `start_time_is_readable_for_this_process`,
 //! `watch_parent_returns_once_parent_dies`.
 
 use std::process::Command;
+use std::time::Duration;
 
 /// Names the pid a spawned process must not outlive (`TRUSTY_EXIT_WITH_PARENT`).
 ///
@@ -47,9 +60,28 @@ pub const ENV_EXIT_WITH_PARENT: &str = "TRUSTY_EXIT_WITH_PARENT";
 
 /// How often the watchdog re-checks its parent.
 ///
-/// Why: 250 ms bounds an orphan's lifetime to under a second while costing two
+/// Why: 250 ms bounds an orphan's lifetime to about a second while costing two
 /// syscalls per tick, which is free next to a daemon's idle work.
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How long a graceful shutdown gets before the watchdog exits the hard way.
+///
+/// Why: the point of routing through SIGTERM is that the daemon's own handler
+/// flushes its indexes and unlinks its socket. A daemon that is wedged must
+/// still not survive its parent, so the grace window is bounded rather than
+/// open-ended. 5 s clears trusty-memory's BM25 exit flush on a temp data dir
+/// while keeping the worst-case orphan lifetime in single-digit seconds.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// Exit status a self-exiting watchdog reports when it had to force the exit.
+///
+/// Why: an operator reading a crash log has to be able to tell "my parent died
+/// and I refused to become an orphan" from a panic or an OOM kill. A distinct,
+/// documented code plus the stderr line above it says which happened.
+/// What: 0 for the graceful path (launchd's `KeepAlive { SuccessfulExit: false }`
+/// must not respawn a daemon that exited on purpose); this code only when the
+/// grace window expired with the process still running.
+pub const EXIT_CODE_PARENT_DIED_UNGRACEFUL: i32 = 87;
 
 /// Stamp `cmd` so the process it spawns exits when THIS process dies.
 ///
@@ -75,25 +107,54 @@ pub fn exit_with_parent_tokio(cmd: &mut tokio::process::Command) -> &mut tokio::
     cmd.env(ENV_EXIT_WITH_PARENT, std::process::id().to_string())
 }
 
+/// This process's own parent-death stamp, if it carries one.
+///
+/// Why (#7085 review): a detached spawn scrubs the stamp by default, so a caller
+/// that deliberately wants its grandchild linked has to hand the value over
+/// explicitly. Reading it through this function keeps the env-var name in one
+/// place and makes every forwarding site greppable.
+/// What: the raw value of [`ENV_EXIT_WITH_PARENT`] in this process, or `None`.
+/// Test: `daemon_guard::tests::detached_command_scrubs_the_parent_stamp`.
+pub fn inherited_stamp() -> Option<String> {
+    std::env::var(ENV_EXIT_WITH_PARENT).ok()
+}
+
+/// The pid a watchdog is watching, plus the identity of the process that held
+/// that pid when the watchdog armed.
+///
+/// Why: see the module doc — a pid the OS recycles would otherwise read as the
+/// parent still being alive, forever.
+/// What: `start` is the process start time in whole seconds, or `None` where
+/// this platform cannot report it. Two `ParentIdentity` values with the same
+/// pid and different `start` are different processes.
+/// Test: `recycled_pid_reads_as_gone`, `start_time_is_readable_for_this_process`.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ParentIdentity {
+    pid: u32,
+    start: Option<u64>,
+}
+
 /// Arm the watchdog from [`ENV_EXIT_WITH_PARENT`], if the spawner set it.
 ///
 /// Why (#7085): this is the half that runs inside the child, and it is what a
 /// SIGKILL of the parent cannot skip. Call it once, early, on the long-running
 /// path of a program a test may spawn.
 /// What: reads the env var. Absent → returns `None` and arms nothing, which is
-/// every production invocation. Present and naming a pid above 1 → spawns the
-/// watchdog thread and returns that pid. Unparseable or `<= 1` → warns on stderr
-/// and arms nothing; a typo must not silently disable the linkage.
+/// every production invocation. Present and naming a pid above 1 → records that
+/// pid's identity, spawns the watchdog thread, announces the arming on stderr,
+/// and returns the pid. Unparseable or `<= 1` → warns on stderr and arms
+/// nothing; a typo must not silently disable the linkage.
 ///
 /// The reparent prong is armed only when the stamped pid IS this process's
-/// direct parent. A daemon started detached by an intermediate CLI inherits the
-/// stamp but is a grandchild: that CLI exits by design, so its own ppid moving
-/// says nothing about whether the stamped process is still alive, and watching
-/// for it would kill the daemon seconds after it started. Such a daemon watches
-/// the stamped pid's liveness only.
+/// direct parent. A daemon started detached by an intermediate CLI is a
+/// grandchild: that CLI exits by design, so its own ppid moving says nothing
+/// about whether the stamped process is still alive, and watching for it would
+/// kill the daemon seconds after it started. Such a daemon watches the stamped
+/// process's identity — pid plus start time — instead.
 /// Test: `stamps_this_process_pid` pins the contract's spawner half;
-/// `crates/trusty-memory/tests/orphan_reap_7085.rs` proves the whole loop end to
-/// end against a real SIGKILLed spawner.
+/// `crates/trusty-memory/tests/orphan_reap_7085.rs` proves both the direct-child
+/// and the detached-grandchild loops against a real SIGKILLed spawner.
 #[cfg(unix)]
 pub fn arm_from_env(tag: &str) -> Option<u32> {
     let raw = std::env::var(ENV_EXIT_WITH_PARENT).ok()?;
@@ -109,7 +170,7 @@ pub fn arm_from_env(tag: &str) -> Option<u32> {
     };
     // SAFETY: `getppid` takes no arguments and cannot fail.
     let ppid = unsafe { libc::getppid() } as u32;
-    arm(parent, (ppid == parent).then_some(ppid), tag);
+    arm(identify(parent), (ppid == parent).then_some(ppid), tag);
     Some(parent)
 }
 
@@ -124,11 +185,11 @@ pub fn arm_from_env(_tag: &str) -> Option<u32> {
 /// Why (#3734): the desktop GUI passes its pid to the `tagent --api` sidecar as
 /// `--parent-pid`, and that pid is not required to be the sidecar's direct
 /// spawner. Anchoring the reparent check to `getppid()` AT ARM TIME rather than
-/// to `parent_pid` keeps the check correct in that case, while the liveness
+/// to `parent_pid` keeps the check correct in that case, while the identity
 /// probe on `parent_pid` covers the parent this process was told about.
 /// What: reads `getppid()` as the expected ppid, then arms as [`arm_from_env`]
 /// does. A `parent_pid` of 0 or 1 is not watchable and arms nothing.
-/// Test: `parent_is_gone_when_named_parent_exits` covers the liveness prong this
+/// Test: `parent_is_gone_when_named_parent_exits` covers the identity prong this
 /// entry point depends on.
 #[cfg(unix)]
 pub fn arm_for_named_parent(parent_pid: u32, tag: &str) {
@@ -140,35 +201,67 @@ pub fn arm_for_named_parent(parent_pid: u32, tag: &str) {
     }
     // SAFETY: `getppid` takes no arguments and cannot fail.
     let armed_ppid = unsafe { libc::getppid() } as u32;
-    arm(parent_pid, Some(armed_ppid), tag);
+    arm(identify(parent_pid), Some(armed_ppid), tag);
 }
 
 /// Non-unix stub: see [`arm_from_env`].
 #[cfg(not(unix))]
 pub fn arm_for_named_parent(_parent_pid: u32, _tag: &str) {}
 
-/// Spawn the watchdog thread that self-exits this process once the parent goes.
+/// Pair a pid with its current start time.
+#[cfg(unix)]
+fn identify(pid: u32) -> ParentIdentity {
+    ParentIdentity {
+        pid,
+        start: process_start_secs(pid),
+    }
+}
+
+/// Spawn the watchdog thread that ends this process once the parent goes.
 ///
 /// Why a dedicated OS thread and not an async task: this must work in a program
 /// with no runtime, and it must keep ticking while the runtime is saturated or
 /// mid-shutdown — the whole point is that it fires when other machinery cannot.
-/// What: blocks in [`watch_parent`], then `process::exit(0)`. Abrupt is correct:
-/// the parent is already gone, so there is no work to drain and no reader for a
-/// graceful shutdown's result. Exit 0 keeps launchd's `KeepAlive
-/// { SuccessfulExit: false }` from respawning, which matters if this ever arms
-/// under a supervisor.
+///
+/// Why SIGTERM rather than a bare `process::exit` (#7085 review): every trusty-*
+/// daemon already handles SIGTERM through `shutdown::shutdown_signal`, which is
+/// what flushes BM25 and unlinks the socket. Raising it on ourselves reuses that
+/// tested path instead of a second, weaker one. A daemon that ignores SIGTERM,
+/// or is wedged, must still not outlive its parent, so the graceful window is
+/// bounded by [`SHUTDOWN_GRACE`] and then forced.
+/// What: blocks in [`watch_parent`], announces the reason on stderr, raises
+/// SIGTERM on this process, and waits up to [`SHUTDOWN_GRACE`]. If the process
+/// is still running when that expires it exits
+/// [`EXIT_CODE_PARENT_DIED_UNGRACEFUL`], which distinguishes this from a crash.
 #[cfg(unix)]
-fn arm(named_parent: u32, armed_ppid: Option<u32>, tag: &str) {
+fn arm(parent: ParentIdentity, armed_ppid: Option<u32>, tag: &str) {
     let owned_tag = tag.to_string();
+    let watching = if armed_ppid.is_some() {
+        "as a direct child"
+    } else {
+        "as a detached grandchild (liveness and start time only)"
+    };
+    eprintln!(
+        "[{tag}] parent-death watchdog armed for pid {} {watching}",
+        parent.pid
+    );
     let spawned = std::thread::Builder::new()
         .name("parent-death-watchdog".to_string())
         .spawn(move || {
-            watch_parent(named_parent, armed_ppid, POLL_INTERVAL);
+            watch_parent(parent, armed_ppid, POLL_INTERVAL);
             eprintln!(
-                "[{owned_tag}] parent pid {named_parent} is gone; exiting rather \
-                 than becoming an orphan"
+                "[{owned_tag}] parent pid {} is gone; shutting down rather than \
+                 becoming an orphan",
+                parent.pid
             );
-            std::process::exit(0);
+            // SAFETY: `raise` delivers to this process and takes a signal number.
+            unsafe { libc::raise(libc::SIGTERM) };
+            std::thread::sleep(SHUTDOWN_GRACE);
+            eprintln!(
+                "[{owned_tag}] graceful shutdown did not complete within \
+                 {SHUTDOWN_GRACE:?}; forcing exit {EXIT_CODE_PARENT_DIED_UNGRACEFUL}"
+            );
+            std::process::exit(EXIT_CODE_PARENT_DIED_UNGRACEFUL);
         });
     if let Err(e) = spawned {
         eprintln!("[{tag}] could not start the parent-death watchdog thread: {e}");
@@ -178,35 +271,46 @@ fn arm(named_parent: u32, armed_ppid: Option<u32>, tag: &str) {
 /// Block until the parent is gone, polling every `interval`.
 ///
 /// What: pure control flow with no process-global effect, so the detection logic
-/// is testable without calling `process::exit` on the test runner.
+/// is testable without signalling or exiting the test runner.
 /// Test: `watch_parent_returns_once_parent_dies`.
 #[cfg(unix)]
-fn watch_parent(named_parent: u32, armed_ppid: Option<u32>, interval: std::time::Duration) {
-    while !parent_is_gone(named_parent, armed_ppid) {
+fn watch_parent(parent: ParentIdentity, armed_ppid: Option<u32>, interval: Duration) {
+    while !parent_is_gone(parent, armed_ppid) {
         std::thread::sleep(interval);
     }
 }
 
-/// Has the parent gone, by either signal?
+/// Has the parent gone, by any of the three signals?
 ///
-/// Why two signals: being reparented is immune to pid reuse — only our real
-/// parent dying changes `getppid()` — but it is available only when we are that
+/// Why three: being reparented is immune to pid reuse — only our real parent
+/// dying changes `getppid()` — but it is available only when we are that
 /// parent's direct child. `armed_ppid` is `None` for a detached grandchild,
-/// which leaves the liveness probe as the sole signal. Either firing is
-/// sufficient.
-/// What: `true` when `getppid()` has moved off `armed_ppid`, or when
-/// `named_parent` no longer exists.
+/// which leaves the liveness probe, and a liveness probe alone cannot tell a
+/// live parent from a recycled pid. The start-time comparison closes that.
+/// What: `true` when `getppid()` has moved off `armed_ppid`, when
+/// `parent.pid` no longer exists, or when the process now holding `parent.pid`
+/// started at a different time than the one we armed on. A platform that cannot
+/// report start times compares nothing and falls back to the first two.
 /// Test: `parent_is_gone_on_reparent`, `parent_is_gone_when_named_parent_exits`,
-/// `grandchild_ignores_its_own_reparent`.
+/// `grandchild_ignores_its_own_reparent`, `recycled_pid_reads_as_gone`.
 #[cfg(unix)]
-fn parent_is_gone(named_parent: u32, armed_ppid: Option<u32>) -> bool {
+fn parent_is_gone(parent: ParentIdentity, armed_ppid: Option<u32>) -> bool {
     if let Some(armed) = armed_ppid {
         // SAFETY: `getppid` takes no arguments and cannot fail.
         if unsafe { libc::getppid() } as u32 != armed {
             return true;
         }
     }
-    !pid_alive(named_parent)
+    if !pid_alive(parent.pid) {
+        return true;
+    }
+    match (parent.start, process_start_secs(parent.pid)) {
+        (Some(armed), Some(now)) => armed != now,
+        // Either we could not read a start time when arming, or cannot read one
+        // now. Reporting "gone" on a missing reading would kill a healthy daemon
+        // on any platform this cannot see into, so liveness stands alone there.
+        _ => false,
+    }
 }
 
 /// True while a process with `pid` still exists.
@@ -217,6 +321,9 @@ fn parent_is_gone(named_parent: u32, armed_ppid: Option<u32>) -> bool {
 /// Test: `parent_is_gone_when_named_parent_exits`.
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
     // SAFETY: `kill` with signal 0 performs existence and permission checks
     // only, delivering no signal; every return value is safe to observe.
     let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
@@ -227,6 +334,57 @@ fn pid_alive(pid: u32) -> bool {
         std::io::Error::last_os_error().raw_os_error(),
         Some(libc::EPERM)
     )
+}
+
+/// The start time of the process currently holding `pid`, in whole seconds.
+///
+/// What: on macOS, `pbi_start_tvsec` from `proc_pidinfo(PROC_PIDTASKALLINFO)` —
+/// wall-clock seconds. On Linux, field 22 of `/proc/<pid>/stat`, which is clock
+/// ticks since boot; the unit does not matter because the value is only ever
+/// compared against another reading from the same host. `None` when the process
+/// is gone, is not ours to inspect, or the platform has neither source.
+/// Test: `start_time_is_readable_for_this_process`, `recycled_pid_reads_as_gone`.
+#[cfg(target_os = "macos")]
+fn process_start_secs(pid: u32) -> Option<u64> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return None;
+    }
+    let mut info = std::mem::MaybeUninit::<libc::proc_taskallinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_taskallinfo>() as libc::c_int;
+    // SAFETY: `info` is a correctly sized, zeroed buffer of exactly the type
+    // PROC_PIDTASKALLINFO fills, and `size` describes it. A short or failed read
+    // returns a value below `size`, which is checked before the buffer is read.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTASKALLINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written < size {
+        return None;
+    }
+    // SAFETY: the kernel wrote `size` bytes, so the struct is initialised.
+    Some(unsafe { info.assume_init() }.pbsd.pbi_start_tvsec)
+}
+
+/// Linux counterpart of the macOS reader above: `/proc/<pid>/stat` field 22.
+#[cfg(all(unix, target_os = "linux"))]
+fn process_start_secs(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name in field 2 is parenthesised and may contain spaces, so
+    // fields are counted from after the closing paren rather than by splitting
+    // the whole line.
+    let after_comm = stat.rsplit_once(") ")?.1;
+    after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Every other unix: no start-time source, so identity degrades to the pid.
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "linux")))]
+fn process_start_secs(_pid: u32) -> Option<u64> {
+    None
 }
 
 #[cfg(test)]
@@ -250,19 +408,36 @@ mod tests {
         );
     }
 
+    /// The start-time source must actually work on the platforms this runs on.
+    /// Without this the identity check degrades to liveness silently, which is
+    /// the pid-reuse hole it exists to close.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn start_time_is_readable_for_this_process() {
+        assert!(
+            process_start_secs(std::process::id()).is_some(),
+            "this platform must report a process start time"
+        );
+        assert!(
+            process_start_secs(u32::MAX - 1).is_none(),
+            "a pid nothing holds must report no start time"
+        );
+    }
+
     /// The reparent prong: a ppid that no longer matches the one we armed with
-    /// means our spawner died, whatever the named pid says.
+    /// means our spawner died, whatever the identity says.
     #[cfg(unix)]
     #[test]
     fn parent_is_gone_on_reparent() {
         // SAFETY: `getppid` takes no arguments and cannot fail.
         let real_ppid = unsafe { libc::getppid() } as u32;
+        let me = identify(std::process::id());
         assert!(
-            !parent_is_gone(std::process::id(), Some(real_ppid)),
+            !parent_is_gone(me, Some(real_ppid)),
             "our own live pid under our real ppid must read as present"
         );
         assert!(
-            parent_is_gone(std::process::id(), Some(real_ppid.wrapping_add(1))),
+            parent_is_gone(me, Some(real_ppid.wrapping_add(1))),
             "a ppid that no longer matches the armed one must read as gone"
         );
     }
@@ -278,22 +453,22 @@ mod tests {
             .arg("30")
             .spawn()
             .expect("spawn fake parent");
-        let pid = fake_parent.id();
+        let parent = identify(fake_parent.id());
         assert!(
-            !parent_is_gone(pid, Some(armed_ppid)),
+            !parent_is_gone(parent, Some(armed_ppid)),
             "a live named parent must read as present"
         );
         fake_parent.kill().expect("kill fake parent");
         fake_parent.wait().expect("reap fake parent");
         assert!(
-            parent_is_gone(pid, Some(armed_ppid)),
+            parent_is_gone(parent, Some(armed_ppid)),
             "a reaped named parent must read as gone"
         );
     }
 
     /// A detached grandchild must NOT read its own reparent as its stamped
     /// parent dying: the intermediate CLI that spawned it exits immediately by
-    /// design, so only the liveness prong may speak for it.
+    /// design, so only the identity prong may speak for it.
     #[cfg(unix)]
     #[test]
     fn grandchild_ignores_its_own_reparent() {
@@ -301,23 +476,48 @@ mod tests {
             .arg("30")
             .spawn()
             .expect("spawn stand-in parent");
-        let pid = live_parent.id();
+        let parent = identify(live_parent.id());
         assert!(
-            !parent_is_gone(pid, None),
+            !parent_is_gone(parent, None),
             "with no reparent prong armed, a live stamped pid must read as present"
         );
         live_parent.kill().expect("kill stand-in parent");
         live_parent.wait().expect("reap stand-in parent");
         assert!(
-            parent_is_gone(pid, None),
-            "the liveness prong must still fire once the stamped pid is gone"
+            parent_is_gone(parent, None),
+            "the identity prong must still fire once the stamped pid is gone"
+        );
+    }
+
+    /// Pid reuse, which is the only way a grandchild's liveness probe can lie:
+    /// the pid is alive and signalable, but the process holding it is not the
+    /// one we armed on. A recycled pid is faked here by arming on a start time
+    /// that does not match the live process's — exactly the state the kernel
+    /// leaves behind when it hands a freed pid to something new.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn recycled_pid_reads_as_gone() {
+        let live = identify(std::process::id());
+        assert!(
+            !parent_is_gone(live, None),
+            "the real start time must read as present"
+        );
+        let recycled = ParentIdentity {
+            pid: live.pid,
+            start: live.start.map(|s| s.wrapping_add(1)),
+        };
+        assert!(
+            parent_is_gone(recycled, None),
+            "a live pid whose start time moved is a DIFFERENT process and must \
+             read as gone; without this a recycled pid keeps a grandchild alive \
+             forever"
         );
     }
 
     /// The loop the watchdog thread awaits: it must keep waiting while the
     /// parent lives and return promptly once it dies. Watching a real `sleep`
-    /// child by pid exercises the same code the daemon runs without calling
-    /// `process::exit`, which would kill the test runner.
+    /// child by pid exercises the same code the daemon runs without signalling
+    /// the test runner.
     #[cfg(unix)]
     #[test]
     fn watch_parent_returns_once_parent_dies() {
@@ -327,13 +527,13 @@ mod tests {
             .arg("30")
             .spawn()
             .expect("spawn fake parent");
-        let pid = fake_parent.id();
+        let parent = identify(fake_parent.id());
 
         let handle = std::thread::spawn(move || {
-            watch_parent(pid, Some(armed_ppid), std::time::Duration::from_millis(25));
+            watch_parent(parent, Some(armed_ppid), Duration::from_millis(25));
         });
 
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(150));
         assert!(
             !handle.is_finished(),
             "the watchdog must keep waiting while its parent is alive"
@@ -342,13 +542,13 @@ mod tests {
         fake_parent.kill().expect("kill fake parent");
         fake_parent.wait().expect("reap fake parent");
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !handle.is_finished() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the watchdog must return within 5s of its parent dying"
             );
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            std::thread::sleep(Duration::from_millis(25));
         }
         handle.join().expect("watchdog thread must not panic");
     }

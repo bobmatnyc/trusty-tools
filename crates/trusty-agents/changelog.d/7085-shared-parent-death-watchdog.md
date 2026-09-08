@@ -1,3 +1,3 @@
 Changed
 
-- The `tagent --api` sidecar's parent-death watchdog now delegates to `trusty_common::parent_death` instead of carrying its own copy of the detection loop. Behavior is unchanged — the same reparent and pid-liveness signals, armed only when the GUI passes `--parent-pid` (#7085).
+- The `tagent --api` sidecar's parent-death watchdog now delegates to `trusty_common::parent_death` instead of carrying its own copy of the detection loop. Two behaviours change with the move: the poll runs on a dedicated OS thread every 250 ms rather than a Tokio task every 2 s, so the sidecar releases its port about eight times sooner after the GUI dies; and it now raises SIGTERM on itself and only forces the exit if that has not completed within five seconds, where it previously always exited immediately. It also gained pid-reuse protection — the watched pid is paired with the parent's process start time (#7085).
