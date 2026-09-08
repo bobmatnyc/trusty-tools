@@ -11,10 +11,12 @@
 //! set and pinning it is cheaper and more honest than teaching two unrelated
 //! eviction policies to each re-derive "active" on their own.
 //!
-//! What: [`ActiveProjectSet`] / [`ActiveProject`] are the wire shape a
-//! producer (trusty-mpm, slice 1b) publishes and every consumer (trusty-memory,
-//! trusty-search; slices 2 and 3) decodes. [`ResidencySnapshot`] is the
-//! injected-clock state machine a consumer's pull ticker drives:
+//! What: [`crate::residency::ActiveProjectSet`] /
+//! [`crate::residency::ActiveProject`] are the wire shape a producer
+//! (trusty-mpm, slice 1b) publishes and every consumer (trusty-memory,
+//! trusty-search; slices 2 and 3) decodes.
+//! [`crate::residency::ResidencySnapshot`] is the injected-clock state
+//! machine a consumer's pull ticker drives:
 //! [`crate::residency::ResidencySnapshot::observe`] on a successful pull,
 //! [`crate::residency::ResidencySnapshot::on_pull_failure`] on a failed one,
 //! [`crate::residency::ResidencySnapshot::pinned`] to read the currently-trusted set (or `None`
