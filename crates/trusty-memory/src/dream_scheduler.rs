@@ -11,8 +11,14 @@
 //! What: exports `spawn_dream_scheduler`, a function that iterates the palaces
 //! already loaded in the `PalaceRegistry`, spawns one `Dreamer` loop per
 //! palace wired to the daemon's graceful-shutdown signal, and returns
-//! immediately. A global `TRUSTY_DREAM_DISABLED=1` env var disables all
-//! scheduling (useful for tests and deployments that prefer explicit runs).
+//! immediately. Each loop's FIRST tick is offset by
+//! `stagger_offset(k, n, idle_secs)` — palace k of n waits an extra
+//! `idle_secs * k / n` — so a cold start spreads the first cycle across the
+//! idle window rather than firing all n in the same second (#7106); how many
+//! of those cycles may then run at once is bounded process-wide by
+//! `TRUSTY_DREAM_MAX_CONCURRENT`. A global `TRUSTY_DREAM_DISABLED=1` env var
+//! disables all scheduling (useful for tests and deployments that prefer
+//! explicit runs).
 //! Failures in one palace's dream loop never crash other loops — they log and
 //! continue. Also exports `make_shutdown_watch` and `spawn_shutdown_bridge`,
 //! the watch-channel helpers that wire those loops to the daemon's
@@ -23,10 +29,11 @@
 //! `tests::dream_scheduler_shutdown_stops_all_loops`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::watch;
 use tracing::info;
-use trusty_common::memory_core::dream::Dreamer;
+use trusty_common::memory_core::dream::{dream_max_concurrent, stagger_offset, Dreamer};
 use trusty_common::memory_core::PalaceRegistry;
 
 /// Environment variable that disables autonomous dream scheduling when set to
@@ -91,11 +98,20 @@ pub fn spawn_dream_scheduler(
     let config_template = crate::service::dream_config_from_user_config(&user_cfg);
 
     let palace_ids = registry.list();
+    let total = palace_ids.len();
+    let interval = Duration::from_secs(config_template.idle_secs.max(1));
     let mut spawned: usize = 0;
 
-    for palace_id in palace_ids {
+    for (index, palace_id) in palace_ids.into_iter().enumerate() {
         let config = config_template.clone();
         let idle_secs = config.idle_secs;
+        // #7106: palace k of n waits `interval * k / n` past its first
+        // interval, so a cold start spreads the first tick across the whole
+        // idle window instead of firing every palace in the same second. The
+        // index follows `registry.list()`, which walks the LRU in recency
+        // order — that decides only which palace draws which slot, and this is
+        // a one-shot startup call, so the assignment never shifts afterwards.
+        let stagger = stagger_offset(index, total, interval);
         let dreamer = Arc::new(Dreamer::new(config));
         // Unpin (idle-to-disk): the loop takes the registry + id and resolves
         // the handle each cycle via `peek` (no reopen), so it never captures an
@@ -103,18 +119,25 @@ pub fn spawn_dream_scheduler(
         // disk is simply skipped until the next access re-opens it — the loop
         // keeps running and picks it back up. This is what lets the idle-evict
         // sweep actually free a cold palace's heavy RAM.
-        dreamer.start_with_shutdown(registry.clone(), palace_id.clone(), shutdown_rx.clone());
+        dreamer.start_with_shutdown(
+            registry.clone(),
+            palace_id.clone(),
+            stagger,
+            shutdown_rx.clone(),
+        );
         spawned += 1;
 
         info!(
             palace = %palace_id,
             idle_secs,
+            stagger_secs = stagger.as_secs_f64(),
             "dream_scheduler: spawned background dream loop"
         );
     }
 
     info!(
         loops_spawned = spawned,
+        max_concurrent = dream_max_concurrent(),
         "dream_scheduler: all per-palace loops running"
     );
     spawned
@@ -311,7 +334,7 @@ mod tests {
         let dreamer = Arc::new(Dreamer::new(config));
         let (tx, rx) = make_shutdown_watch();
 
-        let join = dreamer.start_with_shutdown(registry, id, rx);
+        let join = dreamer.start_with_shutdown(registry, id, Duration::ZERO, rx);
 
         // Signal shutdown.
         tx.send(true).expect("send shutdown");

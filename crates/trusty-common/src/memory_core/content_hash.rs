@@ -234,7 +234,7 @@ pub fn normalize_for_hash(content: &str) -> String {
 /// `room_id`, not `drawer_type`, not importance. The dream cycle rewrites both
 /// content and tags during routine housekeeping
 /// (`dream::helpers::merge_into` appends the loser's text and unions its tags;
-/// `dream::cycle::apply_consolidation_result` writes an LLM-authored canonical
+/// `dream::semantic::apply_consolidation_result` writes an LLM-authored canonical
 /// body with a rewritten tag set), so a metadata-inclusive digest would fork
 /// identity on a consolidation pass that changed nothing a reader would call a
 /// new fact.

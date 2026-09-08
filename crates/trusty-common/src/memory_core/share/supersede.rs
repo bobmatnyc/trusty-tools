@@ -6,7 +6,7 @@
 //! reader that finds only the new fact has no way back to what it replaced, and
 //! the estate hand-wrote 109 amendment edges precisely so corrections stay
 //! traceable (ADR-0028 D6). The mechanism for that already existed:
-//! `dream::cycle::record_provenance_and_collect_superseded` asserts
+//! `dream::semantic::record_provenance_and_collect_superseded` asserts
 //! `Triple { subject: "drawer:{orig}", predicate: "superseded_by",
 //! object: "drawer:{canonical}" }` and — this is the load-bearing half, issue
 //! #1713 — only reports the original as evictable once that triple write
