@@ -145,10 +145,30 @@ const PROJECT_LIST_LIMIT: &str = "200";
 /// working directory the milestone call reads.
 /// What: `gh repo view --json owner`, then
 /// `gh project list --owner <login> -L 200 --format json`, dropping closed
-/// projects.
+/// projects. #7169: an owner-qualified list can hit a scope wall a bare
+/// `gh project list` (the viewer's own projects) does not — see
+/// [`fetch_projects_owner_scoped`]'s doc — so a scope-shaped failure there
+/// retries with the bare form rather than reporting the section unavailable
+/// on a call that a plain `gh project list` would have satisfied.
 /// Test: `filing_targets_skip_closed_projects`,
-/// `project_list_carries_an_explicit_limit`.
+/// `project_list_carries_an_explicit_limit`,
+/// `filing_targets_fall_back_to_the_bare_project_list_on_a_scope_error`,
+/// `a_non_scope_project_failure_does_not_fall_back`.
 fn fetch_projects(runner: &dyn CommandRunner) -> anyhow::Result<Vec<(u64, String)>> {
+    match fetch_projects_owner_scoped(runner) {
+        Ok(projects) => Ok(projects),
+        // #7169: the bare fallback also failed — surface the ORIGINAL error,
+        // which names the owner-scoped call the operator actually needs
+        // explained.
+        Err(e) if is_scope_shaped_failure(&e) => fetch_projects_bare(runner).map_err(|_| e),
+        Err(e) => Err(e),
+    }
+}
+
+/// The owner-qualified `gh project list --owner <login> -L 200 --format json`
+/// half of [`fetch_projects`], split out so the fallback in the caller can
+/// retry independently.
+fn fetch_projects_owner_scoped(runner: &dyn CommandRunner) -> anyhow::Result<Vec<(u64, String)>> {
     let owner_out = runner.run(
         "gh",
         &["repo", "view", "--json", "owner", "--jq", ".owner.login"],
@@ -173,14 +193,61 @@ fn fetch_projects(runner: &dyn CommandRunner) -> anyhow::Result<Vec<(u64, String
         ],
     )?;
     let text = list_out.ok_or_stderr("gh project list")?;
-    let parsed: GhProjectList = serde_json::from_str(&text)
-        .with_context(|| format!("could not parse `gh project list --owner {owner}` output"))?;
+    parse_project_list(&text, &format!("`gh project list --owner {owner}`"))
+}
+
+/// The bare `gh project list -L 200 --format json` fallback — the viewer's own
+/// projects, with no `--owner` qualification.
+///
+/// Why (#7169): `gh project list --owner <login>` queries GitHub's
+/// `user(login:)`/`organization(login:)` GraphQL object, which GitHub gates on
+/// the `read:project` scope even when `<login>` is the token's own account; the
+/// bare form queries `viewer`, which the same token can read without that
+/// scope. A token missing `read:project` therefore fails the owner-qualified
+/// call while `gh project list` alone — "the same token", per #7169's report —
+/// succeeds.
+/// Test: `filing_targets_fall_back_to_the_bare_project_list_on_a_scope_error`.
+fn fetch_projects_bare(runner: &dyn CommandRunner) -> anyhow::Result<Vec<(u64, String)>> {
+    let list_out = runner.run(
+        "gh",
+        &[
+            "project",
+            "list",
+            "-L",
+            PROJECT_LIST_LIMIT,
+            "--format",
+            "json",
+        ],
+    )?;
+    let text = list_out.ok_or_stderr("gh project list")?;
+    parse_project_list(&text, "`gh project list`")
+}
+
+fn parse_project_list(text: &str, source: &str) -> anyhow::Result<Vec<(u64, String)>> {
+    let parsed: GhProjectList =
+        serde_json::from_str(text).with_context(|| format!("could not parse {source} output"))?;
     Ok(parsed
         .projects
         .into_iter()
         .filter(|p| !p.closed)
         .map(|p| (p.number, p.title))
         .collect())
+}
+
+/// Whether an error from [`fetch_projects_owner_scoped`] looks like a missing
+/// `project`/`read:project` OAuth scope rather than some other failure (`gh`
+/// missing, unauthenticated entirely, network outage).
+///
+/// Why (#7169): only a scope-shaped failure should trigger the bare-list
+/// fallback — any other failure means the bare call would fail identically,
+/// so retrying it would just mask the real error with a confusing second one.
+/// What: a case-insensitive substring match on the phrasing GitHub's GraphQL
+/// API and `gh` itself use for this class of failure.
+/// Test: `filing_targets_fall_back_to_the_bare_project_list_on_a_scope_error`,
+/// `a_non_scope_project_failure_does_not_fall_back`.
+fn is_scope_shaped_failure(err: &anyhow::Error) -> bool {
+    let text = err.to_string().to_lowercase();
+    (text.contains("scope") && text.contains("project")) || text.contains("read:project")
 }
 
 #[cfg(test)]
@@ -315,6 +382,48 @@ mod tests {
         assert!(text.contains("project"), "{text}");
         // The milestone half still rendered.
         assert!(text.contains("open milestones (1):"), "{text}");
+    }
+
+    /// #7169: a real `gh` scope error names `read:project` this way when a
+    /// classic PAT lacks the `project` scope.
+    const SCOPE_ERROR: &str = "gh: your token has not been granted the required scopes: \
+        the 'read:project' scope is required";
+
+    #[test]
+    fn filing_targets_fall_back_to_the_bare_project_list_on_a_scope_error() {
+        // #7169: the owner-scoped call fails on a missing `read:project`
+        // scope; the bare call (same token, no `--owner`) succeeds and its
+        // result must reach the report instead of "unavailable".
+        let runner = FakeRunner::new(vec![
+            ok_out("Backlog · mpm/core\n"),
+            ok_out("bobmatnyc"),
+            fail_out(SCOPE_ERROR),
+            ok_out(PROJECTS_JSON),
+        ]);
+        let text = render_filing_targets(&runner);
+        assert!(text.contains("open projects (1):"), "{text}");
+        assert!(text.contains("#3  trusty-mpm"), "{text}");
+        assert!(!text.contains("projects: unavailable"), "{text}");
+        // The fallback call carries no `--owner`.
+        let calls = runner.calls.borrow();
+        let fallback = calls.last().expect("a fallback call was made");
+        assert!(!fallback.contains(&"--owner".to_string()), "{fallback:?}");
+    }
+
+    #[test]
+    fn a_non_scope_project_failure_does_not_fall_back() {
+        // #7169: an unrelated failure (offline, unauthenticated) must not
+        // trigger a second `gh` call that would just fail the same way — the
+        // original error is what the operator needs to see.
+        let runner = FakeRunner::new(vec![
+            ok_out("Backlog · mpm/core\n"),
+            ok_out("bobmatnyc"),
+            fail_out("gh: not authenticated"),
+        ]);
+        let text = render_filing_targets(&runner);
+        assert!(text.contains("projects: unavailable ("), "{text}");
+        assert!(text.contains("not authenticated"), "{text}");
+        assert_eq!(runner.calls.borrow().len(), 3, "no fallback call was made");
     }
 
     #[test]

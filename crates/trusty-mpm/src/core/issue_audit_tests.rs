@@ -63,6 +63,29 @@ fn facts_parse_a_live_view_payload() {
     assert_eq!(facts.created_at, "2026-09-08T00:30:20Z");
 }
 
+/// A real `gh issue view 7166 --json projectItems` payload, captured live on
+/// 2026-09-08 (#7169). Unlike [`COMPLIANT`]'s simplified
+/// `{"title": "trusty-mpm"}`, a live project item carries a sibling `status`
+/// object — `gh`'s actual wire shape for a ProjectV2 item, not the minimal
+/// shape prior fixtures exercised.
+const LIVE_PROJECT_ITEM_WITH_STATUS: &str = r#"{"projectItems":[
+    {"status":{"optionId":"f75ad846","name":"Todo"},"title":"trusty-mpm"}
+]}"#;
+
+#[test]
+fn a_project_item_with_a_status_sibling_field_still_parses() {
+    // #7169: `tm issue audit 7166` was reported to FAIL "no project" despite
+    // `gh issue view 7166 --json projectItems` showing the item attached.
+    // `TitleRef` has no `deny_unknown_fields`, so the extra `status` object
+    // must be ignored rather than rejected — this fixture is the exact live
+    // shape, captured directly from #7166, that a stricter deserializer would
+    // break on.
+    let facts: IssueFacts =
+        serde_json::from_str(LIVE_PROJECT_ITEM_WITH_STATUS).expect("the live shape parses");
+    assert_eq!(facts.project_items.len(), 1);
+    assert_eq!(facts.project_items[0].title, "trusty-mpm");
+}
+
 #[test]
 fn facts_parse_a_list_payload() {
     // #7097: `gh issue list --json` returns an ARRAY of the same objects, so
