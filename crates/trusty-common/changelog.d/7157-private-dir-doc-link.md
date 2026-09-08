@@ -1,0 +1,3 @@
+Fixed
+
+- The bare `[`ensure_private_dir`]` intra-doc link in `private_dir`'s own inner doc comment now resolves. A module declared as `pub mod private_dir;` merges the declaration site's outer doc with the module's own inner `//!` doc onto one rustdoc page, but a bare link written inside the inner doc resolves against the DECLARING scope (crate root), not `private_dir`'s own — the same failure mode #7162 fixed elsewhere in this crate, missed here because this module landed after that pass. Fixed with a `[`ensure_private_dir`]: crate::private_dir::ensure_private_dir` link-reference definition (#7157).

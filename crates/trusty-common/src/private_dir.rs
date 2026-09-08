@@ -38,6 +38,8 @@
 //! THEY call, in a follow-up PR, not something this PR can reach.
 //!
 //! Test: `tests` below.
+//!
+//! [`ensure_private_dir`]: crate::private_dir::ensure_private_dir
 
 use std::path::{Path, PathBuf};
 
