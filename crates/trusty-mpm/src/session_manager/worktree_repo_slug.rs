@@ -20,11 +20,11 @@
 //! wrong-repository substitution, one level up, and equally silent.
 //!
 //! An SSH `Host` ALIAS is not a host (#7196). A multi-account operator writes
-//! `git@github-duetto:duettoresearch/APEX.git` and lets `~/.ssh/config` rewrite
-//! `github-duetto` to `github.com`. Nothing but `ssh` performs that rewrite, so
+//! `git@gh-work:acme-corp/widgets.git` and lets `~/.ssh/config` rewrite
+//! `gh-work` to `github.com`. Nothing but `ssh` performs that rewrite, so
 //! the alias arrived here as the GitHub host and `gh --repo
-//! github-duetto/duettoresearch/APEX` failed with "error connecting to
-//! github-duetto" — four merged-PR worktrees refused at gate 5 on 2026-09-08,
+//! gh-work/acme-corp/widgets` failed with "error connecting to
+//! gh-work" — four merged-PR worktrees refused at gate 5 on 2026-09-08,
 //! and no repository behind such an alias could ever be reclaimed. An SSH
 //! remote's host is now resolved through [`super::ssh_host_alias`] before it
 //! becomes part of a slug.
@@ -77,7 +77,7 @@ const SSH_URL_SCHEME: &str = "ssh://";
 /// Why a git remote URL names no repository this module will ask `gh` about.
 ///
 /// Why: the two cases need different refusals. "This is a filesystem path"
-/// tells the operator the remote is not a GitHub one at all; "`github-duetto`
+/// tells the operator the remote is not a GitHub one at all; "`gh-work`
 /// resolves to nothing" tells them which `~/.ssh/config` entry is missing. One
 /// `None` for both is what made #7196 read as a `gh` connection error.
 /// What: carried by [`parse_repo_slug`] and rendered by [`refusal`].
@@ -166,7 +166,7 @@ pub(crate) fn parse_repo_slug(url: &str, aliases: &SshHostAliases) -> Result<Str
 /// The machine an SSH remote's host names, resolving a `~/.ssh/config` alias.
 ///
 /// Why: `gh --repo [HOST/]OWNER/REPO` addresses a SERVER, and an alias
-/// addresses none — passing `github-duetto` through produced a slug `gh` could
+/// addresses none — passing `gh-work` through produced a slug `gh` could
 /// only fail to connect to, which gate 5 then read as "the merged-PR lookup
 /// failed" for a tree it should have reclaimed (#7196).
 /// What: three outcomes, in order. A host `aliases` renames becomes the name it
@@ -236,7 +236,11 @@ fn slug_from_path(path: &str) -> Option<String> {
 /// Test: `two_worktrees_with_different_origins_resolve_to_different_repos`,
 /// `an_enterprise_worktree_names_its_host_in_the_repo_flag`,
 /// `a_directory_with_no_origin_falls_back_to_its_owning_checkout`,
-/// `a_non_repository_directory_resolves_to_no_repository`.
+/// `a_non_repository_directory_resolves_to_no_repository` — each through
+/// [`repo_slug_with`], which is this function's whole body. Nothing tests this
+/// wrapper directly, because the only thing it adds is a read of the
+/// operator's own `~/.ssh/config` and a test that read it would answer
+/// differently on two machines (#7196).
 pub(crate) fn repo_slug_for(dir: &Path) -> Result<String, String> {
     repo_slug_with(dir, &SshHostAliases::for_current_user())
 }
@@ -244,7 +248,7 @@ pub(crate) fn repo_slug_for(dir: &Path) -> Result<String, String> {
 /// [`repo_slug_for`], against a stated SSH alias table (#7196).
 ///
 /// Why: the alias table is the operator's `~/.ssh/config`, which no test may
-/// read — a machine whose config renames `github-duetto` and one whose config
+/// read — a machine whose config renames `gh-work` and one whose config
 /// does not would give the same test two answers. Taking the table as a
 /// parameter is how a test states its own, without an environment variable this
 /// crate is not allowed to set.

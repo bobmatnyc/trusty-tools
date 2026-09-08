@@ -1,12 +1,12 @@
 //! The machine an SSH config `Host` alias actually names (#7196).
 //!
 //! Why: a multi-account operator gives each GitHub identity its own `Host`
-//! block — `git@github-duetto:duettoresearch/APEX.git`, where `github-duetto`
+//! block — `git@gh-work:acme-corp/widgets.git`, where `gh-work`
 //! is an alias for `github.com` in `~/.ssh/config`. Git hands that alias to
 //! `ssh`, which rewrites it; nothing else on the machine does. So
-//! [`super::worktree_repo_slug`] read `github-duetto` as the GitHub host,
-//! `gh --repo github-duetto/duettoresearch/APEX` failed with "error connecting
-//! to github-duetto", and gate 5 of the merged-PR reclaim refused every one of
+//! [`super::worktree_repo_slug`] read `gh-work` as the GitHub host,
+//! `gh --repo gh-work/acme-corp/widgets` failed with "error connecting
+//! to gh-work", and gate 5 of the merged-PR reclaim refused every one of
 //! four worktrees whose pull requests had merged. Reproduced six times on
 //! 2026-09-08; the effect is that no worktree on any repository behind a
 //! per-account alias can ever be reclaimed.
@@ -161,7 +161,7 @@ impl SshHostAliases {
     /// The real hostname `host` resolves to, or `None` when nothing renames it.
     ///
     /// Why: `gh --repo [HOST/]OWNER/REPO` addresses a GitHub SERVER, and an
-    /// alias names no server — this is the step that turns `github-duetto` into
+    /// alias names no server — this is the step that turns `gh-work` into
     /// `github.com` before the slug is built (#7196).
     /// What: the first block whose patterns match, ssh's own rule (first value
     /// obtained wins). A block matches when `host` matches at least one

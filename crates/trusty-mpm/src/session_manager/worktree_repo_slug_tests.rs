@@ -176,11 +176,11 @@ fn two_worktrees_with_different_origins_resolve_to_different_repos() {
         "git@github.com:hotstats/hotstats-product-poc.git",
     );
     assert_eq!(
-        repo_slug_for(&a).expect("a resolves"),
+        repo_slug_with(&a, &no_aliases()).expect("a resolves"),
         "1m-consulting/adaptive-crm"
     );
     assert_eq!(
-        repo_slug_for(&b).expect("b resolves"),
+        repo_slug_with(&b, &no_aliases()).expect("b resolves"),
         "hotstats/hotstats-product-poc"
     );
 }
@@ -218,7 +218,7 @@ fn a_directory_with_no_origin_falls_back_to_its_owning_checkout() {
         "fixture must leave the worktree without an origin"
     );
     assert_eq!(
-        repo_slug_for(&wt).expect("the owning checkout answers"),
+        repo_slug_with(&wt, &no_aliases()).expect("the owning checkout answers"),
         "1m-consulting/adaptive-crm"
     );
 }
@@ -228,7 +228,8 @@ fn a_directory_with_no_origin_falls_back_to_its_owning_checkout() {
 #[test]
 fn a_non_repository_directory_resolves_to_no_repository() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let reason = repo_slug_for(tmp.path()).expect_err("a non-repository must refuse");
+    let reason =
+        repo_slug_with(tmp.path(), &no_aliases()).expect_err("a non-repository must refuse");
     assert!(reason.contains("cannot be established"), "{reason}");
     assert!(
         reason.contains(&tmp.path().display().to_string()),
@@ -242,7 +243,7 @@ fn a_non_repository_directory_resolves_to_no_repository() {
 fn an_unparseable_origin_refuses_and_quotes_the_url() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = checkout_with_origin(tmp.path(), "local-remote", "/tmp/fixtures/remote.git");
-    let reason = repo_slug_for(&repo).expect_err("a local-path origin must refuse");
+    let reason = repo_slug_with(&repo, &no_aliases()).expect_err("a local-path origin must refuse");
     assert!(reason.contains("names no GitHub"), "{reason}");
     assert!(reason.contains("/tmp/fixtures/remote.git"), "{reason}");
 }
@@ -252,36 +253,36 @@ fn an_unparseable_origin_refuses_and_quotes_the_url() {
 // ---------------------------------------------------------------------------
 
 /// The `~/.ssh/config` a multi-account operator writes, as a table.
-fn duetto_aliases() -> SshHostAliases {
+fn work_aliases() -> SshHostAliases {
     SshHostAliases::parse(
-        "Host github-duetto\n  HostName github.com\n  User git\n\n\
+        "Host gh-work\n  HostName github.com\n  User git\n\n\
          Host ghe-work\n  HostName ghe.example\n",
     )
 }
 
-/// 🔴 #7196: the alias in the remote is not the host. `github-duetto` is an
+/// 🔴 #7196: the alias in the remote is not the host. `gh-work` is an
 /// `~/.ssh/config` name for `github.com`, and reading it as the host produced
-/// `gh --repo github-duetto/duettoresearch/APEX`, which fails with "error
-/// connecting to github-duetto" — so four worktrees whose pull requests had
+/// `gh --repo gh-work/acme-corp/widgets`, which fails with "error
+/// connecting to gh-work" — so four worktrees whose pull requests had
 /// MERGED were refused at gate 5. Fails on 9b57099a5, where the slug carries
 /// the alias.
 #[test]
 fn an_ssh_alias_resolves_to_the_host_it_names() {
     for url in [
-        "git@github-duetto:duettoresearch/APEX.git",
-        "ssh://git@github-duetto/duettoresearch/APEX.git",
-        "ssh://git@github-duetto:22/duettoresearch/APEX",
+        "git@gh-work:acme-corp/widgets.git",
+        "ssh://git@gh-work/acme-corp/widgets.git",
+        "ssh://git@gh-work:22/acme-corp/widgets",
     ] {
         assert_eq!(
-            parse_repo_slug(url, &duetto_aliases()).as_deref(),
-            Ok("duettoresearch/APEX"),
+            parse_repo_slug(url, &work_aliases()).as_deref(),
+            Ok("acme-corp/widgets"),
             "{url}"
         );
     }
     // An alias for an ENTERPRISE host keeps that host — the resolution answers
     // WHICH server, it does not collapse everything onto github.com.
     assert_eq!(
-        parse_repo_slug("git@ghe-work:owner/repo.git", &duetto_aliases()).as_deref(),
+        parse_repo_slug("git@ghe-work:owner/repo.git", &work_aliases()).as_deref(),
         Ok("ghe.example/owner/repo")
     );
 }
@@ -325,16 +326,16 @@ fn an_undeclared_dotted_ssh_host_is_taken_at_face_value() {
 /// asked, on evidence that does not apply.
 #[test]
 fn an_https_remote_is_not_rewritten_by_an_ssh_alias() {
-    let aliases = SshHostAliases::parse("Host github-duetto\n  HostName github.com\n");
+    let aliases = SshHostAliases::parse("Host gh-work\n  HostName github.com\n");
     assert_eq!(
-        parse_repo_slug("https://github-duetto/duettoresearch/APEX.git", &aliases).as_deref(),
-        Ok("github-duetto/duettoresearch/APEX")
+        parse_repo_slug("https://gh-work/acme-corp/widgets.git", &aliases).as_deref(),
+        Ok("gh-work/acme-corp/widgets")
     );
 }
 
 /// 🔴 #7196 end to end: the same worktree resolves against a test-controlled
-/// ssh config, and the argv `gh` is handed names `duettoresearch/APEX` on
-/// github.com rather than the unreachable `github-duetto/duettoresearch/APEX`.
+/// ssh config, and the argv `gh` is handed names `acme-corp/widgets` on
+/// github.com rather than the unreachable `gh-work/acme-corp/widgets`.
 #[test]
 fn an_aliased_origin_resolves_through_the_given_ssh_config() {
     use crate::core::gh_identity::GhEnv;
@@ -344,20 +345,16 @@ fn an_aliased_origin_resolves_through_the_given_ssh_config() {
     // A config FILE, not a literal — the production path reads one, and this is
     // the only way to exercise that read without touching `~/.ssh/config`.
     let config = tmp.path().join("ssh-config");
-    std::fs::write(&config, "Host github-duetto\n  HostName github.com\n")
+    std::fs::write(&config, "Host gh-work\n  HostName github.com\n")
         .expect("fixture: write ssh config");
     let aliases = SshHostAliases::load(&config);
 
-    let repo = checkout_with_origin(
-        tmp.path(),
-        "APEX",
-        "git@github-duetto:duettoresearch/APEX.git",
-    );
+    let repo = checkout_with_origin(tmp.path(), "widgets", "git@gh-work:acme-corp/widgets.git");
     let slug = repo_slug_with(&repo, &aliases).expect("the aliased origin resolves");
-    assert_eq!(slug, "duettoresearch/APEX");
+    assert_eq!(slug, "acme-corp/widgets");
     assert_eq!(
         repo_flag(&gh_pr_list_command(&repo, &GhEnv::default(), &slug)).as_deref(),
-        Some("duettoresearch/APEX"),
+        Some("acme-corp/widgets"),
         "the alias must never reach `gh --repo` — that is the connection error in #7196"
     );
 }
@@ -401,8 +398,16 @@ fn two_worktrees_with_different_origins_produce_different_repo_flags() {
         "git@github.com:hotstats/hotstats-product-poc.git",
     );
     let env = GhEnv::default();
-    let cmd_a = gh_pr_list_command(&a, &env, &repo_slug_for(&a).expect("a resolves"));
-    let cmd_b = gh_pr_list_command(&b, &env, &repo_slug_for(&b).expect("b resolves"));
+    let cmd_a = gh_pr_list_command(
+        &a,
+        &env,
+        &repo_slug_with(&a, &no_aliases()).expect("a resolves"),
+    );
+    let cmd_b = gh_pr_list_command(
+        &b,
+        &env,
+        &repo_slug_with(&b, &no_aliases()).expect("b resolves"),
+    );
     assert_eq!(
         repo_flag(&cmd_a).as_deref(),
         Some("1m-consulting/adaptive-crm")
@@ -440,10 +445,10 @@ fn an_enterprise_worktree_names_its_host_in_the_repo_flag() {
         "https://github.com/1m-consulting/adaptive-crm.git",
     );
 
-    let slug = repo_slug_for(&ghe).expect("the enterprise origin resolves");
+    let slug = repo_slug_with(&ghe, &no_aliases()).expect("the enterprise origin resolves");
     assert_eq!(slug, "ghe.example/owner/repo");
     assert_eq!(
-        repo_slug_for(&scp).expect("the scp-like enterprise origin resolves"),
+        repo_slug_with(&scp, &no_aliases()).expect("the scp-like enterprise origin resolves"),
         "ghe.example/owner/repo",
         "the two spellings of one remote must not disagree"
     );
@@ -459,7 +464,7 @@ fn an_enterprise_worktree_names_its_host_in_the_repo_flag() {
         repo_flag(&gh_pr_list_command(
             &com,
             &env,
-            &repo_slug_for(&com).expect("the github.com origin resolves"),
+            &repo_slug_with(&com, &no_aliases()).expect("the github.com origin resolves"),
         ))
         .as_deref(),
         Some("1m-consulting/adaptive-crm")
