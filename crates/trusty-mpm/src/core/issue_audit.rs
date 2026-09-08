@@ -10,11 +10,12 @@
 //!
 //! What: the [`IssueFacts`] wire shape `gh issue view --json` /
 //! `gh issue list --json` return, [`audit_issue`] folding one issue's facts
-//! against a [`ResolvedTicketing`] into an [`IssueAudit`], and the two
-//! renderers ([`render_audit`] for one issue, [`render_summary`] for a batch).
-//! Everything here is pure — the `gh` reads live in
-//! [`crate::core::issue_audit_gh`], so every verdict is unit-testable against
-//! fixture JSON with no network.
+//! against a [`ResolvedTicketing`] and a [`ComponentLabels`] set into an
+//! [`IssueAudit`], and the two renderers ([`render_audit`] for one issue,
+//! [`render_summary`] for a batch). Everything here is pure — the `gh` reads
+//! live in [`crate::core::issue_audit_gh`] and the Cargo-manifest reads in
+//! [`crate::core::component_labels`], so every verdict is unit-testable against
+//! fixture JSON with no network and no filesystem.
 //!
 //! # What is and is not a failure
 //!
@@ -32,7 +33,7 @@
 
 use serde::Deserialize;
 
-use crate::core::policy_labels::policy_labels_configured;
+use crate::core::component_labels::ComponentLabels;
 use crate::core::trusty_tools_config::ResolvedTicketing;
 
 /// The `--json` field list both `gh issue view` and `gh issue list` are asked
@@ -245,22 +246,28 @@ pub const SUMMARY_REQUIREMENTS: &[&str] = &[REQ_PROJECT, REQ_MILESTONE, REQ_COMP
 /// What: four rows in a fixed order. `project` and `milestone` are PASS/FAIL
 /// only when `project_required` / `milestone_required` are set and INFO
 /// otherwise; an unset milestone with a `no-milestone: <reason>` comment is
-/// SKIP with the reason quoted. `component label` requires at least one of the
-/// component labels [`policy_labels_configured`] yields with NO session name —
-/// the `ws/<session>` workstream label is deliberately excluded, since a
-/// workstream is not a component. `relationships` is always INFO.
+/// SKIP with the reason quoted. `component label` requires at least one label
+/// from `components` — the accepted set [`ComponentLabels`] derives, which is
+/// the seed table plus the repository's own crate labels (#7123). The
+/// `ws/<session>` workstream label is never in it, since a workstream is not a
+/// component. `relationships` is always INFO.
 /// Test: `a_compliant_issue_passes_every_requirement`, `a_missing_project_fails`,
 /// `an_unset_milestone_with_a_reason_comment_is_a_skip`,
 /// `an_unset_milestone_without_a_comment_fails`,
 /// `an_unrequired_milestone_is_informational`,
 /// `a_missing_component_label_fails`,
+/// `a_non_mpm_crate_component_label_passes`,
 /// `relationships_are_never_a_failure`.
 #[must_use]
-pub fn audit_issue(facts: &IssueFacts, ticketing: &ResolvedTicketing) -> IssueAudit {
+pub fn audit_issue(
+    facts: &IssueFacts,
+    ticketing: &ResolvedTicketing,
+    components: &ComponentLabels,
+) -> IssueAudit {
     let rows = vec![
         project_row(facts, ticketing),
         milestone_row(facts, ticketing),
-        component_row(facts, ticketing),
+        component_row(facts, components),
         relationships_row(facts),
     ];
     IssueAudit {
@@ -355,25 +362,27 @@ fn no_milestone_reason(comments: &[CommentRef]) -> Option<String> {
 }
 
 /// The `component label` row.
-fn component_row(facts: &IssueFacts, ticketing: &ResolvedTicketing) -> AuditRow {
-    // #7097: `None` for the session — `ws/<session>` is a workstream label, and
-    // accepting it here would let a workstream satisfy the component rule.
-    let components: Vec<String> = policy_labels_configured(ticketing, None)
-        .into_iter()
-        .map(|l| l.name)
-        .collect();
+///
+/// Why: #7123 — this row used to build its own accepted set from the labels the
+/// harness SEEDS, which on this workspace is `trusty-mpm` alone, so an issue
+/// correctly labelled with the crate that owns it failed. The accepted set is
+/// now [`ComponentLabels`]'s, and the FAIL line names every label in it so the
+/// fix is a label the reader can copy rather than a guess.
+/// Test: `a_missing_component_label_fails`,
+/// `a_non_mpm_crate_component_label_passes`.
+fn component_row(facts: &IssueFacts, components: &ComponentLabels) -> AuditRow {
     let present: Vec<&str> = facts
         .labels
         .iter()
         .map(|l| l.name.as_str())
-        .filter(|name| components.iter().any(|c| c == name))
+        .filter(|name| components.accepts(name))
         .collect();
     let (verdict, detail) = if present.is_empty() {
         (
             Verdict::Fail,
             format!(
                 "none of [{}] present (labels: {})",
-                components.join(", "),
+                components.names().join(", "),
                 if facts.labels.is_empty() {
                     "none".to_string()
                 } else {

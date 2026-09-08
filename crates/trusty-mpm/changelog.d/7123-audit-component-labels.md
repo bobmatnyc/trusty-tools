@@ -1,0 +1,3 @@
+Fixed
+
+- `tm issue audit` now accepts any of the repository's own crate labels as the owning component, not only `trusty-mpm`. The check read its accepted set from the labels the harness SEEDS (`policy_labels_configured`), which on this workspace is `trusty-mpm` alone, so every correctly labelled non-mpm issue reported `component label FAIL none of [trusty-mpm] present` — #7116, #7128 and #7132–#7140 all did. The accepted set now also carries each `[workspace] members` crate's package name and directory name, and the FAIL line names the whole set. An issue with no component label at all still FAILs (#7123).
