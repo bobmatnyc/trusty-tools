@@ -30,6 +30,12 @@
 //! Test: `command_disables_maintenance_and_gc`,
 //! `command_in_adds_dash_c_before_the_directory`,
 //! `tokio_command_disables_maintenance_and_gc` (feature `unconditional-only`).
+//!
+//! [`command`]: crate::git::command
+//! [`command_in`]: crate::git::command_in
+//! [`tokio_command`]: crate::git::tokio_command
+//! [`tokio_command_in`]: crate::git::tokio_command_in
+//! [`MAINTENANCE_DISABLE_ARGS`]: crate::git::MAINTENANCE_DISABLE_ARGS
 
 use std::path::Path;
 use std::process::Command;
