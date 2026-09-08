@@ -1,4 +1,4 @@
-//! The AUDIT full-dataset sweep — one call, eight stages, no TTY.
+//! The AUDIT full-dataset sweep — one call, nine stages, no TTY.
 //!
 //! Why: DOC-67 §7 (resolved Q1/Q6) requires that `tga audit` and the TUI's
 //! "Run Audit" button drive the SAME sweep, and that neither re-sequences the
@@ -20,7 +20,10 @@ use crate::commands::args::{ClassifyArgs, CollectArgs, ReportArgs};
 use crate::commands::deployments::DeploymentsCollectArgs;
 use crate::commands::incidents::IncidentsCollectArgs;
 use crate::commands::jira::JiraSyncArgs;
-use crate::commands::{classify, collect, deployments, dora, incidents, jira, pr_metrics, report};
+use crate::commands::linear::LinearSyncArgs;
+use crate::commands::{
+    classify, collect, deployments, dora, incidents, jira, linear, pr_metrics, report,
+};
 use crate::commands::{dora::DoraArgs, pr_metrics::PrMetricsArgs};
 use crate::core::config::Config;
 use crate::core::db::Database;
@@ -30,12 +33,13 @@ use super::stage::{AuditSweepStats, DeclaredSkip, StaleFetch, SweepStage};
 
 /// How many stages [`run_full_sweep`] drives.
 ///
-/// Why: the per-stage start event says "stage 3 of 9", and that denominator has
-/// to come from one place or it drifts the next time a stage is added.
-/// What: `9` — the eight subcommands plus the correlation pass (#5405).
+/// Why: the per-stage start event says "stage 3 of 10", and that denominator
+/// has to come from one place or it drifts the next time a stage is added.
+/// What: `10` — the eight original subcommands, the correlation pass
+/// (#5405), and `linear sync` (#7139).
 /// Test: `super::tests::sweep_runs_every_stage_in_order_and_survives_failures`
 /// asserts the sweep records exactly this many outcomes.
-pub(crate) const TOTAL_STAGES: usize = 9;
+pub(crate) const TOTAL_STAGES: usize = 10;
 
 /// The knobs `tga audit` (or a TUI action) hands the sweep.
 ///
@@ -75,16 +79,17 @@ pub struct SweepOptions {
 /// button and `tga audit` execute byte-identical sequencing instead of two
 /// drifting copies.
 ///
-/// What: runs collect → correlate → classify → jira sync → deployments →
-/// incidents → dora → pr-metrics → report by calling each subcommand's own
-/// `run`, recording every outcome into an [`AuditSweepStats`]. No stage result
+/// What: runs collect → correlate → classify → jira sync → linear sync →
+/// deployments → incidents → dora → pr-metrics → report by calling each
+/// subcommand's own `run`, recording every outcome into an
+/// [`AuditSweepStats`]. No stage result
 /// is propagated with `?`, so no stage can abort the run. `--allow-stale` is
 /// applied to collection as a fixed default (§9) — not an operator choice.
 ///
 /// `progress`, when supplied, receives a [`Stage::Audit`] start event before
-/// each of the nine stages and a completed/failed event after it, with
+/// each of the ten stages and a completed/failed event after it, with
 /// [`SweepStage::as_str`] as the target — so a ten-minute sweep is observable
-/// even though seven of the eight subcommands have no instrumentation of their
+/// even though eight of the nine subcommands have no instrumentation of their
 /// own (#5361). The collection stage additionally gets the SAME bus handed to
 /// its pipeline, so its per-repository [`Stage::Collect`] events land there
 /// too. `None` emits nothing at all.
@@ -114,9 +119,9 @@ pub struct SweepOptions {
 /// `super::tests::the_sweep_window_falls_back_to_the_config_field`,
 /// `super::tests::an_explicit_sweep_window_beats_the_config_field`.
 ///
-/// `SPEC-TGAUDIT-05~draft` §5 "Executed stage order" lists the nine stages this
-/// body runs, in this order (#5306). Changing the sequence here means changing
-/// that list.
+/// `SPEC-TGAUDIT-05~draft` §5 "Executed stage order" lists the ten stages this
+/// body runs, in this order (#5306, extended #7139). Changing the sequence
+/// here means changing that list.
 ///
 /// # Spec References
 /// - [`SPEC-TGAUDIT-02~draft`](docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-02~draft)
@@ -186,6 +191,18 @@ pub async fn run_full_sweep(
     let t = begin(progress, &stats, SweepStage::JiraSync);
     let result = jira::run_sync(config.clone(), db, JiraSyncArgs::default()).await;
     finish(progress, &mut stats, SweepStage::JiraSync, t, result);
+
+    // #7139: the Linear counterpart to `jira sync`, next to it for the same
+    // reason — an engagement registered with only `[boards.linear]` (no JIRA)
+    // otherwise had no path to ticket-linked metrics from the standard sweep.
+    // `LinearSyncArgs::default()` has no `--team`, so this resolves the team
+    // scope from `linear.team_keys` exactly as `commands::linear::run_sync`
+    // does for a direct CLI invocation; an absent/ambiguous/misconfigured
+    // Linear board fails this stage (recorded, not propagated) and reaches
+    // the report as a gap line, identical in shape to an absent JIRA config.
+    let t = begin(progress, &stats, SweepStage::LinearSync);
+    let result = linear::run_sync(config.clone(), db, LinearSyncArgs::default()).await;
+    finish(progress, &mut stats, SweepStage::LinearSync, t, result);
 
     // Deployments and incidents populate `fact_deployments` / `fact_incidents`,
     // which `dora` reduces — so they precede it. #5306: DOC-67 §5 states this
