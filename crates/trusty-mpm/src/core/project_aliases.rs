@@ -263,6 +263,51 @@ pub fn is_worktree_path(path: &Path) -> bool {
     s.contains("/.claude/worktrees/") || s.contains("/.worktrees/")
 }
 
+/// The worktree ROOT `path` sits in — the tree itself, not a directory inside it.
+///
+/// Why (#7172): [`is_worktree_path`] answers "is this a worktree?", and the
+/// `EnterWorktree` guard has to answer a second question — "is this the SAME
+/// worktree the agent is already pinned to?". A subdirectory of a tree and the
+/// tree's root are the same tree, so comparing the raw paths would refuse an
+/// agent re-entering its own worktree from `crates/foo`, which is the one
+/// recovery path a wedged agent has. It lives here beside [`is_worktree_path`]
+/// and [`main_checkout_root`] so the worktree-vs-checkout question keeps a
+/// single definition, exactly as [`is_main_checkout`]'s doc records.
+/// What: the prefix of `path` up to and including the segment that FOLLOWS the
+/// last `.claude/worktrees` or `.worktrees` component — `<repo>/.claude/worktrees/agent-x`
+/// for `<repo>/.claude/worktrees/agent-x/crates/foo`. `None` when `path` names
+/// no worktree at all, and also when it stops AT the container directory
+/// (`…/.claude/worktrees`), which names no single tree. Purely lexical: no
+/// `stat`, no `git`, no canonicalization, matching the callers' `PreToolUse`
+/// budget and carrying the same symlink limit as [`is_worktree_path`].
+/// Test: `worktree_root_of_a_tree_root`, `worktree_root_of_a_subdirectory`,
+/// `worktree_root_of_a_non_worktree`, `worktree_root_of_the_container_itself`,
+/// `worktree_root_takes_the_innermost_container`.
+pub fn worktree_root(path: &Path) -> Option<PathBuf> {
+    let components: Vec<_> = path.components().collect();
+    // Scan from the right so a nested layout resolves to the INNERMOST tree.
+    let container_end = components.iter().enumerate().rev().find_map(|(i, c)| {
+        let name = c.as_os_str();
+        if name == "worktrees" {
+            // `.claude/worktrees` needs its `.claude` parent; `.worktrees` is
+            // one component and must not be the filesystem's first component.
+            if i > 0 && components[i - 1].as_os_str() == ".claude" {
+                return Some(i);
+            }
+            return None;
+        }
+        // A `.worktrees` directly under the filesystem root is somebody's home
+        // for repositories, not a repository's worktree container — the same
+        // second-path-level rule [`is_worktree_path`]'s doc states.
+        (name == ".worktrees"
+            && i > 0
+            && matches!(components[i - 1], std::path::Component::Normal(_)))
+        .then_some(i)
+    })?;
+    let root_end = container_end + 1;
+    (root_end < components.len()).then(|| components[..=root_end].iter().collect())
+}
+
 /// Whether `path` sits inside a repository's MAIN CHECKOUT — the operator's
 /// live working copy — rather than a linked git worktree (ADR-0037).
 ///
@@ -509,6 +554,59 @@ mod tests {
         assert!(
             !is_worktree_path(p),
             "expected is_worktree_path=false for normal project path, got true"
+        );
+    }
+
+    #[test]
+    fn worktree_root_of_a_tree_root() {
+        // The tree's own root answers itself, with no trailing-slash surprise.
+        assert_eq!(
+            worktree_root(Path::new("/repo/.claude/worktrees/agent-a")),
+            Some(PathBuf::from("/repo/.claude/worktrees/agent-a"))
+        );
+        assert_eq!(
+            worktree_root(Path::new("/repo/.worktrees/feature-x/")),
+            Some(PathBuf::from("/repo/.worktrees/feature-x"))
+        );
+    }
+
+    #[test]
+    fn worktree_root_of_a_subdirectory() {
+        // #7172: an agent standing in `crates/foo` is still in its own tree —
+        // the recovery re-entry must compare equal from anywhere inside it.
+        assert_eq!(
+            worktree_root(Path::new("/repo/.claude/worktrees/agent-a/crates/foo")),
+            Some(PathBuf::from("/repo/.claude/worktrees/agent-a"))
+        );
+    }
+
+    #[test]
+    fn worktree_root_of_a_non_worktree() {
+        // A main checkout, and a `.worktrees` sitting at the filesystem root,
+        // both name no tree.
+        assert_eq!(worktree_root(Path::new("/repo/crates/foo")), None);
+        assert_eq!(worktree_root(Path::new("/.worktrees/thing")), None);
+        assert_eq!(worktree_root(Path::new("/repo/worktrees/agent-a")), None);
+    }
+
+    #[test]
+    fn worktree_root_of_the_container_itself() {
+        // The container directory holds every tree and is not one of them.
+        assert_eq!(worktree_root(Path::new("/repo/.claude/worktrees")), None);
+        assert_eq!(worktree_root(Path::new("/repo/.worktrees")), None);
+    }
+
+    #[test]
+    fn worktree_root_takes_the_innermost_container() {
+        // A worktree that itself contains worktrees resolves to the inner one,
+        // so a guard comparing roots never mistakes an inner tree for its host.
+        assert_eq!(
+            worktree_root(Path::new(
+                "/repo/.claude/worktrees/agent-a/.claude/worktrees/agent-b/src"
+            )),
+            Some(PathBuf::from(
+                "/repo/.claude/worktrees/agent-a/.claude/worktrees/agent-b"
+            ))
         );
     }
 

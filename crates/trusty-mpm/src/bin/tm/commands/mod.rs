@@ -97,7 +97,12 @@ pub(crate) mod pm_guard_builder_cap;
 pub(crate) mod pm_guard_cost;
 pub(crate) mod pm_guard_deny_by_default;
 pub(crate) mod pm_guard_dispatch;
+// #7172: a worktree-pinned agent's `EnterWorktree` switch, refused rather than
+// left to succeed and wedge the agent — see its module doc for why the pin it
+// names belongs to the harness and cannot be moved from here.
+pub(crate) mod pm_guard_enter_worktree;
 pub(crate) mod pm_guard_fanout;
+pub(crate) mod pm_guard_response;
 pub(crate) mod pm_guard_routing;
 pub(crate) mod pm_guard_worktree_grant;
 pub(crate) mod pm_guard_write_boundary;
