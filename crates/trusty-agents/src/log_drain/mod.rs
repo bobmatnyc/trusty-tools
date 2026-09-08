@@ -22,6 +22,11 @@
 //! `trusty_common::log_drain`; nothing here reimplements it.
 //!
 //! Test: `resolve::tests`, `scheduler::tests`.
+//!
+//! [`LogDrainConfig`]: crate::log_drain::LogDrainConfig
+//! [`resolve_log_drain`]: crate::log_drain::resolve_log_drain
+//! [`LogDrainSetting`]: crate::log_drain::LogDrainSetting
+//! [`spawn`]: crate::log_drain::spawn
 
 mod resolve;
 mod scheduler;
