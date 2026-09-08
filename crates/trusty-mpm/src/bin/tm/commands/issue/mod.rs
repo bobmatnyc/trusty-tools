@@ -137,7 +137,7 @@ fn dispatch<S: TicketSystem>(
             recent,
             since,
         } => {
-            audit::run(&ticketing, gh_env, issue, recent, since)?;
+            audit::run(&ticketing, gh_env, runner, issue, recent, since)?;
         }
         IssueCmd::Repair { issue, config } => {
             let model = load_model(config.as_deref(), lifecycle)?;

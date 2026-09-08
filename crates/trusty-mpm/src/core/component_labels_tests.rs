@@ -1,14 +1,17 @@
 //! Tests for [`super`] — the accepted component-label set (#7123).
 //!
-//! Every test builds a throwaway workspace in a `TempDir`, so nothing here
-//! depends on the checkout it runs in.
+//! Every test but one builds a throwaway workspace in a `TempDir`, so it does
+//! not depend on the checkout it runs in.
+//! `resolve_accepts_every_live_workspace_crate` is the exception (#7182): it
+//! runs the real derivation against THIS checkout's actual `crates/*`
+//! listing, so a drift a synthetic fixture could not see still fails CI.
 
 use std::fs;
 use std::path::Path;
 
 use tempfile::TempDir;
 
-use super::{ComponentLabels, cargo_workspace_root, expand_member};
+use super::{ComponentLabels, cargo_workspace_root, expand_member, package_name};
 use crate::core::trusty_tools_config::ResolvedTicketing;
 
 /// Write a crate directory with a `[package] name`.
@@ -183,4 +186,39 @@ fn member_literal_path_is_kept() {
 fn member_pattern_that_matches_nothing_yields_nothing() {
     let tmp = workspace();
     assert!(expand_member(tmp.path(), "services/*").is_empty());
+}
+
+/// #7182 (recurrence of #7123): every OTHER test in this file resolves
+/// against a synthetic fixture, so nothing here would notice `resolve` ever
+/// drifting from THIS checkout's actual `crates/*` listing — the exact gap a
+/// hand-maintained allow-list would also have had. This runs the real
+/// derivation against the real repository: every directory `crates/*`
+/// contains (this checkout's ground truth, walked fresh — never a hardcoded
+/// name) must resolve to an accepted package-name label, `trusty-audit`
+/// included.
+#[test]
+fn resolve_accepts_every_live_workspace_crate() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/trusty-mpm/src/core is 3 levels under the workspace root");
+    let labels = ComponentLabels::resolve(&ResolvedTicketing::default(), Some(root));
+    let crates_dir = root.join("crates");
+    let entries = fs::read_dir(&crates_dir)
+        .unwrap_or_else(|e| panic!("read_dir({}): {e}", crates_dir.display()));
+    for entry in entries {
+        let dir = entry.unwrap().path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(name) = package_name(&dir) else {
+            continue;
+        };
+        assert!(
+            labels.accepts(&name),
+            "crates/{} declares package `{name}`, not accepted; set was {:?}",
+            dir.file_name().unwrap().to_string_lossy(),
+            labels.names()
+        );
+    }
 }

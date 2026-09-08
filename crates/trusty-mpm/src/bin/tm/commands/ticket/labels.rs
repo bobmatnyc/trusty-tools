@@ -63,7 +63,9 @@ pub(crate) enum AssigneeTarget {
 /// Test: `gh_list_repo_labels_parses`, `gh_list_repo_labels_errors`,
 /// `gh_list_repo_labels_reads_past_the_default_page`,
 /// `gh_list_repo_labels_rejects_a_truncated_page`.
-pub(crate) fn gh_list_repo_labels<R: CommandRunner>(runner: &R) -> anyhow::Result<Vec<RepoLabel>> {
+pub(crate) fn gh_list_repo_labels<R: CommandRunner + ?Sized>(
+    runner: &R,
+) -> anyhow::Result<Vec<RepoLabel>> {
     // #6914: the probe asked for gh's default 30-label page and read a partial
     // label set as if it were the whole repo.
     let limit = trusty_mpm::core::policy_labels::LABEL_LIST_LIMIT;

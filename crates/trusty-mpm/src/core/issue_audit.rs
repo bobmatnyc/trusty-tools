@@ -369,7 +369,8 @@ fn no_milestone_reason(comments: &[CommentRef]) -> Option<String> {
 /// now [`ComponentLabels`]'s, and the FAIL line names every label in it so the
 /// fix is a label the reader can copy rather than a guess.
 /// Test: `a_missing_component_label_fails`,
-/// `a_non_mpm_crate_component_label_passes`.
+/// `a_non_mpm_crate_component_label_passes`,
+/// `trusty_audit_alone_passes_the_component_label_check`.
 fn component_row(facts: &IssueFacts, components: &ComponentLabels) -> AuditRow {
     let present: Vec<&str> = facts
         .labels
