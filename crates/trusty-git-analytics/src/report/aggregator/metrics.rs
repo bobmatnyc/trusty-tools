@@ -137,6 +137,13 @@ pub(super) struct DoraInputs<'a> {
     pub(super) period_start: DateTime<Utc>,
     pub(super) period_end: DateTime<Utc>,
     pub(super) cycle_time_avg: f64,
+    // #212 review round 3: `cycle_time_avg` is 0.0 both when it's a genuine
+    // average AND when zero PRs survived `compute_velocity_inputs`' 0.5-720h
+    // outlier filter — `has_merged_prs` (any raw `merged_at`) missed the case
+    // where merges exist but every one was filtered out, so the proxy still
+    // reported a fabricated `Some(0.0)` "measured" lead time. This is the
+    // post-filter count `compute_velocity_inputs` actually averaged over.
+    pub(super) pr_cycle_time_count: usize,
     pub(super) total_weeks: usize,
     pub(super) revert_count: usize,
 }
@@ -233,8 +240,9 @@ pub(super) fn compute_dora(inputs: DoraInputs<'_>) -> DoraMetrics {
 /// `deployment_frequency`, tagged `"fact_deployments"`. Lead time is
 /// resolved separately: the average `deploy_time - commit_time` over deploys
 /// whose `git_sha` matches a commit (`"measured"`) when any resolve; else the
-/// PR cycle-time proxy (`"proxy"`) when at least one PR merged; else `None`
-/// (`"unmeasurable"`) — never a bare `0.0` standing in for "no data".
+/// PR cycle-time proxy (`"proxy"`) when `pr_cycle_time_count > 0` — at least
+/// one merged PR survived `compute_velocity_inputs`' outlier filter; else
+/// `None` (`"unmeasurable"`) — never a bare `0.0` standing in for "no data".
 /// Test: the `dora_*` cases in `report::tests`.
 fn deployment_frequency_and_lead_time(
     inputs: &DoraInputs<'_>,
@@ -248,9 +256,12 @@ fn deployment_frequency_and_lead_time(
                 .is_some_and(|t| t >= inputs.period_start && t <= inputs.period_end)
         })
         .collect();
-    let has_merged_prs = inputs.prs.iter().any(|p| p.merged_at.is_some());
+    // #212 review round 3: gate on the POST-outlier-filter count, not "any
+    // raw merged_at" — a PR set that exists but was entirely filtered out by
+    // `compute_velocity_inputs`' 0.5-720h window must not proxy a fabricated
+    // `Some(0.0)` lead time.
     let proxy_lead = || {
-        if has_merged_prs {
+        if inputs.pr_cycle_time_count > 0 {
             (Some(inputs.cycle_time_avg), "proxy".to_string())
         } else {
             (None, "unmeasurable".to_string())

@@ -1431,6 +1431,33 @@ fn dora_falls_back_to_pr_proxy_when_fact_deployments_empty() {
 }
 
 #[test]
+fn dora_lead_time_is_unmeasurable_when_merged_prs_are_all_outlier_filtered() {
+    // #212 review round 3: `cycle_time_avg` reads 0.0 both as a genuine
+    // average and as "zero PRs survived the 0.5-720h outlier filter" —
+    // gating the proxy on "any raw merged_at" missed this case and returned
+    // a fabricated `Some(0.0)` tagged `"proxy"`. One merged PR exists (so a
+    // naive `merged_at.is_some()` check would wrongly treat lead time as
+    // available), but its cycle time is 960h, outside the filter window, and
+    // no deploys exist to source frequency from either.
+    let db = seed_db();
+    db.connection()
+        .execute(
+            "INSERT INTO pull_requests \
+                 (pr_number, title, author, state, created_at, merged_at) \
+             VALUES (1, 'pr', 'alice', 'merged', '2024-01-01T00:00:00+00:00', \
+                 '2024-02-10T00:00:00+00:00')",
+            [],
+        )
+        .expect("insert outlier-filtered merged pr");
+
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    let dora = data.dora.as_ref().expect("dora present");
+
+    assert_eq!(dora.lead_time_hours, None);
+    assert_eq!(dora.lead_time_source, "unmeasurable");
+}
+
+#[test]
 fn dora_ignores_fact_deployments_rows_outside_the_period() {
     // Report period is 2024-01-15 .. 2024-01-22 (two ISO weeks, from
     // `seed_db()`'s two commits). Five deploys land inside it; three land

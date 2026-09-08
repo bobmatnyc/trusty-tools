@@ -647,6 +647,7 @@ impl Aggregator {
             period_start: acc.min_ts,
             period_end: acc.max_ts,
             cycle_time_avg: velocity_inputs.cycle_time_avg,
+            pr_cycle_time_count: velocity_inputs.pr_count,
             total_weeks,
             revert_count: acc.revert_count,
         }));
