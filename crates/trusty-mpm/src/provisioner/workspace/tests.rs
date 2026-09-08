@@ -15,18 +15,26 @@ use super::*;
 // ── #2184: RealGitBackend applies the resolved identity to every command ──
 
 /// Why: a `RealGitBackend::default()` (no identity resolved) must build a
-/// PLAIN `git` command — no env overrides, no `-c` args — so every existing
+/// command carrying ONLY `trusty_common::git::command`'s maintenance-disable
+/// args — no identity `-c` args, no env overrides — so every existing
 /// production call site (which constructs `RealGitBackend::default()` when it
-/// has no project context) is byte-for-byte unaffected by #2184.
+/// has no project context) is unaffected by #2184 beyond the #7171
+/// maintenance-storm fix every git command in the workspace now carries.
 /// Test: itself.
 #[test]
 fn default_identity_produces_plain_git_command() {
     let backend = RealGitBackend::default();
     let cmd = backend.command();
+    let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
     assert_eq!(
-        cmd.get_args().count(),
-        0,
-        "no -c args for an empty identity"
+        args,
+        vec![
+            std::ffi::OsStr::new("-c"),
+            std::ffi::OsStr::new("maintenance.auto=false"),
+            std::ffi::OsStr::new("-c"),
+            std::ffi::OsStr::new("gc.auto=0"),
+        ],
+        "an empty identity adds no -c args of its own beyond #7171's"
     );
     assert_eq!(
         cmd.get_envs().count(),
@@ -84,6 +92,12 @@ fn git_identity_commit_args_applied_to_command() {
     assert_eq!(
         args,
         vec![
+            // #7171: trusty_common::git::command's maintenance-disable args
+            // come first — every RealGitBackend command carries them.
+            std::ffi::OsStr::new("-c"),
+            std::ffi::OsStr::new("maintenance.auto=false"),
+            std::ffi::OsStr::new("-c"),
+            std::ffi::OsStr::new("gc.auto=0"),
             std::ffi::OsStr::new("-c"),
             std::ffi::OsStr::new("user.name=Bot"),
             std::ffi::OsStr::new("-c"),

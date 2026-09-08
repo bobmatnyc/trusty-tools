@@ -150,7 +150,7 @@ fn decide_update(
 /// real non-default checkout through this function; the `None` case is modelled
 /// by `decide_update_detached_head_skips`.
 fn current_branch(base_path: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
+    let out = trusty_common::git::command()
         .arg("-C")
         .arg(base_path)
         .args(["symbolic-ref", "--short", "HEAD"])
@@ -180,7 +180,7 @@ fn current_branch(base_path: &Path) -> Option<String> {
 /// [`run_hygiene_for_base`]).
 fn ahead_count(base_path: &Path, branch: &str) -> Option<usize> {
     let range = format!("origin/{branch}..{branch}");
-    let out = std::process::Command::new("git")
+    let out = trusty_common::git::command()
         .arg("-C")
         .arg(base_path)
         .args(["rev-list", "--count", &range])
@@ -224,7 +224,7 @@ fn is_dirty(base_path: &Path) -> Option<bool> {
 /// Test: `hygiene_dirty_tree_is_not_reset` (via [`run_hygiene_for_base`]);
 /// `dirty_existing_checkout_warns_and_proceeds` (via the cold-start gate).
 pub(crate) fn porcelain_status(base_path: &Path) -> Result<Vec<String>, String> {
-    let out = std::process::Command::new("git")
+    let out = trusty_common::git::command()
         .arg("-C")
         .arg(base_path)
         .args(["status", "--porcelain"])
@@ -254,7 +254,7 @@ pub(crate) fn porcelain_status(base_path: &Path) -> Result<Vec<String>, String> 
 /// Test: exercised through `colliding_untracked_paths` by
 /// `hygiene_gitignored_file_is_not_clobbered`.
 fn git_z_lines(base_path: &Path, args: &[&str]) -> Result<Vec<String>, String> {
-    let out = std::process::Command::new("git")
+    let out = trusty_common::git::command()
         .arg("-C")
         .arg(base_path)
         .args(args)
@@ -323,7 +323,7 @@ fn colliding_untracked_paths(base_path: &Path, target: &str) -> Result<Vec<Strin
 /// Test: `hygiene_recovery_ref_written_before_update` integration test (via
 /// [`run_hygiene_for_base`]).
 fn write_recovery_ref(base_path: &Path, branch: &str) {
-    let head = std::process::Command::new("git")
+    let head = trusty_common::git::command()
         .arg("-C")
         .arg(base_path)
         .args(["rev-parse", "HEAD"])
@@ -349,7 +349,7 @@ fn write_recovery_ref(base_path: &Path, branch: &str) {
     }
 
     let refname = format!("refs/trusty-mpm/pre-hygiene/{branch}");
-    let update = std::process::Command::new("git")
+    let update = trusty_common::git::command()
         .arg("-C")
         .arg(base_path)
         .args(["update-ref", &refname, &sha])
@@ -381,7 +381,7 @@ fn write_recovery_ref(base_path: &Path, branch: &str) {
 /// fails or there is no `origin/HEAD` symref (the caller falls back to `main`).
 /// Test: `get_default_branch_returns_none_for_non_git` (unit).
 pub fn get_default_branch(base_path: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
+    let out = trusty_common::git::command()
         .arg("-C")
         .arg(base_path)
         .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
@@ -465,7 +465,7 @@ fn update_to_origin(base_path: &Path) {
         write_recovery_ref(base_path, branch);
     }
 
-    let merge = std::process::Command::new("git")
+    let merge = trusty_common::git::command()
         .arg("-C")
         .arg(base_path)
         .args(["merge", "--ff-only", &target])
@@ -522,7 +522,7 @@ pub fn run_hygiene_for_base(base_path: &Path) -> Result<(), String> {
     info!(path = %base_path.display(), "inproject-hygiene: running for base clone");
 
     // Step 1: fetch from origin.
-    let fetch = std::process::Command::new("git")
+    let fetch = trusty_common::git::command()
         .arg("-C")
         .arg(base_path)
         .args(["fetch", "origin"])
@@ -548,7 +548,7 @@ pub fn run_hygiene_for_base(base_path: &Path) -> Result<(), String> {
     update_to_origin(base_path);
 
     // Step 3: prune stale worktrees.
-    let prune = std::process::Command::new("git")
+    let prune = trusty_common::git::command()
         .arg("-C")
         .arg(base_path)
         .args(["worktree", "prune"])

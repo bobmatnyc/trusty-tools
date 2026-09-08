@@ -423,7 +423,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_forty_checks() {
+async fn run_doctor_produces_forty_two_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -499,6 +499,9 @@ async fn run_doctor_produces_forty_checks() {
         "tcc_taint",
         "scaffold_tracking",
         "push_guard",
+        // #7171: the git-maintenance-storm detection probes.
+        "maintenance_config",
+        "maintenance_processes",
         "binary_provenance",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",

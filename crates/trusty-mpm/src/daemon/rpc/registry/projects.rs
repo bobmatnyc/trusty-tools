@@ -73,8 +73,13 @@ pub struct PathParams {
 
 /// `POST /projects`, `mpm.projects.register` — announce a working directory.
 ///
-/// Test: `parity_projects_register_agrees_across_transports`.
+/// Test: `parity_projects_register_agrees_across_transports`,
+/// `register_project_op_disables_git_auto_maintenance`.
 pub fn register_project_op(state: &Arc<DaemonState>, path: PathBuf) -> ProjectInfo {
+    // #7171: an explicit registration is the "operator points trusty-mpm at
+    // an existing repo" case `ensure_base_clone`'s equivalent write does not
+    // cover — best-effort and non-fatal; `path` need not even be a git repo.
+    crate::core::git_maintenance::disable_and_log(&path);
     state.register_project(path)
 }
 

@@ -180,7 +180,9 @@ fn git_stdout(base_path: &Path, args: &[&str]) -> Option<String> {
 }
 
 fn git(base_path: &Path) -> Command {
-    let mut cmd = Command::new("git");
+    // #7171: through the shared entry point so this fetch cannot trigger a
+    // background `git maintenance run --auto` against the shared object store.
+    let mut cmd = trusty_common::git::command();
     // A daemon has no terminal: without this a private remote's credential
     // prompt blocks the spawn indefinitely instead of failing fast.
     cmd.env("GIT_TERMINAL_PROMPT", "0").arg("-C").arg(base_path);

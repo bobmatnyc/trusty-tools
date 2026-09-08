@@ -324,7 +324,7 @@ pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), Strin
     // inherited cwd cannot cause git to fail at startup with "fatal: Unable to
     // read current working directory" (exit 128) → HTTP 500 on managed-spawn.
     let cwd = base_path.parent().unwrap_or(std::path::Path::new("/"));
-    let out = std::process::Command::new("git")
+    let out = trusty_common::git::command()
         .args(["clone", "--no-local", origin_url])
         .arg(base_path)
         .current_dir(cwd)
@@ -340,6 +340,11 @@ pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), Strin
     }
     info!(dest = %base_path.display(), "inproject: base clone complete");
     ensure_worktrees_gitignored(base_path)?;
+    // #7171: disable git's own background maintenance/gc on this FRESHLY
+    // CLONED base — every worktree the base will ever host shares its
+    // GIT_COMMON_DIR config, so one write here covers operator-run git in all
+    // of them, the same sharing property the push guard below relies on.
+    crate::core::git_maintenance::disable_and_log(base_path);
     // #2867: install the cross-branch push guard into this FRESHLY CLONED base.
     // `$GIT_COMMON_DIR/hooks` is shared by every worktree of a base clone —
     // provisioner-created and ad-hoc `git worktree add` alike (verified
@@ -412,7 +417,7 @@ pub fn worktree_name_collides(base_path: &Path, worktree_name: &str) -> bool {
         return true;
     }
     let branch_ref = format!("refs/heads/{}", worktree_branch_for(worktree_name));
-    std::process::Command::new("git")
+    trusty_common::git::command()
         .arg("-C")
         .arg(base_path)
         .args(["rev-parse", "--verify", "--quiet"])
@@ -495,7 +500,7 @@ pub fn create_session_worktree(
         "inproject: creating per-session worktree"
     );
 
-    let mut add_cmd = std::process::Command::new("git");
+    let mut add_cmd = trusty_common::git::command();
     add_cmd
         .arg("-C")
         .arg(base_path)
@@ -624,7 +629,7 @@ pub fn create_session_worktree(
 /// the fail-safe direction.
 /// Test: `push_pin_detection_matches_effective_config`.
 fn push_is_pinned_to_current(worktree_path: &Path) -> bool {
-    std::process::Command::new("git")
+    trusty_common::git::command()
         .arg("-C")
         .arg(worktree_path)
         .args(["config", "--get", "push.default"])
@@ -636,7 +641,7 @@ fn push_is_pinned_to_current(worktree_path: &Path) -> bool {
 
 fn configure_session_branch_tracking(base_path: &Path, worktree_path: &Path) {
     // Step 1: enable per-worktree config on the shared base repo (idempotent).
-    let enable_worktree_config = std::process::Command::new("git")
+    let enable_worktree_config = trusty_common::git::command()
         .arg("-C")
         .arg(base_path)
         .args(["config", "extensions.worktreeConfig", "true"])
@@ -663,7 +668,7 @@ fn configure_session_branch_tracking(base_path: &Path, worktree_path: &Path) {
 
     // Step 2: scope push.default=current to THIS worktree only, so `git push`
     // always targets `origin/session/<name>` and never the default branch.
-    let set_push_default = std::process::Command::new("git")
+    let set_push_default = trusty_common::git::command()
         .arg("-C")
         .arg(worktree_path)
         .args(["config", "--worktree", "push.default", "current"])
@@ -708,7 +713,7 @@ fn configure_session_branch_tracking(base_path: &Path, worktree_path: &Path) {
     let default_branch = super::inproject_hygiene::get_default_branch(base_path)
         .unwrap_or_else(|| "main".to_string());
     let upstream = format!("origin/{default_branch}");
-    let set_upstream = std::process::Command::new("git")
+    let set_upstream = trusty_common::git::command()
         .arg("-C")
         .arg(worktree_path)
         .args(["branch", &format!("--set-upstream-to={upstream}")])
@@ -783,7 +788,7 @@ fn ensure_repo_rooted_at(path: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    let out = std::process::Command::new("git")
+    let out = trusty_common::git::command()
         .arg("-C")
         .arg(path)
         .args(["rev-parse", "--show-toplevel"])
@@ -848,7 +853,7 @@ pub fn get_origin_url(path: &Path) -> Result<Option<String>, String> {
     // never read the repo rooted here" — see `ensure_repo_rooted_at`.
     ensure_repo_rooted_at(path)?;
 
-    let out = std::process::Command::new("git")
+    let out = trusty_common::git::command()
         .arg("-C")
         .arg(path)
         .args(["config", "--get", "remote.origin.url"])

@@ -460,9 +460,10 @@ fn prune_refs_after_removal(repo_root: &Path, path: &Path) {
         // Step 2: git worktree prune to clear any stale git worktree refs.
         // Best-effort: a failure here is a minor annoyance (stale ref in git output),
         // not a correctness failure.
-        let prune_out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo_root)
+        // #7171: through the shared entry point — this runs on every session
+        // teardown across the fleet, one of the storm-trigger commands named
+        // by the incident.
+        let prune_out = trusty_common::git::command_in(repo_root)
             .args(["worktree", "prune"])
             .output();
         if let Err(e) = prune_out {
@@ -559,9 +560,9 @@ pub(super) fn registry_root_to_repair(record: &SessionRecord) -> Option<std::pat
 /// teardown that already succeeded continues.
 /// Test: `decommission_prunes_the_base_repo_worktree_registry`.
 fn prune_worktree_registry(root: &Path) {
-    match std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
+    // #7171: through the shared entry point — same storm-trigger command as
+    // `prune_refs_after_removal` above.
+    match trusty_common::git::command_in(root)
         .args(["worktree", "prune"])
         .output()
     {

@@ -302,9 +302,9 @@ pub fn spawn_workstream_label_ensure(
 /// What: `None` on any git failure (not a repo, no origin, git absent) or an
 /// empty result.
 fn origin_url_from_workspace(dir: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    // #7171: through the shared entry point for consistency with every other
+    // git spawn in the crate.
+    let output = trusty_common::git::command_in(dir)
         .args(["config", "--get", "remote.origin.url"])
         .output()
         .ok()?;

@@ -1244,6 +1244,9 @@ async fn doctor_endpoint_returns_report() {
         "tcc_taint",
         "scaffold_tracking",
         "push_guard",
+        // #7171: the git-maintenance-storm detection probes.
+        "maintenance_config",
+        "maintenance_processes",
         "binary_provenance",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
