@@ -9,9 +9,13 @@
 # (#6520).
 #
 # What: builds the bundle (or takes a prebuilt one via `--from`), removes any
-# installed copy, `cp -R`s the new one into `~/Library/Screen Savers/`, prints the
-# installed path and its codesign verdict, and prints the one manual step that
-# cannot be automated. `--uninstall` removes it.
+# installed copy, `cp -R`s the new one into `~/Library/Screen Savers/`, restarts
+# the processes that cache saver bundle metadata (System Settings,
+# legacyScreenSaver, WallpaperAgent) so a renamed bundle shows its new name
+# immediately, prints the installed path and its codesign verdict, and prints
+# the one manual step that cannot be automated. `--uninstall` removes it and
+# does not restart those processes — see the #7128 comment at the restart
+# site for why.
 #
 # Usage:
 #   bash scripts/install-console-saver.sh
@@ -112,12 +116,34 @@ else
   echo "installed: $DEST"
   codesign --verify --deep --strict --verbose=2 "$DEST"
   codesign -dv "$DEST"
+
+  # #7128: WallpaperAgent caches saver bundle metadata across reinstalls, and
+  # System Settings and legacyScreenSaver hold their own copies of it too —
+  # the Screen Saver tile keeps showing the previous CFBundleName/
+  # CFBundleDisplayName until these are restarted, even though the bundle on
+  # disk already carries the new one. Not run on --uninstall: nothing is left
+  # at $DEST for a cached name to be stale about, and the existing
+  # "repopulates on reopen" note above covers the separate saver-list cache.
+  echo
+  echo "==> restarting processes that cache the saver's bundle metadata"
+  RESTARTED=()
+  for proc in "System Settings" legacyScreenSaver WallpaperAgent; do
+    if killall "$proc" 2>/dev/null; then
+      RESTARTED+=("$proc")
+    fi
+  done
+  if [[ ${#RESTARTED[@]} -gt 0 ]]; then
+    echo "restarted: ${RESTARTED[*]}"
+  else
+    echo "restarted: none were running"
+  fi
 fi
 
 cat <<EOF
 
 MANUAL STEP — this cannot be scripted:
-  System Settings → Screen Saver → select "Trusty Console", then Preview.
+  System Settings → Wallpaper → "Screen Saver…" → select "Trusty Console", then
+  Preview.
 
   The console must be running and reachable at http://127.0.0.1:7788 (or the
   port set with: defaults -currentHost write $SAVER_IDENTIFIER ConsolePort <port>).
