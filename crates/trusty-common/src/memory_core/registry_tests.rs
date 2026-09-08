@@ -1295,3 +1295,44 @@ fn open_error_is_not_absent_for_an_unstattable_alias_target() {
          id's own empty directory, so the caller renders 404 for a palace that exists: {denied:#}"
     );
 }
+
+/// Why (#7106): `release_if_unreferenced` is what lets a startup sweep hand a
+/// palace back to the LRU. Its whole safety argument is the `strong_count == 1`
+/// guard — without it the release could drop a handle out from under an
+/// in-flight recall or dream cycle.
+/// What: registers a palace, holds a second `Arc`, asserts the release refuses
+/// and the handle is still cached; drops the reference and asserts it then
+/// releases and the entry is gone.
+/// Test: this test.
+#[test]
+fn release_if_unreferenced_skips_a_referenced_handle() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = PalaceRegistry::new();
+    let palace = Palace {
+        id: PalaceId::new("held".to_string()),
+        name: "held".to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: tmp.path().join("held"),
+    };
+    let id = palace.id.clone();
+    let held = registry
+        .create_palace(tmp.path(), palace)
+        .expect("create palace");
+
+    assert!(
+        !registry.release_if_unreferenced(&id),
+        "a handle something still references must never be released"
+    );
+    assert!(registry.peek(&id).is_some());
+
+    drop(held);
+    assert!(
+        registry.release_if_unreferenced(&id),
+        "an unreferenced handle must release"
+    );
+    assert!(
+        registry.peek(&id).is_none(),
+        "the cache entry must be gone; redb remains the source of truth"
+    );
+}

@@ -24,6 +24,35 @@ use super::types::{
 };
 use super::MemoryService;
 
+/// The three adjacency-derived graph counts, computed on the blocking pool.
+///
+/// Why (#7106): `community_count` runs a full Louvain partition the first time
+/// it is asked at a given KG write generation. `kg_graph` and `kg_graph_seed`
+/// asked for it inline on an async worker, so one call against a large palace
+/// parked that worker for the whole partition — and before the memo, every
+/// call did it again. Hopping once for all three keeps the executor free
+/// without spending three tasks on work that shares a lock.
+/// What: `(node_count, edge_count, community_count)` as `u64`, read under
+/// `tokio::task::spawn_blocking`. A join failure degrades to zeros, the same
+/// rule the counts already use for a poisoned adjacency, rather than failing a
+/// graph render.
+/// Test: `kg_graph_returns_active_triples`, `kg_graph_seed_ranks_by_degree`.
+async fn adjacency_counts(handle: &Arc<PalaceHandle>) -> (u64, u64, u64) {
+    let handle = Arc::clone(handle);
+    tokio::task::spawn_blocking(move || {
+        (
+            handle.kg.node_count() as u64,
+            handle.kg.edge_count() as u64,
+            handle.kg.community_count() as u64,
+        )
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!("kg adjacency counts task failed: {e}");
+        (0, 0, 0)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // KG list bounds
 // ---------------------------------------------------------------------------
@@ -242,11 +271,15 @@ impl MemoryService {
             ServiceError::internal(format!("kg count_active_triples for palace {id}: {e:#}"))
         })? as u64;
         let returned_triple_count = triples.len() as u64;
+        // #7106: `community_count` runs a Louvain partition on the first read
+        // after a write, so it never runs on an async worker. The three
+        // adjacency-derived counts share one hop.
+        let (node_count, edge_count, community_count) = adjacency_counts(&handle).await;
         Ok(KgGraphPayload {
             triples,
-            node_count: handle.kg.node_count() as u64,
-            edge_count: handle.kg.edge_count() as u64,
-            community_count: handle.kg.community_count() as u64,
+            node_count,
+            edge_count,
+            community_count,
             returned_triple_count,
             active_triple_count,
             truncated: returned_triple_count < active_triple_count,
@@ -270,15 +303,16 @@ impl MemoryService {
             .kg
             .top_degree_subgraph(limit)
             .map_err(|e| ServiceError::internal(format!("kg top_degree_subgraph: {e:#}")))?;
-        let node_count = handle.kg.node_count() as u64;
+        // #7106: same reason as `kg_graph_with_cap` — off the async worker.
+        let (node_count, edge_count, community_count) = adjacency_counts(&handle).await;
         let returned_node_count = nodes.len() as u64;
         Ok(KgSeedPayload {
             nodes: nodes.into_iter().map(KgNodeView::from).collect(),
             returned_triple_count: triples.len() as u64,
             triples,
             node_count,
-            edge_count: handle.kg.edge_count() as u64,
-            community_count: handle.kg.community_count() as u64,
+            edge_count,
+            community_count,
             returned_node_count,
             limit: limit as u64,
             truncated: returned_node_count < node_count,

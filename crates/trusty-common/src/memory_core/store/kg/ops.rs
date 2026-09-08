@@ -125,12 +125,54 @@ impl KnowledgeGraph {
     /// number of non-empty partition groups. Returns `0` for an empty
     /// graph or when the adjacency snapshot fails (the partition function
     /// itself returns an empty vec in those cases).
-    /// Test: `kg_graph_tests::community_count_returns_partition_size`.
+    /// #7106: the partition is memoised per adjacency write generation — see
+    /// the body — so a roster poll over many palaces re-partitions none of
+    /// them, and a KG write invalidates exactly the palace it touched.
+    /// Test: `kg_graph_tests::community_count_returns_partition_size`,
+    /// `kg_graph_tests::community_count_is_cached_until_the_graph_changes`.
     pub fn community_count(&self) -> usize {
-        crate::memory_core::community::partition(self)
+        // #7106: memoised per adjacency generation. `palaces_list` asks every
+        // resident palace for this on every poll and `kg_graph` asks again on
+        // every call; before the cache each ask was a full Louvain partition
+        // over the whole graph, which is what drove the daemon's CPU and
+        // footprint spikes with no write in between to justify it.
+        let generation = match self.adj.read() {
+            Ok(adj) => adj.generation,
+            // A poisoned adjacency means the graph views are already stale
+            // (#5424). Partition returns 0 for it anyway; do not cache that.
+            Err(_) => return 0,
+        };
+        if let Ok(cache) = self.community_cache.read()
+            && let Some((cached_generation, count)) = *cache
+            && cached_generation == generation
+        {
+            return count;
+        }
+        let count = crate::memory_core::community::partition(self)
             .iter()
             .filter(|c| !c.is_empty())
-            .count()
+            .count();
+        self.community_computations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut cache) = self.community_cache.write() {
+            *cache = Some((generation, count));
+        }
+        count
+    }
+
+    /// How many Louvain partitions this handle has actually run (#7106).
+    ///
+    /// Why: a cache hit and a recomputation return the same number, so "the
+    /// count is cached" cannot be asserted from [`Self::community_count`]'s
+    /// return value. This exposes the thing the fix is about. It is an
+    /// observability read, not a test-only hook: it is what an operator or a
+    /// diagnostic surface uses to confirm the roster is not re-partitioning 94
+    /// graphs per poll.
+    /// What: a relaxed load of the per-handle counter, shared across clones.
+    /// Test: `community_count_is_cached_until_the_graph_changes`.
+    pub fn community_computations(&self) -> u64 {
+        self.community_computations
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The underlying redb store, for the #6652 compaction path.

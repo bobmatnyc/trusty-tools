@@ -64,6 +64,31 @@ pub struct KnowledgeGraph {
     /// `Arc` as `adj`.
     /// Test: `retract_triple_after_poisoned_adjacency_is_distinguishable_from_never_retracted`.
     pub(super) adj_desynced: Arc<std::sync::OnceLock<(&'static str, usize)>>,
+    /// Memoised Louvain community count, keyed by adjacency generation (#7106).
+    ///
+    /// Why: `palaces_list` opens every palace and asks each for its community
+    /// count, and `kg_graph` asks again on every call. Each ask was a full
+    /// Louvain partition over the whole adjacency — for 94 palaces that is 94
+    /// partitions per roster poll, with no write in between to justify a single
+    /// one of them. The daemon's footprint and CPU spikes both trace back to
+    /// that. Shared across handle clones via the same `Arc` discipline as
+    /// [`Self::adj`], so the registry's cached handle keeps a warm answer.
+    /// What: `Some((generation, count))` for the generation the count was
+    /// computed at; `None` before the first computation. Read under the same
+    /// lock ordering as the adjacency (adjacency first, then this) so the two
+    /// can never deadlock against each other.
+    /// Test: `community_count_is_cached_until_the_graph_changes`.
+    pub(super) community_cache: Arc<RwLock<Option<(u64, usize)>>>,
+    /// How many times this handle has actually run the Louvain partition.
+    ///
+    /// Why (#7106): "the count is cached" is not observable from the count
+    /// itself — a correct cache and a recomputation return the same number.
+    /// This makes the thing the fix is about measurable, both to a test and to
+    /// an operator reading it back through a debug surface.
+    /// What: a relaxed counter bumped inside [`Self::community_count`] on a
+    /// cache miss only, shared across clones of the handle.
+    /// Test: `community_count_is_cached_until_the_graph_changes`.
+    pub(super) community_computations: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Why: Callers historically pass `data_dir.join("kg.db")` (SQLite filename).
@@ -149,6 +174,10 @@ impl KnowledgeGraph {
             writer,
             adj: Arc::new(RwLock::new(adj)),
             adj_desynced: Arc::new(std::sync::OnceLock::new()),
+            // #7106: cold cache on open — the first ask computes, later asks
+            // reuse until a write bumps the adjacency generation.
+            community_cache: Arc::new(RwLock::new(None)),
+            community_computations: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -211,7 +240,15 @@ impl KnowledgeGraph {
         f: impl FnOnce(&mut Adjacency) -> T,
     ) -> Result<T> {
         match self.adj.write() {
-            Ok(mut adj) => Ok(f(&mut adj)),
+            Ok(mut adj) => {
+                let out = f(&mut adj);
+                // #7106: one bump per applied mutation invalidates the memoised
+                // community count without the cache needing to know what
+                // changed. Saturating so a pathological handle cannot wrap into
+                // a stale-but-matching generation.
+                adj.generation = adj.generation.saturating_add(1);
+                Ok(out)
+            }
             Err(_) => {
                 let _ = self.adj_desynced.set((operation, committed));
                 tracing::error!(

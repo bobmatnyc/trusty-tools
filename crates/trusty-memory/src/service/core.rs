@@ -26,7 +26,8 @@ use uuid::Uuid;
 
 use super::helpers::{
     collect_palace_stats, drawer_content_preview, drawer_snippet, is_reserved_system_palace,
-    list_palaces_blocking, open_palaces_blocking, palace_info_from, recall_entry_json,
+    list_palaces_blocking, open_palaces_blocking, palace_info_blocking, palace_info_from,
+    recall_entry_json,
 };
 use super::types::{
     CreateDrawerBody, CreatePalaceBody, ListDrawersQuery, PalaceInfo, ServiceError, ServiceResult,
@@ -173,15 +174,25 @@ impl MemoryService {
         let palaces = list_palaces_blocking(&self.state)
             .await
             .map_err(|e| ServiceError::internal(format!("{e:#}")))?;
-        let mut out = Vec::with_capacity(palaces.len());
-        for p in palaces {
-            if is_reserved_system_palace(&p.id) {
-                continue;
+        // #7106: the enrichment itself is blocking work — a resident palace's
+        // first community count after a write partitions its whole graph. One
+        // hop for the whole loop, not one per row: this list can be thousands
+        // of rows and a task each would cost more than the work.
+        let registry = Arc::clone(&self.state.registry);
+        let out = tokio::task::spawn_blocking(move || {
+            let mut out = Vec::with_capacity(palaces.len());
+            for p in palaces {
+                if is_reserved_system_palace(&p.id) {
+                    continue;
+                }
+                // #4637: peek() not open_palace() — full-registry open is O(n) cold disk I/O
+                let handle = registry.peek(&p.id);
+                out.push(palace_info_from(&p, handle.as_ref()));
             }
-            // #4637: peek() not open_palace() — full-registry open is O(n) cold disk I/O
-            let handle = self.state.registry.peek(&p.id);
-            out.push(palace_info_from(&p, handle.as_ref()));
-        }
+            out
+        })
+        .await
+        .map_err(|e| ServiceError::internal(format!("join list_palaces enrichment: {e}")))?;
         Ok(out)
     }
 
@@ -442,7 +453,8 @@ impl MemoryService {
             .registry
             .open_palace(&self.state.data_root, &palace.id)
             .ok();
-        let info = palace_info_from(&palace, handle.as_ref());
+        // #7106: enrichment runs on the blocking pool.
+        let info = palace_info_blocking(&palace, handle).await;
         self.state.emit(self.aggregate_status_event());
         serde_json::to_value(info).context("serialize palace info")
     }
@@ -501,7 +513,8 @@ impl MemoryService {
             .registry
             .open_palace(&self.state.data_root, &palace.id)
             .ok();
-        let info = palace_info_from(&palace, handle.as_ref());
+        // #7106: enrichment runs on the blocking pool.
+        let info = palace_info_blocking(&palace, handle).await;
         self.state.emit(self.aggregate_status_event());
         serde_json::to_value(info)
             .map_err(|e| ServiceError::internal(format!("serialize palace info: {e}")))
@@ -525,7 +538,8 @@ impl MemoryService {
             .registry
             .open_palace(&self.state.data_root, &palace.id)
             .ok();
-        Ok(palace_info_from(&palace, handle.as_ref()))
+        // #7106: enrichment runs on the blocking pool.
+        Ok(palace_info_blocking(&palace, handle).await)
     }
 
     // -----------------------------------------------------------------

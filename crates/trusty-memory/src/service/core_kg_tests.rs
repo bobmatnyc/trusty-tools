@@ -978,3 +978,129 @@ async fn activity_endpoint_lists_recent_emits() {
     // Payload is structured JSON, not an escaped string.
     assert!(entries[0]["payload"].is_object());
 }
+
+/// Why (#7106): `palaces_list` opens every palace and asks each for its
+/// community count, and before the memo each ask ran a full Louvain partition —
+/// 94 partitions per roster poll on the reporting host, none of them justified
+/// by a write. This is the roster-level statement of that: two polls back to
+/// back must partition the palace once, not twice.
+/// What: creates a palace, asserts a triple, runs `list_palaces_with_counts`
+/// twice and reads the partition counter off the resident handle; then asserts
+/// another triple and polls again, expecting exactly one more partition.
+/// Test: this test.
+#[tokio::test]
+async fn roster_polls_partition_each_palace_at_most_once_per_write() {
+    let (svc, state) = service();
+    let id = svc
+        .create_palace(palace_body("roster-memo"), ActivitySource::Http)
+        .await
+        .expect("create palace");
+    let palace_id = PalaceId::new(id.clone());
+
+    svc.kg_assert(
+        &id,
+        KgAssertBody {
+            subject: "alpha".into(),
+            predicate: "rel".into(),
+            object: "beta".into(),
+            confidence: None,
+            provenance: None,
+        },
+    )
+    .await
+    .expect("assert triple");
+
+    let handle = state
+        .registry
+        .open_palace(&state.data_root, &palace_id)
+        .expect("palace is resident");
+    let baseline = handle.kg.community_computations();
+
+    for _ in 0..2 {
+        let rows = svc
+            .list_palaces_with_counts()
+            .await
+            .expect("roster poll must succeed");
+        assert!(
+            rows.iter().any(|(row_id, _)| row_id == &id),
+            "the palace must appear in the roster"
+        );
+    }
+    assert_eq!(
+        handle.kg.community_computations(),
+        baseline + 1,
+        "#7106: two roster polls with no write between them must partition once"
+    );
+
+    svc.kg_assert(
+        &id,
+        KgAssertBody {
+            subject: "beta".into(),
+            predicate: "rel".into(),
+            object: "gamma".into(),
+            confidence: None,
+            provenance: None,
+        },
+    )
+    .await
+    .expect("assert second triple");
+
+    svc.list_palaces_with_counts()
+        .await
+        .expect("roster poll after the write");
+    assert_eq!(
+        handle.kg.community_computations(),
+        baseline + 2,
+        "a KG write must force exactly one recomputation, not zero and not two"
+    );
+}
+
+/// Why (#7106): `palace_info_blocking` exists so no async surface computes a
+/// Louvain partition on a tokio worker. Routing every caller through it is only
+/// safe if it answers exactly what the inline call answered — a wrapper that
+/// quietly changed a count would be a behaviour change smuggled inside a memory
+/// fix.
+/// What: builds a palace with a triple, then compares the row from
+/// `palace_info_blocking` against the row `palace_info_from` produces inline
+/// from the same handle, field by field on the counts the KG feeds.
+/// Test: this test.
+#[tokio::test]
+async fn palace_info_blocking_matches_the_inline_row() {
+    let (svc, state) = service();
+    let id = svc
+        .create_palace(palace_body("blocking-parity"), ActivitySource::Http)
+        .await
+        .expect("create palace");
+    svc.kg_assert(
+        &id,
+        KgAssertBody {
+            subject: "one".into(),
+            predicate: "rel".into(),
+            object: "two".into(),
+            confidence: None,
+            provenance: None,
+        },
+    )
+    .await
+    .expect("assert triple");
+
+    let palace_id = PalaceId::new(id.clone());
+    let palace = trusty_common::memory_core::PalaceRegistry::list_palaces(&state.data_root)
+        .expect("list palaces")
+        .into_iter()
+        .find(|p| p.id == palace_id)
+        .expect("palace row on disk");
+    let handle = state
+        .registry
+        .open_palace(&state.data_root, &palace_id)
+        .expect("palace opens");
+
+    let inline = crate::service::palace_info_from(&palace, Some(&handle));
+    let hopped = crate::service::helpers::palace_info_blocking(&palace, Some(handle)).await;
+
+    assert_eq!(hopped.node_count, inline.node_count);
+    assert_eq!(hopped.edge_count, inline.edge_count);
+    assert_eq!(hopped.community_count, inline.community_count);
+    assert_eq!(hopped.kg_triple_count, inline.kg_triple_count);
+    assert_eq!(hopped.drawer_count, inline.drawer_count);
+}

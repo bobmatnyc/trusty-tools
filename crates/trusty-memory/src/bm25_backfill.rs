@@ -626,6 +626,36 @@ fn palace_ids_on_disk(data_root: &std::path::Path) -> anyhow::Result<Vec<String>
     }
     Ok(ids)
 }
+/// Hand a palace the startup sweep opened back to the LRU (#7106).
+///
+/// Why: the sweep walks the whole estate, so without this every palace it
+/// touches stays resident — a background job nobody asked for pinning the
+/// daemon at the LRU cap for the rest of the process's life. The owner's
+/// residency ruling (#7087) is the limit on that, and
+/// `startup_budget::release_after_sweep` applies it.
+/// What: drops the sweep's own `Arc` FIRST (otherwise the registry's
+/// `strong_count == 1` guard can never hold), then asks
+/// `startup_budget::release_after_sweep` whether to drop the cached handle, and
+/// finally releases the startup-open permit so the next palace can start.
+/// Test: `startup_budget::tests::release_after_sweep_keeps_a_recently_used_palace`.
+fn release_swept_palace(
+    state: &AppState,
+    id: &trusty_common::memory_core::palace::PalaceId,
+    was_resident_before: bool,
+    handle: std::sync::Arc<trusty_common::memory_core::PalaceHandle>,
+    permit: crate::startup_budget::StartupOpenPermit,
+) {
+    drop(handle);
+    let data_dir = state.data_root.join(&id.0);
+    crate::startup_budget::release_after_sweep(
+        &state.registry,
+        id,
+        &data_dir,
+        was_resident_before,
+        std::time::Duration::from_secs(crate::startup_budget::DEFAULT_KEEP_RECENT_SECS),
+    );
+    drop(permit);
+}
 
 /// Sweep every palace ON DISK that has drawers, serially.
 ///
@@ -680,9 +710,18 @@ pub async fn run_startup_sweep(state: &AppState) -> SweepOutcome {
 
     for palace in palaces {
         let id = trusty_common::memory_core::palace::PalaceId::new(palace.clone());
+        // #7106: the sweep draws on the same startup budget hydration does, so
+        // the two running together cannot hold more than one limit's worth of
+        // palaces open between them.
+        let permit = state.startup_gate.acquire().await;
+        // #7106: a palace already resident was warmed by something else — the
+        // sweep must hand back only what it brought in itself.
+        let was_resident_before = state.registry.peek(&id).is_some();
         let registry = std::sync::Arc::clone(&state.registry);
         let root = state.data_root.clone();
-        let opened = tokio::task::spawn_blocking(move || registry.open_palace(&root, &id)).await;
+        let open_id = id.clone();
+        let opened =
+            tokio::task::spawn_blocking(move || registry.open_palace(&root, &open_id)).await;
         let handle = match opened {
             Ok(Ok(h)) => h,
             Ok(Err(e)) => {
@@ -712,6 +751,7 @@ pub async fn run_startup_sweep(state: &AppState) -> SweepOutcome {
         // serves, not to what is on disk behind it. Change where the lanes read
         // from and this skip stops being safe.
         if handle.drawers.read().is_empty() {
+            release_swept_palace(state, &id, was_resident_before, handle, permit);
             continue;
         }
 
@@ -721,6 +761,9 @@ pub async fn run_startup_sweep(state: &AppState) -> SweepOutcome {
             out.incomplete += 1;
             crate::bm25_repair::mark_dirty(state, &palace);
         }
+        // #7106: hand the palace back to the LRU now that this sweep is done
+        // with it, subject to the #7087 residency ruling.
+        release_swept_palace(state, &id, was_resident_before, handle, permit);
     }
 
     if out.all_verified() {
