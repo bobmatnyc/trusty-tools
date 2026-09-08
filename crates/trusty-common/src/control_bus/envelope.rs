@@ -19,7 +19,9 @@
 //!       `super::tests::payload_lifecycle_round_trips`,
 //!       `super::tests::payload_hook_round_trips`,
 //!       `super::tests::payload_ping_round_trips`,
-//!       `super::tests::payload_domain_matches_serde_tag`.
+//!       `super::tests::payload_domain_matches_serde_tag`,
+//!       `super::tests::harness_payload_action_round_trips`,
+//!       `super::tests::harness_payload_pre_action_payload_still_deserializes`.
 
 // #6846: `HarnessPayload` and `HarnessEvent` moved here from
 // `trusty_agents_common::events::bus`; that module keeps its stderr transport.
@@ -32,6 +34,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::action::ActionEvent;
 use super::event_id::EventId;
 use super::lifecycle::{HarnessSource, LifecycleEvent};
 
@@ -45,11 +48,16 @@ use super::lifecycle::{HarnessSource, LifecycleEvent};
 ///      instead of being modelled variant-by-variant.
 /// What: `serde(tag = "domain", content = "event")` produces
 ///       `{"domain":"lifecycle","event":{...}}`, `{"domain":"hook","event":
-///       {"kind":...,"data":...}}`, or `{"domain":"ping"}`. `Ping` is the
-///       transport keepalive, kept out of the lifecycle enum.
+///       {"kind":...,"data":...}}`, `{"domain":"ping"}`, or
+///       `{"domain":"action","event":{...}}` (issue #6847, DOC-73 §3.1). An
+///       old subscriber that matches on `domain` skips an `action` frame
+///       cleanly rather than failing to deserialize. `Ping` is the transport
+///       keepalive, kept out of the lifecycle enum.
 /// Test: `super::tests::payload_lifecycle_round_trips`,
 ///       `super::tests::payload_hook_round_trips`,
-///       `super::tests::payload_ping_round_trips`.
+///       `super::tests::payload_ping_round_trips`,
+///       `super::tests::harness_payload_action_round_trips`,
+///       `super::tests::harness_payload_pre_action_payload_still_deserializes`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "domain", content = "event", rename_all = "snake_case")]
 pub enum HarnessPayload {
@@ -59,10 +67,15 @@ pub enum HarnessPayload {
     Hook { kind: String, data: Value },
     /// Transport keepalive so long-lived SSE connections don't time out.
     Ping,
+    /// A typed dashboard action — the six-kind taxonomy DOC-73 §3.2 defines
+    /// (issue #6847). Additive: an old subscriber matching on `domain` alone
+    /// skips this arm rather than failing to deserialize (§3.3).
+    Action(ActionEvent),
 }
 
 impl HarnessPayload {
-    /// The domain string for this payload (`"lifecycle"`, `"hook"`, `"ping"`).
+    /// The domain string for this payload (`"lifecycle"`, `"hook"`, `"ping"`,
+    /// `"action"`).
     ///
     /// Why: `Filter` matches on the domain without serialising the whole
     ///      payload; keeping the mapping here is the single source of truth.
@@ -73,6 +86,7 @@ impl HarnessPayload {
             HarnessPayload::Lifecycle(_) => "lifecycle",
             HarnessPayload::Hook { .. } => "hook",
             HarnessPayload::Ping => "ping",
+            HarnessPayload::Action(_) => "action",
         }
     }
 }

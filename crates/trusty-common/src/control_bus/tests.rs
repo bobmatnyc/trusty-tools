@@ -130,6 +130,269 @@ fn payload_domain_matches_serde_tag() {
         "hook"
     );
     assert_eq!(HarnessPayload::Ping.domain(), "ping");
+    assert_eq!(
+        HarnessPayload::Action(sample_action_event()).domain(),
+        "action"
+    );
+}
+
+/// A `HarnessEvent` serialized before issue #6847 added `HarnessPayload::Action`
+/// still deserializes — proving the new variant does not disturb matching on
+/// the existing `domain` tags.
+///
+/// Why: §3.3's second versioning rule ("a new `kind` or `phase` variant is
+///      added without renumbering") only holds if adding `Action` alongside
+///      `Lifecycle`/`Hook`/`Ping` is itself invisible to an old-shaped
+///      payload — a consumer running today's code must still read yesterday's
+///      log.
+/// What: A hand-written JSON literal in the exact pre-#6847 `Hook` shape (no
+///       `Action` anywhere in the document), deserialized against the current
+///       `HarnessPayload` enum.
+/// Test: this test itself.
+#[test]
+fn harness_payload_pre_action_payload_still_deserializes() {
+    let json = r#"{"domain":"hook","event":{"kind":"pre_tool_use","data":{"tool":"bash"}}}"#;
+    let back: HarnessPayload = serde_json::from_str(json).expect("legacy hook payload parses");
+    assert_eq!(
+        back,
+        HarnessPayload::Hook {
+            kind: "pre_tool_use".into(),
+            data: json!({"tool": "bash"}),
+        }
+    );
+}
+
+/// A `HarnessPayload::Action` round-trips with the same `{"domain":"action",
+/// "event":{...}}` shape every other domain uses.
+#[test]
+fn harness_payload_action_round_trips() {
+    let p = HarnessPayload::Action(sample_action_event());
+    let s = serde_json::to_string(&p).expect("serialize");
+    assert!(s.contains("\"domain\":\"action\""), "{s}");
+    assert!(s.contains("\"kind\":\"session\""), "{s}");
+    let back: HarnessPayload = serde_json::from_str(&s).expect("deserialize");
+    assert_eq!(back, p);
+}
+
+// ---- ActionEvent taxonomy (DOC-73 §3.2) ----
+
+fn sample_meta() -> ActionMeta {
+    ActionMeta {
+        id: EventId::new(),
+        at: chrono::Utc::now(),
+        source: HarnessSource::Mpm,
+        session: Some("s1".into()),
+        parent_id: None,
+        actor: Actor::Agent {
+            name: "rust-engineer".into(),
+            agent_id: "agent-1".into(),
+        },
+        objects: vec![ObjectRef {
+            object_type: ObjectType::Session,
+            id: "s1".into(),
+            label: "session s1".into(),
+        }],
+        schema_version: 1,
+    }
+}
+
+fn sample_action_event() -> ActionEvent {
+    ActionEvent::Session {
+        meta: sample_meta(),
+        phase: SessionPhase::Started,
+    }
+}
+
+/// Every one of the six `ActionEvent` kinds round-trips through serde with
+/// its fields intact.
+#[test]
+fn action_event_round_trips_all_six_kinds() {
+    let meta = sample_meta();
+    let events = vec![
+        ActionEvent::Workflow {
+            meta: meta.clone(),
+            phase: WorkflowPhase::Spawn,
+            object: ObjectRef {
+                object_type: ObjectType::Task,
+                id: "t1".into(),
+                label: "build the thing".into(),
+            },
+        },
+        ActionEvent::Agent {
+            meta: meta.clone(),
+            phase: AgentPhase::Spawned,
+            agent_id: "agent-1".into(),
+        },
+        ActionEvent::File {
+            meta: meta.clone(),
+            phase: FilePhase::Written,
+            path: PathRef {
+                path: "src/lib.rs".into(),
+                diff_ref: Some("diff-1".into()),
+            },
+        },
+        ActionEvent::Tool {
+            meta: meta.clone(),
+            phase: CallPhase::Finished,
+            tool: "bash".into(),
+            call_id: "call-1".into(),
+        },
+        ActionEvent::Session {
+            meta: meta.clone(),
+            phase: SessionPhase::Done,
+        },
+        ActionEvent::Inference {
+            meta: meta.clone(),
+            phase: CallPhase::Started,
+            model: "claude-sonnet".into(),
+        },
+    ];
+
+    for event in events {
+        let s = serde_json::to_string(&event).expect("serialize");
+        let back: ActionEvent = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(back, event, "round trip for {}: {s}", event.kind());
+        assert_eq!(back.meta(), event.meta());
+    }
+}
+
+/// The wire shape tags each variant with `kind` and flattens `ActionMeta`'s
+/// fields alongside the variant-specific ones, rather than nesting them.
+#[test]
+fn action_event_wire_shape_matches_kind_tag() {
+    let event = ActionEvent::Tool {
+        meta: sample_meta(),
+        phase: CallPhase::Started,
+        tool: "bash".into(),
+        call_id: "call-1".into(),
+    };
+    let s = serde_json::to_string(&event).expect("serialize");
+    assert!(s.contains("\"kind\":\"tool\""), "{s}");
+    assert!(s.contains("\"tool\":\"bash\""), "{s}");
+    assert!(s.contains("\"call_id\":\"call-1\""), "{s}");
+    assert!(
+        s.contains("\"actor\":{\"type\":\"agent\""),
+        "meta fields are flattened alongside the variant fields: {s}"
+    );
+}
+
+#[test]
+fn action_event_kind_matches_serde_tag() {
+    let meta = sample_meta();
+    let cases: Vec<(ActionEvent, &str)> = vec![
+        (
+            ActionEvent::Workflow {
+                meta: meta.clone(),
+                phase: WorkflowPhase::Start,
+                object: ObjectRef {
+                    object_type: ObjectType::Task,
+                    id: "t1".into(),
+                    label: "l".into(),
+                },
+            },
+            "workflow",
+        ),
+        (
+            ActionEvent::Agent {
+                meta: meta.clone(),
+                phase: AgentPhase::Done,
+                agent_id: "a1".into(),
+            },
+            "agent",
+        ),
+        (
+            ActionEvent::File {
+                meta: meta.clone(),
+                phase: FilePhase::Created,
+                path: PathRef {
+                    path: "x".into(),
+                    diff_ref: None,
+                },
+            },
+            "file",
+        ),
+        (
+            ActionEvent::Tool {
+                meta: meta.clone(),
+                phase: CallPhase::Errored,
+                tool: "t".into(),
+                call_id: "c1".into(),
+            },
+            "tool",
+        ),
+        (
+            ActionEvent::Session {
+                meta: meta.clone(),
+                phase: SessionPhase::Cancelled,
+            },
+            "session",
+        ),
+        (
+            ActionEvent::Inference {
+                meta: meta.clone(),
+                phase: CallPhase::Finished,
+                model: "m".into(),
+            },
+            "inference",
+        ),
+    ];
+
+    for (event, expected) in cases {
+        let s = serde_json::to_string(&event).expect("serialize");
+        assert_eq!(event.kind(), expected);
+        assert!(s.contains(&format!("\"kind\":\"{expected}\"")), "{s}");
+    }
+}
+
+/// `schema_version` defaults to `1` when absent from the wire, so
+/// `ActionMeta`'s own addition of the field is itself additive (DOC-73 §3.3
+/// rule 1).
+#[test]
+fn action_meta_schema_version_defaults_to_one() {
+    let json = r#"{
+        "kind": "session",
+        "id": "018f1e0a-0000-7000-8000-000000000000",
+        "at": "2026-01-01T00:00:00Z",
+        "source": "mpm",
+        "actor": {"type": "system"},
+        "phase": "started"
+    }"#;
+    let event: ActionEvent =
+        serde_json::from_str(json).expect("deserialize without schema_version");
+    assert_eq!(event.meta().schema_version, 1);
+}
+
+#[test]
+fn actor_operator_and_system_round_trip() {
+    for (actor, tag) in [
+        (Actor::Operator, "\"type\":\"operator\""),
+        (Actor::System, "\"type\":\"system\""),
+    ] {
+        let s = serde_json::to_string(&actor).expect("serialize");
+        assert_eq!(s, format!("{{{tag}}}"));
+        let back: Actor = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(back, actor);
+    }
+}
+
+#[test]
+fn object_type_round_trips_every_variant() {
+    for (ty, tag) in [
+        (ObjectType::Session, "\"session\""),
+        (ObjectType::Agent, "\"agent\""),
+        (ObjectType::Task, "\"task\""),
+        (ObjectType::Workstream, "\"workstream\""),
+        (ObjectType::File, "\"file\""),
+        (ObjectType::ToolCall, "\"tool_call\""),
+        (ObjectType::Inference, "\"inference\""),
+        (ObjectType::Issue, "\"issue\""),
+        (ObjectType::Pr, "\"pr\""),
+    ] {
+        let s = serde_json::to_string(&ty).expect("serialize");
+        assert_eq!(s, tag);
+        let back: ObjectType = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(back, ty);
+    }
 }
 
 // ---- HarnessEvent envelope ----
@@ -371,10 +634,19 @@ fn filter_combination() {
 /// the real shipped text rather than a list someone has to remember to update.
 const MODULE_SOURCES: &[(&str, &str)] = &[
     ("control_bus/mod.rs", include_str!("mod.rs")),
+    ("control_bus/action.rs", include_str!("action.rs")),
     ("control_bus/lifecycle.rs", include_str!("lifecycle.rs")),
     ("control_bus/envelope.rs", include_str!("envelope.rs")),
     ("control_bus/event_id.rs", include_str!("event_id.rs")),
     ("control_bus/filter.rs", include_str!("filter.rs")),
+    // #6847: `push_client.rs` is the one file in this list that DOES dial a
+    // socket — see `control_bus_declares_no_transport`'s doc comment for why
+    // the scan below still passes it (it holds no global state, and none of
+    // the five forbidden spellings), and `push_client.rs`'s own module doc
+    // for the full design. `include_str!` embeds it unconditionally
+    // regardless of the `#[cfg(all(unix, feature = "uds"))]` gate on its `mod`
+    // declaration, so this scan covers it even in a build with `uds` off.
+    ("control_bus/push_client.rs", include_str!("push_client.rs")),
     ("control_bus/tests.rs", include_str!("tests.rs")),
 ];
 
