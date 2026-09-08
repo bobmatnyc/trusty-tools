@@ -910,16 +910,53 @@ fn long_stage_reasons_are_truncated() {
     );
 }
 
+/// #7140: the sweep must call the real attestation #5218 shipped instead of
+/// unconditionally asserting the pre-#5218 "pending" placeholder. A clean
+/// database — no content-bearing columns, no diff-shaped rows — states the
+/// attestation actually ran and passed, never that one is still pending.
 #[test]
-fn data_handling_note_is_a_pending_claim() {
-    let note = crate::audit::DATA_HANDLING_NOTE;
-    // DOC-67 §10: pending, never asserted — and #5218 is where the real one comes from.
-    assert!(note.contains("pending"), "{note}");
-    assert!(note.contains("#5218"), "{note}");
-    // §10's exact scope claim; the broader "no code" claim is wrong and must
-    // not appear, because free-text columns can carry pasted snippets.
+fn data_handling_note_states_a_clean_attestation() {
+    let db = Database::open_in_memory().expect("open in-memory db");
+    let note = crate::audit::data_handling_note(db.connection());
+
+    assert!(
+        !note.contains("pending"),
+        "a real attestation ran; it must not say pending: {note}"
+    );
+    assert!(!note.contains("#5218"), "{note}");
+    assert!(note.contains("no findings"), "{note}");
+    // §10's exact scope claim, plus its caveat that this is not the broader
+    // "no code" claim — free-text columns can still carry a pasted snippet.
     assert!(note.contains("no file content, diffs, patches, hunks, or blobs"));
-    assert!(!note.contains("no code"), "{note}");
+    assert!(
+        note.contains("not a claim that the database contains no code"),
+        "{note}"
+    );
+}
+
+/// A database carrying a diff pasted into a commit message must be named as a
+/// finding, not folded into a silent "consistent" claim — DOC-67 §9's rule
+/// that an unassessed or contradicted claim is stated, never hidden.
+#[test]
+fn data_handling_note_states_findings_instead_of_asserting_the_claim() {
+    let db = Database::open_in_memory().expect("open in-memory db");
+    db.connection()
+        .execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, repository) \
+             VALUES ('deadbee', 'Ada', 'ada@example.com', '2026-01-01T00:00:00Z', ?1, 'r')",
+            ["fix: paste\n\ndiff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n"],
+        )
+        .expect("insert commit");
+
+    let note = crate::audit::data_handling_note(db.connection());
+
+    assert!(
+        !note.contains("pending"),
+        "a real attestation ran; it must not say pending: {note}"
+    );
+    assert!(note.contains("found"), "{note}");
+    assert!(note.contains("diff-shaped"), "{note}");
+    assert!(note.contains("does not hold unreviewed"), "{note}");
 }
 
 // ---------------------------------------------------------------------------
