@@ -49,6 +49,43 @@ fn fixture_config(
     }
 }
 
+/// An enabled `log_drain:` config with TWO destinations, each fed by its own
+/// source over the same crate name and log filename — so the two destinations'
+/// candidates share one `relative_file`, and only their destination identity
+/// tells them apart (#7154).
+fn fixture_config_two_destinations(
+    dest_a: &Path,
+    dest_b: &Path,
+    log_a: &Path,
+    log_b: &Path,
+) -> TrustyToolsConfig {
+    TrustyToolsConfig {
+        log_drain: Some(LogDrainConfig {
+            enabled: Some(true),
+            owner: Some(FIXTURE_OWNER.to_string()),
+            project: Some(FIXTURE_PROJECT.to_string()),
+            sources: vec![
+                LogDrainSourceConfig {
+                    crate_name: Some("trusty-mpm".to_string()),
+                    root: Some(log_a.display().to_string()),
+                    include: vec!["*.log".to_string()],
+                    destination: Some(format!("file://{}", dest_a.display())),
+                    ..Default::default()
+                },
+                LogDrainSourceConfig {
+                    crate_name: Some("trusty-mpm".to_string()),
+                    root: Some(log_b.display().to_string()),
+                    include: vec!["*.log".to_string()],
+                    destination: Some(format!("file://{}", dest_b.display())),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 fn resolve(config: &TrustyToolsConfig, home: &Path) -> ResolvedLogDrain {
     match resolve_log_drain(config, home).expect("fixture config resolves") {
         crate::core::trusty_tools_config::LogDrainSetting::Enabled(plan) => *plan,
@@ -233,5 +270,131 @@ async fn prune_after_upload_respects_the_off_switch() {
     assert!(
         object_exists(dest_root.path()).await,
         "the object survives indefinitely with pruning switched off"
+    );
+}
+
+/// #7154: a config reorder between ticks must never transfer one
+/// destination's armed prune state to a different destination that now
+/// happens to sit at the same plan index.
+#[tokio::test]
+async fn prune_after_upload_survives_a_destination_reorder_between_ticks() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dest_a = tempfile::tempdir().expect("tempdir");
+    let dest_b = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+
+    // Tick 1: only A has a file to drain — B's source directory is empty, so
+    // B contributes no prune candidate this tick at all.
+    let log_a = log_dir_with(&tmp, "line one\n");
+    let log_b = tmp.path().join("logs-b");
+    std::fs::create_dir_all(&log_b).expect("create empty log dir for b");
+
+    let config = fixture_config_two_destinations(dest_a.path(), dest_b.path(), &log_a, &log_b);
+    let mut plan = resolve(&config, tmp.path());
+    plan.prune_retention = Duration::from_secs(0);
+    assert_eq!(
+        plan.destinations.len(),
+        2,
+        "two distinct file:// destinations"
+    );
+
+    let mut debounce = RetentionDebounce::new();
+    let first = super::super::run_tick(&plan, state.path(), &mut debounce).await;
+    assert_eq!(first.uploaded, 1, "only A's file uploads this tick");
+    assert_eq!(first.pruned, 0, "a first-time candidate is never pruned");
+
+    // Between ticks: B gets its own file for the first time, and the plan is
+    // reordered so B now sits at index 0 — the index A's candidate was armed
+    // under on tick one.
+    std::fs::write(log_b.join("trusty-mpm.log"), "line one\n").expect("write b's file");
+    plan.destinations.swap(0, 1);
+
+    let second = super::super::run_tick(&plan, state.path(), &mut debounce).await;
+
+    assert!(
+        object_exists(dest_b.path()).await,
+        "B's object must survive its own FIRST tick as a candidate, even though \
+         its destination now occupies A's old index"
+    );
+    // A's identity survives the reorder intact: its second real consecutive
+    // observation confirms and prunes it, exactly as if the plan had never
+    // been reordered — proving the fix resolves by identity, not position.
+    assert!(
+        !object_exists(dest_a.path()).await,
+        "A's own two-tick history, tracked by identity rather than position, \
+         still confirms and prunes A"
+    );
+    assert_eq!(second.outcome, DrainOutcome::Success);
+}
+
+/// #7154: a confirmed batch over the sanity cap is refused outright — nothing
+/// deleted — and the refusal is visible in the destination's status without
+/// marking it `Failed`.
+#[tokio::test]
+async fn prune_after_upload_refuses_a_batch_over_the_count_ceiling() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    let log_dir = log_dir_with(&tmp, "line one\n");
+    let config = fixture_config(dest_root.path(), &log_dir, None);
+    let mut plan = resolve(&config, tmp.path());
+    plan.prune_retention = Duration::from_secs(0);
+
+    let group = &plan.destinations[0];
+    let dest = ObjectStoreDestination::connect(&group.destination)
+        .await
+        .expect("connect");
+
+    // Seed a manifest whose entry count is over `PRUNE_BATCH_COUNT_CEILING`,
+    // bypassing real uploads — `prune_confirmed` only reads keys and deletes,
+    // it never re-verifies the underlying file.
+    let mut manifest = trusty_common::log_drain::DrainManifest::default();
+    let overflow = trusty_common::log_drain::PRUNE_BATCH_COUNT_CEILING + 1;
+    for i in 0..overflow {
+        manifest.record(trusty_common::log_drain::ManifestEntry {
+            relative_file: format!("trusty-mpm/{i}.log"),
+            size: 1,
+            mtime_unix: 0,
+            sha256: "deadbeef".to_string(),
+            uploaded_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+    manifest
+        .save(
+            &dest,
+            state.path(),
+            &group.target.manifest_key(),
+            "synthetic",
+        )
+        .await
+        .expect("manifest saves");
+
+    let mut statuses = vec![LogDrainDestinationStatus::failed(group, "placeholder")];
+    statuses[0].outcome = DrainOutcome::Success;
+    let mut debounce: RetentionDebounce<PruneCandidate> = RetentionDebounce::new();
+
+    // First tick only arms every candidate; the second confirms the whole
+    // (oversize) batch and is where the cap must refuse it.
+    apply(&plan, state.path(), &mut statuses, &mut debounce).await;
+    assert_eq!(
+        statuses[0].pruned, 0,
+        "a first-time candidate is never pruned"
+    );
+
+    apply(&plan, state.path(), &mut statuses, &mut debounce).await;
+
+    assert_eq!(
+        statuses[0].pruned, 0,
+        "a batch over the count ceiling deletes nothing"
+    );
+    assert_eq!(
+        statuses[0].outcome,
+        DrainOutcome::Success,
+        "a sanity-cap refusal is not a destination failure"
+    );
+    assert!(
+        statuses[0].detail.contains("prune refused"),
+        "the refusal is visible in the detail line: {}",
+        statuses[0].detail
     );
 }

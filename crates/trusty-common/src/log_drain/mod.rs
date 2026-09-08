@@ -404,7 +404,10 @@ pub async fn run_once(
 /// Why: a destructive pass and an upload pass need the same "nothing changed
 /// vs. everything failed" distinction [`DrainReport`] gives uploads.
 /// What: a count of objects actually removed, plus per-key failures that never
-/// abort the batch — the same shape [`DrainReport::errors`] uses.
+/// abort the batch — the same shape [`DrainReport::errors`] uses. `refused`
+/// carries the [`PruneRefusal`] when the whole batch was declined by the
+/// sanity cap (#7154); `pruned` is always `0` and `errors` always empty in
+/// that case, because a refused batch deletes nothing.
 /// Test: `tests::prune_confirmed_deletes_object_and_manifest_entry`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -414,6 +417,117 @@ pub struct PruneOutcome {
     pub pruned: usize,
     /// Per-key failures, as `(key, message)`. Never aborts the batch.
     pub errors: Vec<(String, String)>,
+    /// Set instead of acting when the batch tripped the sanity cap.
+    pub refused: Option<PruneRefusal>,
+}
+
+/// Ceiling on how many objects one [`prune_confirmed`] call may delete in a
+/// single tick.
+///
+/// Why (#7154): the two-tick `RetentionDebounce` only proves a candidate was
+/// STILL prunable on two consecutive ticks — it does not bound how MANY can
+/// qualify at once. A forward clock jump (a bad NTP sync, a suspended host
+/// waking up days later) ages every manifest entry past `prune_retention` in
+/// one stroke, and both ticks agree, so the debounce confirms the whole
+/// history in one pass. A destination's entire backlog vanishing in a single
+/// tick is exactly the failure mode retention pruning must never cause.
+/// What: an absolute count, independent of the fraction ceiling below —
+/// either one refuses the batch. `500` is generous for the steady-state
+/// workload (one object per source file per upload pass) while still well
+/// short of "this destination's whole history".
+/// Test: `tests::prune_batch_refusal_over_the_count_ceiling`.
+pub const PRUNE_BATCH_COUNT_CEILING: usize = 500;
+
+/// Ceiling on what FRACTION of the manifest's own entries one tick may
+/// delete, once the manifest is large enough for a fraction to mean anything.
+///
+/// What: `0.5` — a batch may claim at most half of what the manifest
+/// currently lists. Paired with [`PRUNE_FRACTION_FLOOR`] so a manifest with a
+/// handful of entries (where "half" is one or two files) does not trip on
+/// perfectly ordinary retention behaviour.
+/// Test: `tests::prune_batch_refusal_over_the_fraction_ceiling`,
+/// `tests::prune_batch_refusal_allows_a_small_manifest_at_any_fraction`.
+pub const PRUNE_BATCH_FRACTION_CEILING: f64 = 0.5;
+
+/// Manifests at or below this many entries are exempt from
+/// [`PRUNE_BATCH_FRACTION_CEILING`] — the count ceiling alone still applies.
+pub const PRUNE_FRACTION_FLOOR: usize = 20;
+
+/// Why a confirmed prune batch was refused outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PruneRefusalReason {
+    /// `batch_len` exceeded [`PRUNE_BATCH_COUNT_CEILING`].
+    CountCeiling,
+    /// `batch_len` exceeded [`PRUNE_BATCH_FRACTION_CEILING`] of `manifest_len`,
+    /// with `manifest_len` over [`PRUNE_FRACTION_FLOOR`].
+    FractionCeiling,
+}
+
+impl std::fmt::Display for PruneRefusalReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CountCeiling => {
+                write!(f, "batch exceeds the {PRUNE_BATCH_COUNT_CEILING}-entry cap")
+            }
+            Self::FractionCeiling => write!(
+                f,
+                "batch exceeds {:.0}% of the manifest",
+                PRUNE_BATCH_FRACTION_CEILING * 100.0
+            ),
+        }
+    }
+}
+
+/// A confirmed prune batch the sanity cap declined to act on (#7154).
+///
+/// Why: the destructive decision already survived the two-tick debounce by
+/// the time [`prune_confirmed`] sees it — this is the LAST guard, and it has
+/// to say what it saw, not just that it said no.
+/// What: the batch size and the manifest size the refusal was judged against,
+/// plus which ceiling tripped. Neither count implies the other: a huge batch
+/// against a huge manifest can still trip [`PruneRefusalReason::CountCeiling`]
+/// first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PruneRefusal {
+    /// How many keys the debounce confirmed this tick.
+    pub batch_len: usize,
+    /// How many entries the manifest held when the batch was judged.
+    pub manifest_len: usize,
+    /// Which ceiling refused the batch.
+    pub reason: PruneRefusalReason,
+}
+
+/// Pure decision: would this batch trip the sanity cap?
+///
+/// Why: kept free of I/O so the two ceilings are testable directly against
+/// plain integers rather than a real manifest and destination.
+/// What: [`PRUNE_BATCH_COUNT_CEILING`] is checked first, then
+/// [`PRUNE_BATCH_FRACTION_CEILING`] once `manifest_len` is over
+/// [`PRUNE_FRACTION_FLOOR`]. `None` means the batch may proceed.
+/// Test: `tests::prune_batch_refusal_over_the_count_ceiling`,
+/// `tests::prune_batch_refusal_over_the_fraction_ceiling`,
+/// `tests::prune_batch_refusal_allows_a_small_manifest_at_any_fraction`,
+/// `tests::prune_batch_refusal_allows_a_batch_under_both_ceilings`.
+fn prune_batch_refusal(batch_len: usize, manifest_len: usize) -> Option<PruneRefusal> {
+    if batch_len > PRUNE_BATCH_COUNT_CEILING {
+        return Some(PruneRefusal {
+            batch_len,
+            manifest_len,
+            reason: PruneRefusalReason::CountCeiling,
+        });
+    }
+    if manifest_len > PRUNE_FRACTION_FLOOR
+        && (batch_len as f64) > (manifest_len as f64) * PRUNE_BATCH_FRACTION_CEILING
+    {
+        return Some(PruneRefusal {
+            batch_len,
+            manifest_len,
+            reason: PruneRefusalReason::FractionCeiling,
+        });
+    }
+    None
 }
 
 /// Manifest-confirmed object keys at least `retention` old, as of now.
@@ -460,11 +574,17 @@ pub async fn prunable_candidates(
 /// entry. The manifest is saved once at the end, only if something changed.
 ///
 /// Test: `tests::prune_confirmed_deletes_object_and_manifest_entry`,
-/// `tests::prune_confirmed_ignores_a_key_the_manifest_no_longer_lists`.
+/// `tests::prune_confirmed_ignores_a_key_the_manifest_no_longer_lists`,
+/// `tests::prune_confirmed_refuses_a_batch_over_the_count_ceiling`,
+/// `tests::prune_confirmed_refuses_a_batch_over_the_fraction_ceiling`,
+/// `tests::prune_confirmed_prunes_a_batch_under_both_ceilings`.
 ///
 /// # Errors
 /// [`DrainError::Transport`] only when the manifest itself could not be
-/// loaded or saved — a per-key delete failure is collected, not raised.
+/// loaded or saved — a per-key delete failure is collected, not raised. A
+/// batch that trips the sanity cap ([`PRUNE_BATCH_COUNT_CEILING`],
+/// [`PRUNE_BATCH_FRACTION_CEILING`]) is reported in [`PruneOutcome::refused`]
+/// rather than as an error — it is a deliberate refusal, not a failure.
 pub async fn prune_confirmed(
     dest: &dyn LogDestination,
     target: &DrainTarget,
@@ -474,6 +594,17 @@ pub async fn prune_confirmed(
     let manifest_key = target.manifest_key();
     let cache_key = target.cache_key();
     let mut manifest = DrainManifest::load(dest, state_dir, &manifest_key, &cache_key).await?;
+
+    // #7154: judged against the manifest as loaded, before anything this
+    // batch would remove — the sanity cap asks "is it safe to trust this
+    // batch", not "what would be left afterward". Delete nothing this tick
+    // when it is not.
+    if let Some(refusal) = prune_batch_refusal(confirm.len(), manifest.entries.len()) {
+        return Ok(PruneOutcome {
+            refused: Some(refusal),
+            ..PruneOutcome::default()
+        });
+    }
 
     let mut outcome = PruneOutcome::default();
     let mut dirty = false;

@@ -39,23 +39,39 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use trusty_common::log_drain::{ObjectStoreDestination, prunable_candidates, prune_confirmed};
+use trusty_common::log_drain::{
+    LogDestination, ObjectStoreDestination, prunable_candidates, prune_confirmed,
+};
 
 use crate::core::trusty_tools_config::ResolvedLogDrain;
 use crate::session_manager::RetentionDebounce;
 
 use super::{DrainOutcome, LogDrainDestinationStatus};
 
-/// One prune candidate: which destination group it belongs to, and the
-/// manifest's own identity for the object within that group.
+/// Stable identity of one destination/project pass, independent of its
+/// position in [`ResolvedLogDrain::destinations`].
 ///
-/// `group_index` — the position in [`ResolvedLogDrain::destinations`] — is a
-/// cheap, collision-free key: `resolve_log_drain` already merges any two
-/// sources that would otherwise share an identity, so two different indices
-/// can never mean the same destination/project pair.
+/// #7154: the plan is rebuilt from config every tick, so a config reorder can
+/// change which destination sits at a given index between two ticks while
+/// `prune_debounce`'s armed set — keyed by the OLD index — survives across
+/// them. `cache_namespace` ([`LogDestination::cache_namespace`]) plus the
+/// target's own `<owner>/<project>` key is what actually distinguishes two
+/// passes: it is exactly the pair the manifest cache path is namespaced by
+/// (see `DrainManifest::cache_path`), so two groups can share this identity
+/// only when they would also share a manifest — which is precisely when
+/// transferring armed state between them is safe.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DestinationIdentity {
+    cache_namespace: String,
+    target_key: String,
+}
+
+/// One prune candidate: the destination/project pass it belongs to, keyed by
+/// stable identity rather than plan position, and the manifest's own identity
+/// for the object within that pass.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PruneCandidate {
-    group_index: usize,
+    destination_id: DestinationIdentity,
     relative_file: String,
 }
 
@@ -75,7 +91,11 @@ pub async fn apply(
     debounce: &mut RetentionDebounce<PruneCandidate>,
 ) {
     let mut all_candidates = Vec::new();
-    let mut connections: HashMap<usize, ObjectStoreDestination> = HashMap::new();
+    // Identity, not plan position: `connections` is resolved fresh every tick
+    // from THIS tick's plan, so a candidate confirmed by identity can only
+    // ever be resolved back to the destination that produced it this tick.
+    let mut connections: HashMap<DestinationIdentity, (usize, ObjectStoreDestination)> =
+        HashMap::new();
 
     for (index, group) in plan.destinations.iter().enumerate() {
         // See the module docs: a destination whose upload just failed gets no
@@ -89,15 +109,19 @@ pub async fn apply(
             // a genuinely transient race. Try again next tick.
             Err(_) => continue,
         };
+        let destination_id = DestinationIdentity {
+            cache_namespace: dest.cache_namespace().to_string(),
+            target_key: group.target.key_prefix(),
+        };
         if let Ok(files) =
             prunable_candidates(&dest, &group.target, state_dir, plan.prune_retention).await
         {
             all_candidates.extend(files.into_iter().map(|relative_file| PruneCandidate {
-                group_index: index,
+                destination_id: destination_id.clone(),
                 relative_file,
             }));
         }
-        connections.insert(index, dest);
+        connections.insert(destination_id, (index, dest));
     }
 
     let confirmed = debounce.confirm(&all_candidates);
@@ -105,24 +129,32 @@ pub async fn apply(
         return;
     }
 
-    let mut by_group: HashMap<usize, Vec<String>> = HashMap::new();
+    let mut by_destination: HashMap<DestinationIdentity, Vec<String>> = HashMap::new();
     for candidate in confirmed {
-        by_group
-            .entry(candidate.group_index)
+        by_destination
+            .entry(candidate.destination_id)
             .or_default()
             .push(candidate.relative_file);
     }
 
-    for (index, files) in by_group {
-        let Some(dest) = connections.get(&index) else {
+    for (destination_id, files) in by_destination {
+        // A candidate whose identity no longer resolves in THIS tick's plan
+        // (the destination was removed, or failed its connect/upload above)
+        // is dropped rather than pruned against stale state.
+        let Some((index, dest)) = connections.get(&destination_id) else {
             continue;
         };
-        let group = &plan.destinations[index];
+        let group = &plan.destinations[*index];
         match prune_confirmed(dest, &group.target, state_dir, &files).await {
-            Ok(outcome) => statuses[index].apply_prune_outcome(outcome.pruned, &outcome.errors),
-            Err(e) => {
-                statuses[index].apply_prune_outcome(0, &[("<manifest>".to_string(), e.to_string())])
+            Ok(outcome) => {
+                if let Some(refusal) = &outcome.refused {
+                    statuses[*index].apply_prune_refusal(refusal);
+                } else {
+                    statuses[*index].apply_prune_outcome(outcome.pruned, &outcome.errors);
+                }
             }
+            Err(e) => statuses[*index]
+                .apply_prune_outcome(0, &[("<manifest>".to_string(), e.to_string())]),
         }
     }
 }

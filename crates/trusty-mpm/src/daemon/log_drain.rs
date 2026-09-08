@@ -320,6 +320,25 @@ impl LogDrainDestinationStatus {
             self.detail = format!("{}; {} pruned", self.detail, pruned);
         }
     }
+
+    /// Record that the sanity cap refused this tick's confirmed batch
+    /// outright (#7154) — nothing was deleted, so `pruned` is untouched.
+    ///
+    /// Why: a refusal is a deliberate protective stop, not a connectivity or
+    /// permission failure, so it does not flip [`DrainOutcome::Failed`] the
+    /// way [`Self::apply_prune_outcome`]'s error branch does — an operator
+    /// reading `tm doctor` should see the destination is healthy and the cap
+    /// did its job, not that the drain is broken. The counts are recorded in
+    /// `detail` so the refusal is visible either way.
+    /// What: appends the batch size, the manifest size it was judged against,
+    /// and which ceiling tripped.
+    /// Test: `log_drain_prune::tests::prune_after_upload_refuses_a_batch_over_the_count_ceiling`.
+    fn apply_prune_refusal(&mut self, refusal: &trusty_common::log_drain::PruneRefusal) {
+        self.detail = format!(
+            "{}; prune refused: {} candidate(s) against {} manifest entries — {}",
+            self.detail, refusal.batch_len, refusal.manifest_len, refusal.reason
+        );
+    }
 }
 
 /// The drain's state directory: `<framework root>/log-drain`.
