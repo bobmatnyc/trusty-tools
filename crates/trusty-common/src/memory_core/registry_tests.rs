@@ -732,6 +732,112 @@ fn evict_idle_skips_recent_and_respects_zero_threshold() {
     assert_eq!(reg.len(), 2, "no handle should have been evicted");
 }
 
+/// An on-disk open is not an access (#7087): `evict_idle` must be able to
+/// reclaim a handle that was opened but never genuinely touched, on its very
+/// first sweep.
+///
+/// Why: `PalaceHandle::open_with_intent` used to stamp `last_accessed` to the
+/// open time, so a restart burst (every persisted palace opened in a tight
+/// loop by `load_palaces_from_disk`) looked like a burst of fresh recalls to
+/// `evict_idle` and none of them were ever reclaimed — reintroducing the
+/// #6836 memory blowup even through the idle-evict fallback.
+/// What: opens two palaces via `create_palace` (the real disk-hydration path,
+/// not the in-memory `PalaceHandle::new` `make_handle` helper), drops the
+/// caller's reference to each so only the cache holds them
+/// (`Arc::strong_count == 1`), and asserts a 300 s `evict_idle` drops both
+/// immediately even though they were "just opened".
+/// Test: this test itself.
+#[test]
+fn open_does_not_reset_idle_clock() {
+    use crate::memory_core::palace::Palace;
+    use chrono::Utc;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+
+    for name in ["alpha", "beta"] {
+        let palace = Palace {
+            id: PalaceId::new(name),
+            name: name.to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join(name),
+        };
+        let handle = reg.create_palace(data_root, palace).expect("create palace");
+        // Release the caller's clone so only the cache references it —
+        // matching the restart-hydration path, where nothing is ever held
+        // beyond `register_arc`.
+        drop(handle);
+    }
+    assert_eq!(reg.len(), 2, "both palaces opened");
+
+    let evicted = reg.evict_idle(std::time::Duration::from_secs(300));
+    assert_eq!(
+        evicted, 2,
+        "an opened-but-never-accessed handle must read as idle since open"
+    );
+    assert_eq!(reg.len(), 0, "both must have been evicted");
+}
+
+/// A genuine access after open makes a handle recent again — `touch()` still
+/// overrides the "never accessed" open-time sentinel (#7087).
+///
+/// Why: the fix must not make every opened handle permanently look idle;
+/// `PalaceHandle::touch` (called by every real recall/remember/forget path)
+/// has to win over the open-time sentinel the moment a genuine access occurs.
+/// What: opens two palaces, calls `touch()` on only one immediately after
+/// open, and asserts a 300 s `evict_idle` reclaims only the untouched one.
+/// Test: this test itself.
+#[test]
+fn touch_after_open_makes_handle_recent() {
+    use crate::memory_core::palace::Palace;
+    use chrono::Utc;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+
+    let touched = Palace {
+        id: PalaceId::new("touched"),
+        name: "Touched".to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: data_root.join("touched"),
+    };
+    let touched_handle = reg
+        .create_palace(data_root, touched)
+        .expect("create touched palace");
+    touched_handle.touch();
+    drop(touched_handle);
+
+    let untouched = Palace {
+        id: PalaceId::new("untouched"),
+        name: "Untouched".to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: data_root.join("untouched"),
+    };
+    let untouched_handle = reg
+        .create_palace(data_root, untouched)
+        .expect("create untouched palace");
+    drop(untouched_handle);
+
+    let evicted = reg.evict_idle(std::time::Duration::from_secs(300));
+    assert_eq!(
+        evicted, 1,
+        "only the untouched, merely-opened palace should be evicted"
+    );
+    assert!(
+        reg.get(&PalaceId::new("touched")).is_some(),
+        "a touched handle must survive the idle sweep"
+    );
+    assert!(
+        reg.get(&PalaceId::new("untouched")).is_none(),
+        "an untouched handle must not survive the idle sweep"
+    );
+}
+
 /// `PalaceHandle::touch` must be a no-op while a dream cycle holds
 /// `is_compacting`.
 ///
