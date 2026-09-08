@@ -261,6 +261,70 @@ fn a_missing_component_label_fails() {
     );
 }
 
+#[test]
+fn a_missing_component_label_with_a_reason_comment_is_a_skip() {
+    // #7198: the website/CI shape — no Cargo crate owns the changed path, so
+    // applying no component label is policy-correct, not a violation.
+    let json = COMPLIANT
+        .replace(
+            r#"[{"name": "enhancement"}, {"name": "trusty-mpm"}]"#,
+            r#"[{"name": "bug"}, {"name": "ci"}]"#,
+        )
+        .replace(
+            r#""comments": []"#,
+            r#""comments": [{"body": "no-component-label: website/ tests, no crate owns the path"}]"#,
+        );
+    let audit = audit_issue(&parse(&json), &standard(), &components());
+    let component = row(&audit, "component label");
+    assert_eq!(component.verdict, Verdict::Skip);
+    assert!(
+        component
+            .detail
+            .contains("website/ tests, no crate owns the path"),
+        "the reason is quoted: {}",
+        component.detail
+    );
+    assert!(!audit.failed(), "a recorded waiver must not exit 1");
+}
+
+#[test]
+fn the_no_component_label_comment_is_matched_case_insensitively() {
+    // #7198: mirrors `the_no_milestone_comment_is_matched_case_insensitively` —
+    // an agent writing `No-Component-Label:` still records a waiver.
+    let json = COMPLIANT
+        .replace(
+            r#"[{"name": "enhancement"}, {"name": "trusty-mpm"}]"#,
+            r#"[{"name": "bug"}]"#,
+        )
+        .replace(
+            r#""comments": []"#,
+            r#""comments": [{"body": "context\nNo-Component-Label: CI workflow only"}]"#,
+        );
+    let audit = audit_issue(&parse(&json), &standard(), &components());
+    let component = row(&audit, "component label");
+    assert_eq!(component.verdict, Verdict::Skip);
+    assert!(
+        component.detail.contains("CI workflow only"),
+        "the reason is quoted: {}",
+        component.detail
+    );
+}
+
+#[test]
+fn a_present_component_label_wins_over_a_waiver_comment() {
+    // #7198: a waiver never downgrades a label that IS present — the row still
+    // names the crate, so a reader cannot mistake a labelled issue for a waived
+    // one.
+    let json = COMPLIANT.replace(
+        r#""comments": []"#,
+        r#""comments": [{"body": "no-component-label: stale waiver"}]"#,
+    );
+    let audit = audit_issue(&parse(&json), &standard(), &components());
+    let component = row(&audit, "component label");
+    assert_eq!(component.verdict, Verdict::Pass);
+    assert_eq!(component.detail, "trusty-mpm");
+}
+
 /// A throwaway workspace whose crate labels are the ones #7139 carries.
 ///
 /// Why: the two #7123 regressions below have to run the real derivation — a

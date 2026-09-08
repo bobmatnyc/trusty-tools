@@ -200,6 +200,13 @@ because the session that filed the issue happened to run under tm. When no
 component label fits, apply none — that decision is final, not a trigger to
 reach for `trusty-mpm`.
 
+Then post a `no-component-label: <reason>` comment on the issue in the same
+dispatch, exactly as an unset milestone takes a `no-milestone: <reason>` one.
+That comment is the only thing that makes an absent component label legitimate:
+`tm issue audit` reads it and prints `component label  SKIP  <reason>` instead
+of FAIL (#7198). The `website/` and CI-only shape — no Cargo crate owns the
+changed path — is what it is for.
+
 🔴 **Seed the harness's own labels on first use in a repository.** `tm issue
 seed-labels` creates the four `status:*` lifecycle labels, `trusty-mpm`, and
 `ws/<session>`. It is idempotent and never rewrites a label that already
