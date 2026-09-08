@@ -93,6 +93,57 @@ pub const DEFAULT_VERIFIER_MODEL: &str = "anthropic/claude-haiku-4.5";
 /// Summarizer model — deterministic, low-stakes, same tier as the verifier.
 pub const DEFAULT_SUMMARIZER_MODEL: &str = "anthropic/claude-haiku-4.5";
 
+// #6144: provider names this crate treats as staying on the operator's own
+// machine rather than reaching a hosted API.
+//
+// Why: closure condition of #6144 — a run index or manifest that states only a
+// provider name reads `bedrock` and `local` identically, both "some string",
+// even though one call leaves the machine and the other never does. Neither
+// this crate nor the child it spawns exposes a live HTTP client to introspect,
+// so the classification below is a static table of names rather than an
+// inspection of a request — the same spelling
+// `trusty_common::inference::ProviderId::Local` and the `ollama` alias upstream
+// use for the same case (#3247).
+const LOCAL_PROVIDER_NAMES: [&str; 2] = ["local", "ollama"];
+
+/// Whether `provider` names a hosted API or stays on the operator's machine.
+///
+/// Why: #6144 — the run index and the manifest state this beside the provider
+/// and model ids, because "which provider" does not by itself say whether the
+/// call left the machine.
+/// What: `"local"` for a name in [`LOCAL_PROVIDER_NAMES`] (case-insensitively),
+/// `"api"` for anything else — including a name this table does not
+/// recognise, which is, as far as this crate can tell, still a network call.
+/// Test: `super::inference_tests::endpoint_class_of_known_and_unknown_providers`.
+#[must_use]
+pub fn endpoint_class(provider: &str) -> &'static str {
+    if LOCAL_PROVIDER_NAMES.contains(&provider.trim().to_ascii_lowercase().as_str()) {
+        "local"
+    } else {
+        "api"
+    }
+}
+
+/// The fixed host a provider's API is documented to run on, for display only.
+///
+/// Why: #6144 — a reader deciding whether a run's inference call could have
+/// reached a given network needs more than "api"; the host is the fact that
+/// answers it. Never a live lookup and never a credential — this crate holds
+/// no client to ask, see the module docs for why.
+/// What: `None` for Bedrock, which resolves per AWS region rather than one
+/// fixed host, for a `local` provider, and for any name this table does not
+/// recognise. OpenRouter's and Fireworks's hosts are their own documented API
+/// hosts.
+/// Test: `super::inference_tests::known_host_of_recognised_providers`.
+#[must_use]
+pub fn known_host(provider: &str) -> Option<&'static str> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "openrouter" => Some("openrouter.ai"),
+        "fireworks" => Some("api.fireworks.ai"),
+        _ => None,
+    }
+}
+
 /// The four variables in the order they are reported, so an error message and
 /// the emitted pairs list read the same way.
 const SELECTION: [&str; 4] = [
@@ -358,9 +409,10 @@ where
 /// writing it here is what makes a delivered package re-render on the provider
 /// that produced it rather than on whatever the recipient's machine is pinned to
 /// (#6135, and #6080's portable re-render is the use case).
-/// What: an `[inference]` table with the four identity keys, replacing any
-/// previous one. NEVER a credential — a key stays in the environment, because
-/// this file is handed to the client.
+/// What: an `[inference]` table with the four identity keys plus, since
+/// #6144, a derived `endpoint_class` (`"api"` or `"local"`, from
+/// [`endpoint_class`]) — replacing any previous table. NEVER a credential — a
+/// key stays in the environment, because this file is handed to the client.
 ///
 /// The write is the same read-parse-write shape
 /// [`crate::grounding::priority::write_into`] uses on the same file, and runs
@@ -387,6 +439,12 @@ pub fn write_into_manifest(path: &std::path::Path, selection: &Selection) -> Res
     for (key, value) in selection.rows() {
         table.insert(key, toml_edit::value(value));
     }
+    // #6144: derived from the provider that was just written above, never a
+    // second independent fact that could disagree with it.
+    table.insert(
+        "endpoint_class",
+        toml_edit::value(endpoint_class(&selection.provider)),
+    );
     doc.insert("inference", toml_edit::Item::Table(table));
 
     std::fs::write(path, doc.to_string())
@@ -716,6 +774,12 @@ trusty-review = "0.15.1"
             section.get("reviewer").and_then(toml::Value::as_str),
             Some(DEFAULT_REVIEWER_MODEL)
         );
+        // #6144: derived from the provider row above, never a second
+        // independently-set value.
+        assert_eq!(
+            section.get("endpoint_class").and_then(toml::Value::as_str),
+            Some("api")
+        );
         assert_eq!(
             text.matches("[inference]").count(),
             1,
@@ -757,6 +821,35 @@ trusty-review = "0.15.1"
                 .expect("a blank key is not an error")
                 .is_empty()
         );
+    }
+
+    /// #6144: `bedrock` and `openrouter` are both hosted APIs; `local` and its
+    /// `ollama` alias stay on the operator's machine; anything this table does
+    /// not recognise is still treated as a network call rather than silently
+    /// dropped.
+    /// Test: this test itself.
+    #[test]
+    fn endpoint_class_of_known_and_unknown_providers() {
+        assert_eq!(endpoint_class("openrouter"), "api");
+        assert_eq!(endpoint_class("bedrock"), "api");
+        assert_eq!(endpoint_class("fireworks"), "api");
+        assert_eq!(endpoint_class("local"), "local");
+        assert_eq!(endpoint_class("ollama"), "local");
+        assert_eq!(endpoint_class("Ollama"), "local", "case-insensitive");
+        assert_eq!(endpoint_class("some-future-provider"), "api");
+    }
+
+    /// #6144: only the providers with one fixed, documented host resolve to
+    /// one; Bedrock (regional) and an unrecognised name resolve to `None`
+    /// rather than a guess.
+    /// Test: this test itself.
+    #[test]
+    fn known_host_of_recognised_providers() {
+        assert_eq!(known_host("openrouter"), Some("openrouter.ai"));
+        assert_eq!(known_host("fireworks"), Some("api.fireworks.ai"));
+        assert_eq!(known_host("bedrock"), None);
+        assert_eq!(known_host("local"), None);
+        assert_eq!(known_host("something-else"), None);
     }
 
     /// The property the whole module exists for: whatever the inputs, the
