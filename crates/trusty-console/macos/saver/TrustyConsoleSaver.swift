@@ -16,8 +16,9 @@
 // Test: `LoadHarness.swift` in this directory resolves the principal class,
 //   instantiates the view outside the screen-saver host and asserts `didFinish`
 //   fires; `PaintHarness.swift` reads the rendered bitmap in the offline,
-//   slow-daemon and preview states and tracks the web view's frame across a
-//   late host resize in the `resize` state. The in-host run is manual — see
+//   slow-daemon and preview states, tracks the web view's frame across a late
+//   host resize in the `resize` state, and in the `stop` state asserts the host's
+//   stop request is honoured at once (#6900). The in-host run is manual — see
 //   README.md, "Manual verification".
 //
 // Two constraints below are load-tested spike findings, not preference:
@@ -101,6 +102,12 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         case live
         case offline
         case preview
+        /// #6900: the host has asked the saver to stop. Terminal until the next
+        /// `startAnimation()` — nothing may start a load, arm a retry, or put
+        /// the web view back on screen from here. `.offline` cannot serve this
+        /// purpose because it is the state [`scheduleRetryTimer`] reads as
+        /// "keep trying".
+        case stopped
     }
 
     /// How long one load attempt may run before it counts as a failure.
@@ -214,6 +221,12 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         // already the preview and never an unpainted view.
         needsDisplay = true
         guard state != .preview else { return }
+        // #6900: leaving `.stopped` is this method's job alone. A host that
+        // stops the saver and re-arms it — a wake that does not unlock — has to
+        // get a loading view back, and the navigation delegate `stopAnimation()`
+        // detached on the way out has to come back with it.
+        state = .offline
+        webView?.navigationDelegate = self
         loadConsole()
         scheduleReloadTimer()
     }
@@ -252,7 +265,30 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         needsDisplay = true
     }
 
+    /// Why: `loginwindow` asks the screen-saver host to stop and then waits for
+    ///   it before handing the display to the unlock UI, so whatever this view
+    ///   is still doing after the stop delays Touch ID at unlock (#6900). Before
+    ///   #6900 the stop set `state = .offline` — the exact state
+    ///   [`scheduleRetryTimer`] reads as "keep trying" — while leaving the
+    ///   navigation delegate attached and the in-flight console load running.
+    ///   The `about:blank` navigation below then superseded that load, WebKit
+    ///   delivered the cancellation to [`webView(_:didFailProvisionalNavigation:withError:)`],
+    ///   and [`enterOffline`] re-armed the retry timer the stop had just
+    ///   invalidated. From there the loop sustained itself: retry, load,
+    ///   watchdog, retry. The saver went on loading the console for four
+    ///   minutes after being told to stop.
+    /// What: enters the terminal `.stopped` state, cancels the in-flight load,
+    ///   and detaches the delegate BEFORE navigating away, so a late WebKit
+    ///   callback reaches nothing. Every timer callback and delegate method
+    ///   refuses to act in `.stopped`, and only `startAnimation()` leaves it.
+    ///   Returns synchronously; the elapsed time is logged so a real unlock can
+    ///   be measured against #6900's 500 ms bar without instrumenting the host.
+    /// Test: `PaintHarness.swift`'s `stop` mode asserts the call returns inside
+    ///   that budget and that no connection reaches the console afterwards —
+    ///   both for a stop that lands on an in-flight load and for one that lands
+    ///   inside a render tick.
     public override func stopAnimation() {
+        let startedAt = Date()
         super.stopAnimation()
         retryTimer?.invalidate()
         retryTimer = nil
@@ -262,29 +298,42 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         loadTimer = nil
         offlineSince = nil
         guard state != .preview else { return }
+        // #6900: the state flip comes FIRST. Everything below can hand control
+        // back to WebKit, and every re-entry guard in this file reads `.stopped`.
+        state = .stopped
+        // #6900: detach before cancelling. A superseded provisional navigation
+        // is delivered to the delegate, and on the way out of the saver that
+        // callback must have nothing to re-arm.
+        webView?.navigationDelegate = nil
+        webView?.stopLoading()
+        webView?.isHidden = true
         // about:blank tears down the SPA, which stops its metrics polling. Without
         // this the console keeps being polled by an off-screen saver.
         if let blank = URL(string: "about:blank") {
             webView?.load(URLRequest(url: blank))
         }
-        webView?.isHidden = true
-        state = .offline
-        os_log("stopAnimation — navigated away", log: saverLog, type: .info)
+        // `.default` rather than `.info`: this is the number #6900's acceptance
+        // is stated in, and `log show` has to still carry it after an unlock.
+        os_log("stopAnimation — stopped in %{public}@ms", log: saverLog, type: .default,
+               String(format: "%.1f", Date().timeIntervalSince(startedAt) * 1000))
     }
 
     /// Why: the fallback has to render even when no web view exists (preview) or the
     ///   web view is hidden (offline), and a transparent screen saver is
     ///   indistinguishable from a crashed one.
     /// What: fills the Foundry dark background, then draws the bundled dashboard
-    ///   render unless the live page is on screen — dimmed and banner-stamped
-    ///   while offline, so a photograph of numbers is never mistaken for live
-    ///   ones (#6839). Falls back to the text wordmark if the asset is missing.
-    /// Test: `PaintHarness.swift`, all three modes.
+    ///   render unless the live page is on screen — dimmed while offline, and
+    ///   banner-stamped there, so a photograph of numbers is never mistaken for
+    ///   live ones (#6839). #6900's `.stopped` takes the same dimming for the
+    ///   same reason and NOT the banner, which says "retrying" and would be
+    ///   false after the host's stop. Only the gallery tile draws at full
+    ///   brightness. Falls back to the text wordmark if the asset is missing.
+    /// Test: `PaintHarness.swift`, all modes.
     public override func draw(_ rect: NSRect) {
         Foundry.background.setFill()
         rect.fill()
         guard state != .live else { return }
-        guard drawPreviewAsset(fraction: state == .offline ? Self.offlineAssetFraction : 1) else {
+        guard drawPreviewAsset(fraction: state == .preview ? 1 : Self.offlineAssetFraction) else {
             drawWordmark()
             return
         }
@@ -297,7 +346,9 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     // MARK: - Loading
 
     private func loadConsole() {
-        guard let webView else { return }
+        // #6900: no load is started after the host's stop, whichever timer or
+        // callback got here.
+        guard let webView, state != .stopped else { return }
         os_log("loading %{public}@", log: saverLog, type: .info, config.url.absoluteString)
         var request = URLRequest(url: config.url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -344,8 +395,12 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     /// What: one-shot rather than repeating, rescheduled per attempt, so the
     ///   cadence can widen: [`fastRetryInterval`] for the first
     ///   [`fastRetryWindow`] of an outage, then [`slowRetryInterval`].
-    ///   Invalidating first makes two stacked timers unreachable.
-    /// Test: `PaintHarness.swift`'s `slow` mode.
+    ///   Invalidating first makes two stacked timers unreachable. The fired
+    ///   closure reloads only in `.offline`, which is what keeps `.stopped`
+    ///   terminal (#6900) — a timer already in flight when the host stops runs
+    ///   out and reloads nothing.
+    /// Test: `PaintHarness.swift`'s `slow` mode; `stop` mode for the `.stopped`
+    ///   half.
     private func scheduleRetryTimer() {
         retryTimer?.invalidate()
         let downFor = offlineSince.map { Date().timeIntervalSince($0) } ?? 0
@@ -359,6 +414,14 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     }
 
     private func enterOffline(_ reason: String) {
+        // #6900: a callback that lands after the host's stop must not put the
+        // view back into the retrying state the stop just left. This is the
+        // exact re-entry that kept the saver loading for four minutes past
+        // `loginwindow`'s stop request.
+        guard state != .stopped else {
+            os_log("ignored after stop — %{public}@", log: saverLog, type: .info, reason)
+            return
+        }
         state = .offline
         webView?.isHidden = true
         loadTimer?.invalidate()
@@ -491,6 +554,9 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     // MARK: - WKNavigationDelegate
 
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // #6900: a load that finishes after the host's stop must not unhide the
+        // web view or take the view out of `.stopped`.
+        guard state != .stopped else { return }
         // stopAnimation()'s teardown navigation also lands here; treating it as a
         // successful console load would put a blank page on screen.
         guard webView.url?.absoluteString != "about:blank" else { return }
