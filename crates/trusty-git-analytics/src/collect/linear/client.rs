@@ -679,8 +679,8 @@ fn parse_issue_node(identifier_fallback: &str, node: &serde_json::Value) -> Line
 /// autocommit `INSERT OR REPLACE` — fine for the old per-commit-reference
 /// callers (a handful of issues), but the new bulk sync can hand this
 /// hundreds or thousands of rows in one call, turning a first-time backfill
-/// into that many individual fsync'd commits. [`unchecked_transaction`] (not
-/// [`Connection::transaction`]) is used because this function's signature
+/// into that many individual fsync'd commits. `unchecked_transaction` (not
+/// `Connection::transaction`) is used because this function's signature
 /// takes `&Database`, not `&mut Database` — widening it would ripple into
 /// every caller (`linear_pipeline`, `commands::linear`, and both modules'
 /// tests) for no behavioral gain: `tga` is single-process and nothing else
