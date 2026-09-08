@@ -260,11 +260,24 @@
     margin: 0 auto;
     padding: 2rem 1rem;
   }
+  /* #7167: pin the header so Services, Sessions, event lists and dashboard
+     sections scroll beneath it instead of off the top of the viewport.
+     `sticky` (not `fixed`) leaves the header's flow slot intact, so nothing
+     reflows on load — it only starts holding its position once the page
+     scrolls past main's own top padding. The card surface + border-bottom +
+     shadow give it a background distinct from the page, so scrolled content
+     reads as visibly underneath rather than blending into it. */
   header {
     display: flex;
     justify-content: space-between;
     align-items: center;
     margin-bottom: 1.5rem;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: var(--trusty-card-bg);
+    border-bottom: 1.5px solid var(--trusty-border);
+    box-shadow: var(--trusty-shadow);
   }
   /* The brand lockup owns its own type scale and color (BrandLockup.svelte);
      the heading exists for document structure only. The previous gradient
