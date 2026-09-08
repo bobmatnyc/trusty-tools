@@ -19,14 +19,9 @@
     sortIndicator,
   } from './lastUsed.js';
 
-  /** Format bytes into a human-readable string (KB / MB / GB). */
-  function formatBytes(bytes) {
-    if (bytes == null) return '—';
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-  }
+  // #6928: the byte formatter moved to `bytes.js` when the Memory tab needed
+  // the identical one. Behaviour is unchanged; a non-number still renders `—`.
+  import { formatBytes } from './bytes.js';
 
   let report = $state(null);
   let loading = $state(true);

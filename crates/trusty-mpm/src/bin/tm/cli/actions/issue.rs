@@ -3,7 +3,7 @@
 //! Why: extracted from `cli.rs` (issue #2603) to keep the top-level file
 //! under the 500-SLOC production cap.
 //! What: [`IssueCmd`] — `seed-labels`/`transition`/`current`/`states`/
-//! `standard`/`seed-config`/`repair`.
+//! `standard`/`seed-config`/`repair`/`audit`.
 //! Test: `cli_parses_issue_*` in `tests.rs`.
 
 use clap::Subcommand;
@@ -17,7 +17,8 @@ use clap::Subcommand;
 /// atomic state change), `Current` (read state from labels), `States` (list the
 /// model), `Standard` (print the effective ticketing standard, #6918),
 /// `SeedConfig` (write the default lifecycle YAML plus the `agents.ticketing`
-/// block, #7067), `Repair` (resolve a multi-state issue).
+/// block, #7067), `Repair` (resolve a multi-state issue), `Audit` (verify a
+/// filed issue against the standard, #7097).
 /// Test: `cli_parses_issue_*` in `tests.rs`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum IssueCmd {
@@ -68,6 +69,18 @@ pub(crate) enum IssueCmd {
         /// Overwrite an existing user config file.
         #[arg(long)]
         force: bool,
+    },
+    /// Verify a filed issue carries a project, a milestone, and a component label (#7097).
+    Audit {
+        /// Issue number. Omit and pass `--recent`/`--since` to audit a window.
+        #[arg(conflicts_with_all = ["recent", "since"])]
+        issue: Option<u64>,
+        /// Audit the N most recently created OPEN issues instead.
+        #[arg(long, conflicts_with = "since")]
+        recent: Option<usize>,
+        /// Audit every OPEN issue created on or after this `YYYY-MM-DD` date.
+        #[arg(long)]
+        since: Option<String>,
     },
     /// Resolve a mid-transition issue carrying multiple state labels.
     Repair {

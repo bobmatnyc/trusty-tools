@@ -152,21 +152,22 @@ fn finding_category_serde_roundtrip() {
     assert_eq!(FindingCategory::default(), FindingCategory::Correctness);
 }
 
-/// `Style` is the only informational category (#3474).
+/// `Style` (#3474) and `TestCoverage` (#7036) are the informational categories.
 ///
 /// Why: `grade::derive_verdict_with` and `github::inline::render_finding_comment`
 /// both key off `is_informational`, so the set it reports is the contract
-/// between the verdict ceiling and the reader-facing label.  `TestCoverage` is
-/// asserted OUT deliberately: its floor treatment predates #3474 and changing it
-/// is a separate calibration decision.
+/// between the verdict ceiling and the reader-facing label.  `TestCoverage` was
+/// asserted OUT until #7036, which is exactly the state the `TestCoverage` doc
+/// comment contradicted — a coverage gap it called advisory could still floor to
+/// BLOCK.
 /// What: asserts the predicate over all four variants.
 /// Test: this test itself.
 #[test]
-fn style_category_is_informational() {
+fn advisory_categories_are_informational() {
     assert!(FindingCategory::Style.is_informational());
+    assert!(FindingCategory::TestCoverage.is_informational());
     assert!(!FindingCategory::Correctness.is_informational());
     assert!(!FindingCategory::MethodConformance.is_informational());
-    assert!(!FindingCategory::TestCoverage.is_informational());
 }
 
 /// A `Finding` constructed via `new` defaults to the `Correctness` category.

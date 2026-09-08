@@ -9,8 +9,11 @@
 //! What: [`map_request`] turns a method, a path and a query string into one
 //! [`Call`]. The table covers every endpoint the two SPAs served from this
 //! binary actually call — the trusty-search dashboard at `/tools/search/`
-//! (`crates/trusty-console/ui-search/src/lib/api.js` plus the two `EventSource`s) and
-//! the console's own cleanup flow (`ui/src/cleanupFlow.js`).
+//! (`crates/trusty-console/ui-search/src/lib/api.js` plus the two
+//! `EventSource`s) and the search dashboard's cleanup panel
+//! (`crates/trusty-console/ui-search/src/lib/cleanup.js`). The console panel's
+//! own copy of that flow is gone — #6923 made the Search tab display-only and
+//! #6928 did the same for the Memory tab.
 //!
 //! ## Two endpoints the SPA calls have no method to map to
 //!

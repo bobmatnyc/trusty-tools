@@ -22,6 +22,12 @@
 //               the target frame the way a host that learns the screen late
 //               would; asserts the web view tracks `bounds`, that the page's own
 //               viewport matches, and that the frame is not black at its edges.
+//     stop    — #6900: points the view at the same never-answering listener so a
+//               load is genuinely in flight, then issues `stopAnimation()` the
+//               way `loginwindow` does; asserts the call returns inside the
+//               issue's 500 ms bar and that the listener sees no further
+//               connection, twice — once on an in-flight load and once from
+//               inside a render tick.
 //   Every mode takes the frame it runs at — `--frame WxH`, default 1280x800 —
 //   so the ultrawide geometry #6871 was reported on is reachable.
 // Test: it IS the test. README.md, "Paint harness", has the invocations;
@@ -92,6 +98,29 @@ let retryObservationSeconds: TimeInterval = 34
 /// one connection and waits out `URLRequest`'s 60 s default, so this is the
 /// assertion that fails on the unfixed bundle.
 let minSlowModeAttempts = 3
+
+// MARK: - Stop-path thresholds (#6900)
+
+/// How long `stopAnimation()` itself may take to return. #6900's acceptance
+/// says "under 500 ms"; `loginwindow` waits on the screen-saver host before it
+/// hands the display to the unlock UI, so this is what Touch ID waits behind.
+///
+/// The call does synchronous work only — invalidate four timers, detach a
+/// delegate, cancel a load — so the real number is microseconds and the budget
+/// is not a tight fit. It is here to catch a future change that puts a blocking
+/// wait, a synchronous XPC round trip, or a run-loop spin into the stop path.
+let stopReturnBudget: TimeInterval = 0.5
+/// How long after the stop the listener is watched for traffic that must not
+/// come. The unfixed view's re-armed retry lands about 5 s after the stop
+/// (`about:blank` supersedes the in-flight load, WebKit reports the
+/// cancellation, `enterOffline` re-arms `scheduleRetryTimer`'s 5 s delay), and
+/// each subsequent attempt about 11 s after that, so 20 s holds two or three of
+/// them. Anything above zero in this window is #6900.
+let stopQuietSeconds: TimeInterval = 20
+/// How long to wait for the view to open its first connection before issuing
+/// the stop. The stop has to land on a load that is genuinely IN FLIGHT —
+/// stopping an idle view proves nothing.
+let stopInFlightWait: TimeInterval = 10
 
 /// The Foundry dark background the view fills before drawing anything, from
 /// `docs/design/UI/design-system/tokens.css` (`--trusty-content-bg: #201612`).
@@ -164,8 +193,8 @@ let bundlePath = positional.count > 1
     ? positional[1]
     : NSHomeDirectory() + "/Library/Screen Savers/TrustyConsole.saver"
 
-guard ["offline", "slow", "preview", "resize"].contains(mode) else {
-    note("usage: paintharness <offline|slow|preview|resize> [bundlePath]"
+guard ["offline", "slow", "preview", "resize", "stop"].contains(mode) else {
+    note("usage: paintharness <offline|slow|preview|resize|stop> [bundlePath]"
         + " [--frame WxH] [--start WxH]")
     note("  --frame  the frame to run at (default 1280x800; env SAVER_HARNESS_FRAME)")
     note("  --start  resize mode only: the frame to construct at (default 320x200)")
@@ -416,7 +445,10 @@ var silent: SilentListener?
 switch mode {
 case "offline":
     pointView(atPort: closedPort())
-case "slow":
+case "slow", "stop":
+    // #6900 wants the same endpoint `slow` uses: a load that is in flight and
+    // stays there is the state the stop has to interrupt, and every connection
+    // the view opens is counted.
     guard let listener = SilentListener() else {
         note("could not start the silent listener")
         finish(6)
@@ -611,6 +643,106 @@ case "slow":
         }
     } else {
         failures.append("could not read the view's bitmap after the stall")
+    }
+
+case "stop":
+    guard let listener = silent else { break }
+
+    /// Runs the run loop until `condition` holds or `seconds` elapse. The view's
+    /// timers and WebKit's callbacks all land on the main run loop, so a plain
+    /// sleep would stop the very machinery under test.
+    func pump(_ seconds: TimeInterval, until condition: () -> Bool = { false }) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline && !condition() {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+    }
+
+    /// One stop, measured. Returns the elapsed seconds and how many connections
+    /// the listener saw in the quiet window that follows.
+    ///
+    /// `issue` is the caller's stop — a plain call for the in-flight case, a
+    /// run-loop timer for the mid-render one — and is handed the clock so the
+    /// budget covers `stopAnimation()` and nothing around it.
+    func measureStop(_ label: String, issue: (@escaping () -> Void) -> Void) -> (elapsed: TimeInterval, leaked: Int) {
+        let before = listener.accepted
+        var elapsed: TimeInterval = -1
+        issue {
+            let started = Date()
+            view.stopAnimation()
+            elapsed = Date().timeIntervalSince(started)
+        }
+        pump(5, until: { elapsed >= 0 })
+        note("\(label): stopAnimation() returned in "
+            + String(format: "%.1f", elapsed * 1000) + "ms")
+        if elapsed < 0 {
+            failures.append("\(label): the stop never ran")
+            return (elapsed, 0)
+        }
+        if elapsed > stopReturnBudget {
+            failures.append(String(format: "%@: stopAnimation() took %.3fs, budget %.3fs",
+                                   label, elapsed, stopReturnBudget))
+        }
+        note("\(label): watching for \(Int(stopQuietSeconds))s of traffic that must not come")
+        pump(stopQuietSeconds)
+        let leaked = listener.accepted - before
+        note("\(label): connection attempts after the stop: \(leaked)")
+        if leaked > 0 {
+            failures.append("\(label): kept loading the console after the stop —"
+                + " \(leaked) connection attempt(s), expected 0")
+        }
+        return (elapsed, leaked)
+    }
+
+    // --- the load must be in flight before the stop lands -------------------
+    pump(stopInFlightWait, until: { listener.accepted > 0 })
+    guard listener.accepted > 0 else {
+        failures.append("the view never opened a connection — nothing to interrupt")
+        break
+    }
+    note("load in flight after \(listener.accepted) connection attempt(s)")
+
+    // --- 1: the stop lands on an in-flight load ----------------------------
+    // This is #6900's reported shape: `loginwindow` stops the saver while its
+    // WKWebView is mid-load.
+    _ = measureStop("in-flight stop") { body in body() }
+
+    // --- restart, then 2: the stop lands inside a render tick --------------
+    // Restarting first proves the stopped state is not sticky (a wake that does
+    // not unlock stops and re-arms the saver) and re-arms the loader that the
+    // second stop has to interrupt.
+    view.startAnimation()
+    let afterRestart = listener.accepted
+    pump(stopInFlightWait, until: { listener.accepted > afterRestart })
+    if listener.accepted == afterRestart {
+        failures.append("startAnimation() after a stop did not resume loading:"
+            + " no new connection in \(Int(stopInFlightWait))s")
+    }
+
+    // The failure path #6900 asks for: the stop arrives while the view is
+    // repainting. `animateOneFrame()` marks the view dirty and the stop is
+    // issued in the same turn of the run loop, before that redraw is flushed —
+    // the host's animation tick and `loginwindow`'s stop request landing
+    // together.
+    var midRenderFrame: PaintStats?
+    _ = measureStop("mid-render stop") { body in
+        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: false) { _ in
+            view.animateOneFrame()
+            body()
+            midRenderFrame = capture(view).flatMap(stats(of:))
+        }
+    }
+
+    // #6838 must not regress on the way out: a view told to stop mid-frame
+    // still paints the fallback rather than going black.
+    if let painted = midRenderFrame {
+        note("frame after the mid-render stop: \(painted.summary)")
+        if painted.nonBlackRatio < minNonBlackRatio {
+            failures.append(String(format: "frame went black across the mid-render stop: nonBlack=%.4f",
+                                   painted.nonBlackRatio))
+        }
+    } else {
+        failures.append("could not read the view's bitmap after the mid-render stop")
     }
 
 default:

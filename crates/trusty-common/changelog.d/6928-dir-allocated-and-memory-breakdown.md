@@ -1,0 +1,2 @@
+Added
+- `sys_metrics::dir_allocated_bytes` measures a directory's allocated on-disk size (`st_blocks`), the figure `du -s` reports, rather than the sum of file lengths — redb's sparse preallocation put the apparent size 36% above `du` on a 1.7 GB palace store. `sys_metrics::self_memory_breakdown` reports the calling process's heap / file-backed / compressed split from macOS `TASK_VM_INFO`, so a large footprint can be diagnosed instead of merely reported.

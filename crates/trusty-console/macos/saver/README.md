@@ -133,7 +133,7 @@ daemon**: each mode builds its own endpoint.
 swiftc -O -swift-version 5 -o target/console-saver/harness/paintharness \
   crates/trusty-console/macos/saver/PaintHarness.swift
 
-for mode in offline slow preview resize; do
+for mode in offline slow preview resize stop; do
   ./target/console-saver/harness/paintharness "$mode" \
     target/console-saver/TrustyConsole.saver || echo "FAILED: $mode"
 done
@@ -148,6 +148,41 @@ unoptimised build spends over a second in it.
 | `slow` | a listener that accepts and never answers | the same, plus ≥3 connection attempts in 34 s — i.e. the load timed out and retried instead of hanging on `URLRequest`'s 60 s default |
 | `preview` | none (`isPreview: true`) | the bundled asset draws, and no `WKWebView` is built for a tile |
 | `resize` | the real console (7788, or `SAVER_HARNESS_PORT`) | after a late growth: `webView.frame == view.bounds`, the page's own `innerWidth`×`innerHeight` equals those bounds, and none of five edge samples is black (#6871) |
+| `stop` | the same never-answering listener | `stopAnimation()` returns inside 500 ms and the listener sees **zero** further connections for 20 s — twice, once with a load in flight and once from inside a render tick (#6900) |
+
+### Stop path (#6900)
+
+`loginwindow` stops the screen-saver host and waits for it before handing the
+display to the unlock UI, so anything the view still does after the stop is time
+the operator spends waiting instead of touching the sensor. The owner's report
+was Touch ID not being offered; the unified log showed the stop request landing
+at 18:35:26 and the saver still loading the console four minutes later.
+
+`stopAnimation()` was never slow — it returns in about 0.2 ms on both the fixed
+and the unfixed bundle. It simply did not stop the view. It set
+`state = .offline`, which is the state `scheduleRetryTimer` reads as "keep
+trying", left the navigation delegate attached, and then navigated to
+`about:blank` over an in-flight console load. WebKit reported that cancellation,
+`enterOffline` re-armed the retry timer the stop had just invalidated, and the
+loop sustained itself from there.
+
+So the mode measures traffic, not latency, and the budget is only a guard
+against a future change putting a blocking wait into the stop path:
+
+```
+# unfixed bundle
+PAINT: in-flight stop: stopAnimation() returned in 0.2ms
+PAINT: in-flight stop: connection attempts after the stop: 2
+PAINT: FAIL — in-flight stop: kept loading the console after the stop — 2 connection attempt(s), expected 0
+
+# fixed bundle
+PAINT: in-flight stop: connection attempts after the stop: 0
+PAINT: PASS — stop
+```
+
+Between the two stops the mode calls `startAnimation()` again and requires a
+fresh connection, so the terminal `.stopped` state cannot be sticky — a wake
+that does not unlock stops and re-arms the saver, and that view has to load.
 
 ### Frame size (#6871)
 
