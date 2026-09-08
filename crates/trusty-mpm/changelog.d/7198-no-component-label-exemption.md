@@ -1,0 +1,3 @@
+Added
+
+- `tm issue audit` reads a `no-component-label: <reason>` comment as the component row's escape hatch and prints `component label  SKIP  <reason>` instead of FAIL (#7198). It mirrors the existing `no-milestone: <reason>` hatch — same case-insensitive line match, same SKIP-never-PASS rendering — and covers the shape where no Cargo crate owns the changed path (a `website/` or CI-only issue), which `tm-ticketing` policy already treats as correct. A present component label still wins over a waiver comment, and the FAIL line now names the hatch so the fix is discoverable from the failing row.

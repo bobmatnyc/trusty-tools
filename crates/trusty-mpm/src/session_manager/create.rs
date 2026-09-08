@@ -363,6 +363,10 @@ impl SessionManager {
             return Err(ManagedError::from(e));
         }
 
+        // #7087: a new session can join the active-project set; bump so a
+        // residency consumer polling `mpm.residency.active` notices.
+        self.bump_residency_generation();
+
         // The record is durably persisted; the store/registry now owns the
         // session's lifetime. Disarm so the guard's drop is a no-op and the
         // tracked session is NOT reaped at the end of this request scope (#1453).

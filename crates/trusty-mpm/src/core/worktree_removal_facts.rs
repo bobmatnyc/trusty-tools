@@ -37,9 +37,21 @@
 //! and the deny message names the repository that WAS searched so a
 //! wrong-repository answer is visible instead of reading as "no pull request".
 //!
+//! **"Does this tree hold work" is ONE question, asked in one place (#7185).**
+//! This module used to count `git status --porcelain` lines itself, while the
+//! reclaim sweep asked
+//! [`crate::session_manager::worktree_safety::count_dirty_files`]. The two
+//! disagreed about the harness's own `.trusty-mpm-worktree` ownership marker,
+//! which the harness writes into every isolated worktree it provisions: the
+//! sweep excuses it, this module counted it, so every managed worktree was
+//! dirty by construction here and none could be reclaimed from inside a live
+//! session. The guard now routes through that one implementation.
+//!
 //! Test: `merged_pull_request_argv_asks_github_for_the_branch`,
-//! `detached_head_is_not_a_branch`, `dirty_entry_count_ignores_blank_lines`
-//! below; the policy that consumes these answers is tested in
+//! `detached_head_is_not_a_branch`,
+//! `the_harness_ownership_marker_alone_leaves_the_tree_clean`,
+//! `a_real_untracked_file_beside_the_marker_still_counts` below; the policy
+//! that consumes these answers is tested in
 //! `bin/tm/commands/pm_guard_bash/worktree_remove`.
 
 use std::path::Path;
@@ -48,7 +60,7 @@ use crate::session_manager::worktree_reclaim_gh::{
     GH_TIMEOUT, gh_pr_list_command, resolve_daemon_gh_env,
 };
 use crate::session_manager::worktree_repo_slug::repo_slug_for;
-use crate::session_manager::worktree_safety::git_stdout;
+use crate::session_manager::worktree_safety::{count_dirty_files, git_stdout};
 
 /// The `gh pr list` argv the merged-PR re-check runs, without the branch.
 ///
@@ -114,7 +126,12 @@ const DETACHED_HEAD: &str = "HEAD";
 /// Test: implemented by [`GitAndGhProbe`] in production and by
 /// `worktree_remove::tests::FakeProbe` in the guard's unit tests.
 pub trait WorktreeRemovalProbe {
-    /// Working-tree entries `git status --porcelain` reports in `dir`.
+    /// Working-tree entries in `dir` that represent WORK.
+    ///
+    /// #7185: modified or staged tracked files, untracked-but-not-ignored
+    /// files, and anything under `.trusty-mpm/` that is not disposable
+    /// bookkeeping — but NOT the `.trusty-mpm-worktree` ownership marker the
+    /// harness itself writes into every worktree it provisions.
     fn dirty_entries(&self, dir: &Path) -> Result<usize, String>;
 
     /// Commits on `HEAD` that the upstream branch does not have.
@@ -146,10 +163,12 @@ pub struct GitAndGhProbe;
 
 impl WorktreeRemovalProbe for GitAndGhProbe {
     fn dirty_entries(&self, dir: &Path) -> Result<usize, String> {
-        Ok(count_nonblank_lines(&git_stdout(
-            dir,
-            &["status", "--porcelain"],
-        )?))
+        // #7185: the reclaim sweep's own count, not a second one. A plain
+        // `git status --porcelain` line count here read the harness's
+        // `.trusty-mpm-worktree` ownership marker as unsaved work, so every
+        // isolated worktree was dirty by construction and none could be
+        // reclaimed from inside a live session.
+        count_dirty_files(dir)
     }
 
     fn unpushed_commits(&self, dir: &Path) -> Result<usize, String> {
@@ -209,14 +228,12 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
     }
 }
 
-/// Count the lines of `text` that carry anything but whitespace.
-fn count_nonblank_lines(text: &str) -> usize {
-    text.lines().filter(|l| !l.trim().is_empty()).count()
-}
-
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+    use crate::session_manager::decommission::WORKTREE_SENTINEL_FILE;
 
     #[test]
     fn merged_pull_request_argv_asks_github_for_the_branch() {
@@ -228,16 +245,91 @@ mod tests {
     }
 
     #[test]
-    fn dirty_entry_count_ignores_blank_lines() {
-        assert_eq!(count_nonblank_lines(""), 0);
-        assert_eq!(count_nonblank_lines("\n  \n"), 0);
-        assert_eq!(count_nonblank_lines(" M src/lib.rs\n?? new.txt\n"), 2);
-    }
-
-    #[test]
     fn detached_head_is_not_a_branch() {
         // A detached HEAD prints the literal `HEAD`, which is not a branch a
         // pull request can be looked up by — so it must not become one.
         assert_eq!(DETACHED_HEAD, "HEAD");
+    }
+
+    /// Run `git -C <dir> <args>`, panicking with git's own stderr on failure.
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("fixture: `git {}` could not be run: {e}", args.join(" ")));
+        assert!(
+            out.status.success(),
+            "fixture: `git {}` failed in {}: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A checkout with one commit, standing in for a harness worktree.
+    fn checkout(tmp: &Path) -> PathBuf {
+        let repo = tmp.join("tree");
+        std::fs::create_dir_all(&repo).expect("fixture: create repo dir");
+        git_ok(&repo, &["init", "--initial-branch=main"]);
+        git_ok(&repo, &["config", "user.email", "ci@test.invalid"]);
+        git_ok(&repo, &["config", "user.name", "CI"]);
+        git_ok(&repo, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("README.md"), "base\n").expect("fixture: write README");
+        git_ok(&repo, &["add", "README.md"]);
+        git_ok(&repo, &["commit", "-m", "base"]);
+        repo
+    }
+
+    /// 🔴 #7185: the harness writes `.trusty-mpm-worktree` into every isolated
+    /// worktree it provisions, so counting it made EVERY managed worktree
+    /// permanently un-reclaimable from inside a live session — the `clean-tree`
+    /// gate denied a tree whose only untracked entry was the harness's own
+    /// marker. Fails on 9b57099a5, where `dirty_entries` counts every porcelain
+    /// line.
+    #[test]
+    fn the_harness_ownership_marker_alone_leaves_the_tree_clean() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = checkout(tmp.path());
+        std::fs::write(repo.join(WORKTREE_SENTINEL_FILE), b"").expect("write marker");
+
+        assert_eq!(
+            GitAndGhProbe.dirty_entries(&repo).expect("status readable"),
+            0,
+            "the harness's own ownership marker is not the agent's unsaved work"
+        );
+    }
+
+    /// 🔴 The excusal is for that ONE name and nothing else: a real untracked
+    /// file beside the marker still denies, so #7185 cannot become a hole the
+    /// next uncommitted rescue file falls through.
+    #[test]
+    fn a_real_untracked_file_beside_the_marker_still_counts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = checkout(tmp.path());
+        std::fs::write(repo.join(WORKTREE_SENTINEL_FILE), b"").expect("write marker");
+        std::fs::write(repo.join("rescued.rs"), "fn main() {}\n").expect("write work");
+
+        assert_eq!(
+            GitAndGhProbe.dirty_entries(&repo).expect("status readable"),
+            1,
+            "unsaved work beside the marker must still deny removal"
+        );
+    }
+
+    /// A modified TRACKED file is work too — the marker excusal must not have
+    /// widened into "ignore everything the harness could have touched".
+    #[test]
+    fn a_modified_tracked_file_counts_even_with_the_marker_present() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = checkout(tmp.path());
+        std::fs::write(repo.join(WORKTREE_SENTINEL_FILE), b"").expect("write marker");
+        std::fs::write(repo.join("README.md"), "edited\n").expect("edit README");
+
+        assert_eq!(
+            GitAndGhProbe.dirty_entries(&repo).expect("status readable"),
+            1
+        );
     }
 }

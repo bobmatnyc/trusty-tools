@@ -107,7 +107,12 @@ Resolve an abbreviation against the project's own table rather than
 guessing — in trusty-tools that is the root `CLAUDE.md` section
 "Abbreviations & Aliases". **When no crate label fits the file path, apply
 none** — an unlabeled component field is correct more often than a guessed
-one.
+one. Then post `no-component-label: <reason>` as a comment on the issue in the
+same dispatch, exactly as an unset milestone takes a `no-milestone: <reason>`
+one. Without that comment an absent component label is a defect; with it,
+`tm issue audit` prints `component label  SKIP  <reason>` instead of FAIL
+(#7198). A `website/` or CI-only path — no Cargo crate owns it — is the shape
+this is for.
 
 🔴 **There is no second, unnamed label axis for "which session found this."
 `trusty-mpm` never fills one, because none exists.** `trusty-mpm` is a crate

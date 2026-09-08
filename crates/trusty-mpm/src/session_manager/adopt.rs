@@ -465,6 +465,9 @@ impl SessionManager {
             }
         };
 
+        // #7087: an adopted session can join the active-project set.
+        self.bump_residency_generation();
+
         info!(
             id = %record.id,
             name = %record.tmux_name,

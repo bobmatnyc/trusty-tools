@@ -386,7 +386,11 @@ pub(super) fn inspect_dirt_at(path: &Path, scan_nested: bool) -> Option<DirtyWor
 /// [`trusty_mpm_dirt`], which sees ignored and untracked content alike.
 /// Test: `inspect_dirt_counts_wip_backup_under_trusty_mpm`,
 /// `inspect_dirt_excludes_own_sentinel`.
-pub(super) fn count_dirty_files(path: &Path) -> Result<usize, String> {
+///
+/// `pub(crate)` since #7185 so the ADR-0057 removal guard asks this ONE
+/// question instead of its own plain `git status --porcelain` count, which
+/// counted the harness's own ownership marker as the agent's unsaved work.
+pub(crate) fn count_dirty_files(path: &Path) -> Result<usize, String> {
     let status = git_stdout(path, STATUS_ARGS)?;
     let mut count = 0usize;
     for line in status.lines() {

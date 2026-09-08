@@ -3749,3 +3749,76 @@ fn pm_guard_denies_a_builder_when_the_machine_is_full() {
     assert!(verdict.contains("capped at 2"), "{verdict}");
     assert!(verdict.contains("builders.max_concurrent"), "{verdict}");
 }
+
+// ---------------------------------------------------------------------------
+// `EnterWorktree` from a worktree-pinned agent (issue #7172) —
+// `commands::pm_guard_enter_worktree`.
+//
+// The pure policy is unit-tested in that module; these cases prove the payload
+// resolves through the real binary — caller context from `agent_id`, the pinned
+// tree from the payload's own `cwd` — and that the refusal reaches the agent
+// instead of a success that wedges it.
+// ---------------------------------------------------------------------------
+
+/// A pinned subagent's `EnterWorktree` payload, switching to `target`.
+///
+/// Why: the cases below differ only in the target path, and hand-copying the
+/// payload is how one of them drifts into omitting `cwd` and asserting nothing.
+/// What: a `PreToolUse` payload with a non-empty `agent_id` (the subagent
+/// marker) standing inside `.claude/worktrees/agent-a`.
+fn enter_worktree_payload(target: &str) -> String {
+    format!(
+        r#"{{"hook_event_name":"PreToolUse","agent_id":"agent-a","agent_type":"rust-engineer","cwd":"/repo/.claude/worktrees/agent-a/crates/trusty-mpm","tool_name":"EnterWorktree","tool_input":{{"path":"{target}"}}}}"#
+    )
+}
+
+#[test]
+fn pm_guard_denies_enter_worktree_switch_from_a_pinned_subagent() {
+    // The #7172 incident: pinned to A, pointed at B. Before this rule the call
+    // was allowed, the harness reported success, and every command after it —
+    // `pwd` included — was refused with no way back.
+    let stdout = run_pm_guard(
+        &enter_worktree_payload("/repo/.claude/worktrees/agent-b"),
+        &[],
+    );
+    assert_denied(&stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(
+        reason.contains("#7172")
+            && reason.contains("/repo/.claude/worktrees/agent-a")
+            && reason.contains("/repo/.claude/worktrees/agent-b"),
+        "the deny must name the issue, the pinned tree, and the target, got: {reason}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_enter_worktree_to_a_path_outside_the_worktree_family() {
+    // The fail-closed arm: a pinned agent never accepts a cwd outside
+    // `.claude/worktrees/`, the main checkout included.
+    assert_denied(&run_pm_guard(&enter_worktree_payload("/repo"), &[]));
+}
+
+#[test]
+fn pm_guard_allows_enter_worktree_back_into_the_pinned_worktree() {
+    // The one recovery a wedged agent has — blocking it would strand exactly
+    // the agent this rule protects. Silence is the allow.
+    assert_eq!(
+        run_pm_guard(
+            &enter_worktree_payload("/repo/.claude/worktrees/agent-a"),
+            &[]
+        )
+        .trim(),
+        ""
+    );
+}
+
+#[test]
+fn pm_guard_allows_enter_worktree_from_the_pm() {
+    // No `agent_id` — the PM's own worktree moves are untouched.
+    let payload = r#"{"hook_event_name":"PreToolUse","cwd":"/repo/.claude/worktrees/agent-a","tool_name":"EnterWorktree","tool_input":{"path":"/repo/.claude/worktrees/agent-b"}}"#;
+    assert_eq!(run_pm_guard(payload, &[]).trim(), "");
+}
