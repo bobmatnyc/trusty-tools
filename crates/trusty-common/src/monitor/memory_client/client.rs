@@ -124,7 +124,7 @@ impl MemoryClient {
         self.call("memory.health", json!({})).await.is_ok()
     }
 
-    /// Fetch the palace list with live counts.
+    /// Fetch the palace roster, without paying to open every palace on disk.
     ///
     /// Why (#6286): the retired `GET /api/v1/palaces` returned one row per
     /// palace WITH its counts, and the first pass at this migration had nothing
@@ -135,20 +135,40 @@ impl MemoryClient {
     /// nine rows with nothing saying why.
     ///
     /// `memory.palaces_list` is the one call that answers what the fan-out was
-    /// assembling: the same opens, one round trip instead of N, and a row that
-    /// carries its own failure. A palace that could not be read is now a row
-    /// saying so rather than a silent omission.
+    /// assembling: one round trip instead of N, and a row that carries its own
+    /// failure. A palace that could not be read is now a row saying so rather
+    /// than a silent omission.
     ///
-    /// What: one `memory.palaces_list` call; every row's `palace` object goes
-    /// through [`parse_palace_detail`], and a row carrying `error` becomes a
-    /// [`PalaceRow`] marked [`PalaceRow::counts_unknown`] with the daemon's
-    /// reason on it. A row that is neither is a warn and a skip — the only
-    /// remaining drop, and it means the daemon answered a shape this client
-    /// does not know.
+    /// Why `counts: false` (#7125): this runs on the dashboard's 2-second tick,
+    /// and counting is what opens every palace on disk. On the estate that
+    /// prompted the issue that was ~94 cold opens per poll — each one a fully
+    /// hydrated palace the 64-slot LRU then held, a multi-GB floor the daemon
+    /// never dropped below while the monitor was running. The roster the panel
+    /// draws is names; a count the operator wants for ONE palace comes from
+    /// [`Self::fetch_palace`], which opens that palace and nothing else.
+    ///
+    /// What: one `memory.palaces_list` call with `counts: false`; every row's
+    /// `palace` object goes through [`parse_palace_detail`], and a row carrying
+    /// `error` becomes a [`PalaceRow`] marked [`PalaceRow::counts_unknown`]
+    /// with the daemon's reason on it. Under `counts: false` a palace that is
+    /// not already resident comes back with `cached: false`, which the same
+    /// projection reads as UNKNOWN rather than as zero (#4682) — so the panel
+    /// renders `—` for it, never a false empty. A row that is neither is a warn
+    /// and a skip — the only remaining drop, and it means the daemon answered a
+    /// shape this client does not know.
+    ///
+    /// That the poll leaves the daemon's palaces closed is proven against a
+    /// real daemon by `monitor_client_poll_leaves_closed_palaces_closed`, in
+    /// `trusty-memory/tests/palaces_list_poll_residency.rs` — this crate sits
+    /// below trusty-memory, so the residency it asserts on is only observable
+    /// from that side of the edge.
     /// Test: `palaces_project_a_failed_row_rather_than_dropping_it`,
     /// `palaces_project_a_readable_row`.
     async fn palaces(&self) -> anyhow::Result<Vec<PalaceRow>> {
-        let listed = self.call("memory.palaces_list", json!({})).await?;
+        // #7125: a poll must not open every palace on disk just to count it.
+        let listed = self
+            .call("memory.palaces_list", json!({ "counts": false }))
+            .await?;
         Ok(project_palaces(&listed))
     }
 

@@ -1,0 +1,7 @@
+Fixed
+
+- **The health TUI's palace roster stopped opening every palace on disk every five seconds.** `HealthClient::memory_collections` sent `memory.palaces_list` an empty params object, which the daemon reads as `counts: true` — every tick of the 5-second refresh opened and hydrated the whole estate and left it in the daemon's 64-slot LRU. It sends `counts: false` now ([#7125](https://github.com/bobmatnyc/trusty-tools/issues/7125))
+  - A palace the daemon has not opened answers placeholder zeros with `cached: false`, so `project_palace_rows` no longer runs those rows through its empty-palace filter — without that the Collections panel would have gone blank on a cold daemon and called every palace empty
+  - Those rows render `?v` / `?g` rather than the `--v` / `--g` that states a palace holds nothing; `CollectionRow::counts_unknown` carries the distinction, and a row whose counts the daemon could not read at all now carries it too
+  - Selecting such a row opens the INDEX detail panel, which read the counts straight through and printed `Vectors: 0`, `Drawers: 0`, `Rooms: 0`, `Triples: 0` — the same placeholder zeros one screen deeper, presented as measurements. Every count cell there reads `?` now; a counted zero still reads `N/A` for nodes and edges, which is the claim that the palace has no graph
+  - `memory_collections_asks_for_a_roster_without_counts` pins the params against a mock daemon that records what it was called with

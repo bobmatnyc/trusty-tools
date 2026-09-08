@@ -1,0 +1,4 @@
+Changed
+
+- **`memory.palaces_list` keeps its `counts: true` default, and the doc now says why.** It is a published UDS/MCP method, so an external caller sending `{}` asked for the #6286 contract and still gets it. What changed in #7125 is who sends `{}`: the two periodic pollers named in that doc — `trusty-common`'s monitor client and trusty-mpm's health TUI — send `counts: false` now, so a poll no longer opens every palace on disk to count it ([#7125](https://github.com/bobmatnyc/trusty-tools/issues/7125))
+  - `palaces_list_poll_residency.rs` pins both halves against a real daemon: `monitor_client_poll_leaves_closed_palaces_closed` drives the shared monitor client and asserts the registry's open-handle count is unchanged, and `palaces_list_without_counts_opens_nothing_on_the_daemon` names the daemon side directly so a future regression is attributable to one side or the other

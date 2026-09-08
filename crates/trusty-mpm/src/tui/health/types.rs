@@ -177,6 +177,19 @@ pub struct CollectionRow {
     /// Test: `palace_activity_marks_compacting_as_dreaming`,
     /// `project_palace_rows_reads_is_compacting`.
     pub is_compacting: bool,
+    /// Whether this row's counts are placeholders rather than measurements.
+    ///
+    /// Why (#7125): the poller asks `memory.palaces_list` for `counts: false`,
+    /// because counting opens every palace on disk on every 5-second tick. A
+    /// palace the daemon has not opened then answers zeros with `cached:
+    /// false`, and #4637's rule is that such a zero means UNKNOWN. Rendering it
+    /// as `--v --g` would say the palace is empty, which is a different claim
+    /// and usually a false one.
+    /// What: `true` when the daemon reported `cached: false`. Always `false`
+    /// for search rows and for a palace the daemon actually counted.
+    /// Test: `project_palace_rows_keep_uncached_rows_as_unknown`,
+    /// `collections_lines_show_unknown_counts_for_uncached_palaces`.
+    pub counts_unknown: bool,
 }
 
 /// Activity state of a memory palace, derived from `last_write_at`.

@@ -469,6 +469,111 @@ fn project_palace_roster_renders_a_failed_row() {
     );
 }
 
+/// Why (#7125): the health probe asks for `counts: false` now, so a palace the
+/// daemon has not opened answers placeholder zeros with `cached: false`. The
+/// empty-palace filter reads zeros — unguarded, it would drop every unopened
+/// palace and leave the Collections panel blank on a cold daemon.
+/// What: mixes a counted row, an uncounted one, and a genuinely empty counted
+/// one; asserts only the last is dropped and the uncounted row is flagged.
+/// Test: this IS the test.
+#[test]
+fn project_palace_rows_keep_uncached_rows_as_unknown() {
+    let list = serde_json::json!([
+        { "name": "warm",  "vector_count": 10u64, "kg_triple_count": 0u64, "cached": true },
+        { "name": "cold",  "vector_count": 0u64,  "kg_triple_count": 0u64, "cached": false },
+        { "name": "empty", "vector_count": 0u64,  "kg_triple_count": 0u64, "cached": true },
+    ]);
+    let rows = project_palace_rows(&list);
+    let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["warm", "cold"],
+        "an unopened palace is not an empty one"
+    );
+    assert!(
+        !rows[0].counts_unknown,
+        "a counted row reports measurements"
+    );
+    assert!(
+        rows[1].counts_unknown,
+        "cached:false marks the counts unknown"
+    );
+}
+
+/// Why (#7125): `--v` is the cell that says "this palace holds no vectors".
+/// Rendering it for a palace nobody counted states something the poll never
+/// established.
+/// What: renders one unknown row and asserts it reads `?v` / `?g`.
+/// Test: this IS the test.
+#[test]
+fn collections_lines_show_unknown_counts_for_uncached_palaces() {
+    let mut screen = HealthScreen::new("http://a", "http://b");
+    screen.focus = Daemon::Memory;
+    screen.memory_collections = vec![CollectionRow {
+        id: "cold".into(),
+        count: 0,
+        kg_count: 0,
+        ok: true,
+        counts_unknown: true,
+        ..Default::default()
+    }];
+    let lines = collections_lines(&screen);
+    assert_eq!(lines.len(), 1);
+    assert!(
+        lines[0].contains("?v") && lines[0].contains("?g"),
+        "expected `?v` / `?g` for uncounted palace in {line:?}",
+        line = lines[0]
+    );
+    assert!(
+        !lines[0].contains("--v"),
+        "`--v` claims the palace is empty: {line:?}",
+        line = lines[0]
+    );
+}
+
+/// Why (#7125): counting is what opens every palace on disk, and this probe
+/// runs on a 5-second timer — against `origin/main` it sent `{}`, so every
+/// tick hydrated the whole estate and pinned the daemon's LRU. The params are
+/// the only place that decision is visible; the rows projected either way are
+/// the same shape.
+/// What: stands up a mock daemon that records the params it was called with,
+/// runs the real probe, and asserts `counts` was `false`.
+/// Test: this IS the test.
+#[tokio::test]
+async fn memory_collections_asks_for_a_roster_without_counts() {
+    use std::sync::{Arc, Mutex};
+
+    let seen: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let recorder = Arc::clone(&seen);
+    let daemon = crate::uds_mock::spawn(move |method: &str, params: serde_json::Value| {
+        let recorder = Arc::clone(&recorder);
+        let method = method.to_string();
+        Box::pin(async move {
+            if method == "memory.palaces_list" {
+                *recorder.lock().expect("params recorder") = Some(params);
+            }
+            Ok(serde_json::json!({ "palaces": [] }))
+        })
+    })
+    .await;
+
+    let rows = client_for(Daemon::Memory, &daemon.socket().display().to_string())
+        .memory_collections()
+        .await;
+    assert!(rows.is_empty(), "the mock answered an empty roster");
+
+    let params = seen
+        .lock()
+        .expect("params recorder")
+        .clone()
+        .expect("the probe called memory.palaces_list");
+    assert_eq!(
+        params.get("counts"),
+        Some(&serde_json::Value::Bool(false)),
+        "a health poll must opt out of the opens: {params}"
+    );
+}
+
 #[test]
 fn project_palace_rows_filters_empty() {
     let list = serde_json::json!([
@@ -1048,6 +1153,51 @@ fn project_palace_rows_falls_back_to_legacy_wing_count() {
     ]);
     let rows = project_palace_rows(&list);
     assert_eq!(rows[0].room_count, 4);
+}
+
+/// Why (#7125): the Collections list renders an uncounted palace as `?v ?g`,
+/// and selecting that row opens this panel. Reading `row.count` straight
+/// through printed `Vectors: 0`, `Drawers: 0`, `Rooms: 0`, `Triples: 0` — the
+/// same placeholder zeros, one screen deeper, presented as measurements. The
+/// poller change makes `cached: false` the common case, so this is the row the
+/// operator usually drills into.
+/// What: renders a row flagged `counts_unknown` and asserts every count cell
+/// reads `?`, with no bare `0` anywhere in the panel.
+/// Test: this IS the test.
+#[test]
+fn palace_index_tab_lines_show_unknown_counts_as_unknown() {
+    let row = CollectionRow {
+        id: "cold".into(),
+        count: 0,
+        kg_count: 0,
+        drawer_count: 0,
+        room_count: 0,
+        node_count: 0,
+        edge_count: 0,
+        ok: true,
+        counts_unknown: true,
+        ..Default::default()
+    };
+    let lines = palace_index_tab_lines(&row);
+    for label in ["Vectors:", "Drawers:", "Rooms:", "Triples:"] {
+        let line = lines
+            .iter()
+            .find(|l| l.contains(label))
+            .unwrap_or_else(|| panic!("the panel renders a `{label}` line: {lines:?}"));
+        assert!(
+            line.contains('?'),
+            "`{label}` must read `?` when nothing counted it: {line:?}"
+        );
+    }
+    assert!(
+        !lines.iter().any(|l| l.contains(": 0")),
+        "a placeholder zero must never render as a measurement: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("N/A")),
+        "`N/A` says the palace has no graph, which is also a measurement: \
+         {lines:?}"
+    );
 }
 
 #[test]
