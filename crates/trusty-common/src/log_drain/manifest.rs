@@ -522,7 +522,14 @@ fn read_cache(path: &Path) -> Option<DrainManifest> {
 /// upload.
 fn write_cache(path: &Path, manifest: &DrainManifest) {
     let Some(parent) = path.parent() else { return };
-    if let Err(e) = std::fs::create_dir_all(parent) {
+    // #7158: was a raw `create_dir_all`, left at the umask-derived mode. The
+    // manifest cache records filenames and hashes of what has already left the
+    // machine, so it gets the same 0700 tightening the sibling log directories
+    // already got in #6537 (PR #7155) — via the crate-shared, symlink-safe,
+    // atomically-created `private_dir::ensure_private_dir`, not a local copy.
+    if let Err(e) =
+        crate::private_dir::ensure_private_dir(parent, crate::private_dir::PRIVATE_DIR_MODE)
+    {
         tracing::warn!(path = %parent.display(), error = %e, "log-drain cache dir unwritable");
         return;
     }

@@ -187,31 +187,34 @@ pub struct Inbox {
 impl Inbox {
     /// Open (creating) an inbox at `root`, held at [`INBOX_DIR_MODE`].
     ///
-    /// Deliberately narrower than [`crate::uds::prepare_socket_dir`]: it chmods
-    /// an existing directory without checking ownership or refusing a symlink.
+    /// #7158: routes through the crate-shared [`crate::private_dir::ensure_private_dir`]
+    /// (atomic creation, lstat-based symlink refusal) instead of the inline
+    /// `create_dir_all` + `set_permissions` this used to run — still narrower
+    /// than [`crate::uds::prepare_socket_dir`] in one respect: no owner check.
     /// The inbox lives under the user's own data directory, so reaching it
-    /// already requires having compromised that directory. Point this somewhere
-    /// less private and those checks become load-bearing.
+    /// already requires having compromised that directory; an owner check
+    /// becomes load-bearing only if this is ever pointed somewhere less
+    /// private, and `ensure_private_dir` does not add one.
     ///
     /// # Errors
     ///
-    /// [`InboxError::PrepareDir`] when the directory cannot be created or
-    /// narrowed. Called at startup so a misconfigured data directory fails
-    /// before the first delivery rather than during one.
+    /// [`InboxError::PrepareDir`] when the directory cannot be created,
+    /// narrowed, or is a symlink / not a directory. Called at startup so a
+    /// misconfigured data directory fails before the first delivery rather
+    /// than during one.
     ///
     /// Test: `inbox_open_creates_an_owner_only_directory`.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, InboxError> {
         let root = root.into();
-        std::fs::create_dir_all(&root).map_err(|source| InboxError::PrepareDir {
-            path: root.clone(),
-            source,
-        })?;
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(INBOX_DIR_MODE)).map_err(
-            |source| InboxError::PrepareDir {
+        // #7158 round 2: `.into()` uses `From<PrivateDirError> for io::Error`,
+        // which forwards the original `ErrorKind` instead of flattening it to
+        // `Other` the way `io::Error::other(..)` would.
+        crate::private_dir::ensure_private_dir(&root, INBOX_DIR_MODE).map_err(|source| {
+            InboxError::PrepareDir {
                 path: root.clone(),
-                source,
-            },
-        )?;
+                source: source.into(),
+            }
+        })?;
         Ok(Self { root })
     }
 

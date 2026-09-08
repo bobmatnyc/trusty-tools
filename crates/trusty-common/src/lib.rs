@@ -1058,6 +1058,20 @@ pub mod slack_format;
 /// data_dir::tests`.
 pub mod data_dir;
 
+/// One shared "create and hold a directory at owner-only" implementation
+/// (#7158).
+///
+/// Why: `trusty-common` held three divergent bodies solving this problem
+/// before this module — see [`private_dir`]'s module docs for the inventory.
+/// What: Exposes [`private_dir::ensure_private_dir`] (lstat-first symlink
+/// defense, atomic recursive creation at the caller's mode, narrow-in-place
+/// for an existing wide directory), [`private_dir::PRIVATE_DIR_MODE`], and
+/// [`private_dir::PrivateDirError`]. Pure `std`, no feature gate — always
+/// compiled.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// private_dir::tests`.
+pub mod private_dir;
+
 /// Runtime "am I a `cargo test` process?" detection (issue #4255).
 ///
 /// Why: every existing guard against a test run mutating the operator's live
