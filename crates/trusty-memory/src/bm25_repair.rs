@@ -18,7 +18,10 @@
 //! dropped: an empty set costs one wakeup.
 //!
 //! The sweep is bounded the same way the startup sweep is — serial, one palace
-//! at a time, so it cannot outrun the supervisor's three-daemon cap.
+//! at a time, so it cannot outrun the supervisor's three-daemon cap. It also
+//! draws each open from the shared [`crate::startup_budget::StartupOpenGate`]
+//! and hands the palace back afterwards (#7106), so a repair tick under
+//! sustained writes cannot leave the estate resident behind it.
 //!
 //! Test: `bm25_repair_tests.rs`.
 
@@ -124,10 +127,17 @@ pub fn dirty_palaces(state: &AppState) -> Vec<String> {
 /// to prevent. Telling "evicted" from "deleted" needs the on-disk palace list;
 /// without it, a transient open failure and a deleted palace look identical and
 /// one of the two answers is always wrong.
+/// Each open takes a slot from `AppState::startup_gate` and hands the palace
+/// back through `bm25_backfill::release_swept_palace` when the backfill
+/// finishes (#7106). Without that the pass grew the resident set on every tick:
+/// its input is the write path's drop-on-full arm, so it fires under sustained
+/// writes, not only at boot, and every palace it touched stayed hydrated.
 /// Returns `(attempted, repaired)`.
 /// Test: `an_evicted_palace_is_rehydrated_not_dropped`,
 /// `a_palace_absent_from_disk_is_dropped_from_the_queue`,
-/// `an_unrepairable_palace_stays_queued`.
+/// `an_unrepairable_palace_stays_queued`,
+/// `repair_pass_hands_back_the_palace_it_opened`,
+/// `repair_pass_keeps_a_recently_used_palace`.
 pub async fn run_repair_pass(state: &AppState) -> (usize, usize) {
     // Snapshot rather than drain: an entry leaves the set only once its
     // coverage is verified, so a panic or cancellation mid-pass cannot silently
@@ -170,18 +180,34 @@ pub async fn run_repair_pass(state: &AppState) -> (usize, usize) {
         }
 
         let id = trusty_common::memory_core::palace::PalaceId::new(palace.clone());
+        // #7106: this pass draws on the same startup budget hydration and the
+        // startup sweep do, so the three cannot hold more than one limit's
+        // worth of palaces open between them. `bm25_dirty` is fed by the write
+        // path's drop-on-full arm, so this pass runs under exactly the
+        // sustained-write load the bound exists for — not only at boot.
+        let permit = state.startup_gate.acquire().await;
+        // #7106: a palace already resident was warmed by something else — the
+        // pass hands back only what it brought in itself.
+        let was_resident_before = state.registry.peek(&id).is_some();
         let registry = Arc::clone(&state.registry);
         let root = state.data_root.clone();
-        let handle = match tokio::task::spawn_blocking(move || registry.open_palace(&root, &id))
-            .await
+        let open_id = id.clone();
+        let handle = match tokio::task::spawn_blocking(move || {
+            registry.open_palace(&root, &open_id)
+        })
+        .await
         {
             Ok(Ok(h)) => h,
             Ok(Err(e)) => {
                 tracing::warn!(palace = %palace, "bm25 repair: open failed, staying queued: {e:#}");
+                // #7106: nothing was opened, but the slot was taken — hand it
+                // back before the next palace waits on it.
+                drop(permit);
                 continue;
             }
             Err(e) => {
                 tracing::warn!(palace = %palace, "bm25 repair: open task failed, staying queued: {e}");
+                drop(permit);
                 continue;
             }
         };
@@ -206,6 +232,11 @@ pub async fn run_repair_pass(state: &AppState) -> (usize, usize) {
                 "bm25 repair: coverage still unverified — staying queued"
             );
         }
+        // #7106: hand the palace back to the LRU now this pass is done with it,
+        // subject to the #7087 residency ruling — on BOTH arms above, because a
+        // palace this pass could not repair is no more entitled to stay
+        // resident than one it could. Releases the permit last.
+        crate::bm25_backfill::release_swept_palace(state, &id, was_resident_before, handle, permit);
     }
     (queued.len(), repaired)
 }

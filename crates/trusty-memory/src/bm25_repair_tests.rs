@@ -2,9 +2,11 @@
 //!
 //! Why: split out of `bm25_repair.rs` to keep the production module under the
 //! 500-SLOC cap, wired back in via `#[path] mod tests;`.
-//! What: covers the dirty-set contract, the interval knob, and the repair
-//! pass's two terminal branches — a palace that is gone is dropped, a palace
-//! whose coverage is still unverified stays queued.
+//! What: covers the dirty-set contract, the interval knob, the repair pass's
+//! two terminal branches — a palace that is gone is dropped, a palace whose
+//! coverage is still unverified stays queued — and the #7106 residency
+//! contract: the pass opens through the shared startup budget and hands back
+//! what it opened, unless a client used the palace recently (#7087).
 //! Test: this *is* the test file.
 
 use super::*;
@@ -125,7 +127,10 @@ fn create_on_disk(state: &AppState, id: &str) {
 /// the palace is on disk and absent from the LRU, which is what eviction looks
 /// like. The pass must hydrate it and (with the lane off) leave it queued.
 /// Test: this test itself. Swap `open_palace` back to `registry.get` and the
-/// palace is dropped, so the queue is empty and this fails.
+/// palace is dropped, so the queue is empty and this fails — the queue
+/// assertion, not the registry, is what discriminates. Since #7106 the pass
+/// hands the palace back once it is done, so residency afterwards is asserted
+/// by `repair_pass_hands_back_the_palace_it_opened` instead.
 #[tokio::test]
 async fn an_evicted_palace_is_rehydrated_not_dropped() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -151,8 +156,74 @@ async fn an_evicted_palace_is_rehydrated_not_dropped() {
         "an evicted palace must be hydrated and kept queued, never dropped"
     );
     assert!(
-        cold.registry.list().iter().any(|p| p.as_str() == "evicted"),
-        "and the pass must actually have opened it"
+        cold.startup_gate.peak_concurrent() >= 1,
+        "and the pass must actually have taken a startup-budget slot to open it"
+    );
+}
+
+/// Why (#7106): the repair pass's input is the write path's drop-on-full arm,
+/// so it fires under sustained writes rather than only at boot. Opening every
+/// queued palace and leaving each one hydrated made the pass a slow leak of the
+/// exact resident set this issue is about — and the module docs claimed
+/// three-way gate coverage the pass did not have.
+/// What: a cold `AppState` over a palace that exists on disk, so the pass must
+/// open it. Asserts the pass took a startup-budget slot and that the palace is
+/// NOT resident afterwards.
+/// Test: this test itself. On 78d5fa6a2 the pass neither acquires nor releases,
+/// so both assertions fail.
+#[tokio::test]
+async fn repair_pass_hands_back_the_palace_it_opened() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    create_on_disk(&AppState::new(root.clone()), "swept");
+
+    let cold = AppState::new(root);
+    assert!(
+        cold.registry.list().is_empty(),
+        "precondition: cold registry"
+    );
+    mark_dirty(&cold, "swept");
+
+    let (attempted, _) = run_repair_pass(&cold).await;
+    assert_eq!(attempted, 1);
+
+    assert!(
+        cold.registry.peek(&PalaceId::new("swept")).is_none(),
+        "#7106: a palace the repair pass itself opened must be handed back, \
+         not left resident for the rest of the process's life"
+    );
+    assert!(
+        cold.startup_gate.peak_concurrent() >= 1,
+        "#7106: the repair pass must open through the shared startup budget"
+    );
+}
+
+/// Why (#7087): the owner's residency ruling binds the repair pass exactly as
+/// it binds the startup sweep — a release that ignored `last_used` would evict
+/// an active session's palace every time a dropped write queued a repair.
+/// What: stamps `last_used` at "now" before the pass runs, then asserts the
+/// palace is still resident afterwards. This is what proves the release above
+/// is conditional rather than unconditional.
+/// Test: this test itself.
+#[tokio::test]
+async fn repair_pass_keeps_a_recently_used_palace() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    create_on_disk(&AppState::new(root.clone()), "in-session");
+    crate::palace_last_used::write(
+        &root.join("in-session"),
+        crate::palace_last_used::now_unix(),
+    )
+    .expect("stamp last_used");
+
+    let cold = AppState::new(root);
+    mark_dirty(&cold, "in-session");
+    let (attempted, _) = run_repair_pass(&cold).await;
+
+    assert_eq!(attempted, 1);
+    assert!(
+        cold.registry.peek(&PalaceId::new("in-session")).is_some(),
+        "#7087: a palace a client used inside the keep-recent window stays resident"
     );
 }
 

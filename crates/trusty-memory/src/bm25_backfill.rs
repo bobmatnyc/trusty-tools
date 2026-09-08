@@ -638,7 +638,11 @@ fn palace_ids_on_disk(data_root: &std::path::Path) -> anyhow::Result<Vec<String>
 /// `startup_budget::release_after_sweep` whether to drop the cached handle, and
 /// finally releases the startup-open permit so the next palace can start.
 /// Test: `startup_budget::tests::release_after_sweep_keeps_a_recently_used_palace`.
-fn release_swept_palace(
+///
+/// `pub(crate)` because the BM25 repair sweep (`bm25_repair::run_repair_pass`)
+/// opens palaces on the same budget and owes the same hand-back; a second
+/// implementation there would be the bug this exists to prevent.
+pub(crate) fn release_swept_palace(
     state: &AppState,
     id: &trusty_common::memory_core::palace::PalaceId,
     was_resident_before: bool,

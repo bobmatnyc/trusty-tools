@@ -9,10 +9,23 @@
 //! be pinned is that nothing bypasses it.
 //!
 //! What: scans the memory-core source tree plus the shared `redb_open` recovery
-//! path for `Database::create(` / `Database::open(` outside `#[cfg(test)]`
-//! bodies and outside the one module allowed to call redb directly
-//! (`redb_cache`). Any hit is a bypass and fails the test naming the file and
-//! line.
+//! path for a direct redb open outside `#[cfg(test)]` bodies and outside the one
+//! module allowed to call redb directly (`redb_cache`). Any hit is a bypass and
+//! fails the test naming the file and line.
+//!
+//! The scan covers the BUILDER path too (`Database::builder(`,
+//! `Builder::new(`), not just `Database::create` / `open`: a builder that never
+//! calls `set_cache_size` takes the same 1 GiB default, so matching only the
+//! two constructors would let the identical regression through by a different
+//! spelling. A bare `::builder(` is deliberately NOT matched — it hits
+//! `reqwest::Client::builder()` in this same tree, and a ratchet that cries wolf
+//! gets an allowlist row instead of a fix.
+//!
+//! Scope: this crate only. `trusty-memory` has its own copy of this ratchet
+//! (`crates/trusty-memory/tests/redb_cache_bounds.rs`) covering its own sources
+//! and its own allowlist — a scan that reached across the crate boundary from
+//! here would go silently inert the day that crate moved, which is the exact
+//! failure this test exists to prevent.
 //!
 //! Deliberately source-level, not behavioural: redb exposes no way to read a
 //! database's configured cache size back, so the ceiling cannot be asserted
@@ -63,8 +76,8 @@ fn is_test_file(path: &Path) -> bool {
 /// Why (#7106): one unbounded open is enough to bring the 1 GiB ceiling back
 /// for that file, and it would look like every other open in review.
 /// What: walks the memory-core and shared-recovery sources, skips test files
-/// and `#[cfg(test)]` module bodies, and fails on any remaining
-/// `Database::create(` / `Database::open(` outside [`ALLOWED`].
+/// and `#[cfg(test)]` module bodies, and fails on any remaining direct redb
+/// open — constructor or builder — outside [`ALLOWED`].
 /// Test: this test.
 #[test]
 fn every_memory_core_redb_open_is_bounded() {
@@ -130,6 +143,8 @@ fn every_memory_core_redb_open_is_bounded() {
             if line.contains("Database::create(")
                 || line.contains("Database::open(")
                 || line.contains("ReadOnlyDatabase::open(")
+                || line.contains("Database::builder(")
+                || line.contains("Builder::new(")
             {
                 bypasses.push(format!("{rel}:{}: {}", idx + 1, line.trim()));
             }
