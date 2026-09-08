@@ -423,7 +423,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_thirty_nine_checks() {
+async fn run_doctor_produces_forty_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -490,6 +490,9 @@ async fn run_doctor_produces_thirty_nine_checks() {
         // #3605: the base clone a live worktree resolves through.
         "base_clone",
         "gh_account",
+        // #7097: whether the issues opened this week carry the milestone,
+        // project and component label the ticketing standard requires.
+        "issue_audit_recent",
         "oauth_token",
         "hooks_contamination",
         "hooks_foreign_conflict",

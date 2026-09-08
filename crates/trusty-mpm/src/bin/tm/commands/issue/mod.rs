@@ -9,12 +9,14 @@
 //! `agents.ticketing` standard (#6918), loads + validates the model (config
 //! discovery: flag > CWD > `agents.ticketing.lifecycle_model` > user > embedded
 //! default), and runs the requested verb (`seed-labels`, `transition`,
-//! `current`, `states`, `standard`, `seed-config`, `repair`). Schema types live
-//! in `config.rs`, validation in `validate.rs`, the state machine in `state.rs`,
-//! the operations in `ops.rs`, the `standard` printer in `standard.rs`.
+//! `current`, `states`, `standard`, `seed-config`, `repair`, `audit`). Schema
+//! types live in `config.rs`, validation in `validate.rs`, the state machine in
+//! `state.rs`, the operations in `ops.rs`, the `standard` printer in
+//! `standard.rs`, the #7097 `audit` verb in `audit.rs`.
 //! Test: pure logic is unit-tested in the submodules (`config`/`validate`/
 //! `state`/`ops`); CLI parsing in `tests.rs`.
 
+pub(crate) mod audit;
 pub(crate) mod config;
 pub(crate) mod ops;
 pub(crate) mod seed_ticketing;
@@ -63,19 +65,25 @@ pub(crate) fn issue(cmd: IssueCmd, system: TicketSystemKind) -> anyhow::Result<(
         TicketSystemKind::Jira => return Err(not_yet_supported("jira")),
         TicketSystemKind::Linear => return Err(not_yet_supported("linear")),
     };
-    dispatch(&backend, &runner, cmd)
+    dispatch(&backend, &runner, &gh_env, cmd)
 }
 
 /// Dispatch a parsed [`IssueCmd`] against a backend (generic for testability).
 ///
 /// Why: separating dispatch from backend construction keeps the verb wiring
 /// independent of `gh`, so the orchestration could be exercised with a fake.
+/// `gh_env` rides along for the one verb (#7097's `audit`) whose `gh` calls go
+/// through the workspace's shared `GhCommand` entry point rather than through
+/// the `CommandRunner` seam the other verbs share.
 /// What: matches each verb, loads the model where required, runs the op, and
 /// prints a human summary.
 /// Test: per-verb ops are unit-tested; this is thin glue.
 fn dispatch<S: TicketSystem>(
     backend: &S,
     runner: &dyn CommandRunner,
+    // #7097: `audit` reaches `gh` through `trusty_common::gh::GhCommand` rather
+    // than the `CommandRunner` seam, so it needs the resolved identity itself.
+    gh_env: &trusty_mpm::core::gh_identity::GhEnv,
     cmd: IssueCmd,
 ) -> anyhow::Result<()> {
     // #6918: resolve the operator's ticketing standard ONCE. An absent
@@ -122,6 +130,14 @@ fn dispatch<S: TicketSystem>(
         }
         IssueCmd::SeedConfig { force } => {
             seed_config(force)?;
+        }
+        // #7097: reads only — no model needed, and no `gh` write.
+        IssueCmd::Audit {
+            issue,
+            recent,
+            since,
+        } => {
+            audit::run(&ticketing, gh_env, issue, recent, since)?;
         }
         IssueCmd::Repair { issue, config } => {
             let model = load_model(config.as_deref(), lifecycle)?;
