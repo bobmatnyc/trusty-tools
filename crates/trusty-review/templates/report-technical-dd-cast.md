@@ -103,7 +103,7 @@ in the coverage data provided — and name it specifically.
 | Field | Value |
 |---|---|
 | Source document | {{source_document_reference}} |
-| Vendor / methodology | CAST (CAST Software) — CAST Highlight + CAST Imaging |
+| Vendor / methodology | {{vendor_methodology}} |
 | Report date / version | {{report_date}} / {{report_version}} |
 | Inference models | {{inference_models}} |
 | Target / deal codename | {{target_codename}} |

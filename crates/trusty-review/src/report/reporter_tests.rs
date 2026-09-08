@@ -390,6 +390,42 @@ fn cast_template_instruct_override_never_renders() {
     assert!(md.contains("Acme Due Diligence"), "report still renders");
 }
 
+/// Why (#7136): the CAST template's Report Metadata table used to hardcode
+/// `CAST (CAST Software) — CAST Highlight + CAST Imaging` as the Vendor /
+/// methodology value — a static string with no provenance marker, unlike
+/// every other row in the same table, that a reader could mistake for a
+/// factual claim that CAST Software's platform produced the analysis. No
+/// CAST product is invoked; trusty-analyze/trusty-search did the analysis.
+/// What: renders the bundled CAST template and asserts the Vendor /
+/// methodology row now carries the same self-known, provenance-tagged
+/// `vendor_methodology` value the generic template already renders — never
+/// the literal "CAST Software" vendor claim.
+/// Test: this test itself.
+#[test]
+fn cast_template_vendor_methodology_carries_provenance_not_cast_vendor_claim() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd-cast")
+        .expect("bundled cast template");
+    let reporter = Reporter::new(tmp.path());
+    let md = reporter.render(&model, &template);
+
+    assert!(
+        !md.contains("CAST (CAST Software)"),
+        "must not hardcode a vendor attribution: {md}"
+    );
+    let expected_row = format!(
+        "| Vendor / methodology | {}{} |",
+        model.vendor_methodology,
+        crate::report::provenance::MEASURED_TAG
+    );
+    assert!(
+        md.contains(&expected_row),
+        "expected self-known, tagged vendor/methodology row {expected_row:?} in: {md}"
+    );
+}
+
 /// Why: the model must assemble deterministically from the manifest.
 /// What: asserts repository count, metrics presence, and no git info for a
 /// non-existent local path.
