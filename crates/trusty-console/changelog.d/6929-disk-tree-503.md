@@ -1,0 +1,4 @@
+Fixed
+
+- A failed disk survey now says what failed (#6929). `GET /api/console/disk/tree` answered a transport failure with a bare 502 and `content-length: 0`, and an unreachable daemon with a bare 503, so the Disk view could print nothing but `HTTP 502` at the operator — a number that names no cause and suggests no action. Both arms now carry `{status, hint}`: `survey_failed` names the survey and the console's thirty-second MCP call timeout, `unreachable` names the missing bridge. The daemon's own error text stays in the log, since it can carry a path.
+- The Disk view renders those hints instead of the status number, and shows a banner when the survey reports itself `partial` — the budget ran out before every worktree was inspected, so the `review` rows below were listed rather than classified and a missing size is unmeasured rather than zero.

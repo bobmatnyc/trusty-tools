@@ -31,7 +31,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -307,6 +307,23 @@ impl PrIndex {
     /// `pr_index_from_gh_reads_this_repository` (a real successful call);
     /// `pr_index_malformed_json_is_unavailable` (failure-to-unavailable).
     pub(crate) fn from_gh(registry_root: &Path) -> Self {
+        Self::from_gh_within(registry_root, GH_TIMEOUT)
+    }
+
+    /// [`from_gh`](Self::from_gh) with the `gh` subprocess bound to `timeout`.
+    ///
+    /// Why: a caller that is itself under a deadline cannot afford
+    /// [`GH_TIMEOUT`]'s fixed ten seconds late in its own budget. The disk
+    /// survey gates ENTRY to each worktree on its deadline but could not bound
+    /// the lookup the admitted worktree then paid for, so a 20-second budget
+    /// produced a pass past 30 and the console's stdio transport answered its
+    /// Disk view with a 502 carrying no survey at all (#6929).
+    /// What: identical to [`from_gh`](Self::from_gh) but for the subprocess
+    /// bound. `timeout` is the caller's ceiling, never a floor — pass
+    /// `GH_TIMEOUT` for the unbudgeted default.
+    /// Test: `a_budgeted_survey_answers_within_its_budget`,
+    /// `pr_index_from_gh_reads_this_repository`.
+    pub(crate) fn from_gh_within(registry_root: &Path, timeout: Duration) -> Self {
         // #7057: WHICH repository, read from this root's own `origin` rather
         // than left to `gh` to infer from the working directory. Resolved
         // before the gate because a root whose repository cannot be
@@ -338,7 +355,9 @@ impl PrIndex {
             cmd.args(["--state", "all", "--limit"])
                 .arg(PR_INDEX_LIMIT.to_string())
                 .args(["--json", PR_JSON_FIELDS]);
-            run_with_timeout(cmd, GH_TIMEOUT).map_err(|f| f.with_identity(identity))
+            // #6929: the caller's ceiling, so a lookup cannot outlive the
+            // survey that asked for it.
+            run_with_timeout(cmd, timeout).map_err(|f| f.with_identity(identity))
         });
         match outcome {
             Ok(stdout) => {
@@ -462,6 +481,22 @@ impl PrIndex {
 /// Test: `pr_state_for_branch_reports_a_failed_call_as_lookup_failed`,
 /// `pr_index_resolves_a_squash_merged_pr_whose_head_branch_was_deleted`.
 pub(crate) fn pr_state_for_branch(registry_root: &Path, branch: &str) -> BranchPrState {
+    pr_state_for_branch_within(registry_root, branch, GH_TIMEOUT)
+}
+
+/// [`pr_state_for_branch`] with the `gh` subprocess bound to `timeout`.
+///
+/// Why: the same bound [`PrIndex::from_gh_within`] exists for, and it matters
+/// more here — this is the SECOND `gh` call a worktree can pay for, so an
+/// unbounded one doubles the overrun past a caller's deadline (#6929).
+/// What: identical to [`pr_state_for_branch`] but for the subprocess bound.
+/// Test: `a_budgeted_survey_answers_within_its_budget`,
+/// `pr_state_for_branch_reports_a_failed_call_as_lookup_failed`.
+pub(crate) fn pr_state_for_branch_within(
+    registry_root: &Path,
+    branch: &str,
+    timeout: Duration,
+) -> BranchPrState {
     const PER_BRANCH_LIMIT: usize = 50;
     // #7057: same per-directory resolution as the bulk index, and the same
     // refusal when it cannot be established.
@@ -491,7 +526,8 @@ pub(crate) fn pr_state_for_branch(registry_root: &Path, branch: &str) -> BranchP
         cmd.args(["--head", branch, "--state", "all", "--limit"])
             .arg(PER_BRANCH_LIMIT.to_string())
             .args(["--json", PR_JSON_FIELDS]);
-        run_with_timeout(cmd, GH_TIMEOUT).map_err(|f| f.with_identity(identity))
+        // #6929: bounded by the caller's remaining budget, not a fixed ceiling.
+        run_with_timeout(cmd, timeout).map_err(|f| f.with_identity(identity))
     });
     match outcome {
         Ok(stdout) => PrIndex::from_json(&stdout, PER_BRANCH_LIMIT).state_for(Some(branch)),

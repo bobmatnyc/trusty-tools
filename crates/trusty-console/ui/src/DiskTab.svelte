@@ -42,6 +42,30 @@
   let sortDir = $state('desc');
 
   /**
+   * What went wrong, in the operator's terms rather than the number's.
+   *
+   * Why (#6929): this used to print `HTTP ${resp.status}` for everything except
+   * a 503, so the live failure read `HTTP 502` — a number that names no cause
+   * and suggests no action, for a response that also carried no body. The route
+   * now sends `{status, hint}` on both failure arms; the hint is preferred and
+   * the status only names the family when one is missing.
+   */
+  async function failureMessage(resp) {
+    let hint = null;
+    try {
+      hint = (await resp.json())?.hint ?? null;
+    } catch {
+      hint = null;
+    }
+    if (hint) return `${hint}.`;
+    if (resp.status === 503)
+      return 'trusty-mpm is not reachable — the disk survey needs its MCP bridge.';
+    if (resp.status === 502)
+      return 'trusty-mpm did not answer the disk survey — check the daemon’s log.';
+    return `The disk survey failed (HTTP ${resp.status}).`;
+  }
+
+  /**
    * Read the survey.
    *
    * The route always sends a classification budget under the console's 30 s MCP
@@ -54,11 +78,10 @@
     else loading = true;
     try {
       const resp = await fetch('/api/console/disk/tree');
-      if (resp.status === 503) {
-        error = 'trusty-mpm is not reachable — the disk survey needs its MCP bridge.';
+      if (!resp.ok) {
+        error = await failureMessage(resp);
         return;
       }
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       survey = await resp.json();
       error = null;
     } catch (e) {
@@ -112,6 +135,17 @@
     <!-- The keep-list state, stated rather than swallowed. An unreadable config
          keeps EVERYTHING, so an operator who cannot see the failure would read
          a fleet of `keep` rows as real classifications. -->
+    <!-- #6929: a truncated pass is a 200 with every worktree listed, but the
+         rows it ran out of time on read `review` / `unknown-branch-state`. Say
+         so, or an operator reads a partial answer as the whole one. -->
+    {#if survey.partial}
+      <div class="banner warning" role="status">
+        <strong>Partial survey.</strong>
+        The classification budget ran out before every worktree was inspected.
+        Rows marked <em>review</em> with an unknown branch state were listed but
+        not classified, and any missing size is unmeasured rather than zero.
+      </div>
+    {/if}
     {#if keepList?.error}
       <div class="banner danger" role="alert">
         <strong>Keep-list unreadable.</strong>
