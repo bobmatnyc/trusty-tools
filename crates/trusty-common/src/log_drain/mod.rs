@@ -53,6 +53,7 @@ mod destination;
 mod error;
 mod manifest;
 mod pipeline;
+mod single_source;
 mod uri;
 
 #[cfg(test)]
@@ -69,6 +70,10 @@ pub use error::DrainError;
 pub use manifest::{
     DrainManifest, MANIFEST_FILENAME, MANIFEST_VERSION, ManifestEntry, ManifestOrigin, SkipReason,
     SkipRecord, StatDecision,
+};
+pub use single_source::{
+    DEFAULT_INTERVAL_SECS, DrainOutcome, LogDrainSetting, ResolvedLogDrain, SingleSourceError,
+    SingleSourceSection, resolve_single_source, run_tick,
 };
 pub use uri::{DestinationScheme, DestinationUri};
 

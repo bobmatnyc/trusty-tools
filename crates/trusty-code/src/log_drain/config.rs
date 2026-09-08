@@ -4,7 +4,12 @@
 //! own small one rather than inventing a general config system this ticket
 //! does not need. Field names match trusty-mpm's `log_drain:` section
 //! (`trusty_mpm::core::trusty_tools_config::log_drain::LogDrainConfig`) so an
-//! operator who already knows that shape needs nothing new.
+//! operator who already knows that shape needs nothing new. [`LogDrainConfig`]
+//! is now a bare alias onto
+//! [`trusty_common::log_drain::SingleSourceSection`] — the shared shape
+//! trusty-agents' own TOML section also aliases (#6537 code-review fix
+//! round) — since YAML and TOML serialize the same eight fields with no
+//! mapping needed.
 //! What: [`LogDrainConfig`] is the on-disk shape; [`load_config`] reads it,
 //! defaulting to a disabled section when the file is absent. A present but
 //! malformed file is an error, never a silent default — matching trusty-mpm's
@@ -14,39 +19,9 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
 /// The `log_drain.yaml` schema. Every field optional, same names as
 /// trusty-mpm's `log_drain:` section.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct LogDrainConfig {
-    /// Whether the scheduler runs at all. `None`/`Some(false)` → disabled.
-    #[serde(default)]
-    pub enabled: Option<bool>,
-    /// Destination URI — `s3://bucket/prefix` or `file:///abs/path`.
-    #[serde(default)]
-    pub destination: Option<String>,
-    /// Seconds between passes. `None` → [`super::resolve::DEFAULT_INTERVAL_SECS`].
-    #[serde(default)]
-    pub interval_secs: Option<u64>,
-    /// Plaintext source ceiling. `None` → the collector's own default.
-    #[serde(default)]
-    pub max_file_bytes: Option<u64>,
-    /// Compressed-body ceiling. `None` → the collector's own default.
-    #[serde(default)]
-    pub max_wire_bytes: Option<u64>,
-    /// Extra literal strings scrubbed from every body before upload.
-    #[serde(default)]
-    pub secrets: Vec<String>,
-    /// Repository owner, when `tcode serve` runs with no bound project (or
-    /// its root has no git origin).
-    #[serde(default)]
-    pub owner: Option<String>,
-    /// Project name, paired with [`LogDrainConfig::owner`].
-    #[serde(default)]
-    pub project: Option<String>,
-}
+pub type LogDrainConfig = trusty_common::log_drain::SingleSourceSection;
 
 /// Path of the config file: `~/.trusty-code/log_drain.yaml`.
 pub fn config_path() -> PathBuf {

@@ -126,27 +126,41 @@ pub fn file_log_dir() -> PathBuf {
 /// (`bin/tm/tracing_setup.rs`), where a short-lived CLI invocation gets the
 /// lighter [`init_tracing`] instead. A file-directory creation failure (a
 /// read-only home, a full disk) degrades to stderr-only rather than failing
-/// daemon startup.
+/// daemon startup. A prior version created the directory with a raw
+/// `create_dir_all`, which applies the process umask and commonly leaves
+/// `0755`/`0644` — code-review fix (#6537): this now routes through the same
+/// private-state hardening every other writer under `~/.trusty-code` uses
+/// (#6999), so the directory is `0700` and each rolled file `0600`.
 /// What: builds a `tracing_subscriber::registry()` with a stderr `fmt` layer
 /// and, when the log directory is creatable, a non-blocking daily file `fmt`
 /// layer (`with_ansi(false)`, since a rotated file is read by tooling, not a
-/// terminal). Returns the file layer's `WorkerGuard` — the caller MUST hold
-/// it for the process lifetime; dropping it early silently discards buffered
-/// log records.
+/// terminal). The directory is created and tightened via
+/// [`crate::paths::private_state::ensure_private_state_dir`] (the
+/// `~/.trusty-code` root) then
+/// [`crate::paths::private_state::ensure_dir`] (the `logs` subdirectory
+/// itself); [`chmod_log_files_owner_only`] then tightens whichever file
+/// `tracing_appender::rolling::daily` just opened for today. Returns the
+/// file layer's `WorkerGuard` — the caller MUST hold it for the process
+/// lifetime; dropping it early silently discards buffered log records.
 /// Test: `tests::file_log_dir_is_under_private_state` covers the path
 /// computation this function depends on; installing a second GLOBAL
 /// subscriber in-process (this function's own behavior) cannot itself run in
-/// the shared `--lib` test binary alongside `begin_capture`'s `try_init` — see
-/// that test's own doc comment.
+/// the shared `--lib` test binary alongside `begin_capture`'s `try_init` —
+/// see that test's own doc comment. The directory/file mode guarantee is
+/// covered by `tests/logging_e2e.rs::file_log_dir_and_current_file_are_owner_only`
+/// (a subprocess with `HOME` pointed at a tempdir, for the same reason).
 pub fn init_tracing_with_file_log() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let stderr_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_filter(env_filter());
 
     let log_dir = file_log_dir();
-    let (file_layer, guard) = match std::fs::create_dir_all(&log_dir) {
+    let create_result = crate::paths::private_state::ensure_private_state_dir()
+        .and_then(|_| crate::paths::private_state::ensure_dir(&log_dir));
+    let (file_layer, guard) = match create_result {
         Ok(()) => {
             let appender = tracing_appender::rolling::daily(&log_dir, FILE_LOG_BASENAME);
+            chmod_log_files_owner_only(&log_dir);
             let (non_blocking, guard) = tracing_appender::non_blocking(appender);
             let layer = tracing_subscriber::fmt::layer()
                 .with_writer(non_blocking)
@@ -170,6 +184,49 @@ pub fn init_tracing_with_file_log() -> Option<tracing_appender::non_blocking::Wo
 
     guard
 }
+
+/// Tighten every regular file already in `log_dir` to owner-only (#6537).
+///
+/// Why: `tracing_appender::rolling::daily` opens today's file the moment the
+/// appender is constructed — before this function runs — with whatever mode
+/// the process umask leaves (commonly `0644`). Chmod'ing every entry
+/// currently in the directory, rather than computing tomorrow's filename
+/// itself, stays correct regardless of `tracing_appender`'s internal naming.
+/// KNOWN LIMITATION: a file this appender creates on a LATER day's rotation,
+/// after this function has already returned, is never chmod'd by it — this
+/// daemon is expected to restart at least daily in practice, and each
+/// restart re-tightens whatever file is current at that point.
+/// What: on Unix, chmod every regular file directly under `log_dir` to
+/// `0600`, logging a `warn` (never failing) on any entry it cannot stat or
+/// chmod. No-op on non-Unix targets, which have no comparable mode bits.
+/// Test: `tests/logging_e2e.rs::file_log_dir_and_current_file_are_owner_only`.
+#[cfg(unix)]
+fn chmod_log_files_owner_only(log_dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(entries) = std::fs::read_dir(log_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "could not tighten a tcode log file to 0600; its contents may \
+                 be readable by other users on this machine"
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn chmod_log_files_owner_only(_log_dir: &std::path::Path) {}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 

@@ -454,9 +454,20 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     // reason to fail server startup. `crate::ctrl::detect_self_project()`
     // (falling back to `listener_project_path`, computed just above from the
     // same cwd) resolves the project this daemon's own log identity is
-    // scoped to.
+    // scoped to. This is the ONE place that resolves the real
+    // `~/.trusty-agents/log-drain` state directory (#6537 code-review fix
+    // round) — every test drives the scheduler's `tick` with a tempdir
+    // instead.
     let drain_project_root = crate::ctrl::detect_self_project().or(Some(listener_project_path));
-    crate::log_drain::spawn(drain_project_root, crate::service::log_dir());
+    let drain_state_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".trusty-agents")
+        .join("log-drain");
+    crate::log_drain::spawn(
+        drain_project_root,
+        crate::service::log_dir(),
+        drain_state_dir,
+    );
 
     // #212: Load persisted task snapshot so restarts don't lose history.
     let state = AppState::with_persistence(None).await;
