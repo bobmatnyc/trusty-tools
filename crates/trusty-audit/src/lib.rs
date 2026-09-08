@@ -79,6 +79,9 @@ pub mod chain;
 pub mod cli;
 pub mod clone;
 pub mod config;
+// #7134: the preflight for OPTIONAL collector binaries (gitleaks, cargo-audit,
+// cargo-deny), run before a sweep starts.
+pub mod collectors;
 // #6781: the bundle-level technical-debt roll-up — counts by tier, dimension,
 // repository, and tier x dimension, computed once per run and read by BOTH the
 // index's table and `report.json`, so the two cannot disagree.

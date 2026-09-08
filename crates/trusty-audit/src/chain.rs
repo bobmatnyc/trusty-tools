@@ -104,6 +104,11 @@ use crate::workdir::WorkDir;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Phase {
+    /// #7134: checking which OPTIONAL collector binaries (gitleaks,
+    /// cargo-audit, cargo-deny) are on this machine, before anything is
+    /// cloned. Refuses only under `--strict-collectors`; otherwise it always
+    /// lets the chain continue.
+    Preflight,
     /// Downloading and verifying the engagement's pinned tool set (#5495).
     InstallTools,
     /// Turning registered targets into checkouts the sweep can read (#5215).
@@ -118,6 +123,7 @@ impl Phase {
     /// The name this phase is reported under, e.g. `"collect"`.
     pub fn label(self) -> &'static str {
         match self {
+            Phase::Preflight => "preflight",
             Phase::InstallTools => "install",
             Phase::Materialize => "materialize",
             Phase::Collect => "collect",
@@ -149,6 +155,13 @@ pub struct ChainOptions {
     pub fresh: bool,
     /// Where the return package lands, or `None` for the default.
     pub destination: Option<PathBuf>,
+    /// #7134: refuse in [`Phase::Preflight`], before anything is cloned, when
+    /// an OPTIONAL collector binary (gitleaks, cargo-audit, cargo-deny) is
+    /// missing. `false` (the default) only warns —
+    /// [`ChainReport::collector_gaps`] carries the same rows either way, and
+    /// the sweep still runs; each repository's own `[report].gaps` line is
+    /// unaffected regardless of this flag.
+    pub strict_collectors: bool,
 }
 
 /// What one chained run did, phase by phase.
@@ -186,6 +199,16 @@ pub struct ChainReport {
     /// run's exit status non-zero, so a silently unaudited target cannot read as
     /// a whole engagement.
     pub gaps: Vec<String>,
+    /// #7134: one warning row per OPTIONAL collector binary that was missing
+    /// at [`Phase::Preflight`] — always empty when
+    /// [`ChainOptions::strict_collectors`] refused instead. Deliberately
+    /// separate from [`ChainReport::gaps`]: this is informational (it does
+    /// not change [`crate::session::Outcome::exit_code`]) and is not a target
+    /// the chain failed to audit — every repository still ran, only one
+    /// evidence dimension went unassessed for all of them. Each repository's
+    /// own `[report].gaps` line for the same collector is unaffected by this
+    /// field either way.
+    pub collector_gaps: Vec<String>,
 }
 
 /// Run the whole engagement: install, materialize, collect, package.
@@ -223,6 +246,46 @@ pub async fn audit(
     auto_install: bool,
     progress: &Progress,
 ) -> Result<ChainReport, AuditError> {
+    // #7134: real machine, real resolver. `audit_with_preflight` is what
+    // actually runs Phase::Preflight; splitting it out here is what lets the
+    // ordering guarantee (before Phase 2 clones anything) be tested by
+    // injecting the preflight's OUTCOME directly, rather than by faking the
+    // process-global `PATH`/`HOME` env vars a concurrently running unrelated
+    // test could observe too — see `chain_tests::audit_with_preflight`.
+    audit_with_preflight(
+        work,
+        config,
+        options,
+        auto_install,
+        progress,
+        crate::collectors::check(options.strict_collectors),
+    )
+    .await
+}
+
+/// [`audit`], with Phase 1's preflight outcome supplied rather than computed.
+///
+/// Why: see [`audit`]. Production has exactly one caller, which always passes
+/// a real [`crate::collectors::check`] result; tests are the second caller,
+/// and pass a result built by hand.
+/// What: identical to [`audit`] except `collector_check` replaces the
+/// [`crate::collectors::check`] call — still the first thing evaluated, still
+/// wrapped as [`Phase::Preflight`] on failure, still ahead of every other
+/// phase.
+async fn audit_with_preflight(
+    work: &WorkDir,
+    config: &EngagementConfig,
+    options: &ChainOptions,
+    auto_install: bool,
+    progress: &Progress,
+    collector_check: Result<Vec<String>, AuditError>,
+) -> Result<ChainReport, AuditError> {
+    // #7134: first, before anything else — in particular before Phase 2
+    // clones a single repository. Refuses only under `--strict-collectors`;
+    // its default is to hand back warning rows and let the chain proceed
+    // exactly as it does today.
+    let collector_gaps = collector_check.map_err(|e| stopped(Phase::Preflight, e))?;
+
     let installed = install(work, config, auto_install, progress)
         .await
         .map_err(|e| stopped(Phase::InstallTools, e))?;
@@ -258,6 +321,7 @@ pub async fn audit(
         run,
         package,
         gaps,
+        collector_gaps,
     })
 }
 
@@ -729,6 +793,106 @@ trusty-review = "0.15.1"
             err.to_string().contains("trusty-audit add repo"),
             "the refusal must name the remedy: {err}"
         );
+    }
+
+    /// #7134: `--strict-collectors` stops the chain before Phase 2 clones or
+    /// materializes anything at all — proven here by a work directory that
+    /// has neither a tool install nor a repository selection, so any phase
+    /// after [`Phase::Preflight`] would fail with a DIFFERENT error the
+    /// moment it ran (`ToolsNotInstalled` or `NothingRegistered`).
+    ///
+    /// The preflight's outcome is injected via [`audit_with_preflight`]
+    /// rather than produced by a real, missing `cargo-audit` — this crate's
+    /// tests run with `--test-threads` greater than 1, and faking the
+    /// process-global `PATH`/`HOME` env vars `crate::collectors::check`
+    /// actually reads would corrupt every OTHER test running concurrently
+    /// that also resolves a binary (`crate::run::pins`, `crate::git`, …).
+    /// `crate::collectors::collectors_tests` proves the real resolution path
+    /// against a sandboxed env instead, in isolation.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn strict_collectors_refuses_before_any_repo_is_cloned() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let options = ChainOptions {
+            strict_collectors: true,
+            ..ChainOptions::default()
+        };
+        let collector_check = Err(AuditError::MissingOptionalCollectors {
+            missing: vec!["cargo-audit"],
+        });
+
+        let err = audit_with_preflight(
+            &work,
+            &config(),
+            &options,
+            true,
+            &Progress::none(),
+            collector_check,
+        )
+        .await
+        .expect_err("a missing optional collector refuses under --strict-collectors");
+
+        let AuditError::ChainStopped { phase, source } = &err else {
+            panic!("expected a phase-attributed refusal, got {err:?}");
+        };
+        assert_eq!(*phase, Phase::Preflight, "{err}");
+        assert!(
+            matches!(**source, AuditError::MissingOptionalCollectors { .. }),
+            "{source:?}"
+        );
+        assert!(
+            err.to_string().contains("cargo-audit"),
+            "the refusal must name the missing binary: {err}"
+        );
+        // Nothing was installed and no selection was written — Phase::Preflight
+        // stopped the chain before InstallTools or Materialize could run.
+        assert!(
+            crate::tools::status(&work)
+                .expect("status")
+                .iter()
+                .all(|s| !s.installed),
+            "install must not have run"
+        );
+    }
+
+    /// #7134's default: a missing optional collector warns and the sweep still
+    /// runs to a package, and the warning does not change the exit status. See
+    /// `strict_collectors_refuses_before_any_repo_is_cloned` for why the
+    /// preflight's outcome is injected rather than produced by a real, missing
+    /// binary.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_missing_collector_warns_and_the_sweep_still_proceeds() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = prepared(tmp.path(), &["acme-api"], &["acme-api"]);
+        let warning_row = "cve-scan: `cargo-audit` is not installed, so known dependency CVEs \
+                            will go unassessed for every repository in this sweep (install it \
+                            with `cargo install cargo-audit`)"
+            .to_owned();
+
+        let report = audit_with_preflight(
+            &work,
+            &config(),
+            &ChainOptions::default(),
+            true,
+            &Progress::none(),
+            Ok(vec![warning_row.clone()]),
+        )
+        .await
+        .expect("a missing optional collector only warns by default");
+
+        assert_eq!(
+            report.run.status,
+            RunStatus::AllSucceeded,
+            "{:?}",
+            report.run
+        );
+        assert!(report.package.path.is_file(), "the sweep still packages");
+        assert_eq!(report.collector_gaps, vec![warning_row]);
+        // The warning is informational: it must not change the exit status.
+        assert!(report.gaps.is_empty(), "{:?}", report.gaps);
+        assert_eq!(Outcome::Audit(report).exit_code(), 0);
     }
 
     /// #5824 requirement 4: the operator who cloned by hand before the registry
