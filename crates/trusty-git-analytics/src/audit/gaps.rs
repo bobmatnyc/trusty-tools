@@ -7,7 +7,8 @@
 //! reads, so the wording lives in one place instead of being formatted at the
 //! call site.
 //! What: [`sweep_gap_lines`] (one line per failed stage) and
-//! [`DATA_HANDLING_NOTE`] (§10's placeholder attestation, #5244).
+//! [`data_handling_note`] (§10's attestation line, now backed by the real
+//! scan #5218 shipped, #7140).
 //! Test: `super::tests`.
 //!
 //! ## Redaction happens here, before the excerpt is cut
@@ -31,7 +32,11 @@
 
 use std::collections::BTreeMap;
 
+use rusqlite::Connection;
 use trusty_common::credentials::scrub_secrets;
+
+use crate::core::inspect::attest::{self, Verdict, NOT_A_NO_CODE_CLAIM, NO_CONTENT_CLAIM};
+use crate::core::inspect::schema;
 
 use super::repo_index::RepoIndexStatus;
 use super::stage::{AuditSweepStats, StageStatus};
@@ -44,23 +49,58 @@ use super::stage::{AuditSweepStats, StageStatus};
 /// and in the sweep's own record; this is the reader's excerpt.
 pub(crate) const MAX_REASON_CHARS: usize = 160;
 
-/// The placeholder data-retention statement AUDIT carries until #5218 ships.
+/// The data-retention line AUDIT's Gaps & Caveats section carries.
 ///
 /// Why: DOC-67 §10 — an acquirer's counterparty asks what the tool retained
-/// before granting access, and #5218 is the authoritative mechanism for that
-/// answer. Until it ships, the report must say an attestation is *pending*
-/// rather than assert one, and must not paraphrase a claim it cannot yet
-/// enforce.
-/// What: states that the formal attestation is pending, and states §10's
-/// verified scope claim exactly as §10 words it — "no file content, diffs,
-/// patches, hunks, or blobs", never the broader "no code", because free-text
-/// columns can carry whatever an author pasted into them.
-/// Test: `super::tests::data_handling_note_is_a_pending_claim`.
-pub const DATA_HANDLING_NOTE: &str = "Data handling: a formal data-retention attestation for \
-this run is pending (#5218) and is not asserted here. tga's database records commit, \
-pull-request, and ticket metadata; it stores no file content, diffs, patches, hunks, or blobs. \
-Free-text fields it does store — commit messages, pull-request and ticket titles — are retained \
-verbatim and carry whatever their authors wrote into them.";
+/// before granting access. #5218 shipped the real attestation
+/// (`core::inspect::attest`, also reachable by hand via `tga inspect attest`),
+/// but the sweep path kept asserting the pre-#5218 placeholder verbatim, so
+/// every `tga audit` report still said the attestation was "pending (#5218)"
+/// after #5218 shipped and closed (#7140). This runs the real scan against
+/// the sweep's own connection instead of quoting a fact about tga's release
+/// history.
+/// What: reads the live schema and scans every free-text column, exactly as
+/// `tga inspect attest` does, then reports one sentence: a clean scan states
+/// §10's claim with the tables/columns it covers; a scan with findings names
+/// the finding counts instead of asserting the claim unreviewed; a scan that
+/// cannot run (a schema-read failure) says so and why, and still states the
+/// schema-level claim so the report never falls silent on data handling.
+/// Test: `super::tests::{data_handling_note_states_a_clean_attestation,
+/// data_handling_note_states_findings_instead_of_asserting_the_claim}`.
+pub fn data_handling_note(conn: &Connection) -> String {
+    match schema::snapshot(conn).and_then(|snapshot| attest::attest(conn, &snapshot)) {
+        Ok(attestation) => match attestation.verdict {
+            Verdict::Consistent => format!(
+                "Data handling: a data-retention attestation ran for this database — {} \
+                 table(s) and {} free-text column(s) scanned, no findings. {} {}",
+                attestation.tables_scanned,
+                attestation.scanned_columns.len(),
+                attestation.claim,
+                attestation.caveat
+            ),
+            Verdict::Findings => {
+                let flagged: i64 = attestation
+                    .scanned_columns
+                    .iter()
+                    .map(|s| s.diff_shaped_rows)
+                    .sum();
+                format!(
+                    "Data handling: a data-retention attestation ran for this database and \
+                     found {} content-bearing column(s) and {flagged} row(s) of diff-shaped \
+                     text — the claim that {} does not hold unreviewed for this run. Run \
+                     `tga inspect attest` against this database for the full finding list.",
+                    attestation.content_columns.len(),
+                    attestation.claim
+                )
+            }
+        },
+        Err(e) => format!(
+            "Data handling: a data-retention attestation could not be run against this \
+             database ({e}); none is asserted for this run. {NO_CONTENT_CLAIM} \
+             {NOT_A_NO_CODE_CLAIM}"
+        ),
+    }
+}
 
 /// The words a stale-refs gap line opens with (#6782).
 ///

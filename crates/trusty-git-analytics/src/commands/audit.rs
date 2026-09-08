@@ -18,11 +18,10 @@ use clap::Args;
 
 use anyhow::Context as _;
 use tga::audit::{
-    ensure_analyze_daemon, ensure_repositories_indexed, ensure_search_daemon, index_gap_lines,
-    require_inference_credential, require_rendered_report_carries_synthesis,
+    data_handling_note, ensure_analyze_daemon, ensure_repositories_indexed, ensure_search_daemon,
+    index_gap_lines, require_inference_credential, require_rendered_report_carries_synthesis,
     require_review_supports_required_inference, resolve_review_binary, run_full_sweep,
     run_review_report, sweep_gap_lines, AuditSweepStats, SweepOptions, SweepStage,
-    DATA_HANDLING_NOTE,
 };
 use tga::core::config::Config;
 use tga::core::db::Database;
@@ -267,7 +266,10 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
         }
     };
 
-    gaps.push(DATA_HANDLING_NOTE.to_string());
+    // #7140: the sweep's own connection reads back what this run's database
+    // actually holds, so the report states the real attestation instead of
+    // quoting a fact about tga's release history.
+    gaps.push(data_handling_note(db.connection()));
     let mut manifest = build_dd_manifest(
         &config,
         &DdManifestOptions {
