@@ -19,13 +19,24 @@
 //! from there if a repository with those two names existed. That is the same
 //! wrong-repository substitution, one level up, and equally silent.
 //!
+//! An SSH `Host` ALIAS is not a host (#7196). A multi-account operator writes
+//! `git@gh-work:acme-corp/widgets.git` and lets `~/.ssh/config` rewrite
+//! `gh-work` to `github.com`. Nothing but `ssh` performs that rewrite, so
+//! the alias arrived here as the GitHub host and `gh --repo
+//! gh-work/acme-corp/widgets` failed with "error connecting to
+//! gh-work" — four merged-PR worktrees refused at gate 5 on 2026-09-08,
+//! and no repository behind such an alias could ever be reclaimed. An SSH
+//! remote's host is now resolved through [`super::ssh_host_alias`] before it
+//! becomes part of a slug.
+//!
 //! What: [`repo_slug_for`] derives `[host/]owner/repo` from the TARGET
 //! directory's own `origin` remote, falling back to the checkout that owns it
 //! only when the directory carries no `origin` of its own. [`parse_repo_slug`]
-//! is the pure URL half, and is where the host is kept or — for
+//! is the URL half, and is where the host is resolved and then kept or — for
 //! [`DEFAULT_GH_HOST`], which `gh` assumes — omitted. Both fail CLOSED: a
-//! missing or unparseable remote is an `Err` naming the directory and the URL,
-//! never a guess and never another repository — the [ADR-0045]
+//! missing remote, an unparseable one, and an SSH alias that resolves to
+//! nothing are each an `Err` naming the directory and what was read, never a
+//! guess and never another repository — the [ADR-0045]
 //! absent-vs-undeterminable rule, applied to a gate whose ALLOW deletes a
 //! checkout.
 //!
@@ -35,6 +46,7 @@
 
 use std::path::Path;
 
+use super::ssh_host_alias::SshHostAliases;
 use super::worktree_registry::registry_root_for;
 use super::worktree_safety::git_stdout;
 
@@ -54,7 +66,34 @@ const REMOTE_URL_SCHEMES: &[&str] = &["https://", "http://", "ssh://", "git://"]
 /// into the slug or the lookup silently changes which server it asks.
 const DEFAULT_GH_HOST: &str = "github.com";
 
-/// The `[host/]owner/repo` a git remote URL names, or `None` when it names none.
+/// The SSH transports whose host `~/.ssh/config` may rename (#7196).
+///
+/// Why: only `ssh` consults that config, so only a remote git hands to `ssh`
+/// can carry an alias. Resolving an `https://` host through it would rewrite a
+/// host git never sends to `ssh` at all — a change of SERVER made on evidence
+/// that does not apply.
+const SSH_URL_SCHEME: &str = "ssh://";
+
+/// Why a git remote URL names no repository this module will ask `gh` about.
+///
+/// Why: the two cases need different refusals. "This is a filesystem path"
+/// tells the operator the remote is not a GitHub one at all; "`gh-work`
+/// resolves to nothing" tells them which `~/.ssh/config` entry is missing. One
+/// `None` for both is what made #7196 read as a `gh` connection error.
+/// What: carried by [`parse_repo_slug`] and rendered by [`refusal`].
+/// Test: `an_unparseable_origin_refuses_and_quotes_the_url`,
+/// `an_unresolvable_ssh_alias_refuses_and_names_the_alias`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SlugRefusal {
+    /// The URL names no `owner/repo` — a filesystem path, a `file://` URL, a
+    /// single-segment path, a segment carrying whitespace.
+    NoRepository,
+    /// An SSH host that neither `~/.ssh/config` renames nor looks like a
+    /// machine name. The string is the alias, verbatim.
+    UnresolvedSshAlias(String),
+}
+
+/// The `[host/]owner/repo` a git remote URL names.
 ///
 /// Why: `gh --repo` takes `[HOST/]OWNER/REPO`, and the two spellings a GitHub
 /// remote arrives in — scp-like (`git@github.com:owner/repo.git`) and URL
@@ -66,46 +105,88 @@ const DEFAULT_GH_HOST: &str = "github.com";
 /// its default host — answering for a same-named repository there, with nothing
 /// in the reply disclosing the substitution. That is the same wrong-repository
 /// defect this module exists to close, one host up.
+///
+/// #7196: an SSH host is an ALIAS until `~/.ssh/config` says otherwise, so
+/// `aliases` is consulted before the host is trusted — see [`resolve_ssh_host`].
 /// What: strips a recognised scheme and its authority, or the scp-like
 /// `[user@]host:` prefix, then takes the last two non-empty path segments with
 /// any `.git` suffix removed. The authority's host — userinfo and port removed,
-/// lowercased — is prepended unless it is [`DEFAULT_GH_HOST`], which `gh`
-/// assumes. Anything else — a filesystem path, a `file://` URL, a
-/// single-segment path, a segment carrying whitespace — is `None`.
+/// lowercased, and for an SSH transport resolved through `aliases` — is
+/// prepended unless it is [`DEFAULT_GH_HOST`], which `gh` assumes.
 /// Test: `https_remote_yields_its_owner_and_repo`,
 /// `ssh_remote_yields_its_owner_and_repo`,
 /// `scp_like_remote_yields_its_owner_and_repo`,
 /// `a_non_default_host_survives_into_the_slug`,
+/// `an_ssh_alias_resolves_to_the_host_it_names`,
+/// `an_unresolvable_ssh_alias_refuses_and_names_the_alias`,
 /// `an_enterprise_worktree_names_its_host_in_the_repo_flag`,
 /// `a_local_path_remote_names_no_repository`,
 /// `a_file_url_remote_names_no_repository`.
-pub(crate) fn parse_repo_slug(url: &str) -> Option<String> {
+pub(crate) fn parse_repo_slug(url: &str, aliases: &SshHostAliases) -> Result<String, SlugRefusal> {
     let url = url.trim();
-    let (authority, path) = match REMOTE_URL_SCHEMES.iter().find(|s| url.starts_with(**s)) {
+    let (authority, path, ssh) = match REMOTE_URL_SCHEMES.iter().find(|s| url.starts_with(**s)) {
         // `<scheme>://<authority>/<path>` — the authority carries the host plus
         // an optional port and userinfo, which `host_from_authority` drops.
-        Some(scheme) => url[scheme.len()..].split_once('/')?,
+        Some(scheme) => {
+            let (authority, path) = url[scheme.len()..]
+                .split_once('/')
+                .ok_or(SlugRefusal::NoRepository)?;
+            (authority, path, *scheme == SSH_URL_SCHEME)
+        }
         None => {
             // scp-like `[user@]host:owner/repo`. The colon must come before any
             // slash, or this is a filesystem path with a colon in it; and the
             // remainder must be relative, or this is a `<scheme>://` URL whose
             // scheme this module does not trust.
-            let (authority, path) = url.split_once(':')?;
+            let (authority, path) = url.split_once(':').ok_or(SlugRefusal::NoRepository)?;
             if authority.is_empty() || authority.contains('/') || path.starts_with('/') {
-                return None;
+                return Err(SlugRefusal::NoRepository);
             }
-            (authority, path)
+            // git hands this spelling straight to `ssh`, so it is the shape the
+            // #7196 aliases arrive in.
+            (authority, path, true)
         }
     };
-    let host = host_from_authority(authority)?;
-    let slug = slug_from_path(path)?;
+    let host = host_from_authority(authority).ok_or(SlugRefusal::NoRepository)?;
+    let slug = slug_from_path(path).ok_or(SlugRefusal::NoRepository)?;
+    let host = if ssh {
+        resolve_ssh_host(&host, aliases)?
+    } else {
+        host
+    };
     // #7057: a non-default host must reach `gh --repo`, or the lookup asks the
     // wrong server.
     if host == DEFAULT_GH_HOST {
-        Some(slug)
+        Ok(slug)
     } else {
-        Some(format!("{host}/{slug}"))
+        Ok(format!("{host}/{slug}"))
     }
+}
+
+/// The machine an SSH remote's host names, resolving a `~/.ssh/config` alias.
+///
+/// Why: `gh --repo [HOST/]OWNER/REPO` addresses a SERVER, and an alias
+/// addresses none — passing `gh-work` through produced a slug `gh` could
+/// only fail to connect to, which gate 5 then read as "the merged-PR lookup
+/// failed" for a tree it should have reclaimed (#7196).
+/// What: three outcomes, in order. A host `aliases` renames becomes the name it
+/// gives. A host carrying a `.` is taken as a real machine, which is what keeps
+/// the #7057 GitHub Enterprise case working when the operator declares no alias
+/// for it. Anything else — a bare name nothing renames — is
+/// [`SlugRefusal::UnresolvedSshAlias`], because a dotless name is not a
+/// reachable host and guessing which server it meant is the substitution this
+/// module exists to prevent.
+/// Test: `an_ssh_alias_resolves_to_the_host_it_names`,
+/// `an_unresolvable_ssh_alias_refuses_and_names_the_alias`,
+/// `an_undeclared_dotted_ssh_host_is_taken_at_face_value`.
+fn resolve_ssh_host(host: &str, aliases: &SshHostAliases) -> Result<String, SlugRefusal> {
+    if let Some(real) = aliases.hostname_for(host) {
+        return Ok(real);
+    }
+    if host.contains('.') {
+        return Ok(host.to_string());
+    }
+    Err(SlugRefusal::UnresolvedSshAlias(host.to_string()))
 }
 
 /// The lowercased host an authority names, without userinfo or port.
@@ -155,11 +236,30 @@ fn slug_from_path(path: &str) -> Option<String> {
 /// Test: `two_worktrees_with_different_origins_resolve_to_different_repos`,
 /// `an_enterprise_worktree_names_its_host_in_the_repo_flag`,
 /// `a_directory_with_no_origin_falls_back_to_its_owning_checkout`,
-/// `a_non_repository_directory_resolves_to_no_repository`.
+/// `a_non_repository_directory_resolves_to_no_repository` — each through
+/// [`repo_slug_with`], which is this function's whole body. Nothing tests this
+/// wrapper directly, because the only thing it adds is a read of the
+/// operator's own `~/.ssh/config` and a test that read it would answer
+/// differently on two machines (#7196).
 pub(crate) fn repo_slug_for(dir: &Path) -> Result<String, String> {
+    repo_slug_with(dir, &SshHostAliases::for_current_user())
+}
+
+/// [`repo_slug_for`], against a stated SSH alias table (#7196).
+///
+/// Why: the alias table is the operator's `~/.ssh/config`, which no test may
+/// read — a machine whose config renames `gh-work` and one whose config
+/// does not would give the same test two answers. Taking the table as a
+/// parameter is how a test states its own, without an environment variable this
+/// crate is not allowed to set.
+/// What: exactly [`repo_slug_for`]'s body; `repo_slug_for` is this with the
+/// current user's table.
+/// Test: `an_aliased_origin_resolves_through_the_given_ssh_config`,
+/// `an_unresolvable_ssh_alias_refuses_and_names_the_alias`.
+pub(crate) fn repo_slug_with(dir: &Path, aliases: &SshHostAliases) -> Result<String, String> {
     match origin_url(dir) {
-        Some(url) => parse_repo_slug(&url).ok_or_else(|| unparseable(dir, &url)),
-        None => slug_from_owning_checkout(dir),
+        Some(url) => parse_repo_slug(&url, aliases).map_err(|r| refusal(dir, &url, &r)),
+        None => slug_from_owning_checkout(dir, aliases),
     }
 }
 
@@ -175,13 +275,13 @@ fn origin_url(dir: &Path) -> Option<String> {
 ///
 /// The fallback is ONE hop and never recurses: a checkout that is its own
 /// registry root and still has no `origin` has nothing left to fall back to.
-fn slug_from_owning_checkout(dir: &Path) -> Result<String, String> {
+fn slug_from_owning_checkout(dir: &Path, aliases: &SshHostAliases) -> Result<String, String> {
     let root = registry_root_for(dir).ok_or_else(|| missing(dir))?;
     if same_directory(&root, dir) {
         return Err(missing(dir));
     }
     let url = origin_url(&root).ok_or_else(|| missing(dir))?;
-    parse_repo_slug(&url).ok_or_else(|| unparseable(&root, &url))
+    parse_repo_slug(&url, aliases).map_err(|r| refusal(&root, &url, &r))
 }
 
 /// Are these two paths the same directory, symlinks resolved?
@@ -200,13 +300,32 @@ fn missing(dir: &Path) -> String {
     )
 }
 
-/// The refusal for a remote URL that names no `owner/repo`.
-fn unparseable(dir: &Path, url: &str) -> String {
-    format!(
-        "the `origin` remote at {} is {url:?}, which names no GitHub `owner/repo` — \
-         the lookup is refused rather than aimed at a guess (#7057)",
-        dir.display()
-    )
+/// The refusal text for a remote URL that yields no slug.
+///
+/// Why: the operator's next action differs by case. An unparseable remote means
+/// this is not a GitHub repository; an unresolved alias means one `~/.ssh/config`
+/// entry is missing, and naming the alias is what turns a `gh` connection error
+/// into an actionable line (#7196).
+/// What: one sentence per [`SlugRefusal`] variant, each naming the directory and
+/// what was read.
+/// Test: `an_unparseable_origin_refuses_and_quotes_the_url`,
+/// `an_unresolvable_ssh_alias_refuses_and_names_the_alias`.
+fn refusal(dir: &Path, url: &str, why: &SlugRefusal) -> String {
+    match why {
+        SlugRefusal::NoRepository => format!(
+            "the `origin` remote at {} is {url:?}, which names no GitHub `owner/repo` — \
+             the lookup is refused rather than aimed at a guess (#7057)",
+            dir.display()
+        ),
+        SlugRefusal::UnresolvedSshAlias(alias) => format!(
+            "the `origin` remote at {} is {url:?}, whose SSH host {alias:?} names no machine: \
+             `~/.ssh/config` declares no `HostName` for it and it is not a hostname itself. \
+             An alias is not a GitHub host, so the lookup is refused rather than aimed at \
+             {alias:?} (#7196). Add a `Host {alias}` block with the `HostName` git reaches \
+             through it, or point `origin` at that host directly.",
+            dir.display()
+        ),
+    }
 }
 
 #[cfg(test)]
