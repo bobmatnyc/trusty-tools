@@ -12,7 +12,7 @@ use chrono::Utc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use trusty_common::control_bus::{EventId, HarnessEvent, HarnessPayload, HarnessSource};
-use trusty_common::uds::connect_hardened;
+use trusty_common::uds::{SocketVerdict, connect_hardened, probe_socket_verdict};
 
 use super::bus::{EventBus, EventBusConfig, IngestOutcome};
 use super::ingest::{bind_ingest, serve_ingest};
@@ -182,20 +182,24 @@ async fn oversized_line_ends_only_its_own_connection() {
 
     // One byte over the listener's per-line budget, with no newline — the
     // listener must give up on this connection rather than buffer forever.
+    // Because it now gives up as soon as it has read MAX_LINE_BYTES (the
+    // CRITICAL fix this test also covers), it can close the connection
+    // before this write — or the trailing newline below — finishes; a
+    // broken pipe here is the expected shape of "the listener disconnected
+    // early", not a test bug, so these are best-effort rather than asserted.
     let oversized = vec![b'a'; super::ingest::MAX_LINE_BYTES + 1];
     let mut stream = dial(&socket).await;
-    stream
-        .write_all(&oversized)
-        .await
-        .expect("write oversized payload");
-    stream.write_all(b"\n").await.expect("terminate");
-    stream.shutdown().await.expect("half-close");
+    let _ = stream.write_all(&oversized).await;
+    let _ = stream.write_all(b"\n").await;
+    let _ = stream.shutdown().await;
 
-    // The connection is dropped without being ingested or crashing anything.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(bus.metrics().ingested, 0);
-
-    // A fresh connection still works.
+    // #6848 fix round: rather than sleep a fixed interval and assert a
+    // negative (which proves nothing about *why* the count stayed at zero),
+    // drive a second, independent connection and wait for ITS event to land.
+    // Ingest is a single-threaded ring behind one mutex, so once the second
+    // connection's event is observably in the bus, the first connection's
+    // oversized frame has already been through the same code path — and
+    // never bumped `ingested`.
     let event = make_event(None);
     let event_id = event.id;
     let mut line = serde_json::to_vec(&event).expect("serialize event");
@@ -205,6 +209,169 @@ async fn oversized_line_ends_only_its_own_connection() {
     second_stream.shutdown().await.expect("half-close");
 
     wait_until(Duration::from_secs(1), || bus.contains(event_id)).await;
+    assert_eq!(
+        bus.metrics().ingested,
+        1,
+        "only the second connection's well-formed frame was ever ingested"
+    );
+}
+
+#[tokio::test]
+async fn unterminated_line_never_grows_past_the_line_cap() {
+    // A peer that streams well past the per-line budget with no newline at
+    // all must never grow the read buffer past that budget — the fix this
+    // proves reads with a `.take(MAX_LINE_BYTES)` budget re-applied to every
+    // line, rather than an unbounded `read_until` checked only after it
+    // returns (#6848 fix round, CRITICAL finding). `UnixStream::pair` gives a
+    // connected socket pair with no filesystem path, so this drives
+    // `read_capped_line` directly rather than through the full accept loop.
+    let (mut writer, reader) = UnixStream::pair().expect("create a connected pair");
+
+    let total = super::ingest::MAX_LINE_BYTES * 2;
+    let write_task = tokio::spawn(async move {
+        let chunk = vec![b'a'; 64 * 1024];
+        let mut sent = 0usize;
+        while sent < total {
+            if writer.write_all(&chunk).await.is_err() {
+                // The reader dropped its half once `read_capped_line`
+                // returned; a write failing here is expected, not a bug.
+                break;
+            }
+            sent += chunk.len();
+        }
+    });
+
+    let mut buffered = tokio::io::BufReader::new(reader);
+    let mut line = Vec::new();
+    let read = tokio::time::timeout(
+        Duration::from_secs(5),
+        super::ingest::read_capped_line(&mut buffered, &mut line),
+    )
+    .await
+    .expect("read_capped_line must return once its budget is exhausted, not hang")
+    .expect("a budget-exhausted read is not an I/O error");
+
+    assert!(
+        line.len() <= super::ingest::MAX_LINE_BYTES,
+        "the line buffer must never grow past the per-line cap, got {} bytes",
+        line.len()
+    );
+    assert_eq!(read, line.len());
+    assert!(
+        !line.ends_with(b"\n"),
+        "no newline was ever sent, so the read must have stopped on the budget alone"
+    );
+
+    write_task.abort();
+}
+
+#[tokio::test]
+async fn stale_socket_file_is_reclaimed_on_bind() {
+    // Why: `bind_ingest` now binds through `bind_singleton_hardened` (#6848
+    // fix round, HIGH finding) specifically so a console that exits
+    // uncleanly (SIGKILL, crash) does not wedge every future bind on the
+    // corpse it left behind — `bind_hardened` alone refuses an occupied path
+    // forever. See `trusty_common::uds::tests::bind_singleton_takes_over_a_stale_socket_file`
+    // for the same contract proven at the trusty-common layer.
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = tmp.path().join("sockets").join("trusty-console.sock");
+
+    let dead = bind_ingest(&socket).await.expect("first bind");
+    drop(dead); // tokio does not unlink on drop, so the file survives.
+    assert!(socket.exists(), "the corpse must still be on disk");
+
+    // Wait for the kernel to actually finish tearing the dropped listener
+    // down before asserting the takeover — a condition wait on the socket's
+    // own provable state, not a fixed sleep. On macOS a connect can land in
+    // the teardown window and spuriously succeed; this loop is the same one
+    // `bind_singleton_takes_over_a_stale_socket_file` uses for that reason.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while probe_socket_verdict(&socket, Duration::from_millis(50)).await
+        != SocketVerdict::NotServing
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the dropped listener never stopped answering connects"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let listener = bind_ingest(&socket)
+        .await
+        .expect("a stale socket file must be reclaimed, not refused forever");
+    drop(listener);
+}
+
+#[tokio::test]
+async fn idle_connection_is_dropped_after_the_read_timeout() {
+    // #6848 fix round, security finding: a connection that never completes a
+    // line must not be held open forever — it would hold a concurrency slot
+    // and a `BufReader` for no reason. `UnixStream::pair` avoids waiting the
+    // real production timeout: `handle_connection_with_timeout` takes it
+    // explicitly for exactly this reason.
+    let (writer, reader) = UnixStream::pair().expect("create a connected pair");
+    let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+
+    let handle = tokio::spawn(super::ingest::handle_connection_with_timeout(
+        reader,
+        Arc::clone(&bus),
+        Duration::from_millis(50),
+    ));
+
+    // Send nothing at all. The task must return on its own once the idle
+    // timeout elapses — awaited here with a generous outer bound, not slept
+    // for — rather than being held open indefinitely.
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("handle_connection_with_timeout must return once idle")
+        .expect("the connection task must not panic");
+
+    drop(writer);
+    assert_eq!(
+        bus.metrics().ingested,
+        0,
+        "an idle connection that never sent anything ingests nothing"
+    );
+}
+
+#[tokio::test]
+async fn connections_beyond_the_limit_wait_for_a_free_slot() {
+    // #6848 fix round, security finding: bound concurrent connections so a
+    // burst cannot hand out an unbounded number of tasks and `BufReader`s.
+    // `serve_ingest_with_limit` takes the cap explicitly so this test can
+    // prove the gate at a limit of 1 instead of opening 257 real sockets.
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = tmp.path().join("sockets").join("trusty-console.sock");
+    let listener = bind_ingest(&socket).await.expect("bind ingest socket");
+    let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    let served_bus = Arc::clone(&bus);
+    tokio::spawn(async move {
+        super::ingest::serve_ingest_with_limit(listener, served_bus, 1, std::future::pending())
+            .await;
+    });
+
+    // Occupy the only slot: connect and never send a line, so this
+    // connection's handler never returns and its permit is never released.
+    let occupant = dial(&socket).await;
+
+    // A second connection is accepted at the kernel level, but with the sole
+    // slot held, its handler must not run until the slot frees. Prove that
+    // with a bounded, repeatedly-polled negative check — not a single blind
+    // sleep — followed by the definite positive once the slot is freed.
+    let event = make_event(None);
+    let event_id = event.id;
+    let mut line = serde_json::to_vec(&event).expect("serialize event");
+    line.push(b'\n');
+    let mut second = dial(&socket).await;
+    second.write_all(&line).await.expect("write frame");
+    second.shutdown().await.expect("half-close");
+
+    assert_stays_false(Duration::from_millis(300), || bus.contains(event_id)).await;
+
+    // Free the slot: the occupant's connection closes, its permit releases,
+    // and the second connection's handler can finally run.
+    drop(occupant);
+    wait_until(Duration::from_secs(2), || bus.contains(event_id)).await;
 }
 
 /// Poll `predicate` until it is true or `budget` elapses.
@@ -222,6 +389,23 @@ async fn wait_until(budget: Duration, mut predicate: impl FnMut() -> bool) {
             tokio::time::Instant::now() < deadline,
             "condition did not become true within {budget:?}"
         );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Poll `predicate` for the whole of `budget` and fail the moment it becomes
+/// true, rather than checking once after a blind sleep.
+///
+/// Why not a single `sleep(budget)` then one assertion: this fails FAST the
+/// instant the forbidden state appears (a broken gate is caught well inside
+/// `budget`, not only after it), and it still bounds the check to a fixed
+/// window because a negative can only ever be proven "not yet", never
+/// "never" — `budget` is that concession, kept short and paired with the
+/// definite positive check that follows it in the caller.
+async fn assert_stays_false(budget: Duration, mut predicate: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + budget;
+    while tokio::time::Instant::now() < deadline {
+        assert!(!predicate(), "condition became true within {budget:?}");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }

@@ -20,9 +20,8 @@
 //! a subscriber that falls behind gets `Lagged` on its own next `recv`,
 //! exactly like the ring's own eviction would have produced, per DOC-73 §4.3's
 //! "ingest never blocks on fan-out" rule.
-//! Test: `super::tests` — `ingest_reaches_a_subscriber`,
-//! `duplicate_id_is_deduped`, `eviction_at_capacity_drops_the_oldest`,
-//! `metrics_count_ingested_deduped_and_evicted`.
+//! Test: `super::tests` — `a_subscriber_receives_ingested_events`,
+//! `duplicate_id_is_deduped`, `eviction_at_capacity_drops_the_oldest`.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
@@ -66,7 +65,8 @@ impl Default for EventBusConfig {
 /// What: a plain snapshot, one `Ordering::Relaxed` load per field — these are
 /// independent counters, not a transaction, so relaxed ordering is sufficient
 /// and matches how `trusty-console`'s other pollers read their own gauges.
-/// Test: `super::tests::metrics_count_ingested_deduped_and_evicted`.
+/// Test: `super::tests::duplicate_id_is_deduped`,
+/// `super::tests::eviction_at_capacity_drops_the_oldest`.
 // Reserved for the metrics route a later slice adds (#6850); exercised today
 // only by this module's own tests.
 #[allow(dead_code)]
@@ -147,7 +147,7 @@ impl EventBus {
     /// returns a `SendError` from `broadcast::Sender::send`, which is
     /// discarded — no subscriber is not a failure, it is the common case
     /// before any SSE route (#6851) attaches.
-    /// Test: `super::tests::ingest_reaches_a_subscriber`,
+    /// Test: `super::tests::a_subscriber_receives_ingested_events`,
     /// `super::tests::duplicate_id_is_deduped`,
     /// `super::tests::eviction_at_capacity_drops_the_oldest`.
     pub(crate) fn ingest(&self, event: HarnessEvent) -> IngestOutcome {
