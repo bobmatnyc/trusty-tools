@@ -1235,6 +1235,9 @@ async fn doctor_endpoint_returns_report() {
         // #3605: the base clone a live worktree resolves through.
         "base_clone",
         "gh_account",
+        // #7097: whether the issues opened this week carry the milestone,
+        // project and component label the ticketing standard requires.
+        "issue_audit_recent",
         "oauth_token",
         "hooks_contamination",
         "hooks_foreign_conflict",

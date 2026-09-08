@@ -142,6 +142,12 @@ use doctor_agent_skills::check_agent_skills;
 mod doctor_gh_account;
 use doctor_gh_account::check_gh_account;
 
+// #7097: the `issue_audit_recent` sweep — the unprompted half of the ticketing
+// standard's mechanical read-back. Its own file for the same 500-SLOC reason.
+#[path = "doctor_issue_audit.rs"]
+mod doctor_issue_audit;
+use doctor_issue_audit::check_issue_audit_recent;
+
 // Split out to keep this file under the 500-SLOC production cap (issue #2940
 // — the tm hook contamination / foreign claude-mpm hook conflict probe).
 #[path = "doctor_hooks_hygiene.rs"]
@@ -349,7 +355,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_thirty_nine_checks`,
+/// Test: `run_doctor_produces_forty_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -457,6 +463,11 @@ pub async fn run_doctor(
     // command there fails while both probes above stay green.
     checks.push(check_base_clones(active_workspace_paths));
     checks.push(check_gh_account().await);
+    // #7097: whether the issues opened this week actually carry the milestone,
+    // project and component label the ticketing standard requires. Advisory —
+    // Warn at worst, and UNDETERMINED (never Ok) when `gh` could not answer,
+    // since an audit that did not run has not found the tickets clean.
+    checks.push(check_issue_audit_recent(project_dir).await);
     checks.push(check_oauth_token_config());
     let (hooks_contamination, hooks_foreign_conflict) =
         check_hooks_hygiene(project_dir, active_workspace_paths);

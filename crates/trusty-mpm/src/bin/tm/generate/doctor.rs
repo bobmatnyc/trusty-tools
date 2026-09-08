@@ -142,6 +142,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Active `gh` CLI identity is unambiguous — warns on multi-account ambiguity.",
     ),
     (
+        "issue_audit_recent",
+        "Warns when an OPEN issue created in the last 7 days misses what the ticketing standard requires — a GitHub Project, a milestone (or a `no-milestone: <reason>` comment), or a component label — naming the failing issue numbers and the requirement each missed. Advisory: ticket hygiene never turns `tm doctor` red. A `gh` that is absent, unauthenticated, or erroring reports UNDETERMINED rather than a pass, since an audit that did not run has not found the tickets clean. Run `tm issue audit <N>` for one issue's detail (issue #7097).",
+    ),
+    (
         "oauth_token",
         "Warns when a managed session risks the `CLAUDE_CONFIG_DIR`-keyed Keychain login loop (issue #2246).",
     ),

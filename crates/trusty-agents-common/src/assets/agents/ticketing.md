@@ -220,6 +220,10 @@ gh issue view 7070 --json milestone,projectItems
 A `null` milestone with no `no-milestone` comment, or an empty `projectItems`,
 is yours to fix now.
 
+Run `tm issue audit <N>` after filing and paste its output into your report — it
+checks the project, the milestone and the component label mechanically and exits
+1 on a violation, so the filing is proved rather than asserted (#7097).
+
 If `tm issue standard` reports `milestones: unavailable (…)`, the fetch failed —
 the requirement did not lift. Fix the `gh` error, or say in your report that the
 milestone is unset because the list could not be read.
