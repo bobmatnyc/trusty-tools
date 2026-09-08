@@ -79,6 +79,32 @@ pub const TECHNIQUE_INSTRUCTION_COMPRESSION: &str = "instruction-compression";
 /// Test: `divert_row_carries_the_named_technique`.
 pub const TECHNIQUE_DIVERT: &str = "divert";
 
+/// The environment variable Claude Code exports carrying the session's own id.
+///
+/// Why (#7209): every row on this ledger is folded back by
+/// [`fold_session`] under the `session_id` Claude Code sends the statusline on
+/// stdin, which is this variable's value. A producer that keys a row by any
+/// other id writes a row the segment can never match, and the `💸` segment then
+/// omits itself instead of rendering a percent.
+/// What: `CLAUDE_CODE_SESSION_ID`.
+/// Test: `claude_code_session_id_names_the_harness_variable`.
+pub const CLAUDE_CODE_SESSION_ID_ENV: &str = "CLAUDE_CODE_SESSION_ID";
+
+/// The Claude Code session id, when the harness exported one.
+///
+/// Why: this is the single read of [`CLAUDE_CODE_SESSION_ID_ENV`] both savings
+/// producers route through — the divert producer in the `tm` binary and the
+/// instruction-compression producer in this crate — so the two cannot drift
+/// into keying their rows differently.
+/// What: the variable's value, or `None` when it is absent or blank.
+/// Test: `claude_code_session_id_names_the_harness_variable`, and the
+/// producers' own suites.
+pub fn claude_code_session_id() -> Option<String> {
+    std::env::var(CLAUDE_CODE_SESSION_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
 /// One producer's claim that a technique avoided sending some tokens.
 ///
 /// Why: estimates and measurements share one row shape, which is why `basis` is

@@ -170,12 +170,14 @@ fn source_bytes_sums_every_file_body() {
 /// works because this process keeps the harness's session id while the worker it
 /// spawns does not. If the id were ever scrubbed here too, every row would be
 /// declined and the statusline would stay empty with nothing saying why.
-/// What: asserts the variable this module reads is on the worker's scrub list —
-/// the child loses it, this process keeps it.
+/// What: asserts the variable this module reads — the shared
+/// [`trusty_mpm::core::savings::CLAUDE_CODE_SESSION_ID_ENV`] since #7209 — is on
+/// the worker's scrub list: the child loses it, this process keeps it.
 #[test]
 fn parent_session_id_env_is_scrubbed_from_the_worker_only() {
     assert!(
-        crate::commands::divert_worker::NESTED_SESSION_ENV.contains(&PARENT_SESSION_ID_ENV),
+        crate::commands::divert_worker::NESTED_SESSION_ENV
+            .contains(&trusty_mpm::core::savings::CLAUDE_CODE_SESSION_ID_ENV),
         "the worker must be scrubbed of the parent session id"
     );
 }

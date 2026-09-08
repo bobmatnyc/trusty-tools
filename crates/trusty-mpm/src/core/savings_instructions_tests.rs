@@ -198,3 +198,84 @@ fn resolve_pm_price_agrees_with_the_shared_table() {
         assert!(rate > 0.0, "a priced model must have a positive input rate");
     }
 }
+
+/// Build a compiled-prompt destination under a fresh harness root.
+///
+/// Why: every keying test needs the same
+/// `<root>/.trusty-mpm/sessions/<scope>/INSTRUCTIONS-COMPILED.md` shape, and the
+/// producer reads the root as a project directory, so it must exist on disk.
+/// What: creates the session directory and returns the destination path.
+/// Test: used by `the_row_is_keyed_by_the_claude_session_id`.
+fn compiled_prompt_dest(root: &std::path::Path, scope: &str) -> std::path::PathBuf {
+    let dir = root.join(".trusty-mpm").join("sessions").join(scope);
+    std::fs::create_dir_all(&dir).expect("session dir");
+    dir.join("INSTRUCTIONS-COMPILED.md")
+}
+
+/// Why (#7209): the `💸` segment folds this ledger by the session id Claude Code
+/// sends the statusline on stdin, while the compiled prompt lives under the
+/// managed scope (`local` for an unmanaged launch). A row keyed by that
+/// directory name is a row the segment can never match, so the segment renders
+/// nothing at all — the owner-reported symptom.
+/// Test: itself.
+#[test]
+fn the_row_is_keyed_by_the_claude_session_id() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let dest = compiled_prompt_dest(root.path(), "local");
+    let ledger = root.path().join("savings.jsonl");
+
+    record_instruction_compression_to(
+        &ledger,
+        &dest,
+        "a compiled prompt far smaller than its sources",
+        Some("claude-abc-123".to_string()),
+        sonnet_price,
+    );
+
+    let written = std::fs::read_to_string(&ledger).expect("the ledger must exist");
+    assert!(
+        written.contains("\"session_id\":\"claude-abc-123\""),
+        "the row must be keyed by the Claude Code session id: {written}"
+    );
+
+    let matched = crate::core::savings::fold_session(&ledger, "claude-abc-123");
+    assert!(
+        !matched.is_zero(),
+        "the statusline fold under the Claude Code id must find the row: {matched:?}"
+    );
+    assert!(
+        crate::core::savings::fold_session(&ledger, "local").is_zero(),
+        "nothing may be attributed to the compiled-prompt directory name"
+    );
+}
+
+/// Why (#7209): a launch with no harness session id — a direct `tm` invocation
+/// outside Claude Code — still has a real fold to record, and the directory name
+/// remains the only id available. Losing that row would trade one attribution
+/// bug for another.
+/// Test: itself.
+#[test]
+fn the_row_falls_back_to_the_compiled_prompt_directory_id() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let dest = compiled_prompt_dest(root.path(), "sess-42");
+    let ledger = root.path().join("savings.jsonl");
+
+    record_instruction_compression_to(&ledger, &dest, "tiny", None, sonnet_price);
+
+    let folded = crate::core::savings::fold_session(&ledger, "sess-42");
+    assert!(
+        !folded.is_zero(),
+        "with no Claude Code id the directory name must key the row: {folded:?}"
+    );
+}
+
+/// Why (#7209): the producers must read one variable name. A rename on one side
+/// only would silently unmatch every row the other writes.
+/// Test: itself.
+#[test]
+fn claude_code_session_id_names_the_harness_variable() {
+    assert_eq!(
+        crate::core::savings::CLAUDE_CODE_SESSION_ID_ENV,
+        "CLAUDE_CODE_SESSION_ID"
+    );
+}
