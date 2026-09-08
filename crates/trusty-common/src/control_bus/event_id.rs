@@ -9,7 +9,12 @@
 //! What: A newtype over `uuid::Uuid`. `EventId::new` mints a UUIDv7 —
 //!       time-ordered, so ids sort close to `seq`/`at` order even before a
 //!       central bus assigns a total order. Serializes as the standard
-//!       hyphenated UUID string via `#[serde(transparent)]`.
+//!       hyphenated UUID string via `#[serde(transparent)]`. Note: a UUIDv7's
+//!       embedded millisecond timestamp is redundant with `HarnessEvent.at`
+//!       (the envelope's own, explicitly-stamped time) — readers needing an
+//!       event's time should use `at`, not decode the id. The id's
+//!       time-ordering is a sort-friendliness property, not a second
+//!       timestamp source.
 //! Test: `super::tests::event_id_round_trips`,
 //!       `super::tests::event_id_new_mints_distinct_ids`,
 //!       `super::tests::event_id_display_matches_serialized_string`.
