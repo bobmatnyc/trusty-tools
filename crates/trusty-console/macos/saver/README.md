@@ -133,7 +133,7 @@ daemon**: each mode builds its own endpoint.
 swiftc -O -swift-version 5 -o target/console-saver/harness/paintharness \
   crates/trusty-console/macos/saver/PaintHarness.swift
 
-for mode in offline slow preview resize stop; do
+for mode in offline slow preview resize stop suspend suspend-cold; do
   ./target/console-saver/harness/paintharness "$mode" \
     target/console-saver/TrustyConsole.saver || echo "FAILED: $mode"
 done
@@ -149,6 +149,8 @@ unoptimised build spends over a second in it.
 | `preview` | none (`isPreview: true`) | the bundled asset draws, and no `WKWebView` is built for a tile |
 | `resize` | the real console (7788, or `SAVER_HARNESS_PORT`) | after a late growth: `webView.frame == view.bounds`, the page's own `innerWidth`×`innerHeight` equals those bounds, and none of five edge samples is black (#6871) |
 | `stop` | the same never-answering listener | `stopAnimation()` returns inside 500 ms and the listener sees **zero** further connections for 20 s — twice, once with a load in flight and once from inside a render tick (#6900) |
+| `suspend` | a listener that **answers**, serving a page that reports `document.visibilityState` as `visible` for three reads then `hidden` | three re-entrant `startAnimation()` calls over the live page produce **zero** further requests; the page then goes 35 s reporting itself visible with **zero** requests, so a view that reloaded on every probe tick fails here; then the flip to `hidden` produces exactly one reload, and every frame captured while the web view is off screen carries ≥2% ink (#7112) |
+| `suspend-cold` | the same listener, serving a page that is `hidden` from its **first** read | the same re-entrant assertion, then the view recovers inside 90 s with no visible-then-hidden history to reason from — the bounded forced-recovery deadline, measured at 69 s (#7112) |
 
 ### Stop path (#6900)
 
@@ -183,6 +185,86 @@ PAINT: PASS — stop
 Between the two stops the mode calls `startAnimation()` again and requires a
 fresh connection, so the terminal `.stopped` state cannot be sticky — a wake
 that does not unlock stops and re-arms the saver, and that view has to load.
+
+### Visibility recovery (#7112)
+
+The owner's saver showed two rotation frames and then went black. Two behaviours
+combined, and the mode covers both.
+
+**The host re-arms a running view.** On macOS 26.6.2 the screen saver is hosted by
+`WallpaperAgent`, which called `startAnimation()` every 20 s to 3.5 min on the
+same live view with no `stopAnimation()` between. Every call reset the state and
+reloaded, so the dashboard restarted from its first rotation frame each time —
+and re-armed the hourly reload timer often enough that it could never fire.
+
+**The OS suspends the page without killing it.** RunningBoard moved the
+WebContent process to `running-suspended-NotVisible` and WebKit ran
+`freezeAllLayerTrees` → `destroyRenderingResources` → `markAllLayersVolatile`,
+discarding the backing store. The process stayed alive, so
+`webViewWebContentProcessDidTerminate` — the view's only exit from `.live` — never
+fired. `draw(_:)` went on deferring to a compositor with nothing left to
+composite.
+
+The view now asks the page every 10 s what `document.visibilityState` says. That
+property is WebKit's own view of whether the page is visible, set by the same
+activity-state change that freezes the layers, so it reports the cause rather
+than the symptom. Anything but `visible`, or no answer inside 3 s, leaves `.live`
+for `.suspended` — dimmed preview, no banner, because the console is reachable
+and the reload is already in flight.
+
+**Four grounds to recover on, and every path out is bounded.** An unhealthy
+probe alone does not mean the page is broken — a saver whose window really is
+behind something *should* have a hidden page. So `recoverVisibility` reloads on
+any one of: the saver's own window is not occluded, so a hidden page contradicts
+what is on screen; a visible-then-hidden transition was observed; the page
+stopped answering at all; or the page has been unhealthy for 60 s. Only the
+last-resort combination — an occluded window whose page has never reported
+visible — waits, and that wait is what the 60 s deadline caps.
+
+Deciding on the observed-transition flag alone was not enough, and the first cut
+of this fix got it wrong. That flag resets on every `didFinish`, so a page
+suspended inside its first 10 s probe interval answered `hidden` with no history,
+only logged, and stayed live with the web view on screen — which the re-entrant
+guard then read as healthy. The hourly reload was the only exit: up to an hour of
+the exact symptom this issue is about.
+
+`recoveryCooldown` caps the reload rate at one a minute, so none of the four
+grounds can turn into a treadmill.
+
+Every decision names its trigger and its ground at `.default`, so `log show`
+separates them:
+
+```
+re-entrant startAnimation ignored — page already live
+re-entrant startAnimation ignored — recovery already in flight
+visibility lost, recovering — document.visibilityState=hidden (was visible)
+visibility lost, recovering — document.visibilityState=hidden (unhealthy for 69s)
+visibility lost, waiting — occluded window, page never reported visible (…)
+window occlusion changed — visible=false
+```
+
+Against a bundle built from the pre-fix `main` (951d46b6b) both modes report
+three failures each:
+
+```
+PAINT: FAIL — re-entrant startAnimation() reloaded the page — 3 extra request(s), expected 0
+PAINT: FAIL — re-entrant startAnimation() took the live page off screen
+PAINT: FAIL — the view never recovered: no reload in 35s after the page reported itself hidden
+```
+
+**What the modes do not prove.** Two things.
+
+They drive the visibility flip from the page, because no unsandboxed harness can
+make RunningBoard suspend a WebContent process.
+
+And neither reaches the unoccluded-window ground. AppKit reports no `.visible`
+for a window parked off every display, and setting `alphaValue` to 0 or 0.01 on
+screen does not change that — the only way to produce an unoccluded window is to
+put a real one in front of the operator, which the harness will not do. So
+`suspend-cold` measures the 60 s deadline (69 s observed) rather than the
+immediate ground the real full-screen saver would take. Whether the real
+`WallpaperAgent`-hosted page reports `visible` at all before the NotVisible flip
+is likewise settled only in host, and the log lines above say which happened.
 
 ### Frame size (#6871)
 
@@ -317,6 +399,16 @@ configuration sheet this phase (`hasConfigureSheet` is `false`).
   script refuses to produce such a bundle, so this is a defensive path.
 - **Hourly reload** while animating, for long-run memory hygiene. The SPA polls
   its own data, so this is not a freshness mechanism.
+- **Idempotent restart** — `startAnimation()` over a page that is already live
+  and on screen, or over a recovery already in flight, reloads nothing.
+  `WallpaperAgent` re-arms a running view every 20 s to 3.5 min with no
+  `stopAnimation()` between (#7112).
+- **Suspended** — while live, the view asks the page every 10 s whether WebKit
+  still considers it visible. A page that stops reporting `visible`, or stops
+  answering inside 3 s, is left for the dimmed preview (no banner — the console
+  is reachable) and reloaded, on any of four grounds and after at most 60 s. This
+  is the only exit from `.live` when the OS discards the page's layers without
+  terminating its process (#7112).
 - **Multi-display** — the framework instantiates one view per screen, so each
   display gets its own web view and timers. No coordination is attempted.
 - **Tracks the frame** — the web view is sized from `bounds` in
