@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
 use tokio::sync::broadcast;
-use trusty_common::control_bus::{HarnessEvent, HarnessPayload, HarnessSource};
+use trusty_common::control_bus::{EventId, HarnessEvent, HarnessPayload, HarnessSource};
 
 /// Stderr line prefix used to relay events from a child process to its parent.
 ///
@@ -145,12 +145,18 @@ fn next_seq() -> u64 {
     SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Build a fully-populated `HarnessEvent`, assigning `seq` and `at`.
+/// Build a fully-populated `HarnessEvent`, assigning `seq`, `at`, and `id`.
 ///
 /// Why: `publish` and `emit` both need to stamp the envelope identically; one
 ///      helper avoids drift between the two paths.
-/// What: Allocates the next seq, reads `Utc::now()`, and assembles the envelope.
-/// Test: Exercised by `publish_round_trips_through_subscribe` (seq/at present).
+/// What: Allocates the next seq, reads `Utc::now()`, mints a fresh `EventId`
+///       (DOC-73 §3.1 — "minted by the emitting process"), and assembles the
+///       envelope. `parent_id` is `None`: threading real causal context
+///       through this crate's emit sites is DOC-73 §9 Phase 3 / future work
+///       (issue #6847 lands the envelope fields only), so every event this
+///       function builds today is a root.
+/// Test: Exercised by `publish_round_trips_through_subscribe` (seq/at/id
+///       present).
 fn make_event(
     source: HarnessSource,
     session: Option<String>,
@@ -162,6 +168,8 @@ fn make_event(
         seq: next_seq(),
         at: Utc::now(),
         payload,
+        id: EventId::new(),
+        parent_id: None,
     }
 }
 

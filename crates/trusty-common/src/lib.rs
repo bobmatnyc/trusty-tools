@@ -355,11 +355,14 @@ pub mod parent_death;
 /// sibling producer, not a shared library. These types live here so all four
 /// crates compile against one definition.
 /// What: [`control_bus::HarnessEvent`] and [`control_bus::HarnessPayload`] (the
-/// envelope), [`control_bus::LifecycleEvent`] and [`control_bus::HarnessSource`]
-/// (the taxonomy), and [`control_bus::Filter`]. Types only — no channel and no
-/// global state, which `control_bus::tests::control_bus_declares_no_transport`
-/// enforces against the module's own sources. Ungated: `serde`, `serde_json`
-/// and `chrono` are already unconditional here, so it adds no dependency.
+/// envelope), [`control_bus::EventId`] (the envelope's `id`/`parent_id` type,
+/// issue #6847), [`control_bus::LifecycleEvent`] and
+/// [`control_bus::HarnessSource`] (the taxonomy), and [`control_bus::Filter`].
+/// Types only — no channel and no global state, which
+/// `control_bus::tests::control_bus_declares_no_transport` enforces against
+/// the module's own sources. Ungated: `serde`, `serde_json` and `chrono` were
+/// already unconditional here; `uuid` became a mandatory (no longer optional)
+/// dependency with #6847 so `EventId::new` can mint a UUIDv7 unconditionally.
 /// Test: `cargo test -p trusty-common --features unconditional-only control_bus`.
 pub mod control_bus;
 

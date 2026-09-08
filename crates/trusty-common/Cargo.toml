@@ -277,8 +277,13 @@ reqwest = { workspace = true }
 futures-util = { workspace = true }
 axum = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
-# Optional: enabled by the `rpc` feature for UUID-v4 JSON-RPC request ids.
-uuid = { workspace = true, optional = true }
+# Mandatory since #6847: `control_bus::EventId` (the always-compiled
+# `HarnessEvent.id`/`parent_id` fields, DOC-73 §3.1) mints a UUIDv7 on every
+# envelope, so `uuid` can no longer be gated behind an opt-in feature the way
+# `rpc`'s UUID-v4 request ids and the other optional consumers below still are
+# — `dep:uuid` was removed from their feature lists accordingly; enabling any
+# of them still works, they just no longer need to ask for this dependency.
+uuid = { workspace = true }
 # Optional: enabled by `daemon-token` for `url_targets_loopback` (#5439). The
 # gate must parse a URL the way the client dialling it does; a hand-rolled
 # authority split is the bug it exists to prevent.
@@ -511,10 +516,10 @@ axum-server = ["dep:axum", "dep:tower-http"]
 # the router-wide enforcement layer. Kept separate from `axum-server` because
 # the two halves are genuinely separable — a client that only reads the token
 # needs no router — even though both of today's consumers happen to enable both.
-# `uuid` supplies the CSPRNG behind `mint_token`, `url` the WHATWG parsing the
-# loopback gate must not hand-roll, and `thiserror` the weak-credential error;
-# all three are already optional dependencies here.
-daemon-token = ["dep:uuid", "dep:url", "dep:thiserror"]
+# `mint_token`'s CSPRNG is `uuid`, mandatory since #6847 so it needs no
+# `dep:` entry here; `url` the WHATWG parsing the loopback gate must not
+# hand-roll and `thiserror` the weak-credential error are still optional.
+daemon-token = ["dep:url", "dep:thiserror"]
 # Enables the `memory_rpc` module: the one JSON-RPC client for the
 # trusty-memory daemon's Unix socket. Implies `uds` (#6286) — the daemon retired
 # its HTTP listener, so the framing and the envelope now come from that module
@@ -548,14 +553,16 @@ blocking-http = ["reqwest/blocking"]
 # `is_managed_session_name` classifier) shared by trusty-mpm's SessionManager
 # and trusty-agents' TmManager so lifecycle passes (reconcile/prune/adopt) never
 # orphan a session created by the other manager (SPEC-ONESM-01 / DOC-33). Pulls
-# in `uuid` (UUID→name derivation) and `thiserror` (`SessionNameError`), both
-# already optional workspace deps in this crate.
-session-naming = ["dep:uuid", "dep:thiserror"]
+# in `uuid` (UUID→name derivation, mandatory since #6847 so no `dep:` entry
+# is needed) and `thiserror` (`SessionNameError`), an optional workspace dep.
+session-naming = ["dep:thiserror"]
 # Enables the `rpc` module: general-purpose JSON-RPC client + stdio/HTTP
 # transports + pretty-print helpers (formerly the library half of the
-# `trusty-rpc` crate). Requires `uuid` for request id generation and reuses
-# the workspace `reqwest` for HTTP transport.
-rpc = ["dep:uuid"]
+# `trusty-rpc` crate). Uses `uuid` (mandatory since #6847) for request id
+# generation and reuses the workspace `reqwest` for HTTP transport. No
+# additional dependency to name here — module compilation is the only thing
+# this flag gates.
+rpc = []
 # Enables the `embedder` module: shared text-embedding abstraction
 # (Embedder trait + FastEmbedder + MockEmbedder), formerly the
 # `trusty-embedder` crate. Pulls in fastembed-rs, lru, parking_lot, and
@@ -652,7 +659,7 @@ symgraph = ["dep:thiserror", "dep:sha2"]
 # — only enable in one crate per build graph (typically `trusty-agents`).
 symgraph-parser = [
     "symgraph",
-    "dep:uuid",
+    # #6847: `uuid` is a mandatory dependency now, so no `dep:` entry here.
     "dep:indexmap",
     "dep:similar",
     "dep:walkdir",
@@ -703,7 +710,7 @@ memory-core = [
     "dep:lru",
     "dep:parking_lot",
     "dep:thiserror",
-    "dep:uuid",
+    # #6847: `uuid` is a mandatory dependency now, so no `dep:` entry here.
     # #5063: the shared redb corruption classifier moved to the light
     # `redb-open` feature; memory-core implies it so `memory_core::store` is
     # unchanged for every existing consumer.
@@ -745,12 +752,13 @@ monitor-tui = ["dep:ratatui", "dep:crossterm", "memory-rpc"]
 embedder-client = ["dep:thiserror", "embedder", "uds"]
 # Enables the `tickets` module: unified ticketing MCP server with GitHub,
 # JIRA, and Linear backends (absorbed from the former standalone `trusty-tickets`
-# crate). Pulls in `chrono`, `uuid`, `base64`, `thiserror`, and `toml` as
-# additional optional deps. #6316: it must NOT pull in `trusty-mcp` — that crate
-# depends on this one, so the edge closed a cycle. The stdio loop the
-# `tickets-mcp` binary needs lives in `src/tickets/stdio.rs` instead, and
+# crate). Pulls in `chrono`, `base64`, `thiserror`, and `toml` as additional
+# optional deps (`uuid` is mandatory since #6847, so it needs no `dep:` entry
+# here). #6316: it must NOT pull in `trusty-mcp` — that crate depends on this
+# one, so the edge closed a cycle. The stdio loop the `tickets-mcp` binary
+# needs lives in `src/tickets/stdio.rs` instead, and
 # `tests/no_trusty_mcp_backedge.rs` fails if the dependency comes back.
-tickets = ["dep:uuid", "dep:base64", "dep:thiserror", "dep:toml", "gh-cli"]
+tickets = ["dep:base64", "dep:thiserror", "dep:toml", "gh-cli"]
 # Enables the `gh` module: the workspace's single entry point for invoking the
 # GitHub CLI (#5475). Pulls in `thiserror` only — `tokio/process`, `serde` and
 # `serde_json` are already unconditional here.

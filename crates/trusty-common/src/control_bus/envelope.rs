@@ -12,6 +12,10 @@
 //!       owns the bus.
 //! Test: `super::tests::harness_event_round_trips`,
 //!       `super::tests::harness_event_omits_none_session`,
+//!       `super::tests::harness_event_omits_none_parent_id`,
+//!       `super::tests::harness_event_parent_id_links_to_the_causing_event`,
+//!       `super::tests::harness_event_back_compat_missing_fields_deserializes`,
+//!       `super::tests::harness_event_missing_id_mints_a_fresh_id_each_deserialize`,
 //!       `super::tests::payload_lifecycle_round_trips`,
 //!       `super::tests::payload_hook_round_trips`,
 //!       `super::tests::payload_ping_round_trips`,
@@ -19,11 +23,16 @@
 
 // #6846: `HarnessPayload` and `HarnessEvent` moved here from
 // `trusty_agents_common::events::bus`; that module keeps its stderr transport.
+// #6847: added `id` (`EventId`, always present) and `parent_id`
+// (`Option<EventId>`, the call-graph edge) per DOC-73 §3.1. Both carry
+// `#[serde(default)]` so a `HarnessEvent` serialized before this field
+// existed still deserializes.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::event_id::EventId;
 use super::lifecycle::{HarnessSource, LifecycleEvent};
 
 /// Domain-tagged inner union carried inside a `HarnessEvent`.
@@ -78,10 +87,21 @@ impl HarnessPayload {
 /// What: `source` is the originating harness; `session` is the optional task
 ///       correlation key (omitted from JSON when `None`); `seq` is a
 ///       process-monotonic counter assigned by the producer; `at` is the
-///       emit-time UTC timestamp; `payload` is the domain-tagged union. All
-///       fields are public so a producer can stamp one by struct literal.
-/// Test: `super::tests::harness_event_round_trips` and
-///       `super::tests::harness_event_omits_none_session`.
+///       emit-time UTC timestamp; `payload` is the domain-tagged union; `id`
+///       is a UUIDv7 minted by the emitting process, globally unique and
+///       stable through every relay hop (DOC-73 §3.1); `parent_id` is the
+///       call-graph edge — the event that caused this one, `None` for a root.
+///       All fields are public so a producer can stamp one by struct
+///       literal. `id` and `parent_id` both carry `#[serde(default)]`, so an
+///       event serialized before issue #6847 added them still deserializes:
+///       a missing `id` mints a fresh one, a missing `parent_id` becomes
+///       `None`.
+/// Test: `super::tests::harness_event_round_trips`,
+///       `super::tests::harness_event_omits_none_session`,
+///       `super::tests::harness_event_omits_none_parent_id`,
+///       `super::tests::harness_event_parent_id_links_to_the_causing_event`,
+///       `super::tests::harness_event_back_compat_missing_fields_deserializes`,
+///       `super::tests::harness_event_missing_id_mints_a_fresh_id_each_deserialize`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HarnessEvent {
     /// Which harness produced this event.
@@ -95,4 +115,15 @@ pub struct HarnessEvent {
     pub at: DateTime<Utc>,
     /// Domain-tagged payload.
     pub payload: HarnessPayload,
+    /// Globally-unique id minted by the emitting process (DOC-73 §3.1).
+    /// Defaults to a freshly-minted id when absent from the wire, so a
+    /// pre-#6847 payload still deserializes rather than failing.
+    #[serde(default)]
+    pub id: EventId,
+    /// The call-graph edge: the event that caused this one. `None` marks a
+    /// root. Threading real parent context through each harness is future
+    /// work (DOC-73 §3.4, §9 Phase 3) — every event emitted today is a root.
+    /// Omitted from JSON when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<EventId>,
 }
