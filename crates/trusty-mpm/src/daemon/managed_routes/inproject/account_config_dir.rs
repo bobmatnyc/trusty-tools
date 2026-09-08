@@ -55,6 +55,85 @@ pub(super) fn account_config_dir(state_root: &Path, login: &str) -> PathBuf {
     state_root.join(GH_ACCOUNTS_DIR_NAME).join(login)
 }
 
+/// Reject a `login` value that would escape or corrupt the intended
+/// `<state_root>/gh-accounts/<login>` join (#7166 review follow-up MEDIUM).
+///
+/// Why: `is_name_segment` (`bin/tm/commands/register_args.rs`) only restricts
+/// the CHARACTER SET (alnum, `.`, `_`, `-`) — it does not reject the exact
+/// strings `.`/`..`, so `--account ..` passes CLI validation and resolves to
+/// `<state_root>/gh-accounts/..` = `<state_root>` itself. That this is
+/// currently unexploitable is incidental to a check written for a different
+/// purpose ([`crate::core::gh_account::GhAccountStatus::
+/// canonical_logged_in_login`] requires an exact, case-insensitive match
+/// against a real, already-logged-in `gh` account, and no GitHub login can be
+/// `.`/`..`) — not a guard at THIS path-construction site.
+/// What: refuses `login` when it is empty, exactly `.` or `..`, or contains a
+/// path separator (`/` or `\`), independent of whatever the caller already
+/// validated.
+/// Test: `ensure_account_config_dir_refuses_dot`,
+/// `ensure_account_config_dir_refuses_dotdot`,
+/// `ensure_account_config_dir_refuses_empty`,
+/// `ensure_account_config_dir_refuses_a_forward_slash`,
+/// `ensure_account_config_dir_refuses_a_backslash`.
+fn reject_unsafe_login_segment(login: &str) -> Result<(), String> {
+    if login.is_empty()
+        || login == "."
+        || login == ".."
+        || login.contains('/')
+        || login.contains('\\')
+    {
+        return Err(format!(
+            "'{login}' is not a valid account login for a config directory segment"
+        ));
+    }
+    Ok(())
+}
+
+/// `true` when `path` exists and is ITSELF a symlink (#7166 review follow-up
+/// LOW) — checked with `symlink_metadata`, which does NOT follow the link,
+/// unlike the `is_file`/`exists` calls used elsewhere in this module.
+/// Test: `ensure_account_config_dir_refuses_a_symlinked_dir`,
+/// `ensure_account_config_dir_refuses_a_symlinked_hosts_yml`.
+fn is_symlink(path: &Path) -> bool {
+    path.symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Restrict `dir` to owner-only access (#7166 review follow-up MEDIUM) —
+/// `gh`'s own `hosts.yml` is written 0600 because it normally holds a token;
+/// this directory never holds one, but it does reveal which GitHub accounts
+/// are used with `tm` and copies the operator's real `config.yml` verbatim,
+/// so it must not be left at the ambient umask on a shared host.
+/// Test: `ensure_account_config_dir_sets_restrictive_permissions`.
+#[cfg(unix)]
+fn set_private_dir_permissions(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("cannot set permissions on {}: {e}", dir.display()))
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_dir: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// Restrict a written file (`hosts.yml`/`config.yml`) to owner-only access
+/// (#7166 review follow-up MEDIUM) — same rationale as
+/// [`set_private_dir_permissions`].
+/// Test: `ensure_account_config_dir_sets_restrictive_permissions`.
+#[cfg(unix)]
+fn set_private_file_permissions(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("cannot set permissions on {}: {e}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
 /// Ensure a per-account `gh` config dir exists for `login`, building it from
 /// `operator_gh_config_dir` on first use.
 ///
@@ -82,8 +161,33 @@ pub(super) fn ensure_account_config_dir(
     operator_gh_config_dir: &Path,
     login: &str,
 ) -> Result<PathBuf, String> {
+    // #7166 review follow-up MEDIUM: reject before the path is even joined —
+    // see the function's own doc for why the CLI's `is_name_segment` check is
+    // not a substitute for this.
+    reject_unsafe_login_segment(login)?;
     let dir = account_config_dir(state_root, login);
-    if dir.join("hosts.yml").is_file() {
+
+    // #7166 review follow-up LOW: refuse a pre-planted symlink before any
+    // create/write. Checked on `dir` itself AND on `hosts.yml` — the latter
+    // because `is_file()` below FOLLOWS a symlink, so a symlinked `hosts.yml`
+    // pointing at a real file would otherwise satisfy the "already built,
+    // reuse untouched" check without ever being detected as a symlink.
+    if is_symlink(&dir) {
+        return Err(format!(
+            "{} is a symlink — refusing to use it as a per-account gh config directory; \
+             remove it and retry",
+            dir.display()
+        ));
+    }
+    let hosts_yml_path = dir.join("hosts.yml");
+    if is_symlink(&hosts_yml_path) {
+        return Err(format!(
+            "{} is a symlink — refusing to use it as a per-account gh config file; remove it \
+             and retry",
+            hosts_yml_path.display()
+        ));
+    }
+    if hosts_yml_path.is_file() {
         return Ok(dir);
     }
 
@@ -116,21 +220,26 @@ pub(super) fn ensure_account_config_dir(
     })?;
 
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    // #7166 review follow-up MEDIUM: 0700 before anything is written into it.
+    set_private_dir_permissions(&dir)?;
 
     let operator_config_path = operator_gh_config_dir.join("config.yml");
     if operator_config_path.is_file() {
-        std::fs::copy(&operator_config_path, dir.join("config.yml")).map_err(|e| {
+        let copied_config_path = dir.join("config.yml");
+        std::fs::copy(&operator_config_path, &copied_config_path).map_err(|e| {
             format!(
                 "cannot copy {} to {}: {e}",
                 operator_config_path.display(),
                 dir.display()
             )
         })?;
+        set_private_file_permissions(&copied_config_path)?;
     }
 
     let hosts_yml = render_single_account_hosts_yml(&canonical);
-    std::fs::write(dir.join("hosts.yml"), hosts_yml)
-        .map_err(|e| format!("cannot write {}: {e}", dir.join("hosts.yml").display()))?;
+    std::fs::write(&hosts_yml_path, hosts_yml)
+        .map_err(|e| format!("cannot write {}: {e}", hosts_yml_path.display()))?;
+    set_private_file_permissions(&hosts_yml_path)?;
 
     Ok(dir)
 }

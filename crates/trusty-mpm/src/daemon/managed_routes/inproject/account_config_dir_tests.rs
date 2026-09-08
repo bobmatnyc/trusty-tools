@@ -190,3 +190,151 @@ fn render_single_account_hosts_yml_round_trips_through_the_parser() {
     assert_eq!(status.logged_in, vec!["bob-duetto".to_string()]);
     assert!(!status.is_ambiguous());
 }
+
+// -----------------------------------------------------------------------
+// #7166 review follow-up MEDIUM: `login` must be rejected before it ever
+// becomes a path segment — `is_name_segment` (the CLI-layer check) restricts
+// only the character set, not the exact strings `.`/`..`.
+// -----------------------------------------------------------------------
+
+#[test]
+fn ensure_account_config_dir_refuses_dot() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmp.path().join("state");
+    let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
+
+    let err = ensure_account_config_dir(&state_root, &operator_dir, ".")
+        .expect_err("'.' must be refused before any join");
+    assert!(err.contains('.'), "{err}");
+    assert!(
+        !state_root.exists(),
+        "a refused login must never touch the filesystem"
+    );
+}
+
+#[test]
+fn ensure_account_config_dir_refuses_dotdot() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmp.path().join("state");
+    let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
+
+    let err = ensure_account_config_dir(&state_root, &operator_dir, "..").expect_err(
+        "'..' must be refused before any join — otherwise it resolves to state_root itself",
+    );
+    assert!(err.contains(".."), "{err}");
+}
+
+#[test]
+fn ensure_account_config_dir_refuses_empty() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmp.path().join("state");
+    let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
+
+    let err = ensure_account_config_dir(&state_root, &operator_dir, "")
+        .expect_err("an empty login must be refused");
+    assert!(err.contains("not a valid account login"), "{err}");
+}
+
+#[test]
+fn ensure_account_config_dir_refuses_a_forward_slash() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmp.path().join("state");
+    let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
+
+    let err = ensure_account_config_dir(&state_root, &operator_dir, "bob/duetto")
+        .expect_err("a path separator must be refused");
+    assert!(err.contains("bob/duetto"), "{err}");
+}
+
+#[test]
+fn ensure_account_config_dir_refuses_a_backslash() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmp.path().join("state");
+    let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
+
+    let err = ensure_account_config_dir(&state_root, &operator_dir, "bob\\duetto")
+        .expect_err("a path separator must be refused");
+    assert!(err.contains("bob\\duetto"), "{err}");
+}
+
+// -----------------------------------------------------------------------
+// #7166 review follow-up LOW: a pre-planted symlink at the dir or at
+// `hosts.yml` must be refused before any create/write follows it.
+// -----------------------------------------------------------------------
+
+#[test]
+#[cfg(unix)]
+fn ensure_account_config_dir_refuses_a_symlinked_dir() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmp.path().join("state");
+    let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
+
+    let real_target = tmp.path().join("elsewhere");
+    std::fs::create_dir_all(&real_target).unwrap();
+    std::fs::create_dir_all(state_root.join("gh-accounts")).unwrap();
+    std::os::unix::fs::symlink(
+        &real_target,
+        state_root.join("gh-accounts").join("bob-duetto"),
+    )
+    .expect("create symlink");
+
+    let err = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto")
+        .expect_err("a pre-planted symlinked dir must be refused");
+    assert!(err.contains("symlink"), "{err}");
+}
+
+#[test]
+#[cfg(unix)]
+fn ensure_account_config_dir_refuses_a_symlinked_hosts_yml() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmp.path().join("state");
+    let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
+
+    let dir = state_root.join("gh-accounts").join("bob-duetto");
+    std::fs::create_dir_all(&dir).unwrap();
+    let real_target = tmp.path().join("some-real-file");
+    std::fs::write(&real_target, "not a hosts.yml").unwrap();
+    std::os::unix::fs::symlink(&real_target, dir.join("hosts.yml")).expect("create symlink");
+
+    let err = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto")
+        .expect_err("a pre-planted symlinked hosts.yml must be refused");
+    assert!(err.contains("symlink"), "{err}");
+}
+
+// -----------------------------------------------------------------------
+// #7166 review follow-up MEDIUM: the built directory and files must be
+// owner-only (0700/0600), matching `gh`'s own `hosts.yml` convention.
+// -----------------------------------------------------------------------
+
+#[test]
+#[cfg(unix)]
+fn ensure_account_config_dir_sets_restrictive_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmp.path().join("state");
+    let operator_dir = fake_operator_gh_config_dir(
+        tmp.path(),
+        TWO_ACCOUNT_HOSTS_YML,
+        Some("git_protocol: ssh\n"),
+    );
+
+    let dir = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto").unwrap();
+
+    let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(dir_mode, 0o700, "dir mode was {dir_mode:o}");
+
+    let hosts_mode = std::fs::metadata(dir.join("hosts.yml"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(hosts_mode, 0o600, "hosts.yml mode was {hosts_mode:o}");
+
+    let config_mode = std::fs::metadata(dir.join("config.yml"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(config_mode, 0o600, "config.yml mode was {config_mode:o}");
+}
