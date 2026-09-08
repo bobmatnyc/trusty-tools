@@ -39,6 +39,21 @@ typo, they just get a blank icon, which is the signal something needs fixing.
 | `web_search` | Magnifying glass over a globe |
 | `load_skill` | Lightning bolt with a download arrow |
 | `review` | Document with a checkmark |
+| `home` | House outline — an app's own Dashboard/overview nav entry |
+| `indexes` | Three stacked disks — a data-index / storage nav entry |
+| `health` | Monitor with a pulse line — daemon/service health nav entry |
+| `config` | Gear — settings/config nav entry |
+| `palaces` | Four-room floor plan — trusty-memory's Palaces nav entry |
+| `dream` | Crescent moon — trusty-memory's Dream (consolidation) nav entry |
+| `smells` | Warning triangle — trusty-analyze's Smells nav entry |
+| `clusters` | Three overlapping circles — trusty-analyze's Clusters nav entry |
+
+The last eight rows (#6439) are the service dashboards' sidebar nav glyphs —
+added so `crates/trusty-console/ui-search`, `ui-memory` and `ui-analyze` no
+longer draw a different, ad hoc unicode character per app for the same kind
+of nav entry. The console link-back those three dashboards also carry (#6439)
+reuses the existing `pm` glyph rather than adding a ninth: the console's own
+robot-face iconography is already this set's stand-in for "the console".
 
 New glyphs are additive: extend the `{#if name === '...'}` chain in
 `ActionIcon.svelte`, add a row to this table, and update every vendored copy.
@@ -77,6 +92,9 @@ hand-edit a vendored crate copy and let it diverge — fix the bug or add the
 glyph here first, then propagate:
 
 - `crates/trusty-agents/ui/src/lib/icons/ActionIcon.svelte`
+- `crates/trusty-console/ui-search/src/lib/components/ActionIcon.svelte` (#6439)
+- `crates/trusty-console/ui-memory/src/lib/components/ActionIcon.svelte` (#6439)
+- `crates/trusty-console/ui-analyze/src/lib/components/ActionIcon.svelte` (#6439)
 
 `crates/trusty-agents/ui/src/lib/icons/LogoMark.svelte` still uses that
 crate's own Tailwind token layer (`text-foundry-text`, `font-display`)

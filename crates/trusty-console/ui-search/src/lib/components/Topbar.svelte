@@ -4,14 +4,30 @@
    * Topbar. The redesign (issue #38) adds service controls — a Stop button
    * wired to `POST /admin/stop` plus restart guidance — and keeps the
    * version badge doubling as a health indicator.
+   * #6439: owner directive — every service dashboard the console can serve
+   * links back to it. `resolveConsoleUrl` (vendored `consoleLink.js`)
+   * resolves a same-origin relative link when this SPA is served through the
+   * console's `/tools/search/` mount, else the well-known standalone default
+   * (owner ruling 2026-08-31) — no config knob. The status badge is now the
+   * shared Foundry `Badge` (`dot` prop) instead of a hand-rolled span, so its
+   * status glyph matches the console's own (`crates/trusty-console/ui/src/
+   * Badge.svelte`) rather than being a third divergent copy.
    * What: Renders crumbs derived from the current route, then a right-side
-   * cluster with the version/online badge and a Stop control.
+   * cluster with the console link-back, the version/online badge, and a Stop
+   * control.
    * Test: navigate to /search, confirm crumb reads "Search"; click Stop,
-   * confirm the dialog appears.
+   * confirm the dialog appears. `consoleLink.test.js` covers the link
+   * address; the console-link anchor itself is exercised via
+   * `Topbar` mounting in existing component coverage.
    */
   import { getHealth } from '../state.svelte.js';
   import { getRoute } from '../router.svelte.js';
   import { api } from '../api.js';
+  import { resolveConsoleUrl } from '../consoleLink.js';
+  import ActionIcon from './ActionIcon.svelte';
+  import Badge from './Badge.svelte';
+
+  const consoleHref = resolveConsoleUrl();
 
   let health = $derived(getHealth());
   let route = $derived(getRoute());
@@ -78,6 +94,10 @@
     {/each}
   </div>
   <div class="actions">
+    <a class="console-link" href={consoleHref} title="Back to the Trusty Console">
+      <ActionIcon name="pm" size={14} />
+      Console
+    </a>
     {#if actionNote}
       <span class="text-xs text-muted note">{actionNote}</span>
     {/if}
@@ -95,11 +115,11 @@
       </button>
     </div>
     {#if health && healthy}
-      <span class="badge badge-success">v{health.version || '?'}</span>
+      <Badge tone="success" dot>v{health.version || '?'}</Badge>
     {:else if health}
-      <span class="badge badge-danger">offline</span>
+      <Badge tone="danger" dot>offline</Badge>
     {:else}
-      <span class="badge badge-muted">connecting…</span>
+      <Badge tone="muted" dot>connecting…</Badge>
     {/if}
   </div>
 </header>
@@ -140,6 +160,24 @@
     display: flex;
     align-items: center;
     gap: 12px;
+  }
+  .console-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border: 1px solid var(--trusty-border);
+    border-radius: 6px;
+    color: var(--trusty-text-secondary);
+    font-size: var(--trusty-fs-sm);
+    font-weight: 500;
+    text-decoration: none;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .console-link:hover,
+  .console-link:focus-visible {
+    color: var(--trusty-text-primary);
+    border-color: var(--trusty-accent);
   }
   .controls {
     display: flex;

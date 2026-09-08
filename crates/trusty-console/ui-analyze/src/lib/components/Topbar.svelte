@@ -2,10 +2,20 @@
   /*
    * Why: Sticky header providing route breadcrumbs, the global index picker,
    * and the daemon-health pill (status dot + search-reachable + version).
+   * #6439: owner directive — every service dashboard the console can serve
+   * links back to it. `resolveConsoleUrl` (vendored `consoleLink.js`)
+   * resolves a same-origin relative link when this SPA is served through the
+   * console's `/tools/analyze/` mount, else the well-known standalone default
+   * (owner ruling 2026-08-31) — no config knob. Both status pills are now the
+   * shared Foundry `Badge` (`dot` prop) instead of hand-rolled spans, so
+   * their status glyphs match the console's own (`crates/trusty-console/ui/
+   * src/Badge.svelte`) rather than being a third divergent copy.
    * What: Renders crumbs derived from the current route on the left; on the
-   * right, a <select> for choosing the active index (persisted via state) and
-   * a colored health pill.
+   * right, the console link-back, a <select> for choosing the active index
+   * (persisted via state), the search-reachable pill, and the daemon health
+   * badge.
    * Test: Stop trusty-search, refresh /health, confirm pill turns red.
+   * `consoleLink.test.js` covers the link address.
    */
   import {
     getHealth,
@@ -20,6 +30,11 @@
     getTheme,
     setTheme
   } from '../state.svelte.js';
+  import { resolveConsoleUrl } from '../consoleLink.js';
+  import ActionIcon from './ActionIcon.svelte';
+  import Badge from './Badge.svelte';
+
+  const consoleHref = resolveConsoleUrl();
 
   const themes = [
     { value: 'light', label: '☀', title: 'Light' },
@@ -72,6 +87,10 @@
     {/each}
   </div>
   <div class="actions">
+    <a class="console-link" href={consoleHref} title="Back to the Trusty Console">
+      <ActionIcon name="pm" size={14} />
+      Console
+    </a>
     <select
       class="select index-picker"
       value={selected}
@@ -108,20 +127,14 @@
 
     <!-- #6155: the `sse` pill is gone. #6287 deleted this daemon's event
          broadcast, so the badge reported a stream that no longer exists. -->
-    <span
-      class="pill"
-      title={searchReachable ? 'trusty-search reachable' : 'trusty-search unreachable'}
-    >
-      <span class="dot" class:ok={searchReachable} class:err={health && !searchReachable}></span>
-      search
-    </span>
+    <Badge tone={searchReachable ? 'success' : health ? 'danger' : 'muted'} dot>search</Badge>
 
     {#if health && healthy}
-      <span class="badge badge-success">v{health.version || 'ok'}</span>
+      <Badge tone="success" dot>v{health.version || 'ok'}</Badge>
     {:else if health}
-      <span class="badge badge-danger">unreachable</span>
+      <Badge tone="danger" dot>unreachable</Badge>
     {:else}
-      <span class="badge badge-muted">connecting…</span>
+      <Badge tone="muted" dot>connecting…</Badge>
     {/if}
   </div>
 </header>
@@ -160,6 +173,24 @@
     display: flex;
     align-items: center;
     gap: 12px;
+  }
+  .console-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border: 1px solid var(--trusty-border);
+    border-radius: 6px;
+    color: var(--trusty-text-secondary);
+    font-size: var(--trusty-fs-sm);
+    font-weight: 500;
+    text-decoration: none;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .console-link:hover,
+  .console-link:focus-visible {
+    color: var(--trusty-text-primary);
+    border-color: var(--trusty-accent);
   }
   .index-picker {
     width: auto;

@@ -4,19 +4,25 @@
    * operators jumping between the two tools get a consistent shell.
    * What: Six top-level routes — Dashboard, Search, Indexes, Health, Logs,
    * Config — backed by the hash router. Brand text reads "Trusty Search".
+   * #6439: each route's nav glyph used to be a bespoke unicode character,
+   * one divergent set per dashboard (owner directive: "use the same
+   * iconography"). Now it names a glyph from the shared Foundry ActionIcon
+   * vocabulary (docs/design/UI/design-system/icons/README.md), vendored
+   * alongside this component.
    * Test: Click each nav item, confirm hash updates and `.active` moves.
    */
   import { getRoute, navigate } from '../router.svelte.js';
+  import ActionIcon from './ActionIcon.svelte';
 
   let route = $derived(getRoute());
 
   const links = [
-    { path: '/', label: 'Dashboard', icon: '◇' },
-    { path: '/search', label: 'Search', icon: '⌕' },
-    { path: '/indexes', label: 'Indexes', icon: '▣' },
-    { path: '/health', label: 'Health', icon: '♥' },
-    { path: '/logs', label: 'Logs', icon: '☰' },
-    { path: '/config', label: 'Config', icon: '⚙' }
+    { path: '/', label: 'Dashboard', icon: 'home' },
+    { path: '/search', label: 'Search', icon: 'web_search' },
+    { path: '/indexes', label: 'Indexes', icon: 'indexes' },
+    { path: '/health', label: 'Health', icon: 'health' },
+    { path: '/logs', label: 'Logs', icon: 'terminal' },
+    { path: '/config', label: 'Config', icon: 'config' }
   ];
 
   function isActive(path) {
@@ -44,7 +50,7 @@
           navigate(link.path);
         }}
       >
-        <span class="icon">{link.icon}</span>
+        <span class="icon"><ActionIcon name={link.icon} size={16} /></span>
         <span>{link.label}</span>
       </a>
     {/each}
@@ -124,7 +130,10 @@
   }
   .icon {
     width: 16px;
-    text-align: center;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
   .footer {
     padding: 16px 20px;

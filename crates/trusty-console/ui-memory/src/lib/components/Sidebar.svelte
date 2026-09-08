@@ -4,18 +4,24 @@
    * operators jumping between the two tools get a consistent shell.
    * What: Four top-level routes — Health, Palaces, Logs, Dream — backed by
    * the hash router. Brand text reads "Trusty Memory".
+   * #6439: each route's nav glyph used to be a bespoke unicode character,
+   * one divergent set per dashboard (owner directive: "use the same
+   * iconography"). Now it names a glyph from the shared Foundry ActionIcon
+   * vocabulary (docs/design/UI/design-system/icons/README.md), vendored
+   * alongside this component.
    * Test: click each nav item, confirm hash updates and `.active` moves.
    */
   import { getRoute, navigate } from '../router.svelte.js';
+  import ActionIcon from './ActionIcon.svelte';
 
   let route = $derived(getRoute());
 
   const links = [
-    { path: '/', label: 'Health', icon: '♥' },
-    { path: '/palaces', label: 'Palaces', icon: '▤' },
-    { path: '/kg', label: 'KG', icon: '⌬' },
-    { path: '/logs', label: 'Logs', icon: '☰' },
-    { path: '/dream', label: 'Dream', icon: '☾' }
+    { path: '/', label: 'Health', icon: 'health' },
+    { path: '/palaces', label: 'Palaces', icon: 'palaces' },
+    { path: '/kg', label: 'KG', icon: 'agent' },
+    { path: '/logs', label: 'Logs', icon: 'terminal' },
+    { path: '/dream', label: 'Dream', icon: 'dream' }
   ];
 
   function isActive(path) {
@@ -45,7 +51,7 @@
           navigate(link.path);
         }}
       >
-        <span class="icon">{link.icon}</span>
+        <span class="icon"><ActionIcon name={link.icon} size={16} /></span>
         <span>{link.label}</span>
       </a>
     {/each}
@@ -125,7 +131,10 @@
   }
   .icon {
     width: 16px;
-    text-align: center;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
   .footer {
     padding: 16px 20px;
