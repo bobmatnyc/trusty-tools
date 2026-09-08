@@ -311,12 +311,23 @@ fn format_search_row(marker: &str, r: &CollectionRow) -> String {
 /// What: `{marker} {name:<16} {vec:>4} {kg:>4}` where each count is the
 /// abbreviated form (`format_count`) suffixed with `v` / `g`, falling back to
 /// `--v` / `--g` when the underlying count is zero so the operator can spot
-/// palaces missing vectors or a graph.
+/// palaces missing vectors or a graph. A row whose counts the daemon never
+/// measured ([`CollectionRow::counts_unknown`], #7125) reads `?v` / `?g`
+/// instead — `--` is the claim that the palace is empty.
 /// Test: `collections_lines_show_graph_count_for_memory`,
-/// `collections_lines_show_dashes_for_zero_counts`.
+/// `collections_lines_show_dashes_for_zero_counts`,
+/// `collections_lines_show_unknown_counts_for_uncached_palaces`.
 fn format_palace_row(marker: &str, r: &CollectionRow, tick: usize) -> String {
-    let vec_cell = format_count_suffix(r.count, 'v');
-    let kg_cell = format_count_suffix(r.kg_count, 'g');
+    // #7125: an uncounted palace's zeros are unknown, not empty — `--` would
+    // claim the palace holds nothing.
+    let (vec_cell, kg_cell) = if r.counts_unknown {
+        ("?v".to_string(), "?g".to_string())
+    } else {
+        (
+            format_count_suffix(r.count, 'v'),
+            format_count_suffix(r.kg_count, 'g'),
+        )
+    };
     // The activity glyph occupies a fixed one-column slot so rows stay
     // aligned whether or not a palace is active. Idle palaces get a space.
     let glyph = spinner_frame(palace_activity(r), tick).unwrap_or(' ');

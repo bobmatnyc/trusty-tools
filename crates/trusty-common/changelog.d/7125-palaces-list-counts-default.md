@@ -1,0 +1,5 @@
+Fixed
+
+- **The monitor dashboard stopped opening every palace on disk twice a second.** `MemoryClient::palaces` sent `memory.palaces_list` an empty params object, which the daemon reads as `counts: true` — so each 2-second poll opened, hydrated and LRU-pinned every palace on the estate. On the ~94-palace install that prompted the issue that held the registry's 64-slot cache at its ceiling for as long as the monitor ran, a multi-GB floor the daemon never dropped below. It sends `counts: false` now; a palace the daemon already has open still reports real counts, and one it does not comes back flagged `cached: false`, which the existing projection has rendered as unknown rather than as zero since #4682 ([#7125](https://github.com/bobmatnyc/trusty-tools/issues/7125))
+  - `MemoryClient::fetch_palace` is unchanged and still opens one named palace for its real numbers
+  - `monitor_client_poll_leaves_closed_palaces_closed` (in `trusty-memory/tests/palaces_list_poll_residency.rs`) drives a real daemon through this client and asserts the registry's open-handle count is still zero afterwards — against the previous code it read 6 of 6

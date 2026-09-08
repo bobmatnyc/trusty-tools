@@ -330,7 +330,7 @@ impl HealthClient {
         rows
     }
 
-    /// Fetch the memory daemon's palace list with vector and KG counts.
+    /// Fetch the memory daemon's palace roster for the Collections panel.
     ///
     /// Why: the Collections list (left panel for the memory service) needs the
     /// per-palace name, vector count, and KG triple count so the operator can
@@ -345,12 +345,24 @@ impl HealthClient {
     /// failed, silently; `memory.palaces_list` carries a per-palace error
     /// instead, and [`project_palace_roster`] renders it.
     ///
+    /// Why `counts: false` (#7125): this is a health probe on a 5-second
+    /// timer, and counting is what opens every palace on disk — ~94 cold opens
+    /// per tick on the estate that prompted the issue, each one left in the
+    /// daemon's 64-slot LRU. A palace the daemon already has open still reports
+    /// its real counts; one it does not comes back flagged `cached: false`, and
+    /// [`project_palace_rows`] renders that as unknown rather than as empty.
+    ///
     /// A whole-call failure still yields an empty list — the panel's other
     /// rows are worth showing, and the daemon's own health line already says
     /// it is unreachable.
-    /// Test: the projection is unit-tested via `project_palace_roster`.
+    /// Test: `memory_collections_asks_for_a_roster_without_counts`; the
+    /// projection is unit-tested via `project_palace_roster`.
     pub async fn memory_collections(&self) -> Vec<CollectionRow> {
-        let Ok(listed) = self.memory_call("memory.palaces_list", json!({})).await else {
+        // #7125: a health poll must not open every palace on disk to count it.
+        let Ok(listed) = self
+            .memory_call("memory.palaces_list", json!({ "counts": false }))
+            .await
+        else {
             return Vec::new();
         };
         project_palace_roster(&listed)
@@ -471,6 +483,9 @@ pub(crate) fn project_palace_roster(answer: &serde_json::Value) -> Vec<Collectio
             id,
             note: format!("counts unavailable: {error}"),
             ok: false,
+            // #7125: its zeros are unknown for the same reason an unopened
+            // palace's are — render `?v`, not the `--v` that reads as empty.
+            counts_unknown: true,
             ..Default::default()
         });
     }
@@ -490,8 +505,16 @@ pub(crate) fn project_palace_roster(answer: &serde_json::Value) -> Vec<Collectio
 /// back to `id`), `vector_count`, and `kg_triple_count` (any absent field
 /// defaults to zero). Rows where both counts are zero are dropped. A
 /// non-array payload yields an empty list.
+///
+/// The empty-palace filter reads a ZERO, and a zero only means empty when the
+/// daemon actually counted (#4637). Since #7125 the poller asks for
+/// `counts: false`, so a palace the daemon has not opened answers `cached:
+/// false` with placeholder zeros — that row is flagged
+/// [`CollectionRow::counts_unknown`] and exempted from the filter, or the panel
+/// would go blank on a cold daemon and call every palace empty.
 /// Test: `project_palace_rows_reads_palaces`,
-/// `project_palace_rows_filters_empty`.
+/// `project_palace_rows_filters_empty`,
+/// `project_palace_rows_keep_uncached_rows_as_unknown`.
 pub(crate) fn project_palace_rows(list: &serde_json::Value) -> Vec<CollectionRow> {
     let Some(arr) = list.as_array() else {
         return Vec::new();
@@ -531,9 +554,12 @@ pub(crate) fn project_palace_rows(list: &serde_json::Value) -> Vec<CollectionRow
                 .get("is_compacting")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            // #7125: `cached: false` means the daemon peeked instead of
+            // opening, so these zeros are UNKNOWN (#4637), never empty.
+            let counts_unknown = p.get("cached").and_then(|v| v.as_bool()) == Some(false);
             // Skip palaces with no vectors and no graph triples: they hold
             // nothing the operator can act on and clutter the left pane.
-            if count == 0 && kg_count == 0 {
+            if !counts_unknown && count == 0 && kg_count == 0 {
                 return None;
             }
             Some(CollectionRow {
@@ -547,6 +573,7 @@ pub(crate) fn project_palace_rows(list: &serde_json::Value) -> Vec<CollectionRow
                 edge_count,
                 community_count,
                 is_compacting,
+                counts_unknown,
                 // Note left empty: the row shows vector + graph counts inline
                 // (e.g. `12v 34g`), so a trailing badge would be redundant.
                 note: String::new(),

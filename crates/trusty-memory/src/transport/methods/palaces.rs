@@ -113,11 +113,18 @@ pub struct PalaceListRow {
 /// answered it from `PalaceRegistry::peek` — zero disk I/O — since #4637.
 ///
 /// What: `counts` defaults to `true`, so `{}` and `null` both keep the #6286
-/// behaviour every existing caller relies on (`trusty_common`'s monitor and
-/// trusty-mpm's health TUI both send `{}` and want measurements). `null` is
-/// accepted because the method took [`NoParams`] before this field existed.
+/// behaviour. `null` is accepted because the method took [`NoParams`] before
+/// this field existed.
+///
+/// The default stays `true` because this is a published UDS/MCP method and an
+/// external caller sending `{}` asked for the #6286 contract. What changed in
+/// #7125 is who sends `{}`: the two PERIODIC pollers — `trusty_common`'s
+/// monitor client and trusty-mpm's health TUI — now send `counts: false`,
+/// because a poll on a 2- or 5-second timer was opening every palace on disk
+/// and pinning the registry's LRU at its ceiling for as long as it ran.
 /// Test: `rpc_palaces_list_without_counts_does_not_open_a_cold_palace`,
-/// `rpc_palaces_list_defaults_to_counting`.
+/// `rpc_palaces_list_defaults_to_counting`,
+/// `monitor_client_poll_leaves_closed_palaces_closed`.
 #[derive(Debug, Clone, Copy)]
 pub struct PalacesListParams {
     /// Open every palace and report measured counts. `false` answers ids,
