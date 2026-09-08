@@ -195,6 +195,7 @@ async fn every_scoped_route_has_a_method() {
         "mpm.managed.prune_worktrees",
         "mpm.managed.reconcile_worktrees",
         "mpm.managed.fleet",
+        "mpm.residency.active",
         "mpm.managed.get",
         "mpm.managed.stop",
         "mpm.managed.runtime_stop",
@@ -1584,4 +1585,48 @@ async fn proxy_summary_parity() {
     .await;
     assert_eq!(http.status, 200);
     assert_parity("mpm.proxy.summary", &http, &rpc);
+}
+
+/// `mpm.residency.active` round-trips over a REAL Unix socket, through the
+/// REAL `managed::register` router — not just `RpcRouter::dispatch` in memory
+/// (#7087 slice 1b). Proves the method is reachable by the same client
+/// trusty-memory/trusty-search will use:
+/// [`trusty_common::mpm_rpc::fetch_active_projects_at`].
+#[tokio::test]
+async fn residency_active_round_trips_over_the_real_socket() {
+    use tokio::sync::oneshot;
+
+    let (state, _dir) = test_state().await;
+    let router = Arc::new(managed::register(RpcRouter::new(), &state));
+
+    let socket_dir = tempfile::tempdir().expect("socket tempdir");
+    let socket = socket_dir.path().join("trusty-mpm.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+
+    let (stop, shutdown) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        trusty_common::uds::server::serve_until(
+            &listener,
+            router,
+            trusty_common::uds::server::RpcServeOptions::default(),
+            async {
+                let _ = shutdown.await;
+            },
+        )
+        .await;
+    });
+
+    let set = trusty_common::mpm_rpc::fetch_active_projects_at(
+        &socket,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("fetch_active_projects_at");
+    assert_eq!(
+        set.schema,
+        trusty_common::residency::ACTIVE_PROJECT_SET_SCHEMA
+    );
+    assert_eq!(set.projects.len(), 0, "no managed sessions seeded");
+
+    let _ = stop.send(());
 }

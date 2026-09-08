@@ -21,8 +21,10 @@
 //! `manager_resume_respawns`, `manager_decommission_removes_workspace`,
 //! `manager_reconcile_gone_tmux_yields_stopped` in tests.rs.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use chrono::Utc;
 use thiserror::Error;
@@ -36,6 +38,10 @@ use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::resume_workdir;
 use super::slots::SlotRegistry;
 use super::store::{SessionStore, StoreError};
+
+/// One session's cached `(root, palace_id, index_ids)` residency derivation.
+/// See `residency_state.rs`.
+type ResidencyCacheEntry = (PathBuf, Option<String>, Vec<String>);
 
 /// Errors produced by the session manager.
 ///
@@ -250,6 +256,18 @@ pub struct SessionManager {
     pub(crate) resume_breaker: RwLock<super::resume_breaker::ResumeBreakerStore>,
     /// #6568: the breaker's window/threshold, read once at construction.
     pub(crate) resume_breaker_cfg: super::resume_breaker::ResumeBreakerConfig,
+    /// #7087: monotonic residency-set version. In-memory only, like `slots` —
+    /// a fresh daemon process has nothing to compare a first pull against, so
+    /// there is nothing to persist. Bumped by `create`/`stop`/`adopt`/
+    /// `decommission`; read (never bumped) by `mpm.residency.active`. See
+    /// `residency_state.rs`.
+    pub(crate) residency_generation: AtomicU64,
+    /// #7087: per-session `(root, palace_id, index_ids)` derivation cache the
+    /// residency route reuses across polls, avoiding a repeat
+    /// `resolve_palace_slug`/`derive_project_index_id` (both filesystem/`git`
+    /// touching) for a session whose root has not changed. In-memory only,
+    /// like `slots` and `residency_generation` above. See `residency_state.rs`.
+    pub(crate) residency_cache: RwLock<HashMap<ManagedSessionId, ResidencyCacheEntry>>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -289,6 +307,8 @@ impl SessionManager {
                 super::resume_breaker::ResumeBreakerStore::load(data_dir).await,
             ),
             resume_breaker_cfg: super::resume_breaker::ResumeBreakerConfig::from_env(),
+            residency_generation: AtomicU64::new(0),
+            residency_cache: RwLock::new(HashMap::new()),
         })
     }
 

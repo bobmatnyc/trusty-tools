@@ -712,6 +712,8 @@ impl SessionManager {
         // starts here, not at `created_at`.
         record.set_lifecycle_state(ManagedSessionState::Decommissioned, Utc::now());
         self.store.write().await.upsert(record.clone()).await?;
+        // #7087: a record-only tombstone leaves the active-project set.
+        self.bump_residency_generation();
         info!(id = %id, name = %record.tmux_name, "managed session record tombstoned (record-only)");
         Ok((record, false))
     }
@@ -1120,6 +1122,8 @@ impl SessionManager {
         // starts here, not at `created_at`.
         record.set_lifecycle_state(ManagedSessionState::Decommissioned, Utc::now());
         self.store.write().await.upsert(record.clone()).await?;
+        // #7087: a full teardown leaves the active-project set.
+        self.bump_residency_generation();
         info!(id = %id, name = %record.tmux_name, "managed session decommissioned");
         Ok((record, workspace_removed))
     }

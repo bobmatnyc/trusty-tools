@@ -53,6 +53,8 @@ pub mod proxy;
 pub mod prune;
 pub mod reactivate;
 pub mod reconcile;
+// #7087: the `mpm.residency.active` producer route.
+pub(crate) mod residency;
 // #6497: the explicit ownership transfer for a dead owner's worktree.
 pub mod adopt_worktree;
 pub mod rename;

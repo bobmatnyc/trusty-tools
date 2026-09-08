@@ -30,6 +30,7 @@ pub mod reactivate;
 mod reconcile;
 pub mod record;
 pub mod rename;
+pub mod residency_state;
 pub mod restart_ops;
 /// #6568: the auto-resume circuit breaker's policy and its persisted counters.
 pub mod resume_breaker;

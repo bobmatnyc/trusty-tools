@@ -100,6 +100,8 @@ impl SessionManager {
         // undo one of those.
         record.stop_cause = Some(cause);
         self.store.write().await.upsert(record.clone()).await?;
+        // #7087: a stopped session leaves the active-project set.
+        self.bump_residency_generation();
         info!(id = %id, name = %record.tmux_name, cause = ?cause, "managed session stopped (workspace intact)");
         Ok(record)
     }
