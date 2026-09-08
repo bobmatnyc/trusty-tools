@@ -210,6 +210,32 @@ fn render_marks_style_finding_informational() {
     );
 }
 
+/// A coverage-gap finding is labelled informational, but not as a style nit.
+///
+/// Why: #7036 made `TestCoverage` advisory, so it earns the same "does not
+/// block" promise — but calling a missing test a "style / preference" nit would
+/// misdescribe it and invite the author to discount a note worth acting on.
+/// What: renders a `FindingCategory::TestCoverage` finding, asserts the
+/// coverage-specific lead-in and the absence of the style wording.
+#[test]
+fn render_marks_test_coverage_finding_informational() {
+    let f = finding_at("src/db.rs", Some(11))
+        .with_category(crate::models::FindingCategory::TestCoverage);
+    let body = render_finding_comment(&f);
+    assert!(
+        body.starts_with("> **Informational (test coverage) — does not block.**"),
+        "a coverage gap must lead with the coverage-specific label (#7036): {body}"
+    );
+    assert!(
+        !body.contains("style / preference"),
+        "a coverage gap must not be labelled a taste note (#7036): {body}"
+    );
+    assert!(
+        body.contains("**security**"),
+        "the ordinary lead line still renders: {body}"
+    );
+}
+
 /// An ordinary correctness finding gains no informational label.
 ///
 /// Why: the label must be a signal, not decoration — if every comment carried it
