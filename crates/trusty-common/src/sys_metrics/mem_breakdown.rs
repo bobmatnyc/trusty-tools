@@ -1,8 +1,10 @@
 //! Where a process's physical footprint actually sits: heap, file-backed, or
 //! compressed (#7084, consumed by #6928).
 //!
-//! Why: [`crate::sys_metrics::physical_footprint_bytes`] answers "how much
-//! memory does this daemon hold" with one number, and one number cannot tell a
+//! Why: `crate::sys_metrics::physical_footprint_bytes` (macOS-only, so named
+//! here rather than linked — a link would break the docs build on every other
+//! target) answers "how much memory does this daemon hold" with one number,
+//! and one number cannot tell a
 //! 14 GB heap apart from 14 GB of mmapped redb pages the kernel can evict for
 //! free. Those two call for opposite responses — the first is a leak, the
 //! second is the vector store working as designed — so the console reports the

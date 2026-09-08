@@ -25,6 +25,10 @@
 //! Test: `gate_never_exceeds_its_limit_under_contention`,
 //! `parse_open_limit_warns_and_keeps_the_default_on_garbage`,
 //! `release_after_sweep_keeps_a_recently_used_palace`.
+//!
+//! [`StartupOpenGate`]: crate::startup_budget::StartupOpenGate
+//! [`release_after_sweep`]: crate::startup_budget::release_after_sweep
+//! [`DEFAULT_KEEP_RECENT_SECS`]: crate::startup_budget::DEFAULT_KEEP_RECENT_SECS
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

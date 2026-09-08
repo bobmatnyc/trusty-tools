@@ -31,8 +31,8 @@
 //! sanctioned sync see `*.tfvars` and refuse to sync a `.env` an operator
 //! legitimately declared, or let this guard stop denying `.env*` — neither is
 //! what either caller wants. Only the matching FUNCTION
-//! ([`untracked_sync::glob_match`], promoted to `pub` for this reuse) is
-//! shared between them.
+//! ([`trusty_mpm::daemon::managed_routes::inproject::untracked_sync::glob_match`],
+//! promoted to `pub` for this reuse) is shared between them.
 //!
 //! What: [`evaluate_secret_file_copy_command`] scans every composition
 //! segment (via [`super::split_shell_segments`]) for a `cp`/`mv` verb token —

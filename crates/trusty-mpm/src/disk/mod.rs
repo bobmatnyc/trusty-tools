@@ -24,6 +24,8 @@
 //! a workspace-wide gate for sharing that does not exist yet. Moving the module
 //! to `trusty-common` is a file move plus a re-export the day a second crate
 //! needs it.
+//!
+//! [`size_index::DirSizeIndex`]: crate::disk::size_index::DirSizeIndex
 
 pub mod size_index;
 // #6927: the Disk dashboard's worktree survey — the classification the
