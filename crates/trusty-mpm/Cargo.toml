@@ -25,7 +25,10 @@ name = "trusty-mpm"
 # changes in the test suite under an already-published version.
 # 1.5.18 (refs #6892): patch — 1.5.17 is published and this PR edits `src/**`.
 # The edits are doc comments only, so no public item changed signature.
-version = "1.5.19"
+# 1.5.20 (owner-authorized reinstall, refs #7209 #7198 #7180 #7185 #7196
+# #7172): patch, version-only — 1.5.19 is already published and this bump
+# exists solely so `tm --version` identifies the reinstalled build.
+version = "1.5.20"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
