@@ -88,6 +88,12 @@ provisioned Claude Code settings; never restate it in prose.
 
 ## Label at Creation — Mandatory
 
+🔴 **The rule lives in `tm-ticketing`, in the section
+"The Labels, Project, Milestone Standard"** — read it once, then use the `gh`
+mechanics below. It is one standard over two artifacts: the issue side is
+yours, and the pull-request side is `version-control`'s, applied by
+`tm pr open`. Nothing here restates it.
+
 🔴 **Every issue carries three label families the moment it is created.**
 Labeling later does not happen: an issue filed bare stays bare, and the board
 loses the only axes anyone triages on. A `gh issue create` missing these is an
@@ -175,12 +181,13 @@ the deliberate `tm pr open --closes` flag), and `trusty-mpm` stays a component
 label, never a lifecycle one. A block that tries either is refused at load with
 the field named.
 
-## Milestone, Project, Relationships — Set on Every New Issue
+## Milestone, Project, Relationships — the `gh` Calls
 
-🔴 **Every issue you file carries exactly one milestone, at least one GitHub
-Project, and every relationship the brief names.** All three are set with the
-call that creates the issue, natively, never in prose and never in a follow-up
-pass. An issue filed with no milestone and no project is a standard violation.
+The milestone and the project are the standard's
+("The Labels, Project, Milestone Standard" in `tm-ticketing`); the
+relationships are the issue side's
+alone. All three are set with the call that creates the issue, natively, never
+in prose and never in a follow-up pass.
 
 🔴 **`tm issue standard` is the source of truth.** It prints
 `milestone_required`, `project_required`, the configured `default_project`, and

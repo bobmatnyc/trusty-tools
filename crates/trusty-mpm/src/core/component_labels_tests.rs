@@ -11,7 +11,7 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
-use super::{ComponentLabels, cargo_workspace_root, expand_member, package_name};
+use super::{ComponentLabels, CrateOwnership, cargo_workspace_root, expand_member, package_name};
 use crate::core::trusty_tools_config::ResolvedTicketing;
 
 /// Write a crate directory with a `[package] name`.
@@ -221,4 +221,125 @@ fn resolve_accepts_every_live_workspace_crate() {
             labels.names()
         );
     }
+}
+
+// ── CrateOwnership — which crate owns a changed path (#7274) ──────────────
+
+/// A map for the lookup tests, without touching a filesystem.
+fn ownership() -> CrateOwnership {
+    CrateOwnership::from_members([
+        ("crates/trusty-mpm/".to_string(), "trusty-mpm".to_string()),
+        (
+            "crates/trusty-audit/".to_string(),
+            "trusty-audit".to_string(),
+        ),
+        (
+            "crates/trusty-audit/ui/src-tauri/".to_string(),
+            "trusty-audit-ui".to_string(),
+        ),
+        // A sibling whose directory name has another member's as a prefix.
+        (
+            "crates/trusty-mpm-gui/".to_string(),
+            "trusty-mpm-gui".to_string(),
+        ),
+    ])
+}
+
+#[test]
+fn ownership_labels_a_path_under_a_member() {
+    let map = CrateOwnership::resolve(Some(workspace().path()));
+    assert_eq!(
+        map.labels_for_paths(&["crates/trusty-mpm/src/lib.rs"]),
+        vec!["trusty-mpm".to_string()]
+    );
+    // The package name, hyphenated — never the directory name.
+    assert_eq!(
+        map.labels_for_paths(&["crates/trusty-git-analytics/src/main.rs"]),
+        vec!["tga".to_string()]
+    );
+    assert_eq!(
+        map.labels_for_paths(&["crates/trusty-review/src/lib.rs"]),
+        vec!["trusty-review".to_string()],
+        "a package spelled `trusty_review` is labelled with a hyphen"
+    );
+}
+
+#[test]
+fn ownership_prefers_the_longest_matching_member() {
+    // The nested Tauri member sits INSIDE `crates/trusty-audit/`, so a plain
+    // first-match scan would label its files `trusty-audit`.
+    assert_eq!(
+        ownership().labels_for_paths(&["crates/trusty-audit/ui/src-tauri/src/main.rs"]),
+        vec!["trusty-audit-ui".to_string()]
+    );
+}
+
+/// #7274 round 2: `crates/trusty-mpm-gui/` starts with `crates/trusty-mpm`,
+/// so the trailing slash on each member key is what keeps a GUI file from
+/// earning the `trusty-mpm` label as well.
+#[test]
+fn ownership_does_not_leak_across_a_sibling_prefix() {
+    assert_eq!(
+        ownership().labels_for_paths(&["crates/trusty-mpm-gui/src/main.rs"]),
+        vec!["trusty-mpm-gui".to_string()],
+        "a sibling whose name extends another member's earns only its own label"
+    );
+    assert_eq!(
+        ownership().labels_for_paths(&["crates/trusty-mpm/src/lib.rs"]),
+        vec!["trusty-mpm".to_string()],
+        "and the shorter sibling is unaffected"
+    );
+    // With the longer sibling absent from the map, the trailing slash is the
+    // ONLY thing standing between the GUI path and a `trusty-mpm` label — the
+    // longest-first sort cannot help when there is nothing longer to find.
+    let mpm_only = CrateOwnership::from_members([(
+        "crates/trusty-mpm/".to_string(),
+        "trusty-mpm".to_string(),
+    )]);
+    assert!(
+        mpm_only
+            .labels_for_paths(&["crates/trusty-mpm-gui/src/main.rs"])
+            .is_empty(),
+        "a member directory prefixes a path only at a directory boundary"
+    );
+}
+
+#[test]
+fn ownership_ignores_a_path_no_crate_owns() {
+    assert!(
+        ownership()
+            .labels_for_paths(&["docs/specs/DOC-65.md", ".github/workflows/ci.yml"])
+            .is_empty(),
+        "a docs-or-CI-only diff earns no component label"
+    );
+}
+
+#[test]
+fn ownership_deduplicates_multi_file_crates() {
+    let labels = ownership().labels_for_paths(&[
+        "crates/trusty-mpm/src/a.rs",
+        "crates/trusty-mpm/src/b.rs",
+        "./crates/trusty-audit/src/c.rs",
+        "README.md",
+    ]);
+    assert_eq!(
+        labels,
+        vec!["trusty-mpm".to_string(), "trusty-audit".to_string()],
+        "one label per crate, in first-seen order, `./` prefix tolerated"
+    );
+}
+
+#[test]
+fn ownership_without_a_workspace_is_empty() {
+    let tmp = TempDir::new().unwrap();
+    assert!(
+        CrateOwnership::resolve(Some(tmp.path()))
+            .labels_for_paths(&["crates/trusty-mpm/src/lib.rs"])
+            .is_empty()
+    );
+    assert!(
+        CrateOwnership::resolve(None)
+            .labels_for_paths(&["crates/trusty-mpm/src/lib.rs"])
+            .is_empty()
+    );
 }

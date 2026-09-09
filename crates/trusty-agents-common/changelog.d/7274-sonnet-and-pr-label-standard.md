@@ -1,0 +1,3 @@
+Changed
+
+- The `version-control` agent ships at `model: sonnet`, up from `haiku` (#7274, owner ruling 2026-09-09). Its PR metadata is now derived rather than dictated — component labels from the diff, project and milestone from the issue the body's `Refs #N` names — which is the same judgment that already put `ticketing` at sonnet. `ticketing.md` and `version-control.md` now point at one shared section, `tm-ticketing`'s "The Labels, Project, Milestone Standard", instead of each restating the labels/project/milestone rule; `agent_assets::tests::ticketing_and_version_control_are_not_haiku` pins both tiers at the frontmatter, which is the only place the harness reads them.

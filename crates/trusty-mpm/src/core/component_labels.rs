@@ -261,6 +261,158 @@ fn expand_member(root: &Path, pattern: &str) -> Vec<PathBuf> {
     candidates
 }
 
+/// Which crate owns each path in a diff (#7274).
+///
+/// Why: [`ComponentLabels`] answers "does this label name a component", which
+/// is the question an issue audit asks. A pull request asks the other
+/// direction — "which component labels does this diff earn" — because nobody
+/// types a PR's component labels: they are read off the files it changed. The
+/// two questions want different data (a set versus a directory-to-label map),
+/// so this is a separate type rather than a field on the set. Keeping them
+/// apart also keeps [`ComponentLabels::from_names`], which the audit uses to
+/// widen from live `gh` labels, from silently dropping a map it never carried.
+/// What: workspace-relative member directory → the crate's GitHub label,
+/// which is the package name with any `_` replaced by `-` (a GitHub label name
+/// cannot contain an underscore). [`Self::labels_for_paths`] is the lookup.
+/// Test: `ownership_labels_a_path_under_a_member`,
+/// `ownership_prefers_the_longest_matching_member`,
+/// `ownership_ignores_a_path_no_crate_owns`,
+/// `ownership_deduplicates_multi_file_crates`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CrateOwnership {
+    /// `(workspace-relative directory with a trailing `/`, label)`, longest
+    /// directory first so a nested member wins over its ancestor.
+    members: Vec<(String, String)>,
+}
+
+impl CrateOwnership {
+    /// The ownership map of the workspace at or above `start_dir`.
+    ///
+    /// Why: `tm pr open` runs inside the checkout whose diff it is labelling,
+    /// so the workspace that answers is the one the command is standing in.
+    /// What: every member directory the root manifest's `[workspace] members`
+    /// expands to, paired with its `[package] name` hyphenated. `None`, no
+    /// workspace root, or an unreadable manifest all yield an empty map, which
+    /// labels nothing — the same fail-closed bias the rest of this module has.
+    /// Test: `ownership_without_a_workspace_is_empty`,
+    /// `ownership_labels_a_path_under_a_member`.
+    #[must_use]
+    pub fn resolve(start_dir: Option<&Path>) -> Self {
+        let Some(root) = start_dir.and_then(cargo_workspace_root) else {
+            return Self::default();
+        };
+        let mut members: Vec<(String, String)> = Vec::new();
+        for (dir, label) in workspace_member_labels(&root) {
+            let Ok(rel) = dir.strip_prefix(&root) else {
+                continue;
+            };
+            let mut key = rel.to_string_lossy().replace('\\', "/");
+            if key.is_empty() {
+                continue;
+            }
+            key.push('/');
+            members.push((key, label));
+        }
+        Self::from_members(members)
+    }
+
+    /// Build a map from pairs already in hand.
+    ///
+    /// Why: the pure lookup is what `tm pr open` tests, and constructing a
+    /// workspace on disk to test it would test Cargo, not the lookup.
+    /// What: sorts longest-directory-first so [`Self::labels_for_paths`] can
+    /// take the first match rather than scanning for the best one.
+    #[must_use]
+    pub fn from_members(members: impl IntoIterator<Item = (String, String)>) -> Self {
+        let mut members: Vec<(String, String)> = members
+            .into_iter()
+            .filter(|(dir, label)| !dir.is_empty() && !label.is_empty())
+            .collect();
+        members.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+        Self { members }
+    }
+
+    /// The component labels `paths` earn, de-duplicated in first-seen order.
+    ///
+    /// Why: a PR's component labels are exactly the crates its diff touches,
+    /// and a diff naming forty files in one crate earns one label.
+    /// What: for each path, the label of the longest member directory that
+    /// prefixes it. A path no member owns — `docs/`, `scripts/`, `.github/` —
+    /// contributes nothing rather than a guess.
+    /// The trailing slash each member key carries is what keeps a sibling whose
+    /// directory name extends another's — `crates/trusty-mpm-gui/` beside
+    /// `crates/trusty-mpm/` — from matching both (#7274 round 2).
+    /// Test: `ownership_prefers_the_longest_matching_member`,
+    /// `ownership_ignores_a_path_no_crate_owns`,
+    /// `ownership_deduplicates_multi_file_crates`,
+    /// `ownership_does_not_leak_across_a_sibling_prefix`.
+    #[must_use]
+    pub fn labels_for_paths<S: AsRef<str>>(&self, paths: &[S]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for path in paths {
+            let path = path.as_ref().trim_start_matches("./");
+            let Some((_, label)) = self
+                .members
+                .iter()
+                .find(|(dir, _)| path.starts_with(dir.as_str()))
+            else {
+                continue;
+            };
+            if !out.iter().any(|existing| existing == label) {
+                out.push(label.clone());
+            }
+        }
+        out
+    }
+}
+
+/// Every `(member directory, hyphenated crate label)` pair the workspace at
+/// `root` declares.
+///
+/// Why: [`workspace_crate_labels`] throws the directory away because the
+/// accepted SET does not need it; [`CrateOwnership`] needs exactly that pairing.
+/// Deriving both from one walk keeps the two answers about the same workspace
+/// from disagreeing.
+/// What: expands each `[workspace] members` pattern and pairs each existing
+/// member directory with its `[package] name`, hyphenated. Capped at
+/// [`MAX_MEMBERS`]; every read is fail-closed.
+/// Test: `ownership_labels_a_path_under_a_member`,
+/// `resolve_accepts_every_workspace_crate_label`.
+fn workspace_member_labels(root: &Path) -> Vec<(PathBuf, String)> {
+    let Some(raw) = read_bounded(&root.join("Cargo.toml")) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = raw.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let patterns: Vec<String> = manifest
+        .get("workspace")
+        .and_then(|w| w.get("members"))
+        .and_then(toml::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut pairs = Vec::new();
+    let mut members = 0usize;
+    for pattern in patterns {
+        for dir in expand_member(root, &pattern) {
+            if members >= MAX_MEMBERS {
+                return pairs;
+            }
+            members += 1;
+            if let Some(name) = package_name(&dir) {
+                pairs.push((dir, name.replace('_', "-")));
+            }
+        }
+    }
+    pairs
+}
+
 /// Read a manifest, refusing anything oversized or unreadable.
 ///
 /// Why: one place holds the size cap and the fail-closed rule, so the two

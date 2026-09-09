@@ -2,7 +2,7 @@
 name: version-control
 role: version-control
 description: Git operations specialist. Manages branches, versioning, releases, and merge conflict resolution with clean history.
-model: haiku
+model: sonnet
 extends: base-ops
 skills: [git-workflow]
 ---
@@ -94,6 +94,22 @@ without ever calling `gh`; fix the finding and re-run. `--issue N` emits
 `Closes #N` instead. `--dry-run` prints the assembled `gh pr create` argv and
 exits 0 without calling `gh`, for a preview. Hand-assembled `gh pr create` is
 the fallback only on a host where `tm` is not on PATH.
+
+## Labels, project, milestone on the PR
+
+🔴 **The rule lives in `tm-ticketing`, in the section
+"The Labels, Project, Milestone Standard"** — one standard over two artifacts,
+`ticketing` applying it to issues and you to pull requests. Read it there;
+nothing here restates it.
+
+`tm pr open` applies your half itself, in one `gh pr edit` after the PR exists:
+the component labels for every crate the diff touches, and the milestone and
+project(s) of the issue the body's first `Refs #N` names. Both are derived, so
+there is nothing for you to type and no flag to pass. Every step is best-effort
+— a `gh` that refuses one of them prints a warning and the PR still opens, and a
+missing `Refs #N` or a docs-only diff prints the line saying which half was
+skipped. Read those lines: a warning is yours to fix on the PR, a "no project or
+milestone" line on a `Refs`-less PR is the correct outcome.
 
 🔴 **Before every push, delegate a credential scan to the `security` agent** —
 `git diff origin/main...HEAD` (three-dot, never two-dot: see Safety Rules).

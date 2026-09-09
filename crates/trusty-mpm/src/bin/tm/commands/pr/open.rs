@@ -16,10 +16,14 @@ use std::path::Path;
 
 use anyhow::Context as _;
 
+use trusty_mpm::core::component_labels::CrateOwnership;
+use trusty_mpm::core::issue_audit::IssueFacts;
+use trusty_mpm::core::issue_audit_gh::view_argv;
 use trusty_mpm::core::policy_labels;
 use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
 
 use super::body::{self, IssueLink};
+use super::metadata::{self, ChangedPaths, PrMetadata, RefsIssue, RefsLookup};
 use super::{EXIT_CHECK_FAILED, EXIT_OK, GhRunner, argv};
 use crate::cli::PrOpenArgs;
 
@@ -43,6 +47,17 @@ pub(crate) trait Preflight {
     fn session_name(&self) -> Option<String>;
     /// Run the changelog-fragment gate for `origin/<base>...HEAD`.
     fn changelog_gate(&self, base: &str) -> anyhow::Result<ChangelogVerdict>;
+    /// Paths `git diff --name-only origin/<base>...HEAD` reports (#7274).
+    ///
+    /// Why: the PR's component labels are the crates these paths belong to, so
+    /// this probe is what makes the label derivation real. It sits behind the
+    /// same seam as the other two rather than beside them, so the tests keep
+    /// driving one fake.
+    /// What: repository-relative paths. An error means the diff could not be
+    /// read, which downgrades the label derivation to a warning.
+    fn changed_paths(&self, base: &str) -> anyhow::Result<Vec<String>>;
+    /// The workspace crate ownership used to label those paths (#7274).
+    fn ownership(&self) -> CrateOwnership;
 }
 
 /// What the changelog-fragment gate said.
@@ -102,6 +117,31 @@ impl Preflight for RealPreflight {
         let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&out.stderr));
         Ok(ChangelogVerdict::Fail(text.trim().to_string()))
+    }
+
+    fn changed_paths(&self, base: &str) -> anyhow::Result<Vec<String>> {
+        let root = repo_root()?;
+        // Three-dot: the changes THIS branch made, never main's own drift.
+        let out = std::process::Command::new("git")
+            .args(["diff", "--name-only", &format!("origin/{base}...HEAD")])
+            .current_dir(&root)
+            .output()
+            .context("cannot run `git diff --name-only`")?;
+        anyhow::ensure!(
+            out.status.success(),
+            "`git diff --name-only origin/{base}...HEAD` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn ownership(&self) -> CrateOwnership {
+        CrateOwnership::resolve(std::env::current_dir().ok().as_deref())
     }
 }
 
@@ -312,7 +352,98 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
         println!("  test-ladder rung claimed: {rung}");
     }
     println!("  body fields supplied: {}", plan.supplied.join(", "));
+    // #7274: the PR half of the labels/project/milestone standard, applied
+    // after the PR exists because every step needs its number.
+    apply_metadata(gh, args, pre, number, &plan.body);
     Ok(EXIT_OK)
+}
+
+/// Apply the PR's component labels, milestone and projects — best-effort.
+///
+/// Why (#7274): the standard is now one rule over issues and PRs, and a PR's
+/// share of it is entirely derived — labels from its own diff, project and
+/// milestone from the issue its `Refs #N` names. None of it is worth failing
+/// an open over: the PR already exists by this point, and a `tm pr open` that
+/// reported failure after creating a PR would be worse than a warning. So each
+/// step prints a named warning on failure and the command still exits 0.
+/// What: reads the diff and the linked issue, calls [`metadata::plan`], and
+/// runs one `gh pr edit`. Prints what it applied, and one line per thing the
+/// standard wanted and this PR could not get.
+/// Test: `open_applies_pr_metadata`, `open_without_refs_says_so`,
+/// `open_survives_a_failed_metadata_edit`, `open_notes_an_unreadable_diff`,
+/// `open_notes_an_unreadable_refs_issue`.
+fn apply_metadata<R: GhRunner, P: Preflight>(
+    gh: &R,
+    args: &PrOpenArgs,
+    pre: &P,
+    pr: &str,
+    body: &str,
+) {
+    // #7274 round 2: a failed read reaches `plan` as its own state, so the note
+    // it prints names the failure rather than blaming an empty answer.
+    let read = pre.changed_paths(&args.base);
+    let changed = match &read {
+        Ok(paths) => ChangedPaths::Read(&paths[..]),
+        Err(e) => {
+            eprintln!("  warning: the diff could not be read: {e:#}");
+            ChangedPaths::Unreadable
+        }
+    };
+    let number = metadata::first_refs_issue(body);
+    let issue = number.and_then(|n| match refs_issue(gh, args, n) {
+        Ok(issue) => Some(issue),
+        Err(e) => {
+            eprintln!("  warning: issue #{n} could not be read: {e:#}");
+            None
+        }
+    });
+    let refs = match (number, issue.as_ref()) {
+        (_, Some(issue)) => RefsLookup::Found(issue),
+        (Some(n), None) => RefsLookup::Unreadable(n),
+        (None, None) => RefsLookup::Absent,
+    };
+    let meta = metadata::plan(refs, changed, &pre.ownership());
+    if !meta.is_empty() {
+        let edit = metadata::edit_argv(pr, args.repo.as_deref(), &meta);
+        match gh.run(&edit) {
+            Ok(out) if out.success => report_applied(&meta),
+            Ok(out) => eprintln!("  warning: `gh pr edit` failed: {}", out.stderr.trim()),
+            Err(e) => eprintln!("  warning: `gh pr edit` could not run: {e:#}"),
+        }
+    }
+    for note in &meta.notes {
+        println!("  {note}");
+    }
+}
+
+/// Print what the edit actually applied.
+fn report_applied(meta: &PrMetadata) {
+    if !meta.labels.is_empty() {
+        println!("  component labels: {}", meta.labels.join(", "));
+    }
+    if let Some(milestone) = &meta.milestone {
+        println!("  milestone: {milestone}");
+    }
+    if !meta.projects.is_empty() {
+        println!("  projects: {}", meta.projects.join(", "));
+    }
+}
+
+/// Read the `Refs` issue's milestone and projects through `gh`.
+///
+/// Why: `view_argv` is the issue audit's own field list, so this reads the
+/// issue exactly the way `tm issue audit` does rather than inventing a second
+/// `--json` spelling that could drift from it.
+fn refs_issue<R: GhRunner>(gh: &R, args: &PrOpenArgs, number: u64) -> anyhow::Result<RefsIssue> {
+    let mut view = view_argv(number);
+    if let Some(repo) = args.repo.as_deref().filter(|r| !r.trim().is_empty()) {
+        view.push("--repo".to_string());
+        view.push(repo.to_string());
+    }
+    let json = gh.run(&view)?.stdout_ok(&view)?;
+    let facts: IssueFacts =
+        serde_json::from_str(&json).context("`gh issue view --json` returned unreadable JSON")?;
+    Ok(RefsIssue::from_facts(number, &facts))
 }
 
 /// Read the body file, rejecting an empty one before anything else.
