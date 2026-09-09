@@ -1,0 +1,3 @@
+Fixed
+
+- The composed PM prompt no longer requires every engineer brief to end with `check_test_pointers.sh`, `check_line_cap.sh` and `check_changelog_fragment.sh` (#7247). Those three scripts ship in `trusty-tools` and in no other project — in `bobmatnyc/trusty-things` none of them exists, and two `rust-engineer` runs each spent a round trip discovering that. "Delegating Well" now tells the PM to ask for the project's own doc gates, naming its `CLAUDE.md` and `scripts/` as where to find them, and says a project that defines none owes no such run. `the_delivered_prompt_names_no_repo_specific_doc_gate_script` composes through both composers with no project `CLAUDE.md` and rejects all three literals.
