@@ -21,7 +21,7 @@
 //! Test: `cargo test -p trusty-mpm daemon::mcp_context` plus the dispatch-level
 //! mock tests in `crate::mcp::tests`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -370,6 +370,43 @@ pub async fn session_context_pause(
         Vec::new()
     };
 
+    // #7282: the snapshot reaches `origin/main` through its own branch and PR.
+    // A failure here is an ERROR, never a warning — the previous behaviour
+    // (commit onto whatever branch the checkout was on) failed silently for
+    // weeks, and the snapshot file is already on disk either way.
+    let publish = publish_snapshot(&project_path, session_id, &outcome).await;
+
+    let publish_json = match publish {
+        Ok(SnapshotPublish::Opened(out)) => json!({
+            "status": "opened",
+            "branch": out.branch,
+            "commit": out.commit,
+            "pr_url": out.pr_url,
+            "auto_merge_armed": out.auto_merge_armed,
+            // #7282 review round 3: an unarmed PR is not a failed pause, but the
+            // reason must reach the caller — otherwise the PR simply never
+            // merges and nothing anywhere says why.
+            "auto_merge_error": out.auto_merge_error,
+        }),
+        // #7282 review: a skip carries WHY. `not_tracked` (this project keeps
+        // its sessions git-ignored) and `not_a_git_repo` are benign, but a bare
+        // `skipped` made them indistinguishable from `unchanged` — and from
+        // each other — for anyone reading the pause result.
+        Ok(SnapshotPublish::Skipped(reason)) => json!({
+            "status": "skipped",
+            "reason": reason,
+        }),
+        Err(e) => {
+            return Err(format!(
+                "pause snapshot written to {}, but publishing it failed: {e} \
+                 (worktree prune: {} removed, {} skipped as dirty)",
+                outcome.snapshot_path.display(),
+                pruned_worktrees.len(),
+                skipped_dirty.len()
+            ));
+        }
+    };
+
     Ok(json!({
         // #6888: report the id the snapshot was filed under, derived or not.
         "session_id": session_id,
@@ -377,12 +414,166 @@ pub async fn session_context_pause(
         "timestamp": outcome.timestamp.to_rfc3339(),
         "pruned_worktrees": pruned_worktrees,
         "skipped_dirty_worktrees": skipped_dirty,
+        "snapshot_publish": publish_json,
     }))
+}
+
+/// Publish a freshly written pause snapshot as a branch + PR (#7282).
+///
+/// Why: `session_context_pause` is the one path every pause goes through, so
+/// wiring the publish here is what makes "no snapshot commits onto the main
+/// checkout's current branch" true by construction rather than by convention.
+/// What: resolves the two repo-relative paths a pause touches (the snapshot and
+/// the append-only log), then runs
+/// [`crate::core::session_pause_pr::publish_pause_snapshot`] on a blocking
+/// thread, with the project's configured default branch from
+/// [`configured_default_branch`]. A skip carries its reason so the pause result
+/// distinguishes "this project git-ignores its sessions" from "this directory
+/// is not a checkout" from "nothing changed"; every other failure is an error
+/// the caller must surface.
+/// Test: `crate::core::session_pause_pr` covers the sequence against a fake
+/// driver; `publish_snapshot_reports_not_a_git_repo_as_the_skip_reason` covers
+/// this wiring.
+async fn publish_snapshot(
+    project_path: &Path,
+    session_id: &str,
+    outcome: &trusty_common::catchup::pause::PauseSnapshotOutcome,
+) -> Result<SnapshotPublish, String> {
+    use crate::core::session_pause_pr as pause_pr;
+
+    let Ok(rel) = outcome.snapshot_path.strip_prefix(project_path) else {
+        return Err(format!(
+            "snapshot {} is not inside {}",
+            outcome.snapshot_path.display(),
+            project_path.display()
+        ));
+    };
+    let paths = vec![
+        rel.to_string_lossy().replace('\\', "/"),
+        format!("{}sessions-log.jsonl", pause_pr::SESSIONS_PREFIX),
+    ];
+
+    let repo = project_path.to_path_buf();
+    let session = session_id.to_string();
+    let timestamp = outcome.timestamp;
+    let default_branch = configured_default_branch(project_path);
+    tokio::task::spawn_blocking(move || {
+        let req = pause_pr::PublishRequest {
+            repo: &repo,
+            session_id: &session,
+            timestamp,
+            paths,
+            default_branch: default_branch.as_deref(),
+        };
+        match pause_pr::publish_pause_snapshot(&pause_pr::RealPauseVcs, &req) {
+            Ok(Some(out)) => Ok(SnapshotPublish::Opened(out)),
+            Ok(None) => Ok(SnapshotPublish::Skipped("unchanged")),
+            Err(pause_pr::PublishError::NotTracked(_)) => {
+                Ok(SnapshotPublish::Skipped("not_tracked"))
+            }
+            Err(pause_pr::PublishError::NotAGitRepo(_)) => {
+                Ok(SnapshotPublish::Skipped("not_a_git_repo"))
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await
+    .map_err(|e| format!("snapshot publish task failed: {e}"))?
+}
+
+/// What a pause snapshot publish produced.
+///
+/// Why: three different reasons produce no PR, and the pause result has to say
+/// which — collapsing them into one `skipped` string hid a git-ignored sessions
+/// tree behind the same word as an unchanged one (#7282 review).
+/// What: the opened PR, or a stable snake_case reason for the skip.
+/// Test: `publish_snapshot_reports_not_a_git_repo_as_the_skip_reason`.
+#[derive(Debug)]
+enum SnapshotPublish {
+    /// A branch was pushed and a PR opened.
+    Opened(crate::core::session_pause_pr::PublishOutcome),
+    /// No PR: `unchanged`, `not_tracked`, or `not_a_git_repo`.
+    Skipped(&'static str),
+}
+
+/// The default branch this project declares in `config.yaml`, if any.
+///
+/// Why: the pause publish must not assume `main` — a `master` or `develop`
+/// project would then be told every pause is illegal (#7282 review). The
+/// operator's declaration is the authoritative answer; the resolver in
+/// `session_pause_pr` falls back to `origin/HEAD` when this returns `None`.
+/// What: matches the project directory's own name against the `projects:`
+/// entries and returns that entry's `default_branch`.
+/// Test: `configured_default_branch_reads_the_projects_section`.
+fn configured_default_branch(project_path: &Path) -> Option<String> {
+    let name = project_path.file_name()?.to_str()?.to_string();
+    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+    default_branch_for(&config.projects, &name)
+}
+
+/// The `default_branch` of the `projects:` entry named `name`.
+fn default_branch_for(
+    projects: &[crate::core::trusty_tools_config::ProjectConfig],
+    name: &str,
+) -> Option<String> {
+    projects
+        .iter()
+        .find(|p| p.name == name)
+        .and_then(|p| p.default_branch.clone())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why: `NotTracked` and `NotAGitRepo` both used to render as a bare
+    /// `{"status":"skipped"}`, so a pause result could not say whether the
+    /// project git-ignores its sessions or is not a checkout at all (#7282
+    /// review). The wiring, not the module, is where that collapse happened.
+    #[tokio::test]
+    async fn publish_snapshot_reports_not_a_git_repo_as_the_skip_reason() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let snapshot = tmp
+            .path()
+            .join(".trusty-mpm/sessions/s/session-20260909-183015.md");
+        std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+        std::fs::write(&snapshot, b"# Session Pause\n").unwrap();
+        let outcome = trusty_common::catchup::pause::PauseSnapshotOutcome {
+            snapshot_path: snapshot,
+            timestamp: chrono::Utc::now(),
+        };
+
+        let publish = publish_snapshot(tmp.path(), "s", &outcome).await.unwrap();
+        let SnapshotPublish::Skipped(reason) = publish else {
+            panic!("{publish:?}");
+        };
+        assert_eq!(reason, "not_a_git_repo");
+    }
+
+    /// Why: a `develop` project must publish its pause from `develop`, and the
+    /// operator declares that in `config.yaml`'s `projects:` section.
+    #[test]
+    fn configured_default_branch_reads_the_projects_section() {
+        use crate::core::trusty_tools_config::ProjectConfig;
+        let projects = vec![
+            ProjectConfig {
+                name: "on-develop".into(),
+                default_branch: Some("develop".into()),
+                ..ProjectConfig::default()
+            },
+            ProjectConfig {
+                name: "undeclared".into(),
+                ..ProjectConfig::default()
+            },
+        ];
+
+        assert_eq!(
+            default_branch_for(&projects, "on-develop").as_deref(),
+            Some("develop")
+        );
+        assert_eq!(default_branch_for(&projects, "undeclared"), None);
+        assert_eq!(default_branch_for(&projects, "unregistered"), None);
+    }
 
     #[tokio::test]
     async fn session_context_catchup_missing_project_dir_errors() {

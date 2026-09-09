@@ -263,6 +263,16 @@ fails loudly instead of resolving anything silently. A dirty tree does not block
 a fast-forward unless the incoming commits touch the same files, so the common
 case just works.
 
+**A session pause is one of those merges (#7282).** Where a project tracks
+`.trusty-mpm/sessions/`, `/tm-session-pause` no longer commits the snapshot onto
+the checkout's current branch — a commit on a PR-only `main` strands there, and
+the refresh above then fails on every session. The pause commits onto its own
+`chore/sessions-<session>-<ts>` branch off the project's default branch (the one
+`config.yaml` declares, else `origin/HEAD`, else `main`), pushes it, and opens an
+auto-merging docs-only PR. So run the fetch and `pull --ff-only` above after a
+pause PR lands, the same as after any other merge, and the snapshot is visible
+locally again.
+
 🔴 **If `--ff-only` fails, never clear the way by discarding.** The usual cause
 is another session's uncommitted work. Do not `git stash` — repo-level and
 shared across every worktree, so it yanks state out from under sessions running
