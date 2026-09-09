@@ -1373,6 +1373,21 @@ pub(crate) enum Command {
     /// Test: `cli_parses_statusline` in `tests.rs`.
     Statusline,
 
+    /// Print this session's commit-stats trailers, or splice them into a
+    /// commit message file (#7074).
+    ///
+    /// Why: the bundled `prepare-commit-msg` hook calls this so a commit made
+    /// in a tm session carries the session's tokens in and out, its savings
+    /// percentage, and its model id beside the attribution footer. Every value
+    /// is read at commit time from the stores the statusline render already
+    /// writes; this command adds no writer of its own.
+    /// What: with `--message-file`, splices the trailers into that file where
+    /// git will parse them (above a trailing comment block, above a `--verbose`
+    /// scissors line, and never twice). Without it, prints them to stdout.
+    /// Exits 0 on every path, including when there is nothing to stamp.
+    /// Test: `cli_parses_commit_trailers`.
+    CommitTrailers(CommitTrailersArgs),
+
     /// Preview the launch banner in the current terminal without starting Claude.
     ///
     /// Why: operators and developers need a way to eyeball the colored robot
@@ -1636,6 +1651,20 @@ pub struct DoctorFlags {
 /// What: the three `tm reinstall` flags, flattened by clap so the parsed CLI
 /// surface is identical to the inline struct-variant form it replaces.
 /// Test: `cli_parses_reinstall`, `cli_parses_reinstall_binary`.
+/// Flags for [`Command::CommitTrailers`] (`tm commit-trailers`, #7074).
+///
+/// Why: the same one-line-dispatch-arm reason as [`ReinstallArgs`] — `main.rs`
+/// sits against the 500-SLOC production cap.
+/// What: the one optional path the `prepare-commit-msg` hook passes.
+/// Test: `cli_parses_commit_trailers`.
+#[derive(Debug, Clone, clap::Args)]
+pub(crate) struct CommitTrailersArgs {
+    /// Commit message file to splice the trailers into, as git hands one to a
+    /// `prepare-commit-msg` hook. Omitted, the trailers go to stdout.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) message_file: Option<std::path::PathBuf>,
+}
+
 #[derive(Debug, Clone, clap::Args)]
 pub(crate) struct ReinstallArgs {
     /// Overwrite files you own or edited, backing each one up first.

@@ -9,15 +9,47 @@ it. The `💸` segment on the `tm` statusline shows what percentage of tokens
 that would otherwise have been sent, this session avoided sending.
 
 ```
-TM 1.5.18 ● | trusty-tools ⎇ main | @bobmatnyc | ✻you@example.com | Opus | ctx 41% | $12.40 | ⏳24% 📅41% | 💸34%
+TM 1.5.18 ● | trusty-tools ⎇ main | @bobmatnyc | ✻you@example.com | Opus | ctx 41% | $12.40 | ⏳24% 📅41% | 💸34% (avg 29%)
 ```
 
 It has one form and one absence:
 
 | Folded total | Segment |
 |---|---|
-| At least one accepted row, with a percent to report | `💸34%` |
+| At least one accepted row, with a percent to report | `💸34% (avg 29%)` |
 | Nothing recorded for this session, or every accepted row predates #7179 | *the segment is not rendered at all* |
+
+The first figure is this session. The second is the **average across sessions**
+— the arithmetic mean of every session's own percentage on the ledger.
+
+### The average
+
+One session's percentage says how that session went; it says nothing about
+whether the harness saves anything in general. The average answers that.
+
+It is the mean of the per-session PERCENTAGES, not one ratio pooled over every
+row. That is the shape the owner ruled for on 2026-09-09: after the 2026-09-08
+ruling made the figure a percentage of tokens saved, percentages no longer sum
+into a lifetime total, but they do average cleanly — and a short session that
+avoided 60 % of its tokens counts as much as a long one that avoided 10 %.
+Three sessions at 10 %, 30 % and 50 % therefore show `avg 30%`, where a pooled
+ratio over the same rows would show 29 %.
+
+A session contributes only when it has a percentage of its own — the same rule
+as the per-session figure, so a session with no denominator on either path is
+skipped rather than counted as a zero that would drag the mean down. When the
+ledger holds only your session, the average equals your figure.
+
+The average needs no new file. It is folded from the same
+`~/.trusty-mpm/usage/savings.jsonl` on the same render, grouped by
+`session_id`, using the same accepted-row rules as the per-session figure — so
+the two cannot disagree about which rows count, and nothing is written to the
+usage directory to produce it.
+
+**Your session's figure gates the whole segment.** With no savings rows for
+this session you see neither number, even when other sessions on the ledger
+have plenty. An average alone would state a measurement about a session that
+was never made.
 
 ### How the percent is computed
 
@@ -150,6 +182,104 @@ Any call site that can compute a before/after byte or token count appends a row
 with its own `technique` string. `tm compress`, which already knows the input
 and output size of every gate log it trims, is the obvious third one. No change
 to the ledger, the fold, or the segment is required.
+
+## The same numbers on the commit
+
+A commit made in a tm session carries what that session spent, as git trailers
+below the attribution footer:
+
+```
+feat(trusty-mpm): a thing (Refs #7074)
+
+What changed, and why.
+
+🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools
+Claude-Session: https://claude.ai/code/session_01…
+
+Tokens-In: 1284431
+Tokens-Out: 38902
+Savings: 34%
+Model: claude-opus-4-1-20250805
+```
+
+| Trailer | Where it comes from |
+|---|---|
+| `Tokens-In` / `Tokens-Out` | the session's own Claude Code transcript, folded at commit time |
+| `Tokens-Window` | present only when the fold read a tail window rather than the whole transcript |
+| `Savings` | the ledger, folded for this session — the same percentage the `💸` segment shows |
+| `Model` | `~/.trusty-mpm/usage/session-model/<session-id>`, written by the statusline render |
+
+A value with no source is left out rather than written as a zero, exactly as
+the segment omits itself. A commit made outside a tm session gets no block at
+all.
+
+### Why it is a separate paragraph
+
+Git recognises a trailer block only as the message's **last paragraph, whose
+first line is itself a trailer**. The attribution line is not trailer-shaped,
+so adding these keys to that paragraph makes `git interpret-trailers --parse`
+return nothing — including the `Claude-Session:` line already there. The block
+therefore goes below it, after a blank line. Verified against git 2.54.
+
+The stamper is a bundled `prepare-commit-msg` hook, installed into the
+repository's effective hooks directory by the same installer as the `pre-push`
+guard, and refused the same way when a symlink, a foreign hook, or a
+`core.hooksPath` redirect says the slot belongs to somebody else. It places the
+block above any trailing comment block and above a `git commit --verbose`
+scissors line, and it never stamps twice — an amend re-runs the hook over a
+message that already carries the block and leaves it alone.
+
+`TM_SKIP_COMMIT_STATS=1 git commit …` skips it for one commit. The hook exits 0
+on every path: a missing `tm`, a session with nothing recorded, or a failure
+inside `tm commit-trailers` all leave the message exactly as git wrote it.
+
+### What it costs a commit
+
+Git blocks while the hook runs, so the stamper is bounded twice over.
+
+- **A byte cap on the read.** `tm commit-trailers` folds at most the last
+  **8 MiB** of the transcript. A day-long session's transcript reaches hundreds
+  of megabytes; without the cap every commit after that point would wait on the
+  whole file. 8 MiB reads in tens of milliseconds and spans hundreds of
+  assistant turns, so an ordinary session is never cut at all.
+- **A wall-clock budget in the hook.** The stamper runs with a **2-second**
+  budget and is killed if it outruns it; the commit then proceeds with no stats
+  block. This is the second bound, for a slow read the byte cap does not
+  cover — a stalled network mount, a machine under load. Set
+  `TM_COMMIT_STATS_TIMEOUT` to a whole number of seconds to change it. The
+  message file is written through a temp-file rename, so a killed stamper
+  leaves either the original message or the stamped one, never a half-written
+  file.
+
+When the cap does cut, the two counts describe that window rather than the
+session, and the footer says so on its own line:
+
+```
+Tokens-In: 1284431
+Tokens-Out: 38902
+Tokens-Window: last 8 MiB of a larger transcript
+```
+
+The window is a separate trailer rather than a suffix on the numbers, so
+`Tokens-In` and `Tokens-Out` stay plain integers for anything parsing them
+back. There is no running per-session total to fall back on — the store behind
+the fold holds the transcript's path and nothing else — so narrowing the claim
+is what the footer does instead of guessing at one.
+
+### Where the token counts come from
+
+The `statusLine` payload carries a dollar cost and a context-window size, never
+an output-token count, so the transcript is the only place the pair exists.
+`tm statusline` remembers the transcript's path per session — the same store
+and the same write-only-when-changed rule as the model record — and
+`tm commit-trailers`, a separate process, folds the file at commit time.
+
+That fold counts one message ONCE. Claude Code writes one transcript line per
+content block and repeats the turn's identical `usage` object on each, so a
+three-block turn appears three times; the fold dedupes on `message.id`.
+Tokens-in is `input_tokens + cache_creation_input_tokens +
+cache_read_input_tokens` — what was actually sent, where `input_tokens` alone
+would exclude the cached prefix that is most of a long session's input.
 
 ## The ledger
 

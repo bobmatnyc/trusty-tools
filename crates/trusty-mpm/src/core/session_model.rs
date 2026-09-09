@@ -66,21 +66,6 @@ pub const MODEL_SOURCE_CONFIG_FALLBACK: &str = "config-fallback";
 /// Test: `instruction_compression_row_names_its_model_source`.
 pub const MODEL_SOURCE_LAUNCH_CONFIG: &str = "launch-config";
 
-/// Whether `session_id` is safe to use as a file name.
-///
-/// Why: the id arrives on Claude Code's stdin JSON, so it is
-/// attacker-influenceable; joining `../../.bashrc` onto the framework root would
-/// be a path traversal. The rule is deliberately the same one
-/// `statusline::compaction` already applies to the same value.
-/// What: non-empty and entirely `[A-Za-z0-9_-]`.
-/// Test: `rejects_a_path_traversal_session_id`.
-fn is_safe_session_id(session_id: &str) -> bool {
-    !session_id.is_empty()
-        && session_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
 /// The record's path under an explicit framework root.
 ///
 /// Why: taking the root as an argument is what keeps the statusline writer and
@@ -91,8 +76,13 @@ fn is_safe_session_id(session_id: &str) -> bool {
 /// safe file name.
 /// Test: `a_recorded_model_reads_back`, `rejects_a_path_traversal_session_id`.
 pub fn session_model_path_in(root: &Path, session_id: &str) -> Option<PathBuf> {
-    is_safe_session_id(session_id)
-        .then(|| root.join("usage").join("session-model").join(session_id))
+    // #7074: the store itself is shared with the transcript-path record; this
+    // function is the model-named facade over it.
+    crate::core::session_record::session_record_path_in(
+        root,
+        crate::core::session_record::KIND_MODEL,
+        session_id,
+    )
 }
 
 /// Read the model id recorded for `session_id`, if a statusline render wrote one.
@@ -103,10 +93,11 @@ pub fn session_model_path_in(root: &Path, session_id: &str) -> Option<PathBuf> {
 /// absent or unreadable, or it holds only whitespace.
 /// Test: `a_recorded_model_reads_back`, `reading_an_absent_record_is_none`.
 pub fn read_session_model(root: &Path, session_id: &str) -> Option<String> {
-    let path = session_model_path_in(root, session_id)?;
-    let text = std::fs::read_to_string(path).ok()?;
-    let trimmed = text.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
+    crate::core::session_record::read_session_record(
+        root,
+        crate::core::session_record::KIND_MODEL,
+        session_id,
+    )
 }
 
 /// Remember the model `session_id` is running, writing only when it changed.
@@ -123,27 +114,12 @@ pub fn read_session_model(root: &Path, session_id: &str) -> Option<String> {
 /// `an_unchanged_model_leaves_the_file_untouched`,
 /// `a_blank_model_is_never_recorded`.
 pub fn record_session_model(root: &Path, session_id: &str, model_id: &str) {
-    use std::io::Write as _;
-
-    let model_id = model_id.trim();
-    if model_id.is_empty() {
-        return;
-    }
-    let Some(path) = session_model_path_in(root, session_id) else {
-        return;
-    };
-    if read_session_model(root, session_id).as_deref() == Some(model_id) {
-        return;
-    }
-    let _ = (|| -> Option<()> {
-        let dir = path.parent()?;
-        std::fs::create_dir_all(dir).ok()?;
-        let mut tmp = tempfile::NamedTempFile::new_in(dir).ok()?;
-        tmp.write_all(model_id.as_bytes()).ok()?;
-        // On failure `PersistError::Drop` removes the temp file.
-        let _ = tmp.persist(&path);
-        Some(())
-    })();
+    crate::core::session_record::record_session_value(
+        root,
+        crate::core::session_record::KIND_MODEL,
+        session_id,
+        model_id,
+    );
 }
 
 #[cfg(test)]

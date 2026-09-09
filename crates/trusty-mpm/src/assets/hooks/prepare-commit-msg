@@ -1,0 +1,62 @@
+#!/bin/sh
+# trusty-mpm-commit-stats: v2
+#
+# Stamp the commit message with the session's token counts, savings percentage
+# and model id, as git trailers (#7074). Installed by trusty-mpm into the
+# repository's effective hooks directory, which every worktree of a base clone
+# shares.
+#
+# This hook must never block a commit. Every branch below exits 0, and the
+# stamping command is invoked with its output discarded: a missing `tm`, a
+# session with nothing recorded, or a `tm` that fails outright all leave the
+# message exactly as git wrote it.
+#
+# It must also never DELAY a commit. `git` blocks here, so the stamper runs
+# under a wall-clock budget and is killed if it outruns it; the commit then
+# proceeds with no stats block. `tm commit-trailers` already caps how much of
+# the transcript it reads, so this budget is the second bound, for a read that
+# is slow for a reason the byte cap does not cover — a stalled network mount,
+# a machine under load.
+#
+# Set TM_SKIP_COMMIT_STATS=1 to turn it off for one commit, or
+# TM_COMMIT_STATS_TIMEOUT to a whole number of seconds to change the budget.
+
+set -u
+
+[ -n "${TM_SKIP_COMMIT_STATS:-}" ] && exit 0
+
+# Only a commit made inside a Claude Code session has stats to report.
+[ -n "${CLAUDE_CODE_SESSION_ID:-}" ] || exit 0
+
+command -v tm >/dev/null 2>&1 || exit 0
+
+budget="${TM_COMMIT_STATS_TIMEOUT:-2}"
+case "$budget" in
+  '' | *[!0-9]*) budget=2 ;;
+esac
+
+tm commit-trailers --message-file "$1" >/dev/null 2>&1 &
+stamper=$!
+
+# Poll in tenths of a second so a stamper that finishes in milliseconds — the
+# ordinary case — costs no measurable wait. A `sleep` that rejects a fractional
+# argument fails immediately without sleeping, so the fallback second is
+# charged as the ten tenths it is.
+elapsed=0
+limit=$((budget * 10))
+while [ "$elapsed" -lt "$limit" ]; do
+  kill -0 "$stamper" 2>/dev/null || break
+  if sleep 0.1 2>/dev/null; then
+    elapsed=$((elapsed + 1))
+  else
+    sleep 1
+    elapsed=$((elapsed + 10))
+  fi
+done
+
+if kill -0 "$stamper" 2>/dev/null; then
+  kill "$stamper" 2>/dev/null
+fi
+wait "$stamper" 2>/dev/null
+
+exit 0

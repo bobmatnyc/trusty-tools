@@ -30,6 +30,14 @@ Projects are registered rather than inferred, which is what makes the rest work:
 the same directory resolves to the same project every time, across sessions and
 across restarts.
 
+## What the harness saved, on the bar and on the commit
+
+The status bar shows what percentage of tokens this session avoided sending,
+and the average across every session beside it. The same numbers land on the
+commit: a commit made in a tm session carries its tokens in, tokens out,
+savings percentage and model id as git trailers, so what a change cost is
+readable straight out of `git log` — and by anything that parses trailers.
+
 <!-- include: docs/trusty-mpm/statusline-savings.md -->
 
 ## Hooked into the session, not beside it
