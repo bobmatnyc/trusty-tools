@@ -10,9 +10,9 @@
 //!
 //! What: [`TerminalGuard`] is the `Drop`-based safety net (normal return AND
 //! panic unwind); [`enter`] builds a ratatui terminal on stdout already in raw
-//! mode and on the alternate screen; [`leave`] hands the real screen back
+//! mode and on the alternate screen; [`suspend`] hands the real screen back
 //! WITHOUT dropping the terminal, so a caller can shell out (a tmux attach,
-//! say) and then [`enter`] again.
+//! say) and then [`resume`] onto the same terminal value.
 //!
 //! Test: `terminal_guard_drop_is_idempotent`,
 //! `enter_with_restores_the_terminal_when_the_screen_fails`,
@@ -38,9 +38,9 @@ pub type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
 /// operator's shell in raw mode on the alternate screen. A `Drop` guard covers
 /// both paths that a trailing teardown call misses.
 /// What: hold one for the lifetime of the TUI. Its `Drop` is best-effort and
-/// idempotent — running it after [`leave`] has already restored the screen is a
-/// no-op in practice, which is what lets a suspend/resume cycle keep the guard
-/// installed across the hand-off.
+/// idempotent — running it after [`suspend`] has already restored the screen
+/// is a no-op in practice, which is what lets a suspend/resume cycle keep the
+/// guard installed across the hand-off.
 /// Test: `terminal_guard_drop_is_idempotent`.
 pub struct TerminalGuard;
 
@@ -58,7 +58,7 @@ impl Drop for TerminalGuard {
 /// Restore cooked mode, the main screen, and the cursor — best effort.
 ///
 /// Why: the one place the restore sequence is written, so the `Drop` guard and
-/// the explicit [`leave`] can never drift apart on the order of operations.
+/// the explicit [`suspend`] can never drift apart on the order of operations.
 /// What: `disable_raw_mode`, then `LeaveAlternateScreen` + `Show` on stdout;
 /// every error is dropped for the reason [`TerminalGuard::drop`] gives.
 /// Test: side-effect-only; covered by launching a TUI.

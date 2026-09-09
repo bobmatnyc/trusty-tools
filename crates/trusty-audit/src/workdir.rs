@@ -24,12 +24,14 @@
 //! [`WorkDir::resolve`] takes the environment as an argument rather than reading
 //! it, so resolution order is testable without mutating process state.
 //!
-//! [`write_atomically`] is the module's one free function, and the one writer
-//! for every state file under the root: `state/selected-repos.toml`
-//! (`crate::run`) and `state/audit-targets.toml` (`crate::registry`) both go
-//! through it, so the temp-file-then-rename discipline is decided once (#5822).
-//! [`write_private_atomically`] is the same writer at mode 0600, for the one
-//! file that carries a credential (#5868).
+//! [`write_atomically`] is the one writer for every state file under the root:
+//! `state/selected-repos.toml` (`crate::run`) and `state/audit-targets.toml`
+//! (`crate::registry`) both go through it, so the temp-file-then-rename
+//! discipline is decided once (#5822). [`write_private_atomically`] is the same
+//! writer at mode 0600, for the one file that carries a credential (#5868), and
+//! [`stage_pair`] is that same writer applied to two files that have to become
+//! visible together — an engagement's signing seed and the public half that
+//! checks it (#5478).
 //! Test: `super::layout_tests`.
 //!
 //! ## Open questions, recorded rather than resolved (#5502)
@@ -556,18 +558,7 @@ const OWNER_ONLY: u32 = 0;
 
 /// The shared temp-file-then-rename writer. See [`write_atomically`].
 fn write_with_mode(path: &Path, text: &str, mode: Option<u32>) -> Result<(), AuditError> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir).map_err(|source| AuditError::WorkDir {
-        path: dir.to_path_buf(),
-        source,
-    })?;
-
-    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temp = path.with_file_name(format!("{file_name}.{}.tmp", writer_tag()));
-    write_temp(&temp, text, mode).map_err(|source| AuditError::WorkDir {
-        path: temp.clone(),
-        source,
-    })?;
+    let temp = create_parent_and_stage(path, text, mode)?;
     std::fs::rename(&temp, path).map_err(|source| {
         let _ = std::fs::remove_file(&temp);
         AuditError::WorkDir {
@@ -575,6 +566,243 @@ fn write_with_mode(path: &Path, text: &str, mode: Option<u32>) -> Result<(), Aud
             source,
         }
     })
+}
+
+/// The temporary this module publishes `path` from.
+///
+/// Why: the name is derived rather than random so a caller — in practice a test
+/// proving what a failed write leaves behind — can name it. `crate::registry`'s
+/// tests seed a lock through `trusty_common::file_lock::lock_path` for the same
+/// reason. Deriving it is also what lets two concurrent writers of one file
+/// stage side by side without either reading the other's half-written bytes.
+/// What: `<name>.<pid>-<thread>.tmp`, beside the target. It is guessable by a
+/// local attacker and must not be relied on as a secret — [`write_temp`]'s
+/// exclusive open is what makes that harmless (#5868).
+/// Test: `super::layout_tests::a_stale_temporary_is_replaced_not_reused`.
+pub(crate) fn staging_path(path: &Path) -> PathBuf {
+    suffixed(path, "tmp")
+}
+
+/// Where [`StagedPair::commit`] parks the file it is about to replace.
+///
+/// A distinct suffix from [`staging_path`] so a publish and the backup of what
+/// it replaces can never collide on one name.
+fn backup_path(path: &Path) -> PathBuf {
+    suffixed(path, "bak")
+}
+
+/// `<name>.<pid>-<thread>.<suffix>`, beside `path`.
+fn suffixed(path: &Path, suffix: &str) -> PathBuf {
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!("{file_name}.{}.{suffix}", writer_tag()))
+}
+
+/// Create `path`'s parent directory and write its content to a temporary there.
+fn create_parent_and_stage(
+    path: &Path,
+    text: &str,
+    mode: Option<u32>,
+) -> Result<PathBuf, AuditError> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|source| AuditError::WorkDir {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    let temp = staging_path(path);
+    write_temp(&temp, text, mode).map_err(|source| AuditError::WorkDir {
+        path: temp.clone(),
+        source,
+    })?;
+    Ok(temp)
+}
+
+/// Two files that become visible together, or not at all.
+///
+/// Why: #5478's mint writes an engagement's private signing seed into
+/// `engagement.toml` and that seed's public half into `retained.pub`. Published
+/// one at a time they can be caught disagreeing: a config holding seed B beside
+/// the public half of seed A parses, loads, and reports nothing, and the
+/// mismatch surfaces weeks later when `trusty-audit verify --public-key`
+/// rejects a package that is in fact genuine. A forced remint was worse still —
+/// the config was replaced first, so a failure to write the public half deleted
+/// the config that had just overwritten the previous engagement's, leaving the
+/// directory with neither.
+/// What: [`stage_pair`] performs every fallible write first, into temporaries
+/// beside the two targets, so a failure there has touched nothing.
+/// [`StagedPair::commit`] then publishes by rename only. The private half is
+/// moved out of the way first and renamed into place last, so at every point an
+/// observer can look, a private key on disk is accompanied by its own public
+/// half — the states between the renames are missing files, never disagreeing
+/// ones. A commit that fails partway puts the previous pair back.
+///
+/// This orders and bounds the damage of a hard kill; it is not a transaction.
+/// A kill between the renames can leave the directory holding only the public
+/// half, with the previous pair recoverable under the two `.bak` names.
+/// Test: `super::layout_tests::a_staged_pair_publishes_both_halves_or_neither`,
+/// `super::layout_tests::a_commit_that_cannot_finish_restores_the_previous_pair`,
+/// `crate::engagement::engagement_tests::a_forced_remint_that_cannot_write_the_public_half_leaves_the_previous_engagement_whole`.
+#[derive(Debug)]
+pub(crate) struct StagedPair {
+    /// The half carrying the secret, written 0600. Published LAST.
+    private: Staged,
+    /// The half that must already be in place when the secret is. Published FIRST.
+    public: Staged,
+}
+
+/// One member of a [`StagedPair`]: where it goes, and how far it has got.
+#[derive(Debug)]
+struct Staged {
+    /// Where the content is published.
+    target: PathBuf,
+    /// The temporary holding the content until the commit renames it.
+    temp: PathBuf,
+    /// Where an existing `target` is parked for the length of the commit.
+    backup: PathBuf,
+    /// Whether an existing `target` was in fact parked at `backup`.
+    parked: bool,
+    /// Whether `temp` has been renamed onto `target`.
+    published: bool,
+}
+
+/// Write both halves to temporaries beside their targets, publishing neither.
+///
+/// Why/What/Test: see [`StagedPair`]. `private` is created 0600 through the
+/// same [`write_temp`] the [`write_private_atomically`] path uses, so the
+/// credential is never momentarily world-readable and a symlink pre-planted at
+/// the temporary's name is refused rather than followed (#5868).
+///
+/// # Errors
+///
+/// [`AuditError::WorkDir`] naming the directory or the temporary that could not
+/// be created. Neither target has been touched when this returns `Err`, and
+/// neither temporary is left behind.
+pub(crate) fn stage_pair(
+    private: (&Path, &str),
+    public: (&Path, &str),
+) -> Result<StagedPair, AuditError> {
+    let private = stage(private.0, private.1, Some(OWNER_ONLY))?;
+    match stage(public.0, public.1, None) {
+        Ok(public) => Ok(StagedPair { private, public }),
+        Err(source) => {
+            let _ = std::fs::remove_file(&private.temp);
+            Err(source)
+        }
+    }
+}
+
+/// One half of [`stage_pair`]: content written, nothing published.
+fn stage(target: &Path, text: &str, mode: Option<u32>) -> Result<Staged, AuditError> {
+    Ok(Staged {
+        temp: create_parent_and_stage(target, text, mode)?,
+        target: target.to_path_buf(),
+        backup: backup_path(target),
+        parked: false,
+        published: false,
+    })
+}
+
+impl StagedPair {
+    /// Publish both halves by rename. See [`StagedPair`] for the ordering.
+    ///
+    /// # Errors
+    ///
+    /// [`AuditError::WorkDir`] naming the file whose rename failed. The
+    /// previous pair is put back before this returns, and both temporaries are
+    /// removed, so a failed commit leaves the directory as the commit found it.
+    pub(crate) fn commit(mut self) -> Result<(), AuditError> {
+        if let Err(source) = self.publish() {
+            self.roll_back();
+            return Err(source);
+        }
+        self.private.discard_backup();
+        self.public.discard_backup();
+        Ok(())
+    }
+
+    /// The four renames, in the one order that never exposes a disagreeing pair.
+    fn publish(&mut self) -> Result<(), AuditError> {
+        self.private.park()?;
+        self.public.park()?;
+        self.public.publish()?;
+        self.private.publish()
+    }
+
+    /// Undo as much of [`Self::publish`] as ran, private half restored LAST.
+    ///
+    /// Only the public half can be published here — the private one is the last
+    /// step and its success ends the commit — so removing it is what frees the
+    /// name its backup is renamed back onto. Every step is best-effort: the
+    /// error already being returned is the one the caller must see, and no
+    /// failure here can turn this into an `Ok`.
+    fn roll_back(&mut self) {
+        if self.public.published {
+            let _ = std::fs::remove_file(&self.public.target);
+        }
+        self.public.restore();
+        self.private.restore();
+        let _ = std::fs::remove_file(&self.public.temp);
+        let _ = std::fs::remove_file(&self.private.temp);
+    }
+}
+
+impl Staged {
+    /// Move an existing target aside, remembering whether there was one.
+    ///
+    /// A target that is not there is not an error — that is the ordinary fresh
+    /// mint. A DIRECTORY there is, and is refused rather than renamed away:
+    /// moving one aside would publish over a path the operator put something
+    /// else at, and the backup could then not be cleaned up either. That is
+    /// also the failure the caller sees today when the target cannot receive a
+    /// file. `symlink_metadata` rather than `metadata`, so a symlink is parked
+    /// as the link it is rather than judged by what it points at.
+    fn park(&mut self) -> Result<(), AuditError> {
+        match std::fs::symlink_metadata(&self.target) {
+            Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(AuditError::WorkDir {
+                    path: self.target.clone(),
+                    source,
+                });
+            }
+            Ok(occupant) if occupant.is_dir() => {
+                return Err(AuditError::WorkDir {
+                    path: self.target.clone(),
+                    source: std::io::Error::other("a directory occupies this path"),
+                });
+            }
+            Ok(_) => {}
+        }
+        std::fs::rename(&self.target, &self.backup).map_err(|source| AuditError::WorkDir {
+            path: self.target.clone(),
+            source,
+        })?;
+        self.parked = true;
+        Ok(())
+    }
+
+    /// Rename the staged content onto the (now free) target.
+    fn publish(&mut self) -> Result<(), AuditError> {
+        std::fs::rename(&self.temp, &self.target).map_err(|source| AuditError::WorkDir {
+            path: self.target.clone(),
+            source,
+        })?;
+        self.published = true;
+        Ok(())
+    }
+
+    /// Put back whatever [`Self::park`] moved aside.
+    fn restore(&mut self) {
+        if self.parked {
+            let _ = std::fs::rename(&self.backup, &self.target);
+        }
+    }
+
+    /// Drop the parked previous version, the commit having replaced it.
+    fn discard_backup(&self) {
+        if self.parked {
+            let _ = std::fs::remove_file(&self.backup);
+        }
+    }
 }
 
 /// Create the temporary file holding `text`, at `mode` when one is asked for.
@@ -1049,6 +1277,166 @@ mod layout_tests {
             .filter(|p| p.extension().is_some_and(|e| e == "tmp"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// Every entry beside `dir`'s two published names, so a test can assert a
+    /// publish left no temporary and no backup behind.
+    fn strays(dir: &Path, published: &[&str]) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| !published.contains(&name.as_str()))
+            .collect()
+    }
+
+    /// #5478: both halves become visible, and nothing is left beside them.
+    #[test]
+    fn a_staged_pair_publishes_both_halves_or_neither() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("acme-2026");
+        let private = dir.join("engagement.toml");
+        let public = dir.join("retained.pub");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(&private, "seed = \"A\"\n").expect("seed private");
+        std::fs::write(&public, "A\n").expect("seed public");
+
+        stage_pair((&private, "seed = \"B\"\n"), (&public, "B\n"))
+            .expect("both halves stage")
+            .commit()
+            .expect("both halves publish");
+
+        assert_eq!(
+            std::fs::read_to_string(&private).expect("reads"),
+            "seed = \"B\"\n"
+        );
+        assert_eq!(std::fs::read_to_string(&public).expect("reads"), "B\n");
+        assert!(
+            strays(&dir, &["engagement.toml", "retained.pub"]).is_empty(),
+            "{:?}",
+            strays(&dir, &["engagement.toml", "retained.pub"])
+        );
+    }
+
+    /// #5478, the mode half: the private member is created 0600 by the same
+    /// exclusive open [`write_private_atomically`] uses, so the credential is
+    /// never momentarily readable by another account.
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_pairs_private_half_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let private = tmp.path().join("engagement.toml");
+        let public = tmp.path().join("retained.pub");
+
+        stage_pair(
+            (&private, "openrouter_key = \"sk-or-v1-x\"\n"),
+            (&public, "B\n"),
+        )
+        .expect("stages")
+        .commit()
+        .expect("publishes");
+
+        let mode = std::fs::metadata(&private)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "mode was {mode:o}");
+    }
+
+    /// #5478, the interrupted-sequence half: a commit that cannot finish must
+    /// leave the PREVIOUS pair, whole and agreeing — never the new public half
+    /// beside the old private one, which parses and verifies nothing.
+    ///
+    /// The failure is injected between the two commits by removing the private
+    /// half's staged temporary after staging: its rename is the last step, so
+    /// it fails with the public half already published. That is the hard-kill
+    /// window as a reachable error.
+    #[test]
+    fn a_commit_that_cannot_finish_restores_the_previous_pair() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("acme-2026");
+        let private = dir.join("engagement.toml");
+        let public = dir.join("retained.pub");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(&private, "seed = \"A\"\n").expect("seed private");
+        std::fs::write(&public, "A\n").expect("seed public");
+
+        let staged = stage_pair((&private, "seed = \"B\"\n"), (&public, "B\n")).expect("stages");
+        std::fs::remove_file(staging_path(&private)).expect("drop the private half's temporary");
+
+        let err = staged
+            .commit()
+            .expect_err("the private half can no longer be published");
+        assert!(matches!(err, AuditError::WorkDir { .. }), "{err:?}");
+        assert_eq!(
+            std::fs::read_to_string(&private).expect("the previous private half is back"),
+            "seed = \"A\"\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&public).expect("the previous public half is back"),
+            "A\n",
+            "the new public half must not be left beside the old private one"
+        );
+        assert!(
+            strays(&dir, &["engagement.toml", "retained.pub"]).is_empty(),
+            "{:?}",
+            strays(&dir, &["engagement.toml", "retained.pub"])
+        );
+    }
+
+    /// A staging failure has published nothing, so both targets are as they
+    /// were and neither temporary survives.
+    #[test]
+    fn a_pair_that_cannot_be_staged_touches_neither_target() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("acme-2026");
+        let private = dir.join("engagement.toml");
+        let public = dir.join("retained.pub");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(&private, "seed = \"A\"\n").expect("seed private");
+        std::fs::write(&public, "A\n").expect("seed public");
+        // Occupy the public half's temporary with a directory: it can neither
+        // be created nor unlinked by the one recovery `write_temp` allows.
+        std::fs::create_dir_all(staging_path(&public)).expect("occupy");
+
+        let err = stage_pair((&private, "seed = \"B\"\n"), (&public, "B\n"))
+            .expect_err("the public half cannot be staged");
+        assert!(matches!(err, AuditError::WorkDir { .. }), "{err:?}");
+        assert_eq!(
+            std::fs::read_to_string(&private).expect("reads"),
+            "seed = \"A\"\n"
+        );
+        assert_eq!(std::fs::read_to_string(&public).expect("reads"), "A\n");
+        assert!(
+            !staging_path(&private).exists(),
+            "the private half's temporary outlived the failure"
+        );
+    }
+
+    /// A directory at a target is refused rather than renamed out of the way:
+    /// the operator put it there, and publishing over it would also strand the
+    /// backup, which cannot be unlinked.
+    #[test]
+    fn a_directory_at_a_target_is_refused_rather_than_moved_aside() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("acme-2026");
+        let private = dir.join("engagement.toml");
+        let public = dir.join("retained.pub");
+        std::fs::create_dir_all(&public).expect("a directory occupies the public half");
+
+        let err = stage_pair((&private, "seed = \"B\"\n"), (&public, "B\n"))
+            .expect("staging is beside the targets, so it still succeeds")
+            .commit()
+            .expect_err("the commit refuses the directory");
+        assert!(matches!(err, AuditError::WorkDir { .. }), "{err:?}");
+        assert!(
+            !private.exists(),
+            "the private half must not be published without its public half"
+        );
+        assert!(public.is_dir(), "the operator's directory must survive");
     }
 
     #[test]

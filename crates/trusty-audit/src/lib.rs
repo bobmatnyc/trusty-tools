@@ -91,6 +91,9 @@ pub mod discover;
 // outbound one built on the recipient's. Two modules, opposite directions,
 // opposite rules about the credential — never one with a flag.
 pub mod distribute;
+// #5478: minting an engagement — the config plus its signing keypair. Upstream
+// of `distribute`, which packages what this writes.
+pub mod engagement;
 pub mod error;
 // #6079: the one hardened `git` child this crate spawns — the ambient-repository
 // environment cleared and terminal prompting off, in one place rather than a
