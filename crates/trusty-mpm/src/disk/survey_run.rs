@@ -405,7 +405,9 @@ fn claiming_session(
 ) -> Option<String> {
     use crate::session_manager::worktree_reclaim_claim::ClaimState;
     match claim {
-        ClaimState::Unclaimed => None,
+        // #7232: a dead session's discarded claim names nobody the panel could
+        // usefully show — the session is gone.
+        ClaimState::Unclaimed | ClaimState::DeadClaimsDiscarded { .. } => None,
         ClaimState::CallerNested { session }
         | ClaimState::CallerWorkspace { session }
         | ClaimState::Foreign { session, .. } => Some(session.clone()),

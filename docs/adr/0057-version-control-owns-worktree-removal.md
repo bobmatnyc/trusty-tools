@@ -83,8 +83,19 @@ the guard will establish every precondition itself.
      it runs before anything costs a subprocess.
    - **`clean-tree`** — `git status --porcelain` in the target reports nothing.
    - **`unpushed-commits`** — `git rev-list --count @{upstream}..HEAD` is zero.
-     No upstream is a DENY, not a pass: nothing then proves the commits reached
-     a remote.
+     No upstream is not a pass on its own: nothing there proves the commits
+     reached a remote. Amended by #7232 — it is no longer a deny on its own
+     either. `gh pr merge --delete-branch`, the sanctioned merge flow, deletes
+     the remote branch, so `@{upstream}` stops resolving on every squash-merged
+     worktree and this check denied exactly the trees the grant exists to let
+     `version-control` reclaim. A missing upstream is now carried to
+     `merged-pull-request`, which must then supply the landing evidence: a
+     MERGED pull request plus a clean tree grants, and no merged pull request
+     still denies. The guarantee is unchanged — no removal without evidence
+     the commits reached GitHub — only which check supplies it. A missing
+     upstream is distinguished from a git failure by proving `git rev-parse
+     --verify HEAD` succeeds in the same directory first; when it does not,
+     the check denies as before.
    - **`sole-owner`** — the daemon, keyed on the TARGET directory, names
      nobody. Asked through `live_shared_tree_writers_or_deny`, NOT the
      fail-open `live_shared_tree_writers` the HEAD-move rule uses: that one

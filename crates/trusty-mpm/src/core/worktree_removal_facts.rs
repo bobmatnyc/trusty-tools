@@ -47,11 +47,21 @@
 //! dirty by construction here and none could be reclaimed from inside a live
 //! session. The guard now routes through that one implementation.
 //!
+//! **A missing upstream is a FACT, not a failure (#7232).** `gh pr merge
+//! --delete-branch` — the sanctioned merge flow — deletes the remote branch, so
+//! `@{upstream}` stops resolving on every squash-merged worktree. Reporting
+//! that as `Err` made the guard deny exactly the trees ADR-0057 exists to let
+//! `version-control` reclaim. [`UpstreamComparison::NoUpstream`] names the
+//! condition instead, and the policy decides: it is not evidence the commits
+//! are safe, so the merged-PR re-check still has to supply that evidence.
+//!
 //! Test: `merged_pull_request_argv_asks_github_for_the_branch`,
 //! `detached_head_is_not_a_branch`,
 //! `the_harness_ownership_marker_alone_leaves_the_tree_clean`,
-//! `a_real_untracked_file_beside_the_marker_still_counts` below; the policy
-//! that consumes these answers is tested in
+//! `a_real_untracked_file_beside_the_marker_still_counts`,
+//! `a_branch_with_no_upstream_reports_no_upstream_not_an_error`,
+//! `a_branch_with_an_upstream_counts_the_commits_it_is_ahead_by` below; the
+//! policy that consumes these answers is tested in
 //! `bin/tm/commands/pm_guard_bash/worktree_remove`.
 
 use std::path::Path;
@@ -115,6 +125,27 @@ impl MergedPrLookup {
 /// What `git rev-parse --abbrev-ref HEAD` prints for a detached HEAD.
 const DETACHED_HEAD: &str = "HEAD";
 
+/// How HEAD compares to its upstream branch, when it still has one (#7232).
+///
+/// Why: "2 commits are unpushed" and "there is no upstream to compare against"
+/// are different facts, and collapsing the second into `Err` denied every
+/// worktree the sanctioned merge flow produces — `gh pr merge --delete-branch`
+/// removes the remote branch, so `@{upstream}` stops resolving the moment the
+/// pull request lands. `Err` keeps its meaning: git could not answer at all.
+/// What: `Ahead(n)` is `git rev-list --count @{upstream}..HEAD`; `NoUpstream`
+/// means the upstream ref does not resolve while git and the repository do.
+/// Test: `a_branch_with_no_upstream_reports_no_upstream_not_an_error`,
+/// `a_branch_with_an_upstream_counts_the_commits_it_is_ahead_by`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UpstreamComparison {
+    /// Commits on HEAD that the upstream branch does not have.
+    Ahead(usize),
+    /// `@{upstream}` does not resolve — the branch tracks nothing, or the
+    /// remote branch it tracked has been deleted.
+    NoUpstream,
+}
+
 /// The four facts ADR-0057's removal re-checks turn into a verdict.
 ///
 /// Why: a trait rather than four free functions so the guard's policy can be
@@ -134,11 +165,14 @@ pub trait WorktreeRemovalProbe {
     /// harness itself writes into every worktree it provisions.
     fn dirty_entries(&self, dir: &Path) -> Result<usize, String>;
 
-    /// Commits on `HEAD` that the upstream branch does not have.
+    /// How `HEAD` compares to its upstream branch.
     ///
-    /// A worktree with no upstream configured is an `Err`: nothing proves its
-    /// commits reached the remote, so removal would destroy them.
-    fn unpushed_commits(&self, dir: &Path) -> Result<usize, String>;
+    /// #7232: a worktree with no upstream reports
+    /// [`UpstreamComparison::NoUpstream`], not `Err`. That is not a pass —
+    /// nothing there proves the commits reached a remote — but it is a fact the
+    /// policy can weigh against the merged-PR answer, which the `Err` it used
+    /// to be could not be.
+    fn unpushed_commits(&self, dir: &Path) -> Result<UpstreamComparison, String>;
 
     /// The branch `dir` has checked out. A detached HEAD is an `Err`.
     fn branch(&self, dir: &Path) -> Result<String, String>;
@@ -171,13 +205,18 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         count_dirty_files(dir)
     }
 
-    fn unpushed_commits(&self, dir: &Path) -> Result<usize, String> {
-        // No upstream makes `@{upstream}` unresolvable and git exits non-zero,
-        // which `git_stdout` returns as `Err` — the fail-closed direction this
-        // gate needs, and the one the deliverable names explicitly.
+    fn unpushed_commits(&self, dir: &Path) -> Result<UpstreamComparison, String> {
+        // #7232: ask whether there IS an upstream before asking how far ahead
+        // of it HEAD is. `gh pr merge --delete-branch` deletes the remote
+        // branch, so every squash-merged worktree reaches this with an
+        // unresolvable `@{upstream}` — a fact, not a probe failure.
+        if !upstream_resolves(dir)? {
+            return Ok(UpstreamComparison::NoUpstream);
+        }
         let out = git_stdout(dir, &["rev-list", "--count", "@{upstream}..HEAD"])?;
         out.trim()
             .parse::<usize>()
+            .map(UpstreamComparison::Ahead)
             .map_err(|e| format!("`git rev-list --count` printed {:?}: {e}", out.trim()))
     }
 
@@ -226,6 +265,31 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
             repo,
         })
     }
+}
+
+/// Whether `@{upstream}` resolves in `dir` (#7232).
+///
+/// Why: reading a failed `@{upstream}` lookup as "no upstream" would be
+/// fail-OPEN if the reason were a broken git or an unreadable repository — the
+/// policy treats `NoUpstream` as a condition it can still grant under, given a
+/// merged pull request. So the negative answer is only returned once git has
+/// PROVED it works here: `rev-parse --verify HEAD` succeeding in the same
+/// directory leaves "the upstream ref does not resolve" as the only remaining
+/// explanation.
+/// What: `Ok(true)` the ref resolved, `Ok(false)` it did not and HEAD did,
+/// `Err` git could not answer either question — which denies at the call site.
+/// Test: `a_branch_with_no_upstream_reports_no_upstream_not_an_error`.
+fn upstream_resolves(dir: &Path) -> Result<bool, String> {
+    if git_stdout(dir, &["rev-parse", "--symbolic-full-name", "@{upstream}"]).is_ok() {
+        return Ok(true);
+    }
+    git_stdout(dir, &["rev-parse", "--verify", "HEAD"]).map_err(|e| {
+        format!(
+            "`@{{upstream}}` did not resolve and neither did HEAD, so whether this \
+                 worktree's commits reached a remote could not be established: {e}"
+        )
+    })?;
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -315,6 +379,55 @@ mod tests {
             GitAndGhProbe.dirty_entries(&repo).expect("status readable"),
             1,
             "unsaved work beside the marker must still deny removal"
+        );
+    }
+
+    /// 🔴 #7232: `gh pr merge --delete-branch` deletes the remote branch, so
+    /// every squash-merged worktree arrives here with no upstream. On
+    /// `ad64460e8` this returned `Err`, the guard denied at `unpushed-commits`,
+    /// and the merged-PR re-check that would have cleared the tree was never
+    /// reached — so `version-control` could not reclaim a single tree the
+    /// sanctioned merge flow produced.
+    #[test]
+    fn a_branch_with_no_upstream_reports_no_upstream_not_an_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = checkout(tmp.path());
+
+        assert_eq!(
+            GitAndGhProbe
+                .unpushed_commits(&repo)
+                .expect("a missing upstream is a fact, not a probe failure"),
+            UpstreamComparison::NoUpstream
+        );
+    }
+
+    /// The counting arm still counts: `NoUpstream` must not have swallowed the
+    /// case the re-check exists for, or an unpushed commit would be deletable.
+    #[test]
+    fn a_branch_with_an_upstream_counts_the_commits_it_is_ahead_by() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = checkout(tmp.path());
+        // A local bare repository is enough: `@{upstream}` only has to resolve.
+        let remote = tmp.path().join("remote.git");
+        std::fs::create_dir_all(&remote).expect("fixture: create remote dir");
+        git_ok(&remote, &["init", "--bare", "--initial-branch=main"]);
+        git_ok(
+            &repo,
+            &["remote", "add", "origin", &remote.to_string_lossy()],
+        );
+        git_ok(&repo, &["push", "-u", "origin", "main"]);
+        assert_eq!(
+            GitAndGhProbe.unpushed_commits(&repo).expect("upstream set"),
+            UpstreamComparison::Ahead(0)
+        );
+
+        std::fs::write(repo.join("later.txt"), "more\n").expect("fixture: write");
+        git_ok(&repo, &["add", "later.txt"]);
+        git_ok(&repo, &["commit", "-m", "later"]);
+        assert_eq!(
+            GitAndGhProbe.unpushed_commits(&repo).expect("upstream set"),
+            UpstreamComparison::Ahead(1),
+            "an unpushed commit must still be counted"
         );
     }
 

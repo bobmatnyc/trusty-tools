@@ -149,11 +149,17 @@ pub(crate) fn survey_with_index(
         {
             pr = pr_state_for_branch(&scanned.registry_root, branch);
         }
+        // #6806: WHOSE claim, not merely whether one exists.
+        let claim = in_use.claim_state(&scanned.path);
+        // #7232: a claim that stopped blocking has to be visible, or the change
+        // reads as a regression to whoever saw yesterday's refusal.
+        if let Some(note) = claim.note() {
+            tracing::info!(path = %scanned.path.display(), "{note}");
+        }
         let verdict = classify(
             &scanned.path,
             scanned.admission,
-            // #6806: WHOSE claim, not merely whether one exists.
-            &in_use.claim_state(&scanned.path),
+            &claim,
             &pr,
             &inspect_dirt,
             agent_state,

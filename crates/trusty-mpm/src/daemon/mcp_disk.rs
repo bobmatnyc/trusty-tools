@@ -31,7 +31,7 @@ use crate::disk::size_index::DirSize;
 use crate::disk::survey_run::{self, DiskProbes, run};
 use crate::session_manager::worktree_ownership::AgentWorktreeOwner;
 use crate::session_manager::worktree_reclaim::{
-    BranchPrState, LiveClaims, PrIndex, WorkspaceClaim, pr_state_for_branch_within,
+    BranchPrState, PrIndex, pr_state_for_branch_within,
 };
 use crate::session_manager::worktree_reclaim_gh::GH_TIMEOUT;
 use crate::session_manager::worktree_registry::ScannedWorktree;
@@ -69,20 +69,11 @@ pub async fn disk_survey(
     // destructive path: this tool only displays, and the delete path re-reads
     // liveness per candidate immediately before each removal (#2919).
     let manager = state.session_manager().await;
-    let claims = LiveClaims {
-        claims: manager
-            .list()
-            .await
-            .into_iter()
-            .filter_map(|r| {
-                r.workspace_path
-                    .map(|p| WorkspaceClaim::new(r.id.to_string(), p))
-            })
-            .collect(),
-        // The console is not a managed session, so it names none — every claim
-        // it sees is foreign, which is the conservative reading.
-        caller: None,
-    };
+    // #7232: through the crate's single claim producer, so this report and the
+    // reclaim sweep agree about which claims are tombstones. The console is not
+    // a managed session, so it names no caller — every LIVE claim it sees is
+    // foreign, which is the conservative reading.
+    let claims = manager.workspace_claims(None).await;
     let index = state.disk_size_index();
     let state_for_agents = Arc::clone(state);
     let project = project.map(str::to_string);

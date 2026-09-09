@@ -77,6 +77,10 @@ pub(crate) mod worktree_reclaim_verdict;
 // #6806: gate 2's claim resolution — WHICH session claims a candidate, and
 // whether that session is the one that invoked the sweep.
 pub(crate) mod worktree_reclaim_claim;
+// #7232: the ONE place a claim set is built from the store, so the liveness
+// probe that keeps a tombstoned record from blocking reclaim cannot be omitted
+// by a call site.
+pub(crate) mod worktree_claim_source;
 // #4732: the tri-state "does git still hold state here?" classifier that gates
 // every raw directory removal on the worktree teardown path.
 mod worktree_protection;

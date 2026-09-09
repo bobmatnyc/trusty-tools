@@ -294,7 +294,12 @@ fn keep(reasons: Vec<Reason>) -> Classification {
 /// `a_callers_own_nested_worktree_is_not_kept_for_liveness`.
 fn claiming_session(claim: &ClaimState) -> Option<&str> {
     match claim {
-        ClaimState::Unclaimed | ClaimState::CallerNested { .. } => None,
+        // #7232: a discarded dead claim forbids nothing — the session it names
+        // no longer exists, so showing the worktree as KEEP would be as wrong
+        // as the `CallerNested` case above.
+        ClaimState::Unclaimed
+        | ClaimState::CallerNested { .. }
+        | ClaimState::DeadClaimsDiscarded { .. } => None,
         ClaimState::CallerWorkspace { session } | ClaimState::Foreign { session, .. } => {
             Some(session)
         }
