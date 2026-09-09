@@ -124,6 +124,13 @@ pub struct PublishRequest<'a> {
 }
 
 /// A published pause snapshot.
+///
+/// Why: the PR is the deliverable, so a failure to ARM auto-merge is reported
+/// rather than raised — but it is reported, not dropped. A PR that never merges
+/// with nothing naming why is the same silent-failure shape #7282 exists to end.
+/// What: the branch, the commit, the PR URL, and whether auto-merge armed —
+/// with what the refusal said when it did not.
+/// Test: `auto_merge_failure_is_reported_without_failing_the_publish`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishOutcome {
     /// The branch the commit was created on.
@@ -134,6 +141,9 @@ pub struct PublishOutcome {
     pub pr_url: String,
     /// Whether `tm pr merge --auto` armed squash auto-merge.
     pub auto_merge_armed: bool,
+    /// What `tm pr merge --auto` reported when it did not arm. `None` whenever
+    /// [`Self::auto_merge_armed`] is true.
+    pub auto_merge_error: Option<String>,
 }
 
 /// Why a publish did not produce a PR.
@@ -213,7 +223,9 @@ fn commit_note(branch: Option<&str>, commit: Option<&str>) -> String {
 /// `publish_uses_the_configured_default_branch`,
 /// `concurrent_publishes_never_share_a_scratch_index`,
 /// `push_failure_leaves_the_commit_and_names_it`,
-/// `publish_is_a_noop_when_the_tree_is_unchanged`.
+/// `publish_is_a_noop_when_the_tree_is_unchanged`,
+/// `publish_rejects_a_symlinked_sessions_directory`,
+/// `auto_merge_failure_is_reported_without_failing_the_publish`.
 pub fn publish_pause_snapshot<V: PauseVcs>(
     vcs: &V,
     req: &PublishRequest<'_>,
@@ -417,17 +429,27 @@ pub fn publish_pause_snapshot<V: PauseVcs>(
     })?;
 
     // Arming is reported, never enforced: the PR exists and is the deliverable,
-    // so a refusal here must not read as "the snapshot was not published".
-    let armed = vcs
-        .tm(req.repo, &owned(&["pr", "merge", &pr_number, "--auto"]))
-        .map(|o| o.success)
-        .unwrap_or(false);
+    // so a refusal here must not read as "the snapshot was not published". What
+    // the refusal SAID is kept, though — dropping it left a false `armed` and a
+    // PR that never merges with nothing anywhere naming why (#7282 review
+    // round 3).
+    let auto_merge_error = match vcs.tm(req.repo, &owned(&["pr", "merge", &pr_number, "--auto"])) {
+        Ok(o) if o.success => None,
+        Ok(o) => Some(o.failure()),
+        Err(e) => Some(e.to_string()),
+    };
+    if let Some(detail) = &auto_merge_error {
+        tracing::warn!(
+            "session-snapshot PR {pr_url} was opened but auto-merge did not arm: {detail}"
+        );
+    }
 
     Ok(Some(PublishOutcome {
         branch,
         commit,
         pr_url,
-        auto_merge_armed: armed,
+        auto_merge_armed: auto_merge_error.is_none(),
+        auto_merge_error,
     }))
 }
 
@@ -439,11 +461,11 @@ pub fn publish_pause_snapshot<V: PauseVcs>(
 /// named here either. A symlink is refused here rather than at `hash-object`,
 /// which would follow it and commit whatever it points at under a
 /// sessions-tree name (#7282 review).
-/// What: requires a non-empty list, every entry starting with the prefix,
-/// containing no `..` segment, and — when it exists on disk — being a regular
-/// file rather than a symlink or a directory.
+/// What: requires a non-empty list, and every entry to start with the prefix,
+/// to contain no `..` segment, and to pass [`walk_is_unredirected`].
 /// Test: `publish_rejects_a_path_outside_the_sessions_tree`,
-/// `publish_rejects_a_snapshot_path_that_is_not_a_regular_file`.
+/// `publish_rejects_a_snapshot_path_that_is_not_a_regular_file`,
+/// `publish_rejects_a_symlinked_sessions_directory`.
 fn allowlisted(repo: &Path, paths: &[String]) -> Result<Vec<String>, PublishError> {
     if paths.is_empty() {
         return Err(step_err(
@@ -462,20 +484,49 @@ fn allowlisted(repo: &Path, paths: &[String]) -> Result<Vec<String>, PublishErro
                 None,
             ));
         }
-        // A path that does not exist yet is left to `hash-object`, whose error
-        // already names it; only an existing non-regular file is refused here.
-        if let Ok(meta) = std::fs::symlink_metadata(repo.join(p))
-            && !meta.is_file()
-        {
-            return Err(step_err(
-                "allowlist",
-                format!("`{p}` is not a regular file and may not be committed by a pause"),
-                None,
-                None,
+        walk_is_unredirected(repo, p).map_err(|d| step_err("allowlist", d, None, None))?;
+    }
+    Ok(paths.to_vec())
+}
+
+/// Refuse `p` when any segment under `repo` is a symlink, or its leaf is not a
+/// regular file.
+///
+/// Why: `symlink_metadata` on the whole path answers about the LEAF only —
+/// every ancestor segment is followed first. A `.trusty-mpm/sessions` that is
+/// itself a symlink to a directory outside the checkout therefore left the leaf
+/// reporting as an ordinary regular file, and `hash-object` committed the
+/// redirected content under a sessions-tree name (#7282 review round 3).
+/// What: walks `p` segment by segment from `repo`, `symlink_metadata`s each,
+/// and refuses on the first symlink. `repo` itself is not walked — the caller
+/// chose it. A segment that does not exist ends the walk, because nothing below
+/// it can exist either and `hash-object`'s own error already names it.
+/// Test: `publish_rejects_a_symlinked_sessions_directory`,
+/// `publish_rejects_a_snapshot_path_that_is_not_a_regular_file`.
+fn walk_is_unredirected(repo: &Path, p: &str) -> Result<(), String> {
+    let segments: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
+    let leaf = segments.len().saturating_sub(1);
+    let mut at = repo.to_path_buf();
+    for (i, segment) in segments.iter().enumerate() {
+        at.push(segment);
+        let Ok(meta) = std::fs::symlink_metadata(&at) else {
+            return Ok(());
+        };
+        if i == leaf {
+            // `symlink_metadata` reports a symlink as neither file nor dir, so
+            // this one arm refuses a leaf symlink and a leaf directory alike.
+            if !meta.is_file() {
+                return Err(format!(
+                    "`{p}` is not a regular file and may not be committed by a pause"
+                ));
+            }
+        } else if meta.is_symlink() {
+            return Err(format!(
+                "`{p}` passes through the symlink `{segment}` and may not be committed by a pause"
             ));
         }
     }
-    Ok(paths.to_vec())
+    Ok(())
 }
 
 /// The branch this project publishes pauses from.

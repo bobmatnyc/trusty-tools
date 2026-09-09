@@ -383,6 +383,10 @@ pub async fn session_context_pause(
             "commit": out.commit,
             "pr_url": out.pr_url,
             "auto_merge_armed": out.auto_merge_armed,
+            // #7282 review round 3: an unarmed PR is not a failed pause, but the
+            // reason must reach the caller — otherwise the PR simply never
+            // merges and nothing anywhere says why.
+            "auto_merge_error": out.auto_merge_error,
         }),
         // #7282 review: a skip carries WHY. `not_tracked` (this project keeps
         // its sessions git-ignored) and `not_a_git_repo` are benign, but a bare

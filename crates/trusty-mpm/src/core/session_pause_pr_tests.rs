@@ -570,6 +570,50 @@ fn publish_opens_the_pr_through_tm_pr_open() {
     );
 }
 
+/// Why: `tm pr merge --auto` refuses for reasons a person must act on — a
+/// missing label, auto-merge disabled on the repo, a permissions gap. Dropping
+/// its stderr left `auto_merge_armed: false` as the entire report, so the PR
+/// simply never merged and nothing anywhere said why (#7282 review round 3).
+/// The publish itself must still succeed: the PR is the deliverable.
+/// Test target: the `pr merge` arm's failure capture.
+#[test]
+fn auto_merge_failure_is_reported_without_failing_the_publish() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = happy().fail(
+        &["pr", "merge"],
+        "auto-merge is not enabled for bobmatnyc/trusty-tools",
+    );
+    let out = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths()))
+        .unwrap()
+        .expect("an unarmed PR is still a published PR");
+
+    assert!(!out.auto_merge_armed, "{out:?}");
+    assert_eq!(
+        out.auto_merge_error.as_deref(),
+        Some("auto-merge is not enabled for bobmatnyc/trusty-tools"),
+        "{out:?}"
+    );
+    // The PR and its commit are unaffected — the caller reads them either way.
+    assert_eq!(out.branch, "chore/sessions-trusty-tools-95-20260909-183015");
+    assert_eq!(out.commit, "c0ffee1");
+    assert_eq!(
+        out.pr_url,
+        "https://github.com/bobmatnyc/trusty-tools/pull/4242"
+    );
+}
+
+/// Why: `auto_merge_error` is the reason arming failed, so carrying one on a
+/// PR that DID arm would make every armed pause look broken.
+#[test]
+fn a_successful_arming_carries_no_auto_merge_error() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let out = publish_pause_snapshot(&happy(), &request(dir.path(), snapshot_paths()))
+        .unwrap()
+        .expect("the happy path opens a PR");
+    assert!(out.auto_merge_armed, "{out:?}");
+    assert_eq!(out.auto_merge_error, None, "{out:?}");
+}
+
 /// Why: two pauses overlapping — two sessions, or two projects on one host —
 /// shared one `GIT_INDEX_FILE` and one body file when the scratch directory was
 /// `std::env::temp_dir()` with fixed names, so one PR could carry the other's
@@ -670,6 +714,42 @@ fn publish_rejects_a_snapshot_path_that_is_not_a_regular_file() {
     assert!(
         vcs.calls().is_empty(),
         "nothing may be spawned once the allowlist rejects a path"
+    );
+}
+
+/// Why: `symlink_metadata` on the full path answers about the LEAF only — every
+/// ancestor segment is followed first. A `.trusty-mpm/sessions` that is itself a
+/// symlink to a directory outside the checkout therefore left the leaf reporting
+/// as an ordinary regular file, and `hash-object` committed the redirected
+/// content under a sessions-tree name (#7282 review round 3).
+/// Test target: `allowlisted`'s per-component walk.
+#[cfg(unix)]
+#[test]
+fn publish_rejects_a_symlinked_sessions_directory() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let outside = tempfile::TempDir::new().unwrap();
+    std::fs::write(outside.path().join("session-1.md"), b"redirected").unwrap();
+    std::fs::create_dir_all(dir.path().join(".trusty-mpm")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join(".trusty-mpm/sessions")).unwrap();
+
+    let vcs = happy();
+    let paths = vec![".trusty-mpm/sessions/session-1.md".to_string()];
+    let err = publish_pause_snapshot(&vcs, &request(dir.path(), paths)).unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PublishError::Step {
+                step: "allowlist",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("symlink"), "{err}");
+    assert!(
+        vcs.calls().is_empty(),
+        "nothing may be spawned once the allowlist rejects a redirected path"
     );
 }
 
