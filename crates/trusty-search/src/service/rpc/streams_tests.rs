@@ -562,12 +562,10 @@ async fn a_daemon_event_reaches_both_the_sse_body_and_the_socket_stream() {
 /// subscriber count on the daemon's own broadcaster is the observable: it rises
 /// when the stream opens and must fall back once the write fails.
 ///
-/// **The disconnect costs ONE event to clear, and this test emits it.** The
-/// stream client half-closes its write side after the request frame, so the
-/// server's read-EOF does not mean the caller left — `write_stream` finds out at
-/// its next write. Emitting here is what a live daemon's 2 s status ticker does
-/// on its own; a test that asserted the count falls with nothing emitted would
-/// be asserting a mechanism this transport does not have.
+/// **Since #7217 the disconnect clears without an event.** `write_stream` reads
+/// the closed socket, drops the receiver, and the producer's `Sender::closed()`
+/// arm ends the task. The emit below is kept because a live daemon's 2 s status
+/// ticker produces one anyway; it is no longer what clears the subscription.
 ///
 /// The limiter is checked on both sides of the disconnect: a stream that took a
 /// permit would leak one per abandoned dashboard, which no later event clears.

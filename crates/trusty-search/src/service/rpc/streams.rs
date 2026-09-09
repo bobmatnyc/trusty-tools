@@ -61,44 +61,33 @@
 //!
 //! ## A dropped client stops the producer
 //!
-//! Each producer runs on its own task and writes into an `mpsc::Sender`. The
-//! server learns of a disconnect at its NEXT WRITE and not before: the stream
-//! client half-closes its write side once the request frame is out
-//! (`uds::rpc::dial_and_send`), so read-EOF on the server means "the request is
-//! complete", not "the caller left". `write_stream` therefore parks in
-//! `recv()` until an item exists to fail on.
+//! Each producer runs on its own task and writes into an `mpsc::Sender`. Since
+//! #7217 `write_stream` watches the socket alongside that channel, so a client
+//! that closes it ends the handler within one poll interval (~250 ms) whether or
+//! not an item is due. Read-EOF alone still says nothing — the stream client
+//! half-closes its write side once the request frame is out
+//! (`uds::rpc::dial_and_send`) — so what `write_stream` reads is this socket's
+//! SEND side going down, which only a full close sets.
 //!
-//! What follows from that, and what this module does about it:
+//! The departure reaches this module as a dropped receiver:
 //!
-//! - the failing write drops the receiver, so the next `send` here returns
-//!   `Err`. Every loop treats that as the end; discarding it is what would leak
-//!   a task per abandoned dashboard, so no `send` here is discarded.
-//! - each wait ALSO selects on `Sender::closed()`, so a producer parked in
-//!   `broadcast::recv()` ends as soon as the receiver goes rather than one event
-//!   later. Without it a disconnect would cost two events to clear instead of
-//!   one.
-//! - one event still has to arrive, and how long that takes differs per stream.
-//!   `search.status.stream` is bounded: the daemon's status ticker emits every
-//!   ~2 s whatever else is happening, so an abandoned producer clears within a
-//!   tick. `search.index.reindex.stream` is bounded only while the reindex is
-//!   PROGRESSING — it emits per batch, and a run that stalls between batches
-//!   emits nothing, so its abandoned producer stays parked for the stall's
-//!   duration. A finished reindex never parks at all; that arm returns after the
-//!   replay rather than subscribing. A run that COMPLETES while a producer is
-//!   parked ends it when the progress record is garbage-collected — 60 s after
-//!   the terminal event (`service::reindex::stages`'s `REINDEX_PROGRESS_TTL_SECS`)
-//!   — because dropping the record drops the sender the producer is waiting on.
-//!   `a_client_that_drops_mid_stream_leaves_no_producer_subscribed` pins that
-//!   sequence over a real socket for the status stream; the stalled-reindex case
-//!   is documented rather than tested, since forcing a stall needs a seam the
-//!   reindex runner does not have.
+//! - `write_stream` owns the receiver and drops it on return, so the next `send`
+//!   here returns `Err`. Every loop treats that as the end; discarding it is what
+//!   would leak a task per abandoned dashboard, so no `send` here is discarded.
+//! - a producer parked in `broadcast::recv()` never touches its sender, so each
+//!   wait ALSO selects on `Sender::closed()`. That select is what carries the
+//!   departure to a parked producer.
+//! - no event has to arrive. A `search.index.reindex.stream` producer parked
+//!   across a stall between batches used to wait out the stall, and one parked
+//!   past a completed run used to wait for the progress record's garbage
+//!   collection. That record still expires 60 s after its terminal event
+//!   (`service::reindex::stages`'s `REINDEX_PROGRESS_TTL_SECS`, issue #75) to
+//!   bound daemon memory, but it is no longer what frees the producer.
+//!   `a_client_that_drops_mid_stream_leaves_no_producer_subscribed` pins the
+//!   sequence over a real socket for the status stream.
 //!
-//! The pre-existing HTTP SSE route parks on the same broadcast with the same
-//! characteristic: its 20 s heartbeat keeps the TCP connection alive but does not
-//! unstick a stalled reindex either. So a parked producer costs one task and one
-//! broadcast subscriber slot. Neither stream holds an admission permit for its
-//! lifetime, so an abandoned one costs the semaphore nothing even while its task
-//! is still parked.
+//! Neither stream holds an admission permit for its lifetime, so an abandoned
+//! one costs the semaphore nothing.
 //!
 //! Test: `streams_tests.rs`.
 //!

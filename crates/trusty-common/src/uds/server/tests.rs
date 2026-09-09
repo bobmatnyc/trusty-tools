@@ -902,6 +902,38 @@ async fn stream_survives_a_client_that_disconnects_mid_stream() {
     assert_eq!(response.result, Some(json!({ "text": "hello ada" })));
 }
 
+/// Why (#7217): `write_stream` used to end only when its producer channel
+/// closed, so a client that hung up on a quiet stream left the handler parked
+/// and `serve_until`'s shutdown drain spent its whole budget waiting for it.
+/// What: a socketpair whose client half is dropped while the producer's sender
+/// is deliberately held open, so the departed peer is the ONLY thing that can
+/// end the drain. Against the pre-fix code this call never returns and the
+/// timeout fires.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn stream_ends_when_the_peer_departs_with_its_producer_still_open() {
+    let (client, mut server) = tokio::net::UnixStream::pair().expect("socketpair");
+    let (producer, items) = tokio::sync::mpsc::channel::<Result<serde_json::Value, RpcError>>(1);
+    drop(client);
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        write_stream(&mut server, json!(1), items, MAX_FRAME_BYTES),
+    )
+    .await
+    .expect("a departed peer must end the drain rather than park it on a quiet producer");
+
+    let error = outcome.expect_err("no terminal frame reaches a peer that is gone");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe,
+        "departure is reported as the write failure it is: {error}"
+    );
+    // Held open across the call: nothing about the producer ended this stream.
+    drop(producer);
+}
+
 // ── one connection, driven directly ─────────────────────────────────────────
 
 #[tokio::test]

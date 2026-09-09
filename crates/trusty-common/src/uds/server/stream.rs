@@ -34,10 +34,12 @@
 //! Test: `super::tests` — `stream_*`.
 
 use std::marker::PhantomData;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncWrite, AsyncWriteExt, Interest};
+use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
 use super::wire::{RpcError, RpcResponse, RpcStreamFrame};
@@ -195,27 +197,47 @@ impl std::fmt::Debug for RpcOutcome {
 /// also defeat the point: a token stream the client sees only at completion is
 /// the buffered response streaming exists to replace.
 ///
+/// **A departed peer ends the drain, whatever the producer is doing (#7217).**
+/// Waiting on the producer alone left a handler parked for as long as its
+/// stream stayed quiet, so a client that hung up kept the connection — and
+/// [`super::serve_until`]'s shutdown drain — alive until its whole budget was
+/// spent. [`peer_departed`] watches the socket alongside the channel; see it for
+/// why a half-closed client is not mistaken for a departed one.
+///
 /// # Errors
 ///
-/// Only the underlying write error. A handler failure is data, not an error
-/// here — it leaves as the terminal error frame.
+/// Only the underlying write error, of which a departed peer is one: it returns
+/// [`std::io::ErrorKind::BrokenPipe`] with no terminal frame written, exactly as
+/// a failed write would. A handler failure is data, not an error here — it
+/// leaves as the terminal error frame.
 ///
 /// [`StreamPhase::Item`]: super::StreamPhase
 ///
 /// Test: `stream_round_trips_many_frames_over_a_real_socket`,
 /// `stream_reports_a_handler_error_as_a_terminal_frame`,
 /// `stream_refuses_an_item_larger_than_the_frame_budget`,
-/// `stream_survives_a_client_that_disconnects_mid_stream`.
-pub async fn write_stream<W>(
-    writer: &mut W,
+/// `stream_survives_a_client_that_disconnects_mid_stream`,
+/// `stream_ends_when_the_peer_departs_with_its_producer_still_open`.
+pub async fn write_stream(
+    writer: &mut UnixStream,
     id: serde_json::Value,
     mut items: RpcStreamItems,
     max_frame_bytes: u64,
-) -> std::io::Result<bool>
-where
-    W: AsyncWrite + Unpin,
-{
-    while let Some(item) = items.recv().await {
+) -> std::io::Result<bool> {
+    loop {
+        // #7217: the peer is watched alongside the producer, so a departed
+        // client ends the handler instead of parking it on a quiet stream.
+        let next = tokio::select! {
+            item = items.recv() => item,
+            () = peer_departed(writer) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "the stream's peer closed the socket",
+                ));
+            }
+        };
+        let Some(item) = next else { break };
+
         let value = match item {
             Ok(value) => value,
             Err(error) => {
@@ -242,6 +264,40 @@ where
 
     write_frame(writer, &RpcStreamFrame::end(id)).await?;
     Ok(false)
+}
+
+/// How often an otherwise quiet stream re-reads whether its peer is still there.
+///
+/// Why a poll rather than an await on the event: the socket is writable for
+/// essentially a stream's whole life, so `ready(Interest::WRITABLE)` returns at
+/// once and awaiting it in a loop would spin. A quarter second bounds how long a
+/// departed client delays a shutdown drain, at four wakeups per second per open
+/// stream.
+const PEER_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Resolve once `socket`'s peer can no longer receive anything (#7217).
+///
+/// Why: [`write_stream`] needs "the client left" as a signal it can select on,
+/// and read-EOF is not that signal. `uds::rpc::dial_and_send` half-closes the
+/// client's write side the moment the request frame is out, so every
+/// well-behaved streaming client sits at read-EOF for the whole stream.
+/// What: `is_write_closed` is the bit that separates the two. A peer that closed
+/// both halves leaves this socket's SEND side shut down — `EPOLLHUP` on Linux,
+/// `EV_EOF` on the write filter on macOS — which a half-close by a client that
+/// is still reading never sets. A readiness error is treated as departure for
+/// the same reason a write error is: the socket is finished either way.
+///
+/// Test: `stream_ends_when_the_peer_departs_with_its_producer_still_open`,
+/// `stream_round_trips_many_frames_over_a_real_socket` (the half-close that must
+/// NOT count as departure).
+async fn peer_departed(socket: &UnixStream) {
+    loop {
+        match socket.ready(Interest::WRITABLE).await {
+            Ok(ready) if ready.is_write_closed() => return,
+            Err(_) => return,
+            Ok(_) => tokio::time::sleep(PEER_POLL_INTERVAL).await,
+        }
+    }
 }
 
 /// [`crate::uds::encode_frame`] with its serde failure mapped to an io error,
