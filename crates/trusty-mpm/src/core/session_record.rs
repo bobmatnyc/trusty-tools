@@ -22,12 +22,19 @@
 //!   a session id that is not a safe filename — each returns without writing.
 //!   Nothing here may cost the status bar a render.
 //!
+//! Both halves of a transcript record are screened, because both come from the
+//! same attacker-influenceable payload: [`is_safe_session_id`] the file NAME,
+//! [`contained_transcript_path`] the value (#7250).
+//!
 //! Test: the inline suite in `session_record_tests.rs` —
 //! `a_recorded_value_reads_back`, `rejects_a_path_traversal_session_id`,
 //! `an_unchanged_value_leaves_the_file_untouched`,
-//! `a_blank_value_is_never_recorded`, `two_kinds_do_not_collide`.
+//! `a_blank_value_is_never_recorded`, `two_kinds_do_not_collide`,
+//! `rejects_a_transcript_path_outside_the_config_dir`,
+//! `rejects_a_traversing_transcript_path`,
+//! `accepts_a_transcript_path_under_the_config_dir`.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Record kind holding the session's harness model id (#6972).
 pub const KIND_MODEL: &str = "session-model";
@@ -54,6 +61,66 @@ fn is_safe_session_id(session_id: &str) -> bool {
         && session_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Screen a payload's `transcript_path`, returning the file it may record.
+///
+/// Why (#7250): `transcript_path` reaches `tm` from Claude Code's `statusLine`
+/// stdin JSON on the same footing as `session_id`, which [`is_safe_session_id`]
+/// already screens — and a LATER `tm` process opens whatever this store holds.
+/// Unscreened, a crafted payload aims that read at any file on the machine.
+/// What: the path must be absolute, carry no `..` component, and canonicalize
+/// under the canonicalized `claude_config_dir`, the directory Claude Code writes
+/// transcripts beneath (`<config>/projects/<slug>/<session_id>.jsonl`).
+/// Canonicalization rather than lexical resolution, on BOTH sides: the
+/// transcript exists by the time a render reports its path, and resolving
+/// symlinks is what stops a link planted under the config directory from
+/// aiming the read outside it. A path that cannot be canonicalized is rejected,
+/// which costs nothing — `statusLine` fires again seconds later and records it
+/// then. The returned path is the CANONICAL one, so the reader opens the file
+/// that was checked rather than re-resolving the payload's spelling.
+/// Test: `rejects_a_transcript_path_outside_the_config_dir`,
+/// `rejects_a_traversing_transcript_path`,
+/// `accepts_a_transcript_path_under_the_config_dir`.
+pub fn contained_transcript_path(
+    claude_config_dir: &Path,
+    transcript_path: &str,
+) -> Option<PathBuf> {
+    let raw = transcript_path.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let raw = Path::new(raw);
+    if !raw.is_absolute() || raw.components().any(|c| c == Component::ParentDir) {
+        tracing::debug!(
+            path = %raw.display(),
+            "statusline transcript_path is relative or traverses; not recorded"
+        );
+        return None;
+    }
+    let Ok(root) = claude_config_dir.canonicalize() else {
+        tracing::debug!(
+            dir = %claude_config_dir.display(),
+            "Claude config directory does not resolve; transcript_path not recorded"
+        );
+        return None;
+    };
+    let Ok(canonical) = raw.canonicalize() else {
+        tracing::debug!(
+            path = %raw.display(),
+            "statusline transcript_path does not resolve; not recorded"
+        );
+        return None;
+    };
+    if !canonical.starts_with(&root) {
+        tracing::debug!(
+            path = %canonical.display(),
+            dir = %root.display(),
+            "statusline transcript_path resolves outside the Claude config directory; not recorded"
+        );
+        return None;
+    }
+    Some(canonical)
 }
 
 /// The record's path under an explicit framework root.
