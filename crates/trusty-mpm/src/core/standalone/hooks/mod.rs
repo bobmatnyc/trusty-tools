@@ -146,11 +146,12 @@ fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Result<PathBuf, Stabl
 /// What: accepts `running` (the already-canonicalized `current_exe()` or
 /// override) only when it is absolute, is not an ephemeral build path
 /// ([`trusty_common::bin_resolve::is_ephemeral_build_path`]), AND names one of
-/// [`MPM_BIN_STEMS`]. Otherwise falls back to the first absolute
-/// [`MPM_BIN_NAMES`] hit from `path_lookup`, and reports why the running
-/// binary was refused when that fallback also fails.
+/// [`MPM_BIN_STEMS`]. Otherwise falls back to the first `path_lookup` hit for a
+/// [`MPM_BIN_NAMES`] entry that passes those SAME three gates, and reports why
+/// the running binary was refused when that fallback also fails.
 /// Test: `resolve_stable_hook_exe_with_refuses_a_foreign_binary_stem`,
 /// `resolve_stable_hook_exe_with_refuses_an_ephemeral_exe`,
+/// `resolve_stable_hook_exe_with_refuses_an_ephemeral_path_lookup_hit`,
 /// `resolve_stable_hook_exe_with_falls_back_to_the_installed_binary`.
 fn resolve_stable_hook_exe_with(
     running: Option<PathBuf>,
@@ -178,10 +179,19 @@ fn resolve_stable_hook_exe_with(
 
     // Refused or unresolved running path: fall back to a PATH-resolved
     // installed binary so the hook command survives worktree/debug rebuilds.
+    // #7244 round 2: `$PATH` is not a trust boundary. A build-tree `tm` ahead
+    // of the installed one — `target/debug/tm`, or one of this repo's
+    // `target-<issue>/debug/tm` — is exactly the path the running-exe branch
+    // above refuses, so the fallback applies the SAME two gates rather than
+    // accepting through the side door what the front door just turned away.
     MPM_BIN_NAMES
         .iter()
         .find_map(|name| path_lookup(name))
-        .filter(|p| p.is_absolute())
+        .filter(|p| {
+            p.is_absolute()
+                && !trusty_common::bin_resolve::is_ephemeral_build_path(p)
+                && is_mpm_bin_stem_path(p)
+        })
         .ok_or_else(|| refusal.unwrap_or(StableHookExeError::Unresolved))
 }
 
@@ -352,18 +362,34 @@ pub fn mpm_hook_additions() -> Result<serde_json::Value, StableHookExeError> {
 /// unnoticed.
 const MPM_BIN_NAMES: &[&str] = &["trusty-mpm", "tm"];
 
-/// File-name STEMS that identify an mpm-owned binary once any Cargo
-/// build-artifact `-<hash>` suffix is stripped.
+/// File-name STEMS that identify a binary this crate SHIPS TODAY, once any
+/// Cargo build-artifact `-<hash>` suffix is stripped.
 ///
-/// Why (#2235): managed hooks resolved from a debug/worktree build embed a
-/// `target/debug/deps/<stem>-<hash>` path whose file name is NOT one of
-/// [`MPM_BIN_NAMES`] — the Cargo dep artifact uses the underscore crate name
-/// (`trusty_mpm`) or the `[[bin]]` alias (`tm`) with a trailing content hash,
-/// and the long-defunct pre-rename binary was `session_manager_mvp`. All of
-/// these must be recognised as the SAME hook owner so stale entries collapse.
-/// What: the canonical stems (dash + underscore spellings) plus the retired MVP
-/// name. Matched by [`is_mpm_binary_filename`] against the hash-stripped stem.
-const MPM_BIN_STEMS: &[&str] = &["trusty-mpm", "trusty_mpm", "tm", "session_manager_mvp"];
+/// Why (#7244 round 2): this list is the WRITE-side identity check
+/// ([`is_mpm_bin_stem_path`]), the second of two independent reasons a binary
+/// may be persisted as a hook command. `session_manager_mvp` used to be here —
+/// but `crates/trusty-mpm/tests/session_manager_mvp.rs` compiles to
+/// `session_manager_mvp-<hash>` on every `cargo test`, so for that one name the
+/// "two independent checks" collapsed to one: only the path guard stood between
+/// a running test harness and a real project's `settings.json`. Nothing this
+/// crate ships is named that any more, so the write side does not need it.
+/// What: the two `[[bin]]` names plus the underscore crate-name spelling Cargo
+/// uses for dep artifacts. The cleanup side keeps the retired name — see
+/// [`MPM_STALE_BIN_STEMS`].
+const MPM_BIN_STEMS: &[&str] = &["trusty-mpm", "trusty_mpm", "tm"];
+
+/// [`MPM_BIN_STEMS`] plus the retired pre-rename binary name.
+///
+/// Why (#2235): a pre-rename install still carries
+/// `…/deps/session_manager_mvp-<hash> hook` in its `settings.json`, and the
+/// replace-by-identity strip in [`write_project_hooks`] can only collapse an
+/// entry it recognises as the same hook owner. Removing the name from the WRITE
+/// check (#7244 round 2) must not orphan those entries, so the CLEANUP check
+/// keeps it. Recognising a name for removal is the safe direction; recognising
+/// it for persistence is not.
+/// What: the shipped stems plus `session_manager_mvp`. Read only by
+/// [`is_mpm_hash_suffixed_artifact`].
+const MPM_STALE_BIN_STEMS: &[&str] = &["trusty-mpm", "trusty_mpm", "tm", "session_manager_mvp"];
 
 /// Recognise an mpm-owned binary by its EXACT file-name component: a
 /// canonical [`MPM_BIN_NAMES`] entry or the defunct `session_manager_mvp` name.
@@ -401,7 +427,7 @@ fn is_mpm_binary_filename(name: &str) -> bool {
 /// same coincidental-collision risk pre-existing #2940 and is out of this
 /// PR's scope — see `cleanup.rs`'s module doc for the residual risk note).
 /// What: returns `true` when `path`'s file name is `<stem>-<hexhash>` with
-/// `stem ∈ MPM_BIN_STEMS` and an all-hex-digit `<hexhash>` of length ≥ 8, AND
+/// `stem ∈ MPM_STALE_BIN_STEMS` and an all-hex-digit `<hexhash>` of length ≥ 8, AND
 /// `path` has a `deps` component anywhere in it.
 /// Test: `test_is_mpm_hook_command_recognises_stale_hash_and_mvp_variants`,
 /// `test_is_mpm_hook_command_rejects_hash_suffixed_binary_outside_deps_dir`.
@@ -415,7 +441,7 @@ fn is_mpm_hash_suffixed_artifact(path: &Path) -> bool {
     // carried no hash suffix, which is the exact-name branch's business
     // ([`is_mpm_binary_filename`]), not this one's.
     let stem = hash_stripped_stem(name);
-    if stem == name || !MPM_BIN_STEMS.contains(&stem) {
+    if stem == name || !MPM_STALE_BIN_STEMS.contains(&stem) {
         return false;
     }
     path.components().any(|c| c.as_os_str() == "deps")

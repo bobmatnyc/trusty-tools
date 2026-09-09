@@ -162,6 +162,48 @@ fn resolve_stable_hook_exe_with_refuses_an_ephemeral_exe() {
     );
 }
 
+/// Why (#7244 round 2): `$PATH` is not a trust boundary. The running-exe branch
+/// refuses a build-tree binary, then the fallback resolved `tm` from `$PATH`
+/// and accepted whatever came back — so a `target/debug/tm` (or one of this
+/// repo's `target-<issue>/debug/tm`) ahead of the installed one on `$PATH` was
+/// written into `settings.json` as the hook command, which is the same bad
+/// write #7244 reports, through the side door instead of the front one.
+/// What: injects an ephemeral hit from `path_lookup` with a running path that
+/// is itself refused, and asserts the whole call refuses rather than persisting
+/// the lookup's answer. `deps` sits under `<profile>` so the guard reads it as
+/// the Cargo artifact it is. The variant is the running path's refusal, which
+/// is the actionable one for the operator.
+#[test]
+fn resolve_stable_hook_exe_with_refuses_an_ephemeral_path_lookup_hit() {
+    let from_path = PathBuf::from("/Users/x/trusty-tools/target-7244/debug/tm");
+    let refused = PathBuf::from("/Users/x/trusty-tools/target-7224/debug/deps/tm-cd3ba8f0");
+    let err = resolve_stable_hook_exe_with(Some(refused.clone()), |_| Some(from_path.clone()))
+        .expect_err("a build-tree binary on PATH must never become the hook command");
+    assert!(
+        matches!(&err, StableHookExeError::Ephemeral(p) if *p == refused),
+        "expected Ephemeral({}), got {err:?}",
+        refused.display()
+    );
+}
+
+/// Why (#7244 round 2): the fallback's second gate is the stem check — a
+/// `$PATH` entry that resolves to something outside a build tree but is not a
+/// binary this crate ships must be refused for the same reason the running-exe
+/// branch refuses one.
+/// What: injects a foreign, non-ephemeral hit from `path_lookup` and asserts
+/// the refusal, so the two gates are pinned independently rather than one
+/// masking the other.
+#[test]
+fn resolve_stable_hook_exe_with_refuses_a_foreign_path_lookup_hit() {
+    let from_path = PathBuf::from("/usr/local/bin/session_manager_mvp-cd3ba8f0");
+    let err = resolve_stable_hook_exe_with(None, |_| Some(from_path.clone()))
+        .expect_err("a non-tm binary on PATH must never become the hook command");
+    assert!(
+        matches!(&err, StableHookExeError::Unresolved),
+        "with no running path to blame the refusal is Unresolved, got {err:?}"
+    );
+}
+
 /// Why (#7244): refusing the running binary must not mean refusing outright —
 /// a developer running a debug build still gets working hooks, pointed at the
 /// installed binary. The fallback is what keeps the hard refusal from being a
@@ -182,9 +224,18 @@ fn resolve_stable_hook_exe_with_falls_back_to_the_installed_binary() {
 
 /// Why (#7244): the name check is the second, independent reason a binary is
 /// accepted, so it must accept every name this crate actually ships — a false
-/// refusal here would stop hooks being written at all. Both `[[bin]]` names,
-/// the underscore crate-name spelling Cargo uses for dep artifacts, and the
-/// retired `session_manager_mvp` name all identify the same hook owner.
+/// refusal here would stop hooks being written at all. Both `[[bin]]` names and
+/// the underscore crate-name spelling Cargo uses for dep artifacts identify the
+/// same hook owner.
+///
+/// Round 2 removes `session_manager_mvp` from the accepted set.
+/// `crates/trusty-mpm/tests/session_manager_mvp.rs` compiles to
+/// `session_manager_mvp-<hash>` on every `cargo test`, so while that name was
+/// accepted the two supposedly independent checks collapsed to one for exactly
+/// the shape #7244 is about: a running test harness whose only remaining
+/// obstacle was the path guard. The cleanup side still recognises the retired
+/// name (`MPM_STALE_BIN_STEMS`) — recognising a name for REMOVAL is safe,
+/// recognising it for PERSISTENCE is not.
 /// What: asserts each shipped name (bare and hash-suffixed) is recognised and
 /// that a lookalike is not. `trusty-mpm` is why the hash-strip rule checks that
 /// the suffix is hex: its own trailing `-mpm` must not be taken for a hash.
@@ -194,10 +245,8 @@ fn is_mpm_bin_stem_path_accepts_the_shipped_names() {
         "tm",
         "trusty-mpm",
         "trusty_mpm",
-        "session_manager_mvp",
         "tm-1a2b3c4d5e6f7a8b",
         "trusty_mpm-1a2b3c4d",
-        "session_manager_mvp-deadbeef",
     ] {
         assert!(
             is_mpm_bin_stem_path(&PathBuf::from("/usr/local/bin").join(name)),
@@ -206,6 +255,11 @@ fn is_mpm_bin_stem_path_accepts_the_shipped_names() {
     }
     for name in [
         "test_session_lifecycle-cd3ba8f03938239b",
+        // The `cargo test` harness for this crate's own integration suite. A
+        // plain `/usr/local/bin/` prefix means the path guard says nothing —
+        // the stem check is the only thing refusing it (#7244 round 2).
+        "session_manager_mvp",
+        "session_manager_mvp-deadbeef",
         "tm-cli",
         "trusty-mpmx",
         "claude",

@@ -309,7 +309,26 @@ pub fn is_under_system_temp(path: &Path) -> bool {
 /// What: the variable name only; [`is_under_cargo_target_dir`] does the read.
 const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
 
-/// Path COMPONENTS that place a path inside a Cargo build tree.
+/// The two Cargo build profiles that name a build root's immediate child.
+///
+/// Why (#7244): the build root is what varies (`target`, `target-7224`, any
+/// `CARGO_TARGET_DIR`); the profile directory under it does not. Requiring it
+/// is what separates a real build tree from a directory that merely shares a
+/// name — see [`is_in_cargo_build_tree`].
+/// What: the profile directory names Cargo creates under a build root.
+const BUILD_TREE_PROFILES: &[&str] = &["debug", "release"];
+
+/// Path COMPONENTS Cargo creates INSIDE a build profile directory.
+///
+/// Why (#7244): these two names are common enough as ordinary directories
+/// (`/Users/x/build/tools`, `/Users/x/deps/vendor`) that matching them on their
+/// own misclassifies an installed binary as ephemeral, which stops hooks being
+/// written at all — the same end-state as #7244, reached from the other
+/// direction. They only mean "Cargo artifact" in the position Cargo puts them.
+/// What: matched only in the [`is_in_cargo_build_tree`] positions, never alone.
+const BUILD_TREE_ARTIFACT_DIRS: &[&str] = &["deps", "build"];
+
+/// Whether `path` runs through a Cargo build-tree directory.
 ///
 /// Why (#7244): this repo gives every agent worktree its own build directory
 /// named `target-<issue>` (`target-7224`, `target-7244`). Neither
@@ -318,34 +337,46 @@ const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
 /// [`is_ephemeral_build_path`] read that running TEST BINARY as a stable
 /// installed path and `resolve_stable_hook_exe` baked it into the project's
 /// real `settings.json` for every hook — pm-guard enforcement and Read/Bash
-/// diversion were silently dead until the file was regenerated. Matching on
-/// the STRUCTURE Cargo always produces (a `deps/` or `build/` directory, or a
-/// `target`-named build root) closes the whole family rather than one more
-/// literal spelling.
-/// What: matched COMPONENT-wise (never as substrings), so `/opt/deps-tool/tm`
-/// and `/Users/x/rebuild/bin/tm` stay accepted — the false-positive class a
-/// `contains("deps")` test would introduce. `target` is additionally matched
-/// with a `target-` prefix so any `target-<anything>` build root is covered.
-const BUILD_TREE_COMPONENTS: &[&str] = &["deps", "build", "target"];
-
-/// Whether `path` runs through a Cargo build-tree directory.
-///
-/// Why (#7244): see [`BUILD_TREE_COMPONENTS`]. Split out so the
-/// component-vs-substring decision has one implementation and one place to
-/// document it.
-/// What: `true` when any component of `path` is exactly a
-/// [`BUILD_TREE_COMPONENTS`] entry, or starts with `target-` (the
-/// `target-<issue>` per-worktree build roots this repo mints). A non-UTF-8
-/// component degrades to "no match" rather than panicking; the substring pass
-/// in [`is_ephemeral_build_path`] still covers the default layout in that case.
+/// diversion were silently dead until the file was regenerated. Matching the
+/// STRUCTURE Cargo produces closes the whole family rather than one more
+/// literal spelling. Round 2 narrows that structure: flagging a bare `target`,
+/// `deps` or `build` component wherever it appeared also rejected
+/// `/Users/target/.cargo/bin/tm` and `/Users/x/build/tools/tm`, and a refused
+/// path writes no hooks at all.
+/// What: `true` when the path carries the Cargo LAYOUT
+/// `<root>/{debug,release}[/{deps,build}]`, matched COMPONENT-wise (never as
+/// substrings) in three positions: a `target` / `target-<anything>` component
+/// immediately followed by a [`BUILD_TREE_PROFILES`] entry; a
+/// [`BUILD_TREE_ARTIFACT_DIRS`] component whose parent is a profile (which
+/// covers a `CARGO_TARGET_DIR` with no `target` in its name); or a
+/// [`BUILD_TREE_ARTIFACT_DIRS`] component under a `target` / `target-*`
+/// ancestor. A non-UTF-8 component matches nothing and does not collapse the
+/// adjacency around it; the substring pass in [`is_ephemeral_build_path`] still
+/// covers the default layout in that case.
 /// Test: `is_ephemeral_build_path_flags_custom_cargo_target_dirs`,
 /// `is_ephemeral_build_path_accepts_installed_paths`.
 fn is_in_cargo_build_tree(path: &Path) -> bool {
-    path.components().any(|c| {
-        c.as_os_str().to_str().is_some_and(|name| {
-            BUILD_TREE_COMPONENTS.contains(&name) || name.starts_with("target-")
-        })
-    })
+    // Positions are preserved (a non-UTF-8 component stays as `None`) so a
+    // component the guard cannot read never makes two others adjacent.
+    let names: Vec<Option<&str>> = path.components().map(|c| c.as_os_str().to_str()).collect();
+    let is_build_root =
+        |n: Option<&str>| n.is_some_and(|s| s == "target" || s.starts_with("target-"));
+    let is_profile = |n: Option<&str>| n.is_some_and(|s| BUILD_TREE_PROFILES.contains(&s));
+
+    let mut under_build_root = false;
+    for (i, name) in names.iter().copied().enumerate() {
+        if is_build_root(name) {
+            if is_profile(names.get(i + 1).copied().flatten()) {
+                return true;
+            }
+            under_build_root = true;
+        } else if name.is_some_and(|s| BUILD_TREE_ARTIFACT_DIRS.contains(&s))
+            && (under_build_root || (i > 0 && is_profile(names[i - 1])))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether `path` lives under the build directory `CARGO_TARGET_DIR` names.
@@ -660,7 +691,9 @@ mod tests {
     /// home, a linked `.cargo`) means the path is not the on-disk spelling.
     /// The guard reads COMPONENTS and never canonicalizes the candidate, so a
     /// symlinked prefix cannot flip the verdict — that is the property the
-    /// symlinked rows pin. `CARGO_TARGET_DIR` is exercised through the ambient
+    /// symlinked rows pin. Round 2 adds the POSITION rows: a `target`, `build`
+    /// or `deps` component only means "Cargo artifact" where Cargo puts it, so
+    /// a user directory of that name stays accepted. `CARGO_TARGET_DIR` is exercised through the ambient
     /// process environment rather than a `set_var`: the test binary is itself
     /// built by Cargo, so the variable is already set to whatever build tree
     /// produced it, and mutating a process-global would race sibling tests.
@@ -671,7 +704,9 @@ mod tests {
             "/Users/x/trusty-tools/target-7244/debug/tm",
             "/Users/x/trusty-tools/target/release/tm",
             "/Users/x/trusty-tools/target/debug/build/libsqlite3-sys-abc/build-script-build",
-            "/Users/x/scratch/deps/trusty_mpm-1a2b3c4d",
+            // A `CARGO_TARGET_DIR` with no `target` in its name still produces
+            // the `<profile>/deps` tail, which is what the guard reads.
+            "/Users/x/scratch/debug/deps/trusty_mpm-1a2b3c4d",
         ];
         let stable = [
             "/Users/x/.cargo/bin/tm",
@@ -683,6 +718,15 @@ mod tests {
             "/Users/x/.cargo-link/bin/tm",
             "/opt/deps-tool/bin/tm",
             "/Users/x/rebuild/bin/tm",
+            // #7244 round 2: these four are the false-positive class a bare
+            // component match introduced. A user directory named `target`,
+            // `build` or `deps` is not a Cargo build tree, and refusing one
+            // stops hooks being written at all — the same end-state as the bug
+            // this guard exists to fix, reached from the other direction.
+            "/Users/target/.cargo/bin/tm",
+            "/Users/x/build/tools/tm",
+            "/Users/x/deps/vendor/tm",
+            "/Users/x/scratch/deps/trusty_mpm-1a2b3c4d",
         ];
 
         let missed: Vec<&str> = ephemeral
