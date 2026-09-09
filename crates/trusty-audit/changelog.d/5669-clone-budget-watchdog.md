@@ -39,6 +39,20 @@ Fixed
   and feed that straight into the budget ledger, so a reused checkout of any
   size could be spent invisibly. Both are now named gaps instead. A checkout
   that was already on disk when the run started is never removed.
+- Ctrl-C during a clone now stops the clone. Putting each clone in a process
+  group of its own is what lets one signal reach the whole tree, and it is also
+  what takes that tree out of the terminal's foreground group — so a raw Ctrl-C
+  used to kill `taudit` outright, running no destructors, and leave `ssh` and
+  `git-index-pack` fetching into the client's disk with the watchdog dead. The
+  interrupt is now forwarded to every clone group the terminal can no longer
+  reach, anything still running 250ms later is killed, and `trusty-audit` then
+  dies by `SIGINT` under its default disposition, so a shell script or CI runner
+  still sees the run as interrupted rather than as finished.
+- A partial checkout that can be neither removed nor measured is now reported as
+  an unknown size naming the measurement failure, instead of as "at least 0
+  bytes are still on disk" — a figure that reads as measured for a tree that may
+  hold gigabytes. Its bytes are excluded from the budget ledger and every later
+  budget decision in the run is marked a floor.
 - `CloneOptions::budget_bytes`, `DEFAULT_BUDGET_BYTES`, and the `--budget-gb`
   help text no longer say the budget stops clones from starting without capping
   one in flight.

@@ -152,7 +152,15 @@ pub(super) struct Finished {
 /// it MEASURES what survived, so the bytes count against the budget instead of
 /// being reported as zero, and returns the sentence the report prints as its own
 /// gap line.
-/// Test: `super::clone_tests::a_staged_tree_that_cannot_be_removed_is_its_own_gap`.
+///
+/// A tree that cannot be REMOVED and cannot be MEASURED either is a third case,
+/// and it is reported as unknown rather than as a floor of zero: "at least 0
+/// bytes" reads as a measured figure to a recipient, and the number it hides can
+/// be gigabytes. The gap line names the measurement failure, and
+/// [`Finished::bytes_complete`] is cleared, which is what turns every later
+/// budget decision in the run into the floor it has become (#5669).
+/// Test: `super::clone_tests::a_staged_tree_that_cannot_be_removed_is_its_own_gap`,
+/// `super::clone_tests::an_unmeasurable_residue_is_reported_unknown_not_zero`.
 pub(super) fn discard_at(path: &Path, state: CloneState) -> Finished {
     let source = match std::fs::remove_dir_all(path) {
         Ok(()) => {
@@ -173,22 +181,36 @@ pub(super) fn discard_at(path: &Path, state: CloneState) -> Finished {
         }
         Err(source) => source,
     };
-    // The removal failed, so whatever is there is still occupying disk. An
-    // unreadable root gives no figure at all, which is reported as a floor of
-    // zero rather than as a confident zero.
-    let (bytes, bytes_complete) = measure_tree(path).unwrap_or((0, false));
-    let size = if bytes_complete {
-        format!("{bytes} bytes")
-    } else {
-        format!("at least {bytes} bytes")
+    // #5669: the removal failed, so whatever is there is still occupying disk.
+    // Whether that is a FIGURE at all is what this match keeps: an unopenable
+    // root used to collapse into `(0, false)`, which the sentence below then
+    // printed as "at least 0 bytes" — a measurement, of a tree nothing measured.
+    let (bytes, bytes_complete, size) = match measure_tree(path) {
+        Ok((bytes, true)) => (
+            bytes,
+            true,
+            format!("{bytes} bytes are still on disk and count against the disk budget"),
+        ),
+        Ok((bytes, false)) => (
+            bytes,
+            false,
+            format!("at least {bytes} bytes are still on disk and count against the disk budget"),
+        ),
+        Err(why) => (
+            0,
+            false,
+            format!(
+                "its size is unknown ({why}), so what it holds is not counted against the disk \
+                 budget and every later budget decision in this run is a floor"
+            ),
+        ),
     };
     Finished {
         state,
         bytes,
         bytes_complete,
         residue: Some(format!(
-            "the partial checkout at {} could not be removed: {source}; {size} are still on \
-             disk and count against the disk budget",
+            "the partial checkout at {} could not be removed: {source}; {size}",
             path.display()
         )),
     }

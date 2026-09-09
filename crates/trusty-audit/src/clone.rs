@@ -68,6 +68,9 @@ mod watchdog;
 
 use disk::{finish_one, measure_tree};
 
+/// The Ctrl-C path a binary running this module's clones must install (#5669).
+pub use watchdog::stop_clones_on_interrupt;
+
 /// Directory under [`Area::State`] where in-progress clones are built.
 ///
 /// Why: the staging path must be one no repository name can address. Building
@@ -1918,6 +1921,63 @@ mod clone_tests {
                 .any(|g| g.contains("acme/monorepo") && g.contains("could not be removed")),
             "the removal failure is named to the recipient: {:?}",
             report.gaps
+        );
+    }
+
+    /// A residue that cannot be MEASURED is unknown, not "at least 0" (#5669).
+    ///
+    /// `measure_tree(path).unwrap_or((0, false))` folded a root that could not
+    /// be opened into the same shape as a partial walk, so the gap line said
+    /// "at least 0 bytes are still on disk" for a tree that may hold gigabytes —
+    /// a figure a recipient reads as measured. The 0o555 fixture above cannot
+    /// reach this arm: a read-only directory still OPENS, so the measurement
+    /// there succeeds and only the removal fails.
+    #[test]
+    fn an_unmeasurable_residue_is_reported_unknown_not_zero() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // root ignores the mode bits, so the case cannot be staged there.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let staged = tmp.path().join("staged");
+        std::fs::create_dir_all(&staged).expect("mkdir");
+        std::fs::write(staged.join("huge"), vec![b'x'; 8192]).expect("write");
+        // 0o000 denies the read the REMOVAL walks with and the read the
+        // MEASUREMENT walks with, which is the pair 0o555 cannot produce.
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+        let finished = discard_at(
+            &staged,
+            CloneState::BudgetExceeded {
+                staged_bytes: 8192,
+                budget_bytes: 4096,
+            },
+        );
+
+        // Restore before the assertions so the tempdir can always be removed.
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let residue = finished
+            .residue
+            .as_deref()
+            .expect("a removal that failed must say so");
+        assert!(residue.contains("could not be removed"), "{residue}");
+        assert!(
+            residue.contains("size is unknown"),
+            "an unmeasured tree is named as unknown: {residue}"
+        );
+        assert!(
+            residue.contains("could not be measured"),
+            "the measurement failure itself is named: {residue}"
+        );
+        assert!(
+            !residue.contains("at least 0 bytes"),
+            "an unmeasured tree must not read as a measured floor: {residue}"
+        );
+        assert!(
+            !finished.bytes_complete,
+            "an unknown size makes every later budget decision in the run a floor"
         );
     }
 

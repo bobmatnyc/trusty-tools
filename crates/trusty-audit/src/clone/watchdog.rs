@@ -41,6 +41,7 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
@@ -56,6 +57,144 @@ pub(super) const SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How long a signalled child has to exit before it is killed outright.
 pub(super) const TERM_GRACE: Duration = Duration::from_secs(5);
+
+/// How long a clone group gets to wind down after a Ctrl-C.
+///
+/// Deliberately far shorter than [`TERM_GRACE`]: this one runs while an operator
+/// is holding a terminal that has stopped answering them, and five seconds there
+/// reads as a hang. `git` and `ssh` unlink their temporary files on the `SIGINT`
+/// that arrives first, so the `SIGKILL` this precedes is only for whatever
+/// ignored it.
+const INTERRUPT_GRACE: Duration = Duration::from_millis(250);
+
+/// The clone process groups this process has taken out of the terminal's reach.
+///
+/// Why: `process_group(0)` in [`run`] is what lets one signal reach a whole
+/// clone tree, and the very same call is what removes that tree from the
+/// terminal's FOREGROUND group — so a raw Ctrl-C arrives at `taudit` alone. This
+/// list is the only record of what the terminal can no longer signal, and
+/// [`stop_clones_on_interrupt`] is what walks it (#5669).
+/// What: pids of process-group LEADERS, added when a child is spawned and
+/// removed once it has been waited on. The sweep clones one repository at a
+/// time, so there is at most one entry in practice — a list rather than a slot
+/// because a second caller must not be able to displace the first's group.
+/// Test: `super::watchdog::watchdog_tests::an_interrupt_kills_a_detached_clone_group`,
+/// `super::watchdog::watchdog_tests::a_detached_group_is_deregistered_when_its_guard_drops`.
+static DETACHED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// One entry in [`DETACHED`], removed however [`run`] returns.
+///
+/// A panic between the spawn and the wait would otherwise leave a pid behind
+/// that a later interrupt would signal, and pids are reused.
+/// Test: `super::watchdog::watchdog_tests::a_detached_group_is_deregistered_when_its_guard_drops`.
+struct Detached(u32);
+
+impl Detached {
+    /// Record a child that now leads a process group of its own.
+    fn register(pid: u32) -> Self {
+        // A poisoned lock must not disarm the one record of what is still
+        // running: this guards against orphaned clones, so it recovers the
+        // inner value rather than skipping the write.
+        DETACHED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(pid);
+        Self(pid)
+    }
+}
+
+impl Drop for Detached {
+    fn drop(&mut self) {
+        DETACHED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|pid| *pid != self.0);
+    }
+}
+
+/// Give Ctrl-C back its meaning, then die the way an uncaught one would have.
+///
+/// Why: [`run`] puts every clone in a process group of its own so that one
+/// signal reaches the whole tree, and the price is that the tree is no longer in
+/// the terminal's foreground group. This crate installed no signal handling at
+/// all, so a raw Ctrl-C killed `taudit` by `SIGINT`'s default disposition — no
+/// destructors, `kill_on_drop` never reached — and left `ssh` and
+/// `git-index-pack` fetching into a client's disk with nothing watching the
+/// ceiling any more (#5669).
+/// What: awaits `SIGINT`, passes it on to every group the terminal can no longer
+/// reach, kills whatever outlives [`INTERRUPT_GRACE`], and then re-raises
+/// `SIGINT` under the default disposition. Awaiting this registers a handler, so
+/// `SIGINT` stops killing the process on its own from the first poll onwards;
+/// the re-raise is what puts that back. Never returns.
+///
+/// This belongs to the BINARY, not to [`super::clone_all`]: it ends the process,
+/// and a front end embedding this crate owns that decision itself.
+/// Test: `super::watchdog::watchdog_tests::an_interrupt_kills_a_detached_clone_group`.
+pub async fn stop_clones_on_interrupt() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        // The handler could not be installed, so `SIGINT` keeps its default
+        // disposition and this task has nothing left to contribute. Returning
+        // would instead re-raise on a signal that never arrived.
+        std::future::pending::<()>().await;
+    }
+    interrupt_detached_groups(INTERRUPT_GRACE).await;
+    die_by_sigint()
+}
+
+/// Deliver the interrupt on to every detached clone group.
+///
+/// Split from [`stop_clones_on_interrupt`] so it can be reasoned about without a
+/// real `SIGINT`; the groups it reads and the signalling it delegates are tested
+/// separately, because a test that called this would signal every OTHER test's
+/// clone in the same process.
+/// Test: `super::watchdog::watchdog_tests::an_interrupt_kills_a_detached_clone_group`.
+async fn interrupt_detached_groups(grace: Duration) {
+    let groups = DETACHED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    stop_groups(&groups, grace).await;
+}
+
+/// Signal these process groups, killing whatever outlives the grace.
+///
+/// Test: `super::watchdog::watchdog_tests::an_interrupt_kills_a_detached_clone_group`.
+async fn stop_groups(groups: &[u32], grace: Duration) {
+    if groups.is_empty() {
+        return;
+    }
+    // #5669: `SIGINT`, because that is exactly what the terminal would have
+    // delivered had `process_group(0)` not moved the tree out of its reach.
+    for pgid in groups {
+        signal_group(*pgid, libc::SIGINT);
+    }
+    tokio::time::sleep(grace).await;
+    // A process may IGNORE `SIGINT` — a shell gives its background jobs
+    // `SIG_IGN` for it, and that disposition survives `exec`. The kill is what
+    // makes "nothing keeps writing" true rather than merely requested.
+    for pgid in groups {
+        signal_group(*pgid, libc::SIGKILL);
+    }
+}
+
+/// Die the way an uncaught Ctrl-C would have.
+///
+/// Exiting 0 — or on any invented code — tells a shell's `set -e`, a `for` loop
+/// over engagements, and a CI runner that the run finished. Restoring the
+/// default disposition and re-raising is what makes the parent observe
+/// `WIFSIGNALED(SIGINT)` instead, which is where the conventional 130 comes
+/// from.
+fn die_by_sigint() -> ! {
+    // SAFETY: both calls act on this process alone and take no pointer.
+    // `SIG_DFL` for `SIGINT` is termination, so the `raise` does not return.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        libc::raise(libc::SIGINT);
+    }
+    // Reachable only if `SIGINT` is blocked for this thread, which nothing here
+    // does. 130 is the shell's own encoding of the same death.
+    std::process::exit(130)
+}
 
 /// The ceiling one clone is watched against.
 ///
@@ -137,11 +276,13 @@ pub(super) enum Outcome {
 /// them; [`terminate`] sends it (#5669).
 ///
 /// The cost is that the child no longer shares this process's group, so a
-/// terminal `SIGINT` reaches the audit and not the clone. The watchdog is the
-/// interruption path either way, and `kill_on_drop` covers the future being
-/// dropped, but a `taudit` killed outright leaves the clone running.
+/// terminal `SIGINT` reaches the audit and not the clone. That is why the group
+/// is recorded in [`DETACHED`] the moment it is spawned:
+/// [`stop_clones_on_interrupt`] is what forwards a Ctrl-C to it, and a binary
+/// that does not run that task gets a clone which outlives its own audit.
 /// Test: `super::watchdog::watchdog_tests::a_missing_binary_names_itself`,
-/// `super::watchdog::watchdog_tests::a_budget_kill_reaches_a_grandchild`.
+/// `super::watchdog::watchdog_tests::a_budget_kill_reaches_a_grandchild`,
+/// `super::watchdog::watchdog_tests::an_interrupt_kills_a_detached_clone_group`.
 pub(super) async fn run(
     spec: &Spawn<'_>,
     mut command: Command,
@@ -166,6 +307,9 @@ pub(super) async fn run(
             return Outcome::Failed(format!("`{}` could not be run: {source}{hint}", spec.label));
         }
     };
+    // #5669: the `process_group(0)` above put this tree beyond the terminal's
+    // reach, so record it while it runs — see `stop_clones_on_interrupt`.
+    let _detached = child.id().map(Detached::register);
     watch_child(spec, child, staged, watch).await
 }
 
@@ -299,15 +443,38 @@ async fn terminate(child: &mut Child, grace: Duration) {
 /// Test: `super::watchdog::watchdog_tests::a_budget_kill_reaches_a_grandchild`,
 /// `super::watchdog::watchdog_tests::a_child_in_our_own_process_group_is_signalled_alone`.
 fn signal_tree(pid: u32, signal: libc::c_int) {
-    let pid = pid as libc::pid_t;
+    let raw = pid as libc::pid_t;
     // SAFETY: the pid is this process's own child and has not been reaped, so
-    // it cannot have been reused; `getpgid` only reads. A negative pid names
-    // the process GROUP with that id, which is why it is sent only when the
-    // child is that group's leader.
-    unsafe {
-        let target = if libc::getpgid(pid) == pid { -pid } else { pid };
-        libc::kill(target, signal);
+    // it cannot have been reused; `getpgid` only reads.
+    let leads_a_group = unsafe { libc::getpgid(raw) == raw };
+    if leads_a_group {
+        signal_group(pid, signal);
+    } else {
+        // SAFETY: a positive pid names that process alone, which is the only
+        // safe target for a child sharing THIS process's group.
+        unsafe { libc::kill(raw, signal) };
     }
+}
+
+/// Signal a process group named by its leader's pid.
+///
+/// Why: a group OUTLIVES its leader, and [`interrupt_detached_groups`] needs
+/// that. Its first signal kills the leading `gh` or `git`, which this process
+/// then reaps — after which `getpgid` on that pid answers `ESRCH` and
+/// [`signal_tree`] can no longer recognise the group, so the follow-up `SIGKILL`
+/// would land on nothing and the grandchildren would keep fetching (#5669).
+/// Every pid in [`DETACHED`] is a leader by construction — [`run`] is the only
+/// registrar and it always sets `process_group(0)` — so the group can be named
+/// directly there rather than probed for.
+/// What: `kill(-pgid)`. A group id is not reused while any member survives,
+/// which is exactly the case this is called in; an already-empty group answers
+/// `ESRCH` and nothing happens.
+/// Test: `super::watchdog::watchdog_tests::an_interrupt_kills_a_detached_clone_group`.
+fn signal_group(pgid: u32, signal: libc::c_int) {
+    // SAFETY: a negative pid names the process GROUP with that id and takes no
+    // pointer. `pgid` leads a group in both call paths — checked by `getpgid` in
+    // `signal_tree`, guaranteed by `process_group(0)` in the other.
+    unsafe { libc::kill(-(pgid as libc::pid_t), signal) };
 }
 
 /// One measurement of the staged tree.
@@ -478,6 +645,28 @@ done
         !alive(pid)
     }
 
+    /// The pid [`forking_writer`] recorded, once it has finished recording it.
+    ///
+    /// The fixture writes the pid while the test polls for it, so a single read
+    /// could catch a half-written number and name an unrelated process. Two
+    /// identical reads of a pid that is actually alive is what settles it.
+    async fn grandchild_pid(pidfile: &Path) -> u32 {
+        let started = std::time::Instant::now();
+        let mut last = None;
+        while started.elapsed() < STOP_DEADLINE {
+            if let Ok(text) = std::fs::read_to_string(pidfile)
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                if last == Some(pid) && alive(pid) {
+                    return pid;
+                }
+                last = Some(pid);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the fixture recorded no live grandchild within {STOP_DEADLINE:?}");
+    }
+
     /// [`watch_child`] under a deadline.
     ///
     /// Every runaway fixture here writes until it is stopped, so a regression
@@ -490,6 +679,20 @@ done
         )
         .await
         .unwrap_or_else(|_| panic!("the watchdog left the child running past {STOP_DEADLINE:?}"))
+    }
+
+    /// A snapshot of [`DETACHED`], so an assertion never holds its lock.
+    fn registered() -> Vec<u32> {
+        DETACHED.lock().expect("an unpoisoned lock").clone()
+    }
+
+    /// The process group this pid belongs to.
+    fn group_of(pid: u32) -> u32 {
+        // SAFETY: `getpgid` only reads, and the pid names a live process the
+        // caller has just observed.
+        let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+        assert!(pgid > 0, "pid {pid} has no process group");
+        pgid as u32
     }
 
     /// Is this pid still a process on this machine?
@@ -873,5 +1076,86 @@ done
         };
         assert!(why.contains("could not be run"), "{why}");
         assert!(why.contains("install it"), "the hint is carried: {why}");
+    }
+
+    /// A Ctrl-C must reach the clone the terminal can no longer see (#5669).
+    ///
+    /// `process_group(0)` is what took the tree out of the foreground group, so
+    /// a raw `SIGINT` killed `taudit` on the default disposition and left `ssh`
+    /// and `git-index-pack` writing into a client's disk with the watchdog dead.
+    /// The budget here is `u64::MAX`, which takes the watchdog itself out of the
+    /// picture: the only thing that can stop this fixture is the interrupt path.
+    #[tokio::test]
+    async fn an_interrupt_kills_a_detached_clone_group() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let staged = tmp.path().join("staged");
+        let pidfile = tmp.path().join("grandchild.pid");
+
+        let clone = tokio::spawn({
+            let (staged, pidfile) = (staged.clone(), pidfile.clone());
+            async move {
+                // No ceiling this fixture can reach, so nothing but the
+                // interrupt can end it.
+                let unreachable_ceiling = Watch {
+                    budget_bytes: u64::MAX,
+                    ..tiny_watch(0, u64::MAX)
+                };
+                run(
+                    &SPEC,
+                    forking_writer(&staged, &pidfile, 1024),
+                    &staged,
+                    Some(unreachable_ceiling),
+                )
+                .await
+            }
+        });
+
+        let pid = grandchild_pid(&pidfile).await;
+        let group = group_of(pid);
+
+        // Half the finding: `run` must have RECORDED this group, or an interrupt
+        // has nothing to walk. `interrupt_detached_groups` is not called here —
+        // it signals every registered group, and the other tests in this binary
+        // clone too.
+        assert!(
+            registered().contains(&group),
+            "run must register the group it detached; {group} is not in {:?}",
+            registered()
+        );
+        // The other half: signalling that group ends the whole tree.
+        stop_groups(&[group], Duration::from_millis(50)).await;
+
+        assert!(
+            died_within(pid, Duration::from_secs(5)).await,
+            "grandchild {pid} outlived the interrupt and would keep fetching into a tree \
+             nothing is watching any more"
+        );
+        // Reap the fixture's own shell, which the same signal stopped.
+        let _ = tokio::time::timeout(STOP_DEADLINE, clone).await;
+    }
+
+    /// A guard's entry does not outlive the guard (#5669).
+    ///
+    /// A pid left in [`DETACHED`] is a pid a later interrupt signals, and the
+    /// kernel reuses pids. Asserted on a sentinel rather than on a real clone
+    /// because [`DETACHED`] is process-global: a sibling test registering its
+    /// own clone must not be able to decide this one.
+    #[test]
+    fn a_detached_group_is_deregistered_when_its_guard_drops() {
+        // Above every pid this kernel hands out, so it names nothing.
+        const SENTINEL: u32 = 0x7fff_fffe;
+
+        {
+            let _guard = Detached::register(SENTINEL);
+            assert!(
+                registered().contains(&SENTINEL),
+                "registered while the guard is held"
+            );
+        }
+
+        assert!(
+            !registered().contains(&SENTINEL),
+            "the entry is gone once the guard drops"
+        );
     }
 }
