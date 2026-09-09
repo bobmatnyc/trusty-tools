@@ -15,6 +15,32 @@
 use super::*;
 use tempfile::TempDir;
 
+/// The production entry point, with a stable hook binary pinned for every case
+/// in this file.
+///
+/// Why (#7244): phase 1 writes the managed hook triad, which refuses a
+/// build-artifact binary — and a test process is one. On a CI runner nothing
+/// installed rescues the PATH fallback, so every case here aborted on the
+/// refusal before reaching the roster and skill assertions it exists for. One
+/// shadow supplies the pin for all of them, so no case carries the fixture.
+/// What: shadows the glob-imported [`super::ensure_managed_config_dir_with_root`]
+/// with the identical signature, delegating to
+/// [`super::ensure_managed_config_dir_with_root_and_exe`] with
+/// [`crate::test_support::STABLE_HOOK_EXE`].
+/// Test: every case in this file.
+fn ensure_managed_config_dir_with_root(
+    fw: &FrameworkPaths,
+    config_dir: &Path,
+    project_dir: &Path,
+) -> anyhow::Result<()> {
+    super::ensure_managed_config_dir_with_root_and_exe(
+        fw,
+        config_dir,
+        project_dir,
+        Some(Path::new(crate::test_support::STABLE_HOOK_EXE)),
+    )
+}
+
 /// The session workspace these tests provision against.
 ///
 /// Why (#4880): `ensure_managed_config_dir_with_root` now also refreshes the

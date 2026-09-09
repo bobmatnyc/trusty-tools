@@ -56,7 +56,7 @@ fn prepare_session_continues_after_agent_deploy_failure() {
         true,
         None,
         None,
-        dirs::home_dir().as_deref(),
+        HostInputs::with_home(dirs::home_dir().as_deref()),
     )
     .expect("a roster-deploy failure must not fail the whole preparation");
 
@@ -124,7 +124,7 @@ fn prepare_session_continues_after_skill_deploy_failure() {
         true,
         None,
         None,
-        dirs::home_dir().as_deref(),
+        HostInputs::with_home(dirs::home_dir().as_deref()),
     )
     .expect("a roster-deploy failure must not fail the whole preparation");
 

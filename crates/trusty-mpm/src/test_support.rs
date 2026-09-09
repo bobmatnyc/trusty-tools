@@ -166,6 +166,23 @@ pub(crate) fn dead_loopback_url() -> String {
 /// guessing.
 pub(crate) const TEST_DIR_PREFIX: &str = "tm-test-";
 
+/// An absolute, installed-looking `tm` path every hook-writing test can pin.
+///
+/// Why (#7244): the hooks writer refuses a build-artifact binary, and a test
+/// process IS one. It then PATH-resolves an installed `tm`, which a developer
+/// machine has and a CI runner does not — so every test that provisions hooks
+/// asserted one thing locally and aborted on a refusal in CI. Pinning a path
+/// that passes both of the writer's gates (absolute, not a build tree, a stem
+/// this crate ships) makes those tests hermetic: they assert the WRITE, which
+/// is what they are about, on any host.
+/// What: a literal path, never created and never executed — the resolver only
+/// inspects the spelling. It must stay outside any temp root, since
+/// [`trusty_common::bin_resolve::is_ephemeral_build_path`] refuses those too,
+/// which rules out a `TempDir`-hosted fake.
+/// Test: every caller; the refusal arms themselves are covered by
+/// `resolve_stable_hook_exe_with_refuses_an_ephemeral_exe` and siblings.
+pub(crate) const STABLE_HOOK_EXE: &str = "/usr/local/bin/tm";
+
 /// How long a `tm-test-*` directory may sit in the hermetic root before
 /// [`sweep_stale_test_dirs`] treats it as leaked and removes it.
 const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);

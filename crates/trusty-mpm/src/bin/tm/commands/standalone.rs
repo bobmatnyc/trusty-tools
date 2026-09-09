@@ -280,9 +280,30 @@ pub(crate) fn rm_cmd(paths: &ManagedPaths, alias: &str) -> anyhow::Result<()> {
 /// update_cmd_all_skips_unloaded_returns_ok_when_none_loaded
 /// in tests_behavior_b_tests.rs.
 pub(crate) fn update_cmd(paths: &ManagedPaths, alias: Option<&str>) -> anyhow::Result<()> {
+    update_cmd_with_exe(paths, alias, None)
+}
+
+/// [`update_cmd`] with the hook binary pinned by the caller.
+///
+/// Why (#7244): the config-dir scaffolding this runs first writes the managed
+/// hook triad, and that write refuses a build-artifact binary. On a runner with
+/// no installed `tm` the refusal surfaced as `update_cmd`'s error, so the three
+/// tests asserting on the ALIAS message read a hook-resolution message instead.
+/// What: the body of [`update_cmd`], forwarding `hook_exe` to
+/// [`trusty_mpm::core::standalone::global_config::ensure_global_config_dir_with_exe`].
+/// Test: `update_cmd_errors_if_alias_not_in_registry`,
+/// `update_cmd_errors_if_not_loaded`,
+/// `update_cmd_all_skips_unloaded_returns_ok_when_none_loaded`.
+pub(crate) fn update_cmd_with_exe(
+    paths: &ManagedPaths,
+    alias: Option<&str>,
+    hook_exe: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     let root = &paths.root;
     let cfg_dir = &paths.claude_config_dir;
-    trusty_mpm::core::standalone::global_config::ensure_global_config_dir(root, cfg_dir)?;
+    trusty_mpm::core::standalone::global_config::ensure_global_config_dir_with_exe(
+        root, cfg_dir, hook_exe,
+    )?;
 
     let registry = trusty_mpm::core::standalone::registry::ManagedRegistry::load(root)
         .with_context(|| format!("failed to load registry from {}", root.display()))?;

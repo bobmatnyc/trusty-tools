@@ -762,6 +762,23 @@ fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
 /// `prepare_managed_config_writes_no_mcp_json` and
 /// `prepare_managed_config_writes_no_mcp_approval` cover the deletions.
 fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::PathBuf> {
+    prepare_managed_config_with_exe(tmux_name, cwd, None)
+}
+
+/// [`prepare_managed_config`] with the hook binary pinned by the caller.
+///
+/// Why (#7244): provisioning writes the managed hook triad, and that write
+/// refuses a build-artifact binary — which a test process is, on a runner with
+/// no installed `tm` to fall back to. The provisioning then never reached the
+/// `.claude.json` seeding this function's test asserts on.
+/// What: the body of [`prepare_managed_config`], forwarding `hook_exe` to
+/// [`crate::core::managed_config::ensure_managed_config_dir_with_exe`].
+/// Test: `prepare_managed_config_writes_no_mcp_json_and_no_approval`.
+fn prepare_managed_config_with_exe(
+    tmux_name: &str,
+    cwd: &Path,
+    hook_exe: Option<&Path>,
+) -> Option<std::path::PathBuf> {
     let Some(config_dir) = crate::core::trusty_tools_config::managed_claude_config_dir() else {
         // Home unresolved (stripped env): no config dir to point at. Fall back
         // to the legacy home-trust seed so startup prompts are still dismissed.
@@ -782,7 +799,9 @@ fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::Path
     // #4880: `cwd` is the workspace, so the same call also refreshes the
     // PROJECT skill tier (`<cwd>/.claude/skills`) when the project manifest
     // moved — the tier that outranks everything this config dir carries.
-    if let Err(e) = crate::core::managed_config::ensure_managed_config_dir(&config_dir, cwd) {
+    if let Err(e) =
+        crate::core::managed_config::ensure_managed_config_dir_with_exe(&config_dir, cwd, hook_exe)
+    {
         tracing::warn!(
             session = %tmux_name,
             config_dir = %config_dir.display(),

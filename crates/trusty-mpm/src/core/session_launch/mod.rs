@@ -455,6 +455,27 @@ pub fn prepare_session_with_repo_url(
     project_dir: &Path,
     repo_url: Option<&str>,
 ) -> Result<PrepReport, PrepError> {
+    prepare_session_with_repo_url_and_exe(fw, project_dir, repo_url, None)
+}
+
+/// [`prepare_session_with_repo_url`] with the hook binary pinned by the caller.
+///
+/// Why (#7244): the project-tier hooks write refuses a build-artifact binary,
+/// and a CI runner has no installed `tm` for the PATH fallback — so
+/// [`crate::core::deploy_validate::validate_and_repair`]'s test could never
+/// close the `HooksMissing` gap it asserts on. Pinning the path from the test
+/// makes that assertion about the repair pipeline again rather than about
+/// whether the host has `tm` installed.
+/// What: identical to [`prepare_session_with_repo_url`] except `hook_exe`
+/// reaches the settings writer as its `exe_override`. Production callers pass
+/// `None` and keep resolving the running binary exactly as before.
+/// Test: `repair_closes_gaps_on_incomplete_workspace`.
+pub fn prepare_session_with_repo_url_and_exe(
+    fw: &FrameworkPaths,
+    project_dir: &Path,
+    repo_url: Option<&str>,
+    hook_exe: Option<&Path>,
+) -> Result<PrepReport, PrepError> {
     let native = crate::core::output_style::claude_supports_native_output_style();
     prepare_session_inner(
         fw,
@@ -463,7 +484,10 @@ pub fn prepare_session_with_repo_url(
         native,
         repo_url,
         None,
-        dirs::home_dir().as_deref(),
+        HostInputs {
+            home: dirs::home_dir().as_deref(),
+            hook_exe,
+        },
     )
 }
 
@@ -497,7 +521,7 @@ pub fn prepare_session_for_managed(
         native,
         repo_url,
         Some(session_id),
-        dirs::home_dir().as_deref(),
+        HostInputs::with_home(dirs::home_dir().as_deref()),
     )
 }
 
@@ -667,7 +691,7 @@ pub fn prepare_session_with_home(
         native_supported,
         None,
         None,
-        home,
+        HostInputs::with_home(home),
     )
 }
 
@@ -693,6 +717,35 @@ pub fn prepare_session_with_home(
 /// Test: covered by every `prepare_session_*` test plus
 /// `prepare_session_continues_after_agent_deploy_failure`,
 /// `prepare_session_continues_after_skill_deploy_failure`.
+/// The ambient host inputs [`prepare_session_inner`] would otherwise read from
+/// the process itself.
+///
+/// Why: both fields are things production reads from the environment and tests
+/// must pin — `home` since #5544, `hook_exe` since #7244. Grouping them keeps
+/// [`prepare_session_inner`]'s arity where clippy wants it and puts the two
+/// injections side by side, so the next one has an obvious home.
+/// What: `home` is the USER-GLOBAL home (not derivable from `FrameworkPaths` —
+/// the managed constructors relocate every `.claude/` path on it onto the
+/// workspace); `hook_exe` is the stable binary the project-tier hooks writer
+/// should bake, `None` meaning "resolve the running one".
+/// Test: `repair_closes_gaps_on_incomplete_workspace`, plus every
+/// `prepare_session_*` test.
+#[derive(Clone, Copy, Default)]
+struct HostInputs<'a> {
+    home: Option<&'a Path>,
+    hook_exe: Option<&'a Path>,
+}
+
+impl<'a> HostInputs<'a> {
+    /// The production shape: a real home, and the running binary for hooks.
+    fn with_home(home: Option<&'a Path>) -> Self {
+        Self {
+            home,
+            hook_exe: None,
+        }
+    }
+}
+
 fn prepare_session_inner(
     fw: &FrameworkPaths,
     project_dir: &Path,
@@ -700,12 +753,9 @@ fn prepare_session_inner(
     native_supported: bool,
     repo_url: Option<&str>,
     session_id: Option<&str>,
-    // #5544: the USER-GLOBAL home. Not derivable from `fw` — the managed
-    // constructors relocate every `.claude/` path on it onto the workspace, so
-    // any accessor there answers a different question. Production passes
-    // `dirs::home_dir()`; only tests pass anything else.
-    home: Option<&Path>,
+    host: HostInputs<'_>,
 ) -> Result<PrepReport, PrepError> {
+    let home = host.home;
     // Load the user config ONCE and thread it through both the manifest
     // resolution / catalog-root path AND the style resolution path below. Reading
     // `config.toml` a second time mid-function (the old `MpmConfig::load` just
@@ -1008,8 +1058,9 @@ fn prepare_session_inner(
         project_dir,
         // #7244: `None` resolves the running installed binary. When nothing
         // stable resolves this now returns an error and writes NOTHING, rather
-        // than wiring every hook to a build artifact.
-        None,
+        // than wiring every hook to a build artifact. A test pins a stable path
+        // through `HostInputs::hook_exe` so it asserts the write, not the host.
+        host.hook_exe,
         config.hooks.prompt_context,
         plan.divert_enabled,
     ) {

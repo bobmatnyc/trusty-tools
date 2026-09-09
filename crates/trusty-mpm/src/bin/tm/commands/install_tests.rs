@@ -29,7 +29,13 @@ fn install_claude_hooks_at_writes_only_the_managed_config_dir() {
     let config_dir = tmp.path().join("claude-config");
     std::fs::create_dir_all(&config_dir).unwrap();
 
-    let changed = install_claude_hooks_at(&config_dir).unwrap();
+    let changed = install_claude_hooks_at(
+        &config_dir,
+        Some(std::path::PathBuf::from(
+            crate::test_support::STABLE_HOOK_EXE,
+        )),
+    )
+    .unwrap();
     assert_eq!(changed, 1, "first install must report one file changed");
 
     let settings_path = config_dir.join("settings.json");
@@ -56,12 +62,24 @@ fn install_claude_hooks_at_is_idempotent() {
     let config_dir = tmp.path().join("claude-config");
     std::fs::create_dir_all(&config_dir).unwrap();
 
-    let first = install_claude_hooks_at(&config_dir).unwrap();
+    let first = install_claude_hooks_at(
+        &config_dir,
+        Some(std::path::PathBuf::from(
+            crate::test_support::STABLE_HOOK_EXE,
+        )),
+    )
+    .unwrap();
     assert_eq!(first, 1);
     let settings_path = config_dir.join("settings.json");
     let after_first = std::fs::read_to_string(&settings_path).unwrap();
 
-    let second = install_claude_hooks_at(&config_dir).unwrap();
+    let second = install_claude_hooks_at(
+        &config_dir,
+        Some(std::path::PathBuf::from(
+            crate::test_support::STABLE_HOOK_EXE,
+        )),
+    )
+    .unwrap();
     assert_eq!(second, 0, "second install must report no changes");
     let after_second = std::fs::read_to_string(&settings_path).unwrap();
     assert_eq!(
@@ -79,7 +97,7 @@ fn install_claude_hooks_at_is_idempotent() {
 /// unchanged.
 /// What: builds a temp tree with `claude-config/` (the managed config dir)
 /// and a sibling `some-other-project/.claude/settings.json` seeded with
-/// unrelated content; calls `install_claude_hooks_at(&config_dir)`; asserts
+/// unrelated content; calls `install_claude_hooks_at`; asserts
 /// the sibling project's settings file is untouched and carries no `hooks`
 /// key.
 #[test]
@@ -94,7 +112,13 @@ fn install_claude_hooks_at_never_touches_a_sibling_project_dir() {
     let sibling_original = r#"{"outputStyle":"claude-mpm"}"#;
     std::fs::write(&sibling_settings, sibling_original).unwrap();
 
-    install_claude_hooks_at(&config_dir).unwrap();
+    install_claude_hooks_at(
+        &config_dir,
+        Some(std::path::PathBuf::from(
+            crate::test_support::STABLE_HOOK_EXE,
+        )),
+    )
+    .unwrap();
 
     let sibling_after = std::fs::read_to_string(&sibling_settings).unwrap();
     assert_eq!(

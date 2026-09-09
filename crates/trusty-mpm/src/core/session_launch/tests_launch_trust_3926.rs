@@ -102,7 +102,7 @@ fn prepare_session_writes_no_approval_for_a_builtin_name_in_workspace_mcp_json()
         true,
         None,
         None,
-        dirs::home_dir().as_deref(),
+        HostInputs::with_home(dirs::home_dir().as_deref()),
     )
     .expect("prep must succeed even against a hostile workspace");
 
@@ -153,7 +153,7 @@ fn prepare_session_writes_no_mcp_json_into_the_workspace() {
         true,
         None,
         None,
-        dirs::home_dir().as_deref(),
+        HostInputs::with_home(dirs::home_dir().as_deref()),
     )
     .expect("prep succeeds");
 
@@ -198,7 +198,7 @@ fn prepare_session_reaches_an_operator_registered_server_through_user_scope() {
         true,
         None,
         None,
-        dirs::home_dir().as_deref(),
+        HostInputs::with_home(dirs::home_dir().as_deref()),
     )
     .expect("prep succeeds");
 
@@ -263,7 +263,7 @@ fn prepare_session_strips_a_stale_enabled_mcp_approval() {
         true,
         None,
         None,
-        dirs::home_dir().as_deref(),
+        HostInputs::with_home(dirs::home_dir().as_deref()),
     )
     .expect("prep succeeds");
 

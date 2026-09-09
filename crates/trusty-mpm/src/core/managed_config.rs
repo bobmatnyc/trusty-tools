@@ -75,7 +75,8 @@
 //! either order across to the other artifact type.
 //!
 //! What: [`ensure_managed_config_dir`] (1) runs the canonical standalone
-//! scaffolding ([`ensure_global_config_dir`] — settings.json + the MPM hook
+//! scaffolding ([`super::standalone::global_config::ensure_global_config_dir`]
+//! — settings.json + the MPM hook
 //! triad + `.mcp.json` + output-styles, plus a best-effort deploy from the
 //! `framework/*` dirs), then (2) refreshes the framework source and deploys the
 //! FULL agent/skill roster from the resolved source dirs so the complete,
@@ -104,7 +105,7 @@ use std::path::Path;
 
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_tiers::deploy_all_skill_tiers;
-use crate::core::standalone::global_config::ensure_global_config_dir;
+use crate::core::standalone::global_config::ensure_global_config_dir_with_exe;
 use crate::core::standalone::trust_seed::preseed_managed_trust;
 
 /// Provision (idempotently) the tm-owned managed `CLAUDE_CONFIG_DIR`.
@@ -122,7 +123,7 @@ use crate::core::standalone::trust_seed::preseed_managed_trust;
 /// matching the standalone `tm run` contract.
 /// What: resolves the framework layout from the daemon's fixed home-relative
 /// root ([`FrameworkPaths::default`]), then:
-/// 1. calls [`ensure_global_config_dir`]`(&fw.root, config_dir)` for the shared
+/// 1. calls [`super::standalone::global_config::ensure_global_config_dir`]`(&fw.root, config_dir)` for the shared
 ///    scaffolding (settings.json, the MPM hook triad, `.mcp.json`, output-styles,
 ///    credential seed) — this also deploys agents/skills from the `framework/*`
 ///    dirs, which may be empty on a dev checkout;
@@ -141,7 +142,24 @@ use crate::core::standalone::trust_seed::preseed_managed_trust;
 /// `ensure_managed_config_dir_is_idempotent`,
 /// `ensure_managed_config_dir_refreshes_stale_bundled_agents`.
 pub fn ensure_managed_config_dir(config_dir: &Path, project_dir: &Path) -> anyhow::Result<()> {
-    ensure_managed_config_dir_with_root(&FrameworkPaths::default(), config_dir, project_dir)
+    ensure_managed_config_dir_with_exe(config_dir, project_dir, None)
+}
+
+/// [`ensure_managed_config_dir`] with the hook binary pinned by the caller
+/// (#7244 — see [`ensure_managed_config_dir_with_root_and_exe`] for why).
+///
+/// Test: `prepare_managed_config_writes_no_mcp_json_and_no_approval`.
+pub fn ensure_managed_config_dir_with_exe(
+    config_dir: &Path,
+    project_dir: &Path,
+    exe_override: Option<&Path>,
+) -> anyhow::Result<()> {
+    ensure_managed_config_dir_with_root_and_exe(
+        &FrameworkPaths::default(),
+        config_dir,
+        project_dir,
+        exe_override,
+    )
 }
 
 /// Hermetic core of [`ensure_managed_config_dir`], taking an explicit framework
@@ -192,8 +210,31 @@ pub fn ensure_managed_config_dir_with_root(
     config_dir: &Path,
     project_dir: &Path,
 ) -> anyhow::Result<()> {
+    ensure_managed_config_dir_with_root_and_exe(fw, config_dir, project_dir, None)
+}
+
+/// [`ensure_managed_config_dir_with_root`] with the hook binary pinned by the
+/// caller.
+///
+/// Why (#7244): phase 1 writes the managed hook triad, and that write refuses a
+/// build-artifact binary. A test process IS one, and a CI runner has no
+/// installed `tm` for the PATH fallback, so every roster/skill assertion in this
+/// module aborted on the refusal before reaching what it was written to check.
+/// Pinning the path is the same seam `ensure_managed_hooks_with_exe` already
+/// offers, carried one layer up so the tests can reach it.
+/// What: forwards `exe_override` to
+/// [`super::standalone::global_config::ensure_global_config_dir_with_exe`], then
+/// runs the phases [`ensure_managed_config_dir_with_root`] documents unchanged.
+/// Test: `ensure_managed_config_dir_is_idempotent`,
+/// `ensure_managed_config_dir_deploys_full_roster`.
+pub fn ensure_managed_config_dir_with_root_and_exe(
+    fw: &FrameworkPaths,
+    config_dir: &Path,
+    project_dir: &Path,
+    exe_override: Option<&Path>,
+) -> anyhow::Result<()> {
     // Phase 1: canonical scaffolding shared with the standalone driver.
-    ensure_global_config_dir(&fw.root, config_dir)?;
+    ensure_global_config_dir_with_exe(&fw.root, config_dir, exe_override)?;
 
     // #1939 / #4181: heal the claude-mpm palace split-brain — when the derived
     // `owner-repo` palace does not exist but the BARE repo-name one does,
