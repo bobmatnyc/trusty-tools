@@ -28,6 +28,14 @@ use trusty_audit::workdir::{WORKDIR_ENV, WorkDir};
 // shim owns the runtime. Nothing else moved here.
 #[tokio::main]
 async fn main() -> Result<()> {
+    // #5669: the clone watchdog puts each clone in a process group of its own,
+    // which is also what takes it out of this terminal's reach — so Ctrl-C is
+    // forwarded to the clone here, and the process then dies by `SIGINT` as it
+    // always did. It lives in the binary because it ends the process, which a
+    // library embedded by a front end must not decide. Spawned before anything
+    // can start a clone.
+    tokio::spawn(trusty_audit::clone::stop_clones_on_interrupt());
+
     let cli = Cli::parse();
 
     let cwd = std::env::current_dir().context("cannot determine the current directory")?;

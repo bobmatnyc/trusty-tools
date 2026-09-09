@@ -32,14 +32,10 @@ pub mod state;
 #[cfg(test)]
 mod tests;
 
-use std::io::{self, Stdout};
+use std::io::Stdout;
 use std::time::{Duration, Instant};
 
-use crossterm::{
-    event::{self, Event},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{self, Event};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::client::{CommandExecutor, DaemonClient};
@@ -49,36 +45,11 @@ use poll::coord_poll_daemon;
 use render::render_result;
 use state::CoordinatorState;
 
-/// RAII guard that restores the terminal on drop — including during a panic.
-///
-/// Why: the original `run` did its teardown (disable raw mode, leave the
-/// alternate screen, show the cursor) only AFTER `run_loop` returned, so a
-/// panic anywhere in the loop unwound straight past the cleanup and left the
-/// operator's terminal in raw mode + the alternate screen (no echo, no prompt).
-/// A `Drop` impl runs on BOTH the normal return and the unwind path, so the
-/// terminal is always restored. The dashboard's `run`/`run_focused` still use
-/// the older sequential teardown; this is the panic-safe pattern for the new
-/// coordinator screen.
-/// What: constructed right after entering raw mode + the alternate screen; its
-/// `Drop` best-effort runs `disable_raw_mode`, `LeaveAlternateScreen`, and
-/// `Show` (the cursor) against stdout, ignoring errors (nothing useful can be
-/// done while unwinding). Idempotent enough to be the SOLE teardown path.
-/// Test: terminal glue is exercised by launching the TUI; `Drop` cannot be
-/// unit-tested without a real terminal, so correctness rests on it being the
-/// only teardown seam (no manual cleanup duplicates it).
-struct TerminalGuard;
-
-impl Drop for TerminalGuard {
-    /// Why: see [`TerminalGuard`] — runs on normal return and on panic unwind.
-    /// What: best-effort restore of cooked mode, the main screen, and the
-    /// cursor; every step ignores its error because a `Drop` cannot propagate
-    /// one and a partial restore is still better than none.
-    /// Test: side-effect-only teardown; covered by launching the TUI.
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
-    }
-}
+// #7224: the panic-safe terminal guard this screen has used since its first
+// cut now lives in `tui::terminal`, shared with `project_ctl` and the `tm ls`
+// session TUI. Three surfaces enter the alternate screen, and a per-file copy
+// of the restore sequence is three things to keep in step instead of one.
+use crate::tui::terminal::TerminalGuard;
 
 /// How long [`run_loop`] blocks waiting for a key before redrawing.
 ///
@@ -119,15 +90,13 @@ pub async fn run(url: String, interval_ms: u64) -> anyhow::Result<()> {
     // backplane shows `○ unreachable`, never blocking the TUI (DOC-16 §3.1).
     banner::print_startup_banner(None, None, active_count).await;
 
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
     // From here on the terminal is in raw mode + the alternate screen; the guard
     // restores both on every exit path — normal return AND panic unwind — so it
     // is the SOLE teardown (no manual cleanup follows `run_loop`).
+    // #7224: setup and guard both come from `tui::terminal`, shared with
+    // `project_ctl` and the `tm ls` session TUI.
+    let mut terminal = crate::tui::terminal::enter()?;
     let _guard = TerminalGuard;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
 
     run_loop(&mut terminal, &mut client, state, interval_ms).await
     // `_guard` drops here (or during an unwind), restoring the terminal.

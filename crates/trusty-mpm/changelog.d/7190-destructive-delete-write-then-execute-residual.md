@@ -1,0 +1,3 @@
+Documentation
+
+- **`destructive_delete`'s residual-bypasses list now names the write-then-execute shape.** One segment writing a script that contains a delete verb (`python3 -c "open('/tmp/x.sh','w').write('rm -rf /')"`, or the same payload as a heredoc body) and a later segment merely executing that file (`bash /tmp/x.sh`) carries no delete-verb token in either segment, so the guard's per-segment token scan finds nothing to deny. Owner ruling: accepted as a pre-existing gap rather than closed — closing it needs cross-segment tracking this module does not attempt ([#7190](https://github.com/bobmatnyc/trusty-tools/issues/7190))

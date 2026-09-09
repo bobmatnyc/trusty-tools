@@ -69,6 +69,18 @@
 //! - The Guard 2/3 operator escape hatches
 //!   (`TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED`) lift this rule
 //!   along with every other in the file — tracked separately as issue #3981.
+//! - A delete verb hidden inside a file this module never opens is not
+//!   detected: one segment WRITES a script containing `rm -rf /` (e.g.
+//!   `python3 -c "open('/tmp/x.sh','w').write('rm -rf /')"`, or the same
+//!   payload as a heredoc body) and a later segment merely EXECUTES that file
+//!   (`bash /tmp/x.sh`) — neither segment's own tokens carry a delete verb, so
+//!   per-segment scanning ([`split_shell_segments`]) finds nothing to deny.
+//!   Pre-existing today via the one-line form above; accepted rather than
+//!   closed (owner ruling, #7190) — closing it needs cross-segment tracking
+//!   of "this path was just written, and a later segment executes it", which
+//!   this module does not attempt. A heredoc-body allowlist redesign
+//!   considered for #7190 does not add this class, only removes an
+//!   incidental catch a masked multi-line body happened to trigger.
 //!
 //! Test: `denies_filesystem_root_deletion`, `denies_repo_root_deletion`,
 //! `denies_dot_git_deletion`, `denies_worktree_root_deletion`,

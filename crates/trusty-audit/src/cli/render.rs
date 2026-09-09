@@ -12,7 +12,6 @@
 //! Test: `super::cli_tests`.
 
 use crate::chain::ChainReport;
-use crate::clone::CloneState;
 use crate::distribute::InstallPackage;
 use crate::registry::{COVERAGE_COACHING, TargetKind};
 use crate::run::{RepoResult, RunStatus};
@@ -206,7 +205,7 @@ pub fn render(outcome: &Outcome) -> String {
             out
         }
         Outcome::Run(report) => render_run(report),
-        Outcome::Cloned(report) => render_cloned(report),
+        Outcome::Cloned(report) => cloned::render(report),
         // #5822: an idempotent re-add and a fresh registration are different
         // facts, and an operator re-running `add` over a list needs to see
         // which one happened rather than the same line twice.
@@ -273,6 +272,9 @@ pub fn render(outcome: &Outcome) -> String {
 
 // #5563: the verify arm's own file, because this one is at the 500-SLOC cap.
 mod verify;
+
+// #5669: same reason — the clone report's own file.
+mod cloned;
 
 /// The regenerated reports, where they landed, and what did not come back.
 ///
@@ -454,7 +456,7 @@ fn render_chain(report: &ChainReport) -> String {
         ));
     }
     if let Some(acquired) = &report.acquired {
-        out.push_str(&render_cloned(acquired));
+        out.push_str(&cloned::render(acquired));
         out.push('\n');
     }
     out.push_str(&render_run(&report.run));
@@ -596,46 +598,6 @@ fn render_run(report: &crate::run::RunReport) -> String {
             report.repos.len()
         ),
     });
-    out
-}
-
-/// What acquisition put on disk, and what it could not.
-///
-/// Test: `super::cli_tests::rendering_a_clone_report_names_every_exclusion`.
-fn render_cloned(report: &crate::clone::CloneReport) -> String {
-    let mut out = String::new();
-    for repo in &report.repos {
-        // #5215: a repository that is NOT in the audit has to read as
-        // excluded, never as a blank line the recipient scrolls past.
-        let state = match &repo.state {
-            CloneState::Cloned => "cloned".to_string(),
-            CloneState::Reused => "already present".to_string(),
-            CloneState::Failed(why) => format!("FAILED — {why}"),
-            CloneState::Empty(why) => format!("NOTHING CLONED — {why}"),
-            CloneState::Skipped(why) => format!("SKIPPED — {why}"),
-        };
-        out.push_str(&format!("  {:<40} {state}\n", repo.name_with_owner));
-    }
-    out.push_str(&format!(
-        "{} on disk, using {}{}.\n",
-        count_of(
-            report.repos.iter().filter(|r| r.state.is_usable()).count(),
-            "repository",
-            "repositories"
-        ),
-        // #5215 review: a walk that hit something unreadable produces a
-        // floor, and saying "using X" of a floor is a confident number
-        // nothing measured.
-        if report.total_bytes_complete {
-            ""
-        } else {
-            "at least "
-        },
-        human_bytes(report.total_bytes)
-    ));
-    for gap in &report.gaps {
-        out.push_str(&format!("Gap: {gap}\n"));
-    }
     out
 }
 
