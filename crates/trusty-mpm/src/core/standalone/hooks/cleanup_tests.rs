@@ -313,3 +313,140 @@ fn clean_settings_file_non_object_json_is_noop() {
         "a non-object JSON file must never get a backup written"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #7262: the build-tree classifier's reporting and repair surface. Every test
+// below FAILS on 1ba38636c, where `is_mpm_hook_command` judged a hook command
+// purely by the binary's NAME.
+// ---------------------------------------------------------------------------
+
+use super::super::build_tree::tests::{INCIDENT_EXE, incident_settings};
+
+#[test]
+fn build_tree_hook_commands_lists_the_incident_commands() {
+    let found = build_tree_hook_commands(&incident_settings());
+    assert_eq!(
+        found,
+        vec![
+            format!("{INCIDENT_EXE} hook"),
+            format!("{INCIDENT_EXE} hook --pm-guard"),
+        ],
+        "every distinct build-tree hook command must be named, once each"
+    );
+}
+
+#[test]
+fn build_tree_hook_commands_is_empty_for_an_installed_binary() {
+    assert!(build_tree_hook_commands(&tm_settings()).is_empty());
+    assert!(build_tree_hook_commands(&claude_mpm_settings()).is_empty());
+}
+
+#[test]
+fn build_tree_statusline_command_in_settings_is_reported() {
+    assert_eq!(
+        build_tree_statusline_command(&incident_settings()),
+        Some(format!("{INCIDENT_EXE} statusline"))
+    );
+}
+
+#[test]
+fn build_tree_statusline_command_in_settings_ignores_an_installed_binary() {
+    let val = json!({
+        "statusLine": { "type": "command", "command": "/usr/local/bin/tm statusline" }
+    });
+    assert_eq!(build_tree_statusline_command(&val), None);
+    assert_eq!(build_tree_statusline_command(&tm_settings()), None);
+}
+
+#[test]
+fn strips_pm_guard_entry_is_true_only_for_a_removable_guard() {
+    // The incident file's `PreToolUse` guard is build-tree-rooted, so the strip
+    // takes it and the caller must be told.
+    assert!(strips_pm_guard_entry(&incident_settings()));
+
+    // An INSTALLED guard carries the same argv but survives the strip, so
+    // reporting it removed would be a lie.
+    let installed = json!({
+        "hooks": {
+            "PreToolUse": [{
+                "hooks": [{ "command": "/usr/local/bin/tm hook --pm-guard" }]
+            }]
+        }
+    });
+    assert!(!strips_pm_guard_entry(&installed));
+
+    // A contaminated file with no guard at all.
+    assert!(!strips_pm_guard_entry(&tm_settings()));
+    assert!(!strips_pm_guard_entry(&json!({})));
+}
+
+#[test]
+fn clean_settings_file_flags_a_removed_pm_guard_entry() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("settings.json");
+
+    std::fs::write(&path, incident_settings().to_string()).unwrap();
+    let outcome = clean_settings_file(&path, false).unwrap().unwrap();
+    assert!(
+        outcome.removed_pm_guard,
+        "the incident file's guard is removable: {outcome:?}"
+    );
+
+    // Same reader, a file whose only tm entry is the lifecycle triad.
+    std::fs::write(&path, tm_settings().to_string()).unwrap();
+    let outcome = clean_settings_file(&path, false).unwrap().unwrap();
+    assert!(!outcome.removed_pm_guard, "{outcome:?}");
+}
+
+#[test]
+fn tm_hook_event_names_flags_the_build_tree_incident() {
+    // Before #7262 this returned an empty list: neither name branch recognises
+    // the `test_session_lifecycle` stem, so `tm doctor` saw nothing at all.
+    let mut events = tm_hook_event_names(&incident_settings());
+    events.sort();
+    assert_eq!(
+        events,
+        vec![
+            "PostToolUse",
+            "PreToolUse",
+            "SessionEnd",
+            "SessionStart",
+            "Stop",
+            "SubagentStop",
+        ]
+    );
+}
+
+#[test]
+fn clean_settings_file_force_removes_the_build_tree_incident() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&incident_settings()).unwrap(),
+    )
+    .unwrap();
+
+    let outcome = clean_settings_file(&path, true)
+        .unwrap()
+        .expect("the incident shape must be reported as contamination");
+    assert!(outcome.backup_path.is_some(), "a --force pass must back up");
+
+    let cleaned: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(
+        build_tree_hook_commands(&cleaned).is_empty(),
+        "no build-tree hook command may survive: {cleaned}"
+    );
+    // The project's own entry, and every unrelated key, survive untouched.
+    assert_eq!(
+        cleaned["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+        json!("trusty-memory prompt-context")
+    );
+    assert_eq!(cleaned["outputStyle"], json!("trusty-mpm"));
+    // statusLine is detection-only: `clean_settings_file` does not own that key
+    // and must not strip what it cannot put back.
+    assert_eq!(
+        build_tree_statusline_command(&cleaned),
+        Some(format!("{INCIDENT_EXE} statusline"))
+    );
+}

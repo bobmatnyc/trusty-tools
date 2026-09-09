@@ -158,6 +158,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Informational: warns when a project's `.claude/settings*.json` carries foreign (claude-mpm) hook entries that would fire inside a tm session — never auto-removed (issue #2940).",
     ),
     (
+        "hooks_build_tree_binary",
+        "Warns when a hook or `statusLine` command in a project's `.claude/settings*.json` runs a binary that lives in a Cargo build tree, naming the file and each offending command. Such a command stops working the moment the artifact is rebuilt away, which silently disables PM-guard enforcement; the hook entries are removed by `tm doctor --fix --yes` / `tm hooks clean` and re-rendered from the installed binary on the next managed launch (issue #7262).",
+    ),
+    (
         "tcc_taint",
         "macOS: whether managed panes spawn `claude` with TCC responsibility disclaimed so its data-access prompts aren't attributed to the shared tmux server (issue #2997).",
     ),

@@ -1241,6 +1241,7 @@ async fn doctor_endpoint_returns_report() {
         "oauth_token",
         "hooks_contamination",
         "hooks_foreign_conflict",
+        "hooks_build_tree_binary",
         "tcc_taint",
         "scaffold_tracking",
         "push_guard",

@@ -147,6 +147,52 @@ fn hooks_repair_leaves_foreign_entries_alone() {
 }
 
 #[test]
+fn hooks_repair_warns_when_it_removes_the_pm_guard() {
+    // #7262: the step text must say what the removal COSTS. An operator who
+    // reads "remove tm hook entries under [PreToolUse]" has no way to know PM
+    // enforcement just went offline until the next managed launch.
+    let tmp = tempfile::tempdir().unwrap();
+    let claude = tmp.path().join(".claude");
+    fs::create_dir_all(&claude).unwrap();
+    let settings =
+        crate::core::standalone::hooks::build_tree::tests::incident_settings().to_string();
+    fs::write(claude.join("settings.json"), &settings).unwrap();
+
+    for mode in [RepairMode::DryRun, RepairMode::Apply] {
+        fs::write(claude.join("settings.json"), &settings).unwrap();
+        let steps = repair_hooks_contamination(tmp.path(), mode);
+        assert_eq!(steps.len(), 1, "{steps:?}");
+        assert!(
+            steps[0].what.contains("pm-guard enforcement is absent"),
+            "{mode:?} step must name the consequence: {}",
+            steps[0].what
+        );
+        // The clause is an ADDITION, never a replacement.
+        assert!(
+            steps[0].what.starts_with("remove tm hook entries under ["),
+            "{}",
+            steps[0].what
+        );
+    }
+}
+
+#[test]
+fn hooks_repair_omits_the_pm_guard_clause_for_other_entries() {
+    // The mixed fixture's only tm entry is the lifecycle triad, so the guard
+    // clause would be false there.
+    let tmp = tempfile::tempdir().unwrap();
+    write_mixed_settings(tmp.path());
+
+    let steps = repair_hooks_contamination(tmp.path(), RepairMode::DryRun);
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        !steps[0].what.contains("pm-guard"),
+        "no guard was removed, so nothing may claim one was: {}",
+        steps[0].what
+    );
+}
+
+#[test]
 fn push_guard_repair_installs_when_missing() {
     let Some((_dir, repo)) = temp_repo() else {
         return;

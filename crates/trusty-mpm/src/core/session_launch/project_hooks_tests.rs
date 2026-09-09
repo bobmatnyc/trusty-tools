@@ -1076,3 +1076,58 @@ fn write_project_hooks_aborts_when_the_snapshot_fails() {
         "the settings file must be untouched when its snapshot could not be taken"
     );
 }
+
+/// A build-tree executable path the #7262 classifier must always reject.
+const EPHEMERAL_EXE: &str = "/repo/target-7247/debug/deps/test_session_lifecycle-cd3ba8f03938239b";
+
+/// The argv shapes this crate's writers produce must stay inside the list
+/// [`crate::core::standalone::hooks::build_tree`] classifies (#7262).
+///
+/// Why: the classifier keeps its own copy of the argv vocabulary, and a writer
+/// that grows a new sub-flag without adding it there goes back to being
+/// invisible to `tm doctor` and unstrippable by the writer — the exact #7244
+/// failure, one flag later. This test derives each shape from the writer's OWN
+/// output rather than restating the literal, so the two cannot drift.
+/// What: strips the resolved binary off each writer-produced command, re-attaches
+/// the same argv to a build-tree binary, and asserts the classifier claims it.
+#[test]
+fn pm_guard_and_divert_commands_end_in_a_known_argv_tail() {
+    use crate::core::standalone::hooks::{
+        is_build_tree_hook_command, is_build_tree_statusline_command,
+    };
+
+    let bin = super::super::settings::resolve_statusline_binary();
+    let mut produced: Vec<String> = vec![
+        super::super::settings::pm_guard_hook_value()[0]["hooks"][0]["command"]
+            .as_str()
+            .expect("the PM-guard command is a string")
+            .to_string(),
+    ];
+    for group in super::super::divert_hooks::divert_hook_groups() {
+        produced.push(
+            group["hooks"][0]["command"]
+                .as_str()
+                .expect("a divert command is a string")
+                .to_string(),
+        );
+    }
+
+    for cmd in &produced {
+        let argv = cmd
+            .strip_prefix(&bin)
+            .unwrap_or_else(|| panic!("{cmd} must start with the resolved binary {bin}"));
+        assert!(
+            is_build_tree_hook_command(&format!("{EPHEMERAL_EXE}{argv}")),
+            "argv {argv:?} is not in the #7262 classifier's vocabulary"
+        );
+    }
+
+    let statusline = super::super::settings::resolve_statusline_command();
+    let argv = statusline
+        .strip_prefix(&bin)
+        .unwrap_or_else(|| panic!("{statusline} must start with the resolved binary {bin}"));
+    assert!(
+        is_build_tree_statusline_command(&format!("{EPHEMERAL_EXE}{argv}")),
+        "statusLine argv {argv:?} is not in the #7262 classifier's vocabulary"
+    );
+}

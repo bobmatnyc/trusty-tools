@@ -50,7 +50,7 @@ fn check_hooks_hygiene_ok_when_clean() {
         &serde_json::json!({ "outputStyle": "trusty-mpm" }),
     );
 
-    let (contamination, foreign) = check_hooks_hygiene(Some(&project), &[]);
+    let (contamination, foreign, _build_tree) = check_hooks_hygiene(Some(&project), &[]);
     assert_eq!(contamination.status, CheckStatus::Ok);
     assert_eq!(foreign.status, CheckStatus::Ok);
 }
@@ -61,7 +61,7 @@ fn check_hooks_hygiene_warns_on_tm_contamination() {
     let project = dir.path().join("contaminated-project");
     write_settings(&project, &tm_hooks_value());
 
-    let (contamination, foreign) = check_hooks_hygiene(Some(&project), &[]);
+    let (contamination, foreign, _build_tree) = check_hooks_hygiene(Some(&project), &[]);
     assert_eq!(contamination.status, CheckStatus::Warn);
     assert!(contamination.message.contains("tm hooks clean"));
     assert_eq!(foreign.status, CheckStatus::Ok);
@@ -73,7 +73,7 @@ fn check_hooks_hygiene_warns_on_foreign_conflict() {
     let project = dir.path().join("foreign-project");
     write_settings(&project, &claude_mpm_hooks_value());
 
-    let (contamination, foreign) = check_hooks_hygiene(Some(&project), &[]);
+    let (contamination, foreign, _build_tree) = check_hooks_hygiene(Some(&project), &[]);
     assert_eq!(contamination.status, CheckStatus::Ok);
     assert_eq!(foreign.status, CheckStatus::Warn);
     assert!(foreign.message.contains("informational"));
@@ -101,7 +101,7 @@ fn check_hooks_hygiene_warns_on_mixed_group_both_checks() {
         }),
     );
 
-    let (contamination, foreign) = check_hooks_hygiene(Some(&project), &[]);
+    let (contamination, foreign, _build_tree) = check_hooks_hygiene(Some(&project), &[]);
     assert_eq!(
         contamination.status,
         CheckStatus::Warn,
@@ -122,7 +122,7 @@ fn check_hooks_hygiene_never_double_counts_active_workspace_dupes() {
 
     // The SAME project is passed as BOTH `project_dir` and an active
     // workspace path — it must be counted once, not twice.
-    let (contamination, _foreign) =
+    let (contamination, _foreign, _build_tree) =
         check_hooks_hygiene(Some(&project), std::slice::from_ref(&project));
     assert_eq!(contamination.status, CheckStatus::Warn);
     assert_eq!(
@@ -144,11 +144,90 @@ fn check_hooks_hygiene_covers_active_workspace_paths_beyond_project_dir() {
     std::fs::create_dir_all(&project).unwrap();
     write_settings(&other_workspace, &tm_hooks_value());
 
-    let (contamination, _foreign) =
+    let (contamination, _foreign, _build_tree) =
         check_hooks_hygiene(Some(&project), std::slice::from_ref(&other_workspace));
     assert_eq!(
         contamination.status,
         CheckStatus::Warn,
         "a live workspace outside project_dir must still be scanned"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #7262: `hooks_build_tree_binary`. These FAIL on 1ba38636c, where no check
+// existed and `tm_hook_event_names` could not see the incident shape either.
+// ---------------------------------------------------------------------------
+
+use crate::core::standalone::hooks::build_tree::tests::{INCIDENT_EXE, incident_settings};
+
+#[test]
+fn check_hooks_hygiene_reports_the_build_tree_incident_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("corrupted-project");
+    let settings = write_settings(&project, &incident_settings());
+
+    let (contamination, _foreign, build_tree) = check_hooks_hygiene(Some(&project), &[]);
+    assert_eq!(build_tree.status, CheckStatus::Warn);
+    assert!(
+        build_tree.message.contains(&*settings.to_string_lossy()),
+        "the report must name the file: {}",
+        build_tree.message
+    );
+    for cmd in [
+        format!("{INCIDENT_EXE} hook"),
+        format!("{INCIDENT_EXE} hook --pm-guard"),
+    ] {
+        assert!(
+            build_tree.message.contains(&cmd),
+            "the report must name `{cmd}`: {}",
+            build_tree.message
+        );
+    }
+    // The pre-existing check must see it now too, so `--fix` has something to
+    // repair rather than a finding with no remedy.
+    assert_eq!(contamination.status, CheckStatus::Warn);
+}
+
+#[test]
+fn check_hooks_hygiene_reports_a_build_tree_statusline() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("statusline-only-project");
+    write_settings(
+        &project,
+        &serde_json::json!({
+            "statusLine": {
+                "type": "command",
+                "command": format!("{INCIDENT_EXE} statusline")
+            }
+        }),
+    );
+
+    let (contamination, _foreign, build_tree) = check_hooks_hygiene(Some(&project), &[]);
+    assert_eq!(build_tree.status, CheckStatus::Warn);
+    assert!(
+        build_tree
+            .message
+            .contains(&format!("{INCIDENT_EXE} statusline")),
+        "the statusLine command must be named: {}",
+        build_tree.message
+    );
+    assert_eq!(
+        contamination.status,
+        CheckStatus::Ok,
+        "a statusLine command is not a hook entry and must not be reported as one"
+    );
+}
+
+#[test]
+fn check_hooks_hygiene_build_tree_check_is_ok_for_an_installed_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("installed-binary-project");
+    write_settings(&project, &tm_hooks_value());
+
+    let (_contamination, _foreign, build_tree) = check_hooks_hygiene(Some(&project), &[]);
+    assert_eq!(
+        build_tree.status,
+        CheckStatus::Ok,
+        "an installed `/usr/local/bin/tm hook` is not build-tree contamination"
     );
 }

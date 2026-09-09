@@ -131,6 +131,23 @@ impl RepairStep {
     }
 }
 
+/// Appended to a `hooks_contamination` step that removes the PM guard.
+///
+/// Why (#7262): the base message names the EVENTS it cleans, which reads as a
+/// tidy-up. Removing the `PreToolUse` PM-guard entry is not a tidy-up — it
+/// takes PM enforcement offline, and this repair does not put it back. Only
+/// the project's next managed `tm` launch re-renders the hook, so an operator
+/// who runs `--fix` and then keeps working in an unmanaged session is
+/// unguarded with nothing on screen saying so.
+/// What: one clause, in both dry-run and apply wording (the step's `what` is
+/// mode-independent by [`RepairStep`]'s contract), appended to the base
+/// message when
+/// [`crate::core::standalone::hooks::cleanup::CleanOutcome::removed_pm_guard`]
+/// is set.
+/// Test: `hooks_repair_warns_when_it_removes_the_pm_guard`.
+const PM_GUARD_REMOVAL_CLAUSE: &str =
+    "; pm-guard enforcement is absent until the project's next managed `tm` launch re-renders it";
+
 /// Remove tm's own hook entries from a project's `.claude/settings*.json`.
 ///
 /// Why (#2940, #4948): a pre-#2940 `tm install` wired tm hooks into every
@@ -153,7 +170,9 @@ impl RepairStep {
 /// than on every diagnostic.
 /// Test: `hooks_repair_applies_and_backs_up`,
 /// `hooks_repair_dry_run_changes_nothing`,
-/// `hooks_repair_leaves_foreign_entries_alone`.
+/// `hooks_repair_leaves_foreign_entries_alone`,
+/// `hooks_repair_warns_when_it_removes_the_pm_guard`,
+/// `hooks_repair_omits_the_pm_guard_clause_for_other_entries`.
 pub fn repair_hooks_contamination(project_dir: &Path, mode: RepairMode) -> Vec<RepairStep> {
     let claude = project_dir.join(".claude");
     let mut steps = Vec::new();
@@ -162,10 +181,15 @@ pub fn repair_hooks_contamination(project_dir: &Path, mode: RepairMode) -> Vec<R
         match clean_settings_file(&path, mode == RepairMode::Apply) {
             Ok(None) => {}
             Ok(Some(outcome)) => {
-                let what = format!(
+                let mut what = format!(
                     "remove tm hook entries under [{}]",
                     outcome.removed_events.join(", ")
                 );
+                // #7262: removing the guard is not self-describing — say what
+                // it costs and when it comes back.
+                if outcome.removed_pm_guard {
+                    what.push_str(PM_GUARD_REMOVAL_CLAUSE);
+                }
                 let status = match mode {
                     RepairMode::DryRun => StepStatus::Planned,
                     RepairMode::Apply => StepStatus::Applied {
