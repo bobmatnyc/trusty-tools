@@ -5,10 +5,12 @@
 
 use super::body::{self, ATTRIBUTION_FOOTER, FIELDS, Field, IssueLink};
 use super::merge;
+use super::metadata::{self, PrMetadata, RefsIssue};
 use super::open::{self, ChangelogVerdict, Preflight};
 use super::queue_check;
 use super::{GhRun, GhRunner, repo_slug};
 use crate::cli::{PrMergeArgs, PrOpenArgs, PrQueueCheckArgs};
+use trusty_mpm::core::component_labels::CrateOwnership;
 use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
 
 // ── fakes ────────────────────────────────────────────────────────────────
@@ -71,10 +73,14 @@ impl GhRunner for FakeGh {
     }
 }
 
-/// A [`Preflight`] with both probes pinned.
+/// A [`Preflight`] with every probe pinned.
 struct FakePreflight {
     session: Option<String>,
     changelog: ChangelogVerdict,
+    /// #7274: the diff the component labels are derived from.
+    changed: Vec<String>,
+    /// #7274: the workspace ownership those paths are looked up in.
+    ownership: CrateOwnership,
 }
 
 impl FakePreflight {
@@ -82,7 +88,16 @@ impl FakePreflight {
         Self {
             session: Some("tm-test-01".to_string()),
             changelog: ChangelogVerdict::Pass,
+            changed: Vec::new(),
+            ownership: CrateOwnership::default(),
         }
+    }
+
+    /// [`Self::ok`] with a diff and the ownership map to resolve it (#7274).
+    fn with_diff(mut self, paths: &[&str]) -> Self {
+        self.changed = paths.iter().map(|p| (*p).to_string()).collect();
+        self.ownership = test_ownership();
+        self
     }
 }
 
@@ -93,6 +108,23 @@ impl Preflight for FakePreflight {
     fn changelog_gate(&self, _base: &str) -> anyhow::Result<ChangelogVerdict> {
         Ok(self.changelog.clone())
     }
+    fn changed_paths(&self, _base: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self.changed.clone())
+    }
+    fn ownership(&self) -> CrateOwnership {
+        self.ownership.clone()
+    }
+}
+
+/// A two-crate workspace map, without a filesystem.
+fn test_ownership() -> CrateOwnership {
+    CrateOwnership::from_members([
+        ("crates/trusty-mpm/".to_string(), "trusty-mpm".to_string()),
+        (
+            "crates/trusty-agents-common/".to_string(),
+            "trusty-agents-common".to_string(),
+        ),
+    ])
 }
 
 // ── body fixtures ────────────────────────────────────────────────────────
@@ -565,6 +597,210 @@ fn open_creates_and_reports() {
     let calls = gh.calls();
     assert_eq!(calls.len(), 1);
     assert!(calls[0].join(" ").contains("--label ws/tm-test-01"));
+}
+
+// ── PR labels / project / milestone standard (#7274) ─────────────────────
+
+/// The `gh issue view --json` payload for an issue with both fields set.
+const ISSUE_JSON: &str = r#"{"number":7274,"milestone":{"title":"mpm 1.6"},
+    "projectItems":[{"title":"trusty-mpm"},{"title":"Harness"}],
+    "labels":[],"comments":[],"state":"OPEN"}"#;
+
+fn refs_issue() -> RefsIssue {
+    RefsIssue {
+        number: 7274,
+        milestone: Some("mpm 1.6".to_string()),
+        projects: vec!["trusty-mpm".to_string()],
+    }
+}
+
+#[test]
+fn metadata_inherits_milestone_and_projects() {
+    let meta = metadata::plan(
+        Some(&refs_issue()),
+        &["crates/trusty-mpm/src/lib.rs"],
+        &test_ownership(),
+    );
+    assert_eq!(meta.labels, vec!["trusty-mpm".to_string()]);
+    assert_eq!(meta.milestone.as_deref(), Some("mpm 1.6"));
+    assert_eq!(meta.projects, vec!["trusty-mpm".to_string()]);
+    assert!(
+        meta.notes.is_empty(),
+        "nothing was missing: {:?}",
+        meta.notes
+    );
+}
+
+#[test]
+fn metadata_without_refs_applies_nothing() {
+    let meta = metadata::plan(None, &["docs/specs/DOC-65.md"], &test_ownership());
+    assert!(meta.is_empty(), "{meta:?}");
+    let notes = meta.notes.join("\n");
+    assert!(notes.contains("no component label"), "{notes}");
+    assert!(notes.contains("no `Refs #N`"), "{notes}");
+}
+
+#[test]
+fn metadata_multi_crate_diff() {
+    let meta = metadata::plan(
+        Some(&refs_issue()),
+        &[
+            "crates/trusty-agents-common/src/assets/agents/version-control.md",
+            "crates/trusty-mpm/src/bin/tm/commands/pr/open.rs",
+            "crates/trusty-mpm/src/core/component_labels.rs",
+            "docs/specs/DOC-65-universal-framework-agents.md",
+        ],
+        &test_ownership(),
+    );
+    assert_eq!(
+        meta.labels,
+        vec!["trusty-agents-common".to_string(), "trusty-mpm".to_string()],
+        "one label per crate the diff touches, docs contributing none"
+    );
+}
+
+#[test]
+fn metadata_notes_an_issue_with_no_milestone() {
+    let bare = RefsIssue {
+        number: 99,
+        milestone: None,
+        projects: Vec::new(),
+    };
+    let meta = metadata::plan(Some(&bare), &["crates/trusty-mpm/a.rs"], &test_ownership());
+    let notes = meta.notes.join("\n");
+    assert!(
+        notes.contains("no milestone: issue #99 carries none"),
+        "{notes}"
+    );
+    assert!(
+        notes.contains("no project: issue #99 joins none"),
+        "{notes}"
+    );
+    assert!(meta.milestone.is_none());
+    assert!(meta.projects.is_empty());
+}
+
+#[test]
+fn metadata_parses_a_gh_issue_view_payload() {
+    let facts = serde_json::from_str(ISSUE_JSON).expect("the fixture parses");
+    let issue = RefsIssue::from_facts(7274, &facts);
+    assert_eq!(issue.milestone.as_deref(), Some("mpm 1.6"));
+    assert_eq!(
+        issue.projects,
+        vec!["trusty-mpm".to_string(), "Harness".to_string()]
+    );
+}
+
+#[test]
+fn metadata_edit_argv_carries_every_field() {
+    let meta = PrMetadata {
+        labels: vec!["trusty-mpm".to_string()],
+        milestone: Some("mpm 1.6".to_string()),
+        projects: vec!["trusty-mpm".to_string()],
+        notes: Vec::new(),
+    };
+    let argv = metadata::edit_argv("4242", Some("o/r"), &meta).join(" ");
+    assert!(argv.starts_with("pr edit 4242 --repo o/r"), "{argv}");
+    assert!(argv.contains("--add-label trusty-mpm"), "{argv}");
+    assert!(argv.contains("--milestone mpm 1.6"), "{argv}");
+    assert!(argv.contains("--add-project trusty-mpm"), "{argv}");
+}
+
+#[test]
+fn metadata_finds_the_first_refs() {
+    let body = "## Outcome\n\nRefs #7274\n\nRefs #9999\n";
+    assert_eq!(metadata::first_refs_issue(body), Some(7274));
+}
+
+#[test]
+fn metadata_finds_a_qualified_refs() {
+    assert_eq!(
+        metadata::first_refs_issue("Refs bobmatnyc/trusty-tools#7274\n"),
+        Some(7274)
+    );
+}
+
+#[test]
+fn metadata_ignores_refs_mid_sentence() {
+    assert_eq!(
+        metadata::first_refs_issue("This one refs #12 in passing.\nRefs #34\n"),
+        Some(34),
+        "only a line that STARTS with the keyword is the link line"
+    );
+    assert_eq!(metadata::first_refs_issue("## Outcome\n\ntext\n"), None);
+}
+
+#[test]
+fn open_applies_pr_metadata() {
+    let mut body = full_body();
+    body = body.replace(
+        ATTRIBUTION_FOOTER,
+        &format!("Refs #7274\n\n{ATTRIBUTION_FOOTER}"),
+    );
+    let (_d, path) = scratch_body(&body);
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new()
+        .on("pr create", "https://github.com/o/r/pull/4242\n")
+        .on("issue view 7274", ISSUE_JSON)
+        .on("pr edit 4242", "");
+    let pre = FakePreflight::ok().with_diff(&[
+        "crates/trusty-mpm/src/bin/tm/commands/pr/open.rs",
+        "crates/trusty-agents-common/src/assets/agents/version-control.md",
+    ]);
+    let code = open::run(&gh, &args, &pre).expect("create succeeds");
+    assert_eq!(code, super::EXIT_OK);
+    let edit = gh
+        .calls()
+        .into_iter()
+        .map(|c| c.join(" "))
+        .find(|c| c.starts_with("pr edit"))
+        .expect("a `gh pr edit` ran");
+    assert!(edit.contains("--add-label trusty-mpm"), "{edit}");
+    assert!(edit.contains("--add-label trusty-agents-common"), "{edit}");
+    assert!(edit.contains("--milestone mpm 1.6"), "{edit}");
+    assert!(edit.contains("--add-project trusty-mpm"), "{edit}");
+    assert!(edit.contains("--add-project Harness"), "{edit}");
+}
+
+#[test]
+fn open_without_refs_says_so() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new().on("pr create", "https://github.com/o/r/pull/7\n");
+    let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+    let code = open::run(&gh, &args, &pre).expect("create succeeds");
+    assert_eq!(code, super::EXIT_OK);
+    // The component label still lands; only the inherited half is skipped.
+    let edit = gh
+        .calls()
+        .into_iter()
+        .map(|c| c.join(" "))
+        .find(|c| c.starts_with("pr edit"))
+        .expect("a `gh pr edit` ran for the component label");
+    assert!(edit.contains("--add-label trusty-mpm"), "{edit}");
+    assert!(!edit.contains("--milestone"), "{edit}");
+    assert!(
+        !gh.calls()
+            .iter()
+            .any(|c| c.join(" ").contains("issue view")),
+        "no `Refs #N` means no issue read at all"
+    );
+}
+
+#[test]
+fn open_survives_a_failed_metadata_edit() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new()
+        .on("pr create", "https://github.com/o/r/pull/7\n")
+        .on_fail("pr edit", "label not found");
+    let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+    let code = open::run(&gh, &args, &pre).expect("a failed edit is not an error");
+    assert_eq!(
+        code,
+        super::EXIT_OK,
+        "the PR already exists; the metadata apply is best-effort"
+    );
 }
 
 #[test]

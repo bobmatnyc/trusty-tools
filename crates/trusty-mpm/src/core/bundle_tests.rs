@@ -202,6 +202,67 @@ fn tm_capabilities_constants_are_non_empty() {
     assert!(!TM_CAPABILITIES_WORKFLOWS.trim().is_empty());
 }
 
+/// The heading of the one section that states the labels/project/milestone
+/// standard (#7274).
+const STANDARD_HEADING: &str = "## The Labels, Project, Milestone Standard";
+
+/// The one sentence that states it. Asserting on the sentence, not the
+/// heading, is what makes "stated once" mechanical.
+const STANDARD_RULE: &str = "Every issue and every pull request carries the same four things: the\n\
+     `ws/<session>` label, its component label(s), its project, and its milestone.";
+
+#[test]
+fn the_labels_project_milestone_standard_is_stated_once() {
+    // #7274, owner ruling 2026-09-09: one standard covering issues AND pull
+    // requests, stated in `tm-ticketing` and pointed at from the three files
+    // that carry the mechanics. A second statement of the rule is the drift
+    // this consolidation removed — #6939 and #7073 hand-edited two copies in
+    // step, which worked only for as long as someone remembered to.
+    assert!(
+        TM_TICKETING.contains(STANDARD_HEADING),
+        "`tm-ticketing.md` must hold the section `{STANDARD_HEADING}`"
+    );
+    let stated: Vec<&str> = [
+        ("tm-ticketing.md", TM_TICKETING),
+        ("ticketing.md", TICKETING_AGENT),
+        ("version-control.md", VERSION_CONTROL_AGENT),
+        ("tm-workflow.md", TM_WORKFLOW),
+    ]
+    .into_iter()
+    .filter(|(_, body)| body.contains(STANDARD_RULE))
+    .map(|(name, _)| name)
+    .collect();
+    assert_eq!(
+        stated,
+        vec!["tm-ticketing.md"],
+        "the rule sentence must appear in `tm-ticketing.md` and nowhere else"
+    );
+
+    // The three mechanics files reach the rule by naming the section, so a
+    // reader landing in any of them can find it without knowing it exists.
+    let name = STANDARD_HEADING.trim_start_matches('#').trim();
+    for (file, body) in [
+        ("ticketing.md", TICKETING_AGENT),
+        ("version-control.md", VERSION_CONTROL_AGENT),
+        ("tm-workflow.md", TM_WORKFLOW),
+    ] {
+        assert!(
+            body.contains(name),
+            "`{file}` must reference the shared section by name (`{name}`)"
+        );
+        assert!(
+            body.contains("tm-ticketing"),
+            "`{file}` must say which skill holds the shared section"
+        );
+    }
+
+    // `version-control.md` also has to say what applies its half.
+    assert!(
+        VERSION_CONTROL_AGENT.contains("`tm pr open` applies your half itself"),
+        "`version-control.md` must say `tm pr open` applies the PR side (#7274)"
+    );
+}
+
 #[test]
 fn tm_skills_have_frontmatter() {
     // Every /tm- skill must carry YAML frontmatter with a tm-native `name:`

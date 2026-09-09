@@ -32,6 +32,7 @@
 
 pub(crate) mod body;
 pub(crate) mod merge;
+pub(crate) mod metadata;
 pub(crate) mod open;
 pub(crate) mod queue_check;
 

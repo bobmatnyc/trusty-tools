@@ -344,6 +344,42 @@ mod tests {
         );
     }
 
+    /// `ticketing` and `version-control` are sonnet-tier, never haiku.
+    ///
+    /// Why (#7274, owner ruling 2026-09-09): both agents carry judgment the
+    /// haiku tier does not reach. `ticketing` weighs a deduplication
+    /// disposition and a scope boundary; `version-control` now derives a PR's
+    /// component labels from its own diff and inherits the project and
+    /// milestone of the issue its `Refs #N` names. `version-control.md`
+    /// declared `model: haiku` until that ruling, so this test pins the tier at
+    /// the one place the harness actually reads it — the asset's frontmatter.
+    /// A tier lives nowhere else per DOC-61 §3.3, so a prose table that drifts
+    /// cannot flip the shipped default, and this assertion cannot be satisfied
+    /// by editing a table.
+    #[test]
+    fn ticketing_and_version_control_are_not_haiku() {
+        for (name, body) in [
+            ("ticketing.md", TICKETING),
+            ("version-control.md", VERSION_CONTROL),
+        ] {
+            let frontmatter = body
+                .strip_prefix("---\n")
+                .and_then(|rest| rest.split_once("\n---"))
+                .map(|(fm, _)| fm)
+                .unwrap_or_else(|| panic!("`{name}` must open with YAML frontmatter"));
+            assert!(
+                !frontmatter.lines().any(|l| l.trim() == "model: haiku"),
+                "`{name}` frontmatter must not declare `model: haiku` (#7274); \
+                 got:\n{frontmatter}"
+            );
+            assert!(
+                frontmatter.lines().any(|l| l.trim() == "model: sonnet"),
+                "`{name}` frontmatter must declare `model: sonnet` (#7274); \
+                 got:\n{frontmatter}"
+            );
+        }
+    }
+
     /// Worktree removal is PM-executed, and the shipped prompt must say so.
     ///
     /// Why (#5791, owner ruling 2026-08-19): this bullet used to tell every

@@ -179,11 +179,45 @@ This governs issue bodies only. It does **not** relax the evidence rule for
 claiming a gate passed: raw test output stays mandatory there (`BASE-AGENT.md` —
 never summarise test results in your own words).
 
+## The Labels, Project, Milestone Standard
+
+🔴 **Every issue and every pull request carries the same four things: the
+`ws/<session>` label, its component label(s), its project, and its milestone.**
+One standard, two artifacts. This section is where it is stated; `ticketing.md`,
+`version-control.md` and `tm-workflow` carry the `gh` mechanics and point back
+here by name rather than restating it.
+
+| | Issue | Pull request |
+|---|---|---|
+| `ws/<session>` label | the filing session's | the opening session's |
+| Component label(s) | the crate the defect lives in, read off the file paths the finding cites | every crate the PR's own diff touches, read off `git diff --name-only <base>...<head>` |
+| Project | chosen by crate/topic fit, or `default_project` | the project(s) of the issue its `Refs #N` names |
+| Milestone | by the ordered rule in "Choosing the Milestone" below | the milestone of the issue its `Refs #N` names |
+| Type / priority label | yes — "Labels" below | no; a PR's type is its title's conventional-commit prefix |
+| Relationships | native sub-issue and blocked-by — "Relationships (native, never prose)" | none; a PR's relationship IS its `Refs #N` |
+
+Neither half of a PR's derived metadata is typed by anyone. `tm pr open`
+computes both — the component labels from the diff, the project and milestone
+from the `Refs` issue — and applies them in one `gh pr edit` after the PR
+exists. A PR whose body carries no `Refs #N` gets no project and no milestone,
+and the command prints one line saying so; a PR no workspace crate owns
+(docs-only, CI-only) gets no component label and prints the same kind of line.
+Both are the correct outcome, not a gap to fill by guessing.
+
+🟡 **`trusty-mpm` means different things on the two artifacts, and this is the
+one place that difference is stated.** On an issue it is a component label like
+any other, applying only when the code at fault sits under `crates/trusty-mpm/`.
+On a pull request it is the convention label every `tm pr open` attaches, which
+is what marks a PR as a trusty-mpm session's. A PR therefore carries
+`trusty-mpm` plus whatever component labels its diff earns, and those can be
+disjoint.
+
 ## Labels
 
-Three separable families. The `ticketing` agent applies them at creation and the
-exact command form lives in the agent asset ("Label at Creation"); this is the
-model, so a delegation brief never needs to spell it out.
+Three separable families, on issues. The rule that they are applied at all is
+"The Labels, Project, Milestone Standard" above; the exact command form lives in
+the agent asset ("Label at Creation"), so a delegation brief never needs to
+spell either out.
 
 | Family | Cardinality | Content |
 |---|---|---|
@@ -238,14 +272,13 @@ issue-link keyword stays `Refs #N` (a one-off `Closes` is the deliberate
 lifecycle one. A block that tries either is refused at load with the field
 named.
 
-## Every New Issue Carries a Milestone, a Project, and Its Relationships
+## Choosing the Milestone and the Project (issues)
 
-🔴 **Three things are set at creation, natively, on every issue you file:**
-exactly one milestone, at least one GitHub Project, and every relationship the
-brief names. An issue filed with no milestone and no project is a standard
-violation, not a tidy-up for later. The relationship half is "Relationships
-(native, never prose)" below — parent/child and blocked-by, set with the same
-`gh` call that files the issue.
+The standard that an issue carries both is "The Labels, Project, Milestone
+Standard" above. This section is how the two values are chosen and set — and the
+relationships that go with them, which are the issue side's alone: parent/child
+and blocked-by, set with the same `gh` call that files the issue ("Relationships
+(native, never prose)" below).
 
 `tm issue standard` is the source of truth for all three. It prints
 `milestone_required`, `project_required`, the configured `default_project`, and
@@ -278,10 +311,9 @@ parked there evicts the real slot. `ws/<session-name>` is always a label.
 
 ## Projects
 
-🔴 **Every new issue joins at least one project**, chosen by crate/topic fit
-from the list `tm issue standard` prints. `agents.ticketing.default_project`
-names one when the project always applies; when it does not, pick from the live
-list rather than guessing a title.
+Pick an issue's project by crate/topic fit from the list `tm issue standard`
+prints. `agents.ticketing.default_project` names one when the project always
+applies; when it does not, pick from the live list rather than guessing a title.
 
 ```bash
 # -L is required: gh silently caps the list at 30 without it (#7067)

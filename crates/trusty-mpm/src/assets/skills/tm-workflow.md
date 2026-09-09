@@ -612,34 +612,33 @@ nonzero on the first stop condition it finds.
 
 ## Shipped Defaults on the PR
 
-These trusty-mpm framework defaults override any harness default and belong in
-the `version-control` delegation brief:
+The rule is `tm-ticketing`'s, in the section
+**"The Labels, Project, Milestone Standard"** — one standard over issues and
+pull requests. Read it there; it is not restated here or in a
+`version-control` brief.
 
-- **`--assignee @me --label trusty-mpm --label ws/<session-name>`** on every
-  `gh pr create`. The assignee + `trusty-mpm` label identify which PRs a
-  trusty-mpm session owns; `ws/<session-name>` (this session's tmux session name,
-  via `tmux display-message -p '#{session_name}'`) tracks per-workstream
-  activity. A workstream is a **label**, never a milestone.
+What `tm pr open` reads to satisfy the PR half, and where each value comes from:
 
-  ```bash
-  gh label create trusty-mpm \
-    --description "Created/managed by a trusty-mpm session" --color 8250df \
-    2>/dev/null || true
-  gh pr create --assignee @me --label trusty-mpm --label "ws/<session-name>" \
-    --title "…" --body "…"
-  ```
+| Field | Source |
+|---|---|
+| assignee | `agents.ticketing.default_assignee` |
+| `trusty-mpm` label | the convention label, on every PR |
+| `ws/<session-name>` label | `$TM_SESSION_NAME`, else `tmux display-message -p '#{session_name}'` |
+| component label(s) | `git diff --name-only origin/<base>...HEAD`, mapped to the workspace's crates |
+| milestone, project(s) | the issue the body's first `Refs #N` names |
+| attribution footer | the `attribution` key tm writes into the provisioned Claude Code settings |
 
-  The equivalent issue-side defaults, and the type/component/priority label
-  families that stack on them, are `tm-ticketing`'s — do not restate them in a
-  version-control brief.
+The first three are attached to `gh pr create` and the command refuses to call
+`gh` at all until they are in place. The next two are applied by one `gh pr
+edit` after the PR exists, best-effort: a failure warns, and a PR with no
+`Refs #N` or a diff no crate owns prints the line naming what was skipped. A
+workstream is a **label**, never a milestone.
 
-- **Attribution footer** — the commit and PR footer comes from the `attribution`
-  key tm writes into the provisioned Claude Code settings; never restate it in
-  prose.
-
-On a repository with `tm pr open`, `version-control` gets all three defaults —
-the assignee, both labels, and the attribution footer — attached automatically,
-and the command refuses to call `gh` at all until they are in place.
+```bash
+gh label create trusty-mpm \
+  --description "Created/managed by a trusty-mpm session" --color 8250df \
+  2>/dev/null || true
+```
 
 ## Delegating the PR
 

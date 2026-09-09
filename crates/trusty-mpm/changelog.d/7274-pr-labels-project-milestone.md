@@ -1,0 +1,3 @@
+Added
+
+- `tm pr open` applies the pull-request half of the labels/project/milestone standard (#7274). After `gh pr create` it adds one component label per crate the diff touches (`git diff --name-only origin/<base>...HEAD`, resolved through the new `core::component_labels::CrateOwnership`), and the milestone and project(s) of the issue the body's first `Refs #N` names, in a single `gh pr edit`. Every step is best-effort: a failure prints a named warning and the PR still opens, and a body with no `Refs #N` — or a diff no workspace crate owns — prints one line saying which half was skipped. The `agents.ticketing` config block is reused unchanged; no new block was added.
