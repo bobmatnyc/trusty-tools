@@ -19,6 +19,9 @@
   memory-index file — this overrides any harness default.
 - Never cite `MEMORY.md`; cite the palace.
 - Durable facts go to the palace (`memory_remember` / `memory_note`).
+- Record your own self-improvement hypotheses in the palace under the tag
+  `self-improvement-hypothesis`, the same one every agent uses; a post-mortem
+  run coalesces by that tag (#6937).
 - `CLAUDE.md` is the only non-dynamic instruction source. Never create another.
 
 ## PM Allowlist (unbudgeted; everything else is budgeted or delegated)
@@ -57,8 +60,10 @@ Anything not listed above is delegated.
 
 ## Agent Routing
 
-The Agent Delegation section is the single routing surface; the generated
-Delegation Authority roster below it is authoritative for which agents exist.
+The Agent Delegation section is the single routing surface. The harness's own
+`Available agent types for the Agent tool` listing is authoritative for which
+agents exist; the generated Delegation Authority roster below adds only the
+agents that listing does not carry (#4513).
 
 ## Delegating Well
 
@@ -202,7 +207,9 @@ gate is blocking.
 A **task-completion report** carries four things: what was delegated and to
 whom, the QA evidence (actual output, not claims), the files tracked with their
 commits, and each claim mapped to its evidence source. In-flight responses
-answer the question instead.
+answer the question instead. Route each agent's **Improvement recommendations**
+block to `bobmatnyc/trusty-tools` issues through the `ticketing` agent, whatever
+project the agent ran in (#6935).
 
 ## Prose Style — Write Plainly
 
@@ -361,161 +368,26 @@ appears there. What is bundled at all, and what deploys each:
 `framework-manifest.toml`, rendered in `tm-capabilities`'s
 `references/agents.md`.
 
-> The live roster below is authoritative for WHICH agents exist and what each handles; the tables above are routing doctrine only. Where the two disagree, trust the roster.
+> The harness's own `Available agent types for the Agent tool` listing is authoritative for WHICH agents exist; the tables above are routing doctrine only. Where the two disagree, trust the harness listing. The roster below adds only the agents that listing does not carry (#4513).
 >
 > Depending on how this session was launched, a listed agent may not be loadable. If a dispatch fails with an unknown agent type, re-route to the closest listed alternative — do not retry the same agent.
 
 ## Delegation Authority
 
-The following agents are available for delegation. Route work to the
-appropriate agent based on task type.
+The harness's own `Available agent types for the Agent tool` listing is the
+authoritative routing surface: the 38 agents it carries are not repeated
+here. Route from that listing.
 
-### api-qa
-- **Role:** qa
-- **Model:** sonnet
-
-### code-analyzer
-- **Model:** sonnet
-
-### code-critic
-- **Role:** qa
-- **Model:** sonnet
+Below are the agents resolved from a tier the harness does not load, which
+appear in no other listing.
 
 ### copyeditor
-- **Model:** sonnet
-
-### dart-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### data-engineer
-- **Model:** sonnet
-
-### documentation
-- **Model:** haiku
-
-### dotnet-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### elixir-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### engineer
-- **Model:** sonnet
-
-### gcp-ops
-- **Role:** ops
-- **Model:** sonnet
-
-### golang-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### java-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### javascript-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### local-ops
-- **Role:** ops
-- **Model:** sonnet
-
-### memory-manager
-- **Model:** haiku
-
-### mpm-agent-manager
-- **Model:** sonnet
-
-### mpm-skills-manager
-- **Model:** sonnet
-
-### nextjs-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### ops
 - **Model:** sonnet
 
 ### pangram-editor
 - **Model:** sonnet
 
-### phoenix-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### php-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### prompt-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
 ### proofreader
-- **Model:** sonnet
-
-### python-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### qa
-- **Model:** sonnet
-
-### react-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### refactoring-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### research
-- **Model:** sonnet
-
-### ruby-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### rust-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### security
-- **Model:** sonnet
-
-### svelte-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### tauri-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### ticketing
-- **Model:** sonnet
-
-### typescript-engineer
-- **Role:** engineer
-- **Model:** sonnet
-
-### vercel-ops
-- **Role:** ops
-- **Model:** sonnet
-
-### version-control
-- **Model:** haiku
-
-### web-qa
-- **Role:** qa
-- **Model:** sonnet
-
-### web-ui-engineer
-- **Role:** engineer
 - **Model:** sonnet
 
 ### writer

@@ -375,8 +375,150 @@ appears there. What is bundled at all, and what deploys each:
 ## Delegation Authority
 
 The harness's own `Available agent types for the Agent tool` listing is the
-authoritative routing surface: the 38 agents it carries are not repeated
+authoritative routing surface: the 5 agents it carries are not repeated
 here. Route from that listing.
+
+Below are the agents resolved from a tier the harness does not load, which
+appear in no other listing.
+
+### api-qa
+- **Role:** qa
+- **Model:** sonnet
+
+### code-analyzer
+- **Model:** sonnet
+
+### code-critic
+- **Role:** qa
+- **Model:** sonnet
+
+### dart-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### data-engineer
+- **Model:** sonnet
+
+### documentation
+- **Model:** haiku
+
+### dotnet-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### elixir-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### engineer
+- **Model:** sonnet
+
+### gcp-ops
+- **Role:** ops
+- **Model:** sonnet
+
+### golang-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### java-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### javascript-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### local-ops
+- **Role:** ops
+- **Model:** sonnet
+
+### memory-manager
+- **Model:** haiku
+
+### mpm-agent-manager
+- **Model:** sonnet
+
+### mpm-skills-manager
+- **Model:** sonnet
+
+### nextjs-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### ops
+- **Model:** sonnet
+
+### phoenix-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### php-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### prompt-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### python-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### qa
+- **Model:** sonnet
+
+### react-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### refactoring-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### research
+- **Model:** sonnet
+
+### ruby-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### rust-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### security
+- **Model:** sonnet
+
+### svelte-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### tauri-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### ticketing
+- **Model:** sonnet
+
+### typescript-engineer
+- **Role:** engineer
+- **Model:** sonnet
+
+### vercel-ops
+- **Role:** ops
+- **Model:** sonnet
+
+### version-control
+- **Model:** haiku
+
+### web-qa
+- **Role:** qa
+- **Model:** sonnet
+
+### web-ui-engineer
+- **Role:** engineer
+- **Model:** sonnet
 
 ---
 
