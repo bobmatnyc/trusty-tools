@@ -11592,12 +11592,17 @@ name = "trusty-code-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "chrono",
+ "http-body-util",
  "serde",
  "serde_json",
- "serial_test",
  "tauri",
  "tauri-build",
+ "tempfile",
  "tokio",
+ "tower",
+ "tracing",
  "trusty-code",
  "trusty-common",
 ]

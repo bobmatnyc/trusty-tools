@@ -3,13 +3,18 @@
 // exactly the ones a per-call-site implementation would get wrong: the header
 // is attached without a call site asking, it is NOT attached to a non-daemon
 // URL, and it never overwrites one a caller set deliberately.
-// What: drives the wrapper against a stub `fetch`, with the daemon URL and
+// What: drives the wrapper against a stub `fetch`, with the bridge URL and
 // credential supplied through localStorage (the plain-browser path — `isTauri()`
 // is false under jsdom).
+//
+// #6637: the base is now a per-launch ephemeral port on the app's own bridge
+// rather than the daemon's fixed 7882, so these cases set one explicitly instead
+// of importing a shared default. The properties under test are unchanged — what
+// the wrapper does about an origin is not a function of which port it is.
 // Test: this file.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_DAEMON_URL } from './api-config';
+import { BASE_URL_STORAGE_KEY } from './api-config';
 import {
   TICKET_QUERY_PARAM,
   TOKEN_STORAGE_KEY,
@@ -21,6 +26,9 @@ import {
 } from './daemon-auth';
 
 const TOKEN = 'a'.repeat(64);
+
+/** A stand-in for the ephemeral port the bridge binds at launch. */
+const BASE = 'http://127.0.0.1:54321';
 
 /** Replace `globalThis.fetch` with a recording stub and return it. */
 function stubFetch(response?: Response) {
@@ -38,6 +46,9 @@ function authHeaderOf(stub: ReturnType<typeof stubFetch>, call = 0): string | nu
 describe('daemon-auth', () => {
   beforeEach(() => {
     localStorage.clear();
+    // #6637: `apiBase()` invents no URL in web mode, so every case that reaches
+    // the wrapper has to say which bridge it means.
+    localStorage.setItem(BASE_URL_STORAGE_KEY, BASE);
     resetDaemonTokenCache();
     vi.restoreAllMocks();
   });
@@ -56,7 +67,7 @@ describe('daemon-auth', () => {
     const stub = stubFetch();
     installDaemonAuth();
 
-    await fetch(`${DEFAULT_DAEMON_URL}/sessions`);
+    await fetch(`${BASE}/sessions`);
 
     expect(stub).toHaveBeenCalledTimes(1);
     expect(authHeaderOf(stub)).toBe(`Bearer ${TOKEN}`);
@@ -77,7 +88,7 @@ describe('daemon-auth', () => {
     const stub = stubFetch();
     installDaemonAuth();
 
-    await fetch(`${DEFAULT_DAEMON_URL}/sessions`, {
+    await fetch(`${BASE}/sessions`, {
       headers: { Authorization: 'Bearer explicit' },
     });
 
@@ -88,7 +99,7 @@ describe('daemon-auth', () => {
     const stub = stubFetch();
     installDaemonAuth();
 
-    await fetch(`${DEFAULT_DAEMON_URL}/sessions`);
+    await fetch(`${BASE}/sessions`);
 
     expect(authHeaderOf(stub)).toBeNull();
   });
@@ -98,7 +109,7 @@ describe('daemon-auth', () => {
     const stub = stubFetch();
     installDaemonAuth();
 
-    await fetch(`${DEFAULT_DAEMON_URL}/tasks`, {
+    await fetch(`${BASE}/tasks`, {
       method: 'POST',
       body: '{"task":"x"}',
     });
@@ -111,18 +122,18 @@ describe('daemon-auth', () => {
 
   it('rejects a lookalike host rather than prefix-matching the base URL', () => {
     // The prefix-match class already fixed once in #3280:
-    // `http://127.0.0.1:7882` is a PREFIX of
-    // `http://127.0.0.1:7882.attacker.example`, so a startsWith test would have
+    // `http://127.0.0.1:54321` is a PREFIX of
+    // `http://127.0.0.1:54321.attacker.example`, so a startsWith test would have
     // sent the credential there.
-    expect(sameOrigin(`${DEFAULT_DAEMON_URL}/sessions`, DEFAULT_DAEMON_URL)).toBe(true);
+    expect(sameOrigin(`${BASE}/sessions`, BASE)).toBe(true);
     for (const hostile of [
-      'http://127.0.0.1:7882.attacker.example/sessions',
-      'http://127.0.0.1:78820/sessions',
-      'https://127.0.0.1:7882/sessions',
-      'http://127.0.0.1:7883/sessions',
+      'http://127.0.0.1:54321.attacker.example/sessions',
+      'http://127.0.0.1:543210/sessions',
+      'https://127.0.0.1:54321/sessions',
+      'http://127.0.0.1:54322/sessions',
       'not a url',
     ]) {
-      expect(sameOrigin(hostile, DEFAULT_DAEMON_URL)).toBe(false);
+      expect(sameOrigin(hostile, BASE)).toBe(false);
     }
   });
 
@@ -131,7 +142,7 @@ describe('daemon-auth', () => {
     const stub = stubFetch();
     installDaemonAuth();
 
-    await fetch(`${DEFAULT_DAEMON_URL}.attacker.example/sessions`);
+    await fetch(`${BASE}.attacker.example/sessions`);
 
     expect(authHeaderOf(stub)).toBeNull();
   });
@@ -147,11 +158,11 @@ describe('daemon-auth', () => {
     expect(stream).not.toBeNull();
     // The ticket request names the stream it is for, so the daemon can bind it.
     expect(String(stub.mock.calls[0]?.[0])).toBe(
-      `${DEFAULT_DAEMON_URL}/auth/sse-ticket?path=%2Fsessions%2Fs1%2Fevents`,
+      `${BASE}/auth/sse-ticket?path=%2Fsessions%2Fs1%2Fevents`,
     );
     expect(opened).toHaveLength(1);
     expect(opened[0]).toBe(
-      `${DEFAULT_DAEMON_URL}/sessions/s1/events?${TICKET_QUERY_PARAM}=tkt-1`,
+      `${BASE}/sessions/s1/events?${TICKET_QUERY_PARAM}=tkt-1`,
     );
     // The durable credential must never reach the URL — that is the whole
     // reason the ticket exchange exists.
