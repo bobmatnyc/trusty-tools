@@ -24,6 +24,45 @@ fn bare_handle(id: &str) -> StdArc<IndexHandle> {
     ))
 }
 
+/// How long a condition below may take to hold before the test gives up.
+///
+/// Why so generous: every deadline in this file bounds a `tokio::spawn`ed task
+/// competing with the rest of the binary for CPU. Under a fully parallel
+/// `cargo test -p trusty-search` on a loaded host, the two-second budget this
+/// file used to spend polling stage status expired before the first embed call
+/// had been dispatched at all, and the ordering assertion then read an EMPTY
+/// recording and reported it as an ordering failure (#7226). A long deadline
+/// costs nothing when the condition holds — the poll returns on the first tick
+/// after it does — and only ever spends its full budget on a genuine hang.
+const CONDITION_BUDGET: Duration = Duration::from_secs(60);
+
+/// How often [`wait_until`] re-checks its condition.
+const CONDITION_POLL: Duration = Duration::from_millis(10);
+
+/// Poll `cond` until it holds or [`CONDITION_BUDGET`] expires; returns whether
+/// it held.
+///
+/// Why: a fixed sleep encodes a guess about how fast a spawned task gets
+/// scheduled, and that guess is wrong on a loaded host — see #7226 and
+/// [`CONDITION_BUDGET`]. Waiting on the condition the assertion actually needs
+/// makes the test's timing independent of host load, so a failure afterwards
+/// can only be the ordering defect the test guards.
+/// What: checks `cond` immediately, then every [`CONDITION_POLL`] until the
+/// deadline. `false` means the condition never held — the caller reports what
+/// it observed instead.
+async fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
+    let deadline = tokio::time::Instant::now() + CONDITION_BUDGET;
+    loop {
+        if cond() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(CONDITION_POLL).await;
+    }
+}
+
 /// Wait until [`QUEUE_DEPTH`] is back to zero, i.e. every job this test enqueued
 /// has left the shared heap AND decremented the counter (#6574).
 ///
@@ -39,15 +78,11 @@ fn bare_handle(id: &str) -> StdArc<IndexHandle> {
 /// `embed_pause_tests`'s depth assertions came to read "the deferred-embed queue
 /// never emptied; depth is 1" for work that was never theirs.
 async fn wait_for_a_drained_queue(what: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while deferred_embed_queue_depth() > 0 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "{what}: the deferred-embed queue never drained; depth is {}",
-            deferred_embed_queue_depth()
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    assert!(
+        wait_until(|| deferred_embed_queue_depth() == 0).await,
+        "{what}: the deferred-embed queue never drained; depth is {}",
+        deferred_embed_queue_depth()
+    );
 }
 
 /// Issue #3748: [`best_pending_seq`] must identify the job with the
@@ -291,8 +326,10 @@ fn same_burst_never_reverts_to_arrival_order_even_once_max_wait_has_elapsed() {
 /// indistinguishable from a real ordering bug once both jobs' embed
 /// passes are cheap enough to complete within the same poll tick).
 /// Enqueues big (9000 "chunks", the priority key — the real committed
-/// chunk count is 1) then small (3), waits for both to reach a terminal
-/// stage, and asserts the RECORDED order is `[small, big]`.
+/// chunk count is 1) then small (3), waits until BOTH embed calls have
+/// been recorded (#7226 — the condition the assertion needs, on a
+/// generous deadline, never a fixed budget), and asserts the RECORDED
+/// order is `[small, big]`.
 /// Test: this IS the test.
 ///
 /// #6574: `#[serial_test::serial]` because this drives the process-global
@@ -392,17 +429,17 @@ async fn enqueue_drains_smallest_first_end_to_end() {
     enqueue(StdArc::clone(&big), Arc::new(ReindexProgress::new()), 9_000);
     enqueue(StdArc::clone(&small), Arc::new(ReindexProgress::new()), 3);
 
-    for handle in [&big, &small] {
-        for _ in 0..200 {
-            let status = handle.stages.read().await.semantic.status;
-            if status != crate::core::registry::StageStatus::Pending
-                && status != crate::core::registry::StageStatus::InProgress
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }
+    // #7226: wait on the CONDITION the assertion below needs — both embed calls
+    // observed — not on a fixed budget. The old wait polled stage status for a
+    // capped 2s and then asserted regardless, so a loaded host that had not yet
+    // run either job produced an EMPTY recording reported as an ordering
+    // failure.
+    assert!(
+        wait_until(|| order.lock().expect("lock").len() >= 2).await,
+        "both jobs' embed calls must be observed within {CONDITION_BUDGET:?}; \
+         recorded so far = {:?}",
+        order.lock().expect("lock").clone()
+    );
 
     let recorded = order.lock().expect("lock").clone();
     assert_eq!(
@@ -442,7 +479,7 @@ async fn enqueue_drains_smallest_first_end_to_end() {
 /// 1 giant (94000 priority key, 1 real committed chunk) + 26 small jobs
 /// (priority keys `1..=26`, 1 real committed chunk each). Enqueues the
 /// giant FIRST, then the 26 small jobs in ASCENDING priority-key order,
-/// waits for every handle to leave Pending/InProgress, and asserts the
+/// waits until all 27 embed calls have been recorded (#7226), and asserts the
 /// giant is the LAST id in the recorded order.
 /// Test: this IS the test.
 ///
@@ -549,21 +586,18 @@ async fn burst_of_many_jobs_still_dispatches_the_giant_last_end_to_end() {
         );
     }
 
-    let mut all_handles = small.clone();
-    all_handles.push(StdArc::clone(&giant));
-    for handle in &all_handles {
-        for _ in 0..500 {
-            let status = handle.stages.read().await.semantic.status;
-            if status != crate::core::registry::StageStatus::Pending
-                && status != crate::core::registry::StageStatus::InProgress
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-
+    // #7226: same condition-based wait as
+    // `enqueue_drains_smallest_first_end_to_end` — every job's embed call
+    // observed, on a deadline generous enough that only a genuine hang can
+    // expire it. The count assertion below then reports a real shortfall rather
+    // than a host that was merely slow.
+    let observed = wait_until(|| order.lock().expect("lock").len() >= 27).await;
     let recorded = order.lock().expect("lock").clone();
+    assert!(
+        observed,
+        "all 27 jobs' embed calls must be observed within {CONDITION_BUDGET:?}; \
+         recorded={recorded:?}"
+    );
     assert_eq!(
         recorded.len(),
         27,
