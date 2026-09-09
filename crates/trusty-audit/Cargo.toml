@@ -26,7 +26,10 @@ name = "trusty-audit"
 # changes `src/**`. The change is confined to the body of the private
 # `grounding::osv::absorb`, which now honours the producer's `resolved` flag;
 # no public item is added, removed, or reshaped.
-version = "0.14.6"
+# 0.14.6 -> 0.14.7: PATCH, owner-authorized reinstall bump only. Picks up
+# #7242 (the engagement config generator) and #7246 (the clone budget killing
+# the process group), both already merged to main. No public API change.
+version = "0.14.7"
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"
