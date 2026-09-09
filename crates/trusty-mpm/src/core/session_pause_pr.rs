@@ -12,8 +12,11 @@
 //! a scratch index, so HEAD, the shared index, and the working tree are never
 //! touched: only the caller-supplied `.trusty-mpm/sessions/**` paths enter the
 //! tree, `git add` is never run, and another session's dirty file cannot be
-//! swept in. The commit lands on a fresh `chore/sessions-<slug>-<ts>` branch off
-//! `origin/main`, is pushed, and the PR is opened and armed through the existing
+//! swept in. The scratch index and the PR body live in a private
+//! [`tempfile::TempDir`] this module creates per call and drops on every exit
+//! path, so two overlapping pauses cannot share either file. The commit lands
+//! on a fresh `chore/sessions-<slug>-<ts>` branch off the project's default
+//! branch, is pushed, and the PR is opened and armed through the existing
 //! `tm pr open` / `tm pr merge --auto` path — this module spells no
 //! `gh pr create` of its own.
 //! Test: `session_pause_pr_tests.rs`.
@@ -27,8 +30,13 @@ use crate::core::attribution::ATTRIBUTION_FOOTER;
 /// The only path prefix a pause commit may ever contain.
 pub const SESSIONS_PREFIX: &str = ".trusty-mpm/sessions/";
 
-/// The branch a pause snapshot may be published from.
-pub const REQUIRED_BRANCH: &str = "main";
+/// The default branch assumed when neither the project config nor
+/// `origin/HEAD` names one.
+///
+/// Why: `session_context_pause` serves every managed project, and a `master` or
+/// `develop` project must not be told its pause is illegal. This is the LAST
+/// resort in [`resolve_default_branch`], never an override (#7282 review).
+pub const FALLBACK_BRANCH: &str = "main";
 
 /// Blob mode for a regular non-executable file, as `update-index` spells it.
 const BLOB_MODE: &str = "100644";
@@ -70,7 +78,8 @@ impl CmdOut {
 ///
 /// Why: the whole publish sequence is a decision table over command output, so
 /// hiding the spawn behind a trait makes branch naming, the path allowlist, the
-/// not-on-`main` refusal, and the push/PR failure arms testable with no git
+/// not-on-the-default-branch refusal, and the push/PR failure arms testable
+/// with no git
 /// repository, no network, and no `gh`.
 /// What: `git` (with an optional `GIT_INDEX_FILE` overlay, which is how the
 /// scratch index stays out of the shared one) and `tm`.
@@ -94,7 +103,9 @@ pub trait PauseVcs {
 /// exactly which files it touched; re-deriving any of them here would be a
 /// second answer to a question already settled.
 /// What: the checkout, the session id, the pause timestamp, the repo-relative
-/// paths to publish, and a directory to write the PR body into.
+/// paths to publish, and the project's configured default branch when one is
+/// declared. The scratch directory is NOT a field: this module makes its own,
+/// so no caller can hand two concurrent pauses the same one (#7282 review).
 /// Test: `publish_commits_only_the_allowlisted_paths`.
 #[derive(Debug)]
 pub struct PublishRequest<'a> {
@@ -107,8 +118,9 @@ pub struct PublishRequest<'a> {
     /// Repo-relative paths to commit. Every one must start with
     /// [`SESSIONS_PREFIX`].
     pub paths: Vec<String>,
-    /// Directory the PR body file is written into.
-    pub body_dir: &'a Path,
+    /// The project's configured default branch, when the operator declared one.
+    /// `None` falls back to `origin/HEAD`, then to [`FALLBACK_BRANCH`].
+    pub default_branch: Option<&'a str>,
 }
 
 /// A published pause snapshot.
@@ -129,10 +141,10 @@ pub struct PublishOutcome {
 /// Why: "this project does not track its sessions" is a legitimate no-op, while
 /// "the push failed after the commit was made" leaves a local commit a person
 /// must deal with. Collapsing the two into one string would hide the second.
-/// What: `NotTracked` is the no-op; `NotOnMain` refuses before anything is
-/// created; `Step` names the failed step and carries the branch and commit when
-/// they already exist.
-/// Test: `publish_refuses_when_not_on_main`,
+/// What: `NotTracked` is the no-op; `NotOnDefaultBranch` refuses before
+/// anything is created and names the branch it expected; `Step` names the
+/// failed step and carries the branch and commit when they already exist.
+/// Test: `publish_refuses_when_not_on_the_default_branch`,
 /// `push_failure_leaves_the_commit_and_names_it`,
 /// `publish_skips_a_directory_that_is_not_a_git_repo`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -144,12 +156,17 @@ pub enum PublishError {
     /// The project directory is not a git checkout at all.
     #[error("`{0}` is not a git repository; there is nothing to publish a snapshot into")]
     NotAGitRepo(String),
-    /// The checkout is on some other branch.
+    /// The checkout is on some branch other than the project's default.
     #[error(
-        "pause snapshots publish only from `{REQUIRED_BRANCH}`; this checkout is on `{0}`. \
+        "pause snapshots publish only from `{expected}`; this checkout is on `{actual}`. \
          The snapshot file was written; commit and open its PR by hand."
     )]
-    NotOnMain(String),
+    NotOnDefaultBranch {
+        /// The project's default branch, as resolved for this checkout.
+        expected: String,
+        /// The branch the checkout is actually on.
+        actual: String,
+    },
     /// A step failed. `commit` is `Some` once the commit exists locally.
     #[error(
         "session-snapshot publish failed at `{step}`: {detail}{}",
@@ -181,22 +198,27 @@ fn commit_note(branch: Option<&str>, commit: Option<&str>) -> String {
 ///
 /// Why: see the module doc — a pause must reach `origin/main`, and it must do
 /// so without disturbing a checkout other sessions are working in.
-/// What: refuses unless the checkout is on `main` and the paths are tracked,
-/// then builds the tree with `hash-object` / `read-tree` / `update-index` /
-/// `write-tree` against a scratch `GIT_INDEX_FILE`, commits with `commit-tree`
-/// parented on `origin/main`, points a fresh `chore/sessions-<slug>-<ts>` branch
-/// at it, pushes that ref, and hands the PR to `tm pr open` and `tm pr merge
-/// --auto`. Nothing here runs `git add`, `git stash`, or `git checkout`, so the
-/// working tree, HEAD, and the shared index are untouched.
+/// What: refuses unless the checkout is on the project's default branch and the
+/// paths are tracked regular files, then builds the tree with `hash-object` /
+/// `read-tree` / `update-index` / `write-tree` against a scratch
+/// `GIT_INDEX_FILE` in a per-call [`tempfile::TempDir`], commits with
+/// `commit-tree` parented on `origin/<default>`, points a fresh
+/// `chore/sessions-<slug>-<ts>` branch at it, pushes that ref, and hands the PR
+/// to `tm pr open` and `tm pr merge --auto`. Nothing here runs `git add`,
+/// `git stash`, or `git checkout`, so the working tree, HEAD, and the shared
+/// index are untouched.
 /// Test: `publish_commits_only_the_allowlisted_paths`,
 /// `publish_branch_name_carries_session_and_timestamp`,
-/// `publish_refuses_when_not_on_main`, `push_failure_leaves_the_commit_and_names_it`,
+/// `publish_refuses_when_not_on_the_default_branch`,
+/// `publish_uses_the_configured_default_branch`,
+/// `concurrent_publishes_never_share_a_scratch_index`,
+/// `push_failure_leaves_the_commit_and_names_it`,
 /// `publish_is_a_noop_when_the_tree_is_unchanged`.
 pub fn publish_pause_snapshot<V: PauseVcs>(
     vcs: &V,
     req: &PublishRequest<'_>,
 ) -> Result<Option<PublishOutcome>, PublishError> {
-    let paths = allowlisted(&req.paths)?;
+    let paths = allowlisted(req.repo, &req.paths)?;
 
     // A project directory that is not a checkout at all publishes nothing — the
     // same no-op as a project that git-ignores its sessions, not a failure.
@@ -211,8 +233,12 @@ pub fn publish_pause_snapshot<V: PauseVcs>(
         return Err(PublishError::NotAGitRepo(req.repo.display().to_string()));
     }
     let current = branch_out.out().to_string();
-    if current != REQUIRED_BRANCH {
-        return Err(PublishError::NotOnMain(current));
+    let default = resolve_default_branch(vcs, req);
+    if current != default {
+        return Err(PublishError::NotOnDefaultBranch {
+            expected: default,
+            actual: current,
+        });
     }
 
     // Exit 0 from `check-ignore` means the path IS ignored: this project keeps
@@ -228,14 +254,9 @@ pub fn publish_pause_snapshot<V: PauseVcs>(
         return Err(PublishError::NotTracked(paths[0].clone()));
     }
 
-    git(
-        vcs,
-        req,
-        &["fetch", "origin", REQUIRED_BRANCH],
-        None,
-        "fetch",
-    )?;
-    let base = git(vcs, req, &["rev-parse", "origin/main"], None, "rev-parse")?
+    git(vcs, req, &["fetch", "origin", &default], None, "fetch")?;
+    let origin_ref = format!("origin/{default}");
+    let base = git(vcs, req, &["rev-parse", &origin_ref], None, "rev-parse")?
         .out()
         .to_string();
     let base_tree = git(
@@ -248,7 +269,15 @@ pub fn publish_pause_snapshot<V: PauseVcs>(
     .out()
     .to_string();
 
-    let index = req.body_dir.join("pause-index");
+    // #7282 review: the scratch index and the PR body are per-call. Two pauses
+    // overlapping — two sessions, or two projects on one host — sharing one
+    // `GIT_INDEX_FILE` across the non-atomic read-tree/update-index/write-tree
+    // sequence would let one PR carry the other's tree with every git step
+    // exiting 0. `TempDir` also removes both files on every exit path,
+    // including the early-return errors below.
+    let scratch =
+        tempfile::TempDir::new().map_err(|e| step_err("scratch", e.to_string(), None, None))?;
+    let index = scratch.path().join("index");
     let idx = Some(index.as_path());
 
     let mut blobs: Vec<(String, String)> = Vec::with_capacity(paths.len());
@@ -291,7 +320,6 @@ pub fn publish_pause_snapshot<V: PauseVcs>(
     let tree = git(vcs, req, &["write-tree"], idx, "write-tree")?
         .out()
         .to_string();
-    let _ = std::fs::remove_file(&index);
 
     if tree == base_tree {
         // Every snapshot path already matches `origin/main`; an empty PR helps
@@ -331,7 +359,7 @@ pub fn publish_pause_snapshot<V: PauseVcs>(
         &commit,
     )?;
 
-    let body_path = req.body_dir.join("pause-pr-body.md");
+    let body_path = scratch.path().join("pr-body.md");
     std::fs::write(&body_path, pr_body(req.session_id, &paths)).map_err(|e| {
         step_err(
             "pr-body",
@@ -352,7 +380,7 @@ pub fn publish_pause_snapshot<V: PauseVcs>(
                 "--body-file",
                 &body_path.to_string_lossy(),
                 "--base",
-                REQUIRED_BRANCH,
+                &default,
                 "--docs-only",
                 "--rung",
                 "1",
@@ -408,11 +436,15 @@ pub fn publish_pause_snapshot<V: PauseVcs>(
 /// Why: this is the whole path allowlist. Because the tree is assembled from
 /// exactly these entries and `git add` is never run, a dirty file belonging to
 /// another session cannot reach the commit — but only if nothing else can be
-/// named here either.
-/// What: requires a non-empty list, every entry starting with the prefix and
-/// containing no `..` segment.
-/// Test: `publish_rejects_a_path_outside_the_sessions_tree`.
-fn allowlisted(paths: &[String]) -> Result<Vec<String>, PublishError> {
+/// named here either. A symlink is refused here rather than at `hash-object`,
+/// which would follow it and commit whatever it points at under a
+/// sessions-tree name (#7282 review).
+/// What: requires a non-empty list, every entry starting with the prefix,
+/// containing no `..` segment, and — when it exists on disk — being a regular
+/// file rather than a symlink or a directory.
+/// Test: `publish_rejects_a_path_outside_the_sessions_tree`,
+/// `publish_rejects_a_snapshot_path_that_is_not_a_regular_file`.
+fn allowlisted(repo: &Path, paths: &[String]) -> Result<Vec<String>, PublishError> {
     if paths.is_empty() {
         return Err(step_err(
             "allowlist",
@@ -430,8 +462,49 @@ fn allowlisted(paths: &[String]) -> Result<Vec<String>, PublishError> {
                 None,
             ));
         }
+        // A path that does not exist yet is left to `hash-object`, whose error
+        // already names it; only an existing non-regular file is refused here.
+        if let Ok(meta) = std::fs::symlink_metadata(repo.join(p))
+            && !meta.is_file()
+        {
+            return Err(step_err(
+                "allowlist",
+                format!("`{p}` is not a regular file and may not be committed by a pause"),
+                None,
+                None,
+            ));
+        }
     }
     Ok(paths.to_vec())
+}
+
+/// The branch this project publishes pauses from.
+///
+/// Why: `session_context_pause` serves every managed project, so a literal
+/// `main` made a pause on a `master` or `develop` project always error
+/// (#7282 review). The operator's declared answer wins; `origin/HEAD` is what
+/// the checkout itself says; [`FALLBACK_BRANCH`] is the last resort, consulted
+/// only when neither answered.
+/// What: configured branch, else `git rev-parse --abbrev-ref origin/HEAD` with
+/// its `origin/` prefix stripped, else `main`.
+/// Test: `publish_uses_the_configured_default_branch`,
+/// `publish_falls_back_to_origin_head_for_the_default_branch`,
+/// `publish_falls_back_to_main_when_nothing_names_a_branch`.
+fn resolve_default_branch<V: PauseVcs>(vcs: &V, req: &PublishRequest<'_>) -> String {
+    if let Some(b) = req.default_branch.map(str::trim).filter(|b| !b.is_empty()) {
+        return b.to_string();
+    }
+    if let Ok(out) = vcs.git(
+        req.repo,
+        &owned(&["rev-parse", "--abbrev-ref", "origin/HEAD"]),
+        None,
+    ) && out.success
+        && let Some(b) = out.out().strip_prefix("origin/")
+        && !b.is_empty()
+    {
+        return b.to_string();
+    }
+    FALLBACK_BRANCH.to_string()
 }
 
 /// `chore/sessions-<slug>-<YYYYMMDD-HHMMSS>`.

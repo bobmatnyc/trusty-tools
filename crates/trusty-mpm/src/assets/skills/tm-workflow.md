@@ -267,7 +267,8 @@ case just works.
 `.trusty-mpm/sessions/`, `/tm-session-pause` no longer commits the snapshot onto
 the checkout's current branch — a commit on a PR-only `main` strands there, and
 the refresh above then fails on every session. The pause commits onto its own
-`chore/sessions-<session>-<ts>` branch off `origin/main`, pushes it, and opens an
+`chore/sessions-<session>-<ts>` branch off the project's default branch (the one
+`config.yaml` declares, else `origin/HEAD`, else `main`), pushes it, and opens an
 auto-merging docs-only PR. So run the fetch and `pull --ff-only` above after a
 pause PR lands, the same as after any other merge, and the snapshot is visible
 locally again.

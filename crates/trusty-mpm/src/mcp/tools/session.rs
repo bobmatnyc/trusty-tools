@@ -400,16 +400,19 @@ pub(super) fn session_tools() -> Vec<Value> {
              files the snapshot where nothing will look for it (#6888). Where \
              the project TRACKS `.trusty-mpm/sessions/`, the snapshot is then \
              published: those two files and nothing else are committed onto a \
-             fresh `chore/sessions-<session>-<ts>` branch cut from \
-             `origin/main`, pushed, and opened as an auto-merging docs-only PR \
+             fresh `chore/sessions-<session>-<ts>` branch cut from the \
+             project's default branch — the one `config.yaml`'s `projects:` \
+             entry declares, else `origin/HEAD`, else `main` — pushed, and \
+             opened as an auto-merging docs-only PR \
              through `tm pr open` — your branch, your HEAD and every other file \
              stay untouched, and `snapshot_publish` in the result carries the \
              branch, commit and PR URL for you to report (#7282). Publishing \
-             from anything but `main`, or a failure at any step, is an ERROR \
-             naming the step and the branch the commit was left on; the \
-             snapshot file is written either way. A project that git-ignores \
-             `.trusty-mpm/sessions/` gets `snapshot_publish.status: \"skipped\"` \
-             and no commit. Also \
+             from anything but that branch, or a failure at any step, is an \
+             ERROR naming the step and the branch the commit was left on; the \
+             snapshot file is written either way. Every no-PR outcome reports \
+             `snapshot_publish.status: \"skipped\"` with a `reason` — \
+             `not_tracked` (the project git-ignores `.trusty-mpm/sessions/`), \
+             `not_a_git_repo`, or `unchanged`. Also \
              prunes orphaned managed-session \
              git worktrees in-process (same engine as `tm session prune-worktrees`) \
              unless `prune_worktrees` is set to `false`. That prune NEVER removes a \

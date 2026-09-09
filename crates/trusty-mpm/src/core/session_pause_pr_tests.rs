@@ -1,7 +1,7 @@
 //! Tests for [`super::publish_pause_snapshot`] (#7282).
 //!
 //! Every test drives [`FakeVcs`], so none of them needs a git repository, a
-//! network, or a `gh` install — which is what makes the not-on-`main` refusal
+//! network, or a `gh` install — which is what makes the default-branch refusal
 //! and the post-commit push failure testable at all.
 
 use std::cell::RefCell;
@@ -35,6 +35,12 @@ struct FakeVcs {
     script: Vec<(Vec<String>, CmdOut)>,
     /// Everything the publish ran, in order.
     calls: RefCell<Vec<Call>>,
+    /// `(--body-file path, its contents)` read at the moment `tm` was invoked.
+    ///
+    /// The body lives in a scratch directory the publish drops before it
+    /// returns, so a test that read the file afterwards would be reading a path
+    /// that no longer exists — which is the point of `#7282`'s scratch fix.
+    bodies: RefCell<Vec<(PathBuf, String)>>,
 }
 
 impl FakeVcs {
@@ -42,6 +48,7 @@ impl FakeVcs {
         Self {
             script: Vec::new(),
             calls: RefCell::new(Vec::new()),
+            bodies: RefCell::new(Vec::new()),
         }
     }
 
@@ -100,6 +107,18 @@ impl FakeVcs {
             .map(|c| c.args.join(" "))
             .collect()
     }
+
+    /// Every distinct `GIT_INDEX_FILE` this driver was handed.
+    fn index_files(&self) -> Vec<PathBuf> {
+        let mut seen: Vec<PathBuf> = self
+            .calls()
+            .into_iter()
+            .filter_map(|c| c.index_file)
+            .collect();
+        seen.sort();
+        seen.dedup();
+        seen
+    }
 }
 
 impl PauseVcs for FakeVcs {
@@ -123,6 +142,11 @@ impl PauseVcs for FakeVcs {
             args: args.to_vec(),
             index_file: None,
         });
+        if let Some(i) = args.iter().position(|a| a == "--body-file") {
+            let path = PathBuf::from(&args[i + 1]);
+            let body = std::fs::read_to_string(&path).unwrap_or_default();
+            self.bodies.borrow_mut().push((path, body));
+        }
         Ok(self.respond(args))
     }
 }
@@ -131,6 +155,10 @@ impl PauseVcs for FakeVcs {
 fn happy() -> FakeVcs {
     FakeVcs::new()
         .ok(&["rev-parse", "--abbrev-ref", "HEAD"], "main\n")
+        .ok(
+            &["rev-parse", "--abbrev-ref", "origin/HEAD"],
+            "origin/main\n",
+        )
         // exit 1 from `check-ignore` = the path is NOT ignored = tracked here.
         .fail(&["check-ignore"], "")
         .ok(&["rev-parse", "origin/main"], "base000\n")
@@ -157,7 +185,15 @@ fn request<'a>(dir: &'a Path, paths: Vec<String>) -> PublishRequest<'a> {
         session_id: "trusty-tools-95",
         timestamp: ts(),
         paths,
-        body_dir: dir,
+        default_branch: None,
+    }
+}
+
+/// A request for a project whose configured default branch is `branch`.
+fn request_on<'a>(dir: &'a Path, paths: Vec<String>, branch: &'a str) -> PublishRequest<'a> {
+    PublishRequest {
+        default_branch: Some(branch),
+        ..request(dir, paths)
     }
 }
 
@@ -292,30 +328,130 @@ fn publish_rejects_a_path_outside_the_sessions_tree() {
 /// Why: publishing off a feature branch would put unrelated commits in the PR.
 /// The refusal must be an error, not a warning — the snapshot file is already
 /// written, and a silent skip is how the old behaviour went unnoticed.
-/// Test target: the `REQUIRED_BRANCH` guard.
+/// Test target: the default-branch guard.
 #[test]
-fn publish_refuses_when_not_on_main() {
+fn publish_refuses_when_not_on_the_default_branch() {
     let dir = tempfile::TempDir::new().unwrap();
-    let vcs = FakeVcs::new().ok(
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        "fix/7282-something\n",
-    );
+    let vcs = FakeVcs::new()
+        .ok(
+            &["rev-parse", "--abbrev-ref", "HEAD"],
+            "fix/7282-something\n",
+        )
+        .ok(
+            &["rev-parse", "--abbrev-ref", "origin/HEAD"],
+            "origin/main\n",
+        );
     let err = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths())).unwrap_err();
 
     assert_eq!(
         err,
-        PublishError::NotOnMain("fix/7282-something".to_string())
+        PublishError::NotOnDefaultBranch {
+            expected: "main".to_string(),
+            actual: "fix/7282-something".to_string(),
+        }
     );
     assert!(
         err.to_string().contains("The snapshot file was written"),
         "{err}"
     );
-    assert_eq!(
-        vcs.calls().len(),
-        1,
-        "nothing beyond the branch probe may run: {:?}",
+    assert!(
+        !vcs.git_argv().iter().any(|a| a.starts_with("fetch")),
+        "nothing beyond the two branch probes may run: {:?}",
         vcs.calls()
     );
+}
+
+/// Why: `session_context_pause` serves every managed project, so a `develop`
+/// project must publish from `develop` — the literal `main` the first round
+/// carried made every pause on such a project an error.
+/// Test target: `resolve_default_branch`, configured arm.
+#[test]
+fn publish_uses_the_configured_default_branch() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = happy()
+        .ok(&["rev-parse", "--abbrev-ref", "HEAD"], "develop\n")
+        .ok(&["rev-parse", "origin/develop"], "base000\n");
+    let out = publish_pause_snapshot(&vcs, &request_on(dir.path(), snapshot_paths(), "develop"))
+        .unwrap()
+        .expect("a changed tree publishes");
+
+    assert_eq!(out.commit, "c0ffee1");
+    let argv = vcs.git_argv();
+    assert!(
+        argv.contains(&"fetch origin develop".to_string()),
+        "{argv:?}"
+    );
+    assert!(
+        argv.contains(&"rev-parse origin/develop".to_string()),
+        "{argv:?}"
+    );
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a.contains("origin/HEAD") || a.contains("origin/main")),
+        "a configured branch is authoritative; nothing else may be consulted: {argv:?}"
+    );
+
+    // The PR opens against `develop`, not `main`.
+    let tm = vcs
+        .calls()
+        .into_iter()
+        .find(|c| c.program == "tm")
+        .unwrap()
+        .args;
+    assert_eq!(
+        tm[tm.iter().position(|a| a == "--base").unwrap() + 1],
+        "develop"
+    );
+}
+
+/// Why: a project with no declared default branch must still read the branch
+/// off its own checkout rather than assume `main`.
+/// Test target: `resolve_default_branch`, `origin/HEAD` arm.
+#[test]
+fn publish_falls_back_to_origin_head_for_the_default_branch() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = happy()
+        .ok(&["rev-parse", "--abbrev-ref", "HEAD"], "develop\n")
+        .ok(
+            &["rev-parse", "--abbrev-ref", "origin/HEAD"],
+            "origin/develop\n",
+        )
+        .ok(&["rev-parse", "origin/develop"], "base000\n");
+    let out = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths()))
+        .unwrap()
+        .expect("a changed tree publishes");
+
+    assert_eq!(out.commit, "c0ffee1");
+    assert!(
+        vcs.git_argv().contains(&"fetch origin develop".to_string()),
+        "{:?}",
+        vcs.git_argv()
+    );
+}
+
+/// Why: `main` stays the answer when nothing else names one, and the refusal
+/// has to say which branch it expected so the operator can fix the config.
+/// Test target: `resolve_default_branch`, `FALLBACK_BRANCH` arm.
+#[test]
+fn publish_falls_back_to_main_when_nothing_names_a_branch() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = FakeVcs::new()
+        .ok(&["rev-parse", "--abbrev-ref", "HEAD"], "master\n")
+        .fail(
+            &["rev-parse", "--abbrev-ref", "origin/HEAD"],
+            "fatal: ambiguous argument 'origin/HEAD'",
+        );
+    let err = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths())).unwrap_err();
+
+    assert_eq!(
+        err,
+        PublishError::NotOnDefaultBranch {
+            expected: "main".to_string(),
+            actual: "master".to_string(),
+        }
+    );
+    assert!(err.to_string().contains("only from `main`"), "{err}");
 }
 
 /// Why: when the push fails the commit already exists locally, and a person
@@ -409,8 +545,8 @@ fn publish_opens_the_pr_through_tm_pr_open() {
     );
 
     // The body file `tm pr open` was handed satisfies the seven-field contract.
-    let body_arg = &tm[0][tm[0].iter().position(|a| a == "--body-file").unwrap() + 1];
-    let body = std::fs::read_to_string(body_arg).unwrap();
+    // It is read as `tm` saw it: the scratch directory is gone by now.
+    let (body_path, body) = vcs.bodies.borrow()[0].clone();
     for heading in [
         "## Outcome",
         "## Changes",
@@ -426,6 +562,114 @@ fn publish_opens_the_pr_through_tm_pr_open() {
     assert!(
         !body.to_lowercase().contains("closes #"),
         "a session PR closes nothing: {body}"
+    );
+    assert!(
+        !body_path.exists(),
+        "the scratch body must not outlive the publish: {}",
+        body_path.display()
+    );
+}
+
+/// Why: two pauses overlapping — two sessions, or two projects on one host —
+/// shared one `GIT_INDEX_FILE` and one body file when the scratch directory was
+/// `std::env::temp_dir()` with fixed names, so one PR could carry the other's
+/// tree with every git step exiting 0 (#7282 review).
+/// Test target: the per-call `TempDir`.
+#[test]
+fn concurrent_publishes_never_share_a_scratch_index() {
+    let indexes: Vec<PathBuf> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                s.spawn(|| {
+                    let dir = tempfile::TempDir::new().unwrap();
+                    let vcs = happy();
+                    publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths())).unwrap();
+                    let idx = vcs.index_files();
+                    assert_eq!(idx.len(), 1, "one publish uses one index: {idx:?}");
+                    idx.into_iter().next().unwrap()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    let mut unique = indexes.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        indexes.len(),
+        "concurrent publishes shared a scratch index: {indexes:?}"
+    );
+}
+
+/// Why: the first round removed the scratch index only on the success path, so
+/// every failed publish left one behind under a name the next publish would
+/// reuse.
+/// Test target: `TempDir`'s drop on the early-return arms.
+#[test]
+fn an_early_failure_leaves_no_scratch_file_behind() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = happy().fail(&["write-tree"], "fatal: unable to write new index file");
+    let err = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths())).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            PublishError::Step {
+                step: "write-tree",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+
+    let idx = vcs.index_files();
+    assert_eq!(idx.len(), 1, "{idx:?}");
+    assert!(
+        !idx[0].exists(),
+        "scratch index survived: {}",
+        idx[0].display()
+    );
+    assert!(
+        !idx[0].parent().unwrap().exists(),
+        "scratch directory survived: {}",
+        idx[0].parent().unwrap().display()
+    );
+}
+
+/// Why: `hash-object` follows a symlink, so a `.trusty-mpm/sessions/` entry
+/// pointing at `~/.ssh/id_ed25519` would commit that file's contents under a
+/// sessions-tree name. The allowlist is the only place that can refuse it.
+/// Test target: `allowlisted`'s regular-file check.
+#[test]
+fn publish_rejects_a_snapshot_path_that_is_not_a_regular_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let sessions = dir.path().join(".trusty-mpm/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(dir.path().join("secret.txt"), b"private").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.path().join("secret.txt"), sessions.join("linked.md")).unwrap();
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(sessions.join("linked.md")).unwrap();
+
+    let vcs = happy();
+    let paths = vec![".trusty-mpm/sessions/linked.md".to_string()];
+    let err = publish_pause_snapshot(&vcs, &request(dir.path(), paths)).unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PublishError::Step {
+                step: "allowlist",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("not a regular file"), "{err}");
+    assert!(
+        vcs.calls().is_empty(),
+        "nothing may be spawned once the allowlist rejects a path"
     );
 }
 
