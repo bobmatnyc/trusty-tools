@@ -1,0 +1,3 @@
+Added
+
+- ratchet the lib target's env-mutating tests against `data_dir::ENV_LOCK`. A test that mutates the process environment under a `serial_test` attribute must take the lock too: `#[serial]` and `ENV_LOCK` are different mutexes, so a test holding one still runs inside another test's `setenv` — the race behind the `http_client.rs` flake (#6575) and a 1-in-6 failure in trusty-search. `env_lock_ratchet_tests.rs` scans `src/**`, holds the 19 files that predate the rule in an explicit table, and fails on a new one or on a table row that has become stale. Test-only; no production behaviour changed
