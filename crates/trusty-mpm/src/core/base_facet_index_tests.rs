@@ -271,61 +271,59 @@ fn gitdir_outside_a_worktrees_directory_resolves_to_nothing() {
     assert_eq!(base_checkout_of(&sub), None);
 }
 
-/// A loopback stand-in for the trusty-search daemon.
+/// A trusty-search stand-in on a Unix socket that records every create (#7237).
 ///
-/// Why: three tests below need the bytes a registration puts on the wire, and
-/// one `ensure_project_indexed_reporting` call makes three requests (create,
-/// status, reindex) across two clients — a single-connection listener captures
-/// the first and leaves the rest in the accept backlog. Looping also lets the
-/// two call-site tests observe BOTH registrations a worktree path triggers and
-/// pick out the one they care about.
-/// What: binds an ephemeral loopback port, answers every request `200 {}` (an
-/// empty status body is not fresh, so the reindex trigger proceeds as it would
-/// in production), and forwards the body of each `POST /indexes` to the returned
-/// channel. The accept loop is detached and ends when the receiver is gone.
+/// Why: three tests below need the params a registration puts on the wire, and
+/// one `ensure_project_indexed_reporting` call makes three calls (create,
+/// status, reindex). The two call-site tests also need to observe BOTH
+/// registrations a worktree path triggers and pick out the one they care about,
+/// so the rig records rather than answering one request.
+/// What: binds a mock daemon at `<socket_dir>/s.sock`, answers every method
+/// `{}` (an empty status body is not fresh, so the reindex trigger proceeds as
+/// it would in production), and pushes the params of each `search.index.create`
+/// into the returned buffer. The daemon stops when the returned handle drops.
 /// Test: used by `base_facet_posts_the_base_checkout_with_the_vector_lane_on`,
 /// `session_launch_registers_the_base_facet_for_a_worktree`,
 /// `worktree_creation_registers_the_base_facet`.
-fn fake_daemon() -> (std::net::SocketAddr, std::sync::mpsc::Receiver<String>) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        use std::io::{Read, Write};
-        while let Ok((mut stream, _)) = listener.accept() {
-            let mut buf = [0u8; 8192];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
-            let _ = stream.write_all(
-                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
-            );
-            let _ = stream.flush();
-            if request.starts_with("POST /indexes ")
-                && tx
-                    .send(request.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
-                    .is_err()
-            {
-                return;
-            }
+type CapturedCreates = std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+
+fn fake_daemon(
+    socket_dir: &Path,
+) -> (
+    PathBuf,
+    CapturedCreates,
+    crate::uds_mock::BlockingMockDaemon,
+) {
+    let socket = socket_dir.join("s.sock");
+    let seen: CapturedCreates = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = std::sync::Arc::clone(&seen);
+    let daemon = crate::uds_mock::spawn_blocking_at(socket.clone(), move |method, params| {
+        if method == trusty_common::search_rpc::METHOD_INDEX_CREATE {
+            log.lock().unwrap_or_else(|e| e.into_inner()).push(params);
         }
+        // An empty status body is not fresh, so the reindex trigger proceeds as
+        // it would in production.
+        Box::pin(async move { Ok(serde_json::json!({})) })
     });
-    (addr, rx)
+    (socket, seen, daemon)
 }
 
-/// Redirect daemon discovery at `addr` and opt out of the #4255 suppression.
+/// Redirect daemon discovery at `socket` and opt out of the #4255 suppression.
 ///
-/// Why: both env vars are process-global, so every caller is `#[serial]`, and
-/// returning the guards keeps them alive for the caller's whole body.
-/// What: writes `<data_dir>/trusty-search/http_addr` (the on-disk contract
-/// `resolve_daemon_base_url` reads) and sets the two variables. Opting out of
-/// the write suppression is safe here precisely because discovery now points at
-/// the test's own loopback socket, never the operator's daemon.
+/// Why: all three env vars are process-global, so every caller is `#[serial]`,
+/// and returning the guards keeps them alive for the caller's whole body.
+/// What: sets `TRUSTY_SEARCH_SOCKET` (the client's own override, so the socket
+/// can live at a path short enough for `sun_path`), the data-dir override, and
+/// the production opt-out. Opting out of the write suppression is safe here
+/// precisely because discovery now points at the test's own socket, never the
+/// operator's daemon.
 /// Test: used by the three fake-daemon tests.
-fn point_discovery_at(data_dir: &Path, addr: std::net::SocketAddr) -> (EnvVarGuard, EnvVarGuard) {
-    let search_data_dir = data_dir.join("trusty-search");
-    std::fs::create_dir_all(&search_data_dir).expect("mkdir");
-    std::fs::write(search_data_dir.join("http_addr"), addr.to_string()).expect("write http_addr");
+fn point_discovery_at(data_dir: &Path, socket: &Path) -> (EnvVarGuard, EnvVarGuard, EnvVarGuard) {
     (
+        EnvVarGuard::set(
+            trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV,
+            &socket.to_string_lossy(),
+        ),
         EnvVarGuard::set(
             trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV,
             &data_dir.to_string_lossy(),
@@ -334,28 +332,31 @@ fn point_discovery_at(data_dir: &Path, addr: std::net::SocketAddr) -> (EnvVarGua
     )
 }
 
-/// Wait for a create-index POST naming `root`, ignoring any others.
+/// Wait for a create call naming `root`, ignoring any others.
 ///
 /// Why: a worktree path registers TWO indexes — its own and the base facet —
 /// and the detached threads decide the order. Filtering by `root_path` makes
 /// the assertion about which facet was registered rather than about which
 /// thread won.
-/// What: drains the channel until a body's `root_path` matches, or the deadline
-/// passes. `None` means no such POST arrived.
+/// What: polls the captured create params until one matches, or the deadline
+/// passes. `None` means no such call arrived.
 /// Test: used by the three fake-daemon tests.
-fn wait_for_create_index(
-    rx: &std::sync::mpsc::Receiver<String>,
-    root: &Path,
-) -> Option<serde_json::Value> {
+fn wait_for_create_index(seen: &CapturedCreates, root: &Path) -> Option<serde_json::Value> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
-        let body = rx.recv_timeout(remaining).ok()?;
-        let parsed: serde_json::Value = serde_json::from_str(&body).ok()?;
-        if parsed.get("root_path").and_then(serde_json::Value::as_str)
-            == Some(root.to_string_lossy().as_ref())
-        {
-            return Some(parsed);
+    while std::time::Instant::now() < deadline {
+        let found = seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|params| {
+                params.get("root_path").and_then(serde_json::Value::as_str)
+                    == Some(root.to_string_lossy().as_ref())
+            })
+            .cloned();
+        if found.is_some() {
+            return found;
         }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
     None
 }
@@ -392,14 +393,15 @@ fn base_facet_posts_the_base_checkout_with_the_vector_lane_on() {
         return;
     };
     let data_dir = tempfile::tempdir().expect("data dir");
-    let (addr, rx) = fake_daemon();
-    let _guards = point_discovery_at(data_dir.path(), addr);
+    let socket_dir = tempfile::tempdir().expect("socket dir");
+    let (socket, seen, _daemon) = fake_daemon(socket_dir.path());
+    let _guards = point_discovery_at(data_dir.path(), &socket);
 
     let _ = ensure_base_facet_indexed(&fx.worktree);
 
     let expected_root = trusty_common::resolve_project_root(&fx.base);
-    let body = wait_for_create_index(&rx, &expected_root)
-        .expect("the fake daemon must have received a create-index POST for the BASE checkout");
+    let body = wait_for_create_index(&seen, &expected_root)
+        .expect("the fake daemon must have received a create call for the BASE checkout");
     assert_base_facet_body(&body);
 }
 
@@ -422,13 +424,14 @@ fn session_launch_registers_the_base_facet_for_a_worktree() {
         return;
     };
     let data_dir = tempfile::tempdir().expect("data dir");
-    let (addr, rx) = fake_daemon();
-    let _guards = point_discovery_at(data_dir.path(), addr);
+    let socket_dir = tempfile::tempdir().expect("socket dir");
+    let (socket, seen, _daemon) = fake_daemon(socket_dir.path());
+    let _guards = point_discovery_at(data_dir.path(), &socket);
 
     let _ = crate::core::session_launch::register_project_index(&fx.worktree);
 
     let expected_root = trusty_common::resolve_project_root(&fx.base);
-    let body = wait_for_create_index(&rx, &expected_root)
+    let body = wait_for_create_index(&seen, &expected_root)
         .expect("launching a session in a worktree must also register its base facet");
     assert_base_facet_body(&body);
 }
@@ -449,13 +452,14 @@ fn worktree_creation_registers_the_base_facet() {
         return;
     };
     let data_dir = tempfile::tempdir().expect("data dir");
-    let (addr, rx) = fake_daemon();
-    let _guards = point_discovery_at(data_dir.path(), addr);
+    let socket_dir = tempfile::tempdir().expect("socket dir");
+    let (socket, seen, _daemon) = fake_daemon(socket_dir.path());
+    let _guards = point_discovery_at(data_dir.path(), &socket);
 
     crate::core::worktree_index::index_new_worktree_in_background(fx.worktree.clone());
 
     let expected_root = trusty_common::resolve_project_root(&fx.base);
-    let body = wait_for_create_index(&rx, &expected_root)
+    let body = wait_for_create_index(&seen, &expected_root)
         .expect("creating a worktree must also register its base facet");
     assert_base_facet_body(&body);
 }

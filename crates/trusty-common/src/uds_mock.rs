@@ -1,30 +1,22 @@
-#![allow(dead_code)]
-//! A stand-in trusty-* daemon on a temp Unix socket, for tests (#6286, #6285).
+//! A stand-in trusty-* daemon on a Unix socket, for this crate's tests (#7237).
 //!
-//! Why: this crate's memory rigs each bound an ephemeral TCP port and served
-//! `POST /rpc` (or the REST routes) with axum, because that is how they reached
-//! trusty-memory. ADR-0032 retired that listener, so every one of them has to
-//! dial a socket instead — and a copy of the accept loop per rig is the
-//! duplication the workspace's common-entry-point rule exists to prevent.
-//! #6285 moved the trusty-search rigs across the same way, which is why nothing
-//! here names a service: the handler decides which daemon it is pretending to
-//! be.
+//! Why: `search_index`'s find-or-create used to be exercised against a
+//! `TcpListener` speaking hand-rolled HTTP, because that is how it reached
+//! trusty-search. #7237 moved it onto the socket, so every one of those rigs has
+//! to serve a framed JSON-RPC envelope instead — and a copy of the accept loop
+//! per rig is the duplication the workspace's common-entry-point rule exists to
+//! prevent.
 //!
-//! What: [`spawn`] binds a socket under a `TempDir`, mounts `handler` as the
-//! router's catch-all through the same [`trusty_common::uds::server`] pieces the
-//! real daemon uses, and serves until the returned [`MockUdsDaemon`] drops.
-//! [`spawn_at`] does the same at a path the caller chose, for a rig that has to
-//! bind where production discovery will look.
-//! The handler answers a `result` value directly — a rig that needs the
-//! `tools/call` envelope wraps it itself, the same way it did over HTTP.
+//! What: [`spawn_at`] binds `socket` through the same [`crate::uds::server`]
+//! pieces the real daemon uses, mounts `handler` as the router's catch-all, and
+//! serves until the returned [`MockUdsDaemon`] drops. [`spawn`] does the same at
+//! a path under a `TempDir` it mints, for a rig that dials the socket directly
+//! rather than through production discovery. The handler answers a `result`
+//! value directly, or an [`RpcError`] to make the daemon refuse.
 //!
 //! This is a `#[cfg(test)]` module, so it never ships.
 //!
-//! Test: every caller — `core::memory_import::tests`,
-//! `tui::coordinator::tests`, `daemon::doctor_tests`,
-//! `daemon::doctor_search_pin_tests`,
-//! `session_manager::search_gc_guard_tests`,
-//! `session_manager::index_delete_guard::tests`.
+//! Test: every caller — `search_rpc::tests` and `search_index::tests`.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -34,19 +26,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 use tempfile::TempDir;
-pub use trusty_common::uds::server::RpcError;
-use trusty_common::uds::server::{RpcFallback, RpcRouter, RpcServeOptions, serve_until};
+
+pub use crate::uds::server::RpcError;
+use crate::uds::server::{RpcFallback, RpcRouter, RpcServeOptions, serve_until};
 
 /// What one mock call answers, as a boxed future.
 ///
-/// Boxed rather than generic because one rig's handler awaits a `watch`
-/// channel: it cannot be a plain function of its arguments. `Err` is how a rig
-/// makes the daemon refuse — the palace-missing case `ensure_palace` branches
-/// on used a JSON-RPC error body over HTTP too.
+/// Boxed rather than generic because a rig's handler may capture shared state
+/// it mutates per call: it cannot be a plain function of its arguments.
 pub type MockFuture = Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send>>;
 
-/// A running mock daemon. Dropping it stops the accept loop and removes the
-/// socket with its temp directory.
+/// A running mock daemon. Dropping it stops the accept loop.
 pub struct MockUdsDaemon {
     socket: PathBuf,
     /// Held only when [`spawn`] minted the directory. [`spawn_at`] binds inside
@@ -85,7 +75,8 @@ where
     }
 }
 
-/// Start a mock daemon answering every method through `handler`.
+/// Start a mock daemon answering every method through `handler`, on a socket
+/// under a temp directory this function owns.
 ///
 /// # Panics
 ///
@@ -105,11 +96,7 @@ where
 ///
 /// Why: a rig that exercises production socket DISCOVERY cannot take whatever
 /// path [`spawn`] minted — it has to bind where `daemon_socket_path` will look,
-/// under a `TRUSTY_DATA_DIR_OVERRIDE` the test controls. `search_gc_guard_tests`
-/// and `index_delete_guard_tests` both need that, and a second accept loop for
-/// them is the duplication this module exists to prevent (#6285).
-/// What: as [`spawn`], except the temp directory keeping the socket alive is the
-/// caller's. `bind_hardened` creates and hardens the parent directory itself.
+/// under a `TRUSTY_DATA_DIR_OVERRIDE` the test controls.
 ///
 /// # Panics
 ///
@@ -118,7 +105,7 @@ pub async fn spawn_at<F>(socket: PathBuf, handler: F) -> MockUdsDaemon
 where
     F: Fn(&str, Value) -> MockFuture + Send + Sync + 'static,
 {
-    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the mock socket");
+    let listener = crate::uds::bind_hardened(&socket).expect("bind the mock socket");
 
     let router = Arc::new(RpcRouter::new().fallback(MockFallback { handler }));
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -136,30 +123,15 @@ where
     }
 }
 
-/// Wrap `inner` the way the daemon's `tools/call` arm answers.
+/// A mock daemon owning its own runtime on its own OS thread.
 ///
-/// Why: the real dispatcher stringifies a tool's result into
-/// `result.content[0].text`, and the rigs assert the unwrap as well as the
-/// request. Keeping the shape here means one place gets it wrong or right.
-pub fn tools_call_envelope(inner: &Value) -> Value {
-    serde_json::json!({ "content": [{ "type": "text", "text": inner.to_string() }] })
-}
-
-/// Sugar for a handler that answers the same value to every call.
-pub fn always(result: Value) -> impl Fn(&str, Value) -> MockFuture + Send + Sync + 'static {
-    move |_method, _params| {
-        let result = result.clone();
-        Box::pin(async move { Ok(result) })
-    }
-}
-
-/// A mock daemon owning its own runtime on its own OS thread (#7237).
-///
-/// Why: the `search_index` registration rigs are SYNCHRONOUS `#[test]`s holding
-/// process-global env guards, and the code they drive is a blocking function.
-/// An async rig would have to hold those guards across an `.await`. Giving the
-/// daemon its own thread keeps the rig exactly the shape the retired
-/// `TcpListener` fixtures had.
+/// Why: `search_index`'s rigs are SYNCHRONOUS — they hold
+/// `crate::data_dir::ENV_LOCK` across the whole arrangement, and the code they
+/// drive is a blocking function. An async rig would have to hold that guard
+/// across an `.await`, which is both a clippy refusal and a lock this crate's
+/// other env-mutating tests rely on being held for a bounded, non-yielding
+/// stretch. Giving the daemon its own thread keeps the rig exactly the shape the
+/// retired `TcpListener` fixtures had.
 /// What: dropping it stops the accept loop and joins the thread.
 pub struct BlockingMockDaemon {
     socket: PathBuf,
@@ -208,8 +180,7 @@ where
             .build()
             .expect("runtime for the mock daemon");
         runtime.block_on(async move {
-            let listener =
-                trusty_common::uds::bind_hardened(&bind_at).expect("bind the mock socket");
+            let listener = crate::uds::bind_hardened(&bind_at).expect("bind the mock socket");
             let router = Arc::new(RpcRouter::new().fallback(MockFallback { handler }));
             let _ = ready_tx.send(());
             serve_until(&listener, router, RpcServeOptions::default(), async {
