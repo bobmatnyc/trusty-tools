@@ -44,8 +44,8 @@
 //! ([`is_secret_bearing_source`], which expands a brace alternation before
 //! matching against [`SECRET_BEARING_FILE_PATTERNS`]) AND the destination
 //! either resolves under a harness worktree ([`is_worktree_path`]) or still
-//! carries a shell variable [`resolve_target_path`] could not expand
-//! ([`unexpanded_shell_variable`]) — the guard cannot prove that destination
+//! carries an expansion [`resolve_target_path`] could not perform
+//! ([`unresolved_target`]) — the guard cannot prove that destination
 //! is NOT a worktree, and it must not allow what it cannot verify. Matching
 //! is case-insensitive: a credential file named `Secrets.json` or
 //! `AWS_Credentials` is exactly as real as a lowercase one, and filename
@@ -103,7 +103,7 @@ use std::path::Path;
 use trusty_mpm::core::project_aliases::is_worktree_path;
 use trusty_mpm::daemon::managed_routes::inproject::untracked_sync::glob_match;
 
-use super::{PathEnv, resolve_target_path, split_shell_segments, unexpanded_shell_variable};
+use super::{PathEnv, resolve_target_path, split_shell_segments, unresolved_target};
 use crate::commands::hook_rewrite::first_command_token;
 
 /// Deny reason for a `cp`/`mv` of a secret-shaped source into a worktree (#7122).
@@ -298,7 +298,9 @@ fn evaluate_secret_file_copy_command_in(
         // `main_checkout`/`worktree_remove` already do: deny, naming what
         // could not be established, rather than allow what cannot be
         // verified.
-        let dest_variable = unexpanded_shell_variable(&dest_path);
+        // #7234: a leading `~` left literal by an unset `$HOME` is the same
+        // shape as `$WT` and gets the same refusal.
+        let dest_variable = unresolved_target(&dest_path).map(|u| u.token);
         if !is_worktree_path(&dest_path) && dest_variable.is_none() {
             continue;
         }
@@ -329,8 +331,8 @@ fn evaluate_secret_file_copy_command_in(
 /// worktree, e.g. `/repo/$WT/live.tfvars`. Denying only a PROVEN worktree
 /// destination let `cp secret.tfvars "$WT/live.tfvars"` through unexamined —
 /// the same shape [`super::main_checkout`] and [`super::worktree_remove`]
-/// already refuse to guess about, via the same [`unexpanded_shell_variable`]
-/// check.
+/// already refuse to guess about, via the same [`unresolved_target`] check
+/// (which since #7234 also answers for a `~` an unset `$HOME` left literal).
 /// What: names the source, the destination token as written, and the
 /// unresolved variable, then points at the remedy.
 /// Test: `denies_secret_copy_to_a_destination_with_unresolved_variable`.

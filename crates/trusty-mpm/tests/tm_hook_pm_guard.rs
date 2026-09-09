@@ -59,6 +59,7 @@ fn run_pm_guard(stdin_json: &str, extra_env: &[(&str, &str)]) -> String {
         UNREACHABLE_DAEMON,
         None,
         extra_env,
+        &[],
     ))
 }
 
@@ -76,7 +77,9 @@ const UNREACHABLE_DAEMON: &str = "http://127.0.0.1:1";
 /// quietly asserting nothing.
 /// What: builds the child, writes `stdin_json`, closes stdin, and returns
 /// without waiting. `cwd` of `None` inherits the runner's directory, which is
-/// [`run_pm_guard`]'s documented behaviour.
+/// [`run_pm_guard`]'s documented behaviour. `unset` names variables to strip
+/// from the child's environment on top of the shared scrub list — #7234 needs
+/// `HOME` gone, and only there, which `extra_env` cannot express.
 /// Test: every helper below routes through it, and
 /// `pm_guard_denies_the_second_of_two_simultaneous_dispatches` is the one
 /// caller that needs the un-waited child.
@@ -85,6 +88,7 @@ fn spawn_pm_guard(
     url: &str,
     cwd: Option<&std::path::Path>,
     extra_env: &[(&str, &str)],
+    unset: &[&str],
 ) -> std::process::Child {
     let bin = env!("CARGO_BIN_EXE_tm");
     let mut command = Command::new(bin);
@@ -103,6 +107,9 @@ fn spawn_pm_guard(
     }
     for (k, v) in extra_env {
         command.env(k, v);
+    }
+    for k in unset {
+        command.env_remove(k);
     }
     let mut child = command
         .spawn()
@@ -1588,7 +1595,7 @@ fn run_pm_guard_outside_a_checkout(stdin_json: &str) -> String {
 /// silent regression there would leave every test green.
 /// What: as [`run_pm_guard_at`], but hands back the child's stderr.
 fn run_pm_guard_at_stderr(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String {
-    let child = spawn_pm_guard(stdin_json, url, Some(cwd), &[]);
+    let child = spawn_pm_guard(stdin_json, url, Some(cwd), &[], &[]);
     let output = child.wait_with_output().expect("wait");
     assert!(output.status.success(), "the guard must always exit 0");
     String::from_utf8(output.stderr).expect("stderr is utf8")
@@ -1604,7 +1611,7 @@ fn run_pm_guard_at_with_env(
     cwd: &std::path::Path,
     extra_env: &[(&str, &str)],
 ) -> String {
-    finish_pm_guard(spawn_pm_guard(stdin_json, url, Some(cwd), extra_env))
+    finish_pm_guard(spawn_pm_guard(stdin_json, url, Some(cwd), extra_env, &[]))
 }
 
 /// A one-shot HTTP stand-in for the daemon's shared-tree-dispatch route.
@@ -2099,7 +2106,7 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
             let payload = format!(
                 r#"{{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"{tool_use_id}","tool_name":"Agent","tool_input":{{"subagent_type":"rust-engineer","prompt":"go"}}}}"#
             );
-            spawn_pm_guard(&payload, &url, Some(cwd.path()), &[])
+            spawn_pm_guard(&payload, &url, Some(cwd.path()), &[], &[])
         })
         .collect();
 
@@ -2480,6 +2487,66 @@ fn pm_guard_denies_a_commit_in_a_main_checkout() {
         let stdout = run_pm_guard(&bash_payload_at(command, &repo, ""), &[]);
         assert_eq!(stdout.trim(), "", "`{command}` must stay allowed");
     }
+}
+
+/// The #7234 incident, end to end through the real binary: `git -C ~/… commit`
+/// with `HOME` absent from the guard process.
+///
+/// `resolve_target_path` expands a leading `~` only from `$HOME`, so without it
+/// the `~` survives as a literal component, the path is joined onto the
+/// payload's `cwd`, and `main_checkout_root` walks up into THAT directory's
+/// `.git` — the refusal named the agent's launch directory as a main checkout
+/// it was never asked about. Both halves are pinned here because the fix must
+/// change only the HOME-less one.
+/// Test: itself.
+#[test]
+fn pm_guard_denies_a_tilde_commit_without_naming_the_launch_directory() {
+    let (_dir, repo) = main_checkout_fixture();
+    // A real scratch checkout under the fake HOME, as on the machine the
+    // incident was reported from: with `~` expanded the command lands here.
+    let home = tempfile::tempdir().expect("tempdir");
+    let scratch = home.path().join("audit-live-check-7137/repo-acme-test");
+    std::fs::create_dir_all(scratch.join(".git")).expect("mkdir scratch .git");
+    let payload = bash_payload_at(
+        "git -C ~/audit-live-check-7137/repo-acme-test commit --allow-empty -m test",
+        &repo,
+        "",
+    );
+
+    let without_home = finish_pm_guard(spawn_pm_guard(
+        &payload,
+        UNREACHABLE_DAEMON,
+        None,
+        &[],
+        &["HOME"],
+    ));
+    assert_denied(&without_home);
+    assert!(
+        without_home.contains("unresolvable"),
+        "a target the guard cannot place must refuse as unresolvable: {without_home}"
+    );
+    assert!(
+        !without_home.contains(&repo.display().to_string()),
+        "the launch directory is not where this command lands: {without_home}"
+    );
+
+    let with_home = finish_pm_guard(spawn_pm_guard(
+        &payload,
+        UNREACHABLE_DAEMON,
+        None,
+        &[("HOME", &home.path().display().to_string())],
+        &[],
+    ));
+    assert_denied(&with_home);
+    assert!(
+        with_home.contains(&scratch.display().to_string()),
+        "with `$HOME` set the tilde expands and the refusal names the scratch \
+         repository: {with_home}"
+    );
+    assert!(
+        !with_home.contains("unresolvable"),
+        "a resolved target is not an unresolvable one: {with_home}"
+    );
 }
 
 // ---------------------------------------------------------------------------

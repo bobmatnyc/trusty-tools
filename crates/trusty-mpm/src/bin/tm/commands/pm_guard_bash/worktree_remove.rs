@@ -67,7 +67,7 @@ use super::main_checkout::git_verb_target_dir_with_tail;
 use super::worktree_remove_rechecks::{
     CHECK_DISPATCH_IDENTITY, CHECK_WORKTREE_SCOPE, recheck_deny,
 };
-use super::{PathEnv, resolve_target_path, unexpanded_shell_variable};
+use super::{PathEnv, resolve_target_path, unresolved_target};
 
 /// Deny reason for an agent-side `git worktree remove` (#5791, ADR-0057).
 ///
@@ -214,15 +214,18 @@ pub(crate) fn evaluate_worktree_remove_command(
     // remove $MAIN/…` probed `<repo>/$MAIN/$MAIN/…` and the failure surfaced as
     // a `clean-tree` deny quoting a directory the command never named. Refuse
     // here instead, against the token as written.
-    if let Some(variable) = unexpanded_shell_variable(&target) {
+    // #7234: a leading `~` survives the same way when `$HOME` is unset.
+    if let Some(unresolved) = unresolved_target(&target) {
+        let expansion = unresolved.token;
         return WorktreeRemoveVerdict::Deny(recheck_deny(
             CHECK_WORKTREE_SCOPE,
             Path::new(&token),
             &format!(
-                "the path still carries the unexpanded shell variable `{variable}` — the guard \
-                 expands only `$TMPDIR`, `$TMP`, `$HOME` and `$PWD`, so it cannot establish which \
-                 directory would be deleted, and every later re-check would probe a path that \
-                 does not exist. Re-run the removal with the worktree path written out in full."
+                "the path still carries the unresolved shell expansion `{expansion}` — the guard \
+                 expands `$TMPDIR`, `$TMP`, `$HOME` and `$PWD`, and a leading `~` only when \
+                 `$HOME` is set, so it cannot establish which directory would be deleted, and \
+                 every later re-check would probe a path that does not exist. Re-run the removal \
+                 with the worktree path written out in full."
             ),
         ));
     }
@@ -484,7 +487,7 @@ mod tests {
         ));
         assert!(reason.contains(CHECK_WORKTREE_SCOPE), "{reason}");
         assert!(reason.contains("$MAIN"), "{reason}");
-        assert!(reason.contains("unexpanded shell variable"), "{reason}");
+        assert!(reason.contains("unresolved shell expansion"), "{reason}");
         assert!(
             !reason.contains("$MAIN/$MAIN"),
             "the doubled join must never reach the message: {reason}"

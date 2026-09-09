@@ -3,6 +3,9 @@
 //! `tests.rs` is classified as a test file (1500-SLOC cap).
 
 use super::*;
+// #7234: the rules now ask `unresolved_target`, so the narrower `$NAME` half is
+// no longer imported by `mod.rs` and is reached here directly.
+use super::path_tokens::unexpanded_shell_variable;
 
 #[test]
 fn evaluate_bash_command_denies_shell_edit_verbs() {
@@ -1764,6 +1767,69 @@ fn unexpanded_shell_variable_is_none_for_ordinary_paths() {
             unexpanded_shell_variable(Path::new(path)),
             None,
             "path: {path}"
+        );
+    }
+}
+
+/// A `~` reaches `resolve_target_path` as literal text whenever `$HOME` is
+/// unset, survives as a path COMPONENT, and then reads as an ordinary relative
+/// path joined onto the base — which is how the guard came to call an agent's
+/// launch directory a main checkout (#7234). Both spellings a shell would
+/// expand are pinned, and the refusal must quote the token AS WRITTEN rather
+/// than the fabricated join.
+/// Test: itself.
+#[test]
+fn unresolved_target_reports_a_surviving_tilde_as_written() {
+    let no_home = PathEnv {
+        tmpdir: None,
+        tmp: None,
+        home: None,
+    };
+    let base = Path::new("/launch/dir");
+    for (token, expected_token, expected_shown) in [
+        ("~/audit/repo", "~", "~/audit/repo"),
+        ("~", "~", "~"),
+        ("~bob/scratch", "~bob", "~bob/scratch"),
+    ] {
+        let resolved = resolve_target_path(token, base, &no_home);
+        assert_eq!(
+            resolved,
+            base.join(token),
+            "the join this rule exists to catch: {token}"
+        );
+        let unresolved =
+            unresolved_target(&resolved).unwrap_or_else(|| panic!("must be unresolved: {token}"));
+        assert_eq!(unresolved.token, expected_token, "token: {token}");
+        assert_eq!(
+            unresolved.shown,
+            Path::new(expected_shown),
+            "the refusal must not quote the launch directory: {token}"
+        );
+    }
+}
+
+/// The other half: with `$HOME` set the tilde expands, and an ordinary path
+/// must not be reported unresolved — otherwise every `~`-written target would
+/// deny with "cannot determine".
+/// Test: itself.
+#[test]
+fn unresolved_target_is_none_once_home_expands_the_tilde() {
+    let with_home = PathEnv {
+        tmpdir: None,
+        tmp: None,
+        home: Some("/Users/bob".to_string()),
+    };
+    let resolved = resolve_target_path("~/audit/repo", Path::new("/launch/dir"), &with_home);
+    assert_eq!(resolved, Path::new("/Users/bob/audit/repo"));
+    assert!(
+        unresolved_target(&resolved).is_none(),
+        "an expanded tilde leaves nothing unresolved: {}",
+        resolved.display()
+    );
+    for path in ["/repo/.claude/worktrees/agent-x", "/repo/a~b/c"] {
+        assert!(
+            unresolved_target(Path::new(path)).is_none(),
+            "a `~` inside a component is not a tilde expansion: {path}"
         );
     }
 }
