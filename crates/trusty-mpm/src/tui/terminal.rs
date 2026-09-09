@@ -14,8 +14,12 @@
 //! WITHOUT dropping the terminal, so a caller can shell out (a tmux attach,
 //! say) and then [`enter`] again.
 //!
-//! Test: `terminal_guard_drop_is_idempotent` in `super::tests`; the escape
-//! sequences themselves are side-effect-only and verified by launching a TUI.
+//! Test: `terminal_guard_drop_is_idempotent`,
+//! `enter_with_restores_the_terminal_when_the_screen_fails`,
+//! `enter_with_leaves_the_terminal_alone_when_raw_mode_fails` and
+//! `term_supports_raw_mode_rejects_dumb_and_missing` in `super::tests`; the
+//! escape sequences themselves are side-effect-only and verified by launching a
+//! TUI.
 
 use std::io::{self, Stdout};
 
@@ -63,20 +67,66 @@ fn restore() {
     let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
 }
 
+/// May a full-screen TUI take this `TERM` over, or must the caller print statically?
+///
+/// Why: a `dumb` (or absent) `TERM` has no cursor addressing, so a redraw smears
+/// the frame down the screen instead of repainting it — and raw mode has already
+/// taken the operator's echo away by then. One predicate so every gate that
+/// guards [`enter`] answers this the same way; a second copy is how `tm ls` and
+/// `tm f` came to disagree (#7224).
+/// What: true only for a `TERM` that is present, non-empty, and not `dumb`
+/// (case-insensitively). `NO_COLOR` is deliberately not consulted: it suppresses
+/// color, not cursor addressing.
+/// Test: `term_supports_raw_mode_rejects_dumb_and_missing`,
+/// `term_supports_raw_mode_accepts_a_real_terminal`.
+pub fn term_supports_raw_mode(term: Option<&str>) -> bool {
+    matches!(term, Some(t) if !t.is_empty() && !t.eq_ignore_ascii_case("dumb"))
+}
+
 /// Enter raw mode + the alternate screen and build the ratatui terminal.
 ///
 /// Why: every caller wants the same four steps in the same order, and getting
 /// the order wrong (building the backend before the alternate screen) leaves a
 /// frame of the shell's own scrollback painted over.
 /// What: `enable_raw_mode`, `EnterAlternateScreen` on stdout, then a
-/// `CrosstermBackend` terminal over that same stdout. The caller is responsible
-/// for holding a [`TerminalGuard`] so a failure after this point still restores.
-/// Test: side-effect-only; covered by launching a TUI.
+/// `CrosstermBackend` terminal over that same stdout — atomically, so a failure
+/// at either later step restores the terminal before propagating (#7224).
+/// Callers construct their [`TerminalGuard`] only after this returns `Ok`, so
+/// until then this function is the only thing that can undo the raw mode it
+/// just took.
+/// Test: the atomicity by `enter_with_restores_the_terminal_when_the_screen_fails`
+/// and `enter_with_leaves_the_terminal_alone_when_raw_mode_fails`; the real
+/// escape sequences are side-effect-only and covered by launching a TUI.
 pub fn enter() -> io::Result<TuiTerminal> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    Terminal::new(CrosstermBackend::new(stdout))
+    enter_with(io::stdout(), enable_raw_mode, restore)
+}
+
+/// [`enter`] with its two terminal side effects injected, so failure is testable.
+///
+/// Why: crossterm's raw-mode calls act on the process's real controlling
+/// terminal, which a unit test can neither fake nor safely disturb. Taking the
+/// screen writer, the raw-mode enable, and the restore as parameters lets a test
+/// hand in a writer that fails on `EnterAlternateScreen` and then assert the
+/// restore actually ran — the property that was missing (#7224).
+/// What: enables raw mode, enters the alternate screen on `screen`, and builds
+/// the backend over it. On a failure at either step AFTER raw mode engaged it
+/// calls `restore_terminal` and propagates the error; a failure of `enable`
+/// itself changed nothing, so nothing is restored. The step-3 restore goes
+/// through `restore_terminal` rather than `screen` because `Terminal::new`
+/// consumes the writer on the error path.
+/// Test: `enter_with_restores_the_terminal_when_the_screen_fails`,
+/// `enter_with_leaves_the_terminal_alone_when_raw_mode_fails`.
+pub(super) fn enter_with<W: io::Write>(
+    mut screen: W,
+    enable: impl FnOnce() -> io::Result<()>,
+    restore_terminal: impl FnOnce(),
+) -> io::Result<Terminal<CrosstermBackend<W>>> {
+    enable()?;
+    if let Err(e) = execute!(screen, EnterAlternateScreen) {
+        restore_terminal();
+        return Err(e);
+    }
+    Terminal::new(CrosstermBackend::new(screen)).inspect_err(|_| restore_terminal())
 }
 
 /// Hand the real screen back while keeping the terminal value alive (#7224).

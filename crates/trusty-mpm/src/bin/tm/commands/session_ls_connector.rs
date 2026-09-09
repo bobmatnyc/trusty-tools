@@ -47,7 +47,21 @@ use super::session_picker_order::{filter_sessions_by_term, sort_sessions};
 /// meant to be READ rather than acted on. It sits with `json`/`all`/`attached`
 /// rather than being a separate gate because they all answer the same question:
 /// is this invocation a listing, or a connect?
-/// Test: `ls_connector_should_show_picker_*` in `tests_behavior_d_tests.rs`.
+///
+/// #7224: `term` is the `TERM` value, injected rather than read here so the gate
+/// stays pure. A TTY is not enough — `TERM=dumb` under a real pty (`script`, an
+/// Emacs shell buffer, a CI pty) is two TTYs with no cursor addressing, and the
+/// TUI would smear its redraw down the screen after raw mode had already taken
+/// the operator's echo away. The predicate is
+/// [`trusty_mpm::tui::terminal::term_supports_raw_mode`], shared with `tm f`'s
+/// `interactive_filter_allowed` so the two surfaces cannot drift.
+/// Test: `ls_connector_should_show_picker_*` and
+/// `ls_connector_dumb_term_reaches_the_static_renderer` in
+/// `tests_behavior_d_ls_connector_tests.rs`.
+// #7224: the eighth input is `TERM`. The alternative to the arity is a flags
+// struct built at the one call site and destructured here, which hides the same
+// operands behind a type without removing one.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn should_show_picker(
     stdin_tty: bool,
     stdout_tty: bool,
@@ -55,9 +69,15 @@ pub(crate) fn should_show_picker(
     all: bool,
     attached: bool,
     plain: bool,
+    term: Option<&str>,
     session_count: usize,
 ) -> bool {
-    stdin_tty && stdout_tty && !json && !all && !attached && !plain && session_count > 0
+    // #7224: defined as the complement of [`prints_static_table`] rather than a
+    // second spelling of the same operands, so a gate added to one can never be
+    // missing from the other — which is how the `TERM` check came to be in
+    // `tm f` and not here.
+    !prints_static_table(stdin_tty, stdout_tty, json, all, attached, plain, term)
+        && session_count > 0
 }
 
 /// Does this invocation print the static table and return before any TUI?
@@ -69,12 +89,14 @@ pub(crate) fn should_show_picker(
 /// than something to establish by reading the function. It is also the sole
 /// path to [`super::managed::session_ls`] from here, so every static invocation
 /// produces one renderer's bytes.
-/// What: true for `--json`, `--all`, `--attached`, `--plain`, or either stream
-/// not being a terminal. The complement is NOT [`should_show_picker`] — that
-/// one additionally requires a non-empty fleet, because zero sessions on a TTY
-/// prints the static "no managed sessions" line from a later branch instead.
+/// What: true for `--json`, `--all`, `--attached`, `--plain`, either stream not
+/// being a terminal, or (#7224) a `TERM` that cannot address the cursor. The
+/// complement is NOT [`should_show_picker`] — that one additionally requires a
+/// non-empty fleet, because zero sessions on a TTY prints the static "no managed
+/// sessions" line from a later branch instead.
 /// Test: `plain_and_non_tty_reach_the_same_static_renderer`,
-/// `ls_connector_should_show_picker_plain_static`.
+/// `ls_connector_should_show_picker_plain_static`,
+/// `ls_connector_dumb_term_reaches_the_static_renderer`.
 pub(crate) fn prints_static_table(
     stdin_tty: bool,
     stdout_tty: bool,
@@ -82,8 +104,17 @@ pub(crate) fn prints_static_table(
     all: bool,
     attached: bool,
     plain: bool,
+    term: Option<&str>,
 ) -> bool {
-    json || all || attached || plain || !stdin_tty || !stdout_tty
+    json
+        || all
+        || attached
+        || plain
+        || !stdin_tty
+        || !stdout_tty
+        // #7224: a dumb terminal takes the SAME early return a pipe does, so the
+        // TUI is unreachable before any fetch rather than after one.
+        || !trusty_mpm::tui::terminal::term_supports_raw_mode(term)
 }
 
 /// `tm ls` — the interactive managed-session connector (top-level).
@@ -93,7 +124,8 @@ pub(crate) fn prints_static_table(
 /// scripted, or `--plain` it degrades to the same static, pipeable list as
 /// `tm session ls`.
 /// What: resolves the scope (`--current` derives `owner/repo` from the cwd git
-/// remote, mirroring `tm session ls`); routes `--json`, `--all`, `--attached`, or
+/// remote, mirroring `tm session ls`); routes `--json`, `--all`, `--attached`, a
+/// `TERM` that cannot address the cursor (#7224), or
 /// any non-TTY invocation straight to the static [`super::managed::session_ls`]
 /// renderer (preserving its raw `--json` passthrough byte-for-byte); otherwise
 /// fetches the live sessions once and either renders the static table (0
@@ -115,7 +147,9 @@ pub(crate) async fn run_ls_connector(
     attached: bool,
     plain: bool,
     sort: SessionSortArg,
-    term: Option<SessionFilter>,
+    // #7224: renamed from `term` — the new `term` below is the TERM variable,
+    // and two different meanings under one name is how a gate gets miswired.
+    filter: Option<SessionFilter>,
     no_prune: bool,
 ) -> anyhow::Result<()> {
     // `--current` derives the source_id from the cwd git remote, exactly like
@@ -129,17 +163,23 @@ pub(crate) async fn run_ls_connector(
 
     let stdin_tty = std::io::stdin().is_terminal();
     let stdout_tty = std::io::stdout().is_terminal();
+    // #7224: read at this I/O boundary and injected into both pure gates below,
+    // mirroring `run_f_command`. The gates stay unit-testable without a live
+    // terminal, and `src/bin/tm/**` keeps its no-process-global-env posture
+    // (#5544) — this is a read, and it never leaves the boundary.
+    let term_var = std::env::var("TERM").ok();
+    let term = term_var.as_deref();
 
     // Cheap pre-gate: `--json`, `--all`, `--attached`, or any non-interactive
     // stream never fetches for the picker — delegate straight to the static
     // renderer, which owns the raw `--json` passthrough, the `--all` tombstone
-    // sort, and the `-a` attached-only filter. `sort`/`term` ride along (the
+    // sort, and the `-a` attached-only filter. `sort`/`filter` ride along (the
     // static renderer applies them; `--json` ignores them, matching `--all`'s
     // existing "no effect on --json" precedent).
     // #7224: `--plain` joins the list, so the static renderer below is reached
     // by the SAME branch a piped invocation takes — byte-identical output, not
     // a second formatting path.
-    if prints_static_table(stdin_tty, stdout_tty, json, all, attached, plain) {
+    if prints_static_table(stdin_tty, stdout_tty, json, all, attached, plain, term) {
         return super::managed::session_ls(
             client,
             url,
@@ -148,7 +188,7 @@ pub(crate) async fn run_ls_connector(
             all,
             attached,
             sort,
-            term,
+            filter,
             // #5950: the operator's explicit "this read must not mutate".
             no_prune,
         )
@@ -169,13 +209,13 @@ pub(crate) async fn run_ls_connector(
                 false,
                 false,
                 sort,
-                term,
+                filter,
                 no_prune,
             )
             .await;
         }
     };
-    let mut sessions = filter_sessions_by_term(sessions, term.as_ref());
+    let mut sessions = filter_sessions_by_term(sessions, filter.as_ref());
     sort_sessions(&mut sessions, sort);
 
     if !should_show_picker(
@@ -185,6 +225,7 @@ pub(crate) async fn run_ls_connector(
         all,
         attached,
         plain,
+        term,
         sessions.len(),
     ) {
         // 0 sessions on a TTY: print the static "no managed sessions" line rather
@@ -208,7 +249,7 @@ pub(crate) async fn run_ls_connector(
         source_id: sid,
         repo_url,
         sort,
-        term,
+        term: filter,
         selected_id: None,
     };
     // #7224: both "self" signals are read HERE, at the I/O boundary, and

@@ -169,3 +169,89 @@ fn terminal_guard_drop_is_idempotent() {
     drop(super::terminal::TerminalGuard);
     drop(super::terminal::TerminalGuard);
 }
+
+// ── `terminal::enter` atomicity and the TERM predicate (#7224) ───────────────
+
+/// A writer that fails every write, standing in for a screen that rejects the
+/// `EnterAlternateScreen` sequence.
+///
+/// Why: crossterm acts on the process's real controlling terminal, so the only
+/// step of `enter` a unit test can fault is the one that goes through a writer.
+struct FailingScreen;
+
+impl std::io::Write for FailingScreen {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("screen rejected the sequence"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other("screen rejected the flush"))
+    }
+}
+
+/// A failure AFTER raw mode engaged still restores the terminal (#7224).
+///
+/// Why: this is the leak the fix closes. `enter` takes raw mode first and its
+/// callers install their `TerminalGuard` only once it returns `Ok`, so a failure
+/// in between used to propagate with the shell left in raw mode and no guard in
+/// existence — no echo, no Ctrl-C, and nothing left that would ever put it back.
+/// What: enables raw mode successfully, then fails on `EnterAlternateScreen`,
+/// and asserts both that the error propagates and that the restore ran.
+#[test]
+fn enter_with_restores_the_terminal_when_the_screen_fails() {
+    let restored = std::cell::Cell::new(false);
+    let result = super::terminal::enter_with(FailingScreen, || Ok(()), || restored.set(true));
+    assert!(
+        result.is_err(),
+        "a screen that rejects EnterAlternateScreen must surface as Err"
+    );
+    assert!(
+        restored.get(),
+        "raw mode engaged, so the failure path must restore the terminal"
+    );
+}
+
+/// A failure of raw mode itself restores nothing, because nothing changed.
+///
+/// Why: the complement that keeps the fix honest — restoring after a no-op would
+/// emit `LeaveAlternateScreen` at a shell that never left it, scrolling the
+/// operator's screen for no reason.
+#[test]
+fn enter_with_leaves_the_terminal_alone_when_raw_mode_fails() {
+    let restored = std::cell::Cell::new(false);
+    let result = super::terminal::enter_with(
+        FailingScreen,
+        || Err(std::io::Error::other("no tty")),
+        || restored.set(true),
+    );
+    assert!(result.is_err(), "a raw-mode failure must surface as Err");
+    assert!(
+        !restored.get(),
+        "nothing engaged, so nothing may be restored"
+    );
+}
+
+/// An absent, empty, or `dumb` `TERM` refuses raw mode (#7224).
+///
+/// Why: `tm ls` gated only on TTY-ness, so `TERM=dumb tm ls` under a real pty
+/// opened the full-screen TUI on a terminal with no cursor addressing. This is
+/// the shared predicate both `tm ls` and `tm f` now answer through.
+#[test]
+fn term_supports_raw_mode_rejects_dumb_and_missing() {
+    use super::terminal::term_supports_raw_mode;
+    assert!(!term_supports_raw_mode(None), "unset TERM -> static");
+    assert!(!term_supports_raw_mode(Some("")), "empty TERM -> static");
+    assert!(!term_supports_raw_mode(Some("dumb")), "dumb TERM -> static");
+    assert!(
+        !term_supports_raw_mode(Some("DUMB")),
+        "the dumb check is case-insensitive"
+    );
+}
+
+/// A real terminal type passes the predicate.
+#[test]
+fn term_supports_raw_mode_accepts_a_real_terminal() {
+    use super::terminal::term_supports_raw_mode;
+    assert!(term_supports_raw_mode(Some("xterm-256color")));
+    assert!(term_supports_raw_mode(Some("screen")));
+}

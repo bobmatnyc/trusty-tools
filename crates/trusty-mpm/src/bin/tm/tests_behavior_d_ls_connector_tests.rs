@@ -197,14 +197,22 @@ fn cli_ls_source_id_and_current_conflict() {
 
 use crate::commands::session_ls_connector::should_show_picker;
 
+/// The `TERM` a real interactive terminal reports (#7224).
+///
+/// Why: every gate case below is about a flag or a TTY, not about `TERM`, so
+/// they all pass the one value that keeps the terminal question out of the way.
+/// The `TERM` question itself is
+/// `ls_connector_dumb_term_reaches_the_static_renderer`.
+const REAL_TERM: Option<&str> = Some("xterm-256color");
+
 /// The picker opens only on a fully-interactive terminal with ≥1 session.
 #[test]
 fn ls_connector_should_show_picker_interactive_with_sessions() {
     assert!(should_show_picker(
-        true, true, false, false, false, false, 1
+        true, true, false, false, false, false, REAL_TERM, 1
     ));
     assert!(should_show_picker(
-        true, true, false, false, false, false, 5
+        true, true, false, false, false, false, REAL_TERM, 5
     ));
 }
 
@@ -213,15 +221,15 @@ fn ls_connector_should_show_picker_interactive_with_sessions() {
 #[test]
 fn ls_connector_should_show_picker_non_tty_static() {
     assert!(
-        !should_show_picker(false, true, false, false, false, false, 3),
+        !should_show_picker(false, true, false, false, false, false, REAL_TERM, 3),
         "piped stdin -> static"
     );
     assert!(
-        !should_show_picker(true, false, false, false, false, false, 3),
+        !should_show_picker(true, false, false, false, false, false, REAL_TERM, 3),
         "piped stdout -> static"
     );
     assert!(!should_show_picker(
-        false, false, false, false, false, false, 3
+        false, false, false, false, false, false, REAL_TERM, 3
     ));
 }
 
@@ -230,15 +238,15 @@ fn ls_connector_should_show_picker_non_tty_static() {
 #[test]
 fn ls_connector_should_show_picker_flags_and_empty_static() {
     assert!(
-        !should_show_picker(true, true, true, false, false, false, 3),
+        !should_show_picker(true, true, true, false, false, false, REAL_TERM, 3),
         "--json -> static"
     );
     assert!(
-        !should_show_picker(true, true, false, true, false, false, 3),
+        !should_show_picker(true, true, false, true, false, false, REAL_TERM, 3),
         "--all -> static"
     );
     assert!(
-        !should_show_picker(true, true, false, false, false, false, 0),
+        !should_show_picker(true, true, false, false, false, false, REAL_TERM, 0),
         "0 sessions -> static"
     );
 }
@@ -251,11 +259,11 @@ fn ls_connector_should_show_picker_flags_and_empty_static() {
 #[test]
 fn ls_connector_should_show_picker_attached_static() {
     assert!(
-        !should_show_picker(true, true, false, false, true, false, 3),
+        !should_show_picker(true, true, false, false, true, false, REAL_TERM, 3),
         "--attached -> static even with sessions on a TTY"
     );
     assert!(
-        should_show_picker(true, true, false, false, false, false, 3),
+        should_show_picker(true, true, false, false, false, false, REAL_TERM, 3),
         "the same invocation WITHOUT -a still opens the picker"
     );
 }
@@ -287,11 +295,11 @@ fn cli_parses_ls_plain() {
 #[test]
 fn ls_connector_should_show_picker_plain_static() {
     assert!(
-        !should_show_picker(true, true, false, false, false, true, 3),
+        !should_show_picker(true, true, false, false, false, true, REAL_TERM, 3),
         "--plain -> static even with sessions on a TTY"
     );
     assert!(
-        should_show_picker(true, true, false, false, false, false, 3),
+        should_show_picker(true, true, false, false, false, false, REAL_TERM, 3),
         "the same invocation WITHOUT --plain opens the TUI"
     );
 }
@@ -307,30 +315,64 @@ fn ls_connector_should_show_picker_plain_static() {
 /// branch, before any terminal setup runs.
 #[test]
 fn plain_and_non_tty_reach_the_same_static_renderer() {
-    // (stdin_tty, stdout_tty, plain) — every non-interactive shape.
+    // (stdin_tty, stdout_tty, plain, term) — every non-interactive shape.
     let static_cases = [
-        (true, true, true),    // --plain on a full TTY
-        (true, false, false),  // piped stdout
-        (false, true, false),  // piped stdin
-        (false, false, false), // both piped
-        (true, false, true),   // piped stdout AND --plain
+        (true, true, true, REAL_TERM),      // --plain on a full TTY
+        (true, false, false, REAL_TERM),    // piped stdout
+        (false, true, false, REAL_TERM),    // piped stdin
+        (false, false, false, REAL_TERM),   // both piped
+        (true, false, true, REAL_TERM),     // piped stdout AND --plain
+        (true, true, false, Some("dumb")),  // #7224: two TTYs, dumb terminal
+        (true, true, false, None),          // #7224: two TTYs, TERM unset
+        (true, true, false, Some("")),      // #7224: two TTYs, TERM empty
+        (true, true, false, Some("DUMB")),  // #7224: the check is case-insensitive
+        (false, true, false, Some("dumb")), // piped stdin AND dumb
     ];
-    for (stdin_tty, stdout_tty, plain) in static_cases {
+    for (stdin_tty, stdout_tty, plain, term) in static_cases {
         assert!(
-            prints_static_table(stdin_tty, stdout_tty, false, false, false, plain),
-            "({stdin_tty},{stdout_tty},plain={plain}) must reach the static renderer"
+            prints_static_table(stdin_tty, stdout_tty, false, false, false, plain, term),
+            "({stdin_tty},{stdout_tty},plain={plain},term={term:?}) must reach the static renderer"
         );
         assert!(
-            !should_show_picker(stdin_tty, stdout_tty, false, false, false, plain, 3),
-            "({stdin_tty},{stdout_tty},plain={plain}) must never open the TUI"
+            !should_show_picker(stdin_tty, stdout_tty, false, false, false, plain, term, 3),
+            "({stdin_tty},{stdout_tty},plain={plain},term={term:?}) must never open the TUI"
         );
     }
     // The one shape that does NOT take the static branch is the interactive one.
     assert!(
-        !prints_static_table(true, true, false, false, false, false),
+        !prints_static_table(true, true, false, false, false, false, REAL_TERM),
         "a full TTY with no forcing flag is the TUI path"
     );
     assert!(should_show_picker(
-        true, true, false, false, false, false, 3
+        true, true, false, false, false, false, REAL_TERM, 3
     ));
+}
+
+/// `TERM=dumb` under a real pty prints the static table and never opens the TUI.
+///
+/// Why (#7224): the TTY check alone is not the raw-mode question. `script`, an
+/// Emacs shell buffer, and a CI pty all give `tm ls` two real TTYs while
+/// reporting a `TERM` with no cursor addressing — the exact combination
+/// `interactive_filter_allowed` has always refused for `tm f`, and the one
+/// `should_show_picker` used to let through into raw mode.
+/// What: pins both gates on the dumb/unset/empty values against an otherwise
+/// fully interactive invocation, and asserts the same invocation with a real
+/// `TERM` still opens the TUI — so the fix is a `TERM` gate, not a blanket off
+/// switch.
+#[test]
+fn ls_connector_dumb_term_reaches_the_static_renderer() {
+    for term in [Some("dumb"), Some("Dumb"), Some(""), None] {
+        assert!(
+            prints_static_table(true, true, false, false, false, false, term),
+            "TERM={term:?} on two TTYs must take the static branch"
+        );
+        assert!(
+            !should_show_picker(true, true, false, false, false, false, term, 3),
+            "TERM={term:?} on two TTYs must never open the TUI"
+        );
+    }
+    assert!(
+        should_show_picker(true, true, false, false, false, false, Some("screen"), 3),
+        "a real TERM on the same invocation still opens the TUI"
+    );
 }
