@@ -1210,9 +1210,12 @@ fn e2e_survey_against_a_real_store() {
         measure: Some(std::time::Duration::from_secs(20)),
         classify: None,
     };
-    let s = survey(
+    // #7259: against the real `gh`-backed index — the `survey` wrapper that
+    // used to bind it lost its production caller and went with it.
+    let s = survey_with_index(
         &root,
         &nobody(),
+        &PrIndex::from_gh,
         &no_agents,
         budget,
         true,

@@ -882,3 +882,21 @@ fn unknown_never_aggregates_to_ok() {
     ]);
     assert_eq!(with_fail.overall, CheckStatus::Fail);
 }
+
+/// 🔴 #7259: the four "which workspaces are live" probes drop a claim only when
+/// a liveness probe ANSWERED and found the session gone.
+///
+/// Why: `Live` covers both "the session is running" and "nothing could
+/// establish that it is not", and collapsing those two would let a tmux outage
+/// promote an unmanaged cwd to a managed workspace and hand every base-clone
+/// and hooks probe a shorter list than the fleet actually holds.
+#[test]
+fn live_workspace_paths_drops_only_claims_a_probe_found_gone() {
+    let gone = PathBuf::from("/srv/projects/acme");
+    let still_here = PathBuf::from("/srv/projects/beta");
+    let claims = LiveClaims::foreign(vec![
+        WorkspaceClaim::with_liveness("tm-gone", &gone, ClaimLiveness::SessionGone),
+        WorkspaceClaim::with_liveness("tm-still-here", &still_here, ClaimLiveness::Live),
+    ]);
+    assert_eq!(live_workspace_paths(&claims), vec![still_here]);
+}

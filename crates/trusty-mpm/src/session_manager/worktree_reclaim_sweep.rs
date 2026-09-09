@@ -221,30 +221,12 @@ fn measure_reclaimable_first(candidates: &mut [ReclaimCandidate], deadline: Opti
     }
 }
 
-/// [`survey_with_index`] against the real `gh`-backed index.
-///
-/// Why: the production entry point; the injectable form exists for tests.
-/// Test: covered through [`survey_with_index`].
-pub(crate) fn survey(
-    repos_root: &Path,
-    in_use: &LiveClaims,
-    agent_state: AgentStateProbe<'_>,
-    budget: SurveyBudget,
-    per_branch_fallback: bool,
-    // #6927: the operator keep-list `classify`'s gate 0 applies. An empty list
-    // is a no-op gate, so every pre-#6927 caller keeps its exact behaviour.
-    keep_list: &KeepList,
-) -> ReclaimSurvey {
-    survey_with_index(
-        repos_root,
-        in_use,
-        &PrIndex::from_gh,
-        agent_state,
-        budget,
-        per_branch_fallback,
-        keep_list,
-    )
-}
+// #7259: the `survey` wrapper that bound `survey_with_index` to
+// `PrIndex::from_gh` lived here for one caller — `doctor_worktree_disk`. That
+// probe now owns the same wrapper itself
+// (`check_worktree_disk` over `check_worktree_disk_with_index`), so the index
+// seam reaches the doctor's own tests rather than stopping one layer below
+// them, and this indirection had no callers left.
 
 /// Re-ask git, RIGHT NOW, whether this path may still be removed (#2919).
 ///

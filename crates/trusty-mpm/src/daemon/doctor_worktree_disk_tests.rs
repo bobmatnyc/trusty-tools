@@ -10,10 +10,16 @@
 
 use std::path::PathBuf;
 
+use tempfile::TempDir;
+
 use super::*;
+use crate::session_manager::record::{ManagedSessionId, ManagedSessionState};
+use crate::session_manager::tests::FakeTmuxDriver;
+use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 use crate::session_manager::worktree_reclaim::{
     BranchPrState, ReclaimCandidate, ReclaimGate, ReclaimVerdict,
 };
+use crate::session_manager::{SessionManager, tests::make_active_test_record};
 
 /// Build a survey holding `candidates`, with the totals derived the same way
 /// the real survey derives them.
@@ -248,7 +254,7 @@ fn worktree_disk_check_flags_an_undercounted_total() {
 
 #[tokio::test]
 async fn worktree_disk_check_is_ok_without_a_repos_root() {
-    let check = check_worktree_disk(None, &[]).await;
+    let check = check_worktree_disk(None, &LiveClaims::default()).await;
     assert_eq!(check.status, CheckStatus::Ok);
     assert_eq!(check.name, "worktree_disk");
 }
@@ -256,8 +262,150 @@ async fn worktree_disk_check_is_ok_without_a_repos_root() {
 #[tokio::test]
 async fn worktree_disk_check_is_ok_for_a_missing_repos_root() {
     let missing = PathBuf::from("/nonexistent-repos-root-2919");
-    let check = check_worktree_disk(Some(&missing), &[]).await;
+    let check = check_worktree_disk(Some(&missing), &LiveClaims::default()).await;
     assert_eq!(check.status, CheckStatus::Ok);
+}
+
+// ---------------------------------------------------------------------------
+// #7259 — the claim set the probe surveys with
+// ---------------------------------------------------------------------------
+
+/// The adopted pane from the #7232 incident: a `deleted` record holding an
+/// ORG-level `workspace_path`, one level above every repository under it.
+///
+/// Why: the record's `state` must never be what decides anything (#2919
+/// measured a live session in a terminal-looking record), so the fixture is
+/// deliberately terminal — an assertion that passed by reading `state` would
+/// pass here for the wrong reason.
+/// What: seeds one record under `tmux_name` into a manager backed by
+/// `FakeTmuxDriver`, so the test controls exactly which names a
+/// `tmux list-sessions` reports.
+async fn manager_claiming(
+    dir: &TempDir,
+    fake: std::sync::Arc<FakeTmuxDriver>,
+    tmux_name: &str,
+    org_path: &Path,
+) -> SessionManager {
+    let mgr = SessionManager::new(dir.path(), fake)
+        .await
+        .expect("manager");
+    let mut record = make_active_test_record(
+        tmux_name,
+        "adopted pane",
+        org_path.to_str().expect("utf8 org path"),
+    );
+    record.id = ManagedSessionId::for_adopted_tmux_name(tmux_name);
+    record.state = ManagedSessionState::Deleted;
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("upsert");
+    mgr
+}
+
+/// Put a worktree in the state a merged pull request leaves behind: one
+/// commit, pushed. `commit_all_and_push` runs a real `git commit`, which
+/// refuses an empty one, so the file write is required rather than incidental.
+fn land(path: &Path) {
+    std::fs::write(path.join("landed.rs"), "// landed\n").expect("write landed file");
+    GitWorktreeFixture::commit_all_and_push(path, "landed");
+}
+
+/// A pull-request index naming one branch as merged.
+fn merged_index(branch: &str, pr: u64) -> PrIndex {
+    PrIndex::from_json(
+        &format!(r#"[{{"number": {pr}, "headRefName": "{branch}", "state": "MERGED"}}]"#),
+        400,
+    )
+}
+
+/// 🔴 #7259, the reported defect: a tombstoned adopted session claiming an
+/// ORG-level path must not hide the orphaned disk beneath it.
+///
+/// Why: `run_doctor_for_manager` built this probe's claim set from
+/// `mgr.list()`, which has no liveness in it — so one `deleted` record for the
+/// pane `tm-bobmatnyc`, holding `<repos_root>/<owner>`, covered every worktree
+/// in every repository below it and the disk figures counted the whole subtree
+/// as in use. On `65d31525b` this worktree comes back blocked at gate 2 and the
+/// check reports nothing reclaimable.
+/// What: one real merged, clean, pushed worktree under an org-level path that
+/// only a dead session claims; tmux answers, and does not list that name.
+#[tokio::test]
+async fn a_dead_sessions_org_level_claim_no_longer_hides_orphaned_disk() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("doctor-7259");
+    land(&wt);
+    let org = fx.repo.parent().expect("owner dir above the checkout");
+
+    let dir = TempDir::new().expect("tempdir");
+    // Seeded with a DIFFERENT live name: the probe answered, and `tm-bobmatnyc`
+    // was not in the answer.
+    let fake = FakeTmuxDriver::new();
+    fake.seeded_names
+        .lock()
+        .unwrap()
+        .push("tm-someone-else".into());
+    let mgr = manager_claiming(&dir, fake, "tm-bobmatnyc", org).await;
+
+    let check = check_worktree_disk_with_index(
+        Some(&fx.repos_root),
+        &mgr.workspace_claims(None).await,
+        |_: &Path| merged_index("session/doctor-7259", 7259),
+    )
+    .await;
+
+    assert_eq!(
+        check.status,
+        CheckStatus::Warn,
+        "a merged worktree claimed only by a dead session is reclaimable disk: {}",
+        check.message
+    );
+    assert!(
+        check.message.contains("prune-worktrees --merged-prs"),
+        "the reclaim command must be advertised: {}",
+        check.message
+    );
+}
+
+/// 🔴 #5856 / #7232's fail direction, restated at this probe: an unobservable
+/// tmux is not an empty tmux, so the same claim still hides the same worktree.
+///
+/// Why: the probe reports a number an operator acts on with a DELETE, so a
+/// liveness question nobody could answer must resolve toward "in use". This is
+/// the assertion that stops the fix above from being implemented as "ignore
+/// tombstones", which would discard live sessions' claims during a tmux outage.
+#[tokio::test]
+async fn an_unobservable_tmux_still_hides_the_same_worktree() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("doctor-7259-failclosed");
+    land(&wt);
+    let org = fx.repo.parent().expect("owner dir above the checkout");
+
+    let dir = TempDir::new().expect("tempdir");
+    let fake = FakeTmuxDriver::new();
+    let mgr = manager_claiming(&dir, fake.clone(), "tm-bobmatnyc", org).await;
+    *fake.list_sessions_should_fail.lock().unwrap() = true;
+
+    let check = check_worktree_disk_with_index(
+        Some(&fx.repos_root),
+        &mgr.workspace_claims(None).await,
+        |_: &Path| merged_index("session/doctor-7259-failclosed", 7259),
+    )
+    .await;
+
+    assert_ne!(
+        check.status,
+        CheckStatus::Warn,
+        "a probe that could not read tmux must keep the claim, not reclaim under it: {}",
+        check.message
+    );
+    assert!(
+        !check.message.contains("prune-worktrees --merged-prs"),
+        "nothing may be advertised as reclaimable here: {}",
+        check.message
+    );
 }
 
 #[test]

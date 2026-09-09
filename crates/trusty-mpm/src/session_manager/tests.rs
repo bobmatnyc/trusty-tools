@@ -1155,8 +1155,10 @@ async fn decommission_full_still_terminates_the_runtime() {
 // 20-field struct literals when only tmux_name / task / ws_path vary).
 // `pub(super)` since #6116: the sibling `naming_tests` reconcile coverage seeds
 // the same shape, and a second copy of a 27-field literal is one field addition
-// away from drifting.
-pub(super) fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str) -> SessionRecord {
+// away from drifting. Widened to `pub(crate)` by #7259, for the same reason:
+// the doctor's worktree-disk regression seeds a tombstoned record and would
+// otherwise carry a third copy.
+pub(crate) fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str) -> SessionRecord {
     SessionRecord {
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.into(),

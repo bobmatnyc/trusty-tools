@@ -96,8 +96,12 @@ pub(crate) mod ssh_host_alias;
 pub(crate) mod worktree_repo_slug;
 pub mod worktree_safety;
 
+// #7259: `pub(crate)` so the doctor's own tests can drive a manager against
+// `FakeTmuxDriver` — the doctor probe's claim set now comes from the store, so
+// pinning it needs a controllable tmux answer, and a second fake would be a
+// second answer to the same question.
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 // #4743: the destructive index-DELETE guard, asserted against a live,
 // accepting loopback daemon rather than a dead port.

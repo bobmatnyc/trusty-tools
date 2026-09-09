@@ -10,18 +10,31 @@
 //! disposable.
 //!
 //! What: one `worktree_disk` check driven by
-//! [`crate::session_manager::worktree_reclaim::survey`], which is read-only —
-//! this probe opens no destructive path and never removes anything.
+//! [`crate::session_manager::worktree_reclaim_sweep::survey_with_index`], which
+//! is read-only — this probe opens no destructive path and never removes
+//! anything.
+//!
+//! #7259: the claim set arrives already probed for liveness. This probe used to
+//! receive a bare `&[PathBuf]` and rebuild every path into a live unattributed
+//! claim, which is the tombstone shape #7232 fixed for reclaim: one `deleted`
+//! adopted record holding an ORG-level `workspace_path` covered every worktree
+//! beneath it, so the disk figures counted that whole subtree as in use and the
+//! probe under-reported orphaned disk. It now takes
+//! [`crate::session_manager::worktree_reclaim::LiveClaims`] whole from
+//! [`crate::session_manager::SessionManager::workspace_claims`] — the one
+//! producer — and never constructs a claim of its own.
 //! Test: `worktree_disk_check_is_ok_without_a_repos_root`,
 //! `worktree_disk_check_warns_when_bytes_are_reclaimable`,
-//! `worktree_disk_check_is_unknown_when_no_pr_state_resolved`.
+//! `worktree_disk_check_is_unknown_when_no_pr_state_resolved`,
+//! `a_dead_sessions_org_level_claim_no_longer_hides_orphaned_disk`,
+//! `an_unobservable_tmux_still_hides_the_same_worktree`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::session_manager::worktree_ownership::AgentDelegationState;
-use crate::session_manager::worktree_reclaim::{LiveClaims, ReclaimSurvey, WorkspaceClaim};
-use crate::session_manager::worktree_reclaim_sweep::{SurveyBudget, survey};
+use crate::session_manager::worktree_reclaim::{LiveClaims, PrIndex, ReclaimSurvey};
+use crate::session_manager::worktree_reclaim_sweep::{SurveyBudget, survey_with_index};
 
 /// Wall-clock budget for the survey this probe runs.
 ///
@@ -220,17 +233,43 @@ fn build_worktree_disk_check(survey: &ReclaimSurvey) -> DoctorCheck {
 ///
 /// Why: see the module doc — the existing `worktrees` probe reports counts, not
 /// bytes, and never noticed a terabyte.
+/// What: [`check_worktree_disk_with_index`] against the real `gh`-backed
+/// pull-request index, mirroring
+/// [`crate::session_manager::worktree_reclaim_sweep::survey`] over
+/// `survey_with_index`. `active` is the claim set
+/// [`crate::session_manager::SessionManager::workspace_claims`] produced, taken
+/// whole so its liveness travels with it (#7259).
+/// Test: `worktree_disk_check_is_ok_without_a_repos_root`.
+pub(super) async fn check_worktree_disk(
+    repos_root: Option<&Path>,
+    active: &LiveClaims,
+) -> DoctorCheck {
+    check_worktree_disk_with_index(repos_root, active, PrIndex::from_gh).await
+}
+
+/// [`check_worktree_disk`] against an injectable pull-request index (#7259).
+///
+/// Why: the production entry point resolves pull-request state through `gh`,
+/// which a hermetic test has neither the network nor the repository for — and
+/// "is this worktree reclaimable?" is exactly the question a stale claim
+/// changes the answer to, so the claim wiring cannot be pinned without it. The
+/// same seam `survey_with_index` exists for, one layer up.
 /// What: runs the read-only survey on a blocking thread (it shells out and
 /// walks the filesystem) under [`SURVEY_TIMEOUT`], then renders it with
 /// [`build_worktree_disk_check`]. A missing or absent `repos_root` is `Ok` —
 /// an operator who runs no managed sessions has no worktrees to account for. A
 /// panicked or timed-out survey is `Unknown`, never `Ok`: a probe that learned
 /// nothing must not read healthy.
-/// Test: `worktree_disk_check_is_ok_without_a_repos_root`.
-pub(super) async fn check_worktree_disk(
+/// Test: `a_dead_sessions_org_level_claim_no_longer_hides_orphaned_disk`,
+/// `an_unobservable_tmux_still_hides_the_same_worktree`.
+async fn check_worktree_disk_with_index<F>(
     repos_root: Option<&Path>,
-    active_workspace_paths: &[PathBuf],
-) -> DoctorCheck {
+    active: &LiveClaims,
+    index_for: F,
+) -> DoctorCheck
+where
+    F: Fn(&Path) -> PrIndex + Send + 'static,
+{
     let Some(root) = repos_root else {
         return DoctorCheck::new(
             "worktree_disk",
@@ -249,16 +288,12 @@ pub(super) async fn check_worktree_disk(
         );
     }
     let root = root.to_path_buf();
-    // #6806: gate 2 now resolves WHOSE claim blocks a candidate. This probe is
-    // report-only, has no caller identity, and reads paths through a helper
-    // shared by four doctor checks that carries no session ids — so every claim
-    // it builds is unattributed and therefore foreign, exactly as before.
-    let active = LiveClaims::foreign(
-        active_workspace_paths
-            .iter()
-            .map(WorkspaceClaim::unattributed)
-            .collect(),
-    );
+    // #6806: gate 2 resolves WHOSE claim blocks a candidate. This probe is
+    // report-only and names no caller of its own, so every claim it carries is
+    // foreign and refuses exactly as before — what #7259 changes is that a
+    // claim whose session the tmux probe found gone arrives already marked
+    // `SessionGone`, and gate 2 discards it instead of obeying a tombstone.
+    let active = active.clone();
     // #2919: the deadline is passed INTO the blocking task, not wrapped around
     // it. `tokio::time::timeout` cannot cancel `spawn_blocking`, so an outer
     // timeout returns a verdict on schedule while the walk keeps running — and
@@ -290,9 +325,10 @@ pub(super) async fn check_worktree_disk(
             // it advertises — and a config that will not parse reports nothing
             // reclaimable rather than everything.
             let keep_list = crate::core::trusty_tools_config::load_disk_keep_list();
-            survey(
+            survey_with_index(
                 &root,
                 &active,
+                &index_for,
                 &|_| AgentDelegationState::Unknown,
                 budget,
                 false,

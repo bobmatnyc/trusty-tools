@@ -58,7 +58,9 @@ use super::worktree_safety::DirtyWorktree;
 // unchanged.
 pub(crate) use super::worktree_reclaim_verdict::{ReclaimGate, ReclaimVerdict};
 // #6806: gate 2's claim vocabulary, re-exported for the same reason.
-pub(crate) use super::worktree_reclaim_claim::{ClaimState, LiveClaims, WorkspaceClaim};
+pub(crate) use super::worktree_reclaim_claim::{
+    ClaimLiveness, ClaimState, LiveClaims, WorkspaceClaim,
+};
 
 /// Resolves the delegation registry's answer for the agent a sentinel names.
 ///
