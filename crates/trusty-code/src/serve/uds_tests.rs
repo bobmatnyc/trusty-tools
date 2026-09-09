@@ -359,13 +359,11 @@ async fn session_events_stream_stays_open_under_idle_window() {
         .expect("the frame must not be a terminal error");
     assert_eq!(frame.session_id, session_id);
 
-    // Dropped rather than shut down: an open tail parks the connection handler
-    // awaiting its next frame, so `serve_until`'s shutdown drain spends its
-    // whole budget on it. That is the transport's documented behaviour and not
-    // this test's subject — `Drop` signals the loop and the runtime reclaims
-    // the task.
+    // #7217: dropping the tail closes the socket, and `write_stream` now reads
+    // that departure off the socket rather than waiting on a quiet producer, so
+    // the drain ends with the handler instead of spending its whole budget.
     drop(stream);
-    drop(daemon);
+    daemon.shutdown().await.expect("clean shutdown");
 }
 
 /// The socket sits beside the daemon's other persistent state, which is where
