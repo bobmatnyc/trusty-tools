@@ -73,6 +73,12 @@ pub mod singleton;
 // #6896: one place that sizes SO_SNDBUF/SO_RCVBUF, so both ends of every socket
 // this module owns are sized identically and no consumer sets them itself.
 pub mod sockbuf;
+// #6637: the SSE rendering of an opened stream, hoisted out of trusty-console
+// so a second UI crate bridging a webview onto a socket shares it rather than
+// carrying a third copy. Behind `axum-server` because it is axum types all the
+// way down; a crate that only dials a socket must not pull axum in.
+#[cfg(feature = "axum-server")]
+pub mod sse;
 // #6286: the reading half of a multi-frame response, so a token stream has one
 // definition of what terminates it rather than one per consumer.
 pub mod stream_client;

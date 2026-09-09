@@ -79,8 +79,6 @@ pub mod service_metrics;
 // #6155: the trusty-search, trusty-memory and trusty-analyze SPAs, mounted
 // under /tools/<tool>/.
 pub mod tools_ui;
-// #6155: the SSE plumbing both UDS bridges hand an opened stream to.
-pub(crate) mod uds_sse;
 pub mod webhook;
 
 /// How often the background sweep re-attempts pending webhook deliveries.

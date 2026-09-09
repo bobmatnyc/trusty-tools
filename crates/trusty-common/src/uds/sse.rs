@@ -6,7 +6,9 @@
 //! keep-alive comment, the cancel-safe reader task, and the response head are
 //! identical for both, because none of them is about which daemon is on the
 //! other end. A second copy is how one bridge starts closing a failed stream
-//! silently while the other reports it.
+//! silently while the other reports it. #6637 hoisted it out of trusty-console
+//! for the same reason one step out: trusty-code-gui's webview bridge is a
+//! third consumer of the identical shape, and it lives in a different crate.
 //!
 //! What is NOT here: anything a service owns. Which method is streaming, which
 //! JSON-RPC code becomes which HTTP status, and what the peek before the
@@ -31,9 +33,9 @@
 //!   consumer reads a closed stream as a COMPLETED operation and a silent close
 //!   would report a broken one as finished.
 //!
-//! Test: `sse_data_is_one_line_per_event` below, plus
-//! `tests/search_uds_bridge.rs` and `tests/memory_uds_bridge.rs`, which drive
-//! whole streams through the real router.
+//! Test: `sse_data_is_one_line_per_event` below. Whole streams run through a
+//! real router in trusty-console's `tests/search_uds_bridge.rs` and
+//! `tests/memory_uds_bridge.rs`.
 
 use axum::body::{Body, Bytes};
 use axum::http::{StatusCode, header};
@@ -42,20 +44,21 @@ use futures_util::StreamExt as _;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tracing::warn;
-use trusty_common::uds::UdsRpcError;
-use trusty_common::uds::stream_client::FramedStream;
+
+use super::UdsRpcError;
+use super::stream_client::FramedStream;
 
 /// How often an open stream emits an SSE keep-alive comment.
 ///
 /// The same 20 s the daemons' own SSE routes used, so an idle browser
 /// connection sees the byte sequence it saw before the migration.
-const SSE_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+pub const SSE_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// How many stream items may buffer between the socket reader and the browser.
 ///
 /// Matches the daemon-side producer buffer, so neither side is the first to
 /// accumulate behind a slow reader.
-const SSE_BUFFER: usize = 64;
+pub const SSE_BUFFER: usize = 64;
 
 /// Build the `200 text/event-stream` response for an already-opened stream.
 ///
@@ -67,8 +70,11 @@ const SSE_BUFFER: usize = 64;
 /// well-formed empty answer, and an immediately-closed event stream.
 /// What: the peeked item, then [`sse_tail`], under the three headers a browser
 /// and any reverse proxy in front of the console need.
-/// Test: `tests/memory_uds_bridge.rs`'s `a_stream_reaches_the_browser_frame_for_frame`.
-pub(crate) fn sse_response(
+/// Test: covered end to end by trusty-console's
+/// `tests/memory_uds_bridge.rs`, in `a_stream_reaches_the_browser_frame_for_frame`.
+///
+/// [`sse_tail`]: crate::uds::sse::sse_tail
+pub fn sse_response(
     first: Option<Value>,
     stream: FramedStream<Value>,
     method: &'static str,
@@ -93,7 +99,7 @@ pub(crate) fn sse_response(
 /// The rest of an open stream, as SSE frames plus keep-alive comments.
 ///
 /// Why the reader runs in its own task rather than inside the `select!`:
-/// `FramedStream::next_frame` reads a line off a `BufReader`, and cancelling
+/// [`FramedStream::next_frame`] reads a line off a `BufReader`, and cancelling
 /// that mid-line — which a heartbeat tick would do — discards the bytes already
 /// read. Moving the read behind an `mpsc` makes both arms of the select
 /// cancel-safe, since `Receiver::recv` and `Interval::tick` both are.
@@ -104,11 +110,15 @@ pub(crate) fn sse_response(
 /// frame — a status stream can be silent for minutes, and waiting for a frame
 /// that will never come would hold the socket, and the daemon's producer behind
 /// it, open for exactly that long. Either way the task returns, dropping the
-/// `FramedStream` and closing the socket, which is what ends the producer.
+/// [`FramedStream`] and closing the socket, which is what ends the producer.
 ///
-/// Test: `tests/search_uds_bridge.rs`'s `a_mid_stream_failure_becomes_an_error_event`
+/// Test: covered end to end by trusty-console's
+/// `tests/search_uds_bridge.rs`, in `a_mid_stream_failure_becomes_an_error_event`
 /// and `a_browser_disconnect_releases_the_daemon_socket`.
-fn sse_tail(
+///
+/// [`FramedStream`]: crate::uds::stream_client::FramedStream
+/// [`FramedStream::next_frame`]: crate::uds::stream_client::FramedStream::next_frame
+pub fn sse_tail(
     mut stream: FramedStream<Value>,
     method: &'static str,
 ) -> impl futures_util::Stream<Item = Result<Bytes, std::convert::Infallible>> {
@@ -164,7 +174,7 @@ fn sse_tail(
 /// stream carries parsed JSON, and re-serialising is what puts it back on one
 /// line — an embedded newline would split one event into two.
 /// Test: `sse_data_is_one_line_per_event`.
-fn sse_data(value: &Value) -> Bytes {
+pub fn sse_data(value: &Value) -> Bytes {
     Bytes::from(format!("data: {value}\n\n"))
 }
 

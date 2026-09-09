@@ -10,9 +10,9 @@
 //! dials the socket, and answers either a JSON body or an open
 //! `text/event-stream`.
 //!
-//! The SSE plumbing itself is [`crate::uds_sse`]'s, shared with the trusty-search
-//! bridge. What stays here is what trusty-memory owns: which JSON-RPC code
-//! becomes which HTTP status, and the peek below.
+//! The SSE plumbing itself is [`trusty_common::uds::sse`]'s, shared with the
+//! trusty-search bridge. What stays here is what trusty-memory owns: which
+//! JSON-RPC code becomes which HTTP status, and the peek below.
 //!
 //! A refusal that arrives BEFORE the first item becomes an HTTP status, not a
 //! `200` carrying an error event — which is why the first frame is read before
@@ -38,7 +38,7 @@ use super::{
     call, json_response, open_stream,
 };
 use crate::server::AppState;
-use crate::uds_sse::sse_response;
+use trusty_common::uds::sse::sse_response;
 
 /// `ANY /api/memory/{*path}` — reach trusty-memory over its socket.
 ///
