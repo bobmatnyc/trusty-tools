@@ -354,11 +354,15 @@ fn write_project_hooks_writes_via_atomic_path() {
     );
     let first_content = std::fs::read_to_string(&settings_path).unwrap();
 
+    // #7244 (round 3): the second call flips `divert_enabled` so the merged
+    // value actually DIFFERS. Repeating the first call's arguments now takes
+    // the no-op exit, which writes nothing — and a test asserting the atomic
+    // path ran would then be asserting against a call that never reached it.
     super::super::settings::write_project_hooks(
         project,
         Some(std::path::Path::new("/usr/local/bin/tm")),
         true,
-        false,
+        true,
     )
     .expect("second write succeeds");
     assert!(
@@ -850,5 +854,218 @@ fn write_project_hooks_strips_stale_divert_when_disabled() {
         pre.len(),
         2,
         "PM guard + lifecycle triad must remain: {pre:?}"
+    );
+}
+
+/// The pinned installed-looking binary every test in this module writes with.
+const TEST_EXE: &str = "/usr/local/bin/tm";
+
+/// Every timestamped snapshot of `settings.json` in `dir`, name-sorted.
+///
+/// Shares the prune's own inclusion rule rather than re-deriving it, so a
+/// count here can never include a file the prune would not have touched — the
+/// atomic writer's single-slot `settings.json.bak` in particular.
+fn snapshot_names(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("readable dir")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| crate::core::standalone::hooks::backup::is_snapshot_of("settings.json", n))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Call the project-tier writer with the pinned test binary.
+fn write(project: &std::path::Path, prompt_context: bool, divert: bool) {
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new(TEST_EXE)),
+        prompt_context,
+        divert,
+    )
+    .expect("write succeeds");
+}
+
+/// Why (#7244, round 3): this is the writer that damaged a real project's
+/// `.claude/settings.json`. Its prior state has to survive the rewrite that
+/// replaces it, and the atomic writer's one `.bak` slot cannot carry that —
+/// the next launch overwrites it.
+/// What: creates the file, rewrites it with a different toggle, and asserts one
+/// snapshot exists holding the pre-rewrite bytes.
+#[test]
+fn write_project_hooks_snapshots_the_file_it_replaces() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+    let settings_path = claude_dir.join("settings.json");
+
+    write(project, true, false);
+    let before = std::fs::read_to_string(&settings_path).unwrap();
+    assert!(
+        snapshot_names(&claude_dir).is_empty(),
+        "nothing existed before the first write, so nothing was snapshotted"
+    );
+
+    write(project, true, true);
+
+    let snapshots = snapshot_names(&claude_dir);
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "expected one snapshot, got {snapshots:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(claude_dir.join(&snapshots[0])).unwrap(),
+        before,
+        "the snapshot must hold the file as it was before the rewrite"
+    );
+}
+
+/// Why (#7244): every managed launch that changes the file adds a snapshot, so
+/// an unbounded set would turn a long-lived project's `.claude/` into an
+/// archive. Three is the kept depth.
+/// What: four rewrites that each change the file, then asserts exactly three
+/// snapshots survive and the FIRST one taken is the one gone — pruning the
+/// newest would bound the set while discarding the copy an operator wants.
+#[test]
+fn write_project_hooks_prunes_snapshots_to_three() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+
+    // Creates the file; no snapshot (nothing existed).
+    write(project, true, false);
+    // Four rewrites, each differing from the one before it.
+    write(project, true, true);
+    let oldest = snapshot_names(&claude_dir);
+    assert_eq!(oldest.len(), 1, "the first rewrite snapshots once");
+    write(project, false, true);
+    write(project, false, false);
+    write(project, true, false);
+
+    let snapshots = snapshot_names(&claude_dir);
+    assert_eq!(
+        snapshots.len(),
+        3,
+        "four rewrites must leave exactly three snapshots, got {snapshots:?}"
+    );
+    assert!(
+        !snapshots.contains(&oldest[0]),
+        "the oldest snapshot must be the one pruned, still present in {snapshots:?}"
+    );
+}
+
+/// Why (#7244): `prepare_session` calls this on EVERY managed launch, and
+/// almost every call reproduces the bytes already on disk. Snapshotting those
+/// would fill all three kept slots with copies of the current file within
+/// three launches, evicting the one prior state worth keeping.
+/// What: writes twice with identical arguments and asserts no snapshot and no
+/// change to the file.
+#[test]
+fn write_project_hooks_takes_no_snapshot_when_nothing_changes() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+    let settings_path = claude_dir.join("settings.json");
+
+    write(project, true, false);
+    let before = std::fs::read_to_string(&settings_path).unwrap();
+
+    write(project, true, false);
+
+    assert!(
+        snapshot_names(&claude_dir).is_empty(),
+        "an identical rewrite must take no snapshot"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings_path).unwrap(),
+        before,
+        "an identical rewrite must leave the file alone"
+    );
+}
+
+/// Why (#7244): a refusal writes nothing, so there is no prior state at risk.
+/// Snapshotting anyway would let a machine that cannot resolve `tm` evict a
+/// real prior state, three launches at a time, while changing nothing.
+/// What: seeds a settings file, hands the writer a refusal through the
+/// resolution seam (a host with `tm` installed would otherwise have the PATH
+/// fallback rescue any refused `exe_override`), and asserts the refusal
+/// surfaced, no snapshot appeared, and the file is unchanged.
+#[test]
+fn write_project_hooks_takes_no_snapshot_when_the_exe_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+
+    write(project, true, false);
+    let before = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
+
+    let refusal = Err(
+        crate::core::standalone::hooks::StableHookExeError::Ephemeral(std::path::PathBuf::from(
+            "/x/target-7244/debug/deps/some_test-cd3ba8f0",
+        )),
+    );
+    super::super::settings::write_project_hooks_with(project, refusal)
+        .expect_err("a refusal must reach the caller, not be written");
+
+    assert!(
+        snapshot_names(&claude_dir).is_empty(),
+        "a refused write must take no snapshot"
+    );
+    assert_eq!(
+        std::fs::read_to_string(claude_dir.join("settings.json")).unwrap(),
+        before,
+        "a refused write must leave the file alone"
+    );
+}
+
+/// Why (#7244, fail-closed): a rewrite whose prior state cannot be preserved
+/// must not run. Writing anyway and warning about the snapshot repeats the
+/// original defect — a writer proceeding past a step it could not complete.
+/// What: makes `.claude/` unwritable so the snapshot's exclusive create fails,
+/// then asserts `PrepError::HookSnapshot` came back naming the file, and the
+/// file is byte-identical. Unix-only: the read-only directory bit is the
+/// portable way to deny file creation.
+#[cfg(unix)]
+#[test]
+fn write_project_hooks_aborts_when_the_snapshot_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+    let settings_path = claude_dir.join("settings.json");
+
+    write(project, true, false);
+    let before = std::fs::read_to_string(&settings_path).unwrap();
+
+    std::fs::set_permissions(&claude_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result = super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new(TEST_EXE)),
+        true,
+        true,
+    );
+    // Restore before asserting, so a failed assertion still leaves a removable
+    // temp dir behind.
+    std::fs::set_permissions(&claude_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let err = result.expect_err("an unsnapshottable rewrite must fail");
+    assert!(
+        matches!(
+            err,
+            crate::core::session_launch::PrepError::HookSnapshot { .. }
+        ),
+        "expected HookSnapshot, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("settings.json"),
+        "the error must name the file whose rewrite was abandoned, got: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings_path).unwrap(),
+        before,
+        "the settings file must be untouched when its snapshot could not be taken"
     );
 }

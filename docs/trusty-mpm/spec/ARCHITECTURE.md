@@ -354,6 +354,7 @@ a migration artifact to be absorbed into `tm-workflow` under #5202. See DOC-59
 <project>/                                  # project-owned inputs and launch configuration
 ├── CLAUDE.md                              # optional project prose + named-section overrides
 ├── .claude/settings.json                  # outputStyle + spinner tips + trusty-memory hooks
+├── .claude/settings.json.<UTC>.bak        # pre-rewrite snapshots, newest 3 kept (#7244)
 ├── .mcp.json                              # injected trusty-memory MCP server
 └── .trusty-mpm/last-instructions.md       # compatibility inspection stash
 

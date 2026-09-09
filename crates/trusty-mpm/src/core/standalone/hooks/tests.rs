@@ -1182,3 +1182,145 @@ fn remove_global_hooks_at_reports_zero_when_no_global_settings_exist() {
         0
     );
 }
+
+/// Every timestamped snapshot of `settings.json` in `dir`, name-sorted.
+///
+/// Deliberately narrower than "every `.bak`": the atomic writer keeps its own
+/// single-slot `settings.json.bak`, and counting that as a snapshot would make
+/// the no-snapshot assertions below pass for the wrong reason.
+fn snapshot_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("readable dir")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| backup::is_snapshot_of("settings.json", n))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Why (#7244, round 3): the incident's only recovery path was reconstructing
+/// `.claude/settings.json` by hand, because the writer that broke it also
+/// consumed the one `.bak` slot the atomic writer keeps. A snapshot taken
+/// before the replacing rename is what makes the prior state readable
+/// afterwards.
+/// What: writes once to create the file, rewrites with a different toggle, and
+/// asserts exactly one snapshot exists whose bytes are the pre-rewrite file's.
+#[test]
+fn write_project_hooks_snapshots_the_file_it_replaces() {
+    let tmp = TempDir::new().expect("tempdir");
+    let settings = tmp.path().join("settings.json");
+
+    write_project_hooks(&settings, Some(Path::new(STABLE_TEST_EXE))).expect("first write");
+    let before = std::fs::read_to_string(&settings).expect("read back");
+    assert!(
+        snapshot_names(tmp.path()).is_empty(),
+        "the file did not exist before the first write, so nothing was snapshotted"
+    );
+
+    // A different exe path is what makes the merged value differ, so the
+    // no-op exit does not swallow this rewrite.
+    write_project_hooks(&settings, Some(Path::new("/opt/homebrew/bin/tm"))).expect("second write");
+
+    let snapshots = snapshot_names(tmp.path());
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "expected one snapshot, got {snapshots:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join(&snapshots[0])).expect("read snapshot"),
+        before,
+        "the snapshot must hold the file as it was before the rewrite"
+    );
+    assert_ne!(
+        std::fs::read_to_string(&settings).expect("read back"),
+        before,
+        "the rewrite itself must still have happened"
+    );
+}
+
+/// Why (#7244): a refusal writes nothing, so there is nothing to preserve. A
+/// snapshot taken anyway would push a real prior state out of the kept three
+/// on a machine whose `tm` cannot be resolved — every launch adding a copy of
+/// a file no launch is changing.
+/// What: hands the writer a refusal over an existing file and asserts no
+/// snapshot appeared.
+#[test]
+fn write_project_hooks_takes_no_snapshot_when_the_exe_is_refused() {
+    let tmp = TempDir::new().expect("tempdir");
+    let settings = tmp.path().join("settings.json");
+    std::fs::write(&settings, "{}").expect("seed settings");
+
+    let refusal = Err(StableHookExeError::Unresolved);
+    write_project_hooks_with(&settings, refusal).expect_err("a refusal must reach the caller");
+
+    assert!(
+        snapshot_names(tmp.path()).is_empty(),
+        "a refused write must take no snapshot"
+    );
+}
+
+/// Why (#7244): `ensure_managed_hooks` runs on every managed launch and almost
+/// always produces the same bytes. Snapshotting an unchanged file would fill
+/// the three kept slots with copies of the current state, evicting the one
+/// prior state worth keeping.
+/// What: writes twice with identical arguments and asserts the second call
+/// reports no change and left no snapshot.
+#[test]
+fn write_project_hooks_takes_no_snapshot_when_nothing_changes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let settings = tmp.path().join("settings.json");
+
+    assert!(
+        write_project_hooks(&settings, Some(Path::new(STABLE_TEST_EXE))).expect("first write"),
+        "the first write creates the file"
+    );
+    assert!(
+        !write_project_hooks(&settings, Some(Path::new(STABLE_TEST_EXE))).expect("second write"),
+        "an identical rewrite must report no change"
+    );
+    assert!(
+        snapshot_names(tmp.path()).is_empty(),
+        "a no-op rewrite must take no snapshot"
+    );
+}
+
+/// Why (#7244, fail-closed): if the prior state cannot be preserved, the
+/// rewrite that would destroy it must not run. The alternative — write anyway,
+/// warn about the snapshot — is exactly the shape of the original bug: a
+/// writer proceeding past a step it could not complete.
+/// What: makes the settings directory unwritable so the snapshot's exclusive
+/// create fails, then asserts the error names the snapshot stage (not the
+/// write, which never ran) and the file is byte-identical. Unix-only: the
+/// read-only directory bit is the portable way to deny file creation.
+#[cfg(unix)]
+#[test]
+fn write_project_hooks_aborts_the_rewrite_when_the_snapshot_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let dir = tmp.path().join("claude");
+    std::fs::create_dir(&dir).expect("create dir");
+    let settings = dir.join("settings.json");
+
+    write_project_hooks(&settings, Some(Path::new(STABLE_TEST_EXE))).expect("first write");
+    let before = std::fs::read_to_string(&settings).expect("read back");
+
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+    let result = write_project_hooks(&settings, Some(Path::new("/opt/homebrew/bin/tm")));
+    // Restore before asserting, so a failed assertion still leaves a removable
+    // temp dir behind.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod back");
+
+    let err = result.expect_err("an unsnapshottable rewrite must fail");
+    assert!(
+        err.to_string().contains("snapshot"),
+        "the error must name the stage that refused, got: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings).expect("read back"),
+        before,
+        "the settings file must be untouched when its snapshot could not be taken"
+    );
+}

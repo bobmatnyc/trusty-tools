@@ -39,6 +39,7 @@
 #[cfg(test)]
 mod tests;
 
+pub(crate) mod backup;
 pub mod cleanup;
 
 use std::path::{Path, PathBuf};
@@ -773,9 +774,20 @@ pub(crate) fn strip_hook_entries_matching_for_events(
 /// can be found the error is returned and the file is not read, created, or
 /// written — a `settings.json` with no tm hooks is recoverable, one wired to a
 /// `cargo test` harness silently disables pm-guard enforcement.
+///
+/// #7244 (round 3): a rewrite that actually changes the file first copies it to
+/// `<path>.<YYYYMMDDTHHMMSSZ>.bak` via
+/// [`backup::snapshot_then_prune`], keeping the newest
+/// [`backup::HOOK_SETTINGS_SNAPSHOTS_KEPT`]. A snapshot failure aborts the
+/// rewrite. The two earlier exits stay ahead of it, so a refused write and a
+/// no-op rewrite both take no snapshot.
 /// Test: `test_write_project_hooks_targets_project_dir`,
 /// `test_write_project_hooks_replaces_stale_exe_path_group`,
-/// `write_project_hooks_writes_nothing_when_the_exe_cannot_be_resolved`.
+/// `write_project_hooks_writes_nothing_when_the_exe_cannot_be_resolved`,
+/// `write_project_hooks_snapshots_the_file_it_replaces`,
+/// `write_project_hooks_takes_no_snapshot_when_the_exe_is_refused`,
+/// `write_project_hooks_takes_no_snapshot_when_nothing_changes`,
+/// `write_project_hooks_aborts_the_rewrite_when_the_snapshot_fails`.
 pub fn write_project_hooks(
     settings_path: &Path,
     exe_override: Option<&Path>,
@@ -792,9 +804,10 @@ pub fn write_project_hooks(
 /// assert the file is untouched, while production still routes through the one
 /// resolution above.
 /// What: returns `additions`'s error unchanged before touching the filesystem;
-/// otherwise performs the read / strip / merge / atomic-write exactly as
-/// [`write_project_hooks`] documents.
-/// Test: `write_project_hooks_writes_nothing_when_the_exe_cannot_be_resolved`.
+/// otherwise performs the read / strip / merge / snapshot / atomic-write
+/// exactly as [`write_project_hooks`] documents.
+/// Test: `write_project_hooks_writes_nothing_when_the_exe_cannot_be_resolved`,
+/// `write_project_hooks_takes_no_snapshot_when_the_exe_is_refused`.
 fn write_project_hooks_with(
     settings_path: &Path,
     additions: Result<serde_json::Value, StableHookExeError>,
@@ -837,6 +850,20 @@ fn write_project_hooks_with(
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
+    // #7244: snapshot BEFORE the rename that replaces the file, and fail
+    // closed. The equality check above already returned for a no-op rewrite,
+    // and the refusal at the top returned before any of this, so every
+    // snapshot taken here corresponds to a real change of content.
+    backup::snapshot_then_prune(settings_path, backup::HOOK_SETTINGS_SNAPSHOTS_KEPT).map_err(
+        |e| {
+            anyhow::anyhow!(
+                "snapshot {} before rewriting it: {e}",
+                settings_path.display()
+            )
+        },
+    )?;
+
     write_json_atomic(settings_path, &merged)
         .map_err(|e| anyhow::anyhow!("write {}: {e}", settings_path.display()))?;
     Ok(true)

@@ -306,6 +306,23 @@ pub enum PrepError {
         #[source]
         source: crate::core::standalone::hooks::StableHookExeError,
     },
+    /// The pre-rewrite snapshot of the project's `settings.json` could not be
+    /// taken, so the hooks writer left the file alone (#7244, round 3).
+    ///
+    /// Why its own variant rather than [`Self::Io`]: the operator's next move
+    /// differs. A generic I/O failure is usually about the path; this one says
+    /// the CURRENT file survived and only the update was skipped, which is the
+    /// benign half of fail-closed and reads as alarming without that framing.
+    /// Non-fatal, for the same reason [`Self::HookExe`] is: the session starts
+    /// with the hooks already on disk.
+    /// Test: `write_project_hooks_aborts_when_the_snapshot_fails`.
+    #[error("could not snapshot {path} before rewriting it: {source}")]
+    HookSnapshot {
+        /// The settings file whose rewrite was abandoned.
+        path: PathBuf,
+        /// The underlying IO error.
+        source: std::io::Error,
+    },
     /// The session's instructions could not be established — the ONE fatal
     /// preparation condition (#4752, owner ruling 2026-08-04).
     ///
