@@ -32,6 +32,7 @@
 //! `a_blank_value_is_never_recorded`, `two_kinds_do_not_collide`,
 //! `rejects_a_transcript_path_outside_the_config_dir`,
 //! `rejects_a_traversing_transcript_path`,
+//! `rejects_a_symlink_under_the_config_dir_aimed_outside_it`,
 //! `accepts_a_transcript_path_under_the_config_dir`.
 
 use std::path::{Component, Path, PathBuf};
@@ -81,6 +82,7 @@ fn is_safe_session_id(session_id: &str) -> bool {
 /// that was checked rather than re-resolving the payload's spelling.
 /// Test: `rejects_a_transcript_path_outside_the_config_dir`,
 /// `rejects_a_traversing_transcript_path`,
+/// `rejects_a_symlink_under_the_config_dir_aimed_outside_it`,
 /// `accepts_a_transcript_path_under_the_config_dir`.
 pub fn contained_transcript_path(
     claude_config_dir: &Path,

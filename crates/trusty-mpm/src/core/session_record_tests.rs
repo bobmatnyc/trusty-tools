@@ -149,6 +149,38 @@ fn accepts_a_transcript_path_under_the_config_dir() {
     assert_eq!(contained_transcript_path(config.path(), "   "), None);
 }
 
+/// Why (#7250): the screen resolves the CANDIDATE as well as the config
+/// directory, and a symlink is the only shape that tells the two apart — a link
+/// planted under the config directory spells a contained path while pointing at
+/// a file outside it. Every other test here passes on lexical comparison alone,
+/// so without this one a change that dropped the candidate's `canonicalize`
+/// would leave the suite green.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn rejects_a_symlink_under_the_config_dir_aimed_outside_it() {
+    let config = tempfile::tempdir().expect("temp dir");
+    let elsewhere = tempfile::tempdir().expect("temp dir");
+    let outside = elsewhere.path().join("stolen.jsonl");
+    std::fs::write(&outside, "{}\n").expect("write");
+
+    // The link is planted under the CANONICAL config directory so its own
+    // spelling already starts with the root the screen compares against; only
+    // resolving the link separates it from a real transcript.
+    let root = config.path().canonicalize().expect("canonicalize config");
+    let link = root.join("linked.jsonl");
+    std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+    assert!(
+        link.starts_with(&root),
+        "the link must look contained before it is resolved"
+    );
+
+    assert_eq!(
+        contained_transcript_path(&root, &link.to_string_lossy()),
+        None
+    );
+}
+
 /// Why (#7074): the two kinds share one store, so a bug that dropped the kind
 /// from the path would make the transcript path read back as the model id —
 /// and the commit footer would then name a file as its model.

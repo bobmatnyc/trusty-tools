@@ -136,6 +136,7 @@ pub(crate) fn savings_segment_at(
 /// `a_blank_value_is_never_recorded`, `two_kinds_do_not_collide`; and
 /// `a_transcript_path_outside_the_config_dir_is_not_recorded`,
 /// `a_traversing_transcript_path_is_not_recorded`,
+/// `a_transcript_path_is_not_recorded_without_a_config_dir`,
 /// `a_transcript_path_under_the_config_dir_is_recorded`.
 pub(crate) fn record_session_facts(session_id: &str, model_id: &str, transcript_path: &str) {
     if session_id.is_empty() {
@@ -149,7 +150,7 @@ pub(crate) fn record_session_facts(session_id: &str, model_id: &str, transcript_
     };
     record_session_facts_at(
         &root,
-        &claude_config_dir(),
+        claude_config_dir().as_deref(),
         session_id,
         model_id,
         transcript_path,
@@ -165,22 +166,29 @@ pub(crate) fn record_session_facts(session_id: &str, model_id: &str, transcript_
 /// What: records the model unconditionally, and the transcript path only when
 /// [`trusty_mpm::core::session_record::contained_transcript_path`] accepts it
 /// against `claude_config_dir`. The value stored is that function's canonical
-/// path, so the reader opens the file that was screened.
+/// path, so the reader opens the file that was screened. A `None`
+/// `claude_config_dir` records no transcript path: with no directory to
+/// contain it there is nothing to screen against, and the model record — which
+/// carries no path — is unaffected.
 /// Test: `a_transcript_path_outside_the_config_dir_is_not_recorded`,
 /// `a_traversing_transcript_path_is_not_recorded`,
+/// `a_transcript_path_is_not_recorded_without_a_config_dir`,
 /// `a_transcript_path_under_the_config_dir_is_recorded`.
 fn record_session_facts_at(
     root: &Path,
-    claude_config_dir: &Path,
+    claude_config_dir: Option<&Path>,
     session_id: &str,
     model_id: &str,
     transcript_path: &str,
 ) {
     trusty_mpm::core::session_model::record_session_model(root, session_id, model_id);
-    let Some(transcript) = trusty_mpm::core::session_record::contained_transcript_path(
-        claude_config_dir,
-        transcript_path,
-    ) else {
+    let Some(config_dir) = claude_config_dir else {
+        tracing::debug!("no Claude config directory resolves; transcript_path not recorded");
+        return;
+    };
+    let Some(transcript) =
+        trusty_mpm::core::session_record::contained_transcript_path(config_dir, transcript_path)
+    else {
         return;
     };
     trusty_mpm::core::session_record::record_session_value(
@@ -201,15 +209,20 @@ fn record_session_facts_at(
 /// `~/.claude` — so the two cannot share one resolver.
 /// What: `CLAUDE_CONFIG_DIR` when set and non-blank, else `~/.claude` from
 /// [`trusty_mpm::core::paths::FrameworkPaths::claude_home_dir`] rather than a
-/// second `home.join(".claude")`. A stripped environment with no home yields a
-/// relative directory, which no absolute transcript path can sit under — the
-/// screen fails closed.
-/// Test: covered through `record_session_facts`; the fallback resolver has its
-/// own tests (`claude_home_dir_matches_default_home`).
-fn claude_config_dir() -> PathBuf {
+/// second `home.join(".claude")`. `None` when neither is available, and the
+/// caller then records no transcript path at all — that is what makes the
+/// screen fail closed. `FrameworkPaths::default()` cannot stand in here: with
+/// no home directory it resolves against `"."`, which canonicalizes to the
+/// process's working directory, so the containment check would silently
+/// re-scope to whatever `<cwd>/.claude` happens to be (#7250 critic round 2).
+/// Test: `a_transcript_path_is_not_recorded_without_a_config_dir`; the fallback
+/// resolver has its own tests (`claude_home_dir_matches_default_home`).
+fn claude_config_dir() -> Option<PathBuf> {
     match std::env::var_os("CLAUDE_CONFIG_DIR") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => trusty_mpm::core::paths::FrameworkPaths::default().claude_home_dir(),
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => Some(
+            trusty_mpm::core::paths::FrameworkPaths::under(dirs::home_dir()?).claude_home_dir(),
+        ),
     }
 }
 
@@ -536,7 +549,7 @@ mod tests {
 
         record_session_facts_at(
             root.path(),
-            config.path(),
+            Some(config.path()),
             "sess-1",
             "claude-opus-4-1",
             "/etc/passwd",
@@ -545,7 +558,7 @@ mod tests {
 
         record_session_facts_at(
             root.path(),
-            config.path(),
+            Some(config.path()),
             "sess-1",
             "claude-opus-4-1",
             &outside.to_string_lossy(),
@@ -576,12 +589,45 @@ mod tests {
 
         record_session_facts_at(
             root.path(),
-            config.path(),
+            Some(config.path()),
             "sess-1",
             "claude-opus-4-1",
             &traversing.to_string_lossy(),
         );
         assert_eq!(recorded_transcript(root.path(), "sess-1"), None);
+    }
+
+    /// Why (#7250, critic round 2): with no `CLAUDE_CONFIG_DIR` and no home
+    /// directory there is no directory to contain the path, and the earlier
+    /// `FrameworkPaths::default()` fallback resolved to `"."` — which
+    /// canonicalizes to the working directory, quietly re-scoping containment
+    /// to `<cwd>/.claude` instead of refusing. `claude_config_dir` now answers
+    /// `None` there, and nothing lands in the store. This bin target may not
+    /// write `HOME` (#5544), so the `None` arrives as an argument.
+    /// Test: itself.
+    #[test]
+    fn a_transcript_path_is_not_recorded_without_a_config_dir() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let config = tempfile::tempdir().expect("temp dir");
+        let transcript = transcript_under(config.path(), "sess-1");
+
+        record_session_facts_at(
+            root.path(),
+            None,
+            "sess-1",
+            "claude-opus-4-1",
+            &transcript.to_string_lossy(),
+        );
+        assert_eq!(
+            recorded_transcript(root.path(), "sess-1"),
+            None,
+            "with no config directory there is nothing to contain the path"
+        );
+        assert_eq!(
+            read_session_record(root.path(), KIND_MODEL, "sess-1").as_deref(),
+            Some("claude-opus-4-1"),
+            "the model carries no path, so it is still recorded"
+        );
     }
 
     /// Why (#7250): the screen must still accept the ordinary payload, or the
@@ -597,7 +643,7 @@ mod tests {
 
         record_session_facts_at(
             root.path(),
-            config.path(),
+            Some(config.path()),
             "sess-1",
             "claude-opus-4-1",
             &transcript.to_string_lossy(),
