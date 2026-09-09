@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-61 top-level commands.
+62 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -18,6 +18,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `ls` — List the cached agents and skills
   - `status` — Report whether the deployed content has drifted from the synced catalog
   - `sync` — Fetch or refresh the agent/skill catalog from the claude-mpm repo
+- `commit-trailers` — Print this session's commit-stats trailers, or splice them into a commit message file (#7074)
 - `compress` — Compress a piped command's stdout — the `tm hook` PreToolUse Bash command-rewrite spike's filter stage (issue #1956, Option 0)
 - `config` — Manage inference provider configuration (API keys) — the universal `config keys set/list/test/unset` surface shared by every trusty-* binary (epic #2400 Wave 1, #2405)
   - `keys` — Manage inference provider API keys (set / list / test / unset)
