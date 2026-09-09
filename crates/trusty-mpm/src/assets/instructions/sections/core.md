@@ -73,8 +73,9 @@ agents that listing does not carry (#4513).
 - Every engineer delegation MUST end with: "Before returning: run
   linters/formatters, fix any issues, run tests, verify all pass. Verify ALL
   deliverables from the prompt are present (README, config, etc.). Show raw test
-  output. Including this repo's doc gates: `check_test_pointers.sh`,
-  `check_line_cap.sh`, `check_changelog_fragment.sh`."
+  output. Plus this project's own doc gates, if it defines any — its CLAUDE.md
+  names them and `scripts/` holds them; name the ones you ran. A project that
+  defines none owes no such run."
 - A running agent's scope is fixed. New work is a new agent, or it waits.
 - A brief carries findings, evidence and constraints, never the implementation
   mechanism: state what must be TRUE.

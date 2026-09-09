@@ -1,0 +1,260 @@
+//! ratatui drawing for the `tm ls` session TUI (#7224).
+//!
+//! Why: kept apart from the event loop so the frame can be rendered against a
+//! `TestBackend` at any size — 20x5, 80x24, 200x50 — without a daemon, a
+//! terminal, or a key loop. That is what turns "no panic at a tiny size" and
+//! "narrow terminals drop columns" into tests rather than claims.
+//!
+//! What: [`render`] draws a title line, the session table (columns chosen by
+//! [`super::layout::visible_columns`] from the CURRENT frame width), a status
+//! line, and the key footer — then overlays the confirm / rename / help modal
+//! when one is open. Every region comes from a `Layout`, which clamps to the
+//! available area rather than computing a `Rect` that could fall outside it.
+//!
+//! Test: `render_*` in `super::tests`.
+
+use ratatui::{
+    Frame,
+    layout::{Constraint, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph, Row, Table, Wrap},
+};
+use trusty_mpm::client::ManagedSessionSummary;
+
+use super::layout::{self, Column, MARKER_WIDTH};
+use super::state::{Mode, Severity, TuiState};
+
+/// The footer key legend — the discoverability half of every action key.
+const FOOTER: &str = "↑↓ move · Enter open · r rename · d delete · R refresh · ? keys · q quit";
+
+/// Draw one frame of the session TUI.
+///
+/// Why: one entry point so the modal overlay can never be drawn without the
+/// list underneath it, and so the `TestBackend` tests exercise exactly what a
+/// real terminal gets.
+/// What: splits the area into title / table / status / footer, renders the
+/// table for the columns that fit, records the scroll offset it used back into
+/// `state` (so the next frame holds still), then overlays a modal for any mode
+/// other than [`Mode::Browse`]. Takes `&mut TuiState` only for that scroll
+/// write-back; nothing else about the state changes here.
+/// Test: `render_at_eighty_by_twentyfour_drops_the_widest_columns`,
+/// `render_at_two_hundred_by_fifty_shows_every_column`,
+/// `render_tiny_terminal_does_not_panic`, `render_*_overlay_*`.
+pub(crate) fn render(frame: &mut Frame, sessions: &[ManagedSessionSummary], state: &mut TuiState) {
+    let area = frame.area();
+    let [title, body, status, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+
+    frame.render_widget(
+        Paragraph::new(title_line(sessions, state))
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        title,
+    );
+    render_table(frame, body, sessions, state);
+    frame.render_widget(Paragraph::new(status_line(state)), status);
+    frame.render_widget(
+        Paragraph::new(FOOTER).style(Style::default().fg(Color::DarkGray)),
+        footer,
+    );
+
+    match state.mode() {
+        Mode::Browse => {}
+        Mode::Help => overlay(frame, area, "keys", help_body()),
+        Mode::Confirm {
+            index,
+            force,
+            typed,
+        } => {
+            let name = sessions.get(*index).map_or("?", |s| s.name.as_str());
+            overlay(frame, area, "delete", confirm_body(name, *force, typed));
+        }
+        Mode::Rename { index, typed } => {
+            let was = sessions.get(*index).map_or("?", |s| s.name.as_str());
+            overlay(frame, area, "rename", rename_body(was, typed));
+        }
+    }
+}
+
+/// The one-line header above the table.
+fn title_line(sessions: &[ManagedSessionSummary], state: &TuiState) -> String {
+    if sessions.is_empty() {
+        return "tm ls — no sessions".to_string();
+    }
+    format!(
+        "tm ls — {} of {} session(s)",
+        state.selected() + 1,
+        sessions.len()
+    )
+}
+
+/// The status line: the last outcome, or a hint when there is none.
+fn status_line(state: &TuiState) -> Line<'static> {
+    match state.message() {
+        Some((text, Severity::Error)) => Line::from(Span::styled(
+            text.to_string(),
+            Style::default().fg(Color::Red),
+        )),
+        Some((text, Severity::Info)) => Line::from(Span::styled(
+            text.to_string(),
+            Style::default().fg(Color::Green),
+        )),
+        None => Line::from(Span::styled(
+            "".to_string(),
+            Style::default().fg(Color::DarkGray),
+        )),
+    }
+}
+
+/// Render the session table into `area` for whatever columns fit its width.
+///
+/// Why: the column set has to be recomputed here rather than cached, because
+/// `area` is whatever the terminal is RIGHT NOW — a resize is just a frame with
+/// a different width, which is the whole of #7224's resize handling.
+/// What: reserves one row for the header, computes the visible window through
+/// [`layout::visible_window`], and writes the offset back into `state`.
+fn render_table(
+    frame: &mut Frame,
+    area: Rect,
+    sessions: &[ManagedSessionSummary],
+    state: &mut TuiState,
+) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let columns = layout::visible_columns(area.width);
+    let rows_height = area.height.saturating_sub(1) as usize;
+    let (start, len) = layout::visible_window(
+        sessions.len(),
+        state.selected(),
+        rows_height,
+        state.scroll(),
+    );
+    state.set_scroll(start);
+
+    let rows: Vec<Row> = sessions[start..start + len]
+        .iter()
+        .enumerate()
+        .map(|(offset, session)| row(&columns, session, start + offset == state.selected()))
+        .collect();
+    let header = Row::new(
+        std::iter::once(String::new())
+            .chain(columns.iter().map(|c| layout::header(*c).to_string()))
+            .collect::<Vec<_>>(),
+    )
+    .style(Style::default().fg(Color::DarkGray));
+    let widths: Vec<Constraint> = std::iter::once(Constraint::Length(MARKER_WIDTH))
+        .chain(columns.iter().map(|c| match c {
+            // NAME absorbs the leftover width so a wide terminal is not mostly
+            // empty gutter; every other column keeps its fixed size.
+            Column::Name => Constraint::Min(layout::width(Column::Name)),
+            other => Constraint::Length(layout::width(*other)),
+        }))
+        .collect();
+    frame.render_widget(
+        Table::new(rows, widths).header(header).column_spacing(1),
+        area,
+    );
+}
+
+/// Build one table row, marked and highlighted when it is the selected one.
+fn row(columns: &[Column], session: &ManagedSessionSummary, selected: bool) -> Row<'static> {
+    let cells: Vec<String> = std::iter::once(if selected {
+        "▸".to_string()
+    } else {
+        String::new()
+    })
+    .chain(columns.iter().map(|c| layout::cell(*c, session)))
+    .collect();
+    let style = match (selected, session.attached, session.unresumable) {
+        (true, _, _) => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        (false, _, true) => Style::default().fg(Color::Red),
+        (false, true, _) => Style::default().fg(Color::Cyan),
+        _ => Style::default(),
+    };
+    Row::new(cells).style(style)
+}
+
+/// Draw a centered modal with `title` over the list.
+///
+/// Why: the confirm and rename steps must be unmissable, and an overlay is the
+/// only way to say "this key press means something different now" without
+/// redrawing the whole surface.
+/// What: a percentage-sized centered `Rect` (percentages cannot fall outside
+/// the parent, which is what keeps a 20x5 terminal from panicking), `Clear`ed
+/// then filled with a bordered paragraph.
+fn overlay(frame: &mut Frame, area: Rect, title: &str, body: Vec<Line<'static>>) {
+    let [_, middle, _] = Layout::vertical([
+        Constraint::Percentage(20),
+        Constraint::Percentage(60),
+        Constraint::Percentage(20),
+    ])
+    .areas(area);
+    let [_, popup, _] = Layout::horizontal([
+        Constraint::Percentage(10),
+        Constraint::Percentage(80),
+        Constraint::Percentage(10),
+    ])
+    .areas(middle);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(body).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {title} ")),
+        ),
+        popup,
+    );
+}
+
+/// The delete confirmation's text — the word required, and what typing it does.
+fn confirm_body(name: &str, force: bool, typed: &str) -> Vec<Line<'static>> {
+    let ask = if force {
+        format!("'{name}' is RUNNING. Type the word force, then Enter, to delete it.")
+    } else {
+        format!("Delete '{name}'? Type y, then Enter.")
+    };
+    vec![
+        Line::from(ask),
+        Line::from(String::new()),
+        Line::from(format!("> {typed}▌")),
+        Line::from("Esc cancels."),
+    ]
+}
+
+/// The rename overlay's text.
+fn rename_body(was: &str, typed: &str) -> Vec<Line<'static>> {
+    vec![
+        Line::from(format!("Rename '{was}' to:")),
+        Line::from(String::new()),
+        Line::from(format!("> {typed}▌")),
+        Line::from("Enter applies, Esc cancels."),
+    ]
+}
+
+/// The `?` key reference.
+fn help_body() -> Vec<Line<'static>> {
+    [
+        "↑ / k, ↓ / j   move the selection",
+        "g / G          first / last row",
+        "PgUp / PgDn    move ten rows",
+        "Enter          open (resume + attach) the selected session",
+        "r              rename it",
+        "d              delete it, with a confirm step",
+        "R              refresh the list from the daemon",
+        "q / Esc        quit",
+        "",
+        "Any key closes this help.",
+    ]
+    .into_iter()
+    .map(|l| Line::from(l.to_string()))
+    .collect()
+}

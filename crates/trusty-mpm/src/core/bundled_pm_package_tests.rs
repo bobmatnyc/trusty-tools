@@ -874,3 +874,50 @@ fn the_delivered_prompt_teaches_sprint_then_harden() {
         );
     }
 }
+
+/// Doc-gate script names in this repository's `scripts/` do not exist in every
+/// project, so the delivered prompt must never name one.
+///
+/// Why (#7247): "Delegating Well" required every engineer brief to end with
+/// "Including this repo's doc gates: `check_test_pointers.sh`,
+/// `check_line_cap.sh`, `check_changelog_fragment.sh`". Those three ship in
+/// `trusty-tools` and nowhere else — in `bobmatnyc/trusty-things` none exists,
+/// and two `rust-engineer` runs on 2026-09-09 each spent a round trip
+/// discovering that before substituting hand-run equivalents. The prompt every
+/// PM session receives is composed from bundled sections, so a repo-specific
+/// filename written into one is delivered verbatim to every project.
+/// What: composes through BOTH composers with no project `CLAUDE.md` present,
+/// so any hit is necessarily framework text rather than a project-scoped
+/// override block, and rejects the three literals. The rule generalises past
+/// these three names — the replacement text tells an agent to read the
+/// project's own CLAUDE.md and `scripts/` — but a literal list is what a
+/// reword can regress to, so a literal list is what this pins.
+/// Test: this IS the assertion.
+#[test]
+fn the_delivered_prompt_names_no_repo_specific_doc_gate_script() {
+    /// Gates that exist in `trusty-tools` and cannot be assumed anywhere else.
+    const REPO_SPECIFIC_GATES: [&str; 3] = [
+        "check_test_pointers.sh",
+        "check_line_cap.sh",
+        "check_changelog_fragment.sh",
+    ];
+
+    let packaged =
+        compose_bundled_fallback(FIXED_STACK, FIXED_ROSTER, None).expect("package composes");
+
+    // No `CLAUDE.md` written: the string assembly receives only framework text.
+    let tmp = TempDir::new().expect("tempdir");
+    let assembled = resolve_pm_prompt_with_roster(tmp.path(), || None).0;
+
+    for (composer, prompt) in [("packaged", &packaged), ("assembly", &assembled)] {
+        for gate in REPO_SPECIFIC_GATES {
+            assert!(
+                !prompt.contains(gate),
+                "the {composer} PM prompt names `{gate}`, a script that exists \
+                 in trusty-tools and not in every project (#7247) — state the \
+                 project-relative rule (read the project's CLAUDE.md and \
+                 `scripts/`) instead of a filename"
+            );
+        }
+    }
+}

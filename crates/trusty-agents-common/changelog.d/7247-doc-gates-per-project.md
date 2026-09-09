@@ -1,0 +1,3 @@
+Fixed
+
+- `BASE-AGENT.md` no longer asserts "This project: CLAUDE.md sets 500/3000 SLOC via `scripts/check_line_cap.sh`" as a fact about whatever project the agent was dispatched into, and `rust-engineer.md` no longer instructs every run to execute `check_line_cap.sh`, `check_changelog_fragment.sh` and `check_test_pointers.sh` (#7247). Those scripts exist in `trusty-tools` and nowhere else; both assets now direct the agent to read the project's own `CLAUDE.md` and `scripts/` and state the fallbacks (a grep-based SLOC count, a `CHANGELOG.md` bullet under `## [Unreleased]`) for a project that defines no gates. `engineer_assets_name_no_repo_specific_doc_gate_script` pins it.

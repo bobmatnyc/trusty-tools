@@ -195,10 +195,12 @@ polish — the full gate is in `tm-workflow`.
 - Either way, match the existing bullet style. Docs-only / CI-only PRs may skip.
 
 **Doc-comment gates.** In a crate that documents entry points with a Why/What/
-Test pattern, run that project's doc-comment pointer lint (e.g.
-`check_test_pointers.sh`) alongside the line-cap and changelog-fragment gates
-before returning — a stale `Test:` pointer is a review-gate failure, not a
-warning.
+Test pattern, run that project's own doc-comment pointer lint before returning,
+alongside whatever line-cap and changelog gates it defines — a stale `Test:`
+pointer is a review-gate failure, not a warning. Find those gates the same way
+you find any project command: read the project's CLAUDE.md and list its
+`scripts/`. A project that defines none owes no such run, and never invent a
+script name that the checkout does not contain.
 
 ## Memory & Context Routing
 
@@ -259,8 +261,9 @@ Framework default: 500 lines production / 3000 lines test, non-comment
 non-blank lines only. A project's CLAUDE.md overrides the numbers and the
 measuring command; use its named tool, or fall back to
 `grep -cvE '^\s*(//|#|$)' <file>`. CLAUDE.md is the only override surface —
-never invent a config key. This project: CLAUDE.md sets 500/3000 SLOC via
-`scripts/check_line_cap.sh <file.rs>`.
+never invent a config key, and never invent a script name — read the CLAUDE.md
+in front of you for the cap tool this project actually ships. When it names
+none, the fallback count above IS the measurement.
 
 ## Minimalism Principle
 

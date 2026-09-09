@@ -230,10 +230,13 @@ pub(crate) fn visible_indices(sessions: &[ManagedSessionSummary], pattern: &str)
 /// unit test rather than a thing discovered in production.
 /// What: requires BOTH stdin and stdout to be TTYs (a piped stdin would EOF
 /// immediately; a piped stdout must stay a clean table), no `--json`, no
-/// `--all`, and a `TERM` that is neither absent nor `dumb` — a dumb terminal
-/// has no cursor addressing, so the redraw would smear the list down the
-/// screen. `NO_COLOR` is deliberately NOT consulted: it suppresses color, not
-/// interactivity, and the row renderer already honours it.
+/// `--all`, and a `TERM` that clears
+/// [`trusty_mpm::tui::terminal::term_supports_raw_mode`] — a dumb terminal has
+/// no cursor addressing, so the redraw would smear the list down the screen.
+/// That predicate moved to `tui::terminal` in #7224 so `tm ls` answers this the
+/// same way; the behaviour here is unchanged. `NO_COLOR` is deliberately NOT
+/// consulted: it suppresses color, not interactivity, and the row renderer
+/// already honours it.
 /// Test: `interactive_filter_allowed_requires_both_ttys`,
 /// `interactive_filter_allowed_false_for_json_and_all`,
 /// `interactive_filter_allowed_false_for_dumb_or_missing_term`,
@@ -250,7 +253,8 @@ pub(crate) fn interactive_filter_allowed(
         && stdout_tty
         && !json
         && !all
-        && matches!(term, Some(t) if !t.is_empty() && !t.eq_ignore_ascii_case("dumb"))
+        // #7224: one implementation of the dumb-terminal rule, shared with `tm ls`.
+        && trusty_mpm::tui::terminal::term_supports_raw_mode(term)
 }
 
 /// `tm f [pattern]` — filter sessions by name, interactively when possible.
