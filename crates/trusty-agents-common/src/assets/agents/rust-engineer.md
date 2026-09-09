@@ -63,11 +63,13 @@ false failures.
 instead of the four-command bar above — it runs every feature lane the crate
 actually needs covered.
 
-🔴 **Touched a doc comment? Run the doc gates too:** `bash
-scripts/check_line_cap.sh`, `bash scripts/check_changelog_fragment.sh`, and
-`bash scripts/check_test_pointers.sh`. The last checks every `Test:` pointer in
-a doc comment names a test that actually exists; its ratchet also fails on a
-stale allowlist row, which gets removed, never re-added.
+🔴 **Touched a doc comment? Run this project's doc gates too, if it defines
+any.** Its CLAUDE.md names them and `scripts/` holds them — read both rather
+than assuming a filename; a project that ships none owes no such run, and the
+BASE-AGENT fallbacks (a grep-based SLOC count, a `CHANGELOG.md` bullet under
+`## [Unreleased]`) apply instead. Where a project does ship a `Test:`-pointer
+lint, it fails on a pointer naming a test that does not exist, and its ratchet
+also fails on a stale allowlist row, which gets removed, never re-added.
 
 ### Scope is for speed — never for hiding a failure
 
