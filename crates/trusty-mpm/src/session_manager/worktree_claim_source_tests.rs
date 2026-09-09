@@ -81,7 +81,7 @@ async fn seeded(
 #[tokio::test]
 async fn dead_sessions_claims_are_discarded_and_live_ones_are_not() {
     let dir = TempDir::new().unwrap();
-    let workspace = PathBuf::from("/Users/masa/trusty-mpm-projects/bobmatnyc");
+    let workspace = PathBuf::from("/srv/projects/acme");
     let fake = FakeTmuxDriver::new();
     fake.seeded_names
         .lock()
@@ -114,7 +114,7 @@ async fn dead_sessions_claims_are_discarded_and_live_ones_are_not() {
 #[tokio::test]
 async fn an_unobservable_tmux_leaves_every_claim_live() {
     let dir = TempDir::new().unwrap();
-    let workspace = PathBuf::from("/Users/masa/trusty-mpm-projects/bobmatnyc");
+    let workspace = PathBuf::from("/srv/projects/acme");
     let fake = FakeTmuxDriver::new();
     fake.seeded_names
         .lock()
@@ -143,7 +143,7 @@ async fn an_unobservable_tmux_leaves_every_claim_live() {
 #[tokio::test]
 async fn an_unmanaged_tmux_name_is_never_read_as_dead() {
     let dir = TempDir::new().unwrap();
-    let workspace = PathBuf::from("/Users/masa/trusty-mpm-projects/bobmatnyc");
+    let workspace = PathBuf::from("/srv/projects/acme");
     let fake = FakeTmuxDriver::new();
     let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
     {
