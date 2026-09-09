@@ -128,10 +128,16 @@ pub(crate) fn savings_segment_at(
 /// deliberately not a fallback: the price table matches on slugs
 /// (`claude-opus-…`), and a bare "Opus" would not price. An absent value is
 /// skipped rather than written blank, so a payload that omits one field cannot
-/// erase a good record.
+/// erase a good record. The transcript path is screened against the session's
+/// own Claude config directory first (#7250); a path outside it is dropped and
+/// the model is still recorded.
 /// Test: the store's own suite — `a_recorded_value_reads_back`,
 /// `an_unchanged_value_leaves_the_file_untouched`,
-/// `a_blank_value_is_never_recorded`, `two_kinds_do_not_collide`.
+/// `a_blank_value_is_never_recorded`, `two_kinds_do_not_collide`; and
+/// `a_transcript_path_outside_the_config_dir_is_not_recorded`,
+/// `a_traversing_transcript_path_is_not_recorded`,
+/// `a_transcript_path_is_not_recorded_without_a_config_dir`,
+/// `a_transcript_path_under_the_config_dir_is_recorded`.
 pub(crate) fn record_session_facts(session_id: &str, model_id: &str, transcript_path: &str) {
     if session_id.is_empty() {
         return;
@@ -142,13 +148,82 @@ pub(crate) fn record_session_facts(session_id: &str, model_id: &str, transcript_
     let Some(root) = savings_root() else {
         return;
     };
-    trusty_mpm::core::session_model::record_session_model(&root, session_id, model_id);
-    trusty_mpm::core::session_record::record_session_value(
+    record_session_facts_at(
         &root,
-        trusty_mpm::core::session_record::KIND_TRANSCRIPT,
+        claude_config_dir().as_deref(),
         session_id,
+        model_id,
         transcript_path,
     );
+}
+
+/// [`record_session_facts`] against explicit roots.
+///
+/// Why: both directories are resolved from the process environment by the
+/// caller above, and this bin target may not write `CLAUDE_CONFIG_DIR` or
+/// `HOME` to steer them (#5544) — so the screening rule is only assertable if
+/// the two paths arrive as arguments.
+/// What: records the model unconditionally, and the transcript path only when
+/// [`trusty_mpm::core::session_record::contained_transcript_path`] accepts it
+/// against `claude_config_dir`. The value stored is that function's canonical
+/// path, so the reader opens the file that was screened. A `None`
+/// `claude_config_dir` records no transcript path: with no directory to
+/// contain it there is nothing to screen against, and the model record — which
+/// carries no path — is unaffected.
+/// Test: `a_transcript_path_outside_the_config_dir_is_not_recorded`,
+/// `a_traversing_transcript_path_is_not_recorded`,
+/// `a_transcript_path_is_not_recorded_without_a_config_dir`,
+/// `a_transcript_path_under_the_config_dir_is_recorded`.
+fn record_session_facts_at(
+    root: &Path,
+    claude_config_dir: Option<&Path>,
+    session_id: &str,
+    model_id: &str,
+    transcript_path: &str,
+) {
+    trusty_mpm::core::session_model::record_session_model(root, session_id, model_id);
+    let Some(config_dir) = claude_config_dir else {
+        tracing::debug!("no Claude config directory resolves; transcript_path not recorded");
+        return;
+    };
+    let Some(transcript) =
+        trusty_mpm::core::session_record::contained_transcript_path(config_dir, transcript_path)
+    else {
+        return;
+    };
+    trusty_mpm::core::session_record::record_session_value(
+        root,
+        trusty_mpm::core::session_record::KIND_TRANSCRIPT,
+        session_id,
+        &transcript.to_string_lossy(),
+    );
+}
+
+/// The Claude config directory this session's transcript must sit under.
+///
+/// Why (#7250): the payload's `transcript_path` is only trustworthy relative to
+/// the config directory the session itself runs under, and `CLAUDE_CONFIG_DIR`
+/// relocates that for every daemon-managed tm session. The neighbouring
+/// [`super::account::claude_json_path`] reads the same variable but resolves a
+/// different shape — `.claude.json` sits INSIDE `CLAUDE_CONFIG_DIR` and BESIDE
+/// `~/.claude` — so the two cannot share one resolver.
+/// What: `CLAUDE_CONFIG_DIR` when set and non-blank, else `~/.claude` from
+/// [`trusty_mpm::core::paths::FrameworkPaths::claude_home_dir`] rather than a
+/// second `home.join(".claude")`. `None` when neither is available, and the
+/// caller then records no transcript path at all — that is what makes the
+/// screen fail closed. `FrameworkPaths::default()` cannot stand in here: with
+/// no home directory it resolves against `"."`, which canonicalizes to the
+/// process's working directory, so the containment check would silently
+/// re-scope to whatever `<cwd>/.claude` happens to be (#7250 critic round 2).
+/// Test: `a_transcript_path_is_not_recorded_without_a_config_dir`; the fallback
+/// resolver has its own tests (`claude_home_dir_matches_default_home`).
+fn claude_config_dir() -> Option<PathBuf> {
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => Some(
+            trusty_mpm::core::paths::FrameworkPaths::under(dirs::home_dir()?).claude_home_dir(),
+        ),
+    }
 }
 
 /// Resolve the framework root the ledger lives under.
@@ -202,6 +277,7 @@ pub(crate) fn render_savings_segment(
 mod tests {
     use super::*;
     use trusty_mpm::core::savings::{SavingsRow, append_row, now_ts};
+    use trusty_mpm::core::session_record::{KIND_MODEL, KIND_TRANSCRIPT, read_session_record};
 
     fn total(tokens_saved: u64, tokens_before: u64) -> SavingsTotal {
         SavingsTotal {
@@ -440,5 +516,147 @@ mod tests {
     #[test]
     fn savings_segment_probe_is_absent_without_a_session_id() {
         assert_eq!(savings_segment_probe(""), None);
+    }
+
+    /// A Claude-config-shaped directory holding one real transcript file.
+    ///
+    /// Why: `contained_transcript_path` canonicalizes both sides, and
+    /// `canonicalize` refuses a path that does not exist — so a fixture that
+    /// only names a file proves nothing.
+    fn transcript_under(config_dir: &Path, session_id: &str) -> PathBuf {
+        let projects = config_dir.join("projects").join("slug");
+        std::fs::create_dir_all(&projects).expect("mkdir");
+        let transcript = projects.join(format!("{session_id}.jsonl"));
+        std::fs::write(&transcript, "{}\n").expect("write transcript");
+        transcript
+    }
+
+    fn recorded_transcript(root: &Path, session_id: &str) -> Option<String> {
+        read_session_record(root, KIND_TRANSCRIPT, session_id)
+    }
+
+    /// Why (#7250): the payload names the file a LATER `tm` process opens, so a
+    /// path outside the session's Claude config directory must never reach the
+    /// store. The model, which carries no path, is still recorded.
+    /// Test: itself.
+    #[test]
+    fn a_transcript_path_outside_the_config_dir_is_not_recorded() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let config = tempfile::tempdir().expect("temp dir");
+        let elsewhere = tempfile::tempdir().expect("temp dir");
+        let outside = elsewhere.path().join("stolen.jsonl");
+        std::fs::write(&outside, "{}\n").expect("write");
+
+        record_session_facts_at(
+            root.path(),
+            Some(config.path()),
+            "sess-1",
+            "claude-opus-4-1",
+            "/etc/passwd",
+        );
+        assert_eq!(recorded_transcript(root.path(), "sess-1"), None);
+
+        record_session_facts_at(
+            root.path(),
+            Some(config.path()),
+            "sess-1",
+            "claude-opus-4-1",
+            &outside.to_string_lossy(),
+        );
+        assert_eq!(recorded_transcript(root.path(), "sess-1"), None);
+        assert_eq!(
+            read_session_record(root.path(), KIND_MODEL, "sess-1").as_deref(),
+            Some("claude-opus-4-1"),
+            "a rejected transcript path must not cost the model record"
+        );
+    }
+
+    /// Why (#7250): a `..` component walks out of the config directory while
+    /// still looking like it starts inside it.
+    /// Test: itself.
+    #[test]
+    fn a_traversing_transcript_path_is_not_recorded() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let config = tempfile::tempdir().expect("temp dir");
+        transcript_under(config.path(), "sess-1");
+        let traversing = config
+            .path()
+            .join("projects")
+            .join("..")
+            .join("..")
+            .join("etc")
+            .join("passwd");
+
+        record_session_facts_at(
+            root.path(),
+            Some(config.path()),
+            "sess-1",
+            "claude-opus-4-1",
+            &traversing.to_string_lossy(),
+        );
+        assert_eq!(recorded_transcript(root.path(), "sess-1"), None);
+    }
+
+    /// Why (#7250, critic round 2): with no `CLAUDE_CONFIG_DIR` and no home
+    /// directory there is no directory to contain the path, and the earlier
+    /// `FrameworkPaths::default()` fallback resolved to `"."` — which
+    /// canonicalizes to the working directory, quietly re-scoping containment
+    /// to `<cwd>/.claude` instead of refusing. `claude_config_dir` now answers
+    /// `None` there, and nothing lands in the store. This bin target may not
+    /// write `HOME` (#5544), so the `None` arrives as an argument.
+    /// Test: itself.
+    #[test]
+    fn a_transcript_path_is_not_recorded_without_a_config_dir() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let config = tempfile::tempdir().expect("temp dir");
+        let transcript = transcript_under(config.path(), "sess-1");
+
+        record_session_facts_at(
+            root.path(),
+            None,
+            "sess-1",
+            "claude-opus-4-1",
+            &transcript.to_string_lossy(),
+        );
+        assert_eq!(
+            recorded_transcript(root.path(), "sess-1"),
+            None,
+            "with no config directory there is nothing to contain the path"
+        );
+        assert_eq!(
+            read_session_record(root.path(), KIND_MODEL, "sess-1").as_deref(),
+            Some("claude-opus-4-1"),
+            "the model carries no path, so it is still recorded"
+        );
+    }
+
+    /// Why (#7250): the screen must still accept the ordinary payload, or the
+    /// commit footer silently loses its token counts. What lands is the
+    /// canonical path, which on macOS differs from the temp directory's own
+    /// spelling.
+    /// Test: itself.
+    #[test]
+    fn a_transcript_path_under_the_config_dir_is_recorded() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let config = tempfile::tempdir().expect("temp dir");
+        let transcript = transcript_under(config.path(), "sess-1");
+
+        record_session_facts_at(
+            root.path(),
+            Some(config.path()),
+            "sess-1",
+            "claude-opus-4-1",
+            &transcript.to_string_lossy(),
+        );
+        assert_eq!(
+            recorded_transcript(root.path(), "sess-1"),
+            Some(
+                transcript
+                    .canonicalize()
+                    .expect("canonicalize")
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
     }
 }
