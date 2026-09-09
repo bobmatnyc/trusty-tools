@@ -438,9 +438,20 @@ const GIT_GLOBAL_OPTS_WITH_ARG: &[&str] = &[
 /// tokens are valueless global flags — and returns the first non-option token
 /// (the subcommand). `None` when the segment is not `git`, is unparseable, or
 /// has no subcommand after the options.
+/// This is where every git rule in the guard decides that a segment IS a git
+/// invocation, and it decides on POSITION: the program token, resolved through
+/// the wrapper/env-assignment prefix and its own basename. `git` inside any
+/// other token — `crates/trusty-git-analytics/`, `.gitignore`, `github.com`,
+/// prose inside quotes — is not a command word and yields `None`. #6982
+/// reported such commands being refused; the refusals come from the Claude
+/// Code harness rather than from here, and the two tests named below pin this
+/// side of the contract so a later rule cannot introduce the substring match
+/// the report describes.
 /// Test: `git_subcommand_skips_global_flags`, `git_subcommand_plain`,
 /// `git_subcommand_none_for_non_git`, `git_subcommand_none_when_unbalanced`,
-/// `git_subcommand_resolves_through_command_and_nice_wrappers`.
+/// `git_subcommand_resolves_through_command_and_nice_wrappers`,
+/// `git_is_only_a_git_command_in_command_position`,
+/// `git_in_command_position_is_still_a_git_command`.
 pub(super) fn git_subcommand(segment: &str) -> Option<String> {
     let argv = shlex::split(segment)?;
     let mut i = strip_wrapper_prefix(&argv)?;
