@@ -78,8 +78,8 @@ use std::path::Path;
 
 use crate::commands::hook_rewrite::{effective_tool_name, first_command_token};
 // Reached by the sibling rule modules through `super::…` — one answer to "what
-// did not expand" (#7098, #7100).
-use path_tokens::unexpanded_shell_variable;
+// did not expand" (#7098, #7100), covering a surviving `~` since #7234.
+use path_tokens::unresolved_target;
 // One definition of "which directory does this token name", crate-visible since
 // #7172: the `EnterWorktree` rule is no Bash rule but asks the same question, so
 // it reaches this resolver instead of growing a second normalizer.

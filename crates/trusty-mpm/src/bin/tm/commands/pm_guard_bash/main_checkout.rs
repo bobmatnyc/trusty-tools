@@ -132,8 +132,7 @@ use trusty_mpm::core::project_aliases::{is_main_checkout, main_checkout_root};
 use trusty_mpm::core::staged_paths::staged_paths;
 
 use super::{
-    PathEnv, git_dash_c_override, resolve_target_path, split_shell_segments,
-    unexpanded_shell_variable,
+    PathEnv, git_dash_c_override, resolve_target_path, split_shell_segments, unresolved_target,
 };
 use crate::commands::hook_rewrite::first_command_token;
 use crate::commands::pm_guard::is_source_code_path;
@@ -161,25 +160,42 @@ use crate::commands::pm_guard_bash::shell_lex;
 /// exists yet.
 /// Test: the two halves are covered separately (see the module doc);
 /// `destructive_deny_names_an_unresolved_variable_rather_than_the_checkout`,
+/// `destructive_deny_names_a_surviving_tilde_rather_than_the_checkout`,
 /// `destructive_allows_a_path_restoring_checkout_in_a_sibling_worktree`; the
 /// composition runs end to end in `tests/tm_hook_pm_guard.rs`.
 pub(crate) fn evaluate_main_checkout_destructive_command(
     command: &str,
     cwd: &Path,
 ) -> Option<String> {
-    let (verb, target) = git_verb_target_dir(
-        command,
-        cwd,
-        &PathEnv::from_process(),
-        is_whole_tree_destructive,
-    )?;
+    evaluate_main_checkout_destructive_command_in(command, cwd, &PathEnv::from_process())
+}
+
+/// [`evaluate_main_checkout_destructive_command`] against an explicit
+/// environment.
+///
+/// Why: see [`PathEnv`] — the `~` arm of the unresolved-target rule (#7234) is
+/// reachable only with `$HOME` absent, and pinning that in a test by mutating
+/// process-global env would leak into every sibling in the `tm` test binary.
+/// Test: `destructive_deny_names_a_surviving_tilde_rather_than_the_checkout`.
+fn evaluate_main_checkout_destructive_command_in(
+    command: &str,
+    cwd: &Path,
+    env: &PathEnv,
+) -> Option<String> {
+    let (verb, target) = git_verb_target_dir(command, cwd, env, is_whole_tree_destructive)?;
     if !is_main_checkout(&target) {
         return None;
     }
     // #7100: an unexpanded variable in the path is not evidence about which
     // tree this lands in, so the refusal must not read as if it were.
-    match unexpanded_shell_variable(&target) {
-        Some(variable) => Some(unresolved_directory_deny_reason(&verb, &target, &variable)),
+    // #7234: a `~` left literal because `$HOME` was unset says the same thing.
+    match unresolved_target(&target) {
+        Some(unresolved) => Some(unresolved_directory_deny_reason(
+            DESTRUCTIVE_UNRESOLVED_HEADLINE,
+            &verb,
+            &unresolved.shown,
+            &unresolved.token,
+        )),
         None => Some(deny_reason(&verb, &target)),
     }
 }
@@ -255,20 +271,47 @@ pub(crate) enum CommitVerdict {
 /// rules exist for (ADR-0049 decision 4). It is still refused when CHAINED to a
 /// commit, which is a statement about the index read above, not about `git add`.
 /// Test: `commit_target_dir_*`, `evaluate_main_checkout_commit_*`,
+/// `commit_deny_names_a_surviving_tilde_rather_than_the_checkout`,
 /// `command_is_a_lone_commit_*`.
 pub(crate) fn evaluate_main_checkout_commit_command(
     command: &str,
     cwd: &Path,
 ) -> Option<CommitVerdict> {
-    let (_, target, tail) =
-        git_verb_target_dir_with_tail(command, cwd, &PathEnv::from_process(), |verb, _| {
-            verb == "commit"
-        })?;
+    evaluate_main_checkout_commit_command_in(command, cwd, &PathEnv::from_process())
+}
+
+/// [`evaluate_main_checkout_commit_command`] against an explicit environment.
+///
+/// Why: as [`evaluate_main_checkout_destructive_command_in`] — the `~` arm of
+/// the unresolved-target rule (#7234) needs `$HOME` absent, and this is the
+/// seam that pins it without touching process-global env.
+/// Test: `commit_deny_names_a_surviving_tilde_rather_than_the_checkout`.
+fn evaluate_main_checkout_commit_command_in(
+    command: &str,
+    cwd: &Path,
+    env: &PathEnv,
+) -> Option<CommitVerdict> {
+    let (verb, target, tail) =
+        git_verb_target_dir_with_tail(command, cwd, env, |verb, _| verb == "commit")?;
     // `main_checkout_root` rather than `is_main_checkout` for the reason #5769
     // gave the HEAD-move rule: `cd crates/foo && git commit` resolves a
     // subdirectory that shares the checkout's HEAD, and the writer query has to
     // be keyed on a directory a delegation record can actually carry.
     let root = main_checkout_root(&target)?;
+    // #7234: that upward walk is exactly what an unresolved component subverts.
+    // `git -C ~/scratch/repo commit` with `$HOME` unset leaves `~` literal, the
+    // path is joined onto the launch directory, and the walk finds the LAUNCH
+    // directory's `.git` — so the refusal named a checkout the command never
+    // addressed. Asked before the index is read, because a target this cannot
+    // place is refused whatever is staged.
+    if let Some(unresolved) = unresolved_target(&target) {
+        return Some(CommitVerdict::Deny(unresolved_directory_deny_reason(
+            COMMIT_UNRESOLVED_HEADLINE,
+            &verb,
+            &unresolved.shown,
+            &unresolved.token,
+        )));
+    }
     // #5788 review, CRITICAL 1: one index read authorises at most one commit,
     // and only when nothing between the read and that commit can change the
     // index. Asked before the staged set is even read, because a composition
@@ -758,30 +801,45 @@ fn deny_reason(verb: &str, target: &Path) -> String {
     )
 }
 
+/// How the destructive rule opens its unresolved-target refusal.
+const DESTRUCTIVE_UNRESOLVED_HEADLINE: &str =
+    "Destructive git command denied because its target directory is unresolvable (ADR-0037)";
+
+/// How the commit rule opens the same refusal (#7234).
+const COMMIT_UNRESOLVED_HEADLINE: &str =
+    "Commit denied because its target directory is unresolvable (ADR-0044, amended by ADR-0049)";
+
 /// Build the deny message for a target directory the guard could not resolve
-/// (#7100).
+/// (#7100, extended to a surviving `~` by #7234).
 ///
-/// Why: [`deny_reason`] asserts the directory IS a main checkout, and that
-/// assertion is what a `version-control` agent acted on when it abandoned
-/// `git -C "$WT" checkout -- <file>` and hand-edited the file instead. The
-/// guard reached the checkout root only by walking `<repo>/$WT` upwards, so the
-/// honest statement is that it does not know where `$WT` points — and the
-/// remedy is a different one from "do this work in a worktree", because the
-/// agent already was.
-/// What: the refusal, naming the verb, the path AS RESOLVED (variable still in
-/// it, so the reader can see which component failed), the variable itself, and
-/// the two forms that work.
+/// Why: [`deny_reason`] and [`commit_deny_reason`] both assert the directory IS
+/// a main checkout, and that assertion is what a `version-control` agent acted
+/// on when it abandoned `git -C "$WT" checkout -- <file>` and hand-edited the
+/// file instead. The guard reached the checkout root only by walking upwards
+/// from a path it could not place, so the honest statement is that it does not
+/// know where the target points — and the remedy is a different one from "do
+/// this work in a worktree", because the agent already was. `headline` is a
+/// parameter because both rules refuse for the same reason and differ only in
+/// which ADR they enforce; a second copy of the body would drift on what the
+/// guard actually expands.
+/// What: the refusal, naming the verb, the path [`super::unresolved_target`]
+/// chose to quote, the expansion that failed, and the two forms that work.
 /// Test: `unresolved_directory_deny_reason_names_the_variable_and_the_remedy`.
-fn unresolved_directory_deny_reason(verb: &str, target: &Path, variable: &str) -> String {
+fn unresolved_directory_deny_reason(
+    headline: &str,
+    verb: &str,
+    target: &Path,
+    token: &str,
+) -> String {
     format!(
-        "Destructive git command denied because its target directory is unresolvable (ADR-0037): \
-         `git {verb}` names {}, which still carries the unexpanded shell variable `{variable}`. \
-         The guard expands only `$TMPDIR`, `$TMP`, `$HOME` and `$PWD`, so it cannot tell whether \
-         this lands in a sibling worktree or in the main checkout it walked up to — and an empty \
-         `{variable}` would run the command in that checkout. Spell the directory out \
-         (`git -C /abs/path/.claude/worktrees/<name> {verb} …`) or `cd` into the worktree first. \
-         A `-C` path that names a harness worktree (`.claude/worktrees/`, `.worktrees/`) is not \
-         restricted by this rule, so the same command with the path written out is allowed.",
+        "{headline}: `git {verb}` names {}, which still carries the unresolved shell expansion \
+         `{token}`. The guard expands `$TMPDIR`, `$TMP`, `$HOME` and `$PWD`, and a leading `~` \
+         only when `$HOME` is set, so it cannot tell whether this lands in a sibling worktree or \
+         in the main checkout it walked up to — and it will not clear a directory it cannot name. \
+         Spell the directory out (`git -C /abs/path/.claude/worktrees/<name> {verb} …`) or `cd` \
+         into the worktree first. A `-C` path that names a harness worktree \
+         (`.claude/worktrees/`, `.worktrees/`) is not restricted by this rule, so the same command \
+         with the path written out is allowed.",
         target.display()
     )
 }
@@ -1277,10 +1335,103 @@ mod tests {
 
     #[test]
     fn unresolved_directory_deny_reason_names_the_variable_and_the_remedy() {
-        let reason = unresolved_directory_deny_reason("checkout", Path::new("/repo/$WT"), "$WT");
+        let reason = unresolved_directory_deny_reason(
+            DESTRUCTIVE_UNRESOLVED_HEADLINE,
+            "checkout",
+            Path::new("/repo/$WT"),
+            "$WT",
+        );
         assert!(reason.contains("/repo/$WT"), "{reason}");
         assert!(reason.contains("$WT"), "{reason}");
         assert!(reason.contains(".claude/worktrees/"), "{reason}");
+    }
+
+    /// An environment with no `$HOME`, which is the only way a leading `~`
+    /// reaches the rules as literal text (#7234).
+    fn no_home() -> PathEnv {
+        PathEnv {
+            tmpdir: None,
+            tmp: None,
+            home: None,
+        }
+    }
+
+    /// The `~` half of #7100's rule (#7234). `git -C ~/… checkout -- .` with
+    /// `$HOME` unset joins `~` onto the launch directory, `is_main_checkout`
+    /// then answers `true` for the fabricated path, and the refusal used to
+    /// call the launch directory a main checkout.
+    #[test]
+    fn destructive_deny_names_a_surviving_tilde_rather_than_the_checkout() {
+        let checkout = main_checkout_dir();
+        let reason = evaluate_main_checkout_destructive_command_in(
+            "git -C ~/audit-live-check-7137/repo-acme-test checkout -- .",
+            checkout.path(),
+            &no_home(),
+        )
+        .expect("an unresolvable target directory must still deny");
+        assert!(reason.contains("unresolvable"), "{reason}");
+        assert!(reason.contains('~'), "{reason}");
+        assert!(
+            !reason.contains("which is a project's main checkout"),
+            "the guard must not assert what it could not establish: {reason}"
+        );
+        assert!(
+            !reason.contains(&checkout.path().display().to_string()),
+            "the launch directory is not where this command lands: {reason}"
+        );
+    }
+
+    /// The incident command from #7234, which is a COMMIT and so never reached
+    /// the destructive rule above: the deny has to come from the commit rule,
+    /// and it must not name the launch directory it walked up into.
+    #[test]
+    fn commit_deny_names_a_surviving_tilde_rather_than_the_checkout() {
+        let checkout = main_checkout_dir();
+        let verdict = evaluate_main_checkout_commit_command_in(
+            "git -C ~/audit-live-check-7137/repo-acme-test commit --allow-empty -m test",
+            checkout.path(),
+            &no_home(),
+        )
+        .expect("an unresolvable target directory must still deny");
+        let CommitVerdict::Deny(reason) = verdict else {
+            panic!("a target the guard cannot place must never reach the docs-only carve-out");
+        };
+        assert!(reason.contains("unresolvable"), "{reason}");
+        assert!(
+            reason.contains("~/audit-live-check-7137/repo-acme-test"),
+            "the refusal must quote the token as written: {reason}"
+        );
+        assert!(
+            !reason.contains("is a project's main checkout"),
+            "the guard must not assert what it could not establish: {reason}"
+        );
+        assert!(
+            !reason.contains(&checkout.path().display().to_string()),
+            "the launch directory is not where this command lands: {reason}"
+        );
+    }
+
+    /// The half that must NOT change: with `$HOME` set the tilde expands, the
+    /// target is a scratch repository outside the checkout, and the commit rule
+    /// has no business with it at all.
+    #[test]
+    fn commit_with_home_set_resolves_the_tilde_and_leaves_the_checkout_alone() {
+        let checkout = main_checkout_dir();
+        let home = tempfile::tempdir().expect("tempdir");
+        let env = PathEnv {
+            tmpdir: None,
+            tmp: None,
+            home: Some(home.path().display().to_string()),
+        };
+        assert!(
+            evaluate_main_checkout_commit_command_in(
+                "git -C ~/audit-live-check-7137/repo-acme-test commit --allow-empty -m test",
+                checkout.path(),
+                &env,
+            )
+            .is_none(),
+            "a resolved target outside any checkout is not this rule's business"
+        );
     }
 
     #[test]

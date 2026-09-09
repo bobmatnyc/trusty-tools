@@ -13,13 +13,15 @@
 //!
 //! What: [`PathEnv`] carries the three environment values as data rather than
 //! reading `std::env` per use, [`resolve_target_path`] expands and normalizes a
-//! token against a base directory, and [`unexpanded_shell_variable`] reports
-//! what the expansion could not reach — the one question a rule must ask before
-//! stating anything about the directory it got back.
+//! token against a base directory, and [`unresolved_target`] reports what the
+//! expansion could not reach — the one question a rule must ask before stating
+//! anything about the directory it got back.
 //!
 //! Test: `evaluate_worktree_add_command_expands_tmpdir_and_home`,
 //! `unexpanded_shell_variable_finds_both_spellings`,
-//! `unexpanded_shell_variable_is_none_for_ordinary_paths` in the sibling
+//! `unexpanded_shell_variable_is_none_for_ordinary_paths`,
+//! `unresolved_target_reports_a_surviving_tilde_as_written`,
+//! `unresolved_target_is_none_once_home_expands_the_tilde` in the sibling
 //! `tests` module.
 
 use std::path::{Path, PathBuf};
@@ -89,7 +91,7 @@ impl PathEnv {
 /// that motivated the seam. In production [`PathEnv::from_process`] supplies
 /// the guard process's own environment, which a `Bash` tool call inherits
 /// unchanged. Anything it could NOT expand survives as a literal path
-/// component; [`unexpanded_shell_variable`] is how a caller finds out.
+/// component; [`unresolved_target`] is how a caller finds out.
 pub(crate) fn resolve_target_path(token: &str, base: &Path, env: &PathEnv) -> PathBuf {
     let mut expanded = token.to_string();
     if let Some(tmpdir) = env.tmpdir.as_deref() {
@@ -194,4 +196,60 @@ pub(super) fn unexpanded_shell_variable(path: &Path) -> Option<String> {
 /// Whether `c` may appear in a shell variable name.
 fn is_shell_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// What [`resolve_target_path`] could not expand, and the path a refusal
+/// should quote because of it.
+///
+/// Why: two expansions survive resolution and they need DIFFERENT paths in the
+/// refusal. A `$WT` the guard does not expand is joined onto the directory the
+/// command actually stands in, so `/repo/$WT` is a true statement about where
+/// an empty `$WT` would land and the whole path is worth showing (#7100). A
+/// `~` that survived because `$HOME` was unset is not: a shell never joins `~`
+/// onto the working directory, so `<launch-dir>/~/scratch/repo` names nothing
+/// that exists — and quoting it is how the guard came to call an agent's
+/// launch directory a main checkout (#7234). For that case the honest path is
+/// the suffix from the tilde on, which is the token as the command wrote it.
+/// What: `token` is the expansion itself (`$WT`, `${WT}`, `~`, `~user`);
+/// `shown` is the path to name in the refusal.
+/// Test: `unresolved_target_reports_a_surviving_tilde_as_written`,
+/// `unresolved_target_is_none_once_home_expands_the_tilde`.
+pub(super) struct UnresolvedTarget {
+    pub(super) token: String,
+    pub(super) shown: std::path::PathBuf,
+}
+
+/// The first expansion [`resolve_target_path`] could not perform in `path`.
+///
+/// Why: every rule in this module tree denies a directory it cannot resolve,
+/// and each was asking only [`unexpanded_shell_variable`] — which scans for a
+/// `$`-prefixed token and nothing else. A leading `~` reaches
+/// [`resolve_target_path`] as literal text whenever `$HOME` is unset, survives
+/// as a path COMPONENT, and then reads as an ordinary relative path: it is
+/// joined onto the base, `main_checkout_root` walks up into the base's `.git`,
+/// and the refusal names a checkout the command never addressed (#7234).
+/// Routing both spellings through one detector is what keeps a rule added
+/// later from inheriting only half the answer.
+/// What: the `$NAME` answer first, then a path COMPONENT beginning with `~`.
+/// Fails CLOSED, in the direction this module tree already takes: a directory
+/// genuinely named `~backup` is reported unresolved and the caller refuses
+/// rather than clears it.
+/// Test: `unresolved_target_reports_a_surviving_tilde_as_written`,
+/// `unresolved_target_is_none_once_home_expands_the_tilde`,
+/// `unexpanded_shell_variable_finds_both_spellings`.
+pub(super) fn unresolved_target(path: &Path) -> Option<UnresolvedTarget> {
+    if let Some(token) = unexpanded_shell_variable(path) {
+        return Some(UnresolvedTarget {
+            token,
+            shown: path.to_path_buf(),
+        });
+    }
+    let components: Vec<_> = path.components().collect();
+    let at = components
+        .iter()
+        .position(|c| c.as_os_str().to_string_lossy().starts_with('~'))?;
+    Some(UnresolvedTarget {
+        token: components[at].as_os_str().to_string_lossy().into_owned(),
+        shown: components[at..].iter().collect(),
+    })
 }
