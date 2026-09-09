@@ -24,7 +24,7 @@
 //! Test: `project_hooks_tests.rs`.
 
 use super::divert_hooks::{divert_hook_groups, is_divert_hook_command};
-use super::settings::{TRUSTY_MEMORY_HOOKS, pm_guard_hook_value};
+use super::settings::{PM_GUARD_SUFFIX, TRUSTY_MEMORY_HOOKS, pm_guard_hook_value};
 use crate::core::standalone::hooks::{is_mpm_hook_command, mpm_hook_additions_with_exe};
 
 /// Build the full set of trusty-mpm-owned hook additions for the project tier.
@@ -178,14 +178,14 @@ const EVENT_KEY_PROBE_EXE: &str = "/usr/local/bin/tm";
 /// `trusty-memory`/PM-guard groups on every launch instead of replacing them.
 /// What: returns `true` for a lifecycle-triad command
 /// ([`is_mpm_hook_command`]), a `trusty-memory ` command, a PM-guard command
-/// (ends with ` hook --pm-guard`), or a diversion-check command (#6887,
+/// (ends with [`PM_GUARD_SUFFIX`]), or a diversion-check command (#6887,
 /// [`is_divert_hook_command`]).
 /// Test: `is_project_managed_hook_command_recognises_all_three_sources`,
 /// `is_project_managed_hook_command_recognises_divert_check`.
 pub(super) fn is_project_managed_hook_command(cmd: &str) -> bool {
     is_mpm_hook_command(cmd)
         || cmd.starts_with("trusty-memory ")
-        || cmd.ends_with(" hook --pm-guard")
+        || cmd.ends_with(PM_GUARD_SUFFIX)
         // #6887: without this arm the strip never removes a stale divert group.
         || is_divert_hook_command(cmd)
 }

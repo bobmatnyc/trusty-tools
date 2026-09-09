@@ -9,9 +9,19 @@
 
 use super::*;
 
-/// The exact executable #7244 wrote into `.claude/settings.json`, seven times
+/// The executable SHAPE #7244 wrote into `.claude/settings.json`, seven times
 /// on 2026-09-09.
-pub(crate) const INCIDENT_EXE: &str = "/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/target-7247/debug/deps/test_session_lifecycle-cd3ba8f03938239b";
+///
+/// Why: the repository prefix is synthetic. What the predicate reads is the
+/// Cargo layout — a `target-<n>` build root, a `debug` profile under it, a
+/// `deps` directory under that, and a hash-suffixed test-harness stem — and
+/// none of those components is the home directory the incident happened to
+/// occur in. Baking a real `$HOME` into a fixture leaks an operator path into
+/// the repository for no test value, so the prefix is a placeholder and the
+/// four load-bearing components are preserved verbatim.
+/// Test: every test in this file, plus the `incident_settings` consumers.
+pub(crate) const INCIDENT_EXE: &str =
+    "/srv/projects/acme/target-7247/debug/deps/test_session_lifecycle-cd3ba8f03938239b";
 
 /// A `hooks` group wrapping one command, in Claude Code's settings shape.
 fn group(cmd: &str) -> serde_json::Value {
@@ -96,7 +106,7 @@ fn build_tree_hook_command_flags_other_build_layouts() {
 fn build_tree_hook_command_ignores_an_installed_binary() {
     assert!(!is_build_tree_hook_command("/usr/local/bin/tm hook"));
     assert!(!is_build_tree_hook_command(
-        "/Users/masa/.cargo/bin/tm hook --pm-guard"
+        "/opt/tm/bin/tm hook --pm-guard"
     ));
     // Relative/bare names are the exact-name branch's business, not this one's.
     assert!(!is_build_tree_hook_command("tm hook"));

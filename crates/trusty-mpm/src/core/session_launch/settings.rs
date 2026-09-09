@@ -14,6 +14,20 @@ use std::path::{Path, PathBuf};
 use super::PrepError;
 use crate::core::standalone::hooks::backup;
 
+/// The `tm hook` sub-flag the PM enforcement guard is invoked with.
+///
+/// Why: [`pm_guard_hook_value`] writes this shape and
+/// [`super::project_hooks::is_project_managed_hook_command`] must recognise
+/// exactly what was written, or the replace-by-identity strip stops matching
+/// and every relaunch appends a duplicate group (#2948). #7262 added a third
+/// reader — the build-tree classifier — so the literal now lives in the lower
+/// layer beside the other argv tails and is re-exported here rather than
+/// spelled out in each module, mirroring
+/// [`super::divert_hooks::DIVERT_CHECK_SUFFIX`].
+/// What: the literal suffix, including its leading space.
+/// Test: `pm_guard_and_divert_commands_end_in_a_known_argv_tail`.
+pub(super) use crate::core::standalone::hooks::build_tree::PM_GUARD_SUFFIX;
+
 /// Default Claude Code output style applied to launched sessions.
 ///
 /// Why: the Claude Code status bar renders `style:<outputStyle>`; when no style
@@ -444,7 +458,7 @@ pub(super) fn pm_guard_hook_value() -> serde_json::Value {
             "hooks": [
                 {
                     "type": "command",
-                    "command": format!("{} hook --pm-guard", resolve_statusline_binary()),
+                    "command": format!("{}{PM_GUARD_SUFFIX}", resolve_statusline_binary()),
                     "timeout": 10
                 }
             ]

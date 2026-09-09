@@ -359,6 +359,46 @@ fn build_tree_statusline_command_in_settings_ignores_an_installed_binary() {
 }
 
 #[test]
+fn strips_pm_guard_entry_is_true_only_for_a_removable_guard() {
+    // The incident file's `PreToolUse` guard is build-tree-rooted, so the strip
+    // takes it and the caller must be told.
+    assert!(strips_pm_guard_entry(&incident_settings()));
+
+    // An INSTALLED guard carries the same argv but survives the strip, so
+    // reporting it removed would be a lie.
+    let installed = json!({
+        "hooks": {
+            "PreToolUse": [{
+                "hooks": [{ "command": "/usr/local/bin/tm hook --pm-guard" }]
+            }]
+        }
+    });
+    assert!(!strips_pm_guard_entry(&installed));
+
+    // A contaminated file with no guard at all.
+    assert!(!strips_pm_guard_entry(&tm_settings()));
+    assert!(!strips_pm_guard_entry(&json!({})));
+}
+
+#[test]
+fn clean_settings_file_flags_a_removed_pm_guard_entry() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("settings.json");
+
+    std::fs::write(&path, incident_settings().to_string()).unwrap();
+    let outcome = clean_settings_file(&path, false).unwrap().unwrap();
+    assert!(
+        outcome.removed_pm_guard,
+        "the incident file's guard is removable: {outcome:?}"
+    );
+
+    // Same reader, a file whose only tm entry is the lifecycle triad.
+    std::fs::write(&path, tm_settings().to_string()).unwrap();
+    let outcome = clean_settings_file(&path, false).unwrap().unwrap();
+    assert!(!outcome.removed_pm_guard, "{outcome:?}");
+}
+
+#[test]
 fn tm_hook_event_names_flags_the_build_tree_incident() {
     // Before #7262 this returned an empty list: neither name branch recognises
     // the `test_session_lifecycle` stem, so `tm doctor` saw nothing at all.

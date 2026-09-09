@@ -41,17 +41,17 @@ use std::path::Path;
 ///
 /// Why (#7262): the second half of the two-part test above. Each entry is a
 /// shape one of tm's writers produces: `" hook"` is the six-event lifecycle
-/// triad ([`super::mpm_hook_additions_with_exe`]), `" hook --pm-guard"` the PM
+/// triad ([`super::mpm_hook_additions_with_exe`]), [`PM_GUARD_SUFFIX`] the PM
 /// enforcement guard, and [`DIVERT_CHECK_SUFFIX`] the #6887 bulk-read diversion
 /// groups. Anything else is not tm's to classify.
 /// What: the three tails, matched as exact string suffixes so the whole prefix
 /// is the executable path — spaces in that path included. They are mutually
-/// exclusive: a command ending in `" hook --pm-guard"` cannot also end in
+/// exclusive: a command ending in [`PM_GUARD_SUFFIX`] cannot also end in
 /// `" hook"`.
 /// Test: `build_tree_hook_command_matches_every_tm_argv_shape`,
 /// `pm_guard_and_divert_commands_end_in_a_known_argv_tail` (the drift guard, in
 /// `session_launch::project_hooks_tests`).
-const TM_HOOK_ARGV_TAILS: &[&str] = &[" hook", " hook --pm-guard", DIVERT_CHECK_SUFFIX];
+const TM_HOOK_ARGV_TAILS: &[&str] = &[" hook", PM_GUARD_SUFFIX, DIVERT_CHECK_SUFFIX];
 
 /// The `statusLine.command` argv tail (`#4492`, `#7262`).
 ///
@@ -74,6 +74,23 @@ const STATUSLINE_ARGV_TAIL: &str = " statusline";
 /// What: the suffix `divert_hook_groups` appends to the resolved binary.
 /// Test: `is_project_managed_hook_command_recognises_divert_check`.
 pub(crate) const DIVERT_CHECK_SUFFIX: &str = " hook --divert-check";
+
+/// The `hook --pm-guard` argv tail (#1914, #7262).
+///
+/// Why: three modules read or write this exact shape — the writer
+/// (`session_launch::settings::pm_guard_hook_value`), the strip's identity
+/// predicate (`session_launch::project_hooks::is_project_managed_hook_command`),
+/// and [`TM_HOOK_ARGV_TAILS`] here. Each spelled the literal itself, so a
+/// change to the sub-flag would have silently split them: the writer would
+/// persist a shape the strip no longer recognises, and every relaunch would
+/// append a duplicate group instead of replacing one — the #2948 failure mode.
+/// One definition in the lowest layer, re-used upward, is the same fix
+/// [`DIVERT_CHECK_SUFFIX`] already applies to the sibling shape.
+/// What: the literal suffix, including its leading space.
+/// Test: `pm_guard_and_divert_commands_end_in_a_known_argv_tail` (the drift
+/// guard, in `session_launch::project_hooks_tests`),
+/// `build_tree_hook_command_matches_every_tm_argv_shape`.
+pub(crate) const PM_GUARD_SUFFIX: &str = " hook --pm-guard";
 
 /// Does `cmd` invoke a hook from a binary inside a Cargo build tree?
 ///
