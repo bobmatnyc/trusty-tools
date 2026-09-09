@@ -1,0 +1,6 @@
+Added
+
+- `tm pr cleanup <n>` reclaims everything a merged pull request made obsolete: the remote head branch, every worktree holding the merged head, the local head branch, its round-N siblings (`<branch>-r2`) and each `worktree-agent-*` branch at that commit, and the session claims on those directories. Five steps, one line of output each, exiting 0 only when all five succeeded.
+- A worktree holding uncommitted or unpushed work is the one refusal — cleanup never passes `--force`. A round-N sibling whose merge into the base would still change files is refused too, naming the residue files. `--dry-run` runs every read and issues no mutating command.
+- `tm pr merge` runs cleanup as its final step after the merge it performs, and the supervisor sweeps the pull requests `tm pr open` recorded every five minutes (`TRUSTY_MPM_PR_CLEANUP_INTERVAL`, `0` to disable), cleaning up after each one that has newly merged.
+- The ADR-0057 `git worktree remove` guard now accepts a merge into the base that changes nothing as landing evidence, so the post-`gh pr merge --delete-branch` state — a deleted remote branch leaving a stale tracking ref — and a round-N sibling that never carried a pull request of its own are both reclaimable rather than refused.

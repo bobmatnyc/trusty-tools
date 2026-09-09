@@ -180,6 +180,19 @@ pub trait WorktreeRemovalProbe {
     /// How many MERGED pull requests GitHub has for `branch`, and in WHICH
     /// repository the question was asked (#7057).
     fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<MergedPrLookup, String>;
+
+    /// Would merging this worktree's HEAD into its base change anything
+    /// (#7275)?
+    ///
+    /// Why: a review round lands on `<branch>-r2` and `version-control` pushes
+    /// it onto the PR's own head name, so the PR merges under `<branch>` and no
+    /// MERGED pull request ever carries the sibling's name — the guard refused
+    /// two such trees on 2026-09-09. Their content IS on the base, which is the
+    /// fact the merged-PR question was standing in for.
+    /// What: `Ok(true)` when the merge would be a no-op, `Ok(false)` when it
+    /// would change files or conflict, `Err` when git could not be asked —
+    /// which denies, like every other undeterminable answer here.
+    fn merge_into_base_is_a_noop(&self, dir: &Path) -> Result<bool, String>;
 }
 
 /// The production probe: git for the local facts, `gh` for the merge state.
@@ -265,6 +278,36 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
             repo,
         })
     }
+
+    fn merge_into_base_is_a_noop(&self, dir: &Path) -> Result<bool, String> {
+        // #7275, owner correction 2026-09-09: NOT `git cherry`. Every merge here
+        // is a squash, so its per-commit patch-id comparison reports `+` for
+        // content that IS on the base — observed on #7258. Merging into the base
+        // and diffing the result is the question that actually gets answered.
+        let base = base_ref_for(dir);
+        let tree = git_stdout(dir, &["merge-tree", "--write-tree", &base, "HEAD"])
+            .map_err(|e| format!("`git merge-tree --write-tree {base} HEAD` failed: {e}"))?;
+        let Some(tree) = tree.lines().next().map(str::trim).filter(|t| !t.is_empty()) else {
+            return Err(format!(
+                "`git merge-tree --write-tree {base} HEAD` named no tree"
+            ));
+        };
+        // `git diff --name-only` rather than `--quiet`: an empty answer is the
+        // no-op, and a non-empty one names the residue for the deny message.
+        let residue = git_stdout(dir, &["diff", "--name-only", &base, tree])
+            .map_err(|e| format!("`git diff --name-only {base} <merged tree>` failed: {e}"))?;
+        Ok(residue.trim().is_empty())
+    }
+}
+
+/// The base ref a worktree's content is judged against: `origin/HEAD`'s target,
+/// falling back to `origin/main` when the symbolic ref is not set locally.
+fn base_ref_for(dir: &Path) -> String {
+    git_stdout(dir, &["rev-parse", "--abbrev-ref", "origin/HEAD"])
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty() && s != "origin/HEAD")
+        .unwrap_or_else(|| "origin/main".to_string())
 }
 
 /// Whether `@{upstream}` resolves in `dir` (#7232).

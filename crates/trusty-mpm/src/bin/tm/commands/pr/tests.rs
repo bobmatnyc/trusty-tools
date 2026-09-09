@@ -83,6 +83,9 @@ struct FakePreflight {
     ownership: CrateOwnership,
     /// #7274 round 2: make `changed_paths` fail the way a broken `git` does.
     diff_fails: bool,
+    /// #7275: a scratch registry, so no test writes a live cleanup entry that
+    /// would arm the daemon's branch-deleting sweep against an invented repo.
+    registry_dir: tempfile::TempDir,
 }
 
 impl FakePreflight {
@@ -93,6 +96,7 @@ impl FakePreflight {
             changed: Vec::new(),
             ownership: CrateOwnership::default(),
             diff_fails: false,
+            registry_dir: tempfile::tempdir().expect("registry tempdir"),
         }
     }
 
@@ -124,6 +128,9 @@ impl Preflight for FakePreflight {
     }
     fn ownership(&self) -> CrateOwnership {
         self.ownership.clone()
+    }
+    fn cleanup_registry(&self) -> trusty_mpm::core::pr_cleanup::CleanupRegistry {
+        trusty_mpm::core::pr_cleanup::CleanupRegistry::under_root(self.registry_dir.path())
     }
 }
 
@@ -951,6 +958,53 @@ fn open_notes_an_unreadable_refs_issue() {
     assert!(edit.contains("--add-label trusty-mpm"), "{edit}");
     assert!(!edit.contains("--milestone"), "{edit}");
     assert!(!edit.contains("--add-project"), "{edit}");
+}
+
+// ── post-merge cleanup registry (#7275) ──────────────────────────────────
+
+/// REGRESSION (#7275): a PR `tm pr open` created is recorded for post-merge
+/// cleanup, keyed by the repo and number in `gh`'s own URL — with no second
+/// `gh` call, so the record cannot name a different remote than the push used.
+#[test]
+fn open_records_the_new_pr_for_cleanup() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new().on(
+        "pr create",
+        "https://github.com/bobmatnyc/trusty-tools/pull/7275\n",
+    );
+    let pre = FakePreflight::ok();
+    let code = open::run(&gh, &args, &pre).expect("create succeeds");
+    assert_eq!(code, super::EXIT_OK);
+    assert_eq!(
+        gh.calls().len(),
+        1,
+        "recording must not cost a second gh call"
+    );
+
+    let entries = pre.cleanup_registry().entries();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0].pr, 7275);
+    assert_eq!(entries[0].repo, "bobmatnyc/trusty-tools");
+    assert!(
+        entries[0].pending(),
+        "a freshly opened PR has not been cleaned up"
+    );
+}
+
+/// REGRESSION (#7275): a URL `gh` printed in a shape this cannot parse records
+/// nothing, rather than an entry naming a repository it guessed at.
+#[test]
+fn open_records_nothing_for_an_unparsable_url() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new().on("pr create", "created: see the web UI\n");
+    let pre = FakePreflight::ok();
+    open::run(&gh, &args, &pre).expect("create succeeds");
+    assert!(
+        pre.cleanup_registry().entries().is_empty(),
+        "an unparsable URL must not become a guessed registry entry"
+    );
 }
 
 #[test]

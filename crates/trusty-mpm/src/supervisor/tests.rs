@@ -250,9 +250,19 @@ fn config_defaults() {
     assert_eq!(c.interval.as_secs(), 30);
     assert!(!c.auto_resume);
     assert!(c.classify_idle);
-    // An empty injected env yields the same defaults (no process env touched).
+    assert_eq!(
+        c.pr_cleanup_interval, None,
+        "#7275: the post-merge cleanup sweep spawns `gh` and deletes branches, so it \
+         follows auto_resume's precedent and is OFF in a hand-constructed config"
+    );
+    // An empty injected env yields the same cadence and policy (no process env
+    // touched). The cleanup sweep is the one field that deliberately differs —
+    // `from_env` is the real daemon's path and turns it on; see above.
     let from_empty = SupervisorConfig::from_env_with(fake_env(&[]));
-    assert_eq!(from_empty, c);
+    assert_eq!(from_empty.interval, c.interval);
+    assert_eq!(from_empty.auto_resume, c.auto_resume);
+    assert_eq!(from_empty.classify_idle, c.classify_idle);
+    assert!(from_empty.pr_cleanup_interval.is_some());
 }
 
 #[test]
@@ -287,6 +297,68 @@ fn interval_env_parsing() {
     assert_eq!(garbage.interval.as_secs(), 30);
 }
 
+/// The cleanup cadence: on by default from the env, `0` turns it off, and a
+/// hand-built `Default` config never acquires it (#7275).
+#[test]
+fn pr_cleanup_interval_env_parsing() {
+    use crate::supervisor::config::{DEFAULT_PR_CLEANUP_SECS, ENV_PR_CLEANUP_SECS};
+
+    let unset = SupervisorConfig::from_env_with(fake_env(&[]));
+    assert_eq!(
+        unset.pr_cleanup_interval,
+        Some(std::time::Duration::from_secs(DEFAULT_PR_CLEANUP_SECS)),
+        "the real daemon sweeps every five minutes with no env set"
+    );
+
+    let slow = SupervisorConfig::from_env_with(fake_env(&[(ENV_PR_CLEANUP_SECS, "900")]));
+    assert_eq!(
+        slow.pr_cleanup_interval,
+        Some(std::time::Duration::from_secs(900))
+    );
+
+    let off = SupervisorConfig::from_env_with(fake_env(&[(ENV_PR_CLEANUP_SECS, "0")]));
+    assert_eq!(off.pr_cleanup_interval, None, "`0` is the off switch");
+
+    let garbage = SupervisorConfig::from_env_with(fake_env(&[(ENV_PR_CLEANUP_SECS, "soon")]));
+    assert_eq!(
+        garbage.pr_cleanup_interval,
+        Some(std::time::Duration::from_secs(DEFAULT_PR_CLEANUP_SECS)),
+        "an unparsable value falls back; only an explicit 0 disables"
+    );
+
+    assert_eq!(
+        SupervisorConfig::default().pr_cleanup_interval,
+        None,
+        "a hand-constructed config must not acquire a `gh`-spawning sweep by omission"
+    );
+}
+
+/// The cleanup sweep runs on the first tick, then only once per interval
+/// (#7275).
+#[test]
+fn pr_cleanup_is_due_only_after_the_interval() {
+    use crate::supervisor::pr_cleanup_tick::due;
+    use std::time::{Duration, Instant};
+
+    let now = Instant::now();
+    let interval = Duration::from_secs(300);
+
+    assert!(
+        due(Some(interval), None, now),
+        "the first tick after a restart sweeps, so a merge that landed while the \
+         daemon was down is not held for a full interval"
+    );
+    assert!(
+        !due(Some(interval), Some(now), now + Duration::from_secs(299)),
+        "a tick inside the interval must not sweep again"
+    );
+    assert!(due(Some(interval), Some(now), now + interval));
+    assert!(
+        !due(None, None, now),
+        "`None` is the off switch and never sweeps"
+    );
+}
+
 #[test]
 fn classify_idle_env_parsing() {
     let off = SupervisorConfig::from_env_with(fake_env(&[(ENV_CLASSIFY_IDLE, "off")]));
@@ -308,7 +380,7 @@ fn supervisor_config_ignores_a_stale_bind_address() {
     )]));
     assert_eq!(
         with_stale_addr,
-        SupervisorConfig::default(),
+        SupervisorConfig::from_env_with(fake_env(&[])),
         "a leftover TRUSTY_MPM_SUPERVISOR_ADDR in an operator's environment must \
          change nothing — the supervisor publishes to a file (#6288)"
     );
@@ -1213,6 +1285,8 @@ async fn supervisor_run_until_stops_cleanly() {
         interval: std::time::Duration::from_secs(3600),
         auto_resume: true,
         classify_idle: false,
+        // #7275: off, so this shutdown test never reaches a `gh` spawn.
+        pr_cleanup_interval: None,
     };
     let metrics_file = dir.path().join("supervisor-metrics.json");
     let sup: Supervisor<StubClassifier> = Supervisor::new(mgr, cfg, None)

@@ -142,13 +142,37 @@ pub(crate) fn evaluate_removal_rechecks(
     // the one that establishes the commits landed — unreachable.
     let upstream = match probe.unpushed_commits(target) {
         Ok(UpstreamComparison::Ahead(0)) => UpstreamComparison::Ahead(0),
-        Ok(UpstreamComparison::Ahead(n)) => {
-            return Some(recheck_deny(
-                CHECK_UNPUSHED_COMMITS,
-                target,
-                &format!("{n} commit(s) on HEAD are not on the upstream branch."),
-            ));
-        }
+        // #7275: being ahead of the upstream is not the same as holding work
+        // nobody has. `gh pr merge --delete-branch` deletes the remote branch,
+        // so the tracking ref goes stale on every squash-merged worktree and
+        // this arm refused five clean, merged trees on 2026-09-09. What matters
+        // is whether the content is on the base, which is asked directly.
+        Ok(UpstreamComparison::Ahead(n)) => match probe.merge_into_base_is_a_noop(target) {
+            Ok(true) => UpstreamComparison::Ahead(0),
+            Ok(false) => {
+                return Some(recheck_deny(
+                    CHECK_UNPUSHED_COMMITS,
+                    target,
+                    &format!(
+                        "{n} commit(s) on HEAD are not on the upstream branch, and merging \
+                         HEAD into the base would still change files — that work is on no \
+                         remote. Inspect it with `git -C {dir} diff --name-only $(git -C \
+                         {dir} rev-parse --abbrev-ref origin/HEAD)...HEAD`.",
+                        dir = target.display()
+                    ),
+                ));
+            }
+            Err(e) => {
+                return Some(recheck_deny(
+                    CHECK_UNPUSHED_COMMITS,
+                    target,
+                    &format!(
+                        "{n} commit(s) on HEAD are not on the upstream branch, and whether \
+                         their content is already on the base could not be established: {e}"
+                    ),
+                ));
+            }
+        },
         Ok(UpstreamComparison::NoUpstream) => UpstreamComparison::NoUpstream,
         // `UpstreamComparison` is `#[non_exhaustive]`, so a variant this build
         // does not know is reachable. It is a fact this policy cannot weigh,
@@ -210,17 +234,39 @@ pub(crate) fn evaluate_removal_rechecks(
         // #7057: the repository is named. "No merged pull request" is what a
         // lookup aimed at the WRONG repository says too, so the answer is
         // useless without knowing where it was asked.
-        Ok(lookup) if lookup.count == 0 => Some(recheck_deny(
-            CHECK_MERGED_PULL_REQUEST,
-            target,
-            &format!(
-                "GitHub has no MERGED pull request for `{branch}` in `{repo}` (resolved \
-                 from this worktree's `origin` remote). Ancestry is not an acceptable \
-                 substitute — a squash merge leaves the branch tip no ancestry \
-                 relationship to the squash commit.{no_upstream_note}",
-                repo = lookup.repo
-            ),
-        )),
+        // #7275: a round-N sibling never carries a pull request of its own —
+        // the review round lands on `<branch>-r2` and `version-control` pushes
+        // it onto the PR's head name, so `<branch>` (or `<branch>-r2`) is left
+        // with no MERGED row that can ever appear. Its content IS on the base,
+        // which is the fact the pull-request question was standing in for, so
+        // that fact is asked for directly before denying.
+        Ok(lookup) if lookup.count == 0 => match probe.merge_into_base_is_a_noop(target) {
+            Ok(true) => None,
+            Ok(false) => Some(recheck_deny(
+                CHECK_MERGED_PULL_REQUEST,
+                target,
+                &format!(
+                    "GitHub has no MERGED pull request for `{branch}` in `{repo}` (resolved \
+                     from this worktree's `origin` remote), and merging it into the base \
+                     would still change files — it holds work no merge has carried. Ancestry \
+                     is not an acceptable substitute — a squash merge leaves the branch tip \
+                     no ancestry relationship to the squash commit. Inspect the residue with \
+                     `git -C {dir} diff --name-only $(git -C {dir} rev-parse --abbrev-ref \
+                     origin/HEAD)...HEAD`.{no_upstream_note}",
+                    repo = lookup.repo,
+                    dir = target.display()
+                ),
+            )),
+            Err(e) => Some(recheck_deny(
+                CHECK_MERGED_PULL_REQUEST,
+                target,
+                &format!(
+                    "GitHub has no MERGED pull request for `{branch}` in `{repo}`, and whether \
+                     its content is already on the base could not be established: {e}",
+                    repo = lookup.repo
+                ),
+            )),
+        },
         Ok(_) => None,
         // #7232: the branch is named here too. A failed lookup used to quote
         // only the probe's error, so a deny an operator had to act on did not

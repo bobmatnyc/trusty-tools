@@ -2594,6 +2594,75 @@ fn cli_parses_pr_merge() {
     );
 }
 
+/// `tm pr cleanup <n>` parses, with `--repo` and `--dry-run` (#7275).
+///
+/// Why: the argv wiring IS the command's surface — the owner asked for one
+/// deterministic verb run as the final step after merge confirmation, so a
+/// missing subcommand or a renamed flag breaks the whole trigger chain.
+/// Test: this.
+#[test]
+fn cli_parses_pr_cleanup() {
+    use crate::cli::PrCmd;
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "pr",
+        "cleanup",
+        "7275",
+        "--repo",
+        "bobmatnyc/trusty-tools",
+        "--dry-run",
+    ])
+    .unwrap();
+    let Some(Command::Pr {
+        cmd: PrCmd::Cleanup(args),
+    }) = cli.command
+    else {
+        panic!("expected pr cleanup");
+    };
+    assert_eq!(args.pr, 7275);
+    assert_eq!(args.repo.as_deref(), Some("bobmatnyc/trusty-tools"));
+    assert!(args.dry_run);
+
+    let bare = Cli::try_parse_from(["trusty-mpm", "pr", "cleanup", "7275"]).unwrap();
+    let Some(Command::Pr {
+        cmd: PrCmd::Cleanup(args),
+    }) = bare.command
+    else {
+        panic!("expected pr cleanup");
+    };
+    assert!(
+        !args.dry_run,
+        "cleanup performs the work by default; --dry-run is the preview"
+    );
+    assert_eq!(args.repo, None);
+}
+
+/// `tm pr cleanup --help` names the five steps and the one refusal (#7275).
+#[test]
+fn cli_pr_cleanup_help_states_the_steps() {
+    use clap::CommandFactory as _;
+    let mut root = Cli::command();
+    let help = root
+        .find_subcommand_mut("pr")
+        .expect("pr group")
+        .find_subcommand_mut("cleanup")
+        .expect("cleanup verb")
+        .render_long_help()
+        .to_string();
+    for needle in [
+        "MERGED",
+        "remote-branch",
+        "worktree",
+        "local-branch",
+        "prune",
+        "never passes `--force`",
+        "record-only",
+        "--dry-run",
+    ] {
+        assert!(help.contains(needle), "`pr cleanup --help` omits {needle}");
+    }
+}
+
 /// `tm pr merge --help` names every refusal and the `--auto` semantics (#6808).
 #[test]
 fn cli_pr_merge_help_states_the_refusals() {

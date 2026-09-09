@@ -319,7 +319,7 @@ impl DirtyWorktree {
 /// `inspect_dirt_treats_missing_path_as_dirty`,
 /// `inspect_dirt_treats_non_worktree_with_files_as_dirty`,
 /// `inspect_dirt_allows_empty_non_git_leftover`.
-pub(crate) fn inspect_dirt(path: &Path) -> Option<DirtyWorktree> {
+pub fn inspect_dirt(path: &Path) -> Option<DirtyWorktree> {
     inspect_dirt_at(path, true)
 }
 

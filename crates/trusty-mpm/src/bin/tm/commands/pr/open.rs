@@ -58,6 +58,16 @@ pub(crate) trait Preflight {
     fn changed_paths(&self, base: &str) -> anyhow::Result<Vec<String>>;
     /// The workspace crate ownership used to label those paths (#7274).
     fn ownership(&self) -> CrateOwnership;
+    /// Where the PR just opened is recorded for post-merge cleanup (#7275).
+    ///
+    /// Why: the registry is real state under `~/.trusty-mpm`, and the daemon's
+    /// sweep acts on it by DELETING branches. A unit test that wrote a live
+    /// entry would arm that sweep against a repository the test invented, so
+    /// the path is injected through the seam that already carries this
+    /// command's environment rather than resolved at the write site.
+    /// Test: `open_records_the_new_pr_for_cleanup`,
+    /// `open_creates_and_reports`.
+    fn cleanup_registry(&self) -> trusty_mpm::core::pr_cleanup::CleanupRegistry;
 }
 
 /// What the changelog-fragment gate said.
@@ -96,6 +106,10 @@ impl Preflight for RealPreflight {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .or_else(crate::commands::statusline::branch::tmux_session_name)
+    }
+
+    fn cleanup_registry(&self) -> trusty_mpm::core::pr_cleanup::CleanupRegistry {
+        trusty_mpm::core::pr_cleanup::CleanupRegistry::production()
     }
 
     fn changelog_gate(&self, base: &str) -> anyhow::Result<ChangelogVerdict> {
@@ -355,6 +369,8 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
     // #7274: the PR half of the labels/project/milestone standard, applied
     // after the PR exists because every step needs its number.
     apply_metadata(gh, args, pre, number, &plan.body);
+    // #7275: record the PR so the daemon can clean up after it merges.
+    record_for_cleanup(pre, url, number);
     Ok(EXIT_OK)
 }
 
@@ -444,6 +460,55 @@ fn refs_issue<R: GhRunner>(gh: &R, args: &PrOpenArgs, number: u64) -> anyhow::Re
     let facts: IssueFacts =
         serde_json::from_str(&json).context("`gh issue view --json` returned unreadable JSON")?;
     Ok(RefsIssue::from_facts(number, &facts))
+}
+
+/// Record the PR just opened, so the daemon can clean up after it merges
+/// (#7275, owner amendment 2026-09-09).
+///
+/// Why: the periodic trigger has to know WHICH pull requests to watch. Every PR
+/// this harness creates comes through here, so this is the one place that
+/// knows — and the only place a second, competing registry could be avoided.
+/// What: appends a registry entry keyed by (repo, number), taking BOTH from the
+/// URL `gh pr create` just printed rather than asking `gh` again — a second
+/// round trip could resolve a different remote than the one that took the push.
+/// The checkout the PR was opened from is recorded too, so cleanup runs its git
+/// commands in the right tree. BEST-EFFORT: the PR is already open, so a failed
+/// write is a warning on stderr, never a failed `tm pr open` — the operator can
+/// still run `tm pr cleanup <n>` by hand.
+/// Test: `open_records_the_new_pr_for_cleanup`,
+/// `open_records_nothing_for_an_unparsable_url`.
+fn record_for_cleanup<P: Preflight>(pre: &P, url: &str, number: &str) {
+    let Ok(pr) = number.trim().parse::<u64>() else {
+        eprintln!("tm pr open: could not read the new PR's number; not recording it for cleanup");
+        return;
+    };
+    let (Some(repo), Ok(root)) = (repo_from_pr_url(url), std::env::current_dir()) else {
+        eprintln!("tm pr open: could not resolve the repo or cwd; not recording #{pr} for cleanup");
+        return;
+    };
+    let entry = trusty_mpm::core::pr_cleanup::OpenedPr {
+        pr,
+        repo,
+        repo_root: root,
+        opened_at: chrono::Utc::now(),
+        cleaned_at: None,
+    };
+    if let Err(e) = pre.cleanup_registry().record_open(entry) {
+        eprintln!("tm pr open: could not record #{pr} for post-merge cleanup: {e:#}");
+    }
+}
+
+/// `owner/repo` from a `https://<host>/<owner>/<repo>/pull/<n>` URL.
+///
+/// Test: `open_records_the_new_pr_for_cleanup`,
+/// `open_records_nothing_for_an_unparsable_url`.
+fn repo_from_pr_url(url: &str) -> Option<String> {
+    let (before, _) = url.trim().rsplit_once("/pull/")?;
+    let mut parts = before.rsplitn(3, '/');
+    let repo = parts.next()?;
+    let owner = parts.next()?;
+    (!repo.is_empty() && !owner.is_empty() && !owner.contains(':'))
+        .then(|| format!("{owner}/{repo}"))
 }
 
 /// Read the body file, rejecting an empty one before anything else.
