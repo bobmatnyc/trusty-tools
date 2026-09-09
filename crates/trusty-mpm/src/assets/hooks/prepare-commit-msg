@@ -1,0 +1,27 @@
+#!/bin/sh
+# trusty-mpm-commit-stats: v1
+#
+# Stamp the commit message with the session's token counts, savings percentage
+# and model id, as git trailers (#7074). Installed by trusty-mpm into the
+# repository's effective hooks directory, which every worktree of a base clone
+# shares.
+#
+# This hook must never block a commit. Every branch below exits 0, and the
+# stamping command is invoked with its output discarded: a missing `tm`, a
+# session with nothing recorded, or a `tm` that fails outright all leave the
+# message exactly as git wrote it.
+#
+# Set TM_SKIP_COMMIT_STATS=1 to turn it off for one commit.
+
+set -u
+
+[ -n "${TM_SKIP_COMMIT_STATS:-}" ] && exit 0
+
+# Only a commit made inside a Claude Code session has stats to report.
+[ -n "${CLAUDE_CODE_SESSION_ID:-}" ] || exit 0
+
+command -v tm >/dev/null 2>&1 || exit 0
+
+tm commit-trailers --message-file "$1" >/dev/null 2>&1
+
+exit 0

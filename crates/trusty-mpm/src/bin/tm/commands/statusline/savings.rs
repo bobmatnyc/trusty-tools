@@ -1,6 +1,5 @@
 //! The `💸` estimated-savings segment for `tm statusline` (#6958, percent
-//! form since #7179, session-share denominator since #7179's owner ruling
-//! 2026-09-08).
+//! form since #7179, per-session average beside it since #7074).
 //!
 //! Why: the owner asked to see what the harness saves by not sending tokens —
 //! instruction folding today, diverted file reads and compressed gate output as
@@ -12,35 +11,44 @@
 //! much of everything this session sent did we avoid" is the number that
 //! actually answers "how much are we saving", where a ledger-only ratio only
 //! answers it for the subset of tokens a savings technique happened to touch.
+//! #7074 then added the average, because one session's percentage says nothing
+//! about whether the harness is saving anything in general.
 //!
 //! What: folds `~/.trusty-mpm/usage/savings.jsonl` for the current session,
 //! reads that session's cumulative actual-token count from
 //! [`compaction::session_actual_tokens_for`] (the same per-session store
-//! `compaction.rs` already keys by `session_id` — no third store), and renders
-//! one segment:
+//! `compaction.rs` already keys by `session_id` — no third store), folds the
+//! same ledger once more grouped by session for the average, and renders one
+//! segment:
 //!
 //! | Fold | Renders |
 //! |---|---|
-//! | `tokens_saved > 0` and a percent denominator exists | `💸34%` |
+//! | `tokens_saved > 0`, a percent denominator, and other sessions on the ledger | `💸34% (avg 29%)` |
+//! | the same, but the ledger holds only this session | `💸34% (avg 34%)` |
 //! | zero fold, or no denominator at all (every row predates #7179 and no compaction tick has landed) | nothing at all |
 //!
-//! The percent is [`SavingsTotal::percent_saved`]: `saved / (actual + saved)`
-//! when a compaction tick has landed for this session, else the pre-ruling
-//! `saved / tokens_before` fallback — see that method's doc for why the
-//! fallback is never distinguished in the rendered string.
+//! The average is the arithmetic mean of each session's OWN percentage
+//! ([`average_percent_saved`]), which is the shape the owner ruled for on
+//! 2026-09-09: percentages do not sum into a lifetime total but do average
+//! cleanly. Both figures are derived at read time from the one ledger — this
+//! segment writes nothing, and adds no accumulator file of its own.
 //!
 //! **`0%` is unreachable by construction**, the same way `$0.00` was before
 //! #7179: [`SavingsTotal::is_zero`] gates the whole segment, so a fold with
-//! nothing to show renders nothing rather than a false `0%`.
+//! nothing to show renders nothing rather than a false `0%`, and the average is
+//! never rendered on its own.
 //!
 //! Test: `savings_segment_renders_a_percent`,
-//! `savings_segment_uses_the_session_actual_denominator_when_available`,
+//! `savings_segment_renders_the_average_beside_the_session_figure`,
 //! `savings_segment_is_absent_on_a_zero_fold`,
-//! `savings_segment_never_renders_zero_percent`.
+//! `savings_segment_never_renders_zero_percent`,
+//! `rendering_writes_nothing_under_the_usage_directory`.
 
 use std::path::{Path, PathBuf};
 
-use trusty_mpm::core::savings::{SavingsTotal, fold_session, savings_log_in};
+use trusty_mpm::core::savings::{
+    SavingsTotal, average_percent_saved, fold_session, fold_sessions, savings_log_in,
+};
 
 use super::compaction;
 
@@ -51,10 +59,13 @@ use super::compaction;
 /// and no resolved framework root.
 /// What: resolves the ledger under the operator's framework root — the same
 /// `--root` / `TRUSTY_MPM_ROOT` / XDG-config / `~/.trusty-mpm` chain every other
-/// `tm` command honours — folds it for this session, reads this session's
-/// cumulative actual-token count from [`compaction::session_actual_tokens_for`]
-/// (#7179), and renders. An empty `session_id` (Claude Code sends one only
-/// once the session has an id) omits the segment without touching the disk.
+/// `tm` command honours — folds it for this session and for every session, and
+/// renders. Each session's actual-token count comes from
+/// [`compaction::session_actual_tokens_for`] (#7179), which is why the lookup
+/// is passed as a closure rather than a single reading: the average needs one
+/// per session, not this session's applied to all of them. An empty
+/// `session_id` (Claude Code sends one only once the session has an id) omits
+/// the segment without touching the disk.
 /// Test: `savings_segment_probe_is_absent_without_a_session_id`,
 /// `savings_segment_reads_the_ledger_under_an_explicit_root`.
 pub(crate) fn savings_segment_probe(session_id: &str) -> Option<String> {
@@ -62,31 +73,42 @@ pub(crate) fn savings_segment_probe(session_id: &str) -> Option<String> {
         return None;
     }
     let root = savings_root()?;
-    let actual_tokens = compaction::session_actual_tokens_for(session_id);
-    savings_segment_at(&savings_log_in(&root), session_id, actual_tokens)
+    savings_segment_at(&savings_log_in(&root), session_id, |id| {
+        compaction::session_actual_tokens_for(id)
+    })
 }
 
 /// [`savings_segment_probe`] against an explicit ledger path.
 ///
 /// Why: makes the missing-ledger and populated-ledger branches assertable end
-/// to end from a temp directory, with no environment mutation. Taking
-/// `session_actual_tokens` as a parameter (rather than reading the compaction
-/// state file itself) keeps this function's own I/O to the one ledger path its
+/// to end from a temp directory, with no environment mutation. Taking the
+/// actual-tokens lookup as a parameter (rather than reading the compaction
+/// state files itself) keeps this function's own I/O to the one ledger path its
 /// tests already control.
-/// What: folds `ledger` for `session_id` and renders the result against
-/// `session_actual_tokens` — the session's cumulative actual-token count, or
-/// `None` when no compaction tick has landed yet (#7179).
+/// What: folds `ledger` for `session_id`, folds it again grouped by session for
+/// the average (#7074), and renders. `actual_tokens` answers, per session id,
+/// that session's cumulative actual-token count, or `None` when no compaction
+/// tick has landed for it yet (#7179).
 /// Test: `savings_segment_is_absent_when_the_ledger_is_missing`,
-/// `savings_segment_reads_the_ledger_under_an_explicit_root`.
+/// `savings_segment_reads_the_ledger_under_an_explicit_root`,
+/// `savings_segment_renders_the_average_beside_the_session_figure`.
 pub(crate) fn savings_segment_at(
     ledger: &Path,
     session_id: &str,
-    session_actual_tokens: Option<u64>,
+    actual_tokens: impl Fn(&str) -> Option<u64>,
 ) -> Option<String> {
-    render_savings_segment(&fold_session(ledger, session_id), session_actual_tokens)
+    let total = fold_session(ledger, session_id);
+    if total.is_zero() {
+        // Criterion 3 (#7074): a session with no savings rows shows neither
+        // figure, so the second fold is not even worth doing.
+        return None;
+    }
+    let average = average_percent_saved(&fold_sessions(ledger), &actual_tokens);
+    render_savings_segment(&total, actual_tokens(session_id), average)
 }
 
-/// Remember which model this session runs, for the divert producer to price at.
+/// Remember what only the `statusLine` payload knows: the session's model and
+/// the path to its own transcript.
 ///
 /// Why (#6972): `tm divert` runs in its own process and has no way to learn the
 /// parent session's model — Claude Code exports no model variable to a hook
@@ -96,23 +118,37 @@ pub(crate) fn savings_segment_at(
 /// diversion priced at the config chain's Sonnet default: an Opus session
 /// under-reported its savings by five times, and three smoke diversions wrote no
 /// row at all because the Haiku worker's bill exceeded the understated delta.
-/// What: writes `model_id` under the same framework root the ledger uses, and
-/// only when it changed — the store does the comparison, so a steady session
-/// costs one small read per render. `model.display_name` is deliberately not a
-/// fallback: the price table matches on slugs (`claude-opus-…`), and a bare
-/// "Opus" would not price. The two early returns exist to skip resolving the
-/// root at all before Claude Code has assigned a session id.
-/// Test: the store's own suite — `a_recorded_model_reads_back`,
-/// `an_unchanged_model_leaves_the_file_untouched`,
-/// `a_blank_model_is_never_recorded`.
-pub(crate) fn record_parent_model(session_id: &str, model_id: &str) {
-    if session_id.is_empty() || model_id.trim().is_empty() {
+/// Since #7074 the same record also names the model in the commit footer, and
+/// `transcript_path` joins it: the transcript is the only place a session's
+/// output-token count exists, and `tm commit-trailers` runs in a different
+/// process that is never handed the path.
+/// What: writes both values under the same framework root the ledger uses, and
+/// only when they changed — the store does the comparison, so a steady session
+/// costs two small reads per render and no write. `model.display_name` is
+/// deliberately not a fallback: the price table matches on slugs
+/// (`claude-opus-…`), and a bare "Opus" would not price. An absent value is
+/// skipped rather than written blank, so a payload that omits one field cannot
+/// erase a good record.
+/// Test: the store's own suite — `a_recorded_value_reads_back`,
+/// `an_unchanged_value_leaves_the_file_untouched`,
+/// `a_blank_value_is_never_recorded`, `two_kinds_do_not_collide`.
+pub(crate) fn record_session_facts(session_id: &str, model_id: &str, transcript_path: &str) {
+    if session_id.is_empty() {
+        return;
+    }
+    if model_id.trim().is_empty() && transcript_path.trim().is_empty() {
         return;
     }
     let Some(root) = savings_root() else {
         return;
     };
     trusty_mpm::core::session_model::record_session_model(&root, session_id, model_id);
+    trusty_mpm::core::session_record::record_session_value(
+        &root,
+        trusty_mpm::core::session_record::KIND_TRANSCRIPT,
+        session_id,
+        transcript_path,
+    );
 }
 
 /// Resolve the framework root the ledger lives under.
@@ -138,23 +174,28 @@ fn savings_root() -> Option<PathBuf> {
 /// `0%`, never a fabricated figure.
 /// What: `💸<N>%` from [`SavingsTotal::percent_saved`] against
 /// `session_actual_tokens` (#7179's session-share denominator, or its
-/// pre-ruling `tokens_before` fallback on `None`); `None` on
-/// [`SavingsTotal::is_zero`] or when that method itself returns `None` (no
-/// denominator on either path).
+/// pre-ruling `tokens_before` fallback on `None`), followed by ` (avg <M>%)`
+/// when an average exists (#7074). `None` on [`SavingsTotal::is_zero`] or when
+/// that method itself returns `None` (no denominator on either path) — and in
+/// that case the average is not rendered on its own, because a session with no
+/// figure of its own shows neither (criterion 3).
 /// Test: `savings_segment_renders_a_percent`,
-/// `savings_segment_uses_the_session_actual_denominator_when_available`,
+/// `savings_segment_renders_the_average_beside_the_session_figure`,
 /// `savings_segment_is_absent_on_a_zero_fold`,
 /// `savings_segment_never_renders_zero_percent`.
 pub(crate) fn render_savings_segment(
     total: &SavingsTotal,
     session_actual_tokens: Option<u64>,
+    average_percent: Option<u32>,
 ) -> Option<String> {
     if total.is_zero() {
         return None;
     }
-    total
-        .percent_saved(session_actual_tokens)
-        .map(|pct| format!("\u{1f4b8}{pct}%"))
+    let pct = total.percent_saved(session_actual_tokens)?;
+    Some(match average_percent {
+        Some(avg) => format!("\u{1f4b8}{pct}% (avg {avg}%)"),
+        None => format!("\u{1f4b8}{pct}%"),
+    })
 }
 
 #[cfg(test)]
@@ -171,6 +212,23 @@ mod tests {
         }
     }
 
+    fn write_row(ledger: &Path, session_id: &str, tokens_saved: i64, tokens_before: u64) {
+        append_row(
+            ledger,
+            &SavingsRow {
+                ts: now_ts(),
+                session_id: session_id.to_string(),
+                technique: "instruction-compression".to_string(),
+                tokens_saved,
+                tokens_before,
+                cost_saved_usd: 0.18,
+                basis: "fixture".to_string(),
+                model_source: "launch-config".to_string(),
+            },
+        )
+        .expect("append");
+    }
+
     /// Why (#7179): with no actual-tokens reading supplied, the segment falls
     /// back to the pre-ruling ledger-only formula — pinned here so a
     /// regression in the fallback path is caught independently of the
@@ -179,12 +237,24 @@ mod tests {
     #[test]
     fn savings_segment_renders_a_percent() {
         assert_eq!(
-            render_savings_segment(&total(1, 3), None).as_deref(),
+            render_savings_segment(&total(1, 3), None, None).as_deref(),
             Some("\u{1f4b8}33%")
         );
         assert_eq!(
-            render_savings_segment(&total(5_000, 20_000), None).as_deref(),
+            render_savings_segment(&total(5_000, 20_000), None, None).as_deref(),
             Some("\u{1f4b8}25%")
+        );
+    }
+
+    /// Why (#7074): the average renders beside the session's own figure, not
+    /// instead of it. A render that dropped either half would still look like a
+    /// savings segment.
+    /// Test: itself.
+    #[test]
+    fn savings_segment_renders_the_average_beside_the_session_figure() {
+        assert_eq!(
+            render_savings_segment(&total(5_000, 20_000), None, Some(29)).as_deref(),
+            Some("\u{1f4b8}25% (avg 29%)")
         );
     }
 
@@ -195,7 +265,7 @@ mod tests {
     #[test]
     fn savings_segment_uses_the_session_actual_denominator_when_available() {
         assert_eq!(
-            render_savings_segment(&total(40_000, 999_999), Some(160_000)).as_deref(),
+            render_savings_segment(&total(40_000, 999_999), Some(160_000), None).as_deref(),
             Some("\u{1f4b8}20%")
         );
     }
@@ -205,7 +275,10 @@ mod tests {
     /// Test: itself.
     #[test]
     fn savings_segment_is_absent_on_a_zero_fold() {
-        assert_eq!(render_savings_segment(&SavingsTotal::default(), None), None);
+        assert_eq!(
+            render_savings_segment(&SavingsTotal::default(), None, None),
+            None
+        );
         assert_eq!(
             render_savings_segment(
                 &SavingsTotal {
@@ -214,9 +287,11 @@ mod tests {
                     cost_saved_usd: 0.0,
                     rows: 3,
                 },
-                None
+                None,
+                Some(40),
             ),
-            None
+            None,
+            "an average must never render on its own"
         );
     }
 
@@ -235,7 +310,8 @@ mod tests {
                     cost_saved_usd: 0.01,
                     rows: 1,
                 },
-                None
+                None,
+                None,
             ),
             None
         );
@@ -250,7 +326,7 @@ mod tests {
     #[test]
     fn savings_segment_never_renders_zero_percent() {
         for (tokens_saved, tokens_before) in [(1_u64, 200), (12_000, 12_000_100), (5, 1_000)] {
-            let rendered = render_savings_segment(&total(tokens_saved, tokens_before), None)
+            let rendered = render_savings_segment(&total(tokens_saved, tokens_before), None, None)
                 .unwrap_or_default();
             assert_ne!(
                 rendered, "\u{1f4b8}0%",
@@ -267,36 +343,95 @@ mod tests {
     fn savings_segment_is_absent_when_the_ledger_is_missing() {
         let dir = tempfile::tempdir().expect("temp dir");
         let ledger = dir.path().join("usage").join("savings.jsonl");
-        assert_eq!(savings_segment_at(&ledger, "sess-1", None), None);
+        assert_eq!(savings_segment_at(&ledger, "sess-1", |_| None), None);
+    }
+
+    /// Why (#7074, acceptance criterion b): an EMPTY ledger must render neither
+    /// the per-session figure nor the average — a file that exists but holds no
+    /// row is a different code path from a file that does not exist.
+    /// Test: itself.
+    #[test]
+    fn savings_segment_is_absent_on_an_empty_ledger() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ledger = savings_log_in(dir.path());
+        std::fs::create_dir_all(ledger.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&ledger, "").expect("write empty ledger");
+        assert_eq!(savings_segment_at(&ledger, "sess-1", |_| None), None);
     }
 
     /// Why: proves the whole path — append a row, fold it back for that session
-    /// id, and render — without touching the operator's real root.
+    /// id, and render — without touching the operator's real root. With one
+    /// session on the ledger the average is that session's own figure
+    /// (#7074, acceptance criterion a).
     /// Test: itself.
     #[test]
     fn savings_segment_reads_the_ledger_under_an_explicit_root() {
         let dir = tempfile::tempdir().expect("temp dir");
         let ledger = savings_log_in(dir.path());
-        append_row(
-            &ledger,
-            &SavingsRow {
-                ts: now_ts(),
-                session_id: "sess-1".to_string(),
-                technique: "instruction-compression".to_string(),
-                tokens_saved: 12_000,
-                tokens_before: 60_000,
-                cost_saved_usd: 0.18,
-                basis: "sources 60000 B - compiled 12000 B".to_string(),
-                model_source: "launch-config".to_string(),
-            },
-        )
-        .expect("append");
+        write_row(&ledger, "sess-1", 12_000, 60_000);
         assert_eq!(
-            savings_segment_at(&ledger, "sess-1", None).as_deref(),
-            Some("\u{1f4b8}20%")
+            savings_segment_at(&ledger, "sess-1", |_| None).as_deref(),
+            Some("\u{1f4b8}20% (avg 20%)")
         );
         // A different session's bar reads nothing from the same file.
-        assert_eq!(savings_segment_at(&ledger, "sess-2", None), None);
+        assert_eq!(savings_segment_at(&ledger, "sess-2", |_| None), None);
+    }
+
+    /// Why (#7074, acceptance criterion a): three sessions on one ledger, and
+    /// the rendered average is their arithmetic mean — 10, 30 and 50 average to
+    /// 30, while a pooled ratio over the same rows would render 29.
+    /// Test: itself.
+    #[test]
+    fn savings_segment_averages_across_every_session_on_the_ledger() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ledger = savings_log_in(dir.path());
+        write_row(&ledger, "sess-a", 100, 1_000); // 10 %
+        write_row(&ledger, "sess-b", 3_000, 10_000); // 30 %
+        write_row(&ledger, "sess-c", 500, 1_000); // 50 %
+
+        assert_eq!(
+            savings_segment_at(&ledger, "sess-a", |_| None).as_deref(),
+            Some("\u{1f4b8}10% (avg 30%)")
+        );
+    }
+
+    /// Why (#7074, acceptance criterion e): the average is derived at read
+    /// time. A future implementation that cached it into a rollup file would
+    /// reintroduce the second writer the 2026-07-29 owner ruling forbids, and
+    /// the two surfaces could then drift. Asserting the directory listing is
+    /// byte-identical after a render is what catches that.
+    /// Test: itself.
+    #[test]
+    fn rendering_writes_nothing_under_the_usage_directory() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ledger = savings_log_in(dir.path());
+        write_row(&ledger, "sess-a", 100, 1_000);
+        write_row(&ledger, "sess-b", 300, 1_000);
+
+        let usage_dir = ledger.parent().expect("usage dir").to_path_buf();
+        let listing = |dir: &Path| -> Vec<(String, u64)> {
+            let mut entries: Vec<(String, u64)> = std::fs::read_dir(dir)
+                .expect("read usage dir")
+                .map(|entry| {
+                    let entry = entry.expect("entry");
+                    let len = entry.metadata().expect("metadata").len();
+                    (entry.file_name().to_string_lossy().into_owned(), len)
+                })
+                .collect();
+            entries.sort();
+            entries
+        };
+
+        let before = listing(&usage_dir);
+        assert!(
+            savings_segment_at(&ledger, "sess-a", |_| None).is_some(),
+            "the fixture must render, or this test proves nothing"
+        );
+        assert_eq!(
+            listing(&usage_dir),
+            before,
+            "rendering must add or grow no file under usage/"
+        );
     }
 
     /// Why: before Claude Code assigns a session id there is nothing to fold,

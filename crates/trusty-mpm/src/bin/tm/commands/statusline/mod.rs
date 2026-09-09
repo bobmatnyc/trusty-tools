@@ -34,7 +34,7 @@ use crate::formatters::info_box::DaemonInfo;
 use account::{claude_account_segment_probe, claude_json_path};
 use branch::project_segment;
 use compaction::{ContextWindow, colorize_ctx_segment, compaction_segment};
-use savings::{record_parent_model, savings_segment_probe};
+use savings::{record_session_facts, savings_segment_probe};
 use usage::{RateLimits, usage_segment};
 
 /// Claude Code `statusLine` hook input (all fields optional via `#[serde(default)]`).
@@ -50,6 +50,10 @@ pub(crate) struct StatusInput {
     pub(crate) session_id: String,
     #[serde(default)]
     pub(crate) cwd: String,
+    /// #7074: the session's own transcript, the only source of its token
+    /// counts. Remembered per session so `tm commit-trailers` can fold it.
+    #[serde(default)]
+    pub(crate) transcript_path: String,
     #[serde(default)]
     pub(crate) model: ModelInfo,
     #[serde(default)]
@@ -144,8 +148,10 @@ fn render_statusline_from(input: &StatusInput, account_config: Option<&Path>) ->
     let model = model_segment(&input.model);
     // #6972: this payload is the only place the authoritative model id reaches
     // `tm`, so remember it here for `tm divert` — a separate process — to price
-    // its savings rows at. Writes only when the id changed.
-    record_parent_model(&input.session_id, &input.model.id);
+    // its savings rows at. #7074 adds the transcript path on the same footing,
+    // for `tm commit-trailers` to fold a session's token counts out of. Writes
+    // only when a value changed.
+    record_session_facts(&input.session_id, &input.model.id, &input.transcript_path);
 
     // Compaction efficiency / live context fill; falls back to a bare
     // `ctx>200k` marker when no context-window payload was sent at all.
@@ -383,6 +389,7 @@ mod tests {
         StatusInput {
             session_id: String::new(),
             cwd: "/home/user/my-project".to_string(),
+            transcript_path: String::new(),
             model: ModelInfo {
                 id: "claude-sonnet-4-6".to_string(),
                 display_name: "Claude Sonnet 4.6".to_string(),

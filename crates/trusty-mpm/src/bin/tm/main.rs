@@ -671,6 +671,7 @@ async fn main() -> anyhow::Result<()> {
             commands::sessctl::dispatch(&client, &url, action).await
         }
         Some(Command::Statusline) => commands::statusline::run_statusline(),
+        Some(Command::CommitTrailers(args)) => commands::commit_trailers::run(&args),
         Some(Command::Banner { reconnecting }) => {
             commands::banner::run_banner_preview(reconnecting)
         }

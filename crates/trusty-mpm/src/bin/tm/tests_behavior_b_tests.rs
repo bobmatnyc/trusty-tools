@@ -2169,6 +2169,34 @@ fn launch_paths_prepare_through_the_isolated_seam() {
     );
 }
 
+/// `tm commit-trailers` takes an optional `--message-file`; bare, it prints the
+/// trailers. The bundled `prepare-commit-msg` hook passes the path git hands
+/// it, so a rename of that flag silently stops every commit being stamped
+/// (#7074).
+#[test]
+fn cli_parses_commit_trailers() {
+    let bare = Cli::try_parse_from(["trusty-mpm", "commit-trailers"]).unwrap();
+    match bare.command.unwrap() {
+        Command::CommitTrailers(args) => assert_eq!(args.message_file, None),
+        other => panic!("expected CommitTrailers, got {other:?}"),
+    }
+
+    let with_file = Cli::try_parse_from([
+        "trusty-mpm",
+        "commit-trailers",
+        "--message-file",
+        "/tmp/COMMIT_EDITMSG",
+    ])
+    .unwrap();
+    match with_file.command.unwrap() {
+        Command::CommitTrailers(args) => assert_eq!(
+            args.message_file.as_deref(),
+            Some(std::path::Path::new("/tmp/COMMIT_EDITMSG"))
+        ),
+        other => panic!("expected CommitTrailers, got {other:?}"),
+    }
+}
+
 /// The default must touch NO binary and clobber NOTHING — a `tm reinstall`
 /// typed with no flags refreshes assets only.
 #[test]

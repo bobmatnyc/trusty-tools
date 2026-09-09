@@ -42,6 +42,57 @@ pub const PRE_PUSH_HOOK: &str = include_str!("../assets/hooks/pre-push");
 /// Test: `bundled_hook_carries_marker_and_shebang`.
 pub const HOOK_MARKER: &str = "trusty-mpm-push-guard:";
 
+/// The bundled `prepare-commit-msg` stats stamper, installed verbatim (#7074).
+///
+/// Why: the commit footer's token counts, savings percentage and model id have
+/// to be added by something that runs at commit time in the repository the
+/// commit is being made in — a settings-tier attribution string is fixed text
+/// and cannot carry a per-commit measurement. Shipping it beside the `pre-push`
+/// guard means one installer, one ownership rule, and one refusal path.
+/// What: the contents of `../assets/hooks/prepare-commit-msg`.
+/// Test: `bundled_commit_stats_hook_carries_its_marker`.
+pub const PREPARE_COMMIT_MSG_HOOK: &str = include_str!("../assets/hooks/prepare-commit-msg");
+
+/// Marker line identifying a `prepare-commit-msg` hook as trusty-mpm's own.
+///
+/// Test: `bundled_commit_stats_hook_carries_its_marker`.
+pub const COMMIT_STATS_MARKER: &str = "trusty-mpm-commit-stats:";
+
+/// One bundled hook: which slot it occupies, what it contains, and how to
+/// recognise an older revision of it.
+///
+/// Why (#7074): trusty-mpm now ships two hooks, and every rule that made the
+/// `pre-push` installer safe — refuse a foreign hook, refuse a symlink, refuse
+/// what cannot be read, write atomically — has to apply identically to the
+/// second. Parameterising the one installer is what keeps a second copy of
+/// those rules from existing at all.
+/// What: the three values the installer branches on.
+/// Test: `installs_then_reports_already_current` (pre-push),
+/// `installs_the_commit_stats_hook` (prepare-commit-msg).
+#[derive(Debug, Clone, Copy)]
+pub struct BundledHook {
+    /// The hook's file name in the hooks directory, e.g. `pre-push`.
+    pub name: &'static str,
+    /// The script installed verbatim.
+    pub script: &'static str,
+    /// The comment line that identifies the script as ours.
+    pub marker: &'static str,
+}
+
+/// The cross-branch push guard (#2867).
+pub const PUSH_GUARD: BundledHook = BundledHook {
+    name: "pre-push",
+    script: PRE_PUSH_HOOK,
+    marker: HOOK_MARKER,
+};
+
+/// The per-commit stats stamper (#7074).
+pub const COMMIT_STATS: BundledHook = BundledHook {
+    name: "prepare-commit-msg",
+    script: PREPARE_COMMIT_MSG_HOOK,
+    marker: COMMIT_STATS_MARKER,
+};
+
 /// Result of an [`install_pre_push_guard`] attempt.
 ///
 /// Why: callers log the three outcomes differently — an install is worth an
@@ -139,11 +190,22 @@ pub enum GuardState {
 /// Test: `inspect_reports_missing_then_current`, `refuses_non_utf8_foreign_hook`,
 /// `refuses_symlinked_hook`, `refuses_unreadable_hook`.
 pub fn inspect_pre_push_guard(repo_path: &Path) -> GuardState {
+    inspect_hook(repo_path, &PUSH_GUARD)
+}
+
+/// Classify `repo_path`'s slot for `hook` without writing anything.
+///
+/// Why/What: the generalized body of [`inspect_pre_push_guard`] — see that
+/// function's doc for the ownership rules, which are unchanged and now apply to
+/// both bundled hooks (#7074).
+/// Test: `inspect_reports_missing_then_current`, `refuses_foreign_hook`,
+/// `installs_the_commit_stats_hook`.
+pub fn inspect_hook(repo_path: &Path, hook: &BundledHook) -> GuardState {
     let hooks_dir = match effective_hooks_dir(repo_path) {
         Ok(d) => d,
         Err(reason) => return GuardState::Foreign(reason),
     };
-    let hook_path = hooks_dir.join("pre-push");
+    let hook_path = hooks_dir.join(hook.name);
 
     match std::fs::symlink_metadata(&hook_path) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -162,11 +224,12 @@ pub fn inspect_pre_push_guard(repo_path: &Path) -> GuardState {
     }
 
     match std::fs::read(&hook_path) {
-        Ok(bytes) if !contains_marker(&bytes) => GuardState::Foreign(format!(
-            "a non-trusty-mpm pre-push hook already exists at {}",
+        Ok(bytes) if !contains_marker(&bytes, hook.marker) => GuardState::Foreign(format!(
+            "a non-trusty-mpm {} hook already exists at {}",
+            hook.name,
             hook_path.display()
         )),
-        Ok(bytes) if bytes == PRE_PUSH_HOOK.as_bytes() => GuardState::Current(hook_path),
+        Ok(bytes) if bytes == hook.script.as_bytes() => GuardState::Current(hook_path),
         Ok(_) => GuardState::Outdated(hook_path),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => GuardState::Missing(hook_path),
         Err(e) => GuardState::Foreign(format!(
@@ -192,7 +255,18 @@ pub fn inspect_pre_push_guard(repo_path: &Path) -> GuardState {
 /// `refuses_non_utf8_foreign_hook`, `refuses_symlinked_hook`, plus
 /// `crates/trusty-mpm/tests/push_guard_hook.rs` end-to-end.
 pub fn install_pre_push_guard(repo_path: &Path) -> Result<HookInstall, String> {
-    let hook_path = match inspect_pre_push_guard(repo_path) {
+    install_hook(repo_path, &PUSH_GUARD)
+}
+
+/// Install `hook` into `repo_path`, idempotently.
+///
+/// Why/What: the generalized body of [`install_pre_push_guard`] — see that
+/// function's doc for the write rules, unchanged and now shared by both bundled
+/// hooks (#7074).
+/// Test: `installs_then_reports_already_current`, `refuses_foreign_hook`,
+/// `installs_the_commit_stats_hook`.
+pub fn install_hook(repo_path: &Path, hook: &BundledHook) -> Result<HookInstall, String> {
+    let hook_path = match inspect_hook(repo_path, hook) {
         GuardState::Current(p) => return Ok(HookInstall::AlreadyCurrent(p)),
         GuardState::Foreign(reason) => return Ok(HookInstall::Refused(reason)),
         GuardState::Missing(p) | GuardState::Outdated(p) => p,
@@ -204,7 +278,7 @@ pub fn install_pre_push_guard(repo_path: &Path) -> Result<HookInstall, String> {
 
     std::fs::create_dir_all(&hooks_dir)
         .map_err(|e| format!("failed to create {}: {e}", hooks_dir.display()))?;
-    write_hook_atomically(&hooks_dir, &hook_path)?;
+    write_hook_atomically(&hooks_dir, &hook_path, hook)?;
     Ok(HookInstall::Installed(hook_path))
 }
 
@@ -214,8 +288,8 @@ pub fn install_pre_push_guard(repo_path: &Path) -> Result<HookInstall, String> {
 /// cannot go through `str::contains`.
 /// What: a byte-level substring search for the marker.
 /// Test: `refuses_non_utf8_foreign_hook`, `reinstalls_over_an_older_trusty_mpm_revision`.
-fn contains_marker(bytes: &[u8]) -> bool {
-    let needle = HOOK_MARKER.as_bytes();
+fn contains_marker(bytes: &[u8], marker: &str) -> bool {
+    let needle = marker.as_bytes();
     bytes.windows(needle.len()).any(|w| w == needle)
 }
 
@@ -231,13 +305,17 @@ fn contains_marker(bytes: &[u8]) -> bool {
 /// renames it over `hook_path`. The temp file is removed on any failure.
 /// Test: `installs_then_reports_already_current` (mode + content survive the
 /// rename), `atomic_write_leaves_no_temp_file_behind`.
-fn write_hook_atomically(hooks_dir: &Path, hook_path: &Path) -> Result<(), String> {
-    let tmp_path = hooks_dir.join(format!("pre-push.tmp.{}", std::process::id()));
+fn write_hook_atomically(
+    hooks_dir: &Path,
+    hook_path: &Path,
+    hook: &BundledHook,
+) -> Result<(), String> {
+    let tmp_path = hooks_dir.join(format!("{}.tmp.{}", hook.name, std::process::id()));
     let cleanup = |e: String| {
         let _ = std::fs::remove_file(&tmp_path);
         e
     };
-    std::fs::write(&tmp_path, PRE_PUSH_HOOK)
+    std::fs::write(&tmp_path, hook.script)
         .map_err(|e| cleanup(format!("failed to write {}: {e}", tmp_path.display())))?;
     set_executable(&tmp_path).map_err(cleanup)?;
     std::fs::rename(&tmp_path, hook_path).map_err(|e| {
@@ -263,21 +341,34 @@ fn write_hook_atomically(hooks_dir: &Path, hook_path: &Path) -> Result<(), Strin
 /// `daemon::managed_routes::inproject::tests` base-clone coverage
 /// (call-site wiring).
 pub fn install_and_log(repo_path: &Path) {
-    match install_pre_push_guard(repo_path) {
+    install_one_and_log(repo_path, &PUSH_GUARD, "cross-branch push guard (#2867)");
+    install_one_and_log(repo_path, &COMMIT_STATS, "commit stats stamper (#7074)");
+}
+
+/// Install one bundled hook, log the outcome, and never fail.
+///
+/// Why (#7074): both bundled hooks want the identical four-arm outcome
+/// handling, and `label` is what keeps the log line naming the right feature.
+/// What: see [`install_and_log`]; `label` is the human name used in each
+/// message.
+/// Test: `crates/trusty-mpm/tests/push_guard_hook.rs` (behaviour) and
+/// `daemon::managed_routes::inproject::tests` base-clone coverage.
+fn install_one_and_log(repo_path: &Path, hook: &BundledHook, label: &str) {
+    match install_hook(repo_path, hook) {
         Ok(HookInstall::Installed(p)) => {
-            tracing::info!(hook = %p.display(), "cross-branch push guard installed (#2867)");
+            tracing::info!(hook = %p.display(), "{label} installed");
         }
         Ok(HookInstall::AlreadyCurrent(_)) => {}
         Ok(HookInstall::Refused(reason)) => {
             tracing::warn!(
                 repo = %repo_path.display(),
-                "cross-branch push guard NOT installed (#2867): {reason}"
+                "{label} NOT installed: {reason}"
             );
         }
         Err(e) => {
             tracing::warn!(
                 repo = %repo_path.display(),
-                "cross-branch push guard install failed (non-fatal): {e}"
+                "{label} install failed (non-fatal): {e}"
             );
         }
     }
@@ -357,6 +448,64 @@ mod tests {
             PRE_PUSH_HOOK.contains("TM_ALLOW_CROSS_BRANCH_PUSH"),
             "the bundled hook must document its override env var"
         );
+    }
+
+    /// Why (#7074): the second bundled hook has to satisfy the same three
+    /// properties the installer relies on — a POSIX shebang, its own ownership
+    /// marker, and a documented escape hatch.
+    /// Test: itself.
+    #[test]
+    fn bundled_commit_stats_hook_carries_its_marker() {
+        assert!(
+            PREPARE_COMMIT_MSG_HOOK.starts_with("#!/bin/sh"),
+            "the bundled hook must be a POSIX sh script"
+        );
+        assert!(
+            PREPARE_COMMIT_MSG_HOOK.contains(COMMIT_STATS_MARKER),
+            "the bundled hook must carry the ownership marker {COMMIT_STATS_MARKER}"
+        );
+        assert!(
+            PREPARE_COMMIT_MSG_HOOK.contains("TM_SKIP_COMMIT_STATS"),
+            "the bundled hook must document its override env var"
+        );
+        assert_ne!(
+            COMMIT_STATS_MARKER, HOOK_MARKER,
+            "each hook needs its own marker, or one would claim the other's slot"
+        );
+    }
+
+    /// Why (#7074): the generalized installer must place the second hook in its
+    /// own slot, executable, and report `AlreadyCurrent` on a second run — the
+    /// same contract `installs_then_reports_already_current` pins for
+    /// `pre-push`.
+    /// Test: itself.
+    #[test]
+    fn installs_the_commit_stats_hook() {
+        let Some((_dir, repo)) = temp_repo() else {
+            return;
+        };
+        let first = install_hook(&repo, &COMMIT_STATS).expect("install");
+        let path = match first {
+            HookInstall::Installed(ref p) => p.clone(),
+            other => panic!("expected a fresh install, got {other:?}"),
+        };
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("prepare-commit-msg")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            PREPARE_COMMIT_MSG_HOOK
+        );
+        assert!(matches!(
+            install_hook(&repo, &COMMIT_STATS).expect("reinstall"),
+            HookInstall::AlreadyCurrent(_)
+        ));
+        // The push guard's own slot is untouched by the second hook's install.
+        assert!(matches!(
+            inspect_hook(&repo, &PUSH_GUARD),
+            GuardState::Missing(_)
+        ));
     }
 
     #[test]

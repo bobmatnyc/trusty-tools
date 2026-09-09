@@ -23,6 +23,7 @@ pub(crate) mod auth;
 // refusing; both the guided default and `tm launch` call it before detection.
 pub(crate) mod auto_git_init;
 pub(crate) mod banner;
+pub(crate) mod commit_trailers;
 pub(crate) mod compress;
 pub(crate) mod daemon;
 pub(crate) mod delete;

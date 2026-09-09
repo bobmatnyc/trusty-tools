@@ -337,26 +337,112 @@ pub fn fold_all(ledger: &Path) -> SavingsTotal {
     fold(ledger, None)
 }
 
+/// Fold every accepted row, grouped by the session that wrote it (#7074).
+///
+/// Why: the `💸` segment's average is the mean of each session's OWN percentage
+/// — percentages do not sum into a lifetime total but do average cleanly (owner
+/// ruling 2026-09-09, option A). That needs one total per session, which no
+/// existing reader produced. Deriving it from the same row-acceptance walk as
+/// [`fold`] is what keeps the average and the per-session figure from
+/// disagreeing about which rows count.
+/// What: [`for_each_accepted_row`] with no filter, accumulating into one
+/// [`SavingsTotal`] per `session_id`. A missing or unreadable ledger yields an
+/// empty map — never a map of zeros.
+/// Test: `fold_sessions_groups_by_session`,
+/// `fold_sessions_of_a_missing_ledger_is_empty`.
+pub fn fold_sessions(ledger: &Path) -> std::collections::BTreeMap<String, SavingsTotal> {
+    let mut by_session: std::collections::BTreeMap<String, SavingsTotal> =
+        std::collections::BTreeMap::new();
+    for_each_accepted_row(ledger, None, |row| {
+        let total = by_session.entry(row.session_id.clone()).or_default();
+        total.tokens_saved += row.tokens_saved as u64;
+        total.tokens_before += row.tokens_before;
+        total.cost_saved_usd += row.cost_saved_usd;
+        total.rows += 1;
+    });
+    by_session
+}
+
+/// The mean of every session's own savings percentage (#7074).
+///
+/// Why: the owner ruled the statusline shows a per-session AVERAGE beside the
+/// current session's figure (2026-09-09, option A). Averaging the PERCENTAGES —
+/// rather than folding all rows into one ratio — is what makes a short session
+/// that saved 60 % count as much as a long one that saved 10 %, which is the
+/// question "how much are we saving per session" actually asks.
+/// What: computes [`SavingsTotal::percent_saved`] for each session in
+/// `by_session`, passing that session's own actual-token count from
+/// `session_actual_tokens` (the caller supplies the lookup, so this function
+/// does no I/O and is testable against a fixture map), and returns the
+/// arithmetic mean rounded to a whole percent. Sessions whose percent is `None`
+/// — a zero fold, or no denominator on either path — contribute nothing, so a
+/// ledger holding only such sessions yields `None` rather than a false `0%`.
+/// Test: `average_percent_is_the_mean_of_each_sessions_percent`,
+/// `average_of_one_session_is_that_sessions_percent`,
+/// `average_of_sessions_with_no_denominator_is_none`,
+/// `average_skips_corrupt_rows_and_never_reports_a_false_zero`.
+pub fn average_percent_saved(
+    by_session: &std::collections::BTreeMap<String, SavingsTotal>,
+    session_actual_tokens: impl Fn(&str) -> Option<u64>,
+) -> Option<u32> {
+    let percents: Vec<u32> = by_session
+        .iter()
+        .filter_map(|(session_id, total)| total.percent_saved(session_actual_tokens(session_id)))
+        .collect();
+    if percents.is_empty() {
+        return None;
+    }
+    let sum: u64 = percents.iter().map(|p| u64::from(*p)).sum();
+    let mean = sum as f64 / percents.len() as f64;
+    Some(mean.round().clamp(1.0, 100.0) as u32)
+}
+
 /// The one fold both readers share.
 ///
 /// Why: the skip rules — unparseable line, non-positive tokens, non-positive or
 /// non-finite cost — must be identical for every consumer, or a per-session
 /// figure and a machine-wide figure computed from the same file could disagree
 /// about which rows count.
-/// What: reads the whole file (it is one short line per saving event), parses
-/// each non-blank line, applies the filter, and sums what survives. Each
-/// rejection emits one `warn!` naming the reason.
+/// What: [`for_each_accepted_row`] with the caller's filter, summed.
 /// Test: `fold_skips_a_malformed_line_and_keeps_the_valid_total`,
 /// `a_negative_row_cannot_raise_the_total`,
 /// `fold_skips_a_row_whose_cost_is_not_a_number`.
 fn fold(ledger: &Path, session_id: Option<&str>) -> SavingsTotal {
+    let mut total = SavingsTotal::default();
+    for_each_accepted_row(ledger, session_id, |row| {
+        total.tokens_saved += row.tokens_saved as u64;
+        total.tokens_before += row.tokens_before;
+        total.cost_saved_usd += row.cost_saved_usd;
+        total.rows += 1;
+    });
+    total
+}
+
+/// Walk the ledger once, handing `visit` every row that passes the skip rules.
+///
+/// Why (#7074): [`fold`] and [`fold_sessions`] must accept and reject exactly
+/// the same rows, or the current session's figure and the average beside it
+/// could be computed from different subsets of one file. One walk, one set of
+/// rules, two accumulators.
+/// What: reads the whole file (it is one short line per saving event), parses
+/// each non-blank line, applies the optional session filter, and calls `visit`
+/// for what survives. Each rejection emits one `warn!` naming the reason. A
+/// missing or unreadable ledger visits nothing.
+/// Test: `fold_skips_a_malformed_line_and_keeps_the_valid_total`,
+/// `a_negative_row_cannot_raise_the_total`,
+/// `fold_skips_a_row_whose_cost_is_not_a_number`,
+/// `fold_sessions_groups_by_session`.
+fn for_each_accepted_row(
+    ledger: &Path,
+    session_id: Option<&str>,
+    mut visit: impl FnMut(&SavingsRow),
+) {
     let Ok(text) = std::fs::read_to_string(ledger) else {
         // Absent or unreadable is the ordinary state before any producer has
         // run; it is not a fault and must not be logged as one.
-        return SavingsTotal::default();
+        return;
     };
 
-    let mut total = SavingsTotal::default();
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -396,12 +482,8 @@ fn fold(ledger: &Path, session_id: Option<&str>) -> SavingsTotal {
             );
             continue;
         }
-        total.tokens_saved += row.tokens_saved as u64;
-        total.tokens_before += row.tokens_before;
-        total.cost_saved_usd += row.cost_saved_usd;
-        total.rows += 1;
+        visit(&row);
     }
-    total
 }
 
 /// The current instant as an RFC 3339 UTC timestamp, for a row's `ts`.
@@ -419,3 +501,7 @@ pub fn now_ts() -> String {
 #[cfg(test)]
 #[path = "savings_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "savings_average_tests.rs"]
+mod average_tests;

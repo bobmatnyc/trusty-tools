@@ -77,6 +77,7 @@ pub mod builders;
 // #7123: the component labels an issue audit ACCEPTS — the seed table plus the
 // repository's own crate labels. Distinct from `policy_labels`, which answers
 // which labels the harness CREATES.
+pub mod commit_trailers;
 pub mod component_labels;
 pub mod compress;
 pub mod config;
@@ -198,6 +199,7 @@ pub mod session_launch;
 // #6972: which model the parent session runs, remembered by the statusline hook
 // so the divert producer prices its rows at the parent's real rate.
 pub mod session_model;
+pub mod session_record;
 pub mod session_store;
 pub mod skill_deploy_tiers;
 pub mod skill_deployer;
@@ -219,6 +221,7 @@ pub mod stale_skills;
 pub mod standalone;
 pub mod stray_mcp;
 pub mod tmux;
+pub mod transcript_usage;
 pub mod trusty_tools_config;
 pub mod update_check;
 pub mod version_staleness;
