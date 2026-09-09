@@ -24,7 +24,13 @@
 //! suspend/resume around the tmux hand-off come from
 //! [`trusty_mpm::tui::terminal`], shared with the coordinator and `project_ctl`
 //! screens. What is NOT shared is the input loop: a full-screen surface needs
-//! raw-mode keys, and the numbered picker keeps its line reader for bare `tm`.
+//! raw-mode keys, and the numbered picker keeps its line reader for the cases
+//! this surface cannot serve — an empty fleet (only the picker can launch a
+//! NEW session) and a terminal that cannot enter raw mode.
+//!
+//! #7224: bare `tm` opens this surface too, through
+//! [`super::session_ls_connector::run_bare_tm_surface`] — the same gate, not a
+//! second copy of it.
 //!
 //! `tm ls --plain`, `--json`, `--all`, `--attached`, and any non-TTY stream
 //! still print the static table, unchanged — see

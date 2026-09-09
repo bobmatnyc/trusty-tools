@@ -376,3 +376,90 @@ fn ls_connector_dumb_term_reaches_the_static_renderer() {
         "a real TERM on the same invocation still opens the TUI"
     );
 }
+
+// ── bare `tm` reaches the same surface (#7224) ───────────────────────────────
+
+use crate::commands::session_ls_connector::bare_tm_opens_session_tui;
+
+/// Bare `tm` on a real terminal opens the session TUI, exactly as `tm ls` does.
+///
+/// Why (#7224): this is the owner ruling — "bare tm should also open the TUI" —
+/// and it FAILS on the parent commit, where `guided::try_show_picker` called
+/// `run_tty_picker` unconditionally and no gate existed to assert against. It
+/// is the positive mirror of
+/// `ls_connector_dumb_term_reaches_the_static_renderer`: same operands, same
+/// shape, opposite claim.
+/// What: two TTYs, a cursor-addressable `TERM`, no managed pane, and a
+/// non-empty fleet must open the TUI — for every `TERM` a real terminal
+/// reports.
+#[test]
+fn bare_tm_opens_the_session_tui_on_two_ttys_with_a_capable_term() {
+    for term in [
+        Some("xterm-256color"),
+        Some("screen"),
+        Some("tmux-256color"),
+    ] {
+        assert!(
+            bare_tm_opens_session_tui(true, true, term, false, 1),
+            "TERM={term:?}: bare `tm` on two TTYs with a live fleet must open the TUI"
+        );
+    }
+    assert!(
+        bare_tm_opens_session_tui(true, true, REAL_TERM, false, 12),
+        "fleet size is not a reason to refuse"
+    );
+}
+
+/// Inside a tm-managed pane bare `tm` never opens the TUI.
+///
+/// Why (#7224): a managed pane is the pane whose agent bare `tm` relaunches in
+/// place. A full-screen alternate-screen surface would take that pane over
+/// instead, so the relaunch/"this pane" behavior has to survive the new
+/// surface. `tm ls` in that same pane still opens the TUI — it reads the same
+/// id as its self-delete guard, not as a refusal — which is why the operand
+/// lives on this wrapper and not in `should_show_picker`.
+/// What: a managed pane refuses on an otherwise fully interactive invocation
+/// with a live fleet, and refuses for every `TERM` — the pane, not the
+/// terminal, is what settles it.
+#[test]
+fn bare_tm_never_opens_the_tui_inside_a_managed_pane() {
+    for term in [Some("xterm-256color"), Some("screen"), Some("dumb"), None] {
+        assert!(
+            !bare_tm_opens_session_tui(true, true, term, true, 3),
+            "TERM={term:?}: a managed pane keeps the line picker, never a full-screen TUI"
+        );
+    }
+    assert!(
+        bare_tm_opens_session_tui(true, true, REAL_TERM, false, 3),
+        "the same invocation outside a managed pane opens the TUI"
+    );
+}
+
+/// Bare `tm` and `tm ls` refuse the TUI on exactly the same inputs.
+///
+/// Why (#7224): "a gate present on one surface and missing from the other" is
+/// the defect round 2 removed when `tm f`'s `TERM` check turned out to be
+/// absent from `tm ls`. Pinning the delegation as an IDENTITY — not a list of
+/// cases — is what makes a future gate added to `should_show_picker` reach bare
+/// `tm` for free, because a wrapper that stopped delegating would fail here.
+/// What: over every TTY / `TERM` / fleet-size combination, with no managed
+/// pane, the two decisions agree.
+#[test]
+fn bare_tm_and_ls_refuse_the_tui_on_the_same_inputs() {
+    for stdin_tty in [true, false] {
+        for stdout_tty in [true, false] {
+            for term in [Some("xterm-256color"), Some("dumb"), Some(""), None] {
+                for count in [0usize, 1, 7] {
+                    assert_eq!(
+                        bare_tm_opens_session_tui(stdin_tty, stdout_tty, term, false, count),
+                        should_show_picker(
+                            stdin_tty, stdout_tty, false, false, false, false, term, count
+                        ),
+                        "bare `tm` and `tm ls` disagree at \
+                         stdin={stdin_tty} stdout={stdout_tty} TERM={term:?} count={count}"
+                    );
+                }
+            }
+        }
+    }
+}
