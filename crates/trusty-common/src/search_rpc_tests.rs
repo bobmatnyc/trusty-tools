@@ -139,6 +139,43 @@ async fn call_blocking_carries_the_daemons_own_error_code() {
     assert_eq!(refusal.message, "root_path is taken");
 }
 
+/// Why: a handler that dies mid-call is the one failure that reaches
+/// [`call_blocking`] as neither a coded refusal nor a clean dial failure — the
+/// daemon accepted the connection and then never answered. The caller is a
+/// best-effort registration on a session-launch path, so what it owes is an
+/// `Err` that names the method it was making, not a stall and not a panic
+/// escaping the worker thread (#7237).
+/// Test: itself.
+#[tokio::test]
+async fn call_blocking_reports_a_panicking_handler_rather_than_hanging() {
+    let daemon = uds_mock::spawn(|_method, _params| {
+        Box::pin(async move { panic!("the mock daemon handler died before answering") })
+    })
+    .await;
+    let socket = daemon.socket().to_path_buf();
+
+    let err = tokio::task::spawn_blocking(move || {
+        call_blocking(
+            &socket,
+            METHOD_INDEX_CREATE,
+            serde_json::json!({}),
+            PROBE_TIMEOUT,
+        )
+    })
+    .await
+    .expect("the panic must stay inside the daemon's connection task")
+    .expect_err("a handler that never answers cannot produce a result");
+
+    assert!(
+        err.downcast_ref::<SearchRpcError>().is_none(),
+        "an unanswered call is a transport failure, never a daemon refusal: {err:#}"
+    );
+    assert!(
+        format!("{err:#}").contains(METHOD_INDEX_CREATE),
+        "the error must name the method that failed: {err:#}"
+    );
+}
+
 /// Why: an absent socket is what "trusty-search is not running" looks like, and
 /// the registration path treats it as fail-closed rather than falling back to
 /// anything. It must come back promptly and as a transport failure.

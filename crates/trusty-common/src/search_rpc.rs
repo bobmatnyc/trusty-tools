@@ -32,7 +32,8 @@
 //! `call_at_reports_a_dead_socket_rather_than_hanging`,
 //! `call_blocking_reports_a_dead_socket_rather_than_hanging`,
 //! `call_blocking_round_trips_against_a_listening_daemon`,
-//! `call_blocking_carries_the_daemons_own_error_code`.
+//! `call_blocking_carries_the_daemons_own_error_code`,
+//! `call_blocking_reports_a_panicking_handler_rather_than_hanging`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -226,6 +227,12 @@ pub async fn call_at(
 /// [`call_at`] on it. A panicked worker is reported as an error rather than
 /// re-raised, so a best-effort caller keeps its fail-closed shape.
 ///
+/// A panic on the DAEMON's side takes the other route: the connection task dies
+/// and this thread sees an unanswered call, which
+/// `call_blocking_reports_a_panicking_handler_rather_than_hanging` pins. The
+/// `join` arm below stays defensive — nothing this function drives panics on
+/// its own thread — so it has no test of its own.
+///
 /// # Errors
 ///
 /// Everything [`call_at`] reports, plus a failure to build the runtime and a
@@ -233,7 +240,8 @@ pub async fn call_at(
 ///
 /// Test: `call_blocking_round_trips_against_a_listening_daemon`,
 /// `call_blocking_carries_the_daemons_own_error_code`,
-/// `call_blocking_reports_a_dead_socket_rather_than_hanging`.
+/// `call_blocking_reports_a_dead_socket_rather_than_hanging`,
+/// `call_blocking_reports_a_panicking_handler_rather_than_hanging`.
 pub fn call_blocking(
     socket: &Path,
     method: &str,

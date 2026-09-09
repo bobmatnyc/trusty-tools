@@ -915,9 +915,19 @@ pub use project_index_id::{ProjectIdentity, derive_project_index_id};
 /// best-effort find-or-create + freshness-gated reindex, fail-open) and the
 /// [`search_index::index_is_fresh`] predicate. Feature-gated because it enables
 /// `reqwest`'s `blocking` client; default builds pay nothing.
+///
+/// Also `unix`-gated since #7237: registration speaks [`search_rpc`], a Unix
+/// socket client that does not exist on other targets. The
+/// [`compile_error!`] below states that so a non-unix build says why rather
+/// than reporting an unresolved `crate::search_rpc`.
 /// Test: `cargo test -p trusty-common --features search-index -- search_index::tests`.
-#[cfg(feature = "search-index")]
+#[cfg(all(unix, feature = "search-index"))]
 pub mod search_index;
+
+// #7237: `search-index` implies `uds`, and `uds` is unix-only, so the feature
+// cannot be honoured anywhere else.
+#[cfg(all(not(unix), feature = "search-index"))]
+compile_error!("search-index requires a unix target: it talks to trusty-search over a Unix socket");
 
 /// Bounded worker pool behind [`search_index::index_files_best_effort`] (issue
 /// #2798), gated behind `search-index` alongside its only caller.
@@ -931,7 +941,7 @@ pub mod search_index;
 /// both full is rejected (never blocked) and counted, and the caller logs what
 /// it dropped.
 /// Test: `cargo test -p trusty-common --features search-index -- index_dispatch`.
-#[cfg(feature = "search-index")]
+#[cfg(all(unix, feature = "search-index"))]
 pub(crate) mod index_dispatch;
 
 /// Shared trusty-search index READINESS probe (issue #2784), gated behind the
@@ -948,7 +958,7 @@ pub(crate) mod index_dispatch;
 /// [`search_readiness::log_index_readiness`] (one stderr line surfacing lane
 /// readiness to the session).
 /// Test: `cargo test -p trusty-common --features search-index -- search_readiness::tests`.
-#[cfg(feature = "search-index")]
+#[cfg(all(unix, feature = "search-index"))]
 pub mod search_readiness;
 
 /// Canonical tmux-session naming shared by both session managers (SPEC-ONESM-01).
