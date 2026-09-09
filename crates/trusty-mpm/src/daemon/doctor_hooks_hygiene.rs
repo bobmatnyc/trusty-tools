@@ -13,18 +13,22 @@
 //! (informational only — tm never touches another harness's hooks).
 //! What: [`check_hooks_hygiene`] scans `project_dir` (when given) plus every
 //! currently-live `active_workspace_paths` — the SAME bounded scope
-//! `check_agents`/`check_skills` use — and returns TWO checks:
-//! `hooks_contamination` (`Warn` when any file carries a tm-owned hook group)
-//! and `hooks_foreign_conflict` (`Warn` when any file carries a foreign
-//! claude-mpm hook group).
-//! Test: the `tests` module below covers both checks against temp
+//! `check_agents`/`check_skills` use — and returns THREE checks:
+//! `hooks_contamination` (`Warn` when any file carries a tm-owned hook group),
+//! `hooks_foreign_conflict` (`Warn` when any file carries a foreign claude-mpm
+//! hook group), and `hooks_build_tree_binary` (#7262 — `Warn` naming each hook
+//! or `statusLine` command whose executable lives in a Cargo build tree).
+//! Test: the `tests` module below covers all three checks against temp
 //! directories.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
-use crate::core::standalone::hooks::cleanup::{foreign_hook_event_names, tm_hook_event_names};
+use crate::core::standalone::hooks::cleanup::{
+    build_tree_hook_commands, build_tree_statusline_command, foreign_hook_event_names,
+    tm_hook_event_names,
+};
 
 /// Every `.claude/settings*.json` this probe should inspect.
 ///
@@ -87,18 +91,27 @@ pub(crate) fn read_settings(path: &Path) -> Option<serde_json::Value> {
 /// foreign claude-mpm hook group, else `Warn` naming up to 3 affected files
 /// (plus a count), purely informational (never suggests removal — that is
 /// the operator's call).
+/// #7262: a THIRD check, `hooks_build_tree_binary`, names every hook or
+/// `statusLine` command whose executable lives in a Cargo build tree, with its
+/// file path and the command string itself. `hooks_contamination` counts files
+/// and cannot say which command is broken, which is the only fact that matters
+/// for this shape: the entry is tm's own, and the fault is the path inside it.
 /// Test: `check_hooks_hygiene_ok_when_clean`,
 /// `check_hooks_hygiene_warns_on_tm_contamination`,
 /// `check_hooks_hygiene_warns_on_foreign_conflict`,
-/// `check_hooks_hygiene_never_double_counts_active_workspace_dupes`.
+/// `check_hooks_hygiene_never_double_counts_active_workspace_dupes`,
+/// `check_hooks_hygiene_reports_the_build_tree_incident_shape`,
+/// `check_hooks_hygiene_reports_a_build_tree_statusline`,
+/// `check_hooks_hygiene_build_tree_check_is_ok_for_an_installed_binary`.
 pub(super) fn check_hooks_hygiene(
     project_dir: Option<&Path>,
     active_workspace_paths: &[PathBuf],
-) -> (DoctorCheck, DoctorCheck) {
+) -> (DoctorCheck, DoctorCheck, DoctorCheck) {
     let files = candidate_settings_files(project_dir, active_workspace_paths);
 
     let mut contaminated: Vec<PathBuf> = Vec::new();
     let mut foreign: Vec<PathBuf> = Vec::new();
+    let mut build_tree: Vec<(PathBuf, String)> = Vec::new();
     for path in &files {
         let Some(val) = read_settings(path) else {
             continue;
@@ -108,6 +121,14 @@ pub(super) fn check_hooks_hygiene(
         }
         if !foreign_hook_event_names(&val).is_empty() {
             foreign.push(path.clone());
+        }
+        // #7262: hooks first, then the statusLine key, so the report reads in
+        // the order the file does.
+        for cmd in build_tree_hook_commands(&val) {
+            build_tree.push((path.clone(), cmd));
+        }
+        if let Some(cmd) = build_tree_statusline_command(&val) {
+            build_tree.push((path.clone(), cmd));
         }
     }
 
@@ -159,7 +180,61 @@ pub(super) fn check_hooks_hygiene(
         )
     };
 
-    (contamination_check, foreign_check)
+    (
+        contamination_check,
+        foreign_check,
+        build_tree_check(&build_tree),
+    )
+}
+
+/// Render the `hooks_build_tree_binary` check from the collected offenders
+/// (issue #7262).
+///
+/// Why: split out of [`check_hooks_hygiene`] so the message construction — the
+/// part with a real contract, since an operator acts on the exact command
+/// string — is readable on its own and the scan loop stays a scan loop.
+/// What: `Ok` when `offenders` is empty. Otherwise `Warn`, listing up to 5
+/// `<path>: <command>` pairs plus an overflow count, and naming
+/// `tm doctor --fix` / `tm hooks clean` as the repair. A `statusLine` command is
+/// listed too but not repaired by either — the message says so, because
+/// silently under-delivering on a named remedy is how #4948 happened.
+/// Test: `check_hooks_hygiene_reports_the_build_tree_incident_shape`,
+/// `check_hooks_hygiene_reports_a_build_tree_statusline`,
+/// `check_hooks_hygiene_build_tree_check_is_ok_for_an_installed_binary`.
+fn build_tree_check(offenders: &[(PathBuf, String)]) -> DoctorCheck {
+    if offenders.is_empty() {
+        return DoctorCheck::new(
+            "hooks_build_tree_binary",
+            CheckStatus::Ok,
+            "no hook or statusLine command points into a Cargo build tree",
+        );
+    }
+    let shown: Vec<String> = offenders
+        .iter()
+        .take(5)
+        .map(|(path, cmd)| format!("{}: `{cmd}`", path.display()))
+        .collect();
+    let overflow = if offenders.len() > 5 {
+        format!(" (+{} more)", offenders.len() - 5)
+    } else {
+        String::new()
+    };
+    DoctorCheck::new(
+        "hooks_build_tree_binary",
+        CheckStatus::Warn,
+        format!(
+            "{} command{} point into a Cargo build tree and stop working the moment that \
+             artifact is rebuilt away — `tm doctor --fix` previews the removal of the hook \
+             entries for this project and `--yes` applies it, `tm hooks clean` sweeps every \
+             project under $HOME, and the correct command is re-rendered from the installed \
+             binary on the next managed launch. A `statusLine` command is reported here but \
+             repaired only by that relaunch. {}{}",
+            offenders.len(),
+            if offenders.len() == 1 { "" } else { "s" },
+            shown.join("; "),
+            overflow,
+        ),
+    )
 }
 
 /// Render up to 3 paths plus an overflow count for a check message.

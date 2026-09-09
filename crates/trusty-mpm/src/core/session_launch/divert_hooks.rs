@@ -28,10 +28,13 @@ use super::settings::resolve_statusline_binary;
 ///
 /// Why: the identity predicate and the command builder must agree on one
 /// spelling, or the strip stops recognising what the writer wrote and every
-/// relaunch appends a duplicate group (the #2948 failure mode).
+/// relaunch appends a duplicate group (the #2948 failure mode). #7262 added a
+/// THIRD reader — the build-tree classifier, which must recognise this shape
+/// too — so the literal now lives in the lower layer beside the other argv
+/// tails and is re-exported here rather than spelled out twice.
 /// What: the literal suffix, including its leading space.
 /// Test: `is_project_managed_hook_command_recognises_divert_check`.
-pub(super) const DIVERT_CHECK_SUFFIX: &str = " hook --divert-check";
+pub(super) use crate::core::standalone::hooks::build_tree::DIVERT_CHECK_SUFFIX;
 
 /// Tool names the diversion hook is registered for.
 ///

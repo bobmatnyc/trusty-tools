@@ -15,6 +15,10 @@
 //! entries; [`foreign_hook_event_names`] detects a DIFFERENT harness's hooks
 //! (informational only — never removed); [`clean_settings_file`] performs the
 //! actual scan-or-apply pass over one file, always backing up before writing.
+//! [`build_tree_hook_commands`] / [`build_tree_statusline_command`] (#7262)
+//! name the individual commands whose executable lives in a Cargo build tree,
+//! so `tm doctor` can report WHICH command is broken rather than only how many
+//! files are affected.
 //!
 //! Known limitations:
 //! - **Mixed hook groups (issue #2948, RESOLVED).** [`event_names_matching`]
@@ -40,6 +44,15 @@
 //!   the same pre-existing residual risk. Dry-run mode always prints the
 //!   exact matched command strings before any deletion (see `commands::hooks::clean`)
 //!   so an operator can review before applying `--force`.
+//! - **Both name branches miss a stem they do not ship (issue #7262, RESOLVED
+//!   for the build-tree case).** [`super::is_mpm_hook_command`] now consults
+//!   [`super::is_build_tree_hook_command`] first, which asks WHERE the
+//!   executable lives instead of what it is called, so a `cargo test` harness
+//!   wired in as a hook — the #7244 incident shape — is classified and removed.
+//!   A build-tree path alone is not enough: the argv must also be one tm
+//!   writes. A foreign binary named neither ours nor build-tree-hosted is still
+//!   invisible here, which is the correct answer for one this crate does not
+//!   own.
 //!
 //! Test: `cargo test -p trusty-mpm standalone::hooks::cleanup` — see
 //! `cleanup_tests.rs`.
@@ -48,7 +61,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{is_claude_mpm_hook_command, is_mpm_hook_command, strip_mpm_hook_entries};
+use super::{
+    is_build_tree_hook_command, is_build_tree_statusline_command, is_claude_mpm_hook_command,
+    is_mpm_hook_command, strip_mpm_hook_entries,
+};
 
 /// Per-file outcome of a [`clean_settings_file`] pass.
 ///
@@ -119,6 +135,71 @@ pub fn tm_hook_event_names(val: &Value) -> Vec<String> {
 /// `foreign_hook_event_names_flags_mixed_group`.
 pub fn foreign_hook_event_names(val: &Value) -> Vec<String> {
     event_names_matching(val, is_claude_mpm_hook_command)
+}
+
+/// Every hook command in `val` whose executable lives in a Cargo build tree
+/// (issue #7262).
+///
+/// Why: `tm doctor` has to NAME the damage. `hooks_contamination` reports only
+/// how many files carry tm entries, which is the right report for a pre-#2940
+/// install writing a working `tm hook` where it did not belong — and useless
+/// for #7244's corruption, where the entry is tm's own and the fault is the
+/// path inside it. An operator needs to see the exact command before deciding
+/// to let `--fix` remove it.
+/// What: walks every `hooks.<event>[*].hooks[*].command` and collects the
+/// distinct strings [`is_build_tree_hook_command`] claims, in first-seen order.
+/// Empty when `hooks` is absent or not an object. These are the commands the
+/// strip removes, since [`is_mpm_hook_command`] consults the same predicate.
+/// Test: `build_tree_hook_commands_lists_the_incident_commands`,
+/// `build_tree_hook_commands_is_empty_for_an_installed_binary`.
+pub fn build_tree_hook_commands(val: &Value) -> Vec<String> {
+    let Some(hooks) = val.get("hooks").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut found: Vec<String> = Vec::new();
+    for groups in hooks.values() {
+        let Some(groups) = groups.as_array() else {
+            continue;
+        };
+        for group in groups {
+            let Some(inner) = group.get("hooks").and_then(Value::as_array) else {
+                continue;
+            };
+            for cmd in inner
+                .iter()
+                .filter_map(|e| e.get("command").and_then(Value::as_str))
+                .filter(|c| is_build_tree_hook_command(c))
+            {
+                if !found.iter().any(|seen| seen == cmd) {
+                    found.push(cmd.to_string());
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The `statusLine.command` when it points into a Cargo build tree (#7262).
+///
+/// Why: the same corruption reaches `statusLine.command` (#4492 is the earlier
+/// instance), where it costs the operator their whole statusline with no error
+/// printed anywhere. Detection must name it. Repair does not follow: the hooks
+/// writer does not own this key, and stripping it would leave the file with no
+/// statusline at all rather than a corrected one — `session_launch::settings`
+/// upgrades it in place on the next managed launch, via its
+/// `is_stale_statusline_command`, which already treats an ephemeral binary as
+/// stale.
+/// What: reads `statusLine.command` and returns it when
+/// [`is_build_tree_statusline_command`] claims it; `None` for any other shape,
+/// a missing key, or a non-string value.
+/// Test: `build_tree_statusline_command_in_settings_is_reported`,
+/// `build_tree_statusline_command_in_settings_ignores_an_installed_binary`.
+pub fn build_tree_statusline_command(val: &Value) -> Option<String> {
+    val.get("statusLine")
+        .and_then(|s| s.get("command"))
+        .and_then(Value::as_str)
+        .filter(|c| is_build_tree_statusline_command(c))
+        .map(str::to_string)
 }
 
 /// Shared walker behind [`tm_hook_event_names`] / [`foreign_hook_event_names`].

@@ -1324,3 +1324,87 @@ fn write_project_hooks_aborts_the_rewrite_when_the_snapshot_fails() {
         "the settings file must be untouched when its snapshot could not be taken"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #7262: the writer's replace-by-identity strip against the #7244 incident
+// shape. Both FAIL on 1ba38636c, where the strip could not recognise the
+// `test_session_lifecycle` stem and appended a correct group beside the broken
+// one on every launch.
+// ---------------------------------------------------------------------------
+
+use build_tree::tests::{INCIDENT_EXE, incident_settings};
+
+#[test]
+fn is_mpm_hook_command_claims_the_build_tree_incident_shape() {
+    assert!(is_mpm_hook_command(&format!("{INCIDENT_EXE} hook")));
+    assert!(is_mpm_hook_command(&format!(
+        "{INCIDENT_EXE} hook --pm-guard"
+    )));
+    assert!(is_mpm_hook_command(&format!(
+        "{INCIDENT_EXE} hook --divert-check"
+    )));
+    // Unchanged: a foreign harness's command is still foreign, and an
+    // installed-binary command is still judged by name.
+    assert!(!is_mpm_hook_command("claude-mpm hooks fire PreToolUse"));
+    assert!(is_mpm_hook_command("/usr/local/bin/tm hook"));
+}
+
+#[test]
+fn write_project_hooks_replaces_a_build_tree_group_instead_of_duplicating_it() {
+    let tmp = TempDir::new().unwrap();
+    let settings = tmp.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        serde_json::to_string_pretty(&incident_settings()).unwrap(),
+    )
+    .unwrap();
+
+    let exe = PathBuf::from(STABLE_TEST_EXE);
+    assert!(write_project_hooks(&settings, Some(&exe)).unwrap());
+
+    let val: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+
+    // One group per lifecycle event, and it names the installed binary.
+    for event in [
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+        "SubagentStop",
+        "SessionStart",
+        "SessionEnd",
+    ] {
+        let groups = val["hooks"][event].as_array().unwrap();
+        assert_eq!(
+            groups.len(),
+            1,
+            "{event} must collapse to one group, got {groups:?}"
+        );
+        assert_eq!(
+            groups[0]["hooks"][0]["command"],
+            serde_json::json!(format!("{STABLE_TEST_EXE} hook"))
+        );
+    }
+    assert!(
+        !val["hooks"].to_string().contains("test_session_lifecycle"),
+        "no build-tree command may survive the rewrite: {}",
+        val["hooks"]
+    );
+
+    // The project's own entry survives; so does the `statusLine` key, which
+    // this writer does not own (#7262 scope boundary).
+    assert_eq!(
+        val["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+        serde_json::json!("trusty-memory prompt-context")
+    );
+    assert_eq!(
+        val["statusLine"]["command"],
+        serde_json::json!(format!("{INCIDENT_EXE} statusline"))
+    );
+
+    // Idempotent: further writes are no-ops, so the corruption cannot come back
+    // as a duplicate on the next launch.
+    for _ in 0..3 {
+        assert!(!write_project_hooks(&settings, Some(&exe)).unwrap());
+    }
+}

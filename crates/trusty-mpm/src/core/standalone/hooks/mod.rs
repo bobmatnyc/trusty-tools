@@ -40,7 +40,10 @@
 mod tests;
 
 pub(crate) mod backup;
+pub mod build_tree;
 pub mod cleanup;
+
+pub use build_tree::{is_build_tree_hook_command, is_build_tree_statusline_command};
 
 use std::path::{Path, PathBuf};
 
@@ -470,7 +473,17 @@ fn is_mpm_hash_suffixed_artifact(path: &Path) -> bool {
 /// `"/opt/bin/trusty-mpm hook"`) OR the full prefix is recognised by
 /// [`is_mpm_hash_suffixed_artifact`] (hash-suffixed build artifacts under a
 /// `deps/` directory — `".../deps/trusty_mpm-<hash> hook"`).
+///
+/// #7262: BEFORE either of those, [`build_tree::is_build_tree_hook_command`]
+/// claims any command whose executable lives in a Cargo build tree and whose
+/// argv is one of tm's hook shapes — regardless of stem. Both name branches ask
+/// what the binary is called, so neither could see
+/// `".../target-7247/debug/deps/test_session_lifecycle-<hash> hook --pm-guard"`,
+/// and the strip below therefore duplicated rather than replaced it. That arm
+/// also widens this predicate past the ` hook` suffix, to the `--pm-guard` and
+/// `--divert-check` shapes, but ONLY for a build-tree executable.
 /// Test: `remove_global_hooks_at_strips_only_the_two_global_files`,
+/// `is_mpm_hook_command_claims_the_build_tree_incident_shape`,
 /// `test_is_mpm_hook_command_recognises_tm_bin_name`,
 /// `test_is_mpm_hook_command_recognises_stale_hash_and_mvp_variants`,
 /// `test_is_mpm_hook_command_rejects_hash_suffixed_binary_outside_deps_dir`,
@@ -482,6 +495,13 @@ fn is_mpm_hash_suffixed_artifact(path: &Path) -> bool {
 /// contamination scan and the removal logic can never classify a command
 /// differently.
 pub fn is_mpm_hook_command(cmd: &str) -> bool {
+    // #7262: a build-tree executable is contamination whatever it is named, and
+    // it carries the `--pm-guard` / `--divert-check` argv shapes the ` hook`
+    // suffix check below cannot reach. Asked first so the answer never depends
+    // on a stem this crate happens to recognise.
+    if build_tree::is_build_tree_hook_command(cmd) {
+        return true;
+    }
     // The command must end with " hook" (with exactly one trailing sub-command word).
     let Some(binary) = cmd.strip_suffix(" hook") else {
         return false;
