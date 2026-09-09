@@ -232,7 +232,13 @@ pub fn create(
     // being registered. A lock that cannot be taken is a refusal, never an
     // unserialised write.
     let published = with_exclusive_lock(&config_path, || {
-        publish(&config_path, &rendered, &public_key_path, &public_text, options.force)
+        publish(
+            &config_path,
+            &rendered,
+            &public_key_path,
+            &public_text,
+            options.force,
+        )
     })
     .map_err(|source| AuditError::EngagementNotCreated {
         path: config_path.clone(),

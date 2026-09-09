@@ -1330,10 +1330,13 @@ mod layout_tests {
         let private = tmp.path().join("engagement.toml");
         let public = tmp.path().join("retained.pub");
 
-        stage_pair((&private, "openrouter_key = \"sk-or-v1-x\"\n"), (&public, "B\n"))
-            .expect("stages")
-            .commit()
-            .expect("publishes");
+        stage_pair(
+            (&private, "openrouter_key = \"sk-or-v1-x\"\n"),
+            (&public, "B\n"),
+        )
+        .expect("stages")
+        .commit()
+        .expect("publishes");
 
         let mode = std::fs::metadata(&private)
             .expect("stat")
