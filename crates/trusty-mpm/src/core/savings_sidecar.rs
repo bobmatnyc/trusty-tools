@@ -19,8 +19,11 @@
 //!   because it cannot key it. [`emit_staged_row`] claims it and appends it
 //!   under the Claude session id through
 //!   [`crate::core::savings::append_row`], which stays the ledger's one writer.
-//!   The claim is the `remove` itself, so of two racing hook processes only the
-//!   one whose remove succeeds appends, and the row lands exactly once.
+//!   The claim is an atomic rename onto a per-attempt path, so of two racing
+//!   hook processes only the one whose rename succeeds appends. The claim file
+//!   is deleted once the append has landed, and renamed back to the staging
+//!   path when the append fails: the row lands exactly once, and a failed
+//!   append loses nothing.
 //! - `no-fold-warned/<key>` — the byte pair the last "nothing folded" warning
 //!   named. A project whose fold is steady warns once; a project whose numbers
 //!   move warns again with the new pair.
@@ -47,6 +50,8 @@
 //! `a_staged_row_emits_once_under_the_claude_session_id`,
 //! `emitting_without_a_staged_row_writes_nothing`,
 //! `emitting_without_a_session_id_leaves_the_row_staged`,
+//! `a_failed_append_leaves_the_row_staged_for_the_next_hook`,
+//! `two_racing_claims_append_exactly_one_row`,
 //! `two_compiled_prompts_stage_to_different_files`,
 //! `the_no_fold_warning_fires_once_per_project`,
 //! `the_no_fold_warning_fires_again_when_the_byte_pair_moves`,
@@ -134,21 +139,46 @@ pub fn stage_row(root: &Path, compiled_prompt: &Path, row: &SavingsRow) {
     }
 }
 
+/// A claim path no other attempt can pick, beside the staging path.
+///
+/// Why: the claim has to be a rename, and a rename needs a destination that no
+/// concurrent attempt — in this process or another — is also renaming onto.
+/// What: the staging path plus this process's id and a per-attempt counter, so
+/// the name is unique across processes and across threads within one.
+/// Test: `two_racing_claims_append_exactly_one_row`.
+fn claim_path_for(staged: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static ATTEMPT: AtomicU64 = AtomicU64::new(0);
+    let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed);
+    let mut name = staged.as_os_str().to_os_string();
+    name.push(format!(".claim-{}-{attempt:x}", std::process::id()));
+    PathBuf::from(name)
+}
+
 /// Claim the row staged for `compiled_prompt` and append it under
 /// `claude_session_id`.
 ///
 /// Why: this is the whole point of the staging file — the first process that
 /// knows the id the statusline folds by writes the row the compiling process
-/// could not. The claim is the removal, which is atomic, so running this on
-/// every hook event (or from two hooks at once) still appends exactly one row.
-/// What: reads the staged JSON, removes the file, replaces the row's
-/// `session_id`, and appends through [`append_row`]. Returns whether a row was
-/// appended: `false` for a blank id, no staged file, a lost claim race, an
-/// unparseable staged row, or an unwritable ledger — and in every one of those
-/// cases nothing is written to the ledger.
+/// could not. Running this on every hook event, or from two hooks at once, must
+/// still put exactly one row in the ledger and must never destroy a row it
+/// failed to append.
+/// What: renames the staged file onto a per-attempt claim path — the rename is
+/// the claim, and the racer whose rename fails reads nothing and appends
+/// nothing — then replaces the row's `session_id` and appends through
+/// [`append_row`]. The claim file is removed only once the append has landed;
+/// an append that fails goes back to the staging path for the next hook, and
+/// the warning carries the row's JSON so the measurement survives in the log
+/// even if the rename back also fails. Returns whether a row was appended:
+/// `false` for a blank id, no staged file, a lost claim race, an unparseable
+/// staged row, or a failed append — and in every one of those cases nothing is
+/// written to the ledger.
 /// Test: `a_staged_row_emits_once_under_the_claude_session_id`,
 /// `emitting_without_a_staged_row_writes_nothing`,
-/// `emitting_without_a_session_id_leaves_the_row_staged`.
+/// `emitting_without_a_session_id_leaves_the_row_staged`,
+/// `a_failed_append_leaves_the_row_staged_for_the_next_hook`,
+/// `two_racing_claims_append_exactly_one_row`.
 pub fn emit_staged_row(
     ledger: &Path,
     root: &Path,
@@ -160,14 +190,26 @@ pub fn emit_staged_row(
         return false;
     }
     let path = pending_row_path_in(root, compiled_prompt);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return false;
-    };
-    // #7245: removing IS the claim. A second hook — or a concurrent one — finds
-    // the file gone and appends nothing, which is what makes this idempotent.
-    if std::fs::remove_file(&path).is_err() {
+    // #7245: the rename IS the claim. A second hook — or a concurrent one —
+    // finds nothing to rename and appends nothing, which is what makes this
+    // idempotent, and the claimed file still exists until the append lands.
+    let claim = claim_path_for(&path);
+    if std::fs::rename(&path, &claim).is_err() {
         return false;
     }
+    let text = match std::fs::read_to_string(&claim) {
+        Ok(text) => text,
+        Err(source) => {
+            let restored = std::fs::rename(&claim, &path).is_ok();
+            tracing::warn!(
+                path = %path.display(),
+                %source,
+                restored,
+                "could not read the claimed staged savings row"
+            );
+            return false;
+        }
+    };
     let mut row: SavingsRow = match serde_json::from_str(&text) {
         Ok(row) => row,
         Err(source) => {
@@ -176,18 +218,24 @@ pub fn emit_staged_row(
                 %source,
                 "discarding an unparseable staged savings row"
             );
+            let _ = std::fs::remove_file(&claim);
             return false;
         }
     };
     row.session_id = session_id.to_string();
     if let Err(source) = append_row(ledger, &row) {
+        let restored = std::fs::rename(&claim, &path).is_ok();
+        let row_json = serde_json::to_string(&row).unwrap_or(text);
         tracing::warn!(
             ledger = %ledger.display(),
             %source,
+            restored,
+            row = %row_json,
             "could not append the staged instruction-compression savings row"
         );
         return false;
     }
+    let _ = std::fs::remove_file(&claim);
     true
 }
 

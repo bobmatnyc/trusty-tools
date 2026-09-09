@@ -126,6 +126,90 @@ fn emitting_without_a_session_id_leaves_the_row_staged() {
     assert_eq!(rows_in(&ledger), 1);
 }
 
+/// Why (#7245): the claim and the append are two steps, and the second one can
+/// fail on its own — an unwritable ledger, a full disk, a path component that is
+/// a file. A claim that consumed the staged file before knowing the append
+/// landed would destroy the only copy of the measurement. Exactly-once has to
+/// mean "at most one row AND no lost row".
+/// What: makes the ledger's parent component a regular file, so `append_row`'s
+/// `create_dir_all` fails after the claim, then retries against a writable
+/// ledger.
+/// Test: itself.
+#[test]
+fn a_failed_append_leaves_the_row_staged_for_the_next_hook() {
+    let root = tempfile::tempdir().expect("temp root");
+    let compiled = root
+        .path()
+        .join("project/.trusty-mpm/sessions/m1/INSTRUCTIONS-COMPILED.md");
+
+    let blocker = root.path().join("blocker");
+    std::fs::write(&blocker, b"a regular file, not a directory").expect("write blocker");
+    let unwritable = blocker.join("ledger.jsonl");
+
+    stage_row(root.path(), &compiled, &staged_row("m1"));
+    assert!(
+        !emit_staged_row(&unwritable, root.path(), &compiled, "c1"),
+        "an append that fails must report no append"
+    );
+    assert!(
+        pending_row_path_in(root.path(), &compiled).exists(),
+        "a failed append must return the row to its staging path for the next hook"
+    );
+
+    let ledger = root.path().join("ledger.jsonl");
+    assert!(
+        emit_staged_row(&ledger, root.path(), &compiled, "c1"),
+        "the retry against a writable ledger must append the recovered row"
+    );
+    assert_eq!(
+        rows_in(&ledger),
+        1,
+        "the recovered row must reach the ledger exactly once"
+    );
+    assert!(
+        !crate::core::savings::fold_session(&ledger, "c1").is_zero(),
+        "the recovered row must fold under the Claude session id"
+    );
+}
+
+/// Why (#7245): `tm hook` fires on several events, and two of them can overlap.
+/// The claim is what decides the race, so drive it from two threads at once
+/// rather than trusting the single-threaded ordering above.
+/// What: two threads call `emit_staged_row` against one staged file; exactly one
+/// may report an append, and the ledger holds one row.
+/// Test: itself.
+#[test]
+fn two_racing_claims_append_exactly_one_row() {
+    let root = tempfile::tempdir().expect("temp root");
+    let compiled = root
+        .path()
+        .join("project/.trusty-mpm/sessions/m1/INSTRUCTIONS-COMPILED.md");
+    let ledger = root.path().join("ledger.jsonl");
+
+    stage_row(root.path(), &compiled, &staged_row("m1"));
+
+    let racers: Vec<_> = (0..2)
+        .map(|_| {
+            let ledger = ledger.clone();
+            let root = root.path().to_path_buf();
+            let compiled = compiled.clone();
+            std::thread::spawn(move || emit_staged_row(&ledger, &root, &compiled, "c1"))
+        })
+        .collect();
+    let appended = racers
+        .into_iter()
+        .map(|racer| racer.join().expect("racer thread"))
+        .filter(|appended| *appended)
+        .count();
+
+    assert_eq!(appended, 1, "exactly one racer may claim the staged row");
+    assert_eq!(
+        rows_in(&ledger),
+        1,
+        "two racing hooks must leave exactly one row"
+    );
+}
+
 /// Why (#7245): two projects' unmanaged launches share the single `local`
 /// session scope, so a file named after the scope would let one project's hook
 /// claim the other's row. The compiled prompt's full path is what separates
