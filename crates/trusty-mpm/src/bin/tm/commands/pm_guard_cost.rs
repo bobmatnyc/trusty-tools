@@ -72,9 +72,12 @@ const RETRY_TRANSCRIPT_TAIL: u64 = 1024 * 1024;
 /// EVERY tool call, so the guard must be invisible in the common case. 200 ms
 /// is far above a 64 KiB tail read from page cache and far below the point at
 /// which a user would notice; blowing it fails open rather than stalling.
-/// What: timeout wrapped around the tail read.
+/// What: timeout wrapped around the tail read, passed to
+/// [`evaluate_agent_cost_within`] by the production entry point.
 /// Test: `fails_open_when_the_transcript_is_missing` covers the failure branch
-/// this timeout shares.
+/// this timeout shares;
+/// `the_production_budget_stays_far_inside_the_pretooluse_hook_timeout` pins
+/// the two bounds the value has to sit between.
 const EVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Locate the transcript of the subagent issuing this `PreToolUse` call.
@@ -149,13 +152,38 @@ pub(crate) fn resolve_agent_transcript(payload: &serde_json::Value) -> Option<Pa
 /// context size, and returns `(status, context_tokens)`. Any failure returns
 /// `(`[`BudgetStatus::Ok`]`, 0)` — fail open.
 /// Test: `fails_open_when_the_transcript_is_missing`,
-/// `reports_exceeded_for_an_over_ceiling_transcript`,
-/// `respects_a_disabled_config`,
-/// `retries_with_a_larger_tail_when_64k_holds_no_usage_record`,
-/// `still_fails_open_when_even_the_larger_tail_has_no_record`.
+/// `respects_a_disabled_config`.
 pub(crate) async fn evaluate_agent_cost(
     payload: &serde_json::Value,
     config: &AgentCostConfig,
+) -> (BudgetStatus, u64) {
+    evaluate_agent_cost_within(payload, config, EVAL_TIMEOUT).await
+}
+
+/// [`evaluate_agent_cost`] with the read deadline supplied by the caller.
+///
+/// Why (#7028): [`EVAL_TIMEOUT`] is a 200 ms *production latency* budget, and
+/// a test that reads a fixture through it is racing a wall clock rather than
+/// exercising this module. Expiry fails open, so the loser reads as
+/// `(Ok, 0)` — indistinguishable from a resolution bug in one direction and,
+/// in `still_fails_open_when_even_the_larger_tail_has_no_record`, a false
+/// GREEN in the other. It cost `allows_a_healthy_agent` a red main on run
+/// 34407013504: that one test took 0.335 s in the `bin/tm` target while every
+/// sibling in the same process took 0.010–0.015 s, so the guard hit the
+/// deadline and reported 0 against an expected 71540. Passing the budget in
+/// lets a test whose subject is the read hold the deadline still, without
+/// moving the value that ships. What the expired arm itself answers is
+/// [`verdict`]'s to pin.
+/// What: the whole body of [`evaluate_agent_cost`]; `budget` bounds both tail
+/// reads together, exactly as [`EVAL_TIMEOUT`] does in production.
+/// Test: `reports_exceeded_for_an_over_ceiling_transcript`,
+/// `allows_a_healthy_agent`,
+/// `retries_with_a_larger_tail_when_64k_holds_no_usage_record`,
+/// `still_fails_open_when_even_the_larger_tail_has_no_record`.
+async fn evaluate_agent_cost_within(
+    payload: &serde_json::Value,
+    config: &AgentCostConfig,
+    budget: std::time::Duration,
 ) -> (BudgetStatus, u64) {
     if !config.enabled {
         return (BudgetStatus::Ok, 0);
@@ -163,14 +191,32 @@ pub(crate) async fn evaluate_agent_cost(
     let Some(path) = resolve_agent_transcript(payload) else {
         return (BudgetStatus::Ok, 0);
     };
-    let Some(tokens) = tokio::time::timeout(EVAL_TIMEOUT, read_latest_context(&path))
+    let measured = tokio::time::timeout(budget, read_latest_context(&path))
         .await
         .ok()
-        .flatten()
-    else {
-        return (BudgetStatus::Ok, 0);
-    };
-    (evaluate_cost(tokens, config), tokens)
+        .flatten();
+    verdict(measured, config)
+}
+
+/// The guard's answer once the measurement has either landed or not.
+///
+/// Why (#7028): `None` here is the expired-deadline case, and it is the one
+/// arm no test can reach on purpose — a deadline short enough to be certain of
+/// expiring is also short enough for the read to beat it, so asserting through
+/// the real clock flakes in whichever direction the machine happens to run.
+/// (`Duration::ZERO` did: tokio rounds a deadline up to the next 1 ms tick, and
+/// a warm page-cache read lands inside it.) Splitting the mapping out puts the
+/// property that actually matters — an unmeasured agent is never denied — on a
+/// pure function that answers the same way on every machine.
+/// What: `Some` classifies via [`evaluate_cost`] and reports the measurement;
+/// `None` — timed out, unreadable, or no usage record in either window — is
+/// [`BudgetStatus::Ok`] with 0.
+/// Test: `an_unmeasured_read_never_denies`.
+fn verdict(measured: Option<u64>, config: &AgentCostConfig) -> (BudgetStatus, u64) {
+    match measured {
+        Some(tokens) => (evaluate_cost(tokens, config), tokens),
+        None => (BudgetStatus::Ok, 0),
+    }
 }
 
 /// Two-pass tail read yielding the newest context size, or `None`.
@@ -337,6 +383,14 @@ mod tests {
     use super::*;
     use trusty_mpm::core::agent_cost::stop_reason;
 
+    /// Read deadline for every test whose subject is the READ, not the clock.
+    ///
+    /// Why (#7028): see [`evaluate_agent_cost_within`]. A budget no scheduling
+    /// stall can plausibly consume turns "did the guard measure this fixture?"
+    /// back into a question about this module. It is not a licence to be slow —
+    /// a genuine hang still ends the test rather than running forever.
+    const TEST_EVAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
     /// Build a transcript tree matching Claude Code's real layout and return
     /// `(parent_transcript, subagent_transcript)`.
     fn transcript_tree(dir: &Path, agent_id: &str, context_tokens: u64) -> (PathBuf, PathBuf) {
@@ -452,7 +506,8 @@ mod tests {
             "transcript_path": parent.to_str().expect("utf8"),
             "agent_id": "big",
         });
-        let (status, tokens) = evaluate_agent_cost(&payload, &opted_in_stop()).await;
+        let (status, tokens) =
+            evaluate_agent_cost_within(&payload, &opted_in_stop(), TEST_EVAL_BUDGET).await;
         assert_eq!(status, BudgetStatus::Exceeded);
         assert_eq!(tokens, 622_200);
         // And the reason handed back must carry the measured number.
@@ -469,7 +524,9 @@ mod tests {
             "transcript_path": parent.to_str().expect("utf8"),
             "agent_id": "big",
         });
-        let (status, tokens) = evaluate_agent_cost(&payload, &AgentCostConfig::default()).await;
+        let (status, tokens) =
+            evaluate_agent_cost_within(&payload, &AgentCostConfig::default(), TEST_EVAL_BUDGET)
+                .await;
         assert_eq!(status, BudgetStatus::Warning);
         assert_eq!(tokens, 622_200);
     }
@@ -502,9 +559,37 @@ mod tests {
             "transcript_path": parent.to_str().expect("utf8"),
             "agent_id": "small",
         });
-        let (status, tokens) = evaluate_agent_cost(&payload, &AgentCostConfig::default()).await;
+        let (status, tokens) =
+            evaluate_agent_cost_within(&payload, &AgentCostConfig::default(), TEST_EVAL_BUDGET)
+                .await;
         assert_eq!(status, BudgetStatus::Ok);
         assert_eq!(tokens, 71_540);
+    }
+
+    #[test]
+    fn an_unmeasured_read_never_denies() {
+        // #7028: the state the runner reached on `allows_a_healthy_agent` —
+        // 71540 sitting on disk and a deadline that expired before the read
+        // landed. The guard must answer Ok with 0, never a stop, and it must
+        // still stop on a measurement that genuinely arrived. Asserted on the
+        // mapping because the clock cannot be raced deterministically either
+        // way; see [`verdict`].
+        assert_eq!(verdict(None, &opted_in_stop()), (BudgetStatus::Ok, 0));
+        assert_eq!(
+            verdict(Some(622_200), &opted_in_stop()),
+            (BudgetStatus::Exceeded, 622_200)
+        );
+    }
+
+    #[test]
+    fn the_production_budget_stays_far_inside_the_pretooluse_hook_timeout() {
+        // The two bounds EVAL_TIMEOUT has to sit between, now that the value is
+        // a parameter the tests can override (#7028): Claude Code gives
+        // PreToolUse 5 seconds and this guard runs before every tool call, so
+        // the read has to be invisible inside it — and a zeroed budget would
+        // expire on every call, silently retiring the guard.
+        assert!(EVAL_TIMEOUT > std::time::Duration::ZERO);
+        assert!(EVAL_TIMEOUT <= std::time::Duration::from_millis(500));
     }
 
     // ── #4837 review MEDIUM: the 64 KiB window misses the largest transcripts ──
@@ -550,21 +635,12 @@ mod tests {
             "transcript_path": parent.to_str().expect("utf8"),
             "agent_id": "huge",
         });
-        // #6663: `evaluate_agent_cost` wraps BOTH tail reads in one 200 ms
-        // `EVAL_TIMEOUT`, and this fixture is ~600 KiB read twice. Under a
-        // loaded `--no-fail-fast` run that budget expired, the guard failed
-        // open, and the test saw `(Ok, 0)` — a timing loss, not a behaviour
-        // change. Retrying is sound because the call is a pure read with no
-        // side effect, so an attempt that timed out changed nothing. The
-        // assertion is unchanged: the record must be found, and a guard that
-        // genuinely could not find it still fails at the deadline.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut measured = evaluate_agent_cost(&payload, &opted_in_stop()).await;
-        while measured == (BudgetStatus::Ok, 0) && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            measured = evaluate_agent_cost(&payload, &opted_in_stop()).await;
-        }
-        let (status, tokens) = measured;
+        // #6663 saw this same fixture lose the 200 ms production deadline under
+        // a loaded run and patched it with a retry loop; #7028 removes the race
+        // instead. Both tail reads share one budget and this fixture is
+        // ~600 KiB read twice, so the budget is the generous test one.
+        let (status, tokens) =
+            evaluate_agent_cost_within(&payload, &opted_in_stop(), TEST_EVAL_BUDGET).await;
         assert_eq!(tokens, 500_000, "the larger window must find the record");
         assert_eq!(status, BudgetStatus::Exceeded);
     }
@@ -572,7 +648,10 @@ mod tests {
     #[tokio::test]
     async fn still_fails_open_when_even_the_larger_tail_has_no_record() {
         // Growing the window must not weaken the fail-open contract: a
-        // transcript with no usage record anywhere still ALLOWS.
+        // transcript with no usage record anywhere still ALLOWS. #7028: the
+        // generous budget is what makes that claim mean anything — under the
+        // 200 ms production deadline an expiry returned the expected `(Ok, 0)`
+        // too, so this test could pass without reading the fixture at all.
         let tmp = crate::test_support::hermetic_temp_dir();
         let (parent, sub) = transcript_tree(tmp.path(), "norec", 500_000);
         std::fs::write(&sub, filler_line(100 * 1024)).expect("write");
@@ -581,7 +660,7 @@ mod tests {
             "agent_id": "norec",
         });
         assert_eq!(
-            evaluate_agent_cost(&payload, &opted_in_stop()).await,
+            evaluate_agent_cost_within(&payload, &opted_in_stop(), TEST_EVAL_BUDGET).await,
             (BudgetStatus::Ok, 0)
         );
     }
