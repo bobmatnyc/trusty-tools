@@ -26,7 +26,7 @@ name = "trusty-audit"
 # changes `src/**`. The change is confined to the body of the private
 # `grounding::osv::absorb`, which now honours the producer's `resolved` flag;
 # no public item is added, removed, or reshaped.
-version = "0.14.5"
+version = "0.14.6"
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"
