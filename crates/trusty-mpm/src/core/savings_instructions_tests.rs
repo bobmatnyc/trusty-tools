@@ -220,12 +220,13 @@ fn compiled_prompt_dest(root: &std::path::Path, scope: &str) -> std::path::PathB
 /// Test: itself.
 #[test]
 fn the_row_is_keyed_by_the_claude_session_id() {
-    let root = tempfile::tempdir().expect("temp dir");
-    let dest = compiled_prompt_dest(root.path(), "local");
-    let ledger = root.path().join("savings.jsonl");
+    let project = tempfile::tempdir().expect("temp project");
+    let framework_root = tempfile::tempdir().expect("temp framework root");
+    let dest = compiled_prompt_dest(project.path(), "local");
+    let ledger = crate::core::savings::savings_log_in(framework_root.path());
 
     record_instruction_compression_to(
-        &ledger,
+        framework_root.path(),
         &dest,
         "a compiled prompt far smaller than its sources",
         Some("claude-abc-123".to_string()),
@@ -249,23 +250,102 @@ fn the_row_is_keyed_by_the_claude_session_id() {
     );
 }
 
-/// Why (#7209): a launch with no harness session id — a direct `tm` invocation
-/// outside Claude Code — still has a real fold to record, and the directory name
-/// remains the only id available. Losing that row would trade one attribution
-/// bug for another.
+/// Why (#7245): this producer ALWAYS lacks the Claude Code id — it runs before
+/// `claude` is spawned — so #7209's fallback to the directory name was not an
+/// edge case but every row, and the statusline folds by no such key. Writing one
+/// anyway put a row on the ledger that no surface could ever attribute. It is
+/// staged for the hook instead, and the ledger stays untouched until that hook
+/// can key it.
 /// Test: itself.
 #[test]
-fn the_row_falls_back_to_the_compiled_prompt_directory_id() {
-    let root = tempfile::tempdir().expect("temp dir");
-    let dest = compiled_prompt_dest(root.path(), "sess-42");
-    let ledger = root.path().join("savings.jsonl");
+fn no_claude_id_stages_the_row_instead_of_writing_an_unfoldable_one() {
+    let project = tempfile::tempdir().expect("temp project");
+    let framework_root = tempfile::tempdir().expect("temp framework root");
+    let dest = compiled_prompt_dest(project.path(), "sess-42");
 
-    record_instruction_compression_to(&ledger, &dest, "tiny", None, sonnet_price);
+    record_instruction_compression_to(framework_root.path(), &dest, "tiny", None, sonnet_price);
 
-    let folded = crate::core::savings::fold_session(&ledger, "sess-42");
+    let ledger = crate::core::savings::savings_log_in(framework_root.path());
+    assert!(
+        !ledger.exists(),
+        "a row nothing can fold must not reach the ledger"
+    );
+    let staged = crate::core::savings_sidecar::pending_row_path_in(framework_root.path(), &dest);
+    let text = std::fs::read_to_string(&staged).expect("the row must be staged for the hook");
+    assert!(
+        text.contains("\"session_id\":\"sess-42\""),
+        "the staged row keeps the compile-time id until the hook re-keys it: {text}"
+    );
+}
+
+/// Why (#7245, required acceptance): the closure condition — a session that never
+/// exports `CLAUDE_CODE_SESSION_ID` to the compiling `tm` process still produces
+/// a row the statusline can fold. This drives the real producer and the real
+/// hook-side claim end to end, including the second invocation that must not
+/// duplicate the row.
+/// Test: itself.
+#[test]
+fn a_staged_row_becomes_foldable_at_the_first_hook_invocation() {
+    let project = tempfile::tempdir().expect("temp project");
+    let framework_root = tempfile::tempdir().expect("temp framework root");
+    let dest = compiled_prompt_dest(project.path(), "m1");
+    let ledger = crate::core::savings::savings_log_in(framework_root.path());
+
+    record_instruction_compression_to(framework_root.path(), &dest, "tiny", None, sonnet_price);
+    assert!(
+        crate::core::savings::fold_session(&ledger, "c1").is_zero(),
+        "before the hook there is nothing for the statusline to fold"
+    );
+
+    for _ in 0..2 {
+        crate::core::savings_sidecar::emit_staged_row(&ledger, framework_root.path(), &dest, "c1");
+    }
+
+    let folded = crate::core::savings::fold_session(&ledger, "c1");
     assert!(
         !folded.is_zero(),
-        "with no Claude Code id the directory name must key the row: {folded:?}"
+        "the statusline fold for the launched Claude session must find the row: {folded:?}"
+    );
+    assert_eq!(
+        folded.rows, 1,
+        "two hook invocations must leave exactly one row for the pair: {folded:?}"
+    );
+    assert!(
+        crate::core::savings::fold_session(&ledger, "m1").is_zero(),
+        "nothing may stay attributed to the managed session id"
+    );
+}
+
+/// Why (#7245): for a project that overrides no instruction section the composer
+/// only ADDS context, so this decline is permanent and no row can ever be
+/// written. At `debug!` that left the segment's absence unexplained. The
+/// producer must state it — once — and still write nothing.
+/// Test: itself.
+#[test]
+fn a_prompt_that_folds_nothing_warns_once_and_writes_no_row() {
+    let project = tempfile::tempdir().expect("temp project");
+    let framework_root = tempfile::tempdir().expect("temp framework root");
+    let dest = compiled_prompt_dest(project.path(), "m1");
+    let bulky = "x".repeat(folded_source_bytes(project.path()) + 1);
+
+    record_instruction_compression_to(framework_root.path(), &dest, &bulky, None, sonnet_price);
+
+    assert!(
+        !crate::core::savings::savings_log_in(framework_root.path()).exists(),
+        "a prompt that folded nothing must write no row"
+    );
+    assert!(
+        !crate::core::savings_sidecar::pending_row_path_in(framework_root.path(), &dest).exists(),
+        "a prompt that folded nothing must stage nothing either"
+    );
+    assert!(
+        !crate::core::savings_sidecar::warn_no_fold_once(
+            framework_root.path(),
+            project.path(),
+            folded_source_bytes(project.path()),
+            bulky.len(),
+        ),
+        "the producer must already have warned for this project and byte pair"
     );
 }
 

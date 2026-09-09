@@ -121,12 +121,26 @@ Written once per session launch, at the point that writes
 Both figures land in the row's `basis` string, so any row can be checked by
 hand.
 
+The measurement is taken at launch, but the row reaches the ledger one step
+later. The `tm` process that compiles the prompt runs before `claude` is
+spawned, so it does not yet know the session id the segment folds by — Claude
+Code exports that id into its own children only. It stages the row under
+`~/.trusty-mpm/usage/pending-savings/`, and the session's first `tm hook`
+`SessionStart` invocation, which does know the id, appends it. A launch whose
+hook never fires leaves the staged file in place for the next one.
+
 The composer also *adds* generated context that no source file contributes — the
 live agent roster and the detected stack profile. A project that overrides
 nothing therefore produces a compiled prompt LARGER than its sources, and
 **no row is written**. That is the correct answer, not a bug: the fold removed
 nothing, so there is nothing to claim. The row appears when a project's
 `CLAUDE.md` genuinely replaces a bundled section with a shorter one.
+
+That decline is why the segment can be absent for a whole project rather than a
+single session, so it says so: the launch logs one `warn` naming both byte
+counts, repeated only when those counts move. Look for "not smaller than the
+instruction sources" in the launch output before treating a missing segment as a
+fault.
 
 ### `divert`
 
