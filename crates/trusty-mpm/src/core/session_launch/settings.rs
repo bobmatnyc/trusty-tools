@@ -291,11 +291,33 @@ pub(super) fn write_output_style(
 /// `project_hooks_tests::write_project_hooks_enabled_output_is_unchanged_by_the_toggle`,
 /// `project_hooks_tests::write_project_hooks_writes_divert_groups_when_enabled`,
 /// `project_hooks_tests::write_project_hooks_strips_stale_divert_when_disabled`.
+///
+/// `exe_override` (#7244) pins the binary the hook commands name; production
+/// passes `None` and lets the resolver find the running installed binary. A
+/// test passes an installed-looking path so its assertions do not depend on
+/// whether the host running them has `tm` installed — without which every
+/// assertion here would read the resolver's refusal instead of the write.
 pub(super) fn write_project_hooks(
     project_dir: &Path,
+    exe_override: Option<&Path>,
     inject_prompt_context: bool,
     divert_enabled: bool,
 ) -> Result<(), PrepError> {
+    // #6887: `divert_enabled` adds two `PreToolUse` groups; the strip below is
+    // deliberately NOT narrowed by it, so flipping the manifest key back to
+    // false removes what a prior launch wrote.
+    //
+    // #7244: resolved BEFORE `create_dir_all` and before the read — when no
+    // stable installed binary resolves this call must leave the project's
+    // settings file exactly as it found it (and a missing one missing) rather
+    // than rewriting every hook to point at a `cargo test` harness.
+    let additions = super::project_hooks::project_managed_hook_additions(
+        exe_override,
+        inject_prompt_context,
+        divert_enabled,
+    )
+    .map_err(|source| PrepError::HookExe { source })?;
+
     let claude_dir = project_dir.join(".claude");
     std::fs::create_dir_all(&claude_dir).map_err(|source| PrepError::Io {
         path: claude_dir.clone(),
@@ -312,12 +334,6 @@ pub(super) fn write_project_hooks(
             .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
         Err(_) => serde_json::Value::Object(serde_json::Map::new()),
     };
-
-    // #6887: `divert_enabled` adds two `PreToolUse` groups; the strip below is
-    // deliberately NOT narrowed by it, so flipping the manifest key back to
-    // false removes what a prior launch wrote.
-    let additions =
-        super::project_hooks::project_managed_hook_additions(inject_prompt_context, divert_enabled);
 
     // Replace-by-identity at entry granularity: strip any existing entry we
     // own (trusty-memory / PM-guard / lifecycle-triad), so re-running this on

@@ -15,9 +15,7 @@ use clap::Parser;
 use crate::cli::{
     Cli, CliCompressionLevel, Command, OptimizerAction, OverseerAction, SessionAction,
 };
-use crate::commands::install::{
-    deploy_report_lines, install_to, mpm_hook_additions, write_project_hooks_for_dir,
-};
+use crate::commands::install::{deploy_report_lines, install_to, write_project_hooks_for_dir};
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, hook};
 use crate::commands::project::scaffold_project_dir;
 use crate::formatters::session::{event_summary, print_compression_stats};
@@ -193,7 +191,13 @@ fn test_write_project_hooks_for_dir_targets_project_dir() {
     // The file must not exist before the call.
     assert!(!settings.exists());
 
-    let wrote = write_project_hooks_for_dir(project_dir).unwrap();
+    // #7244: pin the binary. Unpinned, this resolves `current_exe()` — under
+    // `cargo test` a build artifact the resolver refuses — and on a host with
+    // no installed `tm` the call would report that refusal instead of the path
+    // targeting this test is about.
+    let wrote =
+        write_project_hooks_for_dir(project_dir, Some(std::path::Path::new("/usr/local/bin/tm")))
+            .unwrap();
     assert!(wrote, "must report file was written");
     assert!(settings.exists(), "project settings must be created");
 
@@ -225,7 +229,14 @@ fn test_write_project_hooks_for_dir_targets_project_dir() {
 #[test]
 fn mpm_hook_additions_is_idempotent_under_merge() {
     use trusty_common::claude_config::merge_hook_entries;
-    let additions = mpm_hook_additions();
+    // #7244: pin the binary rather than resolving it — under `cargo test` the
+    // running exe is a build artifact the resolver refuses, and a host without
+    // `tm` installed (every CI runner) would otherwise see the refusal here
+    // instead of the merge shape this test is about.
+    let additions = trusty_mpm::core::standalone::hooks::mpm_hook_additions_with_exe(Some(
+        std::path::Path::new("/usr/local/bin/tm"),
+    ))
+    .expect("a pinned installed-looking exe always resolves");
     let once = merge_hook_entries(&serde_json::json!({}), &additions);
     let twice = merge_hook_entries(&once, &additions);
     assert_eq!(once, twice, "second merge must be a no-op");

@@ -272,7 +272,7 @@ pub(crate) async fn launch(
     if let Err(e) = crate::commands::install::remove_global_trusty_mpm_hooks() {
         eprintln!("warning: could not remove global MPM hooks: {e:#}");
     }
-    if let Err(e) = crate::commands::install::write_project_hooks_for_dir(&managed_path) {
+    if let Err(e) = crate::commands::install::write_project_hooks_for_dir(&managed_path, None) {
         eprintln!("warning: could not write project-scoped MPM hooks: {e:#}");
     }
 

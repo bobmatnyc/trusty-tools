@@ -10,6 +10,7 @@
 //! Test: `cargo test -p trusty-mpm-daemon --test test_session_lifecycle`.
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -38,6 +39,22 @@ impl EnvOverride {
         unsafe { std::env::set_var(key, value) };
         Self { key, prev }
     }
+
+    /// Remove `key` for the duration, restoring it on drop.
+    ///
+    /// Why (#7244): `TMUX` is inherited whenever the harness itself runs inside
+    /// tmux, and tmux attaches to the server that variable names in preference
+    /// to `TMUX_TMPDIR`. Leaving it set kept every `tmux` call this test makes
+    /// pointed at the OPERATOR's server, whose live `tm-*` sessions the delete
+    /// step then adopted and re-prepared — writing their real workspaces'
+    /// `.claude/settings.json`. Setting it empty is not equivalent: tmux treats
+    /// an empty `TMUX` as a malformed server address, not as absent.
+    fn remove(key: &'static str) -> Self {
+        let prev = std::env::var_os(key);
+        // SAFETY: as in `set` — single-test binary.
+        unsafe { std::env::remove_var(key) };
+        Self { key, prev }
+    }
 }
 
 impl Drop for EnvOverride {
@@ -46,6 +63,131 @@ impl Drop for EnvOverride {
         match self.prev.take() {
             Some(v) => unsafe { std::env::set_var(self.key, v) },
             None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
+
+/// RAII override of the process working directory, restored on drop.
+///
+/// Why (#7244): `$HOME` was already redirected (#6523), but the project-tier
+/// settings writer resolves its target from the CHECKOUT, not from `$HOME`, and
+/// `cargo test` runs this binary with its cwd inside the repository. A run from
+/// an agent worktree therefore rewrote the real project's
+/// `.claude/settings.json` — every hook, including pm-guard and the Read/Bash
+/// diversion, repointed at this test binary. Redirecting cwd puts any such
+/// resolution inside the scratch directory instead.
+/// What: same shape as [`EnvOverride`], for `std::env::current_dir`. Restores
+/// the original directory on drop so the harness's own teardown is unaffected.
+/// Test: `full_user_cycle`, whose [`RealProjectSettingsGuard`] fails the test if
+/// this redirect ever stops working.
+struct CwdOverride {
+    prev: std::path::PathBuf,
+}
+
+impl CwdOverride {
+    fn set(dir: &Path) -> Self {
+        let prev = std::env::current_dir().expect("resolve cwd");
+        std::env::set_current_dir(dir).expect("redirect cwd into the scratch dir");
+        Self { prev }
+    }
+}
+
+impl Drop for CwdOverride {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.prev);
+    }
+}
+
+/// A tripwire on the REAL checkout's `.claude/settings.json` files.
+///
+/// Why (#7244): hermeticity that is only asserted by construction rots — the
+/// #6523 `$HOME` redirect was in place and the write still happened, through a
+/// path nobody had thought to redirect. This watches the actual files: if any
+/// future change reaches a real settings file again, the test that reached it
+/// fails, naming the file, rather than the damage being noticed days later in a
+/// dead pm-guard.
+/// What: snapshots the content of `<root>/.claude/settings.json` for BOTH roots
+/// a `cargo test` run can resolve — this checkout, and (when this checkout is a
+/// linked worktree) the main checkout its `.git` file points at, which is the
+/// one #7244 actually clobbered. `check` compares content, so a rewrite with
+/// identical bytes is correctly not a failure, and an absent file that appears
+/// is. Runs on drop too, so a panicking test still reports a clobber it caused.
+/// Test: `full_user_cycle`.
+struct RealProjectSettingsGuard {
+    before: Vec<(std::path::PathBuf, Option<String>)>,
+}
+
+impl RealProjectSettingsGuard {
+    /// Snapshot every real settings file this run could reach.
+    fn arm() -> Self {
+        let before = Self::watched_paths()
+            .into_iter()
+            .map(|p| {
+                let content = std::fs::read_to_string(&p).ok();
+                (p, content)
+            })
+            .collect();
+        Self { before }
+    }
+
+    /// The `.claude/settings.json` of this checkout and of its main checkout.
+    ///
+    /// `CARGO_MANIFEST_DIR` is `<checkout>/crates/trusty-mpm`, so two `pop`s
+    /// reach the checkout root without depending on the cwd this test redirects.
+    /// A linked worktree's `.git` is a FILE reading
+    /// `gitdir: <main>/.git/worktrees/<name>`; trimming the last two components
+    /// yields `<main>/.git`, whose parent is the main checkout — resolved by
+    /// reading the file rather than spawning `git`, so the guard works with no
+    /// git binary and cannot be confused by the redirected cwd.
+    fn watched_paths() -> Vec<std::path::PathBuf> {
+        let mut roots = Vec::new();
+        let mut checkout = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        checkout.pop();
+        checkout.pop();
+
+        if let Ok(text) = std::fs::read_to_string(checkout.join(".git"))
+            && let Some(rest) = text.trim().strip_prefix("gitdir:")
+        {
+            let mut admin = std::path::PathBuf::from(rest.trim());
+            // `<main>/.git/worktrees/<name>` -> `<main>`
+            admin.pop();
+            admin.pop();
+            if admin.file_name() == Some(std::ffi::OsStr::new(".git"))
+                && let Some(main_root) = admin.parent()
+            {
+                roots.push(main_root.to_path_buf());
+            }
+        }
+        roots.push(checkout);
+        roots
+            .into_iter()
+            .map(|r| r.join(".claude").join("settings.json"))
+            .collect()
+    }
+
+    /// Panic naming any real settings file whose content changed.
+    fn check(&self) {
+        let changed: Vec<String> = self
+            .before
+            .iter()
+            .filter(|(path, before)| std::fs::read_to_string(path).ok().as_ref() != before.as_ref())
+            .map(|(path, _)| path.display().to_string())
+            .collect();
+        assert!(
+            changed.is_empty(),
+            "this test wrote the REAL project's Claude settings (#7244) — every hook \
+             in these files now points wherever this run resolved, and pm-guard \
+             enforcement is dead until they are regenerated: {changed:#?}"
+        );
+    }
+}
+
+impl Drop for RealProjectSettingsGuard {
+    fn drop(&mut self) {
+        // A double panic aborts the process, so an already-failing test reports
+        // its own failure rather than this one.
+        if !std::thread::panicking() {
+            self.check();
         }
     }
 }
@@ -85,8 +227,16 @@ impl TestServer {
     /// the instant after spawn can race the listener, so we poll `/health`.
     /// What: builds an in-memory `DaemonState`, serves the router on a task, and
     /// blocks until `GET /health` returns `200` (max ~2s).
-    async fn spawn() -> Self {
-        let state = DaemonState::shared();
+    /// #7244: `framework_root` is INJECTED rather than resolved. `DaemonState`
+    /// derives the managed session-manager store from its framework root, and
+    /// `DELETE /sessions/{id}` reconciles that store on the way out —
+    /// re-preparing every session it lists, which runs the project-tier
+    /// settings writer against each one's workspace. Resolving the root led to
+    /// the OPERATOR's real store, so the delete step re-prepared the real
+    /// checkout and rewrote its `.claude/settings.json`. A redirected `$HOME`
+    /// did not stop it; only naming the root does.
+    async fn spawn(framework_root: &Path) -> Self {
+        let state = std::sync::Arc::new(DaemonState::with_root(framework_root.to_path_buf()));
         let app = trusty_mpm::daemon::api::router(state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -151,16 +301,37 @@ async fn full_user_cycle() {
     // real `~/.trusty-mpm/sessions/<uuid>/pause.json` into the operator's home
     // on every run and nothing removed it. Set before `TestServer::spawn`, which
     // resolves `FrameworkPaths::default()` at construction.
+    // #7244: armed FIRST, so it covers everything below including the daemon
+    // construction, and fires on drop even if an assertion panics.
+    let _real_settings = RealProjectSettingsGuard::arm();
+
     let scratch_home = tempfile::tempdir().expect("scratch home");
     let _home = EnvOverride::set("HOME", scratch_home.path());
+    // #7244: `$HOME` is not the only root a settings write resolves — the
+    // project-tier writer starts from the CHECKOUT, and `cargo test` runs this
+    // binary inside it. Redirecting cwd sends any such resolution into the
+    // scratch directory. Safe as a process-global here for the same reason
+    // `EnvOverride` is: this binary holds exactly one test.
+    let _cwd = CwdOverride::set(scratch_home.path());
     // #6523: a scratch `$HOME` is precisely what `host_state_gate` refuses tmux
     // under (#5784), and step 11's #1454 assertion needs a REAL tmux host to
     // mean anything — without the opt-in `tmux_available` reads false and the
     // whole tmux arm silently vanishes. This is the hatch that gate documents
     // for a test that deliberately wants an isolated `$HOME` AND real tmux.
     let _allow_host_state = EnvOverride::set(ALLOW_HOST_STATE_ENV, "1");
+    // #7244: that opt-in is what made this test non-hermetic. Step 9's DELETE
+    // reconciles the managed store, which ADOPTS live `tm-*` tmux sessions it
+    // does not know and re-prepares each one's workspace — running the
+    // project-tier settings writer over the operator's real checkouts. With
+    // real tmux allowed, the operator's own sessions were in scope, so a
+    // `cargo test` run rewrote the real project's `.claude/settings.json`.
+    // `TMUX_TMPDIR` gives this test its own tmux server, so the only session
+    // reconciliation can see is the one this test creates. Step 11's #1454
+    // assertion still runs against real tmux, which is what #6523 wanted.
+    let _tmux_tmpdir = EnvOverride::set("TMUX_TMPDIR", scratch_home.path());
+    let _tmux = EnvOverride::remove("TMUX");
 
-    let server = TestServer::spawn().await;
+    let server = TestServer::spawn(&scratch_home.path().join(".trusty-mpm")).await;
     let client = reqwest::Client::new();
 
     // 1. Start a session.
@@ -342,4 +513,9 @@ async fn full_user_cycle() {
             "tmux host {name} must be killed by DELETE /sessions/{{id}} (#1454)"
         );
     }
+
+    // 12. #7244: nothing above may have touched the real checkout's Claude
+    //     settings. Asserted explicitly here as well as on drop so the failure
+    //     names this step rather than an unwind.
+    _real_settings.check();
 }

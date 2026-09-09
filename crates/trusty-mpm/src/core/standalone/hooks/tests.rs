@@ -12,6 +12,41 @@
 use super::*;
 use tempfile::TempDir;
 
+/// An absolute, installed-looking `tm` path that always resolves.
+///
+/// Why (#7244): `resolve_stable_hook_exe` now refuses the running `cargo test`
+/// binary on two independent grounds — it lives in a build tree, and its stem
+/// is not one this crate ships — so every test that used to lean on
+/// `current_exe()` or on the machine having `tm` on PATH would read a refusal
+/// instead of the behaviour it is asserting. CI runners have no `tm`.
+/// What: outside every build tree and named `tm`, so both halves of the guard
+/// accept it without touching the filesystem.
+const STABLE_TEST_EXE: &str = "/usr/local/bin/tm";
+
+/// The refusal a `cargo test` binary must produce, or the installed binary a
+/// host that happens to have `tm` falls back to — never the test binary.
+///
+/// Why (#7244): the three "must not bake X" tests below run on hosts with and
+/// without `tm` installed and must assert the same thing on both. What matters
+/// is not WHICH answer comes back but that the rejected path is never in it.
+/// What: asserts `result` either refused, or produced a `" hook"` command that
+/// does not mention `rejected`.
+/// Test: this IS a test helper; see its three callers.
+fn assert_never_baked(result: &Result<String, StableHookExeError>, rejected: &Path) {
+    let Ok(cmd) = result else {
+        return;
+    };
+    assert!(
+        cmd.ends_with(" hook"),
+        "a resolved hook command must end with ' hook', got: {cmd:?}"
+    );
+    assert!(
+        !cmd.contains(&rejected.display().to_string()),
+        "{} must never be baked into a hook command, got: {cmd:?}",
+        rejected.display()
+    );
+}
+
 /// Why: hooks must embed an absolute binary path so they fire even in
 /// environments where ~/.cargo/bin is not on PATH.
 /// What: passes a known absolute path as exe_override and asserts the
@@ -19,7 +54,7 @@ use tempfile::TempDir;
 #[test]
 fn test_hook_command_uses_absolute_path() {
     let fake_exe = PathBuf::from("/usr/local/bin/trusty-mpm");
-    let cmd = mpm_hook_command(Some(&fake_exe));
+    let cmd = mpm_hook_command(Some(&fake_exe)).expect("an installed-looking override resolves");
     assert!(
         cmd.starts_with('/'),
         "hook command must start with '/' (absolute path), got: {cmd:?}"
@@ -31,40 +66,38 @@ fn test_hook_command_uses_absolute_path() {
     assert_eq!(cmd, "/usr/local/bin/trusty-mpm hook");
 }
 
-/// Why: when exe_override is None and current_exe() is available (which
-/// it always is in cargo test), the command must still start with '/' —
-/// the test binary itself is an absolute path.
+/// Why (#7244): with no override the resolver reads `current_exe()`, which
+/// under `cargo test` is the libtest harness — a build artifact whose stem is
+/// not one this crate ships. That is exactly the path that got written into a
+/// real project's `settings.json` as the command for pm-guard, Read/Bash
+/// diversion, `PostToolUse` and `SessionEnd`. It must never come back from
+/// here, on any host: one with `tm` installed answers with the installed
+/// binary, one without answers with a refusal.
+/// What: asserts the running test binary's own path is absent from whichever
+/// of those two answers this host produces.
 #[test]
-fn test_hook_command_without_override_is_absolute_or_fallback() {
-    let cmd = mpm_hook_command(None);
-    // Either an absolute path (normal) or the bare fallback (edge case
-    // where current_exe() is somehow unavailable / relative).
-    assert!(
-        cmd.ends_with(" hook"),
-        "hook command must end with ' hook', got: {cmd:?}"
-    );
+fn test_hook_command_without_override_never_names_the_test_binary() {
+    let exe = std::env::current_exe().expect("current_exe resolvable under cargo test");
+    assert_never_baked(&mpm_hook_command(None), &exe);
 }
 
 /// Why (#2229): an ephemeral build/worktree `exe_override` (e.g.
 /// `target/debug/deps/...`) must NOT be baked into the hook command — it 404s
 /// once the artifact is rebuilt away. The command must instead resolve a stable
-/// installed binary via PATH, or degrade to the bare fallback — never the
-/// worktree path.
-/// What: passes a `target/debug/deps` path as exe_override and asserts the
-/// resulting command never contains that ephemeral path and still ends with
-/// " hook".
+/// installed binary via PATH, or refuse (#7244) — never the worktree path.
+/// What: passes each ephemeral shape as exe_override and asserts the resulting
+/// command never contains it.
 #[test]
 fn test_hook_command_rejects_ephemeral_exe_override() {
-    let ephemeral = PathBuf::from("/Users/x/trusty-tools/target/debug/deps/trusty_mpm-deadbeef");
-    let cmd = mpm_hook_command(Some(&ephemeral));
-    assert!(
-        !cmd.contains("target/debug/deps"),
-        "ephemeral build path must never be baked into the hook command, got: {cmd:?}"
-    );
-    assert!(
-        cmd.ends_with(" hook"),
-        "hook command must still end with ' hook', got: {cmd:?}"
-    );
+    // #7244: the second path uses this repo's per-worktree `target-<issue>`
+    // build root, which contains neither `target/debug` nor `target/release`
+    // and so passed the pre-fix guard outright.
+    for ephemeral in [
+        PathBuf::from("/Users/x/trusty-tools/target/debug/deps/trusty_mpm-deadbeef"),
+        PathBuf::from("/Users/x/trusty-tools/target-7224/debug/deps/trusty_mpm-deadbeef"),
+    ] {
+        assert_never_baked(&mpm_hook_command(Some(&ephemeral)), &ephemeral);
+    }
 }
 
 /// Why (#4485): the #2229 guard listed build/worktree layouts only, so a
@@ -78,25 +111,152 @@ fn test_hook_command_rejects_ephemeral_exe_override() {
 /// PATH-resolved install, or the bare fallback).
 #[test]
 fn test_hook_command_rejects_system_temp_exe_override() {
-    let mut baked: Vec<String> = Vec::new();
     for ephemeral in [
         PathBuf::from("/private/tmp/claude-502/-Users-x-proj/9f1c/scratchpad/base-bins/trusty-mpm"),
         PathBuf::from("/tmp/trusty-mpm"),
         std::env::temp_dir().join("claude-4485/base-bins/trusty-mpm"),
     ] {
-        let cmd = mpm_hook_command(Some(&ephemeral));
-        if cmd.contains(&ephemeral.display().to_string()) {
-            baked.push(cmd.clone());
-        }
+        assert_never_baked(&mpm_hook_command(Some(&ephemeral)), &ephemeral);
+    }
+}
+
+/// Why (#7244): the running executable was judged purely by WHERE it lived, so
+/// the moment the path guard missed a build layout — this repo's per-worktree
+/// `target-<issue>` directories — a `cargo test` harness passed as "the
+/// installed tm binary". `deps/test_session_lifecycle-cd3ba8f03938239b` was
+/// written into a real project's `settings.json` as the command for pm-guard,
+/// Read/Bash diversion, `PostToolUse` and `SessionEnd`; enforcement was dead
+/// until the file was regenerated. Asking WHAT the binary is stops the class
+/// even where the path guard is blind.
+/// What: the exact offending stem, at a path with nothing ephemeral about it,
+/// with the PATH fallback injected as empty so the refusal is the ONLY possible
+/// answer on every host. Asserts the variant, not just that it failed.
+#[test]
+fn resolve_stable_hook_exe_with_refuses_a_foreign_binary_stem() {
+    let foreign = PathBuf::from("/usr/local/bin/test_session_lifecycle-cd3ba8f03938239b");
+    let err = resolve_stable_hook_exe_with(Some(foreign.clone()), |_| None)
+        .expect_err("a non-tm binary must never become the hook command");
+    assert!(
+        matches!(&err, StableHookExeError::ForeignBinary(p) if *p == foreign),
+        "expected ForeignBinary({}), got {err:?}",
+        foreign.display()
+    );
+}
+
+/// Why (#7244): the ephemeral half of the guard must keep refusing even when
+/// the name check would have accepted — the two reasons are independent, and a
+/// `deps/trusty_mpm-<hash>` artifact passes the name check by design (it is our
+/// binary, just a transient copy of it).
+/// What: injects an empty PATH fallback so the refusal is the only answer, and
+/// pins the variant so a future change cannot silently reclassify it.
+#[test]
+fn resolve_stable_hook_exe_with_refuses_an_ephemeral_exe() {
+    let ephemeral =
+        PathBuf::from("/Users/x/trusty-tools/target-7224/debug/deps/trusty_mpm-cd3ba8f0");
+    let err = resolve_stable_hook_exe_with(Some(ephemeral.clone()), |_| None)
+        .expect_err("a build artifact must never become the hook command");
+    assert!(
+        matches!(&err, StableHookExeError::Ephemeral(p) if *p == ephemeral),
+        "expected Ephemeral({}), got {err:?}",
+        ephemeral.display()
+    );
+}
+
+/// Why (#7244): refusing the running binary must not mean refusing outright —
+/// a developer running a debug build still gets working hooks, pointed at the
+/// installed binary. The fallback is what keeps the hard refusal from being a
+/// regression for every debug-build launch.
+/// What: injects a refused running path AND a PATH hit, and asserts the
+/// installed path wins while the refused one appears nowhere.
+#[test]
+fn resolve_stable_hook_exe_with_falls_back_to_the_installed_binary() {
+    let installed = PathBuf::from(STABLE_TEST_EXE);
+    let refused = PathBuf::from("/Users/x/trusty-tools/target-7224/debug/deps/tm-cd3ba8f0");
+    let resolved = resolve_stable_hook_exe_with(Some(refused.clone()), |_| Some(installed.clone()))
+        .expect("an installed binary on PATH resolves");
+    assert_eq!(
+        resolved, installed,
+        "the PATH-resolved install must win over a refused running path"
+    );
+}
+
+/// Why (#7244): the name check is the second, independent reason a binary is
+/// accepted, so it must accept every name this crate actually ships — a false
+/// refusal here would stop hooks being written at all. Both `[[bin]]` names,
+/// the underscore crate-name spelling Cargo uses for dep artifacts, and the
+/// retired `session_manager_mvp` name all identify the same hook owner.
+/// What: asserts each shipped name (bare and hash-suffixed) is recognised and
+/// that a lookalike is not. `trusty-mpm` is why the hash-strip rule checks that
+/// the suffix is hex: its own trailing `-mpm` must not be taken for a hash.
+#[test]
+fn is_mpm_bin_stem_path_accepts_the_shipped_names() {
+    for name in [
+        "tm",
+        "trusty-mpm",
+        "trusty_mpm",
+        "session_manager_mvp",
+        "tm-1a2b3c4d5e6f7a8b",
+        "trusty_mpm-1a2b3c4d",
+        "session_manager_mvp-deadbeef",
+    ] {
         assert!(
-            cmd.ends_with(" hook"),
-            "hook command must still end with ' hook', got: {cmd:?}"
+            is_mpm_bin_stem_path(&PathBuf::from("/usr/local/bin").join(name)),
+            "{name} is a binary this crate ships and must be recognised"
         );
     }
+    for name in [
+        "test_session_lifecycle-cd3ba8f03938239b",
+        "tm-cli",
+        "trusty-mpmx",
+        "claude",
+    ] {
+        assert!(
+            !is_mpm_bin_stem_path(&PathBuf::from("/usr/local/bin").join(name)),
+            "{name} is not a binary this crate ships and must be refused"
+        );
+    }
+}
+
+/// Why (#7244) — the Fail-Open Check: a refusal must write NOTHING. The whole
+/// incident is a writer that produced a hook command it could not vouch for and
+/// wrote it anyway, over a settings file that already held correct ones. A
+/// settings file with no tm hooks is recoverable on the next launch; one wired
+/// to a dead `cargo test` harness silently disables pm-guard enforcement and
+/// looks fine.
+/// What: hands the writer a refusal directly (the resolution seam — on a host
+/// with `tm` installed the PATH fallback would otherwise rescue the call and
+/// this could never be observed) and asserts three things: the error surfaces,
+/// an EXISTING settings file is byte-identical afterwards, and a MISSING one is
+/// still missing — no `.claude/` directory conjured, no empty `{}` left behind.
+#[test]
+fn write_project_hooks_writes_nothing_when_the_exe_cannot_be_resolved() {
+    let tmp = TempDir::new().expect("tempdir");
+
+    let existing = tmp.path().join("settings.json");
+    let before = r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/local/bin/tm hook --pm-guard"}]}]}}"#;
+    std::fs::write(&existing, before).expect("seed settings");
+
+    let refusal = Err(StableHookExeError::ForeignBinary(PathBuf::from(
+        "/x/target-7224/debug/deps/test_session_lifecycle-cd3ba8f0",
+    )));
+    let err = write_project_hooks_with(&existing, refusal)
+        .expect_err("a refusal must reach the caller, not be written");
     assert!(
-        baked.is_empty(),
-        "a system temp path must never be baked into the hook command (#4485), but these \
-         commands carry one: {baked:#?}"
+        err.to_string().contains("test_session_lifecycle"),
+        "the error must name the binary it refused, got: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&existing).expect("read back"),
+        before,
+        "an existing settings file must be byte-identical after a refusal"
+    );
+
+    let missing = tmp.path().join("absent").join("settings.json");
+    let refusal = Err(StableHookExeError::Unresolved);
+    write_project_hooks_with(&missing, refusal).expect_err("a refusal must reach the caller");
+    assert!(
+        !missing.exists() && !missing.parent().expect("parent").exists(),
+        "a refusal must not create the settings file or its directory"
     );
 }
 
@@ -106,7 +266,9 @@ fn test_mpm_hook_additions_has_six_events() {
     // them for claude_session_id capture and immediate-Stopped marking.
     // #2610: SubagentStop must be present so the hook handler sees a delegated
     // subagent's turn-end and can flag an idle-parking final message.
-    let v = mpm_hook_additions();
+    // #7244: pinned rather than resolved — see `STABLE_TEST_EXE`.
+    let v = mpm_hook_additions_with_exe(Some(Path::new(STABLE_TEST_EXE)))
+        .expect("a pinned installed-looking exe always resolves");
     let hooks = v.get("hooks").expect("missing 'hooks' key");
     assert!(hooks.get("PreToolUse").is_some(), "missing PreToolUse");
     assert!(hooks.get("PostToolUse").is_some(), "missing PostToolUse");
@@ -130,7 +292,8 @@ fn test_mpm_hook_additions_has_six_events() {
 #[test]
 fn test_mpm_hook_additions_with_exe_embeds_absolute_path() {
     let fake_exe = PathBuf::from("/home/user/.cargo/bin/trusty-mpm");
-    let v = mpm_hook_additions_with_exe(Some(&fake_exe));
+    let v = mpm_hook_additions_with_exe(Some(&fake_exe))
+        .expect("an installed-looking override resolves");
     let hooks = v.get("hooks").expect("missing 'hooks' key");
     for event in &[
         "PreToolUse",
@@ -160,7 +323,7 @@ fn test_ensure_managed_hooks_writes_triad() {
     // Write a minimal settings.json (simulating the initial seed).
     std::fs::write(cfg.join("settings.json"), "{}\n").unwrap();
 
-    ensure_managed_hooks(&cfg).unwrap();
+    ensure_managed_hooks_with_exe(&cfg, Some(std::path::Path::new("/usr/local/bin/tm"))).unwrap();
 
     let text = std::fs::read_to_string(cfg.join("settings.json")).unwrap();
     let val: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -207,10 +370,10 @@ fn test_ensure_managed_hooks_is_idempotent() {
 
     std::fs::write(cfg.join("settings.json"), "{}\n").unwrap();
 
-    ensure_managed_hooks(&cfg).unwrap();
+    ensure_managed_hooks_with_exe(&cfg, Some(std::path::Path::new("/usr/local/bin/tm"))).unwrap();
     let after_first = std::fs::read_to_string(cfg.join("settings.json")).unwrap();
 
-    ensure_managed_hooks(&cfg).unwrap();
+    ensure_managed_hooks_with_exe(&cfg, Some(std::path::Path::new("/usr/local/bin/tm"))).unwrap();
     let after_second = std::fs::read_to_string(cfg.join("settings.json")).unwrap();
 
     assert_eq!(
@@ -253,7 +416,7 @@ fn test_ensure_managed_hooks_preserves_existing_keys() {
     )
     .unwrap();
 
-    ensure_managed_hooks(&cfg).unwrap();
+    ensure_managed_hooks_with_exe(&cfg, Some(std::path::Path::new("/usr/local/bin/tm"))).unwrap();
 
     let text = std::fs::read_to_string(cfg.join("settings.json")).unwrap();
     let val: serde_json::Value = serde_json::from_str(&text).unwrap();

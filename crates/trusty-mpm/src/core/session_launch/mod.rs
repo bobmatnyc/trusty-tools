@@ -292,6 +292,20 @@ pub enum PrepError {
         /// The underlying IO error.
         source: std::io::Error,
     },
+    /// No stable installed `tm`/`trusty-mpm` binary could be resolved, so the
+    /// project's hooks were left untouched (#7244).
+    ///
+    /// Non-fatal, per #2149's rule that a preparation hiccup must not stop a
+    /// launch: the session still starts, without tm's project-tier hooks. What
+    /// it must NOT do is write hooks pointing at a build artifact, which is the
+    /// alternative this variant exists to replace.
+    /// Test: `write_project_hooks_writes_nothing_when_the_exe_cannot_be_resolved`.
+    #[error("could not resolve a stable hook binary: {source}")]
+    HookExe {
+        /// Which resolution step refused, and the path it refused.
+        #[source]
+        source: crate::core::standalone::hooks::StableHookExeError,
+    },
     /// The session's instructions could not be established — the ONE fatal
     /// preparation condition (#4752, owner ruling 2026-08-04).
     ///
@@ -975,6 +989,10 @@ fn prepare_session_inner(
     // wrote). Default `true` — every other hook is written either way.
     let hooks_written = match write_project_hooks(
         project_dir,
+        // #7244: `None` resolves the running installed binary. When nothing
+        // stable resolves this now returns an error and writes NOTHING, rather
+        // than wiring every hook to a build artifact.
+        None,
         config.hooks.prompt_context,
         plan.divert_enabled,
     ) {
