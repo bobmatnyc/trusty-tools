@@ -724,15 +724,40 @@ DPKG_STUB
 # that asserts an exact attempt COUNT raises the ceiling first: at 2s a loaded
 # machine can take long enough to start the stub that a healthy attempt is
 # killed as a stall, which would add an attempt the case did not ask for.
+#
+# CI_APT_LISTS_DIR is pinned to the stub directory for EVERY case, not only the
+# ones that assert on it (#7288). The wrapper purges that directory after a hash
+# mismatch, and this file runs on Linux developer machines where the default
+# would be the host's real /var/lib/apt/lists.
+#
+# GITHUB_OUTPUT is likewise pinned per case, so the rows the wrapper writes for
+# a workflow to read are observable here instead of landing in the runner's real
+# output file.
 apt_run() {
   local dir="$1" rc=0
+  # Actions creates $GITHUB_OUTPUT before the step runs and the wrapper only
+  # ever appends, so create it here too — a case that asserts NOTHING was
+  # written needs a file to read, not a missing one.
+  : >"${dir}/github-output"
   PATH="${dir}:${PATH}" CI_APT_RETRY_DELAY_S=0 CI_APT_ATTEMPTS=3 \
     CI_APT_UPDATE_TIMEOUT_S="${CI_APT_UPDATE_TIMEOUT_S:-2}" \
     CI_APT_INSTALL_TIMEOUT_S="${CI_APT_INSTALL_TIMEOUT_S:-2}" \
+    CI_APT_LISTS_DIR="${dir}/lists" \
+    GITHUB_OUTPUT="${dir}/github-output" \
     bash scripts/ci-apt-install.sh build-essential \
     >"${dir}/out" 2>&1 || rc=$?
   echo "$rc"
 }
+
+# Every case that asserts an exact attempt COUNT, or an exact classified
+# REASON, runs at a 6s ceiling rather than the 2s default — the same reason the
+# dpkg case below already raises it. These stubs exit instantly, so the wider
+# ceiling costs nothing, while a healthy attempt killed at a tight ceiling on a
+# loaded machine adds an attempt the case did not ask for and, since #7288, is
+# classified `stall` instead of the signature under test. The stall case resets
+# it, because the ceiling is the thing it tests.
+CI_APT_UPDATE_TIMEOUT_S=6
+CI_APT_INSTALL_TIMEOUT_S=6
 
 # Always succeeds — the ordinary path, and proof the wrapper is transparent.
 ok_dir="$(apt_stub_dir 'exit 0')"
@@ -764,11 +789,16 @@ assert_eq "  and says so as a CI error"         "1" \
 # THE ISSUE'S OWN CASE: a mirror that accepts the connection and then says
 # nothing. Unwrapped this is the 30-minute silent stall; here each attempt must
 # die at its 2s ceiling and be reported as a stall, not as a plain failure.
+unset CI_APT_UPDATE_TIMEOUT_S CI_APT_INSTALL_TIMEOUT_S
 if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
   stall_dir="$(apt_stub_dir 'sleep 300')"
-  assert_eq "a stalled mirror is killed at the ceiling" "1" "$(apt_run "${stall_dir}")"
+  # 75, not 1, since #7288: a mirror that accepts the connection and then stops
+  # answering is an infrastructure failure, and the exit code is what says so.
+  assert_eq "a stalled mirror is killed at the ceiling" "75" "$(apt_run "${stall_dir}")"
   assert_eq "  reported as a stall, not a plain failure" "3" \
     "$(grep -c 'STALLED — killed at the 2s ceiling' "${stall_dir}/out" || true)"
+  assert_eq "  and classified as infra, reason 'stall'" "1" \
+    "$(grep -c '::error::apt-infra: stall ' "${stall_dir}/out" || true)"
   rm -rf "${stall_dir}"
 
   # #6064: the stall's aftermath. Killing `apt-get install` mid-unpack leaves
@@ -807,6 +837,103 @@ else
 fi
 
 rm -rf "${ok_dir}" "${flaky_dir}" "${dead_dir}"
+
+# ---------------------------------------------------------------------------
+# ci-apt-install.sh — apt-infrastructure classification (#7288)
+#
+# One Chrome-mirror `Hash Sum mismatch` killed 8 jobs on PR #7257 inside a
+# 24-second window, and each one read as its own code red. The classification
+# only ever runs while a mirror is already broken, so every arm is driven here
+# against stubbed apt output rather than waited for.
+#
+# The negative case is the one that matters most: a genuinely broken step must
+# keep exiting 1 with no infra token, or the distinction launders real failures.
+# ---------------------------------------------------------------------------
+
+CI_APT_UPDATE_TIMEOUT_S=6
+CI_APT_INSTALL_TIMEOUT_S=6
+
+# infra_case <label> <stub-body> <expected-reason> — assert that this apt output
+# is classified as infrastructure, with the reason, both tokens, and the rows a
+# workflow reads.
+infra_case() {
+  local label="$1" body="$2" reason="$3" dir
+  dir="$(apt_stub_dir "${body}")"
+  assert_eq "${label}: exits 75, not 1"       "75" "$(apt_run "${dir}")"
+  assert_eq "  reason is ${reason}"           "1" \
+    "$(grep -c "::error::apt-infra: ${reason} " "${dir}/out" || true)"
+  assert_eq "  carries the INFRA-FAIL token"  "1" \
+    "$(grep -c 'INFRA-FAIL: apt' "${dir}/out" || true)"
+  assert_eq "  one annotation, not one per attempt" "1" \
+    "$(grep -c '::error::apt-infra:' "${dir}/out" || true)"
+  assert_eq "  \$GITHUB_OUTPUT carries the reason" "1" \
+    "$(grep -c "^apt_infra_reason=${reason}\$" "${dir}/github-output" || true)"
+  rm -rf "${dir}"
+}
+
+# The #7288 failure itself: dl.google.com served an index whose hash did not
+# match the Release file every job had.
+infra_case "hash sum mismatch" '
+[ "$1" = "update" ] || exit 0
+echo "E: Failed to fetch https://dl.google.com/linux/chrome/deb/dists/stable/main/binary-amd64/Packages  Hash Sum mismatch" >&2
+exit 100' "hash-mismatch"
+
+infra_case "DNS will not resolve" '
+[ "$1" = "update" ] || exit 0
+echo "Err:1 http://archive.ubuntu.com/ubuntu jammy InRelease" >&2
+echo "  Temporary failure resolving '"'"'archive.ubuntu.com'"'"'" >&2
+exit 100' "dns"
+
+infra_case "connection refused" '
+[ "$1" = "update" ] || exit 0
+echo "Err:1 http://archive.ubuntu.com/ubuntu jammy InRelease" >&2
+echo "  Could not connect to archive.ubuntu.com:80 (185.125.190.36), connection refused" >&2
+exit 100' "connect"
+
+infra_case "mirror answers 4xx" '
+[ "$1" = "update" ] || exit 0
+echo "Err:5 https://dl.google.com/linux/chrome/deb stable Release" >&2
+echo "  403  Forbidden [IP: 142.250.72.174 443]" >&2
+exit 100' "mirror-http"
+
+# THE NEGATIVE CASE. A bad package name is not the mirror's fault and must not
+# be reported as one: exit 1, the original annotation, and nothing an infra
+# classifier would group on.
+bad_pkg_dir="$(apt_stub_dir '
+[ "$1" = "update" ] && exit 0
+echo "E: Unable to locate package build-essential" >&2
+exit 100')"
+assert_eq "a bad package name is NOT infra: exits 1" "1" "$(apt_run "${bad_pkg_dir}")"
+assert_eq "  no apt-infra annotation"                "0" \
+  "$(grep -c '::error::apt-infra:' "${bad_pkg_dir}/out" || true)"
+assert_eq "  no INFRA-FAIL token"                    "0" \
+  "$(grep -c 'INFRA-FAIL: apt' "${bad_pkg_dir}/out" || true)"
+assert_eq "  the original annotation still names the phase" "1" \
+  "$(grep -c '::error::ci-apt-install: apt-get install failed 3 time' "${bad_pkg_dir}/out" || true)"
+assert_eq "  and \$GITHUB_OUTPUT stays empty"        "0" \
+  "$(grep -c '^apt_infra=' "${bad_pkg_dir}/github-output" || true)"
+rm -rf "${bad_pkg_dir}"
+
+# The purge that makes the retry able to succeed. apt re-reads its cached index,
+# so without dropping the lists every attempt reproduces the same mismatch — the
+# stub mismatches only while the stale index file is present.
+purge_dir="$(apt_stub_dir '
+d="${0%/*}"
+[ "$1" = "update" ] || exit 0
+if [ -e "${d}/lists/stale-index" ]; then
+  echo "E: Failed to fetch https://dl.google.com/linux/chrome/deb/dists/stable/InRelease  Hash Sum mismatch" >&2
+  exit 100
+fi
+exit 0')"
+mkdir -p "${purge_dir}/lists"
+: > "${purge_dir}/lists/stale-index"
+assert_eq "a mismatch clears once the lists are purged" "0" "$(apt_run "${purge_dir}")"
+assert_eq "  the purge ran, and said so"               "1" \
+  "$(grep -c 'purging .* so the retry re-fetches' "${purge_dir}/out" || true)"
+assert_eq "  the stale index is gone"                  "absent" \
+  "$([ -e "${purge_dir}/lists/stale-index" ] && echo present || echo absent)"
+rm -rf "${purge_dir}"
+unset CI_APT_UPDATE_TIMEOUT_S CI_APT_INSTALL_TIMEOUT_S
 
 # Wiring: the wrapper helps nobody while a job still inlines the raw pair.
 assert_eq "no raw apt-get left in ci.yml" "0" \
