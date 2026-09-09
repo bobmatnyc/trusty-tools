@@ -468,12 +468,17 @@ independently reviewable PR outcome, subagent confinement, cleanup — lives in
   ([ADR-0049](docs/adr/0049-docs-commits-are-permitted-in-a-main-checkout.md)).
 - Extended rationale and the throwaway-worktree fallback for a dirty checkout:
   [worktree-discipline.md](docs/reference/worktree-discipline.md).
-- 🟡 **The isolation-worktree guard's `git` detection can misfire on a path or a
-  heredoc body** — a shell loop over paths containing `git` (e.g.
-  `trusty-git-analytics`) or a `<<'PY'`-style scratch script can both be denied
-  as unverifiable inside the worktree ([#6982](https://github.com/bobmatnyc/trusty-tools/issues/6982),
-  open). Until it lands, write scratch scripts with the Write tool instead of a
-  shell heredoc, and avoid looping over such paths.
+- 🟡 **The isolation-worktree guard's `git` detection can misfire on a path** —
+  a shell loop over paths containing `git` (e.g. `trusty-git-analytics`) is
+  denied as unverifiable inside the worktree
+  ([#6982](https://github.com/bobmatnyc/trusty-tools/issues/6982), open), so
+  avoid looping over such paths until it lands. The quoted-heredoc half is
+  fixed ([#7190](https://github.com/bobmatnyc/trusty-tools/issues/7190)): a
+  `<<'PY'` body is no longer scanned as shell when the operator line is a bare
+  `python3`/`python`/`node`/`ruby`/`perl` (optionally `-`) reading it as
+  program text. Every other consumer — a shell, `cat`, `tee`, a script path, a
+  redirect or pipe on the operator line, an unquoted `<<PY` — keeps its body
+  scanned, so write those scratch scripts with the Write tool instead.
 
 ## Abbreviations & Aliases
 

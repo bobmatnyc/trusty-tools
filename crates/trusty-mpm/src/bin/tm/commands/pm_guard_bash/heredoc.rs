@@ -17,9 +17,23 @@
 //! cannot parse with confidence: unbalanced quotes, or a `<<` whose delimiter
 //! never appears on a line of its own, which is also what an arithmetic
 //! `$((1 << 3))` looks like.
-//! Test: `heredoc_bodies_*` in this module's `tests` submodule;
-//! `has_file_write_redirection_ignores_heredoc_body` and
-//! `evaluate_bash_command_allows_readonly_heredoc_script` in the parent's.
+//!
+//! #7190 adds a second, narrower answer for the destructive-delete rule:
+//! [`mask_allowlisted_heredoc_bodies`] blanks the body of a here-document
+//! whose CONSUMER is on the [`STDIN_PROGRAM_INTERPRETERS`] ALLOWLIST, so
+//! Python or JavaScript source is not tokenized as shell. The allowlist is the
+//! design, not a detail: three earlier attempts on #7190 tried to enumerate
+//! the consumers that RE-EXECUTE a body — `eval`, then `read`/`tee`/`>`
+//! captures, then pipes — and each enumeration was bypassed by the next
+//! capture idiom (`cp /dev/stdin f.sh` then `chmod +x f.sh; ./f.sh` needs no
+//! shell token at all). Enumerating capture is unbounded; enumerating the
+//! interpreters whose stdin IS their program text is bounded and checkable, so
+//! every consumer NOT on the list keeps its body live and scanned.
+//! Test: `heredoc_bodies_*` and `allowlisted_*` in this module's `tests`
+//! submodule; `has_file_write_redirection_ignores_heredoc_body` and
+//! `evaluate_bash_command_allows_readonly_heredoc_script` in the parent's;
+//! `allows_a_delete_verb_inside_an_allowlisted_heredoc_body` and siblings in
+//! `super::destructive_delete`.
 
 use super::shell_lex::QuoteScan;
 
@@ -28,6 +42,13 @@ struct Delimiter {
     word: String,
     /// `<<-` lets the terminator line be indented with tabs.
     strip_tabs: bool,
+    /// Whether the delimiter word was quoted (`<<'PY'`, `<<"PY"`, `<<\PY`).
+    /// #7190: an unquoted delimiter leaves the body open to parameter and
+    /// command substitution, so the text written is not the text run.
+    quoted: bool,
+    /// Line-local `[start, end)` byte range of the operator, `<<` through the
+    /// last byte of the delimiter word (#7190).
+    operator: (usize, usize),
 }
 
 /// Byte ranges of a command's here-document bodies.
@@ -211,7 +232,15 @@ fn delimiters_on(line: &str, offset: usize, quotes: &QuoteScan) -> Vec<Delimiter
             .filter(|c| !matches!(c, '\'' | '"' | '\\'))
             .collect();
         if !word.is_empty() {
-            found.push(Delimiter { word, strip_tabs });
+            // #7190: a leading quote or backslash is what makes the body inert
+            // to expansion.
+            let quoted = matches!(bytes.get(word_start), Some(b'\'' | b'"' | b'\\'));
+            found.push(Delimiter {
+                word,
+                strip_tabs,
+                quoted,
+                operator: (i, j),
+            });
         }
         i = j.max(i + 2);
     }
@@ -264,6 +293,165 @@ fn body_span(
         }
     }
     None
+}
+
+/// Consumer programs whose here-document body is their own program text
+/// (#7190).
+///
+/// Why: these five read stdin as source in their own language and execute it
+/// there; the shell never tokenizes those bytes, so a `rm` written in them is
+/// not a shell deletion. Everything else — a shell, a script path, an unknown
+/// binary, `cat`, `tee`, `cp /dev/stdin` — either runs the body as shell or
+/// can persist it somewhere that later will, so it stays off the list and its
+/// body stays scanned.
+/// What: BARE program names only. A path-qualified spelling
+/// (`/usr/bin/python3`, `./python3`) is deliberately absent: this classifier
+/// reads text and cannot tell a real interpreter from a wrapper of the same
+/// basename, and denying is the safe direction.
+/// Test: `allowlisted_mask_blanks_only_the_body`,
+/// `allowlisted_mask_declines_a_consumer_off_the_list`.
+const STDIN_PROGRAM_INTERPRETERS: &[&str] = &["node", "perl", "python", "python3", "ruby"];
+
+/// Blank every provably-inert here-document body in `command`, or `None` when
+/// there is none to blank (#7190).
+///
+/// Why: [`super::destructive_delete`] scans each segment's TOKENS for a delete
+/// verb, and since #6946 a here-document body stays inside the segment its
+/// operator line opened — so a Python script piped through `python3 <<'PY'`
+/// was tokenized as shell and its prose denied. Blanking rather than dropping
+/// keeps every byte offset, line, and segment boundary identical, so the
+/// caller's existing scan needs no offset arithmetic.
+/// What: replaces each allowlisted body's bytes with spaces, newlines
+/// preserved. The operator line and the terminator line are untouched, so a
+/// redirect or a second command there is still live syntax the caller scans.
+/// Test: `allowlisted_mask_blanks_only_the_body`,
+/// `allowlisted_mask_survives_unbalanced_quotes_in_the_body`.
+pub(super) fn mask_allowlisted_heredoc_bodies(command: &str) -> Option<String> {
+    let spans = allowlisted_body_spans(command);
+    if spans.is_empty() {
+        return None;
+    }
+    let mut bytes = command.as_bytes().to_vec();
+    for (start, end) in spans {
+        for byte in bytes.get_mut(start..end)? {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Byte ranges of the bodies [`mask_allowlisted_heredoc_bodies`] blanks.
+///
+/// Why: [`HeredocBodies::scan`] abandons the whole command when
+/// [`QuoteScan`] reports unbalanced quotes, and an apostrophe inside a body
+/// (`print('It\'s …')`) is exactly what does that — the #7190 report. A
+/// here-document body is not part of the shell's quoting stream, so this scan
+/// tracks quotes over the LIVE lines only and skips each body and its
+/// terminator, which leaves an apostrophe in Python source unable to
+/// destabilize the parse.
+/// What: walks lines in order, accumulating the live ones into a buffer whose
+/// [`QuoteScan`] answers "is this `<<` an operator". A line opening exactly
+/// one quoted here-document whose consumer passes
+/// [`reads_stdin_as_program`] contributes its body span; every other
+/// here-document contributes nothing and stays live. Unbalanced quotes on a
+/// live line, or a delimiter with no terminator, abandon the scan entirely and
+/// return no spans — the fail-closed direction, where the caller scans more
+/// text rather than less. A line whose predecessor ended in a backslash is a
+/// CONTINUATION, so the words before its `<<` are not the whole command
+/// (`sh -s \` then `python3 <<'PY'` runs the body as shell); such a line is
+/// never allowlisted.
+/// Test: `allowlisted_mask_declines_an_unterminated_body`,
+/// `allowlisted_mask_declines_a_consumer_off_the_list`,
+/// `allowlisted_mask_declines_an_unquoted_delimiter`,
+/// `allowlisted_mask_declines_a_continued_operator_line`.
+fn allowlisted_body_spans(command: &str) -> Vec<(usize, usize)> {
+    let lines = line_spans(command);
+    let mut live = String::new();
+    let mut spans = Vec::new();
+    let mut line = 0;
+    let mut continued = false;
+    while line < lines.len() {
+        let (start, end) = lines[line];
+        let text = &command[start..end];
+        let was_continued = continued;
+        continued = ends_with_line_continuation(text);
+        let offset = live.len();
+        live.push_str(text);
+        live.push('\n');
+        let quotes = QuoteScan::new(&live);
+        if !quotes.balanced {
+            return Vec::new();
+        }
+        let delimiters = delimiters_on(text, offset, &quotes);
+        line += 1;
+        if delimiters.is_empty() {
+            continue;
+        }
+        // One here-document per line, or the operator line carries text after
+        // the first delimiter word and `reads_stdin_as_program` rejects it
+        // anyway. Stating the count keeps that implicit case explicit.
+        let inert = !was_continued
+            && delimiters.len() == 1
+            && delimiters[0].quoted
+            && reads_stdin_as_program(text, &delimiters[0]);
+        for delimiter in &delimiters {
+            let Some(body) = body_span(command, &lines, line, delimiter) else {
+                return Vec::new();
+            };
+            if inert && body.span.0 < body.span.1 {
+                spans.push(body.span);
+            }
+            line = body.next_line;
+        }
+    }
+    spans
+}
+
+/// Whether `line` ends in a backslash that joins it to the next line (#7190).
+///
+/// What: counts the trailing backslashes; an odd count continues the line, an
+/// even count is an escaped backslash that ends it. A trailing `\r` is ignored
+/// so a CRLF command reads the same as an LF one.
+/// Test: `allowlisted_mask_declines_a_continued_operator_line`.
+fn ends_with_line_continuation(line: &str) -> bool {
+    line.trim_end_matches('\r')
+        .chars()
+        .rev()
+        .take_while(|c| *c == '\\')
+        .count()
+        % 2
+        == 1
+}
+
+/// Whether an operator line is a single allowlisted interpreter reading its
+/// program from this here-document (#7190).
+///
+/// What: everything after the delimiter word must be whitespace — that one
+/// rule rejects an output redirect (`> f.sh`), a pipe (`| sh`), a second
+/// command (`; ./f.sh`), and a second here-document. Everything BEFORE the
+/// `<<` must shlex-split to an [`STDIN_PROGRAM_INTERPRETERS`] program whose
+/// only argument, if any, is `-`; a `-c` string, a script path, a leading
+/// `VAR=value`, and any wrapper or pipeline all fail that test, so the body
+/// stays live.
+/// Test: `allowlisted_mask_declines_a_redirected_or_piped_operator_line`,
+/// `allowlisted_mask_declines_a_consumer_off_the_list`.
+fn reads_stdin_as_program(line: &str, delimiter: &Delimiter) -> bool {
+    let (operator_start, operator_end) = delimiter.operator;
+    if !line[operator_end..].trim().is_empty() {
+        return false;
+    }
+    let Some(argv) = shlex::split(&line[..operator_start]) else {
+        return false;
+    };
+    let Some((program, args)) = argv.split_first() else {
+        return false;
+    };
+    if !STDIN_PROGRAM_INTERPRETERS.contains(&program.as_str()) {
+        return false;
+    }
+    args.is_empty() || (args.len() == 1 && args[0] == "-")
 }
 
 #[cfg(test)]
@@ -361,6 +549,112 @@ mod tests {
         let bodies = HeredocBodies::scan(command);
         let redirect = command.rfind('>').expect("redirect");
         assert!(!bodies.contains(redirect));
+    }
+
+    /// #7190: the body is blanked, the operator and terminator lines are not,
+    /// and the masked text is the same length so byte offsets still line up.
+    #[test]
+    fn allowlisted_mask_blanks_only_the_body() {
+        let command = "python3 <<'PY'\nrm -rf /\nPY";
+        let masked = mask_allowlisted_heredoc_bodies(command).expect("body masked");
+        assert_eq!(masked.len(), command.len(), "offsets must be preserved");
+        assert_eq!(masked, "python3 <<'PY'\n        \nPY");
+    }
+
+    /// #7190: every consumer off [`STDIN_PROGRAM_INTERPRETERS`] keeps its body
+    /// live — a shell, a capture target, a path-qualified interpreter, and an
+    /// interpreter whose stdin is not its program.
+    #[test]
+    fn allowlisted_mask_declines_a_consumer_off_the_list() {
+        for command in [
+            "bash <<'EOF'\nrm -rf /\nEOF",
+            "cat <<'EOF'\nrm -rf /\nEOF",
+            "tee /tmp/x.sh <<'EOF'\nrm -rf /\nEOF",
+            "cp /dev/stdin /tmp/x.sh <<'EOF'\nrm -rf /\nEOF",
+            "/usr/bin/python3 <<'PY'\nrm -rf /\nPY",
+            "python3 -c 'pass' <<'PY'\nrm -rf /\nPY",
+            "python3 script.py <<'PY'\nrm -rf /\nPY",
+            "PYTHONPATH=/x python3 <<'PY'\nrm -rf /\nPY",
+        ] {
+            assert_eq!(
+                mask_allowlisted_heredoc_bodies(command),
+                None,
+                "expected no mask for: {command}"
+            );
+        }
+    }
+
+    /// #7190: an unquoted delimiter leaves the body open to expansion, so the
+    /// text written is not the text run.
+    #[test]
+    fn allowlisted_mask_declines_an_unquoted_delimiter() {
+        for command in ["python3 <<PY\nrm -rf /\nPY", "python3 <<-PY\nrm -rf /\nPY"] {
+            assert_eq!(mask_allowlisted_heredoc_bodies(command), None);
+        }
+    }
+
+    /// #7190: anything after the delimiter word — a redirect, a pipe, a second
+    /// command — can persist or re-execute the body, so it is not inert.
+    #[test]
+    fn allowlisted_mask_declines_a_redirected_or_piped_operator_line() {
+        for command in [
+            "python3 <<'PY' > /tmp/x.sh\nrm -rf /\nPY",
+            "python3 <<'PY' | sh\nrm -rf /\nPY",
+            "python3 <<'PY' ; ./x.sh\nrm -rf /\nPY",
+            "python3 <<'A' <<'B'\nrm -rf /\nA\nrm -rf /\nB",
+        ] {
+            assert_eq!(
+                mask_allowlisted_heredoc_bodies(command),
+                None,
+                "expected no mask for: {command}"
+            );
+        }
+    }
+
+    /// #7190's reported shape: an apostrophe in the body unbalances the
+    /// command's quotes, which is what defeated [`HeredocBodies::scan`]. The
+    /// live-line scan is unaffected because a body is not part of the shell's
+    /// quoting stream.
+    #[test]
+    fn allowlisted_mask_survives_unbalanced_quotes_in_the_body() {
+        let command = "python3 <<'PY'\nprint('It\\'s time to find it')\nPY";
+        let masked = mask_allowlisted_heredoc_bodies(command).expect("body masked");
+        assert!(!masked.contains("find"), "body text must be blanked");
+        assert!(masked.starts_with("python3 <<'PY'"));
+        assert!(masked.ends_with("\nPY"));
+    }
+
+    /// #7190: a backslash continuation puts the real command on the previous
+    /// line, so the words before `<<` are not the whole command — `sh -s \`
+    /// then `python3 <<'PY'` runs `sh -s`, which reads the body as shell. An
+    /// even number of trailing backslashes is an escaped backslash rather than
+    /// a continuation, so that line is still allowlisted.
+    #[test]
+    fn allowlisted_mask_declines_a_continued_operator_line() {
+        for command in [
+            "sh -s \\\npython3 <<'PY'\nrm -rf /\nPY",
+            "true \\\npython3 <<'PY'\nrm -rf /\nPY",
+        ] {
+            assert_eq!(
+                mask_allowlisted_heredoc_bodies(command),
+                None,
+                "expected no mask for: {command}"
+            );
+        }
+        assert!(
+            mask_allowlisted_heredoc_bodies("echo a\\\\\npython3 <<'PY'\nrm -rf /\nPY").is_some(),
+            "an escaped backslash does not continue the line"
+        );
+    }
+
+    /// #7190 fail-closed arm: with no terminator the body's extent is unknown,
+    /// so nothing is masked and the whole remainder stays live.
+    #[test]
+    fn allowlisted_mask_declines_an_unterminated_body() {
+        assert_eq!(
+            mask_allowlisted_heredoc_bodies("python3 <<'PY'\nrm -rf /\n"),
+            None
+        );
     }
 
     /// Two here-documents opened on one line consume their bodies in order.

@@ -69,6 +69,14 @@
 //! - The Guard 2/3 operator escape hatches
 //!   (`TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED`) lift this rule
 //!   along with every other in the file — tracked separately as issue #3981.
+//! - A quoted here-document body handed to an allowlisted interpreter
+//!   ([`super::heredoc::mask_allowlisted_heredoc_bodies`], #7190) is not
+//!   scanned, so a Python program that itself shells out
+//!   (`os.system("rm -rf /")`) is not caught. That is the pre-existing state
+//!   for `python3 -c '…'` too — this rule reads shell text and has never
+//!   classified another language's source. What the allowlist buys is that
+//!   the body must reach an interpreter DIRECTLY: any redirect, pipe, capture,
+//!   or second command on the operator line puts the body back under the scan.
 //!
 //! Test: `denies_filesystem_root_deletion`, `denies_repo_root_deletion`,
 //! `denies_dot_git_deletion`, `denies_worktree_root_deletion`,
@@ -78,7 +86,13 @@
 //! `denies_home_expanded_from_a_literal_dollar_home`,
 //! `denies_wrapper_words_regardless_of_enumeration`,
 //! `denies_bare_container_roots`, `denies_unresolvable_delete_targets`,
-//! `allows_over_matched_non_verb_mentions_that_resolve_to_no_target` below;
+//! `allows_over_matched_non_verb_mentions_that_resolve_to_no_target`,
+//! `allows_a_delete_verb_inside_an_allowlisted_heredoc_body`,
+//! `allows_an_allowlisted_heredoc_body_shell_cannot_tokenize`,
+//! `denies_a_heredoc_body_whose_consumer_is_not_allowlisted`,
+//! `denies_an_unquoted_heredoc_body`,
+//! `denies_a_delete_outside_an_allowlisted_heredoc_body`,
+//! `denies_an_unterminated_allowlisted_heredoc` below;
 //! `pm_guard_denies_destructive_delete_of_repo_root` and siblings in
 //! `tests/tm_hook_pm_guard.rs` exercise the end-to-end binary path.
 
@@ -149,14 +163,27 @@ pub(crate) fn evaluate_destructive_delete_command(
     evaluate_destructive_delete_command_in(command, cwd, &PathEnv::from_process())
 }
 
-/// [`evaluate_destructive_delete_command`] against an explicit environment —
-/// see [`PathEnv`] for why production and tests must not share `std::env`
-/// mutation.
+/// [`evaluate_destructive_delete_command`] against an explicit environment.
+///
+/// Why: [`PathEnv`] exists so production and tests never share `std::env`
+/// mutation. #7190 adds the second reason this function is not a bare loop:
+/// a here-document body handed to an allowlisted interpreter is that
+/// interpreter's source, and tokenizing it as shell denied Python scripts
+/// whose prose merely mentioned `rm` or `find`.
+/// What: blanks those bodies first (see
+/// [`super::heredoc::mask_allowlisted_heredoc_bodies`], which preserves every
+/// byte offset), then walks the composition segments, tracking `cd` and
+/// resolving each delete verb's targets against the denylist.
+/// Test: see the module doc's test list.
 fn evaluate_destructive_delete_command_in(
     command: &str,
     cwd: &Path,
     env: &PathEnv,
 ) -> Option<&'static str> {
+    // #7190: an allowlisted interpreter's here-document body is its program
+    // text, not shell — blank it before the token scan.
+    let masked = super::heredoc::mask_allowlisted_heredoc_bodies(command);
+    let command = masked.as_deref().unwrap_or(command);
     let mut effective_cwd = cwd.to_path_buf();
     for segment in split_shell_segments(command) {
         let trimmed = segment.trim();
@@ -841,6 +868,123 @@ mod tests {
                 "expected allow for: {command}"
             );
         }
+    }
+
+    #[test]
+    fn allows_a_delete_verb_inside_an_allowlisted_heredoc_body() {
+        // #7190: the body of `python3 <<'PY'` is Python source the shell never
+        // tokenizes, so a delete verb spelled there is not a shell deletion.
+        // Each row is the reported shape with a denylisted target in the body.
+        let env = env_with_home("/Users/agent");
+        for command in [
+            "python3 <<'PY'\nprint('don\\'t rm -rf / the repo')\nPY",
+            "python3 - <<'PY'\nprint('don\\'t rm -rf / the repo')\nPY",
+            "python <<'PY'\nprint('don\\'t rm -rf / the repo')\nPY",
+            "python3 <<\"PY\"\nprint('don\\'t rm -rf / the repo')\nPY",
+            "node <<'JS'\n// cleanup step: rm -rf /\nconsole.log(1)\nJS",
+            "ruby <<'RB'\nputs 'don\\'t rm -rf / the repo'\nRB",
+            "perl <<'PL'\nprint 'don\\'t rm -rf / the repo';\nPL",
+        ] {
+            assert_eq!(
+                evaluate_destructive_delete_command_in(command, Path::new("/repo"), &env),
+                None,
+                "expected allow for: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_an_allowlisted_heredoc_body_shell_cannot_tokenize() {
+        // #7190's reported command: the apostrophe in `It's` leaves the
+        // segment's quoting unbalanced, so the pre-fix fail-closed arm matched
+        // the bare word `find` in text the shell would never execute.
+        let env = env_with_home("/Users/agent");
+        let command = "python3 <<'PY'\nprint('It\\'s time to find it')\nPY";
+        assert_eq!(
+            evaluate_destructive_delete_command_in(command, Path::new("/repo"), &env),
+            None
+        );
+    }
+
+    #[test]
+    fn denies_a_heredoc_body_whose_consumer_is_not_allowlisted() {
+        // #7190: every consumer off the allowlist keeps its body live. The
+        // rows are the round-3 bypasses the allowlist inversion has to keep
+        // denying — a shell reading the body, an interpreter whose stdin is
+        // NOT its program, and every capture-then-execute shape.
+        let env = env_with_home("/Users/agent");
+        for command in [
+            "bash <<'EOF'\nrm -rf /\nEOF",
+            "sh <<'EOF'\nrm -rf /\nEOF",
+            "zsh <<'EOF'\nrm -rf /\nEOF",
+            "eval <<'EOF'\nrm -rf /\nEOF",
+            "xargs <<'EOF'\nrm -rf /\nEOF",
+            "ssh host <<'EOF'\nrm -rf /\nEOF",
+            "./script.sh <<'EOF'\nrm -rf /\nEOF",
+            "notaninterpreter <<'EOF'\nrm -rf /\nEOF",
+            "/usr/bin/python3 <<'PY'\nrm -rf /\nPY",
+            "python3 -c 'pass' <<'PY'\nrm -rf /\nPY",
+            "python3 script.py <<'PY'\nrm -rf /\nPY",
+            "python3 <<'PY' > /tmp/x.sh\nrm -rf /\nPY",
+            "python3 <<'PY' | sh\nrm -rf /\nPY",
+            "cat <<'EOF' > /tmp/x.sh\nrm -rf /\nEOF",
+            "cp /dev/stdin /tmp/x.sh <<'EOF'\nrm -rf /\nEOF",
+            "tee /tmp/x.sh <<'EOF'\nrm -rf /\nEOF",
+        ] {
+            assert_ne!(
+                evaluate_destructive_delete_command_in(command, Path::new("/repo"), &env),
+                None,
+                "expected deny for: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn denies_an_unquoted_heredoc_body() {
+        // #7190: `<<PY` and `<<-PY` expand parameters and substitutions in the
+        // body, so the text the shell runs is not the text written here.
+        let env = env_with_home("/Users/agent");
+        for command in ["python3 <<PY\nrm -rf /\nPY", "python3 <<-PY\nrm -rf /\nPY"] {
+            assert_ne!(
+                evaluate_destructive_delete_command_in(command, Path::new("/repo"), &env),
+                None,
+                "expected deny for: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn denies_a_delete_outside_an_allowlisted_heredoc_body() {
+        // #7190: only the body is excluded. A delete on the operator line, on
+        // a line after the terminator, or in a second here-document whose
+        // consumer is not allowlisted, is still reported.
+        let env = env_with_home("/Users/agent");
+        for command in [
+            "python3 <<'PY'\nprint(1)\nPY\nrm -rf /",
+            "rm -rf / && python3 <<'PY'\nprint(1)\nPY",
+            "python3 <<'PY'\nprint(1)\nPY\nbash <<'EOF'\nrm -rf /\nEOF",
+        ] {
+            assert_ne!(
+                evaluate_destructive_delete_command_in(command, Path::new("/repo"), &env),
+                None,
+                "expected deny for: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn denies_an_unterminated_allowlisted_heredoc() {
+        // #7190 fail-closed arm: with no terminator line the body's extent is
+        // unknown, so nothing is excluded and the whole remainder stays live.
+        let env = env_with_home("/Users/agent");
+        assert_ne!(
+            evaluate_destructive_delete_command_in(
+                "python3 <<'PY'\nrm -rf /\n",
+                Path::new("/repo"),
+                &env
+            ),
+            None
+        );
     }
 
     #[test]
