@@ -1,4 +1,4 @@
-// Why: #5439 put every tcode daemon route except `GET /health` behind
+// Why: #5439 put every tcode daemon route behind
 // `Authorization: Bearer <token>`. This UI has ~30 `fetch()` sites spread over
 // components and lib modules; adding the header at each one means the next site
 // added forgets it and ships a 401 nobody notices until runtime. Installing ONE
@@ -6,16 +6,18 @@
 // that matters: a new call site is authenticated by default rather than by
 // remembering.
 //
-// The credential comes from the native shell (`get_daemon_token`), the only
-// side that can read the daemon's 0600 token file. A plain browser tab cannot,
-// so it falls back to a `localStorage` override — the same shape as the
-// existing daemon-URL override, and the only way `pnpm dev` against a real
-// daemon stays workable. That override is a developer convenience, not a
+// The credential comes from the native shell (`get_daemon_token`). #6637 moved
+// where it originates without changing that: it used to be a 0600 file the
+// DAEMON wrote and the shell read, and it is now minted by the shell itself for
+// the bridge it binds — held in memory, never written down. A plain browser tab
+// has no such shell, so it falls back to a `localStorage` override, the same
+// shape as the base-URL override beside it, and the only way `pnpm dev` against
+// a running app stays workable. That override is a developer convenience, not a
 // security boundary: a page that can write this app's localStorage is already
 // running as this app.
 //
 // What: `installDaemonAuth()` wraps `globalThis.fetch` so requests to the
-// daemon base URL carry the credential; `openDaemonEventStream()` is the SSE
+// bridge base URL carry the credential; `openDaemonEventStream()` is the SSE
 // counterpart, because `EventSource` cannot send a header at all and must
 // exchange the credential for a single-use ticket instead.
 //
@@ -26,7 +28,7 @@ import { apiBase, isTauri } from './api-config';
 /** localStorage key holding a hand-pasted credential for plain-browser use. */
 export const TOKEN_STORAGE_KEY = 'trusty-code.daemonToken';
 
-/** Query parameter the daemon reads an SSE ticket from. */
+/** Query parameter the bridge reads an SSE ticket from. */
 export const TICKET_QUERY_PARAM = 'ticket';
 
 /** Route that exchanges the credential for a single-use SSE ticket. */
@@ -35,7 +37,7 @@ export const SSE_TICKET_PATH = '/auth/sse-ticket';
 let cachedToken: string | null = null;
 
 /**
- * Resolve the daemon credential, or `''` when there is none.
+ * Resolve the bridge credential, or '' when there is none.
  *
  * Why: cached after the first resolution because every request would otherwise
  * cross the Tauri IPC boundary. The credential is fixed for a daemon's whole
@@ -68,8 +70,8 @@ export function resetDaemonTokenCache(): void {
  * Do `url` and `base` share an origin?
  *
  * Why: the first version compared with `url.startsWith(base)`, the prefix-match
- * class this repo already fixed once in #3280. `http://127.0.0.1:7882` is a
- * prefix of `http://127.0.0.1:7882.attacker.example`, so a request to the
+ * class this repo already fixed once in #3280. `http://127.0.0.1:54321` is a
+ * prefix of `http://127.0.0.1:54321.attacker.example`, so a request to the
  * attacker's host would have carried the credential. Comparing parsed origins
  * makes the host, port, and scheme all exact.
  *
@@ -85,10 +87,10 @@ export function sameOrigin(url: string, base: string): boolean {
 }
 
 /**
- * Wrap `globalThis.fetch` so daemon requests carry the credential.
+ * Wrap `globalThis.fetch` so bridge requests carry the credential.
  *
  * What: leaves the URL, method, body, and every other option untouched; adds
- * `Authorization` only when the request targets the daemon base URL and does
+ * `Authorization` only when the request targets the bridge base URL and does
  * not already set the header itself. Idempotent — calling it twice does not
  * stack two wrappers.
  */
@@ -136,16 +138,16 @@ async function mintTicket(base: string, path: string): Promise<string | null> {
 }
 
 /**
- * Open an authenticated SSE subscription to a daemon stream, and keep it open.
+ * Open an authenticated SSE subscription to a bridge stream, and keep it open.
  *
  * Why the ticket: `EventSource` has no header API, and putting the durable
- * token in the query string would write it into the daemon's access log and
- * every tracing span. The daemon mints a single-use ticket that expires in
+ * token in the query string would write it into the access log and
+ * every tracing span. The bridge mints a single-use ticket that expires in
  * seconds, so a ticket captured from a log is already spent.
  *
  * Why this is a subscription rather than a bare `EventSource`: single-use is
  * exactly what breaks `EventSource`'s own reconnect. On any drop the browser
- * retries the SAME URL, which carries the SAME spent ticket, so the daemon
+ * retries the SAME URL, which carries the SAME spent ticket, so the bridge
  * answers `401` and the stream dies permanently — silently, with the component
  * still holding a handle it believes is live. Reconnecting has to mint a fresh
  * ticket, which only this layer can do.
