@@ -11,11 +11,12 @@
 //! trusty-common is what makes one implementation serve both: trusty-mpm's
 //! module is now a re-export of this one.
 //!
-//! What: [`search_socket`] derives the path both ends compute, [`call_at`]
-//! writes one frame and reads one back, and [`call_blocking`] is that call from
-//! a synchronous caller — it runs on a dedicated OS thread with its own
-//! current-thread runtime, because `search_index`'s entry points are called
-//! from inside a tokio runtime as often as not. [`SearchRpcError`] carries the
+//! What: [`crate::search_rpc::search_socket`] derives the path both ends
+//! compute, [`crate::search_rpc::call_at`] writes one frame and reads one back,
+//! and [`crate::search_rpc::call_blocking`] is that call from a synchronous
+//! caller — it runs on a dedicated OS thread with its own current-thread
+//! runtime, because `search_index`'s entry points are called from inside a
+//! tokio runtime as often as not. [`crate::search_rpc::SearchRpcError`] carries the
 //! daemon's own code, so a caller can tell "no such index" — the whole point of
 //! the pinned-index probe (#5045) — and "that root already belongs to another
 //! index" (#6864) from a transport failure.
