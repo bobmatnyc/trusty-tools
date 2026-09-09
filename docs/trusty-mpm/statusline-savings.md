@@ -213,6 +213,29 @@ A value with no source is left out rather than written as a zero, exactly as
 the segment omits itself. A commit made outside a tm session gets no block at
 all.
 
+### Which commits get a block
+
+Tokens are a property of one session's work on one message, so the footer
+follows git's **commit source** — the second argument git hands a
+`prepare-commit-msg` hook — rather than being written onto every commit
+(#7249).
+
+| Commit source | What happens | Why |
+|---|---|---|
+| `merge` | nothing written | git built the message from the merge's parents; the tokens of whoever ran `git merge` describe none of it |
+| `squash` | nothing written | the message is assembled by git or GitHub from a branch's commits, each with its own figures |
+| `commit` — cherry-pick, revert, `--amend`, `-c`/`-C` | the inherited block is **removed**, then this session's figures are written in its place | the message arrives carrying the block the ORIGINAL commit's session wrote; those numbers describe different work |
+| `message` (`-m`/`-F`), `template`, and the empty source of an ordinary editor commit | written | the message is this commit's own |
+
+Cherry-picking outside a tm session removes the inherited block and adds
+nothing: no block at all is correct where another session's block is not. That
+one case is why the hook runs `tm commit-trailers` even with no
+`CLAUDE_CODE_SESSION_ID` set. With no `tm` on `PATH` nothing runs at all, and an
+inherited block stays as it is.
+
+Within a single source the stamp is idempotent — a re-run over a message this
+session already stamped adds nothing, so the block never doubles.
+
 ### Why it is a separate paragraph
 
 Git recognises a trailer block only as the message's **last paragraph, whose
@@ -226,8 +249,9 @@ repository's effective hooks directory by the same installer as the `pre-push`
 guard, and refused the same way when a symlink, a foreign hook, or a
 `core.hooksPath` redirect says the slot belongs to somebody else. It places the
 block above any trailing comment block and above a `git commit --verbose`
-scissors line, and it never stamps twice — an amend re-runs the hook over a
-message that already carries the block and leaves it alone.
+scissors line, and it never stamps twice — a re-run over a message this session
+already stamped leaves it alone, and an amend, which git reports as the `commit`
+source, replaces the block rather than adding a second one.
 
 `TM_SKIP_COMMIT_STATS=1 git commit …` skips it for one commit. The hook exits 0
 on every path: a missing `tm`, a session with nothing recorded, or a failure

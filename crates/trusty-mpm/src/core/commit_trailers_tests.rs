@@ -234,3 +234,82 @@ fn append_preserves_the_attribution_footer() {
         "session link lost:\n{out}"
     );
 }
+
+/// Why (#7249): a merge message is built from its parents and a squash message
+/// from a branch's commits, so the committing session's figures describe
+/// neither. Both sources write nothing.
+/// Test: itself.
+#[test]
+fn stamp_policy_skips_merge_and_squash() {
+    assert_eq!(stamp_policy("merge"), StampPolicy::Skip);
+    assert_eq!(stamp_policy("squash"), StampPolicy::Skip);
+}
+
+/// Why (#7249): `commit` is git's source for a cherry-pick, a revert, an amend
+/// and `-c`/`-C` — every case where the message arrives from an earlier commit
+/// carrying that session's figures.
+/// Test: itself.
+#[test]
+fn stamp_policy_restamps_a_reused_message() {
+    assert_eq!(stamp_policy("commit"), StampPolicy::Restamp);
+}
+
+/// Why: the message sources — `-m`/`-F`, a template, and the empty source git
+/// passes for an ordinary editor commit — describe this commit's own work, and
+/// an unrecognised source is treated as one of them rather than silently
+/// skipped.
+/// Test: itself.
+#[test]
+fn stamp_policy_stamps_a_new_message() {
+    assert_eq!(stamp_policy(""), StampPolicy::Stamp);
+    assert_eq!(stamp_policy("message"), StampPolicy::Stamp);
+    assert_eq!(stamp_policy("template"), StampPolicy::Stamp);
+    assert_eq!(stamp_policy("something-git-adds-later"), StampPolicy::Stamp);
+}
+
+/// Why (#7249): this is the cherry-pick case — the message arrives stamped by
+/// the session that made the original commit. The whole block goes, blank
+/// separator included, and the attribution paragraph above it stays.
+/// Test: itself.
+#[test]
+fn strip_removes_an_inherited_block() {
+    let stamped = append_trailers(
+        &message_with_footer(),
+        &render_trailers(&full_stats()).expect("trailers"),
+    );
+    let stripped = strip_trailers(&stamped);
+    assert_eq!(stripped, message_with_footer(), "{stripped}");
+}
+
+/// Why: an ordinary message must come back byte-identical — the strip runs on
+/// every cherry-pick and amend, and a message with no block is the common case.
+/// Test: itself.
+#[test]
+fn strip_leaves_a_message_that_has_none() {
+    assert_eq!(
+        strip_trailers(&message_with_footer()),
+        message_with_footer()
+    );
+}
+
+/// Why: git hands the hook a file whose tail is `#`-prefixed help text, so the
+/// block is not the file's last lines. The strip has to find it above that run
+/// and leave the comments where they are.
+/// Test: itself.
+#[test]
+fn strip_keeps_a_trailing_comment_block() {
+    let message = "feat: x\n\nTokens-In: 5\nSavings: 3%\n\n# Please enter the commit message.\n#\n";
+    assert_eq!(
+        strip_trailers(message),
+        "feat: x\n\n# Please enter the commit message.\n#\n"
+    );
+}
+
+/// Why: the strip matches only a paragraph that is ENTIRELY this footer's keys,
+/// so a body ending in a line that merely looks like one is left alone.
+/// Test: itself.
+#[test]
+fn strip_leaves_a_paragraph_that_is_not_only_trailers() {
+    let message = "feat: x\n\nModel: the T-800 is not a trailer.\nIt sits in prose.\n";
+    assert_eq!(strip_trailers(message), message);
+}
