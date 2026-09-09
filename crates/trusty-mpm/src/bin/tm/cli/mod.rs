@@ -1094,6 +1094,21 @@ pub(crate) enum Command {
         /// because nothing classified them.
         #[arg(long)]
         no_prune: bool,
+        /// Print the static table instead of opening the session TUI (#7224).
+        ///
+        /// Why: on a terminal, bare `tm ls` opens a full-screen, resize-aware
+        /// session TUI. That is the right default for connecting, and the wrong
+        /// one when the answer is meant to be READ — scrolled back to, copied
+        /// out of, or pasted into a ticket. A piped invocation already gets the
+        /// table; this is the same escape hatch for an interactive one.
+        /// What: forces the identical static output a non-TTY invocation
+        /// produces — the same renderer, byte for byte, not a second formatting
+        /// path. No effect with `--projects` (the alias registry has no TUI).
+        /// Test: `cli_parses_ls_plain`,
+        /// `ls_connector_should_show_picker_plain_static`,
+        /// `plain_and_non_tty_reach_the_same_static_renderer`.
+        #[arg(long)]
+        plain: bool,
         /// Override the managed root (default: `~/.trusty-mpm`). `--projects` only.
         ///
         /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >

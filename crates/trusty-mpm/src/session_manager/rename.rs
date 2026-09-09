@@ -30,8 +30,16 @@ use super::record::{ManagedSessionId, SessionRecord};
 /// character outside `[A-Za-z0-9_-]` (the alphabet the existing
 /// `tm-<leaf>-NN`/`tm-<adjective>-<noun>` names already use). Returns the
 /// trimmed, validated name on success.
-/// Test: `validate_session_name_*` in `super::rename_tests`.
-pub(crate) fn validate_session_name(name: &str) -> Result<String, String> {
+///
+/// `pub` rather than `pub(crate)` since #7224: the `tm ls` session TUI renames
+/// inline, and a client-side pre-check that is a SEPARATE implementation of
+/// this rule would eventually disagree with the daemon about which names are
+/// valid. Calling this exact function makes that impossible — the TUI shows the
+/// same message the PATCH would have returned, without the round trip.
+/// Test: `validate_session_name_*` in `super::rename_tests`;
+/// `state_rename_rejects_an_invalid_name_with_the_shared_validator` in
+/// `bin/tm/commands/session_tui/tests.rs` pins the sharing.
+pub fn validate_session_name(name: &str) -> Result<String, String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err("session name must not be empty".to_string());

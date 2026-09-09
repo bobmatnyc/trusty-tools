@@ -86,6 +86,12 @@ mod tests_behavior_c;
 #[path = "tests_behavior_d_tests.rs"]
 mod tests_behavior_d;
 
+// #7224: the `tm ls` connector's parse + picker/TUI gate tests, split out
+// when `tests_behavior_d_tests.rs` crossed the 3000-SLOC test cap.
+#[cfg(test)]
+#[path = "tests_behavior_d_ls_connector_tests.rs"]
+mod tests_behavior_d_ls_connector;
+
 #[cfg(test)]
 #[path = "tests_behavior_e_tests.rs"]
 mod tests_behavior_e;
@@ -609,6 +615,7 @@ async fn main() -> anyhow::Result<()> {
             all,
             attached,
             no_prune,
+            plain,
             root,
         }) => {
             if projects {
@@ -623,7 +630,8 @@ async fn main() -> anyhow::Result<()> {
                 // #3483 scope: `tm ls <term>` matches every visible column.
                 let filter = term.map(commands::session_picker::SessionFilter::visible);
                 commands::session_ls_connector::run_ls_connector(
-                    &client, &url, json, source_id, current, all, attached, sort, filter, no_prune,
+                    &client, &url, json, source_id, current, all, attached, plain, sort, filter,
+                    no_prune,
                 )
                 .await
             }
