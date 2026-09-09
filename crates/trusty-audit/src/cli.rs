@@ -128,10 +128,11 @@ pub enum Verb {
         /// Repositories to clone, as owner/name.
         #[arg(value_name = "OWNER/NAME", required = true)]
         repos: Vec<String>,
-        /// Stop STARTING clones once this many gigabytes are on disk (0: never).
+        /// Cap what the clones may occupy, in gigabytes (0: no cap).
         ///
-        /// Not a cap on one repository: a clone already running is never
-        /// interrupted, so a single large repository can exceed this.
+        /// #5669: a cap on the run, not only on what it starts. A clone whose
+        /// checkout crosses the ceiling while it is fetching is stopped and its
+        /// partial tree removed, and the repository is reported as excluded.
         #[arg(long, value_name = "GB")]
         budget_gb: Option<u64>,
     },
@@ -1098,6 +1099,17 @@ mod cli_tests {
                     bytes: 0,
                     bytes_complete: true,
                 },
+                // #5669: a budget kill must not read as a failure.
+                ClonedRepo {
+                    name_with_owner: "acme/monorepo".to_owned(),
+                    path: PathBuf::from("/w/repos/acme/monorepo"),
+                    state: CloneState::BudgetExceeded {
+                        staged_bytes: 4096,
+                        budget_bytes: 3072,
+                    },
+                    bytes: 0,
+                    bytes_complete: true,
+                },
             ],
             total_bytes: 2048,
             total_bytes_complete: true,
@@ -1108,6 +1120,27 @@ mod cli_tests {
         assert!(text.contains("2.0 KiB"), "{text}");
         assert!(text.contains("FAILED"), "{text}");
         assert!(text.contains("Gap: acme/web"), "{text}");
+        // #5669: the budget kill gets its own rendered line, and that ONE line
+        // has to carry the repository and both sizes — a reader who cannot see
+        // which repository was dropped, or against what ceiling, is back to the
+        // silent overrun this issue is about.
+        let over = text
+            .lines()
+            .find(|line| line.contains("OVER BUDGET"))
+            .unwrap_or_else(|| panic!("the budget kill must be rendered: {text}"));
+        assert!(
+            over.contains("acme/monorepo"),
+            "the line names the repository: {over}"
+        );
+        assert!(
+            over.contains("4.0 KiB") && over.contains("3.0 KiB"),
+            "the line names what it reached and the ceiling it crossed: {over}"
+        );
+        assert!(
+            over.contains("stopped mid-clone"),
+            "the line says it was interrupted, not refused: {over}"
+        );
+        assert!(!over.contains("FAILED"), "a ceiling is not a fault: {over}");
     }
 
     /// A budget so large it overflows must clamp, never panic or wrap to zero.
