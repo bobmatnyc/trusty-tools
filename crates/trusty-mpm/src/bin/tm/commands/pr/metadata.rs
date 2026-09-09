@@ -67,6 +67,41 @@ impl RefsIssue {
     }
 }
 
+/// What the caller learned about the `Refs #N` issue.
+///
+/// Why (#7274 round 2): a body with no `Refs` line and a body whose `Refs`
+/// issue could not be read both used to arrive as `None`, so [`plan`] printed
+/// "the body carries no `Refs #N`" for a body that carried one. The two cases
+/// have different causes and different fixes, so they arrive as different
+/// values.
+/// What: `Absent` when no `Refs` line exists, `Unreadable` when one exists and
+/// the `gh issue view` behind it failed, `Found` when the read succeeded.
+/// Test: `metadata_notes_an_unreadable_refs_issue`,
+/// `open_notes_an_unreadable_refs_issue`.
+pub(crate) enum RefsLookup<'a> {
+    /// The body names no `Refs #N`.
+    Absent,
+    /// The body names `Refs #N` and that issue was read.
+    Found(&'a RefsIssue),
+    /// The body names `Refs #N` and that issue could not be read.
+    Unreadable(u64),
+}
+
+/// What the caller learned about the diff.
+///
+/// Why (#7274 round 2): a diff `git` refused to produce and a diff that no
+/// crate owns both used to arrive as an empty slice, so [`plan`] blamed the
+/// workspace for a `git` failure.
+/// What: `Read` carries the paths, however few; `Unreadable` says the read
+/// itself failed.
+/// Test: `metadata_notes_an_unreadable_diff`, `open_notes_an_unreadable_diff`.
+pub(crate) enum ChangedPaths<'a, S: AsRef<str>> {
+    /// The diff was read; these are its paths, possibly none.
+    Read(&'a [S]),
+    /// The diff could not be read at all.
+    Unreadable,
+}
+
 /// The labels, milestone and projects a PR earns, plus what it could not get.
 ///
 /// Why: the caller needs both halves — what to apply, and what to say it could
@@ -101,33 +136,50 @@ impl PrMetadata {
 /// derived — the labels from the diff, the milestone and projects from the
 /// linked issue — so there is nothing here for a caller to override, and
 /// nothing that needs a network to decide.
-/// What: component labels are the crates `changed_paths` touch. A `refs` issue
-/// contributes its milestone and its projects; `None` contributes neither and
-/// says so. Each absent value adds a note rather than an error — a PR whose
-/// diff no crate owns, or whose issue has no milestone, still opens.
+/// What: component labels are the crates the changed paths touch. A `Found`
+/// issue contributes its milestone and its projects. Each gap adds a note
+/// rather than an error — a PR whose diff no crate owns, or whose issue has no
+/// milestone, still opens — and the note names the actual cause, so a failed
+/// read never reads as an empty answer (#7274 round 2).
 /// Test: `metadata_inherits_milestone_and_projects`,
 /// `metadata_without_refs_applies_nothing`, `metadata_multi_crate_diff`,
-/// `metadata_notes_an_issue_with_no_milestone`.
+/// `metadata_notes_an_issue_with_no_milestone`,
+/// `metadata_notes_an_unreadable_diff`, `metadata_notes_an_unreadable_refs_issue`.
 pub(crate) fn plan<S: AsRef<str>>(
-    refs: Option<&RefsIssue>,
-    changed_paths: &[S],
+    refs: RefsLookup<'_>,
+    changed: ChangedPaths<'_, S>,
     ownership: &CrateOwnership,
 ) -> PrMetadata {
-    let mut out = PrMetadata {
-        labels: ownership.labels_for_paths(changed_paths),
-        ..PrMetadata::default()
-    };
-    if out.labels.is_empty() {
-        out.notes
-            .push("no component label: no workspace crate owns the changed paths".to_string());
+    let mut out = PrMetadata::default();
+    match changed {
+        ChangedPaths::Read(paths) => {
+            out.labels = ownership.labels_for_paths(paths);
+            if out.labels.is_empty() {
+                out.notes.push(
+                    "no component label: no workspace crate owns the changed paths".to_string(),
+                );
+            }
+        }
+        ChangedPaths::Unreadable => out
+            .notes
+            .push("no component label: the diff could not be read".to_string()),
     }
-    let Some(issue) = refs else {
-        out.notes.push(
-            "no project or milestone: the body carries no `Refs #N`, so there is no issue \
-             to inherit them from"
-                .to_string(),
-        );
-        return out;
+    let issue = match refs {
+        RefsLookup::Found(issue) => issue,
+        RefsLookup::Absent => {
+            out.notes.push(
+                "no project or milestone: the body carries no `Refs #N`, so there is no issue \
+                 to inherit them from"
+                    .to_string(),
+            );
+            return out;
+        }
+        RefsLookup::Unreadable(number) => {
+            out.notes.push(format!(
+                "no project or milestone: issue #{number} could not be read"
+            ));
+            return out;
+        }
     };
     match issue.milestone.clone() {
         Some(m) => out.milestone = Some(m),
@@ -183,12 +235,24 @@ pub(crate) fn edit_argv(pr: &str, repo: Option<&str>, meta: &PrMetadata) -> Vec<
 /// What: scans lines for a leading `Refs`, tolerating an `owner/repo#N`
 /// qualifier, and returns the number. Case-insensitive on the keyword; a
 /// `Refs` appearing mid-sentence is ignored, since the contract puts the link
-/// on its own line.
+/// on its own line. Lines inside a fenced code block are skipped: a body that
+/// quotes the convention in a sample commit message before stating its own
+/// `Refs` line would otherwise inherit the sample's issue (#7274 round 2).
 /// Test: `metadata_finds_the_first_refs`, `metadata_finds_a_qualified_refs`,
-/// `metadata_ignores_refs_mid_sentence`.
+/// `metadata_ignores_refs_mid_sentence`, `metadata_ignores_refs_inside_a_fence`.
 pub(crate) fn first_refs_issue(body: &str) -> Option<u64> {
+    let mut fenced = false;
     for line in body.lines() {
         let line = line.trim();
+        // A fence opens with ``` plus an optional info string and closes with
+        // ```; toggling on either spelling is enough to skip the block.
+        if line.starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
         let Some(rest) = line
             .get(..4)
             .filter(|k| k.eq_ignore_ascii_case("refs"))

@@ -340,9 +340,13 @@ impl CrateOwnership {
     /// What: for each path, the label of the longest member directory that
     /// prefixes it. A path no member owns — `docs/`, `scripts/`, `.github/` —
     /// contributes nothing rather than a guess.
+    /// The trailing slash each member key carries is what keeps a sibling whose
+    /// directory name extends another's — `crates/trusty-mpm-gui/` beside
+    /// `crates/trusty-mpm/` — from matching both (#7274 round 2).
     /// Test: `ownership_prefers_the_longest_matching_member`,
     /// `ownership_ignores_a_path_no_crate_owns`,
-    /// `ownership_deduplicates_multi_file_crates`.
+    /// `ownership_deduplicates_multi_file_crates`,
+    /// `ownership_does_not_leak_across_a_sibling_prefix`.
     #[must_use]
     pub fn labels_for_paths<S: AsRef<str>>(&self, paths: &[S]) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();

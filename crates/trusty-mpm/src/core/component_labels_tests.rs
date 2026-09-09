@@ -237,6 +237,11 @@ fn ownership() -> CrateOwnership {
             "crates/trusty-audit/ui/src-tauri/".to_string(),
             "trusty-audit-ui".to_string(),
         ),
+        // A sibling whose directory name has another member's as a prefix.
+        (
+            "crates/trusty-mpm-gui/".to_string(),
+            "trusty-mpm-gui".to_string(),
+        ),
     ])
 }
 
@@ -266,6 +271,36 @@ fn ownership_prefers_the_longest_matching_member() {
     assert_eq!(
         ownership().labels_for_paths(&["crates/trusty-audit/ui/src-tauri/src/main.rs"]),
         vec!["trusty-audit-ui".to_string()]
+    );
+}
+
+/// #7274 round 2: `crates/trusty-mpm-gui/` starts with `crates/trusty-mpm`,
+/// so the trailing slash on each member key is what keeps a GUI file from
+/// earning the `trusty-mpm` label as well.
+#[test]
+fn ownership_does_not_leak_across_a_sibling_prefix() {
+    assert_eq!(
+        ownership().labels_for_paths(&["crates/trusty-mpm-gui/src/main.rs"]),
+        vec!["trusty-mpm-gui".to_string()],
+        "a sibling whose name extends another member's earns only its own label"
+    );
+    assert_eq!(
+        ownership().labels_for_paths(&["crates/trusty-mpm/src/lib.rs"]),
+        vec!["trusty-mpm".to_string()],
+        "and the shorter sibling is unaffected"
+    );
+    // With the longer sibling absent from the map, the trailing slash is the
+    // ONLY thing standing between the GUI path and a `trusty-mpm` label — the
+    // longest-first sort cannot help when there is nothing longer to find.
+    let mpm_only = CrateOwnership::from_members([(
+        "crates/trusty-mpm/".to_string(),
+        "trusty-mpm".to_string(),
+    )]);
+    assert!(
+        mpm_only
+            .labels_for_paths(&["crates/trusty-mpm-gui/src/main.rs"])
+            .is_empty(),
+        "a member directory prefixes a path only at a directory boundary"
     );
 }
 

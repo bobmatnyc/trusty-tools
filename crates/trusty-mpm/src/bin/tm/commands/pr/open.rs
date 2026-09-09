@@ -23,7 +23,7 @@ use trusty_mpm::core::policy_labels;
 use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
 
 use super::body::{self, IssueLink};
-use super::metadata::{self, PrMetadata, RefsIssue};
+use super::metadata::{self, ChangedPaths, PrMetadata, RefsIssue, RefsLookup};
 use super::{EXIT_CHECK_FAILED, EXIT_OK, GhRunner, argv};
 use crate::cli::PrOpenArgs;
 
@@ -370,7 +370,8 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
 /// runs one `gh pr edit`. Prints what it applied, and one line per thing the
 /// standard wanted and this PR could not get.
 /// Test: `open_applies_pr_metadata`, `open_without_refs_says_so`,
-/// `open_survives_a_failed_metadata_edit`.
+/// `open_survives_a_failed_metadata_edit`, `open_notes_an_unreadable_diff`,
+/// `open_notes_an_unreadable_refs_issue`.
 fn apply_metadata<R: GhRunner, P: Preflight>(
     gh: &R,
     args: &PrOpenArgs,
@@ -378,21 +379,30 @@ fn apply_metadata<R: GhRunner, P: Preflight>(
     pr: &str,
     body: &str,
 ) {
-    let changed = match pre.changed_paths(&args.base) {
-        Ok(paths) => paths,
+    // #7274 round 2: a failed read reaches `plan` as its own state, so the note
+    // it prints names the failure rather than blaming an empty answer.
+    let read = pre.changed_paths(&args.base);
+    let changed = match &read {
+        Ok(paths) => ChangedPaths::Read(&paths[..]),
         Err(e) => {
-            eprintln!("  warning: no component label — cannot read the diff: {e:#}");
-            Vec::new()
+            eprintln!("  warning: the diff could not be read: {e:#}");
+            ChangedPaths::Unreadable
         }
     };
-    let refs = metadata::first_refs_issue(body).and_then(|n| match refs_issue(gh, args, n) {
+    let number = metadata::first_refs_issue(body);
+    let issue = number.and_then(|n| match refs_issue(gh, args, n) {
         Ok(issue) => Some(issue),
         Err(e) => {
-            eprintln!("  warning: no project or milestone — cannot read issue #{n}: {e:#}");
+            eprintln!("  warning: issue #{n} could not be read: {e:#}");
             None
         }
     });
-    let meta = metadata::plan(refs.as_ref(), &changed, &pre.ownership());
+    let refs = match (number, issue.as_ref()) {
+        (_, Some(issue)) => RefsLookup::Found(issue),
+        (Some(n), None) => RefsLookup::Unreadable(n),
+        (None, None) => RefsLookup::Absent,
+    };
+    let meta = metadata::plan(refs, changed, &pre.ownership());
     if !meta.is_empty() {
         let edit = metadata::edit_argv(pr, args.repo.as_deref(), &meta);
         match gh.run(&edit) {

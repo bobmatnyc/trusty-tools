@@ -192,7 +192,7 @@ here by name rather than restating it.
 | `ws/<session>` label | the filing session's | the opening session's |
 | Component label(s) | the crate the defect lives in, read off the file paths the finding cites | every crate the PR's own diff touches, read off `git diff --name-only <base>...<head>` |
 | Project | chosen by crate/topic fit, or `default_project` | the project(s) of the issue its `Refs #N` names |
-| Milestone | by the ordered rule in "Choosing the Milestone" below | the milestone of the issue its `Refs #N` names |
+| Milestone | by the ordered rule in "Choosing the Milestone and the Project (issues)" below | the milestone of the issue its `Refs #N` names |
 | Type / priority label | yes — "Labels" below | no; a PR's type is its title's conventional-commit prefix |
 | Relationships | native sub-issue and blocked-by — "Relationships (native, never prose)" | none; a PR's relationship IS its `Refs #N` |
 

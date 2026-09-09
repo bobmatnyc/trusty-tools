@@ -5,7 +5,7 @@
 
 use super::body::{self, ATTRIBUTION_FOOTER, FIELDS, Field, IssueLink};
 use super::merge;
-use super::metadata::{self, PrMetadata, RefsIssue};
+use super::metadata::{self, ChangedPaths, PrMetadata, RefsIssue, RefsLookup};
 use super::open::{self, ChangelogVerdict, Preflight};
 use super::queue_check;
 use super::{GhRun, GhRunner, repo_slug};
@@ -81,6 +81,8 @@ struct FakePreflight {
     changed: Vec<String>,
     /// #7274: the workspace ownership those paths are looked up in.
     ownership: CrateOwnership,
+    /// #7274 round 2: make `changed_paths` fail the way a broken `git` does.
+    diff_fails: bool,
 }
 
 impl FakePreflight {
@@ -90,6 +92,7 @@ impl FakePreflight {
             changelog: ChangelogVerdict::Pass,
             changed: Vec::new(),
             ownership: CrateOwnership::default(),
+            diff_fails: false,
         }
     }
 
@@ -97,6 +100,13 @@ impl FakePreflight {
     fn with_diff(mut self, paths: &[&str]) -> Self {
         self.changed = paths.iter().map(|p| (*p).to_string()).collect();
         self.ownership = test_ownership();
+        self
+    }
+
+    /// [`Self::ok`] whose diff read fails outright (#7274 round 2).
+    fn with_unreadable_diff(mut self) -> Self {
+        self.ownership = test_ownership();
+        self.diff_fails = true;
         self
     }
 }
@@ -109,6 +119,7 @@ impl Preflight for FakePreflight {
         Ok(self.changelog.clone())
     }
     fn changed_paths(&self, _base: &str) -> anyhow::Result<Vec<String>> {
+        anyhow::ensure!(!self.diff_fails, "git diff exploded");
         Ok(self.changed.clone())
     }
     fn ownership(&self) -> CrateOwnership {
@@ -617,8 +628,8 @@ fn refs_issue() -> RefsIssue {
 #[test]
 fn metadata_inherits_milestone_and_projects() {
     let meta = metadata::plan(
-        Some(&refs_issue()),
-        &["crates/trusty-mpm/src/lib.rs"],
+        RefsLookup::Found(&refs_issue()),
+        ChangedPaths::Read(&["crates/trusty-mpm/src/lib.rs"]),
         &test_ownership(),
     );
     assert_eq!(meta.labels, vec!["trusty-mpm".to_string()]);
@@ -633,23 +644,76 @@ fn metadata_inherits_milestone_and_projects() {
 
 #[test]
 fn metadata_without_refs_applies_nothing() {
-    let meta = metadata::plan(None, &["docs/specs/DOC-65.md"], &test_ownership());
+    let meta = metadata::plan(
+        RefsLookup::Absent,
+        ChangedPaths::Read(&["docs/specs/DOC-65.md"]),
+        &test_ownership(),
+    );
     assert!(meta.is_empty(), "{meta:?}");
     let notes = meta.notes.join("\n");
-    assert!(notes.contains("no component label"), "{notes}");
+    assert!(
+        notes.contains("no component label: no workspace crate owns the changed paths"),
+        "{notes}"
+    );
     assert!(notes.contains("no `Refs #N`"), "{notes}");
+}
+
+/// #7274 round 2: a diff `git` refused to produce is not a diff no crate owns.
+#[test]
+fn metadata_notes_an_unreadable_diff() {
+    let meta = metadata::plan(
+        RefsLookup::Found(&refs_issue()),
+        ChangedPaths::<&str>::Unreadable,
+        &test_ownership(),
+    );
+    let notes = meta.notes.join("\n");
+    assert!(
+        notes.contains("no component label: the diff could not be read"),
+        "{notes}"
+    );
+    assert!(
+        !notes.contains("no workspace crate owns"),
+        "a failed read must not blame the workspace: {notes}"
+    );
+    assert!(meta.labels.is_empty());
+    // The other half is unaffected — the issue was still read.
+    assert_eq!(meta.milestone.as_deref(), Some("mpm 1.6"));
+}
+
+/// #7274 round 2: a `Refs` line whose issue could not be read is not a body
+/// with no `Refs` line.
+#[test]
+fn metadata_notes_an_unreadable_refs_issue() {
+    let meta = metadata::plan(
+        RefsLookup::Unreadable(7274),
+        ChangedPaths::Read(&["crates/trusty-mpm/src/lib.rs"]),
+        &test_ownership(),
+    );
+    let notes = meta.notes.join("\n");
+    assert!(
+        notes.contains("no project or milestone: issue #7274 could not be read"),
+        "{notes}"
+    );
+    assert!(
+        !notes.contains("carries no `Refs #N`"),
+        "the body carried one; that is what triggered the lookup: {notes}"
+    );
+    assert!(meta.milestone.is_none());
+    assert!(meta.projects.is_empty());
+    // The component label is unaffected — the diff was still read.
+    assert_eq!(meta.labels, vec!["trusty-mpm".to_string()]);
 }
 
 #[test]
 fn metadata_multi_crate_diff() {
     let meta = metadata::plan(
-        Some(&refs_issue()),
-        &[
+        RefsLookup::Found(&refs_issue()),
+        ChangedPaths::Read(&[
             "crates/trusty-agents-common/src/assets/agents/version-control.md",
             "crates/trusty-mpm/src/bin/tm/commands/pr/open.rs",
             "crates/trusty-mpm/src/core/component_labels.rs",
             "docs/specs/DOC-65-universal-framework-agents.md",
-        ],
+        ]),
         &test_ownership(),
     );
     assert_eq!(
@@ -666,7 +730,11 @@ fn metadata_notes_an_issue_with_no_milestone() {
         milestone: None,
         projects: Vec::new(),
     };
-    let meta = metadata::plan(Some(&bare), &["crates/trusty-mpm/a.rs"], &test_ownership());
+    let meta = metadata::plan(
+        RefsLookup::Found(&bare),
+        ChangedPaths::Read(&["crates/trusty-mpm/a.rs"]),
+        &test_ownership(),
+    );
     let notes = meta.notes.join("\n");
     assert!(
         notes.contains("no milestone: issue #99 carries none"),
@@ -728,6 +796,24 @@ fn metadata_ignores_refs_mid_sentence() {
         "only a line that STARTS with the keyword is the link line"
     );
     assert_eq!(metadata::first_refs_issue("## Outcome\n\ntext\n"), None);
+}
+
+/// #7274 round 2: a body that quotes the convention before stating its own
+/// link must inherit from its own link, not from the sample.
+#[test]
+fn metadata_ignores_refs_inside_a_fence() {
+    let body =
+        "## Outcome\n\nEvery fix PR reads:\n\n```\nfix(x): y\n\nRefs #999\n```\n\nRefs #7274\n";
+    assert_eq!(
+        metadata::first_refs_issue(body),
+        Some(7274),
+        "a fenced sample is not the PR's own link"
+    );
+    // An info string opens a fence the same way a bare one does.
+    let tagged = "```text\nRefs #999\n```\n\nRefs #7274\n";
+    assert_eq!(metadata::first_refs_issue(tagged), Some(7274));
+    // A body whose only `Refs` is fenced has no link at all.
+    assert_eq!(metadata::first_refs_issue("```\nRefs #999\n```\n"), None);
 }
 
 #[test]
@@ -801,6 +887,70 @@ fn open_survives_a_failed_metadata_edit() {
         super::EXIT_OK,
         "the PR already exists; the metadata apply is best-effort"
     );
+}
+
+/// #7274 round 2: the diff-read failure arm reaches `plan`. The note itself is
+/// stdout, which this harness cannot capture, so the observable proof is that
+/// the edit carries the inherited half and no component label.
+#[test]
+fn open_notes_an_unreadable_diff() {
+    let mut body = full_body();
+    body = body.replace(
+        ATTRIBUTION_FOOTER,
+        &format!("Refs #7274\n\n{ATTRIBUTION_FOOTER}"),
+    );
+    let (_d, path) = scratch_body(&body);
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new()
+        .on("pr create", "https://github.com/o/r/pull/4242\n")
+        .on("issue view 7274", ISSUE_JSON)
+        .on("pr edit 4242", "");
+    let pre = FakePreflight::ok().with_unreadable_diff();
+    let code = open::run(&gh, &args, &pre).expect("an unreadable diff is not an error");
+    assert_eq!(code, super::EXIT_OK);
+    let edit = gh
+        .calls()
+        .into_iter()
+        .map(|c| c.join(" "))
+        .find(|c| c.starts_with("pr edit"))
+        .expect("the inherited half still applies");
+    assert!(!edit.contains("--add-label"), "{edit}");
+    assert!(edit.contains("--milestone mpm 1.6"), "{edit}");
+}
+
+/// #7274 round 2: a `Refs` line whose `gh issue view` fails still opens the PR
+/// and still applies the component label the diff earned.
+#[test]
+fn open_notes_an_unreadable_refs_issue() {
+    let mut body = full_body();
+    body = body.replace(
+        ATTRIBUTION_FOOTER,
+        &format!("Refs #7274\n\n{ATTRIBUTION_FOOTER}"),
+    );
+    let (_d, path) = scratch_body(&body);
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new()
+        .on("pr create", "https://github.com/o/r/pull/4242\n")
+        .on_fail("issue view 7274", "GraphQL: Could not resolve to an Issue")
+        .on("pr edit 4242", "");
+    let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+    let code = open::run(&gh, &args, &pre).expect("an unreadable issue is not an error");
+    assert_eq!(code, super::EXIT_OK);
+    assert!(
+        gh.calls()
+            .iter()
+            .any(|c| c.join(" ").contains("issue view 7274")),
+        "the body carried a `Refs`, so the lookup was attempted"
+    );
+    let edit = gh
+        .calls()
+        .into_iter()
+        .map(|c| c.join(" "))
+        .find(|c| c.starts_with("pr edit"))
+        .expect("the component label still applies");
+    assert!(edit.contains("--add-label trusty-mpm"), "{edit}");
+    assert!(!edit.contains("--milestone"), "{edit}");
+    assert!(!edit.contains("--add-project"), "{edit}");
 }
 
 #[test]
