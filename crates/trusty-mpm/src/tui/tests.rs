@@ -153,3 +153,19 @@ fn initial_view_honours_single_pane_opt_in() {
     // The pre-#6483 surface stays reachable — explicitly.
     assert_eq!(initial_view(true), TuiView::SinglePane);
 }
+
+/// Dropping the shared terminal guard twice, with no terminal attached, is a
+/// silent no-op (#7224).
+///
+/// Why: the guard's whole job is running during a panic unwind, and the two
+/// surfaces that suspend for a tmux hand-off drop it AFTER `terminal::suspend`
+/// has already restored the screen. Both cases run the restore sequence with
+/// nothing to restore — in CI, with no tty at all — so a teardown that
+/// panicked or propagated there would turn a TUI bug into an abort.
+/// What: constructs and drops two guards in a row and asserts only that
+/// control returns; every step inside is best-effort by design.
+#[test]
+fn terminal_guard_drop_is_idempotent() {
+    drop(super::terminal::TerminalGuard);
+    drop(super::terminal::TerminalGuard);
+}
