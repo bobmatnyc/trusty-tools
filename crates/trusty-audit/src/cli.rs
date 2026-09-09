@@ -1091,6 +1091,7 @@ mod cli_tests {
                     state: CloneState::Cloned,
                     bytes: 2048,
                     bytes_complete: true,
+                    staging_residue: None,
                 },
                 ClonedRepo {
                     name_with_owner: "acme/web".to_owned(),
@@ -1098,6 +1099,7 @@ mod cli_tests {
                     state: CloneState::Failed("no such repository".to_owned()),
                     bytes: 0,
                     bytes_complete: true,
+                    staging_residue: None,
                 },
                 // #5669: a budget kill must not read as a failure.
                 ClonedRepo {
@@ -1109,6 +1111,7 @@ mod cli_tests {
                     },
                     bytes: 0,
                     bytes_complete: true,
+                    staging_residue: None,
                 },
             ],
             total_bytes: 2048,
@@ -1168,6 +1171,7 @@ mod cli_tests {
                     state: CloneState::Cloned,
                     bytes: 1024,
                     bytes_complete: false,
+                    staging_residue: None,
                 },
                 ClonedRepo {
                     name_with_owner: "acme/blank".to_owned(),
@@ -1175,6 +1179,7 @@ mod cli_tests {
                     state: CloneState::Empty("the repository has no commits".to_owned()),
                     bytes: 0,
                     bytes_complete: true,
+                    staging_residue: None,
                 },
             ],
             total_bytes: 1024,
@@ -1474,6 +1479,7 @@ mod cli_tests {
                     state: CloneState::Failed("no such repository".to_owned()),
                     bytes: 0,
                     bytes_complete: true,
+                    staging_residue: None,
                 }],
                 total_bytes: 0,
                 total_bytes_complete: true,

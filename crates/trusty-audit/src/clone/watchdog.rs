@@ -8,9 +8,13 @@
 //! interrupt is not a budget.
 //!
 //! What: while the acquisition child runs, its staged tree is measured at a
-//! bounded interval. Once `spent + staged` crosses the ceiling the child is
-//! signalled — `SIGTERM`, then `SIGKILL` if it does not exit within the grace —
-//! and the caller gets [`Outcome::OverBudget`], which
+//! bounded interval. Once `spent + staged` crosses the ceiling the child's whole
+//! PROCESS GROUP is signalled — `SIGTERM`, then `SIGKILL` if it does not exit
+//! within the grace. The group, not the child: a clone forks `ssh`,
+//! `git-index-pack` and `git-unpack-objects`, and those grandchildren are what
+//! hold the sockets and write the bytes, so a signal aimed at the direct child
+//! leaves the fetch running against a staged directory the caller has already
+//! removed. The caller gets [`Outcome::OverBudget`], which
 //! [`finish_one`](super::finish_one) turns into
 //! [`CloneState::BudgetExceeded`](super::CloneState::BudgetExceeded) and a
 //! removed staged tree. The start gate stays: it is what stops a clone nobody
@@ -29,8 +33,9 @@
 //! temporary pack files throughout a fetch, so a walk racing one is ordinary.
 //! That count is a floor, which still trips the ceiling when it crosses it and
 //! is re-measured on the next interval when it does not. The tree's own ROOT is
-//! the exception — an unopenable root would count 0 bytes forever, so it is
-//! opened explicitly and fails closed like any other unmeasurable sample.
+//! the exception — an unopenable root would count 0 bytes forever — and
+//! [`super::disk::measure_tree`] is where the two are told apart, for this module and
+//! for every other disk figure the crate reports.
 //!
 //! Test: `super::watchdog::watchdog_tests`.
 
@@ -121,7 +126,22 @@ pub(super) enum Outcome {
 /// stdout is discarded — no caller has ever read it — and stderr is drained by
 /// a task of its own so a chatty `git` cannot fill the pipe buffer and wedge a
 /// child this function is otherwise prepared to wait on indefinitely.
-/// Test: `super::watchdog::watchdog_tests::a_missing_binary_names_itself`.
+///
+/// **The child leads its own process group.** A real clone is a TREE, not one
+/// process: `gh` forks `git`, and `git` forks `ssh`, `git-index-pack` and
+/// `git-unpack-objects`, every one of which writes into the staged tree.
+/// Signalling the direct child alone leaves those grandchildren fetching, and an
+/// orphan that keeps writing — into a directory [`super::finish_one`] has by
+/// then already removed, and which the orphan recreates — defeats the ceiling
+/// that stopped it. `process_group(0)` is what makes one signal reach all of
+/// them; [`terminate`] sends it (#5669).
+///
+/// The cost is that the child no longer shares this process's group, so a
+/// terminal `SIGINT` reaches the audit and not the clone. The watchdog is the
+/// interruption path either way, and `kill_on_drop` covers the future being
+/// dropped, but a `taudit` killed outright leaves the clone running.
+/// Test: `super::watchdog::watchdog_tests::a_missing_binary_names_itself`,
+/// `super::watchdog::watchdog_tests::a_budget_kill_reaches_a_grandchild`.
 pub(super) async fn run(
     spec: &Spawn<'_>,
     mut command: Command,
@@ -131,7 +151,10 @@ pub(super) async fn run(
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // See #5669.
+        .process_group(0)
+        .kill_on_drop(true);
     let child = match command.spawn() {
         Ok(child) => child,
         Err(source) => {
@@ -234,27 +257,57 @@ async fn supervise(child: &mut Child, staged: &Path, watch: Option<Watch>) -> Ve
     }
 }
 
-/// End the child, politely and then not.
+/// End the child AND everything it forked, politely and then not.
 ///
-/// `SIGTERM` first because both `git` and `gh` remove their temporary pack
-/// files on it, which leaves less for the caller's `remove_dir_all` to walk.
-/// `SIGKILL` follows on the grace expiring, and the child is reaped either way
-/// — an unreaped child is the orphan this whole path exists to avoid.
-/// Test: `super::watchdog::watchdog_tests::a_killed_child_leaves_no_process_behind`.
+/// `SIGTERM` first because both `git` and `gh` remove their temporary pack files
+/// on it, which leaves less for the caller's `remove_dir_all` to walk. `SIGKILL`
+/// follows on the grace expiring, and the child is reaped either way — an
+/// unreaped child is the orphan this whole path exists to avoid.
+///
+/// Both signals go to the whole process group, because the direct child is not
+/// where the bytes come from: see [`run`] and [`signal_tree`].
+/// Test: `super::watchdog::watchdog_tests::a_killed_child_leaves_no_process_behind`,
+/// `super::watchdog::watchdog_tests::a_budget_kill_reaches_a_grandchild`.
 async fn terminate(child: &mut Child, grace: Duration) {
     if let Some(pid) = child.id() {
-        // `libc::kill` is the only way to send a signal other than `SIGKILL`;
-        // `Child::kill` sends `SIGKILL` unconditionally. The pid is this
-        // process's own child and has not been reaped, so it cannot have been
-        // reused.
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGTERM);
-        }
-        if tokio::time::timeout(grace, child.wait()).await.is_ok() {
+        signal_tree(pid, libc::SIGTERM);
+        // #5669: `Ok(Err(_))` is a wait that FAILED, not a child that exited.
+        // `is_ok()` on the timeout treated the two the same and returned
+        // without ever sending the `SIGKILL` this grace exists to precede.
+        if let Ok(Ok(_)) = tokio::time::timeout(grace, child.wait()).await {
             return;
         }
+        signal_tree(pid, libc::SIGKILL);
     }
+    // Reaps, and covers the child whose pid is already gone.
     let _ = child.kill().await;
+}
+
+/// Signal the child and every process it forked.
+///
+/// Why: killing the direct child alone is what let a clone keep running (#5669)
+/// — `git-index-pack` and `ssh` are grandchildren, they hold the sockets and do
+/// the writing, and nothing reparents them into the grave when their parent
+/// dies. [`run`] puts the child in a process group of its own precisely so one
+/// signal can reach the lot.
+/// What: `kill(-pid)` — the whole group — when the child LEADS its own group,
+/// which is what `process_group(0)` arranged. A child that does not lead one is
+/// in THIS process's group, where a group signal would kill the audit itself, so
+/// it is signalled alone. The check is `getpgid`, asked rather than assumed,
+/// because [`watch_child`] is also reached with children this module did not
+/// spawn.
+/// Test: `super::watchdog::watchdog_tests::a_budget_kill_reaches_a_grandchild`,
+/// `super::watchdog::watchdog_tests::a_child_in_our_own_process_group_is_signalled_alone`.
+fn signal_tree(pid: u32, signal: libc::c_int) {
+    let pid = pid as libc::pid_t;
+    // SAFETY: the pid is this process's own child and has not been reaped, so
+    // it cannot have been reused; `getpgid` only reads. A negative pid names
+    // the process GROUP with that id, which is why it is sent only when the
+    // child is that group's leader.
+    unsafe {
+        let target = if libc::getpgid(pid) == pid { -pid } else { pid };
+        libc::kill(target, signal);
+    }
 }
 
 /// One measurement of the staged tree.
@@ -277,25 +330,22 @@ enum Sample {
 /// `super::watchdog::watchdog_tests::an_unopenable_tree_root_is_unmeasurable_not_empty`.
 fn sample(staged: &Path, seen: &mut bool) -> Sample {
     match std::fs::symlink_metadata(staged) {
-        Ok(meta) if meta.is_dir() => {
-            // #5669: `dir_size` answers `(0, false)` when the tree's own root
-            // cannot be opened, which reads as an empty tree and never trips
-            // the ceiling. Open the root here so that case fails CLOSED like
-            // every other unmeasurable one. Entries BELOW the root stay a
-            // floor, because `git` creating and removing pack files mid-fetch
-            // makes a partial walk ordinary rather than a failure.
-            if let Err(source) = std::fs::read_dir(staged) {
-                return Sample::Unmeasurable(format!(
-                    "the staged tree at {} could not be measured: {source}",
-                    staged.display()
-                ));
+        // #5669: one measurement, so there is no window between a guard and the
+        // walk it guards — an explicit `read_dir` check followed by `dir_size`'s
+        // own `read_dir` were two separate opens, and a root that became
+        // unreadable between them still read as an empty tree.
+        // `super::disk::measure_tree` fails on an unreadable ROOT, which would
+        // otherwise count 0 forever and never trip the ceiling, and returns a
+        // floor for anything below it: `git` creates and removes pack files
+        // throughout a fetch, so a partial walk is ordinary, and a floor over
+        // the ceiling still trips it.
+        Ok(meta) if meta.is_dir() => match super::disk::measure_tree(staged) {
+            Ok((bytes, _floor)) => {
+                *seen = true;
+                Sample::Bytes(bytes)
             }
-            *seen = true;
-            // The completeness flag is deliberately dropped: a partial walk is
-            // a floor, and a floor over the ceiling still trips it.
-            let (bytes, _floor) = super::dir_size(staged);
-            Sample::Bytes(bytes)
-        }
+            Err(why) => Sample::Unmeasurable(why),
+        },
         Ok(_) => Sample::Unmeasurable(format!(
             "the staged tree at {} is not a directory",
             staged.display()
@@ -380,6 +430,54 @@ done
         command
     }
 
+    /// A child that FORKS, the way every real clone does.
+    ///
+    /// `gh` forks `git`, `git` forks `ssh` and `git-index-pack`; [`writer`]
+    /// forks nothing, so no test built on it can see a grandchild survive the
+    /// kill. The grandchild here only sleeps — the claim under test is that the
+    /// budget kill REACHES it, and a grandchild that also wrote would be a
+    /// runaway of its own on the day the kill regresses. The parent does the
+    /// writing that trips the ceiling.
+    ///
+    /// `sh -c` runs without job control, so the background job stays in the
+    /// parent's process group: reaching it is exactly the group-kill property.
+    fn forking_writer(dir: &Path, pidfile: &Path, chunk: usize) -> Command {
+        let script = r#"mkdir -p "$1" || exit 1
+sleep 300 &
+printf '%s' "$!" > "$2"
+while :; do
+  printf '%s' "$3" >> "$1/blob"
+done
+"#;
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .arg("watchdog-forking-fixture")
+            .arg(dir)
+            .arg(pidfile)
+            .arg("x".repeat(chunk))
+            .kill_on_drop(true);
+        command
+    }
+
+    /// Wait out the window between a signal and the reaping that follows it.
+    ///
+    /// A grandchild's parent dies first, so the grandchild is reparented and
+    /// reaped by `init` rather than by anything here — `kill(pid, 0)` answers
+    /// "alive" for the moment it spends as a zombie. Polling a bounded deadline
+    /// keeps that from reading as a survival.
+    async fn died_within(pid: u32, deadline: Duration) -> bool {
+        let started = std::time::Instant::now();
+        while started.elapsed() < deadline {
+            if !alive(pid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        !alive(pid)
+    }
+
     /// [`watch_child`] under a deadline.
     ///
     /// Every runaway fixture here writes until it is stopped, so a regression
@@ -443,6 +541,90 @@ done
         assert!(
             elapsed < STOP_DEADLINE,
             "stopped after {elapsed:?}, past the {STOP_DEADLINE:?} deadline"
+        );
+    }
+
+    /// The kill reaches the whole clone, not just the process this module
+    /// spawned (#5669).
+    ///
+    /// A real clone's bytes come from grandchildren — `ssh`, `git-index-pack`,
+    /// `git-unpack-objects` — and one that outlives the budget kill keeps
+    /// fetching into, and RECREATES, the staged directory `finish_one` has by
+    /// then removed. Every other kill test here uses a fixture that forks
+    /// nothing, so this is the only one that can see it.
+    ///
+    /// Goes through [`run`], not [`watch_child`], because `process_group(0)` is
+    /// applied there: this asserts the production spawn path, not a property a
+    /// test fixture arranged for itself.
+    ///
+    /// A surviving grandchild fails this test in either of two ways, and both
+    /// are the same defect. It inherits the stderr pipe, so it holds that pipe
+    /// open after its parent dies and `watch_child`'s drain never finishes —
+    /// that is the deadline arm. When it does not hold the pipe, the pid check
+    /// at the end is what catches it.
+    #[tokio::test]
+    async fn a_budget_kill_reaches_a_grandchild() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let staged = tmp.path().join("staged");
+        let pidfile = tmp.path().join("grandchild.pid");
+
+        let outcome = tokio::time::timeout(
+            STOP_DEADLINE,
+            run(
+                &SPEC,
+                forking_writer(&staged, &pidfile, 1024),
+                &staged,
+                Some(tiny_watch(0, 4096)),
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "no verdict within {STOP_DEADLINE:?} — a grandchild that survived the kill is \
+                 still holding the inherited stderr pipe open"
+            )
+        });
+
+        assert!(matches!(outcome, Outcome::OverBudget { .. }), "{outcome:?}");
+        let pid: u32 = std::fs::read_to_string(&pidfile)
+            .expect("the fixture recorded its grandchild's pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        assert!(
+            died_within(pid, Duration::from_secs(5)).await,
+            "grandchild {pid} outlived the budget kill and would keep writing into the tree \
+             the caller is about to remove"
+        );
+    }
+
+    /// A child this module did not put in its own group is signalled ALONE.
+    ///
+    /// The group signal is `kill(-pid)`, and `-pid` for a child sharing our
+    /// group would name some other group entirely — or, if this process led it,
+    /// the audit itself. [`signal_tree`] asks `getpgid` rather than assuming,
+    /// and this is the arm that answers no: the child is spawned without
+    /// `process_group`, so it inherits ours.
+    #[tokio::test]
+    async fn a_child_in_our_own_process_group_is_signalled_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut child = writer(&tmp.path().join("staged"), 1024, u64::from(u32::MAX))
+            .spawn()
+            .expect("/bin/sh");
+        let pid = child.id().expect("a freshly spawned child has a pid");
+        assert_ne!(
+            unsafe { libc::getpgid(pid as libc::pid_t) },
+            pid as libc::pid_t,
+            "the fixture must NOT lead its own group for this to be the case under test"
+        );
+
+        terminate(&mut child, Duration::from_millis(200)).await;
+
+        // Reaching this line at all is half the assertion: a group signal aimed
+        // at our own group would have killed the test process.
+        assert!(
+            matches!(child.try_wait(), Ok(Some(_))),
+            "a child sharing our group is still ended and reaped"
         );
     }
 

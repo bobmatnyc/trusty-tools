@@ -5,13 +5,21 @@ Fixed
   against a 20 GiB ceiling still admitted a 100 GB monorepo and finished at
   119 GiB — on a client's own machine, during an unattended engagement, with
   nobody watching to intervene. While a clone runs, its staged tree is now
-  measured every 500ms and the child is signalled once `spent + staged` crosses
+  measured every 500ms and the clone is signalled once `spent + staged` crosses
   the ceiling: `SIGTERM` first, so `git` and `gh` remove their own temporary
   pack files, then `SIGKILL` after a five-second grace, and the child is reaped
-  either way. The partial tree is removed by the same path a failed clone takes,
-  so nothing survives under staging or is promoted into `repos/`. The overshoot
-  is bounded by the sampling interval rather than being zero — a clone can
-  exceed the ceiling by what it writes in one sample period.
+  either way. The signal goes to the clone's whole process group, because a
+  clone is a tree of processes — `gh` forks `git`, `git` forks `ssh`,
+  `git-index-pack` and `git-unpack-objects`, and those grandchildren are what
+  hold the sockets and write the bytes. Signalling only the process this crate
+  spawned left them fetching into, and recreating, the staged directory the
+  cleanup had just removed. The partial tree is removed by the same path a
+  failed clone takes, so nothing survives under staging or is promoted into
+  `repos/` — and when that removal itself fails, the surviving bytes are
+  measured, counted against the budget, and named in a gap line of their own
+  rather than silently ignored. The overshoot is bounded by the sampling
+  interval rather than being zero: a clone can exceed the ceiling by what it
+  writes in one sample period.
 - The outcome lands on its own `CloneState::BudgetExceeded` rather than on
   `Failed` or on the existing start-gate `Skipped`, and renders as
   `OVER BUDGET — stopped mid-clone at <size> against a <size> ceiling`. A
@@ -24,6 +32,13 @@ Fixed
   previously counted as zero bytes and so could never trip the ceiling. A
   partial walk below the root stays a floor and is not a failure, because `git`
   creating and removing pack files mid-fetch makes one ordinary.
+- Every disk figure now comes from one measuring function that tells those two
+  cases apart, and all three of its call sites — the watchdog's sample, the
+  freshly promoted checkout, and a checkout reused from an earlier run — get the
+  same answer. The last two used to collapse an unopenable root to zero bytes
+  and feed that straight into the budget ledger, so a reused checkout of any
+  size could be spent invisibly. Both are now named gaps instead. A checkout
+  that was already on disk when the run started is never removed.
 - `CloneOptions::budget_bytes`, `DEFAULT_BUDGET_BYTES`, and the `--budget-gb`
   help text no longer say the budget stops clones from starting without capping
   one in flight.

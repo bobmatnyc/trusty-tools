@@ -26,7 +26,7 @@
 //! **What a caller may assume, and may not.** A directory under
 //! [`Area::Repos`] is a COMPLETED, VERIFIED checkout, always. Work happens
 //! under [`Area::State`] (see [`STAGING_DIR`]) and is renamed into place only
-//! after `gh` exits zero AND [`verify_checkout`] confirms a resolvable `HEAD`,
+//! after `gh` exits zero AND [`disk::verify_checkout`] confirms a resolvable `HEAD`,
 //! so neither an interrupted run nor a commitless repository leaves something a
 //! later stage would silently analyze as whole (#5215).
 //!
@@ -63,7 +63,10 @@ use crate::progress::{Operation, Progress, UnitOutcome};
 use crate::run::{self, SelectedRepo};
 use crate::workdir::{Area, WorkDir};
 
+mod disk;
 mod watchdog;
+
+use disk::{finish_one, measure_tree};
 
 /// Directory under [`Area::State`] where in-progress clones are built.
 ///
@@ -126,7 +129,12 @@ pub enum CloneState {
     Cloned,
     /// A completed clone was already there; nothing was fetched.
     Reused,
-    /// The clone failed. Nothing was left under [`Area::Repos`] for it.
+    /// The clone failed, or what was on disk for it could not be measured.
+    ///
+    /// Nothing this run staged is left under [`Area::Repos`] or [`STAGING_DIR`],
+    /// unless the removal itself failed — which is reported separately, in
+    /// [`ClonedRepo::staging_residue`], rather than silently (#5669). A checkout
+    /// that was ALREADY there when the run started is never removed.
     Failed(String),
     /// `gh` exited zero but produced no checkout worth analyzing.
     ///
@@ -150,9 +158,12 @@ pub enum CloneState {
     /// that ran, was interrupted, and had its partial tree removed. This one
     /// says: raise `--budget-gb`, or drop the repository from the request.
     ///
-    /// Nothing survives under [`Area::Repos`] or [`STAGING_DIR`] for it.
+    /// Nothing survives under [`Area::Repos`] or [`STAGING_DIR`] for it — and on
+    /// the one path where the removal itself fails, that failure is reported in
+    /// [`ClonedRepo::staging_residue`] and its bytes counted, never swallowed.
     /// Test: `super::clone_tests::a_budget_kill_removes_the_staged_tree`,
-    /// `super::clone_tests::a_budget_kill_is_named_as_its_own_gap`.
+    /// `super::clone_tests::a_budget_kill_is_named_as_its_own_gap`,
+    /// `super::clone_tests::a_staged_tree_that_cannot_be_removed_is_its_own_gap`.
     BudgetExceeded {
         /// What the staged tree measured when it was stopped.
         staged_bytes: u64,
@@ -178,7 +189,12 @@ pub struct ClonedRepo {
     pub path: PathBuf,
     /// What happened.
     pub state: CloneState,
-    /// Bytes on disk. Zero unless the state is usable.
+    /// Bytes this repository occupies on disk.
+    ///
+    /// Zero for a state that is not usable, with one exception: a partial tree
+    /// this run tried and failed to remove is still on disk, so its bytes are
+    /// counted here and against the budget rather than reported as nothing
+    /// (#5669). [`ClonedRepo::staging_residue`] says when that happened.
     pub bytes: u64,
     /// Whether [`ClonedRepo::bytes`] counted the whole tree.
     ///
@@ -188,6 +204,15 @@ pub struct ClonedRepo {
     /// about a number a failed walk produced (#5215 review).
     /// Test: `super::clone_tests::an_unreadable_subtree_marks_the_size_incomplete`.
     pub bytes_complete: bool,
+    /// Why a partial tree this run had to remove is still on disk (#5669).
+    ///
+    /// `None` is the ordinary case, and the one every "nothing survives"
+    /// guarantee is written for. `Some` says [`std::fs::remove_dir_all`] failed
+    /// — the bytes are still there, [`ClonedRepo::bytes`] counts them, and this
+    /// sentence becomes a gap line of its own so the recipient learns about
+    /// disk the audit could not reclaim.
+    /// Test: `super::clone_tests::a_staged_tree_that_cannot_be_removed_is_its_own_gap`.
+    pub staging_residue: Option<String>,
 }
 
 /// The whole acquisition step's result.
@@ -479,136 +504,6 @@ fn clone_command(name_with_owner: &str, into: &Path) -> GhCommand {
     GhCommand::new(args).env_remove("GH_REPO")
 }
 
-/// Bytes occupied by a directory tree, and whether the walk saw all of it.
-///
-/// Why: an unreadable subdirectory used to contribute 0 silently, so a failed
-/// walk produced a confident-looking total that understated disk use and made
-/// the budget stop later than asked. The flag is what stops the caller
-/// presenting a floor as a figure (#5215 review).
-/// What: recursive, never following symlinks. `false` means some entry could
-/// not be read, so the count is a lower bound.
-/// Test: `super::clone_tests::an_unreadable_subtree_marks_the_size_incomplete`.
-fn dir_size(path: &Path) -> (u64, bool) {
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return (0, false);
-    };
-    let mut total = 0u64;
-    let mut complete = true;
-    for entry in entries {
-        let Ok(entry) = entry else {
-            complete = false;
-            continue;
-        };
-        let child = entry.path();
-        if child.is_symlink() {
-            continue;
-        }
-        if child.is_dir() {
-            let (bytes, ok) = dir_size(&child);
-            total = total.saturating_add(bytes);
-            complete &= ok;
-        } else {
-            match std::fs::symlink_metadata(&child) {
-                Ok(meta) => total = total.saturating_add(meta.len()),
-                Err(_) => complete = false,
-            }
-        }
-    }
-    (total, complete)
-}
-
-/// Is this staged tree a checkout the sweep can actually read?
-///
-/// Why: `gh` exiting zero is not proof of a usable repository. Cloning a
-/// COMMITLESS repository exits zero and leaves a directory
-/// holding only `.git`, and `gh repo clone` forwards that status — reported as
-/// `Cloned`, the audit claims coverage of a repository nothing ever read
-/// (#5215 review). This is the check the `#[ignore]`d live test was making and
-/// the production path was not.
-/// What: `.git` must be a real directory, and `HEAD` must resolve — either to a
-/// detached SHA, or to a ref that exists loose or in `packed-refs`. An
-/// unresolvable `HEAD` is exactly the commitless case.
-/// Test: `super::clone_tests::a_commitless_clone_is_not_a_usable_checkout`,
-/// `super::clone_tests::a_checkout_with_a_packed_head_ref_is_usable`.
-fn verify_checkout(tree: &Path) -> Result<(), String> {
-    let git = tree.join(".git");
-    if !git.is_dir() {
-        return Err("the clone left no .git directory".to_string());
-    }
-    let head = match std::fs::read_to_string(git.join("HEAD")) {
-        Ok(text) => text.trim().to_string(),
-        Err(source) => return Err(format!("the clone left no readable .git/HEAD: {source}")),
-    };
-    let Some(reference) = head.strip_prefix("ref:").map(str::trim) else {
-        // A detached HEAD is a raw SHA, which means there is a commit.
-        return Ok(());
-    };
-    if git.join(reference).exists() {
-        return Ok(());
-    }
-    let packed = std::fs::read_to_string(git.join("packed-refs")).unwrap_or_default();
-    if packed.lines().any(|line| line.ends_with(reference)) {
-        return Ok(());
-    }
-    Err(format!(
-        "the repository has no commits — HEAD points at {reference}, which does not exist"
-    ))
-}
-
-/// Turn one `gh` result into a state, moving the partial into place or removing it.
-///
-/// Why: this is the fail-open site. `gh repo clone` failing part-way leaves a
-/// directory that LOOKS like a checkout, and a caller that reported success on
-/// it would hand a half-fetched repository to the sweep, which would analyze it
-/// and report on it as if it were whole. The rename is what makes "a directory
-/// under `repos/` is a completed clone" true by construction rather than by
-/// convention.
-/// What: on a failure or a budget kill, removes the staged tree and returns
-/// why. On completion, VERIFIES the tree before promoting it — a zero exit that
-/// produced no usable checkout becomes [`CloneState::Empty`], and nothing is
-/// promoted. Only a verified tree is renamed onto `dest`. Never leaves the
-/// staged tree behind.
-/// Test: `super::clone_tests::a_failed_clone_leaves_nothing_behind`,
-/// `super::clone_tests::a_successful_clone_is_renamed_into_place`,
-/// `super::clone_tests::a_commitless_clone_is_not_a_usable_checkout`,
-/// `super::clone_tests::a_budget_kill_removes_the_staged_tree`.
-fn finish_one(dest: &Path, staged: &Path, outcome: watchdog::Outcome) -> (CloneState, u64, bool) {
-    let discard = |state: CloneState| {
-        let _ = std::fs::remove_dir_all(staged);
-        (state, 0, true)
-    };
-    match outcome {
-        // #6001: the reason arrives as a string rather than a `GhError`, because
-        // acquisition now has two mechanisms and only one of them is `gh`.
-        watchdog::Outcome::Failed(reason) => return discard(CloneState::Failed(reason)),
-        // #5669: the same removal a failure gets — a tree the budget stopped is
-        // as unusable as one the remote refused, and leaving it would defeat
-        // the ceiling it just crossed.
-        watchdog::Outcome::OverBudget {
-            staged_bytes,
-            budget_bytes,
-        } => {
-            return discard(CloneState::BudgetExceeded {
-                staged_bytes,
-                budget_bytes,
-            });
-        }
-        watchdog::Outcome::Completed => {}
-    }
-    // #5215: verify BEFORE the rename, so an unusable tree never occupies the
-    // destination even briefly.
-    if let Err(why) = verify_checkout(staged) {
-        return discard(CloneState::Empty(why));
-    }
-    if let Err(source) = std::fs::rename(staged, dest) {
-        return discard(CloneState::Failed(format!(
-            "clone completed but could not be moved into place: {source}"
-        )));
-    }
-    let (bytes, complete) = dir_size(dest);
-    (CloneState::Cloned, bytes, complete)
-}
-
 /// Assemble the report, deciding whether the sequence may continue.
 ///
 /// Why: DOC-68 §14 Q2's decision, encoded rather than cited — one failure is a
@@ -629,6 +524,14 @@ fn summarize(repos: Vec<ClonedRepo>) -> Result<CloneReport, AuditError> {
     let usable_repos = || repos.iter().filter(|r| r.state.is_usable());
     let total_bytes = usable_repos().map(|r| r.bytes).sum();
     let total_bytes_complete = usable_repos().all(|r| r.bytes_complete);
+    // #5669: a tree that could not be removed is its own line, whatever state
+    // the repository itself ended in — the recipient has disk to reclaim by
+    // hand, and a failed `remove_dir_all` is the only way to learn of it.
+    let residues = repos.iter().filter_map(|r| {
+        r.staging_residue
+            .as_ref()
+            .map(|why| format!("{} left disk behind — {why}", r.name_with_owner))
+    });
     let gaps = repos
         .iter()
         .filter_map(|r| match &r.state {
@@ -655,6 +558,7 @@ fn summarize(repos: Vec<ClonedRepo>) -> Result<CloneReport, AuditError> {
             )),
             CloneState::Cloned | CloneState::Reused => None,
         })
+        .chain(residues)
         .collect();
     Ok(CloneReport {
         repos,
@@ -787,6 +691,10 @@ pub async fn clone_all(
     progress.operation_started(Operation::CloneRepos, total);
     let mut out = Vec::with_capacity(total);
     let mut spent: u64 = 0;
+    // #5669: whether `spent` is a total or a floor. The gate below can only
+    // compare the number it has, so when that number is a lower bound the
+    // reason it prints says so instead of reading as a measured figure.
+    let mut spent_complete = true;
     for (index, (name_with_owner, source, dest, staged)) in planned.into_iter().enumerate() {
         progress.unit_started(
             Operation::CloneRepos,
@@ -801,8 +709,31 @@ pub async fn clone_all(
         ensure_real_dir(dest.clone())?;
 
         if dest.is_dir() {
-            let (bytes, complete) = dir_size(&dest);
+            // #5669: a reused checkout feeds the same ledger a fresh one does,
+            // so an unreadable root here is the identical fail-open — it would
+            // contribute 0 for a tree of any size and let the run spend the
+            // whole budget invisibly. It is a gap instead. The checkout itself
+            // is left exactly as it was found.
+            let (bytes, complete) = match measure_tree(&dest) {
+                Ok(measured) => measured,
+                Err(why) => {
+                    let state = CloneState::Failed(format!(
+                        "{why} — a checkout of unknown size cannot be held to the disk budget"
+                    ));
+                    announce(progress, &name_with_owner, &state);
+                    out.push(ClonedRepo {
+                        name_with_owner,
+                        path: dest,
+                        state,
+                        bytes: 0,
+                        bytes_complete: false,
+                        staging_residue: None,
+                    });
+                    continue;
+                }
+            };
             spent = spent.saturating_add(bytes);
+            spent_complete &= complete;
             announce(progress, &name_with_owner, &CloneState::Reused);
             out.push(ClonedRepo {
                 name_with_owner,
@@ -810,12 +741,18 @@ pub async fn clone_all(
                 state: CloneState::Reused,
                 bytes,
                 bytes_complete: complete,
+                staging_residue: None,
             });
             continue;
         }
         if options.budget_bytes.is_some_and(|b| spent >= b) {
+            let floor = if spent_complete {
+                ""
+            } else {
+                " (a floor — part of an earlier checkout could not be read)"
+            };
             let state = CloneState::Skipped(format!(
-                "the {spent}-byte disk budget for clones was already spent"
+                "the {spent}-byte disk budget for clones was already spent{floor}"
             ));
             announce(progress, &name_with_owner, &state);
             out.push(ClonedRepo {
@@ -824,6 +761,7 @@ pub async fn clone_all(
                 state,
                 bytes: 0,
                 bytes_complete: true,
+                staging_residue: None,
             });
             continue;
         }
@@ -845,15 +783,19 @@ pub async fn clone_all(
             .budget_bytes
             .map(|budget| watchdog::Watch::new(spent, budget));
         let ran = acquire(&name_with_owner, &source, &staged, watch).await;
-        let (state, bytes, complete) = finish_one(&dest, &staged, ran);
-        spent = spent.saturating_add(bytes);
-        announce(progress, &name_with_owner, &state);
+        let finished = finish_one(&dest, &staged, ran);
+        // #5669: bytes a failed removal left behind are still on disk, so they
+        // count against the ceiling exactly as a promoted checkout's do.
+        spent = spent.saturating_add(finished.bytes);
+        spent_complete &= finished.bytes_complete;
+        announce(progress, &name_with_owner, &finished.state);
         out.push(ClonedRepo {
             name_with_owner,
             path: dest,
-            state,
-            bytes,
-            bytes_complete: complete,
+            state: finished.state,
+            bytes: finished.bytes,
+            bytes_complete: finished.bytes_complete,
+            staging_residue: finished.residue,
         });
     }
     let usable = out.iter().filter(|r| r.state.is_usable()).count();
@@ -949,6 +891,8 @@ fn announce(progress: &Progress, name_with_owner: &str, state: &CloneState) {
 #[cfg(test)]
 mod clone_tests {
     use super::*;
+    // Exercised only from here; `super` reaches them through `finish_one`.
+    use super::disk::{discard_at, verify_checkout};
     use crate::local_repo::local_repo_tests::{run_git, source_repo};
     use trusty_common::gh::GhError;
 
@@ -973,6 +917,7 @@ mod clone_tests {
             state,
             bytes,
             bytes_complete: true,
+            staging_residue: None,
         }
     }
 
@@ -1033,13 +978,17 @@ mod clone_tests {
         std::fs::create_dir_all(staged.join(".git/refs/heads")).expect("mkdir");
         std::fs::write(staged.join(".git/HEAD"), b"ref: refs/heads/main\n").expect("HEAD");
 
-        let (state, bytes, _) = finish_one(&dest, &staged, watchdog::Outcome::Completed);
-        let CloneState::Empty(why) = &state else {
-            panic!("a zero exit with no commits must not be Cloned: {state:?}");
+        let finished = finish_one(&dest, &staged, watchdog::Outcome::Completed);
+        let CloneState::Empty(why) = &finished.state else {
+            panic!(
+                "a zero exit with no commits must not be Cloned: {:?}",
+                finished.state
+            );
         };
         assert!(why.contains("no commits"), "{why}");
-        assert!(!state.is_usable());
-        assert_eq!(bytes, 0);
+        assert!(!finished.state.is_usable());
+        assert_eq!(finished.bytes, 0);
+        assert_eq!(finished.residue, None, "the tree was removed");
         assert!(!dest.exists(), "nothing may be promoted");
         assert!(!staged.exists());
     }
@@ -1228,12 +1177,80 @@ mod clone_tests {
         std::fs::write(blocked.join("hidden"), b"0123456789").expect("write");
         std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
 
-        let (bytes, complete) = dir_size(&tree);
+        let measured = measure_tree(&tree);
         // Restore first, so a failed assertion cannot leave an undeletable tree.
         std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755))
             .expect("restore");
+        let (bytes, complete) = measured.expect("the ROOT opened, so this is a floor not an error");
         assert!(!complete, "an unreadable subtree must not read as a total");
         assert_eq!(bytes, 5, "the readable part is still counted: {bytes}");
+    }
+
+    /// The fail-open every disk figure shared (#5669).
+    ///
+    /// A tree whose own root cannot be opened measured `(0, false)`, and a
+    /// confident zero for a checkout of any size means the ceiling is never
+    /// reached and so never enforced. Two of the three call sites — the promoted
+    /// checkout and the reused one — dropped the flag entirely, so the zero
+    /// arrived at the budget ledger with nothing marking it as a non-answer.
+    #[test]
+    fn an_unreadable_root_is_a_measurement_failure_not_a_zero() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // root ignores the mode bits, so the case cannot be staged there.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tree = tmp.path().join("tree");
+        std::fs::create_dir_all(&tree).expect("mkdir");
+        std::fs::write(tree.join("big"), vec![b'x'; 8192]).expect("write");
+        std::fs::set_permissions(&tree, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+        let measured = measure_tree(&tree);
+
+        std::fs::set_permissions(&tree, std::fs::Permissions::from_mode(0o755)).expect("restore");
+        let why = measured.expect_err("an unopenable root is not an empty tree");
+        assert!(why.contains("could not be measured"), "{why}");
+    }
+
+    /// The reused-checkout path is the third call site, and it fed `spent`
+    /// directly: a checkout of any size that could not be opened contributed
+    /// zero and let the run go on spending a budget it had already used (#5669).
+    #[tokio::test]
+    async fn a_reused_checkout_that_cannot_be_measured_is_a_gap() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let present = destination(&work, "acme/api").expect("valid");
+        std::fs::create_dir_all(&present).expect("mkdir");
+        std::fs::write(present.join("f"), vec![b'x'; 8192]).expect("write");
+        std::fs::set_permissions(&present, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+        let outcome = clone_all(
+            &work,
+            &["acme/api".to_string()],
+            &CloneOptions::default(),
+            &Progress::none(),
+        )
+        .await;
+
+        std::fs::set_permissions(&present, std::fs::Permissions::from_mode(0o755))
+            .expect("restore");
+        // The only entry is unusable, so the run has nothing to audit at all.
+        let err = outcome.expect_err("an unmeasurable checkout is not a usable one");
+        assert!(
+            matches!(err, AuditError::AllClonesFailed { attempted: 1 }),
+            "{err:?}"
+        );
+        assert!(
+            present.join("f").is_file(),
+            "a checkout that was already there is never removed"
+        );
     }
 
     #[test]
@@ -1284,13 +1301,18 @@ mod clone_tests {
         plant_checkout(&staged);
         std::fs::write(staged.join("README.md"), b"partial").expect("write");
 
-        let (state, bytes, _) = finish_one(
+        let finished = finish_one(
             &dest,
             &staged,
             watchdog::Outcome::Failed(gh_failure().to_string()),
         );
-        assert!(matches!(state, CloneState::Failed(_)), "{state:?}");
-        assert_eq!(bytes, 0);
+        assert!(
+            matches!(finished.state, CloneState::Failed(_)),
+            "{:?}",
+            finished.state
+        );
+        assert_eq!(finished.bytes, 0);
+        assert_eq!(finished.residue, None, "the removal succeeded");
         assert!(
             !dest.exists(),
             "a failed clone must not appear as a checkout"
@@ -1306,13 +1328,14 @@ mod clone_tests {
         plant_checkout(&staged);
         std::fs::write(staged.join("f"), b"0123456789").expect("write");
 
-        let (state, bytes, complete) = finish_one(&dest, &staged, watchdog::Outcome::Completed);
-        assert_eq!(state, CloneState::Cloned);
+        let finished = finish_one(&dest, &staged, watchdog::Outcome::Completed);
+        assert_eq!(finished.state, CloneState::Cloned);
         assert!(
-            bytes >= 10,
-            "the measured tree includes the payload: {bytes}"
+            finished.bytes >= 10,
+            "the measured tree includes the payload: {}",
+            finished.bytes
         );
-        assert!(complete);
+        assert!(finished.bytes_complete);
         assert!(dest.join(".git").is_dir());
         assert!(!staged.exists());
     }
@@ -1806,7 +1829,7 @@ mod clone_tests {
         plant_checkout(&staged);
         std::fs::write(staged.join("huge"), vec![b'x'; 8192]).expect("write");
 
-        let (state, bytes, _) = finish_one(
+        let finished = finish_one(
             &dest,
             &staged,
             watchdog::Outcome::OverBudget {
@@ -1816,16 +1839,86 @@ mod clone_tests {
         );
 
         assert_eq!(
-            state,
+            finished.state,
             CloneState::BudgetExceeded {
                 staged_bytes: 8192,
                 budget_bytes: 4096
             }
         );
-        assert!(!state.is_usable());
-        assert_eq!(bytes, 0);
+        assert!(!finished.state.is_usable());
+        assert_eq!(finished.bytes, 0);
+        assert_eq!(
+            finished.residue, None,
+            "the removal worked, so there is nothing to report"
+        );
         assert!(!dest.exists(), "a killed clone must not be promoted");
         assert!(!staged.exists(), "the partial tree must be removed");
+    }
+
+    /// The removal FAILING is not nothing (#5669).
+    ///
+    /// `discard` used to be `let _ = std::fs::remove_dir_all(staged)`, so a
+    /// staging directory that could not be emptied left the whole partial tree
+    /// on disk while the report said the state was `BudgetExceeded` and the
+    /// bytes were zero — the ceiling that just stopped the clone then went on
+    /// being measured against a figure missing everything the clone wrote.
+    #[test]
+    fn a_staged_tree_that_cannot_be_removed_is_its_own_gap() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // root ignores the mode bits, so the case cannot be staged there.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let staged = tmp.path().join("staged");
+        std::fs::create_dir_all(&staged).expect("mkdir");
+        std::fs::write(staged.join("huge"), vec![b'x'; 8192]).expect("write");
+        // Unlinking an entry needs write permission on the directory HOLDING
+        // it, so a read-only `staged` is a removal that fails with the payload
+        // intact. A read-only PARENT would not do: `remove_dir_all` empties the
+        // tree first and only then fails to unlink the directory itself.
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+
+        let finished = discard_at(
+            &staged,
+            CloneState::BudgetExceeded {
+                staged_bytes: 8192,
+                budget_bytes: 4096,
+            },
+        );
+
+        // Restore before the assertions so the tempdir can always be removed.
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let residue = finished
+            .residue
+            .as_deref()
+            .expect("a removal that failed must say so");
+        assert!(residue.contains("could not be removed"), "{residue}");
+        assert!(
+            finished.bytes >= 8192,
+            "the surviving bytes are counted, not reported as zero: {}",
+            finished.bytes
+        );
+        assert!(staged.exists(), "the fixture's premise: the tree survived");
+
+        let report = summarize(vec![
+            cloned("acme/api", CloneState::Cloned, 100),
+            ClonedRepo {
+                staging_residue: finished.residue,
+                bytes: finished.bytes,
+                ..cloned("acme/monorepo", finished.state, finished.bytes)
+            },
+        ])
+        .expect("one usable checkout keeps the run going");
+        assert!(
+            report
+                .gaps
+                .iter()
+                .any(|g| g.contains("acme/monorepo") && g.contains("could not be removed")),
+            "the removal failure is named to the recipient: {:?}",
+            report.gaps
+        );
     }
 
     /// The gap line says what to change, and does not read as a failure.
