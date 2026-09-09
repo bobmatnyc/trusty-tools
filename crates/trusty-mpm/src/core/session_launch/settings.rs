@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use super::PrepError;
+use crate::core::standalone::hooks::backup;
 
 /// Default Claude Code output style applied to launched sessions.
 ///
@@ -291,11 +292,71 @@ pub(super) fn write_output_style(
 /// `project_hooks_tests::write_project_hooks_enabled_output_is_unchanged_by_the_toggle`,
 /// `project_hooks_tests::write_project_hooks_writes_divert_groups_when_enabled`,
 /// `project_hooks_tests::write_project_hooks_strips_stale_divert_when_disabled`.
+///
+/// `exe_override` (#7244) pins the binary the hook commands name; production
+/// passes `None` and lets the resolver find the running installed binary. A
+/// test passes an installed-looking path so its assertions do not depend on
+/// whether the host running them has `tm` installed — without which every
+/// assertion here would read the resolver's refusal instead of the write.
+///
+/// #7244 (round 3), two additions in front of the write. A merge that equals
+/// the file as read returns without writing — every managed launch calls this
+/// and almost none of them change anything. A merge that does differ first
+/// copies the file to `<path>.<YYYYMMDDTHHMMSSZ>.bak` via
+/// [`backup::snapshot_then_prune`], keeping the newest
+/// [`backup::HOOK_SETTINGS_SNAPSHOTS_KEPT`] and raising
+/// [`PrepError::HookSnapshot`] — which abandons the rewrite — if that copy
+/// fails. The refusal at the top still precedes both, so a refused write takes
+/// no snapshot either.
+/// Test: `project_hooks_tests::write_project_hooks_snapshots_the_file_it_replaces`,
+/// `project_hooks_tests::write_project_hooks_prunes_snapshots_to_three`,
+/// `project_hooks_tests::write_project_hooks_takes_no_snapshot_when_nothing_changes`,
+/// `project_hooks_tests::write_project_hooks_takes_no_snapshot_when_the_exe_is_refused`,
+/// `project_hooks_tests::write_project_hooks_aborts_when_the_snapshot_fails`.
 pub(super) fn write_project_hooks(
     project_dir: &Path,
+    exe_override: Option<&Path>,
     inject_prompt_context: bool,
     divert_enabled: bool,
 ) -> Result<(), PrepError> {
+    // #6887: `divert_enabled` adds two `PreToolUse` groups; the strip below is
+    // deliberately NOT narrowed by it, so flipping the manifest key back to
+    // false removes what a prior launch wrote.
+    //
+    // #7244: resolved BEFORE `create_dir_all` and before the read — when no
+    // stable installed binary resolves this call must leave the project's
+    // settings file exactly as it found it (and a missing one missing) rather
+    // than rewriting every hook to point at a `cargo test` harness.
+    write_project_hooks_with(
+        project_dir,
+        super::project_hooks::project_managed_hook_additions(
+            exe_override,
+            inject_prompt_context,
+            divert_enabled,
+        ),
+    )
+}
+
+/// [`write_project_hooks`] with the resolved additions supplied by the caller.
+///
+/// Why (#7244, round 3): the fail-closed rules this writer owes — a refusal
+/// writes nothing and snapshots nothing — cannot be exercised through
+/// [`write_project_hooks`] on a machine that has `tm` installed, because
+/// `resolve_stable_hook_exe`'s PATH fallback rescues even a refused
+/// `exe_override`. Taking the already-computed `Result` lets a test hand in the
+/// refusal directly. Mirrors the seam
+/// [`crate::core::standalone::hooks::write_project_hooks`] grew in round 1, so
+/// the two writers stay testable the same way.
+/// What: returns `additions`'s error as [`PrepError::HookExe`] before touching
+/// the filesystem; otherwise performs the read / strip / merge / no-op check /
+/// snapshot / atomic-write exactly as [`write_project_hooks`] documents.
+/// Test: `project_hooks_tests::write_project_hooks_takes_no_snapshot_when_the_exe_is_refused`.
+pub(super) fn write_project_hooks_with(
+    project_dir: &Path,
+    additions: Result<serde_json::Value, crate::core::standalone::hooks::StableHookExeError>,
+) -> Result<(), PrepError> {
+    let additions = additions.map_err(|source| PrepError::HookExe { source })?;
+
     let claude_dir = project_dir.join(".claude");
     std::fs::create_dir_all(&claude_dir).map_err(|source| PrepError::Io {
         path: claude_dir.clone(),
@@ -305,19 +366,16 @@ pub(super) fn write_project_hooks(
 
     // Load existing settings to preserve unrelated keys; tolerate a missing or
     // malformed file by starting from an empty object.
-    let mut settings = match std::fs::read_to_string(&settings_path) {
+    let original = match std::fs::read_to_string(&settings_path) {
         Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
             .ok()
             .filter(serde_json::Value::is_object)
             .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
         Err(_) => serde_json::Value::Object(serde_json::Map::new()),
     };
-
-    // #6887: `divert_enabled` adds two `PreToolUse` groups; the strip below is
-    // deliberately NOT narrowed by it, so flipping the manifest key back to
-    // false removes what a prior launch wrote.
-    let additions =
-        super::project_hooks::project_managed_hook_additions(inject_prompt_context, divert_enabled);
+    // #7244: the no-op check below measures the strip+merge round trip against
+    // the file as it was READ, so the pre-strip value has to outlive the strip.
+    let mut settings = original.clone();
 
     // Replace-by-identity at entry granularity: strip any existing entry we
     // own (trusty-memory / PM-guard / lifecycle-triad), so re-running this on
@@ -336,6 +394,27 @@ pub(super) fn write_project_hooks(
     );
 
     let merged = trusty_common::claude_config::merge_hook_entries(&settings, &additions);
+
+    // #7244: every managed launch calls this, and almost every call produces
+    // the same bytes as the last one. Without this exit the snapshot below
+    // would fire on each launch and the newest three snapshots would all be
+    // copies of the current file — an archive of nothing, and the ONE prior
+    // state worth keeping pushed out of it. Compared against `original`, the
+    // file as read, not against `settings` (already stripped).
+    if merged == original {
+        return Ok(());
+    }
+
+    // #7244: snapshot BEFORE the rename that replaces the file, and fail
+    // closed — a rewrite whose prior state could not be preserved does not
+    // happen. Non-fatal to the launch, like every other `PrepError` bar
+    // `Instructions`: the session starts with the hooks already on disk.
+    backup::snapshot_then_prune(&settings_path, backup::HOOK_SETTINGS_SNAPSHOTS_KEPT).map_err(
+        |source| PrepError::HookSnapshot {
+            path: settings_path.clone(),
+            source,
+        },
+    )?;
 
     trusty_common::claude_config::write_json_atomic(&settings_path, &merged)
         .map_err(|err| PrepError::Deploy(err.to_string()))?;

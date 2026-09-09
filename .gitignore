@@ -42,6 +42,13 @@
 # never a deliverable — same as settings.local.json below.
 /.claude/settings.json
 
+# Its backups are the same machine-local artifact one step removed: the
+# `settings.json.<UTC>.bak` snapshots the hooks writer takes before each
+# rewrite (#7244), the atomic writer's own `settings.json.bak` slot, and the
+# hand-made repair copy this checkout already carries. Without this rule every
+# managed launch that changes the file adds an untracked path to `git status`.
+/.claude/settings.json*.bak
+
 # Project-tier agent files are NEVER tracked in this repo. They are deployed
 # artifacts, not source: the bundled roster is the product and lives in
 # crates/trusty-mpm/src/assets/agents/ (and crates/trusty-code/src/assets/agents/).

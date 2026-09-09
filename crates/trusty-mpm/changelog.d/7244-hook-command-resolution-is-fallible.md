@@ -1,0 +1,3 @@
+Changed
+
+- `mpm_hook_command`, `mpm_hook_additions` and `mpm_hook_additions_with_exe` return `Result<_, StableHookExeError>` instead of silently falling back to the bare literal `trusty-mpm hook`, and `hooks::write_project_hooks` returns that error before reading, creating, or writing anything — so a refusal leaves an existing settings file byte-identical and a missing one missing (#7244). The project-tier `session_launch` writer takes an `exe_override` and raises the new non-fatal `PrepError::HookExe`; `ensure_managed_hooks_with_exe` and the second argument to `write_project_hooks_for_dir` pin the binary for callers that already know it.

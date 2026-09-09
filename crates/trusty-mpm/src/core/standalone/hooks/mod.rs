@@ -7,8 +7,10 @@
 //! Centralising the definition here (rather than duplicating it in the `tm install`
 //! binary) lets `ensure_global_config_dir` call it from the library crate, and
 //! lets the binary re-use the same literal for `tm install`.
-//! What: [`mpm_hook_command`] resolves the absolute binary path (falling back to
-//! the bare name when resolution fails); [`mpm_hook_additions`] returns the hook
+//! What: [`mpm_hook_command`] resolves the absolute binary path, or returns
+//! [`StableHookExeError`] when nothing stable resolves (#7244 — it used to fall
+//! back to the bare name, which made a refusal look like a success at every
+//! call site and let the write proceed); [`mpm_hook_additions`] returns the hook
 //! triad JSON block; [`ensure_managed_hooks`] reads `<claude_config_dir>/settings.json`,
 //! deep-merges the triad idempotently, and writes back;
 //! [`remove_global_trusty_mpm_hooks_at`] strips MPM hook entries from the two
@@ -37,18 +39,46 @@
 #[cfg(test)]
 mod tests;
 
+pub(crate) mod backup;
 pub mod cleanup;
 
 use std::path::{Path, PathBuf};
 
-/// The bare fallback command name when the binary path cannot be resolved.
+/// Why no stable hook binary could be resolved (#7244).
 ///
-/// Why: if `current_exe()` fails (e.g. under `cargo test` without a real
-/// install), we must still produce a working hook definition rather than
-/// panicking. The bare name is what Claude Code would previously use
-/// (resolved via PATH), so it degrades gracefully.
-/// What: `"trusty-mpm hook"`.
-const BARE_HOOK_COMMAND: &str = "trusty-mpm hook";
+/// Why: the previous resolution answered `Option<PathBuf>` and every caller
+/// turned `None` into the bare literal `"trusty-mpm hook"`, so a refusal and a
+/// success both produced a hook command and both got WRITTEN. A refusal is a
+/// fact the caller needs: it means the file about to be written would carry a
+/// command tm cannot vouch for, and the correct response is to write nothing
+/// and say why. Naming the reason (rather than a bare `None`) is what makes
+/// the operator-facing message actionable — "install tm" and "you are running
+/// a test binary" call for different fixes.
+/// What: three refusal reasons, each carrying the path that was rejected where
+/// there is one.
+/// Test: `resolve_stable_hook_exe_with_refuses_a_foreign_binary_stem`,
+/// `resolve_stable_hook_exe_with_refuses_an_ephemeral_exe`,
+/// `write_project_hooks_writes_nothing_when_the_exe_cannot_be_resolved`.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum StableHookExeError {
+    /// The running binary is a build artifact and nothing installed was found.
+    #[error(
+        "refusing to bake the ephemeral build path {0} into a persisted hook command, \
+         and no installed tm/trusty-mpm binary was found on PATH"
+    )]
+    Ephemeral(PathBuf),
+    /// The running binary is not one this crate ships, and nothing installed
+    /// was found. A `cargo test` harness reaches this arm.
+    #[error(
+        "the running executable {0} is not a tm/trusty-mpm binary, and no installed \
+         tm/trusty-mpm binary was found on PATH"
+    )]
+    ForeignBinary(PathBuf),
+    /// Neither `current_exe()` nor a PATH lookup produced an absolute path.
+    #[error("no installed tm/trusty-mpm binary could be resolved")]
+    Unresolved,
+}
 
 /// Resolve the absolute path for the `trusty-mpm hook` command.
 ///
@@ -60,16 +90,16 @@ const BARE_HOOK_COMMAND: &str = "trusty-mpm hook";
 /// dependency entirely and is correct by construction: the binary being
 /// installed is the same binary running `tm install`.
 /// What: delegates to [`resolve_stable_hook_exe`] and renders `"<abs-path>
-/// hook"`; falls back to `BARE_HOOK_COMMAND` when no stable binary resolves so
-/// the install never panics. If a caller already knows the exe path (e.g. from
-/// `current_exe()` cached at startup), they can pass it via `exe_override` to
-/// skip the syscall.
+/// hook"`. If a caller already knows the exe path (e.g. from `current_exe()`
+/// cached at startup), they can pass it via `exe_override` to skip the syscall.
+///
+/// #7244: this used to fall back to the bare literal `"trusty-mpm hook"` when
+/// nothing stable resolved, which made a refusal indistinguishable from a
+/// success at every call site and let the write proceed regardless. The
+/// refusal is now returned; the writers below return it without writing.
 /// Test: `test_hook_command_uses_absolute_path`.
-pub fn mpm_hook_command(exe_override: Option<&Path>) -> String {
-    match resolve_stable_hook_exe(exe_override) {
-        Some(p) => format!("{} hook", p.display()),
-        None => BARE_HOOK_COMMAND.to_string(),
-    }
+pub fn mpm_hook_command(exe_override: Option<&Path>) -> Result<String, StableHookExeError> {
+    resolve_stable_hook_exe(exe_override).map(|p| format!("{} hook", p.display()))
 }
 
 /// Resolve a STABLE, installed absolute binary path for baking into managed
@@ -79,19 +109,21 @@ pub fn mpm_hook_command(exe_override: Option<&Path>) -> String {
 /// `target/debug/deps/trusty_mpm-<hash>` (or worktree) path when `tm` runs from
 /// a debug build. Persisting that path into the SHARED global `settings.json`
 /// breaks every managed session's hooks once the artifact is rebuilt away. The
-/// hook command must instead point at a stable installed binary (`~/.cargo/bin/tm`)
-/// or degrade to the PATH-resolved bare name — anything but the transient path.
+/// hook command must instead point at a stable installed binary
+/// (`~/.cargo/bin/tm`) — anything but the transient path.
 /// What: prefers `exe_override` (canonicalized), then `current_exe()`
-/// (canonicalized), but only when the result is absolute AND not an ephemeral
-/// build path per [`trusty_common::bin_resolve::is_ephemeral_build_path`]. When
-/// the running binary is ephemeral or unresolved, PATH-resolves the installed
+/// (canonicalized), but only when the result is absolute, is not an ephemeral
+/// build path per [`trusty_common::bin_resolve::is_ephemeral_build_path`], AND
+/// names a binary this crate ships (#7244 — see [`is_mpm_bin_stem_path`]). When
+/// the running binary is refused or unresolved, PATH-resolves the installed
 /// `tm`/`trusty-mpm` binary via [`trusty_common::bin_resolve::resolve_binary`].
-/// Returns `None` only when no stable absolute path can be found (caller then
-/// uses the bare command name).
+/// Returns [`StableHookExeError`] when no stable absolute path can be found;
+/// the caller writes nothing rather than persisting a command it cannot vouch
+/// for (#7244).
 /// Test: covered by `test_hook_command_uses_absolute_path`,
 /// `test_hook_command_rejects_ephemeral_exe_override`,
 /// `test_hook_command_rejects_system_temp_exe_override`.
-fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Option<PathBuf> {
+fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Result<PathBuf, StableHookExeError> {
     let running = exe_override
         .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
         .or_else(|| {
@@ -100,24 +132,111 @@ fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Option<PathBuf> {
                 .and_then(|p| p.canonicalize().ok().or(Some(p)))
         });
 
-    // #4485: `is_ephemeral_build_path` now also rejects anything under a system
-    // temp root, so an agent harness's scratchpad binary
-    // (`/private/tmp/claude-<uid>/…/scratchpad/…`) can no longer be persisted
-    // here as if it were the installed binary. The check stays in the guard —
-    // this site must not grow a second, divergent copy of it.
-    if let Some(p) = running
-        && p.is_absolute()
-        && !trusty_common::bin_resolve::is_ephemeral_build_path(&p)
-    {
-        return Some(p);
+    resolve_stable_hook_exe_with(running, trusty_common::bin_resolve::resolve_binary)
+}
+
+/// Testable core of [`resolve_stable_hook_exe`] with its I/O sources injected.
+///
+/// Why (#7244): the resolution had no seam, so the two ways it can refuse the
+/// running binary — an ephemeral build path, a binary that is not ours — could
+/// not be exercised on a machine that has `tm` installed, because the PATH
+/// fallback always rescued the call. That is the same machine every developer
+/// and CI runner uses, so the refusal was untested where it mattered. Injecting
+/// both sources makes each arm deterministic, mirroring the
+/// `resolve_statusline_binary_with` pattern this crate already uses.
+/// What: accepts `running` (the already-canonicalized `current_exe()` or
+/// override) only when it is absolute, is not an ephemeral build path
+/// ([`trusty_common::bin_resolve::is_ephemeral_build_path`]), AND names one of
+/// [`MPM_BIN_STEMS`]. Otherwise falls back to the first `path_lookup` hit for a
+/// [`MPM_BIN_NAMES`] entry that passes those SAME three gates, and reports why
+/// the running binary was refused when that fallback also fails.
+/// Test: `resolve_stable_hook_exe_with_refuses_a_foreign_binary_stem`,
+/// `resolve_stable_hook_exe_with_refuses_an_ephemeral_exe`,
+/// `resolve_stable_hook_exe_with_refuses_an_ephemeral_path_lookup_hit`,
+/// `resolve_stable_hook_exe_with_falls_back_to_the_installed_binary`.
+fn resolve_stable_hook_exe_with(
+    running: Option<PathBuf>,
+    path_lookup: impl Fn(&str) -> Option<PathBuf>,
+) -> Result<PathBuf, StableHookExeError> {
+    let mut refusal: Option<StableHookExeError> = None;
+    if let Some(p) = running.filter(|p| p.is_absolute()) {
+        // #4485: `is_ephemeral_build_path` also rejects anything under a system
+        // temp root, so an agent harness's scratchpad binary
+        // (`/private/tmp/claude-<uid>/…/scratchpad/…`) can no longer be
+        // persisted here as if it were the installed binary. The check stays in
+        // the guard — this site must not grow a second, divergent copy of it.
+        if trusty_common::bin_resolve::is_ephemeral_build_path(&p) {
+            refusal = Some(StableHookExeError::Ephemeral(p));
+        } else if !is_mpm_bin_stem_path(&p) {
+            // #7244: the path guard alone is one predicate away from a silent
+            // catastrophe — when it misses (a build tree it does not recognise),
+            // the name check still refuses `test_session_lifecycle-<hash>`. Two
+            // independent reasons must both say "this is our installed binary".
+            refusal = Some(StableHookExeError::ForeignBinary(p));
+        } else {
+            return Ok(p);
+        }
     }
 
-    // Ephemeral or unresolved running path: fall back to a PATH-resolved
+    // Refused or unresolved running path: fall back to a PATH-resolved
     // installed binary so the hook command survives worktree/debug rebuilds.
+    // #7244 round 2: `$PATH` is not a trust boundary. A build-tree `tm` ahead
+    // of the installed one — `target/debug/tm`, or one of this repo's
+    // `target-<issue>/debug/tm` — is exactly the path the running-exe branch
+    // above refuses, so the fallback applies the SAME two gates rather than
+    // accepting through the side door what the front door just turned away.
     MPM_BIN_NAMES
         .iter()
-        .find_map(|name| trusty_common::bin_resolve::resolve_binary(name))
-        .filter(|p| p.is_absolute())
+        .find_map(|name| path_lookup(name))
+        .filter(|p| {
+            p.is_absolute()
+                && !trusty_common::bin_resolve::is_ephemeral_build_path(p)
+                && is_mpm_bin_stem_path(p)
+        })
+        .ok_or_else(|| refusal.unwrap_or(StableHookExeError::Unresolved))
+}
+
+/// Whether `path`'s file name names a binary THIS crate ships.
+///
+/// Why (#7244): `resolve_stable_hook_exe` judged the running executable purely
+/// by WHERE it lived. A `cargo test` harness built into a build directory the
+/// path guard did not recognise therefore passed as "the installed tm binary",
+/// and `test_session_lifecycle-<hash>` was written into a real project's
+/// `settings.json` as the command for pm-guard, Read/Bash diversion,
+/// `PostToolUse` and `SessionEnd`. Nothing tm ships is ever named anything but
+/// a [`MPM_BIN_STEMS`] entry, so asking WHAT the binary is costs one string
+/// comparison and stops the entire class — including build layouts nobody has
+/// invented yet.
+/// What: strips a Cargo `-<hexhash>` build-artifact suffix (≥ 8 hex digits,
+/// the same shape [`is_mpm_hash_suffixed_artifact`] recognises) when present,
+/// then requires the remaining stem to be in [`MPM_BIN_STEMS`]. A non-UTF-8
+/// file name, or no file name at all, is not ours.
+/// Test: `resolve_stable_hook_exe_with_refuses_a_foreign_binary_stem`,
+/// `is_mpm_bin_stem_path_accepts_the_shipped_names`.
+fn is_mpm_bin_stem_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|f| f.to_str()) else {
+        return false;
+    };
+    MPM_BIN_STEMS.contains(&hash_stripped_stem(name))
+}
+
+/// Strip a Cargo build-artifact `-<hexhash>` suffix from a binary file name.
+///
+/// Why (#7244): the same `<stem>-<hexhash>` shape is read in two places — the
+/// dedup predicate [`is_mpm_hash_suffixed_artifact`] and the identity check
+/// [`is_mpm_bin_stem_path`]. One implementation means the two cannot disagree
+/// about what the stem of `trusty_mpm-1a2b3c4d` is.
+/// What: returns the text before the final `-` when what follows is at least 8
+/// ASCII hex digits, else `name` unchanged — so `trusty-mpm` (whose suffix
+/// `mpm` is not a hash) keeps its full name.
+/// Test: `is_mpm_bin_stem_path_accepts_the_shipped_names`.
+fn hash_stripped_stem(name: &str) -> &str {
+    match name.rsplit_once('-') {
+        Some((stem, hash)) if hash.len() >= 8 && hash.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            stem
+        }
+        _ => name,
+    }
 }
 
 /// Build the MPM lifecycle hook additions JSON block (six events).
@@ -145,9 +264,13 @@ fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Option<PathBuf> {
 /// via `mpm_hook_command(None)`.
 /// Test: `test_mpm_hook_additions_has_six_events`,
 /// covered by `test_ensure_managed_hooks_writes_triad`.
-pub fn mpm_hook_additions_with_exe(exe_override: Option<&Path>) -> serde_json::Value {
-    let cmd = mpm_hook_command(exe_override);
-    serde_json::json!({
+pub fn mpm_hook_additions_with_exe(
+    exe_override: Option<&Path>,
+) -> Result<serde_json::Value, StableHookExeError> {
+    // #7244: resolved BEFORE any JSON is built, so a refusal reaches the caller
+    // with nothing written and no half-formed block to merge.
+    let cmd = mpm_hook_command(exe_override)?;
+    Ok(serde_json::json!({
         "hooks": {
             "PreToolUse": [{
                 "matcher": "*",
@@ -199,7 +322,7 @@ pub fn mpm_hook_additions_with_exe(exe_override: Option<&Path>) -> serde_json::V
                 }]
             }]
         }
-    })
+    }))
 }
 
 /// Build the MPM lifecycle hook additions JSON block with the default exe resolution.
@@ -208,7 +331,7 @@ pub fn mpm_hook_additions_with_exe(exe_override: Option<&Path>) -> serde_json::V
 /// existing call sites that do not need to pin the exe path stay concise.
 /// What: delegates to [`mpm_hook_additions_with_exe`] with `None`.
 /// Test: covered by `test_mpm_hook_additions_has_six_events`.
-pub fn mpm_hook_additions() -> serde_json::Value {
+pub fn mpm_hook_additions() -> Result<serde_json::Value, StableHookExeError> {
     mpm_hook_additions_with_exe(None)
 }
 
@@ -240,18 +363,34 @@ pub fn mpm_hook_additions() -> serde_json::Value {
 /// unnoticed.
 const MPM_BIN_NAMES: &[&str] = &["trusty-mpm", "tm"];
 
-/// File-name STEMS that identify an mpm-owned binary once any Cargo
-/// build-artifact `-<hash>` suffix is stripped.
+/// File-name STEMS that identify a binary this crate SHIPS TODAY, once any
+/// Cargo build-artifact `-<hash>` suffix is stripped.
 ///
-/// Why (#2235): managed hooks resolved from a debug/worktree build embed a
-/// `target/debug/deps/<stem>-<hash>` path whose file name is NOT one of
-/// [`MPM_BIN_NAMES`] — the Cargo dep artifact uses the underscore crate name
-/// (`trusty_mpm`) or the `[[bin]]` alias (`tm`) with a trailing content hash,
-/// and the long-defunct pre-rename binary was `session_manager_mvp`. All of
-/// these must be recognised as the SAME hook owner so stale entries collapse.
-/// What: the canonical stems (dash + underscore spellings) plus the retired MVP
-/// name. Matched by [`is_mpm_binary_filename`] against the hash-stripped stem.
-const MPM_BIN_STEMS: &[&str] = &["trusty-mpm", "trusty_mpm", "tm", "session_manager_mvp"];
+/// Why (#7244 round 2): this list is the WRITE-side identity check
+/// ([`is_mpm_bin_stem_path`]), the second of two independent reasons a binary
+/// may be persisted as a hook command. `session_manager_mvp` used to be here —
+/// but `crates/trusty-mpm/tests/session_manager_mvp.rs` compiles to
+/// `session_manager_mvp-<hash>` on every `cargo test`, so for that one name the
+/// "two independent checks" collapsed to one: only the path guard stood between
+/// a running test harness and a real project's `settings.json`. Nothing this
+/// crate ships is named that any more, so the write side does not need it.
+/// What: the two `[[bin]]` names plus the underscore crate-name spelling Cargo
+/// uses for dep artifacts. The cleanup side keeps the retired name — see
+/// [`MPM_STALE_BIN_STEMS`].
+const MPM_BIN_STEMS: &[&str] = &["trusty-mpm", "trusty_mpm", "tm"];
+
+/// [`MPM_BIN_STEMS`] plus the retired pre-rename binary name.
+///
+/// Why (#2235): a pre-rename install still carries
+/// `…/deps/session_manager_mvp-<hash> hook` in its `settings.json`, and the
+/// replace-by-identity strip in [`write_project_hooks`] can only collapse an
+/// entry it recognises as the same hook owner. Removing the name from the WRITE
+/// check (#7244 round 2) must not orphan those entries, so the CLEANUP check
+/// keeps it. Recognising a name for removal is the safe direction; recognising
+/// it for persistence is not.
+/// What: the shipped stems plus `session_manager_mvp`. Read only by
+/// [`is_mpm_hash_suffixed_artifact`].
+const MPM_STALE_BIN_STEMS: &[&str] = &["trusty-mpm", "trusty_mpm", "tm", "session_manager_mvp"];
 
 /// Recognise an mpm-owned binary by its EXACT file-name component: a
 /// canonical [`MPM_BIN_NAMES`] entry or the defunct `session_manager_mvp` name.
@@ -289,7 +428,7 @@ fn is_mpm_binary_filename(name: &str) -> bool {
 /// same coincidental-collision risk pre-existing #2940 and is out of this
 /// PR's scope — see `cleanup.rs`'s module doc for the residual risk note).
 /// What: returns `true` when `path`'s file name is `<stem>-<hexhash>` with
-/// `stem ∈ MPM_BIN_STEMS` and an all-hex-digit `<hexhash>` of length ≥ 8, AND
+/// `stem ∈ MPM_STALE_BIN_STEMS` and an all-hex-digit `<hexhash>` of length ≥ 8, AND
 /// `path` has a `deps` component anywhere in it.
 /// Test: `test_is_mpm_hook_command_recognises_stale_hash_and_mvp_variants`,
 /// `test_is_mpm_hook_command_rejects_hash_suffixed_binary_outside_deps_dir`.
@@ -298,13 +437,12 @@ fn is_mpm_hash_suffixed_artifact(path: &Path) -> bool {
         return false;
     };
     // Cargo build-artifact form: `<stem>-<hexhash>` (e.g. `trusty_mpm-1a2b3c4d`).
-    let Some((stem, hash)) = name.rsplit_once('-') else {
-        return false;
-    };
-    if hash.len() < 8
-        || !hash.bytes().all(|b| b.is_ascii_hexdigit())
-        || !MPM_BIN_STEMS.contains(&stem)
-    {
+    // #7244: one implementation of "what is the stem of `trusty_mpm-1a2b3c4d`",
+    // shared with `is_mpm_bin_stem_path`. An unchanged return means the name
+    // carried no hash suffix, which is the exact-name branch's business
+    // ([`is_mpm_binary_filename`]), not this one's.
+    let stem = hash_stripped_stem(name);
+    if stem == name || !MPM_STALE_BIN_STEMS.contains(&stem) {
         return false;
     }
     path.components().any(|c| c.as_os_str() == "deps")
@@ -631,13 +769,53 @@ pub(crate) fn strip_hook_entries_matching_for_events(
 /// changed. Returns `true` when the file was updated. `exe_override` is
 /// forwarded to [`mpm_hook_additions_with_exe`] so the caller can pin the
 /// binary path at install time.
+///
+/// #7244: the hook command is resolved FIRST. When no stable installed binary
+/// can be found the error is returned and the file is not read, created, or
+/// written — a `settings.json` with no tm hooks is recoverable, one wired to a
+/// `cargo test` harness silently disables pm-guard enforcement.
+///
+/// #7244 (round 3): a rewrite that actually changes the file first copies it to
+/// `<path>.<YYYYMMDDTHHMMSSZ>.bak` via
+/// [`backup::snapshot_then_prune`], keeping the newest
+/// [`backup::HOOK_SETTINGS_SNAPSHOTS_KEPT`]. A snapshot failure aborts the
+/// rewrite. The two earlier exits stay ahead of it, so a refused write and a
+/// no-op rewrite both take no snapshot.
 /// Test: `test_write_project_hooks_targets_project_dir`,
-/// `test_write_project_hooks_replaces_stale_exe_path_group`.
+/// `test_write_project_hooks_replaces_stale_exe_path_group`,
+/// `write_project_hooks_writes_nothing_when_the_exe_cannot_be_resolved`,
+/// `write_project_hooks_snapshots_the_file_it_replaces`,
+/// `write_project_hooks_takes_no_snapshot_when_the_exe_is_refused`,
+/// `write_project_hooks_takes_no_snapshot_when_nothing_changes`,
+/// `write_project_hooks_aborts_the_rewrite_when_the_snapshot_fails`.
 pub fn write_project_hooks(
     settings_path: &Path,
     exe_override: Option<&Path>,
 ) -> anyhow::Result<bool> {
+    write_project_hooks_with(settings_path, mpm_hook_additions_with_exe(exe_override))
+}
+
+/// [`write_project_hooks`] with the resolved additions supplied by the caller.
+///
+/// Why (#7244): the Fail-Open Check this fix owes — "a refusal writes nothing"
+/// — cannot be exercised through [`write_project_hooks`] on a machine that has
+/// `tm` installed, because the PATH fallback always resolves. Taking the
+/// already-computed `Result` lets a test hand in the refusal directly and
+/// assert the file is untouched, while production still routes through the one
+/// resolution above.
+/// What: returns `additions`'s error unchanged before touching the filesystem;
+/// otherwise performs the read / strip / merge / snapshot / atomic-write
+/// exactly as [`write_project_hooks`] documents.
+/// Test: `write_project_hooks_writes_nothing_when_the_exe_cannot_be_resolved`,
+/// `write_project_hooks_takes_no_snapshot_when_the_exe_is_refused`.
+fn write_project_hooks_with(
+    settings_path: &Path,
+    additions: Result<serde_json::Value, StableHookExeError>,
+) -> anyhow::Result<bool> {
     use trusty_common::claude_config::{merge_hook_entries, write_json_atomic};
+
+    // Before the read: a refusal must leave a missing file missing.
+    let additions = additions?;
 
     let original: serde_json::Value = match std::fs::read_to_string(settings_path) {
         Ok(s) if s.trim().is_empty() => serde_json::Value::Object(serde_json::Map::new()),
@@ -653,8 +831,6 @@ pub fn write_project_hooks(
                 .map_err(|e| anyhow::anyhow!("read {}: {e}", settings_path.display()));
         }
     };
-
-    let additions = mpm_hook_additions_with_exe(exe_override);
 
     // Replace-by-identity: drop any stale MPM-owned group for each event we
     // are about to add, so the merge below can never leave two MPM groups
@@ -674,6 +850,20 @@ pub fn write_project_hooks(
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
+    // #7244: snapshot BEFORE the rename that replaces the file, and fail
+    // closed. The equality check above already returned for a no-op rewrite,
+    // and the refusal at the top returned before any of this, so every
+    // snapshot taken here corresponds to a real change of content.
+    backup::snapshot_then_prune(settings_path, backup::HOOK_SETTINGS_SNAPSHOTS_KEPT).map_err(
+        |e| {
+            anyhow::anyhow!(
+                "snapshot {} before rewriting it: {e}",
+                settings_path.display()
+            )
+        },
+    )?;
+
     write_json_atomic(settings_path, &merged)
         .map_err(|e| anyhow::anyhow!("write {}: {e}", settings_path.display()))?;
     Ok(true)
@@ -694,8 +884,26 @@ pub fn write_project_hooks(
 /// absolute binary path rather than a bare name.
 /// Test: `test_ensure_managed_hooks_writes_triad`, `test_ensure_managed_hooks_is_idempotent`.
 pub fn ensure_managed_hooks(claude_config_dir: &Path) -> anyhow::Result<()> {
+    ensure_managed_hooks_with_exe(claude_config_dir, None)
+}
+
+/// [`ensure_managed_hooks`] with the hook binary pinned by the caller.
+///
+/// Why (#7244): [`ensure_managed_hooks`] resolves the running binary, which
+/// under `cargo test` is a build artifact the resolver now refuses — so its
+/// tests would assert against a refusal on any host without `tm` installed
+/// (every CI runner). Pinning the path keeps them testing the MERGE, which is
+/// what they are about.
+/// What: joins `settings.json` under `claude_config_dir` and forwards both
+/// arguments to [`write_project_hooks`].
+/// Test: `test_ensure_managed_hooks_writes_triad`,
+/// `test_ensure_managed_hooks_is_idempotent`.
+pub fn ensure_managed_hooks_with_exe(
+    claude_config_dir: &Path,
+    exe_override: Option<&Path>,
+) -> anyhow::Result<()> {
     let settings_path = claude_config_dir.join("settings.json");
-    write_project_hooks(&settings_path, None).map(|_| ())
+    write_project_hooks(&settings_path, exe_override).map(|_| ())
 }
 
 /// Resolve the resolved-exe path from `current_exe()` for use at install time.
@@ -706,9 +914,12 @@ pub fn ensure_managed_hooks(claude_config_dir: &Path) -> anyhow::Result<()> {
 /// build/worktree path (#2229) that would 404 after a rebuild — falling back to
 /// the PATH-resolved installed binary instead.
 /// What: delegates to [`resolve_stable_hook_exe`] with no override, returning a
-/// stable installed absolute path, or `None` when none can be found.
+/// stable installed absolute path, or `None` when none can be found. The
+/// callers pass the result straight back in as an `exe_override`, so they need
+/// the path or nothing — [`write_project_hooks`] raises the same refusal with
+/// its reason a moment later (#7244).
 /// Test: covered indirectly by `test_hook_command_uses_absolute_path`,
 /// `test_hook_command_rejects_ephemeral_exe_override`.
 pub fn resolve_current_exe() -> Option<PathBuf> {
-    resolve_stable_hook_exe(None)
+    resolve_stable_hook_exe(None).ok()
 }

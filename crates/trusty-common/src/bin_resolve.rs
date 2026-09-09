@@ -299,6 +299,130 @@ pub fn is_under_system_temp(path: &Path) -> bool {
         .is_ok_and(|real| real.parent().is_some() && path.starts_with(real))
 }
 
+/// The environment variable Cargo reads to relocate its build directory.
+///
+/// Why (#7244): [`EPHEMERAL_PATH_SEGMENTS`] hardcodes the DEFAULT build
+/// directory's name. A build run with `CARGO_TARGET_DIR` set puts artifacts
+/// somewhere that name never appears, so the substring list alone cannot see
+/// them. Reading the variable lets the guard reject the build tree the ASKING
+/// process is itself building into, whatever it is called.
+/// What: the variable name only; [`is_under_cargo_target_dir`] does the read.
+const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
+
+/// The two Cargo build profiles that name a build root's immediate child.
+///
+/// Why (#7244): the build root is what varies (`target`, `target-7224`, any
+/// `CARGO_TARGET_DIR`); the profile directory under it does not. Requiring it
+/// is what separates a real build tree from a directory that merely shares a
+/// name — see [`is_in_cargo_build_tree`].
+/// What: the profile directory names Cargo creates under a build root.
+const BUILD_TREE_PROFILES: &[&str] = &["debug", "release"];
+
+/// Path COMPONENTS Cargo creates INSIDE a build profile directory.
+///
+/// Why (#7244): these two names are common enough as ordinary directories
+/// (`/Users/x/build/tools`, `/Users/x/deps/vendor`) that matching them on their
+/// own misclassifies an installed binary as ephemeral, which stops hooks being
+/// written at all — the same end-state as #7244, reached from the other
+/// direction. They only mean "Cargo artifact" in the position Cargo puts them.
+/// What: matched only in the [`is_in_cargo_build_tree`] positions, never alone.
+const BUILD_TREE_ARTIFACT_DIRS: &[&str] = &["deps", "build"];
+
+/// Whether `path` runs through a Cargo build-tree directory.
+///
+/// Why (#7244): this repo gives every agent worktree its own build directory
+/// named `target-<issue>` (`target-7224`, `target-7244`). Neither
+/// `"target/debug"` nor `"target/release"` is a substring of
+/// `…/target-7224/debug/deps/test_session_lifecycle-<hash>`, so
+/// [`is_ephemeral_build_path`] read that running TEST BINARY as a stable
+/// installed path and `resolve_stable_hook_exe` baked it into the project's
+/// real `settings.json` for every hook — pm-guard enforcement and Read/Bash
+/// diversion were silently dead until the file was regenerated. Matching the
+/// STRUCTURE Cargo produces closes the whole family rather than one more
+/// literal spelling. Round 2 narrows that structure: flagging a bare `target`,
+/// `deps` or `build` component wherever it appeared also rejected
+/// `/Users/target/.cargo/bin/tm` and `/Users/x/build/tools/tm`, and a refused
+/// path writes no hooks at all.
+/// What: `true` when the path carries the Cargo LAYOUT
+/// `<root>/{debug,release}[/{deps,build}]`, matched COMPONENT-wise (never as
+/// substrings) in three positions: a `target` / `target-<anything>` component
+/// immediately followed by a [`BUILD_TREE_PROFILES`] entry; a
+/// [`BUILD_TREE_ARTIFACT_DIRS`] component whose parent is a profile (which
+/// covers a `CARGO_TARGET_DIR` with no `target` in its name); or a
+/// [`BUILD_TREE_ARTIFACT_DIRS`] component under a `target` / `target-*`
+/// ancestor. A non-UTF-8 component matches nothing and does not collapse the
+/// adjacency around it; the substring pass in [`is_ephemeral_build_path`] still
+/// covers the default layout in that case.
+/// Test: `is_ephemeral_build_path_flags_custom_cargo_target_dirs`,
+/// `is_ephemeral_build_path_accepts_installed_paths`.
+fn is_in_cargo_build_tree(path: &Path) -> bool {
+    // Positions are preserved (a non-UTF-8 component stays as `None`) so a
+    // component the guard cannot read never makes two others adjacent.
+    let names: Vec<Option<&str>> = path.components().map(|c| c.as_os_str().to_str()).collect();
+    let is_build_root =
+        |n: Option<&str>| n.is_some_and(|s| s == "target" || s.starts_with("target-"));
+    let is_profile = |n: Option<&str>| n.is_some_and(|s| BUILD_TREE_PROFILES.contains(&s));
+
+    let mut under_build_root = false;
+    for (i, name) in names.iter().copied().enumerate() {
+        if is_build_root(name) {
+            if is_profile(names.get(i + 1).copied().flatten()) {
+                return true;
+            }
+            under_build_root = true;
+        } else if name.is_some_and(|s| BUILD_TREE_ARTIFACT_DIRS.contains(&s))
+            && (under_build_root || (i > 0 && is_profile(names[i - 1])))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `path` lives under the build directory `CARGO_TARGET_DIR` names.
+///
+/// Why (#7244): a `CARGO_TARGET_DIR` may be named anything at all — outside
+/// the repo, with no `target` in its name — and [`is_in_cargo_build_tree`]
+/// cannot see such a directory. When the process asking the question is itself
+/// a Cargo-spawned test binary, the variable is set and names exactly the tree
+/// that binary was built into, so this catches the case the structural check
+/// cannot.
+/// What: `true` when `path` has the variable's value as a component-wise
+/// prefix, comparing both the literal value and its canonicalized form (a
+/// relative or symlinked spelling of the same directory must not read as a
+/// different one). The PATH is canonicalized too, but only opportunistically:
+/// a build artifact is routinely already deleted, and
+/// [`Path::canonicalize`] fails on exactly the paths this guard most needs to
+/// reject. An unset, empty, or parent-less (`/`) value matches nothing rather
+/// than flagging every absolute path.
+/// Test: `is_ephemeral_build_path_flags_custom_cargo_target_dirs`.
+fn is_under_cargo_target_dir(path: &Path) -> bool {
+    let Some(raw) = std::env::var_os(CARGO_TARGET_DIR_ENV) else {
+        return false;
+    };
+    if raw.is_empty() {
+        return false;
+    }
+    let dir = PathBuf::from(raw);
+    // `CARGO_TARGET_DIR=/` would otherwise make every absolute path ephemeral.
+    if dir.parent().is_none() {
+        return false;
+    }
+    if path.starts_with(&dir) {
+        return true;
+    }
+    let Ok(real_dir) = dir.canonicalize() else {
+        return false;
+    };
+    if real_dir.parent().is_none() {
+        return false;
+    }
+    path.starts_with(&real_dir)
+        || path
+            .canonicalize()
+            .is_ok_and(|real_path| real_path.starts_with(&real_dir))
+}
+
 /// Whether `path` points inside an ephemeral build/worktree/temp location that
 /// will not survive a rebuild, a worktree cleanup, or a temp sweep.
 ///
@@ -319,6 +443,7 @@ pub fn is_under_system_temp(path: &Path) -> bool {
 /// encoding.
 /// Test: `is_ephemeral_build_path_flags_build_and_worktree_paths`,
 /// `is_ephemeral_build_path_flags_system_temp_paths`,
+/// `is_ephemeral_build_path_flags_custom_cargo_target_dirs`,
 /// `is_ephemeral_build_path_ignores_temp_lookalike_paths`,
 /// `is_ephemeral_build_path_accepts_installed_paths`.
 pub fn is_ephemeral_build_path(path: &Path) -> bool {
@@ -326,6 +451,11 @@ pub fn is_ephemeral_build_path(path: &Path) -> bool {
     // and, unlike a build dir, an attacker-or-accident-writable location whose
     // contents a persisted hook command would go on executing.
     if is_under_system_temp(path) {
+        return true;
+    }
+    // #7244: a renamed build directory (`target-7224/debug/deps/…`) is the same
+    // artifact as `target/debug/deps/…`; the substring pass below cannot see it.
+    if is_in_cargo_build_tree(path) || is_under_cargo_target_dir(path) {
         return true;
     }
     let s = path.to_string_lossy();
@@ -541,6 +671,93 @@ mod tests {
             is_ephemeral_build_path(worktree),
             "sanity: the same path IS an ephemeral BINARY location, which is \
              exactly why the turn recorder must not use that predicate"
+        );
+    }
+
+    /// Why (#7244): `EPHEMERAL_PATH_SEGMENTS` matched the literal substrings
+    /// `"target/debug"` and `"target/release"`. This repo builds each agent
+    /// worktree into its own `target-<issue>` directory, whose artifact paths
+    /// contain neither literal, so a running TEST BINARY at
+    /// `…/target-7224/debug/deps/test_session_lifecycle-<hash>` was accepted as
+    /// a stable installed path and `resolve_stable_hook_exe` wrote it into the
+    /// project's real `.claude/settings.json` for every hook — pm-guard
+    /// enforcement and Read/Bash diversion were dead until the file was
+    /// regenerated. Same defect class as #4485 and #2229, third root cause.
+    /// What: one table over the ephemeral shapes and the stable ones, asserted
+    /// together so a revert reports EVERY case it stops rejecting rather than
+    /// aborting on the first. The stable rows are what stop the fix from being
+    /// "flag everything": an installed binary under `~/.cargo/bin` or Homebrew
+    /// must still resolve, including when a symlink in the chain (a linked
+    /// home, a linked `.cargo`) means the path is not the on-disk spelling.
+    /// The guard reads COMPONENTS and never canonicalizes the candidate, so a
+    /// symlinked prefix cannot flip the verdict — that is the property the
+    /// symlinked rows pin. Round 2 adds the POSITION rows: a `target`, `build`
+    /// or `deps` component only means "Cargo artifact" where Cargo puts it, so
+    /// a user directory of that name stays accepted. `CARGO_TARGET_DIR` is exercised through the ambient
+    /// process environment rather than a `set_var`: the test binary is itself
+    /// built by Cargo, so the variable is already set to whatever build tree
+    /// produced it, and mutating a process-global would race sibling tests.
+    #[test]
+    fn is_ephemeral_build_path_flags_custom_cargo_target_dirs() {
+        let ephemeral = [
+            "/Users/x/trusty-tools/target-7224/debug/deps/test_session_lifecycle-cd3ba8f0",
+            "/Users/x/trusty-tools/target-7244/debug/tm",
+            "/Users/x/trusty-tools/target/release/tm",
+            "/Users/x/trusty-tools/target/debug/build/libsqlite3-sys-abc/build-script-build",
+            // A `CARGO_TARGET_DIR` with no `target` in its name still produces
+            // the `<profile>/deps` tail, which is what the guard reads.
+            "/Users/x/scratch/debug/deps/trusty_mpm-1a2b3c4d",
+        ];
+        let stable = [
+            "/Users/x/.cargo/bin/tm",
+            "/opt/homebrew/bin/tm",
+            // A symlinked home and a symlinked `.cargo` both produce a path
+            // whose components are ordinary directory names; neither is a build
+            // tree, and the guard must not follow the link to decide otherwise.
+            "/Users/x/homelink/.cargo/bin/trusty-mpm",
+            "/Users/x/.cargo-link/bin/tm",
+            "/opt/deps-tool/bin/tm",
+            "/Users/x/rebuild/bin/tm",
+            // #7244 round 2: these four are the false-positive class a bare
+            // component match introduced. A user directory named `target`,
+            // `build` or `deps` is not a Cargo build tree, and refusing one
+            // stops hooks being written at all — the same end-state as the bug
+            // this guard exists to fix, reached from the other direction.
+            "/Users/target/.cargo/bin/tm",
+            "/Users/x/build/tools/tm",
+            "/Users/x/deps/vendor/tm",
+            "/Users/x/scratch/deps/trusty_mpm-1a2b3c4d",
+        ];
+
+        let missed: Vec<&str> = ephemeral
+            .into_iter()
+            .filter(|p| !is_ephemeral_build_path(Path::new(p)))
+            .collect();
+        let overreach: Vec<&str> = stable
+            .into_iter()
+            .filter(|p| is_ephemeral_build_path(Path::new(p)))
+            .collect();
+
+        assert!(
+            missed.is_empty(),
+            "a renamed Cargo build tree is still a build tree (#7244), but these \
+             were accepted as stable installed paths: {missed:#?}"
+        );
+        assert!(
+            overreach.is_empty(),
+            "an installed binary must stay resolvable, but these were flagged \
+             ephemeral: {overreach:#?}"
+        );
+
+        // The running test binary IS a Cargo build artifact, under whatever
+        // `CARGO_TARGET_DIR` this run used. If the guard cannot see that, the
+        // exact #7244 write happens again.
+        let exe = std::env::current_exe().expect("current_exe resolvable under cargo test");
+        assert!(
+            is_ephemeral_build_path(&exe),
+            "the running test binary {} is a build artifact and must never read \
+             as a stable installed path (#7244)",
+            exe.display()
         );
     }
 

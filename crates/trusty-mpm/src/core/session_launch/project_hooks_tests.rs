@@ -18,7 +18,12 @@ use tempfile::TempDir;
 
 #[test]
 fn project_managed_hook_additions_combines_all_three_sources() {
-    let additions = project_managed_hook_additions(true, false);
+    let additions = project_managed_hook_additions(
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("a stable hook exe resolves in the test environment");
     let hooks = additions["hooks"]
         .as_object()
         .expect("hooks must be an object");
@@ -71,8 +76,18 @@ fn project_managed_hook_additions_combines_all_three_sources() {
 fn project_managed_hook_additions_is_stable_across_calls() {
     // Why: two independent calls must produce byte-identical output so the
     // caller's merge is idempotent across repeated `write_project_hooks` runs.
-    let first = project_managed_hook_additions(true, false);
-    let second = project_managed_hook_additions(true, false);
+    let first = project_managed_hook_additions(
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("a stable hook exe resolves in the test environment");
+    let second = project_managed_hook_additions(
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("a stable hook exe resolves in the test environment");
     assert_eq!(first, second);
 }
 
@@ -85,8 +100,18 @@ fn project_managed_hook_additions_is_stable_across_calls() {
 /// events are byte-identical to the enabled build.
 #[test]
 fn project_managed_hook_additions_omits_prompt_context_when_disabled() {
-    let enabled = project_managed_hook_additions(true, false);
-    let disabled = project_managed_hook_additions(false, false);
+    let enabled = project_managed_hook_additions(
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("a stable hook exe resolves in the test environment");
+    let disabled = project_managed_hook_additions(
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        false,
+        false,
+    )
+    .expect("a stable hook exe resolves in the test environment");
 
     let off = disabled["hooks"].as_object().expect("hooks is an object");
     assert!(
@@ -125,7 +150,12 @@ fn project_managed_hook_additions_omits_prompt_context_when_disabled() {
 fn project_managed_hook_events_is_a_superset_of_every_variant() {
     let owned = project_managed_hook_events();
     for enabled in [true, false] {
-        for key in project_managed_hook_additions(enabled, false)["hooks"]
+        for key in project_managed_hook_additions(
+            Some(std::path::Path::new("/usr/local/bin/tm")),
+            enabled,
+            false,
+        )
+        .expect("a stable hook exe resolves in the test environment")["hooks"]
             .as_object()
             .unwrap()
             .keys()
@@ -176,7 +206,13 @@ fn write_project_hooks_writes_lifecycle_triad() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path();
 
-    super::super::settings::write_project_hooks(project, true, false).expect("write succeeds");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -231,7 +267,13 @@ fn write_project_hooks_preserves_foreign_hooks() {
     )
     .unwrap();
 
-    super::super::settings::write_project_hooks(project, true, false).expect("write succeeds");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("write succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
@@ -253,8 +295,13 @@ fn write_project_hooks_preserves_foreign_hooks() {
     );
 
     // Re-running must not duplicate the foreign entry or our own groups.
-    super::super::settings::write_project_hooks(project, true, false)
-        .expect("second write succeeds");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("second write succeeds");
     let value2: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
             .unwrap();
@@ -289,8 +336,13 @@ fn write_project_hooks_writes_via_atomic_path() {
     let bak_path = claude_dir.join("settings.json.bak");
     let tmp_path = claude_dir.join("settings.json.tmp");
 
-    super::super::settings::write_project_hooks(project, true, false)
-        .expect("first write succeeds");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("first write succeeds");
     assert!(settings_path.exists(), "settings.json must be created");
     assert!(
         !bak_path.exists(),
@@ -302,8 +354,17 @@ fn write_project_hooks_writes_via_atomic_path() {
     );
     let first_content = std::fs::read_to_string(&settings_path).unwrap();
 
-    super::super::settings::write_project_hooks(project, true, false)
-        .expect("second write succeeds");
+    // #7244 (round 3): the second call flips `divert_enabled` so the merged
+    // value actually DIFFERS. Repeating the first call's arguments now takes
+    // the no-op exit, which writes nothing — and a test asserting the atomic
+    // path ran would then be asserting against a call that never reached it.
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        true,
+    )
+    .expect("second write succeeds");
     assert!(
         bak_path.exists(),
         "write_json_atomic must back up the prior file before replacing it"
@@ -336,7 +397,13 @@ fn write_project_hooks_omits_prompt_context_when_disabled() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path();
 
-    super::super::settings::write_project_hooks(project, false, false).expect("write succeeds");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        false,
+        false,
+    )
+    .expect("write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -411,8 +478,13 @@ fn write_project_hooks_strips_stale_prompt_context_when_disabled() {
     let project = tmp.path();
     let settings_path = project.join(".claude").join("settings.json");
 
-    super::super::settings::write_project_hooks(project, true, false)
-        .expect("enabled write succeeds");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("enabled write succeeds");
     let seeded: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
     assert_eq!(
@@ -436,8 +508,13 @@ fn write_project_hooks_strips_stale_prompt_context_when_disabled() {
     )
     .unwrap();
 
-    super::super::settings::write_project_hooks(project, false, false)
-        .expect("disabled write succeeds");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        false,
+        false,
+    )
+    .expect("disabled write succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -470,10 +547,28 @@ fn write_project_hooks_re_enabling_restores_the_hook() {
     let project = tmp.path();
     let settings_path = project.join(".claude").join("settings.json");
 
-    super::super::settings::write_project_hooks(project, true, false).expect("write 1");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("write 1");
     let first = std::fs::read_to_string(&settings_path).unwrap();
-    super::super::settings::write_project_hooks(project, false, false).expect("write 2");
-    super::super::settings::write_project_hooks(project, true, false).expect("write 3");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        false,
+        false,
+    )
+    .expect("write 2");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("write 3");
     let third = std::fs::read_to_string(&settings_path).unwrap();
 
     assert_eq!(
@@ -502,7 +597,12 @@ fn write_project_hooks_enabled_output_is_unchanged_by_the_toggle() {
     // The pre-#5034 strip domain was the additions' own key set. With the hook
     // enabled the two derivations must be identical, which is what makes the
     // default path byte-identical to before.
-    let mut from_additions: Vec<String> = project_managed_hook_additions(true, false)["hooks"]
+    let mut from_additions: Vec<String> = project_managed_hook_additions(
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("a stable hook exe resolves in the test environment")["hooks"]
         .as_object()
         .unwrap()
         .keys()
@@ -521,9 +621,21 @@ fn write_project_hooks_enabled_output_is_unchanged_by_the_toggle() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path();
     let settings_path = project.join(".claude").join("settings.json");
-    super::super::settings::write_project_hooks(project, true, false).expect("write 1");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("write 1");
     let first = std::fs::read_to_string(&settings_path).unwrap();
-    super::super::settings::write_project_hooks(project, true, false).expect("write 2");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("write 2");
     assert_eq!(
         std::fs::read_to_string(&settings_path).unwrap(),
         first,
@@ -541,8 +653,15 @@ fn write_project_hooks_enabled_output_is_unchanged_by_the_toggle() {
 /// between the two builds.
 #[test]
 fn project_managed_hook_additions_includes_divert_when_enabled() {
-    let off = project_managed_hook_additions(true, false);
-    let on = project_managed_hook_additions(true, true);
+    let off = project_managed_hook_additions(
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("a stable hook exe resolves in the test environment");
+    let on =
+        project_managed_hook_additions(Some(std::path::Path::new("/usr/local/bin/tm")), true, true)
+            .expect("a stable hook exe resolves in the test environment");
 
     let off_pre = off["hooks"]["PreToolUse"].as_array().expect("array");
     let on_pre = on["hooks"]["PreToolUse"].as_array().expect("array");
@@ -598,7 +717,12 @@ fn project_managed_hook_additions_includes_divert_when_enabled() {
 /// `--divert-check`.
 #[test]
 fn project_managed_hook_additions_omits_divert_when_disabled() {
-    let off = project_managed_hook_additions(true, false);
+    let off = project_managed_hook_additions(
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("a stable hook exe resolves in the test environment");
     let text = off.to_string();
     assert!(
         !text.contains("--divert-check"),
@@ -638,10 +762,28 @@ fn write_project_hooks_writes_divert_groups_when_enabled() {
     let project = tmp.path();
     let settings_path = project.join(".claude").join("settings.json");
 
-    super::super::settings::write_project_hooks(project, true, true).expect("write 1");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        true,
+    )
+    .expect("write 1");
     let first = std::fs::read_to_string(&settings_path).unwrap();
-    super::super::settings::write_project_hooks(project, true, true).expect("write 2");
-    super::super::settings::write_project_hooks(project, true, true).expect("write 3");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        true,
+    )
+    .expect("write 2");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        true,
+    )
+    .expect("write 3");
     assert_eq!(
         std::fs::read_to_string(&settings_path).unwrap(),
         first,
@@ -678,7 +820,13 @@ fn write_project_hooks_strips_stale_divert_when_disabled() {
     let project = tmp.path();
     let settings_path = project.join(".claude").join("settings.json");
 
-    super::super::settings::write_project_hooks(project, true, true).expect("enabled write");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        true,
+    )
+    .expect("enabled write");
     assert!(
         std::fs::read_to_string(&settings_path)
             .unwrap()
@@ -686,7 +834,13 @@ fn write_project_hooks_strips_stale_divert_when_disabled() {
         "precondition: the enabled write must land the groups"
     );
 
-    super::super::settings::write_project_hooks(project, true, false).expect("disabled write");
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("disabled write");
     let after = std::fs::read_to_string(&settings_path).unwrap();
     assert!(
         !after.contains("--divert-check"),
@@ -700,5 +854,225 @@ fn write_project_hooks_strips_stale_divert_when_disabled() {
         pre.len(),
         2,
         "PM guard + lifecycle triad must remain: {pre:?}"
+    );
+}
+
+/// The pinned installed-looking binary every test in this module writes with.
+const TEST_EXE: &str = "/usr/local/bin/tm";
+
+/// Every timestamped snapshot of `settings.json` in `dir`, name-sorted.
+///
+/// Shares the prune's own inclusion rule rather than re-deriving it, so a
+/// count here can never include a file the prune would not have touched — the
+/// atomic writer's single-slot `settings.json.bak` in particular.
+fn snapshot_names(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("readable dir")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| crate::core::standalone::hooks::backup::is_snapshot_of("settings.json", n))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Call the project-tier writer with the pinned test binary.
+fn write(project: &std::path::Path, prompt_context: bool, divert: bool) {
+    super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new(TEST_EXE)),
+        prompt_context,
+        divert,
+    )
+    .expect("write succeeds");
+}
+
+/// Why (#7244, round 3): this is the writer that damaged a real project's
+/// `.claude/settings.json`. Its prior state has to survive the rewrite that
+/// replaces it, and the atomic writer's one `.bak` slot cannot carry that —
+/// the next launch overwrites it.
+/// What: creates the file, rewrites it with a different toggle, and asserts one
+/// snapshot exists holding the pre-rewrite bytes.
+#[test]
+fn write_project_hooks_snapshots_the_file_it_replaces() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+    let settings_path = claude_dir.join("settings.json");
+
+    write(project, true, false);
+    let before = std::fs::read_to_string(&settings_path).unwrap();
+    assert!(
+        snapshot_names(&claude_dir).is_empty(),
+        "nothing existed before the first write, so nothing was snapshotted"
+    );
+
+    write(project, true, true);
+
+    let snapshots = snapshot_names(&claude_dir);
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "expected one snapshot, got {snapshots:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(claude_dir.join(&snapshots[0])).unwrap(),
+        before,
+        "the snapshot must hold the file as it was before the rewrite"
+    );
+}
+
+/// Why (#7244): every managed launch that changes the file adds a snapshot, so
+/// an unbounded set would turn a long-lived project's `.claude/` into an
+/// archive. Three is the kept depth.
+/// What: four rewrites that each change the file, then asserts exactly three
+/// snapshots survive and the FIRST one taken is the one gone — pruning the
+/// newest would bound the set while discarding the copy an operator wants.
+#[test]
+fn write_project_hooks_prunes_snapshots_to_three() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+
+    // Creates the file; no snapshot (nothing existed).
+    write(project, true, false);
+    // Four rewrites, each differing from the one before it.
+    write(project, true, true);
+    let oldest = snapshot_names(&claude_dir);
+    assert_eq!(oldest.len(), 1, "the first rewrite snapshots once");
+    write(project, false, true);
+    write(project, false, false);
+    write(project, true, false);
+
+    let snapshots = snapshot_names(&claude_dir);
+    assert_eq!(
+        snapshots.len(),
+        3,
+        "four rewrites must leave exactly three snapshots, got {snapshots:?}"
+    );
+    assert!(
+        !snapshots.contains(&oldest[0]),
+        "the oldest snapshot must be the one pruned, still present in {snapshots:?}"
+    );
+}
+
+/// Why (#7244): `prepare_session` calls this on EVERY managed launch, and
+/// almost every call reproduces the bytes already on disk. Snapshotting those
+/// would fill all three kept slots with copies of the current file within
+/// three launches, evicting the one prior state worth keeping.
+/// What: writes twice with identical arguments and asserts no snapshot, no
+/// change to the file, and — the assertion that separates "returned early" from
+/// "rewrote the same bytes" — no `settings.json.bak`, which
+/// `write_json_atomic` creates on any call that reaches it.
+#[test]
+fn write_project_hooks_takes_no_snapshot_when_nothing_changes() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+    let settings_path = claude_dir.join("settings.json");
+
+    write(project, true, false);
+    let before = std::fs::read_to_string(&settings_path).unwrap();
+
+    write(project, true, false);
+
+    assert!(
+        !claude_dir.join("settings.json.bak").exists(),
+        "an identical rewrite must return before the atomic write, which would \
+         have left its own backup"
+    );
+    assert!(
+        snapshot_names(&claude_dir).is_empty(),
+        "an identical rewrite must take no snapshot"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings_path).unwrap(),
+        before,
+        "an identical rewrite must leave the file alone"
+    );
+}
+
+/// Why (#7244): a refusal writes nothing, so there is no prior state at risk.
+/// Snapshotting anyway would let a machine that cannot resolve `tm` evict a
+/// real prior state, three launches at a time, while changing nothing.
+/// What: seeds a settings file, hands the writer a refusal through the
+/// resolution seam (a host with `tm` installed would otherwise have the PATH
+/// fallback rescue any refused `exe_override`), and asserts the refusal
+/// surfaced, no snapshot appeared, and the file is unchanged.
+#[test]
+fn write_project_hooks_takes_no_snapshot_when_the_exe_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+
+    write(project, true, false);
+    let before = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
+
+    let refusal = Err(
+        crate::core::standalone::hooks::StableHookExeError::Ephemeral(std::path::PathBuf::from(
+            "/x/target-7244/debug/deps/some_test-cd3ba8f0",
+        )),
+    );
+    super::super::settings::write_project_hooks_with(project, refusal)
+        .expect_err("a refusal must reach the caller, not be written");
+
+    assert!(
+        snapshot_names(&claude_dir).is_empty(),
+        "a refused write must take no snapshot"
+    );
+    assert_eq!(
+        std::fs::read_to_string(claude_dir.join("settings.json")).unwrap(),
+        before,
+        "a refused write must leave the file alone"
+    );
+}
+
+/// Why (#7244, fail-closed): a rewrite whose prior state cannot be preserved
+/// must not run. Writing anyway and warning about the snapshot repeats the
+/// original defect — a writer proceeding past a step it could not complete.
+/// What: makes `.claude/` unwritable so the snapshot's exclusive create fails,
+/// then asserts `PrepError::HookSnapshot` came back naming the file, and the
+/// file is byte-identical. Unix-only: the read-only directory bit is the
+/// portable way to deny file creation.
+#[cfg(unix)]
+#[test]
+fn write_project_hooks_aborts_when_the_snapshot_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+    let settings_path = claude_dir.join("settings.json");
+
+    write(project, true, false);
+    let before = std::fs::read_to_string(&settings_path).unwrap();
+
+    std::fs::set_permissions(&claude_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result = super::super::settings::write_project_hooks(
+        project,
+        Some(std::path::Path::new(TEST_EXE)),
+        true,
+        true,
+    );
+    // Restore before asserting, so a failed assertion still leaves a removable
+    // temp dir behind.
+    std::fs::set_permissions(&claude_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let err = result.expect_err("an unsnapshottable rewrite must fail");
+    assert!(
+        matches!(
+            err,
+            crate::core::session_launch::PrepError::HookSnapshot { .. }
+        ),
+        "expected HookSnapshot, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("settings.json"),
+        "the error must name the file whose rewrite was abandoned, got: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings_path).unwrap(),
+        before,
+        "the settings file must be untouched when its snapshot could not be taken"
     );
 }

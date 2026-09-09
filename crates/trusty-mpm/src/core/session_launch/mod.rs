@@ -292,6 +292,37 @@ pub enum PrepError {
         /// The underlying IO error.
         source: std::io::Error,
     },
+    /// No stable installed `tm`/`trusty-mpm` binary could be resolved, so the
+    /// project's hooks were left untouched (#7244).
+    ///
+    /// Non-fatal, per #2149's rule that a preparation hiccup must not stop a
+    /// launch: the session still starts, without tm's project-tier hooks. What
+    /// it must NOT do is write hooks pointing at a build artifact, which is the
+    /// alternative this variant exists to replace.
+    /// Test: `write_project_hooks_writes_nothing_when_the_exe_cannot_be_resolved`.
+    #[error("could not resolve a stable hook binary: {source}")]
+    HookExe {
+        /// Which resolution step refused, and the path it refused.
+        #[source]
+        source: crate::core::standalone::hooks::StableHookExeError,
+    },
+    /// The pre-rewrite snapshot of the project's `settings.json` could not be
+    /// taken, so the hooks writer left the file alone (#7244, round 3).
+    ///
+    /// Why its own variant rather than [`Self::Io`]: the operator's next move
+    /// differs. A generic I/O failure is usually about the path; this one says
+    /// the CURRENT file survived and only the update was skipped, which is the
+    /// benign half of fail-closed and reads as alarming without that framing.
+    /// Non-fatal, for the same reason [`Self::HookExe`] is: the session starts
+    /// with the hooks already on disk.
+    /// Test: `write_project_hooks_aborts_when_the_snapshot_fails`.
+    #[error("could not snapshot {path} before rewriting it: {source}")]
+    HookSnapshot {
+        /// The settings file whose rewrite was abandoned.
+        path: PathBuf,
+        /// The underlying IO error.
+        source: std::io::Error,
+    },
     /// The session's instructions could not be established — the ONE fatal
     /// preparation condition (#4752, owner ruling 2026-08-04).
     ///
@@ -975,6 +1006,10 @@ fn prepare_session_inner(
     // wrote). Default `true` — every other hook is written either way.
     let hooks_written = match write_project_hooks(
         project_dir,
+        // #7244: `None` resolves the running installed binary. When nothing
+        // stable resolves this now returns an error and writes NOTHING, rather
+        // than wiring every hook to a build artifact.
+        None,
         config.hooks.prompt_context,
         plan.divert_enabled,
     ) {

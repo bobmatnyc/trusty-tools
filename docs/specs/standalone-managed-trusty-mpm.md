@@ -113,6 +113,14 @@ and extends them:
 | 8 | Inspectable launch prompt | `<project>/.trusty-mpm/last-instructions.md` | `prepare_session` |
 | 9 | Project instructions | `<project>/CLAUDE.md` (if absent) | `prepare_session` |
 
+Write 6 keeps its own history (#7244): before the rename that replaces
+`<project>/.claude/settings.json`, the writer copies the existing file to
+`settings.json.<YYYYMMDDTHHMMSSZ>.bak` beside it, and a copy that fails aborts
+the rewrite rather than proceeding without it. The newest three snapshots of
+that file survive each write and older ones are deleted; a rewrite that would
+produce the bytes already on disk, and one refused because no stable `tm`
+binary resolved, both write nothing and snapshot nothing.
+
 There is **no** existing "managed configuration" standard or spec (verified: no `docs/specs/` file,
 no named type/constant/module enforces an isolation invariant; the only incidental hit is the prose
 "framework-managed config" in `src/daemon/state/core.rs`).

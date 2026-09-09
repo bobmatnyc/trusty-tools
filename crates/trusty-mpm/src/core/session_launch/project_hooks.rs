@@ -53,10 +53,22 @@ use crate::core::standalone::hooks::{is_mpm_hook_command, mpm_hook_additions_wit
 /// `project_managed_hook_additions_omits_prompt_context_when_disabled`,
 /// `project_managed_hook_additions_includes_divert_when_enabled`,
 /// `project_managed_hook_additions_omits_divert_when_disabled`.
+///
+/// #7244: returns the lifecycle triad's resolution error rather than a block
+/// built around an unvouched-for command, so the caller writes nothing.
+/// `exe_override` pins the binary path (production passes `None` and lets
+/// [`mpm_hook_additions_with_exe`] resolve); a test passes an installed-looking
+/// path so its assertions do not depend on whether the host running them has
+/// `tm` installed.
 pub(super) fn project_managed_hook_additions(
+    exe_override: Option<&std::path::Path>,
     inject_prompt_context: bool,
     divert_enabled: bool,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, crate::core::standalone::hooks::StableHookExeError> {
+    // #7244: resolved first — a refusal must reach the caller before the
+    // project's `.claude/` directory is created or its settings file read.
+    let triad = mpm_hook_additions_with_exe(exe_override)?;
+
     let mut hooks: serde_json::Value =
         serde_json::from_str(TRUSTY_MEMORY_HOOKS).expect("bundled hook block is valid JSON");
     if let Some(obj) = hooks.as_object_mut() {
@@ -68,7 +80,6 @@ pub(super) fn project_managed_hook_additions(
         }
     }
 
-    let triad = mpm_hook_additions_with_exe(None);
     if let (Some(hooks_obj), Some(triad_hooks)) = (
         hooks.as_object_mut(),
         triad.get("hooks").and_then(serde_json::Value::as_object),
@@ -107,7 +118,7 @@ pub(super) fn project_managed_hook_additions(
         }
     }
 
-    serde_json::json!({ "hooks": hooks })
+    Ok(serde_json::json!({ "hooks": hooks }))
 }
 
 /// Every hook event key trusty-mpm owns at the project tier, regardless of
@@ -127,11 +138,32 @@ pub(super) fn project_managed_hook_additions(
 /// `write_project_hooks_strips_stale_prompt_context_when_disabled`,
 /// `write_project_hooks_strips_stale_divert_when_disabled`.
 pub(super) fn project_managed_hook_events() -> Vec<String> {
-    project_managed_hook_additions(true, true)["hooks"]
-        .as_object()
-        .map(|events| events.keys().cloned().collect())
+    // #7244: the key SET is a property of the block's SHAPE and must never
+    // depend on whether a binary resolves — an empty answer here would narrow
+    // the strip domain and leave stale entries behind. A synthetic
+    // installed-looking path makes the resolution unconditionally succeed
+    // without a filesystem or PATH lookup; the path itself never reaches a
+    // file, because only the keys are read.
+    project_managed_hook_additions(Some(EVENT_KEY_PROBE_EXE.as_ref()), true, true)
+        .ok()
+        .and_then(|additions| {
+            additions["hooks"]
+                .as_object()
+                .map(|events| events.keys().cloned().collect())
+        })
         .unwrap_or_default()
 }
+
+/// A stable-looking binary path used only to enumerate hook EVENT KEYS.
+///
+/// Why (#7244): see [`project_managed_hook_events`] — the key set must not
+/// vary with the host's installed binaries. Absolute, outside every build
+/// tree, and named `tm`, so it satisfies both halves of the
+/// `resolve_stable_hook_exe` guard by construction.
+/// What: never written anywhere; only the keys of the block built around it
+/// are read.
+/// Test: `project_managed_hook_events_is_a_superset_of_every_variant`.
+const EVENT_KEY_PROBE_EXE: &str = "/usr/local/bin/tm";
 
 /// Recognise a hook command belonging to ANY of the three project-tier
 /// sources [`project_managed_hook_additions`] combines.

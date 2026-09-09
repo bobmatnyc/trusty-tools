@@ -384,28 +384,26 @@ pub(crate) fn remove_global_trusty_mpm_hooks() -> anyhow::Result<usize> {
 /// updated (new or changed), `false` when already configured.
 /// Test: `test_write_project_hooks_for_dir_targets_project_dir` in
 /// `tests_behavior_a.rs`.
-pub(crate) fn write_project_hooks_for_dir(project_dir: &std::path::Path) -> anyhow::Result<bool> {
+pub(crate) fn write_project_hooks_for_dir(
+    project_dir: &std::path::Path,
+    exe_override: Option<&std::path::Path>,
+) -> anyhow::Result<bool> {
     let settings_path = project_dir.join(".claude").join("settings.json");
-    let exe = trusty_mpm::core::standalone::hooks::resolve_current_exe();
+    // #7244: `None` resolves the running installed binary and now REFUSES a
+    // build artifact outright rather than baking its path in. A test passes a
+    // path so it exercises the write, not the host's `tm` installation.
+    let exe = exe_override
+        .map(std::path::Path::to_path_buf)
+        .or_else(trusty_mpm::core::standalone::hooks::resolve_current_exe);
     trusty_mpm::core::standalone::hooks::write_project_hooks(&settings_path, exe.as_deref())
 }
 
-/// Build the MPM lifecycle hook additions JSON block.
-///
-/// Why: every call site (the install handler and its unit test) needs the
-/// exact same shape so [`merge_hook_entries`] can dedup by deep equality;
-/// delegating to the shared library definition avoids two slightly-different
-/// copies racing in the idempotency check. The canonical definition lives in
-/// [`trusty_mpm::core::standalone::hooks::mpm_hook_additions`] so the managed
-/// driver (`ensure_global_config_dir`) and the install path both use the same
-/// literal (WI-3).
-/// What: delegates to the shared library function with no exe override.
-/// Test: covered indirectly by `install_claude_hooks_is_idempotent`.
-/// Only used in tests (idempotency / merge-shape tests in `tests_behavior_a.rs`).
-#[cfg(test)]
-pub(crate) fn mpm_hook_additions() -> serde_json::Value {
-    trusty_mpm::core::standalone::hooks::mpm_hook_additions()
-}
+// #7244: the test-only `mpm_hook_additions` wrapper is gone. Its one caller
+// (`tests_behavior_a::mpm_hook_additions_is_idempotent_under_merge`) now pins
+// the binary through `mpm_hook_additions_with_exe`, because the no-override
+// form resolves `current_exe()` — under `cargo test` a build artifact the
+// resolver refuses — and a wrapper that only forwards `None` had nothing left
+// to forward.
 
 /// Render per-file status lines for an agent `DeployResult`.
 ///
