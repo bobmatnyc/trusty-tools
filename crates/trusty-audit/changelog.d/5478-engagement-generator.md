@@ -14,9 +14,16 @@ Added
   signing key and client labels are dropped and reported by name. A directory
   that already holds an engagement is refused rather than overwritten —
   replacing the signing key would orphan the public half the auditor
-  retained — and `force` is how an operator says they meant it. A mint that
-  cannot write the retained public key removes the config it just wrote instead
-  of leaving an engagement whose signatures nothing could ever check.
+  retained — and `force` is how an operator says they meant it.
+- The two halves of an engagement's keypair are published as one unit. The
+  config carrying the private seed and the `retained.pub` holding its public
+  half are written to temporaries first and then renamed into place, public half
+  first, so a mint that fails leaves the directory exactly as it found it — a
+  `--force` remint that cannot write one half leaves the previous engagement
+  whole rather than destroying it, and a config on disk is always accompanied by
+  the public half of the seed it carries. The check for an existing engagement
+  and the writes now run under that config's exclusive lock, so two mints aimed
+  at one directory cannot both pass the check.
 - The engagement config accepts an `[audit] window_weeks` key, defaulting to 52
   so a config written before it existed still loads and still means one year.
   A declared `0` is refused at parse time rather than accepted: a zero-week
