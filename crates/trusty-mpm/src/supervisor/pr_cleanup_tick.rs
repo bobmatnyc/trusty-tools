@@ -11,7 +11,7 @@
 //! What: [`SessionClaims`] is the daemon-side [`ClaimEnder`] — it reads the
 //! session store directly and tombstones a record through
 //! [`SessionManager::decommission_record_only`], the one path that is
-//! record-only by construction and cannot kill a process. [`run_if_due`] is the
+//! record-only by construction and cannot kill a process. [`due`] is the
 //! cadence gate the supervisor's tick calls.
 //!
 //! Test: the sweep's decisions are covered in
