@@ -202,6 +202,82 @@ fn a_foreign_claim_outranks_the_callers_own() {
     }
 }
 
+/// 🔴 #7232: a claim whose session is gone must not decide anything.
+///
+/// Why: the store tombstones records, so a `deleted` record for the adopted
+/// pane `tm-bobmatnyc` — holding the org-level path
+/// `~/trusty-mpm-projects/bobmatnyc` — refused every worktree in every project
+/// beneath it. The reclaim sweep reported "would remove 0" across seven
+/// repositories and named that one session on every candidate. Fails on
+/// `ad64460e8`, where `WorkspaceClaim` has no liveness and this is `Foreign`.
+#[test]
+fn a_dead_sessions_claim_no_longer_blocks() {
+    let (_tmp, root) = tree();
+    let worktree = root.join("client").join(".worktrees").join("agent-1");
+    std::fs::create_dir_all(&worktree).expect("mkdir");
+
+    let claims = LiveClaims::foreign(vec![WorkspaceClaim::with_liveness(
+        "51786c9c-478f-5b3f-83a7-cbe63e3d5958",
+        &root,
+        ClaimLiveness::SessionGone,
+    )]);
+    let state = claims.claim_state(&worktree);
+    assert!(
+        !matches!(state, ClaimState::Foreign { .. }),
+        "a dead session's claim must not be foreign: {state:?}"
+    );
+    assert_eq!(state.refusal(false), None, "and must not refuse: {state:?}");
+    let note = state
+        .note()
+        .expect("the decision must name what it discarded");
+    assert!(
+        note.contains("51786c9c-478f-5b3f-83a7-cbe63e3d5958"),
+        "{note}"
+    );
+    assert!(note.contains("#7232"), "{note}");
+}
+
+/// 🔴 The other half of #7232: liveness narrows nothing else. A claim by a
+/// session that IS live still refuses exactly as #6806 made it.
+#[test]
+fn a_live_foreign_sessions_claim_still_blocks() {
+    let (_tmp, root) = tree();
+    let worktree = root.join("client").join(".worktrees").join("agent-1");
+    std::fs::create_dir_all(&worktree).expect("mkdir");
+
+    let claims = LiveClaims::foreign(vec![WorkspaceClaim::with_liveness(
+        "tm-other-01",
+        &root,
+        ClaimLiveness::Live,
+    )]);
+    let state = claims.claim_state(&worktree);
+    assert!(
+        matches!(state, ClaimState::Foreign { .. }),
+        "a live foreign claim must still refuse: {state:?}"
+    );
+    assert!(state.refusal(false).is_some());
+    assert_eq!(state.note(), None, "nothing was discarded");
+}
+
+/// A live claim beside a dead one still decides. The discard must not become a
+/// way for one tombstone to launder a genuine owner's refusal.
+#[test]
+fn a_live_claim_beside_a_dead_one_still_blocks() {
+    let (_tmp, root) = tree();
+    let worktree = root.join("client").join(".worktrees").join("agent-1");
+    std::fs::create_dir_all(&worktree).expect("mkdir");
+
+    let claims = LiveClaims::foreign(vec![
+        WorkspaceClaim::with_liveness("tm-dead-01", &root, ClaimLiveness::SessionGone),
+        WorkspaceClaim::with_liveness("tm-alive-02", &worktree, ClaimLiveness::Live),
+    ]);
+    let reason = claims
+        .claim_state(&worktree)
+        .refusal(false)
+        .expect("the live claim must still refuse");
+    assert!(reason.contains("tm-alive-02"), "{reason}");
+}
+
 /// The re-check wording keeps its present tense, so the operator can tell a
 /// survey refusal from one taken immediately before a deletion.
 #[test]

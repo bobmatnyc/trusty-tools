@@ -292,7 +292,9 @@ mod tests {
         CHECK_CLEAN_TREE, CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER, CHECK_UNPUSHED_COMMITS,
         evaluate_removal_rechecks,
     };
-    use trusty_mpm::core::worktree_removal_facts::{MergedPrLookup, WorktreeRemovalProbe};
+    use trusty_mpm::core::worktree_removal_facts::{
+        MergedPrLookup, UpstreamComparison, WorktreeRemovalProbe,
+    };
 
     /// The subagent shape the #5791 deny still binds in full.
     fn engineer() -> DispatchIdentity<'static> {
@@ -338,7 +340,7 @@ mod tests {
     /// Fabricated answers, so no test reaches git, GitHub or the daemon.
     struct FakeProbe {
         dirty: Result<usize, String>,
-        unpushed: Result<usize, String>,
+        unpushed: Result<UpstreamComparison, String>,
         branch: Result<String, String>,
         merged: Result<MergedPrLookup, String>,
     }
@@ -356,9 +358,18 @@ mod tests {
         fn reclaimable() -> Self {
             Self {
                 dirty: Ok(0),
-                unpushed: Ok(0),
+                unpushed: Ok(UpstreamComparison::Ahead(0)),
                 branch: Ok("feat/thing".to_string()),
                 merged: Ok(lookup(1)),
+            }
+        }
+
+        /// The shape `gh pr merge --delete-branch` leaves behind (#7232): the
+        /// remote branch is gone, so `@{upstream}` no longer resolves.
+        fn upstream_deleted() -> Self {
+            Self {
+                unpushed: Ok(UpstreamComparison::NoUpstream),
+                ..Self::reclaimable()
             }
         }
     }
@@ -367,7 +378,7 @@ mod tests {
         fn dirty_entries(&self, _dir: &Path) -> Result<usize, String> {
             self.dirty.clone()
         }
-        fn unpushed_commits(&self, _dir: &Path) -> Result<usize, String> {
+        fn unpushed_commits(&self, _dir: &Path) -> Result<UpstreamComparison, String> {
             self.unpushed.clone()
         }
         fn branch(&self, _dir: &Path) -> Result<String, String> {
@@ -560,7 +571,7 @@ mod tests {
         // commits that exist nowhere else, which is the harm `unpushed-commits`
         // is separate from `clean-tree` to catch.
         let probe = FakeProbe {
-            unpushed: Ok(2),
+            unpushed: Ok(UpstreamComparison::Ahead(2)),
             ..FakeProbe::reclaimable()
         };
         let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
@@ -662,13 +673,89 @@ mod tests {
     #[test]
     fn denies_version_control_when_a_fact_cannot_be_established() {
         // ADR-0045: undeterminable is never absent on a destructive path.
+        // #7232: the `Err` arm now means git could not answer at all — a
+        // missing upstream is `UpstreamComparison::NoUpstream`, a fact, and is
+        // covered by the four tests below.
         let probe = FakeProbe {
-            unpushed: Err("no upstream configured for HEAD".to_string()),
+            unpushed: Err("`git rev-parse --verify HEAD` failed: not a git repository".to_string()),
             ..FakeProbe::reclaimable()
         };
         let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
             .expect("an unestablished fact must deny removal");
-        assert!(reason.contains("no upstream configured"), "{reason}");
+        assert!(reason.contains(CHECK_UNPUSHED_COMMITS), "{reason}");
+        assert!(reason.contains("not a git repository"), "{reason}");
+    }
+
+    /// 🔴 #7232: the whole bug. `gh pr merge --delete-branch` deletes the remote
+    /// branch, so `@{upstream}` stops resolving on every squash-merged
+    /// worktree; the guard returned at `unpushed-commits` and never asked
+    /// GitHub whether the branch had landed. Fails on `ad64460e8`, where this
+    /// denies with `unpushed-commits`.
+    #[test]
+    fn a_merged_pr_clears_a_worktree_whose_upstream_is_gone() {
+        assert_eq!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &FakeProbe::upstream_deleted()),
+            None,
+            "a clean tree whose branch has a MERGED pull request must be removable even \
+             though the merge deleted its upstream"
+        );
+    }
+
+    /// The grant is the merged pull request, not the missing upstream. With no
+    /// upstream AND no merged pull request nothing establishes the commits ever
+    /// reached GitHub, so the removal still denies — and says which branch it
+    /// asked about. Fails against an implementation that reads `NoUpstream` as
+    /// a pass.
+    #[test]
+    fn no_upstream_and_no_merged_pr_denies_and_names_the_branch() {
+        let probe = FakeProbe {
+            merged: Ok(lookup(0)),
+            ..FakeProbe::upstream_deleted()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("no upstream and no merged pull request must deny removal");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains("feat/thing"), "{reason}");
+        assert!(
+            reason.contains("tracks no upstream"),
+            "the deny must say the upstream is gone too: {reason}"
+        );
+    }
+
+    /// ADR-0045 again, at the one gate now load-bearing on its own: a `gh`
+    /// lookup that could not answer is never "no merged pull request". The
+    /// refusal names the branch, the target and the repository, so the operator
+    /// can tell a wrong-repository answer from an absent one (#7057).
+    #[test]
+    fn no_upstream_and_an_unanswerable_merged_pr_lookup_denies() {
+        let probe = FakeProbe {
+            merged: Err(format!(
+                "gh timed out after 20s (repository searched: {FAKE_REPO})"
+            )),
+            ..FakeProbe::upstream_deleted()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("an unanswerable merged-PR lookup must deny removal");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains("feat/thing"), "{reason}");
+        assert!(reason.contains(WT), "{reason}");
+        assert!(reason.contains(FAKE_REPO), "{reason}");
+    }
+
+    /// 🔴 The reorder must not have become a bypass: `clean-tree` still runs
+    /// FIRST, so unsaved work denies whatever GitHub says about the branch.
+    /// Fails against an implementation that lets a merged pull request stand in
+    /// for the whole re-check chain.
+    #[test]
+    fn a_dirty_tree_denies_even_when_merged_with_no_upstream() {
+        let probe = FakeProbe {
+            dirty: Ok(4),
+            ..FakeProbe::upstream_deleted()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("unsaved work must deny removal");
+        assert!(reason.contains(CHECK_CLEAN_TREE), "{reason}");
+        assert!(reason.contains('4'), "{reason}");
     }
 
     #[test]

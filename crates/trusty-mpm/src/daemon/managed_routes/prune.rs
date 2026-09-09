@@ -19,7 +19,7 @@ use tracing::warn;
 
 use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
-use crate::session_manager::worktree_reclaim::{LiveClaims, ReclaimMode, WorkspaceClaim};
+use crate::session_manager::worktree_reclaim::{LiveClaims, ReclaimMode};
 use crate::session_manager::worktree_reclaim_sweep::reclaim_merged_pr_worktrees;
 use crate::session_manager::{DirtyWorktreePolicy, PruneFilter};
 
@@ -347,17 +347,13 @@ pub(crate) async fn prune_worktrees_core(
                         // #6806: each claim carries the session that holds
                         // it, so gate 2 can tell the caller's own claim from a
                         // foreign one and name the claimant when it refuses.
-                        Some(LiveClaims {
-                            claims: handle
-                                .block_on(mgr_for_probe.list())
-                                .into_iter()
-                                .filter_map(|r| {
-                                    r.workspace_path
-                                        .map(|p| WorkspaceClaim::new(r.id.to_string(), p))
-                                })
-                                .collect(),
-                            caller: caller.clone(),
-                        })
+                        // #7232: through the crate's single claim producer,
+                        // which also probes each claiming session for life. A
+                        // `deleted` record holding an org-level
+                        // `workspace_path` blocked every worktree beneath it in
+                        // seven repositories, because the store tombstones
+                        // records rather than dropping them.
+                        Some(handle.block_on(mgr_for_probe.workspace_claims(caller.clone())))
                     };
                     let agent_state = move |owner: &crate::session_manager::worktree_ownership::AgentWorktreeOwner| {
                         crate::daemon::services::agent_worktree_reap::delegation_state_for_agent(

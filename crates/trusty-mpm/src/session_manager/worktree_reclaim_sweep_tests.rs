@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 use crate::session_manager::worktree_ownership::{AgentDelegationState, AgentWorktreeOwner};
-use crate::session_manager::worktree_reclaim_claim::WorkspaceClaim;
+use crate::session_manager::worktree_reclaim_claim::{ClaimLiveness, WorkspaceClaim};
 
 /// Put the worktree in the state a merged PR leaves behind: one commit, pushed.
 ///
@@ -731,6 +731,80 @@ fn reclaim_report_mode_removes_nothing() {
     assert!(path.exists());
 }
 
+/// 🔴 #7232: a dry run must LIST a merged, clean worktree whose only claimant
+/// is a session that no longer exists.
+///
+/// Why: the store tombstones records, so a `deleted` record for the adopted
+/// pane `tm-bobmatnyc` — holding the org-level path
+/// `~/trusty-mpm-projects/bobmatnyc` — sat above every project on the machine.
+/// `tm session prune-worktrees --merged-prs` reported "would remove 0" and
+/// named that one session on every candidate, in seven repositories. Fails on
+/// `ad64460e8`, where gate 2 reads the claim as `Foreign` and blocks.
+#[test]
+fn a_dead_sessions_claim_does_not_block_the_dry_run() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("dead-claim-7232");
+    land(&path);
+    // The incident's shape: the claim covers the whole repository root, so it
+    // covers every worktree beneath it.
+    let dead = LiveClaims::foreign(vec![WorkspaceClaim::with_liveness(
+        "51786c9c-478f-5b3f-83a7-cbe63e3d5958",
+        &fx.repo,
+        ClaimLiveness::SessionGone,
+    )]);
+    let out = reclaim_with_probes(
+        &fx.repos_root,
+        &FreshProbes {
+            keep_list: &no_keeps,
+            agent_state: &no_agents,
+            in_use_now: &|| Some(dead.clone()),
+            index_for: &|_: &Path| merged_index("session/dead-claim-7232", 32),
+        },
+        ReclaimMode::Report,
+    );
+    assert_eq!(
+        out.survey.reclaimable, 1,
+        "a tombstoned session's claim must not block reclaim: {:?}",
+        out.survey.blocked_reasons
+    );
+    assert!(out.removed.is_empty(), "Report mode still removes nothing");
+    assert!(path.exists());
+}
+
+/// The other half: the same fixture with a LIVE claimant is still blocked, so
+/// #7232 cannot have widened into "claims no longer count".
+#[test]
+fn a_live_sessions_claim_still_blocks_the_dry_run() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("live-claim-7232");
+    land(&path);
+    let live = LiveClaims::foreign(vec![WorkspaceClaim::with_liveness(
+        "tm-other-01",
+        &fx.repo,
+        ClaimLiveness::Live,
+    )]);
+    let out = reclaim_with_probes(
+        &fx.repos_root,
+        &FreshProbes {
+            keep_list: &no_keeps,
+            agent_state: &no_agents,
+            in_use_now: &|| Some(live.clone()),
+            index_for: &|_: &Path| merged_index("session/live-claim-7232", 33),
+        },
+        ReclaimMode::Report,
+    );
+    assert_eq!(out.survey.reclaimable, 0);
+    assert!(
+        out.survey
+            .blocked_reasons
+            .iter()
+            .any(|r| r.contains("tm-other-01")),
+        "{:?}",
+        out.survey.blocked_reasons
+    );
+    assert!(path.exists());
+}
+
 #[test]
 fn reclaim_remove_mode_refuses_a_worktree_claimed_after_the_survey() {
     // The candidate passes classification (nothing claimed it at survey time),
@@ -1136,9 +1210,12 @@ fn e2e_survey_against_a_real_store() {
         measure: Some(std::time::Duration::from_secs(20)),
         classify: None,
     };
-    let s = survey(
+    // #7259: against the real `gh`-backed index — the `survey` wrapper that
+    // used to bind it lost its production caller and went with it.
+    let s = survey_with_index(
         &root,
         &nobody(),
+        &PrIndex::from_gh,
         &no_agents,
         budget,
         true,

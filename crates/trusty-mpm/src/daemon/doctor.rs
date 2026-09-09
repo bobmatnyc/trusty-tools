@@ -19,6 +19,9 @@ use std::time::Duration;
 
 use crate::core::doctor::{CheckStatus, DoctorCheck, DoctorReport};
 use crate::core::paths::FrameworkPaths;
+// #7259: doctor's claim set now carries liveness, produced in one place by
+// `SessionManager::workspace_claims`.
+use crate::session_manager::worktree_reclaim::{ClaimLiveness, LiveClaims, WorkspaceClaim};
 
 // Split out to keep this file under the 500-SLOC production cap (#5947 — the
 // worktrees probe now reads the reconciled inventory, and its counts type and
@@ -372,6 +375,40 @@ pub async fn run_doctor(
     // same orphan count `prune-worktrees` and `reconcile-worktrees` agree on.
     worktree_counts: Option<WorktreeOrphanCounts>,
 ) -> DoctorReport {
+    // #7259: a caller holding only paths has no liveness to hand over, so every
+    // path becomes a live unattributed claim. That is the pre-#7232 reading and
+    // the fail-closed one — a claim can only be marked gone by a probe that
+    // actually answered, which is what [`run_doctor_for_manager`] supplies.
+    let active = LiveClaims::foreign(
+        active_workspace_paths
+            .iter()
+            .map(WorkspaceClaim::unattributed)
+            .collect(),
+    );
+    run_doctor_with_claims(project_dir, repos_root, &active, worktree_counts).await
+}
+
+/// [`run_doctor`] over a claim set whose liveness has already been probed
+/// (#7259).
+///
+/// Why: `LiveClaims` is crate-private, so the public entry point above cannot
+/// name it — and the fleet-aware caller must be able to pass liveness through
+/// rather than flatten it back to paths, which is the flattening that let a
+/// tombstoned org-level claim hide every worktree beneath it.
+/// What: the whole check battery. `active` reaches `check_worktree_disk`
+/// unchanged; the four probes that only ask "which workspaces are live" read
+/// [`live_workspace_paths`], which drops the claims a tmux probe answered for
+/// and found gone.
+/// Test: `a_dead_sessions_org_level_claim_no_longer_hides_orphaned_disk`,
+/// `live_workspace_paths_drops_only_claims_a_probe_found_gone`.
+pub(crate) async fn run_doctor_with_claims(
+    project_dir: Option<&Path>,
+    repos_root: Option<&Path>,
+    active: &LiveClaims,
+    worktree_counts: Option<WorktreeOrphanCounts>,
+) -> DoctorReport {
+    let live_paths = live_workspace_paths(active);
+    let active_workspace_paths: &[PathBuf] = &live_paths;
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     // #5867: only a project that IS a managed workspace gets the workspace
     // layout. `tm doctor` sends the process cwd unconditionally, so an ordinary
@@ -464,7 +501,7 @@ pub async fn run_doctor(
     // #2919: `check_worktrees` above counts ORPHANS and has never reported a
     // byte, so it read identically whether the worktree store held 4 GiB or the
     // 1.1 TiB measured on 2026-07-21. This is the disk half.
-    checks.push(check_worktree_disk(repos_root, active_workspace_paths).await);
+    checks.push(check_worktree_disk(repos_root, active).await);
     // #3605: and this is the identity half — a live worktree keeps its files
     // when the base clone behind it loses its git internals, so every git
     // command there fails while both probes above stay green.
@@ -544,10 +581,21 @@ pub async fn run_doctor(
 /// identical battery. It is also why `tm doctor` needs no daemon at all: the
 /// CLI builds a read-only manager over the on-disk session store and calls this
 /// directly.
-/// What: reads every session record for `active_workspace_paths`, resolves the
+/// What: reads the fleet's workspace claims through
+/// [`crate::session_manager::SessionManager::workspace_claims`], resolves the
 /// managed workspace root from [`crate::core::trusty_tools_config`], gathers the
-/// reconciled worktree counts, and delegates to [`run_doctor`]. Reads only —
-/// no spawn, no write, no daemon.
+/// reconciled worktree counts, and delegates to [`run_doctor_with_claims`].
+/// Reads only — no spawn, no write, no daemon.
+///
+/// #7259: the claim set used to be `mgr.list()` mapped to `workspace_path`,
+/// which has no liveness in it. The store tombstones records rather than
+/// dropping them, so one `deleted` adopted pane holding an ORG-level path made
+/// every worktree beneath it read as in use — `tm doctor` under-reported
+/// orphaned disk for the whole subtree. `workspace_claims` is the single
+/// producer #7232 introduced: one `tmux list-sessions` for the set, and a claim
+/// is marked gone only by a probe that ANSWERED. The record's `state` field is
+/// never consulted (#2919 measured a live session in a terminal-looking
+/// record), and an unobservable tmux leaves every claim live.
 /// Test: `doctor_endpoint_returns_report` covers the HTTP caller;
 /// `tm_doctor_reports_every_local_check_with_no_daemon`
 /// (`tests/tm_doctor_standalone.rs`) covers the daemonless CLI caller.
@@ -557,22 +605,34 @@ pub async fn run_doctor_for_manager(
 ) -> DoctorReport {
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
     let repos_root = crate::core::trusty_tools_config::workspace_root(&config);
-    let active_workspace_paths: Vec<PathBuf> = mgr
-        .list()
-        .await
-        .iter()
-        .filter_map(|r| r.workspace_path.clone())
-        .collect();
+    // `None` caller: doctor reports, it never reclaims, so it has no session
+    // identity to exempt — every claim it holds is foreign, as before (#6806).
+    let active = mgr.workspace_claims(None).await;
     // #5947: the orphan count comes from the reconciled inventory — the same
     // classification `prune-worktrees` and `reconcile-worktrees` share.
     let worktree_counts = gather_worktree_counts(mgr, &repos_root).await;
-    run_doctor(
-        project_dir,
-        Some(&repos_root),
-        &active_workspace_paths,
-        worktree_counts,
-    )
-    .await
+    run_doctor_with_claims(project_dir, Some(&repos_root), &active, worktree_counts).await
+}
+
+/// The claimed workspace paths whose session is still live (#7259).
+///
+/// Why: four probes — the managed-workspace tier decision, the base-clone
+/// identity check, and the two hooks-hygiene checks — ask only "which
+/// workspaces belong to a running session". A tombstoned record answers that
+/// question with a directory nobody occupies, which is how a `deleted` adopted
+/// pane's org-level path kept counting as active.
+/// What: every claim except the ones a liveness probe answered for and found
+/// gone. `Live` covers both "the session is running" and "nothing could
+/// establish that it is not", so an unobservable tmux yields the full set —
+/// the same fail-closed direction gate 2 takes.
+/// Test: `live_workspace_paths_drops_only_claims_a_probe_found_gone`.
+fn live_workspace_paths(active: &LiveClaims) -> Vec<PathBuf> {
+    active
+        .claims
+        .iter()
+        .filter(|c| c.liveness != ClaimLiveness::SessionGone)
+        .map(|c| c.path.clone())
+        .collect()
 }
 
 /// Is `project_dir` a workspace some live session was provisioned into?
