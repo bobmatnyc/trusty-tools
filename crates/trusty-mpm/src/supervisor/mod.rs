@@ -23,6 +23,8 @@
 pub mod config;
 pub mod metrics;
 pub mod poller;
+// #7275: the periodic post-merge cleanup sweep, on its own cadence.
+pub mod pr_cleanup_tick;
 pub mod publish;
 
 #[cfg(test)]
@@ -71,6 +73,9 @@ pub struct Supervisor<C: LlmClassifier> {
     last_override: Option<bool>,
     /// #6288: where each sweep's snapshot is published for the daemon to read.
     metrics_path: PathBuf,
+    /// #7275: when the post-merge cleanup sweep last ran, so its cadence is
+    /// independent of the fleet sweep's.
+    last_pr_cleanup: Option<std::time::Instant>,
 }
 
 impl<C: LlmClassifier> Supervisor<C> {
@@ -98,6 +103,10 @@ impl<C: LlmClassifier> Supervisor<C> {
             // #6288: the same `~/.trusty-mpm` root the daemon reads from, so
             // production wiring needs no extra call.
             metrics_path: publish::metrics_path(&FrameworkPaths::default()),
+            // #7275: `None` makes the first tick after a restart sweep, rather
+            // than waiting a full cleanup interval to notice a merge that
+            // landed while the daemon was down.
+            last_pr_cleanup: None,
         }
     }
 
@@ -218,11 +227,39 @@ impl<C: LlmClassifier> Supervisor<C> {
             ..self.cfg.clone()
         };
         let report = run_tick(&self.mgr, &cfg, self.monitor.as_ref()).await;
+        self.pr_cleanup_tick().await;
         self.stats.sweeps += 1;
         self.stats.auto_resumed += report.resumed.len() as u64;
         self.stats.resume_failures += report.resume_failures as u64;
         self.stats.classified += report.classified as u64;
         report
+    }
+
+    /// Run the post-merge cleanup sweep when its own cadence says it is due
+    /// (#7275, owner scope amendment 2026-09-09).
+    ///
+    /// Why: a merge determines that a worktree, its branches and its session
+    /// claim are obsolete, and merges that happen outside `tm pr merge` have
+    /// nothing else watching for them. Running the sweep here — inside the tick
+    /// the supervisor already owns — means no second timer can run it
+    /// concurrently with itself.
+    /// What: gates on [`pr_cleanup_tick::due`] against
+    /// `cfg.pr_cleanup_interval`, runs the sweep, and stamps
+    /// [`Self::last_pr_cleanup`]. The stamp is written whether or not the sweep
+    /// cleaned anything, so a repository with nothing to do costs one sweep per
+    /// interval rather than one per tick.
+    /// Test: `pr_cleanup_is_due_only_after_the_interval`; the sweep's own logic
+    /// is `sweep_stamps_only_a_fully_successful_run`.
+    async fn pr_cleanup_tick(&mut self) {
+        let now = std::time::Instant::now();
+        if !pr_cleanup_tick::due(self.cfg.pr_cleanup_interval, self.last_pr_cleanup, now) {
+            return;
+        }
+        self.last_pr_cleanup = Some(now);
+        let cleaned = pr_cleanup_tick::run_sweep(&self.mgr).await;
+        if cleaned > 0 {
+            info!(cleaned, "supervisor: post-merge cleanup swept merged PRs");
+        }
     }
 
     /// Compute a fresh fleet-metrics snapshot overlaid with current run stats.

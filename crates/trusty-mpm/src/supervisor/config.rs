@@ -73,6 +73,26 @@ pub const ENV_CLASSIFY_IDLE: &str = "TRUSTY_MPM_SUPERVISOR_CLASSIFY";
 /// Test: `config_defaults`.
 pub const DEFAULT_INTERVAL_SECS: u64 = 30;
 
+/// Environment variable that overrides the post-merge cleanup cadence, in
+/// seconds (#7275).
+///
+/// Why: the cleanup sweep costs one `gh pr view` per pending pull request, so
+/// it must run far less often than the fleet sweep. A separate variable lets an
+/// operator slow it down (or, with `0`, turn it off) without touching the
+/// auto-resume cadence the fleet depends on.
+/// What: parsed as `u64` seconds; `0` disables the sweep entirely; an absent or
+/// unparsable value falls back to [`DEFAULT_PR_CLEANUP_SECS`].
+/// Test: `pr_cleanup_interval_env_parsing`.
+pub const ENV_PR_CLEANUP_SECS: &str = "TRUSTY_MPM_PR_CLEANUP_INTERVAL";
+
+/// Default post-merge cleanup cadence when [`ENV_PR_CLEANUP_SECS`] is unset:
+/// 5 minutes (#7275, owner amendment 2026-09-09).
+///
+/// Why: a merge is not time-critical to clean up after — the worktree and
+/// branches cost only disk until they go — and five minutes bounds the sweep's
+/// `gh` traffic to a rate GitHub's API budget never notices.
+pub const DEFAULT_PR_CLEANUP_SECS: u64 = 300;
+
 /// Immutable configuration for one supervisor run.
 ///
 /// Why: the loop reads its policy from one value per tick; bundling the knobs in
@@ -89,18 +109,28 @@ pub struct SupervisorConfig {
     pub auto_resume: bool,
     /// When `true`, idle `active` sessions have their pane classified.
     pub classify_idle: bool,
+    /// How long to wait between post-merge cleanup sweeps; `None` disables them
+    /// (#7275).
+    pub pr_cleanup_interval: Option<Duration>,
 }
 
 impl Default for SupervisorConfig {
     /// Why: a sensible no-env default makes the type usable in tests and as a
     /// base to override; auto-resume defaults OFF (safety) and classification ON.
-    /// What: 30s interval, `auto_resume = false`, `classify_idle = true`.
-    /// Test: `config_defaults`.
+    /// The post-merge cleanup sweep follows auto-resume's precedent and defaults
+    /// OFF here for the same reason (#7275): it spawns `gh` and deletes
+    /// branches, so a hand-constructed config — every test's config — must never
+    /// acquire that by omission. [`SupervisorConfig::from_env_with`] turns it on
+    /// at [`DEFAULT_PR_CLEANUP_SECS`] for the real daemon.
+    /// What: 30s interval, `auto_resume = false`, `classify_idle = true`,
+    /// `pr_cleanup_interval = None`.
+    /// Test: `config_defaults`, `pr_cleanup_interval_env_parsing`.
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(DEFAULT_INTERVAL_SECS),
             auto_resume: false,
             classify_idle: true,
+            pr_cleanup_interval: None,
         }
     }
 }
@@ -143,10 +173,21 @@ impl SupervisorConfig {
             .filter(|s| *s > 0)
             .map(Duration::from_secs)
             .unwrap_or(defaults.interval);
+        // #7275: `0` is the documented off switch, so it must not fall back to
+        // the default the way an unparsable value does. The fallback is the
+        // named constant, NOT `defaults` — `Default` leaves the sweep off so a
+        // hand-constructed config cannot acquire it by omission, while the real
+        // daemon reaches this path and gets the five-minute cadence.
+        let pr_cleanup_interval = match get(ENV_PR_CLEANUP_SECS).map(|v| v.trim().parse::<u64>()) {
+            Some(Ok(0)) => None,
+            Some(Ok(secs)) => Some(Duration::from_secs(secs)),
+            Some(Err(_)) | None => Some(Duration::from_secs(DEFAULT_PR_CLEANUP_SECS)),
+        };
         Self {
             interval,
             auto_resume,
             classify_idle,
+            pr_cleanup_interval,
         }
     }
 }

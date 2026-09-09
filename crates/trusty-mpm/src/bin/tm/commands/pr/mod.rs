@@ -31,6 +31,7 @@
 //! Test: the sibling `tests.rs`; `cli_parses_pr_*` in `tests.rs`.
 
 pub(crate) mod body;
+pub(crate) mod cleanup;
 pub(crate) mod merge;
 pub(crate) mod metadata;
 pub(crate) mod open;
@@ -142,6 +143,27 @@ impl GhRunner for RealGhRunner {
     }
 }
 
+/// Let the shared cleanup engine spawn `gh` through this module's runner
+/// (#7275).
+///
+/// Why: `trusty_mpm::core::pr_cleanup` defines its own `gh` seam so the daemon
+/// can drive it too, and `tm pr` already has a runner carrying the active
+/// project's GitHub identity. Bridging the two is one impl; building a second
+/// identity-bound runner for the CLI would be the duplication the
+/// common-entry-point rule forbids.
+/// Test: the engine's decisions are covered against fakes in
+/// `core::pr_cleanup::tests`; this bridge is exercised live.
+impl trusty_mpm::core::pr_cleanup::Gh for RealGhRunner {
+    fn run(&self, args: &[String]) -> anyhow::Result<trusty_mpm::core::pr_cleanup::CmdOut> {
+        let out = GhRunner::run(self, args)?;
+        Ok(trusty_mpm::core::pr_cleanup::CmdOut {
+            success: out.success,
+            stdout: out.stdout,
+            stderr: out.stderr,
+        })
+    }
+}
+
 /// Resolve `owner/repo` for the verbs that need the REST API.
 ///
 /// Why: branch-protection lives at `repos/<owner>/<repo>/branches/<base>/
@@ -186,8 +208,8 @@ pub(crate) fn argv(parts: &[&str]) -> Vec<String> {
 /// [`EXIT_CHECK_FAILED`].
 /// Test: the verb bodies are unit-tested against [`GhRunner`] fakes; this is
 /// the exit-code wrapper.
-pub(crate) fn run(cmd: PrCmd) -> ! {
-    let code = match run_inner(cmd) {
+pub(crate) async fn run(cmd: PrCmd, client: &reqwest::Client, url: &str) -> ! {
+    let code = match run_inner(cmd, client, url).await {
         Ok(code) => code,
         Err(e) => {
             eprintln!("tm pr: {e:#}");
@@ -198,12 +220,24 @@ pub(crate) fn run(cmd: PrCmd) -> ! {
 }
 
 /// The fallible body of [`run`], split out so every error leaves one way.
-fn run_inner(cmd: PrCmd) -> anyhow::Result<i32> {
+async fn run_inner(cmd: PrCmd, client: &reqwest::Client, url: &str) -> anyhow::Result<i32> {
     let gh = RealGhRunner::new()?;
     match cmd {
         PrCmd::Open(args) => open::run(&gh, &args, &open::RealPreflight),
         // #6808: merge from the validated body, not GitHub's raw-message squash.
-        PrCmd::Merge(args) => merge::run(&gh, &args),
+        PrCmd::Merge(args) => {
+            let code = merge::run(&gh, &args)?;
+            // #7275: cleanup is the final step after merge CONFIRMATION, so it
+            // runs only when this invocation actually merged. Under `--auto`
+            // the merge has not happened yet — the daemon's periodic sweep
+            // picks that PR up when it does.
+            if code == EXIT_OK && !args.auto {
+                return cleanup::after_merge(&args, client, url).await;
+            }
+            Ok(code)
+        }
         PrCmd::QueueCheck(args) => queue_check::run(&gh, &args),
+        // #7275: the executor every cleanup trigger shares.
+        PrCmd::Cleanup(args) => cleanup::run(&args, client, url).await,
     }
 }

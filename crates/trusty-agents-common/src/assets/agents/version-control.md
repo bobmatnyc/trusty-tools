@@ -339,3 +339,38 @@ The line is whether a `cargo publish` is bound to the tag: if it is, that is
   `gh pr update-branch`, or merge the head that is already green (see CI Waits).
   If it still will not merge, hand it back to the PM.
 - Test thoroughly after conflict resolution before merging
+
+## Post-Merge Cleanup — the Final Step (#7275)
+
+The merge-confirmation sequence ends with one command, run from the main
+checkout once `gh pr view <n> --json state` reports `MERGED`:
+
+```bash
+tm pr cleanup <n>
+```
+
+It is the executor for everything the merge made obsolete — the remote head
+branch, every worktree still holding the merged head, the local head branch and
+each `worktree-agent-*` branch at that commit, and the session claims on those
+directories. It reports one line per step and exits 0 only when every step
+succeeded. `tm pr merge <n>` already runs it as its own final step, so a merge
+you performed that way needs no second command; run it by hand after a merge
+that happened any other way.
+
+**A nonzero exit is reported to the PM, never worked around.** The one refusal
+is a worktree holding uncommitted or unpushed work: cleanup never passes
+`--force`, and neither do you. Do not delete that tree, do not re-run with a
+flag that discards it, and do not fall back to `git worktree remove --force` or
+`rm -rf` — say which tree refused and what it holds, and stop. Removing a
+worktree is the PM's to run in any case.
+
+Use `tm pr cleanup <n> --dry-run` to see the plan without changing anything.
+
+**Only pull requests `tm pr open` created are swept automatically.** The daemon
+watches a registry written at open time, so a pull request opened by hand, by
+`gh pr create`, or by a `tm` predating this feature has no entry and the
+periodic sweep never sees it. `tm pr cleanup <n>` takes the number directly and
+needs no entry, so running it by hand cleans up such a pull request exactly the
+same way. Under `--auto` the sweep is the only trigger — nothing runs at merge
+time — so an unrecorded pull request merged that way is not cleaned up at all
+until someone runs the command.

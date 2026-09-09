@@ -156,6 +156,10 @@ pub mod pid_registry;
 // an outer `///` here would resolve its intra-doc links in THIS scope and break
 // them (`check_rustdoc_links.sh`).
 pub mod policy_labels;
+// #7275: deterministic post-merge cleanup — the executor behind
+// `tm pr cleanup <n>`, shared by `tm pr merge`'s final step and the
+// supervisor's periodic merged-PR sweep.
+pub mod pr_cleanup;
 pub mod process;
 pub mod project;
 pub mod project_aliases;

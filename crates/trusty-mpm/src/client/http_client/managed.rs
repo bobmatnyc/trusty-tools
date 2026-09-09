@@ -331,4 +331,49 @@ impl DaemonClient {
             .context("decoding decommission response body")?;
         Ok(outcome)
     }
+
+    /// Tombstone a managed session's RECORD only, leaving its workspace and
+    /// runtime untouched (#7275).
+    ///
+    /// Why: post-merge cleanup ends the session claim on a worktree it is about
+    /// to remove, and must do so without killing a process it does not own —
+    /// `SessionManager::decommission_record_only` is the daemon-side path with
+    /// exactly that guarantee, reached by `?record_only=true`. Cleanup runs
+    /// from the CLI, so it needs that path over HTTP.
+    /// What: the same endpoint as
+    /// [`decommission_managed_session`](Self::decommission_managed_session)
+    /// with `record_only=true`, returning the daemon's verdict so the caller
+    /// can check `workspace_removed` is `false` — the one observable that
+    /// distinguishes a genuine record-only tombstone from a daemon too old to
+    /// read the query parameter at all.
+    ///
+    /// `bin/tm/commands/session_picker_prune::decommission_dead_record` builds
+    /// its own request rather than calling this: its three-way outcome, in
+    /// which an UNPARSABLE body arms an hour-long stale-daemon sentinel, is
+    /// auto-prune policy rather than a transport concern, and collapsing it
+    /// into this function's `Err` would remove that protection.
+    /// Test: `cleanup_ends_a_session_claim_before_removing_the_worktree` covers
+    /// the decision this feeds against a fake; the wire shape is shared with
+    /// `decommission_outcome_round_trips_daemon_response`.
+    pub async fn decommission_managed_session_record_only(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<ManagedDecommissionOutcome> {
+        let url = format!("{}/api/v1/sessions/managed/{id}/decommission", self.base);
+        let resp = self
+            .http
+            .post(&url)
+            .query(&[("record_only", "true")])
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            anyhow::bail!("managed session '{id}' not found");
+        }
+        let outcome = resp
+            .error_for_status()?
+            .json()
+            .await
+            .context("decoding record-only decommission response body")?;
+        Ok(outcome)
+    }
 }

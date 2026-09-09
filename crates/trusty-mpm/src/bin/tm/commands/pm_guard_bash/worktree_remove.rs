@@ -342,12 +342,27 @@ mod tests {
         dirty: Result<usize, String>,
         unpushed: Result<UpstreamComparison, String>,
         branch: Result<String, String>,
+        /// The answer for the CHECKED-OUT branch name.
         merged: Result<MergedPrLookup, String>,
+        /// #7275 round 2: the answer for the round-stripped stem, which the
+        /// guard asks for only when the branch itself has no merged pull
+        /// request. `None` means GitHub reported nothing for it either.
+        merged_related: Option<Result<MergedPrLookup, String>>,
+        /// #7275: whether merging this tree into its base would change nothing.
+        noop_merge: Result<bool, String>,
+        /// #7275 round 2: the base ref the merge-tree question was asked
+        /// against, so a test can prove it came from the pull request.
+        asked_base: std::cell::RefCell<Option<String>>,
     }
 
-    /// A merged-PR answer for the fixture repository (#7057).
+    /// A merged-PR answer for the fixture repository (#7057), landing on `main`.
     fn lookup(count: usize) -> MergedPrLookup {
-        MergedPrLookup::new(count, FAKE_REPO)
+        lookup_on(count, if count == 0 { "" } else { "main" })
+    }
+
+    /// A merged-PR answer that landed on a named base (#7275 round 2).
+    fn lookup_on(count: usize, base: &str) -> MergedPrLookup {
+        MergedPrLookup::new(count, FAKE_REPO, base)
     }
 
     /// The repository the fake probe reports having searched (#7057).
@@ -361,6 +376,25 @@ mod tests {
                 unpushed: Ok(UpstreamComparison::Ahead(0)),
                 branch: Ok("feat/thing".to_string()),
                 merged: Ok(lookup(1)),
+                merged_related: None,
+                // #7275: a tree with its own merged PR and a live, level
+                // upstream is never asked this; a false default keeps the
+                // merged-PR arm the only thing granting here.
+                noop_merge: Ok(false),
+                asked_base: std::cell::RefCell::new(None),
+            }
+        }
+
+        /// #7275: the round-N sibling shape — no pull request carries this
+        /// branch's own name, its round-1 sibling's DID merge, and its content
+        /// is already on that pull request's base.
+        fn round_sibling() -> Self {
+            Self {
+                branch: Ok("feat/thing-r2".to_string()),
+                merged: Ok(lookup(0)),
+                merged_related: Some(Ok(lookup(1))),
+                noop_merge: Ok(true),
+                ..Self::upstream_deleted()
             }
         }
 
@@ -387,10 +421,168 @@ mod tests {
         fn merged_pull_requests(
             &self,
             _dir: &Path,
-            _branch: &str,
+            branch: &str,
         ) -> Result<MergedPrLookup, String> {
-            self.merged.clone()
+            // #7275 round 2: the answer depends on WHICH branch is asked
+            // about, because the guard now asks a second time for the
+            // round-stripped stem.
+            if self.branch.as_deref() == Ok(branch) {
+                return self.merged.clone();
+            }
+            self.merged_related.clone().unwrap_or_else(|| Ok(lookup(0)))
         }
+        fn merge_into_base_is_a_noop(&self, _dir: &Path, base_ref: &str) -> Result<bool, String> {
+            *self.asked_base.borrow_mut() = Some(base_ref.to_string());
+            self.noop_merge.clone()
+        }
+    }
+
+    /// REGRESSION (#7275, round 2): a round-N sibling is reclaimable when its
+    /// ROUND-1 pull request merged and its content is on that pull request's
+    /// base — no MERGED row ever carries the `-r2` name itself.
+    #[test]
+    fn a_round_sibling_whose_related_pr_merged_is_reclaimable() {
+        assert!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &FakeProbe::round_sibling())
+                .is_none(),
+            "a related MERGED pull request plus content on its base IS the landing \
+             evidence the merged-PR question stands in for"
+        );
+    }
+
+    /// 🔴 REGRESSION (#7275, round 2): the critic's CRITICAL. An empty merge
+    /// tree with NO merged pull request anywhere must DENY.
+    ///
+    /// Why: round 1 asked `merge_into_base_is_a_noop` the moment the lookup
+    /// returned zero and granted on `Ok(true)`. A branch that was never pushed,
+    /// holding one empty or self-reverting commit, answers that exactly the way
+    /// a landed branch does — and it clears every other re-check by
+    /// construction: clean by being clean, `unpushed-commits` by reporting
+    /// `NoUpstream`, `sole-owner` by holding no live claim. The guard deleted a
+    /// tree GitHub had never seen. Fails on the round-1 commit, which grants.
+    #[test]
+    fn an_empty_merge_tree_without_any_merged_pr_still_denies() {
+        let probe = FakeProbe {
+            // The exact failing input: no PR for the branch, none for a
+            // sibling, an unpushed branch, and a merge that changes nothing.
+            branch: Ok("feat/never-pushed".to_string()),
+            merged: Ok(lookup(0)),
+            merged_related: None,
+            noop_merge: Ok(true),
+            ..FakeProbe::upstream_deleted()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("content-equivalence alone is not landing evidence");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(
+            reason.contains("never pushed"),
+            "the deny must say why an empty merge proves nothing: {reason}"
+        );
+    }
+
+    /// REGRESSION (#7275, round 2): a related MERGED pull request is not a
+    /// blanket pass — a sibling still holding residue denies and names it.
+    #[test]
+    fn a_related_merged_pr_with_a_non_empty_merge_tree_denies_with_the_residue() {
+        let probe = FakeProbe {
+            noop_merge: Ok(false),
+            ..FakeProbe::round_sibling()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("work the merge did not carry must deny");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains("would still change files"), "{reason}");
+        assert!(reason.contains("diff --name-only"), "{reason}");
+    }
+
+    /// 🔴 REGRESSION (#7275, round 2): the base is the merged pull request's
+    /// own `baseRefName`, never `origin/HEAD`.
+    ///
+    /// Why: `base_ref_for` resolved `origin/HEAD` (falling back to
+    /// `origin/main`), so a branch that merged into a release or stacked base
+    /// was judged against the default branch — the wrong comparison, in the
+    /// grant direction. Fails on the round-1 commit, where the probe is never
+    /// told which base to use.
+    #[test]
+    fn the_merge_tree_is_judged_against_the_merged_prs_own_base() {
+        let probe = FakeProbe {
+            merged_related: Some(Ok(lookup_on(1, "release/2.0"))),
+            ..FakeProbe::round_sibling()
+        };
+        assert!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe).is_none(),
+            "content on the PR's own base is still landing evidence"
+        );
+        assert_eq!(
+            probe.asked_base.borrow().as_deref(),
+            Some("origin/release/2.0"),
+            "the merge-tree question must use the pull request's base, not origin/HEAD"
+        );
+    }
+
+    /// #7275 round 2: a merged pull request GitHub named no base for is
+    /// undeterminable, not a licence to pick one.
+    #[test]
+    fn a_merged_pr_with_no_base_ref_denies() {
+        let probe = FakeProbe {
+            merged_related: Some(Ok(lookup_on(1, ""))),
+            ..FakeProbe::round_sibling()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("a base that cannot be established denies");
+        assert!(reason.contains("named no base branch"), "{reason}");
+        assert!(
+            probe.asked_base.borrow().is_none(),
+            "the merge-tree question must not be asked without a base"
+        );
+    }
+
+    /// REGRESSION (#7275): the standard post-merge state — `gh pr merge
+    /// --delete-branch` deleted the remote branch, so the stale tracking ref
+    /// leaves HEAD reading as "1 commit not on upstream" — no longer refuses a
+    /// tree whose content is on the base. Five clean, merged trees were blocked
+    /// this way on 2026-09-09, which is the exact cleanup the owner ruled must
+    /// happen. Fails on `origin/main`, where `Ahead(n > 0)` denies outright.
+    #[test]
+    fn a_stale_upstream_no_longer_refuses_a_merged_tree() {
+        let probe = FakeProbe {
+            unpushed: Ok(UpstreamComparison::Ahead(1)),
+            noop_merge: Ok(true),
+            ..FakeProbe::reclaimable()
+        };
+        assert!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe).is_none(),
+            "a stale tracking ref is not unpushed work when the content is on the base"
+        );
+    }
+
+    /// #7275: and genuinely unpushed work still denies, naming how to see it.
+    #[test]
+    fn a_stale_upstream_still_denies_when_work_is_not_on_the_base() {
+        let probe = FakeProbe {
+            unpushed: Ok(UpstreamComparison::Ahead(1)),
+            noop_merge: Ok(false),
+            ..FakeProbe::reclaimable()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("real unpushed work must deny");
+        assert!(reason.contains(CHECK_UNPUSHED_COMMITS), "{reason}");
+        assert!(reason.contains("on no remote"), "{reason}");
+        assert!(reason.contains("diff --name-only"), "{reason}");
+    }
+
+    /// #7275: an unanswerable content question denies, like every other
+    /// undeterminable fact this guard consults.
+    #[test]
+    fn a_sibling_whose_content_cannot_be_checked_denies() {
+        let probe = FakeProbe {
+            noop_merge: Err("git could not be run".to_string()),
+            ..FakeProbe::round_sibling()
+        };
+        assert!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe).is_some(),
+            "undeterminable is not absent"
+        );
     }
 
     #[test]
