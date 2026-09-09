@@ -7,9 +7,13 @@
 //! wall-clock budget rather than holding the commit open. Asserting on the
 //! hook's TEXT would prove neither; these tests run the real script under
 //! `/bin/sh` with a stamper on `PATH` that stalls, fails, or succeeds.
-//! What: five runs of the script — a stalled `tm`, a failing `tm`, a prompt
-//! `tm`, no session id, and the real `tm` binary folding a transcript larger
-//! than the fold's byte cap.
+//! It must also honour git's SECOND argument, the commit source (#7249) — a
+//! decision about WHOSE tokens the message describes, which likewise cannot be
+//! proved by reading the script.
+//! What: runs of the script under `/bin/sh` — a stalled `tm`, a failing `tm`, a
+//! prompt `tm`, no session id, the real `tm` binary folding a transcript larger
+//! than the fold's byte cap, and one run per commit source that changes the
+//! answer: `merge`, `squash`, and `commit` with and without a session.
 //! Test: this file IS the test module.
 
 use std::io::Write as _;
@@ -70,8 +74,33 @@ impl Fixture {
         write_executable(&self.bin.join("tm"), body);
     }
 
-    /// Run the hook, returning its exit status and how long it took.
+    /// Put the real `tm` binary on the hook's `PATH`, as a shim rather than a
+    /// copy: it keeps the test off any code-signing question and costs nothing.
+    fn real_tm(&self) {
+        write_executable(
+            &self.bin.join("tm"),
+            &format!("#!/bin/sh\nexec {:?} \"$@\"\n", env!("CARGO_BIN_EXE_tm")),
+        );
+    }
+
+    /// Run the hook with git's one-argument form, as an ordinary editor commit.
     fn run(&self, session_id: Option<&str>, budget: &str) -> (std::process::ExitStatus, Duration) {
+        self.run_sourced(session_id, budget, None, None)
+    }
+
+    /// Run the hook, returning its exit status and how long it took.
+    ///
+    /// `source` is git's second `prepare-commit-msg` argument, passed only when
+    /// given so the one-argument call git makes for an editor commit is
+    /// exercised too. `root` sets `TRUSTY_MPM_ROOT` for a run against the real
+    /// binary.
+    fn run_sourced(
+        &self,
+        session_id: Option<&str>,
+        budget: &str,
+        source: Option<&str>,
+        root: Option<&Path>,
+    ) -> (std::process::ExitStatus, Duration) {
         let path = format!(
             "{}:{}",
             self.bin.display(),
@@ -84,13 +113,44 @@ impl Fixture {
             .env("TM_COMMIT_STATS_TIMEOUT", budget)
             .env_remove("TM_SKIP_COMMIT_STATS")
             .env_remove("CLAUDE_CODE_SESSION_ID");
+        if let Some(source) = source {
+            cmd.arg(source);
+        }
         if let Some(id) = session_id {
             cmd.env("CLAUDE_CODE_SESSION_ID", id);
+        }
+        if let Some(root) = root {
+            cmd.env("TRUSTY_MPM_ROOT", root);
         }
 
         let started = Instant::now();
         let status = cmd.status().expect("the hook must be runnable");
         (status, started.elapsed())
+    }
+
+    /// Overwrite the commit message the hook will be handed.
+    fn set_message(&self, text: &str) {
+        std::fs::write(&self.message, text).expect("write message");
+    }
+
+    /// A managed root whose only session, `session_id`, has a transcript worth
+    /// 10 input and 7 output tokens.
+    fn seed_root(&self, session_id: &str) -> PathBuf {
+        let root = self.root.path().join("mpm-root");
+        std::fs::create_dir_all(&root).expect("create root");
+        let transcript = self.root.path().join(format!("{session_id}.jsonl"));
+        std::fs::write(
+            &transcript,
+            b"{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":10,\"output_tokens\":7}}}\n",
+        )
+        .expect("write transcript");
+        record_session_value(
+            &root,
+            KIND_TRANSCRIPT,
+            session_id,
+            &transcript.display().to_string(),
+        );
+        root
     }
 
     fn message_text(&self) -> String {
@@ -189,13 +249,7 @@ fn no_session_id_means_no_stamper_at_all() {
 #[test]
 fn the_real_stamper_folds_an_oversized_transcript_inside_the_budget() {
     let fixture = Fixture::new();
-
-    // The hook resolves `tm` off PATH. A shim rather than a copy of the binary:
-    // it keeps the test off any code-signing question and costs nothing.
-    write_executable(
-        &fixture.bin.join("tm"),
-        &format!("#!/bin/sh\nexec {:?} \"$@\"\n", env!("CARGO_BIN_EXE_tm")),
-    );
+    fixture.real_tm();
 
     let root = fixture.root.path().join("mpm-root");
     std::fs::create_dir_all(&root).expect("create root");
@@ -208,23 +262,7 @@ fn the_real_stamper_folds_an_oversized_transcript_inside_the_budget() {
         &transcript.display().to_string(),
     );
 
-    let path = format!(
-        "{}:{}",
-        fixture.bin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let started = Instant::now();
-    let status = Command::new("/bin/sh")
-        .arg(&fixture.hook)
-        .arg(&fixture.message)
-        .env("PATH", path)
-        .env("TRUSTY_MPM_ROOT", &root)
-        .env("CLAUDE_CODE_SESSION_ID", "sess-big")
-        .env("TM_COMMIT_STATS_TIMEOUT", "20")
-        .env_remove("TM_SKIP_COMMIT_STATS")
-        .status()
-        .expect("the hook must be runnable");
-    let elapsed = started.elapsed();
+    let (status, elapsed) = fixture.run_sourced(Some("sess-big"), "20", None, Some(&root));
 
     assert!(status.success(), "the hook must exit 0: {status:?}");
     let stamped = fixture.message_text();
@@ -237,6 +275,95 @@ fn the_real_stamper_folds_an_oversized_transcript_inside_the_budget() {
     assert!(
         elapsed < Duration::from_secs(20),
         "the capped fold must finish well inside the budget: {elapsed:?}"
+    );
+}
+
+/// Why (#7249): git passes the commit SOURCE as its second argument, and a
+/// merge message is assembled from the merge's parents — the tokens of whoever
+/// ran `git merge` describe none of it. The hook must not spawn the stamper at
+/// all. A hook that ignored the argument stamps here, which is the bug.
+/// Test: itself.
+#[test]
+fn a_merge_source_leaves_the_message_untouched() {
+    let fixture = Fixture::new();
+    // The hook invokes `tm commit-trailers --message-file <path>`, so the
+    // message file is the third argument.
+    fixture.fake_tm("#!/bin/sh\nprintf '\\nTokens-In: 42\\n' >> \"$3\"\n");
+
+    let (status, _) = fixture.run_sourced(Some("sess-merge"), "60", Some("merge"), None);
+
+    assert!(status.success(), "the hook must exit 0: {status:?}");
+    assert_eq!(
+        fixture.message_text(),
+        "feat: a thing (Refs #7074)\n",
+        "a merge commit's message belongs to no single session"
+    );
+}
+
+/// Why (#7249): the same rule for `squash` — the message is assembled by git or
+/// GitHub from a branch's commits, each with its own figures.
+/// Test: itself.
+#[test]
+fn a_squash_source_leaves_the_message_untouched() {
+    let fixture = Fixture::new();
+    fixture.fake_tm("#!/bin/sh\nprintf '\\nTokens-In: 42\\n' >> \"$3\"\n");
+
+    let (status, _) = fixture.run_sourced(Some("sess-squash"), "60", Some("squash"), None);
+
+    assert!(status.success(), "the hook must exit 0: {status:?}");
+    assert_eq!(fixture.message_text(), "feat: a thing (Refs #7074)\n");
+}
+
+/// Why (#7249): a cherry-pick hands the hook the ORIGINAL commit's message,
+/// block included. Before this fix `already_stamped()` read that inherited
+/// block as this session's own work and left the stale figures in place. The
+/// whole path — hook, source argument, real `tm` — has to replace them.
+/// Test: itself.
+#[test]
+fn a_commit_source_replaces_inherited_trailers() {
+    let fixture = Fixture::new();
+    fixture.real_tm();
+    let root = fixture.seed_root("sess-pick");
+    fixture.set_message(
+        "feat: a thing (Refs #7249)\n\nTokens-In: 999999\nTokens-Out: 888888\nModel: some-other-model\n",
+    );
+
+    let (status, _) = fixture.run_sourced(Some("sess-pick"), "20", Some("commit"), Some(&root));
+
+    assert!(status.success(), "the hook must exit 0: {status:?}");
+    let stamped = fixture.message_text();
+    assert!(
+        !stamped.contains("999999") && !stamped.contains("some-other-model"),
+        "the original commit's figures must be gone: {stamped}"
+    );
+    assert!(stamped.contains("Tokens-In: 10"), "{stamped}");
+    assert!(stamped.contains("Tokens-Out: 7"), "{stamped}");
+    assert_eq!(
+        stamped.matches("Tokens-In:").count(),
+        1,
+        "exactly one stats block: {stamped}"
+    );
+}
+
+/// Why (#7249): the strip is not conditional on having something to write in
+/// its place. Cherry-picking outside a Claude Code session must still remove
+/// the original session's figures — no block at all is correct, another
+/// session's block is not.
+/// Test: itself.
+#[test]
+fn a_commit_source_strips_even_with_no_session() {
+    let fixture = Fixture::new();
+    fixture.real_tm();
+    let root = fixture.seed_root("sess-pick");
+    fixture.set_message("feat: a thing (Refs #7249)\n\nTokens-In: 999999\nSavings: 91%\n");
+
+    let (status, _) = fixture.run_sourced(None, "20", Some("commit"), Some(&root));
+
+    assert!(status.success(), "the hook must exit 0: {status:?}");
+    assert_eq!(
+        fixture.message_text(),
+        "feat: a thing (Refs #7249)\n",
+        "the inherited block goes and nothing replaces it"
     );
 }
 

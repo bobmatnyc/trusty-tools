@@ -1,5 +1,5 @@
 #!/bin/sh
-# trusty-mpm-commit-stats: v2
+# trusty-mpm-commit-stats: v3
 #
 # Stamp the commit message with the session's token counts, savings percentage
 # and model id, as git trailers (#7074). Installed by trusty-mpm into the
@@ -20,13 +20,45 @@
 #
 # Set TM_SKIP_COMMIT_STATS=1 to turn it off for one commit, or
 # TM_COMMIT_STATS_TIMEOUT to a whole number of seconds to change the budget.
+#
+# Git's SECOND argument says where the message came from, and the footer means
+# something different for each source (#7249). Tokens are a property of one
+# session's work on one message:
+#
+#   merge     git built the message from the merge's parents. The tokens of
+#             whoever ran `git merge` describe none of it. No stamping.
+#   squash    the message is assembled by git or GitHub from a branch's
+#             commits, each with its own figures. No stamping.
+#   commit    the message comes from an existing commit — a cherry-pick, a
+#             revert, `--amend`, `-c`/`-C`. Any block in it belongs to the
+#             session that made the ORIGINAL commit, so it is STRIPPED and this
+#             session's figures are stamped in its place. With no current
+#             session the strip still happens and nothing is added: no block is
+#             correct where another session's block is not. This is the one
+#             source that runs the stamper outside a Claude Code session.
+#   message   `-m` / `-F`, and `template` — the message is this commit's own.
+#             Stamped, as is the empty source git passes for an editor commit.
+#
+# `tm commit-trailers` is handed the source and applies the same rules, so the
+# `merge` and `squash` arms below are the cheap short-circuit rather than the
+# decision. Stamping stays idempotent WITHIN a source: a re-run over a message
+# this session already stamped adds nothing.
 
 set -u
 
 [ -n "${TM_SKIP_COMMIT_STATS:-}" ] && exit 0
 
-# Only a commit made inside a Claude Code session has stats to report.
-[ -n "${CLAUDE_CODE_SESSION_ID:-}" ] || exit 0
+commit_source="${2:-}"
+
+case "$commit_source" in
+  merge | squash) exit 0 ;;
+esac
+
+# Only a commit made inside a Claude Code session has stats to report — except
+# a reused message, which may carry another session's stats to remove.
+if [ "$commit_source" != commit ] && [ -z "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+  exit 0
+fi
 
 command -v tm >/dev/null 2>&1 || exit 0
 
@@ -35,7 +67,7 @@ case "$budget" in
   '' | *[!0-9]*) budget=2 ;;
 esac
 
-tm commit-trailers --message-file "$1" >/dev/null 2>&1 &
+tm commit-trailers --message-file "$1" --commit-source "$commit_source" >/dev/null 2>&1 &
 stamper=$!
 
 # Poll in tenths of a second so a stamper that finishes in milliseconds — the

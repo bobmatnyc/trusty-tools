@@ -32,6 +32,11 @@
 //! - **`git commit --verbose` appends a diff after a scissors line.** Anything
 //!   below that line is discarded, so the scissors bound the insert.
 //!
+//! Whether a message gets a block at all depends on git's commit SOURCE, not
+//! only on its text: [`stamp_policy`] maps the source to skip, restamp, or
+//! stamp, and [`strip_trailers`] removes a block a reused message carried in
+//! from another session (#7249).
+//!
 //! Test: the inline suite in `commit_trailers_tests.rs` —
 //! `render_omits_absent_fields`, `render_is_none_when_nothing_is_known`,
 //! `git_interpret_trailers_parses_the_appended_block`,
@@ -78,6 +83,142 @@ pub const TRAILER_MODEL: &str = "Model";
 /// trailer inserted below it never reaches the commit object.
 /// Test: `append_stays_above_the_scissors_line`.
 const SCISSORS: &str = "# ------------------------ >8 ------------------------";
+
+/// The five keys this footer owns, in render order.
+///
+/// Why: [`strip_trailers`] has to recognise a block it wrote in an earlier
+/// session, and recognising it by key is the only thing available — the values
+/// are exactly what changed.
+/// Test: `strip_removes_an_inherited_block`.
+const STATS_KEYS: [&str; 5] = [
+    TRAILER_TOKENS_IN,
+    TRAILER_TOKENS_OUT,
+    TRAILER_TOKENS_WINDOW,
+    TRAILER_SAVINGS,
+    TRAILER_MODEL,
+];
+
+/// What to do with a commit message, given how git says the commit was made.
+///
+/// Why: git tells a `prepare-commit-msg` hook its second argument — the commit
+/// SOURCE — and the footer means something different for each (#7249). Tokens
+/// are a property of one session's work on one message; a source that assembles
+/// a message from other commits, or carries one in from another session, has no
+/// such figure to state.
+/// What: three answers, one per source class. See [`stamp_policy`].
+/// Test: `stamp_policy_skips_merge_and_squash`,
+/// `stamp_policy_restamps_a_reused_message`, `stamp_policy_stamps_a_new_message`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StampPolicy {
+    /// Write nothing: the message belongs to no single session.
+    Skip,
+    /// Remove any inherited block first, then stamp this session's figures.
+    Restamp,
+    /// Stamp, leaving anything already there alone.
+    Stamp,
+}
+
+/// Which policy git's commit-source argument earns.
+///
+/// Why (#7249): the hook used to ignore the argument, so a merge or squash got
+/// the committing session's token counts stamped onto a message assembled from
+/// other people's commits, and a cherry-pick kept the ORIGINAL commit's counts —
+/// [`already_stamped`] read the inherited block as this session's own work and
+/// left it in place. The four rules below are what the sources actually mean:
+///
+/// - `merge` — git built the message from the merge's parents. The tokens of
+///   whoever ran `git merge` describe none of it. **Skip.**
+/// - `squash` — the message is assembled by git or GitHub from a branch's
+///   commits, each with its own figures. **Skip.**
+/// - `commit` — the message comes from an existing commit: a cherry-pick, a
+///   revert, `--amend`, `-c`/`-C`. The new commit is this session's work, so any
+///   inherited block is stale and misattributed. **Restamp** — strip what came
+///   in, then stamp this session's figures. With no current session there is
+///   nothing to stamp, and the strip still happens: no block at all is correct,
+///   another session's block is not.
+/// - `message` (`-m`/`-F`), `template`, and the empty source git passes for an
+///   ordinary editor commit — the message is this commit's own. **Stamp.**
+///
+/// What: an unrecognised source stamps, matching the empty-source case, because
+/// a source git adds later is far likelier to be message-shaped than
+/// merge-shaped, and a wrong stamp is recoverable where a silently skipped one
+/// is invisible.
+/// Test: `stamp_policy_skips_merge_and_squash`,
+/// `stamp_policy_restamps_a_reused_message`, `stamp_policy_stamps_a_new_message`.
+pub fn stamp_policy(source: &str) -> StampPolicy {
+    match source.trim() {
+        "merge" | "squash" => StampPolicy::Skip,
+        "commit" => StampPolicy::Restamp,
+        _ => StampPolicy::Stamp,
+    }
+}
+
+/// Remove a stats footer this code wrote, wherever the message came from.
+///
+/// Why (#7249): a cherry-picked or amended message arrives carrying the ORIGINAL
+/// commit's figures. Those numbers are not wrong about anything the new commit
+/// did — they describe a different session's work — so they are removed rather
+/// than left beside a second block.
+/// What: only the message's LAST content paragraph is considered, and only when
+/// every one of its lines is one of [`STATS_KEYS`] — that is the exact shape
+/// [`append_trailers`] writes, and confining the match to it keeps a `Model:`
+/// line in someone's prose out of scope. The blank line that separated the block
+/// from the paragraph above goes with it. A trailing comment block and anything
+/// below a `--verbose` scissors line are left where they are. A message with no
+/// such block is returned unchanged.
+/// Test: `strip_removes_an_inherited_block`,
+/// `strip_leaves_a_message_that_has_none`,
+/// `strip_keeps_a_trailing_comment_block`,
+/// `strip_leaves_a_paragraph_that_is_not_only_trailers`.
+pub fn strip_trailers(message: &str) -> String {
+    let lines: Vec<&str> = message.lines().collect();
+    let scissors_at = lines.iter().position(|line| line.trim_end() == SCISSORS);
+    let search_end = scissors_at.unwrap_or(lines.len());
+    let Some(last) = lines[..search_end]
+        .iter()
+        .rposition(|line| is_content(line))
+    else {
+        return message.to_string();
+    };
+
+    let mut first = last;
+    while first > 0 && is_content(lines[first - 1]) {
+        first -= 1;
+    }
+    if !lines[first..=last]
+        .iter()
+        .all(|line| is_stats_trailer(line))
+    {
+        return message.to_string();
+    }
+
+    let mut cut_from = first;
+    if cut_from > 0 && lines[cut_from - 1].trim().is_empty() {
+        cut_from -= 1;
+    }
+
+    let mut kept: Vec<&str> = Vec::with_capacity(lines.len());
+    kept.extend_from_slice(&lines[..cut_from]);
+    kept.extend_from_slice(&lines[last + 1..]);
+
+    let mut out = kept.join("\n");
+    if message.ends_with('\n') && !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+/// Is `line` one of this footer's own trailer lines?
+///
+/// Test: `strip_removes_an_inherited_block`.
+fn is_stats_trailer(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    STATS_KEYS.iter().any(|key| {
+        trimmed
+            .strip_prefix(key)
+            .is_some_and(|rest| rest.starts_with(':'))
+    })
+}
 
 /// What one commit's stats footer states, each field independently optional.
 ///
@@ -223,6 +364,12 @@ pub fn append_trailers(message: &str, trailers: &str) -> String {
 
 /// Does `message` already carry a stats footer?
 ///
+/// Why: this is the idempotency guard WITHIN one commit source — `git commit
+/// --amend` and a retried hook both re-run over a message this session already
+/// stamped, and a second block would be the one git parses. It cannot tell that
+/// block apart from one a cherry-pick carried in from another session, which is
+/// why the `commit` source strips before it stamps rather than asking here
+/// (#7249, [`stamp_policy`]).
 /// Test: `append_is_idempotent`.
 fn already_stamped(message: &str) -> bool {
     message.lines().any(|line| {

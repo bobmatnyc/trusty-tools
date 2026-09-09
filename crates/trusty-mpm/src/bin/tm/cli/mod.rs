@@ -1663,6 +1663,13 @@ pub(crate) struct CommitTrailersArgs {
     /// `prepare-commit-msg` hook. Omitted, the trailers go to stdout.
     #[arg(long, value_name = "PATH")]
     pub(crate) message_file: Option<std::path::PathBuf>,
+    /// Git's commit source — its second `prepare-commit-msg` argument (#7249).
+    ///
+    /// `merge` and `squash` write nothing; `commit` (cherry-pick, revert,
+    /// amend, `-c`/`-C`) strips any inherited block before stamping; anything
+    /// else, the empty string included, stamps as usual.
+    #[arg(long, value_name = "SOURCE")]
+    pub(crate) commit_source: Option<String>,
 }
 
 #[derive(Debug, Clone, clap::Args)]
