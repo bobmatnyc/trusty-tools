@@ -307,7 +307,10 @@ pub(crate) async fn install(
 pub(crate) fn install_claude_hooks() -> anyhow::Result<usize> {
     let config_dir = trusty_mpm::core::trusty_tools_config::managed_claude_config_dir()
         .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
-    install_claude_hooks_at(&config_dir)
+    install_claude_hooks_at(
+        &config_dir,
+        trusty_mpm::core::standalone::hooks::resolve_current_exe(),
+    )
 }
 
 /// Hermetic worker behind [`install_claude_hooks`] — writes the MPM hook
@@ -316,11 +319,19 @@ pub(crate) fn install_claude_hooks() -> anyhow::Result<usize> {
 /// Why: separated so tests can point `config_dir` at a `tempfile::TempDir`
 /// instead of the real tm-owned config home, and so the caller's home-
 /// resolution failure is the only thing [`install_claude_hooks`] adds.
-/// What: resolves the absolute running-binary path once, calls
-/// [`trusty_mpm::core::standalone::hooks::write_project_hooks`] against
-/// `<config_dir>/settings.json`, and prints a status line.
+/// #7244: `exe` moved out of here for the same reason `config_dir` did — a test
+/// process's own binary is a build artifact the writer refuses, and a CI runner
+/// has no installed `tm` for the PATH fallback, so resolving it here made these
+/// tests assert whether the host has `tm` installed. Production still passes
+/// [`trusty_mpm::core::standalone::hooks::resolve_current_exe`].
+/// What: calls [`trusty_mpm::core::standalone::hooks::write_project_hooks`]
+/// against `<config_dir>/settings.json` with `exe` as the pinned binary, and
+/// prints a status line.
 /// Test: see [`install_claude_hooks`]'s test list.
-fn install_claude_hooks_at(config_dir: &std::path::Path) -> anyhow::Result<usize> {
+fn install_claude_hooks_at(
+    config_dir: &std::path::Path,
+    exe: Option<std::path::PathBuf>,
+) -> anyhow::Result<usize> {
     use colored::Colorize;
 
     let settings_path = config_dir.join("settings.json");
@@ -329,7 +340,6 @@ fn install_claude_hooks_at(config_dir: &std::path::Path) -> anyhow::Result<usize
         settings_path.display()
     );
 
-    let exe = trusty_mpm::core::standalone::hooks::resolve_current_exe();
     match trusty_mpm::core::standalone::hooks::write_project_hooks(&settings_path, exe.as_deref()) {
         Ok(true) => {
             println!("  {} {}", "✓".green(), settings_path.display());

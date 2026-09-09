@@ -44,6 +44,19 @@ pub(crate) use trusty_mpm::core::spawn_disclaim::disclaimed_output as tmux_spawn
 /// Same prefix the lib's fixture uses, so its sweep reaps these too.
 const TEST_DIR_PREFIX: &str = "tm-test-";
 
+/// An absolute, installed-looking `tm` path every hook-writing test can pin
+/// (#7244) — this target's spelling of `trusty_mpm::test_support::STABLE_HOOK_EXE`,
+/// duplicated for the same reason `hermetic_temp_dir` is: the lib's copy is
+/// `#[cfg(test)] pub(crate)` and no visibility change reaches this target.
+///
+/// Why the value matters: the hooks writer refuses a build-artifact binary, and
+/// a test process is one; a CI runner then has no installed `tm` to fall back
+/// to. This path passes both of the writer's gates and is never created or
+/// executed — only its spelling is inspected. It must stay outside any temp
+/// root, which `is_ephemeral_build_path` also refuses.
+/// Test: `install_claude_hooks_at_is_idempotent`, `update_cmd_errors_if_not_loaded`.
+pub(crate) const STABLE_HOOK_EXE: &str = "/usr/local/bin/tm";
+
 /// The real, hardcoded OS temp root — deliberately NOT `std::env::temp_dir()`.
 ///
 /// Why: `env::temp_dir()` reads `$TMPDIR`, which is the exact indirection this

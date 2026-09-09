@@ -763,12 +763,16 @@ fn rm_cmd_succeeds_when_project_dir_absent() {
 #[test]
 fn update_cmd_errors_if_alias_not_in_registry() {
     use crate::commands::managed_root::ManagedPaths;
-    use crate::commands::standalone::update_cmd;
+    use crate::commands::standalone::update_cmd_with_exe;
 
     let tmp = tempfile::TempDir::new().unwrap();
     let paths = ManagedPaths::from_root(tmp.path().to_path_buf());
 
-    let result = update_cmd(&paths, Some("missing-alias"));
+    let result = update_cmd_with_exe(
+        &paths,
+        Some("missing-alias"),
+        Some(std::path::Path::new(crate::test_support::STABLE_HOOK_EXE)),
+    );
     assert!(result.is_err(), "update_cmd must error when alias unknown");
     let msg = format!("{}", result.unwrap_err());
     assert!(
@@ -783,7 +787,7 @@ fn update_cmd_errors_if_not_loaded() {
     // exist (never loaded) must error IMMEDIATELY with a message that hints to
     // run `tm load <alias>` first — not a generic end-of-loop bail.
     use crate::commands::managed_root::ManagedPaths;
-    use crate::commands::standalone::update_cmd;
+    use crate::commands::standalone::update_cmd_with_exe;
     use trusty_mpm::core::standalone::registry::ManagedRegistry;
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -797,7 +801,11 @@ fn update_cmd_errors_if_not_loaded() {
     reg.save().unwrap();
     assert!(!root.join("projects").join("not-loaded").exists());
 
-    let result = update_cmd(&paths, Some("not-loaded"));
+    let result = update_cmd_with_exe(
+        &paths,
+        Some("not-loaded"),
+        Some(std::path::Path::new(crate::test_support::STABLE_HOOK_EXE)),
+    );
     assert!(
         result.is_err(),
         "update_cmd must error when alias is registered but not yet loaded"
@@ -818,7 +826,7 @@ fn update_cmd_all_skips_unloaded_returns_ok_when_none_loaded() {
     // `tm update` (no alias) with zero loaded projects should print a message
     // and return Ok.
     use crate::commands::managed_root::ManagedPaths;
-    use crate::commands::standalone::update_cmd;
+    use crate::commands::standalone::update_cmd_with_exe;
     use trusty_mpm::core::standalone::registry::ManagedRegistry;
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -832,7 +840,11 @@ fn update_cmd_all_skips_unloaded_returns_ok_when_none_loaded() {
     reg.save().unwrap();
 
     // With no loaded projects, update_cmd should return Ok (nothing to do).
-    let result = update_cmd(&paths, None);
+    let result = update_cmd_with_exe(
+        &paths,
+        None,
+        Some(std::path::Path::new(crate::test_support::STABLE_HOOK_EXE)),
+    );
     assert!(
         result.is_ok(),
         "update_cmd with no loaded aliases must return Ok"

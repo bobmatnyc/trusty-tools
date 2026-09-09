@@ -18,6 +18,30 @@
 use super::*;
 use tempfile::TempDir;
 
+/// The production entry point, with a stable hook binary pinned for every case
+/// in this file.
+///
+/// Why (#7244): the repair pipeline writes the project's hooks, which refuses a
+/// build-artifact binary — and a test process is one. A CI runner has no
+/// installed `tm` for the PATH fallback, so `HooksMissing` stayed a gap and a
+/// repair could never report complete.
+/// What: shadows [`super::validate_and_repair`] with the identical signature,
+/// delegating to [`super::validate_and_repair_with_exe`] with
+/// [`crate::test_support::STABLE_HOOK_EXE`].
+/// Test: `repair_closes_gaps_on_incomplete_workspace`.
+fn validate_and_repair(
+    fw: &FrameworkPaths,
+    workspace: &Path,
+    repo_url: Option<&str>,
+) -> RepairOutcome {
+    super::validate_and_repair_with_exe(
+        fw,
+        workspace,
+        repo_url,
+        Some(Path::new(crate::test_support::STABLE_HOOK_EXE)),
+    )
+}
+
 /// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
 /// identical pattern in `core::standalone::load::tests::HomeGuard` and
 /// `session_launch::tests::EnvVarGuard`.

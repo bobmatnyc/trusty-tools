@@ -24,14 +24,44 @@
 //! Test: this file IS the test module; run with
 //! `cargo test -p trusty-mpm --test standalone_isolation`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use trusty_mpm::core::{
     bundle::OUTPUT_STYLES,
     standalone::{
-        global_config::ensure_global_config_dir, hooks::ensure_managed_hooks, preseed_managed_trust,
+        global_config::ensure_global_config_dir_with_exe, hooks::ensure_managed_hooks_with_exe,
+        preseed_managed_trust,
     },
 };
+
+/// An absolute, installed-looking `tm` path this file pins for every hook write.
+///
+/// Why (#7244): the hooks writer refuses a build-artifact binary, and this test
+/// binary is one; a CI runner then has no installed `tm` for the PATH fallback,
+/// so every case here aborted on the refusal instead of asserting the isolation
+/// boundary it exists for. The path passes both of the writer's gates and is
+/// never created or executed — only its spelling is inspected. It must stay
+/// outside any temp root, which `is_ephemeral_build_path` also refuses.
+const STABLE_HOOK_EXE: &str = "/usr/local/bin/tm";
+
+/// [`ensure_global_config_dir_with_exe`] with [`STABLE_HOOK_EXE`] pinned, under
+/// the production name so no case in this file carries the fixture.
+fn ensure_global_config_dir(
+    managed_root: &Path,
+    claude_config_dir: &Path,
+) -> anyhow::Result<PathBuf> {
+    ensure_global_config_dir_with_exe(
+        managed_root,
+        claude_config_dir,
+        Some(Path::new(STABLE_HOOK_EXE)),
+    )
+}
+
+/// [`ensure_managed_hooks_with_exe`] with [`STABLE_HOOK_EXE`] pinned — see
+/// [`ensure_global_config_dir`] above.
+fn ensure_managed_hooks(claude_config_dir: &Path) -> anyhow::Result<()> {
+    ensure_managed_hooks_with_exe(claude_config_dir, Some(Path::new(STABLE_HOOK_EXE)))
+}
 
 // ── RAII HOME guard ────────────────────────────────────────────────────────────
 //

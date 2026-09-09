@@ -2630,8 +2630,12 @@ fn prepare_managed_config_writes_no_mcp_json_and_no_approval() {
     let cwd_root = tempfile::tempdir().expect("tempdir");
     let cwd = cwd_root.path();
 
-    let config_dir = prepare_managed_config("test-session", cwd)
-        .expect("prepare_managed_config must resolve a config dir under the redirected HOME");
+    let config_dir = prepare_managed_config_with_exe(
+        "test-session",
+        cwd,
+        Some(std::path::Path::new(crate::test_support::STABLE_HOOK_EXE)),
+    )
+    .expect("prepare_managed_config must resolve a config dir under the redirected HOME");
 
     assert!(
         !cwd.join(".mcp.json").exists(),

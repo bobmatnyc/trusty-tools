@@ -396,6 +396,24 @@ pub fn validate_and_repair(
     workspace: &Path,
     repo_url: Option<&str>,
 ) -> RepairOutcome {
+    validate_and_repair_with_exe(fw, workspace, repo_url, None)
+}
+
+/// [`validate_and_repair`] with the hook binary pinned by the caller.
+///
+/// Why (#7244): the repair pipeline writes the project's hooks, and that write
+/// refuses a build-artifact binary. A test process IS one, and a CI runner has
+/// no installed `tm`, so `HooksMissing` stayed a gap and the repair could never
+/// report complete. Pinning the path keeps the assertion about the pipeline.
+/// What: the body of [`validate_and_repair`], forwarding `hook_exe` to
+/// [`crate::core::session_launch::prepare_session_with_repo_url_and_exe`].
+/// Test: `repair_closes_gaps_on_incomplete_workspace`.
+pub fn validate_and_repair_with_exe(
+    fw: &FrameworkPaths,
+    workspace: &Path,
+    repo_url: Option<&str>,
+    hook_exe: Option<&Path>,
+) -> RepairOutcome {
     let before = validate_workspace(fw);
     if before.is_complete() {
         return RepairOutcome {
@@ -406,12 +424,13 @@ pub fn validate_and_repair(
         };
     }
 
-    let repair_error =
-        match crate::core::session_launch::prepare_session_with_repo_url(fw, workspace, repo_url) {
-            Ok(report) if !report.roster_errors.is_empty() => Some(report.roster_errors.join("; ")),
-            Ok(_) => None,
-            Err(e) => Some(e.to_string()),
-        };
+    let repair_error = match crate::core::session_launch::prepare_session_with_repo_url_and_exe(
+        fw, workspace, repo_url, hook_exe,
+    ) {
+        Ok(report) if !report.roster_errors.is_empty() => Some(report.roster_errors.join("; ")),
+        Ok(_) => None,
+        Err(e) => Some(e.to_string()),
+    };
 
     let after = validate_workspace(fw);
     // #4781: `repaired` is a statement about the OUTCOME, never about the

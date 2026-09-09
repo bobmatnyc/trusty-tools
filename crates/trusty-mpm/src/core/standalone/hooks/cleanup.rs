@@ -199,7 +199,7 @@ fn hook_commands(val: &Value) -> impl Iterator<Item = &str> {
 /// Would a strip of `val` remove the PM enforcement guard's entry?
 ///
 /// Why (#7262): `tm doctor --fix` prints one line per repair, and "remove tm
-/// hook entries under [PreToolUse]" does not tell the operator that PM
+/// hook entries under `PreToolUse`" does not tell the operator that PM
 /// enforcement just went offline. Nothing re-registers the guard until the
 /// project's next managed `tm` launch, so the consequence outlives the repair
 /// and has to be said out loud.

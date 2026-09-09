@@ -64,6 +64,28 @@ pub fn ensure_global_config_dir(
     managed_root: &Path,
     claude_config_dir: &Path,
 ) -> anyhow::Result<PathBuf> {
+    ensure_global_config_dir_with_exe(managed_root, claude_config_dir, None)
+}
+
+/// [`ensure_global_config_dir`] with the hook binary pinned by the caller.
+///
+/// Why (#7244): the hook resolution this function reaches refuses the running
+/// executable when it is a build artifact, and a CI runner has no installed
+/// `tm` for the PATH fallback to find — so every test that provisions a config
+/// dir aborted on a refusal instead of exercising the provisioning it is about.
+/// Pinning the path from the test makes the whole suite hermetic without
+/// touching the refusal, which stays exactly as strict for production callers
+/// (`exe_override` is `None` there, as it was before).
+/// What: the body of [`ensure_global_config_dir`], forwarding `exe_override` to
+/// [`super::hooks::ensure_managed_hooks_with_exe`].
+/// Test: `test_global_config_dir_ensure_idempotent`,
+/// `test_global_config_dir_seeds_builtin_mcp_servers`,
+/// `hook_triad_written_to_settings_json` (`tests/standalone_isolation.rs`).
+pub fn ensure_global_config_dir_with_exe(
+    managed_root: &Path,
+    claude_config_dir: &Path,
+    exe_override: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(claude_config_dir)?;
 
     // Issue #2214: seed `outputStyle`/`statusLine` defaults directly into the
@@ -73,7 +95,7 @@ pub fn ensure_global_config_dir(
 
     // WI-3: merge the MPM lifecycle hook triad (PreToolUse/PostToolUse/Stop)
     // into settings.json so managed sessions emit lifecycle events to the daemon.
-    super::hooks::ensure_managed_hooks(claude_config_dir)?;
+    super::hooks::ensure_managed_hooks_with_exe(claude_config_dir, exe_override)?;
 
     seed_credentials(claude_config_dir);
     seed_builtin_mcp_servers(claude_config_dir);
@@ -336,6 +358,29 @@ fn seed_builtin_mcp_servers(claude_config_dir: &Path) {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// The production entry point, with a stable hook binary pinned for every
+    /// case in this module.
+    ///
+    /// Why (#7244): this function writes the managed hook triad, which refuses
+    /// a build-artifact binary — and a test process is one. A CI runner has no
+    /// installed `tm` for the PATH fallback, so every case here aborted on the
+    /// refusal before reaching the scaffolding it asserts on. One shadow
+    /// supplies the pin for all of them.
+    /// What: shadows [`super::ensure_global_config_dir`] with the identical
+    /// signature, delegating to [`super::ensure_global_config_dir_with_exe`]
+    /// with [`crate::test_support::STABLE_HOOK_EXE`].
+    /// Test: every case in this module.
+    fn ensure_global_config_dir(
+        managed_root: &Path,
+        claude_config_dir: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        ensure_global_config_dir_with_exe(
+            managed_root,
+            claude_config_dir,
+            Some(Path::new(crate::test_support::STABLE_HOOK_EXE)),
+        )
+    }
 
     #[test]
     fn test_global_config_dir_ensure_idempotent() {
