@@ -960,8 +960,10 @@ fn write_project_hooks_prunes_snapshots_to_three() {
 /// almost every call reproduces the bytes already on disk. Snapshotting those
 /// would fill all three kept slots with copies of the current file within
 /// three launches, evicting the one prior state worth keeping.
-/// What: writes twice with identical arguments and asserts no snapshot and no
-/// change to the file.
+/// What: writes twice with identical arguments and asserts no snapshot, no
+/// change to the file, and — the assertion that separates "returned early" from
+/// "rewrote the same bytes" — no `settings.json.bak`, which
+/// `write_json_atomic` creates on any call that reaches it.
 #[test]
 fn write_project_hooks_takes_no_snapshot_when_nothing_changes() {
     let tmp = TempDir::new().unwrap();
@@ -974,6 +976,11 @@ fn write_project_hooks_takes_no_snapshot_when_nothing_changes() {
 
     write(project, true, false);
 
+    assert!(
+        !claude_dir.join("settings.json.bak").exists(),
+        "an identical rewrite must return before the atomic write, which would \
+         have left its own backup"
+    );
     assert!(
         snapshot_names(&claude_dir).is_empty(),
         "an identical rewrite must take no snapshot"
