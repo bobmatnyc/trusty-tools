@@ -1270,6 +1270,27 @@ pub mod http_client;
 #[cfg(all(unix, feature = "uds"))]
 pub mod uds;
 
+/// A stand-in trusty-* daemon on a Unix socket, for this crate's own tests
+/// (#7237). Never compiled outside `cargo test`.
+#[cfg(all(test, unix, feature = "uds"))]
+#[path = "uds_mock.rs"]
+pub(crate) mod uds_mock;
+
+/// The one trusty-search socket client (#6285, #7237).
+///
+/// Why: it lived in `trusty_mpm::daemon::search_rpc`, out of reach of
+/// [`search_index`], which sits below trusty-mpm and therefore went on POSTing
+/// the `http://127.0.0.1:7878` listener ADR-0032 retired — the whole of #7237.
+/// Moving it down here is what makes ONE implementation serve both; trusty-mpm's
+/// module is now a re-export.
+/// What: Exposes [`search_rpc::search_socket`], [`search_rpc::call_at`] (async),
+/// [`search_rpc::call_blocking`] (a dedicated OS thread, for synchronous
+/// callers inside a tokio runtime), the daemon's method-name constants, and
+/// [`search_rpc::SearchRpcError`], which carries the daemon's own JSON-RPC code.
+/// Test: `cargo test -p trusty-common --features uds search_rpc::`.
+#[cfg(all(unix, feature = "uds"))]
+pub mod search_rpc;
+
 /// GitHub webhook HMAC-SHA256 verification (#5089 step 3, ADR-0034 §3).
 ///
 /// Why: the check exists twice today and the two copies disagree on what an

@@ -39,12 +39,11 @@ use tempfile::tempdir;
 /// future regression that re-hardcodes (or silently drops) the parameter
 /// threaded through `ensure_project_indexed` is caught here, not just in
 /// `trusty_common::search_index`'s own unit tests.
-/// What: points `TRUSTY_DATA_DIR_OVERRIDE` at an isolated data dir, writes a
-/// fake daemon's bound address to `<data_dir>/trusty-search/http_addr`
-/// (mirroring `resolve_daemon_base_url`'s on-disk discovery contract), calls
-/// `register_project_index` with a `tempfile`-backed, git-rooted project
-/// path, and asserts the captured request body's `allow_sensitive_path` field
-/// is `false`. `#[serial]` because the override env var is process-global.
+/// What: points `TRUSTY_DATA_DIR_OVERRIDE` at an isolated data dir and
+/// `TRUSTY_SEARCH_SOCKET` at a mock daemon, calls `register_project_index` with
+/// a `tempfile`-backed, git-rooted project path, and asserts the captured
+/// create params' `allow_sensitive_path` field is `false`. `#[serial]` because
+/// the override env vars are process-global.
 /// Test: this test.
 #[test]
 #[serial_test::serial]
@@ -56,35 +55,29 @@ fn register_project_index_never_bypasses_sensitive_path_denylist() {
     );
     // #4255: this test asserts on the wire body, so the POST must actually
     // happen — the guard that otherwise suppresses daemon writes under a test
-    // harness has to be opted out of. Safe here because the override above
-    // points discovery at this test's OWN loopback socket, never the
-    // operator's daemon. Restored by the guard's `Drop`.
+    // harness has to be opted out of. Safe here because the override below
+    // points discovery at this test's OWN socket, never the operator's daemon.
+    // Restored by the guard's `Drop`.
     let _allow_production =
         EnvVarGuard::set_str(trusty_common::test_harness::ALLOW_PRODUCTION_ENV, "1");
 
-    // Fake daemon: accept one connection, capture the request body, answer
-    // 200, then close the listener so the follow-up reindex calls fail fast
-    // instead of idling in the kernel's accept backlog.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let server = std::thread::spawn(move || {
-        use std::io::{Read, Write};
-        let (mut stream, _) = listener.accept().unwrap();
-        drop(listener);
-        let mut buf = [0u8; 4096];
-        let n = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..n]).to_string();
-        let _ =
-            stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
-        let _ = stream.flush();
-        let body = request.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
-        let _ = tx.send(body);
+    // Fake daemon on a Unix socket (#7237): record the create params, answer
+    // every method `{}` so the follow-up status/reindex calls complete.
+    let socket_dir = tempdir().unwrap();
+    let socket = socket_dir.path().join("s.sock");
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = std::sync::Arc::clone(&seen);
+    let _daemon = crate::uds_mock::spawn_blocking_at(socket.clone(), move |method, params| {
+        if method == trusty_common::search_rpc::METHOD_INDEX_CREATE {
+            log.lock().unwrap_or_else(|e| e.into_inner()).push(params);
+        }
+        Box::pin(async move { Ok(serde_json::json!({})) })
     });
-
-    let search_data_dir = data_dir.path().join("trusty-search");
-    std::fs::create_dir_all(&search_data_dir).unwrap();
-    std::fs::write(search_data_dir.join("http_addr"), addr.to_string()).unwrap();
+    let _socket_env = EnvVarGuard::set_str(
+        trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV,
+        &socket.to_string_lossy(),
+    );
 
     // A `tempfile`-backed, git-rooted project — the exact shape a
     // session-launch test's workspace fixture takes.
@@ -93,12 +86,12 @@ fn register_project_index_never_bypasses_sensitive_path_denylist() {
 
     let _ = register_project_index(project.path());
 
-    let body_json: serde_json::Value = serde_json::from_str(
-        &rx.recv_timeout(std::time::Duration::from_secs(5))
-            .expect("fake daemon must have received the create-index POST"),
-    )
-    .expect("captured body must be valid JSON");
-    let _ = server.join();
+    let body_json = seen
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .first()
+        .cloned()
+        .expect("the fake daemon must have received the create call");
 
     assert_eq!(
         body_json.get("allow_sensitive_path"),

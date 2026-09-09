@@ -8,9 +8,12 @@
 //! were added).
 //!
 //! What: exercises `ensure_project_indexed`'s daemon-down/no-op paths, the
-//! `allow_sensitive_path` plumbing (both the pure body-builder and the live-HTTP
-//! wire-body regression), the incremental per-file index-update helpers, the
-//! freshness predicate, and the per-file retry/backoff schedule.
+//! `allow_sensitive_path` plumbing (both the pure body-builder and the
+//! live-daemon wire regression), the incremental per-file index-update helpers,
+//! the freshness predicate, and the per-file retry/backoff schedule. #7237 moved
+//! every registration rig from a hand-rolled HTTP `TcpListener` onto
+//! `crate::uds_mock`, because registration now speaks the daemon's socket; the
+//! per-file incremental rigs are still HTTP, because that path is.
 //!
 //! Test: `cargo test -p trusty-common --features search-index -- search_index::tests`
 
@@ -138,9 +141,9 @@ fn reporting_says_skipped_under_test_harness() {
 /// Why: the failure mode #5045 measured at ~94% is "the daemon was not there",
 /// and it is exactly the one the id-only return renders invisible. Opting out
 /// of the #4255 harness guard is what makes this branch reachable at all; the
-/// empty data dir then guarantees `resolve_daemon_base_url` finds no address
-/// file, so no HTTP request is ever built and the operator's real daemon is
-/// never touched despite the opt-in.
+/// empty data dir then guarantees the derived socket path does not exist, so
+/// nothing is ever dialled and the operator's real daemon is never touched
+/// despite the opt-in (#7237).
 /// What: sets `TRUSTY_ALLOW_PRODUCTION_STATE=1` and points the data dir at an
 /// empty temp dir, then asserts the reported registration is
 /// `DaemonUnreachable` while the id is still returned.
@@ -691,111 +694,6 @@ fn index_options_default_matches_legacy_ensure_call() {
     );
 }
 
-/// End-to-end regression for issue #2914: `ensure_project_indexed`'s
-/// `allow_sensitive_path` parameter actually reaches the `POST /indexes`
-/// wire body — not just `create_index_request_body` in isolation.
-///
-/// Why: `create_index_request_body_respects_allow_sensitive_path_param`
-/// proves the pure body-builder is correct, but the actual regression this
-/// issue reports happened at the PLUMBING layer — `ensure_project_indexed`
-/// forwarding its parameter through `best_effort_create_index` into the
-/// body builder. A future edit could silently drop the parameter partway
-/// through that chain (e.g. hardcode `true` back into
-/// `best_effort_create_index`'s call) without this pure-function test
-/// catching it. This test drives the real public entry point against a
-/// bound TCP listener standing in for the trusty-search daemon and
-/// inspects the actual bytes sent over the wire.
-/// What: for each `allow_sensitive_path` value, binds an ephemeral
-/// listener, writes its address to the isolated `TRUSTY_DATA_DIR_OVERRIDE`
-/// data dir's `trusty-search/http_addr` file (mirroring
-/// `resolve_daemon_base_url`'s discovery contract), calls
-/// `ensure_project_indexed(project, allow)`, and asserts the captured
-/// `POST /indexes` body's `allow_sensitive_path` field equals `allow`.
-/// `ENV_LOCK` serialises against sibling env-mutating tests in this module,
-/// matching `ensure_project_indexed_returns_derived_id_when_daemon_down`.
-/// Test: this test.
-#[test]
-fn ensure_project_indexed_sends_allow_sensitive_path_through_to_create_body() {
-    for allow in [true, false] {
-        let _guard = crate::data_dir::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-
-        let data_dir = scratch_dir(&format!("wire-{allow}"));
-        fs::create_dir_all(&data_dir).unwrap();
-        // SAFETY: guarded by ENV_LOCK; removed below before returning.
-        unsafe {
-            std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &data_dir);
-            // #4255: this is the ONE test that genuinely needs the daemon-write
-            // path — asserting on the wire body requires the POST to actually
-            // happen. Opting in explicitly is safe here because the "daemon"
-            // is this test's own loopback socket, not the operator's: the
-            // override above points discovery at it. Every other caller stays
-            // guarded.
-            std::env::set_var(crate::test_harness::ALLOW_PRODUCTION_ENV, "1");
-        }
-
-        // Fake daemon: accept one connection, capture the request body,
-        // answer 200 so `best_effort_create_index` logs success (not that
-        // it matters — the assertion is on the captured body).
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let server = std::thread::spawn(move || {
-            use std::io::{Read, Write};
-            let (mut stream, _) = listener.accept().unwrap();
-            // Close the listening socket immediately after accepting the
-            // ONE connection this test cares about (the create-index
-            // POST), so `ensure_project_indexed`'s follow-up
-            // `best_effort_trigger_reindex` calls hit a fast
-            // connection-refused instead of idling in the kernel's accept
-            // backlog until their own multi-second timeouts elapse.
-            drop(listener);
-            let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).unwrap();
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
-            let _ = stream.flush();
-            let body = request.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
-            let _ = tx.send(body);
-        });
-
-        // Mirrors `write_daemon_addr("trusty-search", ..)`'s on-disk
-        // discovery contract so `resolve_daemon_base_url` finds this fake
-        // daemon instead of reporting "not discoverable".
-        let search_data_dir = data_dir.join("trusty-search");
-        fs::create_dir_all(&search_data_dir).unwrap();
-        fs::write(search_data_dir.join("http_addr"), addr.to_string()).unwrap();
-
-        let project = scratch_dir(&format!("wire-project-{allow}"));
-        fs::create_dir_all(project.join(".git")).unwrap();
-
-        let _ = ensure_project_indexed(&project, allow);
-
-        let body_json: serde_json::Value = serde_json::from_str(
-            &rx.recv_timeout(std::time::Duration::from_secs(5))
-                .expect("fake daemon must have received the create-index POST"),
-        )
-        .expect("captured body must be valid JSON");
-        let _ = server.join();
-
-        unsafe {
-            std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
-            std::env::remove_var(crate::test_harness::ALLOW_PRODUCTION_ENV);
-        }
-        let _ = fs::remove_dir_all(&project);
-        let _ = fs::remove_dir_all(&data_dir);
-
-        assert_eq!(
-            body_json.get("allow_sensitive_path"),
-            Some(&serde_json::Value::Bool(allow)),
-            "POST /indexes body must carry allow_sensitive_path={allow} \
-             all the way from ensure_project_indexed's parameter; got {body_json:?}"
-        );
-    }
-}
-
 #[test]
 fn index_is_fresh_true_when_recently_indexed_with_chunks() {
     // Why: the whole point of the optimisation is to skip a redundant reindex
@@ -982,21 +880,26 @@ fn post_index_file_exhausts_retries_and_returns_send_failed() {
     assert_eq!(accepted, MAX_INDEX_ATTEMPTS as usize);
 }
 
-/// Offer the code under test a REAL, discoverable trusty-search daemon, run
-/// `body`, and report whether anything connected to it (issue #4255).
+/// Offer the code under test a REAL, discoverable trusty-search daemon on BOTH
+/// transports, run `body`, and report whether either was contacted (#4255,
+/// #7237).
 ///
 /// Why: "no write reached the operator's daemon" cannot be proved by pointing
-/// discovery at a dead port — the fail-open path and the guarded path both
-/// look identical then. Standing up a socket that WOULD accept the write is
-/// the only arrangement where the guard is the thing making the difference.
-/// What: binds `127.0.0.1:0`, publishes that address where
-/// `resolve_daemon_base_url("trusty-search")` reads it (via an isolated
-/// `DATA_DIR_OVERRIDE_ENV` data dir, serialised on `ENV_LOCK` like every other
-/// env-mutating test here), asserts discovery actually finds it, runs `body`,
-/// restores the env, and returns `true` if a connection arrived.
+/// discovery at a dead socket — the fail-open path and the guarded path both
+/// look identical then. Standing up a daemon that WOULD accept the write is the
+/// only arrangement where the guard is the thing making the difference. Both
+/// transports are stood up because the two callers use different ones:
+/// registration speaks the socket since #7237, the per-file incremental path is
+/// still HTTP, and a helper covering one of them would silently stop proving
+/// anything about the other.
+/// What: binds a mock UDS daemon that counts every call and a `127.0.0.1:0`
+/// listener published where `resolve_daemon_base_url("trusty-search")` reads it,
+/// points `TRUSTY_SEARCH_SOCKET` at the former, asserts BOTH are discoverable,
+/// runs `body`, restores the env, and returns `true` if either was reached.
 /// Test: used by the two `never_writes_to_a_daemon_under_test` tests below.
 fn daemon_was_contacted_during(body: impl FnOnce()) -> bool {
     use crate::data_dir::{DATA_DIR_OVERRIDE_ENV, ENV_LOCK};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stand-in daemon");
     let addr = listener.local_addr().expect("stand-in daemon local_addr");
@@ -1007,20 +910,44 @@ fn daemon_was_contacted_during(body: impl FnOnce()) -> bool {
     let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let data_dir = scratch_dir("4255-daemon");
     fs::create_dir_all(&data_dir).expect("create isolated data dir");
+    let socket_dir = tempfile::tempdir().expect("tempdir for the stand-in socket");
+    let socket = socket_dir.path().join("s.sock");
     let previous = std::env::var(DATA_DIR_OVERRIDE_ENV).ok();
-    unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, &data_dir) };
+    // SAFETY: guarded by ENV_LOCK; both vars are restored below before returning.
+    unsafe {
+        std::env::set_var(DATA_DIR_OVERRIDE_ENV, &data_dir);
+        std::env::set_var(crate::search_rpc::TRUSTY_SEARCH_SOCKET_ENV, &socket);
+    }
     crate::write_daemon_addr("trusty-search", &addr.to_string()).expect("publish daemon addr");
     assert_eq!(
         crate::resolve_daemon_base_url("trusty-search"),
         Some(format!("http://{addr}")),
-        "the stand-in daemon must be discoverable, or this test proves nothing"
+        "the stand-in HTTP daemon must be discoverable, or this test proves nothing"
+    );
+
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&calls);
+    let daemon = uds_mock::spawn_blocking_at(socket, move |_method, _params| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move { Ok(serde_json::json!({ "id": "x", "created": true })) })
+    });
+    let derived = crate::search_rpc::search_socket().ok();
+    assert_eq!(
+        derived.as_deref(),
+        Some(daemon.socket()),
+        "the stand-in socket daemon must be discoverable, or this test proves nothing"
     );
 
     body();
 
-    match previous {
-        Some(p) => unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, p) },
-        None => unsafe { std::env::remove_var(DATA_DIR_OVERRIDE_ENV) },
+    drop(daemon);
+    // SAFETY: still guarded by ENV_LOCK, which is dropped just below.
+    unsafe {
+        std::env::remove_var(crate::search_rpc::TRUSTY_SEARCH_SOCKET_ENV);
+        match previous {
+            Some(p) => std::env::set_var(DATA_DIR_OVERRIDE_ENV, p),
+            None => std::env::remove_var(DATA_DIR_OVERRIDE_ENV),
+        }
     }
     drop(guard);
     let _ = fs::remove_dir_all(&data_dir);
@@ -1028,10 +955,11 @@ fn daemon_was_contacted_during(body: impl FnOnce()) -> bool {
     // A connection the code opened just before returning may still be in the
     // accept queue; give it a moment rather than racing it.
     std::thread::sleep(std::time::Duration::from_millis(250));
-    !matches!(
+    let tcp_contacted = !matches!(
         listener.accept(),
         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
-    )
+    );
+    tcp_contacted || calls.load(Ordering::SeqCst) > 0
 }
 
 /// Issue #4255: registering a project must not reach a live daemon from a test
@@ -1045,10 +973,11 @@ fn daemon_was_contacted_during(body: impl FnOnce()) -> bool {
 /// deliberately — that is tcode's real caller, and the temp-dir denylist (the
 /// only prior guard) is switched off on that path, so nothing else stands
 /// between the fixture and the operator's registry.
-/// What: with a discoverable stand-in daemon, calls `ensure_project_indexed`
-/// on a temp fixture root; asserts no connection was made, and — since a
-/// suppressed write registers nothing — that no pinnable id came back either
-/// (#5091; before that fix this arm asserted the opposite).
+/// What: with a discoverable stand-in daemon on both transports, calls
+/// `ensure_project_indexed` on a temp fixture root; asserts nothing was
+/// contacted, and — since a suppressed write registers nothing — that no
+/// pinnable id came back either (#5091; before that fix this arm asserted the
+/// opposite).
 /// Test: this test.
 #[test]
 fn ensure_project_indexed_never_writes_to_a_daemon_under_test() {
@@ -1143,123 +1072,319 @@ fn index_options_builders_match_field_construction() {
     );
 }
 
-/// Stand up a one-shot fake trusty-search daemon answering with `status_line`.
-///
-/// Why: the #5091 error arm is only reachable against a daemon that is
-/// REACHABLE and REFUSES — pointing discovery at a dead port lands in
-/// `DaemonUnreachable`, a different branch. Accepting exactly one connection and
-/// then dropping the listener also makes the follow-up reindex probes fail fast
-/// with connection-refused instead of idling in the accept backlog until their
-/// own multi-second timeouts elapse (the trick
-/// `ensure_project_indexed_sends_allow_sensitive_path_through_to_create_body`
-/// already uses).
-/// What: binds `127.0.0.1:0`, spawns a thread that accepts ONE connection, reads
-/// the request, replies `status_line` with an empty body, and exits. Returns the
-/// bound address and the thread handle.
-/// Test: used by `create_rejected_by_the_daemon_withholds_the_pinnable_id`.
-fn one_shot_daemon(
-    status_line: &'static str,
-) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
-    one_shot_daemon_with_body(status_line, String::new())
+// ── #7237: registration speaks the daemon's socket, not `http://…:7878` ──────
+
+use crate::search_rpc::{
+    CODE_CONFLICT, METHOD_INDEX_CREATE, METHOD_INDEX_REINDEX, METHOD_INDEX_STATUS,
+    METHOD_INDEXES_LIST,
+};
+use crate::uds_mock::{self, RpcError};
+use std::sync::{Arc, Mutex};
+
+/// Every call a mock daemon saw, in order, with the params it was sent.
+type CallLog = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+
+/// A fresh, empty [`CallLog`].
+fn call_log() -> CallLog {
+    Arc::new(Mutex::new(Vec::new()))
 }
 
-/// [`one_shot_daemon`], but answering with a JSON `body`.
+/// Snapshot of what a mock daemon has been asked so far.
+fn calls(log: &CallLog) -> Vec<(String, serde_json::Value)> {
+    log.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// The method names a mock daemon has been asked, in order.
+fn methods(log: &CallLog) -> Vec<String> {
+    calls(log).into_iter().map(|(method, _)| method).collect()
+}
+
+/// The params of the `nth` call to `method`, or `None` when it was never made.
+fn params_of(log: &CallLog, method: &str, nth: usize) -> Option<serde_json::Value> {
+    calls(log)
+        .into_iter()
+        .filter(|(m, _)| m == method)
+        .map(|(_, p)| p)
+        .nth(nth)
+}
+
+/// A mock handler that records every call and answers through `answer`.
 ///
-/// Why: the same-id-different-tree arm turns on what the daemon SAYS, not on its
-/// status — `200 {created: false, root_path: …}` is the whole point — so the
-/// error arm cannot be reached with the empty-body form above. Same harness, one
-/// more thing it can say.
-/// What: as [`one_shot_daemon`], with an accurate `content-length` for `body`.
-/// Test: used by `create_index_response_for_a_different_tree_is_not_confirmed`.
-fn one_shot_daemon_with_body(
-    status_line: &'static str,
-    body: String,
-) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake daemon");
-    let addr = listener.local_addr().expect("fake daemon local_addr");
-    let handle = std::thread::spawn(move || {
-        use std::io::{Read, Write};
-        let Ok((mut stream, _)) = listener.accept() else {
-            return;
+/// Why `answer` takes the call's ORDINAL rather than its params: the #6864
+/// recovery issues two creates in one flow and they must be answered
+/// differently. Passing `(method, nth-call-of-that-method)` is what lets a
+/// scripted rig say "refuse the first create, accept the second" without
+/// pattern-matching a body.
+fn recording(
+    log: CallLog,
+    answer: impl Fn(&str, usize) -> Result<serde_json::Value, RpcError> + Send + Sync + 'static,
+) -> impl Fn(&str, serde_json::Value) -> uds_mock::MockFuture + Send + Sync + 'static {
+    move |method, params| {
+        let nth = {
+            let mut seen = log.lock().unwrap_or_else(|e| e.into_inner());
+            seen.push((method.to_string(), params));
+            seen.iter().filter(|(m, _)| m == method).count() - 1
         };
-        drop(listener);
-        let mut buf = [0u8; 4096];
-        let _ = stream.read(&mut buf);
-        let _ = stream.write_all(
-            format!(
-                "{status_line}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .as_bytes(),
-        );
-        let _ = stream.flush();
-    });
-    (addr, handle)
+        let out = answer(method, nth);
+        Box::pin(async move { out })
+    }
 }
 
-/// Publish `addr` where `resolve_daemon_base_url("trusty-search")` will find it.
+/// What the daemon answers for the two calls the reindex trigger makes.
 ///
-/// Why: mirrors `write_daemon_addr`'s on-disk discovery contract so a test's own
-/// loopback socket stands in for the daemon.
-/// What: creates `<data_dir>/trusty-search/` and writes `http_addr`.
-/// Test: used by `create_rejected_by_the_daemon_withholds_the_pinnable_id`.
-fn publish_daemon_addr(data_dir: &Path, addr: std::net::SocketAddr) {
-    let search_data_dir = data_dir.join("trusty-search");
-    fs::create_dir_all(&search_data_dir).unwrap();
-    fs::write(search_data_dir.join("http_addr"), addr.to_string()).unwrap();
+/// A status with no chunks is never fresh, so the trigger always goes on to
+/// issue the reindex — which keeps the reindex call visible in every rig's log.
+fn reindex_lane(method: &str) -> Result<serde_json::Value, RpcError> {
+    if method == METHOD_INDEX_STATUS {
+        return Ok(serde_json::json!({ "chunk_count": 0 }));
+    }
+    if method == METHOD_INDEX_REINDEX {
+        return Ok(serde_json::json!({ "queued": true }));
+    }
+    Err(RpcError::new(
+        -32601,
+        format!("unexpected method: {method}"),
+    ))
 }
 
-/// Run `body` with discovery pointed at a fake daemon that answers `status_line`.
+/// The reply the daemon gives a create it accepted for `root`.
+fn created_at(root: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "id": "whatever",
+        "created": false,
+        "reason": "already exists",
+        "root_path": root.to_string_lossy(),
+    })
+}
+
+/// Run `body` against a mock trusty-search daemon that production socket
+/// discovery will find (#7237).
 ///
-/// Why: the three arms of the #5091 regression need the identical arrangement —
-/// `ENV_LOCK`, an isolated data dir, the #4255 opt-out, a fake daemon, and a
-/// git-rooted project — and repeating it three times is where a missed env
-/// restore leaks into a sibling serial test.
-/// What: locks `ENV_LOCK`, points `DATA_DIR_OVERRIDE_ENV` at a scratch dir, sets
-/// `ALLOW_PRODUCTION_ENV=1` (safe: discovery points at this test's OWN loopback
-/// socket, never the operator's daemon), creates a git-rooted scratch project,
-/// runs `body(&project)`, then restores the env and removes both scratch dirs
-/// before returning `body`'s value.
-/// Test: used by `create_rejected_by_the_daemon_withholds_the_pinnable_id`.
-fn with_refusing_daemon<T>(
+/// Why: the retired rigs published an `http_addr` file and bound a
+/// `TcpListener`. There is no address to publish any more, so the rig points
+/// `TRUSTY_SEARCH_SOCKET` at a socket under a `TempDir` — deliberately not the
+/// data-dir-derived path, whose length blows the ~104-byte `sun_path` budget
+/// once a scratch tag and a pid are in it. `ALLOW_PRODUCTION_ENV` is safe here
+/// for the same reason it always was: discovery points at this test's OWN
+/// daemon, never the operator's.
+/// What: locks `ENV_LOCK`, isolates the data dir, binds the mock, creates a
+/// git-rooted `<scratch>/<project_name>`, runs `body(&project)`, then stops the
+/// daemon, restores the env and removes both scratch trees before returning
+/// `body`'s value.
+/// Test: used by every socket-daemon test below.
+fn with_socket_daemon<T>(
     tag: &str,
-    status_line: &'static str,
+    project_name: &str,
+    handler: impl Fn(&str, serde_json::Value) -> uds_mock::MockFuture + Send + Sync + 'static,
     body: impl FnOnce(&Path) -> T,
 ) -> T {
     let _guard = crate::data_dir::ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let data_dir = scratch_dir(&format!("5091-data-{tag}"));
+    let data_dir = scratch_dir(&format!("7237-data-{tag}"));
     fs::create_dir_all(&data_dir).unwrap();
-    // SAFETY: guarded by ENV_LOCK; both vars are removed below before returning.
+    let socket_dir = tempfile::tempdir().expect("tempdir for the mock socket");
+    let socket = socket_dir.path().join("s.sock");
+    // SAFETY: guarded by ENV_LOCK; all three vars are removed below before
+    // returning.
     unsafe {
         std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &data_dir);
         std::env::set_var(crate::test_harness::ALLOW_PRODUCTION_ENV, "1");
+        std::env::set_var(crate::search_rpc::TRUSTY_SEARCH_SOCKET_ENV, &socket);
     }
 
-    let (addr, server) = one_shot_daemon(status_line);
-    publish_daemon_addr(&data_dir, addr);
+    let daemon = uds_mock::spawn_blocking_at(socket, handler);
 
-    let project = scratch_dir(&format!("5091-project-{tag}"));
+    let workspace = scratch_dir(&format!("7237-ws-{tag}"));
+    let project = workspace.join(project_name);
     fs::create_dir_all(project.join(".git")).unwrap();
 
     let out = body(&project);
 
-    let _ = server.join();
+    drop(daemon);
+    // SAFETY: still guarded by ENV_LOCK, dropped at the end of this function.
     unsafe {
+        std::env::remove_var(crate::search_rpc::TRUSTY_SEARCH_SOCKET_ENV);
         std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
         std::env::remove_var(crate::test_harness::ALLOW_PRODUCTION_ENV);
     }
-    let _ = fs::remove_dir_all(&project);
+    let _ = fs::remove_dir_all(&workspace);
     let _ = fs::remove_dir_all(&data_dir);
     out
 }
 
-/// Regression for #5091: a `POST /indexes` the daemon REFUSES must not yield a
-/// pinnable index id.
+/// The registration reaches the daemon as `search.index.create` carrying a BARE
+/// `CreateIndexRequest` (#7237).
+///
+/// Why: this is the whole fix, asserted at the wire. The old path POSTed
+/// `http://127.0.0.1:7878/indexes` at a listener ADR-0032 retired, so nothing
+/// arrived at all. And the shape matters as much as the transport: the daemon
+/// decodes this method's params as a bare `CreateIndexRequest`, so wrapping them
+/// in the `{index_id, body}` envelope its INDEX-SCOPED writes use would be
+/// refused as `invalid_params` — a failure that looks identical to the one being
+/// fixed.
+/// What: drives the public reporting entry point against a mock daemon and
+/// asserts the first call is the create, that its params carry the four
+/// `CreateIndexRequest` fields at the TOP level, that neither envelope key is
+/// present, and that the registration came back `Confirmed` with the derived id.
+/// Test: this test.
+#[test]
+fn the_create_call_carries_the_bare_create_index_params() {
+    let log = call_log();
+    let seen = Arc::clone(&log);
+
+    let (report, expected) = with_socket_daemon(
+        "bare-params",
+        "wire-project",
+        recording(seen, |method, _nth| {
+            if method == METHOD_INDEX_CREATE {
+                return Ok(serde_json::json!({ "id": "wire-project", "created": true }));
+            }
+            reindex_lane(method)
+        }),
+        |project| {
+            (
+                ensure_project_indexed_reporting(project, IndexOptions::default()),
+                crate::derive_index_id(project),
+            )
+        },
+    );
+
+    assert_eq!(
+        methods(&log).first().map(String::as_str),
+        Some(METHOD_INDEX_CREATE),
+        "the first thing the registration does must be the create: {:?}",
+        methods(&log)
+    );
+    let params = params_of(&log, METHOD_INDEX_CREATE, 0).expect("the create must have been sent");
+    assert_eq!(
+        params.get("id").and_then(serde_json::Value::as_str),
+        Some(expected.as_str()),
+        "the derived id rides on `id`, at the top level: {params}"
+    );
+    assert!(
+        params
+            .get("root_path")
+            .is_some_and(serde_json::Value::is_string),
+        "`root_path` must be a top-level string: {params}"
+    );
+    assert!(
+        params
+            .get("allow_sensitive_path")
+            .is_some_and(serde_json::Value::is_boolean),
+        "`allow_sensitive_path` must be a top-level bool: {params}"
+    );
+    assert!(
+        params
+            .get("skip_vector")
+            .is_some_and(serde_json::Value::is_boolean),
+        "`skip_vector` must be a top-level bool: {params}"
+    );
+    assert!(
+        params.get("index_id").is_none() && params.get("body").is_none(),
+        "the create is a REGISTRY-level write and must not use the index-scoped \
+         envelope, which the daemon would refuse as invalid_params: {params}"
+    );
+    assert_eq!(report.registration, IndexRegistration::Confirmed);
+    assert_eq!(report.index_id, Some(expected));
+}
+
+/// A confirmed registration goes on to trigger the reindex over the same socket
+/// (#1908, #7237).
+///
+/// Why: `search.index.create` only registers an EMPTY index. Without the
+/// follow-up trigger the very first query answers nothing, and the migration
+/// would have moved the create while leaving the populate step pointed at a
+/// listener that is gone.
+/// What: asserts the freshness probe and the reindex trigger both arrive, in
+/// that order, naming the registered index.
+/// Test: this test.
+#[test]
+fn a_confirmed_registration_triggers_a_reindex_over_the_socket() {
+    let log = call_log();
+    let seen = Arc::clone(&log);
+
+    with_socket_daemon(
+        "reindex",
+        "reindex-project",
+        recording(seen, |method, _nth| {
+            if method == METHOD_INDEX_CREATE {
+                return Ok(serde_json::json!({ "created": true }));
+            }
+            reindex_lane(method)
+        }),
+        |project| ensure_project_indexed_reporting(project, IndexOptions::default()),
+    );
+
+    assert_eq!(
+        methods(&log),
+        vec![
+            METHOD_INDEX_CREATE.to_string(),
+            METHOD_INDEX_STATUS.to_string(),
+            METHOD_INDEX_REINDEX.to_string(),
+        ],
+        "create, then the freshness probe, then the trigger"
+    );
+    assert_eq!(
+        params_of(&log, METHOD_INDEX_REINDEX, 0).and_then(|p| {
+            p.get("index_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        }),
+        Some("reindex-project".to_string()),
+        "the reindex names the index that was just registered"
+    );
+}
+
+/// End-to-end regression for issue #2914: `ensure_project_indexed`'s
+/// `allow_sensitive_path` parameter actually reaches the create request — not
+/// just `create_index_request_body` in isolation.
+///
+/// Why: `create_index_request_body_respects_allow_sensitive_path_param` proves
+/// the pure body-builder is correct, but the regression this issue reports
+/// happened at the PLUMBING layer — `ensure_project_indexed` forwarding its
+/// parameter through `best_effort_create_index` into the body builder. A future
+/// edit could silently drop the parameter partway through that chain without the
+/// pure-function test catching it. This drives the real public entry point
+/// against a daemon and inspects the params that actually arrived.
+/// What: for each `allow_sensitive_path` value, runs `ensure_project_indexed`
+/// against a mock daemon and asserts the recorded create params'
+/// `allow_sensitive_path` equals it.
+/// Test: this test.
+#[test]
+fn ensure_project_indexed_sends_allow_sensitive_path_through_to_create_body() {
+    for allow in [true, false] {
+        let log = call_log();
+        let seen = Arc::clone(&log);
+
+        with_socket_daemon(
+            &format!("wire-{allow}"),
+            "wire-project",
+            recording(seen, |method, _nth| {
+                if method == METHOD_INDEX_CREATE {
+                    return Ok(serde_json::json!({ "created": true }));
+                }
+                reindex_lane(method)
+            }),
+            |project| ensure_project_indexed(project, allow),
+        );
+
+        let params =
+            params_of(&log, METHOD_INDEX_CREATE, 0).expect("the create must have been sent");
+        assert_eq!(
+            params.get("allow_sensitive_path"),
+            Some(&serde_json::Value::Bool(allow)),
+            "the create params must carry allow_sensitive_path={allow} all the way \
+             from ensure_project_indexed's parameter; got {params}"
+        );
+    }
+}
+
+/// Regression for #5091: a create the daemon REFUSES must not yield a pinnable
+/// index id.
 ///
 /// Why: this is the fail-open shape the ticket names. The create failed — the
-/// daemon answered 500, so no index exists under the derived id — yet
+/// daemon refused, so no index exists under the derived id — yet
 /// `ensure_project_indexed` handed the id back anyway, session launch pinned it
 /// into `.mcp.json`, and every later `search` in that session answered
 /// `404 unknown index` while `search_health` stayed green. Withholding the id
@@ -1267,48 +1392,223 @@ fn with_refusing_daemon<T>(
 /// reachable through `ensure_project_indexed_reporting` for callers that need it
 /// to log or to GC, where the adjacent `registration` field makes ignoring the
 /// failure a visible choice rather than the default.
-/// What: three arms against a fake daemon that 500s the create — the two id-only
-/// entry points must return `None`, and the reporting entry point must still
-/// carry the derived id alongside `NotConfirmed`.
+/// What: three arms against a daemon that refuses the create with the internal
+/// code — the two id-only entry points must return `None`, and the reporting
+/// entry point must still carry the derived id alongside `NotConfirmed`.
 /// Test: this test.
 #[test]
 fn create_rejected_by_the_daemon_withholds_the_pinnable_id() {
-    let refused = "HTTP/1.1 500 Internal Server Error";
+    fn refusing(method: &str, _nth: usize) -> Result<serde_json::Value, RpcError> {
+        if method == METHOD_INDEX_CREATE {
+            return Err(RpcError::internal("the corpus would not open"));
+        }
+        reindex_lane(method)
+    }
 
-    let id = with_refusing_daemon("ensure", refused, |project| {
-        ensure_project_indexed(project, false)
-    });
+    let id = with_socket_daemon(
+        "refuse-a",
+        "refused",
+        recording(call_log(), refusing),
+        |p| ensure_project_indexed(p, false),
+    );
     assert_eq!(
         id, None,
         "ensure_project_indexed returned a pinnable id after the daemon REFUSED \
-         the create (HTTP 500) — pinning it makes every later search 404 (#5091)"
+         the create — pinning it makes every later search 404 (#5091)"
     );
 
-    let id = with_refusing_daemon("ensure-with", refused, |project| {
-        ensure_project_indexed_with(project, IndexOptions::default().with_skip_vector(true))
-    });
+    let id = with_socket_daemon(
+        "refuse-b",
+        "refused",
+        recording(call_log(), refusing),
+        |p| ensure_project_indexed_with(p, IndexOptions::default().with_skip_vector(true)),
+    );
     assert_eq!(
         id, None,
         "ensure_project_indexed_with returned a pinnable id after the daemon \
-         REFUSED the create (HTTP 500) — #5091"
+         REFUSED the create — #5091"
     );
 
-    let (report, expected) = with_refusing_daemon("report", refused, |project| {
-        (
-            ensure_project_indexed_reporting(project, IndexOptions::default()),
-            crate::derive_index_id(project),
-        )
-    });
+    let (report, expected) = with_socket_daemon(
+        "refuse-c",
+        "refused",
+        recording(call_log(), refusing),
+        |p| {
+            (
+                ensure_project_indexed_reporting(p, IndexOptions::default()),
+                crate::derive_index_id(p),
+            )
+        },
+    );
     assert_eq!(
         report.registration,
         IndexRegistration::NotConfirmed,
-        "a 500 on the create is not a registration"
+        "a refused create is not a registration"
     );
     assert_eq!(
         report.index_id,
         Some(expected),
         "the derived id stays available for logging and GC — it is the PIN that \
          is withheld, not the id"
+    );
+}
+
+/// A daemon refusal that is not the conflict code is unrecoverable (#7237).
+///
+/// Why: [`reconcile::create_and_reconcile`] retries only a conflict. Reading a
+/// generic refusal as one would send it hunting the registry for an index that
+/// was never the problem, and reading a conflict as a generic refusal is #6864.
+/// The split is on the daemon's own code, and this pins it at the
+/// `best_effort_create_index` level, where the two arms are adjacent.
+/// What: a daemon that answers the internal-error code must yield
+/// `NotConfirmed`, and no registry read must follow.
+/// Test: this test.
+#[test]
+fn a_daemon_refusal_is_not_a_registration() {
+    let log = call_log();
+    let seen = Arc::clone(&log);
+
+    let outcome = with_socket_daemon(
+        "refusal-arm",
+        "refusal-arm",
+        recording(seen, |_method, _nth| {
+            Err(RpcError::internal("the embedder never initialised"))
+        }),
+        |project| {
+            let socket = crate::search_rpc::search_socket().expect("derive the socket");
+            best_effort_create_index(&socket, "api", project, IndexOptions::default())
+        },
+    );
+
+    assert_eq!(outcome, CreateOutcome::NotConfirmed);
+    assert_eq!(
+        methods(&log),
+        vec![METHOD_INDEX_CREATE.to_string()],
+        "an unrecoverable refusal must not go on to read the registry"
+    );
+}
+
+/// A reply this client cannot decode is not a registration either (#7237).
+///
+/// Why: fail-closed is the whole point of #5091 — an id the caller pins must be
+/// one the daemon acknowledged. A peer that answers with something that is not a
+/// JSON-RPC frame has acknowledged nothing, and the one outcome that must never
+/// happen is a panic on a session-launch hot path.
+/// What: binds a raw socket that replies with a line of non-JSON, hardened to
+/// the same `0700`/`0600` modes `connect_hardened` verifies so the failure under
+/// test is the DECODE and not the dial. Asserts `NotConfirmed`.
+/// Test: this test.
+#[test]
+fn a_malformed_create_reply_is_not_a_registration() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir for the garbage daemon");
+    let socket = dir.path().join("s.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind the garbage daemon");
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
+        .expect("harden the garbage socket");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("harden the garbage socket directory");
+
+    let server = std::thread::spawn(move || {
+        let Ok((stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut reader = BufReader::new(stream);
+        let mut request = String::new();
+        let _ = reader.read_line(&mut request);
+        let mut stream = reader.into_inner();
+        let _ = stream.write_all(b"this is not a json-rpc frame\n");
+        let _ = stream.flush();
+    });
+
+    let root = scratch_dir("7237-garbage");
+    fs::create_dir_all(&root).unwrap();
+    let outcome = best_effort_create_index(&socket, "api", &root, IndexOptions::default());
+    let _ = server.join();
+    let _ = fs::remove_dir_all(&root);
+
+    assert_eq!(
+        outcome,
+        CreateOutcome::NotConfirmed,
+        "a reply that cannot be read acknowledges nothing"
+    );
+}
+
+/// The registration is fail-closed when trusty-search is not running, and it
+/// does NOT fall back to the retired loopback port (#7237).
+///
+/// Why: this is the reported bug's other half. `resolve_daemon_base_url` read
+/// `~/.trusty-search/http_addr` — a file an OLD daemon leaves behind and nothing
+/// cleans up — so a client that kept HTTP as a fallback would go on dialling a
+/// port on a machine where the socket is the only thing serving. Leaving that
+/// file in place and pointing it at a listener that WOULD accept is the only
+/// arrangement where a fallback shows up as evidence rather than as a silent
+/// timeout.
+/// What: publishes `http_addr` at a live loopback listener, leaves no socket
+/// file, opts out of the #4255 guard, and calls the reporting entry point.
+/// Asserts `DaemonUnreachable`, no pinnable id, and ZERO accepts on the port.
+/// Test: this test.
+#[test]
+fn a_missing_socket_registers_nothing_and_contacts_no_tcp_port() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the legacy port");
+    let addr = listener.local_addr().expect("legacy port local_addr");
+    listener
+        .set_nonblocking(true)
+        .expect("legacy port set_nonblocking");
+
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let data_dir = scratch_dir("7237-nosocket-data");
+    fs::create_dir_all(&data_dir).unwrap();
+    // SAFETY: guarded by ENV_LOCK; both vars are removed below before returning.
+    unsafe {
+        std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &data_dir);
+        std::env::set_var(crate::test_harness::ALLOW_PRODUCTION_ENV, "1");
+    }
+    crate::write_daemon_addr("trusty-search", &addr.to_string()).expect("publish the legacy addr");
+    assert_eq!(
+        crate::resolve_daemon_base_url("trusty-search"),
+        Some(format!("http://{addr}")),
+        "the legacy discovery file must resolve, or this test proves nothing"
+    );
+    let socket = crate::search_rpc::search_socket().expect("derive the socket path");
+    assert!(
+        !socket.exists(),
+        "the rig's premise is that nothing is listening on the socket"
+    );
+
+    let project = scratch_dir("7237-nosocket");
+    fs::create_dir_all(project.join(".git")).unwrap();
+    let report = ensure_project_indexed_reporting(&project, IndexOptions::default());
+
+    // SAFETY: still guarded by ENV_LOCK, dropped at the end of this function.
+    unsafe {
+        std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+        std::env::remove_var(crate::test_harness::ALLOW_PRODUCTION_ENV);
+    }
+    let _ = fs::remove_dir_all(&project);
+    let _ = fs::remove_dir_all(&data_dir);
+
+    assert_eq!(
+        report.registration,
+        IndexRegistration::DaemonUnreachable,
+        "no socket means nothing was sent — that is not a registration"
+    );
+    assert_eq!(
+        pinnable_index_id(report),
+        None,
+        "an unconfirmed registration must not advance a caller's pin (#5091)"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    assert!(
+        matches!(listener.accept(), Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "the registration dialled the retired loopback port — the #7237 fallback \
+         that must not exist"
     );
 }
 
@@ -1321,9 +1621,11 @@ fn create_rejected_by_the_daemon_withholds_the_pinnable_id() {
 /// Test: itself.
 #[test]
 fn registered_root_from_response_reads_the_already_exists_root() {
-    let body = r#"{"id":"api","created":false,"reason":"already exists","root_path":"/srv/other"}"#;
+    let body = serde_json::json!({
+        "id": "api", "created": false, "reason": "already exists", "root_path": "/srv/other"
+    });
     assert_eq!(
-        registered_root_from_response(body),
+        registered_root_from_response(&body),
         Some("/srv/other".to_string())
     );
 }
@@ -1333,8 +1635,8 @@ fn registered_root_from_response_reads_the_already_exists_root() {
 /// Test: itself.
 #[test]
 fn registered_root_from_response_ignores_a_fresh_create() {
-    let body = r#"{"id":"api","created":true,"root_path":"/srv/api"}"#;
-    assert_eq!(registered_root_from_response(body), None);
+    let body = serde_json::json!({ "id": "api", "created": true, "root_path": "/srv/api" });
+    assert_eq!(registered_root_from_response(&body), None);
 }
 
 /// Why: a daemon too old to report `root_path` must leave the verdict exactly as
@@ -1345,28 +1647,34 @@ fn registered_root_from_response_ignores_a_fresh_create() {
 #[test]
 fn registered_root_from_response_tolerates_a_daemon_that_omits_it() {
     assert_eq!(
-        registered_root_from_response(r#"{"id":"api","created":false}"#),
+        registered_root_from_response(&serde_json::json!({ "id": "api", "created": false })),
         None
     );
-    assert_eq!(registered_root_from_response("not json at all"), None);
-    assert_eq!(registered_root_from_response(""), None);
     assert_eq!(
-        registered_root_from_response(r#"{"created":false,"root_path":42}"#),
+        registered_root_from_response(&serde_json::Value::String("not an object".into())),
+        None
+    );
+    assert_eq!(
+        registered_root_from_response(&serde_json::Value::Null),
+        None
+    );
+    assert_eq!(
+        registered_root_from_response(&serde_json::json!({ "created": false, "root_path": 42 })),
         None,
         "a non-string root_path must yield None, not a panic"
     );
 }
 
-/// Regression for the find-or-create fail-open: a `200 {created: false}` naming
-/// a DIFFERENT tree is not a registration.
+/// Regression for the find-or-create fail-open: a successful create naming a
+/// DIFFERENT tree is not a registration.
 ///
 /// Why: this is the silent-wrong-answer bug. `best_effort_create_index` read
-/// only `resp.status()`, so the daemon's "I already have that id, pointed
-/// somewhere else" was byte-identical to "I created what you asked for". The
-/// caller pinned the id and every later query was answered from the OTHER
-/// checkout, with no error and no warning. A 2xx that did not do what was asked
-/// must not read as confirmation.
-/// What: stands up a fake daemon answering `200` with a `root_path` that is a
+/// only whether the daemon answered, so "I already have that id, pointed
+/// somewhere else" was indistinguishable from "I created what you asked for".
+/// The caller pinned the id and every later query was answered from the OTHER
+/// checkout, with no error and no warning. An answer that did not do what was
+/// asked must not read as confirmation.
+/// What: a daemon answering `{created: false}` with a `root_path` that is a
 /// real, existing directory OTHER than the one requested, so the comparison runs
 /// on `(dev, ino)` rather than falling back to string equality. #6864 renamed
 /// the verdict from `NotConfirmed` to `CreateOutcome::Conflict` — the answer is
@@ -1375,34 +1683,30 @@ fn registered_root_from_response_tolerates_a_daemon_that_omits_it() {
 /// Test: itself.
 #[test]
 fn create_index_response_for_a_different_tree_reports_a_conflict() {
-    let requested = scratch_dir("mismatch-requested");
     let registered = scratch_dir("mismatch-registered");
-    fs::create_dir_all(&requested).unwrap();
     fs::create_dir_all(&registered).unwrap();
+    let answer = created_at(&registered);
 
-    let (addr, server) = one_shot_daemon_with_body(
-        "HTTP/1.1 200 OK",
-        format!(
-            r#"{{"id":"api","created":false,"reason":"already exists","root_path":"{}"}}"#,
-            registered.display()
-        ),
+    let outcome = with_socket_daemon(
+        "mismatch",
+        "mismatch-requested",
+        recording(call_log(), move |method, _nth| {
+            if method == METHOD_INDEX_CREATE {
+                return Ok(answer.clone());
+            }
+            reindex_lane(method)
+        }),
+        |project| {
+            let socket = crate::search_rpc::search_socket().expect("derive the socket");
+            best_effort_create_index(&socket, "api", project, IndexOptions::default())
+        },
     );
-
-    let outcome = best_effort_create_index(
-        &format!("http://{addr}"),
-        "api",
-        &requested,
-        IndexOptions::default(),
-    );
-    let _ = server.join();
 
     assert_eq!(
         outcome,
         CreateOutcome::Conflict { existing_id: None },
-        "a 200 naming a different tree must not confirm the registration"
+        "an answer naming a different tree must not confirm the registration"
     );
-
-    let _ = fs::remove_dir_all(&requested);
     let _ = fs::remove_dir_all(&registered);
 }
 
@@ -1412,173 +1716,117 @@ fn create_index_response_for_a_different_tree_reports_a_conflict() {
 /// Test: itself.
 #[test]
 fn create_index_response_for_the_same_tree_is_confirmed() {
-    let root = scratch_dir("mismatch-same-tree");
-    fs::create_dir_all(&root).unwrap();
-
-    let (addr, server) = one_shot_daemon_with_body(
-        "HTTP/1.1 200 OK",
-        format!(
-            r#"{{"id":"api","created":false,"reason":"already exists","root_path":"{}"}}"#,
-            root.display()
-        ),
+    let outcome = with_socket_daemon(
+        "same-tree",
+        "same-tree",
+        |method, params| {
+            // The rig reflects the requested root back, so the registered and
+            // requested trees identify one directory.
+            let answer = if method == METHOD_INDEX_CREATE {
+                let root = params
+                    .get("root_path")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                Ok(serde_json::json!({
+                    "id": "api", "created": false, "reason": "already exists", "root_path": root
+                }))
+            } else {
+                reindex_lane(method)
+            };
+            Box::pin(async move { answer })
+        },
+        |project| {
+            let socket = crate::search_rpc::search_socket().expect("derive the socket");
+            best_effort_create_index(&socket, "api", project, IndexOptions::default())
+        },
     );
-
-    let outcome = best_effort_create_index(
-        &format!("http://{addr}"),
-        "api",
-        &root,
-        IndexOptions::default(),
-    );
-    let _ = server.join();
 
     assert_eq!(outcome, CreateOutcome::Confirmed);
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 // ── #6864: a colliding basename resolves to the index serving this root ───────
 
-/// Stand up a fake trusty-search daemon answering a SCRIPTED SEQUENCE.
+/// The message trusty-search sends when an id already identifies another tree.
 ///
-/// Why: the #6864 recovery is a conversation, not one call — the create is
-/// refused, the registry is read, and (when nothing serves the tree) a second
-/// create is issued. `one_shot_daemon` answers exactly one request, so it can
-/// only ever reach the first step. Dropping the listener once the script is
-/// exhausted keeps the follow-up reindex probes failing fast with
-/// connection-refused instead of idling out their own timeouts, which is the
-/// same trick the one-shot form uses.
-/// What: binds `127.0.0.1:0` and accepts `responses.len()` connections in order,
-/// replying with each `(status_line, body)` pair in turn. Every request in this
-/// module's flows is `connection: close` on a freshly built client, so
-/// connection order IS request order.
-/// Test: used by `registration_matches_an_existing_index_by_root_path` and
-/// `registration_falls_back_to_a_collision_resistant_id`.
-fn scripted_daemon(
-    responses: Vec<(&'static str, String)>,
-) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake daemon");
-    let addr = listener.local_addr().expect("fake daemon local_addr");
-    let handle = std::thread::spawn(move || {
-        use std::io::{Read, Write};
-        for (status_line, body) in responses {
-            let Ok((mut stream, _)) = listener.accept() else {
-                return;
-            };
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
-            let _ = stream.write_all(
-                format!(
-                    "{status_line}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .as_bytes(),
-            );
-            let _ = stream.flush();
-        }
-        drop(listener);
-    });
-    (addr, handle)
-}
-
-/// The `409` trusty-search returns when an id already identifies another tree.
-///
-/// Mirrors `root_path_mismatch_response` — note it names no `existing_id`,
+/// Mirrors `root_path_mismatch_response` — note it names no owning index,
 /// because no index serves the tree that was asked about.
-fn root_mismatch_409(index_id: &str, registered: &Path, requested: &Path) -> String {
+fn root_mismatch_message(index_id: &str, registered: &Path) -> String {
     format!(
-        r#"{{"error":"index '{index_id}' is registered elsewhere","index_id":"{index_id}",
-           "registered_root_path":"{}","requested_root_path":"{}"}}"#,
-        registered.display(),
-        requested.display()
+        "index '{index_id}' is registered at {:?}; it cannot be re-registered \
+         because one index identifies one directory tree",
+        registered.display()
     )
 }
 
-/// Run `body` against a scripted fake daemon, with a git-rooted project named
-/// `project_name` (#6864).
+/// The message trusty-search sends when the requested ROOT already belongs to
+/// another index.
 ///
-/// Why: the two #6864 regressions need the same arrangement as
-/// [`with_refusing_daemon`] — `ENV_LOCK`, an isolated data dir, the #4255
-/// opt-out, a published daemon address — but they also need the project's PATH
-/// before the responses can be written, because the registry body embeds it.
-/// What: creates `<scratch>/<project_name>/.git`, calls `script(&project)` to
-/// build the response sequence, serves it, runs `body(&project)`, then restores
-/// the environment and removes both scratch trees.
-/// Test: used by the two tests below.
-fn with_scripted_daemon<T>(
-    tag: &str,
-    project_name: &str,
-    script: impl FnOnce(&Path) -> Vec<(&'static str, String)>,
-    body: impl FnOnce(&Path) -> T,
-) -> T {
-    let _guard = crate::data_dir::ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let data_dir = scratch_dir(&format!("6864-data-{tag}"));
-    fs::create_dir_all(&data_dir).unwrap();
-    // SAFETY: guarded by ENV_LOCK; both vars are removed below before returning.
-    unsafe {
-        std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &data_dir);
-        std::env::set_var(crate::test_harness::ALLOW_PRODUCTION_ENV, "1");
-    }
-
-    let workspace = scratch_dir(&format!("6864-ws-{tag}"));
-    let project = workspace.join(project_name);
-    fs::create_dir_all(project.join(".git")).unwrap();
-
-    let (addr, server) = scripted_daemon(script(&project));
-    publish_daemon_addr(&data_dir, addr);
-
-    let out = body(&project);
-
-    let _ = server.join();
-    unsafe {
-        std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
-        std::env::remove_var(crate::test_harness::ALLOW_PRODUCTION_ENV);
-    }
-    let _ = fs::remove_dir_all(&workspace);
-    let _ = fs::remove_dir_all(&data_dir);
-    out
+/// Mirrors `root_path_collision_response`, which names the owning index.
+fn root_collision_message(root: &Path, existing_id: &str) -> String {
+    format!(
+        "root_path {:?} is already registered to index '{existing_id}'; two \
+         indexes cannot share one on-disk corpus (issues #2305, #2336)",
+        root.display()
+    )
 }
 
 /// Regression for #6864: a basename already taken by another tree resolves to
 /// the index registered at THIS tree.
 ///
 /// Why: this is the reported failure exactly. The daemon held `trusty-tools` for
-/// `/Users/masa/Projects/trusty-tools` and answered the checkout's registration
-/// `409`; nothing then looked for the index that DID serve the checkout, so the
-/// session got `NotConfirmed`, no pin, and every MCP `search` call in it failed
-/// with `missing required string field: index_id` — while
-/// `trusty-tools-checkout` sat in the same daemon serving the very tree the
-/// session was working in.
+/// `/Users/masa/Projects/trusty-tools` and refused the checkout's registration;
+/// nothing then looked for the index that DID serve the checkout, so the session
+/// got `NotConfirmed`, no pin, and every MCP `search` call in it failed with
+/// `missing required string field: index_id` — while `trusty-tools-checkout` sat
+/// in the same daemon serving the very tree the session was working in.
 /// What: two checkouts named `trusty-tools`; the daemon refuses the create with
-/// the same-id-different-tree `409` and then reports both indexes on
-/// `GET /indexes?details=true`. The report must come back `Confirmed` carrying
+/// the same-id-different-tree conflict and then reports both indexes on
+/// `search.indexes.list`. The report must come back `Confirmed` carrying
 /// `trusty-tools-checkout`, the id whose `root_path` IS this project.
 /// Test: this test.
 #[test]
 fn registration_matches_an_existing_index_by_root_path() {
     let other = scratch_dir("6864-other-checkout");
     fs::create_dir_all(&other).unwrap();
+    let elsewhere = other.clone();
+    let mine: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    let recorded = Arc::clone(&mine);
 
-    let report = with_scripted_daemon(
+    let report = with_socket_daemon(
         "match",
         "trusty-tools",
-        |project| {
-            vec![
-                (
-                    "HTTP/1.1 409 Conflict",
-                    root_mismatch_409("trusty-tools", &other, project),
-                ),
-                (
-                    "HTTP/1.1 200 OK",
-                    format!(
-                        r#"{{"indexes":[{{"id":"trusty-tools","root_path":"{}"}},
-                           {{"id":"trusty-tools-checkout","root_path":"{}"}}]}}"#,
-                        other.display(),
-                        project.display()
-                    ),
-                ),
-            ]
+        move |method, params| {
+            let answer = if method == METHOD_INDEX_CREATE {
+                let requested = params
+                    .get("root_path")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                *recorded.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(PathBuf::from(requested));
+                Err(RpcError::new(
+                    CODE_CONFLICT,
+                    root_mismatch_message("trusty-tools", &elsewhere),
+                ))
+            } else if method == METHOD_INDEXES_LIST {
+                let requested = recorded
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+                    .unwrap_or_default();
+                Ok(serde_json::json!({
+                    "indexes": [
+                        { "id": "trusty-tools", "root_path": elsewhere.to_string_lossy() },
+                        {
+                            "id": "trusty-tools-checkout",
+                            "root_path": requested.to_string_lossy(),
+                        },
+                    ]
+                }))
+            } else {
+                reindex_lane(method)
+            };
+            Box::pin(async move { answer })
         },
         |project| ensure_project_indexed_reporting(project, IndexOptions::default()),
     );
@@ -1598,6 +1846,56 @@ fn registration_matches_an_existing_index_by_root_path() {
     let _ = fs::remove_dir_all(&other);
 }
 
+/// Regression for #6864 over the socket: the root-collision refusal names the
+/// owning index, and reading it costs no extra call (#7237).
+///
+/// Why: the HTTP refusal carried `existing_id` as a body field, and the socket's
+/// error frame carries only a code and a message — so the id survives the
+/// transport only in the daemon's wording. This is the tier that keeps the
+/// common recoverable conflict at zero extra requests; the registry scan is the
+/// guarantee behind it, and the assertion that NO list call was made is what
+/// tells the two apart.
+/// What: the daemon refuses the create with `root_path_collision_response`'s
+/// wording naming `trusty-tools-checkout`. The report must pin that id, and
+/// `search.indexes.list` must never be asked.
+/// Test: this test.
+#[test]
+fn a_root_path_collision_recovers_the_owning_index_without_a_registry_read() {
+    let log = call_log();
+    let seen = Arc::clone(&log);
+
+    let report = with_socket_daemon(
+        "collision",
+        "trusty-tools",
+        recording(seen, |method, _nth| {
+            if method == METHOD_INDEX_CREATE {
+                return Err(RpcError::new(
+                    CODE_CONFLICT,
+                    root_collision_message(
+                        Path::new("/nonexistent/checkout/trusty-tools"),
+                        "trusty-tools-checkout",
+                    ),
+                ));
+            }
+            reindex_lane(method)
+        }),
+        |project| ensure_project_indexed_reporting(project, IndexOptions::default()),
+    );
+
+    assert_eq!(report.registration, IndexRegistration::Confirmed);
+    assert_eq!(
+        report.index_id,
+        Some("trusty-tools-checkout".to_string()),
+        "the id the refusal named is the one to pin (#6864)"
+    );
+    assert!(
+        !methods(&log).contains(&METHOD_INDEXES_LIST.to_string()),
+        "the refusal already named the owning index, so the registry read is \
+         wasted work: {:?}",
+        methods(&log)
+    );
+}
+
 /// Regression for #6864: when nothing serves this tree, the create is retried
 /// once under a collision-resistant id.
 ///
@@ -1607,36 +1905,39 @@ fn registration_matches_an_existing_index_by_root_path() {
 /// id the client ever tried is the one the daemon refuses. Retrying under
 /// `derive_checkout_index_id` — the path-digest form #6149 defined for two
 /// checkouts of one repository — is what gets it indexed at all.
-/// What: same `409`, but the registry names only the OTHER checkout. The client
-/// must POST a second create under the digest id and confirm THAT.
+/// What: same conflict, but the registry names only the OTHER checkout. The
+/// client must issue a second create under the digest id and confirm THAT.
 /// Test: this test.
 #[test]
 fn registration_falls_back_to_a_collision_resistant_id() {
     let other = scratch_dir("6864-fallback-other");
     fs::create_dir_all(&other).unwrap();
+    let elsewhere = other.clone();
+    let log = call_log();
+    let seen = Arc::clone(&log);
 
-    let (report, expected) = with_scripted_daemon(
+    let (report, expected) = with_socket_daemon(
         "fallback",
         "trusty-tools",
-        |project| {
-            vec![
-                (
-                    "HTTP/1.1 409 Conflict",
-                    root_mismatch_409("trusty-tools", &other, project),
-                ),
-                (
-                    "HTTP/1.1 200 OK",
-                    format!(
-                        r#"{{"indexes":[{{"id":"trusty-tools","root_path":"{}"}}]}}"#,
-                        other.display()
-                    ),
-                ),
-                (
-                    "HTTP/1.1 200 OK",
-                    r#"{"id":"trusty-tools-abcdef12","created":true}"#.to_string(),
-                ),
-            ]
-        },
+        recording(seen, move |method, nth| {
+            if method == METHOD_INDEX_CREATE {
+                if nth == 0 {
+                    return Err(RpcError::new(
+                        CODE_CONFLICT,
+                        root_mismatch_message("trusty-tools", &elsewhere),
+                    ));
+                }
+                return Ok(serde_json::json!({ "created": true }));
+            }
+            if method == METHOD_INDEXES_LIST {
+                return Ok(serde_json::json!({
+                    "indexes": [
+                        { "id": "trusty-tools", "root_path": elsewhere.to_string_lossy() }
+                    ]
+                }));
+            }
+            reindex_lane(method)
+        }),
         |project| {
             (
                 ensure_project_indexed_reporting(project, IndexOptions::default()),
@@ -1654,6 +1955,14 @@ fn registration_falls_back_to_a_collision_resistant_id() {
         report.index_id, expected,
         "the id must be the shared checkout derivation, not a scheme invented here \
          (#6149 / #6864)"
+    );
+    assert_eq!(
+        calls(&log)
+            .iter()
+            .filter(|(m, _)| m == METHOD_INDEX_CREATE)
+            .count(),
+        2,
+        "exactly one retry, under the digest id"
     );
 
     let _ = fs::remove_dir_all(&other);

@@ -14,16 +14,24 @@
 //!
 //! What: [`ensure_project_indexed`] resolves the git-root, derives the index id
 //! via [`crate::resolve_project_root`] / [`crate::derive_index_id`], and — when
-//! the daemon is discoverable — best-effort registers the index (`POST
-//! /indexes`, ~1s cap) then best-effort triggers a freshness-gated reindex
-//! (`POST /indexes/{id}/reindex`, ~2s cap, skipped when the index already holds
-//! chunks indexed within the last hour). Every step is fail-open in the sense
+//! the daemon's socket is bound — best-effort registers the index
+//! (`search.index.create`, ~1s cap) then best-effort triggers a
+//! freshness-gated reindex (`search.index.reindex`, ~2s cap, skipped when the
+//! index already holds chunks indexed within the last hour). Every step is fail-open in the sense
 //! that failures are logged at warn/debug and never propagated, so the caller (a
 //! session launch or a task run) is never blocked or aborted by an
 //! unreachable/slow search daemon. What it is NOT (#5091) is fail-open in its
 //! RETURN: the id comes back only when the daemon confirmed the index, so a
-//! failed create cannot advance a caller's pin. The blocking HTTP calls run on dedicated OS
+//! failed create cannot advance a caller's pin. The blocking calls run on dedicated OS
 //! threads so the function is safe to call from inside a tokio runtime.
+//!
+//! **Registration speaks the daemon's Unix socket, not HTTP (#7237).** It used
+//! to resolve `~/.trusty-search/http_addr` and POST `http://127.0.0.1:7878/indexes`
+//! — a listener ADR-0032 retired — so every session launch against a project
+//! with no index logged `error sending request for url` and then withheld the
+//! id. It now dials [`crate::search_rpc`], the one trusty-search client, and an
+//! ABSENT socket is the fail-closed answer: nothing falls back to a port. The
+//! per-file incremental path below has not migrated and is still HTTP.
 //!
 //! Mid-task incremental re-indexing: [`ensure_project_indexed`] runs once, at
 //! task start — for a greenfield project that starts EMPTY, that means
@@ -74,13 +82,23 @@
 //! [`ensure_project_indexed`]: crate::search_index::ensure_project_indexed
 //! [`index_files_best_effort`]: crate::search_index::index_files_best_effort
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 // #6864: basename-collision recovery lives in a sibling file so this one stays
 // under the 500-SLOC production cap. Same child-module rule as `tests` below.
 #[path = "search_index_reconcile.rs"]
 mod reconcile;
 use reconcile::CreateOutcome;
+
+/// Overall budget for the find-or-create call (#7237).
+///
+/// The 1s the retired `reqwest` client carried, kept so the migration changes
+/// the transport and not what a slow daemon costs a session launch.
+const CREATE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Overall budget for each half of the freshness-gated reindex trigger (#7237).
+const REINDEX_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Find-or-create the trusty-search index for `project_root`, best-effort
 /// trigger a reindex so it is actually populated, and return its id (issues
@@ -93,7 +111,7 @@ use reconcile::CreateOutcome;
 /// trusty-search's `detect_project` uses, via [`crate::derive_index_id`]) and
 /// best-effort register it with the running daemon. The daemon's `POST
 /// /indexes` is idempotent (returns `created: false` for an existing id), so a
-/// re-register is safe and cheap. Issue #1908: `POST /indexes` alone only
+/// re-register is safe and cheap. Issue #1908: the create alone only
 /// registers an EMPTY index and starts a future-changes file watcher — it never
 /// walks the existing tree — so a reindex is triggered right after, in the same
 /// reachable-daemon branch, sharing one "is the daemon up" check.
@@ -161,7 +179,7 @@ pub fn ensure_project_indexed(project_root: &Path, allow_sensitive_path: bool) -
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct IndexOptions {
-    /// Forwarded to `POST /indexes`' `allow_sensitive_path` field — see
+    /// Forwarded to `search.index.create`'s `allow_sensitive_path` field — see
     /// [`ensure_project_indexed`]'s doc comment for when `true` is correct.
     pub allow_sensitive_path: bool,
 
@@ -212,14 +230,14 @@ impl IndexOptions {
 /// advisory: the id-only entry points hand back an id only when it says
 /// `Confirmed` (see [`pinnable_index_id`]), while this report still carries the
 /// derived id in every case.
-/// What: the four terminal states of the `POST /indexes` attempt. Only
+/// What: the four terminal states of the create attempt. Only
 /// `Confirmed` means the index is known to exist daemon-side.
 /// Test: `reporting_says_skipped_under_test_harness`,
 /// `reporting_says_daemon_unreachable_when_no_daemon_is_discoverable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IndexRegistration {
-    /// `POST /indexes` returned 2xx — the index exists in the daemon.
+    /// The daemon acknowledged the create — the index exists in the daemon.
     Confirmed,
     /// The daemon address resolved but the create call did not confirm: a
     /// non-2xx response, a transport error, or a panicked worker thread. All
@@ -248,7 +266,7 @@ pub enum IndexRegistration {
 pub struct EnsureIndexReport {
     /// The canonical index id, or `None` when derivation yielded empty.
     pub index_id: Option<String>,
-    /// What the `POST /indexes` attempt achieved.
+    /// What the create attempt achieved.
     pub registration: IndexRegistration,
 }
 
@@ -259,7 +277,7 @@ pub struct EnsureIndexReport {
 /// can never drift between the session-launch, task-start, and
 /// worktree-creation callers.
 /// What: identical to [`ensure_project_indexed`] in every respect except that
-/// `opts.skip_vector` is threaded into the `POST /indexes` body. Failures are
+/// `opts.skip_vector` is threaded into the create params. Failures are
 /// still logged and swallowed rather than propagated, and the returned id is
 /// still gated on a confirmed registration ([`pinnable_index_id`]). A caller
 /// that needs the DERIVED id whether or not the daemon confirmed it — to name
@@ -275,7 +293,7 @@ pub fn ensure_project_indexed_with(project_root: &Path, opts: IndexOptions) -> O
 
 /// The id a caller may PIN, or `None` when nothing observed the index (#5091).
 ///
-/// Why: `POST /indexes` can fail — a non-2xx, a transport error, a daemon that
+/// Why: the create can fail — a refusal, a transport error, a daemon that
 /// is not running — and the id-only entry points used to hand the derived id
 /// back anyway. Session launch writes that id into `.mcp.json` as
 /// `trusty-search serve --index <id>`, so a create that silently failed left the
@@ -317,8 +335,8 @@ fn pinnable_index_id(report: EnsureIndexReport) -> Option<String> {
 /// copy of the register-then-populate sequence exists.
 /// What: resolves the git-root, refuses an unindexable root (#6550), derives
 /// the id, and — when the id is non-empty, this is not a test process, and a
-/// daemon address resolves — issues the find-or-create `POST /indexes` followed
-/// by the freshness-gated reindex trigger. Returns the id in every case except
+/// daemon socket is bound — issues the find-or-create `search.index.create`
+/// followed by the freshness-gated reindex trigger. Returns the id in every case except
 /// a refusal or empty derivation, alongside the registration outcome. Still
 /// fail-open: no step propagates an error.
 ///
@@ -370,34 +388,62 @@ pub fn ensure_project_indexed_reporting(
         };
     }
 
-    // Discover the running daemon's address (issue #2033: via the shared
-    // `resolve_daemon_base_url` helper — never a hardcoded port). Absent /
-    // unreadable file ⇒ daemon not started, so nothing is sent and nothing is
-    // registered. #5091: the earlier claim here — that the daemon would create
-    // the index on first reindex — was false; no later step retries, which is
-    // why `DaemonUnreachable` is not a pinnable outcome.
-    let registration = match crate::resolve_daemon_base_url("trusty-search") {
-        Some(base) => {
+    // #7237: the daemon's hardened Unix socket, not the retired HTTP listener.
+    // No socket file ⇒ daemon not started, so nothing is sent and nothing is
+    // registered — there is deliberately no port to fall back to. #5091: the
+    // earlier claim here — that the daemon would create the index on first
+    // reindex — was false; no later step retries, which is why
+    // `DaemonUnreachable` is not a pinnable outcome.
+    let registration = match search_daemon_socket(&index_id) {
+        Some(socket) => {
             // #6864: a derived id the daemon holds for ANOTHER tree resolves to
             // the index already registered at this root instead of failing.
             let (resolved, outcome) =
-                reconcile::create_and_reconcile(&base, &index_id, &root, opts);
+                reconcile::create_and_reconcile(&socket, &index_id, &root, opts);
             index_id = resolved;
-            best_effort_trigger_reindex(&base, &index_id);
+            best_effort_trigger_reindex(&socket, &index_id);
             outcome
         }
-        None => {
-            tracing::warn!(
-                "trusty-search daemon address not found; index '{index_id}' was NOT \
-                 registered and nothing will retry it"
-            );
-            IndexRegistration::DaemonUnreachable
-        }
+        None => IndexRegistration::DaemonUnreachable,
     };
 
     EnsureIndexReport {
         index_id: Some(index_id),
         registration,
+    }
+}
+
+/// The trusty-search socket to register against, or `None` when nothing is
+/// listening there (#7237).
+///
+/// Why: this replaces `resolve_daemon_base_url("trusty-search")`, which read
+/// the legacy `http_addr` discovery file and always yielded an `http://` base
+/// pointing at a listener ADR-0032 retired. There is deliberately NO fallback:
+/// an absent socket means the daemon is not running, and dialling a port
+/// instead would resurrect the very failure #7237 reports. The refusal names
+/// the path, because "which socket did it look for" is the first thing an
+/// operator needs and the old log line never said.
+/// What: [`crate::search_rpc::search_socket`]'s path when the file exists, else
+/// `None` with one `warn` naming the path and the index that went unregistered.
+/// Test: `a_missing_socket_registers_nothing_and_contacts_no_tcp_port`.
+fn search_daemon_socket(index_id: &str) -> Option<PathBuf> {
+    match crate::search_rpc::search_socket() {
+        Ok(socket) if socket.exists() => Some(socket),
+        Ok(socket) => {
+            tracing::warn!(
+                "trusty-search is not listening at {}; index '{index_id}' was NOT \
+                 registered and nothing will retry it (#7237)",
+                socket.display()
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                "cannot resolve the trusty-search socket ({e:#}); index '{index_id}' \
+                 was NOT registered and nothing will retry it (#7237)"
+            );
+            None
+        }
     }
 }
 
@@ -466,7 +512,7 @@ fn refuse_daemon_write_under_test(operation: &str, index_id: &str) -> bool {
 /// next write or reindex covers the file; it does not lose the file, and it
 /// does not fail the tool call.
 ///
-/// Sensitive-path note (issue #2747): unlike `POST /indexes`, the per-file
+/// Sensitive-path note (issue #2747): unlike the create call, the per-file
 /// `index-file` endpoint does NOT re-run the sensitive-path denylist — it
 /// looks the index up by id in the daemon's in-memory registry
 /// (`crates/trusty-search/src/service/server/files.rs`'s `index_file_handler`
@@ -957,7 +1003,7 @@ fn index_file_request_body(rel_path: &str, content: &str) -> serde_json::Value {
     })
 }
 
-/// Build the JSON body for the `POST /indexes` find-or-create call.
+/// Build the params for the `search.index.create` find-or-create call.
 ///
 /// Why: extracted from `best_effort_create_index` so the request shape —
 /// specifically, whether `allow_sensitive_path` is set — is unit-testable
@@ -996,7 +1042,7 @@ fn create_index_request_body(index_id: &str, root: &Path, opts: IndexOptions) ->
     })
 }
 
-/// Extract the tree a `POST /indexes` response says the index is registered at,
+/// Extract the tree a `search.index.create` reply says the index is registered at,
 /// but ONLY when the daemon reported it did not create anything.
 ///
 /// Why: `created: true` means the daemon adopted the root that was just sent, so
@@ -1006,109 +1052,89 @@ fn create_index_request_body(index_id: &str, root: &Path, opts: IndexOptions) ->
 /// behaviour identical against a daemon too old to report `root_path` — the
 /// check strengthens the verdict where it can and never invents a failure where
 /// it cannot.
-/// What: parses `body` as JSON and returns `root_path` when it is a string and
-/// `created` is exactly `false`. Any parse failure, absent field, or wrong type
-/// yields `None`.
+/// What: returns `body`'s `root_path` when it is a string and `created` is
+/// exactly `false`. An absent field, a wrong type, or a `body` that is not an
+/// object at all yields `None` — #7237 made this a `serde_json::Value` because
+/// the socket hands back the daemon's `result` already parsed, so re-rendering
+/// it to text only to re-parse it would be the one place a malformed reply
+/// could be mistaken for an absent field.
 /// Test: `registered_root_from_response_reads_the_already_exists_root`,
 /// `registered_root_from_response_ignores_a_fresh_create`,
 /// `registered_root_from_response_tolerates_a_daemon_that_omits_it`.
-fn registered_root_from_response(body: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    if value.get("created")? != &serde_json::Value::Bool(false) {
+fn registered_root_from_response(body: &serde_json::Value) -> Option<String> {
+    if body.get("created")? != &serde_json::Value::Bool(false) {
         return None;
     }
-    value.get("root_path")?.as_str().map(str::to_string)
+    body.get("root_path")?.as_str().map(str::to_string)
 }
 
-/// POST `/indexes` to find-or-create `index_id`; failures are logged, never
-/// propagated (issue #1373).
+/// Call `search.index.create` to find-or-create `index_id`; failures are
+/// logged, never propagated (issues #1373, #7237).
 ///
 /// Why: registration is best-effort — a daemon that is briefly unreachable, or
-/// an HTTP hiccup, must NOT abort the caller. Isolating the blocking HTTP call
-/// here keeps [`ensure_project_indexed`] readable and the error handling in one
+/// a socket hiccup, must NOT abort the caller. Isolating the blocking call here
+/// keeps [`ensure_project_indexed`] readable and the error handling in one
 /// place.
-/// What: issues a short-timeout blocking `POST {base}/indexes` with body
-/// `{id, root_path, allow_sensitive_path}` (built by
-/// [`create_index_request_body`]) ON A DEDICATED OS THREAD. Callers are
-/// frequently inside a tokio runtime; creating `reqwest::blocking`'s internal
-/// runtime directly there panics with "Cannot drop a runtime in a context
-/// where blocking is not allowed". Running the blocking client on a
-/// freshly-spawned `std::thread` (joined here) keeps that nested runtime
-/// entirely off the async worker, so the call is safe from both sync and
-/// async callers. A non-2xx response or transport error is logged at
-/// warn/debug and swallowed; the daemon endpoint is idempotent so re-creates
-/// are harmless. The client uses a tight ~1s overall timeout (750 ms connect)
-/// so the joined thread returns quickly: this call sits on a hot path and
-/// must NOT stall when the daemon is slow or unreachable.
+/// What: issues a short-timeout [`crate::search_rpc::call_blocking`] of
+/// `search.index.create` with a BARE `CreateIndexRequest` — `{id, root_path,
+/// allow_sensitive_path, skip_vector}`, built by [`create_index_request_body`]
+/// and byte-for-byte the JSON the retired HTTP route took. It is a
+/// registry-level write, so it must NOT be wrapped in the `{index_id, body}`
+/// envelope the index-scoped writes use; the daemon would refuse that as
+/// `invalid_params`. The call runs on its own OS thread (see
+/// [`crate::search_rpc::call_blocking`]) because both callers are frequently
+/// inside a tokio runtime. Refusals and transport failures are logged at
+/// warn/debug and swallowed; the daemon method is idempotent so re-creates are
+/// harmless. The ~1s budget keeps a slow daemon from stalling a hot path.
 ///
-/// Returns [`CreateOutcome::Confirmed`] ONLY for a 2xx response (#5065
-/// review): a non-2xx other than `409`, a transport error, and a panicked worker
-/// thread are all `NotConfirmed`. They are still logged and swallowed — the
-/// return value gives the caller something honest to report, it does not make
-/// the call fallible.
+/// Returns [`CreateOutcome::Confirmed`] ONLY for a `result` naming this tree
+/// (#5065 review): a refusal other than the conflict code, a transport error, a
+/// malformed reply, and a panicked worker thread are all `NotConfirmed`. They
+/// are still logged and swallowed — the return value gives the caller something
+/// honest to report, it does not make the call fallible.
 ///
-/// A 2xx is no longer sufficient on its own. The daemon answers a find-or-create
-/// for an id it already holds with `200 {created: false}`, and reading only the
-/// status made that indistinguishable from a real create — so a caller whose
-/// tree differed from the registered one was told the registration succeeded and
-/// then had every query answered from the OTHER tree, with no error and no
-/// warning. The response now carries the registered `root_path` and a mismatch
-/// downgrades the verdict to [`CreateOutcome::Conflict`].
+/// A successful answer is not sufficient on its own. The daemon answers a
+/// find-or-create for an id it already holds with `{created: false}`, and
+/// reading only "did it answer" made that indistinguishable from a real create
+/// — so a caller whose tree differed from the registered one was told the
+/// registration succeeded and then had every query answered from the OTHER
+/// tree, with no error and no warning. The reply carries the registered
+/// `root_path` and a mismatch downgrades the verdict to
+/// [`CreateOutcome::Conflict`].
 ///
-/// #6864: a `409` is that same conflict said out loud — the daemon refuses to
-/// re-register an id over a second tree (`root_path_mismatch_response`), and
-/// refuses a second id over one tree (`root_path_collision_response`, which
-/// names the owning `existing_id`). Both are reported as `Conflict` rather than
-/// `NotConfirmed` because an index for the requested tree may well exist under
-/// another id; [`reconcile::create_and_reconcile`] is what goes and finds it.
+/// #6864: the daemon's conflict code is that same conflict said out loud — it
+/// refuses to re-register an id over a second tree
+/// (`root_path_mismatch_response`), and refuses a second id over one tree
+/// (`root_path_collision_response`, which names the owning `existing_id`). Both
+/// are reported as `Conflict` rather than `NotConfirmed` because an index for
+/// the requested tree may well exist under another id;
+/// [`reconcile::create_and_reconcile`] is what goes and finds it.
 /// Test: `ensure_project_indexed_withholds_id_when_nothing_was_registered`
-/// (daemon-down path), `registered_root_from_response_*` (the body contract),
-/// `create_index_response_for_a_different_tree_reports_a_conflict` (the 2xx
-/// conflict arm), `registration_matches_an_existing_index_by_root_path` (the
-/// `409` arm, end to end).
+/// (daemon-down path), `registered_root_from_response_*` (the reply contract),
+/// `create_index_response_for_a_different_tree_reports_a_conflict` (the
+/// same-tree check), `a_daemon_refusal_is_not_a_registration`,
+/// `a_malformed_create_reply_is_not_a_registration`,
+/// `registration_matches_an_existing_index_by_root_path` (the conflict arm, end
+/// to end).
 fn best_effort_create_index(
-    base: &str,
+    socket: &Path,
     index_id: &str,
     root: &Path,
     opts: IndexOptions,
 ) -> CreateOutcome {
-    let url = format!("{base}/indexes");
-    let body = create_index_request_body(index_id, root, opts);
-    let index_id = index_id.to_string();
+    let params = create_index_request_body(index_id, root, opts);
     let root_display = root.display().to_string();
 
-    let result = std::thread::spawn(move || {
-        // 1s overall / 750ms connect cap: this runs synchronously on a hot
-        // path, so the worst-case stall must stay small.
-        // #4392: loopback target, so proxies stay off.
-        let client = crate::http_client::blocking_loopback_client_builder()
-            .timeout(std::time::Duration::from_secs(1))
-            .connect_timeout(std::time::Duration::from_millis(750))
-            .build()?;
-        let resp = client.post(&url).json(&body).send()?;
-        let status = resp.status();
-        // The body is read here, inside the worker, because `resp` cannot cross
-        // the join. An unreadable body is not itself a failure — it degrades to
-        // the pre-existing status-only verdict below.
-        let text = resp.text().unwrap_or_default();
-        Ok::<(reqwest::StatusCode, String), reqwest::Error>((status, text))
-    })
-    .join();
-
-    match result {
-        // #6864: every status→outcome rule lives in `reconcile` beside the
-        // recovery it feeds, so the conflict semantics cannot drift apart.
-        Ok(Ok((status, body))) => {
-            reconcile::classify_create_response(status, &body, &index_id, root, &root_display)
-        }
-        Ok(Err(e)) => {
-            tracing::warn!("trusty-search index registration for '{index_id}' failed: {e}");
-            CreateOutcome::NotConfirmed
-        }
-        Err(_) => {
-            tracing::warn!("trusty-search index registration thread for '{index_id}' panicked");
-            CreateOutcome::NotConfirmed
-        }
+    // #6864/#7237: every reply→outcome rule lives in `reconcile` beside the
+    // recovery it feeds, so the conflict semantics cannot drift apart.
+    match crate::search_rpc::call_blocking(
+        socket,
+        crate::search_rpc::METHOD_INDEX_CREATE,
+        params,
+        CREATE_TIMEOUT,
+    ) {
+        Ok(result) => reconcile::classify_create_result(&result, index_id, root, &root_display),
+        Err(e) => reconcile::classify_create_failure(&e, index_id, &root_display),
     }
 }
 
@@ -1116,75 +1142,52 @@ fn best_effort_create_index(
 /// (issue #1908).
 ///
 /// Why: [`best_effort_create_index`] only find-or-creates an EMPTY index — the
-/// daemon's `POST /indexes` handler registers the id and starts a
-/// future-changes file watcher but never walks the existing tree. Without an
-/// explicit reindex trigger, a freshly registered index stays empty until
-/// *something* changes on disk, so the very first `search`/`grep` query silently
-/// returns nothing. `POST /indexes/{id}/reindex` is fire-and-forget server-side
-/// — it `tokio::spawn`s the walk and returns almost instantly — so triggering it
-/// here does not risk a long stall; the short dedicated-thread timeout guards
-/// the (much rarer) case where even the initial HTTP round trip is slow.
-/// What: on a dedicated OS thread (mirroring [`best_effort_create_index`]) with
-/// a ~2s overall / 750ms connect timeout: first does a cheap `GET
-/// {base}/indexes/{id}/status` freshness probe (see [`index_is_fresh`]) and
+/// daemon's create handler registers the id and starts a future-changes file
+/// watcher but never walks the existing tree. Without an explicit reindex
+/// trigger, a freshly registered index stays empty until *something* changes on
+/// disk, so the very first `search`/`grep` query silently returns nothing.
+/// `search.index.reindex` is fire-and-forget server-side — it `tokio::spawn`s
+/// the walk and returns almost instantly — so triggering it here does not risk a
+/// long stall; the short per-call budget guards the (much rarer) case where even
+/// the round trip is slow.
+/// What: two [`crate::search_rpc::call_blocking`] calls, each capped at ~2s and
+/// each on its own OS thread (mirroring [`best_effort_create_index`]): first a
+/// cheap `search.index.status` freshness probe (see [`index_is_fresh`]), which
 /// skips the reindex entirely when the index already has chunks and was indexed
-/// within the last hour; otherwise POSTs `{base}/indexes/{id}/reindex`. A failed
-/// status probe is treated as "not fresh" (fail-open toward reindexing). Every
-/// outcome — skipped, triggered, non-2xx, transport error, panicked thread — is
-/// logged at warn/debug and swallowed; the daemon-side reindex is itself
-/// idempotent, so calling it redundantly is harmless, and the caller must never
-/// block or fail because trusty-search is unreachable or slow.
+/// within the last hour; otherwise `search.index.reindex`. A failed status probe
+/// is treated as "not fresh" (fail-open toward reindexing). Every outcome —
+/// skipped, triggered, refused, transport error — is logged at warn/debug and
+/// swallowed; the daemon-side reindex is itself idempotent, so calling it
+/// redundantly is harmless, and the caller must never block or fail because
+/// trusty-search is unreachable or slow.
 /// Test: `index_is_fresh_true_when_recently_indexed_with_chunks`,
 /// `index_is_fresh_false_when_no_chunks`, `index_is_fresh_false_when_stale`,
-/// `index_is_fresh_false_when_last_indexed_missing_or_malformed`; the live-HTTP
-/// trigger path is exercised the same way `best_effort_create_index` is
-/// (daemon-down graceful path via
-/// `ensure_project_indexed_withholds_id_when_nothing_was_registered`).
-fn best_effort_trigger_reindex(base: &str, index_id: &str) {
-    let status_url = format!("{base}/indexes/{index_id}/status");
-    let reindex_url = format!("{base}/indexes/{index_id}/reindex");
-    let index_id = index_id.to_string();
+/// `index_is_fresh_false_when_last_indexed_missing_or_malformed`,
+/// `a_confirmed_registration_triggers_a_reindex_over_the_socket`.
+fn best_effort_trigger_reindex(socket: &Path, index_id: &str) {
+    let params = serde_json::json!({ "index_id": index_id });
 
-    let result = std::thread::spawn(move || -> Result<&'static str, reqwest::Error> {
-        // 2s overall / 750ms connect cap: this runs synchronously on a hot path
-        // (after best_effort_create_index's own 1s budget), so the worst-case
-        // added stall must stay small.
-        // #4392: loopback target, so proxies stay off.
-        let client = crate::http_client::blocking_loopback_client_builder()
-            .timeout(std::time::Duration::from_secs(2))
-            .connect_timeout(std::time::Duration::from_millis(750))
-            .build()?;
+    let already_fresh = crate::search_rpc::call_blocking(
+        socket,
+        crate::search_rpc::METHOD_INDEX_STATUS,
+        params.clone(),
+        REINDEX_TIMEOUT,
+    )
+    .ok()
+    .is_some_and(|body| index_is_fresh(&body));
+    if already_fresh {
+        tracing::debug!("trusty-search reindex for '{index_id}': skipped: index already fresh");
+        return;
+    }
 
-        let already_fresh = client
-            .get(&status_url)
-            .send()
-            .ok()
-            .filter(|resp| resp.status().is_success())
-            .and_then(|resp| resp.json::<serde_json::Value>().ok())
-            .is_some_and(|body| index_is_fresh(&body));
-        if already_fresh {
-            return Ok("skipped: index already fresh");
-        }
-
-        let resp = client.post(&reindex_url).send()?;
-        Ok(if resp.status().is_success() {
-            "triggered"
-        } else {
-            "reindex request returned non-2xx"
-        })
-    })
-    .join();
-
-    match result {
-        Ok(Ok(outcome)) => {
-            tracing::debug!("trusty-search reindex for '{index_id}': {outcome}");
-        }
-        Ok(Err(e)) => {
-            tracing::warn!("trusty-search reindex trigger for '{index_id}' failed: {e}");
-        }
-        Err(_) => {
-            tracing::warn!("trusty-search reindex trigger thread for '{index_id}' panicked");
-        }
+    match crate::search_rpc::call_blocking(
+        socket,
+        crate::search_rpc::METHOD_INDEX_REINDEX,
+        params,
+        REINDEX_TIMEOUT,
+    ) {
+        Ok(_) => tracing::debug!("trusty-search reindex for '{index_id}': triggered"),
+        Err(e) => tracing::warn!("trusty-search reindex trigger for '{index_id}' failed: {e:#}"),
     }
 }
 

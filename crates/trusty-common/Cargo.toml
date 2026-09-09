@@ -540,7 +540,12 @@ memory-rpc = ["uds"]
 # `index_id` / `daemon_addr` helpers it uses are already unconditional, so the
 # feature flag gates module compilation + the blocking client only. Off by
 # default so consumers that don't register indexes pay nothing.
-search-index = ["blocking-http"]
+#
+# #7237: implies `uds` too. Index REGISTRATION now speaks the daemon's socket
+# (`search_rpc`) rather than the retired `http://127.0.0.1:7878` listener
+# ADR-0032 removed; `blocking-http` stays because the per-file incremental
+# `index-file` path has not migrated yet.
+search-index = ["blocking-http", "uds"]
 # Enables `http_client::blocking_loopback_client_builder`, the synchronous
 # counterpart of the #4392 proxy-free loopback entry point, by turning on
 # `reqwest/blocking`. Named for what it provides rather than for one consumer:
