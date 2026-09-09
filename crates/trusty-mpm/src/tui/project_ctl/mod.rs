@@ -29,14 +29,10 @@ pub mod state;
 #[cfg(test)]
 mod tests;
 
-use std::io::{self, Stdout};
+use std::io::Stdout;
 use std::time::{Duration, Instant};
 
-use crossterm::{
-    event::{self, Event},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{self, Event};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::client::DaemonClient;
@@ -44,23 +40,9 @@ use events::handle_key;
 use poll::project_ctl_poll_daemon;
 use state::ProjectCtlState;
 
-/// RAII guard that restores the terminal on drop — including during a panic.
-///
-/// Why: mirrors `tui::coordinator::TerminalGuard` — a `Drop` impl runs on both
-/// the normal return and the unwind path, so a panic anywhere in the loop
-/// never leaves the operator's terminal in raw mode / the alternate screen.
-/// What: constructed right after entering raw mode + the alternate screen;
-/// its `Drop` best-effort restores cooked mode, the main screen, and the
-/// cursor, ignoring errors (nothing useful can be done while unwinding).
-/// Test: side-effect-only teardown; covered by launching the TUI.
-struct TerminalGuard;
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
-    }
-}
+// #7224: the panic-safe terminal guard moved to `tui::terminal`, shared with
+// the coordinator screen and the `tm ls` session TUI.
+use crate::tui::terminal::TerminalGuard;
 
 /// How long [`run_loop`] blocks waiting for a key before redrawing.
 ///
@@ -115,15 +97,12 @@ pub async fn run_focused(
         }
     }
 
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
     // The guard restores the terminal on every exit path — normal return AND
     // panic unwind — so it is the SOLE teardown (no manual cleanup follows
     // `run_loop`).
+    // #7224: setup and guard both come from `tui::terminal`.
+    let mut terminal = crate::tui::terminal::enter()?;
     let _guard = TerminalGuard;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
 
     run_loop(&mut terminal, &mut client, state, interval_ms).await
     // `_guard` drops here (or during an unwind), restoring the terminal.

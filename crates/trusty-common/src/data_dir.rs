@@ -183,17 +183,27 @@ pub fn is_dir(path: &Path) -> bool {
     path.metadata().map(|m| m.is_dir()).unwrap_or(false)
 }
 
-/// Mutex serialising all tests that mutate `TRUSTY_DATA_DIR_OVERRIDE`.
+/// The lib target's ONE lock over process-global environment mutation.
 ///
 /// Why: `daemon_addr` tests also call `resolve_data_dir`, so tests across both
 /// modules race on the same env var. Sharing one lock (exported from the module
 /// that owns the constant) prevents spurious failures without pulling in an
-/// external crate.
-/// What: A `std::sync::Mutex<()>` that every env-mutating test locks before
-/// touching `TRUSTY_DATA_DIR_OVERRIDE`.
-/// Test: this is the synchronisation primitive itself — used by test helpers.
+/// external crate. The scope is the whole target, not one variable: a
+/// `#[serial]` group and this mutex exclude nothing of each other, so a test
+/// changing ANY variable under only one of them still runs inside another
+/// test's `setenv` (#6575, #7253). Every env-mutating test in `src/**` takes
+/// this lock, whichever variable it touches.
+/// What: A `std::sync::Mutex<()>` locked for the whole window a variable is
+/// changed. `http_client.rs`'s `with_http_proxy` is the pattern to copy.
+/// Test: `env_lock_ratchet_tests::serial_env_mutating_files_take_env_lock`
+/// enforces the contract; the primitive itself is used by test helpers.
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// #7253: the mechanical guard over the contract [`ENV_LOCK`] states above.
+#[cfg(test)]
+#[path = "env_lock_ratchet_tests.rs"]
+mod env_lock_ratchet_tests;
 
 #[cfg(test)]
 mod tests {
