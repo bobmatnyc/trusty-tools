@@ -468,12 +468,17 @@ independently reviewable PR outcome, subagent confinement, cleanup — lives in
   ([ADR-0049](docs/adr/0049-docs-commits-are-permitted-in-a-main-checkout.md)).
 - Extended rationale and the throwaway-worktree fallback for a dirty checkout:
   [worktree-discipline.md](docs/reference/worktree-discipline.md).
-- 🟡 **The isolation-worktree guard's `git` detection can misfire on a path or a
-  heredoc body** — a shell loop over paths containing `git` (e.g.
+- 🟡 **The isolation-worktree refusals come from the Claude Code harness, not
+  from `tm hook --pm-guard`** — a shell loop over paths containing `git` (e.g.
   `trusty-git-analytics`) or a `<<'PY'`-style scratch script can both be denied
   as unverifiable inside the worktree ([#6982](https://github.com/bobmatnyc/trusty-tools/issues/6982),
-  open). Until it lands, write scratch scripts with the Write tool instead of a
-  shell heredoc, and avoid looping over such paths.
+  open). `tm`'s own guard answers on token POSITION — `git` counts only as a
+  segment's command word — and allows every reported shape; that contract is
+  pinned by `git_is_only_a_git_command_in_command_position` and
+  `git_in_command_position_is_still_a_git_command`, so do not send a fix for
+  these refusals to this repository's guard. Until the harness fix lands, write
+  scratch scripts with the Write tool instead of a shell heredoc, and avoid
+  looping over such paths.
 
 ## Abbreviations & Aliases
 

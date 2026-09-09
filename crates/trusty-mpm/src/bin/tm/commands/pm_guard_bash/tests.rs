@@ -1767,3 +1767,95 @@ fn unexpanded_shell_variable_is_none_for_ordinary_paths() {
         );
     }
 }
+
+/// Whether any composition segment of `command` runs `git` as its command
+/// word — the question every git rule in this guard asks, resolved the way
+/// the production path resolves it (#6982).
+///
+/// Why: the rules do not share one entry point, so a table over any single
+/// rule would pin only that rule's verdict and would move whenever its policy
+/// moved. Composing the two production pieces the rules DO share — the
+/// quote-aware segment split and [`shell_lex::git_subcommand`] — pins the
+/// position question itself: `git` counts when it is a segment's command word
+/// and never when it is a substring of some other token.
+/// What: splits on the composition operators, then asks each segment for its
+/// git subcommand; `true` when any segment resolves one.
+/// Test: `git_is_only_a_git_command_in_command_position`,
+/// `git_in_command_position_is_still_a_git_command`.
+fn command_runs_git(command: &str) -> bool {
+    split_shell_segments(command)
+        .iter()
+        .any(|segment| shell_lex::git_subcommand(segment.trim()).is_some())
+}
+
+/// The allow side of #6982: `git` inside a longer token is not a git command.
+///
+/// Why: engineers in isolation worktrees reported `for` loops over
+/// `crates/trusty-git-analytics/**` refused for "naming git". A classifier
+/// that answered on the substring would deny every row here — a directory
+/// name, a dotfile, a hostname, a word that merely contains the letters, and
+/// a compound command quoted into prose.
+/// What: asserts [`command_runs_git`] is `false` for each.
+/// Test: itself.
+#[test]
+fn git_is_only_a_git_command_in_command_position() {
+    for command in [
+        // A path component, in the three shapes the issue reported.
+        "ls crates/trusty-git-analytics/src",
+        "for f in crates/trusty-git-analytics/src/*.rs; do printf '%s' \"$f\"; done",
+        "cargo test -p trusty-git-analytics --no-fail-fast",
+        // A dotfile whose name starts with the letters.
+        "cat .gitignore",
+        "grep -n target .gitignore",
+        // A hostname that contains them.
+        "echo https://github.com/bobmatnyc/trusty-tools",
+        // A longer word that contains them.
+        "printf '%s' digit-legit-gitignore",
+        // Quoted prose — including a compound command quoted into an argument,
+        // which the quote-aware split must not treat as syntax.
+        "echo 'git status'",
+        "echo \"cd x && git checkout -- .\"",
+    ] {
+        assert!(
+            !command_runs_git(command),
+            "no segment of this runs git as a command word: {command}"
+        );
+    }
+}
+
+/// The deny side of #6982: every position that IS a command word still counts.
+///
+/// Why: the allow side above is only safe if it narrows position, not
+/// recognition. Each row here is a real git invocation the guard denied
+/// before, in one of the positions a command word can occupy — first token of
+/// a pipeline segment, after a composition operator, behind a wrapper or an
+/// env-assignment prefix, or spelled as an absolute path.
+/// What: asserts [`command_runs_git`] is `true` for each.
+/// Test: itself.
+#[test]
+fn git_in_command_position_is_still_a_git_command() {
+    for command in [
+        // First token.
+        "git worktree remove .claude/worktrees/agent-x",
+        // After each composition operator.
+        "cd crates/trusty-git-analytics && git checkout -- .",
+        "echo a | git apply -",
+        "true; git commit -m wip",
+        "false || git reset --hard",
+        // Behind a wrapper or an env-assignment prefix.
+        "env git status",
+        "sudo git clean -fdx",
+        "command git apply -",
+        "exec git reset --hard",
+        "GIT_DIR=/tmp/x git status",
+        // Spelled as an absolute path.
+        "/usr/bin/git status",
+        // A `-C` naming a path that itself contains the letters.
+        "git -C crates/trusty-git-analytics apply p.diff",
+    ] {
+        assert!(
+            command_runs_git(command),
+            "git is the command word of a segment here: {command}"
+        );
+    }
+}
