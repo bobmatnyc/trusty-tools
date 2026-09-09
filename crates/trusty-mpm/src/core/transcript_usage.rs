@@ -24,6 +24,14 @@
 //!   cached prefix, which is the bulk of a long session's input; the sum here
 //!   is `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`.
 //!
+//! The read is BOUNDED. `git` blocks on the `prepare-commit-msg` hook that
+//! reaches this fold, and a long session's transcript grows into the hundreds
+//! of megabytes, so an uncapped stream would slow every commit for the rest of
+//! that session. The fold reads at most [`TRANSCRIPT_TAIL_BYTES`] from the end
+//! of the file and reports [`TranscriptUsage::truncated`] when it did, because
+//! the store behind it holds only the transcript's PATH — no running per-session
+//! totals exist to make a tail read stand for the whole session.
+//!
 //! Everything fails soft: a missing, unreadable, or truncated transcript folds
 //! to zero, and a line that does not parse is skipped with a `warn!` rather
 //! than aborting the fold — a commit must never fail over a stats read.
@@ -32,13 +40,29 @@
 //! `fold_sums_one_message_once_per_id`,
 //! `fold_counts_cache_tokens_as_tokens_in`,
 //! `fold_of_a_missing_transcript_is_empty`,
-//! `fold_skips_a_malformed_line_and_keeps_the_valid_total`.
+//! `fold_skips_a_malformed_line_and_keeps_the_valid_total`,
+//! `fold_reads_only_the_tail_of_an_oversized_transcript`,
+//! `fold_of_a_transcript_within_the_cap_is_not_truncated`.
 
 use std::collections::HashSet;
-use std::io::BufRead as _;
+use std::io::{BufRead as _, Seek as _};
 use std::path::Path;
 
 use serde::Deserialize;
+
+/// How much of a transcript's tail [`fold_transcript`] reads, in bytes.
+///
+/// Why: `git` blocks on the `prepare-commit-msg` hook this fold runs inside, so
+/// the read's cost is paid by every commit of the session. 8 MiB is read in
+/// tens of milliseconds and still spans hundreds of assistant turns, so an
+/// ordinary session is never truncated at all, while a transcript that has
+/// grown to hundreds of megabytes costs the same bounded read as a small one.
+/// What: when the file is larger than this, the fold starts this many bytes
+/// before EOF and discards the partial line at that offset, so every line it
+/// parses is whole.
+/// Test: `fold_reads_only_the_tail_of_an_oversized_transcript`,
+/// `fold_of_a_transcript_within_the_cap_is_not_truncated`.
+pub const TRANSCRIPT_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The tokens one session sent and received, folded from its transcript.
 ///
@@ -55,6 +79,13 @@ pub struct TranscriptUsage {
     pub tokens_out: u64,
     /// How many distinct assistant messages were counted.
     pub messages: usize,
+    /// Whether the byte cap stopped the fold short of the whole transcript.
+    ///
+    /// Why: when this is set the three figures above describe the tail window,
+    /// not the session, and a caller rendering them owes the reader that
+    /// distinction — the commit footer says so on its own `Tokens-Window` line.
+    /// Test: `fold_reads_only_the_tail_of_an_oversized_transcript`.
+    pub truncated: bool,
 }
 
 impl TranscriptUsage {
@@ -117,22 +148,57 @@ fn may_carry_usage(line: &str) -> bool {
 
 /// Fold `transcript` into its tokens-in / tokens-out pair.
 ///
-/// Why/What: see the module doc — streams the file, dedupes on `message.id`,
-/// and sums. A missing or unreadable file, and a line that does not parse, each
-/// cost only what they carried.
+/// Why/What: see the module doc — reads at most [`TRANSCRIPT_TAIL_BYTES`] from
+/// the end of the file, dedupes on `message.id`, and sums. A missing or
+/// unreadable file, and a line that does not parse, each cost only what they
+/// carried.
 /// Test: `fold_sums_one_message_once_per_id`,
 /// `fold_counts_cache_tokens_as_tokens_in`,
 /// `fold_of_a_missing_transcript_is_empty`,
-/// `fold_skips_a_malformed_line_and_keeps_the_valid_total`.
+/// `fold_skips_a_malformed_line_and_keeps_the_valid_total`,
+/// `fold_reads_only_the_tail_of_an_oversized_transcript`.
 pub fn fold_transcript(transcript: &Path) -> TranscriptUsage {
+    fold_transcript_tail(transcript, TRANSCRIPT_TAIL_BYTES)
+}
+
+/// [`fold_transcript`] with the byte cap as a parameter.
+///
+/// Why: a test proving the cap holds would otherwise have to generate a real
+/// 8 MiB fixture on every run. Taking the limit as an argument lets the same
+/// code path be proven against a few hundred bytes.
+/// What: seeks to `limit` bytes before EOF when the file is larger, discards
+/// the partial line at that offset, then folds forward to EOF.
+/// Test: `fold_reads_only_the_tail_of_an_oversized_transcript`,
+/// `fold_of_a_transcript_within_the_cap_is_not_truncated`.
+fn fold_transcript_tail(transcript: &Path, limit: u64) -> TranscriptUsage {
     let Ok(file) = std::fs::File::open(transcript) else {
         // Absent is the ordinary state for a session with no transcript yet.
         return TranscriptUsage::default();
     };
+    let Ok(len) = file.metadata().map(|meta| meta.len()) else {
+        return TranscriptUsage::default();
+    };
 
     let mut total = TranscriptUsage::default();
+    let mut reader = std::io::BufReader::new(file);
+    if len > limit {
+        total.truncated = true;
+        // The seek lands mid-line; that partial line is read and thrown away so
+        // every line the fold then parses is whole. A window holding no newline
+        // at all consumes to EOF here and folds to zero, which is the same
+        // fail-soft outcome as an unreadable file.
+        if reader.seek(std::io::SeekFrom::Start(len - limit)).is_err() {
+            return TranscriptUsage::default();
+        }
+        let mut partial = Vec::new();
+        if reader.read_until(b'\n', &mut partial).is_err() {
+            return TranscriptUsage::default();
+        }
+    }
+
     let mut seen: HashSet<String> = HashSet::new();
-    for (index, line) in std::io::BufReader::new(file).lines().enumerate() {
+    // `index` counts lines within the window read, not from the file's start.
+    for (index, line) in reader.lines().enumerate() {
         let Ok(line) = line else {
             tracing::warn!(
                 transcript = %transcript.display(),

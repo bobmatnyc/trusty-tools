@@ -1,5 +1,6 @@
-//! The per-commit stats footer: `Tokens-In`, `Tokens-Out`, `Savings`, `Model`
-//! (#7074).
+//! The per-commit stats footer: `Tokens-In`, `Tokens-Out`, `Savings`, `Model`,
+//! and the `Tokens-Window` line that scopes the counts when the transcript fold
+//! read only a tail window (#7074).
 //!
 //! Why: the attribution footer Claude Code writes says a session produced the
 //! commit but nothing about what it cost, and the owner's observation on #7074
@@ -47,6 +48,20 @@ pub const TRAILER_TOKENS_IN: &str = "Tokens-In";
 /// Test: `git_interpret_trailers_parses_the_appended_block`.
 pub const TRAILER_TOKENS_OUT: &str = "Tokens-Out";
 
+/// Trailer key stating that the token counts cover a tail window, not the
+/// whole session.
+///
+/// Why: the transcript fold is capped so a commit never waits on a huge read,
+/// and the store behind it holds only the transcript's path — there are no
+/// running per-session totals that would make a tail read stand for the
+/// session. When the cap cuts, `Tokens-In` and `Tokens-Out` describe the window
+/// and a reader has to be told so. It is a separate key rather than a suffix on
+/// the two numbers, so both stay plain integers for anything parsing them back.
+/// What: present only when the fold was truncated, naming the window's size.
+/// Test: `render_states_the_window_when_the_fold_was_truncated`,
+/// `render_omits_the_window_when_the_fold_read_everything`.
+pub const TRAILER_TOKENS_WINDOW: &str = "Tokens-Window";
+
 /// Trailer key carrying the savings percentage (#7179's percent form).
 ///
 /// Test: `git_interpret_trailers_parses_the_appended_block`.
@@ -80,6 +95,13 @@ pub struct CommitStats {
     pub tokens_in: Option<u64>,
     /// Output tokens the session received.
     pub tokens_out: Option<u64>,
+    /// Size of the transcript tail the counts were folded from, when the fold's
+    /// byte cap stopped it short of the whole file.
+    ///
+    /// Why: `None` is the ordinary case and means the two counts are
+    /// whole-session totals. `Some` narrows what they claim to that window.
+    /// Test: `render_states_the_window_when_the_fold_was_truncated`.
+    pub tokens_window_bytes: Option<u64>,
     /// Whole-number percent of tokens the harness avoided sending.
     pub savings_percent: Option<u32>,
     /// The harness model id, e.g. `claude-opus-4-1-20250805`.
@@ -89,6 +111,9 @@ pub struct CommitStats {
 impl CommitStats {
     /// Whether every field is absent, so there is no footer to write.
     ///
+    /// `tokens_window_bytes` is deliberately not consulted: it scopes the two
+    /// counts rather than being a measurement of its own, and a window with no
+    /// counts beside it says nothing.
     /// Test: `render_is_none_when_nothing_is_known`.
     pub fn is_empty(&self) -> bool {
         self.tokens_in.is_none()
@@ -103,13 +128,17 @@ impl CommitStats {
 /// Why: a fixed order makes the footer diffable across commits, and rendering
 /// only present fields is what keeps an unknown value from becoming a stated
 /// zero.
-/// What: `Tokens-In`, `Tokens-Out`, `Savings`, `Model`, one `Key: value` line
-/// each, newline-separated with no trailing newline. A model id carrying a
-/// newline (which would break the block into two paragraphs) is rejected rather
-/// than sanitised — no store writes one, and silently rewriting an id would
-/// make a wrong value look right. `None` when nothing is known.
+/// What: `Tokens-In`, `Tokens-Out`, `Tokens-Window`, `Savings`, `Model`, one
+/// `Key: value` line each, newline-separated with no trailing newline. The
+/// window line follows the counts it scopes and appears only when there is a
+/// count to scope. A model id carrying a newline (which would break the block
+/// into two paragraphs) is rejected rather than sanitised — no store writes
+/// one, and silently rewriting an id would make a wrong value look right.
+/// `None` when nothing is known.
 /// Test: `render_omits_absent_fields`, `render_is_none_when_nothing_is_known`,
-/// `render_rejects_a_multiline_model_id`.
+/// `render_rejects_a_multiline_model_id`,
+/// `render_states_the_window_when_the_fold_was_truncated`,
+/// `render_omits_the_window_when_the_fold_read_everything`.
 pub fn render_trailers(stats: &CommitStats) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
     if let Some(tokens_in) = stats.tokens_in {
@@ -117,6 +146,11 @@ pub fn render_trailers(stats: &CommitStats) -> Option<String> {
     }
     if let Some(tokens_out) = stats.tokens_out {
         lines.push(format!("{TRAILER_TOKENS_OUT}: {tokens_out}"));
+    }
+    if let Some(bytes) = stats.tokens_window_bytes
+        && !lines.is_empty()
+    {
+        lines.push(format!("{TRAILER_TOKENS_WINDOW}: {}", window_label(bytes)));
     }
     if let Some(percent) = stats.savings_percent {
         lines.push(format!("{TRAILER_SAVINGS}: {percent}%"));
@@ -131,6 +165,24 @@ pub fn render_trailers(stats: &CommitStats) -> Option<String> {
         None
     } else {
         Some(lines.join("\n"))
+    }
+}
+
+/// Describe the tail window the token counts were folded from.
+///
+/// Why: a commit footer is read by people, and `8388608` states the same fact
+/// far worse than `8 MiB`. The byte form is kept for a cap that is not a whole
+/// number of MiB, so the label never rounds a size into a lie.
+/// What: `last <n> MiB of a larger transcript`, or the byte count when the size
+/// is not a whole multiple of a MiB.
+/// Test: `render_states_the_window_when_the_fold_was_truncated`,
+/// `window_label_falls_back_to_bytes_off_a_mib_boundary`.
+fn window_label(bytes: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    if bytes >= MIB && bytes.is_multiple_of(MIB) {
+        format!("last {} MiB of a larger transcript", bytes / MIB)
+    } else {
+        format!("last {bytes} bytes of a larger transcript")
     }
 }
 

@@ -32,7 +32,7 @@ use trusty_mpm::core::commit_trailers::{CommitStats, append_trailers, render_tra
 use trusty_mpm::core::savings::{claude_code_session_id, fold_session, savings_log_in};
 use trusty_mpm::core::session_model::read_session_model;
 use trusty_mpm::core::session_record::{KIND_TRANSCRIPT, read_session_record};
-use trusty_mpm::core::transcript_usage::fold_transcript;
+use trusty_mpm::core::transcript_usage::{TRANSCRIPT_TAIL_BYTES, fold_transcript};
 
 use crate::cli::CommitTrailersArgs;
 
@@ -44,8 +44,11 @@ use crate::cli::CommitTrailersArgs;
 /// `~/.trusty-mpm/statusline/` store.
 /// What: folds the recorded transcript for the token pair, folds the savings
 /// ledger for the percentage, and reads the recorded model id. Each field is
-/// `None` when its source said nothing.
-/// Test: `stats_are_empty_without_a_session`, `stats_carry_every_known_value`.
+/// `None` when its source said nothing. A transcript the fold's byte cap cut
+/// short also sets `tokens_window_bytes`, so the footer states that the counts
+/// cover that window rather than the session.
+/// Test: `stats_are_empty_without_a_session`, `stats_carry_every_known_value`,
+/// `a_truncated_fold_scopes_the_counts_to_its_window`.
 pub(crate) fn gather_stats(
     root: &Path,
     session_id: &str,
@@ -59,6 +62,7 @@ pub(crate) fn gather_stats(
     CommitStats {
         tokens_in: (!usage.is_empty()).then_some(usage.tokens_in),
         tokens_out: (!usage.is_empty()).then_some(usage.tokens_out),
+        tokens_window_bytes: usage.truncated.then_some(TRANSCRIPT_TAIL_BYTES),
         savings_percent: savings.percent_saved(session_actual_tokens),
         model_id: read_session_model(root, session_id),
     }
@@ -95,19 +99,31 @@ pub(crate) fn run(args: &CommitTrailersArgs) -> anyhow::Result<()> {
 ///
 /// Why: the hook hands over git's own `COMMIT_EDITMSG`-shaped file, comments
 /// and scissors included, so the placement rules live in
-/// [`append_trailers`] rather than here.
+/// [`append_trailers`] rather than here. The write is atomic because the hook
+/// now enforces a wall-clock budget and can kill this process mid-run: a
+/// half-written `COMMIT_EDITMSG` would cost the operator their commit message,
+/// where a temp-file rename leaves either the original or the stamped text.
 /// What: reads, appends, and writes back only when the text actually changed,
 /// so an amend over an already-stamped message does no write at all.
 /// Test: `stamps_a_message_file`, `an_unstampable_message_is_left_alone`.
 fn stamp_message_file(path: &Path, trailers: &str) -> anyhow::Result<()> {
+    use std::io::Write as _;
+
     let original = std::fs::read_to_string(path)
         .with_context(|| format!("cannot read the commit message file {}", path.display()))?;
     let stamped = append_trailers(&original, trailers);
     if stamped == original {
         return Ok(());
     }
-    std::fs::write(path, stamped)
-        .with_context(|| format!("cannot write the commit message file {}", path.display()))
+
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .with_context(|| format!("cannot stage a commit message beside {}", path.display()))?;
+    tmp.write_all(stamped.as_bytes())
+        .with_context(|| format!("cannot write the commit message file {}", path.display()))?;
+    tmp.persist(path)
+        .with_context(|| format!("cannot replace the commit message file {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -171,6 +187,46 @@ mod tests {
         assert_eq!(stats.tokens_out, Some(7));
         assert_eq!(stats.savings_percent, Some(40));
         assert_eq!(stats.model_id.as_deref(), Some("claude-opus-4-1-20250805"));
+        assert_eq!(
+            stats.tokens_window_bytes, None,
+            "a transcript inside the cap is a whole-session total"
+        );
+    }
+
+    /// Why (#7074 round-2 review): the fold caps its read so a commit never
+    /// waits on a huge transcript, and the counts then cover a tail window. The
+    /// gather must carry that scope through to the footer rather than letting
+    /// the window's figures pass as session totals.
+    /// Test: itself.
+    #[test]
+    fn a_truncated_fold_scopes_the_counts_to_its_window() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("big.jsonl");
+        let filler = format!("{{\"type\":\"user\",\"pad\":\"{}\"}}", "a".repeat(1024));
+        let mut text = String::new();
+        while text.len() as u64 <= TRANSCRIPT_TAIL_BYTES {
+            text.push_str(&filler);
+            text.push('\n');
+        }
+        text.push_str("{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":10,\"output_tokens\":7}}}\n");
+        std::fs::write(&transcript, &text).expect("write transcript");
+        record_session_value(
+            dir.path(),
+            KIND_TRANSCRIPT,
+            "sess-big",
+            &transcript.display().to_string(),
+        );
+
+        let stats = gather_stats(dir.path(), "sess-big", None);
+        assert_eq!(stats.tokens_in, Some(10));
+        assert_eq!(stats.tokens_out, Some(7));
+        assert_eq!(stats.tokens_window_bytes, Some(TRANSCRIPT_TAIL_BYTES));
+
+        let rendered = render_trailers(&stats).expect("trailers");
+        assert!(
+            rendered.contains("Tokens-Window: last 8 MiB of a larger transcript"),
+            "{rendered}"
+        );
     }
 
     /// Why: this is what the hook actually does — hand over a real

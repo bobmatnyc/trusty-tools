@@ -205,6 +205,7 @@ Model: claude-opus-4-1-20250805
 | Trailer | Where it comes from |
 |---|---|
 | `Tokens-In` / `Tokens-Out` | the session's own Claude Code transcript, folded at commit time |
+| `Tokens-Window` | present only when the fold read a tail window rather than the whole transcript |
 | `Savings` | the ledger, folded for this session — the same percentage the `💸` segment shows |
 | `Model` | `~/.trusty-mpm/usage/session-model/<session-id>`, written by the statusline render |
 
@@ -231,6 +232,39 @@ message that already carries the block and leaves it alone.
 `TM_SKIP_COMMIT_STATS=1 git commit …` skips it for one commit. The hook exits 0
 on every path: a missing `tm`, a session with nothing recorded, or a failure
 inside `tm commit-trailers` all leave the message exactly as git wrote it.
+
+### What it costs a commit
+
+Git blocks while the hook runs, so the stamper is bounded twice over.
+
+- **A byte cap on the read.** `tm commit-trailers` folds at most the last
+  **8 MiB** of the transcript. A day-long session's transcript reaches hundreds
+  of megabytes; without the cap every commit after that point would wait on the
+  whole file. 8 MiB reads in tens of milliseconds and spans hundreds of
+  assistant turns, so an ordinary session is never cut at all.
+- **A wall-clock budget in the hook.** The stamper runs with a **2-second**
+  budget and is killed if it outruns it; the commit then proceeds with no stats
+  block. This is the second bound, for a slow read the byte cap does not
+  cover — a stalled network mount, a machine under load. Set
+  `TM_COMMIT_STATS_TIMEOUT` to a whole number of seconds to change it. The
+  message file is written through a temp-file rename, so a killed stamper
+  leaves either the original message or the stamped one, never a half-written
+  file.
+
+When the cap does cut, the two counts describe that window rather than the
+session, and the footer says so on its own line:
+
+```
+Tokens-In: 1284431
+Tokens-Out: 38902
+Tokens-Window: last 8 MiB of a larger transcript
+```
+
+The window is a separate trailer rather than a suffix on the numbers, so
+`Tokens-In` and `Tokens-Out` stay plain integers for anything parsing them
+back. There is no running per-session total to fall back on — the store behind
+the fold holds the transcript's path and nothing else — so narrowing the claim
+is what the footer does instead of guessing at one.
 
 ### Where the token counts come from
 

@@ -8,6 +8,7 @@ fn full_stats() -> CommitStats {
     CommitStats {
         tokens_in: Some(1_234_567),
         tokens_out: Some(8_901),
+        tokens_window_bytes: None,
         savings_percent: Some(42),
         model_id: Some("claude-opus-4-1-20250805".to_string()),
     }
@@ -28,12 +29,69 @@ fn render_omits_absent_fields() {
     let stats = CommitStats {
         tokens_in: Some(10),
         tokens_out: None,
+        tokens_window_bytes: None,
         savings_percent: Some(7),
         model_id: None,
     };
     assert_eq!(
         render_trailers(&stats).as_deref(),
         Some("Tokens-In: 10\nSavings: 7%")
+    );
+}
+
+/// Why (#7074 round-2 review): the transcript fold is capped, so on a long
+/// session the two counts describe the tail window rather than the session. A
+/// footer that stated them bare would overclaim; this line is what makes the
+/// narrower claim explicit, and it sits directly under the counts it scopes.
+/// Test: itself.
+#[test]
+fn render_states_the_window_when_the_fold_was_truncated() {
+    let stats = CommitStats {
+        tokens_in: Some(10),
+        tokens_out: Some(4),
+        tokens_window_bytes: Some(8 * 1024 * 1024),
+        ..CommitStats::default()
+    };
+    assert_eq!(
+        render_trailers(&stats).as_deref(),
+        Some("Tokens-In: 10\nTokens-Out: 4\nTokens-Window: last 8 MiB of a larger transcript")
+    );
+}
+
+/// Why: the ordinary session fits inside the cap, and a window line on every
+/// commit would be noise stating a limit that never bound anything. It must
+/// also never appear alone — with no counts to scope it says nothing.
+/// Test: itself.
+#[test]
+fn render_omits_the_window_when_the_fold_read_everything() {
+    let whole = CommitStats {
+        tokens_in: Some(10),
+        tokens_window_bytes: None,
+        ..CommitStats::default()
+    };
+    assert_eq!(render_trailers(&whole).as_deref(), Some("Tokens-In: 10"));
+
+    let window_only = CommitStats {
+        tokens_window_bytes: Some(8 * 1024 * 1024),
+        savings_percent: Some(7),
+        ..CommitStats::default()
+    };
+    assert_eq!(
+        render_trailers(&window_only).as_deref(),
+        Some("Savings: 7%")
+    );
+}
+
+/// Why: the label must not round a cap that is not a whole number of MiB into
+/// one, because the number it states is the reader's only handle on how much
+/// of the session the counts cover.
+/// Test: itself.
+#[test]
+fn window_label_falls_back_to_bytes_off_a_mib_boundary() {
+    assert_eq!(window_label(1500), "last 1500 bytes of a larger transcript");
+    assert_eq!(
+        window_label(3 * 1024 * 1024),
+        "last 3 MiB of a larger transcript"
     );
 }
 
