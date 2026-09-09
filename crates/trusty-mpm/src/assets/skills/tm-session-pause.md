@@ -26,7 +26,10 @@ When invoked, this skill:
    `tm` sessions in the same project don't clobber each other's resume target).
 4. **Prunes stale git worktrees** left behind by decommissioned managed
    sessions (see below).
-5. Prints the snapshot path so you can resume later.
+5. **Publishes the snapshot** — where the project tracks
+   `.trusty-mpm/sessions/`, commits it on a fresh `chore/sessions-*` branch off
+   `origin/main`, pushes, and opens an auto-merging docs-only PR (#7282).
+6. Prints the snapshot path and the PR URL so you can resume later.
 
 ## Usage
 
@@ -74,8 +77,36 @@ those steps turns "no snapshot for me" into "someone else's snapshot". A flat
 pre-#5272 file at the store root still resolves through its log line; one with
 no log line resolves for nobody.
 
-Add `.trusty-mpm/sessions/` to `.gitignore` — this is machine-local state, not
-a deliverable. No git commit is created by pausing.
+## How the Snapshot Reaches `origin/main` (#7282)
+
+In a project that TRACKS `.trusty-mpm/sessions/`, the pause publishes the
+snapshot instead of leaving it on disk. The tool commits the snapshot file and
+`sessions-log.jsonl` — and nothing else — onto a fresh
+`chore/sessions-<session>-<timestamp>` branch cut from `origin/main`, pushes it,
+and opens a docs-only PR through `tm pr open` with squash auto-merge armed. The
+result carries `snapshot_publish` with the branch, commit, and PR URL; report
+the URL alongside `snapshot_path`.
+
+The commit is built with git plumbing against a scratch index, so your branch,
+your HEAD, and every other file in the checkout are untouched — a pause can
+never sweep in another session's dirty file, and it never runs `git add`,
+`git stash`, or `git checkout`.
+
+Two refusals, both errors rather than warnings, and the snapshot file is written
+either way:
+
+- **Not on `main`.** Publishing from a feature branch would put unrelated
+  commits in the PR, so the tool refuses. Commit and open the PR by hand.
+- **A step failed.** The error names the step. Once the commit exists it also
+  names the branch it is on, so push that branch rather than re-running the
+  pause and building a second commit.
+
+Once the PR lands, `git pull --ff-only` in the main checkout brings the snapshot
+back locally — see `/tm-workflow`, "Keep the main checkout fresh".
+
+In a project that keeps `.trusty-mpm/sessions/` in `.gitignore`, session state is
+machine-local: the tool reports `snapshot_publish.status: "skipped"` and no
+commit, branch, or PR is created.
 
 ## Snapshot Content
 
@@ -164,8 +195,10 @@ explicitly ONLY to attribute the pause to a specific id you already know — nev
 to supply a "stable-looking" string of your own.
 
 The tool returns
-`{ session_id, snapshot_path, timestamp, pruned_worktrees, skipped_dirty_worktrees }`,
-where `session_id` is the id it filed the snapshot under. It writes
+`{ session_id, snapshot_path, timestamp, pruned_worktrees, skipped_dirty_worktrees, snapshot_publish }`,
+where `session_id` is the id it filed the snapshot under and `snapshot_publish`
+names the branch, commit and PR the snapshot was published as (see "How the
+Snapshot Reaches `origin/main`" above). It writes
 `.trusty-mpm/sessions/<session-id>/session-YYYYMMDD-HHMMSS.md` in the same section format
 `/tm-session-resume` already parses (`## Summary` / `## Completed` /
 `## In Progress` / `## Next Steps` / `## Git Context` / `## Tmux Window`,

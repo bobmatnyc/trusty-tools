@@ -199,6 +199,9 @@ pub mod session_launch;
 // #6972: which model the parent session runs, remembered by the statusline hook
 // so the divert producer prices its rows at the parent's real rate.
 pub mod session_model;
+// #7282: a pause snapshot reaches `origin/main` through its own branch and PR,
+// never as a commit on whatever branch the main checkout happens to be on.
+pub mod session_pause_pr;
 pub mod session_record;
 pub mod session_store;
 pub mod skill_deploy_tiers;

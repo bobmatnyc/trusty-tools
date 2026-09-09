@@ -21,7 +21,7 @@
 //! Test: `cargo test -p trusty-mpm daemon::mcp_context` plus the dispatch-level
 //! mock tests in `crate::mcp::tests`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -370,6 +370,32 @@ pub async fn session_context_pause(
         Vec::new()
     };
 
+    // #7282: the snapshot reaches `origin/main` through its own branch and PR.
+    // A failure here is an ERROR, never a warning — the previous behaviour
+    // (commit onto whatever branch the checkout was on) failed silently for
+    // weeks, and the snapshot file is already on disk either way.
+    let publish = publish_snapshot(&project_path, session_id, &outcome).await;
+
+    let publish_json = match publish {
+        Ok(Some(out)) => json!({
+            "status": "opened",
+            "branch": out.branch,
+            "commit": out.commit,
+            "pr_url": out.pr_url,
+            "auto_merge_armed": out.auto_merge_armed,
+        }),
+        Ok(None) => json!({ "status": "skipped" }),
+        Err(e) => {
+            return Err(format!(
+                "pause snapshot written to {}, but publishing it failed: {e} \
+                 (worktree prune: {} removed, {} skipped as dirty)",
+                outcome.snapshot_path.display(),
+                pruned_worktrees.len(),
+                skipped_dirty.len()
+            ));
+        }
+    };
+
     Ok(json!({
         // #6888: report the id the snapshot was filed under, derived or not.
         "session_id": session_id,
@@ -377,7 +403,64 @@ pub async fn session_context_pause(
         "timestamp": outcome.timestamp.to_rfc3339(),
         "pruned_worktrees": pruned_worktrees,
         "skipped_dirty_worktrees": skipped_dirty,
+        "snapshot_publish": publish_json,
     }))
+}
+
+/// Publish a freshly written pause snapshot as a branch + PR (#7282).
+///
+/// Why: `session_context_pause` is the one path every pause goes through, so
+/// wiring the publish here is what makes "no snapshot commits onto the main
+/// checkout's current branch" true by construction rather than by convention.
+/// What: resolves the two repo-relative paths a pause touches (the snapshot and
+/// the append-only log), then runs
+/// [`crate::core::session_pause_pr::publish_pause_snapshot`] on a blocking
+/// thread. `Ok(None)` means the project keeps its sessions git-ignored and there
+/// is nothing to publish; every other failure is an error the caller must
+/// surface.
+/// Test: `crate::core::session_pause_pr` covers the sequence against a fake
+/// driver; this wrapper is exercised live.
+async fn publish_snapshot(
+    project_path: &Path,
+    session_id: &str,
+    outcome: &trusty_common::catchup::pause::PauseSnapshotOutcome,
+) -> Result<Option<crate::core::session_pause_pr::PublishOutcome>, String> {
+    use crate::core::session_pause_pr as pause_pr;
+
+    let Ok(rel) = outcome.snapshot_path.strip_prefix(project_path) else {
+        return Err(format!(
+            "snapshot {} is not inside {}",
+            outcome.snapshot_path.display(),
+            project_path.display()
+        ));
+    };
+    let paths = vec![
+        rel.to_string_lossy().replace('\\', "/"),
+        format!("{}sessions-log.jsonl", pause_pr::SESSIONS_PREFIX),
+    ];
+
+    let repo = project_path.to_path_buf();
+    let session = session_id.to_string();
+    let timestamp = outcome.timestamp;
+    tokio::task::spawn_blocking(move || {
+        let body_dir = std::env::temp_dir();
+        let req = pause_pr::PublishRequest {
+            repo: &repo,
+            session_id: &session,
+            timestamp,
+            paths,
+            body_dir: &body_dir,
+        };
+        match pause_pr::publish_pause_snapshot(&pause_pr::RealPauseVcs, &req) {
+            Ok(out) => Ok(out),
+            Err(pause_pr::PublishError::NotTracked(_) | pause_pr::PublishError::NotAGitRepo(_)) => {
+                Ok(None)
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await
+    .map_err(|e| format!("snapshot publish task failed: {e}"))?
 }
 
 #[cfg(test)]

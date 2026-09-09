@@ -397,7 +397,19 @@ pub(super) fn session_tools() -> Vec<Value> {
              resume from it (#5272). Leave `session_id` out — the daemon derives \
              it from your own identity, which is what the next \
              `session_context_catchup` matches on, and an invented one silently \
-             files the snapshot where nothing will look for it (#6888). Also \
+             files the snapshot where nothing will look for it (#6888). Where \
+             the project TRACKS `.trusty-mpm/sessions/`, the snapshot is then \
+             published: those two files and nothing else are committed onto a \
+             fresh `chore/sessions-<session>-<ts>` branch cut from \
+             `origin/main`, pushed, and opened as an auto-merging docs-only PR \
+             through `tm pr open` — your branch, your HEAD and every other file \
+             stay untouched, and `snapshot_publish` in the result carries the \
+             branch, commit and PR URL for you to report (#7282). Publishing \
+             from anything but `main`, or a failure at any step, is an ERROR \
+             naming the step and the branch the commit was left on; the \
+             snapshot file is written either way. A project that git-ignores \
+             `.trusty-mpm/sessions/` gets `snapshot_publish.status: \"skipped\"` \
+             and no commit. Also \
              prunes orphaned managed-session \
              git worktrees in-process (same engine as `tm session prune-worktrees`) \
              unless `prune_worktrees` is set to `false`. That prune NEVER removes a \
