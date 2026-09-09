@@ -29,30 +29,49 @@
 //! model, or an unwritable ledger each skip the row. A missing savings row must
 //! never cost a session its launch.
 //!
-//! **Which session a row is keyed by (#7209).** The compiled prompt lives at
+//! **Which session a row is keyed by (#7209, corrected by #7245).** The
+//! compiled prompt lives at
 //! `<harness-root>/.trusty-mpm/sessions/<scope>/INSTRUCTIONS-COMPILED.md`,
 //! where `<scope>` is [`crate::core::harness_root::session_scope`] — the
 //! managed session id, or `local`. The `💸` statusline segment folds this
 //! ledger by the id Claude Code sends it on stdin, which is
 //! [`crate::core::savings::CLAUDE_CODE_SESSION_ID_ENV`] and is a different
-//! value. So the row is keyed by the Claude Code id when the harness exported
-//! one, and by the directory name only when it did not. The directory location
-//! is unchanged: one compiled prompt per managed session is what that path is
-//! for.
+//! value.
+//!
+//! #7209 keyed the row by that variable when it is set. It never is here: this
+//! producer runs in the `tm` process that compiles the prompt, before `claude`
+//! is spawned, and Claude Code exports the variable into its own children only.
+//! Every row therefore fell back to the directory name, which is the one key the
+//! statusline cannot match. So since #7245 the fallback does not write a row at
+//! all — it STAGES it through [`crate::core::savings_sidecar::stage_row`], and
+//! the first `tm hook` invocation (which runs inside Claude Code and knows the
+//! id) appends it. The directory location is unchanged: one compiled prompt per
+//! managed session is what that path is for.
+//!
+//! **The decline that hides the segment (#7245).** When the compiled prompt is
+//! not smaller than its sources there is nothing to record, and for a project
+//! that overrides no instruction section that is permanently true — the composer
+//! ADDS generated context and folds nothing away. That decline logged at
+//! `debug!`, so the segment's absence had no explanation anywhere an operator
+//! would look. It now warns once per project through
+//! [`crate::core::savings_sidecar::warn_no_fold_once`], naming both byte counts.
 //!
 //! Test: the inline suite in `savings_instructions_tests.rs` —
 //! `no_row_when_the_compiled_prompt_is_not_smaller`,
 //! `a_folded_source_set_produces_a_row`, `no_row_when_the_model_cannot_be_priced`,
 //! `folded_source_bytes_adds_an_override_body`,
 //! `the_row_is_keyed_by_the_claude_session_id`,
-//! `the_row_falls_back_to_the_compiled_prompt_directory_id`.
+//! `no_claude_id_stages_the_row_instead_of_writing_an_unfoldable_one`,
+//! `a_staged_row_becomes_foldable_at_the_first_hook_invocation`,
+//! `a_prompt_that_folds_nothing_warns_once_and_writes_no_row`.
 
 use std::path::Path;
 
 use crate::core::savings::{
     BYTES_PER_TOKEN, SavingsRow, TECHNIQUE_INSTRUCTION_COMPRESSION, append_row,
-    claude_code_session_id, default_savings_log, now_ts,
+    claude_code_session_id, now_ts, savings_log_in,
 };
+use crate::core::savings_sidecar::{stage_row, warn_no_fold_once};
 
 /// Append one `instruction-compression` row for a session whose compiled prompt
 /// came out smaller than the sources that fed it.
@@ -61,13 +80,13 @@ use crate::core::savings::{
 /// start, daemon resume, in-place relaunch — records the same way without each
 /// one growing its own call.
 /// What: reads the Claude Code session id the statusline folds by, then defers
-/// to [`record_instruction_compression_to`] against the default ledger.
+/// to [`record_instruction_compression_to`] against the default framework root.
 /// Test: `the_row_is_keyed_by_the_claude_session_id`,
-/// `the_row_falls_back_to_the_compiled_prompt_directory_id`.
+/// `no_claude_id_stages_the_row_instead_of_writing_an_unfoldable_one`.
 pub fn record_instruction_compression(dest: &Path, prompt: &str) {
     // #7209: the row's key is the Claude Code session id, not the directory name.
     record_instruction_compression_to(
-        &default_savings_log(),
+        &crate::core::paths::FrameworkPaths::default().root,
         dest,
         prompt,
         claude_code_session_id(),
@@ -75,25 +94,30 @@ pub fn record_instruction_compression(dest: &Path, prompt: &str) {
     );
 }
 
-/// [`record_instruction_compression`] against an explicit ledger, session id
-/// and price.
+/// [`record_instruction_compression`] against an explicit framework root,
+/// session id and price.
 ///
-/// Why: the three ambient reads the entry point makes — the ledger path under
+/// Why: the three ambient reads the entry point makes — the framework root under
 /// the operator's home, the harness's session-id variable, and the configured
 /// PM model — are exactly what makes the keying decision untestable in place.
-/// Passing all three in keeps the test on a tempdir ledger with no process-env
+/// Passing all three in keeps the test on a tempdir root with no process-env
 /// mutation, which the `tm` binary's env ratchet (#5544) and parallel test
-/// binaries both require.
-/// What: derives the fallback session id and the harness root from `dest`
+/// binaries both require. `framework_root` rather than a ledger path because
+/// #7245 gave this function a second destination under that root: the staging
+/// file, which has to land beside the ledger the hook will later append to.
+/// What: derives the compile-time session id and the harness root from `dest`
 /// (which is always
-/// `<harness-root>/.trusty-mpm/sessions/<id>/INSTRUCTIONS-COMPILED.md`), keys
-/// the row by `claude_session_id` when the harness supplied one, measures the
-/// fold, prices the token delta, and appends the row. Silent no-op on every
-/// failure.
+/// `<harness-root>/.trusty-mpm/sessions/<id>/INSTRUCTIONS-COMPILED.md`),
+/// measures the fold, prices the token delta, and then either appends the row —
+/// when `claude_session_id` gives it the key the statusline folds by — or stages
+/// it for the first `tm hook` invocation, which is the first process that knows
+/// that key. A prompt that folded nothing warns once per project and writes
+/// nothing. Silent no-op on every other failure.
 /// Test: `the_row_is_keyed_by_the_claude_session_id`,
-/// `the_row_falls_back_to_the_compiled_prompt_directory_id`.
+/// `no_claude_id_stages_the_row_instead_of_writing_an_unfoldable_one`,
+/// `a_prompt_that_folds_nothing_warns_once_and_writes_no_row`.
 fn record_instruction_compression_to(
-    ledger: &Path,
+    framework_root: &Path,
     dest: &Path,
     prompt: &str,
     claude_session_id: Option<String>,
@@ -102,15 +126,33 @@ fn record_instruction_compression_to(
     let Some((compiled_prompt_id, harness_root)) = session_and_root(dest) else {
         return;
     };
+    let source_bytes = folded_source_bytes(&harness_root);
+    let compiled_bytes = prompt.len();
+    // #7245: checked here, where the project root is in hand, so the decline that
+    // makes the 💸 segment structurally absent for an override-free project is
+    // stated once instead of hidden at `debug!` inside the row builder.
+    if compiled_bytes >= source_bytes {
+        warn_no_fold_once(framework_root, &harness_root, source_bytes, compiled_bytes);
+        return;
+    }
     // #7209: the statusline folds by the id Claude Code sends it, so a row keyed
     // by the compiled-prompt directory name never matches for a managed session.
-    let session_id = claude_session_id.unwrap_or(compiled_prompt_id);
-    let source_bytes = folded_source_bytes(&harness_root);
-    let Some(row) = instruction_compression_row(&session_id, source_bytes, prompt.len(), price)
+    let session_id = claude_session_id
+        .clone()
+        .unwrap_or_else(|| compiled_prompt_id.clone());
+    let Some(row) = instruction_compression_row(&session_id, source_bytes, compiled_bytes, price)
     else {
         return;
     };
-    if let Err(source) = append_row(ledger, &row) {
+    // #7245: this process is the compiler, not a child of Claude Code, so an
+    // absent id here is the NORMAL case rather than an edge one. Staging the row
+    // hands it to the first hook, which can key it correctly.
+    if claude_session_id.is_none() {
+        stage_row(framework_root, dest, &row);
+        return;
+    }
+    let ledger = savings_log_in(framework_root);
+    if let Err(source) = append_row(&ledger, &row) {
         tracing::warn!(
             ledger = %ledger.display(),
             %source,
@@ -185,6 +227,9 @@ fn instruction_compression_row(
     price: impl FnOnce() -> Option<(String, f64)>,
 ) -> Option<SavingsRow> {
     if compiled_bytes >= source_bytes {
+        // #7245: the caller checks this first and warns once per project, so
+        // reaching here means a direct unit-test call. Kept as the builder's own
+        // guard — the arithmetic below is only meaningful on a real fold.
         tracing::debug!(
             session_id,
             source_bytes,

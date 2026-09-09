@@ -451,6 +451,12 @@ async fn detect_idle_parking_from_payload(
 /// `<url>/hooks` with a 500 ms connect timeout and a 2-second total timeout.
 /// Every failure path returns `Ok(())` — failing the hook would block the
 /// user's prompt.
+/// Issue #7245 adds one more read of the same stdin `session_id`: on
+/// `SessionStart` it emits the instruction-compression savings row the compiling
+/// `tm` process staged, which that process could not key because Claude Code
+/// exports `CLAUDE_CODE_SESSION_ID` into its own children only — see
+/// `trusty_mpm::core::savings_sidecar`. It appends nothing when nothing is
+/// staged, writes no stdout, and cannot fail the hook.
 /// Test: `cli_parses_hook` covers parse routing; the guard branches are
 /// exercised via `hook_guard_short_circuits` and
 /// `hook_disable_env_short_circuits` in `tests_behavior_a.rs`. The rewrite
@@ -491,6 +497,15 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
         .map(str::to_string)
         .or_else(|| std::env::var("CLAUDE_SESSION_ID").ok())
         .unwrap_or_default();
+    // #7245: the `tm` process that compiled this session's prompt ran before
+    // `claude` existed, so it could not key its instruction-compression savings
+    // row by the id the statusline folds by, and staged the row instead. This is
+    // the first process that knows that id. Scoped to `SessionStart` because it
+    // fires once per session and the claim resolves a git-owned project root.
+    if event == "SessionStart" && !session_id.is_empty() {
+        trusty_mpm::core::savings_sidecar::emit_staged_row_for_session(&session_id);
+    }
+
     let tool_name = stdin_payload
         .as_ref()
         .and_then(|v| v.get("tool_name"))

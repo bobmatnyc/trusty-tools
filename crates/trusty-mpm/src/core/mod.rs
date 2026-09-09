@@ -191,6 +191,10 @@ pub mod savings;
 // #6959: the bulk-read diversion producer, the ledger's second row source.
 pub mod savings_divert;
 pub mod savings_instructions;
+// #7245: the side files that carry an instruction-compression row from the
+// compiling process to the hook that learns the session id, and that keep the
+// "nothing folded" decline to one warning per project.
+pub mod savings_sidecar;
 pub mod scaffold_gitignore;
 pub mod session;
 pub mod session_assets;
