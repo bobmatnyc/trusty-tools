@@ -30,6 +30,15 @@ use serde::Deserialize;
 use crate::error::AuditError;
 use crate::registry::Target;
 
+// #5478: the `[audit]` table and the substitution that mints one, kept beside
+// this module rather than inside it so `config.rs` keeps its SLOC headroom.
+mod engagement_identity;
+
+pub use engagement_identity::{
+    AUDIT_FIELD, AuditWindow, CLIENT_FIELD, DEFAULT_AUDIT_WINDOW_WEEKS, ENGAGEMENT_FIELD,
+    EngagementIdentity, WINDOW_WEEKS_FIELD, with_engagement_identity,
+};
+
 /// An API key read from the engagement config.
 ///
 /// Why: see the module docs. Three properties, in the order they matter:
@@ -600,6 +609,11 @@ pub struct EngagementConfig {
     /// means the package ships unsigned rather than failing to build.
     #[serde(default)]
     pub signing: SigningSettings,
+    /// How far back this engagement assesses (#5478). Absent means
+    /// [`DEFAULT_AUDIT_WINDOW_WEEKS`], so a config written before this table
+    /// existed still loads and still means one year.
+    #[serde(default)]
+    pub audit: AuditWindow,
     /// What this engagement asks the investigation pass to read (#6247).
     ///
     /// Absent means the machine's environment overrides, then the compiled
@@ -887,8 +901,9 @@ pub const OPENROUTER_KEY_FIELD: &str = "openrouter_key";
 /// engagement is [`generate_for_new_engagement`], because the same substitution
 /// carries one client's board credentials into another's package (#5861).
 ///
-/// #5478 (the engagement-config generator) is unimplemented; when it lands it
-/// calls one of these two rather than growing a third way to write the file.
+/// #5478's engagement generator ([`crate::engagement::create`]) calls
+/// [`generate_for_new_engagement`] and then [`with_engagement_identity`], so
+/// there is still no third way to write this file.
 /// Test: `config_tests::the_generated_config_carries_the_supplied_key`,
 /// `config_tests::generating_a_config_that_would_not_load_fails_here`,
 /// `config_tests::generating_preserves_every_other_field`.
@@ -1316,6 +1331,21 @@ trusty-review = "0.15.1"
         assert_eq!(cfg.tools.tga.version(), "2.9.4");
         assert_eq!(cfg.tools.trusty_analyze.version(), "0.9.2");
         assert_eq!(cfg.tools.trusty_review.version(), "0.15.1");
+    }
+
+    /// #5478 added an `[audit]` table. The fixture every other test in this
+    /// module loads predates it, so this is the backward-compatibility check on
+    /// the real serialized shape rather than on a purpose-built string: an
+    /// engagement config written before the field existed still deserializes,
+    /// and reads as the one-year window it always meant.
+    #[test]
+    fn a_config_predating_the_audit_table_still_deserializes() {
+        let cfg =
+            EngagementConfig::from_toml(SAMPLE, Path::new("engagement.toml")).expect("still loads");
+        assert_eq!(cfg.audit.window_weeks, DEFAULT_AUDIT_WINDOW_WEEKS);
+        // The table is recognised now, so it must not also land in the
+        // unknown-key catch-all that would report it as ignored (#6246).
+        assert!(!cfg.unsupported_keys().iter().any(|k| k == AUDIT_FIELD));
     }
 
     #[test]

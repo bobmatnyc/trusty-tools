@@ -1140,6 +1140,26 @@ pub enum AuditError {
         source: Box<AuditError>,
     },
 
+    /// Minting was pointed at a directory that already holds an engagement.
+    ///
+    /// Why: #5478. Replacing an engagement replaces its signing key, and the
+    /// public half the auditor retained is then the half of a key that no
+    /// longer exists — every package the previous engagement signed becomes
+    /// unverifiable, silently, at a moment nothing reports. So the mint refuses
+    /// before it generates anything rather than overwriting; `--force` is how an
+    /// operator says they meant it.
+    /// What: names the file that is already there and the flag that proceeds
+    /// anyway.
+    /// Test: `crate::engagement::engagement_tests::an_existing_engagement_is_never_replaced_without_force`.
+    #[error(
+        "{path} already holds an engagement; minting another here would replace its signing key \
+         and orphan the public half you retained — pass --force if that is what you want"
+    )]
+    EngagementExists {
+        /// The engagement file that is already there.
+        path: PathBuf,
+    },
+
     /// A cold start could not learn which version of a tool to pin.
     ///
     /// Why: #5970's cold start records the version of each tool it resolved into
