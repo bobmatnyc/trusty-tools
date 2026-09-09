@@ -429,6 +429,48 @@ mod tests {
         }
     }
 
+    /// An engineer's shipped prompt must not name a doc-gate script that only
+    /// `trusty-tools` contains.
+    ///
+    /// Why (#7247): `BASE-AGENT.md` asserted "This project: CLAUDE.md sets
+    /// 500/3000 SLOC via `scripts/check_line_cap.sh`" as a fact about whatever
+    /// project the agent had been dispatched into, and `rust-engineer.md` told
+    /// every run to execute all three gates. In `bobmatnyc/trusty-things` none
+    /// of the three exists, and two `rust-engineer` runs on 2026-09-09 each
+    /// spent a round trip discovering that. These assets deploy unchanged into
+    /// every project, so a filename written here is a claim about a checkout
+    /// this crate has never seen.
+    /// What: rejects the three literals in the assets an engineer composes
+    /// from. `version-control.md` is deliberately out of scope — its two
+    /// mentions describe what `tm pr open` does internally, and that command
+    /// already degrades to a skip when the script is absent.
+    /// Test: this IS the assertion.
+    #[test]
+    fn engineer_assets_name_no_repo_specific_doc_gate_script() {
+        /// Gates that exist in `trusty-tools` and cannot be assumed elsewhere.
+        const REPO_SPECIFIC_GATES: [&str; 3] = [
+            "check_test_pointers.sh",
+            "check_line_cap.sh",
+            "check_changelog_fragment.sh",
+        ];
+
+        for (name, body) in [
+            ("BASE-AGENT.md", BASE_AGENT),
+            ("BASE-ENGINEER.md", BASE_ENGINEER),
+            ("rust-engineer.md", RUST_ENGINEER),
+        ] {
+            for gate in REPO_SPECIFIC_GATES {
+                assert!(
+                    !body.contains(gate),
+                    "`{name}` names `{gate}`, a script that exists in \
+                     trusty-tools and not in every project (#7247) — tell the \
+                     agent to read the project's own CLAUDE.md and `scripts/` \
+                     instead of naming a filename"
+                );
+            }
+        }
+    }
+
     /// The `BASE-*` templates are what every other asset's `extends:` chain
     /// roots at. Shipping the roster without them would make composition
     /// impossible for every consumer, which is precisely why all 42 moved
