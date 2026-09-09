@@ -164,6 +164,12 @@ fn branch_listing() -> String {
     )
 }
 
+/// #7275 round 2: the argv the repo/checkout reconciliation runs, and the
+/// answer that AGREES with `req()`'s stated repository.
+const ORIGIN_QUERY: &str = "config --get remote.origin.url";
+/// See [`ORIGIN_QUERY`]. An https URL, so no test reads an SSH alias table.
+const ORIGIN_URL: &str = "https://github.com/bobmatnyc/trusty-tools.git\n";
+
 /// A `gh` fake that reports the PR merged.
 fn gh_merged() -> Scripted {
     Scripted::new().on("gh pr view 7275", &merged_json())
@@ -172,6 +178,7 @@ fn gh_merged() -> Scripted {
 /// A `git` fake with the remote branch present and one matching worktree.
 fn git_full() -> Scripted {
     Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
         .on(
             "git ls-remote",
             &format!("{HEAD_OID}\trefs/heads/{BRANCH}\n"),
@@ -407,10 +414,61 @@ async fn cleanup_clean_path_removes_everything() {
     assert!(joined.contains("git fetch --prune origin"), "{joined}");
 }
 
+/// 🔴 REGRESSION (#7275 round 2): a registry entry whose `repo` and
+/// `repo_root` name different repositories REFUSES.
+///
+/// Why: `--repo` aims `gh` and `repo_root` aims every git command, and the two
+/// are recorded independently at open time. A directory later reused for a
+/// different clone would let a MERGED pull request in one repository authorise
+/// branch deletion and worktree removal in another. Fails on round 1, where the
+/// two were never compared and the deletions ran.
+#[tokio::test]
+async fn cleanup_refuses_when_the_registry_repo_and_checkout_disagree() {
+    let gh = gh_merged();
+    let git = Scripted::new()
+        .on(
+            ORIGIN_QUERY,
+            "https://github.com/someone-else/other-repo.git\n",
+        )
+        .on("git ls-remote", "");
+    let claims = FakeClaims::none();
+    let report = run(&gh, &git, &claims, &clean, &req(false)).await;
+
+    assert!(report.failed(), "{}", report.render());
+    let rendered = report.render();
+    assert!(rendered.contains("someone-else/other-repo"), "{rendered}");
+    assert!(rendered.contains("bobmatnyc/trusty-tools"), "{rendered}");
+    let joined = git.calls().join("\n");
+    assert!(
+        !joined.contains("push origin --delete") && !joined.contains("branch -D"),
+        "nothing destructive may run against a repository this cleanup is not for: {joined}"
+    );
+}
+
+/// #7275 round 2: an `origin` that cannot be read is undeterminable, so the
+/// destructive steps are refused rather than run on an unverified checkout.
+#[tokio::test]
+async fn cleanup_refuses_when_the_checkout_origin_cannot_be_read() {
+    let gh = gh_merged();
+    let git = Scripted::new()
+        .on_fail(ORIGIN_QUERY, "not a git repository")
+        .on("git ls-remote", "");
+    let claims = FakeClaims::none();
+    let report = run(&gh, &git, &claims, &clean, &req(false)).await;
+
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains("could not be read"),
+        "{}",
+        report.render()
+    );
+}
+
 #[tokio::test]
 async fn cleanup_clean_path_with_the_remote_branch_already_gone() {
     let gh = gh_merged();
     let git = Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
         .on("git ls-remote", "")
         .on("git worktree list", &worktree_listing())
         .on("git worktree remove", "")
@@ -610,6 +668,7 @@ fn git_with_sibling(landed: bool) -> Scripted {
     );
     let branches = format!("main 1111\n{BRANCH} {HEAD_OID}\n{BRANCH}-r2 3333\n");
     let s = Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
         .on("git ls-remote", "")
         // The sibling's tip is NOT an ancestor of the merged head, so the
         // merge-tree test is what decides.
@@ -694,6 +753,7 @@ async fn cleanup_removes_a_round_one_branch_that_never_had_its_own_pr() {
          worktree /repo/wt-r1\nHEAD 4444\nbranch refs/heads/{BRANCH}\n\n"
     );
     let git = Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
         .on("git ls-remote", "")
         .on("git merge-base --is-ancestor", "")
         .on("git worktree list", &listing)

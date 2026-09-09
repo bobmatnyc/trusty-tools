@@ -28,6 +28,36 @@
 //! `git worktree remove`, so a tree holding unsaved work stops the run with a
 //! nonzero exit instead of losing the work.
 //!
+//! **Only pull requests `tm pr open` recorded are swept.** The registry is
+//! written at open time, so a PR opened by hand, by `gh pr create`, or by a
+//! `tm` predating #7275 has no entry and the periodic sweep never considers it.
+//! Cleaning one up is `tm pr cleanup <n>` by hand, which takes the PR number
+//! directly and needs no entry. Under `--auto` the sweep is the only trigger,
+//! so an unrecorded PR merged that way is not cleaned up at all.
+//!
+//! **The sweep and a hand-run `tm pr cleanup` can race, and that is safe.**
+//! Every step is idempotent by construction: `remote-branch` deletes only what
+//! `git ls-remote` still lists, `worktree` removes only trees git still
+//! registers, `local-branch` deletes only branches `git branch` still reports,
+//! and `prune` is idempotent outright. A step whose target is already gone
+//! reports nothing to do rather than failing. The registry stamp and
+//! [`SweepDecision::AlreadyCleaned`] then keep the sweep from re-running a
+//! sequence a hand run already completed — see `sweep.rs`.
+//!
+//! **KNOWN GAP — cleanup does not consult the daemon's live-writer registry
+//! (#7275 round 2, critic finding 3).** [`remove_one`] refuses a tree holding
+//! unsaved work and ends the session claims on it, but it never asks the
+//! question the pm-guard's `CHECK_SOLE_OWNER` asks — whether a live dispatched
+//! agent is writing in that tree right now. A clean tree whose agent is
+//! mid-task is therefore removable here, where the guard would deny it. The
+//! answer lives in the daemon's in-memory delegation map and is reachable only
+//! over the session-scoped `shared-tree-dispatch` route; the supervisor that
+//! runs the sweep is a SEPARATE PROCESS holding a `SessionManager` and no
+//! delegation state, and the HTTP client exposes no path-keyed live-writer
+//! query. Closing it needs a new daemon route plus a client method plus wiring
+//! into both `ClaimEnder` implementations — a cross-crate API change, not a
+//! fix inside this one. Tracked for the parent rather than done here.
+//!
 //! Test: the sibling `tests.rs`.
 
 pub mod driver;
@@ -152,6 +182,16 @@ pub async fn run<G: Gh, T: Git, C: ClaimEnder>(
         ),
     ));
 
+    // #7275 round 2: `gh` is aimed by `--repo` — correct by construction — but
+    // every git command below is aimed by `repo_root`, and a registry entry
+    // carries the two independently. Reconciled here, after the merge is
+    // confirmed and before the first destructive command, so a MERGED pull
+    // request in one repository can never authorise deletions in another.
+    if let Some(reason) = repo_mismatch(git, req) {
+        lines.push(StepLine::failed("repo", reason));
+        return CleanupReport { pr: req.pr, lines };
+    }
+
     lines.push(step_remote_branch(git, req, &view));
     step_worktrees(git, claims, probe_dirt, req, &view, &mut lines).await;
     // The head branch cannot be deleted while a worktree still has it checked
@@ -167,6 +207,84 @@ pub async fn run<G: Gh, T: Git, C: ClaimEnder>(
         "pr cleanup finished"
     );
     report
+}
+
+/// Does the checkout at `repo_root` actually BE `repo` (#7275 round 2)?
+///
+/// Why: `--repo` aims `gh` and `repo_root` aims every git command, and a
+/// registry entry carries both independently — written at `tm pr open` time
+/// from a URL and a cwd that can drift apart afterwards (a directory reused for
+/// a different clone, a hand-edited registry, an `origin` repointed). Reading a
+/// MERGED pull request from one repository and then deleting branches and
+/// worktrees in another is the destructive shape that mismatch produces, so the
+/// two are reconciled before either is used.
+/// What: reads `remote.origin.url` at `repo_root` through the [`Git`] seam —
+/// not a second `Command::new("git")` — and parses it with the crate's one
+/// slug parser. `None` when they agree (or when the request states no repo, in
+/// which case `gh` and git both use the checkout). `Some(reason)` refuses, and
+/// an origin that cannot be read or parsed refuses too: this is the ADR-0045
+/// undeterminable case on a destructive path.
+/// Test: `cleanup_refuses_when_the_registry_repo_and_checkout_disagree`,
+/// `cleanup_refuses_when_the_checkout_origin_cannot_be_read`,
+/// `cleanup_clean_path_removes_everything` (the agreeing case).
+fn repo_mismatch<T: Git>(git: &T, req: &CleanupRequest) -> Option<String> {
+    let stated = req
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())?;
+    let url = match git.run(
+        &req.repo_root,
+        &owned(&["config", "--get", "remote.origin.url"]),
+    ) {
+        Ok(out) if out.success && !out.stdout.trim().is_empty() => out.stdout.trim().to_string(),
+        Ok(out) => {
+            return Some(format!(
+                "the registry names `{stated}`, and the `origin` remote at {} could not be read \
+                 to confirm it: {} — refusing rather than running destructive git in a \
+                 repository this cleanup may not be for (#7275)",
+                req.repo_root.display(),
+                out.stderr.trim()
+            ));
+        }
+        Err(e) => {
+            return Some(format!(
+                "the registry names `{stated}`, and the `origin` remote at {} could not be read \
+                 to confirm it: {e:#} (#7275)",
+                req.repo_root.display()
+            ));
+        }
+    };
+    // The alias table only affects `ssh://<alias>/…` URLs, so an https origin
+    // — what every test states — resolves identically on every machine (#7196).
+    let actual = match crate::session_manager::worktree_repo_slug::parse_repo_slug(
+        &url,
+        &crate::session_manager::ssh_host_alias::SshHostAliases::for_current_user(),
+    ) {
+        Ok(slug) => slug,
+        Err(_) => {
+            return Some(format!(
+                "the registry names `{stated}`, and the `origin` URL at {} ({url}) names no \
+                 repository this can compare it against — refusing (#7275)",
+                req.repo_root.display()
+            ));
+        }
+    };
+    // A non-github host resolves to `host/owner/repo`; the registry records the
+    // `owner/repo` half, so the tail is what must match.
+    let agrees = actual.eq_ignore_ascii_case(stated)
+        || actual
+            .to_ascii_lowercase()
+            .ends_with(&format!("/{}", stated.to_ascii_lowercase()));
+    if agrees {
+        return None;
+    }
+    Some(format!(
+        "the registry names `{stated}` but the checkout at {} is `{actual}` — refusing: a merged \
+         pull request in one repository must never authorise branch deletion or worktree removal \
+         in another (#7275)",
+        req.repo_root.display()
+    ))
 }
 
 /// Step 1: read the PR once.

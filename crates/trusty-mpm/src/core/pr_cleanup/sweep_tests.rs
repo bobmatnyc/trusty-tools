@@ -143,6 +143,12 @@ fn gh_merged() -> Scripted {
 /// A `git` fake where nothing is left to clean — every step completes.
 fn git_nothing_left() -> Scripted {
     Scripted::new()
+        // #7275 round 2: the repo/checkout reconciliation runs before any
+        // destructive step, so every git fake that reaches one answers it.
+        .on(
+            "config --get remote.origin.url",
+            "https://github.com/bobmatnyc/trusty-tools.git\n",
+        )
         .on("git ls-remote", "")
         .on(
             "git worktree list",
@@ -156,6 +162,12 @@ fn git_nothing_left() -> Scripted {
 /// A `git` fake with one worktree still holding the merged head.
 fn git_one_tree(tree: &str) -> Scripted {
     Scripted::new()
+        // #7275 round 2: the repo/checkout reconciliation runs before any
+        // destructive step, so every git fake that reaches one answers it.
+        .on(
+            "config --get remote.origin.url",
+            "https://github.com/bobmatnyc/trusty-tools.git\n",
+        )
         .on("git ls-remote", "")
         .on(
             "git worktree list",

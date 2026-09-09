@@ -55,6 +55,14 @@
 //! condition instead, and the policy decides: it is not evidence the commits
 //! are safe, so the merged-PR re-check still has to supply that evidence.
 //!
+//! **Content-equivalence is never landing evidence on its own (#7275 round
+//! 2).** [`WorktreeRemovalProbe::merge_into_base_is_a_noop`] answers "would
+//! landing this branch change anything", and a branch that was never pushed —
+//! holding one empty or self-reverting commit — answers it exactly the way a
+//! merged branch does. The policy therefore asks it only once a MERGED pull
+//! request is in hand, and judges the content against THAT pull request's own
+//! `baseRefName` rather than against `origin/HEAD`.
+//!
 //! Test: `merged_pull_request_argv_asks_github_for_the_branch`,
 //! `detached_head_is_not_a_branch`,
 //! `the_harness_ownership_marker_alone_leaves_the_tree_clean`,
@@ -81,7 +89,18 @@ use crate::session_manager::worktree_safety::{count_dirty_files, git_stdout};
 /// What: interpolated with `--repo <owner/repo> --head <branch>` by
 /// [`GitAndGhProbe`].
 /// Test: `merged_pull_request_argv_asks_github_for_the_branch`.
-const MERGED_PR_ARGS: &[&str] = &["--state", "merged", "--json", "number", "--limit", "1"];
+/// #7275 round 2: `baseRefName` rides along, because the base a worktree's
+/// content is judged against must be the one its pull request actually merged
+/// into. Asking `origin/HEAD` instead judged every branch against the default
+/// branch, which is the wrong answer for a stacked or release-branch PR.
+const MERGED_PR_ARGS: &[&str] = &[
+    "--state",
+    "merged",
+    "--json",
+    "number,baseRefName",
+    "--limit",
+    "1",
+];
 
 /// What the merged-PR re-check learned, and WHERE it looked (#7057).
 ///
@@ -106,18 +125,27 @@ pub struct MergedPrLookup {
     pub count: usize,
     /// The `[host/]owner/repo` that was searched.
     pub repo: String,
+    /// The `baseRefName` of the first MERGED pull request found, if any
+    /// (#7275 round 2).
+    ///
+    /// Empty when `count` is 0, and — fail-closed — also when GitHub reported a
+    /// pull request without one. The policy denies rather than substituting a
+    /// base of its own, because "which base did this land on" is exactly the
+    /// question a guess gets wrong for a stacked or release-branch PR.
+    pub base_ref: String,
 }
 
 impl MergedPrLookup {
-    /// The answer `count` merged pull requests in `repo`.
+    /// The answer `count` merged pull requests in `repo`, landing on `base_ref`.
     ///
     /// Why: the struct is `#[non_exhaustive]`, so the `tm` binary's fake probe
     /// — a different crate — cannot build one with a struct expression.
     #[must_use]
-    pub fn new(count: usize, repo: impl Into<String>) -> Self {
+    pub fn new(count: usize, repo: impl Into<String>, base_ref: impl Into<String>) -> Self {
         Self {
             count,
             repo: repo.into(),
+            base_ref: base_ref.into(),
         }
     }
 }
@@ -181,7 +209,7 @@ pub trait WorktreeRemovalProbe {
     /// repository the question was asked (#7057).
     fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<MergedPrLookup, String>;
 
-    /// Would merging this worktree's HEAD into its base change anything
+    /// Would merging this worktree's HEAD into `base_ref` change anything
     /// (#7275)?
     ///
     /// Why: a review round lands on `<branch>-r2` and `version-control` pushes
@@ -189,10 +217,18 @@ pub trait WorktreeRemovalProbe {
     /// MERGED pull request ever carries the sibling's name — the guard refused
     /// two such trees on 2026-09-09. Their content IS on the base, which is the
     /// fact the merged-PR question was standing in for.
-    /// What: `Ok(true)` when the merge would be a no-op, `Ok(false)` when it
+    ///
+    /// **This answers ownership, never landing (#7275 round 2).** An empty
+    /// merge is what a branch holding no NEW content looks like, and a branch
+    /// that was never pushed at all looks exactly the same. So the caller must
+    /// already hold a MERGED pull request before it asks — see
+    /// `worktree_remove_rechecks::landing_evidence`.
+    /// What: `base_ref` is the full ref the pull request merged into
+    /// (`origin/<baseRefName>`), supplied by the caller rather than guessed
+    /// here. `Ok(true)` when the merge would be a no-op, `Ok(false)` when it
     /// would change files or conflict, `Err` when git could not be asked —
     /// which denies, like every other undeterminable answer here.
-    fn merge_into_base_is_a_noop(&self, dir: &Path) -> Result<bool, String>;
+    fn merge_into_base_is_a_noop(&self, dir: &Path, base_ref: &str) -> Result<bool, String>;
 }
 
 /// The production probe: git for the local facts, `gh` for the merge state.
@@ -273,19 +309,36 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         let rows: Vec<serde_json::Value> = serde_json::from_str(&stdout).map_err(|e| {
             format!("`gh pr list --repo {repo} --head {branch}` JSON did not parse: {e}")
         })?;
+        // #7275 round 2: the first row's base is the one the policy judges this
+        // worktree's content against. A row without one leaves it empty, which
+        // denies at the call site rather than falling back to a guess.
+        let base_ref = rows
+            .first()
+            .and_then(|r| r.get("baseRefName"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         Ok(MergedPrLookup {
             count: rows.len(),
             repo,
+            base_ref,
         })
     }
 
-    fn merge_into_base_is_a_noop(&self, dir: &Path) -> Result<bool, String> {
+    fn merge_into_base_is_a_noop(&self, dir: &Path, base_ref: &str) -> Result<bool, String> {
         // #7275, owner correction 2026-09-09: NOT `git cherry`. Every merge here
         // is a squash, so its per-commit patch-id comparison reports `+` for
         // content that IS on the base — observed on #7258. Merging into the base
         // and diffing the result is the question that actually gets answered.
-        let base = base_ref_for(dir);
-        let tree = git_stdout(dir, &["merge-tree", "--write-tree", &base, "HEAD"])
+        // #7275 round 2: the base is the merged pull request's own, passed in.
+        // Resolving `origin/HEAD` here judged every branch against the default
+        // branch, which is wrong for anything that merged elsewhere.
+        let base = base_ref.trim();
+        if base.is_empty() {
+            return Err("no base ref was supplied to judge this worktree's content against".into());
+        }
+        let tree = git_stdout(dir, &["merge-tree", "--write-tree", base, "HEAD"])
             .map_err(|e| format!("`git merge-tree --write-tree {base} HEAD` failed: {e}"))?;
         let Some(tree) = tree.lines().next().map(str::trim).filter(|t| !t.is_empty()) else {
             return Err(format!(
@@ -294,21 +347,17 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         };
         // `git diff --name-only` rather than `--quiet`: an empty answer is the
         // no-op, and a non-empty one names the residue for the deny message.
-        let residue = git_stdout(dir, &["diff", "--name-only", &base, tree])
+        let residue = git_stdout(dir, &["diff", "--name-only", base, tree])
             .map_err(|e| format!("`git diff --name-only {base} <merged tree>` failed: {e}"))?;
         Ok(residue.trim().is_empty())
     }
 }
 
-/// The base ref a worktree's content is judged against: `origin/HEAD`'s target,
-/// falling back to `origin/main` when the symbolic ref is not set locally.
-fn base_ref_for(dir: &Path) -> String {
-    git_stdout(dir, &["rev-parse", "--abbrev-ref", "origin/HEAD"])
-        .map(|s| s.trim().to_string())
-        .ok()
-        .filter(|s| !s.is_empty() && s != "origin/HEAD")
-        .unwrap_or_else(|| "origin/main".to_string())
-}
+// #7275 round 2: `base_ref_for` is gone. It resolved `origin/HEAD` (falling back
+// to `origin/main`) with no reference to the pull request whose merge was the
+// thing being checked, so a branch that merged into a release or stacked base
+// was judged against the default branch instead. The base now travels with the
+// merged pull request that supplies it — see `MergedPrLookup::base_ref`.
 
 /// Whether `@{upstream}` resolves in `dir` (#7232).
 ///
