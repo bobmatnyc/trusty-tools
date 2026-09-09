@@ -369,7 +369,9 @@ pub(crate) async fn run_guided_default(
 /// What: fetches the project's live sessions via the shared
 /// [`super::session_picker::fetch_live_sessions`] (decommissioned tombstones
 /// already filtered, #1809), runs the tty-gate, renders the two-panel daily
-/// banner (#1808), then hands off to [`super::session_picker::run_tty_picker`].
+/// banner (#1808), then hands off to
+/// [`super::session_ls_connector::run_bare_tm_surface`] (#7224 — the session
+/// TUI, or the numbered picker when the shared gate refuses raw mode).
 /// Returns `None` when the daemon is unreachable so the caller can try
 /// auto-start; returns `Some(result)` once the daemon responded.
 /// Test: indirectly covered by guided-default e2e tests; the pure sub-functions
@@ -407,7 +409,12 @@ async fn try_show_picker(
     // #3552: mutable — the picker's `[s]` / `/<text>` keys rewrite the scope's
     // sort, filter, and pinned default in place.
     let mut scope = super::session_picker::PickerScope::project(source_id, repo_url);
-    Some(super::session_picker::run_tty_picker(client, url, &mut scope, sessions).await)
+    // #7224: bare `tm` opens the same session TUI `tm ls` does, decided by the
+    // one gate both surfaces share — see
+    // [`super::session_ls_connector::bare_tm_opens_session_tui`]. The numbered
+    // picker is still what an empty fleet, a managed pane, or a `TERM` with no
+    // cursor addressing gets.
+    Some(super::session_ls_connector::run_bare_tm_surface(client, url, &mut scope, sessions).await)
 }
 
 // ── Project derivation ───────────────────────────────────────────────────────

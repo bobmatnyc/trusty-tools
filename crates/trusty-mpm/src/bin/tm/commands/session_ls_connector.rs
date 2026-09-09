@@ -13,10 +13,16 @@
 //! from here, so there is one implementation of each.
 //!
 //! #7224: the interactive branch now opens the full-screen
-//! [`super::session_tui`] rather than the line-based numbered picker. The
-//! picker itself is unchanged and still serves bare `tm`
-//! (`guided::try_show_picker`); what moved is only which surface `tm ls`
-//! reaches. `--plain` is the new opt-out back to the static table.
+//! [`super::session_tui`] rather than the line-based numbered picker.
+//! `--plain` is the opt-out back to the static table.
+//!
+//! #7224: bare `tm` reaches that same TUI, through this module rather than a
+//! second copy of the gate. [`bare_tm_opens_session_tui`] is the decision and
+//! [`run_bare_tm_surface`] the dispatch; `guided::try_show_picker` calls the
+//! latter where it used to call `run_tty_picker` directly. The numbered picker
+//! is still bare `tm`'s fallback — it is the surface that can launch a NEW
+//! session, which the TUI cannot, so an empty fleet or a dumb terminal keeps
+//! it.
 //!
 //! Test: the gate is unit-tested by `ls_connector_should_show_picker_*` in
 //! `tests_behavior_d_tests.rs`; the orchestrator's argument parsing is covered
@@ -266,4 +272,106 @@ pub(crate) async fn run_ls_connector(
         self_tmux_name,
     )
     .await
+}
+
+/// Does bare `tm` open the session TUI on this invocation?
+///
+/// Why (#7224): the owner ruling is that bare `tm` reaches the same surface
+/// `tm ls` reaches. Re-spelling the gate here is the defect #7224 round 2 just
+/// removed — the `TERM` check lived in `tm f` and not in `tm ls`, so one
+/// surface entered raw mode where the other refused. The body is therefore one
+/// delegation to [`should_show_picker`], and a gate added there reaches bare
+/// `tm` without a second edit.
+/// What: `json`, `all`, `attached`, and `plain` are pinned `false` because bare
+/// `tm` has no grammar that could set them — it takes no flags and no
+/// positionals (a leading token parses as `cli::Command::External`), so
+/// `tm recent` and `tm alpha <filter>` are not forms that exist. The one
+/// operand bare `tm` alone carries is `managed_pane`: inside a tm-managed pane,
+/// bare `tm` is that pane's relaunch verb, so a full-screen surface must never
+/// take the pane over there. `tm ls` in the same pane still opens the TUI and
+/// reads the same variable for its self-delete guard — two different questions
+/// about one fact, not a divergent gate. The operand is a `bool` for the same
+/// reason [`super::guided_outside_git::route_bare_tm`]'s is: what counts as a
+/// managed pane is
+/// [`guided_inplace::resolve_env_managed_session_id`](super::guided_inplace::resolve_env_managed_session_id),
+/// the one implementation of that lookup, and re-deciding it here would be a
+/// second one.
+/// Test: `bare_tm_opens_the_session_tui_on_two_ttys_with_a_capable_term`,
+/// `bare_tm_never_opens_the_tui_inside_a_managed_pane`,
+/// `bare_tm_and_ls_refuse_the_tui_on_the_same_inputs`.
+pub(crate) fn bare_tm_opens_session_tui(
+    stdin_tty: bool,
+    stdout_tty: bool,
+    term: Option<&str>,
+    managed_pane: bool,
+    session_count: usize,
+) -> bool {
+    if managed_pane {
+        return false;
+    }
+    should_show_picker(
+        stdin_tty,
+        stdout_tty,
+        false,
+        false,
+        false,
+        false,
+        term,
+        session_count,
+    )
+}
+
+/// Open bare `tm`'s managed-session surface: the TUI, or the numbered picker.
+///
+/// Why (#7224): `guided::try_show_picker` used to call
+/// [`super::session_picker::run_tty_picker`] unconditionally, so the surface
+/// the owner asked for was reachable from `tm ls` and from nothing else.
+/// Putting the choice HERE rather than in `guided.rs` is what keeps the gate
+/// single: this module already owns "which surface does a managed-session
+/// listing open", and `guided.rs` sits one line under the 500-SLOC cap.
+/// What: reads `TERM` and the managed-session id at this I/O boundary and
+/// injects them into [`bare_tm_opens_session_tui`], mirroring
+/// [`run_ls_connector`] — the gate stays pure and `src/bin/tm/**` keeps its
+/// no-process-global-env posture (#5544), which these reads never violate. The
+/// id comes from
+/// [`guided_inplace::resolve_env_managed_session_id`](super::guided_inplace::resolve_env_managed_session_id),
+/// the process-env-then-tmux-env chain `try_inplace_relaunch` and
+/// `try_outside_git` already ask, rather than a third reading of the variable.
+/// The picker is the fallback, not a lesser one: it is the only surface with a
+/// launch-new action, which is exactly what an empty fleet needs, and it reads
+/// whole lines instead of raw-mode keys, which is exactly what a `TERM` with no
+/// cursor addressing needs.
+/// Test: the choice is `bare_tm_opens_the_session_tui_*` and
+/// `bare_tm_never_opens_the_tui_inside_a_managed_pane`; the two surfaces it
+/// dispatches to carry their own.
+pub(crate) async fn run_bare_tm_surface(
+    client: &reqwest::Client,
+    url: &str,
+    scope: &mut PickerScope,
+    sessions: Vec<trusty_mpm::client::ManagedSessionSummary>,
+) -> anyhow::Result<()> {
+    let self_session_id = super::guided_inplace::resolve_env_managed_session_id();
+    let term_var = std::env::var("TERM").ok();
+    if bare_tm_opens_session_tui(
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+        term_var.as_deref(),
+        self_session_id.is_some(),
+        sessions.len(),
+    ) {
+        // `self_session_id` is `None` on this branch by construction — the gate
+        // above refuses a managed pane — and is still threaded through so the
+        // TUI's self-delete guard reads the same operand `tm ls` hands it.
+        let self_tmux_name = super::tmux_attach::current_tmux_session_name();
+        return super::session_tui::run_session_tui(
+            client,
+            url,
+            scope,
+            sessions,
+            self_session_id,
+            self_tmux_name,
+        )
+        .await;
+    }
+    super::session_picker::run_tty_picker(client, url, scope, sessions).await
 }
