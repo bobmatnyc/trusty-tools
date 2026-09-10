@@ -430,7 +430,8 @@ const GIT_GLOBAL_OPTS_WITH_ARG: &[&str] = &[
 /// -` and `command git worktree remove --force <path>` reached the git guards
 /// unresolved. It now shares [`crate::commands::hook_rewrite::strip_wrapper_prefix`]
 /// with that function instead of re-enumerating.
-/// What: shlex-splits `segment` (quote-aware; `None` on unbalanced quotes →
+/// What: through [`git_argv_at_subcommand`], shlex-splits `segment`
+/// (quote-aware; `None` on unbalanced quotes →
 /// caller falls back), delegates the leading `KEY=value`/wrapper skip to
 /// [`strip_wrapper_prefix`], requires the program basename to be `git`, then
 /// walks past global options — those in [`GIT_GLOBAL_OPTS_WITH_ARG`] consume
@@ -453,6 +454,24 @@ const GIT_GLOBAL_OPTS_WITH_ARG: &[&str] = &[
 /// `git_is_only_a_git_command_in_command_position`,
 /// `git_in_command_position_is_still_a_git_command`.
 pub(crate) fn git_subcommand(segment: &str) -> Option<String> {
+    let (argv, i) = git_argv_at_subcommand(segment)?;
+    Some(argv[i].clone())
+}
+
+/// The parsed argv of a git segment, and the index of its subcommand token.
+///
+/// Why: [`git_subcommand`] answers "which subcommand", and [`git_output_file`]
+/// asks the same parser "and what did that subcommand's arguments say". One
+/// walk over the global options serves both, so a rule about a git ARGUMENT
+/// cannot drift from the rule about the git VERB — a second argv parser is the
+/// defect this shape prevents.
+/// What: the body [`git_subcommand`] used to carry — shlex-split (`None` on
+/// unbalanced quotes), [`strip_wrapper_prefix`], a `git` basename check, then
+/// the global-option walk described on [`git_subcommand`]. Returns the argv
+/// alongside the index of the first non-option token.
+/// Test: every `git_subcommand_*` test, plus
+/// `git_output_file_finds_both_spellings`.
+fn git_argv_at_subcommand(segment: &str) -> Option<(Vec<String>, usize)> {
     let argv = shlex::split(segment)?;
     let mut i = strip_wrapper_prefix(&argv)?;
     let program = argv.get(i)?;
@@ -489,7 +508,55 @@ pub(crate) fn git_subcommand(segment: &str) -> Option<String> {
             i += 1;
             continue;
         }
-        return Some(tok.clone());
+        return Some((argv, i));
+    }
+    None
+}
+
+/// The file a git command's `--output` option would write, if it names one.
+///
+/// Why (#7399): `git diff --output=/tmp/o.diff` writes a file exactly as
+/// `git diff > /tmp/o.diff` does, but carries no `>`, so
+/// [`super::has_file_write_redirection`] never saw it and the PM's write
+/// boundary (ADR-0044, ADR-0048) had an uncaught hole. `--output` is a git
+/// DIFF option, so every diff-generating subcommand takes it — `diff`, `log`,
+/// `show`, `format-patch` — which is why this asks about the option rather
+/// than enumerating subcommands.
+/// What: walks the subcommand's own arguments from
+/// [`git_argv_at_subcommand`] and returns the value of the first `--output`
+/// it finds, in either spelling git accepts: `--output=<file>` (attached) and
+/// `--output <file>` (separated, verified against git 2.x). The match is on
+/// the whole option token, never a prefix, so the sibling
+/// `--output-indicator-new=+` — which changes one character of the patch body
+/// and writes nothing — is untouched. Scanning stops at `--`, past which git
+/// parses pathspecs rather than options. `Some("")` when `--output` is the
+/// last token and names no file: the flag is present, so the caller still
+/// denies, and there is no path to report. `None` when the segment is not a
+/// git command, cannot be lexed, or carries no `--output` — a lexing failure
+/// therefore withholds a NEW deny and can never turn an existing deny into an
+/// allow.
+/// Test: `git_output_file_finds_both_spellings`,
+/// `git_output_file_ignores_the_indicator_options`,
+/// `git_output_file_stops_at_the_pathspec_separator`,
+/// `git_output_file_none_when_unbalanced`, and end to end in
+/// `git_diff_output_flag_is_refused_as_a_file_write`.
+pub(crate) fn git_output_file(segment: &str) -> Option<String> {
+    let (argv, subcommand) = git_argv_at_subcommand(segment)?;
+    let mut i = subcommand + 1;
+    while i < argv.len() {
+        let tok = &argv[i];
+        if tok == "--" {
+            // Everything past the POSIX end-of-options marker is a pathspec,
+            // so an `--output=…` there names a path, not a write target.
+            return None;
+        }
+        if let Some(value) = tok.strip_prefix("--output=") {
+            return Some(value.to_string());
+        }
+        if tok == "--output" {
+            return Some(argv.get(i + 1).cloned().unwrap_or_default());
+        }
+        i += 1;
     }
     None
 }
@@ -621,5 +688,61 @@ mod tests {
             git_subcommand("nice git reset --hard").as_deref(),
             Some("reset")
         );
+    }
+
+    // #7399: both spellings of `--output` name a file git writes.
+    #[test]
+    fn git_output_file_finds_both_spellings() {
+        assert_eq!(
+            git_output_file("git diff --output=/tmp/o.diff").as_deref(),
+            Some("/tmp/o.diff")
+        );
+        assert_eq!(
+            git_output_file("git diff --output /tmp/o.diff HEAD").as_deref(),
+            Some("/tmp/o.diff")
+        );
+        assert_eq!(
+            git_output_file("git -C /repo --no-pager log -1 --output=/tmp/l.txt").as_deref(),
+            Some("/tmp/l.txt")
+        );
+        assert_eq!(
+            git_output_file(r#"git diff --output="/tmp/my out.diff""#).as_deref(),
+            Some("/tmp/my out.diff")
+        );
+        // Present but valueless: still a flag to deny on, with no path to
+        // report.
+        assert_eq!(git_output_file("git diff --output").as_deref(), Some(""));
+    }
+
+    // #7399: the rule matches the option, never its prefix.
+    #[test]
+    fn git_output_file_ignores_the_indicator_options() {
+        for command in [
+            "git diff --output-indicator-new=+",
+            "git diff --output-indicator-old=- --stat",
+            "git diff --output-indicator-context= ",
+            "git diff --stat -- docs/",
+            "git diff --no-index /tmp/a.txt /tmp/b.txt",
+        ] {
+            assert_eq!(git_output_file(command), None, "{command}");
+        }
+    }
+
+    // #7399: past `--`, git parses pathspecs, so `--output=…` writes nothing.
+    #[test]
+    fn git_output_file_stops_at_the_pathspec_separator() {
+        assert_eq!(git_output_file("git diff -- --output=/tmp/o.diff"), None);
+        assert_eq!(
+            git_output_file("git diff --output=/tmp/o.diff -- docs/").as_deref(),
+            Some("/tmp/o.diff")
+        );
+    }
+
+    // #7399: a segment that will not lex withholds the deny; it never grants
+    // an allow that did not already exist.
+    #[test]
+    fn git_output_file_none_when_unbalanced() {
+        assert_eq!(git_output_file("git diff --output='/tmp/o.diff"), None);
+        assert_eq!(git_output_file("cargo run -- --output=/tmp/o.diff"), None);
     }
 }
