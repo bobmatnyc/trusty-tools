@@ -348,13 +348,91 @@ pub(crate) fn strip_wrapper_prefix<T: AsRef<str>>(tokens: &[T]) -> Option<usize>
 /// `first_command_token_strips_command_wrapper`,
 /// `first_command_token_strips_builtin_wrapper`,
 /// `first_command_token_strips_backslash_after_sudo`,
-/// `first_command_token_strips_nice_time_nohup_exec`.
+/// `first_command_token_strips_nice_time_nohup_exec`,
+/// `first_command_token_resolves_a_quoted_path_with_spaces`,
+/// `first_command_token_resolves_a_quoted_forbidden_verb`.
 pub(crate) fn first_command_token(command: &str) -> Option<&str> {
-    let tokens: Vec<&str> = command.split_whitespace().collect();
+    // #7374: split quote-aware, so a quoted path with spaces is one word.
+    let tokens = shell_words(command);
     let start = strip_wrapper_prefix(&tokens)?;
     let tok = tokens.get(start)?;
     let tok = tok.strip_prefix('\\').unwrap_or(tok);
     Some(tok.rsplit('/').next().unwrap_or(tok))
+}
+
+/// Split `command` into shell words, keeping a quoted span as ONE word.
+///
+/// Why (#7374): `command.split_whitespace()` cuts
+/// `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"` at its
+/// spaces, so [`first_command_token`] resolved the fragment `Google` instead
+/// of the program's real basename `Google Chrome`. That misreads the command
+/// name in BOTH directions, and both are defects of this guard:
+/// `"/Applications/My Tools/sed" -i x f` resolved to `My` and slipped past the
+/// shell-edit deny, while `"/opt/make tools/echo" hi` resolved to `make` and
+/// was denied as a build. One quote-aware splitter fixes both, because both
+/// are the same misread.
+/// What: scans bytes, toggling on an unescaped `'` or `"`, and cuts only on
+/// whitespace seen OUTSIDE a quote. Each word then has a matched outer quote
+/// pair removed by [`unquote_literal_word`] when what it wraps is fully
+/// literal, which keeps every word a borrowed slice of `command`. Quoting this
+/// cannot decode — an unbalanced quote, an interior quote, a `$`/backtick — is
+/// left exactly as `split_whitespace` would have left it, so no caller loses a
+/// decision it makes today; a command the lexer genuinely cannot read is
+/// refused upstream by `pm_guard_bash::unclassifiable_command`.
+/// Test: `shell_words_keeps_a_quoted_span_whole`,
+/// `shell_words_leaves_an_unbalanced_quote_alone`,
+/// `first_command_token_resolves_a_quoted_path_with_spaces`.
+fn shell_words(command: &str) -> Vec<&str> {
+    let bytes = command.as_bytes();
+    let mut words = Vec::new();
+    let mut quote: Option<u8> = None;
+    let mut start: Option<usize> = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if b == b'\'' || b == b'"' => quote = Some(b),
+            None if b.is_ascii_whitespace() => {
+                if let Some(s) = start.take() {
+                    words.push(unquote_literal_word(&command[s..i]));
+                }
+                continue;
+            }
+            None => {}
+        }
+        start.get_or_insert(i);
+    }
+    if let Some(s) = start {
+        words.push(unquote_literal_word(&command[s..]));
+    }
+    words
+}
+
+/// Strip a matched outer quote pair from `word` when it wraps literal text.
+///
+/// Why (#7374): the command-name decision must read `'/opt/a b/sed'` as the
+/// program `sed`, and must NOT read `"/opt/$TOOL/sed"` as anything — that name
+/// really is computed at runtime, so it keeps the answer it has today. Testing
+/// what the quotes WRAP, rather than merely that quotes are present, is what
+/// separates the two.
+/// What: returns the interior of a leading/trailing `'` or `"` pair when the
+/// interior carries no further quote of that kind, no `$`, no backtick and no
+/// backslash; otherwise returns `word` unchanged. The result is always a
+/// sub-slice of the input, never an owned string.
+/// Test: `unquote_literal_word_strips_a_literal_pair`,
+/// `unquote_literal_word_keeps_a_computed_name`.
+fn unquote_literal_word(word: &str) -> &str {
+    for q in ['\'', '"'] {
+        if let Some(inner) = word.strip_prefix(q).and_then(|w| w.strip_suffix(q))
+            && !inner.contains(q)
+            && !inner.contains('$')
+            && !inner.contains('`')
+            && !inner.contains('\\')
+        {
+            return inner;
+        }
+    }
+    word
 }
 
 /// Whether `token` looks like a `KEY=value` shell environment assignment.
@@ -710,6 +788,110 @@ mod tests {
                 Some("rm"),
                 "expected \"rm\" for: {command}"
             );
+        }
+    }
+
+    /// #7374: a quoted absolute path with spaces resolves to its own basename.
+    ///
+    /// Why: every macOS `.app` binary is spelled this way, and
+    /// `split_whitespace` cut it at the space, so the command name read as the
+    /// fragment `Google`. The unquoted, space-free spelling is the control: the
+    /// two must agree on what the program is.
+    /// Test: itself.
+    #[test]
+    fn first_command_token_resolves_a_quoted_path_with_spaces() {
+        for command in [
+            r#""/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless"#,
+            r#"'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless"#,
+        ] {
+            assert_eq!(
+                first_command_token(command),
+                Some("Google Chrome"),
+                "expected the path's own basename for: {command}"
+            );
+        }
+        // The control: no spaces, no quotes, same shape, same kind of answer.
+        assert_eq!(
+            first_command_token("/Applications/GoogleChrome.app/Contents/MacOS/GoogleChrome -x"),
+            Some("GoogleChrome")
+        );
+    }
+
+    /// #7374: quoting a forbidden verb's path does not hide the verb.
+    ///
+    /// Why: the fix must not degrade to "strip the quotes and allow anything".
+    /// Before it, `"/Applications/My Tools/sed" -i x f` resolved to `My` and
+    /// slipped the shell-edit deny; the quoted `make` row is the same misread
+    /// in the false-DENY direction.
+    /// Test: itself.
+    #[test]
+    fn first_command_token_resolves_a_quoted_forbidden_verb() {
+        assert_eq!(
+            first_command_token(r#""/Applications/My Tools/sed" -i s/a/b/ f"#),
+            Some("sed")
+        );
+        assert_eq!(
+            first_command_token(r#"'/Applications/My Tools/patch' -p1 x"#),
+            Some("patch")
+        );
+        // The false-deny direction: the program is `echo`, never `make`.
+        assert_eq!(
+            first_command_token(r#""/opt/make tools/echo" hi"#),
+            Some("echo")
+        );
+        // A quoted wrapper is still a wrapper.
+        assert_eq!(first_command_token(r#""sudo" rm -rf /root"#), Some("rm"));
+    }
+
+    /// #7374: the splitter keeps a quoted span whole and unwraps it.
+    ///
+    /// Test: itself.
+    #[test]
+    fn shell_words_keeps_a_quoted_span_whole() {
+        assert_eq!(
+            shell_words(r#""/opt/a b/sed" -i f"#),
+            vec!["/opt/a b/sed", "-i", "f"]
+        );
+        assert_eq!(
+            shell_words("git diff -- docs/"),
+            vec!["git", "diff", "--", "docs/"]
+        );
+    }
+
+    /// #7374: quoting the splitter cannot decode is left as it was.
+    ///
+    /// Why: an unbalanced quote, an interior quote and a `$` each mean the
+    /// program name is not established by the quotes alone, so the word keeps
+    /// the shape `split_whitespace` gave it and no caller's decision moves.
+    /// Test: itself.
+    #[test]
+    fn shell_words_leaves_an_unbalanced_quote_alone() {
+        assert_eq!(shell_words(r#"sed -i "x"#), vec!["sed", "-i", "\"x"]);
+        assert_eq!(shell_words(r#"a"b c"d"#), vec!["a\"b c\"d"]);
+    }
+
+    /// #7374: `unquote_literal_word` unwraps only literal text.
+    ///
+    /// Test: itself.
+    #[test]
+    fn unquote_literal_word_strips_a_literal_pair() {
+        assert_eq!(unquote_literal_word(r#""/opt/a b/sed""#), "/opt/a b/sed");
+        assert_eq!(unquote_literal_word("'/opt/a b/sed'"), "/opt/a b/sed");
+        assert_eq!(unquote_literal_word("plain"), "plain");
+    }
+
+    /// #7374: a name computed at runtime keeps the answer it has today.
+    ///
+    /// Test: itself.
+    #[test]
+    fn unquote_literal_word_keeps_a_computed_name() {
+        for word in [
+            r#""/opt/$TOOL/sed""#,
+            r#""/opt/`id -u`/sed""#,
+            r#""/opt/a\ b/sed""#,
+            r#""unbalanced"#,
+        ] {
+            assert_eq!(unquote_literal_word(word), word, "must not unwrap: {word}");
         }
     }
 

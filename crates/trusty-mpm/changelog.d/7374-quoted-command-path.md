@@ -1,0 +1,3 @@
+Fixed
+
+- `tm hook --pm-guard` resolves a quoted command path containing spaces to that path's own basename, so a macOS `.app` binary such as `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"` gets the same decision its space-free spelling gets. The command name was previously read with `split_whitespace`, which cut the path at its spaces and answered with a fragment of it — so `"/Applications/My Tools/sed" -i x f` read as `My` and slipped the shell-edit deny, while `"/opt/make tools/echo" hi` read as `make` and was denied as a build. Quoting the guard cannot decode — an unbalanced quote, an interior quote, a `$` or a backtick — keeps the answer it had before (refs [#7374](https://github.com/bobmatnyc/trusty-tools/issues/7374))
