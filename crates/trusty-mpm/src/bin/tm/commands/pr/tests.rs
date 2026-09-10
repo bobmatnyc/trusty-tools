@@ -286,6 +286,54 @@ fn footer_alone_does_not_fill_a_section() {
     assert_eq!(report.empty, vec![Field::Review], "{report:?}");
 }
 
+/// The session link Claude Code appends after the footer in a PR body.
+const SESSION_LINK: &str = "https://claude.ai/code/session_0194bkFi1G1Wv3kh1bVbMw4q";
+
+#[test]
+fn footer_accepts_the_trailing_session_link() {
+    // #7297: this IS the shape Claude Code's provisioned attribution tells a
+    // session to write — footer, blank line, session link. Rejecting it sent
+    // version-control agents to `gh pr create`, skipping this gate entirely.
+    let body = format!("{}\n{SESSION_LINK}\n", full_body());
+    let report = body::validate(&body);
+    assert!(report.footer_ok, "{report:?}");
+    assert!(report.failures().is_empty(), "{report:?}");
+
+    // The labelled form the commit message uses is the same block.
+    let labelled = format!("{}\nClaude-Session: {SESSION_LINK}\n", full_body());
+    assert!(body::validate(&labelled).footer_ok);
+}
+
+#[test]
+fn footer_accepts_a_session_link_before_the_footer() {
+    // The workaround shape agents adopted while #7297 stood. Bodies already
+    // written this way must keep passing.
+    let mut s = String::new();
+    for f in FIELDS {
+        s.push_str(&format!("## {}\n\nsomething real.\n\n", f.heading()));
+    }
+    s.push_str(&format!("{SESSION_LINK}\n\n{ATTRIBUTION_FOOTER}\n"));
+    let report = body::validate(&s);
+    assert!(report.footer_ok, "{report:?}");
+    assert!(report.failures().is_empty(), "{report:?}");
+}
+
+#[test]
+fn footer_rejects_a_body_with_no_attribution_line() {
+    // A session link alone is not attribution — the footer is still required.
+    let body = full_body().replace(ATTRIBUTION_FOOTER, SESSION_LINK);
+    assert!(!body.contains(ATTRIBUTION_FOOTER));
+    let report = body::validate(&body);
+    assert!(!report.footer_ok, "{report:?}");
+    assert!(
+        report
+            .failures()
+            .iter()
+            .any(|f| f.contains("attribution footer")),
+        "{report:?}"
+    );
+}
+
 // ── Refs vs Closes ───────────────────────────────────────────────────────
 
 #[test]
