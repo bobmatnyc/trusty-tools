@@ -1,3 +1,0 @@
-Added
-
-- Both hooks writers copy a project's `.claude/settings.json` to `settings.json.<YYYYMMDDTHHMMSSZ>.bak` beside it before the rename that replaces it, keeping the newest three and deleting nothing else (#7244). A snapshot that cannot be taken aborts the rewrite and names the file, so a rewrite whose prior state could not be preserved never happens — the atomic writer's single `settings.json.bak` slot is overwritten by the next launch, which is why the #7244 incident had no copy left to restore. A refused write still takes no snapshot, and the project-tier `session_launch` writer now also returns without writing when the merged value equals the file it read, so a launch that changes nothing no longer evicts a real prior state.

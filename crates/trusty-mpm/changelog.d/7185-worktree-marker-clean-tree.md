@@ -1,3 +1,0 @@
-Fixed
-
-- The ADR-0057 worktree-removal guard no longer counts the harness's own `.trusty-mpm-worktree` ownership marker as uncommitted work, so a merged worktree provisioned by a live managed session can be reclaimed instead of failing the `clean-tree` re-check forever (#7185). `GitAndGhProbe::dirty_entries` counted every `git status --porcelain` line; it now routes through `session_manager::worktree_safety::count_dirty_files`, the one implementation the reclaim sweep already used, which excuses that marker and nothing else. A real untracked file or a modified tracked file beside the marker still denies removal.
