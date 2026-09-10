@@ -16,7 +16,7 @@ use trusty_channels::slack::api::client::BaseClient;
 use trusty_channels::slack::api::constants::{MAX_DOWNLOAD_BYTES, SLACK_PROVIDER, SLACK_TOKEN_ENV};
 use trusty_channels::slack::api::error::SlackError;
 use trusty_common::credentials::{env_var_for, resolve_key_with, KeyStore, MemoryKeyStore};
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ── Credential resolution (fake KeyStore — no live token) ─────────────────
@@ -87,6 +87,9 @@ async fn send_ok_returns_envelope() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat.postMessage"))
+        .and(header("authorization", "Bearer xoxb-test"))
+        .and(header("content-type", "application/json"))
+        .and(body_json(serde_json::json!({"channel": "C123"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "ok": true,
             "channel": "C123",
@@ -175,17 +178,21 @@ async fn api_ok_false_maps_to_api_error() {
 #[tokio::test]
 async fn rate_limit_retries_then_succeeds() {
     let server = MockServer::start().await;
-    // Fallback 200 (mounted first → lower precedence).
+    // Explicit priority makes the 200 a fallback after the one-shot 429.
     Mock::given(method("POST"))
         .and(path("/chat.postMessage"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+        .with_priority(2)
+        .expect(1)
         .mount(&server)
         .await;
-    // One 429 with Retry-After: 0 (mounted last → matched first, once only).
+    // One 429 with Retry-After: 0 (lower priority number matches first).
     Mock::given(method("POST"))
         .and(path("/chat.postMessage"))
         .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+        .with_priority(1)
         .up_to_n_times(1)
+        .expect(1)
         .mount(&server)
         .await;
 

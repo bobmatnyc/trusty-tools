@@ -7,7 +7,7 @@
 //! only encodes its own request/response shape.
 //! What: Holds a `reqwest::Client`, a resolved bearer token (or `None`), and
 //! the API base URL. `new()` resolves the token via the shared credential
-//! resolver; [`BaseClient::call_method`] performs a hardened POST that surfaces
+//! resolver; [`BaseClient::call_method`] performs a hardened request that surfaces
 //! auth failures as a typed error (never a silent anonymous retry) and honours
 //! `429 Retry-After` with a bounded backoff.
 //! Test: `new_succeeds_without_token` (constructor, CI-safe) here;
@@ -149,13 +149,15 @@ impl BaseClient {
         self.user_token.is_some()
     }
 
-    /// Call a Slack Web API `method` with a JSON `body`, returning the decoded
+    /// Call a Slack Web API `method` with serializable parameters, returning the decoded
     /// response envelope on success.
     ///
     /// Why: the single hardened request primitive every future tool handler
     /// reuses — one place for auth, error classification, and rate-limit
     /// backoff, so no handler re-implements (or forgets) them.
-    /// What: POSTs `{base_url}/{method}` with a bearer token. Maps HTTP 401 and
+    /// What: GETs `conversations.list` and `users.list` with query parameters;
+    /// other methods POST JSON. List parameters must serialize as a flat map
+    /// of scalar values. Every request carries a bearer token. Maps HTTP 401 and
     /// auth-class `ok:false` bodies to [`SlackError::Auth`] (never retried as
     /// anonymous); honours `429 Retry-After` with a bounded backoff up to
     /// [`MAX_RATE_LIMIT_RETRIES`], then returns [`SlackError::RateLimited`];
@@ -163,6 +165,8 @@ impl BaseClient {
     /// `Value` when `ok:true`.
     /// Test: `tests/client_http.rs` (`send_ok`, `auth_401`, `auth_ok_false`,
     /// `rate_limit_retries_then_succeeds`, `rate_limit_exhausted`).
+    /// List transport: `list_channels_sends_limit_and_types_as_get_query`,
+    /// `list_users_sends_limit_as_get_query` in `tests/slack_list_http.rs`.
     pub async fn call_method<B>(&self, method: &str, body: &B) -> Result<Value, SlackError>
     where
         B: Serialize + ?Sized,
@@ -248,7 +252,8 @@ impl BaseClient {
     /// Why: bot-scope and user-scope calls differ only in *which* token they
     /// present; every other concern (auth classification, rate-limit backoff,
     /// envelope decoding) is identical and must not be duplicated.
-    /// What: POSTs `{base_url}/{method}` with `token` as the bearer credential;
+    /// What: sends list parameters in the URL query and other parameters as
+    /// POST JSON to `{base_url}/{method}`, with `token` as the bearer credential;
     /// maps 401 / auth-class `ok:false` to [`SlackError::Auth`], honours
     /// `429 Retry-After` up to [`MAX_RATE_LIMIT_RETRIES`], and returns the
     /// decoded `Value` on `ok:true`.
@@ -262,13 +267,12 @@ impl BaseClient {
 
         let mut retries: u32 = 0;
         loop {
-            let response = self
-                .http
-                .post(&url)
-                .bearer_auth(token)
-                .json(body)
-                .send()
-                .await?;
+            // #7391: Slack's listing endpoints ignore parameters in POST JSON bodies.
+            let request = match method {
+                "conversations.list" | "users.list" => self.http.get(&url).query(body),
+                _ => self.http.post(&url).json(body),
+            };
+            let response = request.bearer_auth(token).send().await?;
             let status = response.status();
 
             if status == StatusCode::UNAUTHORIZED {
