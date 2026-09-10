@@ -688,7 +688,7 @@ fn names_an_unreadable_secret_file(token: &str) -> bool {
 /// prints freely: `Some(reason)` denies, `None` allows (issue #7266 fix round).
 ///
 /// Why: [`crate::commands::pm_guard_secret_read`] narrows its own file class by
-/// [`has_transparent_source_extension`], so `cat secrets.rs` is allowed by
+/// its private `has_transparent_source_extension`, so `cat secrets.rs` is allowed by
 /// design — the alternative denied 24 ordinary tracked files. That carve-out
 /// held only while nothing could put a credential INTO such a name, and this
 /// module's other rule scopes its destination check to worktree paths. From a
