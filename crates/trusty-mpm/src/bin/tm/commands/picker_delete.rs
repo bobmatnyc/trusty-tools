@@ -228,6 +228,71 @@ pub(crate) async fn route_delete(
     }
 }
 
+/// Route a delete for a record whose persisted state is `state` (#7388).
+///
+/// Why: the picker knows a row's state because it listed it; the
+/// `tm session delete <id>` verb is handed a bare id and used to route without
+/// one, so it always took the plain-delete branch and an errored session came
+/// back refused with advice to run a different command. Both surfaces now
+/// derive the route from the same state through this one function, so a state
+/// the picker stops first can never be a state the verb refuses.
+/// What: reads `stop_first` out of [`delete_route_flags`] and hands the call to
+/// [`route_delete`]. `state` is `None` when the id names no managed record —
+/// a project-only (local) session, or one the daemon could not report — which
+/// takes the plain-delete branch, exactly as before. `force` is the caller's
+/// own (the verb's `--force`, the picker's typed `force` confirm) and is never
+/// escalated here: the daemon's tmux probe stays the authority on whether a
+/// record may go.
+/// Test: `verb_delete_stops_an_errored_session_before_deleting_it` and
+/// `picker_and_verb_route_each_state_identically` in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+pub(crate) async fn route_delete_for_state(
+    client: &reqwest::Client,
+    url: &str,
+    id: &str,
+    state: Option<&str>,
+    force: bool,
+) -> anyhow::Result<DeleteReport> {
+    let stop_first = state.is_some_and(|s| delete_route_flags(s).1);
+    route_delete(client, url, id, force, stop_first).await
+}
+
+/// Read a managed record's persisted state, for routing its delete (#7388).
+///
+/// Why: [`route_delete_for_state`] needs the state the picker already has in
+/// hand. The verb has only an id, so it asks the daemon for the same field the
+/// picker's list carries rather than guessing a route from the id alone.
+/// What: GETs `/api/v1/sessions/managed/{id}` and returns its `state` string.
+/// Answers `None` for a 404 (no managed record — a local session, or nothing at
+/// all) and for any other non-success status or unreadable body: an unknown
+/// state routes to the plain delete, which is the pre-#7388 behaviour, so a
+/// failed probe never escalates a delete it could not classify. A transport
+/// error propagates, since the delete that follows would fail the same way.
+/// Test: `verb_delete_stops_an_errored_session_before_deleting_it`,
+/// `verb_delete_issues_no_stop_when_the_id_is_not_a_managed_record` in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+pub(crate) async fn managed_state_for_delete(
+    client: &reqwest::Client,
+    url: &str,
+    id: &str,
+) -> anyhow::Result<Option<String>> {
+    let resp = client
+        .get(format!("{url}/api/v1/sessions/managed/{id}"))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    Ok(body
+        .get("state")
+        .and_then(|v| v.as_str())
+        .map(str::to_string))
+}
+
 /// Map a managed-delete HTTP status to the next routing step.
 ///
 /// Why: pure seam for the family routing so 200/404/409/other are testable
@@ -540,8 +605,10 @@ pub(crate) async fn delete_confirmed(
     url: &str,
     session: &ManagedSessionSummary,
 ) -> anyhow::Result<bool> {
-    let (force, stop_first) = delete_route_flags(&session.state);
-    match route_delete(client, url, &session.id, force, stop_first).await? {
+    // #7388: routes through the same seam `tm session delete <id>` uses, so the
+    // two surfaces cannot answer the same state differently.
+    let (force, _) = delete_route_flags(&session.state);
+    match route_delete_for_state(client, url, &session.id, Some(&session.state), force).await? {
         DeleteReport::Deleted {
             name,
             prior_state,

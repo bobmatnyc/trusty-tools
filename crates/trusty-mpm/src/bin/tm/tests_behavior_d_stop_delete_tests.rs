@@ -426,3 +426,234 @@ fn both_delete_surfaces_ask_the_same_errored_question() {
         "'tm-quiet-falcon' is errored. Stop it and delete it? Type y, then Enter."
     );
 }
+
+// ── the `tm session delete <id>` verb's own route (#7388) ───────────────────
+
+/// The three managed endpoints the VERB touches, with the state it reports
+/// dialled per test and the stop/delete legs recorded IN ORDER.
+///
+/// The order is the point: proving the verb stops an errored session *first*
+/// needs a server that can say which request arrived when, and a delete that
+/// refuses while the runtime is still up — exactly what the daemon does.
+#[derive(Clone)]
+struct VerbStub {
+    /// The `state` the managed GET reports, or `None` to answer 404 there —
+    /// the id then names no managed record (a project-only session).
+    state: Option<String>,
+    stop_status: axum::http::StatusCode,
+    /// While true the delete endpoint 409s, mirroring the daemon's tmux probe.
+    live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    legs: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+impl VerbStub {
+    fn new(state: Option<&str>, stop_status: axum::http::StatusCode, live: bool) -> Self {
+        Self {
+            state: state.map(str::to_string),
+            stop_status,
+            live: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(live)),
+            legs: Default::default(),
+        }
+    }
+
+    fn router(&self) -> axum::Router {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        use axum::{
+            Router,
+            extract::State,
+            response::IntoResponse,
+            routing::{get, post},
+        };
+        let stub = self.clone();
+        Router::new()
+            .route(
+                "/api/v1/sessions/managed/{id}",
+                get(|State(s): State<VerbStub>| async move {
+                    match s.state {
+                        Some(state) => axum::Json(serde_json::json!({
+                            "id": "sid-verb",
+                            "name": "tm-quiet-falcon",
+                            "state": state,
+                        }))
+                        .into_response(),
+                        None => (axum::http::StatusCode::NOT_FOUND, "no such managed session")
+                            .into_response(),
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/sessions/managed/{id}/runtime-stop",
+                post(|State(s): State<VerbStub>| async move {
+                    s.legs.lock().expect("legs lock").push("stop");
+                    if s.stop_status.is_success()
+                        || s.stop_status == axum::http::StatusCode::NOT_FOUND
+                    {
+                        s.live.store(false, SeqCst);
+                    }
+                    (s.stop_status, "stub stop body")
+                }),
+            )
+            .route(
+                "/api/v1/sessions/managed/{id}/delete",
+                post(|State(s): State<VerbStub>| async move {
+                    s.legs.lock().expect("legs lock").push("delete");
+                    if s.live.load(SeqCst) {
+                        return (
+                            axum::http::StatusCode::CONFLICT,
+                            "session 'tm-quiet-falcon' is errored — stop it first with \
+                             `tm session stop`",
+                        )
+                            .into_response();
+                    }
+                    axum::Json(serde_json::json!({
+                        "name": "tm-quiet-falcon",
+                        "state": "errored",
+                        "deleted": true,
+                    }))
+                    .into_response()
+                }),
+            )
+            .with_state(stub)
+    }
+
+    fn legs(&self) -> Vec<&'static str> {
+        self.legs.lock().expect("legs lock").clone()
+    }
+}
+
+/// #7388, the reported bug: `tm session delete <errored-id>` exited 1 telling
+/// the operator to go run `tm session stop` — the command they were already
+/// asking for. It must stop the runtime and THEN delete the record, in that
+/// order. A fix that deletes without stopping records `["delete"]` and gets the
+/// daemon's 409 back; a fix that special-cases `errored` by skipping the stop
+/// records the same. Only the real two-leg route records `["stop", "delete"]`.
+#[tokio::test]
+async fn verb_delete_stops_an_errored_session_before_deleting_it() {
+    let stub = VerbStub::new(Some("errored"), axum::http::StatusCode::OK, true);
+    let (url, handle) = serve_stub(stub.router()).await;
+
+    crate::commands::delete::session_delete(
+        &reqwest::Client::new(),
+        &url,
+        "sid-verb".to_string(),
+        false,
+    )
+    .await
+    .expect("an errored session must delete, not refuse");
+    assert_eq!(
+        stub.legs(),
+        vec!["stop", "delete"],
+        "the stop must arrive before the delete"
+    );
+    handle.abort();
+}
+
+/// Fail-open check on the verb's route: a stop the daemon REJECTED leaves the
+/// record alone, the delete endpoint is never reached, and the verb exits
+/// non-zero so a script sees the failure.
+#[tokio::test]
+async fn verb_delete_never_deletes_after_a_failed_stop() {
+    for status in [
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        axum::http::StatusCode::CONFLICT,
+    ] {
+        let stub = VerbStub::new(Some("errored"), status, true);
+        let (url, handle) = serve_stub(stub.router()).await;
+
+        let err = crate::commands::delete::session_delete(
+            &reqwest::Client::new(),
+            &url,
+            "sid-verb".to_string(),
+            false,
+        )
+        .await
+        .expect_err("a rejected stop must not report success");
+        assert!(
+            err.to_string().contains("stop failed"),
+            "must name the failed stop: {err}"
+        );
+        assert_eq!(
+            stub.legs(),
+            vec!["stop"],
+            "a rejected stop must issue NO delete request ({status})"
+        );
+        handle.abort();
+    }
+}
+
+/// The carve-out stays scoped on the verb too: an id the managed store does not
+/// know (a project-only session) gets no runtime-stop issued on its behalf, so
+/// the local-fallback route is unchanged.
+#[tokio::test]
+async fn verb_delete_issues_no_stop_when_the_id_is_not_a_managed_record() {
+    let stub = VerbStub::new(None, axum::http::StatusCode::OK, false);
+    let (url, handle) = serve_stub(stub.router()).await;
+
+    // The managed GET 404s, so the state is unknown and the plain delete goes
+    // out; the stub's delete endpoint answers it (the local fallback beyond it
+    // is covered by `local_delete_*` in `tests_behavior_d_tests.rs`).
+    crate::commands::delete::session_delete(
+        &reqwest::Client::new(),
+        &url,
+        "sid-verb".to_string(),
+        false,
+    )
+    .await
+    .expect("an unknown-state delete must route exactly as before");
+    assert_eq!(
+        stub.legs(),
+        vec!["delete"],
+        "an unclassifiable id must not pick up a stop leg"
+    );
+    handle.abort();
+}
+
+/// #7388: the two surfaces must decide the same route for the same state. The
+/// picker reads the state off the row it listed and the verb asks the daemon
+/// for it, but from there both go through `route_delete_for_state`, so the
+/// stop/delete legs they issue must match state for state.
+#[tokio::test]
+async fn picker_and_verb_route_each_state_identically() {
+    use crate::commands::picker_delete::delete_confirmed;
+    // Every variant of `ManagedSessionState`, in its serde (snake_case) spelling.
+    for state in [
+        "provisioning",
+        "active",
+        "stopped",
+        "errored",
+        "decommissioned",
+        "deleted",
+    ] {
+        // `live = false`: the delete succeeds either way, so what differs
+        // between the surfaces is the ROUTE, not the daemon's verdict.
+        let picker_stub = VerbStub::new(Some(state), axum::http::StatusCode::OK, false);
+        let (picker_url, picker_handle) = serve_stub(picker_stub.router()).await;
+        delete_confirmed(&reqwest::Client::new(), &picker_url, &row(state))
+            .await
+            .expect("the picker's delete driver must not error");
+        picker_handle.abort();
+
+        let verb_stub = VerbStub::new(Some(state), axum::http::StatusCode::OK, false);
+        let (verb_url, verb_handle) = serve_stub(verb_stub.router()).await;
+        // The picker force-confirms a running row by having the operator type
+        // `force`; `--force` is the verb's spelling of the same consent, so
+        // pass the flag the state calls for and compare like with like.
+        let force = crate::commands::picker_delete::delete_needs_force(state);
+        crate::commands::delete::session_delete(
+            &reqwest::Client::new(),
+            &verb_url,
+            "sid-verb".to_string(),
+            force,
+        )
+        .await
+        .expect("the verb must not error");
+        verb_handle.abort();
+
+        assert_eq!(
+            picker_stub.legs(),
+            verb_stub.legs(),
+            "the picker and `tm session delete` must route a {state} session the same way"
+        );
+    }
+}
